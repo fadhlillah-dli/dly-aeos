@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -210,6 +211,7 @@ def test_can_run_worker_ready_only_with_all_real_prerequisites(settings, db, wor
     assert st.status == "READY", st.reasons
     live = next(c for c in st.checks if c["check_id"] == "worker_runtime.sandbox_readiness")
     assert live["ok"] and live["kind"] == "process"
+    assert live["effective_status"] == "CONFIGURED"  # WEAK + exception: satisfies policy, never VERIFIED
     # WEAK process sandbox: allowed by the owner's exception, but its residual risks are always surfaced
     assert any("egress" in r for r in st.residual_risks)
     assert any("WEAK" in r for r in st.reasons)
@@ -314,6 +316,8 @@ def test_route_status_change_marks_checks_stale_until_recheck(settings, db, work
     for cid in ("route.registry", "route.worker_key"):
         row = _stored(db, cid)
         assert row.status == "STALE" and "config:routes" in row.observed_evidence["stale_reason"]
+    # a WORKER route (and its revoked TRIAL decision) is not a supervisor route: the bridge proof stays fresh
+    assert _stored(db, "claude.capability_test").status != "STALE"
     st = facade.capability_state(db, Capability.CAN_RUN_WORKER, domain="PERSONAL")
     assert st.status == "UNKNOWN" and any("route.registry: STALE" in r for r in st.reasons)
     assert db.scalar(select(Event).where(Event.kind == "doctor.check.stale")) is not None
@@ -327,23 +331,32 @@ def test_route_config_and_pin_changes_invalidate_model_route(settings, db, worke
     from aeos.routing import seed as routing_seed
     from aeos.routing import service
 
-    # eligible_domains change -> new configuration identity -> config:routes + model:route
+    routing_seed.run(db)
+    db.add(ClaudeCapabilityTest(status="VERIFIED", engine_version="2.1.302", model_requested="opus", mode="LIVE"))
+    db.commit()
+    _run(settings, db, fake_host)
+    # eligible_domains change of a WORKER route -> new configuration identity -> config:routes + model:route
     r = service.get_route(db, ROUTE)
     r.eligible_domains = ["PERSONAL", "OFFICE"]
     assert service.refresh_config_hash(db, r, reason="eligible_domains edited")
     db.commit()
     assert _stored(db, "route.registry").status == "STALE"
-    # supervisor pin: first observed resolution of the alias -> model:route (claude.capability_test)
-    routing_seed.run(db)
-    db.add(ClaudeCapabilityTest(status="VERIFIED", engine_version="2.1.302", model_requested="opus", mode="LIVE"))
-    db.commit()
-    _run(settings, db, fake_host, groups=["CLAUDE_NATIVE"])
+    assert "model:route" in _stored(db, "worker.contract").observed_evidence["stale_reason"]
+    # ... but the Claude bridge proof is about SUPERVISOR routes only: reviews keep their gate
     assert _stored(db, "claude.capability_test").status != "STALE"
+    # supervisor: the FIRST observed resolution is not a pin change (nothing was bound to an earlier identity);
+    # another alias' first call (fable after an opus test) must not push reviews to the manual fallback
+    for alias in ("opus", "fable"):
+        service.observe_supervisor_resolution(db, route_key=f"claude-native/{alias}", requested=alias,
+                                              resolved=f"claude-{alias}-5-5")
+    db.commit()
+    assert _stored(db, "claude.capability_test").status != "STALE"
+    # a real re-resolution of the alias (pin drift) -> model:route:SUPERVISOR -> bridge proof STALE
     service.observe_supervisor_resolution(db, route_key="claude-native/opus", requested="opus",
-                                          resolved="claude-opus-5-5")
+                                          resolved="claude-opus-5-6")
     db.commit()
     row = _stored(db, "claude.capability_test")
-    assert row.status == "STALE" and "model:route" in row.observed_evidence["stale_reason"]
+    assert row.status == "STALE" and "model:route:SUPERVISOR" in row.observed_evidence["stale_reason"]
 
 
 def test_secret_put_and_delete_invalidate_dependent_checks(settings, db, secrets_memory, fake_host):
@@ -356,7 +369,8 @@ def test_secret_put_and_delete_invalidate_dependent_checks(settings, db, secrets
     secrets.put_secret("personal/github", "ghp_" + "x" * 36, actor="test")
     gh = _stored(db, "adapter.github_token")
     assert gh.status == "STALE" and "secret-ref personal/github" in gh.observed_evidence["stale_reason"]
-    assert _stored(db, "secret.status").status == "STALE"  # declares secret:*
+    # the store's own status does not depend on single references (a token write/refresh keeps it fresh)
+    assert _stored(db, "secret.status").status != "STALE"
     assert _stored(db, "route.worker_key").status != "STALE"  # depends on other refs only
     ev = db.scalar(select(Event).where(Event.kind == "doctor.check.stale", Event.entity_id == "adapter.github_token"))
     assert ev.payload["invalidator_kind"] == "secret" and ev.payload["invalidator_target"] == "personal/github"
@@ -394,6 +408,23 @@ def test_policy_and_office_decisions_invalidate_policy_checks(settings, db, fake
     assert r.status_code == 201, r.text
     row = _stored(db, "policy.office_defaults")
     assert row.status == "STALE" and "config:office_policy" in row.observed_evidence["stale_reason"]
+    # platform-level rows and domain-less events are visible to PERSONAL: the OFFICE decision is not quoted
+    office_id = r.json()["id"]
+    platform = [x for x in latest_results(db).values() if not (x.scope or {}).get("domain")]
+    assert platform and not any(office_id[:8] in json.dumps(x.observed_evidence or {}) for x in platform)
+    shared = db.scalars(select(Event).where(Event.kind == "doctor.check.stale", Event.domain.is_(None))).all()
+    assert shared and not any(office_id[:8] in json.dumps(e.payload) for e in shared)
+    # the platform policy snapshot row does not count OFFICE decisions either (counts are metadata, §50)
+    from sqlalchemy import func, or_
+
+    from aeos.models.decisions import Decision
+
+    by_id = _run(settings, db, fake_host, groups=["CANONICAL_POLICY"])
+    active = Decision.status == "ACTIVE"
+    office = db.scalar(select(func.count()).select_from(Decision).where(active, Decision.domain == "OFFICE"))
+    others = db.scalar(select(func.count()).select_from(Decision).where(
+        active, or_(Decision.domain.is_(None), Decision.domain != "OFFICE")))
+    assert office >= 1 and by_id["policy.snapshot"].observed_evidence["active_decisions"] == others
 
 
 # ---------------------------------------------------------------- CAN_PREPARE_PR / delivery provider
@@ -437,6 +468,14 @@ def test_prepare_pr_consumes_provider_capability_evidence(settings, db, secrets_
     note = next(r for r in st.reasons if "delivery.branch_protection" in r)
     assert note.startswith("catatan:") and "MISSING" in note
     assert not any(c["check_id"] == "delivery.branch_protection" and c["ok"] for c in st.checks)
+    # residual risks quote PERSONAL-scoped evidence: shown to a PERSONAL session, not to one without a domain
+    from aeos.doctor.views import capabilities_view
+
+    def pr_item(domain):
+        return next(i for i in capabilities_view(db, domain=domain)["items"] if i["capability"] == "CAN_PREPARE_PR")
+
+    assert NOT_ENFORCEABLE_MESSAGE in pr_item("PERSONAL")["residual_risks"]
+    assert NOT_ENFORCEABLE_MESSAGE not in pr_item(None)["residual_risks"]
 
 
 # ------------------------------------------------------------ CAN_REVIEW_WITH_MAX / CAN_PLAN_PERSONAL
@@ -692,20 +731,24 @@ def test_startup_doctor_runs_under_lifespan_without_blocking(settings, db, fake_
     monkeypatch.setattr(app_mod, "LIFECYCLE_HOOKS", ["aeos.doctor.worker"])
     monkeypatch.setattr(worker, "STARTUP_DELAY_SECONDS", 0.0)
     real = runner.run_doctor
+    gate = threading.Event()
 
-    def slow(*a, **kw):
-        time.sleep(1.5)  # a slow host must never delay serving requests
+    def held(*a, **kw):
+        gate.wait(20)  # the Doctor is held until requests were served: startup must not wait for it
         return real(*a, **kw)
 
-    monkeypatch.setattr(runner, "run_doctor", slow)
+    monkeypatch.setattr(runner, "run_doctor", held)
     app = create_app(settings, testing=False, init_db=False)
     started = time.monotonic()
     with TestClient(app, base_url="http://127.0.0.1:8787") as c:
-        assert time.monotonic() - started < 1.0
+        entered = time.monotonic() - started
         assert c.get("/api/health").json()["status"] == "ok"
-        deadline = time.monotonic() + 30
+        assert worker._thread is not None and worker._thread.is_alive()  # still running in the background
+        gate.set()
+        deadline = time.monotonic() + 60
         while worker._thread is not None and worker._thread.is_alive() and time.monotonic() < deadline:
             time.sleep(0.1)
+    assert entered < 15  # a blocking startup would have waited for the 20 s gate (no tight timing)
     db.expire_all()
     run = db.scalar(select(DoctorRun).where(DoctorRun.trigger == "startup"))
     assert run is not None and run.functional is False
@@ -728,3 +771,111 @@ def test_cli_output_uses_logical_data_dir(settings, db, fake_host):
     assert "(AEOS_DATA_DIR)" in result.output
     payload = json.loads(CliRunner().invoke(app, ["doctor", "--group", "HOST", "--json"]).output)
     assert payload["data_dir"].endswith("(AEOS_DATA_DIR)") and str(Path.home()) not in payload["data_dir"]
+
+
+# ------------------------------------------------------------------------- review (adversarial) fixes
+
+
+def test_credential_writes_keep_the_store_check_and_worker_gate_fresh(settings, db, worker_ready):
+    """A Google token refresh (publisher, no session) must not stop worker admission: the store's own status does
+    not depend on single references. A change of the store itself (secret_store decision) still invalidates it."""
+    from aeos.secrets import facade as secrets
+
+    assert facade.capability_state(db, Capability.CAN_RUN_WORKER, domain="PERSONAL").status == "READY"
+    db.commit()
+    secrets.put_secret("personal/google-oauth-token", '{"token": "w3-rotated-access-Q7z"}', actor="publisher")
+    assert _stored(db, "adapter.google_oauth").status == "STALE"  # the Google check itself is rechecked
+    assert _stored(db, "secret.status").status != "STALE"
+    assert facade.capability_state(db, Capability.CAN_RUN_WORKER, domain="PERSONAL").status == "READY"
+    facade.invalidate(db, invalidator="secret:*", reason="secret backend changed (interim keyring exception)")
+    db.commit()
+    assert _stored(db, "secret.status").status == "STALE"
+    assert facade.capability_state(db, Capability.CAN_RUN_WORKER, domain="PERSONAL").status == "UNKNOWN"
+
+
+def test_office_credential_refs_never_reach_platform_rows_or_events(settings, db, secrets_memory, fake_host):
+    from aeos.secrets import facade as secrets
+
+    create_admin(db)
+    _run(settings, db, fake_host)
+    # distinctive value: put registers it for redaction process-wide (a run of "x" would redact other tests)
+    secrets.put_secret("office/atlassian", "w3-office-atlassian-cred-Q7z", actor="test")
+    jira = _stored(db, "adapter.office_jira")  # OFFICE-scoped row: the reference may be named there
+    assert jira.status == "STALE" and "office/atlassian" in jira.observed_evidence["stale_reason"]
+    platform = [r for r in latest_results(db).values() if not (r.scope or {}).get("domain")]
+    assert platform and not any("office/atlassian" in json.dumps(r.observed_evidence or {}) for r in platform)
+    stale = db.scalars(select(Event).where(Event.kind == "doctor.check.stale")).all()
+    assert stale and all(e.domain == "OFFICE" for e in stale if "office/atlassian" in json.dumps(e.payload))
+    # defence in depth: a platform-level result that depends on an office/* reference is marked STALE without
+    # quoting the reference, even when the caller's reason names it
+    row = latest_results(db)["secret.status"]
+    row.invalidators = ["secret:office/*"]
+    db.commit()
+    assert facade.invalidate(db, invalidator="secret:office/bitbucket", reason="stored office/bitbucket") >= 1
+    db.commit()
+    row = _stored(db, "secret.status")
+    assert row.status == "STALE" and "office/bitbucket" not in json.dumps(row.observed_evidence)
+    ev = db.scalars(select(Event).where(Event.kind == "doctor.check.stale", Event.entity_id == "secret.status")
+                    .order_by(Event.seq.desc())).first()
+    assert ev.domain is None and ev.payload["invalidator_target"] is None
+    assert "office/bitbucket" not in json.dumps(ev.payload)
+    bb = _stored(db, "adapter.office_bitbucket")
+    assert bb.status == "STALE" and "office/bitbucket" in bb.observed_evidence["stale_reason"]
+
+
+def test_opencode_pin_drift_stops_worker_admission(settings, db, worker_ready, fake_host, monkeypatch):
+    """§38/§50: binary version changed from the approved pin -> admission stops until reconciled."""
+    from aeos.models.inventory import ComponentObservation
+    from aeos.worker_runtime import opencode
+
+    assert facade.capability_state(db, Capability.CAN_RUN_WORKER, domain="PERSONAL").status == "READY"
+    monkeypatch.setattr(opencode, "opencode_status", lambda configured=None, *, refresh=False: {
+        "status": "INSTALLED", "binary": "/opt/fake/bin/opencode", "version": "1.20.0",
+        "pinned_version": opencode.PINNED_VERSION, "drift": True, "functional": "NOT_PROVEN"})
+    oc = _run(settings, db, fake_host, groups=["WORKER"])["worker.opencode"]
+    assert (oc.status, oc.error_code) == ("FAILED", "OPENCODE_PIN_DRIFT")
+    assert f"opencode-ai@{opencode.PINNED_VERSION}" in oc.remediation["command"]
+    st = facade.capability_state(db, Capability.CAN_RUN_WORKER, domain="PERSONAL")
+    assert st.status == "BLOCKED" and any(r.startswith("worker.opencode: FAILED") for r in st.reasons)
+    # still truthfully INSTALLED (with the observed version) in the shared inventory
+    obs = db.scalars(select(ComponentObservation).where(ComponentObservation.component_id == "opencode",
+                                                        ComponentObservation.dimension == "installation")
+                     .order_by(ComponentObservation.observed_at.desc())).first()
+    assert (obs.status, obs.observed_version) == ("INSTALLED", "1.20.0")
+
+
+def test_capability_result_without_live_mode_is_not_proof():
+    from aeos.doctor.checks.claude import _bridge_result_outcome
+
+    for result in ({"status": "VERIFIED", "engine_version": "2.1.302"}, {"status": "VERIFIED", "mode": "DEMO"}):
+        out = _bridge_result_outcome(result, fresh=True)
+        assert (out.status, out.error_code) == ("UNKNOWN", "CAPABILITY_TEST_NOT_LIVE")
+    assert _bridge_result_outcome({"status": "VERIFIED", "mode": "LIVE"}, fresh=True).status == "VERIFIED"
+
+
+def test_startup_failure_is_recorded_without_paths_and_shown_until_the_next_run(settings, db, fake_host,
+                                                                               monkeypatch):
+    from aeos.doctor import runner, worker
+    from aeos.doctor.views import checks_view
+
+    create_admin(db)
+    db.commit()
+    real = runner.run_doctor
+
+    def broken(*a, **kw):
+        raise RuntimeError(f"database is locked: {settings.layout.db_path} (home {Path.home()})")
+
+    monkeypatch.setattr(runner, "run_doctor", broken)
+    monkeypatch.setattr(worker, "STARTUP_DELAY_SECONDS", 0.0)
+    worker._stop.clear()
+    worker._run(settings)
+    db.expire_all()
+    ev = db.scalar(select(Event).where(Event.kind == "doctor.run.failed"))
+    assert ev is not None and ev.domain is None and ev.payload["error"] == "RuntimeError"
+    message = ev.payload["message"]
+    assert "<data>" in message and str(Path.home()) not in message and Path.home().as_posix() not in message
+    failure = checks_view(db, domain="PERSONAL")["last_failure"]
+    assert failure["trigger"] == "startup" and failure["error"] == "RuntimeError"
+    monkeypatch.setattr(runner, "run_doctor", real)
+    _run(settings, db, fake_host, groups=["HOST"])
+    assert checks_view(db, domain="PERSONAL")["last_failure"] is None  # a newer run supersedes the failure

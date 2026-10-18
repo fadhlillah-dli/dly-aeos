@@ -132,8 +132,13 @@ def secret_openbao_health(ctx: CheckContext) -> Outcome:
                    target_identity="openbao@loopback")
 
 
+# Depends on the store itself (backend selection, OpenBao address/binary), not on individual references: a
+# credential write or a Google token refresh does not change whether the store is reachable, so it must not
+# make CAN_RUN_WORKER / CAN_PUBLISH_PERSONAL STALE. A secret_store decision (interim keyring exception)
+# emits ``secret:*``, which still matches ``secret:store``.
 @check("secret.status", "SECRET", "Status secret store (tanpa nilai)", component_id="secret-provider",
-       ttl_seconds=900, ok={"CONFIGURED", "VERIFIED"}, severity_fail="HIGH", invalidators=("secret:*",))
+       ttl_seconds=900, ok={"CONFIGURED", "VERIFIED"}, severity_fail="HIGH",
+       invalidators=("secret:store", "config:openbao_addr", "binary:bao"))
 def secret_status(ctx: CheckContext) -> Outcome:
     from aeos.core.errors import Blocked
 

@@ -149,8 +149,9 @@ describe("Readiness page", () => {
           status: "READY",
           reasons: ["catatan: worker_runtime.sandbox_readiness: process sandbox WEAK diizinkan keputusan pengecualian"],
           checks: [
+            // a WEAK process sandbox allowed by an owner exception satisfies the gate but is CONFIGURED, never VERIFIED
             { check_id: "worker_runtime.sandbox_readiness", title: "Syarat sandbox worker (live, ADR-0051)", tier: "critical",
-              status: "READY", effective_status: "VERIFIED", ok: true, last_checked_at: null, component_id: "worker-runtime",
+              status: "READY", effective_status: "CONFIGURED", ok: true, last_checked_at: null, component_id: "worker-runtime",
               live: true },
           ],
           remedies: [],
@@ -162,11 +163,30 @@ describe("Readiness page", () => {
     renderPage();
     expect(await screen.findByText("Menjalankan worker dalam sandbox")).toBeInTheDocument();
     expect(screen.getByTestId("last-run")).toHaveTextContent("otomatis saat server mulai");
-    expect(screen.getByText(/Syarat sandbox worker \(live, ADR-0051\)/)).toBeInTheDocument();
+    const live = screen.getByText(/Syarat sandbox worker \(live, ADR-0051\)/);
+    expect(live).toHaveTextContent("Terkonfigurasi");
+    expect(live).not.toHaveTextContent("Terverifikasi");
     const risks = screen.getByTestId("residual-risks");
     expect(risks).toHaveTextContent("Risiko residual (2)");
     expect(risks).toHaveTextContent("bukan tanda lulus");
     expect(risks).toHaveTextContent(/egress/);
+    expect(screen.queryByTestId("last-failure")).not.toBeInTheDocument();
+  });
+
+  it("says when the latest (startup) Doctor pass failed instead of presenting the older run as current", async () => {
+    checksBody = {
+      ...checks,
+      last_run: {
+        id: "r0", started_at: "2026-10-17T01:00:00+00:00", finished_at: "2026-10-17T01:00:05+00:00",
+        trigger: "cli", functional: false, groups: [], capability: null, counts: { VERIFIED: 27 },
+      },
+      last_failure: { at: "2026-10-18T01:00:03+00:00", trigger: "startup", error: "OperationalError" },
+    };
+    renderPage();
+    const notice = await screen.findByTestId("last-failure");
+    expect(notice).toHaveTextContent("otomatis saat server mulai gagal");
+    expect(notice).toHaveTextContent("OperationalError");
+    expect(notice).toHaveTextContent("bukan status terkini");
   });
 
   it("shows the capability matrix first, unknown is not green, viewer cannot run checks", async () => {

@@ -24,7 +24,9 @@ def invalidate_secret_checks(ref: str, *, reason: str, session: Any | None = Non
     except (ImportError, ModuleNotFoundError):
         return 0
     invalidator = f"secret:{ref}"
-    why = f"{reason} ({ref})"[:200]
+    # The reference is carried by the invalidator label only, so the Doctor can withhold it from rows that
+    # are not scoped to the reference's domain (an office/* ref never appears in a platform-level row).
+    why = reason[:200]
     if session is not None:
         return doctor.invalidate(session, invalidator=invalidator, reason=why)
     try:

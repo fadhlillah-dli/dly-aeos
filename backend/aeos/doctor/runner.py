@@ -135,7 +135,11 @@ def run_check(spec: CheckSpec, ctx: CheckContext) -> CheckResultData:
     if caps:
         scope["capabilities"] = caps
     observations = list(out.observations)
-    if spec.observation and spec.component_id:
+    # A check that reports the dimension itself (e.g. OpenCode INSTALLED but FAILED on pin drift) is not
+    # overwritten by the generic status mapping.
+    explicit = any(o.get("component_id") == spec.component_id and o.get("dimension") == spec.observation
+                   for o in observations)
+    if spec.observation and spec.component_id and not explicit:
         mapped = OBS_MAP.get(spec.observation, {}).get(out.status)
         if spec.observation == "connectivity" and out.status == "FAILED" and "UNREACHABLE" not in (out.error_code or ""):
             # e.g. wrong auth mode, sealed vault, repo not visible: the endpoint answered, so it is not

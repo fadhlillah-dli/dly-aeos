@@ -173,11 +173,12 @@ def _bridge_result_outcome(result: dict[str, Any], *, fresh: bool, current_versi
     keep["source"] = "uji baru (--functional)" if fresh else "uji terakhir yang direkam ClaudeNativeBridge"
     status = str(result.get("status") or "").upper()
     version = result.get("engine_version")
-    mode = str(result.get("mode") or "LIVE").upper()
+    # fail closed: a result that does not say it is LIVE is not proof (the bridge always records mode LIVE)
+    mode = str(result.get("mode") or "").upper()
     when = f" pada {result.get('checked_at')}" if result.get("checked_at") and not fresh else ""
     if mode not in ("LIVE", "NATIVE"):
-        return Outcome("UNKNOWN", f"Hasil uji bermode {mode} bukan bukti (MOCK/DEMO tidak dihitung); {MANUAL_FALLBACK}.",
-                       evidence=keep, error_code="CAPABILITY_TEST_NOT_LIVE")
+        return Outcome("UNKNOWN", f"Hasil uji bermode {mode or 'tanpa mode'} bukan bukti (hanya LIVE dihitung; "
+                       f"MOCK/DEMO tidak); {MANUAL_FALLBACK}.", evidence=keep, error_code="CAPABILITY_TEST_NOT_LIVE")
     if result.get("quota_exhausted") or any(isinstance(s, dict) and s.get("status") == "EXHAUSTED"
                                             for s in result.get("steps") or []):
         return Outcome("FAILED", f"Kuota Max habis{when}; review menunggu, tidak ada fallback ke API/route lain.",
@@ -229,8 +230,11 @@ def _last_recorded_test(ctx: CheckContext) -> dict[str, Any] | None:
             "duration_ms": row.duration_ms, "steps": row.steps or [], "stale_reason": stale, "id": row.id}
 
 
+# ``model:route:SUPERVISOR``: only a supervisor route change (claude-native alias re-resolved, status/config of a
+# supervisor route) invalidates the bridge proof; a WORKER route activation/disable must not push every review
+# to the manual fallback (verification.review requires CAN_REVIEW_WITH_MAX READY).
 @check("claude.capability_test", "CLAUDE_NATIVE", "Capability test ClaudeNativeBridge", component_id="claude-native-bridge",
-       ttl_seconds=86400, invalidators=("binary:claude", "auth:claude", "model:route"), needs_db=True,
+       ttl_seconds=86400, invalidators=("binary:claude", "auth:claude", "model:route:SUPERVISOR"), needs_db=True,
        fingerprint=_fp_claude, severity_fail="HIGH", observation="functional",
        description="Tanpa --functional: membaca uji terakhir yang direkam bridge. Dengan --functional: satu panggilan "
                    "`claude -p` kecil lewat bridge (memakai kuota Max).")
