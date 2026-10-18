@@ -109,7 +109,7 @@ def office_external_allowed(session: Session) -> tuple[bool, str]:
     except ImportError as exc:
         return False, _unavailable("policy", exc)
     if not pol.get("external_worker_allowed"):
-        return False, "OFFICE external_worker_allowed=false (§23 default deny)"
+        return False, "OFFICE external_worker_allowed=false (master s23 default deny)"
     return True, ""
 
 
@@ -151,22 +151,27 @@ def record_decision(session: Session, **kwargs: Any) -> Decision:
         raise Blocked(_unavailable("policy", exc), code="POLICY_UNAVAILABLE") from exc
 
 
-def active_exception_decision(session: Session, *, target_type: str, target_id: str) -> Decision | None:
+def active_exception_decision(session: Session, *, target_type: str, target_id: str,
+                               target_hash: str | None = None) -> Decision | None:
     """ACTIVE, unexpired, human EXCEPTION decision for a target (policy facade first, then a
-    read-only lookup of the canonical Decision rows when the policy module is absent)."""
+    read-only lookup of the canonical Decision rows when the policy module is absent). With
+    ``target_hash`` only a decision bound to exactly that hash counts."""
+    from sqlalchemy import select
+
     from aeos.policy import facade as policy
 
     try:
-        d = policy.find_active_decision(session, kind="EXCEPTION", target_type=target_type, target_id=target_id)
+        d = policy.find_active_decision(session, kind="EXCEPTION", target_type=target_type, target_id=target_id,
+                                        target_hash=target_hash)
     except ImportError:
-        from sqlalchemy import select
-
-        rows = session.scalars(
-            select(Decision).where(Decision.kind == "EXCEPTION", Decision.target_type == target_type,
+        d = None
+    if d is None or (target_hash is not None and d.target_hash != target_hash):
+        # Read-only lookup of the canonical rows (module absent, or the facade returned another binding).
+        q = select(Decision).where(Decision.kind == "EXCEPTION", Decision.target_type == target_type,
                                    Decision.target_id == target_id, Decision.status == "ACTIVE")
-            .order_by(Decision.created_at.desc())
-        )
-        d = next(iter(rows), None)
+        if target_hash is not None:
+            q = q.where(Decision.target_hash == target_hash)
+        d = next(iter(session.scalars(q.order_by(Decision.created_at.desc()))), None)
     if d is None or d.status != "ACTIVE" or d.actor_kind != "HUMAN":
         return None
     exp = ensure_aware(d.expires_at)
@@ -177,3 +182,30 @@ def active_exception_decision(session: Session, *, target_type: str, target_id: 
 
 def is_personal(domain: str) -> bool:
     return domain == Domain.PERSONAL.value
+
+
+def verifier_available() -> tuple[bool, str]:
+    """§19 admission: "siapa verifier dan penerima hasilnya". Without the verification module no
+    result can ever be accepted, so a worker is not started (fail closed, no wasted run/cost)."""
+    import importlib
+
+    try:
+        importlib.import_module("aeos.verification.acceptance")
+    except ImportError as exc:
+        return False, _unavailable("verification", exc)
+    return True, ""
+
+
+QUARANTINE_TARGET_TYPE = "run_quarantine"
+
+
+def quarantine_release(session: Session, run: Any) -> Decision | None:
+    """ACTIVE human EXCEPTION decision releasing a quarantined patch after special review (§21),
+    bound to this run AND its exact runtime head commit (a different patch needs a new decision)."""
+    if not getattr(run, "head_commit", None):
+        return None
+    d = active_exception_decision(session, target_type=QUARANTINE_TARGET_TYPE, target_id=run.id,
+                                  target_hash=run.head_commit)
+    if d is None or d.target_hash != run.head_commit:
+        return None
+    return d

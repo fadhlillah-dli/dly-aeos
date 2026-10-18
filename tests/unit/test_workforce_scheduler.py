@@ -374,8 +374,12 @@ def test_done_impossible_without_valid_acceptance(db, fakes):
 
 
 def test_mark_accepted_fails_closed_without_verification_module(db, monkeypatch):
-    fk = FakeModules().install(monkeypatch, skip=("aeos.verification.acceptance",))
+    fk = FakeModules().install(monkeypatch)
     tid, run = _to_review(db, fk)
+    fk.accepted.add(tid)
+    # The verification module disappears after the run reached REVIEW (admission itself already
+    # refuses to start a worker without a verifier: see test_admission_waits_without_verifier).
+    monkeypatch.delitem(sys.modules, "aeos.verification.acceptance")
     rec = AcceptanceRecord(task_id=tid, run_id=run.id, project_id=run.project_id, artifact_hash="sha256:x",
                            acceptance_status="ACCEPTED")
     db.add(rec)

@@ -109,6 +109,23 @@ def _is_loopback_http(url: str) -> bool:
     return u.scheme == "http" and u.hostname in {"127.0.0.1", "localhost", "::1"}
 
 
+def _check_credential_domain(domain: str, ref: str) -> None:
+    """§26 separate credential paths: an OFFICE run only ever uses an ``office/`` credential and a
+    PERSONAL run never touches one — whatever the route's configuration says."""
+    ns = str(ref).split("/", 1)[0]
+    if domain == "OFFICE" and ns != "office":
+        raise ProxyError(403, "CREDENTIAL_DOMAIN", "OFFICE routes need an office/ credential reference")
+    if domain != "OFFICE" and ns == "office":
+        raise ProxyError(403, "CREDENTIAL_DOMAIN", "office/ credentials are never used outside OFFICE")
+
+
+def _fetch_key(secrets: Any, ref: str, purpose: str) -> str:
+    try:
+        return secrets.get_secret(ref, purpose=purpose, actor="service:broker")
+    except ValueError as exc:  # malformed reference in the route configuration: fail closed
+        raise ProxyError(503, "UPSTREAM_CREDENTIAL_MISSING", "route credential reference is invalid") from exc
+
+
 def resolve_upstream(session: Any, route_key: str, *, domain: str) -> Upstream:
     from aeos.secrets import facade as secrets
 
@@ -129,10 +146,12 @@ def resolve_upstream(session: Any, route_key: str, *, domain: str) -> Upstream:
             raise ProxyError(403, "ROUTE_ENDPOINT", "openrouter route endpoint must be https://openrouter.ai/...")
         refs = [cred_ref] if cred_ref else (["workers/openrouter", "personal/openrouter"]
                                             if domain == "PERSONAL" else [])
+        for ref in refs:
+            _check_credential_domain(domain, ref)
         key = None
         for ref in refs:
             try:
-                key = secrets.get_secret(ref, purpose=purpose, actor="service:broker")
+                key = _fetch_key(secrets, ref, purpose)
                 break
             except Blocked:
                 continue
@@ -146,10 +165,9 @@ def resolve_upstream(session: Any, route_key: str, *, domain: str) -> Upstream:
         raise ProxyError(403, "ROUTE_ENDPOINT", "route endpoint must be https (or loopback http) without credentials")
     key = None
     if cred_ref:
-        if domain == "OFFICE" and not str(cred_ref).startswith("office/"):
-            raise ProxyError(403, "CREDENTIAL_DOMAIN", "OFFICE routes need an office/ credential reference")
+        _check_credential_domain(domain, cred_ref)
         try:
-            key = secrets.get_secret(cred_ref, purpose=purpose, actor="service:broker")
+            key = _fetch_key(secrets, cred_ref, purpose)
         except Blocked as exc:
             raise ProxyError(503, "UPSTREAM_CREDENTIAL_MISSING", exc.message) from exc
     elif not _is_loopback_http(base):
@@ -254,11 +272,14 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
             req.retry_after_seconds = retry_after
             req.error_summary = redact_text(error)[:500]
         tokens = (prompt or 0) + (completion or 0)
-        if outcome == "OK":
+        # Usage the upstream reported is consumed even when the stream broke afterwards: it counts
+        # against the caps and the ledger (never silently dropped).
+        counted = outcome == "OK" or prompt is not None or completion is not None
+        if counted:
             grants.add_usage(s, p.grant_id, tokens=tokens, cost_usd=cost)
         run = s.get(WorkerRun, p.run_id)
         ledger = "NOT_RECORDED"
-        if outcome == "OK":
+        if counted:
             from aeos.cost import facade as cost_facade
 
             try:
@@ -275,7 +296,7 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
         if run is not None:
             us = dict(run.usage_summary or {})
             us["requests"] = int(us.get("requests", 0)) + 1
-            if outcome == "OK":
+            if counted:
                 us["prompt_tokens"] = int(us.get("prompt_tokens", 0)) + (prompt or 0)
                 us["completion_tokens"] = int(us.get("completion_tokens", 0)) + (completion or 0)
                 if cost is None:

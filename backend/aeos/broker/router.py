@@ -12,6 +12,7 @@ from sqlalchemy import select
 from aeos.api.deps import DB, ActiveDomain, AdminPrincipal
 from aeos.broker import grants
 from aeos.broker.model_proxy import router as proxy_router
+from aeos.core.errors import NotFound
 from aeos.core.timeutil import utcnow
 from aeos.models.broker_ext import BrokerRequest, BrokerSideEffect
 from aeos.models.routing import CapabilityGrant
@@ -41,6 +42,8 @@ def list_requests(principal: AdminPrincipal, domain: ActiveDomain, db: DB, run_i
     q = select(BrokerRequest).where(BrokerRequest.domain == domain.value)
     if run_id:
         q = q.where(BrokerRequest.run_id == run_id)
+    if principal.allowed_project_ids is not None:
+        q = q.where(BrokerRequest.project_id.in_(principal.allowed_project_ids))
     rows = db.scalars(q.order_by(BrokerRequest.created_at.desc()).limit(limit))
     items = [{"id": r.id, "run_id": r.run_id, "route_key": r.route_key, "outcome": r.outcome, "status": r.status_code,
               "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens,
@@ -55,6 +58,8 @@ def list_side_effects(principal: AdminPrincipal, domain: ActiveDomain, db: DB,
     q = select(BrokerSideEffect).where(BrokerSideEffect.domain == domain.value)
     if run_id:
         q = q.where(BrokerSideEffect.run_id == run_id)
+    if principal.allowed_project_ids is not None:
+        q = q.where(BrokerSideEffect.project_id.in_(principal.allowed_project_ids))
     items = [{"id": s.id, "run_id": s.run_id, "kind": s.kind, "status": s.status, "target": s.target,
               "external_url": s.external_url, "commit_sha": s.commit_sha, "attempts": s.attempts,
               "updated_at": s.updated_at.isoformat()} for s in db.scalars(q.order_by(BrokerSideEffect.created_at.desc()))]
@@ -69,10 +74,25 @@ class RevokeBody(BaseModel):
 def revoke_run_grants(run_id: str, body: RevokeBody, principal: AdminPrincipal, domain: ActiveDomain,
                       db: DB) -> dict[str, Any]:
     owned = db.scalar(select(CapabilityGrant).where(CapabilityGrant.run_id == run_id))
-    if owned is not None and owned.domain != domain.value:
-        from aeos.core.errors import NotFound
-
+    if owned is not None and (owned.domain != domain.value
+                              or not principal.can_access_project(owned.project_id, owned.domain)):
         raise NotFound("run not found")
     n = grants.revoke_grants(db, run_id=run_id, reason=body.reason, actor=f"user:{principal.user.id}")
     db.commit()
     return {"run_id": run_id, "revoked": n}
+
+
+@router.post("/api/broker/side-effects/{side_effect_id}/reconcile")
+def reconcile_side_effect(side_effect_id: str, principal: AdminPrincipal, domain: ActiveDomain,
+                          db: DB) -> dict[str, Any]:
+    """Read the external state of a PENDING/UNKNOWN push/PR and record it (§14 crash recovery).
+    Read-only towards the provider; nothing is pushed, created or merged."""
+    from aeos.broker.git_broker import reconcile_side_effect as impl
+
+    se = db.get(BrokerSideEffect, side_effect_id)
+    if se is None or se.domain != domain.value or (
+            se.project_id and not principal.can_access_project(se.project_id, se.domain)):
+        raise NotFound("side effect not found")
+    out = impl(db, side_effect_id, actor=f"user:{principal.user.id}")
+    db.commit()
+    return out

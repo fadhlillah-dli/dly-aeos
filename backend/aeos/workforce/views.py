@@ -22,7 +22,7 @@ from aeos.models.decisions import Decision
 from aeos.models.evidence import AcceptanceRecord, EvidenceArtifact, ReviewRecord
 from aeos.models.planning import TaskSpec
 from aeos.models.portfolio import Project
-from aeos.models.routing import CapabilityGrant
+from aeos.models.routing import CapabilityGrant, ModelRoute
 from aeos.models.workforce import AgentDefinition, Lease, RoleSkillPack, TaskExecution, WorkerRun
 from aeos.workforce import scheduler
 from aeos.workforce.catalog import GROUP_LABELS, GROUPS
@@ -39,6 +39,9 @@ def _iso(dt: Any) -> str | None:
 
 
 def derive_ui_state(run: WorkerRun | None, te: TaskExecution | None) -> str:
+    """UI-only state derived from the canonical state + reason (§35). A run's own outcome always
+    wins: a FAILED/CANCELLED attempt is never shown as "waiting for review" just because its task
+    went to REVIEW for a repair decision, and another attempt's task state is never borrowed."""
     if run is not None and run.execution_status in (S.RUNNING.value, S.LEASED.value):
         age = age_seconds(run.last_heartbeat_at or run.started_at or run.created_at)
         if age is not None and age > STALE_HEARTBEAT_SECONDS:
@@ -48,6 +51,9 @@ def derive_ui_state(run: WorkerRun | None, te: TaskExecution | None) -> str:
         return run.execution_status
     if run is not None and run.execution_status == S.REVIEW.value:
         return "WAITING_REVIEW"
+    if run is not None and (run.execution_status in (S.DONE.value, S.FAILED.value, S.CANCELLED.value)
+                            or te is None or te.active_run_id != run.id):
+        return run.execution_status
     if te is not None:
         if te.reason_code in scheduler.QUOTA_CODES:
             return "WAITING_QUOTA"
@@ -190,7 +196,8 @@ def run_detail(session: Session, run: WorkerRun) -> dict[str, Any]:
     targets = [run.id] + ([run.task_id] if run.task_id else []) + ([task.plan_version_id] if task else [])
     sandbox_decision = (run.caps or {}).get("sandbox_decision_id")
     decisions = [{"id": d.id, "kind": d.kind, "target_type": d.target_type, "target_id": d.target_id,
-                  "status": d.status, "rationale": d.rationale, "created_at": _iso(d.created_at)}
+                  "target_hash": d.target_hash, "status": d.status, "rationale": d.rationale,
+                  "created_at": _iso(d.created_at)}
                  for d in session.scalars(select(Decision).where(
                      or_(Decision.target_id.in_(targets), Decision.id == (sandbox_decision or ""))))]
     side_effects = [{"id": se.id, "kind": se.kind, "status": se.status, "target": se.target,
@@ -238,16 +245,20 @@ def run_detail(session: Session, run: WorkerRun) -> dict[str, Any]:
     }
 
 
-def _active_counts(session: Session, column: Any, *, domain: str, mode: str) -> dict[str, int]:
-    q = (select(column, func.count()).where(WorkerRun.domain == domain, WorkerRun.mode == mode,
-                                            WorkerRun.execution_status.in_([S.LEASED.value, S.RUNNING.value]))
-         .group_by(column))
-    return {k: int(n) for k, n in session.execute(q) if k}
+def _active_counts(session: Session, column: Any, *, domain: str, mode: str,
+                   project_ids: list[str] | None = None) -> dict[str, int]:
+    """Active run counts, scoped like every other read: domain AND the principal's project scope
+    (§50 'Viewer mengakses ... Office: backend scope diterapkan termasuk counts')."""
+    q = select(column, func.count()).where(WorkerRun.domain == domain, WorkerRun.mode == mode,
+                                           WorkerRun.execution_status.in_([S.LEASED.value, S.RUNNING.value]))
+    if project_ids is not None:
+        q = q.where(WorkerRun.project_id.in_(project_ids))
+    return {k: int(n) for k, n in session.execute(q.group_by(column)) if k}
 
 
-def roles_view(session: Session, *, domain: str) -> dict[str, Any]:
-    live = _active_counts(session, WorkerRun.role_key, domain=domain, mode=DataMode.LIVE.value)
-    demo = _active_counts(session, WorkerRun.role_key, domain=domain, mode=DataMode.DEMO.value)
+def roles_view(session: Session, *, domain: str, project_ids: list[str] | None = None) -> dict[str, Any]:
+    live = _active_counts(session, WorkerRun.role_key, domain=domain, mode=DataMode.LIVE.value, project_ids=project_ids)
+    demo = _active_counts(session, WorkerRun.role_key, domain=domain, mode=DataMode.DEMO.value, project_ids=project_ids)
     groups: dict[str, list[dict[str, Any]]] = {g: [] for g, _ in GROUPS}
     for r in session.scalars(select(RoleSkillPack).order_by(RoleSkillPack.name)):
         n = live.get(r.role_key, 0)
@@ -266,8 +277,9 @@ def roles_view(session: Session, *, domain: str) -> dict[str, Any]:
             "note": "Org view adalah proyeksi katalog: garis organisasi tidak memberi permission atau authority."}
 
 
-def agents_view(session: Session, *, domain: str) -> list[dict[str, Any]]:
-    live = _active_counts(session, WorkerRun.agent_key, domain=domain, mode=DataMode.LIVE.value)
+def agents_view(session: Session, *, domain: str, project_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    live = _active_counts(session, WorkerRun.agent_key, domain=domain, mode=DataMode.LIVE.value,
+                          project_ids=project_ids)
     out = []
     for a in session.scalars(select(AgentDefinition).order_by(AgentDefinition.agent_key)):
         out.append({"agent_key": a.agent_key, "role_key": a.role_key, "harness": a.harness, "description": a.description,
@@ -312,9 +324,14 @@ def cost_summary(session: Session, *, domain: str, project_ids: list[str] | None
         unknown = unknown.where(UsageLedgerEntry.project_id.in_(project_ids))
     known_usd = session.scalar(known)
     unknown_n = int(session.scalar(unknown) or 0)
+    # Only quota of routes eligible for this domain (no OFFICE-only route metadata in PERSONAL).
+    routes = [r for r in session.scalars(select(ModelRoute)) if domain in (r.eligible_domains or [])]
+    route_keys = {r.route_key for r in routes}
+    providers = {r.provider for r in routes}
     quota = [{"provider": q.provider, "scope": q.scope, "state": q.state, "source": q.source,
               "observed_at": _iso(q.observed_at), "resets_at": _iso(q.resets_at)}
-             for q in session.scalars(select(QuotaState).order_by(QuotaState.updated_at.desc()).limit(50))]
+             for q in session.scalars(select(QuotaState).order_by(QuotaState.updated_at.desc()).limit(200))
+             if q.scope in route_keys or (q.scope in ("*", "") and q.provider in providers)][:50]
     return {"source": "usage_ledger (broker-recorded, LIVE only; DEMO/MOCK excluded)", "entries": int(n or 0),
             "input_tokens": int(tin or 0), "output_tokens": int(tout or 0), "requests": int(reqs or 0),
             "cost_known_usd": float(known_usd) if known_usd is not None else None,
@@ -329,11 +346,16 @@ def summary(session: Session, *, domain: str, project_ids: list[str] | None, loo
 
     cap, cap_decision = scheduler.concurrency_cap(session)
     pause = scheduler.pause_info(session)
-    live_active = session.scalar(select(func.count()).select_from(WorkerRun).where(
+    live_q = select(func.count()).select_from(WorkerRun).where(
         WorkerRun.domain == domain, WorkerRun.mode == DataMode.LIVE.value,
-        WorkerRun.execution_status.in_([S.LEASED.value, S.RUNNING.value]))) or 0
-    demo_runs = session.scalar(select(func.count()).select_from(WorkerRun).where(
-        WorkerRun.domain == domain, WorkerRun.mode != DataMode.LIVE.value)) or 0
+        WorkerRun.execution_status.in_([S.LEASED.value, S.RUNNING.value]))
+    demo_q = select(func.count()).select_from(WorkerRun).where(WorkerRun.domain == domain,
+                                                                WorkerRun.mode != DataMode.LIVE.value)
+    if project_ids is not None:  # counts follow the same project scope as the rows (no count leak)
+        live_q = live_q.where(WorkerRun.project_id.in_(project_ids))
+        demo_q = demo_q.where(WorkerRun.project_id.in_(project_ids))
+    live_active = session.scalar(live_q) or 0
+    demo_runs = session.scalar(demo_q) or 0
     sb = sandbox_readiness(session, domain=domain)
     return {
         "checked_at": utcnow().isoformat(), "domain": domain, "mode": DataMode.LIVE.value,

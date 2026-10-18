@@ -257,11 +257,12 @@ class EventParser:
         if not raw:
             return None, False
         is_abs = PureWindowsPath(raw).is_absolute() or PurePosixPath(raw).is_absolute()
-        if not is_abs:
-            return raw.replace("\\", "/"), False
+        root = self.worktree.resolve()
+        candidate = Path(raw) if is_abs else root / raw.replace("\\", "/")
         try:
-            rel = Path(raw).resolve().relative_to(self.worktree.resolve())
-            return rel.as_posix(), False
+            # Relative paths are resolved too: ``../../x`` from the worktree is an outside attempt.
+            rel = candidate.resolve().relative_to(root)
+            return (rel.as_posix() or "."), False
         except (ValueError, OSError):
             return raw, True
 

@@ -52,7 +52,8 @@ DEFAULT_MAX_TOKENS = 2_000_000
 WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CONFLICT", "PLAN_NOT_APPROVED",
                         "DEPENDENCY_NOT_ACCEPTED", "AGENT_DISABLED", "OFFICE_DENIED", "CAPABILITY_NOT_READY",
                         "SANDBOX_NOT_READY", "ROUTE_INELIGIBLE", "COST_UNKNOWN", "BUDGET_EXCEEDED",
-                        "MODULE_UNAVAILABLE"})
+                        "MODULE_UNAVAILABLE", "VERIFIER_UNAVAILABLE", "SIDE_EFFECT_UNRECONCILED",
+                        "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED"})
 QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED"})
 
 
@@ -269,8 +270,10 @@ _RUN_FIELD_VOCAB: dict[str, set[str] | None] = {
     "worker_reported_status": None,
     "quota_status": None,
 }
+# ``head_commit`` is deliberately NOT updatable here: it is recorded by the runtime commit and is the
+# binding for publication and quarantine-release decisions (ADR-0054).
 _RUN_FREE_FIELDS = {"current_action", "touched_paths", "review_record_id", "acceptance_id", "evidence_refs",
-                    "model_resolved", "engine_version", "head_commit", "usage_summary"}
+                    "model_resolved", "engine_version", "usage_summary"}
 
 
 def update_run(session: Session, run_id: str, *, actor: str, **fields: Any) -> WorkerRun:
@@ -383,10 +386,22 @@ def _previous_worker_alive(session: Session, task_id: str) -> WorkerRun | None:
     return None
 
 
+def _unreconciled_side_effects(session: Session, task_id: str) -> list[tuple[str, str]]:
+    """§14 "Crash recovery membaca lease, reservation, publication records, dan status eksternal
+    sebelum retry": an earlier attempt's push/PR whose outcome is PENDING/UNKNOWN blocks a retry."""
+    from aeos.models.broker_ext import BrokerSideEffect
+
+    rows = session.execute(
+        select(BrokerSideEffect.kind, BrokerSideEffect.status)
+        .join(WorkerRun, WorkerRun.id == BrokerSideEffect.run_id)
+        .where(WorkerRun.task_id == task_id, BrokerSideEffect.status.in_(["PENDING", "UNKNOWN"])))
+    return [(k, st) for k, st in rows]
+
+
 def _fan_out_problem(task: TaskSpec) -> str | None:
     tools = {str(t).split(":", 1)[0].lower() for t in (task.tools_allowed or [])}
     if tools & {"task", "subagent", "spawn", "delegate"}:
-        return "TaskSpec requests nested agents/fan-out (not allowed, §19/§21)"
+        return "TaskSpec requests nested agents/fan-out (not allowed, master s19/s21)"
     scope = task.capability_scope or {}
     if scope.get("fan_out") or scope.get("subtasks"):
         return "TaskSpec capability scope requests fan-out (not allowed)"
@@ -420,6 +435,10 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
     alive = _previous_worker_alive(session, task.id)
     if alive is not None:
         reasons.append(("LEASE_LOST_PROCESS_ALIVE", f"previous worker of run {alive.id} (pid {alive.pid}) is still alive"))
+    pending = _unreconciled_side_effects(session, task.id)
+    if pending:
+        reasons.append(("SIDE_EFFECT_UNRECONCILED", "external side effect(s) of an earlier attempt not reconciled: "
+                        + ", ".join(f"{k} {st}" for k, st in pending[:5])))
     if te.reason_code == "QUOTA_EXHAUSTED" and te.state == S.BLOCKED.value:
         wait = _quota_wait(session, te)
         if wait:
@@ -427,17 +446,28 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
     return reasons
 
 
-def _quota_wait(session: Session, te: TaskExecution) -> str | None:
+def route_quota_exhausted(session: Session, route_key: str | None) -> str | None:
+    """Observed quota exhaustion (e.g. upstream 429 recorded by the broker) that has not reset yet.
+    §22/§42: wait/back off on the same approved route — never switch to a paid/unapproved one."""
     from aeos.models.cost import QuotaState
 
+    if not route_key:
+        return None
+    now = utcnow()
+    for q in session.scalars(select(QuotaState).where(QuotaState.scope == route_key,
+                                                      QuotaState.state == "EXHAUSTED")):
+        resets = ensure_aware(q.resets_at)
+        if resets is None or resets > now:
+            until = resets.isoformat() if resets else "UNKNOWN (no reset time reported)"
+            return f"quota for {route_key} exhausted until {until}"
+    return None
+
+
+def _quota_wait(session: Session, te: TaskExecution) -> str | None:
     run = session.get(WorkerRun, te.active_run_id) if te.active_run_id else None
     if run is None or not run.model_route_key:
         return None
-    q = session.scalar(select(QuotaState).where(QuotaState.scope == run.model_route_key))
-    resets = ensure_aware(q.resets_at) if q else None
-    if q and q.state == "EXHAUSTED" and resets and resets > utcnow():
-        return f"quota for {run.model_route_key} exhausted until {resets.isoformat()}"
-    return None
+    return route_quota_exhausted(session, run.model_route_key)
 
 
 def refresh_readiness(session: Session, plan_version_id: str, *, actor: str = "system:scheduler") -> dict[str, int]:
@@ -591,11 +621,16 @@ def admission_check(session: Session, task_id: str) -> Admission:
     ok, reasons = ext.capability_ready(session, Capability.CAN_RUN_WORKER, domain=task.domain, project_id=task.project_id)
     if not ok:
         adm.waits.append(("CAPABILITY_NOT_READY", "; ".join(reasons)))
-    from aeos.worker_runtime.sandbox import sandbox_readiness
+    from aeos.worker_runtime.sandbox import process_shell_allowed, sandbox_readiness, task_wants_shell
 
     sb = sandbox_readiness(session, domain=task.domain)
     if sb["status"] != "READY":
         adm.waits.append(("SANDBOX_NOT_READY", "; ".join(sb["reasons"])))
+    elif (sb.get("kind") == "process" and task_wants_shell(task.tools_allowed)
+          and not process_shell_allowed(session, sb.get("decision_id"))):
+        adm.waits.append(("SANDBOX_NOT_READY", "TaskSpec grants bash but the process-sandbox exception does not "
+                          "(details.allow_bash=true): with a shell the worker acts as the same OS user, incl. OS "
+                          "credential helpers (ADR-0051)"))
     cap, _decision = concurrency_cap(session)
     adm.cap = cap
     active = active_executions(session, exclude_task=task.id)
@@ -605,11 +640,27 @@ def admission_check(session: Session, task_id: str) -> Admission:
     if conflicts:
         adm.waits.append(("SHARED_WRITE_CONFLICT", "shared-write conflict with " +
                           ", ".join(c["task_key"] for c in conflicts) + " (serialised)"))
+    # §14/§50 "Controller crash dan worker lama masih aktif": no new attempt while an earlier
+    # attempt's process or one of its external side effects may still be active/unreconciled.
+    alive = _previous_worker_alive(session, task.id)
+    if alive is not None:
+        adm.waits.append(("LEASE_LOST_PROCESS_ALIVE",
+                          f"previous worker of run {alive.id} (pid {alive.pid}) is still alive"))
+    pending = _unreconciled_side_effects(session, task.id)
+    if pending:
+        adm.waits.append(("SIDE_EFFECT_UNRECONCILED", "external side effect(s) of an earlier attempt not "
+                          "reconciled: " + ", ".join(f"{k} {st}" for k, st in pending[:5])))
+    ok, why = ext.verifier_available()
+    if not ok:
+        adm.waits.append(("VERIFIER_UNAVAILABLE", f"no independent verifier/acceptance path: {why}"))
     route, rreasons = ext.select_route(session, task)
     if route is None:
         adm.waits.append(("ROUTE_INELIGIBLE", "; ".join(rreasons)))
     else:
         adm.route = route
+        quota = route_quota_exhausted(session, route.route_key)
+        if quota:
+            adm.waits.append(("QUOTA_EXHAUSTED", quota + "; waiting (no fallback to another route)"))
         est_usd, est_tokens = _cost_estimate(task, route)
         if est_usd is None:
             adm.waits.append(("COST_UNKNOWN", f"route {route.route_key} is not free and the TaskSpec has no "
@@ -618,6 +669,15 @@ def admission_check(session: Session, task_id: str) -> Admission:
             adm.est_usd, adm.est_tokens = est_usd, est_tokens
     adm.admitted = not adm.waits and not adm.blocks
     return adm
+
+
+def _role_revision(session: Session, role_key: str | None) -> str | None:
+    from aeos.models.workforce import RoleSkillPack
+
+    if not role_key:
+        return None
+    role = session.scalar(select(RoleSkillPack).where(RoleSkillPack.role_key == role_key))
+    return role.revision_hash if role is not None else None
 
 
 def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admission | None = None,
@@ -662,6 +722,7 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
         model_resolved=adm.route.resolved_version or None, engine=adm.agent.harness, lease_id=lease_id,
         plan_version_id=task.plan_version_id, task_key=task.task_key, requested_by=te.requested_by,
         budget_reservation_id=getattr(reservation, "id", None), mode=te.mode,
+        agent_revision_hash=adm.agent.revision_hash, role_revision_hash=_role_revision(session, task.role_key),
         caps={"max_requests": int(limits.get("max_requests", DEFAULT_MAX_REQUESTS)),
               "max_tokens": int(limits.get("max_tokens", DEFAULT_MAX_TOKENS)),
               "max_cost_usd": adm.est_usd, "timeout_seconds": int(limits.get("timeout_seconds", 1800)),
@@ -850,6 +911,22 @@ def cancel_task(session: Session, task_id: str, *, reason: str, actor: str) -> T
     return transition_task(session, task_id, S.CANCELLED.value, reason=f"cancelled by {actor}: {reason}", actor=actor)
 
 
+def _close_reviewed_run(session: Session, te: TaskExecution, *, review_record_id: str | None, actor: str,
+                       findings: int) -> None:
+    """The attempt whose result came back with findings is not accepted: it ends FAILED
+    (``REVIEW_FINDINGS``) so it can never later be shown as waiting for review or be accepted."""
+    if not te.active_run_id:
+        return
+    run = session.get(WorkerRun, te.active_run_id)
+    if run is None or run.execution_status != S.REVIEW.value:
+        return
+    if review_record_id:
+        run.review_record_id = review_record_id
+    _end_lease(session, run, "RELEASED", "review findings")
+    set_run_status(session, run, S.FAILED.value, reason=f"review returned {findings} finding(s); not accepted",
+                   actor=actor, outcome_code="REVIEW_FINDINGS")
+
+
 def request_repair(session: Session, task_id: str, *, findings: list[Any], review_record_id: str | None,
                    actor: str) -> TaskExecution:
     """Reviewer findings -> a new bounded attempt (READY) or BLOCKED/NEEDS_DECISION when attempts are
@@ -865,6 +942,7 @@ def request_repair(session: Session, task_id: str, *, findings: list[Any], revie
         agent = IMPLEMENTER_AGENT_KEY
     clean = redact(list(findings or []))[:100]
     cap = max_attempts(task, te)
+    _close_reviewed_run(session, te, review_record_id=review_record_id, actor=actor, findings=len(clean))
     if te.attempts_used < cap:
         return transition_task(session, task_id, S.READY.value,
                                reason=f"repair attempt {te.attempts_used + 1}/{cap} requested ({len(clean)} findings)",
@@ -893,6 +971,16 @@ def mark_accepted(session: Session, task_id: str, run_id: str, *, acceptance_id:
         raise Conflict("acceptance record does not match task/run", code="ACCEPTANCE_MISMATCH")
     if rec.acceptance_status != "ACCEPTED":
         raise Conflict(f"acceptance record is {rec.acceptance_status}", code="ACCEPTANCE_NOT_ACCEPTED")
+    # §14 "Perubahan head/base yang relevan membatalkan acceptance": the record must be about the
+    # exact candidate the runtime committed for this attempt.
+    if rec.head_commit and run.head_commit and rec.head_commit != run.head_commit:
+        raise Conflict("acceptance record was made for another head commit", code="ACCEPTANCE_HEAD_MISMATCH")
+    if rec.base_commit and run.base_commit and rec.base_commit != run.base_commit:
+        raise Conflict("acceptance record was made for another base commit", code="ACCEPTANCE_BASE_MISMATCH")
+    if run.quarantined and ext.quarantine_release(session, run) is None:
+        raise Blocked("patch is quarantined: special review and an owner release decision bound to the head "
+                      "commit are required before acceptance (master s21)", code="QUARANTINE_REVIEW_REQUIRED",
+                      details={"reasons": [str(r) for r in (run.quarantine_reasons or [])[:20]]})
     ok, why = ext.acceptance_valid_for_run(session, task, run.base_commit)
     if not ok:
         raise Blocked(f"acceptance not valid: {why}", code="ACCEPTANCE_INVALID")
@@ -904,6 +992,37 @@ def mark_accepted(session: Session, task_id: str, run_id: str, *, acceptance_id:
         set_run_status(session, run, S.DONE.value, reason="acceptance valid", actor=actor, outcome_code="ACCEPTED")
     _end_lease(session, run, "RELEASED", "accepted")
     return te
+
+
+def release_quarantine(session: Session, run_id: str, *, actor: str, actor_user_id: str, rationale: str) -> Decision:
+    """Record the human owner's special-review release of a quarantined patch (§21). The decision is
+    bound to this run and its exact runtime head commit; any other patch needs a new decision.
+    This is human AUTH recorded through the policy module, never produced by a model."""
+    run = get_run(session, run_id)
+    if not run.quarantined:
+        raise Conflict("run is not quarantined", code="NOT_QUARANTINED")
+    if run.execution_status not in (S.REVIEW.value, S.DONE.value):
+        raise Conflict(f"run is {run.execution_status}; only a REVIEW candidate can be released",
+                       code="NOT_RELEASABLE")
+    if not run.head_commit:
+        raise Blocked("no runtime-recorded head commit to bind the decision to", code="NO_RUNTIME_HEAD")
+    if not rationale.strip():
+        raise ValidationFailed("a rationale referencing the special review is required")
+    if not actor_user_id:
+        raise ValidationFailed("a human owner must record the release")
+    d = ext.record_decision(session, kind="EXCEPTION", actor_user_id=actor_user_id,
+                            target_type=ext.QUARANTINE_TARGET_TYPE, target_id=run.id, target_hash=run.head_commit,
+                            allowed_operations=["accept", "push_branch", "create_pr"], project_id=run.project_id,
+                            domain=run.domain, rationale=rationale,
+                            details={"quarantine_reasons": list(run.quarantine_reasons or [])[:50],
+                                     "base_commit": run.base_commit})
+    _audit(session, actor, "workforce.run.quarantine_release", target_type="run", target_id=run.id,
+           project_id=run.project_id, domain=run.domain, reason=rationale,
+           details={"decision_id": d.id, "head_commit": run.head_commit})
+    events.emit(session, source="scheduler", kind="run.updated", entity_type="run", entity_id=run.id, run_id=run.id,
+                attempt=run.attempt, project_id=run.project_id, domain=run.domain, mode=run.mode,
+                payload={"quarantine_release_decision": d.id, "head_commit": run.head_commit})
+    return d
 
 
 def retry_task(session: Session, task_id: str, *, actor: str, extra_attempts: int = 0, rationale: str = "",
@@ -1017,6 +1136,55 @@ def reconcile(session: Session, *, actor: str = "system:reconciler") -> dict[str
     return summary
 
 
+def _authorisation_lost(session: Session, run: WorkerRun, te: TaskExecution) -> str | None:
+    """Why a running attempt is no longer authorised (None = still authorised)."""
+    from aeos.worker_runtime.sandbox import sandbox_readiness
+
+    approved, why = ext.approved_version(session, te.plan_id)
+    if approved is None or approved.id != run.plan_version_id:
+        return "plan approval no longer ACTIVE for this version" + (f" ({why})" if why else "")
+    sb = sandbox_readiness(session, domain=run.domain)
+    if sb["status"] != "READY":
+        return "sandbox requirement no longer met: " + "; ".join(sb.get("reasons", []))[:300]
+    if run.domain == "OFFICE":
+        ok, owhy = ext.office_external_allowed(session)
+        if not ok:
+            return owhy
+    return None
+
+
+def enforce_stop_conditions(session: Session, *, actor: str = "system:scheduler") -> dict[str, Any]:
+    """§22 "Stop berlaku saat ... policy berubah": a LEASED/RUNNING LIVE attempt whose authorisation
+    no longer holds (plan approval invalidated/superseded, sandbox exception revoked or expired,
+    OFFICE policy) is stopped — capability revoked first, process tree killed, lease revoked,
+    reservation released — and the task waits BLOCKED (``POLICY_CHANGED``) instead of finishing
+    under a policy that no longer applies. Evidence is kept. Missing modules fail closed."""
+    stopped: list[str] = []
+    runs = list(session.scalars(select(WorkerRun).where(
+        WorkerRun.mode == DataMode.LIVE.value, WorkerRun.task_id.is_not(None),
+        WorkerRun.execution_status.in_([S.LEASED.value, S.RUNNING.value]))))
+    for run in runs:
+        te = session.scalar(select(TaskExecution).where(TaskExecution.task_id == run.task_id))
+        if te is None or te.active_run_id != run.id:
+            continue
+        why = _authorisation_lost(session, run, te)
+        if not why:
+            continue
+        note = f"stopped: {why}"
+        res = stop_run_resources(session, run, reason=note[:120], lease_state="REVOKED")
+        run.current_action = "Dihentikan: kebijakan/otorisasi berubah"
+        set_run_status(session, run, S.FAILED.value, reason=note, actor=actor, outcome_code="POLICY_CHANGED")
+        if te.state in (S.LEASED.value, S.RUNNING.value):
+            transition_task(session, te.task_id, S.BLOCKED.value, reason=note, actor=actor,
+                            reason_code="POLICY_CHANGED", expected_from=te.state)
+        _audit(session, actor, "workforce.run.policy_stop", target_type="run", target_id=run.id,
+               project_id=run.project_id, domain=run.domain, reason=why,
+               details={"grants_revoked": res["grants_revoked"], "remaining": res["kill"].get("remaining", [])})
+        stopped.append(run.id)
+    session.flush()
+    return {"stopped": stopped}
+
+
 # ----------------------------------------------------------------------------- plan execution
 def execute_plan(session: Session, plan_id: str, *, actor: str, user_id: str | None) -> dict[str, Any]:
     from aeos.models.planning import Plan
@@ -1060,6 +1228,7 @@ __all__ = [
     "cancel_run",
     "cancel_task",
     "concurrency_cap",
+    "enforce_stop_conditions",
     "ensure_executions",
     "execute_plan",
     "heartbeat",
@@ -1068,8 +1237,10 @@ __all__ = [
     "reconcile",
     "record_action",
     "refresh_readiness",
+    "release_quarantine",
     "request_repair",
     "retry_task",
+    "route_quota_exhausted",
     "scheduling_paused",
     "set_scheduling_paused",
     "transition_task",

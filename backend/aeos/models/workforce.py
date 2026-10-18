@@ -152,6 +152,13 @@ class WorkerRun(IdMixin, TimestampMixin, Base):
     quota_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     requested_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     outcome_code: Mapped[str] = mapped_column(String(48), default="")
+    # Trusted git directory of the candidate (outside the worker-editable tree; ADR-0054). Runtime
+    # and broker git operations use it explicitly instead of the worktree's own ``.git`` pointer.
+    git_dir_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Revision of the role/agent definition this attempt ran with (§50 "Role/model/mode diganti":
+    # configuration is versioned; history is never rewritten).
+    role_revision_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    agent_revision_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
 class Lease(IdMixin, TimestampMixin, Base):

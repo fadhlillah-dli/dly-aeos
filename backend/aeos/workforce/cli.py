@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 app = typer.Typer(help="Workforce scheduler: status, run-once, pause/resume, cancel, demo fixtures.",
                   no_args_is_help=True)
 console = Console()
+
+
+def _out(text: str) -> None:
+    """ASCII-only, markup-safe output (AGENTS.md: legacy Windows consoles). Reasons can come from
+    other modules and contain non-ASCII characters or square brackets."""
+    clean = str(text).replace("\u00a7", "s").replace("\u2014", "-").replace("\u2192", "->")
+    console.print(escape(clean.encode("ascii", "replace").decode("ascii")), highlight=False)
 ACTOR = "cli:local-operator"
 
 
@@ -28,20 +36,20 @@ def status(domain: str = typer.Option("PERSONAL", help="PERSONAL or OFFICE")) ->
         data = views.summary(s, domain=domain.upper(), project_ids=None, loop_running=loop.is_running())
         runs = views.list_runs(s, domain=domain.upper(), project_ids=None, active_only=True)
     sch = data["scheduler"]
-    console.print(f"scheduler enabled={sch['enabled']} paused={sch['paused']} cap={sch['concurrency_cap']} "
+    _out(f"scheduler enabled={sch['enabled']} paused={sch['paused']} cap={sch['concurrency_cap']} "
                   f"loop_running_in_this_process={sch['loop_running']}")
-    console.print("tasks: " + ", ".join(f"{k}={v}" for k, v in data["task_counts"].items()))
-    console.print(f"active runs (LIVE): {data['active_runs']}   DEMO rows: {data['demo_runs']}")
-    console.print(f"sandbox: {data['sandbox']['status']} kind={data['sandbox']['kind']}   "
+    _out("tasks: " + ", ".join(f"{k}={v}" for k, v in data["task_counts"].items()))
+    _out(f"active runs (LIVE): {data['active_runs']}   DEMO rows: {data['demo_runs']}")
+    _out(f"sandbox: {data['sandbox']['status']} kind={data['sandbox']['kind']}   "
                   f"engine: {data['engine']['status']} {data['engine'].get('version') or ''}")
     cost = data["cost"]
-    console.print(f"worker API cost: {cost['cost_known_usd'] if cost['cost_known_usd'] is not None else 'UNKNOWN'} "
+    _out(f"worker API cost: {cost['cost_known_usd'] if cost['cost_known_usd'] is not None else 'UNKNOWN'} "
                   f"(status {cost['cost_status']}, unknown entries {cost['cost_unknown_entries']})")
     for r in runs:
-        console.print(f"  run {r['run_id']} [{r['mode']}] {r['execution_state']}/{r['ui_state']} "
+        _out(f"  run {r['run_id']} [{r['mode']}] {r['execution_state']}/{r['ui_state']} "
                       f"task={r['task']['key']} action={r['current_action'][:60]}")
     for b in data["blockers"]:
-        console.print(f"  blocker {b['task_key']} {b['state']} {b['reason_code']}: {b['reason'][:100]}")
+        _out(f"  blocker {b['task_key']} {b['state']} {b['reason_code']}: {b['reason'][:100]}")
 
 
 @app.command("run-once")
@@ -52,11 +60,11 @@ def run_once(no_execute: bool = typer.Option(False, "--no-execute", help="Only r
 
     _db()
     info = loop.run_once(get_settings(), execute=not no_execute, force_admit=True)
-    console.print(f"reconcile={info.get('reconcile')} refreshed={info.get('refreshed')} leased={info.get('leased')}")
+    _out(f"reconcile={info.get('reconcile')} refreshed={info.get('refreshed')} leased={info.get('leased')}")
     for r in info.get("results", []):
-        console.print(f"  run {r.get('run_id')}: {r.get('status')} {r.get('code', '')} {r.get('reason', '')}")
+        _out(f"  run {r.get('run_id')}: {r.get('status')} {r.get('code', '')} {r.get('reason', '')}")
     if info.get("paused"):
-        console.print("Scheduling is paused. Resume with: aeos work resume")
+        _out("Scheduling is paused. Resume with: aeos work resume")
 
 
 @app.command("pause")
@@ -68,7 +76,7 @@ def pause(reason: str = typer.Option("", help="Reason")) -> None:
     _db()
     with session_scope() as s:
         scheduler.set_scheduling_paused(s, True, actor=ACTOR, reason=reason)
-    console.print("Scheduling paused.")
+    _out("Scheduling paused.")
 
 
 @app.command("resume")
@@ -80,7 +88,7 @@ def resume(reason: str = typer.Option("", help="Reason")) -> None:
     _db()
     with session_scope() as s:
         scheduler.set_scheduling_paused(s, False, actor=ACTOR, reason=reason)
-    console.print("Scheduling resumed.")
+    _out("Scheduling resumed.")
 
 
 @app.command("enable")
@@ -92,7 +100,7 @@ def enable() -> None:
     _db()
     with session_scope() as s:
         scheduler.set_scheduler_enabled(s, True, actor=ACTOR)
-    console.print("Scheduler enabled (admission still requires approval, CAN_RUN_WORKER, route, sandbox, budget).")
+    _out("Scheduler enabled (admission still requires approval, CAN_RUN_WORKER, route, sandbox, budget).")
 
 
 @app.command("disable")
@@ -104,7 +112,7 @@ def disable() -> None:
     _db()
     with session_scope() as s:
         scheduler.set_scheduler_enabled(s, False, actor=ACTOR)
-    console.print("Scheduler disabled.")
+    _out("Scheduler disabled.")
 
 
 @app.command("cancel")
@@ -117,7 +125,7 @@ def cancel(run: str = typer.Argument(..., help="Run id"), reason: str = typer.Op
     with session_scope() as s:
         r = scheduler.cancel_run(s, run, reason=reason, actor=ACTOR)
         state = r.execution_status
-    console.print(f"Run {run}: {state}. External side effects that already happened are NOT undone automatically.")
+    _out(f"Run {run}: {state}. External side effects that already happened are NOT undone automatically.")
 
 
 @app.command("demo-fixtures")
@@ -130,4 +138,4 @@ def demo_fixtures(remove: bool = typer.Option(False, "--remove", help="Delete DE
     _db()
     with session_scope() as s:
         res = demo.remove(s, actor=ACTOR) if remove else demo.insert(s, domain=domain.upper(), actor=ACTOR)
-    console.print(f"DEMO fixtures: {res}")
+    _out(f"DEMO fixtures: {res}")

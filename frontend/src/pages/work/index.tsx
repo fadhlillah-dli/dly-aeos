@@ -73,6 +73,11 @@ function SummaryCards({ s }: { s: WorkforceSummary }) {
         <p className="text-sm">
           Biaya tercatat: <strong>{s.cost.cost_known_usd === null ? "UNKNOWN" : `$${s.cost.cost_known_usd.toFixed(4)}`}</strong>
         </p>
+        {s.cost.cost_status === "UNKNOWN" && (
+          <div className="mt-1">
+            <StatusBadge status="UNKNOWN" label="Total biaya belum diketahui (sebagian tanpa biaya dari provider)" />
+          </div>
+        )}
         <p className="text-xs text-ink-3">
           {s.cost.requests} request · {s.cost.input_tokens + s.cost.output_tokens} token · {s.cost.cost_unknown_entries} entri tanpa biaya (UNKNOWN)
         </p>

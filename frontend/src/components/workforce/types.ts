@@ -167,7 +167,7 @@ export interface RunDetail extends RunRow {
   evidence: { id: string; kind: string; origin: string; trusted: boolean; level: string; claim: string; content_hash: string; created_at: string | null; mode: string }[];
   reviews: { id: string; verdict: string; reviewer_kind: string; findings: unknown[]; unknowns: unknown[]; created_at: string | null; mode: string }[];
   acceptance: { id: string; status: string; review_verdict: string | null; base_commit: string | null; head_commit: string | null; invalidated_reason: string | null; created_at: string | null }[];
-  decisions: { id: string; kind: string; target_type: string; target_id: string; status: string; rationale: string; created_at: string | null }[];
+  decisions: { id: string; kind: string; target_type: string; target_id: string; target_hash?: string | null; status: string; rationale: string; created_at: string | null }[];
   side_effects: { id: string; kind: string; status: string; target: Record<string, unknown>; external_url: string | null; commit_sha: string | null; updated_at: string | null; note: string }[];
   model_calls: { at: string | null; route_key: string | null; outcome: string; status: number | null; prompt_tokens: number | null; completion_tokens: number | null; cost_usd: number | "UNKNOWN"; model_resolved: string | null; latency_ms: number | null }[];
   error: string;

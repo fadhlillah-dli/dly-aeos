@@ -16,8 +16,12 @@ the questions admission must answer; §22 lists stop conditions (quota, lease lo
 
 1. `aeos.workforce.states.LEGAL_TRANSITIONS` is exactly the §14 diagram plus cancellation from every
    non-terminal state plus `RUNNING -> BLOCKED`, the latter allowed ONLY with a controller stop code
-   (`LEASE_LOST`, `LEASE_LOST_PROCESS_ALIVE`, `QUOTA_EXHAUSTED`, `REASSIGNED`, `CONTROLLER_SHUTDOWN`).
-   DONE/FAILED/CANCELLED are terminal. Every illegal edge raises `Conflict`.
+   (`LEASE_LOST`, `LEASE_LOST_PROCESS_ALIVE`, `QUOTA_EXHAUSTED`, `REASSIGNED`, `CONTROLLER_SHUTDOWN`,
+   `POLICY_CHANGED`). DONE/FAILED/CANCELLED are terminal. Every illegal edge raises `Conflict`.
+   `POLICY_CHANGED` (§22 "Stop berlaku saat ... policy berubah") is applied every scheduler tick by
+   `enforce_stop_conditions`: an attempt whose plan approval is no longer the ACTIVE approved version,
+   whose sandbox requirement no longer holds (exception revoked/expired) or whose OFFICE policy denies
+   it is stopped (capability revoked first, process tree killed) and its task waits BLOCKED.
 2. Every transition is a conditional `UPDATE ... WHERE state=? AND row_version=?` (optimistic
    concurrency); a lost race raises `Conflict`. READY->LEASED reserves the budget and inserts
    lease + run in the same transaction; exactly one concurrent caller wins (tested with threads).

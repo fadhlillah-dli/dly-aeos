@@ -67,6 +67,12 @@ if scenario == "env":
                                      "values": [k for k, v in os.environ.items()
                                                 if "sk-or-v1-" in v or "ghp_" in v or "aeoscap_" in v]}))
     sys.exit(0)
+if scenario == "gitcfg":
+    write("src/feature.py", "VALUE = 3\n")
+    marker = os.path.join(os.path.dirname(task_file), "fsmonitor-ran.txt")
+    cmd = '"%s" -c "open(r\'%s\', \'w\').write(\'ran\')"' % (sys.executable.replace("\\", "/"), marker.replace("\\", "/"))
+    subprocess.run(["git", "config", "core.fsmonitor", cmd], check=True)
+    sys.exit(0)
 if scenario in ("sleep", "tree"):
     if scenario == "tree":
         g = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
@@ -277,3 +283,52 @@ def test_prompt_contains_scope_and_untrusted_data():
     text = executor.build_prompt(t, findings=["fix y"], protected=("policy/**",), branch="aeos/k-1")
     assert "src/**" in text and "secrets/**" in text and "policy/**" in text and "fix y" in text
     assert "<<<BEGIN DATA name=a.md>>>" in text and "untrusted" in text
+
+
+def test_worker_planting_git_config_is_quarantined_and_never_executed(settings, setup):
+    """ADR-0054 / §50 'Candidate mengubah aktif policy/verifier/controller -> ditolak boundary': the
+    worker sets core.fsmonitor in the repository config it can reach; the runtime refuses to run git
+    on that candidate, restores the config, fails + quarantines the run, and the command never runs."""
+    from aeos.models.audit import AuditEvent
+
+    make, _ = setup
+    run_id, task_id = make("gitcfg")
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, te = _load(run_id, task_id)
+    assert res["status"] == "FAILED" and run.outcome_code == "SCOPE_VIOLATION"
+    assert run.quarantined and any(q["rule"] == "git-control-modified" for q in run.quarantine_reasons)
+    assert run.head_commit is None  # nothing committed from a tampered candidate
+    assert not (Path(run.sandbox_ref) / "config" / "fsmonitor-ran.txt").exists()
+    src = Path(run.git_dir_ref)  # worktree strategy: the owner's repository .git
+    cfg = subprocess.run(["git", "config", "--file", str(src / "config"), "--get", "core.fsmonitor"],
+                         capture_output=True, text=True)
+    assert cfg.stdout.strip() == ""  # restored
+    with session_factory()() as s:
+        assert s.scalar(select(AuditEvent).where(AuditEvent.action == "worker_runtime.git_control_tampered",
+                                                 AuditEvent.target_id == run_id))
+
+
+def test_cancel_racing_with_prepare_still_revokes_the_new_grant(settings, setup, monkeypatch):
+    """§35 'Cancel ... mencabut akses': a cancel that lands while the executor prepares (before the
+    capability grant existed) must not leave that grant active or its token file on disk."""
+    from sqlalchemy import update
+
+    make, _ = setup
+    run_id, task_id = make("sleep")
+    real_spawn = processes.spawn
+
+    def spawn_then_cancelled(rid, argv, **kw):
+        mp = real_spawn(rid, argv, **kw)
+        with session_factory()() as s:  # the cancel committed state without seeing the new grant
+            s.execute(update(WorkerRun).where(WorkerRun.id == rid).values(execution_status="CANCELLED"))
+            s.commit()
+        return mp
+
+    monkeypatch.setattr(processes, "spawn", spawn_then_cancelled)
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, _te = _load(run_id, task_id)
+    assert res["status"] == "SKIPPED"
+    with session_factory()() as s:
+        assert all(not g.active for g in s.scalars(select(CapabilityGrant).where(CapabilityGrant.run_id == run_id)))
+    assert not (Path(run.sandbox_ref) / "config" / "opencode.json").exists()
+    assert processes.registered(run_id) == []
