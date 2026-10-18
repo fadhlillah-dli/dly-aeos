@@ -149,10 +149,20 @@ def install_append_only_triggers(engine: Engine) -> None:
             )
 
 
+def import_all_models() -> None:
+    """Register every mapper, including module-owned ``aeos/models/<module>_ext.py`` files."""
+    import importlib
+    import pkgutil
+
+    import aeos.models as pkg
+
+    for info in pkgutil.iter_modules(pkg.__path__):
+        importlib.import_module(f"aeos.models.{info.name}")
+
+
 def create_all(engine: Engine | None = None) -> None:
     """Create tables for an empty DB (tests / first run) and install guards."""
-    import aeos.models  # noqa: F401  (register all mappers)
-
+    import_all_models()
     engine = engine or get_engine()
     Base.metadata.create_all(engine)
     install_append_only_triggers(engine)

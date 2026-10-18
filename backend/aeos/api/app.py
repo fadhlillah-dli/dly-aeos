@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,7 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 
 from aeos import __version__
-from aeos.api.routers import MODULE_ROUTERS
+from aeos.api.routers import LIFECYCLE_HOOKS, MODULE_ROUTERS
 from aeos.api.security import SecurityMiddleware
 from aeos.core.config import Settings, get_settings
 from aeos.core.db import init_engine
@@ -44,7 +45,25 @@ def create_app(
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if init_db:
             init_engine(settings)
-        yield
+        started = []
+        if not testing:
+            for hook in LIFECYCLE_HOOKS:
+                if importlib.util.find_spec(hook) is None:
+                    continue
+                try:
+                    mod = importlib.import_module(hook)
+                    mod.start(settings)
+                    started.append(mod)
+                except Exception:  # pragma: no cover - logged, visible via doctor
+                    log.exception("lifecycle hook %s failed to start", hook)
+        try:
+            yield
+        finally:
+            for mod in reversed(started):
+                try:
+                    mod.stop()
+                except Exception:  # pragma: no cover
+                    log.exception("lifecycle hook %s failed to stop", mod.__name__)
 
     app = FastAPI(
         title="DLY AEOS Control Plane",
