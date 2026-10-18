@@ -1,16 +1,20 @@
 <#
 .SYNOPSIS
-  DLY AEOS bootstrap for Windows (master §07 order 0-1): verifies prerequisites, creates the
-  repository virtual environment, installs pinned dependencies, builds the Control Center and runs
-  the Readiness Doctor. It never installs system software silently: missing tools are reported with
-  the official install command for you to run.
+  DLY AEOS bootstrap for Windows (master section 07, order 0-1): verifies prerequisites, creates the
+  repository virtual environment, installs pinned dependencies (requirements.lock), backs up any
+  existing data, builds the Control Center, migrates the local database, runs the Readiness Doctor
+  and prints the status of the optional components in bootstrap order.
+  It never installs system software silently: missing tools are reported with the official install
+  command for you to run.
 .EXAMPLE
   .\scripts\bootstrap.ps1
   .\scripts\bootstrap.ps1 -SkipFrontend
+  .\scripts\bootstrap.ps1 -NoDoctor -SkipBackup
 #>
 param(
     [switch]$SkipFrontend,
-    [switch]$NoDoctor
+    [switch]$NoDoctor,
+    [switch]$SkipBackup
 )
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -61,10 +65,27 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
 }
 & .\.venv\Scripts\python.exe -m pip install --upgrade pip --quiet
 if (Test-Path "requirements.lock") {
+    # Pinned, universal (Windows/macOS/Linux) lock; the project itself is installed without
+    # re-resolving dependencies so the locked versions stay in place.
     & .\.venv\Scripts\python.exe -m pip install --quiet -r requirements.lock
+    if ($LASTEXITCODE -ne 0) { throw "pip install -r requirements.lock failed" }
+    & .\.venv\Scripts\python.exe -m pip install --quiet --no-deps -e .
+    if ($LASTEXITCODE -ne 0) { throw "pip install -e . failed" }
+    & .\.venv\Scripts\python.exe -m pip check
+    if ($LASTEXITCODE -ne 0) { Write-Host "  WARNING  pip check reports a dependency problem; regenerate requirements.lock (docs/OPERATIONS.md)" -ForegroundColor Yellow }
+} else {
+    & .\.venv\Scripts\python.exe -m pip install --quiet -e ".[dev]"
+    if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 }
-& .\.venv\Scripts\python.exe -m pip install --quiet -e ".[dev]"
-if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
+
+if (-not $SkipBackup) {
+    Write-Host "Step 0b: back up existing data before any migration (master section 07 step 0)"
+    & .\.venv\Scripts\aeos.exe ops backup create --label pre-bootstrap --if-exists
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Backup of the existing data failed; nothing was migrated. Investigate, or re-run with -SkipBackup if you accept the risk." -ForegroundColor Red
+        exit 1
+    }
+}
 
 if (-not $SkipFrontend) {
     Write-Host "Step 2: Control Center frontend (npm ci + build)"
@@ -87,6 +108,12 @@ if (-not $NoDoctor) {
 }
 
 Write-Host ""
+Write-Host "Step 5: optional components in bootstrap order (status only, nothing is installed)" -ForegroundColor Cyan
+& .\.venv\Scripts\python.exe scripts\component_status.py
+
+Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  .\aeos.ps1 admin create      # first SUPER_ADMIN (no default credentials)"
 Write-Host "  .\aeos.ps1 serve             # http://127.0.0.1:8787"
+Write-Host "  .\scripts\dev.ps1            # development: backend --dev + Vite on http://127.0.0.1:5173"
+Write-Host "  See docs\SETUP_WINDOWS.md for Claude Code, OpenBao, OpenRouter, Google and GitHub setup."
