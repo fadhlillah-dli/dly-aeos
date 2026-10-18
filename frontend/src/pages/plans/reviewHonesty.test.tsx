@@ -5,9 +5,9 @@ import { ContextPanel } from "./ContextPanel";
 import { DecisionPanel } from "./DecisionPanel";
 
 const CATALOG: OperationCatalog = {
-  providers: ["google-docs", "github-repo"],
-  publish: { "google-docs": ["create_doc", "update_doc"], "github-repo": [] },
-  delivery: { "google-docs": [], "github-repo": ["push_branch", "create_pr"] },
+  providers: ["google-drive", "github-repo"],
+  publish: { "google-drive": ["create_folder", "create_doc", "update_doc"], "github-repo": [] },
+  delivery: { "google-drive": [], "github-repo": ["push_branch", "create_pr"] },
   plan: ["compile_dag", "execute_tasks"],
 };
 
@@ -64,7 +64,28 @@ describe("decision panel honesty (§14, §35, §49)", () => {
     renderPanel(plan(true), version("LIVE"));
     expect(screen.getByText(/Belum ada target dengan identifier persis/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Identifier target"), { target: { value: "root_id=F1" } });
-    expect(screen.getByText('{"provider":"google-docs","root_id":"F1"}')).toBeInTheDocument();
+    expect(screen.getByText('{"provider":"google-drive","root_id":"F1"}')).toBeInTheDocument();
+  });
+
+  it("prefills the targets configured in the Integration Registry ({provider, root_id})", () => {
+    const qc = new QueryClient();
+    const catalog: OperationCatalog = {
+      ...CATALOG,
+      providers: ["google-drive", "github-issues", "github-repo"],
+      publish: { ...CATALOG.publish, "github-issues": ["ensure_label", "create_issue"] },
+      configured_targets: [
+        { provider: "google-drive", root_id: "root", purpose: "docs", label: "Google Drive / Google Docs" },
+        { provider: "github-issues", root_id: "owner/app", purpose: "issues", label: "GitHub Issues" },
+      ],
+    };
+    render(
+      <QueryClientProvider client={qc}>
+        <DecisionPanel plan={plan(true)} version={version("LIVE")} catalog={catalog} />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText('{"provider":"google-drive","root_id":"root"}')).toBeInTheDocument();
+    expect(screen.getByText('{"provider":"github-issues","root_id":"owner/app"}')).toBeInTheDocument();
+    expect(screen.getByText(/Publisher hanya menulis bila target terkonfigurasi/)).toBeInTheDocument();
   });
 });
 

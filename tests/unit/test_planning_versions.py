@@ -20,7 +20,7 @@ from aeos.policy import decisions as registry
 from tests.conftest import create_admin
 from tests.unit.test_planning_support import FakeBridge, make_project
 
-TARGET = {"provider": "google-docs", "root_id": "FOLDER-1"}
+TARGET = {"provider": "google-drive", "root_id": "FOLDER-1"}
 
 
 @pytest.fixture
@@ -91,7 +91,7 @@ def test_approval_binds_exact_version_hash_targets_and_operations(db, owner, rea
     assert d["kind"] == "APPROVAL" and d["target_type"] == "plan_version" and d["target_id"] == v.id
     assert d["target_hash"] == v.manifest_hash and d["target_version"] == str(v.version)
     assert d["auth_scope"]["targets"] == [TARGET]
-    assert set(d["allowed_operations"]) == {"compile_dag", "execute_tasks", "create_doc", "update_doc"}
+    assert set(d["allowed_operations"]) == {"compile_dag", "execute_tasks", "create_folder", "create_doc", "update_doc"}
     assert "merge_pr" not in d["allowed_operations"]
     assert ready_plan.state == "APPROVED" and ready_plan.approved_version_id == v.id
     assert res["compile"]["created"] is True and res["compile"]["tasks"] == 2
@@ -263,6 +263,7 @@ def test_reapproval_supersedes_previous_approval(db, owner, ready_plan):
     ("APPROVE_AND_PUBLISH", [], "TARGET_MISSING"),
     ("APPROVE_AND_PUBLISH", [{"provider": "jira", "project_key": "X"}], "TARGET_INVALID"),
     ("APPROVE_AND_PUBLISH", [{"provider": "google-docs"}], "TARGET_NOT_EXACT"),
+    ("APPROVE_AND_PUBLISH", [{"provider": "github-issues", "repo": "o/r"}], "TARGET_NOT_EXACT"),
     ("APPROVE", [TARGET], "TARGET_REQUIRES_PUBLISH"),
 ])
 def test_approval_target_validation(db, owner, ready_plan, action, targets, code):

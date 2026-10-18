@@ -1,7 +1,9 @@
-import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { vi } from "vitest";
 import type { QueueItem } from "../../components/planning/types";
-import { parseScope } from "./DecisionForm";
+import { DecisionForm, parseScope, PROVIDERS } from "./DecisionForm";
 import { formatAge, QueueList } from "./QueueList";
 
 const ITEM: QueueItem = {
@@ -47,6 +49,48 @@ describe("Human Decision Queue (U-12)", () => {
     expect(formatAge(30)).toBe("1 mnt");
     expect(formatAge(90000)).toBe("1 hari");
     expect(formatAge(null)).toBe("—");
+  });
+});
+
+describe("DecisionForm exact target shapes (ADR-0042/0051)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function renderForm(domain: "PERSONAL" | "OFFICE") {
+    const fn = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response("{}", { status: 201, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fn);
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <DecisionForm domain={domain} initialKind="EXCEPTION" onDone={() => undefined} />
+      </QueryClientProvider>,
+    );
+    return fn;
+  }
+
+  it("uses one provider vocabulary (Google Docs live in the google-drive target)", () => {
+    expect(PROVIDERS.PERSONAL).toEqual(["google-drive", "github-issues", "github-repo"]);
+    expect(PROVIDERS.OFFICE).toEqual(["confluence", "jira", "bitbucket"]);
+  });
+
+  it("records the process-sandbox exception as a preset with allow_bash, without a hand-typed target", async () => {
+    const fn = renderForm("PERSONAL");
+    fireEvent.change(screen.getByLabelText("Jenis pengecualian"), { target: { value: "worker_sandbox_process" } });
+    expect(screen.queryByText("Jenis target")).not.toBeInTheDocument();
+    expect(screen.getByText("worker_sandbox/process")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText(/Izinkan bash/));
+    fireEvent.change(screen.getByLabelText(/Scope eksplisit/), { target: { value: "host=laptop" } });
+    fireEvent.change(screen.getByLabelText(/Berlaku sampai/), { target: { value: "2026-11-30T10:00" } });
+    fireEvent.change(screen.getByLabelText(/Rationale/), { target: { value: "Docker belum tersedia di laptop ini" } });
+    fireEvent.click(screen.getByRole("button", { name: "Catat keputusan" }));
+    await waitFor(() => expect(fn).toHaveBeenCalled());
+    const body = JSON.parse(String(fn.mock.calls[0][1]!.body));
+    expect(body).toMatchObject({ kind: "EXCEPTION", exception: "worker_sandbox_process", allow_bash: true, auth_scope: { host: "laptop" } });
+    expect(body.target_type).toBeUndefined();
+  });
+
+  it("does not offer the PERSONAL-only presets in OFFICE", () => {
+    renderForm("OFFICE");
+    expect(screen.queryByLabelText("Jenis pengecualian")).not.toBeInTheDocument();
+    expect(screen.getByText(/hanya untuk PERSONAL; OFFICE selalu ditolak/)).toBeInTheDocument();
   });
 });
 

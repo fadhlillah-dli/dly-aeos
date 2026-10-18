@@ -79,3 +79,14 @@ retry after a provider timeout, the approved version kept even when a newer revi
 14. **Reject.** `POST /api/publications/{id}/reject` (SUPER_ADMIN) cancels a PREVIEW (§05 step 9
     "Reject"); nothing is written externally and its outbox rows are adopted by a later preview.
 15. Only files inside the AEOS data directory are ever embedded/uploaded from an outbox row.
+
+## Amendment 2026-10-18 (integration)
+
+16. **Plan state only through the planning facade.** `aeos.publisher.plan_state` calls
+    `aeos.planning.facade.transition_plan` for PUBLISHING / PUBLISHED / PUBLICATION_PARTIAL /
+    PUBLICATION_FAILED. The private legal-transition fallback is removed: when planning is absent or
+    refuses, the plan state is not changed and the refusal is recorded in `Publication.summary`.
+17. **Outbox rows name the exact target.** Every operation target carries `{provider, root_id}` of the
+    resolved integration (one provider vocabulary); Google Docs updates are `google-drive` operations.
+    Rows planned by earlier builds (`google-docs`, no `root_id`) are normalised when the write intent is
+    built, from the publication's resolved target of the same family — never guessed.

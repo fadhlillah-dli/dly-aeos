@@ -32,7 +32,9 @@ TRANSITIONS: dict[S, frozenset[S]] = {
     # APPROVED -> APPROVED: a new approval of the same current version supersedes the old one.
     S.APPROVED: frozenset({S.APPROVED, S.PUBLISHING, S.REVISION_REQUESTED, S.READY_FOR_HUMAN_REVIEW, S.REJECTED}),
     S.PUBLISHING: frozenset({S.PUBLISHED, S.PUBLICATION_PARTIAL, S.PUBLICATION_FAILED}),
-    S.PUBLISHED: frozenset({S.REVISION_REQUESTED, S.READY_FOR_HUMAN_REVIEW}),
+    # PUBLISHED -> PUBLISHING: another run of the SAME approved version (e.g. a human retry/reconcile of a
+    # partial target); entering PUBLISHING still needs an ACTIVE approval (facade.transition_plan).
+    S.PUBLISHED: frozenset({S.REVISION_REQUESTED, S.READY_FOR_HUMAN_REVIEW, S.PUBLISHING}),
     S.PUBLICATION_PARTIAL: frozenset({S.PUBLISHING, S.PUBLISHED, S.NEEDS_DECISION, S.REVISION_REQUESTED,
                                       S.READY_FOR_HUMAN_REVIEW}),
     S.PUBLICATION_FAILED: frozenset({S.PUBLISHING, S.NEEDS_DECISION, S.REVISION_REQUESTED, S.READY_FOR_HUMAN_REVIEW}),
