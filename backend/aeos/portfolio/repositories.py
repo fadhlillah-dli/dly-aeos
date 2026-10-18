@@ -343,7 +343,8 @@ def _verify_github(repo: RepositoryReference, actor: str) -> tuple[str, str, dic
     if repo.provider_repo_id and repo.provider_repo_id != observed_id:
         return ("UNVERIFIED", f"provider repository id changed ({repo.provider_repo_id} -> {observed_id}); a "
                 "repository with the same name is not the same target (§37)", attempt)
-    perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
+    raw_perms = data.get("permissions")
+    perms: dict[str, Any] = raw_perms if isinstance(raw_perms, dict) else {}
     attempt["github"] = {
         "private": bool(data.get("private")),
         "visibility": data.get("visibility"),

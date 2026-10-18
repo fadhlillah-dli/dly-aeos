@@ -126,11 +126,12 @@ def test_worker_reports_invalid_structured_text(tmp_path: Path):
 
 
 def test_worker_main_usage(tmp_path: Path):
-    assert parse_worker.main([]) == 2
+    """In-process call with limits=False (rlimits are only for the dedicated worker process)."""
+    assert parse_worker.main([], limits=False) == 2
     src = tmp_path / "a.md"
     src.write_text("# a", encoding="utf-8")
     dst = tmp_path / "out.json"
-    assert parse_worker.main([str(src), str(dst), "markdown", "100"]) == 0
+    assert parse_worker.main([str(src), str(dst), "markdown", "100"], limits=False) == 0
     assert json.loads(dst.read_text(encoding="utf-8"))["status"] == "PARSED"
-    assert parse_worker.main([str(tmp_path / "missing"), str(dst), "markdown", "100"]) == 0
+    assert parse_worker.main([str(tmp_path / "missing"), str(dst), "markdown", "100"], limits=False) == 0
     assert json.loads(dst.read_text(encoding="utf-8"))["status"] == "FAILED"
