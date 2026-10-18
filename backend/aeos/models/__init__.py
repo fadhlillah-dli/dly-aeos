@@ -31,6 +31,7 @@ from aeos.models.planning import (
 from aeos.models.portfolio import Attachment, Project, ProjectIntegration, RepositoryReference
 from aeos.models.publishing import (
     DocumentRecord,
+    DocumentRevision,
     ExternalReference,
     OperationalWorkProjection,
     Publication,
@@ -59,6 +60,7 @@ __all__ = [
     "ContextPack",
     "Decision",
     "DocumentRecord",
+    "DocumentRevision",
     "EvalRun",
     "EvalSuite",
     "Event",

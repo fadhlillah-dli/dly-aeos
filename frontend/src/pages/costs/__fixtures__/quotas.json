@@ -1,0 +1,22 @@
+{
+ "items": [
+  {
+   "id": null,
+   "provider": "claude-native",
+   "scope": "*",
+   "state": "UNKNOWN",
+   "source": "no official remaining-quota source",
+   "observed_at": null,
+   "resets_at": null,
+   "details": {
+    "note": "Batas langganan berlaku; sisa kuota UNKNOWN"
+   },
+   "official": false,
+   "implicit": true
+  }
+ ],
+ "source": "quota_states (official / provider-header / observed-429)",
+ "checked_at": "2026-10-18T12:09:15.034290+00:00",
+ "mode": "LIVE",
+ "note": "Sisa kuota langganan Max hanya ditampilkan bila sumber resmi tersedia; selain itu UNKNOWN."
+}

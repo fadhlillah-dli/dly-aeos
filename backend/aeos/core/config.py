@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     openbao_addr: str = "http://127.0.0.1:8200"
     openbao_binary: str | None = None
     keyring_service: str = "dly-aeos"
+    mmdc_binary: str | None = None  # optional mermaid-cli renderer (§29)
+    confluence_projects_parent_id: str | None = None  # canonical CONFLUENCE_PROJECTS_PARENT_ID (§04)
 
     # §23 OFFICE default deny — overridable only by recorded owner/company decisions, not config.
     office_external_worker_allowed: bool = False

@@ -1,0 +1,3342 @@
+# DLY AEOS InstallManifest (master §07, §13, §37, §45). Protected path (§09): workers may only
+# propose changes here; a human reviews every edit.
+#
+# This file is the DESIGN lens of the inventory: what the reviewed design selects, plans or keeps
+# as a candidate/reference. It is NOT installation, connection, evaluation or usage evidence.
+# Loading it (aeos seed) never sets installed/enabled/verified/in-use state; those dimensions come
+# from dated observations and human decisions (§38).
+#
+# Rules enforced by aeos.inventory.manifest (schema.json + semantic checks):
+#   * source_url is either a URL that appears verbatim in the master document, or null;
+#   * identity_verified is VERIFIED only when the master gives the canonical URL, else UNVERIFIED;
+#   * license stays null unless the master states it (it never does) - never guessed;
+#   * approved_pin null means UNKNOWN; "latest" is never a pin;
+#   * UNVERIFIED components carry no install operation;
+#   * health probes target loopback only; probes are read-only and time-bounded.
+manifest_version: "1"
+status: DESIGN
+title: DLY AEOS InstallManifest
+master_ref: docs/architecture/DLY_AEOS_Master_Architecture_Final.md
+sources_checked: "2026-10-17/2026-10-18"
+reviewed_by: null
+categories:
+  - experience/intake
+  - planning/governance
+  - workforce
+  - tools/context
+  - code/docs/CI
+  - data/secrets
+  - operations/evaluation
+components:
+  # ------------------------------------------------------------------ platform core (§06, §10, §11)
+  - component_id: dly-aeos-platform-repo
+    kind: repository
+    name: DLY AEOS platform repository
+    friendly_name: "Repositori DLY AEOS — source platform"
+    function: "Source code platform DLY AEOS (backend, frontend, manifest, policy reference, tests, docs) yang di-clone ke mesin lokal."
+    why_selected: "U-02/U-15: DLY AEOS adalah upgrade proyek pribadi di GitHub; runtime berjalan dari clone lokal."
+    category: code/docs/CI
+    domains: [PLATFORM]
+    usage_role: build
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: [S36]
+    upstream_identity: "github:fadhlillah-dli/dly-aeos"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PLANNED
+    bootstrap_order: 0
+    approved_pin: null
+    probe:
+      type: git_repo
+      timeout_seconds: 10
+      ttl_seconds: 3600
+    capability_tests: []
+    access:
+      paths: ["<repo>/**"]
+      egress: []
+      data_classes: [INTERNAL]
+      operations: [READ]
+      identity_ref: null
+      tenant_target: "github:fadhlillah-dli/dly-aeos (dipilih eksplisit, §37)"
+    cost: {model: NONE, amount: null, note: "Repo pribadi; biaya paket GitHub tidak dicatat di sini.", source: null}
+    operations:
+      health: "git remote get-url origin; git rev-parse HEAD; git status --porcelain (read-only)"
+      restart: "Tidak berlaku (repository)."
+      uninstall: "Tidak dihapus oleh AEOS; clone milik pemilik."
+      recovery: "Clone ulang dari remote; data runtime berada di data dir terpisah (§06)."
+      rollback: "Lewat git revert/PR yang di-merge manusia (U-09)."
+      retention: "Riwayat git dipertahankan."
+      support_status: UNKNOWN
+    placement: "DLY AEOS: control plane yang dipertahankan. Repository pengguna belum diberikan pada master; source ID/URL UNVERIFIED sampai divalidasi."
+    relations:
+      - {target: github, relation: stores_in, data_description: "Source platform di-host pada GitHub pribadi (branch kerja, PR, release).", operation: WRITE, boundary: "broker git (hanya aeos/* branch, tanpa merge)", identity_ref: "personal/github"}
+      - {target: git, relation: depends_on, data_description: "Version control lokal dan worktree.", operation: CALL, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: ["repo:head", "repo:origin"]
+
+  - component_id: dly-aeos-control-plane
+    kind: service
+    name: DLY AEOS control plane
+    friendly_name: "DLY AEOS control plane — pengendali tunggal"
+    function: "Satu pemilik Project/PlanVersion/TaskSpec/DAG/policy/audit; API FastAPI pada 127.0.0.1:8787 dengan login lokal."
+    why_selected: "U-12/§03: satu control plane dan satu Human Decision Queue; tidak ada authority atau tracker kedua."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 8
+    approved_pin: null
+    probe:
+      type: python_package
+      distribution: dly-aeos
+      module: aeos
+      timeout_seconds: 5
+      ttl_seconds: 3600
+    capability_tests:
+      - {id: dashboard.local_e2e, description: "Login, pilih domain, buka Readiness (E2E lokal).", functional: true, requires_authorization: false, evidence: "hasil uji E2E/terkontrol"}
+    access:
+      paths: ["<data>/**", "<repo>/install-manifest/**", "<repo>/policy/** (read-only)"]
+      egress: ["127.0.0.1 (loopback)"]
+      data_classes: [INTERNAL, CONFIDENTIAL]
+      operations: [READ, WRITE]
+      identity_ref: null
+      tenant_target: null
+    cost: {model: NONE, amount: null, note: "Proses lokal; biaya compute mesin pengguna tidak diukur.", source: null}
+    operations:
+      health: "GET http://127.0.0.1:8787/api/health (loopback)"
+      restart: "Hentikan proses 'aeos serve' lalu jalankan ulang; lease/queue direkonsiliasi saat start."
+      uninstall: "Hentikan service; data dir tidak dihapus otomatis."
+      recovery: "Restore backup SQLite dari <data>/backups (restore harus diuji, §33)."
+      rollback: "Kembali ke rilis controller sebelumnya (§09 promotion/rollback)."
+      retention: "Audit/evidence append-only sesuai policy."
+      support_status: UNKNOWN
+    placement: "Control plane yang dipertahankan (§45 baris DLY AEOS)."
+    relations:
+      - {target: dly-aeos-platform-repo, relation: depends_on, data_description: "Kode controller berasal dari source platform (trusted seed/released).", operation: READ, boundary: "trusted seed vs candidate (§09)", identity_ref: null}
+      - {target: python-runtime, relation: runs_with, data_description: "Interpreter Python >=3.11.", operation: EXEC, boundary: null, identity_ref: null}
+      - {target: sqlite-metadata-store, relation: stores_in, data_description: "Metadata project/plan/task/decision/audit/event.", operation: READ_WRITE, boundary: "data dir lokal", identity_ref: null}
+      - {target: evidence-store, relation: stores_in, data_description: "Artefak bukti, lampiran, trace (partisi PERSONAL/OFFICE).", operation: READ_WRITE, boundary: "data dir per domain", identity_ref: null}
+      - {target: claude-native-bridge, relation: calls, data_description: "Permintaan planning/review terstruktur ke pengawas Claude.", operation: CALL, boundary: "supervisor workspace terpisah", identity_ref: null}
+      - {target: capability-broker, relation: calls, data_description: "Penerbitan capability terbatas per run.", operation: CALL, boundary: "broker tepercaya", identity_ref: null}
+      - {target: worker-runtime, relation: calls, data_description: "Menjalankan/menghentikan worker dalam sandbox.", operation: CALL, boundary: "sandbox per task", identity_ref: null}
+      - {target: publisher, relation: calls, data_description: "Job publikasi dari PlanVersion yang disetujui.", operation: CALL, boundary: "external-write interlock", identity_ref: null}
+      - {target: secret-provider, relation: depends_on, data_description: "Credential diambil via SecretProvider; nilai tidak ke UI/model.", operation: READ, boundary: "OpenBao/OS store", identity_ref: null}
+      - {target: policy-decision-registry, relation: governed_by, data_description: "Keputusan manusia terikat target+hash menentukan apa yang boleh berjalan.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {python: [dly-aeos]}
+    invalidators: ["config:settings", "config:port"]
+
+  - component_id: control-center-frontend
+    kind: service
+    name: Control Center frontend
+    friendly_name: "Control Center — dasbor manusia"
+    function: "UI React (Indonesia) untuk readiness, rencana, workforce, System Map, Tools & Repos, bukti dan keputusan; disajikan dari origin yang sama."
+    why_selected: "§35: satu Control Center memvisualisasikan seluruh managed system sebagai projection."
+    category: experience/intake
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:frontend"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 8
+    approved_pin: null
+    probe:
+      type: repo_file
+      path: frontend/dist/index.html
+      timeout_seconds: 5
+      ttl_seconds: 3600
+    capability_tests: []
+    access:
+      paths: ["<repo>/frontend/dist/**"]
+      egress: ["127.0.0.1:8787 (same origin)"]
+      data_classes: [INTERNAL]
+      operations: [READ]
+      identity_ref: "session cookie HttpOnly (tidak di localStorage)"
+      tenant_target: null
+    cost: {model: NONE, amount: null, note: "Build lokal.", source: null}
+    operations:
+      health: "File frontend/dist/index.html ada; halaman dimuat setelah login."
+      restart: "Build ulang: cd frontend; npm ci; npm run build."
+      uninstall: "Hapus frontend/dist (artefak build)."
+      recovery: "Build ulang dari lockfile."
+      rollback: "Checkout commit sebelumnya lalu build ulang."
+      retention: "Tidak menyimpan data."
+      support_status: UNKNOWN
+    placement: "Control Center (§35) bagian dari produk yang sama; bukan aplikasi terpisah."
+    relations:
+      - {target: dly-aeos-control-plane, relation: calls, data_description: "HTTP JSON/SSE localhost; write memakai CSRF + session.", operation: CALL, boundary: "localhost, session, CSRF, origin check", identity_ref: null}
+      - {target: integration-registry, relation: reads, data_description: "Projection inventaris dan System Map.", operation: READ, boundary: "AUTH/domain filter backend", identity_ref: null}
+      - {target: nodejs-runtime, relation: depends_on, data_description: "Node.js hanya untuk build (npm ci/vite build).", operation: EXEC, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: ["repo:lockfile"]
+
+  - component_id: sqlite-metadata-store
+    kind: datastore
+    name: SQLite metadata store
+    friendly_name: "SQLite — penyimpanan metadata lokal"
+    function: "Database metadata V1 (WAL, foreign keys, trigger append-only) di data dir OS."
+    why_selected: "§11: SQLite pada V1 dengan migrasi terversi dan backup teruji."
+    category: data/secrets
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OS_COMPONENT
+    source_url: null
+    source_refs: []
+    upstream_identity: "python:sqlite3 (embedded SQLite library)"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 1
+    approved_pin: null
+    probe:
+      type: sqlite
+      timeout_seconds: 5
+      ttl_seconds: 3600
+    capability_tests:
+      - {id: storage.write_test, description: "Transaksi tulis + rollback pada database.", functional: true, requires_authorization: false, evidence: "CheckResult runtime.storage"}
+    access:
+      paths: ["<data>/aeos.sqlite3", "<data>/backups/**"]
+      egress: []
+      data_classes: [INTERNAL, CONFIDENTIAL]
+      operations: [READ, WRITE]
+      identity_ref: null
+      tenant_target: null
+    cost: {model: NONE, amount: null, note: "Penyimpanan lokal.", source: null}
+    operations:
+      health: "PRAGMA quick_check; status migrasi (aeos db status)."
+      restart: "Tidak berlaku (embedded)."
+      uninstall: "Tidak dihapus otomatis; data milik pemilik."
+      recovery: "Restore dari <data>/backups; aeos db upgrade membuat backup sebelum migrasi."
+      rollback: "Restore backup pra-upgrade."
+      retention: "Audit/event/evidence append-only."
+      support_status: UNKNOWN
+    placement: "Local metadata V1 (§11)."
+    relations:
+      - {target: python-runtime, relation: runs_with, data_description: "Modul sqlite3 bawaan Python.", operation: EXEC, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: ["db:schema"]
+
+  - component_id: evidence-store
+    kind: datastore
+    name: Evidence and artifact store
+    friendly_name: "Penyimpanan bukti — artefak per domain"
+    function: "Direktori data per domain/proyek untuk lampiran, evidence, trace, output worker dan publikasi."
+    why_selected: "§04/§06: evidence/memory/cache dipartisi PERSONAL/OFFICE di luar source tree."
+    category: data/secrets
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "aeos data layout"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 8
+    approved_pin: null
+    probe:
+      type: data_dir
+      path: personal
+      timeout_seconds: 5
+      ttl_seconds: 3600
+    capability_tests: []
+    access:
+      paths: ["<data>/personal/**", "<data>/office/**"]
+      egress: []
+      data_classes: [INTERNAL, CONFIDENTIAL, RESTRICTED]
+      operations: [READ, WRITE]
+      identity_ref: null
+      tenant_target: null
+    cost: {model: NONE, amount: null, note: "Disk lokal.", source: null}
+    operations:
+      health: "Direktori ada dan dapat ditulis (Doctor evidence.dir_permissions)."
+      restart: "Tidak berlaku."
+      uninstall: "Tidak dihapus otomatis (retensi bukti)."
+      recovery: "Bagian dari backup data dir."
+      rollback: "Tidak berlaku."
+      retention: "Mengikuti retention policy evidence."
+      support_status: UNKNOWN
+    placement: "State, evidence dan audit (§36 peta logis)."
+    relations: []
+    discovery: {}
+    invalidators: []
+
+  - component_id: python-runtime
+    kind: runtime
+    name: Python
+    friendly_name: "Python — runtime backend"
+    function: "Interpreter untuk control plane, Doctor dan CLI (>=3.11)."
+    why_selected: "§11 stack backend Python/FastAPI; ADR-0002."
+    category: code/docs/CI
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DISTRIBUTION
+    source_url: null
+    source_refs: []
+    upstream_identity: "python.org CPython"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 1
+    approved_pin: null
+    probe:
+      type: python_runtime
+      min_version: "3.11"
+      timeout_seconds: 5
+      ttl_seconds: 86400
+    capability_tests: []
+    access: {paths: ["<repo>/.venv/**"], egress: [], data_classes: [], operations: [EXEC], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations:
+      health: "python --version; import dependensi backend."
+      restart: "Tidak berlaku."
+      uninstall: "Hapus .venv; interpreter sistem dikelola pemilik."
+      recovery: "Buat ulang .venv lewat scripts/bootstrap."
+      rollback: "Pasang versi interpreter sebelumnya secara manual."
+      retention: "Tidak berlaku."
+      support_status: UNKNOWN
+    placement: "Version checks dan local import/build prerequisites (§07 urutan 1)."
+    relations: []
+    discovery: {}
+    invalidators: ["binary:python"]
+
+  - component_id: nodejs-runtime
+    kind: runtime
+    name: Node.js
+    friendly_name: "Node.js — build Control Center"
+    function: "Runtime untuk npm ci dan build frontend (>=20); tidak dibutuhkan saat runtime bila dist sudah dibangun."
+    why_selected: "§11 frontend React/Vite; ADR-0002."
+    category: code/docs/CI
+    domains: [PLATFORM]
+    usage_role: build
+    source_kind: OFFICIAL_DISTRIBUTION
+    source_url: null
+    source_refs: []
+    upstream_identity: "nodejs.org"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 1
+    approved_pin: null
+    probe:
+      type: binary
+      binaries:
+        - {name: node, settings_override: null, version_args: ["--version"], version_regex: "v?(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 10
+      ttl_seconds: 86400
+    capability_tests: []
+    access: {paths: ["<repo>/frontend/**"], egress: ["registry npm saat npm ci (oleh pemilik)"], data_classes: [], operations: [EXEC], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations:
+      health: "node --version"
+      restart: "Tidak berlaku."
+      uninstall: "Dikelola pemilik (paket OS)."
+      recovery: "Pasang ulang versi LTS."
+      rollback: "Pasang versi sebelumnya."
+      retention: "Tidak berlaku."
+      support_status: UNKNOWN
+    placement: "Version checks dan build prerequisites (§07 urutan 1)."
+    relations: []
+    discovery: {}
+    invalidators: ["binary:node"]
+
+  - component_id: git
+    kind: executable
+    name: Git
+    friendly_name: "Git — version control dan worktree"
+    function: "Version control dan worktree untuk isolasi perubahan; bukan sandbox keamanan."
+    why_selected: "§45: version control dan workspace perubahan; §11 worktree bukan security boundary."
+    category: code/docs/CI
+    domains: [PLATFORM]
+    usage_role: dev
+    source_kind: OFFICIAL_DISTRIBUTION
+    source_url: null
+    source_refs: []
+    upstream_identity: "git-scm distribution"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 1
+    approved_pin: null
+    probe:
+      type: binary
+      binaries:
+        - {name: git, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 10
+      ttl_seconds: 86400
+    capability_tests: []
+    access: {paths: ["<repo>/**", "<data>/*/projects/*/task-data/**"], egress: [], data_classes: [INTERNAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations:
+      health: "git --version"
+      restart: "Tidak berlaku."
+      uninstall: "Dikelola pemilik."
+      recovery: "Pasang ulang distribusi resmi."
+      rollback: "Pasang versi sebelumnya."
+      retention: "Tidak berlaku."
+      support_status: UNKNOWN
+    placement: "Git / worktrees: version control dan workspace perubahan; bukan sandbox (§45)."
+    relations: []
+    discovery: {}
+    invalidators: ["binary:git"]
+
+  - component_id: vscode
+    kind: executable
+    name: Visual Studio Code
+    friendly_name: "VS Code — permukaan kerja"
+    function: "Lingkungan kerja pengguna untuk clone, task dan Claude Code; VS Code Profiles bukan security boundary."
+    why_selected: "U-01: VS Code sebagai lingkungan kerja."
+    category: experience/intake
+    domains: [PLATFORM]
+    usage_role: dev
+    source_kind: OFFICIAL_DISTRIBUTION
+    source_url: null
+    source_refs: []
+    upstream_identity: "Visual Studio Code distribution"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 1
+    approved_pin: null
+    probe:
+      type: binary
+      binaries:
+        - {name: code, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 20
+      ttl_seconds: 86400
+    capability_tests: []
+    access: {paths: ["<repo>/.vscode/**"], egress: [], data_classes: [INTERNAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations:
+      health: "code --version"
+      restart: "Tutup/buka VS Code."
+      uninstall: "Dikelola pemilik."
+      recovery: "Pasang ulang."
+      rollback: "Pasang versi sebelumnya."
+      retention: "Tidak berlaku."
+      support_status: UNKNOWN
+    placement: "VS Code + official Claude Code: permukaan kerja dan supervisor native; identitas distribusi dicatat saat bootstrap (§45)."
+    relations:
+      - {target: dly-aeos-platform-repo, relation: reads, data_description: "Membuka clone lokal dan menjalankan task VS Code.", operation: READ_WRITE, boundary: null, identity_ref: null}
+      - {target: claude-code, relation: runs_with, data_description: "Claude Code resmi dapat dijalankan dari VS Code.", operation: EXEC, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: ["binary:code"]
+
+  # ------------------------------------------------------------------ Claude native supervisor (§12)
+  - component_id: claude-code
+    kind: executable
+    name: Claude Code (official)
+    friendly_name: "Claude Code — pengawas"
+    function: "Binary Claude Code resmi dengan login native Max untuk planning/review checkpoint; tanpa Claude API, tanpa --bare."
+    why_selected: "U-06: Claude Max 20x melalui Claude Code resmi menjadi pengawas; Claude API bukan default atau fallback berbayar."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://code.claude.com/docs/en/headless"
+    source_refs: [S01, S02, S03, S04, S05, S06]
+    upstream_identity: "Anthropic Claude Code (official client)"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 2
+    approved_pin: null
+    probe:
+      type: binary
+      binaries:
+        - {name: claude, settings_override: claude_binary, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      scrub_env_prefixes: ["ANTHROPIC_"]
+      timeout_seconds: 20
+      ttl_seconds: 86400
+    capability_tests:
+      - {id: claude.capability_test, description: "Panggilan terstruktur kecil via ClaudeNativeBridge: versi, mode auth, model teresolusi.", functional: true, requires_authorization: true, evidence: "CheckResult claude.capability_test; memakai kuota Max"}
+    access:
+      paths: ["<data>/supervisor/** (workspace pengawas tepercaya)"]
+      egress: ["Anthropic (alur resmi client)"]
+      data_classes: [INTERNAL, CONFIDENTIAL]
+      operations: [EXEC]
+      identity_ref: "login native Claude (dikelola client resmi; tidak dipindah ke vault)"
+      tenant_target: "akun Max milik pemilik"
+    cost: {model: SUBSCRIPTION, amount: null, note: "Claude Max 20x milik pemilik; batas mingguan termasuk Fable; extra usage harus nonaktif (status UNKNOWN sampai diperiksa).", source: "S02, S03"}
+    operations:
+      health: "claude --version; claude auth status (loggedIn, authMethod claude.ai, apiProvider firstParty, subscriptionType max)"
+      restart: "Tidak berlaku (dipanggil per aktivitas)."
+      uninstall: "Dikelola pemilik melalui distribusi resmi."
+      recovery: "Login ulang lewat alur resmi Anthropic; AEOS tidak menyediakan form login."
+      rollback: "Pin versi CLI yang lulus capability test."
+      retention: "Transcript tidak dibuka default; provenance disimpan."
+      support_status: UNKNOWN
+    placement: "VS Code + official Claude Code: supervisor native (§45, S01–S06)."
+    relations:
+      - {target: claude-native-bridge, relation: governed_by, data_description: "Dipanggil hanya lewat bridge dengan env tanpa ANTHROPIC_API_KEY dan cwd supervisor.", operation: NONE, boundary: "supervisor workspace", identity_ref: null}
+    discovery: {}
+    invalidators: ["binary:claude", "auth:claude", "env:anthropic"]
+
+  - component_id: claude-native-bridge
+    kind: platform_module
+    name: ClaudeNativeBridge
+    friendly_name: "ClaudeNativeBridge — jembatan Claude resmi"
+    function: "Menjalankan Claude Code resmi non-bare dari workspace pengawas, mengonsumsi output terstruktur, mencatat provenance; fallback paket manual."
+    why_selected: "§12: integrasi Claude Max tanpa Claude API; fallback manual bila bridge belum terbukti."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: [S05]
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/claude_bridge"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 8
+    approved_pin: null
+    probe:
+      type: platform_module
+      package: aeos.claude_bridge
+      impl_modules: [aeos.claude_bridge.bridge, aeos.claude_bridge.manual]
+      timeout_seconds: 5
+      ttl_seconds: 3600
+    capability_tests:
+      - {id: claude.capability_test, description: "Capability test pada versi CLI yang benar-benar dipakai (§12).", functional: true, requires_authorization: true, evidence: "CheckResult claude.capability_test"}
+    access: {paths: ["<data>/supervisor/**", "<data>/manual-claude/**"], egress: [], data_classes: [INTERNAL, CONFIDENTIAL], operations: [EXEC, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: SUBSCRIPTION, amount: null, note: "Memakai kuota Max; tidak ada paid fallback.", source: "§12"}
+    operations:
+      health: "Doctor claude.* checks."
+      restart: "Tidak berlaku."
+      uninstall: "Bagian dari control plane."
+      recovery: "Checkpoint disimpan saat kuota habis; aktivitas berhenti."
+      rollback: "Rilis controller sebelumnya."
+      retention: "Provenance run disimpan."
+      support_status: UNKNOWN
+    placement: "Claude native supervisor (§36 peta logis)."
+    relations:
+      - {target: claude-code, relation: runs_with, data_description: "Spawn binary resmi dengan prompt+schema; env tanpa kunci API.", operation: EXEC, boundary: "supervisor workspace terpisah dari worker", identity_ref: "login native Claude"}
+      - {target: verification-review, relation: reads, data_description: "Membaca bundel bukti untuk review checkpoint.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: ["binary:claude"]
+
+  - component_id: claude-native-subagents
+    kind: method_reference
+    name: Claude native subagents/teams/workflows
+    friendly_name: "Claude subagents/teams — opsional di dalam Claude"
+    function: "Fitur native Claude untuk pekerjaan Claude yang layak dipecah; bukan worker eksternal gratis."
+    why_selected: "§45: opsional bila manfaat paralel lebih besar dari biaya konteks/koordinasi (S48)."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://code.claude.com/docs/en/agent-teams"
+    source_refs: [S06, S48]
+    upstream_identity: "Anthropic Claude Code native features"
+    identity_verified: VERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: OPTIONAL_CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Fitur di dalam Claude Code; tidak ada probe terpisah.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [INTERNAL], operations: [EXEC], identity_ref: null, tenant_target: null}
+    cost: {model: SUBSCRIPTION, amount: null, note: "Sesi terpisah memakai kuota Max lebih banyak (S48); bukan cara menghindari kuota.", source: "S48"}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Nonaktifkan via policy.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Opsional untuk pekerjaan Claude yang memang layak; tidak dianggap worker eksternal gratis atau cara menghindari kuota (§45)."
+    relations:
+      - {target: claude-code, relation: runs_with, data_description: "Berjalan di dalam sesi Claude Code resmi.", operation: EXEC, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Penggunaan dievaluasi lewat registry/proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  # ------------------------------------------------------------------ control-plane modules (§10)
+  - component_id: gateway-portfolio
+    kind: platform_module
+    name: Gateway & Portfolio
+    friendly_name: "Gateway & Portfolio — intake, domain, proyek"
+    function: "Intake prompt/lampiran, identitas proyek (UUID), domain pilihan manusia, lifecycle dan pencarian."
+    why_selected: "§10, U-05, U-11: domain dipilih manusia sebelum prompt; semua intake mendukung unggahan."
+    category: experience/intake
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/portfolio+intake"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 8
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.portfolio, impl_modules: [aeos.intake.service], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: ["<data>/*/projects/*/attachments/**"], egress: [], data_classes: [INTERNAL, CONFIDENTIAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Endpoint /api/projects.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Backup data dir.", rollback: "Rilis controller sebelumnya.", retention: "Lampiran sesuai retensi proyek.", support_status: UNKNOWN}
+    placement: "Gateway & Portfolio (§10)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: sqlite-metadata-store, relation: stores_in, data_description: "Project, RepositoryReference, Attachment.", operation: READ_WRITE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: identity-authorization
+    kind: platform_module
+    name: Identity & Authorization
+    friendly_name: "Identity & Authorization — login lokal dan RBAC"
+    function: "Login lokal Argon2id, sesi server-side, CSRF, RBAC SUPER_ADMIN/VIEWER, scope domain."
+    why_selected: "§26: auth lokal tetap wajib walau localhost; VIEWER read-only ditegakkan backend."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/identity"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 8
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.identity, impl_modules: [aeos.identity.service], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [CONFIDENTIAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Doctor auth.* checks.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "aeos admin recover (password sementara satu kali).", rollback: "Rilis controller sebelumnya.", retention: "Login attempts dan audit.", support_status: UNKNOWN}
+    placement: "Identity & Authorization (§10)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: sqlite-metadata-store, relation: stores_in, data_description: "User, AuthSession (hash token), LoginAttempt.", operation: READ_WRITE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: policy-decision-registry
+    kind: platform_module
+    name: Policy & Decision Registry
+    friendly_name: "Policy & Decision Registry — keputusan manusia"
+    function: "Referensi MCI, keputusan pemilik terikat target+hash, policy snapshot, external-write interlock, Office default deny."
+    why_selected: "§10, §20: AUTH manusia sebagai Decision; output agent adalah DATA."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/policy"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 0
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.policy, impl_modules: [aeos.policy.decisions, aeos.policy.interlock, aeos.policy.office], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: ["<repo>/policy/** (read-only)"], egress: [], data_classes: [INTERNAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Doctor policy.* checks.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Decision append-only + backup.", rollback: "Keputusan baru menggantikan (superseded), tidak menghapus.", retention: "Permanen sesuai audit.", support_status: UNKNOWN}
+    placement: "Policy & Decision Registry (§10); MCI tetap authoritative dan UNVERIFIED."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: sqlite-metadata-store, relation: stores_in, data_description: "Decision, PolicySnapshot, ADR.", operation: READ_WRITE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: ["config:policy", "config:office_policy"]
+
+  - component_id: planning-blueprint
+    kind: platform_module
+    name: Planning & Blueprint
+    friendly_name: "Planning & Blueprint — rencana immutable"
+    function: "PlanningRun, PlanVersion immutable, manifest dan proposal DAG."
+    why_selected: "§10, §14: tahap planning dipisah dari state eksekusi/publikasi/acceptance."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/planning"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 9
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.planning, impl_modules: [aeos.planning.service], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [INTERNAL, CONFIDENTIAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Endpoint /api/plans.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "PlanVersion append-only.", rollback: "Versi baru; tidak menimpa.", retention: "Permanen.", support_status: UNKNOWN}
+    placement: "Planning & Blueprint (§10)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: claude-native-bridge, relation: calls, data_description: "Tahap Opus/Fable planning dan review.", operation: CALL, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: ["plan"]
+
+  - component_id: knowledge-context
+    kind: platform_module
+    name: Knowledge & Context
+    friendly_name: "Knowledge & Context — konteks terkurasi"
+    function: "ContextPack terkurasi, retrieval metadata/FTS sederhana, klasifikasi dan provenance."
+    why_selected: "§10, §24: mulai dari Git search dan metadata search; kandidat retrieval diuji kemudian."
+    category: tools/context
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/knowledge"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 9
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.knowledge, impl_modules: [], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: ["<repo>/** (subset per commit)"], egress: [], data_classes: [INTERNAL, CONFIDENTIAL], operations: [READ], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Endpoint knowledge.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Indeks dibangun ulang.", rollback: "Rilis controller sebelumnya.", retention: "Cache dipartisi domain/proyek.", support_status: UNKNOWN}
+    placement: "Knowledge & Context (§10)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: integration-registry
+    kind: platform_module
+    name: Integration Registry & Inventory
+    friendly_name: "Integration Registry — inventaris dan System Map"
+    function: "InstallManifest, ComponentReference, observasi, rekonsiliasi, drift, TechnologyInventoryView dan SystemMapView (projection)."
+    why_selected: "§10, §37, §38: inventaris terotorisasi dari manifest + observasi bertanggal; bukan authority kedua."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/inventory"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 8
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.inventory, impl_modules: [aeos.inventory.observations, aeos.inventory.reconcile, aeos.inventory.views], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: ["<repo>/install-manifest/**", "<repo>/pyproject.toml", "<repo>/frontend/package-lock.json", "<repo>/.github/workflows/*", "<repo>/.vscode/extensions.json"], egress: ["127.0.0.1 (health probe loopback)"], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: "Probe non-LLM; tidak memanggil Claude.", source: "§38"}
+    operations: {health: "aeos inventory reconcile; GET /api/inventory/coverage.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Snapshot terakhir read-only dengan freshness.", rollback: "Manifest/ADR sebelumnya.", retention: "Observasi dan drift disimpan; tombstone untuk penghapusan.", support_status: UNKNOWN}
+    placement: "Integration Registry (§10) + Inventory dan System Map projection (§36)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: install-manifest, relation: reads, data_description: "Desired state (lensa Rancangan).", operation: READ, boundary: null, identity_ref: null}
+      - {target: sqlite-metadata-store, relation: stores_in, data_description: "ComponentReference, observasi, drift, snapshot.", operation: READ_WRITE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: ["manifest"]
+
+  - component_id: publisher
+    kind: platform_module
+    name: Publisher
+    friendly_name: "Publisher — dokumen dan tiket"
+    function: "Publication job, mapping external ID, outbox, preview, partial failure dan konflik revisi."
+    why_selected: "§10, U-10: publikasi eksternal dari versi dan target yang disetujui manusia."
+    category: code/docs/CI
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/publisher"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 7
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.publisher, impl_modules: [aeos.publisher.worker], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests:
+      - {id: publish.dry_run, description: "Preview publikasi tanpa write eksternal.", functional: true, requires_authorization: false, evidence: "preview publikasi"}
+      - {id: publish.controlled_write, description: "Write terkendali ke target yang disetujui.", functional: true, requires_authorization: true, evidence: "Publication + ExternalReference"}
+    access: {paths: ["<data>/*/projects/*/publications/**"], egress: ["Google Drive/Docs API (PERSONAL)", "GitHub API (PERSONAL)", "Atlassian (OFFICE, diblokir default)"], data_classes: [INTERNAL, CONFIDENTIAL], operations: [WRITE], identity_ref: "personal/google-oauth, personal/github, office/atlassian", tenant_target: "per proyek"}
+    cost: {model: NONE, amount: null, note: "Kuota API provider UNKNOWN.", source: null}
+    operations: {health: "Doctor adapter.* checks.", restart: "Worker publisher dihentikan/dijalankan bersama app.", uninstall: "Bagian dari control plane.", recovery: "Outbox + idempotency key; rekonsiliasi sebelum retry.", rollback: "Tidak membatalkan side effect eksternal otomatis.", retention: "Publication history.", support_status: UNKNOWN}
+    placement: "Publisher dan delivery adapters (§36 peta logis)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: google-docs, relation: publishes_to, data_description: "Dokumen Product 1 dari PlanVersion disetujui (requiredRevisionId).", operation: WRITE, boundary: "external-write interlock", identity_ref: "personal/google-oauth"}
+      - {target: google-drive, relation: publishes_to, data_description: "Folder proyek per nama proyek.", operation: WRITE, boundary: "external-write interlock, drive.file", identity_ref: "personal/google-oauth"}
+      - {target: github-issues, relation: publishes_to, data_description: "Tiket kerja dari TaskSpec yang disetujui.", operation: WRITE, boundary: "external-write interlock", identity_ref: "personal/github"}
+      - {target: confluence, relation: publishes_to, data_description: "Dokumen proyek OFFICE (diblokir sampai otorisasi kantor).", operation: WRITE, boundary: "Office default deny", identity_ref: "office/atlassian"}
+      - {target: jira, relation: publishes_to, data_description: "Work item OFFICE (diblokir sampai otorisasi kantor).", operation: WRITE, boundary: "Office default deny", identity_ref: "office/atlassian"}
+      - {target: secret-provider, relation: reads, data_description: "Credential adapter diambil saat operasi; tidak ke UI.", operation: READ, boundary: "SecretProvider", identity_ref: null}
+      - {target: docs-visuals, relation: reads, data_description: "Konten dan diagram yang dirender.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: ["target"]
+
+  - component_id: workforce-scheduler
+    kind: platform_module
+    name: Workforce & Scheduler
+    friendly_name: "Workforce & Scheduler — antrean dan lease"
+    function: "Task readiness, lease, reservasi resource, dependency, fairness dan cancellation dalam satu state machine."
+    why_selected: "§10, §11: state machine eksplisit dan queue/lease persisten; tidak membuat workflow engine generik."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/workforce"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 9
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.workforce, impl_modules: [aeos.workforce.scheduler, aeos.workforce.loop], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [INTERNAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Doctor recovery.queue (lease kedaluwarsa).", restart: "Loop dihentikan/dijalankan bersama app; lease direkonsiliasi.", uninstall: "Bagian dari control plane.", recovery: "Rekonsiliasi lease/side effect sebelum memulai ulang.", rollback: "Rilis controller sebelumnya.", retention: "WorkerRun/Lease history.", support_status: UNKNOWN}
+    placement: "Workforce & Scheduler (§10); satu authority/DAG runtime."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: worker-runtime, relation: calls, data_description: "Admission dan start/cancel run.", operation: CALL, boundary: null, identity_ref: null}
+      - {target: model-routing, relation: calls, data_description: "Pemilihan route eligible per task.", operation: CALL, boundary: null, identity_ref: null}
+      - {target: cost-evaluation, relation: calls, data_description: "Reservasi budget atomik sebelum admission.", operation: CALL, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: model-routing
+    kind: platform_module
+    name: Model Routing
+    friendly_name: "Model Routing — pemilihan route pekerja"
+    function: "Filter eligibility keras (domain/data/terms/tools/budget) lalu pemilihan berdasarkan hasil evaluasi; tanpa paid fallback diam-diam."
+    why_selected: "§10, §23: routing dua tahap; model tidak memilih dirinya sendiri."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: [S07, S12]
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/routing"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 5
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.routing, impl_modules: [aeos.routing.service], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Doctor route.* checks.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Registry di DB.", rollback: "Route/config terversi.", retention: "ModelRoute history.", support_status: UNKNOWN}
+    placement: "Model Routing (§10)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: opencode-console, relation: reads, data_description: "Katalog/pricing/terms route (dicek bertanggal).", operation: READ, boundary: null, identity_ref: null}
+      - {target: openrouter, relation: reads, data_description: "Katalog/limit route (dicek bertanggal).", operation: READ, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: ["config:routes", "model:route"]
+
+  - component_id: worker-runtime
+    kind: platform_module
+    name: Worker Runtime
+    friendly_name: "Worker Runtime — sandbox pekerja"
+    function: "Adapter OpenCode, lifecycle sandbox, kill process tree, hasil dan trace eksekusi."
+    why_selected: "§10, §11, §25: lingkungan per tugas dengan pembatasan; worktree untuk isolasi perubahan."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/worker_runtime"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 4
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.worker_runtime, impl_modules: [aeos.worker_runtime.sandbox, aeos.worker_runtime.containment, aeos.worker_runtime.processes, aeos.worker_runtime.opencode], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests:
+      - {id: containment.report, description: "Uji negatif FS/egress/credential/kill (§07 urutan 4).", functional: true, requires_authorization: false, evidence: "CheckResult containment.report"}
+    access: {paths: ["<data>/*/projects/*/task-data/**"], egress: ["broker saja (default deny)"], data_classes: [INTERNAL, CONFIDENTIAL], operations: [EXEC], identity_ref: "capability token per run (hash disimpan)", tenant_target: null}
+    cost: {model: COMPUTE, amount: null, note: "Compute lokal tidak diukur.", source: null}
+    operations: {health: "Doctor worker.* dan containment.* checks.", restart: "Run dibatalkan/diulang lewat scheduler.", uninstall: "Bagian dari control plane.", recovery: "Kill tree + revoke capability.", rollback: "Rilis controller sebelumnya.", retention: "Trace teredaksi.", support_status: UNKNOWN}
+    placement: "Broker dan worker runtime (§36 peta logis)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: opencode, relation: runs_with, data_description: "Menjalankan OpenCode non-interaktif dengan TaskSpec terbatas.", operation: EXEC, boundary: "sandbox per task, tanpa host home/SSH/docker socket", identity_ref: "capability token"}
+      - {target: docker, relation: depends_on, data_description: "Container sandbox opsional bila tersedia.", operation: EXEC, boundary: "container bukan jaminan isolasi kuat (§25)", identity_ref: null}
+      - {target: capability-broker, relation: calls, data_description: "Akses model/git hanya lewat broker.", operation: CALL, boundary: "broker", identity_ref: "capability token"}
+    discovery: {}
+    invalidators: ["binary:opencode", "binary:docker"]
+
+  - component_id: capability-broker
+    kind: platform_module
+    name: Trusted capability broker
+    friendly_name: "Capability broker — akses terbatas per run"
+    function: "Token capability berumur pendek per run; proxy model; push hanya aeos/* branch dan buat PR; tidak ada operasi merge."
+    why_selected: "§25, §26, §31: worker tidak menerima credential upstream; human-only merge dijaga."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: [S22]
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/broker"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 4
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.broker, impl_modules: [aeos.broker.grants, aeos.broker.git_broker], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests:
+      - {id: broker.bypass_tests, description: "Uji direct push, refspec, merge API, branch deletion, force-push, credential escape (§31).", functional: true, requires_authorization: true, evidence: "laporan uji broker"}
+    access: {paths: [], egress: ["model routes yang disetujui", "GitHub API (push aeos/*, PR)"], data_classes: [INTERNAL, CONFIDENTIAL], operations: [CALL, WRITE], identity_ref: "workers/openrouter, personal/github (diambil broker)", tenant_target: null}
+    cost: {model: METERED_API, amount: null, note: "Biaya route dicatat di usage ledger; cap per run.", source: "§42"}
+    operations: {health: "Grant aktif/kedaluwarsa.", restart: "Revoke semua grant aktif saat restart.", uninstall: "Bagian dari control plane.", recovery: "Revoke + audit.", rollback: "Rilis controller sebelumnya.", retention: "Grant (hash) dan audit.", support_status: UNKNOWN}
+    placement: "Broker dan worker runtime (§36 peta logis); trusted capability broker (§07 urutan 4)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: secret-provider, relation: reads, data_description: "Credential upstream diambil broker, tidak diteruskan ke worker.", operation: READ, boundary: "SecretProvider", identity_ref: "workers/openrouter"}
+      - {target: openrouter, relation: calls, data_description: "Permintaan model worker (dengan cap).", operation: CALL, boundary: "egress broker", identity_ref: "workers/openrouter"}
+      - {target: opencode-console, relation: calls, data_description: "Route worker resmi OpenCode.", operation: CALL, boundary: "egress broker", identity_ref: null}
+      - {target: github, relation: writes, data_description: "Push refs/heads/aeos/* tanpa force/delete; create PR; tidak ada merge.", operation: WRITE, boundary: "branch allow-list aeos/*", identity_ref: "personal/github"}
+    discovery: {}
+    invalidators: ["secret:workers/openrouter", "secret:personal/github"]
+
+  - component_id: verification-review
+    kind: platform_module
+    name: Verification & Review
+    friendly_name: "Verifier independen — bukti dan acceptance"
+    function: "Verifier di luar candidate, review terpisah, claim/evidence ledger, AcceptanceRecord terikat hash."
+    why_selected: "U-14, §34: hasil agent bukan bukti kelulusan; exit 0 -> REVIEW, bukan DONE."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: [S37]
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/verification"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 8
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.verification, impl_modules: [aeos.verification.collector, aeos.verification.acceptance], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: ["<repo>/tests/acceptance/** (read-only bagi worker)", "<data>/*/projects/*/evidence/**"], egress: [], data_classes: [INTERNAL, CONFIDENTIAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: COMPUTE, amount: null, note: null, source: null}
+    operations: {health: "Doctor evidence.* checks.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Evidence append-only.", rollback: "Acceptance stale bila base/head/config berubah.", retention: "Sesuai retention evidence.", support_status: UNKNOWN}
+    placement: "Verifier dan review evidence (§36 peta logis)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: worker-runtime, relation: verifies, data_description: "Menjalankan suite tepercaya terhadap output worker.", operation: READ, boundary: "verifier di luar candidate", identity_ref: null}
+      - {target: evidence-store, relation: stores_in, data_description: "EvidenceArtifact (hash, collector identity).", operation: WRITE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: ["repo:head"]
+
+  - component_id: governance-handoff
+    kind: platform_module
+    name: Governance Handoff
+    friendly_name: "Governance Handoff — kontrak downstream"
+    function: "GovernanceHarnessAdapter setelah verifikasi/review dan sebelum delivery trust promotion."
+    why_selected: "§10, §32: kontrak governance yang direncanakan; bukan klaim layanan Harness.io diperiksa."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/governance"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PLANNED
+    bootstrap_order: 9
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.governance, impl_modules: [], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Belum ada (M4).", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Governance Handoff (§10, §32); M4."
+    relations:
+      - {target: verification-review, relation: reads, data_description: "Verifier reports, reviewer verdict, digests.", operation: READ, boundary: null, identity_ref: null}
+      - {target: delivery-ci, relation: calls, data_description: "Handoff result terversi sebelum PR/CI.", operation: CALL, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: delivery-ci
+    kind: platform_module
+    name: Delivery & CI
+    friendly_name: "Delivery & CI — PR dan status CI"
+    function: "PR bundle, status CI, referensi staging/release; tidak memiliki human merge authority."
+    why_selected: "§10, §31: merge ke main dan produksi tetap human-only (U-09)."
+    category: code/docs/CI
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: [S22, S23]
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/delivery"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 9
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.delivery, impl_modules: [], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests:
+      - {id: delivery.branch_protection, description: "Probe read-only ketersediaan branch protection (S22).", functional: true, requires_authorization: false, evidence: "CheckResult delivery.branch_protection"}
+    access: {paths: [], egress: ["GitHub API read-only"], data_classes: [INTERNAL], operations: [READ], identity_ref: "personal/github", tenant_target: "github:fadhlillah-dli/dly-aeos"}
+    cost: {model: NONE, amount: null, note: "Menit CI GitHub Actions UNKNOWN.", source: null}
+    operations: {health: "Doctor delivery.* checks.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Tidak berlaku.", rollback: "Tidak ada merge otomatis.", retention: "PR/CI links.", support_status: UNKNOWN}
+    placement: "Publisher dan delivery adapters (§36 peta logis)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: github-actions, relation: reads, data_description: "Status check identity dan hasil CI.", operation: READ, boundary: null, identity_ref: "personal/github"}
+      - {target: capability-broker, relation: calls, data_description: "PR dibuat lewat broker; merge tetap manusia.", operation: CALL, boundary: "tanpa operasi merge", identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: docs-visuals
+    kind: platform_module
+    name: Documentation & Visuals
+    friendly_name: "Documentation & Visuals — Product 1 dan diagram"
+    function: "Rencana konten Product 1, rendering diagram, screenshot terverifikasi, delta dan snapshot."
+    why_selected: "§10, §27-§29: Product 1 lengkap dengan visual dari record yang sama."
+    category: code/docs/CI
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/docs_engine"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 7
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.docs_engine, impl_modules: [], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: ["<data>/*/projects/*/publications/**"], egress: [], data_classes: [INTERNAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Endpoint docs.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Render ulang dari record.", rollback: "Snapshot sebelumnya.", retention: "Snapshot dokumen.", support_status: UNKNOWN}
+    placement: "Documentation & Visuals (§10)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: mermaid-cli, relation: runs_with, data_description: "Render diagram Mermaid ke gambar (opsional).", operation: EXEC, boundary: "proses lokal terbatas waktu", identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: operations-reliability
+    kind: platform_module
+    name: Operations & Reliability
+    friendly_name: "Operations & Reliability — backup, restore, insiden"
+    function: "Service inventory, SLI/SLO, runbook, restore, incident dan retirement workflow."
+    why_selected: "§10, §33: restore benar-benar diuji sebelum mengklaim backup siap."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: [S38]
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/operations"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.operations, impl_modules: [], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests:
+      - {id: recovery.restore_test, description: "Restore backup ke lokasi terpisah dan verifikasi (§33).", functional: true, requires_authorization: true, evidence: "EvidenceArtifact kind RESTORE_TEST"}
+    access: {paths: ["<data>/backups/**"], egress: [], data_classes: [INTERNAL, CONFIDENTIAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Doctor recovery.* checks.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Runbook restore.", rollback: "Rilis controller sebelumnya.", retention: "Backup sesuai policy.", support_status: UNKNOWN}
+    placement: "Operations & Reliability (§10)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: sqlite-metadata-store, relation: reads, data_description: "Backup online SQLite.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: cost-evaluation
+    kind: platform_module
+    name: Cost & Model Evaluation
+    friendly_name: "Cost & Evaluation — ledger, kuota, scorecard"
+    function: "Usage ledger, quota state, budget/reservasi atomik, evaluation suite dan scorecard konfigurasi model."
+    why_selected: "§10, §42, §43: biaya UNKNOWN ditampilkan; tidak ada paid fallback atau auto-topup."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: [S12, S31]
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/cost+evaluation"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 6
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.cost, impl_modules: [aeos.cost.service], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [INTERNAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Budget DB sehat; admission ditolak bila tidak dapat dipercaya (§50).", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Ledger append-only.", rollback: "Rilis controller sebelumnya.", retention: "Ledger.", support_status: UNKNOWN}
+    placement: "Cost & Model Evaluation (§10)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: sqlite-metadata-store, relation: stores_in, data_description: "UsageLedger, Budget, Reservation, EvalRun.", operation: READ_WRITE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: monitoring-decision-queue
+    kind: platform_module
+    name: Monitoring & Decision Queue
+    friendly_name: "Monitoring & Decision Queue — proyeksi Control Center"
+    function: "Control Center, Workforce Console, health, sync freshness, alert, blocker, Human Decision Queue dan audit; seluruhnya projection."
+    why_selected: "§10, §35, U-12: satu Control Center dan Human Decision Queue."
+    category: experience/intake
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/control_center+events"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 8
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.control_center, impl_modules: [aeos.events.service], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "SSE /api/events/stream dengan freshness.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Replay event dari cursor.", rollback: "Rilis controller sebelumnya.", retention: "Event append-only.", support_status: UNKNOWN}
+    placement: "Monitoring & Decision Queue (§10)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: sqlite-metadata-store, relation: reads, data_description: "Event dan audit untuk projection.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: secret-provider
+    kind: platform_module
+    name: SecretProvider
+    friendly_name: "SecretProvider — akses credential terbatas"
+    function: "Mengambil credential lewat identity yang sesuai; tidak menampilkan secret ke UI/model; fail closed."
+    why_selected: "§10, §26, U-13: OpenBao sebagai vault runtime; bukan .env."
+    category: data/secrets
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: [S24]
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/secrets"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 3
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.secrets, impl_modules: [aeos.secrets.provider], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: [], egress: ["OpenBao loopback"], data_classes: [RESTRICTED], operations: [READ, WRITE], identity_ref: "AppRole/Agent (OpenBao)", tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Doctor secret.* checks.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Recovery material OpenBao dipisah (§33).", rollback: "Rilis controller sebelumnya.", retention: "Status saja; nilai tidak disimpan di DB.", support_status: UNKNOWN}
+    placement: "SecretProvider (§10)."
+    relations:
+      - {target: openbao, relation: reads, data_description: "Credential runtime per namespace (personal/office/workers/projects).", operation: READ, boundary: "AppRole/Agent scope + TTL", identity_ref: "AppRole"}
+      - {target: os-credential-store, relation: reads, data_description: "Bootstrap credential OS (mis. SecretID/role).", operation: READ, boundary: "OS user", identity_ref: null}
+      - {target: sops-age, relation: reads, data_description: "Backup/bootstrap terenkripsi (opsional, pelengkap).", operation: READ, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: research-technology-registry
+    kind: platform_module
+    name: Research & Technology Registry
+    friendly_name: "Research & Technology Registry — kandidat dan bukti"
+    function: "Menyimpan repo/forum/method evidence dan proposal upgrade; tidak auto-install atau auto-promote."
+    why_selected: "§45, §47: semua kandidat dapat ditemukan tanpa otomatis diaktifkan."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/research+proposals"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PLANNED
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.research, impl_modules: [], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [INTERNAL], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Endpoint research.", restart: "Bagian dari control plane.", uninstall: "Bagian dari control plane.", recovery: "Records di DB.", rollback: "Supersession, bukan hapus.", retention: "Permanen.", support_status: UNKNOWN}
+    placement: "Modul/records internal yang diperluas; bukan service/vendor baru (§45)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: policy-decision-registry, relation: governed_by, data_description: "Promotion memerlukan Decision manusia.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: readiness-doctor
+    kind: platform_module
+    name: Readiness Doctor
+    friendly_name: "Readiness Doctor — pemeriksaan kesiapan"
+    function: "Bootstrap CLI tanpa server/LLM dan Dashboard Readiness: dependency/capability checks, remediation preview, version invalidation."
+    why_selected: "U-16, §08: Doctor menjadi pintu masuk; kekurangan dan remedy terlihat sebelum eksekusi."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:backend/aeos/doctor"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 8
+    approved_pin: null
+    probe: {type: platform_module, package: aeos.doctor, impl_modules: [aeos.doctor.capabilities, aeos.doctor.checks], timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: ["<repo>/**", "<data>/**"], egress: ["127.0.0.1 (loopback)", "api.github.com hanya dengan --functional"], data_classes: [INTERNAL], operations: [READ], identity_ref: "personal/github (opsional, read-only)", tenant_target: null}
+    cost: {model: NONE, amount: null, note: "Tanpa LLM; capability test Claude hanya bila diminta (memakai kuota Max).", source: "§08"}
+    operations: {health: "aeos doctor", restart: "Tidak berlaku.", uninstall: "Bagian dari control plane.", recovery: "Tidak berlaku.", rollback: "Rilis controller sebelumnya.", retention: "CheckResult history.", support_status: UNKNOWN}
+    placement: "Readiness Doctor / InstallManifest: dependency/capability checks, installation sequence, remediation preview dan version invalidation (§45)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: implements, data_description: "Modul di dalam control plane (juga berjalan tanpa server).", operation: NONE, boundary: null, identity_ref: null}
+      - {target: install-manifest, relation: reads, data_description: "Referensi komponen bersama inventaris.", operation: READ, boundary: null, identity_ref: null}
+      - {target: claude-code, relation: verifies, data_description: "Versi, auth status native, env tanpa kunci API.", operation: READ, boundary: "probe read-only", identity_ref: null}
+      - {target: openbao, relation: verifies, data_description: "Health loopback (initialized/sealed).", operation: READ, boundary: "loopback", identity_ref: null}
+      - {target: opencode, relation: verifies, data_description: "Status engine pekerja.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: install-manifest
+    kind: manifest
+    name: InstallManifest
+    friendly_name: "InstallManifest — daftar komponen yang ditinjau"
+    function: "Daftar komponen dengan sumber resmi, pin, probe, capability test, akses, biaya, operasi dan relasi; lensa Rancangan."
+    why_selected: "§07, §13: tool selection dan versi tetap berupa InstallManifest yang ditinjau."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:install-manifest/manifest.yaml"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 0
+    approved_pin: null
+    probe: {type: repo_file, path: install-manifest/manifest.yaml, timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests: []
+    access: {paths: ["<repo>/install-manifest/**"], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Validasi schema + hash (aeos seed).", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Git history.", rollback: "Revert commit manifest (review manusia).", retention: "InstallManifestRecord per hash.", support_status: UNKNOWN}
+    placement: "Readiness Doctor / InstallManifest (§45); protected path (§09)."
+    relations: []
+    discovery: {}
+    invalidators: ["manifest"]
+
+  - component_id: trusted-self-build-seed
+    kind: release_mode
+    name: Trusted self-build seed
+    friendly_name: "Trusted seed — controller tepercaya untuk self-build"
+    function: "Mode awal DLY AEOS yang mengawasi candidate source tanpa self-modification aktif; released controller terpisah dari candidate."
+    why_selected: "§09, U-18: controller/policy/verifier aktif tidak dapat diubah worker."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos (released artifact)"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PLANNED
+    bootstrap_order: 9
+    approved_pin: null
+    probe: {type: data_dir, path: releases, require_entries: true, timeout_seconds: 5, ttl_seconds: 3600}
+    capability_tests:
+      - {id: selfbuild.boundary, description: "Candidate tidak dapat mengubah policy/verifier/controller aktif (§50).", functional: true, requires_authorization: false, evidence: "uji boundary self-build"}
+    access: {paths: ["<data>/releases/**"], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Released controller artifact + hash tersedia.", restart: "Promotion terkendali manusia.", uninstall: "Tidak berlaku.", recovery: "Rilis lama tidak dihapus saat upgrade gagal (§09).", rollback: "Kembali ke rilis sebelumnya.", retention: "Rilis dipertahankan.", support_status: UNKNOWN}
+    placement: "Mode awal DLY AEOS yang mengawasi candidate source tanpa self-modification aktif (§45)."
+    relations:
+      - {target: dly-aeos-platform-repo, relation: depends_on, data_description: "Candidate build dari branch/worktree; release dari merge manusia.", operation: READ, boundary: "trusted vs candidate", identity_ref: null}
+      - {target: policy-decision-registry, relation: governed_by, data_description: "Promotion memakai keputusan manusia + hash artifact.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  # ------------------------------------------------------------------ worker engines (§07 urutan 5, §45)
+  - component_id: opencode
+    kind: worker_engine
+    name: OpenCode
+    friendly_name: "OpenCode — mesin eksekusi pekerja"
+    function: "Worker engine pertama: menjalankan model murah/gratis yang eligible secara non-interaktif dengan output JSON events."
+    why_selected: "§07 urutan 5, §11: worker engine pertama yang diuji (S07, S08, S28)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/anomalyco/opencode"
+    source_refs: [S07, S08, S28]
+    upstream_identity: "github:anomalyco/opencode"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 5
+    approved_pin: null
+    probe:
+      type: binary
+      binaries:
+        - {name: opencode, settings_override: opencode_binary, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 15
+      ttl_seconds: 86400
+    capability_tests:
+      - {id: worker.contract, description: "Bounded tool/schema/patch task sesuai kontrak (§07 urutan 5).", functional: true, requires_authorization: true, evidence: "WorkerRun + verifier evidence"}
+    access: {paths: ["<data>/*/projects/*/task-data/** (sandbox)"], egress: ["broker saja"], data_classes: [INTERNAL], operations: [EXEC, WRITE], identity_ref: "capability token per run", tenant_target: null}
+    cost: {model: FREE_TIER, amount: null, note: "Route gratis/murah per katalog bertanggal; bukan jaminan gratis selamanya.", source: "S07"}
+    operations:
+      health: "opencode --version"
+      restart: "Per run (dibunuh beserta process tree saat cancel)."
+      uninstall: "Dikelola pemilik."
+      recovery: "Run diulang dengan attempt baru."
+      rollback: "Pin versi engine yang lulus kontrak."
+      retention: "Trace teredaksi."
+      support_status: UNKNOWN
+      install: {kind: manual, note: "Dari source resmi github:anomalyco/opencode; versi dipin setelah capability test."}
+    placement: "Worker engine pertama yang diuji (§45)."
+    relations:
+      - {target: opencode-console, relation: calls, data_description: "Route model OpenCode (lewat broker).", operation: CALL, boundary: "egress broker", identity_ref: "capability token"}
+      - {target: openrouter, relation: calls, data_description: "Route model OpenRouter (lewat broker).", operation: CALL, boundary: "egress broker", identity_ref: "capability token"}
+    discovery: {binaries: [opencode]}
+    invalidators: ["binary:opencode"]
+
+  - component_id: goose
+    kind: worker_engine
+    name: Goose
+    friendly_name: "Goose — alternatif adapter pekerja"
+    function: "Alternatif worker adapter; bukan dijalankan bersamaan secara default."
+    why_selected: "§45: kandidat sebelumnya; canonical repo/distribution/version harus diverifikasi sebelum admission."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat dengan identitas belum diverifikasi; tidak diprobe.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Goose / Pi: alternatif worker adapter; bukan bersamaan secara default (§45)."
+    relations:
+      - {target: opencode, relation: alternative_to, data_description: "Alternatif engine bila OpenCode tidak memenuhi kontrak.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: pi
+    kind: worker_engine
+    name: Pi
+    friendly_name: "Pi — alternatif adapter pekerja"
+    function: "Alternatif worker adapter; bukan dijalankan bersamaan secara default."
+    why_selected: "§45: kandidat sebelumnya; canonical repo/distribution/version harus diverifikasi sebelum admission."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat dengan identitas belum diverifikasi; tidak diprobe.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Goose / Pi: alternatif worker adapter; bukan bersamaan secara default (§45)."
+    relations:
+      - {target: opencode, relation: alternative_to, data_description: "Alternatif engine bila OpenCode tidak memenuhi kontrak.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: hermes
+    kind: worker_engine
+    name: Hermes Agent
+    friendly_name: "Hermes — kandidat adapter ops/konteks/skill"
+    function: "Adapter ops/context/skills tambahan bila bermanfaat dan batasnya teruji; tidak memberi auto-promotion memory/skill."
+    why_selected: "§37, §45: OPTIONAL CANDIDATE (S28)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/NousResearch/hermes-agent"
+    source_refs: [S28]
+    upstream_identity: "github:NousResearch/hermes-agent"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: OPTIONAL_CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum keputusan admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Saran skill/memory masuk proposal review.", support_status: UNKNOWN}
+    placement: "Adapter ops/context/skills tambahan bila bermanfaat dan batasnya teruji (§45)."
+    relations:
+      - {target: worker-runtime, relation: runs_with, data_description: "Kandidat adapter di balik worker runtime.", operation: EXEC, boundary: "sandbox", identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: openhands
+    kind: worker_engine
+    name: OpenHands
+    friendly_name: "OpenHands — kandidat engine"
+    function: "Kandidat engine; perlu pembuktian tugas dan trust boundary."
+    why_selected: "§45: kandidat sebelumnya; source identity/version perlu dipastikan sebelum admission."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat dengan identitas belum diverifikasi; tidak diprobe.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "OpenHands / Deep Agents: kandidat engine; perlu pembuktian tugas dan trust boundary (§45)."
+    relations:
+      - {target: opencode, relation: alternative_to, data_description: "Kandidat engine pengganti/pembanding.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: deep-agents
+    kind: worker_engine
+    name: Deep Agents
+    friendly_name: "Deep Agents — kandidat engine"
+    function: "Kandidat engine; perlu pembuktian tugas dan trust boundary."
+    why_selected: "§45: kandidat sebelumnya; source identity/version perlu dipastikan sebelum admission."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat dengan identitas belum diverifikasi; tidak diprobe.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "OpenHands / Deep Agents: kandidat engine; perlu pembuktian tugas dan trust boundary (§45)."
+    relations:
+      - {target: opencode, relation: alternative_to, data_description: "Kandidat engine pengganti/pembanding.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  # ------------------------------------------------------------------ model gateways and routes (§23, §45)
+  - component_id: litellm
+    kind: model_gateway
+    name: LiteLLM
+    friendly_name: "LiteLLM — gateway API pekerja (bila diperlukan)"
+    function: "API worker gateway ketika diperlukan; virtual keys/budget memakai DB sesuai dokumentasinya; Claude Max tidak lewat gateway ini."
+    why_selected: "§07 urutan 6, §11, §23: satu pemilik routing policy tetap di AEOS (S25)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://docs.litellm.ai/docs/proxy/virtual_keys"
+    source_refs: [S25]
+    upstream_identity: "LiteLLM proxy (official docs)"
+    identity_verified: VERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: OPTIONAL_CANDIDATE
+    bootstrap_order: 6
+    approved_pin: null
+    probe: {type: none, reason: "Belum dipilih untuk dijalankan; dipasang hanya bila route API membutuhkannya.", local_install: true}
+    capability_tests:
+      - {id: gateway.routing_caps, description: "Routing, caps, outage behavior dan fallback diuji; connectivity saja belum cukup (§07 urutan 6).", functional: true, requires_authorization: true, evidence: "hasil uji gateway"}
+    access: {paths: [], egress: ["provider API yang disetujui"], data_classes: [INTERNAL], operations: [CALL], identity_ref: "workers/* (virtual keys)", tenant_target: null}
+    cost: {model: METERED_API, amount: null, note: "Biaya provider di belakang gateway; budget DB wajib sehat.", source: "S25"}
+    operations: {health: "Health endpoint proxy (loopback) setelah admission.", restart: "Restart proxy lokal.", uninstall: "Hentikan proxy; hapus konfigurasi.", recovery: "DB budget dipulihkan dari backup.", rollback: "Route kembali ke broker langsung.", retention: "Log teredaksi.", support_status: UNKNOWN}
+    placement: "API worker gateway ketika diperlukan; satu pemilik routing policy di AEOS (§45)."
+    relations:
+      - {target: openrouter, relation: calls, data_description: "Upstream provider route.", operation: CALL, boundary: "egress terbatas", identity_ref: "workers/openrouter"}
+      - {target: capability-broker, relation: governed_by, data_description: "Broker/AEOS tetap pemilik policy routing.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {python: [litellm]}
+    invalidators: ["config:routes"]
+
+  - component_id: openrouter
+    kind: model_provider
+    name: OpenRouter
+    friendly_name: "OpenRouter — route inferensi pekerja"
+    function: "Route inferensi API untuk model pekerja; terms, data, quota dan versi diuji per endpoint."
+    why_selected: "§23, §45: route inferensi resmi (S11, S12); paid route nonaktif kecuali disetujui."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://openrouter.ai/docs/api_reference/limits"
+    source_refs: [S11, S12]
+    upstream_identity: "openrouter.ai"
+    identity_verified: VERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: CANDIDATE
+    bootstrap_order: 5
+    approved_pin: null
+    probe: {type: none, reason: "Layanan eksternal; status kunci via Doctor (route.worker_key) tanpa panggilan berbayar.", local_install: false}
+    capability_tests:
+      - {id: route.free_quota, description: "Perilaku quota/429 dan backoff tanpa paid fallback (§50).", functional: true, requires_authorization: true, evidence: "hasil uji route"}
+    access: {paths: [], egress: ["openrouter.ai (lewat broker)"], data_classes: [INTERNAL], operations: [CALL], identity_ref: "workers/openrouter", tenant_target: null}
+    cost: {model: METERED_API, amount: null, note: "Free route punya limit/expiry (S11, S12); paid route nonaktif tanpa keputusan budget.", source: "S11, S12"}
+    operations: {health: "Doctor route.worker_key (status kunci saja).", restart: "Tidak berlaku.", uninstall: "Hapus kunci dari vault; nonaktifkan route.", recovery: "Rotasi kunci.", rollback: "Route sebelumnya.", retention: "Usage ledger.", support_status: UNKNOWN}
+    placement: "OpenRouter / OpenCode Console / provider resmi: route inferensi; terms, data, quota dan versi diuji per endpoint (§45)."
+    relations: []
+    discovery: {}
+    invalidators: ["secret:workers/openrouter", "model:route"]
+
+  - component_id: opencode-console
+    kind: model_provider
+    name: OpenCode Console (Zen)
+    friendly_name: "OpenCode Console — katalog route gratis/murah"
+    function: "Katalog/pricing/free/privacy route OpenCode untuk model pekerja awal (DeepSeek/GLM Flash Free)."
+    why_selected: "§23: worker awal DeepSeek V4.1 Flash Free dan GLM-5.3 Flash Free di OpenCode (S07)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://opencode.ai/v2/docs/console/models/"
+    source_refs: [S07, S08]
+    upstream_identity: "opencode.ai console"
+    identity_verified: VERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: CANDIDATE
+    bootstrap_order: 5
+    approved_pin: null
+    probe: {type: none, reason: "Layanan eksternal; route diuji per endpoint oleh routing/evaluasi.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: ["opencode.ai (lewat broker)"], data_classes: [INTERNAL], operations: [CALL], identity_ref: null, tenant_target: null}
+    cost: {model: FREE_TIER, amount: null, note: "Free availability adalah E1 saat riset, bukan jaminan (§23).", source: "S07"}
+    operations: {health: "Katalog dibaca ulang bertanggal.", restart: "Tidak berlaku.", uninstall: "Nonaktifkan route.", recovery: "Tidak berlaku.", rollback: "Route sebelumnya.", retention: "Usage ledger.", support_status: UNKNOWN}
+    placement: "OpenRouter / OpenCode Console / provider resmi (§45)."
+    relations: []
+    discovery: {}
+    invalidators: ["model:route"]
+
+  - component_id: gemini-api
+    kind: model_provider
+    name: Gemini API
+    friendly_name: "Gemini API — pembanding (provider resmi)"
+    function: "Provider resmi untuk pembanding Free Tier; hanya input sesuai data terms."
+    why_selected: "§23 pool pembanding; provider resmi pada §45 (S09)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://ai.google.dev/gemini-api/docs/pricing"
+    source_refs: [S09]
+    upstream_identity: "Google Gemini API"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Layanan eksternal; tidak diprobe tanpa route yang disetujui.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: ["Gemini API (lewat broker)"], data_classes: [PUBLIC, INTERNAL], operations: [CALL], identity_ref: null, tenant_target: null}
+    cost: {model: FREE_TIER, amount: null, note: "Free tier dapat memakai data untuk perbaikan model; cek terms (S09).", source: "S09"}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Nonaktifkan route.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Usage ledger.", support_status: UNKNOWN}
+    placement: "Provider resmi (§45 baris OpenRouter / OpenCode Console / provider resmi)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Evaluasi route sebelum aktif.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: deepseek-api
+    kind: model_provider
+    name: DeepSeek API
+    friendly_name: "DeepSeek API — provider resmi"
+    function: "Provider resmi DeepSeek; alias Flash melayani versi tertentu yang harus dicatat atau UNKNOWN."
+    why_selected: "§23: DeepSeek official Flash alias (S10); provider resmi pada §45."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://api-docs.deepseek.com/"
+    source_refs: [S10]
+    upstream_identity: "DeepSeek API"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Layanan eksternal; tidak diprobe tanpa route yang disetujui.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: ["DeepSeek API (lewat broker)"], data_classes: [INTERNAL], operations: [CALL], identity_ref: null, tenant_target: null}
+    cost: {model: METERED_API, amount: null, note: "Harga/terms dibaca ulang saat aktivasi.", source: "S10"}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Nonaktifkan route.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Usage ledger.", support_status: UNKNOWN}
+    placement: "Provider resmi (§45 baris OpenRouter / OpenCode Console / provider resmi)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Evaluasi route sebelum aktif.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: 9router
+    kind: model_gateway
+    name: 9Router
+    friendly_name: "9Router — bukan default (watchlist)"
+    function: "Router berbasis OAuth/subscription; bukan dependency wajib dan tidak menampung OAuth Claude Max."
+    why_selected: "§07, §45, §47: disebut pengguna sebagai contoh; rute berbasis session/subscription credential tidak digunakan (S35)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/decolua/9router"
+    source_refs: [S35]
+    upstream_identity: "github:decolua/9router"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: WATCHLIST
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Bukan default; tidak diprobe.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: "Klaim unlimited/savings tidak diadopsi (§47).", source: "S35"}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "9Router: bukan default; rute berbasis session/subscription credential tidak digunakan (§45)."
+    relations:
+      - {target: litellm, relation: alternative_to, data_description: "Hanya untuk route API-key sah setelah adapter review; jangan ditumpuk dengan gateway lain.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Watchlist; perubahan lewat proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  # ------------------------------------------------------------------ MCP, retrieval, context (§24, §25, §45)
+  - component_id: toolhive
+    kind: mcp_server
+    name: ToolHive
+    friendly_name: "ToolHive — kandidat pengelola MCP"
+    function: "Kandidat pengelola MCP runtime setelah kebutuhan dan kontrol teruji."
+    why_selected: "§11, §25, §45: kandidat pada tahap workforce (S30)."
+    category: tools/context
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/stacklok/toolhive"
+    source_refs: [S30]
+    upstream_identity: "github:stacklok/toolhive"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Kandidat pengelola MCP runtime, setelah kebutuhan dan kontrol teruji (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {binaries: [thv]}
+    invalidators: []
+
+  - component_id: docker-mcp-gateway
+    kind: mcp_server
+    name: Docker MCP Gateway
+    friendly_name: "Docker MCP Gateway — alternatif ToolHive"
+    function: "Alternatif ToolHive; bukan gateway authority kedua."
+    why_selected: "§25, §45: pilih satu sesuai hasil uji; source/distribution resmi perlu diverifikasi."
+    category: tools/context
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat dengan source belum diverifikasi; tidak diprobe.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Alternatif ToolHive, bukan gateway authority kedua (§45)."
+    relations:
+      - {target: toolhive, relation: alternative_to, data_description: "Satu pengelola MCP dipilih dari hasil uji; tidak keduanya.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: serena
+    kind: mcp_server
+    name: Serena
+    friendly_name: "Serena — kandidat retrieval simbol kode"
+    function: "Retrieval simbol kode dengan scope/version; manfaat diuji dahulu."
+    why_selected: "§24, §45 (S29)."
+    category: tools/context
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/oraios/serena"
+    source_refs: [S29]
+    upstream_identity: "github:oraios/serena"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Indeks stale bila base berubah.", support_status: UNKNOWN}
+    placement: "Serena / Context7: retrieval simbol/dokumentasi dengan scope/version; uji manfaat (§45)."
+    relations:
+      - {target: knowledge-context, relation: implements, data_description: "Kandidat retrieval simbol untuk ContextPack.", operation: READ, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {mcp: [serena]}
+    invalidators: []
+
+  - component_id: context7
+    kind: mcp_server
+    name: Context7
+    friendly_name: "Context7 — kandidat dokumentasi dependency"
+    function: "Dokumentasi dependency sesuai versi; manfaat diuji dahulu."
+    why_selected: "§24, §45 (S29)."
+    category: tools/context
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/upstash/context7"
+    source_refs: [S29]
+    upstream_identity: "github:upstash/context7"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Serena / Context7: retrieval simbol/dokumentasi dengan scope/version; uji manfaat (§45)."
+    relations:
+      - {target: knowledge-context, relation: implements, data_description: "Kandidat dokumentasi dependency untuk ContextPack.", operation: READ, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {mcp: [context7], npm: ["@upstash/context7-mcp"]}
+    invalidators: []
+
+  - component_id: codebase-memory-mcp
+    kind: mcp_server
+    name: codebase-memory-mcp
+    friendly_name: "codebase-memory-mcp — kandidat belum terverifikasi"
+    function: "Kandidat memori codebase; identitas/version dan kontrol perlu verifikasi sebelum pemasangan."
+    why_selected: "§24, §45: kandidat yang identitasnya belum dipastikan; tidak diberi tautan tebakan."
+    category: tools/context
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: UNVERIFIED
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Canonical upstream UNVERIFIED; admission diblokir.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Kandidat yang identitas/version dan kontrolnya perlu verifikasi; canonical upstream UNVERIFIED (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Verifikasi identitas lewat registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {mcp: [codebase-memory-mcp, codebase-memory]}
+    invalidators: []
+
+  - component_id: rtk
+    kind: executable
+    name: RTK
+    friendly_name: "RTK — eksperimen reduksi konteks"
+    function: "Eksperimen pengurangan output/konteks; tidak menjamin savings."
+    why_selected: "§45 (S31)."
+    category: tools/context
+    domains: [PLATFORM]
+    usage_role: dev
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/rtk-ai/rtk"
+    source_refs: [S31]
+    upstream_identity: "github:rtk-ai/rtk"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat eksperimen; tidak diprobe sebelum admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: "Tidak menjamin penghematan.", source: "S31"}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "RTK / ccusage: eksperimen context reduction dan metering; tidak menjamin savings atau invoice akurat (§45)."
+    relations:
+      - {target: opencode, relation: runs_with, data_description: "Eksperimen reduksi output tool pekerja.", operation: EXEC, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {binaries: [rtk]}
+    invalidators: []
+
+  - component_id: ccusage
+    kind: executable
+    name: ccusage
+    friendly_name: "ccusage — eksperimen metering Claude"
+    function: "Eksperimen metering penggunaan Claude Code lokal; bukan invoice akurat."
+    why_selected: "§45 (S31)."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: dev
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/ccusage/ccusage"
+    source_refs: [S31]
+    upstream_identity: "github:ccusage/ccusage"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat eksperimen; tidak diprobe sebelum admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: "Angka bukan tagihan resmi.", source: "S31"}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "RTK / ccusage: eksperimen context reduction dan metering; tidak menjamin savings atau invoice akurat (§45)."
+    relations:
+      - {target: claude-code, relation: reads, data_description: "Membaca log penggunaan lokal Claude Code (eksperimen).", operation: READ, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {npm: [ccusage]}
+    invalidators: []
+
+  # ------------------------------------------------------------------ observability / evaluation (§11, §35, §45)
+  - component_id: langfuse
+    kind: observability
+    name: Langfuse
+    friendly_name: "Langfuse — trace backend opsional"
+    function: "Exporter/trace backend opsional yang disetujui; state operasional tetap AEOS."
+    why_selected: "§11, §35, §45: tambahan setelah bermanfaat; destination data diperiksa saat admission."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: OPTIONAL_CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Opsional; source/version diperiksa saat admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: ["trace destination (harus disetujui; Office tidak ke personal)"], data_classes: [INTERNAL], operations: [WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Sesuai policy trace.", support_status: UNKNOWN}
+    placement: "Langfuse / OpenTelemetry: observability tambahan yang disetujui; internal control state tetap AEOS (§45)."
+    relations:
+      - {target: opentelemetry, relation: reads, data_description: "Menerima trace dari exporter OTel (bila diaktifkan).", operation: READ, boundary: "redaksi sebelum ekspor", identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {python: [langfuse]}
+    invalidators: []
+
+  - component_id: opentelemetry
+    kind: observability
+    name: OpenTelemetry
+    friendly_name: "OpenTelemetry — exporter opsional"
+    function: "Exporter trace/metrik opsional; sumber state operasional tetap AEOS."
+    why_selected: "§11, §35, §45: perluasan setelah bermanfaat."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: OPTIONAL_CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Opsional; source/version diperiksa saat admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: ["collector yang disetujui"], data_classes: [INTERNAL], operations: [WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Sesuai policy trace.", support_status: UNKNOWN}
+    placement: "Langfuse / OpenTelemetry: exporter opsional (§45)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: reads, data_description: "Trace/metrik teredaksi dari control plane (bila diaktifkan).", operation: READ, boundary: "redaksi", identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {python: [opentelemetry-api, opentelemetry-sdk]}
+    invalidators: []
+
+  - component_id: promptfoo
+    kind: evaluation
+    name: Promptfoo
+    friendly_name: "Promptfoo — kandidat pelaksana evaluasi"
+    function: "Kandidat alat evaluation suite; bukan acceptance authority."
+    why_selected: "§11, §45: official source/version dan evaluator boundary diperiksa saat admission."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: test
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Kandidat alat untuk evaluation suite; bukan acceptance authority (§45)."
+    relations:
+      - {target: cost-evaluation, relation: implements, data_description: "Kandidat runner suite evaluasi terproteksi.", operation: EXEC, boundary: "grader terproteksi", identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {npm: [promptfoo]}
+    invalidators: []
+
+  # ------------------------------------------------------------------ orchestration candidates (§11, §45)
+  - component_id: temporal
+    kind: orchestrator
+    name: Temporal
+    friendly_name: "Temporal — kandidat scheduler terdistribusi"
+    function: "Pilihan saat workflow distributed/durable dibutuhkan (multi-host, workflow lama, recovery terukur)."
+    why_selected: "§11, §45 (S27)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://docs.temporal.io/"
+    source_refs: [S27]
+    upstream_identity: "Temporal platform"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat; belum dibutuhkan pada V1.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Pilihan saat workflow distributed/durable dibutuhkan (§45)."
+    relations:
+      - {target: workforce-scheduler, relation: alternative_to, data_description: "Hanya bila state machine lokal tidak cukup; tidak menjadi scheduler kedua.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {python: [temporalio]}
+    invalidators: []
+
+  - component_id: langgraph
+    kind: orchestrator
+    name: LangGraph
+    friendly_name: "LangGraph — opsional di dalam activity"
+    function: "Agent graph opsional di dalam activity/adapter; bukan control plane, scheduler atau approval authority kedua."
+    why_selected: "§11, §45 (S26)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://docs.langchain.com/oss/python/langgraph/persistence"
+    source_refs: [S26]
+    upstream_identity: "LangGraph (LangChain)"
+    identity_verified: VERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: OPTIONAL_CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Opsional; belum dipilih.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Opsional sebagai activity internal, bukan control plane kedua (§45)."
+    relations:
+      - {target: worker-runtime, relation: runs_with, data_description: "Graph di dalam satu activity bila terbukti bermanfaat.", operation: EXEC, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {python: [langgraph]}
+    invalidators: []
+
+  - component_id: copier
+    kind: executable
+    name: Copier
+    friendly_name: "Copier — kandidat template bootstrap"
+    function: "Kandidat template bootstrap proyek; hasil tetap mengikuti manifest dan repo yang ada."
+    why_selected: "§45: official source/version/template ownership perlu diverifikasi saat admission."
+    category: code/docs/CI
+    domains: [PLATFORM]
+    usage_role: build
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Kandidat template bootstrap; hasil tetap mengikuti manifest dan repo yang ada (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {python: [copier]}
+    invalidators: []
+
+  - component_id: agent-orchestrator
+    kind: orchestrator
+    name: Agent Orchestrator
+    friendly_name: "Agent Orchestrator — kandidat pelaksana fleet"
+    function: "Kandidat pelaksana fleet di balik adapter; tidak mengambil source of truth."
+    why_selected: "§45 (S34)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/OrchestratorInc/agent-orchestrator"
+    source_refs: [S34]
+    upstream_identity: "github:OrchestratorInc/agent-orchestrator"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Kandidat pelaksana fleet di balik adapter; tidak mengambil source of truth (§45)."
+    relations:
+      - {target: workforce-scheduler, relation: governed_by, data_description: "Hanya di balik adapter; satu authority/DAG runtime dipertahankan.", operation: NONE, boundary: "adapter", identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: paperclip
+    kind: method_reference
+    name: Paperclip
+    friendly_name: "Paperclip — referensi visibilitas organisasi agent"
+    function: "Referensi pengelolaan agent/organisasi, task/goal/budget dan dashboard run visibility."
+    why_selected: "§37, §45, §47: REFERENCE/CANDIDATE; adopsi kebutuhan visibilitas di Control Center (S34, S50)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/paperclipai/paperclip"
+    source_refs: [S34, S50]
+    upstream_identity: "github:paperclipai/paperclip"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REFERENCE_ONLY
+    design_label: REFERENCE_ONLY
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Rujukan; bukan dependency aktif.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Referensi pengelolaan agent/organisasi; tidak dijadikan control plane kedua (§45)."
+    relations:
+      - {target: monitoring-decision-queue, relation: implements, data_description: "Rujukan kebutuhan visibilitas organisasi/run (bukan kode yang dipakai).", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Rujukan tercatat di registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: ddorchestrator
+    kind: orchestrator
+    name: DDorchestrator
+    friendly_name: "DDorchestrator — identitas belum dipastikan"
+    function: "Nama kandidat sebelumnya; identitas repository/version belum berhasil dipastikan ulang sehingga belum dipilih."
+    why_selected: "§37, §45: dipertahankan agar tidak hilang; UNVERIFIED tanpa tautan tebakan atau tombol install."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: UNVERIFIED
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Identitas UNVERIFIED; admission diblokir.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Nama kandidat sebelumnya dipertahankan; identitas repository/version belum berhasil dipastikan ulang, sehingga belum dipilih (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Verifikasi identitas lewat registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: openai-symphony
+    kind: method_reference
+    name: OpenAI Symphony
+    friendly_name: "Symphony — referensi run terisolasi berbasis issue"
+    function: "Referensi issue-driven isolated runs/proof of work; native auto-landing tidak diadopsi."
+    why_selected: "§45, §47 (S51)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/openai/symphony"
+    source_refs: [S51]
+    upstream_identity: "github:openai/symphony"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REFERENCE_ONLY
+    design_label: REFERENCE_ONLY
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Rujukan; bukan dependency aktif.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Referensi issue-driven isolated runs/proof of work; adapter/authority perlu disesuaikan, native auto-landing tidak diadopsi (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Rujukan tercatat di registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: ralph
+    kind: method_reference
+    name: Ralph
+    friendly_name: "Ralph — referensi loop PRD berurutan"
+    function: "Referensi bounded sequential PRD loop; completion memerlukan verifier, bukan checkbox agent."
+    why_selected: "§45, §47 (S54)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/snarktank/ralph"
+    source_refs: [S54]
+    upstream_identity: "github:snarktank/ralph"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REFERENCE_ONLY
+    design_label: REFERENCE_ONLY
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Rujukan; bukan dependency aktif.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Referensi bounded sequential PRD loop; completion memerlukan verifier (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Rujukan tercatat di registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: gas-town
+    kind: orchestrator
+    name: Gas Town
+    friendly_name: "Gas Town — kandidat fleet/meta-harness"
+    function: "Kandidat workspace/fleet dengan persistent work tracking; tidak dipasang sebagai authority paralel."
+    why_selected: "§45, §47 (S55): repo lama redirect ke gastownhall/gastown; manfaat dan boundary perlu bukti."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/gastownhall/gastown"
+    source_refs: [S55]
+    upstream_identity: "github:gastownhall/gastown"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Gas Town / Ruflo: kandidat fleet/meta-harness; tidak dipasang sebagai authority paralel; perlu bukti manfaat dan boundary sebelum aktivasi (§45)."
+    relations:
+      - {target: workforce-scheduler, relation: governed_by, data_description: "Hanya di balik adapter; tidak menjadi scheduler kedua.", operation: NONE, boundary: "adapter", identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: ruflo
+    kind: orchestrator
+    name: Ruflo
+    friendly_name: "Ruflo — kandidat meta-harness"
+    function: "Kandidat meta-harness/fleet/memory menurut klaim repository; benchmark/keamanan/kompatibilitas belum diuji."
+    why_selected: "§45, §47 (S56): candidate only."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/ruvnet/ruflo"
+    source_refs: [S56]
+    upstream_identity: "github:ruvnet/ruflo"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Gas Town / Ruflo: kandidat fleet/meta-harness (§45)."
+    relations:
+      - {target: gas-town, relation: alternative_to, data_description: "Kandidat fleet alternatif; bukan bersamaan sebagai authority.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: metagpt
+    kind: method_reference
+    name: MetaGPT
+    friendly_name: "MetaGPT — referensi orkestrasi peran"
+    function: "Referensi/eksperimen role orchestration; tidak menambah control plane kedua."
+    why_selected: "§45, §47 (S57)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/FoundationAgents/MetaGPT"
+    source_refs: [S57]
+    upstream_identity: "github:FoundationAgents/MetaGPT"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REFERENCE_ONLY
+    design_label: REFERENCE_ONLY
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Rujukan; bukan dependency aktif.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "MetaGPT / ChatDev / CrewAI: referensi/eksperimen role orchestration; tidak menambah control plane kedua (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Rujukan tercatat di registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {python: [metagpt]}
+    invalidators: []
+
+  - component_id: chatdev
+    kind: method_reference
+    name: ChatDev
+    friendly_name: "ChatDev — referensi orkestrasi peran"
+    function: "Referensi/eksperimen role orchestration; ChatDev 2.0 berbeda dari legacy virtual-company v1."
+    why_selected: "§45, §47 (S58)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/OpenBMB/ChatDev"
+    source_refs: [S58]
+    upstream_identity: "github:OpenBMB/ChatDev"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REFERENCE_ONLY
+    design_label: REFERENCE_ONLY
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Rujukan; bukan dependency aktif.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "MetaGPT / ChatDev / CrewAI: referensi/eksperimen role orchestration (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Rujukan tercatat di registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: crewai
+    kind: method_reference
+    name: CrewAI
+    friendly_name: "CrewAI — referensi orkestrasi agent/flow"
+    function: "Referensi/eksperimen agent/flow orchestration; tidak menambah control plane kedua."
+    why_selected: "§45, §47 (S59)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/crewAIInc/crewAI"
+    source_refs: [S59]
+    upstream_identity: "github:crewAIInc/crewAI"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REFERENCE_ONLY
+    design_label: REFERENCE_ONLY
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Rujukan; bukan dependency aktif.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "MetaGPT / ChatDev / CrewAI: referensi/eksperimen role orchestration (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Rujukan tercatat di registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {python: [crewai]}
+    invalidators: []
+
+  # ------------------------------------------------------------------ methods, skills, references (§45, §47)
+  - component_id: spec-kit
+    kind: method_reference
+    name: Spec Kit
+    friendly_name: "Spec Kit — referensi spec workflow"
+    function: "Referensi/adaptor spec workflow; tidak mengganti MCI atau authority plan."
+    why_selected: "§45, §47 (S32)."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/github/spec-kit"
+    source_refs: [S32]
+    upstream_identity: "github:github/spec-kit"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REFERENCE_ONLY
+    design_label: REFERENCE_ONLY
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Rujukan; bukan dependency aktif.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Spec Kit / OpenSpec: referensi/adaptor spec workflow; tidak mengganti MCI atau authority plan (§45)."
+    relations:
+      - {target: planning-blueprint, relation: implements, data_description: "Rujukan pola spesifikasi (bukan kode yang dipakai).", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Rujukan tercatat di registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: openspec
+    kind: method_reference
+    name: OpenSpec
+    friendly_name: "OpenSpec — referensi spec workflow"
+    function: "Referensi/adaptor spec workflow; tidak mengganti MCI atau authority plan."
+    why_selected: "§45, §47 (S32)."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/Fission-AI/OpenSpec"
+    source_refs: [S32]
+    upstream_identity: "github:Fission-AI/OpenSpec"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REFERENCE_ONLY
+    design_label: REFERENCE_ONLY
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Rujukan; bukan dependency aktif.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Spec Kit / OpenSpec: referensi/adaptor spec workflow (§45)."
+    relations:
+      - {target: planning-blueprint, relation: implements, data_description: "Rujukan pola spesifikasi (bukan kode yang dipakai).", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Rujukan tercatat di registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: bmad-method
+    kind: method_reference
+    name: BMAD-METHOD
+    friendly_name: "BMAD — referensi pola peran/konteks/tugas"
+    function: "Referensi pola role/context/task; tidak menambah agent swarm secara otomatis."
+    why_selected: "§45, §47 (S33)."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/bmad-code-org/BMAD-METHOD"
+    source_refs: [S33]
+    upstream_identity: "github:bmad-code-org/BMAD-METHOD"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REFERENCE_ONLY
+    design_label: REFERENCE_ONLY
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Rujukan; bukan dependency aktif.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "BMAD / GSD: referensi pola role/context/task; tidak menambah agent swarm secara otomatis (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Rujukan tercatat di registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: gsd
+    kind: method_reference
+    name: GSD (get-shit-done)
+    friendly_name: "GSD — referensi pola peran/konteks/tugas"
+    function: "Referensi pola role/context/task; tidak menambah agent swarm secara otomatis."
+    why_selected: "§45, §47 (S33)."
+    category: planning/governance
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/gsd-build/get-shit-done"
+    source_refs: [S33]
+    upstream_identity: "github:gsd-build/get-shit-done"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REFERENCE_ONLY
+    design_label: REFERENCE_ONLY
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Rujukan; bukan dependency aktif.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "BMAD / GSD: referensi pola role/context/task (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Rujukan tercatat di registry.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: agency-agents
+    kind: skill_library
+    name: Agency Agents
+    friendly_name: "Agency Agents — kandidat pustaka profil peran"
+    function: "Koleksi profil spesialis/skill; bahan RoleSkillPack setelah review/license/pinning; tidak auto-install."
+    why_selected: "§45, §47 (S49)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/msitarzewski/agency-agents"
+    source_refs: [S49]
+    upstream_identity: "github:msitarzewski/agency-agents"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat pustaka; impor selektif setelah review.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Agency Agents / gstack / Superpowers: kandidat role/skill/checklist workflow; impor selektif setelah review/license/pinning, tidak auto-install semua atau auto-update policy (§45)."
+    relations:
+      - {target: workforce-scheduler, relation: implements, data_description: "Bahan RoleSkillPack (profil bukan bukti kompetensi).", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: gstack
+    kind: skill_library
+    name: gstack
+    friendly_name: "gstack — kandidat workflow peran/review/testing"
+    function: "Role/review/testing workflow; evaluasi bagian relevan, tidak impor policy/hook/auto-update massal."
+    why_selected: "§45, §47 (S53)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/garrytan/gstack"
+    source_refs: [S53]
+    upstream_identity: "github:garrytan/gstack"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat pustaka; impor selektif setelah review.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Agency Agents / gstack / Superpowers: kandidat role/skill/checklist workflow (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: superpowers
+    kind: skill_library
+    name: Superpowers
+    friendly_name: "Superpowers — kandidat skill engineering"
+    function: "Composable engineering skills; evaluasi bagian relevan, tidak impor policy/hook/auto-update massal."
+    why_selected: "§45, §47 (S52)."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: GITHUB_REPO
+    source_url: "https://github.com/obra/superpowers"
+    source_refs: [S52]
+    upstream_identity: "github:obra/superpowers"
+    identity_verified: VERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: 11
+    approved_pin: null
+    probe: {type: none, reason: "Kandidat pustaka; impor selektif setelah review.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Agency Agents / gstack / Superpowers: kandidat role/skill/checklist workflow (§45)."
+    relations:
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  # ------------------------------------------------------------------ secrets (§26, §45)
+  - component_id: openbao
+    kind: secret_store
+    name: OpenBao (Agent / AppRole)
+    friendly_name: "OpenBao — vault runtime"
+    function: "Credential source of truth runtime per namespace (personal/office/workers/projects) via AppRole/Agent dengan TTL."
+    why_selected: "U-13, §26: OpenBao sebagai vault runtime; bukan .env berisi credential (S24)."
+    category: data/secrets
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://openbao.org/docs/auth/approle/"
+    source_refs: [S24]
+    upstream_identity: "openbao.org"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 3
+    approved_pin: null
+    probe:
+      type: binary
+      binaries:
+        - {name: bao, settings_override: openbao_binary, version_args: ["version"], version_regex: "v?(\\d+\\.\\d+\\.\\d+)"}
+      health: {settings_url: openbao_addr, path: "/v1/sys/health", expect: openbao}
+      timeout_seconds: 10
+      ttl_seconds: 900
+    capability_tests:
+      - {id: secret.vault_scope, description: "Policy scope, token TTL, redaksi, restart/recovery behavior (§07 urutan 3).", functional: true, requires_authorization: true, evidence: "hasil uji vault"}
+    access: {paths: [], egress: ["127.0.0.1:8200 (loopback)"], data_classes: [RESTRICTED], operations: [READ, WRITE], identity_ref: "AppRole RoleID/SecretID (bootstrap via OS store)", tenant_target: null}
+    cost: {model: NONE, amount: null, note: "Self-hosted lokal.", source: null}
+    operations:
+      health: "GET <openbao_addr>/v1/sys/health (initialized/sealed), loopback saja"
+      restart: "Restart service bao; unseal oleh pemilik."
+      uninstall: "Hentikan service; data vault tidak dihapus otomatis."
+      recovery: "Recovery/unseal material dipisah dari konfigurasi aplikasi (§26, §33)."
+      rollback: "Snapshot vault sebelum perubahan policy."
+      retention: "Sesuai policy secret."
+      support_status: UNKNOWN
+      install: {kind: manual, note: "Dari distribusi resmi OpenBao; inisialisasi/unseal adalah tindakan pemilik."}
+    placement: "OpenBao / Agent / AppRole: default secret architecture (§45, S24)."
+    relations:
+      - {target: os-credential-store, relation: depends_on, data_description: "Bootstrap credential (SecretID) disimpan di store OS.", operation: READ, boundary: "OS user", identity_ref: null}
+    discovery: {binaries: [bao]}
+    invalidators: ["binary:bao", "config:openbao_addr"]
+
+  - component_id: os-credential-store
+    kind: secret_store
+    name: OS credential store
+    friendly_name: "Credential store OS — bootstrap aman"
+    function: "Windows Credential Manager / macOS Keychain / Secret Service untuk bootstrap credential; bukan input credential pada repository."
+    why_selected: "§26: pada Windows gunakan credential store OS; macOS/Linux secure store yang tersedia."
+    category: data/secrets
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OS_COMPONENT
+    source_url: null
+    source_refs: []
+    upstream_identity: "OS credential store (per platform)"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 3
+    approved_pin: null
+    probe: {type: keyring_backend, timeout_seconds: 5, ttl_seconds: 86400}
+    capability_tests:
+      - {id: secret.keyring_roundtrip, description: "Tulis/baca/hapus entri uji milik dly-aeos (hanya dengan --functional).", functional: true, requires_authorization: true, evidence: "CheckResult secret.keyring"}
+    access: {paths: [], egress: [], data_classes: [RESTRICTED], operations: [READ, WRITE], identity_ref: "OS user", tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Backend keyring bukan fail/null.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku (komponen OS).", recovery: "Sesuai OS.", rollback: "Tidak berlaku.", retention: "Entri dly-aeos saja.", support_status: UNKNOWN}
+    placement: "OS credential store, SOPS + age: bootstrap/backup pelengkap; bukan input credential pada repository (§45)."
+    relations: []
+    discovery: {}
+    invalidators: []
+
+  - component_id: keyring-backend
+    kind: package
+    name: Python keyring
+    friendly_name: "keyring — akses credential store OS"
+    function: "Library Python yang menghubungkan AEOS ke credential store OS (Windows/macOS/Linux)."
+    why_selected: "ADR-0002: keyring (Windows Credential Manager / macOS Keychain)."
+    category: data/secrets
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PACKAGE_REGISTRY
+    source_url: null
+    source_refs: []
+    upstream_identity: "pypi:keyring"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 3
+    approved_pin: null
+    probe: {type: python_module, module: keyring, distribution: keyring, timeout_seconds: 5, ttl_seconds: 86400}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [RESTRICTED], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "import keyring; backend aktif.", restart: "Tidak berlaku.", uninstall: "pip uninstall (lewat bootstrap).", recovery: "pip install -e .", rollback: "Versi sebelumnya dari lockfile.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Pelengkap credential store OS (ADR-0002)."
+    relations:
+      - {target: os-credential-store, relation: calls, data_description: "API keyring ke store OS.", operation: CALL, boundary: "OS user", identity_ref: null}
+    discovery: {python: [keyring]}
+    invalidators: []
+
+  - component_id: sops-age
+    kind: executable
+    name: SOPS + age
+    friendly_name: "SOPS + age — backup terenkripsi (pelengkap)"
+    function: "Enkripsi file untuk bootstrap/backup terenkripsi; bukan pengganti runtime vault."
+    why_selected: "§26, §45: pelengkap sesuai penggunaan; distribusi/versi diperiksa saat pemilihan."
+    category: data/secrets
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: OPTIONAL_CANDIDATE
+    bootstrap_order: 3
+    approved_pin: null
+    probe:
+      type: binary
+      binaries:
+        - {name: sops, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+        - {name: age, settings_override: null, version_args: ["--version"], version_regex: "v?(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 10
+      ttl_seconds: 86400
+    capability_tests: []
+    access: {paths: ["<data>/backups/**"], egress: [], data_classes: [RESTRICTED], operations: [READ, WRITE], identity_ref: "age key (milik pemilik)", tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "sops --version; age --version", restart: "Tidak berlaku.", uninstall: "Dikelola pemilik.", recovery: "Kunci age disimpan terpisah oleh pemilik.", rollback: "Tidak berlaku.", retention: "Sesuai backup.", support_status: UNKNOWN}
+    placement: "OS credential store, SOPS + age: bootstrap/backup pelengkap sesuai penggunaan (§45)."
+    relations: []
+    discovery: {binaries: [sops, age]}
+    invalidators: ["binary:sops"]
+
+  - component_id: infisical
+    kind: secret_store
+    name: Infisical
+    friendly_name: "Infisical — alternatif vault (belum admitted)"
+    function: "Alternatif vault; tidak mengganti keputusan OpenBao."
+    why_selected: "§26, §45: alternatif yang telah dibahas, bukan default baseline."
+    category: data/secrets
+    domains: [PLATFORM]
+    usage_role: reference
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Alternatif; identitas/source/version belum dipin.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Alternatif vault; tidak mengganti keputusan OpenBao; belum admitted (§45)."
+    relations:
+      - {target: openbao, relation: alternative_to, data_description: "Alternatif vault; OpenBao tetap keputusan U-13.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Admission lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  # ------------------------------------------------------------------ PERSONAL profile targets (§04, §45)
+  - component_id: github
+    kind: integration
+    name: GitHub (repositories, PR)
+    friendly_name: "GitHub — kode dan PR PERSONAL"
+    function: "Repository platform dan proyek PERSONAL, branch kerja dan pull request; merge tetap manusia."
+    why_selected: "U-02, U-04, §04: PERSONAL memakai GitHub; repository ID/URL dinyatakan terhubung setelah validasi (S22, S36)."
+    category: code/docs/CI
+    domains: [PERSONAL]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches"
+    source_refs: [S22, S36]
+    upstream_identity: "github.com"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PROFILE_DESIGN
+    bootstrap_order: 7
+    approved_pin: null
+    probe: {type: none, reason: "SaaS; koneksi diperiksa Doctor (adapter.github_token, probe repo read-only dengan --functional).", local_install: false}
+    capability_tests:
+      - {id: adapter.github_repo_read, description: "Probe read-only akses repo yang dipilih (GET /repos/{slug}).", functional: true, requires_authorization: false, evidence: "CheckResult adapter.github_token"}
+      - {id: delivery.branch_protection, description: "Ketersediaan branch protection (403/404 pada private Free = tidak dapat ditegakkan).", functional: true, requires_authorization: false, evidence: "CheckResult delivery.branch_protection"}
+    access: {paths: [], egress: ["api.github.com"], data_classes: [INTERNAL], operations: [READ, WRITE], identity_ref: "personal/github", tenant_target: "repo yang dipilih eksplisit (exact repo ID)"}
+    cost: {model: UNKNOWN, amount: null, note: "Paket/entitlement akun belum diverifikasi (§31).", source: "S22"}
+    operations: {health: "Doctor adapter.github_token + delivery.branch_protection.", restart: "Tidak berlaku.", uninstall: "Cabut token di vault.", recovery: "Rotasi token.", rollback: "Tidak berlaku.", retention: "PR/issue di GitHub.", support_status: UNKNOWN}
+    placement: "GitHub / Issues / Actions: PERSONAL code/work/CI; platform repo sesuai ownership (§45)."
+    relations: []
+    discovery: {}
+    invalidators: ["secret:personal/github", "target"]
+
+  - component_id: github-issues
+    kind: integration
+    name: GitHub Issues
+    friendly_name: "GitHub Issues — tracking kerja PERSONAL"
+    function: "Tiket kerja PERSONAL sebagai projection operasional; bukan authority kerja kedua."
+    why_selected: "§04: tracking kerja PERSONAL di GitHub Issues; §13 OperationalWorkProjection."
+    category: code/docs/CI
+    domains: [PERSONAL]
+    usage_role: runtime
+    source_kind: SAAS_PROVIDER
+    source_url: null
+    source_refs: [S36]
+    upstream_identity: "github.com issues"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PROFILE_DESIGN
+    bootstrap_order: 7
+    approved_pin: null
+    probe: {type: none, reason: "SaaS; dipakai lewat publisher setelah otorisasi.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: ["api.github.com"], data_classes: [INTERNAL], operations: [WRITE], identity_ref: "personal/github", tenant_target: "repo proyek"}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Doctor adapter.github_token.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Rekonsiliasi external ID sebelum retry (§50).", rollback: "Tidak berlaku.", retention: "Issue di GitHub.", support_status: UNKNOWN}
+    placement: "GitHub / Issues / Actions: PERSONAL work tracking (§45)."
+    relations:
+      - {target: github, relation: depends_on, data_description: "Bagian dari repository GitHub.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: github-actions
+    kind: integration
+    name: GitHub Actions
+    friendly_name: "GitHub Actions — CI PERSONAL"
+    function: "CI terpercaya untuk platform dan proyek PERSONAL; action dipin ke commit SHA; PR tanpa secret."
+    why_selected: "§04, §31: CI PERSONAL di GitHub Actions; gate G1-G3."
+    category: code/docs/CI
+    domains: [PERSONAL]
+    usage_role: build
+    source_kind: SAAS_PROVIDER
+    source_url: null
+    source_refs: [S22]
+    upstream_identity: "github.com actions"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PROFILE_DESIGN
+    bootstrap_order: 7
+    approved_pin: null
+    probe: {type: none, reason: "SaaS; workflow dibaca statis dari repo oleh rekonsiliasi (lockfile/workflow scope).", local_install: false}
+    capability_tests: []
+    access: {paths: ["<repo>/.github/workflows/**"], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: "repo platform"}
+    cost: {model: UNKNOWN, amount: null, note: "Menit CI sesuai paket akun; UNKNOWN.", source: null}
+    operations: {health: "Doctor delivery.ci_workflow (statis).", restart: "Re-run workflow di GitHub.", uninstall: "Hapus workflow (perubahan protected path).", recovery: "Tidak berlaku.", rollback: "Revert workflow.", retention: "Log CI di GitHub.", support_status: UNKNOWN}
+    placement: "GitHub / Issues / Actions: PERSONAL CI (§45)."
+    relations:
+      - {target: github, relation: depends_on, data_description: "CI pada repository GitHub.", operation: NONE, boundary: null, identity_ref: null}
+      - {target: dly-aeos-platform-repo, relation: verifies, data_description: "Ruff, secret scan, pytest, typecheck, vitest, build (G1-G3).", operation: READ, boundary: "PR tanpa secret", identity_ref: null}
+      - {target: pytest, relation: runs_with, data_description: "Menjalankan suite backend.", operation: EXEC, boundary: null, identity_ref: null}
+      - {target: ruff, relation: runs_with, data_description: "Lint statis.", operation: EXEC, boundary: null, identity_ref: null}
+      - {target: secret-scan, relation: runs_with, data_description: "Scan secret G1.", operation: EXEC, boundary: null, identity_ref: null}
+      - {target: vitest, relation: runs_with, data_description: "Uji komponen frontend.", operation: EXEC, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: google-drive
+    kind: integration
+    name: Google Drive API
+    friendly_name: "Google Drive — folder dokumentasi PERSONAL"
+    function: "Folder proyek per nama proyek untuk dokumentasi PERSONAL; least-privilege drive.file."
+    why_selected: "U-04, §04: PERSONAL memakai Google Docs dalam folder Google Drive per nama proyek (S16, S18, S20)."
+    category: code/docs/CI
+    domains: [PERSONAL]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://developers.google.com/workspace/drive/api/guides/folder"
+    source_refs: [S16, S18, S20]
+    upstream_identity: "Google Drive API"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PROFILE_DESIGN
+    bootstrap_order: 7
+    approved_pin: null
+    probe: {type: none, reason: "SaaS; status OAuth client/token diperiksa Doctor (adapter.google_oauth).", local_install: false}
+    capability_tests:
+      - {id: adapter.google_scoped_read, description: "Scoped read pada root folder yang dipilih.", functional: true, requires_authorization: true, evidence: "hasil uji adapter"}
+    access: {paths: [], egress: ["www.googleapis.com"], data_classes: [INTERNAL], operations: [READ, WRITE], identity_ref: "personal/google-oauth", tenant_target: "root folder proyek (dipilih eksplisit)"}
+    cost: {model: UNKNOWN, amount: null, note: "Kuota API Google UNKNOWN.", source: null}
+    operations: {health: "Doctor adapter.google_oauth.", restart: "Tidak berlaku.", uninstall: "Cabut consent/token.", recovery: "Re-consent oleh pemilik.", rollback: "Tidak berlaku.", retention: "Dokumen di Drive milik pemilik.", support_status: UNKNOWN}
+    placement: "Google Drive / Docs API: PERSONAL folder/dokumentasi (§45, S16-S21)."
+    relations: []
+    discovery: {}
+    invalidators: ["secret:personal/google-oauth"]
+
+  - component_id: google-docs
+    kind: integration
+    name: Google Docs API
+    friendly_name: "Google Docs — dokumen resmi PERSONAL"
+    function: "Dokumen Product 1 PERSONAL dengan revision conflict (requiredRevisionId) dan gambar."
+    why_selected: "U-04, §04, §29 (S17, S19, S21)."
+    category: code/docs/CI
+    domains: [PERSONAL]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://developers.google.com/workspace/docs/api/how-tos/overview"
+    source_refs: [S17, S19, S21]
+    upstream_identity: "Google Docs API"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PROFILE_DESIGN
+    bootstrap_order: 7
+    approved_pin: null
+    probe: {type: none, reason: "SaaS; status OAuth diperiksa Doctor (adapter.google_oauth).", local_install: false}
+    capability_tests:
+      - {id: docs.revision_conflict, description: "requiredRevisionId conflict tidak menimpa revisi manusia (§50).", functional: true, requires_authorization: true, evidence: "hasil uji publisher"}
+    access: {paths: [], egress: ["docs.googleapis.com"], data_classes: [INTERNAL], operations: [READ, WRITE], identity_ref: "personal/google-oauth", tenant_target: "dokumen di folder proyek"}
+    cost: {model: UNKNOWN, amount: null, note: "Kuota API Google UNKNOWN.", source: null}
+    operations: {health: "Doctor adapter.google_oauth.", restart: "Tidak berlaku.", uninstall: "Cabut consent/token.", recovery: "Re-consent oleh pemilik.", rollback: "Revisi dokumen di Google Docs.", retention: "Dokumen milik pemilik.", support_status: UNKNOWN}
+    placement: "Google Drive / Docs API: PERSONAL folder/dokumentasi (§45)."
+    relations:
+      - {target: google-drive, relation: stores_in, data_description: "Dokumen disimpan dalam folder proyek di Drive.", operation: WRITE, boundary: "drive.file scope", identity_ref: "personal/google-oauth"}
+    discovery: {}
+    invalidators: ["secret:personal/google-oauth"]
+
+  # ------------------------------------------------------------------ OFFICE profile targets (§04, §23, §45)
+  - component_id: bitbucket
+    kind: integration
+    name: Bitbucket
+    friendly_name: "Bitbucket — kode dan PR OFFICE"
+    function: "Repository dan pull request OFFICE pada tenant yang diotorisasi kantor."
+    why_selected: "U-02, U-03, §04: OFFICE memakai Bitbucket; enforcement merge checks fitur Premium (S14, S23)."
+    category: code/docs/CI
+    domains: [OFFICE]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://support.atlassian.com/bitbucket-cloud/docs/suggest-or-require-checks-before-a-merge/"
+    source_refs: [S14, S23]
+    upstream_identity: "Bitbucket Cloud (Atlassian)"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PROFILE_DESIGN
+    bootstrap_order: 10
+    approved_pin: null
+    probe: {type: none, reason: "OFFICE diblokir default sampai otorisasi kantor; tidak diprobe.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: ["api.bitbucket.org (setelah otorisasi)"], data_classes: [CONFIDENTIAL], operations: [READ, WRITE], identity_ref: "office/atlassian", tenant_target: "tenant/workspace kantor (diverifikasi)"}
+    cost: {model: UNKNOWN, amount: null, note: "Paket kantor UNKNOWN.", source: "S23"}
+    operations: {health: "Doctor adapter.office (NOT_APPLICABLE sampai dikonfigurasi).", restart: "Tidak berlaku.", uninstall: "Cabut credential office.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Data office tidak ke personal.", support_status: UNKNOWN}
+    placement: "Bitbucket / Pipelines, Jira, Confluence: OFFICE code/CI/work/docs (§45)."
+    relations: []
+    discovery: {}
+    invalidators: ["secret:office/atlassian", "config:office_policy"]
+
+  - component_id: bitbucket-pipelines
+    kind: integration
+    name: Bitbucket Pipelines
+    friendly_name: "Bitbucket Pipelines — CI OFFICE"
+    function: "CI OFFICE atau CI kantor yang sudah disetujui."
+    why_selected: "§04: CI OFFICE Bitbucket Pipelines atau CI kantor yang disetujui."
+    category: code/docs/CI
+    domains: [OFFICE]
+    usage_role: build
+    source_kind: SAAS_PROVIDER
+    source_url: null
+    source_refs: [S23]
+    upstream_identity: "Bitbucket Pipelines (Atlassian)"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PROFILE_DESIGN
+    bootstrap_order: 10
+    approved_pin: null
+    probe: {type: none, reason: "OFFICE diblokir default; tidak diprobe.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [CONFIDENTIAL], operations: [READ], identity_ref: "office/atlassian", tenant_target: "tenant kantor"}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku sampai otorisasi.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Bitbucket / Pipelines: OFFICE CI (§45)."
+    relations:
+      - {target: bitbucket, relation: depends_on, data_description: "CI pada repository Bitbucket.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: jira
+    kind: integration
+    name: Jira
+    friendly_name: "Jira — work item OFFICE"
+    function: "Work item dan board/roadmap OFFICE sebagai projection operasional."
+    why_selected: "U-03, §04: OFFICE memakai Jira; Atlassian Cloud adalah asumsi yang harus divalidasi (S13)."
+    category: code/docs/CI
+    domains: [OFFICE]
+    usage_role: runtime
+    source_kind: SAAS_PROVIDER
+    source_url: null
+    source_refs: [S13]
+    upstream_identity: "Jira (Atlassian)"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PROFILE_DESIGN
+    bootstrap_order: 10
+    approved_pin: null
+    probe: {type: none, reason: "OFFICE diblokir default; tidak diprobe.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [CONFIDENTIAL], operations: [READ, WRITE], identity_ref: "office/atlassian", tenant_target: "project Jira kantor"}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku sampai otorisasi.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Data office tidak ke personal.", support_status: UNKNOWN}
+    placement: "Bitbucket / Pipelines, Jira, Confluence: OFFICE work (§45)."
+    relations: []
+    discovery: {}
+    invalidators: ["secret:office/atlassian"]
+
+  - component_id: confluence
+    kind: integration
+    name: Confluence
+    friendly_name: "Confluence — dokumentasi OFFICE"
+    function: "Dokumentasi resmi OFFICE dalam folder proyek di bawah parent yang dikonfigurasi (CONFLUENCE_PROJECTS_PARENT_ID)."
+    why_selected: "U-03, §04: OFFICE memakai Confluence; API folder dan permission (S15)."
+    category: code/docs/CI
+    domains: [OFFICE]
+    usage_role: runtime
+    source_kind: OFFICIAL_DOCS
+    source_url: "https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-folder/"
+    source_refs: [S13, S15]
+    upstream_identity: "Confluence Cloud (Atlassian)"
+    identity_verified: VERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: PROFILE_DESIGN
+    bootstrap_order: 10
+    approved_pin: null
+    probe: {type: none, reason: "OFFICE diblokir default; tidak diprobe.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [CONFIDENTIAL], operations: [READ, WRITE], identity_ref: "office/atlassian", tenant_target: "space/parent kantor (divalidasi)"}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku sampai otorisasi.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Revisi halaman Confluence.", retention: "Data office tidak ke personal.", support_status: UNKNOWN}
+    placement: "Bitbucket / Pipelines, Jira, Confluence: OFFICE docs (§45)."
+    relations: []
+    discovery: {}
+    invalidators: ["secret:office/atlassian"]
+
+  # ------------------------------------------------------------------ sandbox, renderer (§11, §25, §29)
+  - component_id: docker
+    kind: sandbox
+    name: Docker
+    friendly_name: "Docker — sandbox container opsional"
+    function: "Container per tugas bila tersedia; container standar bukan jaminan isolasi kuat."
+    why_selected: "§11, §25: sandbox per tugas dalam container/VM; opsional dan tidak memblokir capability lain."
+    category: workforce
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: OFFICIAL_DISTRIBUTION
+    source_url: null
+    source_refs: []
+    upstream_identity: "Docker Engine / Docker Desktop"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: OPTIONAL_CANDIDATE
+    bootstrap_order: 4
+    approved_pin: null
+    probe:
+      type: binary
+      binaries:
+        - {name: docker, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 15
+      ttl_seconds: 86400
+    capability_tests:
+      - {id: containment.report, description: "Uji negatif container: tanpa docker socket/host home/SSH mount, egress deny.", functional: true, requires_authorization: false, evidence: "CheckResult containment.report"}
+    access: {paths: [], egress: ["default deny"], data_classes: [INTERNAL], operations: [EXEC], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: "Lisensi/paket Docker Desktop belum diperiksa.", source: null}
+    operations: {health: "docker --version; docker version (daemon).", restart: "Restart Docker daemon/Desktop.", uninstall: "Dikelola pemilik.", recovery: "Tidak berlaku.", rollback: "Sandbox process-level bila container tidak tersedia (dengan batas yang ditampilkan).", retention: "Container dihapus per run.", support_status: UNKNOWN}
+    placement: "Sandbox per tugas dalam container/VM dengan pembatasan OS (§11); opsional."
+    relations: []
+    discovery: {binaries: [docker]}
+    invalidators: ["binary:docker"]
+
+  - component_id: mermaid-cli
+    kind: executable
+    name: mermaid-cli
+    friendly_name: "mermaid-cli — renderer diagram opsional"
+    function: "Render diagram Mermaid menjadi gambar untuk publikasi dokumen; opsional."
+    why_selected: "§29: visual dan publikasi dokumen; renderer opsional (ADR-0002 memakai mermaid di frontend)."
+    category: code/docs/CI
+    domains: [PLATFORM]
+    usage_role: build
+    source_kind: PACKAGE_REGISTRY
+    source_url: null
+    source_refs: []
+    upstream_identity: "npm:@mermaid-js/mermaid-cli"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: OPTIONAL_CANDIDATE
+    bootstrap_order: 7
+    approved_pin: null
+    probe:
+      type: binary
+      binaries:
+        - {name: mmdc, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 20
+      ttl_seconds: 86400
+    capability_tests: []
+    access: {paths: ["<data>/*/projects/*/publications/**"], egress: [], data_classes: [INTERNAL], operations: [EXEC, WRITE], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "mmdc --version", restart: "Tidak berlaku.", uninstall: "Dikelola pemilik.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Renderer diagram opsional (§29); tidak memblokir capability lain."
+    relations: []
+    discovery: {npm: ["@mermaid-js/mermaid-cli"], binaries: [mmdc]}
+    invalidators: ["binary:mmdc"]
+
+  # ------------------------------------------------------------------ security/test tools (§11, §31, §45)
+  - component_id: pytest
+    kind: test_tool
+    name: pytest
+    friendly_name: "pytest — uji backend"
+    function: "Unit/API/integration/negative tests backend dan suite acceptance tepercaya."
+    why_selected: "§11: pengujian pytest/Ruff/type checking; §31 gate G2."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: test
+    source_kind: PACKAGE_REGISTRY
+    source_url: null
+    source_refs: [S40]
+    upstream_identity: "pypi:pytest"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 1
+    approved_pin: null
+    probe: {type: python_module, module: pytest, distribution: pytest, timeout_seconds: 5, ttl_seconds: 86400}
+    capability_tests: []
+    access: {paths: ["<repo>/tests/**"], egress: [], data_classes: [INTERNAL], operations: [EXEC], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "python -m pytest --version", restart: "Tidak berlaku.", uninstall: "pip uninstall.", recovery: "pip install -e .[dev]", rollback: "Versi sebelumnya.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Security/test tools: pilih minimum berdasarkan stack (§45)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: verifies, data_description: "Suite backend (unit/integration/negative).", operation: EXEC, boundary: null, identity_ref: null}
+    discovery: {python: [pytest]}
+    invalidators: []
+
+  - component_id: ruff
+    kind: test_tool
+    name: Ruff
+    friendly_name: "Ruff — lint statis Python"
+    function: "Lint/format statis Python (gate G1)."
+    why_selected: "§11, §31 gate G1."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: test
+    source_kind: PACKAGE_REGISTRY
+    source_url: null
+    source_refs: []
+    upstream_identity: "pypi:ruff"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 1
+    approved_pin: null
+    probe: {type: python_module, module: ruff, distribution: ruff, timeout_seconds: 5, ttl_seconds: 86400}
+    capability_tests: []
+    access: {paths: ["<repo>/backend/**", "<repo>/tests/**"], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "python -m ruff --version", restart: "Tidak berlaku.", uninstall: "pip uninstall.", recovery: "pip install -e .[dev]", rollback: "Versi sebelumnya.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Security/test tools (§45)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: verifies, data_description: "Lint statis backend/tests.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {python: [ruff]}
+    invalidators: []
+
+  - component_id: mypy
+    kind: test_tool
+    name: mypy
+    friendly_name: "mypy — type checking Python"
+    function: "Type checking backend."
+    why_selected: "§11: pengujian pytest/Ruff/type checking."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: test
+    source_kind: PACKAGE_REGISTRY
+    source_url: null
+    source_refs: []
+    upstream_identity: "pypi:mypy"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 1
+    approved_pin: null
+    probe: {type: python_module, module: mypy, distribution: mypy, timeout_seconds: 5, ttl_seconds: 86400}
+    capability_tests: []
+    access: {paths: ["<repo>/backend/**"], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "python -m mypy --version", restart: "Tidak berlaku.", uninstall: "pip uninstall.", recovery: "pip install -e .[dev]", rollback: "Versi sebelumnya.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Security/test tools (§45)."
+    relations:
+      - {target: dly-aeos-control-plane, relation: verifies, data_description: "Type checking backend.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {python: [mypy]}
+    invalidators: []
+
+  - component_id: vitest
+    kind: test_tool
+    name: Vitest
+    friendly_name: "Vitest — uji komponen frontend"
+    function: "Uji unit/komponen Control Center (gate G3)."
+    why_selected: "§11: pengujian UI yang relevan; §31 gate G3."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: test
+    source_kind: PACKAGE_REGISTRY
+    source_url: null
+    source_refs: []
+    upstream_identity: "npm:vitest"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 1
+    approved_pin: null
+    probe: {type: npm_package, package: vitest, timeout_seconds: 5, ttl_seconds: 86400}
+    capability_tests: []
+    access: {paths: ["<repo>/frontend/src/**"], egress: [], data_classes: [INTERNAL], operations: [EXEC], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "npx vitest --version", restart: "Tidak berlaku.", uninstall: "npm uninstall.", recovery: "npm ci", rollback: "Lockfile sebelumnya.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Security/test tools (§45)."
+    relations:
+      - {target: control-center-frontend, relation: verifies, data_description: "Uji komponen frontend.", operation: EXEC, boundary: null, identity_ref: null}
+    discovery: {npm: [vitest]}
+    invalidators: ["repo:lockfile"]
+
+  - component_id: typescript
+    kind: test_tool
+    name: TypeScript compiler
+    friendly_name: "TypeScript — type checking frontend"
+    function: "Type checking frontend (tsc -b --noEmit)."
+    why_selected: "§11 frontend TypeScript; §31 gate G1."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: build
+    source_kind: PACKAGE_REGISTRY
+    source_url: null
+    source_refs: []
+    upstream_identity: "npm:typescript"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 1
+    approved_pin: null
+    probe: {type: npm_package, package: typescript, timeout_seconds: 5, ttl_seconds: 86400}
+    capability_tests: []
+    access: {paths: ["<repo>/frontend/src/**"], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "npx tsc --version", restart: "Tidak berlaku.", uninstall: "npm uninstall.", recovery: "npm ci", rollback: "Lockfile sebelumnya.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Security/test tools (§45)."
+    relations:
+      - {target: control-center-frontend, relation: verifies, data_description: "Type checking frontend.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {npm: [typescript]}
+    invalidators: ["repo:lockfile"]
+
+  - component_id: secret-scan
+    kind: test_tool
+    name: Secret scan (scripts/secret_scan.py)
+    friendly_name: "Secret scan — gate G1 tanpa jaringan"
+    function: "Memindai file tracked dengan pola credential yang sama dengan redaksi runtime."
+    why_selected: "§31 gate G1: secret scan; U-13 tidak ada secret di repo."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: test
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: "github:fadhlillah-dli/dly-aeos:scripts/secret_scan.py"
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: REQUIRED
+    design_label: SELECTED_DESIGN
+    bootstrap_order: 1
+    approved_pin: null
+    probe: {type: repo_file, path: scripts/secret_scan.py, timeout_seconds: 5, ttl_seconds: 86400}
+    capability_tests: []
+    access: {paths: ["<repo>/** (tracked files)"], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "python scripts/secret_scan.py", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Revert script.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Security/test tools: secret scan (§45, §31 G1)."
+    relations:
+      - {target: dly-aeos-platform-repo, relation: verifies, data_description: "Tidak ada credential di file tracked.", operation: READ, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []
+
+  - component_id: security-test-tools
+    kind: test_tool
+    name: Security/test tools (to be selected per stack)
+    friendly_name: "Alat keamanan/uji lanjutan — belum dipilih"
+    function: "Dependency/SAST/SBOM/IaC/DAST/browser/load/restore tests dipilih minimum sesuai stack dan impact; hasil scan tidak dikarang."
+    why_selected: "§45 (S40 sebagai requirement reference): versi, license dan gate diverifikasi saat implementasi."
+    category: operations/evaluation
+    domains: [PLATFORM]
+    usage_role: test
+    source_kind: UNKNOWN
+    source_url: null
+    source_refs: [S40]
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: CANDIDATE
+    design_label: CANDIDATE
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "Executable/version belum dipilih per stack.", local_install: true}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: UNKNOWN, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku.", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Security/test tools: pilih minimum berdasarkan stack; tidak mengarang hasil scan (§45)."
+    relations:
+      - {target: dly-aeos-platform-repo, relation: verifies, data_description: "Kandidat gate keamanan tambahan.", operation: READ, boundary: null, identity_ref: null}
+      - {target: research-technology-registry, relation: governed_by, data_description: "Pemilihan alat lewat registry + proposal.", operation: NONE, boundary: null, identity_ref: null}
+    discovery: {}
+    invalidators: []

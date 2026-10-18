@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# DLY AEOS bootstrap for macOS/Linux (master §07 order 0-1): verifies prerequisites, creates the
-# repository virtual environment, installs pinned dependencies, builds the Control Center and runs
-# the Readiness Doctor. Never installs system software silently: missing tools are reported with
-# the official install command for you to run.
-#   ./scripts/bootstrap.sh [--skip-frontend] [--no-doctor]
+# DLY AEOS bootstrap for macOS/Linux (master section 07, order 0-1): verifies prerequisites, creates the
+# repository virtual environment, installs pinned dependencies (requirements.lock), backs up any
+# existing data, builds the Control Center, migrates the local database, runs the Readiness Doctor
+# and prints the status of the optional components in bootstrap order.
+# Never installs system software silently: missing tools are reported with the official install
+# command for you to run. Compatible with the bash 3.2 shipped by macOS (no bash 4 features).
+#   ./scripts/bootstrap.sh [--skip-frontend] [--no-doctor] [--skip-backup]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 SKIP_FRONTEND=0
 NO_DOCTOR=0
+SKIP_BACKUP=0
 for a in "$@"; do
   case "$a" in
     --skip-frontend) SKIP_FRONTEND=1 ;;
     --no-doctor) NO_DOCTOR=1 ;;
+    --skip-backup) SKIP_BACKUP=1 ;;
+    *) echo "unknown option: $a" >&2; exit 2 ;;
   esac
 done
 
@@ -60,8 +65,24 @@ fi
 echo "Step 1: Python virtual environment (.venv)"
 [ -x .venv/bin/python ] || "$PY" -m venv .venv
 .venv/bin/python -m pip install --upgrade pip --quiet
-if [ -f requirements.lock ]; then .venv/bin/python -m pip install --quiet -r requirements.lock; fi
-.venv/bin/python -m pip install --quiet -e ".[dev]"
+if [ -f requirements.lock ]; then
+  # Pinned, universal (Windows/macOS/Linux) lock; install the project without re-resolving.
+  .venv/bin/python -m pip install --quiet -r requirements.lock
+  .venv/bin/python -m pip install --quiet --no-deps -e .
+  if ! .venv/bin/python -m pip check; then
+    echo "  WARNING  pip check reports a dependency problem; regenerate requirements.lock (docs/OPERATIONS.md)"
+  fi
+else
+  .venv/bin/python -m pip install --quiet -e ".[dev]"
+fi
+
+if [ "$SKIP_BACKUP" = 0 ]; then
+  echo "Step 0b: back up existing data before any migration (master section 07 step 0)"
+  if ! .venv/bin/aeos ops backup create --label pre-bootstrap --if-exists; then
+    echo "Backup of the existing data failed; nothing was migrated. Investigate, or re-run with --skip-backup if you accept the risk."
+    exit 1
+  fi
+fi
 
 if [ "$SKIP_FRONTEND" = 0 ]; then
   echo "Step 2: Control Center frontend (npm ci + build)"
@@ -71,14 +92,22 @@ fi
 echo "Step 3: local database"
 .venv/bin/aeos db upgrade
 .venv/bin/aeos seed
+# Observe what is actually installed so the first dashboard view is not DESIGN-only (read-only probes).
+.venv/bin/aeos inventory reconcile || true
 
 if [ "$NO_DOCTOR" = 0 ]; then
   echo "Step 4: Readiness Doctor"
   .venv/bin/aeos doctor || true
 fi
 
-chmod +x ./aeos 2>/dev/null || true
+echo
+echo "Step 5: optional components in bootstrap order (status only, nothing is installed)"
+.venv/bin/python scripts/component_status.py || true
+
+chmod +x ./aeos ./scripts/dev.sh 2>/dev/null || true
 echo
 echo "Next steps:"
 echo "  ./aeos admin create      # first SUPER_ADMIN (no default credentials)"
 echo "  ./aeos serve             # http://127.0.0.1:8787"
+echo "  ./scripts/dev.sh         # development: backend --dev + Vite on http://127.0.0.1:5173"
+echo "  See docs/SETUP_MACOS.md for Claude Code, OpenBao, OpenRouter, Google and GitHub setup."

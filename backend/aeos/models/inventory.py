@@ -63,6 +63,11 @@ class ComponentReference(TimestampMixin, Base):
     manifest_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     tombstoned_at: Mapped[datetime | None] = mapped_column(nullable=True)  # removal keeps history
     mode: Mapped[str] = mapped_column(String(16), default="DESIGN")
+    # §45 placement decision text, verbatim intent from the master catalog.
+    placement: Mapped[str] = mapped_column(Text, default="")
+    # Manifest extras that have no dedicated column (discovery hints, invalidators, notes,
+    # source_checked_on, maintainer). Never secrets; never installation/usage evidence.
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class ComponentObservation(IdMixin, Base):
@@ -98,6 +103,12 @@ class ComponentRelation(IdMixin, TimestampMixin, Base):
     boundary: Mapped[str | None] = mapped_column(String(128), nullable=True)
     scope: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     last_observed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # READ|WRITE|READ_WRITE|CALL|EXEC|NONE — what the edge does (§36 "operasi read/write").
+    operation: Mapped[str] = mapped_column(String(16), default="")
+    # Logical identity/credential reference used across the edge (never a value).
+    identity_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # A relation dropped from the manifest is tombstoned, not deleted (§38 history).
+    tombstoned_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class CheckResult(IdMixin, Base):
@@ -107,6 +118,7 @@ class CheckResult(IdMixin, Base):
     __table_args__ = (Index("ix_check_results_check_time", "check_id", "last_checked_at"),)
 
     check_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), default="")
     group: Mapped[str] = mapped_column(String(48), nullable=False)
     component_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
     component_version: Mapped[str | None] = mapped_column(String(128), nullable=True)

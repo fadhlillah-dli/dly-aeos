@@ -1,6 +1,7 @@
 import { clsx } from "clsx";
 import { AlertTriangle, Database, Info, Loader2 } from "lucide-react";
 import { useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { Link, useInRouterContext } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { absoluteTime, ageSeconds, relativeTime } from "../lib/format";
 import { StatusBadge } from "./StatusBadge";
@@ -31,6 +32,8 @@ export function PageHeader({
   evidenceLimit,
   actions,
   mode,
+  relatedDecisionsHref,
+  correctionHref,
 }: {
   title: string;
   question: string;
@@ -39,7 +42,28 @@ export function PageHeader({
   evidenceLimit?: string;
   actions?: ReactNode;
   mode?: string;
+  /** "Keputusan terkait" link; defaults to the decision register, null hides it. */
+  relatedDecisionsHref?: string | null;
+  /** "Usulkan koreksi" link; defaults to a COMPARE proposal about this page, null hides it. */
+  correctionHref?: string | null;
 }) {
+  const inRouter = useInRouterContext();
+  const decisionsHref = relatedDecisionsHref === undefined ? "/decisions" : relatedDecisionsHref;
+  // A correction is a COMPARE proposal about this page (reviewing it never installs or activates anything).
+  const fixHref =
+    correctionHref === undefined
+      ? `/proposals?kind=COMPARE&source=${encodeURIComponent(`DLY AEOS ${title}`)}`
+      : correctionHref;
+  const RelLink = ({ to, children }: { to: string; children: ReactNode }) =>
+    inRouter ? (
+      <Link to={to} className="text-accent hover:underline">
+        {children}
+      </Link>
+    ) : (
+      <a href={to} className="text-accent hover:underline">
+        {children}
+      </a>
+    );
   return (
     <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0">
@@ -70,6 +94,12 @@ export function PageHeader({
             )}
             {mode && mode !== "LIVE" && <StatusBadge status={mode} />}
           </dl>
+        )}
+        {(decisionsHref || fixHref) && (
+          <div className="mt-1.5 flex flex-wrap gap-x-4 text-xs">
+            {decisionsHref && <RelLink to={decisionsHref}>Keputusan terkait</RelLink>}
+            {fixHref && <RelLink to={fixHref}>Usulkan koreksi</RelLink>}
+          </div>
         )}
       </div>
       {actions && <div className="flex flex-wrap gap-2">{actions}</div>}
@@ -232,7 +262,7 @@ export function Tabs({ tabs, initial }: { tabs: { id: string; label: string; con
   );
 }
 
-export function Notice({ tone = "info", children }: { tone?: "info" | "warn" | "mock"; children: ReactNode }) {
+export function Notice({ tone = "info", children }: { tone?: "info" | "warn" | "mock" | "bad"; children: ReactNode }) {
   return (
     <div
       className={clsx(
@@ -240,6 +270,7 @@ export function Notice({ tone = "info", children }: { tone?: "info" | "warn" | "
         tone === "info" && "bg-info-bg text-info",
         tone === "warn" && "bg-warn-bg text-warn",
         tone === "mock" && "bg-mock-bg text-mock",
+        tone === "bad" && "bg-bad-bg text-bad",
       )}
     >
       <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />

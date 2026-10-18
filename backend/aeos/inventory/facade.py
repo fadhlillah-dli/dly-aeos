@@ -18,9 +18,10 @@ def record_observation(
     detail: dict[str, Any] | None = None, ttl_seconds: int | None = 3600, evidence_id: str | None = None,
     scope: dict[str, Any] | None = None,
 ) -> ComponentObservation:
+    kwargs = dict(locals())  # captured before the lazy import adds 'impl'
     from aeos.inventory.observations import record_observation as impl
 
-    return impl(**locals())
+    return impl(**kwargs)
 
 
 def get_component(session: Session, component_id: str) -> ComponentReference | None:

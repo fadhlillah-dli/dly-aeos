@@ -40,6 +40,9 @@ MODULE_ROUTERS: list[str] = [
 # Missing modules are skipped; a failing hook is logged and surfaces through the Doctor, it never
 # silently disables auth or policy.
 LIFECYCLE_HOOKS: list[str] = [
+    "aeos.doctor.worker",
     "aeos.workforce.loop",
+    "aeos.verification.loop",
     "aeos.publisher.worker",
+    "aeos.operations.loop",
 ]

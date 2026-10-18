@@ -26,12 +26,23 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[config
         if k.startswith("AEOS_") and k not in {"AEOS_DATA_DIR", "AEOS_CONFIG"}:
             monkeypatch.delenv(k, raising=False)
     config_mod.reset_settings_cache()
+    _reset_process_caches()
     s = config_mod.get_settings()
     engine = init_engine(s)
     create_all(engine)
     yield s
     engine.dispose()
     config_mod.reset_settings_cache()
+    _reset_process_caches()
+
+
+def _reset_process_caches() -> None:
+    """Process-level caches (OpenBao health/token, claude binary probe) must not leak across tests."""
+    from aeos.claude_bridge.binary import clear_probe_cache
+    from aeos.secrets.provider import reset_provider_cache
+
+    reset_provider_cache()
+    clear_probe_cache()
 
 
 @pytest.fixture
@@ -143,3 +154,17 @@ def admin_client(client: AuthedClient, db: Session) -> AuthedClient:
 def personal_client(admin_client: AuthedClient) -> AuthedClient:
     admin_client.select_domain(Domain.PERSONAL)
     return admin_client
+
+
+@pytest.fixture
+def absent_modules(monkeypatch: pytest.MonkeyPatch):
+    """Simulate that control-plane modules are not installed: importing them raises ImportError.
+
+    Used by fail-closed tests now that every module exists in the integrated tree."""
+    import sys
+
+    def _absent(*names: str) -> None:
+        for name in names:
+            monkeypatch.setitem(sys.modules, name, None)
+
+    return _absent
