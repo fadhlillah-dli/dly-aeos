@@ -1,0 +1,208 @@
+{
+ "source": "usage_ledger + budgets + quota_states (data kode/provider, bukan tebakan model)",
+ "checked_at": "2026-10-18T12:09:14.970016+00:00",
+ "mode": "LIVE",
+ "window": {
+  "period": "MONTH",
+  "start": "2026-10-01T00:00:00+00:00"
+ },
+ "totals": {
+  "actual_usd": 0.42,
+  "estimate_usd": 0.0,
+  "unknown_count": 1,
+  "entries": 2,
+  "note": "Actual, estimasi dan UNKNOWN tidak dijumlahkan menjadi satu angka."
+ },
+ "by_category": [
+  {
+   "category": "WORKER_API",
+   "label": "API worker",
+   "billing": "METERED",
+   "actual_usd": 0.42,
+   "estimate_usd": 0.0,
+   "unknown_count": 1,
+   "entries": 2,
+   "input_tokens": 1200,
+   "output_tokens": 300,
+   "requests": 2,
+   "quantity": {}
+  },
+  {
+   "category": "NATIVE_CLAUDE",
+   "label": "Claude native (langganan Max)",
+   "billing": "SUBSCRIPTION",
+   "actual_usd": null,
+   "estimate_usd": null,
+   "unknown_count": 0,
+   "entries": 1,
+   "input_tokens": 900,
+   "output_tokens": 100,
+   "requests": 1,
+   "quantity": {}
+  },
+  {
+   "category": "CI",
+   "label": "CI",
+   "billing": "METERED",
+   "actual_usd": 0.0,
+   "estimate_usd": 0.0,
+   "unknown_count": 0,
+   "entries": 0,
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "requests": 0,
+   "quantity": {}
+  },
+  {
+   "category": "COMPUTE",
+   "label": "Compute",
+   "billing": "METERED",
+   "actual_usd": 0.0,
+   "estimate_usd": 0.0,
+   "unknown_count": 0,
+   "entries": 0,
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "requests": 0,
+   "quantity": {}
+  },
+  {
+   "category": "STORAGE",
+   "label": "Storage",
+   "billing": "METERED",
+   "actual_usd": 0.0,
+   "estimate_usd": 0.0,
+   "unknown_count": 0,
+   "entries": 0,
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "requests": 0,
+   "quantity": {}
+  },
+  {
+   "category": "HUMAN_TIME",
+   "label": "Waktu manusia",
+   "billing": "METERED",
+   "actual_usd": 0.0,
+   "estimate_usd": 0.0,
+   "unknown_count": 0,
+   "entries": 0,
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "requests": 0,
+   "quantity": {}
+  }
+ ],
+ "by_project": [
+  {
+   "project_id": null,
+   "project_name": "Platform / tanpa proyek",
+   "actual_usd": 0.42,
+   "estimate_usd": 0.0,
+   "unknown_count": 1,
+   "entries": 2,
+   "input_tokens": 1200,
+   "output_tokens": 300,
+   "requests": 2,
+   "quantity": {}
+  }
+ ],
+ "by_route": [
+  {
+   "route_key": "openrouter/free",
+   "actual_usd": 0.42,
+   "estimate_usd": 0.0,
+   "unknown_count": 0,
+   "entries": 1,
+   "input_tokens": 1200,
+   "output_tokens": 300,
+   "requests": 1,
+   "quantity": {}
+  },
+  {
+   "route_key": "(tanpa rute)",
+   "actual_usd": 0.0,
+   "estimate_usd": 0.0,
+   "unknown_count": 1,
+   "entries": 1,
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "requests": 1,
+   "quantity": {}
+  }
+ ],
+ "native_subscription": {
+  "provider": "claude-native",
+  "billing": "SUBSCRIPTION",
+  "dollar_cost": null,
+  "dollar_note": "Penggunaan Claude native tidak dikonversi ke dolar atau persentase kuota Max (§42).",
+  "remaining_quota": "UNKNOWN",
+  "quota_state": "UNKNOWN",
+  "quota_source": "no official remaining-quota source",
+  "quota_observed_at": null,
+  "requests": 1,
+  "input_tokens": 900,
+  "output_tokens": 100,
+  "entries": 1,
+  "note": "Batas langganan berlaku; sisa kuota UNKNOWN"
+ },
+ "stop_caps": [
+  {
+   "id": "54ab7690-fc2c-4c53-abb1-eb6dcc8daa18",
+   "scope_type": "GLOBAL",
+   "scope_id": "*",
+   "period": "MONTH",
+   "period_start": "2026-10-01T00:00:00+00:00",
+   "limit_usd": 5.0,
+   "limit_tokens": null,
+   "limit_requests": null,
+   "hard_stop": true,
+   "status": "ACTIVE",
+   "is_default": false,
+   "implicit": false,
+   "state": "UNTRUSTED",
+   "trust_reasons": [
+    "ledger entry 1bc5aa5e-b5f2-4caa-b3c6-c1c7ef30e3b4 has UNKNOWN cost on a non-free route"
+   ],
+   "decision": {
+    "id": "aa9f5bd8-d021-45c8-a992-394c5eba0504",
+    "kind": "BUDGET",
+    "actor_user_id": "f3c1ab05-0300-4f52-9303-2297ee34d374",
+    "status": "ACTIVE",
+    "created_at": "2026-10-18T12:09:14.636709+00:00",
+    "rationale": "pilot",
+    "target_hash": "sha256:449d8ed1429be12561a7e739925e276c9692a7e6a4944a94ae692b24471a536e"
+   },
+   "notes": "pilot",
+   "created_at": "2026-10-18T12:09:14.892208+00:00",
+   "superseded_by": null,
+   "spent_usd": 0.42,
+   "held_usd": 0.0,
+   "headroom_usd": 4.58,
+   "spent_tokens": 1500,
+   "held_tokens": 0,
+   "spent_requests": 2,
+   "held_requests": 0
+  }
+ ],
+ "per_accepted_outcome": {
+  "accepted_outcomes": 0,
+  "categories": [
+   "WORKER_API",
+   "CI",
+   "COMPUTE"
+  ],
+  "total_known_usd": 0.42,
+  "unknown_entries": 1,
+  "basis": "Total biaya API worker/compute/CI (termasuk attempt gagal) dibagi jumlah accepted outcome",
+  "cost_per_accepted_usd": null,
+  "status": "NO_ACCEPTED_OUTCOMES",
+  "per_task": [],
+  "note": "Belum ada accepted outcome; biaya per hasil diterima belum dapat dihitung."
+ },
+ "excluded_non_live": {
+  "entries": 0,
+  "modes": [],
+  "note": "Entri MOCK/DEMO/ESTIMATE-fixture tidak dihitung sebagai usage actual."
+ }
+}
