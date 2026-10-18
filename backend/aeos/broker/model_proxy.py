@@ -120,8 +120,12 @@ def _check_credential_domain(domain: str, ref: str) -> None:
 
 
 def _fetch_key(secrets: Any, ref: str, purpose: str) -> str:
+    # ADR-0042 purpose contract: the purpose scope must equal the reference namespace
+    # ("workers:..." for workers/*, "projects:<id>:..." for projects/<id>/*).
+    ns, _, rest = str(ref).partition("/")
+    scope = f"projects:{rest.split('/', 1)[0]}" if ns == "projects" else ns
     try:
-        return secrets.get_secret(ref, purpose=purpose, actor="service:broker")
+        return secrets.get_secret(ref, purpose=f"{scope}:{purpose}", actor="service:broker")
     except ValueError as exc:  # malformed reference in the route configuration: fail closed
         raise ProxyError(503, "UPSTREAM_CREDENTIAL_MISSING", "route credential reference is invalid") from exc
 

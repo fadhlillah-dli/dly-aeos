@@ -635,6 +635,10 @@ def interim_exception(settings: Settings) -> dict[str, Any] | None:
     Bound to the exact target ``secret_store/interim-keyring`` (the one ``aeos secrets
     interim-keyring`` tells the owner to record) and made by an active SUPER_ADMIN account —
     an EXCEPTION recorded for anything else never switches the secret store."""
+    if not settings.layout.db_path.is_file():
+        # DB not initialised yet -> no exception can exist. Opening a session here would create the
+        # data dir and database as a side effect of a status read (bootstrap doctor, §08/§50).
+        return None
     try:
         from sqlalchemy import select
 
