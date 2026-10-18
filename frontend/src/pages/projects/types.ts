@@ -81,6 +81,10 @@ export interface CapabilityStatus {
   write_enabled?: boolean;
   office_default_deny?: boolean;
   atlassian_deployment?: string;
+  adapter_enabled?: boolean;
+  /** Exact identity an approval binds and the publisher writes to ({provider, root_id}). */
+  target?: { provider: string; root_id: string };
+  doctor_checks?: string[];
   remedies?: Remedy[];
   computed_at?: string;
 }

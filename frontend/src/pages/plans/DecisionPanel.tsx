@@ -11,15 +11,22 @@ export interface TargetRow {
   identifiers: string;
 }
 
+/** Publication targets are {provider, root_id} — the exact root id of the project integration (U-10). */
 const PLACEHOLDER: Record<string, string> = {
-  "google-drive": "root_id=<ID folder Drive proyek>",
-  "google-docs": "root_id=<ID folder Drive proyek>",
-  "github-issues": "repo=<owner>/<nama>",
+  "google-drive": "root_id=<ID folder Drive proyek> (atau root = My Drive)",
+  "github-issues": "root_id=<owner>/<nama>",
   "github-repo": "repo=<owner>/<nama>",
-  confluence: "space=<KEY>; parent_id=<ID parent>",
-  jira: "project_key=<KEY>",
+  confluence: "root_id=<CONFLUENCE_PROJECTS_PARENT_ID>",
+  jira: "root_id=<JIRA_PROJECT_KEY>",
   bitbucket: "repo=<workspace>/<nama>",
 };
+
+/** Rows prefilled from the targets configured in the Integration Registry (the owner still decides). */
+export function initialRows(catalog: OperationCatalog): TargetRow[] {
+  const configured = catalog.configured_targets ?? [];
+  if (configured.length) return configured.map((t) => ({ provider: t.provider, identifiers: `root_id=${t.root_id}` }));
+  return [{ provider: catalog.providers[0] ?? "", identifiers: "" }];
+}
 
 /** "a=1; b=2" -> {provider, a: "1", b: "2"}; rows without identifiers are dropped (backend rejects them too). */
 export type Target = { provider: string } & Record<string, string>;
@@ -43,7 +50,8 @@ type Action = "APPROVE_AND_PUBLISH" | "APPROVE" | "REQUEST_REVISION" | "REJECT";
 
 export function DecisionPanel({ plan, version, catalog }: { plan: PlanDetail; version: VersionSummary; catalog: OperationCatalog }) {
   const qc = useQueryClient();
-  const [rows, setRows] = useState<TargetRow[]>([{ provider: catalog.providers[0] ?? "", identifiers: "" }]);
+  const [rows, setRows] = useState<TargetRow[]>(() => initialRows(catalog));
+  const configured = catalog.configured_targets ?? [];
   const [rationale, setRationale] = useState("");
   const [rerun, setRerun] = useState(true);
   const targets = parseTargets(rows);
@@ -94,6 +102,17 @@ export function DecisionPanel({ plan, version, catalog }: { plan: PlanDetail; ve
             Versi ini berlabel {nonLive}. Persetujuan boleh untuk menguji alur, tetapi interlock menolak publikasi eksternal isi {nonLive}
             (<Mono>VERSION_NOT_LIVE</Mono>).
           </Notice>
+        )}
+        {configured.length > 0 ? (
+          <Notice tone="info">
+            Target terkonfigurasi di Integrasi proyek:{" "}
+            {configured.map((t) => (
+              <Mono key={`${t.provider}:${t.root_id}`}>{`${t.label ?? t.provider} → ${t.root_id}`}</Mono>
+            ))}
+            . Publisher hanya menulis bila target terkonfigurasi DAN tercantum di persetujuan ini.
+          </Notice>
+        ) : (
+          <Notice tone="warn">Belum ada target publikasi terkonfigurasi untuk proyek ini (atur di halaman proyek → Integrasi).</Notice>
         )}
         <div>
           <div className="mb-1 text-sm font-medium">Target eksternal (scope persis)</div>

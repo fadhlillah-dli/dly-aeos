@@ -11,14 +11,14 @@ from sqlalchemy import or_, select
 
 from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, load_project
 from aeos.core.enums import Domain
-from aeos.core.errors import NotFound, ValidationFailed
+from aeos.core.errors import NotFound
 from aeos.core.hashing import content_hash
 from aeos.core.timeutil import utcnow
 from aeos.identity.service import Principal
 from aeos.models.decisions import ArchitectureDecisionRecord, Decision
 from aeos.models.policy_ext import DecisionRequest
 from aeos.policy import adrs as adr_loader
-from aeos.policy import catalog, enablement, office, snapshot
+from aeos.policy import catalog, enablement, office, recording, snapshot
 from aeos.policy import decisions as registry
 from aeos.policy import queue as decision_queue
 from aeos.policy import requests as decision_requests
@@ -105,6 +105,23 @@ def list_decisions(
     return {"items": items, "counts": by_status, "source": "decisions", "checked_at": _now(), "mode": "LIVE"}
 
 
+@router.get("/api/decisions/shapes")
+def decision_shapes(_principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    """The exact target shapes consumers read (UI/CLI forms are generated from this, never guessed)."""
+    return {
+        "write_enablement": {"providers": list(catalog.providers_for(domain)),
+                             "target_type": catalog.TARGET_PROVIDER_WRITE},
+        "exceptions": {name: {"target_type": p.target_type, "target_id": p.target_id, "domains": list(p.domains),
+                              "details": dict(p.details), "flags": list(p.flags), "consumer": p.consumer,
+                              "available": domain.value in p.domains}
+                       for name, p in catalog.EXCEPTION_PRESETS.items()},
+        "office_authorization": {"target_type": catalog.TARGET_OFFICE_POLICY, "target_id": Domain.OFFICE.value,
+                                 "providers": list(catalog.providers_for(Domain.OFFICE)),
+                                 "available": domain == Domain.OFFICE},
+        "domain": domain.value, "checked_at": _now(),
+    }
+
+
 @router.get("/api/decisions/{decision_id}")
 def get_decision(decision_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
     return registry.decision_view(db, _load_visible_decision(db, principal, domain, decision_id))
@@ -133,6 +150,9 @@ class DecisionIn(BaseModel):
     company_reference: str | None = Field(default=None, max_length=500)
     allowed_providers: list[str] = Field(default_factory=list)
     office_policy: dict[str, Any] | None = None
+    # EXCEPTION presets with the exact target shape their consumer reads (catalog.EXCEPTION_PRESETS)
+    exception: Literal["secret_store_interim_keyring", "worker_sandbox_process"] | None = None
+    allow_bash: bool | None = None
     request_id: str | None = None
 
 
@@ -152,88 +172,23 @@ def _request_visible(principal: Principal, domain: Domain, req: DecisionRequest 
 
 
 # Detail keys that carry policy meaning and are set only from the dedicated, validated fields above.
-# Smuggling them through free-form ``details`` (e.g. ``office_authorization: true`` without a company
-# reference) is refused instead of silently granting or relaxing anything (fail closed).
-_RESERVED_DETAIL_KEYS = frozenset({"office_authorization", "company_reference", "allowed_providers", "office_policy",
-                                   "enabled", "provider", "handled_by"})
-
-
-def _require_target(body: DecisionIn) -> tuple[str, str]:
-    if not body.target_type or not body.target_id:
-        raise ValidationFailed(f"{body.kind} needs an explicit target_type and target_id")
-    return body.target_type, body.target_id
+_RESERVED_DETAIL_KEYS = recording.RESERVED_DETAIL_KEYS
 
 
 @router.post("/api/decisions", status_code=201)
 def create_decision(body: DecisionIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
-    if not body.auth_scope:
-        raise ValidationFailed("auth_scope must state the explicit scope of this decision")
-    reserved = sorted(set(body.details) & _RESERVED_DETAIL_KEYS)
-    if reserved:
-        raise ValidationFailed(f"details may not set {reserved}; use the dedicated fields of this endpoint",
-                               code="RESERVED_DETAIL_KEYS", details={"reserved": reserved})
     project_id = None
     if body.project_id:
         project_id = load_project(db, principal, body.project_id, domain=domain).id
-    details = dict(body.details)
-    ops = list(body.allowed_operations)
-    supersede: list[Decision] = []
-
-    if body.kind in ("EXCEPTION", "RISK_ACCEPTANCE"):
-        target_type, target_id = _require_target(body)
-        if body.expires_at is None:
-            raise ValidationFailed(f"{body.kind} decisions need an explicit expiry (expires_at)")
-    elif body.kind == "WRITE_ENABLEMENT":
-        provider = body.provider or body.target_id
-        if provider not in catalog.providers_for(domain):
-            raise ValidationFailed(f"provider {provider!r} is not allowed in domain {domain.value}",
-                                   details={"allowed": list(catalog.providers_for(domain))})
-        if body.enabled is None:
-            raise ValidationFailed("WRITE_ENABLEMENT needs enabled=true|false")
-        target_type, target_id = catalog.TARGET_PROVIDER_WRITE, provider
-        details["enabled"] = body.enabled
-        details["provider"] = provider
-        ops = list(catalog.operations_for_provider(provider)) if body.enabled else []
-        supersede = list(db.scalars(select(Decision).where(
-            Decision.kind == "WRITE_ENABLEMENT", Decision.target_type == target_type,
-            Decision.target_id == provider, Decision.status == "ACTIVE")))
-    elif body.kind == "POLICY":
-        if body.office_authorization or body.office_policy:
-            if domain != Domain.OFFICE:
-                raise ValidationFailed("OFFICE policy decisions are recorded in the OFFICE domain only")
-            if body.office_policy:
-                unknown = sorted(set(body.office_policy) - set(catalog.OFFICE_POLICY_KEYS))
-                if unknown:
-                    raise ValidationFailed(f"unknown office policy keys {unknown}",
-                                           details={"allowed": list(catalog.OFFICE_POLICY_KEYS)})
-                details["office_policy"] = body.office_policy
-            if body.office_authorization:
-                if not body.company_reference or len(body.company_reference.strip()) < 5:
-                    raise ValidationFailed("company authorisation needs a company_reference (approval artefact)")
-                providers = [p for p in body.allowed_providers if p in catalog.providers_for(Domain.OFFICE)]
-                if not providers or len(providers) != len(body.allowed_providers):
-                    raise ValidationFailed("allowed_providers must list OFFICE providers explicitly",
-                                           details={"allowed": list(catalog.providers_for(Domain.OFFICE))})
-                details.update({"office_authorization": True, "company_reference": body.company_reference.strip(),
-                                "allowed_providers": providers})
-            target_type, target_id = catalog.TARGET_OFFICE_POLICY, Domain.OFFICE.value
-        else:
-            target_type, target_id = _require_target(body)
-    else:  # BUDGET: semantics owned by the cost module; the registry records the human decision.
-        target_type, target_id = _require_target(body)
-        details.setdefault("handled_by", "aeos.cost")
-
-    decision = registry.record_decision(
-        db, kind=body.kind, actor_user_id=principal.user.id, target_type=target_type, target_id=target_id,
-        target_version=body.target_version, target_hash=body.target_hash, allowed_operations=ops,
-        auth_scope=body.auth_scope, project_id=project_id, domain=domain.value, rationale=body.rationale,
-        expires_at=body.expires_at, details=details,
+    decision = recording.record_generic_decision(
+        db, actor_user_id=principal.user.id, domain=domain, kind=body.kind, rationale=body.rationale,
+        auth_scope=body.auth_scope, project_id=project_id, target_type=body.target_type, target_id=body.target_id,
+        target_version=body.target_version, target_hash=body.target_hash, allowed_operations=body.allowed_operations,
+        expires_at=body.expires_at, details=body.details, provider=body.provider, enabled=body.enabled,
+        office_authorization=body.office_authorization, company_reference=body.company_reference,
+        allowed_providers=body.allowed_providers, office_policy=body.office_policy, exception=body.exception,
+        allow_bash=body.allow_bash,
     )
-    for old in supersede:
-        registry.supersede_decision(db, old, new_decision_id=decision.id, reason="new write enablement decision",
-                                    actor_type="user", actor_id=principal.user.id)
-    if body.kind == "WRITE_ENABLEMENT":
-        enablement.set_flag(db, target_id, bool(body.enabled))
     if body.request_id:
         req = db.get(DecisionRequest, body.request_id)
         if not _request_visible(principal, domain, req):

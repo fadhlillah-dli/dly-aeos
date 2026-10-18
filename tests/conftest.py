@@ -30,10 +30,30 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[config
     s = config_mod.get_settings()
     engine = init_engine(s)
     create_all(engine)
+    _stamp_head(engine)
     yield s
     engine.dispose()
     config_mod.reset_settings_cache()
     _reset_process_caches()
+
+
+_HEAD: list[str] = []
+
+
+def _stamp_head(engine) -> None:
+    """Record the migration head like `aeos db upgrade` does for a create_all database (fast path)."""
+    if not _HEAD:
+        from alembic.script import ScriptDirectory
+
+        from aeos.core.migrate import alembic_config
+
+        _HEAD.append(ScriptDirectory.from_config(alembic_config()).get_current_head() or "")
+    if _HEAD[0]:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL, "
+                                 "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))")
+            conn.exec_driver_sql("DELETE FROM alembic_version")
+            conn.exec_driver_sql("INSERT INTO alembic_version (version_num) VALUES (?)", (_HEAD[0],))
 
 
 def _reset_process_caches() -> None:

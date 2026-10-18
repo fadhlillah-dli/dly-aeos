@@ -174,7 +174,72 @@ def record_decision(
     )
     if kind in catalog.SNAPSHOT_DECISION_KINDS:
         _refresh_snapshot(session, reason=f"decision {decision.id} recorded")
+    _notify_readiness(session, [decision], reason=f"decision {decision.id} ({kind}) recorded")
     return decision
+
+
+# ---------------------------------------------------------------- readiness invalidation (§08, §50)
+
+
+def readiness_invalidators(decision: Decision) -> list[str]:
+    """Doctor invalidators a decision lifecycle change affects (only the checks that depend on it)."""
+    from aeos.policy.office import is_office_policy_decision
+
+    out: list[str] = []
+    if decision.kind in catalog.SNAPSHOT_DECISION_KINDS:
+        out.append("config:policy")
+    if is_office_policy_decision(decision):
+        out.append("config:office_policy")
+    if decision.kind == "WRITE_ENABLEMENT" or decision.target_type == catalog.TARGET_PROVIDER_WRITE:
+        out.append("config:write_enablement")
+    if decision.kind == "BUDGET":
+        out.append("config:budget")
+    if decision.kind in ("ROUTE_ACTIVATION", "TRIAL") or decision.target_type == "model_route":
+        out += ["config:routes", "model:route"]
+    if decision.target_type == "worker_sandbox":
+        out.append("config:sandbox")
+    if decision.target_type == "secret_store":
+        out.append("secret:*")  # the selected secret backend may change (interim keyring exception)
+    return list(dict.fromkeys(out))
+
+
+def _route_pool_invalidator(session: Session, decision: Decision) -> str:
+    """``model:route:<POOL>`` of the route a decision is about (the Claude bridge proof depends on SUPERVISOR
+    routes only); unknown route -> ``model:route:*`` (conservative)."""
+    if decision.target_type == "model_route" and decision.target_id:
+        try:
+            from aeos.models.routing import ModelRoute
+
+            pool = session.scalar(select(ModelRoute.pool).where(ModelRoute.route_key == decision.target_id))
+        except Exception:  # pragma: no cover - routing tables always exist with the policy module
+            pool = None
+        if pool:
+            return f"model:route:{str(pool).upper()}"
+    return "model:route:*"
+
+
+def _notify_readiness(session: Session, decisions: list[Decision], *, reason: str) -> None:
+    """Mark dependent Readiness Doctor checks STALE so capabilities stop being READY until a recheck.
+    Same transaction as the decision change; a missing doctor module means nothing was fresh."""
+    invalidators: list[str] = []
+    for d in decisions:
+        invs = readiness_invalidators(d)
+        if "model:route" in invs:
+            invs.append(_route_pool_invalidator(session, d))
+        invalidators += invs
+    invalidators = list(dict.fromkeys(invalidators))
+    if not invalidators:
+        return
+    try:
+        from aeos.doctor import facade as doctor
+    except (ImportError, ModuleNotFoundError):
+        return
+    if any(d.domain == "OFFICE" for d in decisions):
+        # Stored stale reasons and doctor.check.stale events of platform-level checks are visible to every
+        # domain: an OFFICE decision id/kind is OFFICE metadata and is not quoted there (ADR-0011 #8).
+        reason = "keputusan ber-scope domain berubah; detail di halaman Keputusan domain terkait"
+    for inv in invalidators:
+        doctor.invalidate(session, invalidator=inv, reason=redact_text(reason)[:200])
 
 
 # ---------------------------------------------------------------- queries
@@ -264,6 +329,8 @@ def _after_lifecycle(session: Session, changed: list[Decision], *, plan_hook: bo
             enablement.set_flag(session, d.target_id, False)
     if any(d.kind in catalog.SNAPSHOT_DECISION_KINDS for d in changed):
         _refresh_snapshot(session, reason="decision lifecycle change")
+    _notify_readiness(session, changed, reason="decision lifecycle change: " + ", ".join(
+        f"{d.id[:8]} {d.kind} -> {d.status}" for d in changed[:5]))
     if plan_hook:
         approvals = [d for d in changed if d.kind == "APPROVAL" and d.target_type == catalog.TARGET_PLAN_VERSION]
         if approvals:

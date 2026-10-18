@@ -49,3 +49,35 @@ quota exhaustion/429 there is no paid fallback.
 * Cost is UNKNOWN for upstreams that do not report it; the dashboard shows UNKNOWN, never $0.
 * GitHub branch protection on Free private repositories may be unavailable (§31); the broker's
   restrictions are the tested boundary, and merge stays a human action outside AEOS.
+
+## Amendment 2026-10-18 (integration)
+
+1. **Sha-pinned push.** The push refspec is `<runtime head sha>:refs/heads/aeos/X` (never `+`, never a
+   deletion, never another destination; `validate_refspec` accepts a full 40/64-hex sha source or the
+   same-name form, nothing else). `broker.facade.push_task_branch` gained the additive keyword
+   `expected_head_sha` (must equal the runtime head, else `HEAD_MISMATCH`) and ALWAYS returns `head_sha`
+   with `status` PUSHED | FAILED | UNKNOWN. FAILED/UNKNOWN are returned, not raised.
+2. **Branch-update hook.** After a successful push the broker calls
+   `aeos.delivery.sync.on_branch_updated(session, repo=, branch=, head_sha=, actor="broker")`, so open PR
+   records of the branch re-observe the head (acceptance STALE when it moved).
+3. **Interlock binding.** The broker passes the ACTIVE human APPROVAL decision of the run's exact plan
+   version + hash that allows the operation (`find_active_decision(..., operation=)`) and the grant
+   expiry to `check_external_write`. Before, `decision_id=None` made every real interlock refuse.
+4. **Usage and quota through the cost module.** Each model call is one ledger entry recorded with the
+   run's `reservation_id` and `partial=True` (the hold stays open until the scheduler settles it); a
+   MOCK/DEMO run records with its mode and its hold is released, never committed. Observed 429s are
+   written through `aeos.cost.facade.set_quota_state` (source `observed-429`, resets from Retry-After);
+   the broker no longer writes `QuotaState` rows directly. A ledger refusal never breaks the worker's
+   response: it is recorded on the BrokerRequest (`LEDGER_REJECTED:<code>`).
+5. **Credential namespaces (§26).** `mode_params.credential_ref` must be a valid reference in a namespace
+   allowed for the domain: OFFICE -> `office/` only; PERSONAL -> `personal/`, `workers/` or the run's own
+   `projects/<project_id>/`; `platform/` never. Additive facade `credential_ref_problem(domain, ref, *,
+   project_id=None)`; routing eligibility uses the same rule (ADR-0041 amendment).
+6. **Secret purposes.** The broker uses the secrets contract's `<namespace>:<use>` purposes
+   (`workers:broker.model-proxy`, `personal:broker.github`, `projects:<id>:broker.model-proxy`); the
+   previous free-text purposes were refused by the real OpenBao/keyring providers (`SECRET_SCOPE_DENIED`).
+7. **Review fix (2026-10-19).** A refused branch-update observation (delivery hook) is audited and
+   reported (`pr_observation: OBSERVATION_FAILED (<code>)`), never raised over a push that already landed:
+   the SUCCEEDED outbox row must persist with the caller's commit. The E2E now pushes through the real
+   `https://github.com/...` remote path (push interlock + owner token through the secrets contract); only
+   the git transfer is redirected into a local bare repository.

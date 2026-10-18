@@ -92,9 +92,17 @@ def test_claude_env_with_api_key_fails_without_showing_value(settings, db):
     assert check("claude.env", _ctx(settings, db, base_runner())).status == "VERIFIED"
 
 
-def test_claude_binary_missing_and_found(settings, db):
+@pytest.mark.parametrize("plat,expected", [("win32", "winget install --id Anthropic.ClaudeCode -e"),
+                                            ("darwin", "brew install --cask claude-code"), ("linux", None)])
+def test_claude_binary_missing_and_found(settings, db, monkeypatch, plat, expected):
+    import aeos.doctor.checks.claude as claude_mod
+
+    monkeypatch.setattr("aeos.doctor.model.sys.platform", plat)
+    monkeypatch.setattr(claude_mod.sys, "platform", plat)
     missing = check("claude.binary", _ctx(settings, db, base_runner()))
-    assert missing.status == "MISSING" and missing.remediation["command"] is None  # no guessed installer
+    # official package-manager build per OS; Linux distributions differ -> no guessed command, docs only
+    assert missing.status == "MISSING" and missing.remediation["command"] == expected
+    assert "curl" not in json.dumps(missing.remediation) and "| bash" not in json.dumps(missing.remediation)
     found = check("claude.binary", _ctx(settings, db, claude_runner(NATIVE)))
     assert found.status == "VERIFIED" and found.component_version == "2.1.302"
     assert found.observations[0] == {"component_id": "claude-code", "dimension": "installation",
@@ -107,12 +115,16 @@ def test_claude_capability_test_is_unknown_without_bridge_and_verified_with_it(s
     assert res.status == "UNKNOWN" and res.error_code == "BRIDGE_NOT_IMPLEMENTED"
     import aeos.claude_bridge.facade as bridge
 
-    monkeypatch.setattr(bridge, "capability_test", lambda: {"ok": True, "model_resolved": "opus-x",
-                                                            "engine_version": "2.1.302", "mode": "NATIVE"})
+    # the bridge's capability-test contract: status VERIFIED|DEGRADED|FAILED|BLOCKED, mode LIVE
+    monkeypatch.setattr(bridge, "capability_test", lambda: {"status": "VERIFIED", "model_resolved": "opus-x",
+                                                            "engine_version": "2.1.302", "mode": "LIVE"})
     res = check("claude.capability_test", _ctx(settings, db, base_runner(), functional=True))
     assert res.status == "VERIFIED" and any(o["component_id"] == "claude-code" for o in res.observations)
-    monkeypatch.setattr(bridge, "capability_test", lambda: {"ok": False, "quota_exhausted": True})
-    assert check("claude.capability_test", _ctx(settings, db, base_runner(), functional=True)).status == "FAILED"
+    monkeypatch.setattr(bridge, "capability_test", lambda: {"status": "FAILED", "quota_exhausted": True, "mode": "LIVE"})
+    res = check("claude.capability_test", _ctx(settings, db, base_runner(), functional=True))
+    assert (res.status, res.error_code) == ("FAILED", "QUOTA_EXHAUSTED")
+    monkeypatch.setattr(bridge, "capability_test", lambda: {"status": "VERIFIED", "mode": "MOCK"})
+    assert check("claude.capability_test", _ctx(settings, db, base_runner(), functional=True)).status == "UNKNOWN"
 
 
 def test_openbao_health_states(settings, db, monkeypatch):
@@ -141,7 +153,8 @@ def test_port_conflict_is_explained_never_rebinds_publicly(settings, db, monkeyp
     monkeypatch.setattr(host_mod, "tcp_in_use", lambda h, p, timeout=1.0: True)
     res = check("host.port", _ctx(settings, db, r))
     assert res.status == "FAILED" and res.error_code == "PORT_IN_USE"
-    assert "0.0.0.0" not in json.dumps(res.remediation) and "--port 8788" in res.remediation["command"]
+    assert "0.0.0.0" not in json.dumps(res.remediation) and "--port 8788" in res.remediation["operation"]
+    assert "#" not in res.remediation["command"]  # zsh treats '#' literally in interactive shells
     r.http[f"http://127.0.0.1:{settings.port}/api/health"] = HttpResult(200, {"status": "ok", "version": "0.1.0"})
     assert check("host.port", _ctx(settings, db, r)).status == "CONNECTED"
     monkeypatch.setattr(host_mod, "tcp_in_use", lambda h, p, timeout=1.0: False)
@@ -213,20 +226,50 @@ def test_github_adapter_states_and_token_never_exposed(settings, db, secrets_mem
     assert check("adapter.github_token", _ctx(settings, db, r, functional=True)).status == "EXPIRED"
 
 
-@pytest.mark.parametrize("status,body,code", [
+def test_google_adapter_reads_the_token_google_connect_writes(settings, db, secrets_memory):
+    """W1 seam: the check reads personal/google-oauth-token (written by `aeos publish google-connect`, read by
+    the publisher) and its remedy is that consent flow - never `aeos secrets set` of a typed-in token."""
+    r = base_runner()
+    res = check("adapter.google_oauth", _ctx(settings, db, r))
+    assert res.status == "MISSING" and res.error_code == "GOOGLE_OAUTH_MISSING"
+    assert "publish google-connect" in res.remediation["command"] and "secrets set" not in res.remediation["command"]
+    assert res.remediation["executed_by"].startswith("MANUSIA") and res.remediation["command"].isascii()
+    secrets_memory.put("personal/google-oauth-client", '{"installed": {"client_id": "fake"}}', actor="test")
+    secrets_memory.put("personal/google-oauth-token", '{"token": "fake-not-real"}', actor="test")
+    res = check("adapter.google_oauth", _ctx(settings, db, r))
+    assert res.status == "CONFIGURED" and "fake-not-real" not in json.dumps(res.as_dict())
+    assert r.http_calls == []  # configuration only; no network
+
+
+@pytest.mark.parametrize("status,body,code,plan", [
     (403, {"message": "Upgrade to GitHub Pro or make this repository public to enable this feature."},
-     "BRANCH_PROTECTION_NOT_ENFORCEABLE"),
-    (404, {"message": "Branch not protected"}, "BRANCH_NOT_PROTECTED"),
+     "BRANCH_PROTECTION_NOT_ENFORCEABLE", "free"),
+    (404, {"message": "Branch not protected"}, "BRANCH_PROTECTION_NOT_ENFORCEABLE", "free"),  # private Free: 404
+    (404, {"message": "Branch not protected"}, "BRANCH_NOT_PROTECTED", "pro"),
 ])
-def test_branch_protection_residual_risk(settings, db, secrets_memory, status, body, code):
+def test_branch_protection_residual_risk(settings, db, secrets_memory, status, body, code, plan):
+    """The functional probe goes through aeos.delivery.provider.check_capabilities (GET only, faked)."""
+    import respx
+    from httpx import Response
+
     secrets_memory.put("personal/github", "t" * 40, actor="test")
     slug = settings.platform_repo_slug
     r = base_runner()
-    r.http[f"https://api.github.com/repos/{slug}"] = HttpResult(200, {"default_branch": "main"})
-    r.http[f"https://api.github.com/repos/{slug}/branches/main/protection"] = HttpResult(status, body)
-    res = check("delivery.branch_protection", _ctx(settings, db, r, functional=True))
+    with respx.mock(assert_all_called=False) as gh:
+        gh.get(f"https://api.github.com/repos/{slug}").mock(return_value=Response(200, json={
+            "default_branch": "main", "private": True, "visibility": "private",
+            "owner": {"type": "User", "login": slug.split("/")[0]}}))
+        gh.get("https://api.github.com/user").mock(return_value=Response(200, json={
+            "login": slug.split("/")[0], "plan": {"name": plan}}))
+        gh.get(f"https://api.github.com/repos/{slug}/branches/main/protection").mock(
+            return_value=Response(status, json=body))
+        gh.get(f"https://api.github.com/repos/{slug}/rulesets").mock(return_value=Response(status, json=body))
+        gh.get(f"https://api.github.com/repos/{slug}/rules/branches/main").mock(return_value=Response(200, json=[]))
+        res = check("delivery.branch_protection", _ctx(settings, db, r, functional=True))
+        assert all(c.request.method == "GET" for c in gh.calls)
     assert res.status == "MISSING" and res.error_code == code
-    assert "residual_risk" in res.observed_evidence
+    assert res.observed_evidence["enforceable"] is False and res.observed_evidence["residual_risks"]
+    assert "t" * 40 not in json.dumps(res.as_dict())
 
 
 def test_worker_engine_status_through_facade(settings, db, monkeypatch, absent_modules):
@@ -235,10 +278,17 @@ def test_worker_engine_status_through_facade(settings, db, monkeypatch, absent_m
     assert res.status == "UNKNOWN" and res.error_code == "WORKER_RUNTIME_NOT_IMPLEMENTED"
     import aeos.worker_runtime.facade as worker
 
-    monkeypatch.setattr(worker, "opencode_status", lambda: {"status": "OK", "version": "1.2.3",
-                                                            "path": str(Path.home() / "bin" / "opencode")})
+    # worker_runtime contract: status INSTALLED|FAILED|MISSING, binary, version, pinned_version, drift
+    monkeypatch.setattr(worker, "opencode_status", lambda: {
+        "status": "INSTALLED", "version": "1.19.3", "pinned_version": "1.19.3", "drift": False,
+        "binary": str(Path.home() / "bin" / "opencode"), "functional": "NOT_PROVEN"})
     res = check("worker.opencode", _ctx(settings, db, base_runner()))
     assert res.status == "VERIFIED" and res.observed_evidence["location"].startswith("<home>")
+    monkeypatch.setattr(worker, "opencode_status", lambda: {"status": "MISSING", "pinned_version": "1.19.3"})
+    res = check("worker.opencode", _ctx(settings, db, base_runner()))
+    assert res.status == "MISSING" and "opencode-ai@1.19.3" in res.remediation["command"]
+    monkeypatch.setattr(worker, "opencode_status", lambda: {"status": "OK", "version": "1.2.3"})
+    assert check("worker.opencode", _ctx(settings, db, base_runner())).status == "UNKNOWN"  # unknown contract
 
 
 def test_secret_store_fail_closed_and_status_without_values(settings, db, secrets_memory):

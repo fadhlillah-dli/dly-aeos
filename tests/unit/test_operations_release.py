@@ -99,7 +99,7 @@ def test_build_creates_artifact_with_provenance(settings, git_repo, db):
     assert prov["tree_hash"] == git(git_repo, "rev-parse", "HEAD^{tree}").strip()
     artifact = settings.layout.released_controller / prov["artifact"]
     assert artifact.is_file() and prov["artifact_sha256"] == release.file_sha256(artifact)
-    assert prov["schema_head"] is None and prov["schema_heads"] == []  # create_all baseline (no revisions yet)
+    assert prov["schema_head"] == "0001_initial" and prov["schema_heads"] == ["0001_initial"]  # copied real history
     assert prov["builder"]["actor"] == "tester" and prov["built_at"]
     assert prov["source"]["on_main"] and prov["source"]["clean_tree"]
     again = release.build_release(settings, repo=git_repo)
@@ -230,7 +230,7 @@ def test_rollback_refused_when_database_is_ahead(settings, git_repo, db, operato
     a = release.build_release(settings, repo=git_repo)
     assert release.promote(settings, a["release_id"], **kw)["status"] == "SUCCEEDED"
     mig = git_repo / "backend" / "aeos" / "migrations" / "versions" / "r1_init.py"
-    mig.write_text('revision = "r1"\ndown_revision = None\n', encoding="utf-8")
+    mig.write_text('revision = "r1"\ndown_revision = "0001_initial"\n', encoding="utf-8")
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-q", "-m", "add migration")
     b = release.build_release(settings, repo=git_repo)

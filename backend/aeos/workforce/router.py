@@ -100,7 +100,10 @@ def enable_agent(agent_key: str, body: AgentToggle, principal: AdminPrincipal, d
                 reasons.append("no APPROVED worker route is eligible for this domain")
         except ImportError:
             reasons.append("routing module unavailable; failing closed")
-        ok, cap_reasons = ext.capability_ready(db, Capability.CAN_RUN_WORKER, domain=domain.value, project_id=None)
+        # Every CAN_RUN_WORKER prerequisite except this agent itself (the gate also requires the agent to be
+        # enabled; asking for the full gate here would make enabling impossible).
+        ok, cap_reasons = ext.capability_ready(db, Capability.CAN_RUN_WORKER, domain=domain.value, project_id=None,
+                                               exclude_checks=("worker.agent_definition",))
         if not ok:
             reasons += cap_reasons
     else:

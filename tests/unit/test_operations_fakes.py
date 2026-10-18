@@ -139,7 +139,7 @@ def fake_doctor(monkeypatch: pytest.MonkeyPatch, states: dict[str, tuple[str, li
 
     invalidations: list[str] = []
 
-    def capability_state(session, capability, *, domain=None, project_id=None):
+    def capability_state(session, capability, *, domain=None, project_id=None, **_kw):
         status, checks = states.get(capability.value, ("UNKNOWN", []))
         return CapabilityState(capability=capability, status=status, reasons=[] if status == "READY" else ["x"],
                                checks=checks)

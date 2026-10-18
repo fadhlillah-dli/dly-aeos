@@ -131,6 +131,8 @@ const SPECS: Record<string, Spec> = {
   MOCK: { tone: "mock", label: "MOCK", icon: FlaskConical },
   DEMO: { tone: "mock", label: "DEMO", icon: FlaskConical },
   ESTIMATE: { tone: "mock", label: "Estimasi", icon: FlaskConical },
+  // Live records plus labelled MOCK/DEMO fixture rows in the same view (never rendered as plain LIVE).
+  MIXED: { tone: "mock", label: "LIVE + MOCK/DEMO", icon: FlaskConical },
   LIVE: { tone: "ok", label: "LIVE", icon: CheckCircle2 },
 };
 
@@ -148,16 +150,35 @@ export function statusSpec(status: string | null | undefined): Spec {
   return SPECS[status] ?? { tone: "muted", label: status, icon: CircleHelp };
 }
 
-export function StatusBadge({ status, label, className }: { status: string | null | undefined; label?: string; className?: string }) {
+export function StatusBadge({
+  status,
+  label,
+  className,
+  title,
+}: {
+  status: string | null | undefined;
+  label?: string;
+  className?: string;
+  /** Tooltip; defaults to the raw status code so the canonical value is always inspectable. */
+  title?: string;
+}) {
   const spec = statusSpec(status);
   const Icon = spec.icon;
+  const text = label ?? spec.label;
+  // Short labels never break; long explanatory labels may wrap instead of pushing a 390px page wider.
+  const long = text.length > 24;
   return (
     <span
-      className={clsx("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap", TONE_CLASS[spec.tone], className)}
-      title={status ?? "UNKNOWN"}
+      className={clsx(
+        "inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium",
+        long ? "whitespace-normal" : "whitespace-nowrap",
+        TONE_CLASS[spec.tone],
+        className,
+      )}
+      title={title ?? status ?? "UNKNOWN"}
     >
-      <Icon className="h-3.5 w-3.5" aria-hidden />
-      <span>{label ?? spec.label}</span>
+      <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span className={long ? "min-w-0 wrap-break-word" : undefined}>{text}</span>
     </span>
   );
 }

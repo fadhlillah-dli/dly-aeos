@@ -13,6 +13,7 @@ from aeos.core.errors import Blocked, Conflict, PolicyDenied
 from aeos.delivery import gates, pr_bundle, provider, sync
 from aeos.models.delivery_ext import PullRequestRecord
 from aeos.models.evidence import EvidenceArtifact
+from aeos.models.workforce import TaskExecution
 from aeos.policy.facade import InterlockResult
 from aeos.verification import acceptance
 from tests.unit.test_verification_support import (
@@ -50,6 +51,10 @@ def accepted(db, wf, monkeypatch, settings):
     report = record_verification(db, w, head=head, base=base)
     make_review(db, w, report)
     acc = acceptance.evaluate_acceptance(db, w.run.id)
+    # what the real scheduler's mark_accepted records (FakeWorkforce only logs the call)
+    db.add(TaskExecution(task_id=w.task.id, project_id=w.project.id, domain=w.project.domain, state="DONE",
+                         accepted_run_id=w.run.id, plan_id=w.plan.id, plan_version_id=w.version.id,
+                         task_key=w.task.task_key))
     db.commit()
     assert acc.acceptance_status == "ACCEPTED"
     return w, acc
@@ -59,13 +64,17 @@ class FakeBroker:
     def __init__(self, monkeypatch, *, head_sha: str | None):
         self.calls: list[tuple[str, dict]] = []
 
-        def push_task_branch(session, *, run_id, worktree, branch, repo_full_name):
-            self.calls.append(("push", {"run_id": run_id, "branch": branch, "repo": repo_full_name}))
-            return {"pushed": True, "head_sha": head_sha}
+        # Integration contract (ADR-0053/0063 amendments 2026-10-18): sha-pinned push with
+        # expected_head_sha, results always carry status + head_sha.
+        def push_task_branch(session, *, run_id, worktree, branch, repo_full_name, expected_head_sha=None):
+            self.calls.append(("push", {"run_id": run_id, "branch": branch, "repo": repo_full_name,
+                                        "expected_head_sha": expected_head_sha}))
+            return {"status": "PUSHED", "ok": True, "head_sha": head_sha}
 
         def create_pull_request(session, *, run_id, repo_full_name, head, base, title, body):
             self.calls.append(("pr", {"head": head, "base": base, "title": title, "body": body}))
-            return {"number": 12, "html_url": f"https://github.com/{repo_full_name}/pull/12", "head_sha": head_sha,
+            return {"status": "CREATED", "ok": True, "number": 12,
+                    "html_url": f"https://github.com/{repo_full_name}/pull/12", "head_sha": head_sha,
                     "base_sha": "b" * 40}
 
         install_module(monkeypatch, "aeos.broker.git_broker", push_task_branch=push_task_branch,
@@ -128,6 +137,25 @@ def test_prepare_pr_happy_path_uses_broker_only(db, accepted, monkeypatch):
     assert bundle_ev.kind == "PR_BUNDLE"
     with pytest.raises(Conflict):
         pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
+
+
+@pytest.mark.parametrize("state,accepted_run", [("BLOCKED", "same"), ("READY", "same"), ("DONE", "other")])
+def test_prepare_pr_requires_the_scheduler_acceptance_of_this_run(db, accepted, monkeypatch, state, accepted_run):
+    """An ACCEPTED record whose mark_accepted was refused (task BLOCKED after a review block, another
+    attempt, reopened) is never delivered: §14 REVIEW -> DONE needs the scheduler's acceptance."""
+    from sqlalchemy import select
+
+    w, acc = accepted
+    install_doctor(monkeypatch, "READY")
+    _allow(monkeypatch)
+    broker = FakeBroker(monkeypatch, head_sha=acc.head_commit)
+    te = db.scalar(select(TaskExecution).where(TaskExecution.task_id == w.task.id))
+    te.state = state
+    te.accepted_run_id = w.run.id if accepted_run == "same" else "another-run"
+    db.commit()
+    with pytest.raises(Blocked) as e:
+        pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
+    assert e.value.code == "TASK_NOT_DONE" and not broker.calls
 
 
 @pytest.mark.parametrize("status", ["BLOCKED", "UNKNOWN", "DEGRADED"])

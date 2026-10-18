@@ -635,6 +635,10 @@ def interim_exception(settings: Settings) -> dict[str, Any] | None:
     Bound to the exact target ``secret_store/interim-keyring`` (the one ``aeos secrets
     interim-keyring`` tells the owner to record) and made by an active SUPER_ADMIN account —
     an EXCEPTION recorded for anything else never switches the secret store."""
+    if not settings.layout.db_path.is_file():
+        # DB not initialised yet -> no exception can exist. Opening a session here would create the
+        # data dir and database as a side effect of a status read (bootstrap doctor, §08/§50).
+        return None
     try:
         from sqlalchemy import select
 
@@ -746,20 +750,28 @@ def get_provider() -> SecretProvider:
                   code="SECRET_STORE_UNAVAILABLE", details={"reasons": sel.reasons})
 
 
-def provider_delete(ref: str, *, actor: str) -> None:
+def provider_delete(ref: str, *, actor: str, session: Any | None = None) -> None:
+    from aeos.secrets.readiness import invalidate_secret_checks
+
     p = get_provider()
     deleter = getattr(p, "delete", None)
     if deleter is None:  # pragma: no cover
         raise Blocked(f"provider {p.name} cannot delete")
     deleter(ref, actor=actor)
+    invalidate_secret_checks(ref, reason="credential deleted", session=session)
 
 
 def provider_put(ref: str, value: str, *, actor: str, expires_at: datetime | None = None,
-                 scope: dict[str, Any] | None = None) -> SecretStatus:
+                 scope: dict[str, Any] | None = None, session: Any | None = None) -> SecretStatus:
+    from aeos.secrets.readiness import invalidate_secret_checks
+
     p = get_provider()
     if isinstance(p, (OpenBaoProvider, InterimKeyringProvider)):
-        return p.put(ref, value, actor=actor, expires_at=expires_at, scope=scope)
-    return p.put(ref, value, actor=actor)
+        status = p.put(ref, value, actor=actor, expires_at=expires_at, scope=scope)
+    else:
+        status = p.put(ref, value, actor=actor)
+    invalidate_secret_checks(ref, reason="credential stored/rotated", session=session)
+    return status
 
 
 def verification_file(settings: Settings) -> Any:

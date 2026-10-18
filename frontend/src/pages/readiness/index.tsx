@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { clsx } from "clsx";
-import { ChevronDown, ChevronRight, ExternalLink, Play, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, Play, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { get, post } from "../../api/client";
@@ -13,15 +13,69 @@ import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, Loading, Mono,
 import { useEventStream } from "../../lib/events";
 import { absoluteTime, relativeTime } from "../../lib/format";
 
-function CapabilityRow({ cap }: { cap: CapabilityItem }) {
+/** Additive fields of the capability matrix (integration 2026-10-18): residual risks that stay true even when a
+ * gate is READY (WEAK process sandbox, branch protection NOT_ENFORCEABLE) and live gate entries. */
+type Capability = Omit<CapabilityItem, "checks"> & {
+  residual_risks?: string[];
+  checks: (CapabilityItem["checks"][number] & { live?: boolean })[];
+};
+
+/** Additive field of /api/doctor/checks: a failed Doctor pass (e.g. at server start) newer than the last run. */
+type ChecksData = ChecksResponse & { last_failure?: { at: string; trigger: string | null; error: string | null } | null };
+
+/** How a Doctor run was started (``DoctorRun.trigger``). */
+const TRIGGER_LABELS: Record<string, string> = {
+  startup: "otomatis saat server mulai",
+  api: "dashboard",
+  cli: "CLI (aeos doctor)",
+};
+
+function triggerLabel(trigger: string | null | undefined): string {
+  if (!trigger) return "tidak diketahui";
+  return TRIGGER_LABELS[trigger] ?? trigger;
+}
+
+function ResidualRisks({ risks }: { risks: string[] }) {
+  const [open, setOpen] = useState(false);
+  if (!risks.length) return null;
+  const shown = open ? risks : risks.slice(0, 1);
+  return (
+    <div className="mt-2 rounded-md bg-warn-bg p-2 text-xs text-warn" data-testid="residual-risks">
+      <div className="mb-0.5 flex items-center gap-1 font-semibold">
+        <AlertTriangle className="h-3.5 w-3.5" aria-hidden /> Risiko residual ({risks.length}) — tetap berlaku walau READY, bukan
+        tanda lulus
+      </div>
+      <ul className="list-disc space-y-0.5 pl-4">
+        {shown.map((r, i) => (
+          <li key={i} className="break-words">
+            {r}
+          </li>
+        ))}
+      </ul>
+      {risks.length > 1 && (
+        <button className="mt-1 hover:underline" onClick={() => setOpen(!open)}>
+          {open ? "Ringkas" : `Lihat semua risiko (${risks.length})`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function CapabilityRow({ cap }: { cap: Capability }) {
   const [open, setOpen] = useState(false);
   const reasons = open ? cap.reasons : cap.reasons.slice(0, 2);
+  const live = cap.checks.filter((c) => c.live);
   return (
     <tr className="align-top">
       <td className="px-3 py-2">
         <div className="font-medium">{cap.label}</div>
         <div className="mono text-xs text-ink-3">{cap.capability}</div>
         {cap.domain && <div className="text-xs text-ink-3">Domain: {cap.domain}</div>}
+        {live.map((c) => (
+          <div key={c.check_id} className="mt-1 text-xs text-ink-3" title="Dievaluasi langsung setiap kali gate dibaca">
+            {c.title}: <Badge status={c.effective_status} />
+          </div>
+        ))}
       </td>
       <td className="px-3 py-2">
         <Badge status={cap.status} />
@@ -43,6 +97,7 @@ function CapabilityRow({ cap }: { cap: CapabilityItem }) {
             {open ? "Ringkas" : `Lihat semua (${cap.reasons.length})`}
           </button>
         )}
+        <ResidualRisks risks={cap.residual_risks ?? []} />
       </td>
       <td className="px-3 py-2 text-xs text-ink-3">{cap.remedies.length ? `${cap.remedies.length} usulan perbaikan` : "—"}</td>
     </tr>
@@ -169,7 +224,7 @@ function RunControls({ groups }: { groups: { id: string; label: string }[] }) {
 export default function ReadinessPage() {
   const { isAdmin, domain } = useAuth();
   const qc = useQueryClient();
-  const checks = useQuery({ queryKey: ["doctor", "checks", domain], queryFn: () => get<ChecksResponse>("/api/doctor/checks") });
+  const checks = useQuery({ queryKey: ["doctor", "checks", domain], queryFn: () => get<ChecksData>("/api/doctor/checks") });
   const caps = useQuery({ queryKey: ["doctor", "capabilities", domain], queryFn: () => get<CapabilitiesResponse>("/api/doctor/capabilities") });
   const [selected, setSelected] = useState<string | null>(null);
   const [onlyProblems, setOnlyProblems] = useState(false);
@@ -189,6 +244,7 @@ export default function ReadinessPage() {
   if (checks.isLoading || caps.isLoading) return <Loading />;
   if (checks.error) return <ErrorBox error={checks.error} />;
   const lastRun = checks.data?.last_run;
+  const lastFailure = checks.data?.last_failure;
 
   return (
     <div>
@@ -206,9 +262,18 @@ export default function ReadinessPage() {
           {isAdmin ? " atau tombol “Jalankan pemeriksaan”." : " (butuh SUPER_ADMIN)."}
         </Notice>
       )}
+      {lastFailure && (
+        <Notice tone="warn">
+          <span data-testid="last-failure">
+            Pemeriksaan {triggerLabel(lastFailure.trigger)} gagal pada {absoluteTime(lastFailure.at)}
+            {lastFailure.error ? ` (${lastFailure.error})` : ""}; hasil di bawah berasal dari run sebelumnya dan bukan status
+            terkini. Jalankan ulang pemeriksaan.
+          </span>
+        </Notice>
+      )}
       {lastRun && (
-        <p className="mb-3 text-xs text-ink-3">
-          Run terakhir: {absoluteTime(lastRun.finished_at)} via {lastRun.trigger}
+        <p className="mb-3 text-xs text-ink-3" data-testid="last-run">
+          Run terakhir: {absoluteTime(lastRun.finished_at)} via {triggerLabel(lastRun.trigger)}
           {lastRun.functional ? " (dengan uji fungsi)" : " (tanpa uji fungsi)"} —{" "}
           {Object.entries(lastRun.counts ?? {})
             .map(([k, v]) => `${k}: ${v}`)
@@ -231,7 +296,7 @@ export default function ReadinessPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-line">
-                {(caps.data?.items ?? []).map((c) => (
+                {((caps.data?.items ?? []) as Capability[]).map((c) => (
                   <CapabilityRow key={c.capability} cap={c} />
                 ))}
               </tbody>

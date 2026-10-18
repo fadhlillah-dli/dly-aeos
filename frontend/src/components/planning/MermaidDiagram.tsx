@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from "react";
+import { useTheme } from "../../lib/theme";
 import { Mono } from "../ui";
 
 /**
@@ -12,6 +13,7 @@ export function MermaidDiagram({ source, title }: { source: string; title?: stri
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSource, setShowSource] = useState(false);
+  const { theme } = useTheme();
 
   useEffect(() => {
     let cancelled = false;
@@ -24,7 +26,7 @@ export function MermaidDiagram({ source, title }: { source: string; title?: stri
     import("mermaid")
       .then(async (m) => {
         const mermaid = m.default;
-        mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral" });
+        mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: theme === "dark" ? "dark" : "neutral" });
         const out = await mermaid.render(id, source);
         if (!cancelled) setSvg(out.svg);
       })
@@ -34,7 +36,7 @@ export function MermaidDiagram({ source, title }: { source: string; title?: stri
     return () => {
       cancelled = true;
     };
-  }, [source, id]);
+  }, [source, id, theme]);
 
   return (
     <figure className="rounded-md border border-line bg-surface-2 p-3">

@@ -7,7 +7,7 @@ import { BUDGET_STATE, COST_KIND, MappedBadge, QUOTA_STATE } from "../../compone
 import { decisionHref } from "../../components/proposals/PageLinks";
 import { Link } from "react-router-dom";
 import { StatusBadge } from "../../components/StatusBadge";
-import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
+import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputBase, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { absoluteTime, shortHash, usd } from "../../lib/format";
 
 interface Bucket {
@@ -315,7 +315,7 @@ export default function CostsPage() {
         evidenceLimit="Angka dari ledger/provider; aktual, estimasi dan UNKNOWN tidak dijumlahkan; langganan Max tidak dikonversi ke dolar"
         actions={
           <>
-            <select aria-label="Periode" className={inputClass + " w-44"} value={period} onChange={(e) => setPeriod(e.target.value)}>
+            <select aria-label="Periode" className={inputBase + " w-full sm:w-44"} value={period} onChange={(e) => setPeriod(e.target.value)}>
               {PERIODS.map(([k, l]) => (
                 <option key={k} value={k}>
                   {l}

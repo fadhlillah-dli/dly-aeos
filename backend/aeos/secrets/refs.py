@@ -25,7 +25,10 @@ class KnownRef:
 KNOWN_REFS: tuple[KnownRef, ...] = (
     KnownRef("personal/github", "github", "Token GitHub PERSONAL untuk broker (push cabang aeos/*, membuka PR)",
              "broker", "PERSONAL"),
-    KnownRef("personal/google-oauth", "google", "Kredensial OAuth Google Drive/Docs (scope drive.file)",
+    # Written by `aeos publish google-connect` and read by the publisher (aeos.portfolio.providers).
+    KnownRef("personal/google-oauth-client", "google", "Konfigurasi OAuth client Google (Desktop app) untuk Drive/Docs",
+             "publisher", "PERSONAL"),
+    KnownRef("personal/google-oauth-token", "google", "Token OAuth Google Drive/Docs hasil consent (scope drive.file)",
              "publisher", "PERSONAL"),
     KnownRef("workers/openrouter", "openrouter", "Kunci OpenRouter untuk rute pekerja (dipakai broker, bukan sandbox)",
              "broker / routing", None),

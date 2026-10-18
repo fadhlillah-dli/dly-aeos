@@ -115,3 +115,37 @@ Decisions added after the review of the first implementation (same status, same 
   the client could read (S05).
 * **Account e-mail**. The Max account e-mail is shown to SUPER_ADMIN only and masked for other
   roles. A forced re-probe (`?refresh=true`) is admin-only.
+
+## Amendment 2026-10-18 (integration)
+
+* **Quota through the cost contract.** Native quota observations are written with
+  `aeos.cost.facade.set_quota_state(provider="claude-native", state="EXHAUSTED",
+  source="observed-limit-message", scope=<family>)` and recovery with
+  `state="UNKNOWN", source="observed-successful-call"` (one QuotaState authority, ADR-0080 §6); the
+  direct table write remains only as the fail-closed path when the cost module is absent. Usage stays
+  `record_usage(category=NATIVE_CLAUDE, domain=<request domain>, cost_usd=None)`.
+* **Command-line limit instead of a 16k schema limit.** The planning contracts (`plan_content`,
+  `synthesis`, ~19k chars compact) exceeded the 16,000-character schema cap, so the primary planner and
+  synthesizer could never run natively. The bridge now checks the real Windows command line
+  (`subprocess.list2cmdline`, every `"` escaped) against 32,000 characters minus a 512-character margin
+  for the binary path; a schema that does not fit is first sent without validation-neutral annotations
+  (`description`, `title`, `$comment`, `examples`) — the caller still validates the output against its
+  full schema — and is refused with `SCHEMA_TOO_LARGE` only when it still does not fit. Annotations are
+  removed only in subschema positions: names under `properties`/`$defs`/`patternProperties` (the plan
+  contracts have properties called `title` and `description`) and literal values (`enum`, `const`,
+  `default`) are kept, so the stripped schema accepts and rejects exactly the same documents (tested).
+
+Found by the trusted acceptance suite (master §50 planning rows) when planning ran through the
+real bridge: the plan-content and synthesis schemas of the planning pipeline are about 20k
+characters raw (about 23k after Windows quoting), so the earlier fixed bound of 16,000 raw schema
+characters refused every native planning call with `SCHEMA_TOO_LARGE` and only the manual package
+remained.
+
+* The bound now follows the real constraint. The schema is one argv element; the Windows
+  CreateProcess command line is limited to 32,767 characters **after** quoting. `run_structured`
+  measures the encoded command line (`subprocess.list2cmdline` of the exact argv, on every OS so the
+  same request is accepted or refused everywhere) and refuses above `MAX_COMMAND_LINE_CHARS =
+  32,000` with `SCHEMA_TOO_LARGE`. The raw per-schema cap is raised to 100,000 characters (POSIX
+  caps one argument at 128 KiB).
+* Nothing else changes: no file/stdin schema path, no new flags, the manual package remains the
+  fallback for a request that does not fit.

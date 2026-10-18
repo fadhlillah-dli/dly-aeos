@@ -70,3 +70,27 @@ job "query latest".
   through a human decision (`TRANSITION_NOT_DELEGATED`).
 * The ADR-0003 delegation is visible as a decision but grants nothing inside AEOS. Once the owner
   revokes it, the seed never re-records it — not even after the ADR file changes.
+
+## Amendment 2026-10-18 (integration)
+
+* **Publication writes (ADR-0074 amendment).** `check_external_write` now evaluates publication
+  operations against the run's `PUBLICATION` decision and the `APPROVE_AND_PUBLISH` approval it
+  references (new reason codes `PUBLICATION_DECISION_REQUIRED`, `PUBLICATION_DECISION_NOT_ACTIVE`,
+  `PUBLICATION_DECISION_NO_EXPIRY`, `PUBLICATION_MISMATCH`, `PUBLICATION_BINDING_MISMATCH`,
+  `OPERATION_NOT_IN_RUN`, `PREVIEW_HASH_MISMATCH`, `TARGET_NOT_IN_RUN`, `APPROVAL_LINK_MISSING`,
+  `APPROVAL_NOT_FOR_PUBLICATION`). Delivery writes keep the APPROVAL path unchanged.
+* **One operation catalog.** `PUBLISH_OPERATIONS` lists exactly the outbox operation kinds:
+  `google-drive` create_folder/create_doc/update_doc (Docs API updates are writes on the Drive target),
+  `github-issues` ensure_label/create_issue/update_issue, `confluence`
+  create_folder/create_doc/update_doc/upload_attachment, `jira` create_issue/update_issue. Providers come
+  from `aeos.portfolio.providers` (`google-docs` is accepted only as legacy input).
+* **Approval targets are `{provider, root_id}`** for publication providers (other identifying keys are
+  `TARGET_NOT_EXACT`); `target_in_scope` lives in `catalog` and is exposed additively as
+  `policy.facade.target_in_scope`.
+* **Decisions with consumer-read shapes.** `aeos.policy.recording.record_generic_decision` is the single
+  implementation behind `POST /api/decisions`, the Decision page and the new `aeos policy decide` /
+  `aeos policy revoke` (SUPER_ADMIN password prompt, like `aeos routes activate`). EXCEPTION presets
+  (`exception=secret_store_interim_keyring | worker_sandbox_process`, `catalog.EXCEPTION_PRESETS`) produce
+  exactly the targets/details read by `aeos.secrets.provider` and `aeos.worker_runtime.sandbox`
+  (PERSONAL only, expiry required, renewal supersedes); the consumer-read detail keys are refused on
+  any other target. `GET /api/decisions/shapes` publishes these shapes for the UI.

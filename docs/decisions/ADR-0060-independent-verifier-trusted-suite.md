@@ -75,3 +75,28 @@ separate, NOT-PROVEN capability).
 * Paths are kept short (`<data>/vw/<8 hex>/…`, `--basetemp`) because nested pytest temp dirs hit the
   Windows 260-character limit.
 * Trusted tests must not parametrize over candidate-dependent data (collection ids must match).
+
+## Amendment 2026-10-18 (integration)
+
+1. **Trusted suite for managed (non-platform) projects.** Decision 8 is refined: a project's grader can
+   now be registered outside every candidate. The owner calls `POST /api/projects/{id}/trusted-suite`
+   (SUPER_ADMIN + CSRF) naming a reviewed commit/branch of the project's own registered repository; the
+   controller exports exactly that tree with git plumbing and copies `tests/acceptance/**` (+ shared
+   `tests/__init__.py`, `tests/conftest.py`, the `pyproject.toml` lint configuration) to
+   `<data>/trusted-suites/<project_id>/<id>/`, then records a human POLICY decision
+   (`target_type=trusted_suite`, `target_id=<project_id>`, `target_hash=<suite hash>`). The verifier uses
+   that copy only while its files still hash to the decision (`TRUSTED_SUITE_TAMPERED` otherwise);
+   without a registration the result stays BLOCKED `NO_TRUSTED_SUITE`. The expected test ids are
+   collected with the human-reviewed **base commit** of the run (the project's trusted code), never with
+   the candidate head; the platform keeps using the controller checkout. `current_config_hash` resolves
+   the same suite, so a re-registered grader makes earlier acceptance STALE; a project without a
+   registration keeps the previous controller-suite identity (it can never be verified PASS, and that
+   hash never equals a registered suite's), a registered copy that is missing/tampered gives UNKNOWN.
+2. The deterministic loop verifies REVIEW runs of the platform and of projects with a registration.
+3. `update_run(verifier_status=)` now receives the verifier's own vocabulary (accepted by the workforce
+   module); QUARANTINED moves the task to BLOCKED with reason code `QUARANTINED` (waits for the owner).
+4. The verifier's wall-clock seconds are recorded as §42 units through
+   `aeos.cost.facade.record_unit_usage(category="COMPUTE", unit="seconds")`, cash cost UNKNOWN.
+5. **Binary leak scan fix.** The redaction patterns gained a "not after an alphanumeric" guard against
+   prose false positives (security fix c07370d); in binary content that guard let a token glued to other
+   bytes (`PK<token>`) through. The binary scan uses the patterns without the guard.

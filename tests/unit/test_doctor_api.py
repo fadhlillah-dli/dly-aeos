@@ -58,7 +58,7 @@ def test_admin_run_records_audit_events_and_history(personal_client, db, fake_ho
     assert personal_client.get("/api/doctor/checks/nope/history").status_code == 404
     assert personal_client.post("/api/doctor/run", json={"group": "NOPE"}).status_code == 422
     full = personal_client.post("/api/doctor/run", json={}).json()
-    assert {s["check_id"] for s in full["skipped"]} >= {"claude.capability_test", "containment.report"}
+    assert {s["check_id"] for s in full["skipped"]} >= {"containment.report"}  # functional only
     listed = personal_client.get("/api/doctor/checks").json()
     platform = next(i for i in listed["items"] if i["check_id"] == "host.platform")
     assert platform["never_run"] is False and platform["component_link"] is None

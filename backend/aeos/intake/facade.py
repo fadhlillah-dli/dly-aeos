@@ -20,3 +20,17 @@ def attachment_text(session: Session, attachment_id: str, *, max_chars: int = 20
     from aeos.intake.service import attachment_text as impl
 
     return impl(session, attachment_id, max_chars=max_chars)
+
+
+# ---- additive (non-breaking) contract ---------------------------------------------------------------
+
+
+def link_attachment(session: Session, attachment_id: str, *, proposal_id: str) -> Attachment:
+    """Link an intake attachment (e.g. a ``.md`` brief, U-11) to a change proposal as provenance.
+
+    The attachment must be in the proposal's domain (and project, when project-scoped), not REJECTED and
+    not linked to another proposal (``NotFound`` / ``Blocked`` / ``Conflict``). Idempotent; does not
+    commit. Linking never makes the content trusted or authoritative (§25, §50)."""
+    from aeos.intake.service import link_attachment as impl
+
+    return impl(session, attachment_id, proposal_id=proposal_id)

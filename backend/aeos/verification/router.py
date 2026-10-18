@@ -268,6 +268,42 @@ def evaluate(run_id: str, principal: AdminPrincipal, domain: ActiveDomain, db: D
     return acceptance_mod.acceptance_view(db, rec)
 
 
+# ---------------------------------------------------------------------------- trusted suite (non-platform projects)
+
+
+class TrustedSuiteIn(BaseModel):
+    rationale: str = Field(min_length=5, max_length=2000)
+    commit: str | None = Field(default=None, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+
+
+@router.post("/api/projects/{project_id}/trusted-suite", status_code=201)
+def register_trusted_suite(project_id: str, body: TrustedSuiteIn, principal: AdminPrincipal, domain: ActiveDomain,
+                           db: DB) -> dict[str, Any]:
+    """The owner registers the project's grader (``tests/acceptance`` of a reviewed commit of the project's
+    own repository) outside every candidate; bound to a POLICY decision on the suite hash (ADR-0060)."""
+    from aeos.verification import suite
+
+    project = load_project(db, principal, project_id, domain=domain)
+    try:
+        out = suite.register_project_suite(db, project, actor_user_id=principal.user.id, rationale=body.rationale,
+                                           commit=body.commit)
+    except AeosError as exc:
+        audit_denied(db, principal, "verification.suite.register", exc, target_type="project", target_id=project.id,
+                     project_id=project.id, domain=project.domain)
+        raise
+    db.commit()
+    return out
+
+
+@router.get("/api/projects/{project_id}/trusted-suite")
+def trusted_suite_status(project_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
+    from aeos.verification import suite
+
+    project = load_project(db, principal, project_id, domain=domain)
+    return {**suite.suite_status(db, project), "checked_at": utcnow().isoformat(), "mode": "LIVE",
+            "source": "owner POLICY decision (trusted_suite) + controller data dir copy"}
+
+
 # ---------------------------------------------------------------------------- acceptance
 
 

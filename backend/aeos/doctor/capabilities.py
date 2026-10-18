@@ -6,7 +6,14 @@ narration. Each capability has three tiers:
 * **critical** — any failing/missing check -> BLOCKED; never-run, STALE or EXPIRED -> UNKNOWN;
 * **required** — a FAILED check -> BLOCKED (e.g. CONNECTED + functional FAILED is not READY);
   otherwise not-ok -> DEGRADED (e.g. bridge NOT-PROVEN, manual fallback available);
+* **guard** — FAILED -> BLOCKED, anything else is a note (e.g. WEAK process-sandbox containment,
+  worker contract NOT-PROVEN: the run still ends in REVIEW behind the independent verifier);
 * **advisory** — shown as reasons only (e.g. MCI UNVERIFIED, quota UNKNOWN, residual risks).
+
+``CAN_RUN_WORKER`` additionally asks ``aeos.worker_runtime.facade.sandbox_readiness`` live on every read
+(ADR-0051: READY only with a proven container or an ACTIVE owner exception for the WEAK process sandbox).
+Residual risks reported by the checks (WEAK sandbox, branch protection NOT_ENFORCEABLE, interim keyring)
+are returned separately and never turn a gate green.
 
 OFFICE capabilities are BLOCKED by default (§23) until a recorded company authorisation sets the
 relevant policy flag. Human-only merge and production deployment are never capabilities.
@@ -46,6 +53,10 @@ class CapRule:
     office_gate: bool = False
     required_ok: dict[str, frozenset[str]] = field(default_factory=dict)  # stricter ok-set in the required tier
     description: str = ""
+    # checks that only matter when they FAILED (-> BLOCKED); otherwise a note + residual risk, e.g. a WEAK
+    # process-sandbox containment report or an unproven worker contract (the run still ends in REVIEW).
+    guard: tuple[str, ...] = ()
+    live_sandbox: bool = False  # also ask worker_runtime.facade.sandbox_readiness(session, domain) live
 
 
 RULES: dict[Capability, CapRule] = {
@@ -66,16 +77,22 @@ RULES: dict[Capability, CapRule] = {
         description="Butuh otorisasi perusahaan atas data/provider (§23, §51 P1)."),
     Capability.CAN_PUBLISH_PERSONAL: CapRule(
         "Publikasi dokumen/tiket PERSONAL",
-        (*BASE, "auth.interlock", "secret.status", "adapter.github_token", "adapter.google_oauth", "secret.no_raw_exposure"),
+        (*BASE, "auth.interlock", "secret.status", "adapter.github_token", "adapter.google_oauth",
+         "adapter.write_enablement", "secret.no_raw_exposure"),
         required=("adapter.github_token",), advisory=("recovery.publication_idempotency", "policy.mci"),
         domain="PERSONAL", required_ok={"adapter.github_token": STRICT_CONNECTED},
-        description="Interlock external-write, credential adapter dan akses target yang terbukti."),
+        description="Interlock external-write (bootstrap, write enablement manusia), token Google + GitHub dan akses "
+                    "target yang terbukti; setiap write tetap butuh approval versi/hash."),
     Capability.CAN_RUN_WORKER: CapRule(
         "Menjalankan worker dalam sandbox",
-        (*BASE, "worker.opencode", "containment.sandbox", "containment.report", "route.registry", "route.worker_key", "secret.status", "evidence.verifier", "secret.no_raw_exposure"),
-        required=("worker.contract", "route.catalog_freshness", "containment.protected_paths"),
-        advisory=("containment.docker", "recovery.leases"),
-        description="Engine, isolasi yang teruji, route disetujui, kunci via broker dan verifier independen."),
+        (*BASE, "worker.opencode", "worker.agent_definition", "containment.sandbox", "route.registry",
+         "route.worker_key", "route.budget_admission", "secret.status", "evidence.verifier", "secret.no_raw_exposure"),
+        required=("containment.protected_paths",),
+        guard=("containment.report", "worker.contract"),
+        advisory=("route.catalog_freshness", "containment.docker", "recovery.leases"),
+        live_sandbox=True,
+        description="OpenCode terpasang, agent opencode-implementer aktif, sandbox memenuhi ADR-0051 (live), route "
+                    "APPROVED/TRIAL eligible, budget admission sehat, kunci via broker dan verifier independen."),
     Capability.CAN_REVIEW_WITH_MAX: CapRule(
         "Review checkpoint dengan Claude Max", (*BASE, "claude.binary", "claude.auth", "claude.env"),
         required=("claude.capability_test",), advisory=("claude.extra_billing", "claude.quota"),
@@ -100,10 +117,22 @@ RULES: dict[Capability, CapRule] = {
 def checks_for_capability(capability: str | Capability) -> list[str]:
     rule = RULES[Capability(capability)]
     seen: list[str] = []
-    for cid in (*rule.critical, *rule.required, *rule.advisory):
+    for cid in (*rule.critical, *rule.required, *rule.guard, *rule.advisory):
         if cid not in seen:
             seen.append(cid)
     return seen
+
+
+def _risks_of(row: dict[str, Any] | None) -> list[str]:
+    ev = (row or {}).get("observed_evidence") or {}
+    out: list[str] = []
+    for key in ("residual_risks", "residual_risk"):
+        v = ev.get(key)
+        if isinstance(v, str) and v:
+            out.append(v)
+        elif isinstance(v, list):
+            out += [str(x) for x in v if x]
+    return out
 
 
 def capability_index() -> dict[str, list[str]]:
@@ -168,8 +197,57 @@ def _office_gate_key(capability: Capability, rule: CapRule, domain: str | None) 
     return None
 
 
+LIVE_SANDBOX_ID = "worker_runtime.sandbox_readiness"
+
+
+def _live_sandbox(session: Session | None, domain: str | None) -> tuple[str, list[str], list[dict[str, Any]],
+                                                                         list[str], dict[str, Any]]:
+    """(tier outcome, reasons, remedies, residual risks, check entry) of the live ADR-0051 requirement.
+
+    Evaluated on every gate read (not only from a stored CheckResult): an exception decision can expire by
+    time and Docker can disappear between Doctor runs. A domain-less view is evaluated for PERSONAL and says
+    so; OFFICE is always BLOCKED by the worker runtime."""
+    eval_domain = domain or "PERSONAL"
+    entry: dict[str, Any] = {"check_id": LIVE_SANDBOX_ID, "title": "Syarat sandbox worker (live, ADR-0051)",
+                             "tier": "critical", "live": True, "component_id": "worker-runtime",
+                             "last_checked_at": utcnow().isoformat()}
+    if session is None:
+        entry.update(status=None, effective_status="UNKNOWN", ok=False)
+        return "unknown", [f"{LIVE_SANDBOX_ID}: UNKNOWN - syarat sandbox (keputusan pengecualian) tidak dapat dinilai "
+                           "tanpa database"], [], [], entry
+    from aeos.doctor.checks.containment import sandbox_readiness_view
+
+    sb = sandbox_readiness_view(session, eval_domain)
+    status = str(sb.get("status") or "BLOCKED")
+    risks = [str(r) for r in sb.get("residual_risks") or []] if status == "READY" else []
+    # Honest label: only a container whose containment report passed is VERIFIED. The WEAK process sandbox
+    # allowed by an owner exception satisfies the policy (ok) but is CONFIGURED, never VERIFIED (§08, §25).
+    if status == "READY":
+        label = "VERIFIED" if sb.get("kind") == "container" else "CONFIGURED"
+    else:
+        label = "MISSING"
+    entry.update(status=status, effective_status=label, ok=status == "READY", kind=sb.get("kind"),
+                 evaluated_domain=eval_domain)
+    if status == "READY":
+        entry["residual_risks"] = risks
+        notes = [] if domain else [f"catatan: {LIVE_SANDBOX_ID}: dievaluasi untuk PERSONAL (OFFICE selalu BLOCKED "
+                                   "tanpa isolasi terverifikasi)"]
+        if sb.get("kind") == "process":
+            notes.append(f"catatan: {LIVE_SANDBOX_ID}: process sandbox WEAK diizinkan keputusan pengecualian "
+                         f"{str(sb.get('decision_id') or '')[:8]}; residual risk berlaku")
+        return "ok", notes, [], risks, entry
+    why = "; ".join(str(r) for r in sb.get("reasons") or []) or "syarat tidak terpenuhi"
+    remedies = [{"check_id": LIVE_SANDBOX_ID, "operation": str(r), "executed_by": "MANUSIA (salin dan jalankan sendiri)"}
+                for r in sb.get("remedies") or []]
+    # Not accepted yet: these are the risks an owner exception for the WEAK process sandbox would accept.
+    pending = [f"bila process sandbox diizinkan: {r}" for r in sb.get("residual_risks") or []]
+    entry["residual_risks"] = pending
+    return "blocked", [f"{LIVE_SANDBOX_ID}: BLOCKED ({eval_domain}) - {why}"], remedies, pending, entry
+
+
 def evaluate(capability: Capability, rows: dict[str, dict[str, Any]], *, now: datetime,
-             fps: dict[str, str | None], domain: str | None, session: Session | None) -> CapabilityState:
+             fps: dict[str, str | None], domain: str | None, session: Session | None,
+             exclude_checks: tuple[str, ...] = ()) -> CapabilityState:
     from aeos.doctor.checks import REGISTRY, load_all
 
     load_all()
@@ -177,14 +255,20 @@ def evaluate(capability: Capability, rows: dict[str, dict[str, Any]], *, now: da
     if rule.domain is not None and domain is not None and domain != rule.domain:
         return CapabilityState(capability, "NOT_APPLICABLE", [f"Capability ini hanya untuk domain {rule.domain}."])
     eff_domain = rule.domain or domain
+    excluded = set(exclude_checks)
     blocked: list[str] = []
     unknown: list[str] = []
     degraded: list[str] = []
     notes: list[str] = []
     checks: list[dict[str, Any]] = []
     remedies: list[dict[str, Any]] = []
-    for tier, ids in (("critical", rule.critical), ("required", rule.required), ("advisory", rule.advisory)):
+    risks: list[str] = []
+    tiers = (("critical", rule.critical), ("required", rule.required), ("guard", rule.guard),
+             ("advisory", rule.advisory))
+    for tier, ids in tiers:
         for cid in ids:
+            if cid in excluded:
+                continue
             spec = REGISTRY.get(cid)
             row = rows.get(cid)
             eff, why = effective_status(row, now, fps.get(cid))
@@ -192,23 +276,41 @@ def evaluate(capability: Capability, rows: dict[str, dict[str, Any]], *, now: da
                 spec.ok_statuses if spec else frozenset({"VERIFIED"}))
             ok = eff in ok_set
             title = spec.title if spec else cid
+            # a stale/expired result no longer describes the system; risks stay attached to their check so a
+            # view can drop those of checks scoped to another domain (views.capabilities_view, §50)
+            row_risks = _risks_of(row) if eff not in ("STALE", "EXPIRED") else []
             checks.append({"check_id": cid, "title": title, "tier": tier, "status": row["status"] if row else None,
                            "effective_status": eff, "ok": ok, "last_checked_at": row.get("last_checked_at") if row else None,
-                           "component_id": spec.component_id if spec else None})
+                           "component_id": spec.component_id if spec else None, "residual_risks": row_risks})
+            risks += row_risks
             if ok:
                 continue
             summary = (row or {}).get("summary") or why or ""
             reason = f"{cid}: {eff} - {summary}" if summary else f"{cid}: {eff}"
             if why and why not in reason:
                 reason += f" ({why})"
-            if row and row.get("remediation") and tier != "advisory":
+            gating = tier in ("critical", "required") or (tier == "guard" and eff == "FAILED")
+            if row and row.get("remediation") and gating:
                 remedies.append({"check_id": cid, **row["remediation"]})
             if tier == "critical":
                 (unknown if eff in ("UNKNOWN", "STALE", "EXPIRED") else blocked).append(reason)
             elif tier == "required":
                 (blocked if eff == "FAILED" else degraded).append(reason)
+            elif tier == "guard" and eff == "FAILED":
+                blocked.append(reason)
             else:
                 notes.append(f"catatan: {reason}")
+    if rule.live_sandbox and "containment.sandbox" not in excluded:
+        outcome, live_reasons, live_remedies, live_risks, entry = _live_sandbox(session, eff_domain)
+        checks.append(entry)
+        remedies += live_remedies
+        risks += live_risks
+        if outcome == "blocked":
+            blocked += live_reasons
+        elif outcome == "unknown":
+            unknown += live_reasons
+        else:
+            notes += live_reasons
     gate_reason = None
     gate_key = _office_gate_key(capability, rule, eff_domain)
     if gate_key is not None:
@@ -226,7 +328,10 @@ def evaluate(capability: Capability, rows: dict[str, dict[str, Any]], *, now: da
     reasons = [*blocked, *unknown, *degraded, *notes]
     if status == "READY" and gate_reason:
         reasons.insert(0, gate_reason)
-    return CapabilityState(capability=capability, status=status, reasons=reasons, checks=checks, remedies=remedies)
+    seen: set[str] = set()
+    risks = [r for r in risks if not (r in seen or seen.add(r))]
+    return CapabilityState(capability=capability, status=status, reasons=reasons, checks=checks, remedies=remedies,
+                           residual_risks=risks)
 
 
 def _rows(session: Session | None, check_ids: list[str]) -> dict[str, dict[str, Any]]:
@@ -238,11 +343,11 @@ def _rows(session: Session | None, check_ids: list[str]) -> dict[str, dict[str, 
 
 
 def capability_state(session: Session, capability: Capability, *, domain: str | None = None,
-                     project_id: str | None = None) -> CapabilityState:
+                     project_id: str | None = None, exclude_checks: tuple[str, ...] = ()) -> CapabilityState:
     """Facade implementation. ``project_id`` is accepted for scoping; V1 checks are platform/domain-level."""
     ids = checks_for_capability(capability)
     return evaluate(Capability(capability), _rows(session, ids), now=utcnow(), fps=live_fingerprints(session, ids),
-                    domain=domain, session=session)
+                    domain=domain, session=session, exclude_checks=tuple(exclude_checks or ()))
 
 
 def capability_matrix(session: Session | None, *, domain: str | None = None,
@@ -256,7 +361,7 @@ def capability_matrix(session: Session | None, *, domain: str | None = None,
         st = evaluate(cap, rows, now=now, fps=fps, domain=domain, session=session)
         out.append({"capability": cap.value, "label": rule.label, "description": rule.description,
                     "domain": rule.domain, "status": st.status, "reasons": st.reasons, "checks": st.checks,
-                    "remedies": st.remedies})
+                    "remedies": st.remedies, "residual_risks": st.residual_risks})
     return out
 
 
@@ -272,6 +377,35 @@ def _matches(invalidator: str, declared: list[str]) -> bool:
 
 
 COMPONENT_INVALIDATOR = "component:"
+
+
+def invalidator_label(invalidator: str) -> str:
+    """Display form of an invalidator for stored reasons/events. ``secret:<ref>`` is shown as
+    ``secret-ref <ref>``: the raw form reads like a ``secret: value`` assignment to the redaction scanner
+    (it would be redacted to ``[REDACTED]`` and flagged by ``secret.no_raw_exposure``). Matching always
+    uses the raw invalidator."""
+    kind, sep, target = invalidator.partition(":")
+    if sep and kind.lower() in ("secret", "token", "password", "passwd", "api_key", "apikey"):
+        return f"{kind}-ref {target}"
+    return invalidator
+
+
+# Secret namespaces whose reference names are domain metadata (same rule as the platform-level
+# ``secret.status`` row): a result that is not scoped to that domain never quotes them (§35, §50).
+PRIVATE_SECRET_NAMESPACES: dict[str, str | None] = {"office": "OFFICE", "projects": None}
+PRIVATE_LABEL = "secret-ref <ber-scope domain>"
+PRIVATE_REASON = "credential ber-scope domain berubah; detail hanya terlihat di domain pemiliknya"
+
+
+def _private_owner(invalidator: str) -> tuple[bool, str | None]:
+    """(domain-private?, owning domain or None) of an invalidator target. Only ``secret:office/...`` and
+    ``secret:projects/...`` references are private; ``projects`` refs may belong to either domain."""
+    kind, sep, target = invalidator.partition(":")
+    if sep and kind.lower() == "secret":
+        ns = target.partition("/")[0]
+        if ns in PRIVATE_SECRET_NAMESPACES:
+            return True, PRIVATE_SECRET_NAMESPACES[ns]
+    return False, None
 
 
 def _depends(invalidator: str, row: Any) -> bool:
@@ -295,21 +429,32 @@ def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
     from aeos.inventory.observations import expire_component_observations
 
     n = 0
-    components: set[str] = set()
-    why = reason or f"invalidated by {invalidator}"
+    components: dict[str, bool] = {}  # component -> may quote the invalidator target
+    label = invalidator_label(invalidator)
+    why = reason or f"invalidated by {label}"
+    kind, _, target = invalidator.partition(":")
+    private, owner = _private_owner(invalidator)
     for cid, row in latest_results(session).items():
         if row.status == "STALE" or not _depends(invalidator, row):
             continue
+        # A platform-level row (or another domain's row) is visible to every/that session, and so is its
+        # domain-less event: it never names an OFFICE/per-project credential reference (§50 "counts are
+        # metadata too"). Matching above still used the raw invalidator.
+        row_domain = (row.scope or {}).get("domain")
+        quote = not private or (owner is not None and row_domain == owner)
+        row_label, row_why = (label, why) if quote else (PRIVATE_LABEL, PRIVATE_REASON)
         row.observed_evidence = {**(row.observed_evidence or {}), "status_before_stale": row.status,
-                                 "stale_reason": f"{why} ({invalidator})"[:300]}
+                                 "stale_reason": f"{row_why} [{row_label}]"[:300]}
         row.status = "STALE"
         n += 1
         if row.component_id:
-            components.add(row.component_id)
+            components[row.component_id] = components.get(row.component_id, True) and quote
         events.emit(session, source="doctor", kind="doctor.check.stale", entity_type="check", entity_id=cid,
-                    domain=(row.scope or {}).get("domain"),
-                    payload={"check_id": cid, "invalidator": invalidator, "reason": why[:200]})
-    for comp in components:
-        expire_component_observations(session, comp, reason=f"{invalidator}: {why}")
+                    domain=row_domain,
+                    payload={"check_id": cid, "invalidator": row_label, "invalidator_kind": kind,
+                             "invalidator_target": target if quote else None, "reason": row_why[:200]})
+    for comp, quote in components.items():
+        expire_component_observations(session, comp, reason=f"{label}: {why}" if quote
+                                      else f"{PRIVATE_LABEL}: {PRIVATE_REASON}")
     session.flush()
     return n

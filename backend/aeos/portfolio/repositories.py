@@ -441,7 +441,7 @@ def _github_token(actor: str) -> tuple[str | None, str]:
     try:
         from aeos.secrets import facade as secrets
 
-        return secrets.get_secret(GITHUB_SECRET_REF, purpose="repository-verify", actor=actor), "token"
+        return secrets.get_secret(GITHUB_SECRET_REF, purpose="personal:portfolio.repository-verify", actor=actor), "token"
     except (ImportError, ModuleNotFoundError):
         return None, "anonymous (secret store module unavailable)"
     except AeosError as exc:  # Blocked: store unavailable or secret missing -> read-only anonymous lookup

@@ -6,8 +6,10 @@ Create Date: ${create_date}
 """
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
+
+import aeos.core.db  # noqa: F401  (UTCDateTime column type)
 ${imports if imports else ""}
 
 revision = ${repr(up_revision)}

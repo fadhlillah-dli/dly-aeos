@@ -1,17 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Camera, X } from "lucide-react";
+import { Camera, Lightbulb, X } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { Badge, DIMENSION_LABELS, RELATION_LABELS } from "../../components/inventory/labels";
 import type { ComponentDetail, MapNode, RelationView, SnapshotDiff, SnapshotMeta } from "../../components/inventory/types";
-import { Button, Card, EmptyState, ErrorBox, inputClass, KeyValue, Loading, Mono, Notice } from "../../components/ui";
+import { proposeComponentHref } from "../../components/proposals/PageLinks";
+import { Button, Card, EmptyState, ErrorBox, inputClass, KeyValue, LinkButton, Loading, Mono, Notice } from "../../components/ui";
 import { absoluteTime, relativeTime, shortHash } from "../../lib/format";
 
 export function NodeCard({ node, lensLabel, onClose }: { node: MapNode; lensLabel: string; onClose: () => void }) {
   const unregistered = node.kind === "unregistered";
-  const { domain } = useAuth();
+  const { domain, isAdmin } = useAuth();
   const detail = useQuery({
     queryKey: ["inventory", "component", "card", domain, node.id],
     queryFn: () => get<ComponentDetail>(`/api/inventory/components/${encodeURIComponent(node.id)}`),
@@ -46,7 +47,7 @@ export function NodeCard({ node, lensLabel, onClose }: { node: MapNode; lensLabe
         {unregistered ? (
           <Notice tone="warn">
             Ditemukan di managed scope tanpa registrasi. Tidak diadopsi, tidak diuninstall dan tidak diberi akses.{" "}
-            <Link className="underline" to={`/proposals?component=${encodeURIComponent(node.id)}`}>Minta review</Link>
+            {isAdmin ? <Link className="underline" to={proposeComponentHref(node.id)}>Minta review</Link> : "Review dapat diminta oleh SUPER_ADMIN."}
           </Notice>
         ) : detail.isLoading ? (
           <Loading />
@@ -85,12 +86,25 @@ export function NodeCard({ node, lensLabel, onClose }: { node: MapNode; lensLabe
                 ))}
               </ul>
             </div>
-            <div className="flex flex-wrap gap-3 text-sm">
-              <Link className="text-accent hover:underline" to={`/tools/${node.id}`}>Buka detail komponen</Link>
-              <Link className="text-accent hover:underline" to={d.changes.propose_url}>
-                Usulkan perubahan{d.changes.proposals.length ? ` (${d.changes.proposals.length} usulan terkait)` : ""}
-              </Link>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <LinkButton to={`/tools/${encodeURIComponent(node.id)}`}>Buka detail komponen</LinkButton>
+              {isAdmin && (
+                <LinkButton to={proposeComponentHref(node.id)} variant="primary" title="Usulan tidak memasang atau mengaktifkan apa pun">
+                  <Lightbulb className="h-4 w-4" aria-hidden /> Usulkan perubahan
+                </LinkButton>
+              )}
             </div>
+            {d.changes.proposals.length > 0 && (
+              <p className="text-xs text-ink-3">
+                {d.changes.proposals.length} usulan terkait:{" "}
+                {d.changes.proposals.slice(0, 3).map((p, i) => (
+                  <span key={p.id}>
+                    {i > 0 && ", "}
+                    <Link className="text-accent hover:underline" to={`/proposals/${p.id}`}>{p.title}</Link>
+                  </span>
+                ))}
+              </p>
+            )}
           </>
         ) : null}
       </div>

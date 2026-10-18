@@ -189,16 +189,19 @@ def test_generic_decision_endpoint_rules(personal_client, db):
     r = personal_client.post("/api/decisions", json={**base, "kind": "WRITE_ENABLEMENT", "provider": "jira",
                                                      "enabled": True})
     assert r.status_code == 422  # jira is not a PERSONAL provider
+    # legacy spelling "google-docs" is accepted on input and recorded on the one provider id "google-drive"
     r = personal_client.post("/api/decisions", json={**base, "kind": "WRITE_ENABLEMENT", "provider": "google-docs",
                                                      "enabled": True})
     assert r.status_code == 201 and r.json()["details"]["enabled"] is True
+    assert r.json()["target_id"] == "google-drive"
     status = {i["provider"]: i for i in personal_client.get("/api/policy/write-enablement").json()["items"]}
-    assert status["google-docs"]["effective"] is True and status["github-repo"]["effective"] is False
-    r = personal_client.post("/api/decisions", json={**base, "kind": "WRITE_ENABLEMENT", "provider": "google-docs",
+    assert set(status) == {"google-drive", "github-issues", "github-repo"}
+    assert status["google-drive"]["effective"] is True and status["github-repo"]["effective"] is False
+    r = personal_client.post("/api/decisions", json={**base, "kind": "WRITE_ENABLEMENT", "provider": "google-drive",
                                                      "enabled": False})
     assert r.status_code == 201
     status = {i["provider"]: i for i in personal_client.get("/api/policy/write-enablement").json()["items"]}
-    assert status["google-docs"]["flag"] is False and status["google-docs"]["effective"] is False
+    assert status["google-drive"]["flag"] is False and status["google-drive"]["effective"] is False
     r = personal_client.post("/api/decisions", json={**base, "kind": "POLICY", "office_authorization": True,
                                                      "company_reference": "surat 1", "allowed_providers": ["jira"]})
     assert r.status_code == 422  # office authorisation only in the OFFICE domain

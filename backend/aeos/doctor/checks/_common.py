@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import importlib.util
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from aeos.doctor.model import CheckContext, FingerprintFn, Outcome, Remedy
 from aeos.inventory.probes import (
     clean_output,
+    file_is_placeholder,
     logical_location,
     parse_version,
     path_fingerprint,
     scrubbed_env,
 )
+
+Resolver = Callable[[CheckContext], tuple[str | None, str]]
 
 
 def resolve_binary(ctx: CheckContext, name: str, override_attr: str | None = None) -> tuple[str | None, str]:
@@ -24,9 +28,9 @@ def resolve_binary(ctx: CheckContext, name: str, override_attr: str | None = Non
     return ctx.runner.which(name), "PATH"
 
 
-def binary_fingerprint(name: str, override_attr: str | None = None) -> FingerprintFn:
+def binary_fingerprint(name: str, override_attr: str | None = None, resolver: Resolver | None = None) -> FingerprintFn:
     def fp(ctx: CheckContext) -> dict[str, Any]:
-        path, lookup = resolve_binary(ctx, name, override_attr)
+        path, lookup = resolver(ctx) if resolver else resolve_binary(ctx, name, override_attr)
         return {"binary": name, "lookup": lookup, **path_fingerprint(ctx.runner, path)}
 
     return fp
@@ -54,11 +58,11 @@ def run_version(ctx: CheckContext, path: str, args: list[str], *, regex: str | N
 
 def binary_outcome(ctx: CheckContext, *, name: str, override_attr: str | None, args: list[str],
                    missing_remedy: Remedy, regex: str | None = None, timeout: float = 15.0,
-                   label: str | None = None) -> Outcome:
+                   label: str | None = None, resolver: Resolver | None = None) -> Outcome:
     label = label or name
-    path, lookup = resolve_binary(ctx, name, override_attr)
+    path, lookup = resolver(ctx) if resolver else resolve_binary(ctx, name, override_attr)
     if not path:
-        where = f"setelan {override_attr}" if lookup == "settings" else "PATH"
+        where = f"setelan {override_attr}" if lookup == "settings" else ("<data>/bin dan PATH" if resolver else "PATH")
         return Outcome("MISSING", f"{label} tidak ditemukan ({where}).", evidence={"lookup": lookup},
                        error_code="BINARY_MISSING", remedy=missing_remedy)
     version, rr = run_version(ctx, path, args, regex=regex, timeout=timeout)
@@ -74,21 +78,31 @@ def binary_outcome(ctx: CheckContext, *, name: str, override_attr: str | None, a
 
 
 def module_present(name: str) -> tuple[bool, bool]:
-    """(present, placeholder) without importing the module body."""
+    """(present, placeholder) without importing the module body.
+
+    ``placeholder`` follows the shared inventory rule (explicit ``PLACEHOLDER —`` marker in the first
+    docstring line), so a real module that only mentions the word is never reported as missing."""
     try:
         spec = importlib.util.find_spec(name)
     except (ImportError, ValueError):
         return False, False
     if spec is None:
         return False, False
-    origin = getattr(spec, "origin", None)
-    placeholder = False
-    if origin and str(origin).endswith(".py"):
-        try:
-            placeholder = "PLACEHOLDER" in Path(origin).read_text(encoding="utf-8", errors="replace")[:2048]
-        except OSError:
-            placeholder = False
-    return True, placeholder
+    return True, file_is_placeholder(getattr(spec, "origin", None))
+
+
+def resolve_openbao(ctx: CheckContext) -> tuple[str | None, str]:
+    """(path, lookup) of the OpenBao binary with the same precedence as ``aeos vault`` (settings
+    override, then the user-level install in ``<data>/bin`` made by ``aeos vault install``, then PATH)."""
+    import sys
+
+    configured = getattr(ctx.settings, "openbao_binary", None)
+    if configured:
+        return (str(configured) if ctx.runner.stat(str(configured)) else None), "settings"
+    local = ctx.data_dir / "bin" / ("bao.exe" if sys.platform == "win32" else "bao")
+    if ctx.runner.stat(str(local)):
+        return str(local), "data-dir"
+    return ctx.runner.which("bao"), "PATH"
 
 
 def secret_ref_status(ref: str) -> tuple[str, dict[str, Any]]:

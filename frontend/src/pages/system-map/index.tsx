@@ -8,7 +8,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { DomainRequired } from "../../components/inventory/DomainRequired";
 import { Badge, LENS_LABELS, RELATION_LABELS } from "../../components/inventory/labels";
 import type { BlastRadius, MapNode, PathResult, RelationView, SystemMap } from "../../components/inventory/types";
-import { Button, Card, EmptyState, ErrorBox, inputClass, Loading, Notice, PageHeader, Table } from "../../components/ui";
+import { Button, Card, EmptyState, ErrorBox, inputBase, Loading, Notice, PageHeader, Table } from "../../components/ui";
 import { useEventStream } from "../../lib/events";
 import { foldGraph, groupId, hideNodes, type GEdge, type GNode } from "./layout";
 import { MapGraph } from "./MapGraph";
@@ -177,7 +177,7 @@ export default function SystemMapPage() {
             </label>
             <div className="relative">
               <Search className="pointer-events-none absolute left-2 top-2 h-4 w-4 text-ink-3" aria-hidden />
-              <input className={`${inputClass} w-56 pl-8`} placeholder="Cari komponen…" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Cari komponen di peta" />
+              <input className={`${inputBase} w-full pl-8 sm:w-56`} placeholder="Cari komponen…" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Cari komponen di peta" />
             </div>
           </div>
           <div className="mb-3 flex flex-wrap items-center gap-1 text-xs">

@@ -10,7 +10,16 @@ from typing import Any
 
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import binary_fingerprint, binary_outcome, file_fingerprint, logical
-from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd, os_install_command, venv_python
+from aeos.doctor.model import (
+    CheckContext,
+    Outcome,
+    Remedy,
+    aeos_cmd,
+    npm_cmd,
+    os_install_command,
+    shell_chain,
+    venv_python,
+)
 from aeos.inventory import scope as scope_reader
 from aeos.inventory.probes import version_tuple
 
@@ -116,8 +125,9 @@ def runtime_frontend_dist(ctx: CheckContext) -> Outcome:
                            target_identity=logical(ctx, c))
     return Outcome("MISSING", "Frontend belum di-build; dashboard tidak dapat dibuka (API tetap berjalan).",
                    evidence={"looked_in": ["<repo>/frontend/dist"]}, error_code="FRONTEND_NOT_BUILT",
-                   remedy=Remedy(operation="Build Control Center dari lockfile",
-                                 command="cd frontend; npm ci --no-audit --no-fund; npm run build",
+                   remedy=Remedy(operation="Build Control Center dari lockfile (dari root repo)",
+                                 command=shell_chain("cd frontend", npm_cmd("ci --no-audit --no-fund"),
+                                                     npm_cmd("run build")),
                                  source="frontend/package-lock.json", target="<repo>/frontend/dist",
                                  privilege="pengguna lokal", rollback="hapus frontend/dist",
                                  evidence_to_collect="frontend/dist/index.html ada"))
