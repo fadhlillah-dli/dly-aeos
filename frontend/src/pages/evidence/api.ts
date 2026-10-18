@@ -225,7 +225,8 @@ export const evidenceApi = {
   review: (runId: string, reviewer: "FEATURE" | "SECURITY" = "FEATURE") =>
     post<{ review: ReviewItem }>(`/api/runs/${encodeURIComponent(runId)}/review`, { reviewer }),
   recheck: (id: string) => post<AcceptanceItem>(`/api/acceptance/${encodeURIComponent(id)}/recheck`),
-  preparePr: (taskId: string) => post<{ pull_request: PRItem }>(`/api/tasks/${encodeURIComponent(taskId)}/prepare-pr`, {}),
+  preparePr: (taskId: string) =>
+    post<{ pull_request: PRItem; notes?: string[] }>(`/api/tasks/${encodeURIComponent(taskId)}/prepare-pr`, {}),
   handoff: (taskId: string) => post<{ output: { result: string } }>(`/api/delivery/governance/${encodeURIComponent(taskId)}/handoff`, {}),
   syncPr: (id: string) => post<{ notes: string[] }>(`/api/delivery/prs/${encodeURIComponent(id)}/sync`),
   recordCapabilities: () => post<ProviderCaps>("/api/delivery/provider-capabilities/record", {}),

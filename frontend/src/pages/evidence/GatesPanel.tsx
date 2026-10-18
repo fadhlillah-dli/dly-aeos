@@ -69,7 +69,10 @@ export function GatesPanel({ taskId }: { taskId: string | null }) {
             {d.task_key} · head {shortHash(d.head_commit, 10)}
           </div>
         </div>
-        <Freshness at={d.checked_at} label="Dihitung" />
+        <div className="flex items-center gap-2">
+          {d.mode !== "LIVE" && <Status status={d.mode} />}
+          <Freshness at={d.checked_at} label="Dihitung" />
+        </div>
       </div>
       <Notice tone="warn">
         Merge ke main dan rilis adalah tindakan manusia. DLY AEOS tidak memiliki operasi merge atau deploy.
@@ -106,6 +109,17 @@ export function GatesPanel({ taskId }: { taskId: string | null }) {
         </div>
       )}
       <ErrorBox error={prepare.error ?? handoff.error} />
+      {prepare.data && (
+        <Notice tone={prepare.data.notes?.length ? "warn" : "info"}>
+          PR disiapkan melalui broker{prepare.data.pull_request.number ? ` (#${prepare.data.pull_request.number})` : ""}. Merge
+          tetap keputusan manusia.
+          {prepare.data.notes?.map((n) => (
+            <span key={n} className="block">
+              {n}
+            </span>
+          ))}
+        </Notice>
+      )}
       {handoff.data && (
         <Notice tone="warn">
           Hasil governance handoff: <strong>{handoff.data.output.result}</strong> — belum ada governance harness downstream

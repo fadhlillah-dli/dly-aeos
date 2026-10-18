@@ -256,30 +256,56 @@ class AddedLine:
     text: str
 
 
+_HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_UNKNOWN_PATH = "<unparsed-path>"
+
+
 def added_lines(diff_text: str) -> list[AddedLine]:
-    """Added lines of a unified diff with their new-file line numbers."""
+    """Added lines of a unified diff with their new-file line numbers.
+
+    Hunk bodies are consumed by their declared line counts, so an *added line* that itself starts
+    with ``++ `` / ``-- `` / ``diff --git`` can never be mistaken for a file header (which would let a
+    patch re-attribute its following lines to an allow-listed path and dodge the secret scan).
+    """
     out: list[AddedLine] = []
     path: str | None = None
     new_line = 0
-    hunk = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-    for raw in diff_text.splitlines():
+    old_left = new_left = 0
+    for raw in diff_text.split("\n"):
+        if raw.endswith("\r"):
+            raw = raw[:-1]
+        if old_left > 0 or new_left > 0:
+            if raw.startswith("\\"):  # "\ No newline at end of file"
+                continue
+            tag, body = raw[:1], raw[1:]
+            if tag == "+":
+                out.append(AddedLine(path or _UNKNOWN_PATH, new_line, body))
+                new_line += 1
+                new_left -= 1
+            elif tag == "-":
+                old_left -= 1
+            else:  # context line (" " or an empty line from a stripped trailing space)
+                new_line += 1
+                old_left -= 1
+                new_left -= 1
+            continue
+        if raw.startswith("diff --git "):
+            path = None
+            continue
         if raw.startswith("+++ "):
             target = raw[4:].strip()
-            path = None if target == "/dev/null" else (target[2:] if target.startswith("b/") else target)
+            if target == "/dev/null":
+                path = None
+            else:
+                path = target[2:] if target.startswith("b/") else (target or _UNKNOWN_PATH)
             continue
-        if raw.startswith("--- "):
-            continue
-        m = hunk.match(raw)
+        m = _HUNK.match(raw)
         if m:
-            new_line = int(m.group(1))
-            continue
-        if path is None:
-            continue
-        if raw.startswith("+"):
-            out.append(AddedLine(path, new_line, raw[1:]))
-            new_line += 1
-        elif raw.startswith(" "):
-            new_line += 1
+            old_left = int(m.group(1)) if m.group(1) is not None else 1
+            new_line = int(m.group(2))
+            new_left = int(m.group(3)) if m.group(3) is not None else 1
+            if path is None:
+                path = _UNKNOWN_PATH  # hunk without a parsable header: scan it, never skip it
     return out
 
 
@@ -293,6 +319,29 @@ def scan_added_secrets(lines: list[AddedLine]) -> list[dict[str, Any]]:
             if pat.search(al.text):
                 findings.append({"path": al.path, "line": al.line, "pattern": pat.pattern[:32] + "..."})
                 break
+    return findings
+
+
+BINARY_SCAN_MAX_BYTES = 20 * 1024 * 1024
+
+
+def scan_binary_secrets(path: str, data: bytes) -> list[dict[str, Any]]:
+    """High-confidence credential shapes inside a changed *binary* file.
+
+    ``git diff`` prints only "Binary files differ" for files containing NUL bytes, so the added-line
+    scan never sees them; without this a credential could be committed inside such a file unseen.
+    Findings never include the value; offsets are byte offsets (latin-1 view of the bytes). Only the
+    first ``BINARY_SCAN_MAX_BYTES`` are scanned — the caller reports larger files as NOT-PROVEN.
+    """
+    if path in SECRET_SCAN_ALLOW:
+        return []
+    text = data[:BINARY_SCAN_MAX_BYTES].decode("latin-1")
+    findings: list[dict[str, Any]] = []
+    for pat in _HIGH_CONFIDENCE:
+        m = pat.search(text)
+        if m:
+            findings.append({"path": path, "line": None, "offset": m.start(), "pattern": pat.pattern[:32] + "...",
+                             "binary": True})
     return findings
 
 

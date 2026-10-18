@@ -96,3 +96,42 @@ def test_added_lines_secret_and_tamper_scan():
     assert token not in str(secrets)
     tamper = scope.scan_harness_tamper(lines)
     assert tamper == [{"path": "backend/cfg.py", "line": 3, "rule": "HARNESS_TAMPER_CODE"}]
+
+
+def test_added_line_that_looks_like_a_file_header_cannot_dodge_the_scan():
+    """Hunk bodies are consumed by their declared counts: an added line starting with "++ b/<allow-listed>"
+    is still an added line of the real file, so a following credential is scanned (and attributed)."""
+    token = fake_secret()
+    diff = (
+        "diff --git a/backend/cfg.py b/backend/cfg.py\n"
+        "--- a/backend/cfg.py\n"
+        "+++ b/backend/cfg.py\n"
+        "@@ -1,1 +1,3 @@\n"
+        " X = 1\n"
+        "+++ b/tests/unit/test_core.py\n"
+        f'+TOKEN = "{token}"\n'
+    )
+    lines = scope.added_lines(diff)
+    assert [(a.path, a.line) for a in lines] == [("backend/cfg.py", 2), ("backend/cfg.py", 3)]
+    assert [f["path"] for f in scope.scan_added_secrets(lines)] == ["backend/cfg.py"]
+
+
+def test_hunk_without_parsable_header_is_still_scanned():
+    token = fake_secret()
+    lines = scope.added_lines(f'@@ -0,0 +1 @@\n+TOKEN = "{token}"\n')
+    assert [a.path for a in lines] == ["<unparsed-path>"]
+    assert scope.scan_added_secrets(lines)
+
+
+def test_crlf_diff_lines_are_parsed():
+    lines = scope.added_lines("+++ b/a.py\r\n@@ -0,0 +1,2 @@\r\n+one\r\n+two\r\n")
+    assert [(a.path, a.line, a.text) for a in lines] == [("a.py", 1, "one"), ("a.py", 2, "two")]
+
+
+def test_binary_secret_scan_never_returns_the_value():
+    token = fake_secret()
+    findings = scope.scan_binary_secrets("assets/x.bin", b"\x00\xff" + token.encode() + b"\x00")
+    assert len(findings) == 1 and findings[0]["binary"] is True and findings[0]["offset"] == 2
+    assert token not in str(findings)
+    assert scope.scan_binary_secrets("assets/y.bin", b"\x00\x01\x02 plain bytes") == []
+    assert scope.scan_binary_secrets("tests/unit/test_core.py", token.encode()) == []  # same allow-list

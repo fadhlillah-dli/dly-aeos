@@ -82,3 +82,43 @@ def test_git_reader_export_is_exact_tree(tmp_path: Path):
 @pytest.mark.skipif(GIT is None, reason="git not available")
 def test_git_reader_rejects_non_repo(tmp_path: Path):
     assert procs.GitReader(tmp_path).is_repository() is False
+
+
+def test_git_env_is_an_allow_list_without_credentials(monkeypatch):
+    token = fake_secret()
+    monkeypatch.setenv("GITHUB_TOKEN", token)
+    monkeypatch.setenv("GIT_DIR", "/elsewhere")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.hooksPath'='/evil'")
+    monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i key")
+    env = procs.git_env()
+    assert token not in "".join(env.values())
+    for key in ("GITHUB_TOKEN", "GIT_DIR", "GIT_CONFIG_PARAMETERS", "GIT_SSH_COMMAND"):
+        assert key not in env
+    assert env["GIT_TERMINAL_PROMPT"] == "0" and env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_NO_LAZY_FETCH"] == "1"
+
+
+@pytest.mark.parametrize("name,ok", [
+    ("aeos/t1-attempt-1", True), ("feature/x.y", True), ("main", True),
+    ("-delete", False), ("a..b", False), ("a//b", False), ("x.lock", False), ("x/", False), ("HEAD@{1}", False),
+    ("refs/heads/../x", False), ("", False), (None, False), ("a b", False), ("a:b", False), ("~1", False),
+])
+def test_valid_branch(name, ok):
+    assert procs.valid_branch(name) is ok
+
+
+@requires_git
+def test_branch_head_reads_only_local_branches(tmp_path: Path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "a")
+    git(repo, "branch", "aeos/t1")
+    reader = procs.GitReader(repo)
+    assert reader.branch_head("aeos/t1") == git(repo, "rev-parse", "HEAD")
+    with pytest.raises(procs.GitError):
+        reader.branch_head("aeos/missing")
+    with pytest.raises(procs.GitError):
+        reader.branch_head("--output=/tmp/x")

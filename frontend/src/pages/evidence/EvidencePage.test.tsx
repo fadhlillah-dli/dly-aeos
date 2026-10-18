@@ -94,6 +94,28 @@ describe("Evidence & Decisions page", () => {
     expect(within(dialog).getByText(/tidak pernah dihitung sebagai kelulusan/)).toBeInTheDocument();
   });
 
+  it("warns when stored evidence no longer matches its hash and renders nested environment values", async () => {
+    const item = {
+      id: "ev-7", project_id: "p", domain: "PERSONAL", subject_type: "run", subject_id: "run-1", run_id: "run-1",
+      task_id: "task-1", claim: "verification PASS", kind: "VERIFICATION_REPORT", origin: "verifier",
+      collector_identity: "aeos-verifier/1", trusted: true, content_hash: "sha256:" + "2".repeat(64),
+      content_type: "application/json", classification: "INTERNAL", has_content: true, size_bytes: 9, evidence_level: "E2",
+      level_explanation: "Uji terkendali", level_requested: "E2", level_reason: "controlled test",
+      environment: { commit: "a".repeat(40), protected_suite: { suite_hash: "sha256:x" } }, created_at: new Date().toISOString(),
+      mode: "LIVE",
+    };
+    respond({
+      "/api/evidence/ev-7": { ...item, inline: {}, integrity: "MISMATCH", content: "{}", content_note: null },
+      "/api/evidence": { items: [item], source: "s", checked_at: new Date().toISOString(), mode: "LIVE", level_explanations: {}, trusted_collectors: [] },
+    });
+    wrap(<EvidenceLedger />);
+    await userEvent.click(await screen.findByText("verification PASS"));
+    const dialog = await screen.findByRole("dialog", { name: "Detail bukti" });
+    expect(await within(dialog).findByText("Isi TIDAK cocok dengan hash")).toBeInTheDocument();
+    expect(within(dialog).getByText(/Integritas gagal/)).toBeInTheDocument();
+    expect(within(dialog).getByText('{"suite_hash":"sha256:x"}')).toBeInTheDocument();
+  });
+
   it("shows the residual-risk banner when branch protection is not enforceable (§31)", () => {
     const caps: ProviderCaps = {
       provider: "GITHUB", repo: "o/r", branch: "main", checked_at: new Date().toISOString(), credential: "AVAILABLE",

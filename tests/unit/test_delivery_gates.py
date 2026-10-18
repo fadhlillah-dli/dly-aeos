@@ -156,3 +156,66 @@ def test_ci_failure_and_verifier_lint_failure_fail_g1(db, wf, monkeypatch):
     g2 = _by(gates.compute_gates(db, w2.task.id))
     assert g2["G1"]["status"] == "FAIL"
     assert g2["G3"]["status"] == "NOT_APPLICABLE", "no frontend change and no frontend job"
+
+
+def test_verifier_secret_scan_failure_fails_g1(db, wf, monkeypatch):
+    w = make_world(db)
+    install_planning(monkeypatch, w.version)
+    record_verification(db, w, leak="FAIL")
+    _ci(db, w, HEAD, [("backend (ubuntu-latest)", "success")])
+    db.commit()
+    assert _by(gates.compute_gates(db, w.task.id))["G1"]["status"] == "FAIL"
+
+
+def test_pass_static_counts_only_for_allowed_docs_only_changes(db, wf, monkeypatch):
+    """Consistent with acceptance: PASS-STATIC is a G4 pass only for docs-only changes the TaskSpec allows."""
+    w = make_world(db)
+    install_planning(monkeypatch, w.version)
+    report = record_verification(db, w, changed=["backend/extra.py"])
+    make_review(db, w, report, verdict="PASS-STATIC")
+    g4 = _by(gates.compute_gates(db, w.task.id))["G4"]
+    assert g4["status"] == "NOT_PROVEN" and "PASS-STATIC" in g4["summary"]
+    d = make_world(db, project_key="docs", risk_class="R0")
+    install_planning(monkeypatch, d.version)
+    report = record_verification(db, d, changed=["docs/guide.md"])
+    make_review(db, d, report, verdict="PASS-STATIC")
+    assert _by(gates.compute_gates(db, d.task.id))["G4"]["status"] == "PASS"
+
+
+def test_high_impact_change_needs_every_non_regression_dimension_for_g4(db, wf, monkeypatch):
+    """§31: routing/IAM/CI/schema/... changes need full non-regression coverage, as acceptance does."""
+    w = make_world(db)
+    install_planning(monkeypatch, w.version)
+    report = record_verification(db, w, changed=["backend/aeos/api/deps_extra.py"])
+    partial = {"existing_behavior": {"status": "COVERED", "note": "ok"},
+               "authn_authz": {"status": "UNKNOWN", "note": "?"}}
+    make_review(db, w, report, non_regression=partial)
+    g4 = _by(gates.compute_gates(db, w.task.id))["G4"]
+    assert g4["status"] == "NOT_PROVEN"
+    assert any("authn_authz" in r for r in g4["reasons"]) and any("callers" in r for r in g4["reasons"])
+
+
+def test_g2_is_stale_when_grader_or_config_changed(db, wf, monkeypatch):
+    """§50 "Config/model/provider berubah": an old PASS under another grader/config is STALE, not PASS."""
+    w = make_world(db)
+    install_planning(monkeypatch, w.version)
+    record_verification(db, w)
+    assert _by(gates.compute_gates(db, w.task.id))["G2"]["status"] == "PASS"
+    monkeypatch.setattr(gates, "current_config_hash", lambda task: "sha256:" + "9" * 64)
+    g2 = _by(gates.compute_gates(db, w.task.id))["G2"]
+    assert g2["status"] == "STALE" and "Konfigurasi" in g2["summary"]
+    monkeypatch.setattr(gates, "current_config_hash", lambda task: None)
+    assert _by(gates.compute_gates(db, w.task.id))["G2"]["status"] == "STALE"
+
+
+def test_truncated_check_runs_are_never_a_pass(db, wf, monkeypatch):
+    w = make_world(db)
+    install_planning(monkeypatch, w.version)
+    record_verification(db, w)
+    ci = provider.parse_check_runs("o/r", HEAD, [{"total_count": 150, "check_runs": [
+        {"name": "backend (ubuntu-latest)", "status": "completed", "conclusion": "success", "head_sha": HEAD}]}])
+    assert ci.truncated and ci.overall == "NOT_PROVEN"
+    assert ci.gate_status("G1")[0] == "NOT_PROVEN"
+    provider.record_ci_evidence(db, w.project, ci, task_id=w.task.id)
+    db.commit()
+    assert _by(gates.compute_gates(db, w.task.id))["G1"]["status"] == "NOT_PROVEN"

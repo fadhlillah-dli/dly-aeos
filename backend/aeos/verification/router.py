@@ -36,6 +36,12 @@ EVIDENCE_SOURCE = "evidence_artifacts (append-only local ledger; not a WORM/tamp
 MAX_INLINE_CONTENT = 256 * 1024
 
 
+def _mode_of(modes: Any) -> str:
+    """LIVE / MOCK / … for a list response; mixed lists say MIXED so fixtures are never shown as LIVE."""
+    distinct = sorted(set(modes))
+    return distinct[0] if len(distinct) == 1 else ("MIXED" if distinct else "LIVE")
+
+
 def visible_project_ids(db: Session, principal: Principal, domain: Domain) -> list[str]:
     ids = list(db.scalars(select(Project.id).where(Project.domain == domain.value)))
     if principal.allowed_project_ids is not None:
@@ -102,12 +108,11 @@ def list_evidence(
     if origin:
         q = q.where(EvidenceArtifact.origin == origin.lower())
     rows = db.scalars(q.order_by(EvidenceArtifact.created_at.desc()).limit(limit)).all()
-    modes = sorted({r.mode for r in rows})
     return {
         "items": [evidence_item(r) for r in rows],
         "source": EVIDENCE_SOURCE,
         "checked_at": utcnow().isoformat(),
-        "mode": modes[0] if len(modes) == 1 else ("MIXED" if modes else "LIVE"),
+        "mode": _mode_of(r.mode for r in rows),
         "level_explanations": collector.LEVEL_EXPLANATIONS,
         "trusted_collectors": sorted(TRUSTED_COLLECTORS),
     }
@@ -167,7 +172,7 @@ def list_reviews(principal: CurrentPrincipal, domain: ActiveDomain, db: DB, run_
         q = q.where(ReviewRecord.status == status)
     rows = db.scalars(q.order_by(ReviewRecord.created_at.desc()).limit(limit)).all()
     return {"items": [review.review_view(r) for r in rows], "source": "review_records",
-            "checked_at": utcnow().isoformat(), "mode": "LIVE",
+            "checked_at": utcnow().isoformat(), "mode": _mode_of(r.mode for r in rows),
             "note": "Verdict reviewer saja tidak pernah sama dengan penerimaan (U-14)."}
 
 
@@ -189,7 +194,12 @@ def submit_manual_result(review_id: str, body: ManualResultIn, principal: AdminP
     rec = db.scalar(select(ReviewRecord).where(ReviewRecord.id == review_id, _review_scope(db, principal, domain)))
     if rec is None:
         raise NotFound("review not found")
-    outcome = review.collect_manual_review(db, rec.id, actor=principal.user.id, structured=body.structured)
+    try:
+        outcome = review.collect_manual_review(db, rec.id, actor=principal.user.id, structured=body.structured)
+    except AeosError as exc:
+        audit_denied(db, principal, "verification.review.manual_result", exc, target_type="review",
+                     target_id=rec.id, project_id=rec.project_id, domain=rec.domain)
+        raise
     db.commit()
     return {"review": review.review_view(outcome.review), "acceptance": outcome.acceptance, "notes": outcome.notes}
 
@@ -205,6 +215,11 @@ def _load_run(db: Session, principal: Principal, domain: Domain, run_id: str) ->
     return run
 
 
+def _run_target(run: WorkerRun) -> dict[str, Any]:
+    # read before a rollback expires the instance
+    return {"target_type": "worker_run", "target_id": run.id, "project_id": run.project_id, "domain": run.domain}
+
+
 class VerifyIn(BaseModel):
     candidate_path: str | None = Field(default=None, max_length=1024)
     request_repair: bool = True
@@ -213,8 +228,12 @@ class VerifyIn(BaseModel):
 @router.post("/api/runs/{run_id}/verify")
 def verify(run_id: str, body: VerifyIn, principal: AdminPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     run = _load_run(db, principal, domain, run_id)
-    outcome = verifier.verify_run(db, run.id, actor=principal.user.id, candidate_path=body.candidate_path,
-                                  request_repair_on_fail=body.request_repair)
+    try:
+        outcome = verifier.verify_run(db, run.id, actor=principal.user.id, candidate_path=body.candidate_path,
+                                      request_repair_on_fail=body.request_repair)
+    except AeosError as exc:
+        audit_denied(db, principal, "verification.run", exc, **_run_target(run))
+        raise
     db.commit()
     return outcome.to_dict()
 
@@ -227,7 +246,11 @@ class ReviewIn(BaseModel):
 def request_review(run_id: str, principal: AdminPrincipal, domain: ActiveDomain, db: DB,
                    body: ReviewIn | None = None) -> dict[str, Any]:
     run = _load_run(db, principal, domain, run_id)
-    outcome = review.review_run(db, run.id, actor=principal.user.id, reviewer=(body or ReviewIn()).reviewer)
+    try:
+        outcome = review.review_run(db, run.id, actor=principal.user.id, reviewer=(body or ReviewIn()).reviewer)
+    except AeosError as exc:
+        audit_denied(db, principal, "verification.review", exc, **_run_target(run))
+        raise
     db.commit()
     return {"review": review.review_view(outcome.review), "acceptance": outcome.acceptance, "notes": outcome.notes}
 
@@ -235,7 +258,12 @@ def request_review(run_id: str, principal: AdminPrincipal, domain: ActiveDomain,
 @router.post("/api/runs/{run_id}/acceptance/evaluate")
 def evaluate(run_id: str, principal: AdminPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     run = _load_run(db, principal, domain, run_id)
-    rec = acceptance_mod.evaluate_acceptance(db, run.id, actor=f"acceptance-engine (requested by {principal.user.id})")
+    try:
+        rec = acceptance_mod.evaluate_acceptance(db, run.id,
+                                                 actor=f"acceptance-engine (requested by {principal.user.id})")
+    except AeosError as exc:
+        audit_denied(db, principal, "verification.acceptance.decide", exc, **_run_target(run))
+        raise
     db.commit()
     return acceptance_mod.acceptance_view(db, rec)
 
@@ -254,7 +282,7 @@ def list_acceptance(principal: CurrentPrincipal, domain: ActiveDomain, db: DB, t
         q = q.where(AcceptanceRecord.run_id == run_id)
     rows = db.scalars(q.order_by(AcceptanceRecord.created_at.desc()).limit(limit)).all()
     return {"items": [acceptance_mod.acceptance_view(db, r) for r in rows], "source": "acceptance_records",
-            "checked_at": utcnow().isoformat(), "mode": "LIVE",
+            "checked_at": utcnow().isoformat(), "mode": _mode_of(r.mode for r in rows),
             "note": "Penerimaan adalah keputusan kode (verifier PASS + review); merge tetap keputusan manusia."}
 
 
@@ -300,7 +328,7 @@ def verification_summary(principal: CurrentPrincipal, domain: ActiveDomain, db: 
             "merged": {"status": run.merged_status},
         })
     return {"items": items, "source": "worker_runs + evidence_artifacts + review_records + acceptance_records",
-            "checked_at": utcnow().isoformat(), "mode": "LIVE"}
+            "checked_at": utcnow().isoformat(), "mode": _mode_of(r.mode for r in runs)}
 
 
 def audit_denied(db: Session, principal: Principal, action: str, exc: AeosError, **target: Any) -> None:

@@ -10,6 +10,7 @@ deploy call anywhere in delivery: merge to main is a human action (U-09).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -29,6 +30,7 @@ from aeos.models.workforce import WorkerRun
 from aeos.verification import acceptance as acceptance_mod
 from aeos.verification import collector
 from aeos.verification.integration import call
+from aeos.verification.procs import GitError, GitReader
 from aeos.verification.verifier import related_evidence, report_view
 
 TASK_BRANCH_PREFIX = "aeos/"
@@ -129,7 +131,7 @@ def build_pr_bundle(session: Session, task_id: str) -> PRBundle:
                      "trusted_suite": view.get("trusted_suite_status"), "tests_passed": view.get("tests_passed"),
                      "tests_failed": view.get("tests_failed"), "tests_skipped": view.get("tests_skipped"),
                      "candidate_tests": view.get("candidate_tests_status"), "ruff": view.get("ruff_status"),
-                     "scope": view.get("scope_status"), "secret_scan": view.get("secret_scan_status"),
+                     "scope": view.get("scope_status"), "leak_scan": view.get("leak_scan_status"),
                      "evidence": evidence_rows},
         "review": {"id": review.id if review else None, "verdict": review.verdict if review else None,
                    "verdict_requested": review.verdict_requested if review else None,
@@ -186,7 +188,7 @@ def _markdown(d: dict[str, Any], bundle_hash: str) -> str:
         f"- Trusted acceptance suite: {_cell(v['trusted_suite'])} ({_cell(v['tests_passed'])} passed, "
         f"{_cell(v['tests_failed'])} failed, {_cell(v['tests_skipped'])} skipped)",
         f"- Candidate's own tests (lower trust): {_cell(v['candidate_tests'])} · ruff (trusted config): "
-        f"{_cell(v['ruff'])} · scope: {_cell(v['scope'])} · secret scan: {_cell(v['secret_scan'])}",
+        f"{_cell(v['ruff'])} · scope: {_cell(v['scope'])} · secret scan: {_cell(v['leak_scan'])}",
         "",
         "| Evidence | Kind | Level | Trusted | Content hash |", "|---|---|---|---|---|",
         *[f"| `{e['id']}` | {e['kind']} | {e['level']} | {'yes' if e['trusted'] else 'no'} | `{e['content_hash']}` |"
@@ -248,6 +250,17 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
         raise Blocked("accepted run has no aeos/* task branch", code="BRANCH_NOT_TASK_BRANCH")
     if not run.workspace_ref:
         raise Blocked("accepted run has no candidate workspace", code="NO_CANDIDATE")
+    # The broker pushes the branch tip: it must still be exactly the accepted head (read-only git plumbing).
+    try:
+        local_head = GitReader(Path(run.workspace_ref)).branch_head(run.branch)
+    except GitError as exc:
+        raise Blocked(f"task branch head could not be read from the candidate workspace: {exc}",
+                      code="BRANCH_UNRESOLVED") from exc
+    if local_head != acc.head_commit:
+        acceptance_mod.invalidate(session, task_id=task.id, reason="task branch moved after acceptance",
+                                  actor="delivery", head_commit=local_head)
+        raise Conflict("the task branch no longer points at the accepted head; acceptance is now STALE",
+                       code="HEAD_MISMATCH", details={"accepted": acc.head_commit, "branch_head": local_head})
     existing = session.scalar(select(PullRequestRecord).where(PullRequestRecord.acceptance_id == acc.id,
                                                               PullRequestRecord.state.in_(["PREPARED", "OPEN"])))
     if existing is not None:
@@ -293,6 +306,10 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
     if not pushed.ok:
         raise Blocked(f"trusted broker push {pushed.label()}", code="BROKER_PUSH_FAILED")
     pushed_sha = (pushed.result or {}).get("head_sha") or (pushed.result or {}).get("sha")
+    notes: list[str] = []
+    if not pushed_sha:
+        notes.append("broker did not report the pushed head; identity is NOT-PROVEN until the PR is synced "
+                     "(aeos delivery sync-pr)")
     if pushed_sha and acc.head_commit and pushed_sha != acc.head_commit:
         acceptance_mod.invalidate(session, task_id=task.id, reason="pushed branch head differs from accepted head",
                                   actor="delivery", head_commit=pushed_sha)
@@ -321,7 +338,7 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
                 entity_version=acc.head_commit, project_id=project.id, domain=project.domain, run_id=run.id,
                 payload={"task_id": task.id, "url": pr.url, "number": pr.number})
     return {"pull_request": pr_view(pr), "bundle_hash": bundle.bundle_hash, "bundle_evidence_id": bundle_ev.id,
-            "merge_authority": "HUMAN_ONLY"}
+            "merge_authority": "HUMAN_ONLY", "notes": notes}
 
 
 def _safe(value: Any) -> dict[str, Any]:

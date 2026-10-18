@@ -32,9 +32,10 @@ from aeos.core.errors import Blocked, NotFound
 from aeos.core.hashing import content_hash
 from aeos.core.timeutil import utcnow
 from aeos.events import service as events
+from aeos.models.decisions import Decision
 from aeos.models.delivery_ext import PullRequestRecord
 from aeos.models.evidence import EvidenceArtifact, ReviewRecord
-from aeos.models.planning import TaskSpec
+from aeos.models.planning import PlanVersion, TaskSpec
 from aeos.models.portfolio import Project
 from aeos.verification import acceptance as acceptance_mod
 from aeos.verification import collector
@@ -44,6 +45,7 @@ CONTRACT_VERSION = "1.0"
 RESULTS = ("HANDED_OFF", "ACCEPTED", "REJECTED", "BLOCKED", "NOT_CONFIGURED")
 DEPENDENCY_FILES = ("pyproject.toml", "package.json", "package-lock.json", "requirements", "uv.lock", "poetry.lock")
 CONTRACT_PATHS = ("facade.py", "contracts/", "backend/aeos/api/", "router.py")
+OWNER_DECISION_KINDS = ("RISK_ACCEPTANCE", "EXCEPTION", "APPROVAL")
 
 
 def _freeze(value: Any) -> Any:
@@ -169,6 +171,14 @@ def build_input(session: Session, task_id: str) -> tuple[GovernanceHandoffInput,
     changed = list((collector.read_json(scope_ev) or {}).get("changed_files") or [])
     review = session.get(ReviewRecord, acc.review_record_id) if acc.review_record_id else None
     migrations = [p for p in changed if "/migrations/" in p]
+    # §32 input "risk/owner decisions": ACTIVE human decisions bound to this task, its PlanVersion or plan
+    # (read-only; the policy module owns Decision rows). References only — the adapter never writes them.
+    pv = session.get(PlanVersion, task.plan_version_id)
+    targets = [t for t in (task.id, task.plan_version_id, pv.plan_id if pv else None) if t]
+    decisions = session.scalars(select(Decision).where(
+        Decision.project_id == project.id, Decision.target_id.in_(targets), Decision.status == "ACTIVE",
+        Decision.actor_kind == "HUMAN", Decision.kind.in_(OWNER_DECISION_KINDS)))
+    risk_decisions = tuple(sorted(f"{d.kind}:{d.id}" for d in decisions))
     payload = GovernanceHandoffInput(
         contract_version=CONTRACT_VERSION, project_id=project.id, domain=project.domain, task_id=task.id,
         task_key=task.task_key, task_spec_hash=task.spec_hash, plan_version_id=task.plan_version_id,
@@ -181,7 +191,7 @@ def build_input(session: Session, task_id: str) -> tuple[GovernanceHandoffInput,
                                    "status": full.get("status"), "level": report.evidence_level}] if report else []),
         reviewer=_freeze({"review_record_id": review.id, "verdict": review.verdict,
                           "findings": review.findings} if review else {}),
-        risk_decisions=tuple(),
+        risk_decisions=risk_decisions,
         rollback=_freeze({"migrations_changed": migrations,
                           "note": "code revert does not revert data" if migrations else "revert the merge commit"}),
     )

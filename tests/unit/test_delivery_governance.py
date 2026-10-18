@@ -108,3 +108,28 @@ def test_requires_acceptance(db, monkeypatch):
     w = make_world(db)
     with pytest.raises(Blocked):
         governance.handoff(db, w.task.id, actor="owner")
+
+
+def test_handoff_input_carries_owner_risk_decisions_by_reference(db, accepted):
+    """§32 input includes risk/owner decisions: only ACTIVE, human, same-project decisions on this task or
+    its plan are referenced; the adapter receives ids, never a writable session."""
+    w, _acc = accepted
+    other = make_world(db, project_key="other-project")
+    keep = Decision(kind="RISK_ACCEPTANCE", project_id=w.project.id, domain="PERSONAL", actor_user_id="owner",
+                    target_type="task", target_id=w.task.id, status="ACTIVE")
+    plan_level = Decision(kind="APPROVAL", project_id=w.project.id, domain="PERSONAL", actor_user_id="owner",
+                          target_type="plan_version", target_id=w.version.id, status="ACTIVE")
+    ignored = [
+        Decision(kind="RISK_ACCEPTANCE", project_id=w.project.id, domain="PERSONAL", actor_user_id="owner",
+                 target_type="task", target_id=w.task.id, status="INVALIDATED"),
+        Decision(kind="RISK_ACCEPTANCE", project_id=w.project.id, domain="PERSONAL", actor_user_id="agent",
+                 actor_kind="AGENT", target_type="task", target_id=w.task.id, status="ACTIVE"),
+        Decision(kind="RISK_ACCEPTANCE", project_id=other.project.id, domain="PERSONAL", actor_user_id="owner",
+                 target_type="task", target_id=w.task.id, status="ACTIVE"),
+        Decision(kind="BUDGET", project_id=w.project.id, domain="PERSONAL", actor_user_id="owner",
+                 target_type="task", target_id=w.task.id, status="ACTIVE"),
+    ]
+    db.add_all([keep, plan_level, *ignored])
+    db.commit()
+    payload, _ = governance.build_input(db, w.task.id)
+    assert payload.risk_decisions == tuple(sorted([f"RISK_ACCEPTANCE:{keep.id}", f"APPROVAL:{plan_level.id}"]))

@@ -54,7 +54,15 @@ from aeos.models.workforce import WorkerRun
 from aeos.verification import collector, scope, suite
 from aeos.verification.integration import call
 from aeos.verification.junit import JUnitParseError, JUnitReport, nodeid_to_key, parse_junit
-from aeos.verification.procs import GitError, GitReader, ProcResult, SnapshotError, run_process, scrubbed_env
+from aeos.verification.procs import (
+    GitError,
+    GitReader,
+    ProcResult,
+    SnapshotError,
+    run_process,
+    scrubbed_env,
+    valid_branch,
+)
 
 log = logging.getLogger("aeos.verification.verifier")
 
@@ -85,6 +93,16 @@ filterwarnings =
     ignore::DeprecationWarning
 """
 
+# Modules the verifier's test process itself depends on. A candidate that ships a top-level module
+# with one of these names (or any stdlib name) in backend/ would run *its* test runner instead of the
+# trusted one (PYTHONPATH precedes site-packages and the stdlib), so the trusted suite is not run.
+HARNESS_MODULES = frozenset({
+    "pytest", "_pytest", "pluggy", "iniconfig", "packaging", "py", "tests", "conftest", "sitecustomize",
+    "usercustomize", "ruff", "xdist", "exceptiongroup", "tomli", "colorama", "_distutils_hack", "setuptools",
+    "pip", "typing_extensions",
+})
+_MODULE_SUFFIXES = (".py", ".pyc", ".pyo", ".pyd", ".so", ".dylib")
+
 _PREFLIGHT = (
     "import importlib, json, sys\n"
     "out = {}\n"
@@ -96,6 +114,39 @@ _PREFLIGHT = (
     "        out[n] = 'IMPORT_ERROR: ' + type(e).__name__\n"
     "print(json.dumps(out))\n"
 )
+
+
+def top_level_modules(backend: Path) -> list[str]:
+    """Importable top-level names a ``backend/`` directory puts on ``sys.path`` (packages and modules)."""
+    if not backend.is_dir():
+        return []
+    names: set[str] = set()
+    for p in backend.iterdir():
+        if p.is_dir() and (p / "__init__.py").is_file():
+            names.add(p.name)
+        elif p.is_file() and p.name.lower().endswith(_MODULE_SUFFIXES):
+            names.add(p.name.split(".", 1)[0])
+    return sorted(names)
+
+
+def shadowed_modules(candidate_backend: Path, trusted_backend: Path) -> list[str]:
+    """Candidate top-level modules that would shadow the stdlib, the test harness or any module the
+    controller environment already provides — except the platform's own packages (present in the
+    trusted controller's ``backend/``), which the candidate is expected to change."""
+    own = set(top_level_modules(trusted_backend))
+    out: list[str] = []
+    for name in top_level_modules(candidate_backend):
+        if name in own:
+            continue
+        if name in HARNESS_MODULES or name in sys.stdlib_module_names or name in sys.builtin_module_names:
+            out.append(name)
+            continue
+        try:
+            if importlib.util.find_spec(name) is not None:
+                out.append(name)
+        except (ImportError, ValueError):
+            out.append(name)  # unresolvable spec: treat as shadowing (fail closed)
+    return out
 
 
 def verifier_identity() -> str:
@@ -279,7 +330,9 @@ def report_view(ev: EvidenceArtifact | None) -> dict[str, Any] | None:
         "candidate_tests_status": summary.get("candidate_tests_status"),
         "ruff_status": summary.get("ruff_status"),
         "scope_status": summary.get("scope_status"),
-        "secret_scan_status": summary.get("secret_scan_status"),
+        # "leak_scan" (not "secret_scan"): keys containing secret/token/credential are masked by redact().
+        "leak_scan_status": summary.get("leak_scan_status"),
+        "requested_head": env.get("requested_head"),
         "tests_passed": summary.get("tests_passed"),
         "tests_failed": summary.get("tests_failed"),
         "tests_skipped": summary.get("tests_skipped"),
@@ -317,6 +370,10 @@ class _Verifier:
         self.candidate_path = candidate_path
         self.request_repair_on_fail = request_repair_on_fail
         self.pending: list[_PendingEvidence] = []
+        # Not-proven items that alone keep the result from PASS (e.g. head not descending from base).
+        self.blocking_not_proven: list[str] = []
+        self.changed_entries: list[tuple[str, str]] = []
+        self.numstat: dict[str, dict[str, int | None]] = {}
         self.identity = verifier_identity()
         self.env_identity: dict[str, Any] = {"verifier": self.identity, "python": sys.version.split()[0],
                                              "platform": sys.platform, "verifier_version": VERIFIER_VERSION}
@@ -338,6 +395,9 @@ class _Verifier:
         self.run_row, self.project, self.task = run, project, task
         out = VerificationOutcome(run_id=run.id, task_id=run.task_id, project_id=project.id, domain=project.domain)
         self.out = out
+        # The head the runtime asked to verify — recorded even when nothing could be resolved, so the
+        # deterministic trigger never re-runs a BLOCKED verification for the same head (loop.py).
+        self.env_identity["requested_head"] = run.head_commit
         out.worker_claims = self._worker_claims(run)
         workdir: Path | None = None
         trusted_ran = False
@@ -369,7 +429,9 @@ class _Verifier:
             snapshot = workdir / "s"
             snapshot.mkdir()
             snap_ok = self._export(git, snapshot)
-            self._static_scans(diff)
+            self._static_scans(diff, snapshot if snap_ok else None)
+            if snap_ok:
+                snap_ok = self._check_shadowing(snapshot, trusted_root)
             if snap_ok:
                 trusted_copy = workdir / "tr"
                 copied, copy_hash = suite.copy_trusted_suite(trusted_copy, trusted_root)
@@ -460,12 +522,21 @@ class _Verifier:
             out.base_commit = git.resolve_commit(base)
             if run.head_commit:
                 out.head_commit = git.resolve_commit(run.head_commit)
+            elif run.branch and valid_branch(run.branch):
+                # the run's recorded task branch, not the worker-controlled checkout HEAD
+                out.head_commit = git.branch_head(run.branch)
+                out.not_proven.append(f"head commit was not recorded by the runtime; verifier used the tip of "
+                                      f"branch {run.branch}")
             else:
                 out.head_commit = git.resolve_commit("HEAD")
                 out.not_proven.append("head commit was not recorded by the runtime; verifier used candidate HEAD")
             out.tree_hash = git.tree_of(out.head_commit)
             if not git.is_ancestor(out.base_commit, out.head_commit):
-                out.not_proven.append("head does not descend from the recorded base commit")
+                # base..head is then not "the worker's change": the diff/scope would also contain the
+                # reversal of unrelated commits, so the change identity cannot be proven.
+                msg = "head does not descend from the recorded base commit; change identity NOT-PROVEN"
+                out.not_proven.append(msg)
+                self.blocking_not_proven.append(msg)
         except GitError as exc:
             raise _Blocked("COMMIT_UNRESOLVED", str(exc)) from exc
         self.env_identity.update({"commit": out.head_commit, "base_commit": out.base_commit, "tree": out.tree_hash})
@@ -482,6 +553,7 @@ class _Verifier:
             raise _Blocked("DIFF_TOO_LARGE", "diff exceeds the verifier limit; split the task")
         out.artifact_hash = content_hash({"tree": out.tree_hash, "diff_sha256": sha256_bytes(raw_diff)})
         self.env_identity["artifact_hash"] = out.artifact_hash
+        self.changed_entries, self.numstat = changed, stats
         paths = [p for _, p in changed]
         out.changed_files = sorted(set(paths))
         protected = list(scope.GENERIC_PROTECTED_PATHS)
@@ -552,16 +624,42 @@ class _Verifier:
     def _check(self, name: str, status: str, summary: str = "", details: dict[str, Any] | None = None) -> None:
         self.out.checks[name] = CheckOutcome(name=name, status=status, summary=summary[:500], details=details or {})
 
-    def _static_scans(self, diff_text: str) -> None:
+    def _binary_paths(self) -> list[str]:
+        """Added/modified files git reports as binary (numstat ``-``): invisible to the added-line scan."""
+        status_by_path = {p: st for st, p in self.changed_entries}
+        return sorted(p for p, s in self.numstat.items()
+                      if s.get("added") is None and s.get("deleted") is None
+                      and not status_by_path.get(p, "").startswith("D"))
+
+    def _static_scans(self, diff_text: str, snapshot: Path | None) -> None:
         lines = scope.added_lines(diff_text)
         secrets = scope.scan_added_secrets(lines)
         tamper = scope.scan_harness_tamper(lines)
+        binary = self._binary_paths()
+        scanned_binary = 0
+        for rel in binary:
+            target = snapshot.joinpath(*rel.split("/")) if snapshot is not None else None
+            if target is None or not target.is_file():
+                # not materialised (snapshot failed, symlink, submodule): the content was not scanned
+                msg = f"binary file {rel} could not be scanned for credentials"
+                self.out.not_proven.append(msg)
+                self.blocking_not_proven.append(msg)
+                continue
+            data = target.read_bytes()
+            secrets += scope.scan_binary_secrets(rel, data)
+            scanned_binary += 1
+            if len(data) > scope.BINARY_SCAN_MAX_BYTES:
+                msg = f"binary file {rel} is larger than the scan limit; only its first part was scanned"
+                self.out.not_proven.append(msg)
+                self.blocking_not_proven.append(msg)
         status = "FAIL" if secrets else "PASS"
-        self._check("secret_scan", status, f"{len(secrets)} credential-shaped value(s) in added lines")
+        self._check("leak_scan", status, f"{len(secrets)} credential-shaped value(s) in added lines "
+                                         f"and {scanned_binary} changed binary file(s)")
         self.pending.append(_PendingEvidence(
-            "SECRET_SCAN", f"Secret scan of added lines: {status}",
-            {"status": status, "findings": secrets, "patterns": "aeos.core.redaction high-confidence set"},
-            "E1", "secret_scan"))
+            "SECRET_SCAN", f"Secret scan of added lines and changed binary files: {status}",
+            {"status": status, "findings": secrets, "binary_files_scanned": scanned_binary,
+             "binary_files": binary[:200], "patterns": "aeos.core.redaction high-confidence set"},
+            "E1", "leak_scan"))
         if secrets:
             self.out.reasons.append(f"credential-shaped value(s) added in the diff ({len(secrets)})")
         if tamper:
@@ -570,6 +668,18 @@ class _Verifier:
             self.out.reasons.append("product code reaches into the test runner (harness tamper)")
         else:
             self._check("harness_tamper", "PASS", "no test-runner hooks in product code")
+
+    def _check_shadowing(self, snapshot: Path, trusted_root: Path) -> bool:
+        """Refuse candidates whose backend/ would replace the test runner or stdlib modules."""
+        shadowed = shadowed_modules(snapshot / "backend", trusted_root / "backend")
+        if shadowed:
+            names = ", ".join(shadowed[:20])
+            self._check("harness_shadow", "FAIL", f"candidate backend/ shadows harness/stdlib module(s): {names}",
+                        details={"modules": shadowed[:50]})
+            self.out.reasons.append(f"HARNESS_TAMPER: candidate backend/ shadows {names}; trusted suite not run")
+            return False
+        self._check("harness_shadow", "PASS", "no candidate module shadows the test harness or stdlib")
+        return True
 
     def _preflight(self, snapshot: Path, workdir: Path, limits: VerifierLimits) -> None:
         backend = snapshot / "backend"
@@ -799,7 +909,8 @@ class _Verifier:
             out.status = "FAIL"
         elif scope_status == "QUARANTINED":
             out.status = "QUARANTINED"
-        elif out.not_proven and (trusted is None or trusted.status != "PASS"):
+        elif self.blocking_not_proven or (out.not_proven and (trusted is None or trusted.status != "PASS")):
+            # blocking items (e.g. head not descending from base) keep the result from PASS on their own
             out.status = "NOT_PROVEN"
         elif trusted is not None and trusted.status == "PASS":
             out.status = "PASS"
@@ -835,7 +946,7 @@ class _Verifier:
             "candidate_tests_status": checks.get("candidate_tests", "NOT_RUN"),
             "ruff_status": checks.get("ruff", "NOT_RUN"),
             "scope_status": checks.get("scope", "NOT_RUN"),
-            "secret_scan_status": checks.get("secret_scan", "NOT_RUN"),
+            "leak_scan_status": checks.get("leak_scan", "NOT_RUN"),
             "tests_passed": trusted_counts.get("passed"),
             "tests_failed": (trusted_counts.get("failures") or 0) + (trusted_counts.get("errors") or 0)
             if trusted_counts else None,

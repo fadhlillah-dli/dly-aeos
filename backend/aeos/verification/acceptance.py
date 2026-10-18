@@ -29,7 +29,7 @@ from aeos.core.errors import Blocked, Conflict, NotFound
 from aeos.core.timeutil import utcnow
 from aeos.events import service as events
 from aeos.models.evidence import AcceptanceRecord, ReviewRecord
-from aeos.models.planning import TaskSpec
+from aeos.models.planning import PlanVersion, TaskSpec
 from aeos.models.portfolio import Project
 from aeos.models.workforce import WorkerRun
 from aeos.verification.integration import call
@@ -63,10 +63,15 @@ def acceptance_is_valid(
         return False
     if config_hash is not None and rec.config_hash != config_hash:
         return False
-    return not (plan_version_hash is not None and rec.plan_version_hash != plan_version_hash)
+    if plan_version_hash is not None and rec.plan_version_hash != plan_version_hash:
+        return False
+    # Fail closed on drift nobody has persisted yet (run/PR head moved, PR base moved, grader/config or
+    # plan changed, or the current config cannot be computed): such a record is not valid any more.
+    return not staleness(session, rec)
 
 
-def _static_allowed(task: TaskSpec) -> bool:
+def static_allowed(task: TaskSpec) -> bool:
+    """PASS-STATIC is acceptable for this task (risk R0 or an explicit static evidence requirement)."""
     if task.risk_class == "R0":
         return True
     for req in task.evidence_requirements or []:
@@ -139,12 +144,12 @@ def evaluate_acceptance(session: Session, run_id: str, *, actor: str = ENGINE_ID
         reasons.append(f"verification evidence is {report.mode}, not LIVE")
     if run.head_commit and view.get("head_commit") != run.head_commit:
         reasons.append("verification does not cover the run's current head commit")
-    docs_only, static_allowed = bool(view.get("docs_only")), _static_allowed(task)
+    docs_only, static_ok = bool(view.get("docs_only")), static_allowed(task)
     reasons += _verdict_problems(review, "review", artifact_hash=view["artifact_hash"], docs_only=docs_only,
-                                 static_allowed=static_allowed)
+                                 static_allowed=static_ok)
     if security is not None:
         reasons += _verdict_problems(security, "security review", artifact_hash=view["artifact_hash"],
-                                     docs_only=docs_only, static_allowed=static_allowed)
+                                     docs_only=docs_only, static_allowed=static_ok)
     verdict = review.verdict
     if view.get("impact") == "HIGH":
         # §31: high-impact changes need every non-regression dimension argued from evidence.
@@ -152,8 +157,17 @@ def evaluate_acceptance(session: Session, run_id: str, *, actor: str = ENGINE_ID
             status = (review.non_regression or {}).get(key, {}).get("status")
             if status not in ("COVERED", "NOT_APPLICABLE"):
                 reasons.append(f"high-impact change: non-regression '{key}' is {status or 'missing'}")
+    current_config = current_config_hash(task)
+    if current_config is None:
+        reasons.append("current verifier configuration is UNKNOWN (trusted suite unreadable); re-verify")
+    elif view.get("config_hash") != current_config:
+        reasons.append("verification ran under another grader/lint/verifier/TaskSpec configuration; re-verify")
     if not task.plan_version_hash:
         reasons.append("TaskSpec has no PlanVersion hash binding")
+    else:
+        pv = session.get(PlanVersion, task.plan_version_id)
+        if pv is None or pv.manifest_hash != task.plan_version_hash:
+            reasons.append("TaskSpec PlanVersion hash does not match the PlanVersion record")
 
     status = REJECTED if reasons else ACCEPTED
     refs = [report.id, *report_refs(report)]

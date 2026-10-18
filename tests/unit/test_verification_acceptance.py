@@ -145,14 +145,49 @@ def test_invalidate_ignores_unchanged_identity(db, wf):
 
 def test_recheck_persists_config_staleness(db, wf, monkeypatch):
     w = make_world(db)
-    report = record_verification(db, w, config_hash="sha256:" + "1" * 64)
+    report = record_verification(db, w)
     make_review(db, w, report)
     rec = acceptance.evaluate_acceptance(db, w.run.id)
     db.commit()
+    assert rec.acceptance_status == "ACCEPTED"
     monkeypatch.setattr(acceptance, "current_config_hash", lambda task: "sha256:" + "2" * 64)
     assert any("configuration changed" in s for s in acceptance.staleness(db, rec))
+    assert not facade.acceptance_is_valid(db, w.task.id), "unpersisted drift already makes it invalid"
     acceptance.recheck(db, rec.id, actor="t")
     assert rec.acceptance_status == "STALE"
+
+
+def test_verification_under_an_older_grader_is_not_accepted(db, wf, monkeypatch):
+    """§08/§50 config change: a verification made with another grader/config hash cannot be accepted."""
+    w = make_world(db)
+    report = record_verification(db, w, config_hash="sha256:" + "1" * 64)
+    make_review(db, w, report)
+    rec = acceptance.evaluate_acceptance(db, w.run.id)
+    assert rec.acceptance_status == "REJECTED"
+    assert any("another grader" in r for r in rec.reasons)
+    assert wf.of("mark_accepted") == []
+
+
+def test_unknown_current_config_is_not_accepted(db, wf, monkeypatch):
+    w = make_world(db)
+    report = record_verification(db, w)
+    make_review(db, w, report)
+    monkeypatch.setattr(acceptance, "current_config_hash", lambda task: None)
+    rec = acceptance.evaluate_acceptance(db, w.run.id)
+    assert rec.acceptance_status == "REJECTED" and any("UNKNOWN" in r for r in rec.reasons)
+
+
+def test_plan_version_hash_mismatch_is_not_accepted(db, wf):
+    w = make_world(db)
+    report = record_verification(db, w)
+    make_review(db, w, report)
+    db.execute(text("DROP TRIGGER IF EXISTS trg_plan_versions_no_update"))  # simulate a tampered binding
+    db.execute(text("UPDATE plan_versions SET manifest_hash='sha256:other' WHERE id=:i"), {"i": w.version.id})
+    db.commit()
+    db.expire_all()
+    rec = acceptance.evaluate_acceptance(db, w.run.id)
+    assert rec.acceptance_status == "REJECTED"
+    assert any("PlanVersion hash does not match" in r for r in rec.reasons)
 
 
 def test_new_acceptance_supersedes_old(db, wf):

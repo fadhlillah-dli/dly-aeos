@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -18,9 +19,11 @@ from aeos.models.evidence import EvidenceArtifact
 from aeos.verification import collector, suite, verifier
 from tests.unit.test_verification_support import (
     BUGGY_CALC,
+    GIT,
     FakeWorkforce,
     bind_candidate,
     fake_secret,
+    git,
     make_candidate,
     make_controller,
     make_world,
@@ -142,12 +145,130 @@ def test_secret_in_diff_fails_without_persisting_the_value(db, settings, control
     bind_candidate(db, world, cand, base, head)
     out = _verify(db, world)
     assert out.status == "FAIL"
-    assert out.checks["secret_scan"].status == "FAIL"
+    assert out.checks["leak_scan"].status == "FAIL"
+    # the stored status survives redaction (a key named "secret_*" would be masked to [REDACTED] and a
+    # failing secret scan would then be invisible to gates and the PR bundle)
+    view = verifier.report_view(db.get(EvidenceArtifact, out.report_evidence_id))
+    assert view["leak_scan_status"] == "FAIL"
     for ev in db.scalars(select(EvidenceArtifact)).all():
         data, integrity = collector.read_content(ev)
         assert integrity in ("VERIFIED", "NO_CONTENT")
         if data:
             assert token.encode() not in data
+
+
+def _commit_bytes(cand: Path, rel: str, data: bytes) -> str:
+    target = cand / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    git(cand, "add", "-A")
+    git(cand, "commit", "-q", "-m", "binary")
+    return git(cand, "rev-parse", "HEAD")
+
+
+def test_secret_inside_a_binary_file_fails(db, settings, controller, wf):
+    """git diff shows only "Binary files differ" for files with NUL bytes; the verifier scans them too."""
+    world = make_world(db, verifier_policy=FAST)
+    token = fake_secret()
+    cand, base, _ = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
+    head = _commit_bytes(cand, "backend/blob.bin", b"\x00\x01PK" + token.encode() + b"\x00\xff")
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.status == "FAIL"
+    assert out.checks["leak_scan"].status == "FAIL"
+    assert "1 changed binary file" in out.checks["leak_scan"].summary
+    for ev in db.scalars(select(EvidenceArtifact)).all():
+        data, _ = collector.read_content(ev)
+        assert not data or token.encode() not in data
+
+
+def test_clean_binary_file_is_scanned_and_passes(db, settings, controller, wf):
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, _ = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
+    head = _commit_bytes(cand, "backend/blob.bin", b"\x00\x01\x02no credentials here\x00")
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.status == "PASS", out.reasons
+    assert "1 changed binary file" in out.checks["leak_scan"].summary
+
+
+@pytest.mark.parametrize("module_file", ["backend/pytest.py", "backend/tests/__init__.py", "backend/json.py"])
+def test_candidate_module_shadowing_the_harness_fails(db, settings, controller, wf, module_file):
+    """A candidate backend/ module named like the test runner (or the stdlib) would replace the trusted
+    runner on PYTHONPATH — the trusted suite is then not run and the verification fails."""
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, head = make_candidate(settings, world, head_files={module_file: "X = 1\n"})
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.status == "FAIL"
+    assert out.checks["harness_shadow"].status == "FAIL"
+    assert "trusted_suite" not in out.checks
+    assert any("HARNESS_TAMPER" in r for r in out.reasons)
+
+
+def test_shadowed_modules_ignores_platform_packages(tmp_path):
+    trusted = tmp_path / "trusted" / "backend"
+    cand = tmp_path / "cand" / "backend"
+    for root in (trusted, cand):
+        (root / "aeos").mkdir(parents=True)
+        (root / "aeos" / "__init__.py").write_text("", encoding="utf-8")
+    (cand / "newpkg_aeos_test_only").mkdir()
+    (cand / "newpkg_aeos_test_only" / "__init__.py").write_text("", encoding="utf-8")
+    (cand / "pluggy.py").write_text("", encoding="utf-8")
+    assert verifier.shadowed_modules(cand, trusted) == ["pluggy"]
+
+
+def test_head_not_descending_from_base_is_not_proven(db, settings, controller, wf):
+    """base..head would then include the reversal of unrelated commits: the change identity is unproven."""
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
+    bind_candidate(db, world, cand, head, base)  # swapped: "head" is an ancestor of "base"
+    out = _verify(db, world)
+    assert out.status == "NOT_PROVEN"
+    assert any("does not descend" in n for n in out.not_proven)
+    assert out.checks["trusted_suite"].status == "PASS", "tests passing never overrides the identity gap"
+
+
+def test_unrecorded_head_uses_the_task_branch_not_the_checkout(db, settings, controller, wf):
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
+    git(cand, "branch", world.run.branch, head)
+    # the worker keeps editing its checkout after finishing (HEAD moves; the task branch does not)
+    from tests.unit.test_verification_support import write_files
+
+    write_files(cand, {"backend/calc.py": BUGGY_CALC})
+    git(cand, "add", "-A")
+    git(cand, "commit", "-q", "-m", "after the fact")
+    bind_candidate(db, world, cand, base, head)
+    world.run.head_commit = None
+    db.commit()
+    out = _verify(db, world)
+    assert out.head_commit == head
+    assert out.checks["trusted_suite"].status == "PASS"
+    assert any(world.run.branch in n for n in out.not_proven)
+
+
+def test_windows_reserved_name_in_tree_fails_on_every_os(db, settings, controller, wf):
+    """A tree entry named like a Windows device (AUX, NUL, COM1…) is refused on every OS, so the verdict
+    does not depend on where the verifier runs (and nothing is ever written to a device)."""
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, _ = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
+    # plumbing only (nothing is written to the working tree); Git for Windows refuses such index entries
+    # by default (core.protectNTFS), a candidate built on Linux/macOS could still contain them
+    plumbing = [GIT or "git", "-c", "core.protectNTFS=false", "-c", "user.name=AEOS Test",
+                "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-C", str(cand)]
+    blob = subprocess.run([*plumbing, "hash-object", "-w", "--stdin"], input=b"X = 1\n",
+                          capture_output=True, check=True).stdout.decode().strip()
+    subprocess.run([*plumbing, "update-index", "--add", "--cacheinfo", f"100644,{blob},backend/aux.py"],
+                   capture_output=True, check=True)
+    subprocess.run([*plumbing, "commit", "-q", "-m", "device name"], capture_output=True, check=True)
+    head = git(cand, "rev-parse", "HEAD")
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.status == "FAIL"
+    assert out.checks["snapshot"].status == "FAIL" and "reserved" in out.checks["snapshot"].summary
+    assert out.checks["scope"].status == "FAIL"
+    assert "trusted_suite" not in out.checks
 
 
 def test_skipped_trusted_test_is_not_proven(db, settings, tmp_path, monkeypatch, wf):

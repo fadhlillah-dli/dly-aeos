@@ -224,3 +224,29 @@ def test_manual_result_refused_when_candidate_changed(db, world, wf, monkeypatch
     with pytest.raises(Conflict) as e:
         review.collect_manual_review(db, waiting.id, actor="owner", structured=review_payload())
     assert e.value.code == "REVIEW_PACKAGE_STALE"
+
+
+def test_manual_result_refused_after_the_run_left_review(db, world, wf, monkeypatch):
+    """A late manual result cannot trigger acceptance or a repair request for a finished attempt."""
+    install_doctor(monkeypatch, status="UNKNOWN")
+    FakeBridge().install(monkeypatch)
+    record_verification(db, world)
+    waiting = review.review_run(db, world.run.id, actor="t").review
+    world.run.execution_status = "FAILED"
+    db.commit()
+    with pytest.raises(Conflict) as e:
+        review.collect_manual_review(db, waiting.id, actor="owner", structured=review_payload(verdict="FAIL"))
+    assert e.value.code == "RUN_NOT_IN_REVIEW"
+    assert not wf.of("request_repair") and not wf.of("mark_accepted")
+
+
+def test_manual_result_refused_when_verification_no_longer_passes(db, world, wf, monkeypatch):
+    install_doctor(monkeypatch, status="UNKNOWN")
+    FakeBridge().install(monkeypatch)
+    record_verification(db, world)
+    waiting = review.review_run(db, world.run.id, actor="t").review
+    db.commit()
+    record_verification(db, world, status="FAIL")  # re-verified (same artifact) and failed
+    with pytest.raises(Blocked) as e:
+        review.collect_manual_review(db, waiting.id, actor="owner", structured=review_payload())
+    assert e.value.code == "VERIFICATION_NOT_PASSED"

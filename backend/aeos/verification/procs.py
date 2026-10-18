@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 import psutil
 
 from aeos.core.redaction import contains_secret, redact_text
+from aeos.verification.scope import unsafe_path_reason
 
 _PASSTHROUGH_ENV = (
     "PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
@@ -29,7 +30,14 @@ _PASSTHROUGH_ENV = (
 )
 DEAD_PROXY = "http://127.0.0.1:9"
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,250}$")
 _CREATE_NO_WINDOW = 0x08000000
+# Environment git needs to locate itself and the user's global config — nothing else. Secrets from
+# the controller environment never reach a git process that reads an untrusted candidate repository.
+_GIT_PASSTHROUGH_ENV = (
+    *_PASSTHROUGH_ENV, "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+    "SYSTEMDRIVE", "TMP", "TEMP", "TMPDIR", "XDG_CONFIG_HOME",
+)
 
 
 @dataclass
@@ -141,6 +149,31 @@ def valid_sha(value: str | None) -> bool:
     return bool(value) and bool(_SHA_RE.match(value or ""))
 
 
+def valid_branch(value: str | None) -> bool:
+    """A plain branch name (no refspec syntax, traversal, revision operators or options)."""
+    v = value or ""
+    return bool(_BRANCH_RE.match(v)) and ".." not in v and "//" not in v and not v.endswith((".", "/", ".lock")) \
+        and "@{" not in v
+
+
+def git_env() -> dict[str, str]:
+    """Allow-list environment for git plumbing (no credentials, no GIT_* overrides, no network)."""
+    env: dict[str, str] = {}
+    for key in _GIT_PASSTHROUGH_ENV:
+        val = os.environ.get(key)
+        if val and not contains_secret(val):
+            env[key] = val
+    env.update({
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_LAZY_FETCH": "1",  # partial clones must not fetch missing objects (git >= 2.44)
+        "GIT_ASKPASS": "",
+        "SSH_ASKPASS": "",
+    })
+    return env
+
+
 class GitReader:
     """Read-only git plumbing against an untrusted candidate repository."""
 
@@ -151,13 +184,13 @@ class GitReader:
         self.git = git
         self.repo = repo
         self.timeout = timeout
-        self.env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
-        self.env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1"})
+        self.env = git_env()
 
     def _args(self, *args: str) -> list[str]:
         return [
             self.git, "-c", "core.fsmonitor=false", "-c", "core.quotepath=off", "-c", "diff.noprefix=false",
-            "-c", "diff.mnemonicPrefix=false", "-c", "color.ui=false", "-C", str(self.repo), *args,
+            "-c", "diff.mnemonicPrefix=false", "-c", "color.ui=false", "-c", "protocol.allow=never",
+            "-c", "credential.helper=", "-C", str(self.repo), *args,
         ]
 
     def run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
@@ -178,6 +211,13 @@ class GitReader:
         if rev != "HEAD" and not valid_sha(rev):
             raise GitError(f"invalid commit identifier: {rev!r}")
         cp = self.run("rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}")
+        return cp.stdout.decode().strip()
+
+    def branch_head(self, branch: str) -> str:
+        """Commit a local branch (``refs/heads/<branch>``) points to."""
+        if not valid_branch(branch):
+            raise GitError(f"invalid branch name: {branch!r}")
+        cp = self.run("rev-parse", "--verify", "--quiet", "--end-of-options", f"refs/heads/{branch}^{{commit}}")
         return cp.stdout.decode().strip()
 
     def tree_of(self, commit: str) -> str:
@@ -250,6 +290,11 @@ class GitReader:
                 pp = PurePosixPath(path)
                 if pp.is_absolute() or any(seg in ("..", "") for seg in pp.parts) or "\\" in path or ":" in path:
                     raise SnapshotError(f"unsafe path in candidate tree: {path!r}")
+                # Same verdict on every OS: Windows device names (CON, NUL, COM1…) would write to a device
+                # and trailing dots/spaces alias other names there.
+                reason = unsafe_path_reason(path)
+                if reason:
+                    raise SnapshotError(f"unsafe path in candidate tree: {path!r} ({reason})")
                 folded = path.casefold()
                 if folded in seen_casefold:
                     raise SnapshotError(f"case-colliding paths in candidate tree: {path!r}")

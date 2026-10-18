@@ -45,6 +45,27 @@ separate, NOT-PROVEN capability).
    requests a bounded repair attempt; absence of the workforce module degrades closed (UNAVAILABLE).
 8. Projects other than the platform have no trusted suite registered outside the candidate yet →
    BLOCKED (`NO_TRUSTED_SUITE`), never PASS.
+9. Hardening added by the completeness review (2026-10-18):
+   * a candidate `backend/` top-level module that would shadow the test harness, the stdlib or any
+     module of the controller environment (e.g. `backend/pytest.py`, `backend/tests/`, `backend/json.py`)
+     FAILs before the trusted suite runs (`harness_shadow`) — `PYTHONPATH` precedes site-packages;
+   * changed **binary** files (git prints only "Binary files differ") are scanned for credential
+     shapes from the snapshot; files that cannot be scanned keep the result NOT_PROVEN;
+   * the diff parser consumes hunk bodies by their declared line counts, so an added line that looks
+     like a `+++ b/<path>` header cannot re-attribute later lines to an allow-listed file;
+   * tree entries with Windows device names / trailing dots or spaces are refused on **every** OS
+     (same verdict everywhere; nothing is written to a device);
+   * git plumbing runs with an allow-list environment (no credentials, no `GIT_*` overrides,
+     `protocol.allow=never`, no credential helper, no lazy fetch);
+   * a head that does not descend from the recorded base is NOT_PROVEN (base..head is then not the
+     worker's change); when the runtime recorded no head, the run's task branch is used, never the
+     worker-controlled checkout `HEAD`;
+   * status keys stored in evidence avoid words the redactor masks (`leak_scan_status`, not
+     `secret_scan_status`), otherwise a failing scan would be stored as `[REDACTED]` and be invisible
+     to gates and the PR bundle;
+   * acceptance is valid only while nothing it is bound to has drifted (run/PR head, PR base, grader /
+     verifier configuration, PlanVersion) — `acceptance_is_valid` fails closed without a recheck, and a
+     verification made under another configuration is not accepted.
 
 ## Consequences
 

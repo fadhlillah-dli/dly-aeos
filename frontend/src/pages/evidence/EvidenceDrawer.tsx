@@ -69,9 +69,21 @@ export function EvidenceDrawer({ id, onClose }: { id: string; onClose: () => voi
               <section>
                 <h3 className="mb-1 text-sm font-semibold">Lingkungan (commit/config)</h3>
                 <KeyValue
-                  items={Object.entries(d.environment).map(([k, v]) => [k, <Mono key={k}>{String(v)}</Mono>])}
+                  items={Object.entries(d.environment).map(([k, v]) => [
+                    k,
+                    <Mono key={k}>{v !== null && typeof v === "object" ? JSON.stringify(v) : String(v)}</Mono>,
+                  ])}
                 />
               </section>
+            )}
+            {d.integrity === "MISMATCH" && (
+              <Notice tone="warn">
+                <strong>Integritas gagal:</strong> isi yang tersimpan TIDAK cocok dengan hash yang tercatat. Jangan memakai
+                isi ini sebagai bukti; periksa penyimpanan data dir dan kumpulkan ulang bukti dari kolektor tepercaya.
+              </Notice>
+            )}
+            {d.integrity === "MISSING" && (
+              <Notice tone="warn">Berkas bukti tidak ditemukan di data dir; klaim ini tidak dapat diperiksa ulang.</Notice>
             )}
             {!d.trusted && (
               <Notice tone="warn">
