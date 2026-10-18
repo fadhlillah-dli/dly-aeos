@@ -127,7 +127,7 @@ def google_status() -> dict[str, Any]:
         out["status"] = "MISSING"
         return out
     try:
-        tok = json.loads(secrets.get_secret(TOKEN_REF, purpose="google status (scopes only)", actor=ACTOR))
+        tok = json.loads(secrets.get_secret(TOKEN_REF, purpose="personal:publisher.google-status", actor=ACTOR))
         out["granted_scopes"] = sorted(tok.get("scopes") or [])
         out["has_refresh_token"] = bool(tok.get("refresh_token"))
     except (Blocked, ValueError):
@@ -143,7 +143,7 @@ class GoogleAuth:
     def __init__(self, client: httpx.Client, token_json: str | None = None):
         self._client = client
         raw = token_json if token_json is not None else secrets.get_secret(
-            TOKEN_REF, purpose="google drive/docs publication", actor=ACTOR)
+            TOKEN_REF, purpose="personal:publisher.google-docs", actor=ACTOR)
         try:
             self._tok: dict[str, Any] = json.loads(raw)
         except ValueError as exc:

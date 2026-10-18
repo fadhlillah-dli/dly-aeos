@@ -134,3 +134,18 @@ Decisions added after the review of the first implementation (same status, same 
   removed only in subschema positions: names under `properties`/`$defs`/`patternProperties` (the plan
   contracts have properties called `title` and `description`) and literal values (`enum`, `const`,
   `default`) are kept, so the stripped schema accepts and rejects exactly the same documents (tested).
+
+Found by the trusted acceptance suite (master §50 planning rows) when planning ran through the
+real bridge: the plan-content and synthesis schemas of the planning pipeline are about 20k
+characters raw (about 23k after Windows quoting), so the earlier fixed bound of 16,000 raw schema
+characters refused every native planning call with `SCHEMA_TOO_LARGE` and only the manual package
+remained.
+
+* The bound now follows the real constraint. The schema is one argv element; the Windows
+  CreateProcess command line is limited to 32,767 characters **after** quoting. `run_structured`
+  measures the encoded command line (`subprocess.list2cmdline` of the exact argv, on every OS so the
+  same request is accepted or refused everywhere) and refuses above `MAX_COMMAND_LINE_CHARS =
+  32,000` with `SCHEMA_TOO_LARGE`. The raw per-schema cap is raised to 100,000 characters (POSIX
+  caps one argument at 128 KiB).
+* Nothing else changes: no file/stdin schema path, no new flags, the manual package remains the
+  fallback for a request that does not fit.

@@ -154,6 +154,8 @@ def secret_purpose(ref: str, use: str = "broker.model-proxy") -> str:
 
 
 def _fetch_key(secrets: Any, ref: str, purpose: str) -> str:
+    # ADR-0042 purpose contract: the purpose scope must equal the reference namespace
+    # ("workers:..." for workers/*, "projects:<id>:..." for projects/<id>/*) - see secret_purpose().
     try:
         return secrets.get_secret(ref, purpose=secret_purpose(ref), actor="service:broker")
     except ValueError as exc:  # malformed reference in the route configuration: fail closed
