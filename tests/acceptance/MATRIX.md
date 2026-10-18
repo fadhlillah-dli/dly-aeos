@@ -4,20 +4,19 @@ Every row of master §50 (all three tables, 82 rows) is listed exactly once, wit
 that prove it, the status and the evidence level. Test ids are `file::test` relative to
 `tests/acceptance/`.
 
-## Summary (integration run 2026-10-18, review 2026-10-19, worktree `wf_48a549c3-5c7-5`)
+## Summary (integration run 2026-10-18, review 2026-10-19, wave-2 integration `integration/wave2` 2026-10-19)
 
 | Status | Rows | Count |
 |---|---|---|
-| **PASS** (every part of the expected result proven) | all rows not listed below | 66 |
-| **PASS + XFAIL-BUG** (proven parts PASS; a named product bug is a strict xfail) | 1.17, 1.18, 1.23, 1.25, 1.37, 2.6, 3.6, 3.23, 3.24 | 9 |
-| **PASS + XFAIL-BUG + BLOCKED** | 1.13 | 1 |
-| **PASS + BLOCKED** (local part PASS; the rest needs an external capability) | 1.19, 1.33, 1.34, 1.35 | 4 |
-| **XFAIL-BUG** (the row's behaviour is blocked by a product bug; nothing PASSes yet) | 1.20, 1.21 | 2 |
+| **PASS** (every part of the expected result proven) | all rows not listed below | 75 |
+| **PASS + XFAIL-BUG** (proven parts PASS; a named product bug is a strict xfail) | 1.37, 3.6 | 2 |
+| **PASS + BLOCKED** (local part PASS; the rest needs an external capability) | 1.13, 1.19, 1.33, 1.34, 1.35 | 5 |
 | **Total** | | **82** |
 
-Strict xfails (10 tests, 7 distinct bugs) and BLOCKED tests (5) are listed under "Seam bugs" and
+Strict xfails (2 tests, 2 distinct bugs) and BLOCKED tests (5) are listed under "Seam bugs" and
 "Blocked" at the end. A strict xfail turns into a hard failure the moment the bug is fixed, so the
-row must then be re-marked PASS.
+row must then be re-marked PASS. Eight former strict xfails (5 bugs) were fixed by the wave-2 seams and
+are now PASS (see "Fixed by the wave-2 seams").
 
 ### Status and evidence vocabulary
 
@@ -32,9 +31,13 @@ row must then be re-marked PASS.
 * **Controlled preconditions** (labelled in the code): `world.doctor_ready` writes Doctor results
   for one capability (`observed_evidence.fixture = acceptance`, 1 h TTL) where a row is about
   scheduler/runtime semantics and the host cannot make the capability READY for real (no Docker
-  containment); `suite.trusted_controller_root` points the verifier at a tiny trusted grader
-  (running this suite inside the verifier would recurse); `world.fake_opencode` reports the
-  external OpenCode binary.
+  containment). Like a real Doctor run it is written AFTER the owner decisions and route changes it
+  depends on: recording a ROUTE_ACTIVATION/EXCEPTION/WRITE_ENABLEMENT decision marks the dependent
+  results STALE (§08 invalidation), and STALE never counts. It does not replace a human decision:
+  CAN_RUN_WORKER reads the ADR-0051 sandbox requirement live, so the owner's process-sandbox EXCEPTION
+  is always recorded through the decision registry. `suite.trusted_controller_root` points the
+  verifier at a tiny trusted grader (running this suite inside the verifier would recurse);
+  `world.fake_opencode` reports the external OpenCode binary.
 * **XFAIL-BUG** — `pytest.mark.xfail(strict=True, reason="BUG: ...")`. Each was confirmed to fail at
   the bug assertion (`--runxfail`), never earlier.
 * **BLOCKED-<reason>** — `@pytest.mark.integration` + `pytest.skip("BLOCKED-...")`; deselected by the
@@ -56,19 +59,19 @@ row must then be re-marked PASS.
 | 1.10 | Prompt memerintahkan OFFICE menjadi PERSONAL | `test_untrusted_input.py::test_prompt_ordering_office_to_personal_changes_nothing`; `test_domain_scope.py::test_project_domain_is_immutable` | PASS | E2 |
 | 1.11 | Lampiran berisi instruksi mengirim source ke GitHub personal | `test_untrusted_input.py::test_attachment_instructions_grant_no_authorisation_or_tool_permission` | PASS | E2 |
 | 1.12 | File path traversal/symlink keluar sandbox | `test_containment.py::test_task_write_scope_that_leaves_the_workspace_never_becomes_a_task`, `::test_candidate_symlink_and_traversal_are_never_materialised_or_accepted`, `::test_upload_archive_with_traversal_or_symlink_is_rejected`; `test_runtime_binding.py::test_path_traversal_segments_rejected`, `::test_managed_paths_cannot_escape` | PASS | E2 |
-| 1.13 | Worker membaca vault/SSH/native Claude credential | PASS: `test_containment.py::test_worker_environment_and_tools_never_carry_vault_ssh_or_claude_credentials`, `::test_process_sandbox_containment_is_reported_honestly`; XFAIL: `::test_doctor_containment_check_reflects_the_runtime_report` (BUG_CONTAINMENT_REPORT); BLOCKED: `::test_container_sandbox_blocks_filesystem_and_egress` | PASS + XFAIL-BUG + BLOCKED-docker-containment | E2 (env/tool/egress allow-lists); FS containment not proven |
+| 1.13 | Worker membaca vault/SSH/native Claude credential | PASS: `test_containment.py::test_worker_environment_and_tools_never_carry_vault_ssh_or_claude_credentials`, `::test_process_sandbox_containment_is_reported_honestly`, `::test_doctor_containment_check_reflects_the_runtime_report` (was XFAIL BUG_CONTAINMENT_REPORT, fixed by W3); BLOCKED: `::test_container_sandbox_blocks_filesystem_and_egress` | PASS + BLOCKED-docker-containment | E2 (env/tool/egress allow-lists); FS containment not proven |
 | 1.14 | VIEWER memanggil write endpoint langsung | `test_auth_boundary.py::test_viewer_is_denied_on_every_write_route` | PASS | E2 |
 | 1.15 | Bootstrap belum selesai tetapi publish diminta | `test_publication.py::test_publish_before_bootstrap_is_refused` | PASS | E2 |
 | 1.16 | Approval PlanVersion lama | `test_publication.py::test_approving_an_old_plan_version_is_refused_and_latest_reported` (refused, latest reported, nothing recorded as a decision, each refused attempt kept as a DENIED audit row) | PASS | E2 |
-| 1.17 | Revisi baru muncul selama publish | PASS: `test_publication.py::test_publication_binds_the_approved_version_never_latest`; XFAIL: `::test_new_revision_during_a_running_publication_keeps_the_approved_snapshot` (BUG_BINDING) | PASS + XFAIL-BUG | E2 |
-| 1.18 | Google Docs direvisi manusia | PASS (adapter, respx Google): `test_publication.py::test_google_docs_human_revision_is_a_conflict_never_an_overwrite`; XFAIL (end to end): `::test_human_edit_during_update_is_kept_and_handed_to_review` (BUG_BINDING) | PASS + XFAIL-BUG | E2 |
+| 1.17 | Revisi baru muncul selama publish | `test_publication.py::test_publication_binds_the_approved_version_never_latest`, `::test_new_revision_during_a_running_publication_keeps_the_approved_snapshot` (was XFAIL BUG_BINDING, fixed by W1) | PASS | E2 |
+| 1.18 | Google Docs direvisi manusia | adapter (respx Google): `test_publication.py::test_google_docs_human_revision_is_a_conflict_never_an_overwrite`; end to end: `::test_human_edit_during_update_is_kept_and_handed_to_review` (was XFAIL BUG_BINDING, fixed by W1) | PASS | E2 |
 | 1.19 | Tenant tidak mendukung folder Confluence yang wajib | PASS (respx Confluence + OFFICE default deny): `test_publication.py::test_confluence_parent_without_folder_support_blocks_without_changing_structure`; BLOCKED: `::test_confluence_folder_support_on_a_real_tenant` | PASS + BLOCKED-real-atlassian-tenant | E2 |
-| 1.20 | Provider timeout setelah create resource | XFAIL: `test_publication.py::test_provider_timeout_after_create_is_reconciled_before_retry` (BUG_BINDING) | XFAIL-BUG | — |
-| 1.21 | Salah satu target publikasi gagal | XFAIL: `test_publication.py::test_one_failing_target_is_partial_and_successes_are_kept` (BUG_BINDING) | XFAIL-BUG | — |
+| 1.20 | Provider timeout setelah create resource | `test_publication.py::test_provider_timeout_after_create_is_reconciled_before_retry` (was XFAIL BUG_BINDING, fixed by W1) | PASS | E2 |
+| 1.21 | Salah satu target publikasi gagal | `test_publication.py::test_one_failing_target_is_partial_and_successes_are_kept` (was XFAIL BUG_BINDING, fixed by W1) | PASS | E2 |
 | 1.22 | Jira/GitHub issue Done tanpa evidence runtime | `test_workforce.py::test_issue_done_without_runtime_evidence_does_not_unlock_dependency` | PASS | E2 |
-| 1.23 | Worker exit 0 / menulis "all tests pass" | PASS: `test_self_build.py::test_clean_candidate_is_accepted_only_after_verifier_and_review`, `::test_review_without_proven_bridge_never_passes_automatically`; `test_workforce.py::test_worker_exit_zero_and_all_tests_pass_stays_review_not_done`; `test_evidence_honesty.py::test_worker_evidence_is_an_untrusted_claim`, `::test_worker_exit_zero_yields_no_acceptance_and_no_pass`; XFAIL (native review path): `test_self_build.py::test_passing_native_capability_test_makes_max_review_ready` (BUG_REVIEW_CAPABILITY) | PASS + XFAIL-BUG | E2 (review via the §12 manual package) |
+| 1.23 | Worker exit 0 / menulis "all tests pass" | PASS: `test_self_build.py::test_clean_candidate_is_accepted_only_after_verifier_and_review`, `::test_review_without_proven_bridge_never_passes_automatically`; `test_workforce.py::test_worker_exit_zero_and_all_tests_pass_stays_review_not_done`; `test_evidence_honesty.py::test_worker_evidence_is_an_untrusted_claim`, `::test_worker_exit_zero_yields_no_acceptance_and_no_pass`; native review gate: `test_self_build.py::test_passing_native_capability_test_makes_max_review_ready` (was XFAIL BUG_REVIEW_CAPABILITY, fixed by W3) | PASS | E2 (native gate proven against the fake official client; end-to-end reviews via the §12 manual package) |
 | 1.24 | Worker mengubah grader/policy/pipeline di luar kontrak | `test_self_build.py::test_candidate_rewriting_grader_or_pipeline_cannot_fake_its_pass` (first line: the runtime scope check fails/quarantines the attempt; second line proven on its own with that check bypassed: the trusted grader runs, the shadowed test runner is refused) | PASS | E2 |
-| 1.25 | PR baru mengubah head atau base terkait | PASS (acceptance side): `test_self_build.py::test_changed_grader_or_moved_head_makes_acceptance_stale`; `test_delivery.py::test_unaccepted_task_cannot_be_prepared_as_a_pr`; XFAIL (PR sync): `test_delivery.py::test_pr_with_new_commits_makes_the_acceptance_stale` (BUG_DELIVERY) | PASS + XFAIL-BUG | E2 |
+| 1.25 | PR baru mengubah head atau base terkait | acceptance side: `test_self_build.py::test_changed_grader_or_moved_head_makes_acceptance_stale`; `test_delivery.py::test_unaccepted_task_cannot_be_prepared_as_a_pr`; PR sync: `test_delivery.py::test_pr_with_new_commits_makes_the_acceptance_stale` (was XFAIL BUG_DELIVERY, fixed by W2; the owner's plan approval names the repository, which is what authorises `create_pr`) | PASS | E2 (respx GitHub, faked mirror push) |
 | 1.26 | Worker A dan B menulis shared schema yang sama | `test_workforce.py::test_parallel_tasks_with_overlapping_write_sets_are_serialised` | PASS | E2 |
 | 1.27 | Controller crash dan worker lama masih aktif | `test_workforce.py::test_controller_crash_with_old_worker_alive_never_starts_a_duplicate` | PASS | E2 |
 | 1.28 | Cancel saat ada child process | `test_workforce.py::test_cancel_from_dashboard_kills_the_tree_revokes_and_releases` | PASS | E2 (real process tree) |
@@ -94,7 +97,7 @@ row must then be re-marked PASS.
 | 2.3 | Task dinilai dapat paralel tetapi write sets overlap | `test_workforce.py::test_parallel_tasks_with_overlapping_write_sets_are_serialised` | PASS | E2 |
 | 2.4 | Agent berposisi "CTO/manager" meminta privilege anak | `test_workforce.py::test_manager_title_grants_no_privilege` | PASS | E2 |
 | 2.5 | Pesan antaragent mengaku sudah mendapat izin owner | `test_workforce.py::test_agent_message_claiming_owner_approval_is_data` | PASS | E2 |
-| 2.6 | Worker selesai tetapi verifier gagal | PASS: `test_self_build.py::test_worker_done_but_verifier_failed_is_a_visible_failure`; `test_workforce.py::test_worker_done_but_verifier_failed_is_shown_as_failure`; XFAIL: `test_self_build.py::test_workforce_console_shows_the_verifier_result` (BUG_VERIFIER_STATUS) | PASS + XFAIL-BUG | E2 |
+| 2.6 | Worker selesai tetapi verifier gagal | `test_self_build.py::test_worker_done_but_verifier_failed_is_a_visible_failure`, `::test_workforce_console_shows_the_verifier_result` (was XFAIL BUG_VERIFIER_STATUS, fixed by W2); `test_workforce.py::test_worker_done_but_verifier_failed_is_shown_as_failure` | PASS | E2 |
 | 2.7 | Lease lama mengirim event setelah retry/reassign | `test_workforce.py::test_stale_lease_events_after_reassign_never_touch_the_new_attempt` | PASS | E2 |
 | 2.8 | SSE/stream putus | `test_control_center.py::test_broken_stream_resumes_from_the_cursor_and_is_never_shown_live` (real SSE endpoint over raw ASGI: resume by Last-Event-ID, ordered/de-duplicated, deterministic replay, reconnects write no events/usage/observations/runs, no other-domain events, last observed time, UNKNOWN when nothing recorded). The browser rendering of STALE is covered by `frontend/src/pages/overview/overview.test.tsx` "shows STALE with last observed time when disconnected" (vitest, outside the trusted suite) | PASS | E2 (backend) |
 | 2.9 | Cancel dari dashboard | `test_workforce.py::test_cancel_from_dashboard_kills_the_tree_revokes_and_releases` | PASS | E2 |
@@ -130,8 +133,8 @@ row must then be re-marked PASS.
 | 3.20 | Dua orchestration tools hendak menjadi scheduler aktif | `test_governance.py::test_a_second_orchestrator_never_becomes_an_active_scheduler` | PASS | E2 |
 | 3.21 | Migration gagal atau rollback data tidak mungkin | `test_operations.py::test_code_rollback_is_refused_when_data_cannot_roll_back` | PASS | E2 (real release/rollback) |
 | 3.22 | Canary bukan metode aman bagi komponen | `test_governance.py::test_unsafe_canary_is_replaced_by_sandbox_staging_and_an_authorised_cutover` | PASS | E2 |
-| 3.23 | Runtime aktif tetapi external docs publication conflict | PASS: `test_publication.py::test_publication_status_keeps_docs_published_separate_from_active_and_verified`; XFAIL: `::test_one_failing_target_is_partial_and_successes_are_kept` (BUG_BINDING) | PASS + XFAIL-BUG | E2 |
-| 3.24 | GDocs/Confluence diedit manusia selama update | PASS (adapter): `test_publication.py::test_google_docs_human_revision_is_a_conflict_never_an_overwrite`; XFAIL: `::test_human_edit_during_update_is_kept_and_handed_to_review` (BUG_BINDING) | PASS + XFAIL-BUG | E2 |
+| 3.23 | Runtime aktif tetapi external docs publication conflict | `test_publication.py::test_publication_status_keeps_docs_published_separate_from_active_and_verified`, `::test_one_failing_target_is_partial_and_successes_are_kept` (was XFAIL BUG_BINDING, fixed by W1) | PASS | E2 |
+| 3.24 | GDocs/Confluence diedit manusia selama update | adapter: `test_publication.py::test_google_docs_human_revision_is_a_conflict_never_an_overwrite`; end to end: `::test_human_edit_during_update_is_kept_and_handed_to_review` (was XFAIL BUG_BINDING, fixed by W1) | PASS | E2 |
 | 3.25 | Snapshot export dibuka setelah runtime berubah | `test_operations.py::test_export_snapshot_is_scoped_timed_hashed_and_never_live` | PASS | E2 |
 | 3.26 | Nama master tetap Final setelah perubahan sah | `test_control_center.py::test_master_keeps_its_final_name_and_history_after_lawful_changes` (git history is asserted in a checkout; inside the verifier's exported candidate snapshot, which has no `.git`, only the file-level checks apply) | PASS | E2 (repository + git history) |
 | 3.27 | Mock diagram, roster, costs atau tests ditampilkan | `test_control_center.py::test_mock_costs_runs_diagrams_and_tests_are_labelled_and_never_counted`; `test_workforce.py::test_demo_roster_and_runs_are_labelled_and_never_counted`; `test_evidence_honesty.py::test_mock_acceptance_is_never_valid` | PASS | E2 |
@@ -141,13 +144,18 @@ row must then be re-marked PASS.
 
 | Id | Seam | Rows | Tests |
 |---|---|---|---|
-| BUG_BINDING | planning/publication: publisher passes the PUBLICATION decision to `check_external_write` (expects an APPROVAL bound to the plan version), op targets never match the approved scope keys, `create_doc` sent as `google-drive` (catalog: `google-docs`), integration lookup `google-drive` vs stored `GOOGLE_DRIVE` → every real publication INTERLOCK_DENIED | 1.17, 1.18, 1.20, 1.21, 3.23, 3.24 | `test_publication.py` (4 tests) |
-| BUG_DELIVERY | execution/delivery: `prepare_pr` and `git_broker._interlock` build the WriteIntent with `decision_id=None`; nothing issues the GIT_BRANCH/PR_CREATE grants → an ACCEPTED task can never become a PR | 1.25 | `test_delivery.py::test_pr_with_new_commits_makes_the_acceptance_stale` |
-| BUG_REVIEW_CAPABILITY | doctor: `claude.capability_test` reads `result['ok']`, the bridge returns `{'status': 'VERIFIED', 'mode': 'LIVE'}` → CAN_REVIEW_WITH_MAX/CAN_PLAN_* never READY; reviews fall back to the manual package | 1.23 | `test_self_build.py::test_passing_native_capability_test_makes_max_review_ready` |
-| BUG_VERIFIER_STATUS | execution: verifier writes `verifier_status` PASS/FAIL/QUARANTINED, workforce accepts PASSED/FAILED/... → rejected; the console run row never shows the verifier result | 2.6 | `test_self_build.py::test_workforce_console_shows_the_verifier_result` |
-| BUG_CONTAINMENT_REPORT | doctor: `containment.report` reads `name`/`passed`, the worker runtime reports `check`/`status` → every item counted failed, so CAN_RUN_WORKER is never READY even with the ADR-0051 exception (why `world.doctor_ready` exists) | 1.13 | `test_containment.py::test_doctor_containment_check_reflects_the_runtime_report` |
-| BUG_PIN_REDECLARED | doctor: a re-declared approved pin invalidates only `manifest`-invalidator checks; `worker.opencode` accepts any version; HIGH version drift is not a CAN_RUN_WORKER input → READY while off-pin | 3.6 | `test_transparency.py::test_redeclared_pin_that_the_binary_no_longer_matches_invalidates_readiness` |
-| BUG_PII | core redaction: no PII patterns/policy; PII in traces is stored and exported verbatim | 1.37 | `test_operations.py::test_trace_pii_is_redacted_or_limited_before_storage_and_export` |
+| BUG_PIN_REDECLARED | doctor: a re-declared approved pin invalidates only `manifest`-invalidator checks; `worker.opencode` accepts any version; HIGH version drift is not a CAN_RUN_WORKER input → READY while off-pin (re-confirmed on `integration/wave2` with `--runxfail`: fails at the final `!= READY` assertion) | 3.6 | `test_transparency.py::test_redeclared_pin_that_the_binary_no_longer_matches_invalidates_readiness` |
+| BUG_PII | core redaction: no PII patterns/policy; PII in traces is stored and exported verbatim (re-confirmed on `integration/wave2`) | 1.37 | `test_operations.py::test_trace_pii_is_redacted_or_limited_before_storage_and_export` |
+
+### Fixed by the wave-2 seams (former strict xfails, now PASS)
+
+| Id | Fixed by | Rows | Tests |
+|---|---|---|---|
+| BUG_BINDING | W1 planning/publication seam: one provider vocabulary (`aeos.portfolio.providers`), targets `{provider, root_id}`, publisher writes bound to the plan APPROVAL | 1.17, 1.18, 1.20, 1.21, 3.23, 3.24 | `test_publication.py` (4 tests) |
+| BUG_DELIVERY | W2 execution/delivery seam: `prepare_pr` binds the PR to the plan APPROVAL (`create_pr` + repository target) and issues the GIT_BRANCH/PR_CREATE grants | 1.25 | `test_delivery.py::test_pr_with_new_commits_makes_the_acceptance_stale` |
+| BUG_VERIFIER_STATUS | W2: verifier/workforce run status vocabulary reconciled | 2.6 | `test_self_build.py::test_workforce_console_shows_the_verifier_result` |
+| BUG_REVIEW_CAPABILITY | W3 doctor readiness seam: `claude.capability_test` reads the bridge's `status`/`mode` | 1.23 | `test_self_build.py::test_passing_native_capability_test_makes_max_review_ready` |
+| BUG_CONTAINMENT_REPORT | W3: `containment.report` reads the runtime's `check`/`status` items | 1.13 | `test_containment.py::test_doctor_containment_check_reflects_the_runtime_report` |
 
 ## Blocked (external capability; `@pytest.mark.integration`, skipped with the reason)
 
@@ -195,6 +203,28 @@ runs.
 * **Product fix**: `planning.service.decide` recorded the DENIED audit for a stale approval, but the
   API rolled it back together with the failed request. The denial is now committed before the
   conflict is raised, the same pattern `office_gate` uses.
+
+## Wave-2 integration 2026-10-19 (`integration/wave2`: W1 planning/publication, W2 execution/delivery, W3 doctor readiness, W4 UI e2e, W5 this suite)
+
+The fixtures were reconciled with the contracts the other seams changed; no assertion was loosened.
+
+* **Doctor invalidation (W3)**: an owner ROUTE_ACTIVATION/EXCEPTION/WRITE_ENABLEMENT decision marks the
+  dependent Doctor results STALE. `world.worker_ready`, `test_transparency._enabled_opencode` and the
+  1.25 PR test wrote the `doctor_ready` controlled precondition before those decisions, so it was
+  (correctly) stale; it is now written after them.
+* **Live sandbox requirement (W3)**: CAN_RUN_WORKER evaluates ADR-0051 live, so 3.6 records the owner's
+  process-sandbox EXCEPTION through the registry instead of relying on stored check results alone.
+* **Provider vocabulary (W1)**: publication targets are exactly `{provider, root_id}` (`github-issues`
+  root id = `owner/repo`); Google Docs writes are `google-drive` operations, so the world enables and
+  approves `google-drive` + `github-issues` only. The Doctor's `adapter.write_enablement` now takes the
+  PERSONAL publication providers from `aeos.portfolio.providers` (it still required a `google-docs`
+  enablement that no longer exists). Legacy-input tests elsewhere still prove normalisation/refusal.
+* **Delivery binding (W2)**: a PR is authorised by the plan APPROVAL whose operations include
+  `create_pr` and whose targets name the repository; the 1.25 PR test approves with
+  `{"provider": "github-repo", "repo": owner/name}`.
+* Eight strict xfails XPASSed and were re-marked PASS (table above). The two remaining strict xfails
+  were re-run with `--runxfail` and fail at their bug assertion (3.6's earlier failure point was the
+  missing live sandbox decision, now fixed in the fixture).
 
 ## How to run
 

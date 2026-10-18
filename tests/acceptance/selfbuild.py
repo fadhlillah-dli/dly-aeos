@@ -92,7 +92,7 @@ def review_ready(client: AuthedClient, host: Any, settings: Any) -> None:
 def self_build(client: AuthedClient, db: Session, monkeypatch: Any, tmp_path: Path, host: Any, settings: Any, *,
                changes: dict[str, str] | None = None, allowed: list[str] | None = None, grader: str = GRADER_PASS,
                review: dict[str, Any] | None = None, extra_tasks: list[dict[str, Any]] | None = None,
-               bypass_runtime_scope: bool = False) -> dict[str, Any]:
+               bypass_runtime_scope: bool = False, targets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Platform-project task leased, worker change committed by the runtime, run in REVIEW.
 
     The runtime's own bookkeeping after an exit 0 (``executor._finalize``) is reproduced with the
@@ -113,7 +113,7 @@ def self_build(client: AuthedClient, db: Session, monkeypatch: Any, tmp_path: Pa
     responder = SupervisorResponder(review=review)
     tasks = [task("T1", paths=allowed or ["backend/aeos/feature/**"]), *(extra_tasks or [])]
     responder.planning.content = plan_content(tasks=tasks)
-    w = worker_ready(client, db, monkeypatch, tasks=tasks, platform=True, responder=responder)
+    w = worker_ready(client, db, monkeypatch, tasks=tasks, platform=True, responder=responder, targets=targets)
     run = db.get(WorkerRun, admit(db)[0])
     fake = FakeClaude(monkeypatch, responder)
     controller = trusted_controller(tmp_path, monkeypatch, grader)
@@ -165,8 +165,9 @@ def review(client: AuthedClient, run_id: str) -> dict[str, Any]:
 
 
 def manual_review(client: AuthedClient, run_id: str, structured: dict[str, Any] | None = None) -> dict[str, Any]:
-    """§12 fallback (the integrated path today, see test_self_build BUG_REVIEW_CAPABILITY): the checkpoint
-    package is run by the owner in official Claude Code and its JSON result is submitted back."""
+    """§12 fallback (the path while the native bridge is not proven - the self-build world runs no Doctor
+    capability test): the checkpoint package is run by the owner in official Claude Code and its JSON
+    result is submitted back."""
     waiting = review(client, run_id)["review"]
     assert waiting["status"] == "NEEDS_DECISION", waiting
     r = client.post(f"/api/reviews/{waiting['id']}/manual-result", json={"structured": structured or review_output()})

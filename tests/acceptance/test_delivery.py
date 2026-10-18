@@ -3,8 +3,8 @@
 * 1.33 "Agent mencoba direct push main/merge API" -> refused by a boundary that is actually exercised
   (the broker's real git push path against a local bare remote; no merge operation exists anywhere);
   provider-side enforcement on a real GitHub repository is BLOCKED here;
-* 1.25 "PR baru mengubah head atau base terkait" (delivery side) -> PR sync makes the acceptance STALE;
-  the PR cannot be prepared today (``BUG_DELIVERY``), so that part is a strict xfail.
+* 1.25 "PR baru mengubah head atau base terkait" (delivery side) -> PR sync makes the acceptance STALE
+  (the PR is prepared through the broker grants and the interlock bound to the owner's plan approval).
 """
 
 from __future__ import annotations
@@ -24,16 +24,15 @@ from tests.conftest import AuthedClient
 
 pytestmark = pytest.mark.acceptance
 
-BUG_DELIVERY = (
-    "BUG: execution/delivery seam - delivery.pr_bundle.prepare_pr and broker.git_broker._interlock build the "
-    "external-write WriteIntent with decision_id=None (prepare_pr also without capability_expires_at), so "
-    "policy.check_external_write always answers DECISION_MISSING/CAPABILITY_MISSING (INTERLOCK_DENIED); and no "
-    "component ever issues the GIT_BRANCH/PR_CREATE capability grants that push_task_branch/create_pull_request "
-    "require. An ACCEPTED task can never become a PR.")
+
+PLATFORM_REPO = "fadhlillah-dli/dly-aeos"
+# The owner's plan approval names the repository: a PR write is bound to that APPROVAL (create_pr in its
+# allowed operations, the repository in its targets) - the interlock refuses DECISION_MISSING without it.
+DELIVERY_TARGETS = [{"provider": "github-repo", "repo": PLATFORM_REPO}]
 
 
-def _accepted(client, db, monkeypatch, tmp_path, host, settings) -> dict:
-    w = self_build(client, db, monkeypatch, tmp_path, host, settings)
+def _accepted(client, db, monkeypatch, tmp_path, host, settings, *, targets: list[dict] | None = None) -> dict:
+    w = self_build(client, db, monkeypatch, tmp_path, host, settings, targets=targets)
     assert verify(client, w["run_id"])["status"] == "PASS"
     assert manual_review(client, w["run_id"])["acceptance"]["acceptance_status"] == "ACCEPTED"
     return w
@@ -99,20 +98,21 @@ def test_provider_enforces_human_only_merge_on_the_real_repository():
 
 
 # ---------------------------------------------------------------------------------------------- 1.25
-@pytest.mark.xfail(strict=True, reason=BUG_DELIVERY)
+# formerly strict xfail BUG_DELIVERY (WriteIntent without decision id, no delivery grants), fixed by seam W2
 def test_pr_with_new_commits_makes_the_acceptance_stale(personal_client: AuthedClient, db, monkeypatch, tmp_path,
                                                         host, settings, vault):
     from aeos.broker import git_broker
     from aeos.core.enums import Capability
     from tests.acceptance.world import doctor_ready
 
-    w = _accepted(personal_client, db, monkeypatch, tmp_path, host, settings)
+    w = _accepted(personal_client, db, monkeypatch, tmp_path, host, settings, targets=DELIVERY_TARGETS)
     run = db.get(WorkerRun, w["run_id"])
     vault.put("personal/github", "gh" + "p_" + "D1e2l3i4v5" * 4, actor="owner")
-    doctor_ready(db, Capability.CAN_PREPARE_PR)
     assert personal_client.post("/api/decisions", json={
         "kind": "WRITE_ENABLEMENT", "provider": "github-repo", "enabled": True, "rationale": "owner enables PRs",
         "auth_scope": {"provider": "github-repo"}}).status_code == 201
+    # controlled precondition after the owner decision it depends on (it marks dependent results STALE)
+    doctor_ready(db, Capability.CAN_PREPARE_PR)
     # the GitHub git remote is external: the broker's mirror push lands on a fake that records the refspec
     pushes: list[dict] = []
     monkeypatch.setattr(git_broker, "push_from_mirror", lambda **kw: pushes.append(kw) or {
