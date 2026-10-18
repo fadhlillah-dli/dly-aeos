@@ -207,7 +207,7 @@ BUG_PII = ("BUG: core redaction seam - aeos.core.redaction has no PII patterns (
            "in the evidence store and exported verbatim (§50 1.37 'Trace berisi secret/PII').")
 
 
-@pytest.mark.xfail(strict=True, reason=BUG_PII)
+# formerly strict xfail BUG_PII; fixed in integration (aeos.core.pii minimisation on stored traces/exports)
 def test_trace_pii_is_redacted_or_limited_before_storage_and_export(personal_client: AuthedClient, db, settings,
                                                                     host):
     from tests.acceptance.world import create_project

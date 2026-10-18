@@ -224,7 +224,7 @@ BUG_PIN_REDECLARED = (
     "CAN_RUN_WORKER, so the capability stays READY while the binary deviates from the approved pin (§50 3.6).")
 
 
-@pytest.mark.xfail(strict=True, reason=BUG_PIN_REDECLARED)
+# formerly strict xfail BUG_PIN_REDECLARED; fixed in integration (doctor reads the approved manifest pin)
 def test_redeclared_pin_that_the_binary_no_longer_matches_invalidates_readiness(personal_client: AuthedClient, db,
                                                                                 host, settings, tmp_path):
     from aeos.core.paths import repo_root

@@ -151,7 +151,7 @@ def build_export(
     redacted_fields = 0
     items: list[dict[str, Any]] = []
     for item in raw_items:
-        clean = redact(item)
+        clean = redact(item, pii=True)
         if canonical_json(clean) != canonical_json(item):
             redacted_fields += _count_diffs(item, clean)
         items.append(clean)

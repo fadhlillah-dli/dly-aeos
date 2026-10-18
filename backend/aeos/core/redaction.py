@@ -74,7 +74,8 @@ def register_secret(value: str | None) -> None:
             _known_values.add(value)
 
 
-def redact_text(text: str) -> str:
+def redact_text(text: str, *, pii: bool = False) -> str:
+    """Scrub credentials; with ``pii=True`` also minimise personal identifiers (aeos.core.pii)."""
     if not text:
         return text
     with _lock:
@@ -86,23 +87,28 @@ def redact_text(text: str) -> str:
             text = pat.sub(lambda m: m.group(1) + REDACTED, text)
         else:
             text = pat.sub(REDACTED, text)
+    if pii:
+        from aeos.core.pii import redact_pii
+
+        text = redact_pii(text)
     return text
 
 
-def redact(value: Any) -> Any:
-    """Recursively redact strings, and fully mask values under sensitive keys."""
+def redact(value: Any, *, pii: bool = False) -> Any:
+    """Recursively redact strings, and fully mask values under sensitive keys. ``pii=True`` is used for
+    stored traces/evidence/audit/events and exports (§50 "Trace berisi secret/PII")."""
     if isinstance(value, str):
-        return redact_text(value)
+        return redact_text(value, pii=pii)
     if isinstance(value, Mapping):
         out: dict[Any, Any] = {}
         for k, v in value.items():
             if isinstance(k, str) and isinstance(v, str) and v and is_sensitive_key(k):
                 out[k] = REDACTED
             else:
-                out[k] = redact(v)
+                out[k] = redact(v, pii=pii)
         return out
     if isinstance(value, (list, tuple)):
-        return [redact(v) for v in value]
+        return [redact(v, pii=pii) for v in value]
     return value
 
 

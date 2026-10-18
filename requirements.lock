@@ -56,6 +56,8 @@ google-auth==2.62.0
     #   google-auth-oauthlib
 google-auth-oauthlib==1.5.0
     # via dly-aeos (pyproject.toml)
+greenlet==3.5.6
+    # via playwright
 h11==0.16.0
     # via
     #   httpcore
@@ -119,6 +121,8 @@ pathspec==1.1.1
     # via mypy
 platformdirs==4.13.4
     # via dly-aeos (pyproject.toml)
+playwright==1.64.0
+    # via dly-aeos (pyproject.toml)
 pluggy==1.7.0
     # via
     #   pytest
@@ -140,6 +144,8 @@ pydantic-core==2.50.1
     # via pydantic
 pydantic-settings==2.16.0
     # via dly-aeos (pyproject.toml)
+pyee==14.0.0
+    # via playwright
 pygments==2.21.0
     # via
     #   pytest
@@ -208,6 +214,7 @@ typing-extensions==4.16.0
     #   pydantic
     #   pydantic-core
     #   pydantic-settings
+    #   pyee
     #   python-docx
     #   sqlalchemy
     #   typing-inspection

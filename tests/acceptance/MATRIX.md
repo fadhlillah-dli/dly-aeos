@@ -8,12 +8,12 @@ that prove it, the status and the evidence level. Test ids are `file::test` rela
 
 | Status | Rows | Count |
 |---|---|---|
-| **PASS** (every part of the expected result proven) | all rows not listed below | 75 |
-| **PASS + XFAIL-BUG** (proven parts PASS; a named product bug is a strict xfail) | 1.37, 3.6 | 2 |
+| **PASS** (every part of the expected result proven) | all rows not listed below | 77 |
+| **PASS + XFAIL-BUG** (proven parts PASS; a named product bug is a strict xfail) | — | 0 |
 | **PASS + BLOCKED** (local part PASS; the rest needs an external capability) | 1.13, 1.19, 1.33, 1.34, 1.35 | 5 |
 | **Total** | | **82** |
 
-Strict xfails (2 tests, 2 distinct bugs) and BLOCKED tests (5) are listed under "Seam bugs" and
+No strict xfails remain (BUG_PII and BUG_PIN_REDECLARED were fixed during integration); BLOCKED tests (5) are listed under "Seam bugs" and
 "Blocked" at the end. A strict xfail turns into a hard failure the moment the bug is fixed, so the
 row must then be re-marked PASS. Eight former strict xfails (5 bugs) were fixed by the wave-2 seams and
 are now PASS (see "Fixed by the wave-2 seams").
@@ -83,7 +83,7 @@ are now PASS (see "Fixed by the wave-2 seams").
 | 1.34 | PR code mencoba membaca production secret | PASS: `test_containment.py::test_pr_code_under_the_verifier_sees_no_production_secret`, `::test_pr_ci_workflows_get_no_secrets_and_a_read_only_token`; BLOCKED: `::test_github_hosted_pr_run_has_no_secret_access` | PASS + BLOCKED-real-github | E2 |
 | 1.35 | Deploy sukses tetapi fungsi utama gagal | PASS: `test_self_build.py::test_production_claim_without_production_evidence_is_never_pass_production`; BLOCKED: `::test_post_deploy_failure_triggers_incident_and_rollback` | PASS + BLOCKED-no-deployment-target | E2 |
 | 1.36 | Restore backup belum pernah diuji | `test_operations.py::test_untested_backup_is_never_reported_as_recovery_ready` | PASS | E2 (real backup + restore test) |
-| 1.37 | Trace berisi secret/PII | PASS (secrets): `test_operations.py::test_trace_secret_is_redacted_before_storage_and_export`; `test_runtime_binding.py::test_secrets_redacted_before_persistence`; XFAIL (PII): `test_operations.py::test_trace_pii_is_redacted_or_limited_before_storage_and_export` (BUG_PII) | PASS + XFAIL-BUG | E2 |
+| 1.37 | Trace berisi secret/PII | PASS (secrets): `test_operations.py::test_trace_secret_is_redacted_before_storage_and_export`; `test_runtime_binding.py::test_secrets_redacted_before_persistence`; PASS (PII minimisation, aeos.core.pii): `test_operations.py::test_trace_pii_is_redacted_or_limited_before_storage_and_export` | PASS | E2 |
 | 1.38 | Memory lama/cross-project mencoba menjadi kebijakan | `test_governance.py::test_memory_only_from_accepted_facts_never_policy_never_cross_scope` | PASS | E2 |
 | 1.39 | Model/prompt/tool/policy baru | `test_governance.py::test_new_model_or_tool_needs_controlled_eval_version_decision_and_rollback_before_promotion` | PASS | E2 (trial evidence from the real verifier) |
 | 1.40 | Klaim compliance dari template/scanner hijau | `test_control_center.py::test_compliance_is_never_claimed_from_templates_or_green_scanners` | PASS | E2 |
@@ -116,7 +116,7 @@ are now PASS (see "Fixed by the wave-2 seams").
 | 3.3 | Tool installed dan enabled tanpa run yang teramati | `test_transparency.py::test_installed_and_enabled_without_a_run_is_not_in_use` | PASS | E2 |
 | 3.4 | Model request sudah selesai | `test_routing_cost.py::test_finished_model_request_is_last_used_not_an_active_session` | PASS | E2 |
 | 3.5 | Probe connectivity berhasil tetapi functional check gagal | `test_bootstrap_readiness.py::test_connected_but_functional_check_failed_is_not_ready` | PASS | E2 |
-| 3.6 | Binary/model route/config berganti dari approved pin | PASS: `test_transparency.py::test_binary_drift_from_the_approved_pin_is_visible_and_invalidates_readiness`; `test_bootstrap_readiness.py::test_route_configuration_change_invalidates_route_checks`; XFAIL: `test_transparency.py::test_redeclared_pin_that_the_binary_no_longer_matches_invalidates_readiness` (BUG_PIN_REDECLARED) | PASS + XFAIL-BUG | E2 |
+| 3.6 | Binary/model route/config berganti dari approved pin | PASS: `test_transparency.py::test_binary_drift_from_the_approved_pin_is_visible_and_invalidates_readiness`; `test_bootstrap_readiness.py::test_route_configuration_change_invalidates_route_checks`; PASS: `test_transparency.py::test_redeclared_pin_that_the_binary_no_longer_matches_invalidates_readiness` (doctor compares with the approved manifest pin; manifest change invalidates worker.opencode) | PASS | E2 |
 | 3.7 | Upstream release baru terdeteksi | `test_governance.py::test_upstream_release_is_a_notification_never_an_install_route_or_policy_change` | PASS | E2 (respx GitHub REST) |
 | 3.8 | Source repo rename/redirect/fork/publisher berubah | `test_governance.py::test_renamed_redirected_or_forked_source_does_not_inherit_trust` | PASS | E2 (respx GitHub REST) |
 | 3.9 | Nama repo ambigu atau sumber tidak terverifikasi | `test_governance.py::test_ambiguous_or_unverified_source_is_unverified_and_nothing_is_invented` | PASS | E2 |
@@ -144,8 +144,8 @@ are now PASS (see "Fixed by the wave-2 seams").
 
 | Id | Seam | Rows | Tests |
 |---|---|---|---|
-| BUG_PIN_REDECLARED | doctor: a re-declared approved pin invalidates only `manifest`-invalidator checks; `worker.opencode` accepts any version; HIGH version drift is not a CAN_RUN_WORKER input → READY while off-pin (re-confirmed on `integration/wave2` with `--runxfail`: fails at the final `!= READY` assertion) | 3.6 | `test_transparency.py::test_redeclared_pin_that_the_binary_no_longer_matches_invalidates_readiness` |
-| BUG_PII | core redaction: no PII patterns/policy; PII in traces is stored and exported verbatim (re-confirmed on `integration/wave2`) | 1.37 | `test_operations.py::test_trace_pii_is_redacted_or_limited_before_storage_and_export` |
+| BUG_PIN_REDECLARED (FIXED in integration) | doctor: a re-declared approved pin invalidates only `manifest`-invalidator checks; `worker.opencode` accepts any version; HIGH version drift is not a CAN_RUN_WORKER input → READY while off-pin (re-confirmed on `integration/wave2` with `--runxfail`: fails at the final `!= READY` assertion) | 3.6 | `test_transparency.py::test_redeclared_pin_that_the_binary_no_longer_matches_invalidates_readiness` |
+| BUG_PII (FIXED in integration) | core redaction: no PII patterns/policy; PII in traces is stored and exported verbatim (re-confirmed on `integration/wave2`) | 1.37 | `test_operations.py::test_trace_pii_is_redacted_or_limited_before_storage_and_export` |
 
 ### Fixed by the wave-2 seams (former strict xfails, now PASS)
 

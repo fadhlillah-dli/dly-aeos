@@ -133,7 +133,7 @@ def emit(
         attempt=attempt,
         lease_id=lease_id,
         mode=mode,
-        payload=redact(payload or {}),
+        payload=redact(payload or {}, pii=True),
     )
     session.add(ev)
     session.flush()

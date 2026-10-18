@@ -124,7 +124,7 @@ def _serialize(content: bytes | str | dict[str, Any] | None) -> _Serialized:
     if content is None:
         return _Serialized(None, "", "", {"no_content": True})
     if isinstance(content, dict):
-        red = redact(content)
+        red = redact(content, pii=True)
         text = json.dumps(red, indent=2, sort_keys=True, ensure_ascii=False, default=str)
         compact = json.dumps(red, sort_keys=True, ensure_ascii=False, default=str)
         if len(compact) <= INLINE_MAX_CHARS:
@@ -150,7 +150,7 @@ def _serialize(content: bytes | str | dict[str, Any] | None) -> _Serialized:
                                {"binary": True, "redaction": "NOT_APPLICABLE_BINARY"})
         content = decoded
     if isinstance(content, str):
-        red_text = redact_text(content)
+        red_text = redact_text(content, pii=True)
         stripped = red_text.lstrip()
         if stripped.startswith("<?xml") or stripped.startswith("<testsuite"):
             ctype, ext = "application/xml", ".xml"
@@ -207,7 +207,7 @@ def collect_evidence(
         raise ValidationFailed("environment must be a mapping")
 
     trusted = origin_n in TRUSTED_COLLECTORS
-    env = redact(dict(environment or {}))
+    env = redact(dict(environment or {}), pii=True)
     ceiling, ceiling_reason = level_ceiling(trusted=trusted, origin=origin_n, kind=kind_n, environment=env)
     assigned = _min_level(evidence_level, ceiling)
     if not trusted and evidence_level != "E0":
@@ -234,7 +234,7 @@ def collect_evidence(
         location = path.relative_to(layout_root.resolve()).as_posix()
         digest = "sha256:" + sha256_bytes(ser.data)
     else:
-        digest = content_hash({"kind": kind_n, "claim": redact_text(claim or ""), "environment": env,
+        digest = content_hash({"kind": kind_n, "claim": redact_text(claim or "", pii=True), "environment": env,
                                "subject": [subject_type, subject_id], "at": now.isoformat()})
 
     inline = dict(ser.inline)
@@ -247,7 +247,7 @@ def collect_evidence(
         subject_id=str(subject_id or ""),
         run_id=run_id,
         task_id=task_id,
-        claim=redact_text(claim or "")[:4000],
+        claim=redact_text(claim or "", pii=True)[:4000],
         kind=kind_n,
         origin=origin_n,
         collector_identity=redact_text(identity),
