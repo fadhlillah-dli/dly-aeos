@@ -207,5 +207,5 @@ def sanitized_argv(argv: list[str], schema_json: str) -> list[str]:
 def write_trace(ws: Path, layout: DataLayout, trace: dict[str, Any]) -> str:
     """Persist a redacted trace and return its reference relative to the data dir."""
     path = ws / "trace.json"
-    path.write_text(json.dumps(redact_strings(trace), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    path.write_text(json.dumps(redact_strings(trace, pii=True), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return path.relative_to(layout.root).as_posix()

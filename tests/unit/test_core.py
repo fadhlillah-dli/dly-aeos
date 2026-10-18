@@ -73,3 +73,18 @@ def test_sensitive_key_rule_spares_counters_and_flags():
     assert redact({"office_authorization": True, "token_count": 3}) == {"office_authorization": True, "token_count": 3}
     assert not contains_high_confidence_secret("token: string")
     assert contains_high_confidence_secret("sk-or-v1-abcdefghijklmnopqrstuvwxyz0123")
+
+
+def test_pii_minimisation_detects_identifiers_but_spares_versions_and_ids():
+    from aeos.core.pii import contains_pii, redact_pii
+
+    assert redact_pii("telp +62 812-3456-7890 / 0812-3456-7890") == "telp [PII:PHONE] / [PII:PHONE]"
+    assert redact_pii("mail " + "budi" + "@example.com") == "mail [PII:EMAIL]"
+    assert redact_pii("card 4111 1111 1111 1111") == "card [PII:CARD]"
+    assert redact_pii("NIK 3174015505900001") == "NIK [PII:NIK]"
+    for benign in ("version 0.13.1 on 2026-10-18 12:30:45", "run 1234567890123456", "pid 12345 tokens 123456789",
+                   "sha256:8F21F1F126A586C0E77558DDFBA175CC", "ts 1760780000000000"):
+        assert not contains_pii(benign), benign
+    # opt-in through the redactor; default redaction leaves personal data untouched
+    assert "[PII:EMAIL]" in redact({"note": "x " + "a" + "@b.co"}, pii=True)["note"]
+    assert "@b.co" in redact({"note": "x " + "a" + "@b.co"})["note"]

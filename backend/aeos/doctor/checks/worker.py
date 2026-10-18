@@ -28,8 +28,21 @@ def _opencode_remedy(pinned: str | None) -> Remedy:
                   evidence_to_collect="worker.opencode VERIFIED (opencode --version)")
 
 
+def _approved_pin(ctx: CheckContext) -> str | None:
+    """The owner-approved pin of the InstallManifest (§07/§38) wins over the runtime's built-in default."""
+    if ctx.session is None:
+        return None
+    try:
+        from aeos.models.inventory import ComponentReference
+
+        ref = ctx.session.get(ComponentReference, "opencode")
+    except Exception:  # inventory tables unavailable: fall back to the runtime default
+        return None
+    return str(ref.approved_pin) if ref is not None and ref.approved_pin else None
+
+
 @check("worker.opencode", "WORKER", "Engine pekerja OpenCode", component_id="opencode", ttl_seconds=86400,
-       invalidators=("binary:opencode",), ok={"VERIFIED", "CONFIGURED"},
+       invalidators=("binary:opencode", "manifest", "pin:opencode"), ok={"VERIFIED", "CONFIGURED"},
        fingerprint=binary_fingerprint("opencode", "opencode_binary"), severity_fail="HIGH", observation="installation")
 def worker_opencode(ctx: CheckContext) -> Outcome:
     try:
@@ -49,12 +62,15 @@ def worker_opencode(ctx: CheckContext) -> Outcome:
     # worker_runtime contract: status INSTALLED|FAILED|MISSING, version, pinned_version, drift, functional NOT_PROVEN
     st = str(status.get("status") or "").upper()
     version = status.get("version")
-    pinned = status.get("pinned_version")
+    approved = _approved_pin(ctx)
+    pinned = approved or status.get("pinned_version")
     evidence: dict[str, Any] = {k: status.get(k) for k in ("status", "version", "pinned_version", "drift", "functional",
                                                             "checked_at") if k in status}
     path = status.get("binary") or status.get("path")
     if path:
         evidence["location"] = logical(ctx, str(path))
+    evidence["pin_source"] = "install-manifest approved_pin" if approved else "worker runtime default"
+    evidence["pinned_version"] = pinned
     remedy = _opencode_remedy(pinned)
     if st == "MISSING" or status.get("found") is False:
         return Outcome("MISSING", f"OpenCode tidak ditemukan (versi yang dipin: {pinned or 'UNKNOWN'}).", evidence=evidence,
@@ -64,7 +80,7 @@ def worker_opencode(ctx: CheckContext) -> Outcome:
                        evidence=evidence, error_code="OPENCODE_FAILED", remedy=remedy,
                        target_identity=evidence.get("location"))
     if st == "INSTALLED" and version:
-        if status.get("drift") or (pinned and str(version) != str(pinned)):
+        if (status.get("drift") and not approved) or (pinned and str(version) != str(pinned)):
             # §38 "Binary/version/route berubah dari pin": admission stops until reconciled (§50); the engine
             # is installed, so the inventory still records INSTALLED with the observed version.
             return Outcome("FAILED", f"OpenCode {version} terpasang tetapi berbeda dari versi yang dipin {pinned} "
