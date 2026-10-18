@@ -1,0 +1,35 @@
+# Canonical policy reference (master §02, §24, §34, §51 P1).
+# The MCI_V2 source of truth has NOT been provided to this repository. Gates that depend on it
+# stay BLOCKED / NOT-PROVEN. Do not reconstruct MCI content from memory or model output.
+mci:
+  name: MCI_V2_SOURCE_OF_TRUTH
+  status: UNAVAILABLE        # UNAVAILABLE | REFERENCED | VERIFIED
+  version: null
+  content_hash: null
+  location: null
+  verified_at: null
+  note: "Owner must supply the canonical source; until then alignment is UNVERIFIED."
+packs:                       # §34 packs to be mapped to MCI controls once available
+  - ARCH
+  - PRODUCT
+  - UX/FE
+  - BE/API
+  - DB/DATA
+  - PLATFORM/SRE
+  - QA
+  - SEC/GRC
+  - AGENT/HARNESS/ROUTING
+  - TOOL/MCP
+  - RESEARCH
+  - DOCS/DECISIONS
+  - CLIENT/AUDIT
+  - SUPPLY-CHAIN
+  - INCIDENT/REL
+  - AI-GOV
+  - COST/QUOTA
+risk_classes:                # §20 — thresholds come from MCI when available; none invented here
+  R0: read
+  R1: local reversible change
+  R2: external/shared change
+  R3: production/destructive/privileged
+  R4: catastrophic

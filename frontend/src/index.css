@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+/* Design tokens (§35: colour is always paired with text/icon — never the only signal). */
+@theme {
+  --color-surface: #ffffff;
+  --color-surface-2: #f6f7f9;
+  --color-surface-3: #eceef2;
+  --color-ink: #16181d;
+  --color-ink-2: #4a505c;
+  --color-ink-3: #7a8190;
+  --color-line: #dfe2e8;
+  --color-accent: #2f5bd3;
+  --color-accent-ink: #ffffff;
+  --color-ok: #1f7a4d;
+  --color-ok-bg: #e6f4ec;
+  --color-warn: #8a5a00;
+  --color-warn-bg: #fdf3dc;
+  --color-bad: #b42318;
+  --color-bad-bg: #fdeceb;
+  --color-info: #285ea8;
+  --color-info-bg: #e8f0fb;
+  --color-muted: #5b6270;
+  --color-muted-bg: #eef0f3;
+  --color-mock: #6b3fa0;
+  --color-mock-bg: #f1eafa;
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-surface: #15171c;
+    --color-surface-2: #1c1f26;
+    --color-surface-3: #252932;
+    --color-ink: #eceef2;
+    --color-ink-2: #b6bcc8;
+    --color-ink-3: #8a91a0;
+    --color-line: #2f3440;
+    --color-accent: #7b9cff;
+    --color-accent-ink: #0d1020;
+    --color-ok: #5cc98f;
+    --color-ok-bg: #12301f;
+    --color-warn: #f0c050;
+    --color-warn-bg: #33270b;
+    --color-bad: #ff7b6e;
+    --color-bad-bg: #3a1512;
+    --color-info: #82b1ff;
+    --color-info-bg: #142640;
+    --color-muted: #a3aab8;
+    --color-muted-bg: #262a33;
+    --color-mock: #c8a2ff;
+    --color-mock-bg: #2a1d3d;
+  }
+}
+
+:root[data-theme="dark"] {
+  --color-surface: #15171c;
+  --color-surface-2: #1c1f26;
+  --color-surface-3: #252932;
+  --color-ink: #eceef2;
+  --color-ink-2: #b6bcc8;
+  --color-ink-3: #8a91a0;
+  --color-line: #2f3440;
+  --color-accent: #7b9cff;
+  --color-accent-ink: #0d1020;
+  --color-ok: #5cc98f;
+  --color-ok-bg: #12301f;
+  --color-warn: #f0c050;
+  --color-warn-bg: #33270b;
+  --color-bad: #ff7b6e;
+  --color-bad-bg: #3a1512;
+  --color-info: #82b1ff;
+  --color-info-bg: #142640;
+  --color-muted: #a3aab8;
+  --color-muted-bg: #262a33;
+  --color-mock: #c8a2ff;
+  --color-mock-bg: #2a1d3d;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-surface-2);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
