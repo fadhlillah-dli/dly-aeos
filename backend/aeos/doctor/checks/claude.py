@@ -140,7 +140,11 @@ def claude_env(ctx: CheckContext) -> Outcome:
        ttl_seconds=86400, ok=frozenset(), severity_fail="MEDIUM")
 def claude_extra_billing(ctx: CheckContext) -> Outcome:
     return Outcome("UNKNOWN", "Pengaturan extra usage berbayar tidak dapat dibaca secara resmi oleh AEOS; status UNKNOWN.",
-                   severity="MEDIUM", evidence={"source": "tidak ada API resmi untuk status ini"},
+                   severity="MEDIUM", evidence={
+                       "source": "tidak ada API resmi untuk status ini",
+                       # advisory for the Max gates, but true even when they are READY (no silent paid usage, §12)
+                       "residual_risks": ["Extra usage berbayar akun Claude UNKNOWN: bila aktif, pemakaian di atas kuota "
+                                          "Max dapat ditagih; pastikan nonaktif di pengaturan akun (§12)"]},
                    remedy=Remedy(operation="Periksa manual pengaturan usage di akun Claude dan pastikan extra usage "
                                  "berbayar nonaktif (§12)", source=f"S03: {LOGIN_DOCS}", privilege="pemilik akun",
                                  cost="mencegah tagihan tambahan", evidence_to_collect="catatan keputusan pemilik"))

@@ -498,6 +498,31 @@ def test_review_with_max_uses_the_bridge_record_never_narration(settings, db, cl
     assert plan.status in ("DEGRADED", "UNKNOWN", "BLOCKED") and plan.status != "READY"
 
 
+def test_ready_max_gates_still_carry_the_extra_billing_risk(settings, db, claude_host):
+    create_admin(db)
+    _bridge_test(db, "VERIFIED")
+    _run(settings, db, claude_host)
+    st = facade.capability_state(db, Capability.CAN_REVIEW_WITH_MAX, domain="PERSONAL")
+    assert st.status == "READY"
+    assert any("Extra usage berbayar" in r for r in st.residual_risks)  # UNKNOWN is never a silent pass
+    assert any(r.startswith("catatan: claude.extra_billing: UNKNOWN") for r in st.reasons)
+
+
+def test_cli_header_names_the_claude_call_only_in_functional_mode(settings, db, claude_host, monkeypatch):
+    from typer.testing import CliRunner
+
+    import aeos.claude_bridge.facade as bridge
+    from aeos.cli import app
+
+    monkeypatch.setattr(bridge, "capability_test", lambda: {"status": "VERIFIED", "mode": "LIVE",
+                                                            "engine_version": "2.1.302"})
+    plain = CliRunner().invoke(app, ["doctor", "--group", "CLAUDE_NATIVE"]).output
+    assert "(no server, no LLM)" in plain
+    functional = CliRunner().invoke(app, ["doctor", "--group", "CLAUDE_NATIVE", "--functional"]).output
+    assert "no LLM" not in functional and "ONE small Claude Code call" in functional
+    assert functional.isascii()
+
+
 def test_functional_capability_test_calls_the_bridge_once(settings, db, claude_host, monkeypatch):
     import aeos.claude_bridge.facade as bridge
 
