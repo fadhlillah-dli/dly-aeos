@@ -21,7 +21,8 @@ export async function uploadAttachment(projectId: string, file: File): Promise<s
     const form = new FormData();
     form.append("file", file);
     form.append("project_id", projectId);
-    form.append("purpose", "proposal");
+    // The intake upload records an optional "source" label on the Attachment (default "upload").
+    form.append("source", "proposal");
     try {
       const data = await api<unknown>(path, { method: "POST", body: form });
       const id = extractId(data);

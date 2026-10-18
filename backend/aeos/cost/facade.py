@@ -55,7 +55,21 @@ def record_usage(
     return impl(**locals())
 
 
-# --- additive (module group H): quota state for providers and the native bridge -------------
+# --- additive (module group H): non-token units and quota state ------------------------------
+
+
+def record_unit_usage(
+    session: Session, *, provider: str, category: str, source: str, quantity: float, unit: str,
+    project_id: str | None = None, domain: str | None = None, run_id: str | None = None, task_id: str | None = None,
+    cost_usd: float | None = None, is_estimate: bool = False, mode: str = "LIVE",
+) -> UsageLedgerEntry:
+    """§42 units kept separate: CI minutes, compute seconds, storage bytes, human minutes (category
+    CI/COMPUTE/STORAGE/HUMAN_TIME). ``cost_usd`` stays UNKNOWN unless a real price/bill exists."""
+    from aeos.cost.service import record_usage as impl
+
+    return impl(session, provider=provider, category=category, source=source, quantity=quantity, unit=unit,
+                project_id=project_id, domain=domain, run_id=run_id, task_id=task_id, cost_usd=cost_usd,
+                is_estimate=is_estimate, mode=mode)
 
 
 def set_quota_state(

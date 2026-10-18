@@ -5,19 +5,22 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { MappedBadge, PROPOSAL_STATUS } from "../../components/proposals/MappedBadge";
+import { RelatedLinks } from "../../components/proposals/PageLinks";
 import { Button, Card, EmptyState, ErrorBox, inputClass, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { relativeTime } from "../../lib/format";
 import { ProposalForm } from "./ProposalForm";
-import type { Meta, ProposalRow } from "./types";
+import type { Kind, Meta, ProposalRow } from "./types";
 
 const STATUSES = Object.keys(PROPOSAL_STATUS);
-const KINDS = ["ADD", "REPLACE", "UPGRADE", "REMOVE", "COMPARE"];
+const KINDS: Kind[] = ["ADD", "REPLACE", "UPGRADE", "REMOVE", "COMPARE"];
 
 export default function ProposalsPage() {
   const { isAdmin } = useAuth();
   const [params, setParams] = useSearchParams();
   const component = params.get("component");
   const source = params.get("source");
+  const kindParam = params.get("kind");
+  const initialKind = KINDS.find((k) => k === kindParam) ?? null;
   const [open, setOpen] = useState(Boolean(component || source));
   const [status, setStatus] = useState("");
   const [kind, setKind] = useState("");
@@ -42,11 +45,14 @@ export default function ProposalsPage() {
         checkedAt={list.data?.checked_at ?? null}
         evidenceLimit="Usulan dan review bukan instalasi/aktivasi; keputusan manusia terikat baseline/candidate hash"
         actions={
-          isAdmin ? (
-            <Button variant="primary" onClick={() => setOpen(true)} disabled={open}>
-              <Lightbulb className="h-4 w-4" aria-hidden /> Usulkan perubahan
-            </Button>
-          ) : undefined
+          <>
+            {isAdmin && (
+              <Button variant="primary" onClick={() => setOpen(true)} disabled={open}>
+                <Lightbulb className="h-4 w-4" aria-hidden /> Usulkan perubahan
+              </Button>
+            )}
+            <RelatedLinks subject="DLY AEOS Usulan Upgrade (alur proposal)" />
+          </>
         }
       />
       {!isAdmin && <Notice>Peran VIEWER hanya dapat melihat usulan; pengajuan dan keputusan memerlukan SUPER_ADMIN.</Notice>}
@@ -56,6 +62,7 @@ export default function ProposalsPage() {
             meta={meta.data}
             initialComponent={component}
             initialSource={source}
+            initialKind={initialKind}
             onCancel={() => {
               setOpen(false);
               setParams({});

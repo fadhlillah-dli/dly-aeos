@@ -6,6 +6,11 @@ import typer
 
 from aeos.core.enums import Domain
 
+
+def _ascii(s: str) -> str:
+    return s.encode("ascii", "replace").decode()
+
+
 app = typer.Typer(help="Research & Technology Registry (candidates/references; never installs anything).",
                   no_args_is_help=True)
 
@@ -59,9 +64,10 @@ def check_cmd(
         typer.echo(f"{exc.code}: {exc.message}")
         raise typer.Exit(1) from exc
     up = view.get("upstream") or {}
-    typer.echo(f"{view['name']}: {view['check_status']} identity={view['identity_status']} lifecycle={view['lifecycle']}")
-    typer.echo(f"  observed={up.get('observed_full_name')} latest_tag={up.get('latest_tag')} "
-               f"archived={up.get('archived')} redirected={up.get('redirected')}")
+    typer.echo(_ascii(f"{view['name']}: {view['check_status']} identity={view['identity_status']} "
+                      f"lifecycle={view['lifecycle']}"))
+    typer.echo(_ascii(f"  observed={up.get('observed_full_name')} latest_tag={up.get('latest_tag')} "
+                      f"archived={up.get('archived')} redirected={up.get('redirected')}"))
     typer.echo("  Nothing was installed, updated or activated. Update available != compatible.")
 
 

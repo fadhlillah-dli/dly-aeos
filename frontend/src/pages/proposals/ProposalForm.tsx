@@ -32,17 +32,19 @@ export function ProposalForm({
   meta,
   initialComponent,
   initialSource,
+  initialKind,
   onCreated,
   onCancel,
 }: {
   meta: Meta | undefined;
   initialComponent?: string | null;
   initialSource?: string | null;
+  initialKind?: Kind | null;
   onCreated: (p: ProposalDetail) => void;
   onCancel: () => void;
 }) {
   const { projectId } = useAuth();
-  const [kind, setKind] = useState<Kind>(initialComponent ? "REPLACE" : "ADD");
+  const [kind, setKind] = useState<Kind>(initialKind ?? (initialComponent ? "REPLACE" : "ADD"));
   const [title, setTitle] = useState("");
   const [sources, setSources] = useState(initialSource ?? "");
   const [problem, setProblem] = useState("");

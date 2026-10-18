@@ -31,9 +31,15 @@ def list_experiments(principal: CurrentPrincipal) -> dict[str, Any]:
             "note": "Keempat eksperimen memakai gate policy/authority, review dan security yang sama; belum ada hasil."}
 
 
+def _viewer_domain(principal: Any) -> str | None:
+    d = principal.active_domain
+    return d.value if d is not None and principal.can_access_domain(d) else None
+
+
 @router.get("/api/eval/runs")
 def list_runs(db: DB, principal: CurrentPrincipal, suite_key: str | None = None, role: str | None = None) -> dict[str, Any]:
-    return {"items": service.list_runs(db, suite_key=suite_key, role=role), "source": "eval_runs",
+    items = service.list_runs(db, suite_key=suite_key, role=role, domain=_viewer_domain(principal), scoped=True)
+    return {"items": items, "source": "eval_runs",
             "checked_at": utcnow().isoformat(), "mode": "LIVE"}
 
 
@@ -51,7 +57,7 @@ class RunIn(BaseModel):
 def plan_run(body: RunIn, db: DB, principal: AdminPrincipal) -> dict[str, Any]:
     run = service.plan_run(db, suite_key=body.suite_key, configuration=body.configuration, role_key=body.role_key,
                            topology=body.topology, repetitions=body.repetitions, limits=body.limits,
-                           actor_user_id=principal.user.id, notes=body.notes)
+                           actor_user_id=principal.user.id, notes=body.notes, domain=_viewer_domain(principal))
     db.commit()
     view = service.run_view(run)
     view["execution"] = {"status": "NOT_STARTED",
@@ -62,7 +68,7 @@ def plan_run(body: RunIn, db: DB, principal: AdminPrincipal) -> dict[str, Any]:
 
 @router.get("/api/eval/leaderboard")
 def leaderboard(db: DB, principal: CurrentPrincipal, role: str | None = Query(None, max_length=64)) -> dict[str, Any]:
-    return service.leaderboard(db, role=role)
+    return service.leaderboard(db, role=role, domain=_viewer_domain(principal), scoped=True)
 
 
 class ScorecardIn(BaseModel):
@@ -75,7 +81,7 @@ def scorecard(body: ScorecardIn, db: DB, principal: AdminPrincipal, domain: Acti
     """Open a decision request (COMPARE proposal) from the current scorecard. Never changes a route."""
     from aeos.proposals import service as proposals
 
-    snap = service.scorecard_snapshot(db, role=body.role)
+    snap = service.scorecard_snapshot(db, role=body.role, domain=domain.value, scoped=True)
     summary = json.dumps(snap, ensure_ascii=False, sort_keys=True)[:6000]
     p = proposals.create_proposal(
         db, actor_user_id=principal.user.id, domain=domain.value, kind="COMPARE",

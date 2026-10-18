@@ -94,6 +94,12 @@ export interface ClaudeReview {
   model_resolved?: string | null;
   mode?: string;
   sent_metadata?: string[];
+  /** Hash of the public metadata the review judged; a changed hash makes the old result STALE (§41). */
+  metadata_hash?: string | null;
+  reused?: boolean;
+  reuse_note?: string;
+  previous_at?: string | null;
+  previous_verdict?: string | null;
 }
 
 export interface CostItem {
@@ -143,6 +149,8 @@ export interface ReviewPackage {
     options: Record<string, string>;
     allowed_now: string[];
     rules: string[];
+    /** §50: an UNVERIFIED/CHANGED/NOT_FOUND source identity blocks TRIAL/PROMOTE admission. Optional for older packages. */
+    source_identity_gate?: { status: "OK" | "BLOCKED"; blocking: { identity: string; status: string }[]; remedy: string | null };
     next_actions: string[];
   };
   outcome: OutcomeEntry;

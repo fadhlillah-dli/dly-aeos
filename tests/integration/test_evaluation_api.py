@@ -72,3 +72,21 @@ def test_viewer_cannot_plan_runs(client: AuthedClient, db):
                                            "limits": {"max_attempts": 1, "max_minutes": 1, "max_cost_usd": 0}})
     assert r.status_code == 403
     assert client.get("/api/eval/leaderboard").status_code == 200
+
+
+def test_office_planned_runs_never_reach_personal_views(admin_client: AuthedClient, db):
+    """§23/§35: a run planned in an OFFICE session (its notes may describe Office work) is not listed or
+    ranked in PERSONAL; platform rows (no session domain) stay visible to both."""
+    _seed(db)
+    admin_client.select_domain(Domain.OFFICE)
+    r = admin_client.post("/api/eval/runs", json={"suite_key": "eval.small-bugfix", "configuration": CFG,
+                                                 "notes": "office pilot for client ACME",
+                                                 "limits": {"max_attempts": 1, "max_minutes": 5, "max_cost_usd": 0}})
+    assert r.status_code == 200, r.text
+    assert len(admin_client.get("/api/eval/runs").json()["items"]) == 1
+    office_board = admin_client.get("/api/eval/leaderboard", params={"role": "feature-implementer"}).json()
+    assert any(c.get("configuration_hash") for c in office_board["candidates_not_tested"])
+    admin_client.select_domain(Domain.PERSONAL)
+    assert admin_client.get("/api/eval/runs").json()["items"] == []
+    board = admin_client.get("/api/eval/leaderboard", params={"role": "feature-implementer"}).json()
+    assert "ACME" not in str(board) and not any(c.get("configuration_hash") for c in board["candidates_not_tested"])

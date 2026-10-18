@@ -437,6 +437,11 @@
     "Budget tidak naik dari keputusan ini; kenaikan budget memerlukan keputusan BUDGET terpisah",
     "Pengusul/implementer/model tidak dapat memberi approval"
    ],
+   "source_identity_gate": {
+    "status": "OK",
+    "blocking": [],
+    "remedy": null
+   },
    "next_actions": [
     "Pilih keputusan dan scope; sistem merekam Decision terikat hash"
    ]

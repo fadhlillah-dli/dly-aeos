@@ -33,17 +33,33 @@ and hash.
    human BUDGET decision, terms hash mismatch (row edited outside the flow), duplicate ACTIVE budgets
    for one scope/period, negative/non-finite numbers, ledger usage with UNKNOWN cost on a non-free
    route, unregistered route, paid route without pricing/pricing check, or a $0 estimate for a paid
-   route. An EXHAUSTED provider/route quota refuses admission (`QUOTA_EXHAUSTED`) — the caller waits,
-   backs off or uses an already-approved free fallback.
+   route, or a request without a `route_key` estimated at $0 (it cannot be proven to be a free route).
+   An EXHAUSTED provider/route quota refuses admission (`QUOTA_EXHAUSTED`) — the caller waits,
+   backs off or uses an already-approved free fallback. When the admission lock cannot be taken
+   within SQLite's busy timeout the request is refused (`BUDGET_LOCK_UNAVAILABLE`).
+   The request's domain is required and must equal the recorded domain of its project and run.
 5. **Usage ledger:** `record_usage` commits a reservation and records actual vs estimate vs UNKNOWN;
    when the actual cost is UNKNOWN the reserved estimate is *charged* to budgets (`charged_usd`) but
-   never shown as an actual cost. MOCK/DEMO entries never count as actual usage or against budgets.
+   never shown as an actual cost. MOCK/DEMO entries never count as actual usage or against budgets,
+   are listed with their mode instead of ACTUAL, and can never commit a LIVE reservation
+   (`NON_LIVE_RESERVATION_COMMIT`). A commit must match the reservation's run/project/domain/route.
+   An entry without an explicit domain takes the recorded (human-chosen, immutable) domain of its
+   project/run — never model output — so Office usage and its dashboard event are never
+   domain-less; a project/run domain mismatch is refused (`DOMAIN_MISMATCH`).
 6. **Native Claude** (`NATIVE_CLAUDE`) is recorded as subscription usage: any dollar figure passed in
    is discarded; the dashboard shows "Batas langganan berlaku; sisa kuota UNKNOWN". Only an `official`
    source may report OK/LOW remaining quota; an observed limit message may set EXHAUSTED.
 7. **ccusage** is an optional local ESTIMATE (token counts only, dollar figures dropped), run only if
    already installed (`ccusage` or `npx --no-install ccusage`, `--offline`); never an invoice or quota
-   authority and never auto-installed.
+   authority and never auto-installed. It aggregates every local Claude Code session, so only a
+   SUPER_ADMIN with unrestricted domain/project scope may run it (`ESTIMATOR_SCOPE_DENIED`).
+8. **Units** (CI minutes, compute seconds, storage bytes, human minutes) are recorded in their own
+   unit through the additive facade `record_unit_usage`; their cash cost stays UNKNOWN unless a real
+   price/bill exists, and they are never summed with worker API cost.
+9. **Visibility:** summaries/ledgers are domain- and project-scoped. GLOBAL/ROUTE budgets aggregate
+   every domain and project, so their spend is shown only to a principal who may see all of them.
+   For the same reason only a SUPER_ADMIN with unrestricted domain/project scope may change them
+   (`BUDGET_SCOPE_DENIED`); PROJECT/RUN budgets follow the project's domain scope.
 
 ## Consequences
 

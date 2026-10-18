@@ -46,6 +46,8 @@ def _component(db, cid="opencode", pin="1.3.0"):
     db.add(ComponentRelation(source_id=cid, target_id="evidence-store", relation="writes", lens="DESIGN",
                              data_description="run artifacts"))
     db.commit()
+    research.seed_registry(db)  # master-stated identities (e.g. github:anomalyco/opencode) pass the admission gate
+    db.commit()
 
 
 def _evidence(db, trusted=True, domain="PERSONAL", mode="LIVE"):

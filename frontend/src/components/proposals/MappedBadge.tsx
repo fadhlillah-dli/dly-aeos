@@ -85,6 +85,10 @@ export const COST_KIND: BadgeMap = {
   ESTIMATE: ["ESTIMATE", "Estimasi"],
   UNKNOWN: ["UNKNOWN", "UNKNOWN"],
   SUBSCRIPTION: ["NOT_APPLICABLE", "Langganan (bukan dolar)"],
+  // Non-LIVE ledger rows (fixtures) are never shown as actual usage (§50).
+  MOCK: ["MOCK", "MOCK — bukan usage aktual"],
+  DEMO: ["DEMO", "DEMO — bukan usage aktual"],
+  DESIGN: ["DESIGN", "DESIGN — bukan usage aktual"],
 };
 
 export const ELIGIBILITY: BadgeMap = {

@@ -18,13 +18,13 @@ import statistics
 from collections import defaultdict
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
 from aeos.core.errors import Conflict, NotFound, PolicyDenied, ValidationFailed
 from aeos.core.hashing import content_hash
-from aeos.core.redaction import redact
+from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import utcnow
 from aeos.evaluation import definitions as D
 from aeos.events import service as events
@@ -104,8 +104,18 @@ def run_view(r: EvalRun) -> dict[str, Any]:
     }
 
 
-def list_runs(session: Session, *, suite_key: str | None = None, role: str | None = None) -> list[dict[str, Any]]:
-    q = select(EvalRun).order_by(EvalRun.created_at.desc())
+def _scope(q: Any, *, domain: str | None, scoped: bool) -> Any:
+    """Viewer scoping: platform rows plus rows planned in the viewer's own domain (never the other one)."""
+    if not scoped:
+        return q
+    if domain is None:
+        return q.where(EvalRun.submitted_domain.is_(None))
+    return q.where(or_(EvalRun.submitted_domain.is_(None), EvalRun.submitted_domain == domain))
+
+
+def list_runs(session: Session, *, suite_key: str | None = None, role: str | None = None, domain: str | None = None,
+              scoped: bool = False) -> list[dict[str, Any]]:
+    q = _scope(select(EvalRun).order_by(EvalRun.created_at.desc()), domain=domain, scoped=scoped)
     if suite_key:
         q = q.where(EvalRun.suite_key == suite_key)
     if role:
@@ -142,7 +152,7 @@ def normalise_configuration(cfg: dict[str, Any]) -> tuple[dict[str, Any], list[s
 
 def plan_run(session: Session, *, suite_key: str, configuration: dict[str, Any], role_key: str | None,
              topology: str | None, repetitions: int, limits: dict[str, Any], actor_user_id: str,
-             notes: str = "") -> EvalRun:
+             notes: str = "", domain: str | None = None) -> EvalRun:
     suite = session.scalar(select(EvalSuite).where(EvalSuite.suite_key == suite_key))
     if suite is None:
         raise NotFound("eval suite not found")
@@ -169,15 +179,16 @@ def plan_run(session: Session, *, suite_key: str, configuration: dict[str, Any],
         suite_key=suite_key, configuration=cfg, configuration_hash=content_hash(cfg), topology=topology,
         status="PLANNED", sample_size=0, metrics={}, failures=[], gate_results={}, role_key=role,
         route_key=cfg["provider_route"] if cfg["provider_route"] != "UNKNOWN" else None, repetitions=repetitions,
-        samples=[], limits=limits, planned_by=actor_user_id, notes=notes[:2000], mode="LIVE",
+        samples=[], limits=redact(limits), planned_by=actor_user_id, notes=redact_text(notes or "")[:2000], mode="LIVE",
+        submitted_domain=domain,
     )
     session.add(run)
     session.flush()
     audit.record(session, actor_type="user", actor_id=actor_user_id, action="eval.run.plan", target_type="eval_run",
-                 target_id=run.id, details={"suite_key": suite_key, "configuration_hash": run.configuration_hash,
+                 target_id=run.id, domain=domain, details={"suite_key": suite_key, "configuration_hash": run.configuration_hash,
                                             "unknown_fields": unknown, "topology": topology})
     events.emit(session, source="evaluation", kind="eval.run.planned", entity_type="eval_run", entity_id=run.id,
-                payload={"suite_key": suite_key, "configuration_hash": run.configuration_hash,
+                domain=domain, payload={"suite_key": suite_key, "configuration_hash": run.configuration_hash,
                          "execution": "via workforce scheduler; not started by planning"})
     return run
 
@@ -218,6 +229,10 @@ def compute_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
     k = len(accepted)
     first_pass = sum(1 for s in accepted if s.get("first_pass"))
     completed = sum(1 for s in samples if s.get("status") not in D.FAILURE_STATUSES)
+    # §43 Reliability "provider availability": a sample interrupted by quota or flagged by the collector
+    # as provider-unavailable counts as an unavailable provider (never dropped from the denominator).
+    provider_down = sum(1 for s in samples
+                        if s.get("status") == "QUOTA_INTERRUPTED" or s.get("provider_unavailable") is True)
     in_scope = sum(1 for s in samples if not s.get("scope_violations"))
     lat = [x for s in samples if (x := _num(s.get("latency_s"))) is not None]
     queue = [x for s in samples if (x := _num(s.get("queue_wait_s"))) is not None]
@@ -246,6 +261,8 @@ def compute_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "contract": {"scope_adherence_rate": (in_scope / n) if n else None,
                      "permission_attempts": total("permission_attempts"), "false_claims": total("false_claims")},
         "reliability": {"completion_rate": (completed / n) if n else None,
+                        "provider_availability_rate": ((n - provider_down) / n) if n else None,
+                        "provider_unavailable": provider_down,
                         "tool_schema_failures": total("tool_failures"), "repair_count": total("repair_count"),
                         "quota_interrupted": sum(1 for s in samples if s.get("status") == "QUOTA_INTERRUPTED"),
                         "timeouts": sum(1 for s in samples if s.get("status") == "TIMEOUT"),
@@ -312,7 +329,7 @@ def record_result(session: Session, run_id: str, *, samples: list[dict[str, Any]
     run.started_at = run.started_at or run.finished_at
     session.flush()
     events.emit(session, source="evaluation", kind="eval.run.recorded", entity_type="eval_run", entity_id=run.id,
-                payload={"status": status, "sample_size": run.sample_size, "gates": gates,
+                domain=run.submitted_domain, payload={"status": status, "sample_size": run.sample_size, "gates": gates,
                          "route_change": "NONE (results never change routes)"})
     return run
 
@@ -381,11 +398,12 @@ def _candidates(session: Session, tested_hashes: set[str], tested_routes: set[st
     return out
 
 
-def leaderboard(session: Session, *, role: str | None = None) -> dict[str, Any]:
+def leaderboard(session: Session, *, role: str | None = None, domain: str | None = None,
+                scoped: bool = False) -> dict[str, Any]:
     suites = list(session.scalars(select(EvalSuite).order_by(EvalSuite.suite_key)))
     role_suites = [s for s in suites if role is None or s.role_key == role]
     suite_keys = {s.suite_key for s in role_suites}
-    runs = list(session.scalars(select(EvalRun).order_by(EvalRun.created_at)))
+    runs = list(session.scalars(_scope(select(EvalRun).order_by(EvalRun.created_at), domain=domain, scoped=scoped)))
     relevant = [r for r in runs if (r.suite_key in suite_keys) or (role is not None and r.role_key == role)]
     completed = [r for r in relevant if r.status in ("COMPLETED", "FAILED") and r.samples]
     planned = [r for r in relevant if r.status in ("PLANNED", "RUNNING")]
@@ -442,8 +460,8 @@ def leaderboard(session: Session, *, role: str | None = None) -> dict[str, Any]:
     }
 
 
-def scorecard_snapshot(session: Session, *, role: str) -> dict[str, Any]:
-    board = leaderboard(session, role=role)
+def scorecard_snapshot(session: Session, *, role: str, domain: str | None = None, scoped: bool = False) -> dict[str, Any]:
+    board = leaderboard(session, role=role, domain=domain, scoped=scoped)
     snapshot = {"role": role, "suites": [{"suite_key": s["suite_key"],
                                           "ranking": [{k: e[k] for k in ("configuration_hash", "label", "rank", "tie",
                                                                          "sample_size", "final_acceptance_rate",

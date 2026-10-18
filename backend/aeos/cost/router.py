@@ -12,7 +12,7 @@ from sqlalchemy import select
 from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, load_project
 from aeos.audit import service as audit
 from aeos.core.enums import Domain
-from aeos.core.errors import NotFound, ValidationFailed
+from aeos.core.errors import NotFound, PolicyDenied, ValidationFailed
 from aeos.core.timeutil import utcnow
 from aeos.cost import service
 from aeos.cost.ccusage import ccusage_estimate
@@ -26,7 +26,9 @@ SOURCE = "usage_ledger (broker/provider/collector), budgets + BUDGET decisions, 
 
 
 def _cross_domain(principal: Principal) -> bool:
-    return all(principal.can_access_domain(d) for d in Domain)
+    """GLOBAL/ROUTE budget spend aggregates every domain and project, so it is shown only to a
+    principal who may see all of them (no metadata/counts outside the scope, §35/§50)."""
+    return principal.allowed_project_ids is None and all(principal.can_access_domain(d) for d in Domain)
 
 
 @router.get("/api/costs/summary")
@@ -89,6 +91,11 @@ def set_budget(body: BudgetIn, db: DB, principal: AdminPrincipal) -> dict[str, A
     elif body.scope_type == "ROUTE":
         if db.scalar(select(ModelRoute).where(ModelRoute.route_key == body.scope_id)) is None:
             raise NotFound("route not registered")
+    if body.scope_type in ("GLOBAL", "ROUTE") and not _cross_domain(principal):
+        # A GLOBAL/ROUTE cap governs spend in every domain and project; a SUPER_ADMIN whose user scope
+        # is limited is not AUTH over the others (§20 "SUPER_ADMIN bukan otomatis AUTH").
+        raise PolicyDenied("GLOBAL/ROUTE budgets span every domain and project; your user scope is limited",
+                           code="BUDGET_SCOPE_DENIED")
     b = service.set_budget(
         db, actor_user_id=principal.user.id, scope_type=body.scope_type, scope_id=body.scope_id,
         period=body.period, limit_usd=body.limit_usd, limit_tokens=body.limit_tokens,
@@ -110,6 +117,11 @@ def list_quotas(db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
 @router.post("/api/costs/native-estimate")
 def native_estimate(db: DB, principal: AdminPrincipal) -> dict[str, Any]:
     """Optional local ccusage estimator (ESTIMATE only, never invoice or quota authority)."""
+    if not _cross_domain(principal):
+        # ccusage aggregates every local Claude Code session (any domain/project): counts from other
+        # domains must not reach a scope-limited principal (§35/§50 "termasuk counts").
+        raise PolicyDenied("the ccusage estimate aggregates all local sessions across domains; your scope is limited",
+                           code="ESTIMATOR_SCOPE_DENIED")
     result = ccusage_estimate()
     audit.record(db, actor_type="user", actor_id=principal.user.id, action="cost.native_estimate.run",
                  result="SUCCESS" if result.get("status") == "ESTIMATE" else "FAILED",

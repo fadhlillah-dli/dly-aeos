@@ -22,6 +22,7 @@ def record_result(session: Session, run_id: str, *, samples: list[dict[str, Any]
 
 
 def leaderboard(session: Session, *, role: str | None = None) -> dict[str, Any]:
+    """Internal (unscoped) leaderboard for trusted consumers; viewer endpoints scope runs by domain."""
     from aeos.evaluation.service import leaderboard as impl
 
     return impl(session, role=role)

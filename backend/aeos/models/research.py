@@ -155,6 +155,9 @@ class EvalRun(IdMixin, TimestampMixin, Base):
     result_source: Mapped[str | None] = mapped_column(String(64), nullable=True)  # verifier|collector identity
     notes: Mapped[str] = mapped_column(Text, default="")
     mode: Mapped[str] = mapped_column(String(16), default="LIVE")
+    # Session domain the run was planned from (None = platform/facade). Runs planned in OFFICE are never
+    # listed or ranked in a PERSONAL view (§23, §35); suites themselves are generic platform definitions.
+    submitted_domain: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class ContextPack(IdMixin, TimestampMixin, Base):
