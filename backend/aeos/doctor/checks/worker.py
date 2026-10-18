@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import binary_fingerprint, logical
 from aeos.doctor.model import CheckContext, Outcome, Remedy
+from aeos.models.evidence import EvidenceArtifact
 
 OPENCODE_URL = "https://github.com/anomalyco/opencode"
+
+# Platform-level rows are visible to every domain: OFFICE-domain evidence is never quoted here (§35).
+_NOT_OFFICE = or_(EvidenceArtifact.domain.is_(None), EvidenceArtifact.domain != "OFFICE")
 
 
 @check("worker.opencode", "WORKER", "Engine pekerja OpenCode", component_id="opencode", ttl_seconds=86400,
@@ -53,12 +57,10 @@ def worker_opencode(ctx: CheckContext) -> Outcome:
 @check("worker.contract", "WORKER", "Kontrak request/response dan caps pekerja", component_id="opencode",
        needs_db=True, ttl_seconds=86400, invalidators=("binary:opencode", "model:route"), severity_fail="HIGH")
 def worker_contract(ctx: CheckContext) -> Outcome:
-    from aeos.models.evidence import EvidenceArtifact
-
     assert ctx.session is not None
     ev = ctx.session.scalar(select(EvidenceArtifact).where(EvidenceArtifact.kind == "WORKER_CONTRACT_TEST",
                                                            EvidenceArtifact.trusted.is_(True),
-                                                           EvidenceArtifact.mode == "LIVE")
+                                                           EvidenceArtifact.mode == "LIVE", _NOT_OFFICE)
                             .order_by(EvidenceArtifact.created_at.desc()).limit(1))
     if ev is None:
         return Outcome("UNKNOWN", "Belum ada bukti tepercaya uji kontrak worker (tool/schema/patch, caps); NOT-PROVEN.",

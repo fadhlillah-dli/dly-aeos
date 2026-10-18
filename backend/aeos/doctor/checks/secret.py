@@ -16,6 +16,7 @@ from aeos.inventory.probes import ProbeRefused, is_loopback_url
 
 OPENBAO_DOCS = "https://openbao.org/docs/auth/approle/"
 KEYRING_PROBE_SERVICE = "dly-aeos-doctor-probe"
+DOMAIN_PRIVATE_NAMESPACES = frozenset({"office", "projects"})
 
 
 @check("secret.keyring", "SECRET", "Backend credential store OS", component_id="os-credential-store",
@@ -140,14 +141,20 @@ def secret_status(ctx: CheckContext) -> Outcome:
     except Exception as exc:
         return Outcome("MISSING", f"Secret store gagal diperiksa ({type(exc).__name__}); fail closed.",
                        error_code="SECRET_STORE_ERROR")
+    # This is a platform-level row shown to every domain: OFFICE and per-project refs (which may belong
+    # to either domain) are not listed or counted here, so their existence never leaks into a PERSONAL
+    # view (§35, §50). OFFICE credential status is reported by the OFFICE-scoped adapter checks.
+    shown = [st for st in items if st.ref.partition("/")[0] not in DOMAIN_PRIVATE_NAMESPACES]
     by_ns: dict[str, int] = {}
-    for st in items:
+    for st in shown:
         ns = st.ref.partition("/")[0]
         by_ns[ns] = by_ns.get(ns, 0) + (1 if st.exists else 0)
     backends = sorted({st.backend for st in items})
-    return Outcome("CONFIGURED", f"Secret store terjangkau; {sum(by_ns.values())} ref tersimpan (nilai tidak dibaca).",
+    return Outcome("CONFIGURED", f"Secret store terjangkau; {sum(by_ns.values())} ref platform/personal/worker "
+                   "tersimpan (nilai tidak dibaca).",
                    evidence={"refs_by_namespace": by_ns, "backends": backends,
-                             "refs": [st.ref for st in items if st.exists]})
+                             "refs": [st.ref for st in shown if st.exists],
+                             "not_listed": "namespace office/projects dilaporkan oleh pemeriksaan ber-scope domain"})
 
 
 @check("secret.no_raw_exposure", "SECRET", "Tidak ada secret mentah di audit/event/observasi", needs_db=True,

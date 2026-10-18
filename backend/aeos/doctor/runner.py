@@ -39,8 +39,10 @@ DEFAULT_SEVERITY = {
 OBS_MAP: dict[str, dict[str, str]] = {
     "installation": {"VERIFIED": "INSTALLED", "CONFIGURED": "INSTALLED", "CONNECTED": "INSTALLED",
                      "MISSING": "NOT_INSTALLED", "FAILED": "UNKNOWN", "UNKNOWN": "UNKNOWN"},
+    # MISSING (no binary / no stored credential / not logged in) means the connection was never tried:
+    # NOT_CHECKED, not EXPIRED_AUTH; only a rejected credential (EXPIRED) is EXPIRED_AUTH.
     "connectivity": {"CONNECTED": "CONNECTED", "VERIFIED": "CONNECTED", "FAILED": "UNREACHABLE",
-                     "EXPIRED": "EXPIRED_AUTH", "MISSING": "EXPIRED_AUTH", "UNKNOWN": "UNKNOWN"},
+                     "EXPIRED": "EXPIRED_AUTH", "MISSING": "NOT_CHECKED", "UNKNOWN": "UNKNOWN"},
     "configuration": {"CONFIGURED": "CONFIGURED", "VERIFIED": "CONFIGURED", "CONNECTED": "CONFIGURED",
                       "MISSING": "MISSING", "FAILED": "INVALID", "UNKNOWN": "UNKNOWN"},
     "functional": {"VERIFIED": "VERIFIED", "FAILED": "FAILED"},
@@ -124,10 +126,21 @@ def run_check(spec: CheckSpec, ctx: CheckContext) -> CheckResultData:
                                                               "message": redact_text(str(exc))[:200]})
     severity = out.severity or (spec.severity_fail if out.status in ("FAILED", "MISSING") else
                                 DEFAULT_SEVERITY.get(out.status, "LOW"))
+    from aeos.doctor.capabilities import capability_index
+
+    # §08 scope: project/domain/capability. V1 checks are platform- or domain-level (no project);
+    # the capability part names the gates that read this result.
     scope = dict(spec.scope)
+    caps = capability_index().get(spec.check_id)
+    if caps:
+        scope["capabilities"] = caps
     observations = list(out.observations)
     if spec.observation and spec.component_id:
         mapped = OBS_MAP.get(spec.observation, {}).get(out.status)
+        if spec.observation == "connectivity" and out.status == "FAILED" and "UNREACHABLE" not in (out.error_code or ""):
+            # e.g. wrong auth mode, sealed vault, repo not visible: the endpoint answered, so it is not
+            # "unreachable"; the failure itself is the check result. Do not claim more than was seen.
+            mapped = "UNKNOWN"
         if mapped:
             observations.insert(0, {"component_id": spec.component_id, "dimension": spec.observation,
                                     "status": mapped, "observed_version": out.component_version})
@@ -232,9 +245,15 @@ def run_doctor(
         run.counts = counts
         run_id = run.id
         persisted = True
+        # The event has no domain (every session sees it), so its counts cover platform-level checks only;
+        # domain-scoped results are announced by their own domain-tagged doctor.check events.
+        platform_counts: dict[str, int] = {}
+        for r in results:
+            if not r.scope.get("domain"):
+                platform_counts[r.status] = platform_counts.get(r.status, 0) + 1
         events.emit(session, source="doctor", kind="doctor.run.completed", entity_type="doctor_run", entity_id=run.id,
-                    payload={"run_id": run.id, "counts": counts, "functional": functional, "groups": run.groups,
-                             "capability": capability, "skipped": len(skipped)})
+                    payload={"run_id": run.id, "counts_platform": platform_counts, "functional": functional,
+                             "groups": run.groups, "capability": capability})
     return DoctorReport(results=results, run_id=run_id, persisted=persisted, functional=functional,
                         groups=[g.upper() for g in groups or []], capability=capability,
                         started_at=started.isoformat(), finished_at=finished.isoformat(), skipped=skipped)

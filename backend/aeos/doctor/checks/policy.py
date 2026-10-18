@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import file_fingerprint
 from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
-from aeos.doctor.office import read_office_policy
+from aeos.doctor.office import OFFICE_FLAGS, read_office_policy
 
 
 @check("policy.mci", "CANONICAL_POLICY", "Referensi MCI kanonik", ttl_seconds=86400, ok=frozenset(),
@@ -51,9 +51,12 @@ def policy_office_defaults(ctx: CheckContext) -> Outcome:
     if source == "fail-closed":
         return Outcome("FAILED", "Kebijakan OFFICE tidak dapat dibaca; semua operasi OFFICE ditolak (fail closed).",
                        evidence=evidence, error_code="OFFICE_POLICY_UNREADABLE")
-    if pol.get("external_worker_allowed") and source != "policy-module":
-        return Outcome("FAILED", "File default mengizinkan worker eksternal OFFICE tanpa keputusan tercatat.",
-                       evidence=evidence, error_code="OFFICE_DEFAULT_NOT_DENY", severity="CRITICAL")
+    opened = sorted(f for f in set(OFFICE_FLAGS.values()) if pol.get(f) is True)
+    if (opened or pol.get("approved_worker_routes")) and source != "policy-module":
+        return Outcome("FAILED", "File default membuka izin OFFICE tanpa keputusan otorisasi tercatat "
+                       f"({', '.join(opened) or 'approved_worker_routes'}); gate OFFICE tetap tertutup.",
+                       evidence={**evidence, "opened_flags": opened}, error_code="OFFICE_DEFAULT_NOT_DENY",
+                       severity="CRITICAL")
     if not pol.get("external_worker_allowed") and not pol.get("approved_worker_routes"):
         return Outcome("VERIFIED", "OFFICE default deny berlaku: external_worker_allowed=false, approved_worker_routes=[].",
                        evidence=evidence)

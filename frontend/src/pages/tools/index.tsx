@@ -5,6 +5,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { CoverageBanner } from "../../components/inventory/CoverageBanner";
+import { DomainRequired } from "../../components/inventory/DomainRequired";
 import { Badge, DIMENSION_LABELS, REQUIREMENT_LABELS } from "../../components/inventory/labels";
 import type { ComponentList, ComponentRow, DimensionValue } from "../../components/inventory/types";
 import { Button, ErrorBox, inputClass, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
@@ -58,7 +59,11 @@ export default function ToolsPage() {
   const [page, setPage] = useState(1);
   const pageSize = 50;
   const qs = buildQuery({ q, kind, requirement, category, design_label: designLabel, view, page, page_size: pageSize });
-  const list = useQuery({ queryKey: ["inventory", "components", domain, qs], queryFn: () => get<ComponentList>(`/api/inventory/components?${qs}`) });
+  const list = useQuery({
+    queryKey: ["inventory", "components", domain, qs],
+    queryFn: () => get<ComponentList>(`/api/inventory/components?${qs}`),
+    enabled: !!domain,
+  });
   const refresh = useMutation({
     mutationFn: () => post("/api/inventory/refresh", {}),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory"] }),
@@ -135,24 +140,34 @@ export default function ToolsPage() {
   ];
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
+  const header = (
+    <PageHeader
+      title="Tools & Repos"
+      question="Tool/repository apa yang dipakai, dari mana asalnya dan untuk apa?"
+      source={data?.source ?? "InstallManifest + observasi"}
+      checkedAt={data?.checked_at ?? null}
+      evidenceLimit="Katalog desain bukan bukti instalasi; tiap dimensi berasal dari observasi bertanggal"
+      mode={data?.mode}
+      actions={
+        isAdmin && domain ? (
+          <Button busy={refresh.isPending} onClick={() => refresh.mutate()} title="Probe read-only; tidak memasang apa pun">
+            <RefreshCw className="h-4 w-4" aria-hidden /> Segarkan (rekonsiliasi)
+          </Button>
+        ) : undefined
+      }
+    />
+  );
+  if (!domain)
+    return (
+      <div>
+        {header}
+        <DomainRequired />
+      </div>
+    );
 
   return (
     <div>
-      <PageHeader
-        title="Tools & Repos"
-        question="Tool/repository apa yang dipakai, dari mana asalnya dan untuk apa?"
-        source={data?.source ?? "InstallManifest + observasi"}
-        checkedAt={data?.checked_at ?? null}
-        evidenceLimit="Katalog desain bukan bukti instalasi; tiap dimensi berasal dari observasi bertanggal"
-        mode={data?.mode}
-        actions={
-          isAdmin ? (
-            <Button busy={refresh.isPending} onClick={() => refresh.mutate()} title="Probe read-only; tidak memasang apa pun">
-              <RefreshCw className="h-4 w-4" aria-hidden /> Segarkan (rekonsiliasi)
-            </Button>
-          ) : undefined
-        }
-      />
+      {header}
       {refresh.error && <ErrorBox error={refresh.error} />}
       {data?.mode === "DESIGN" && (
         <Notice tone="mock">

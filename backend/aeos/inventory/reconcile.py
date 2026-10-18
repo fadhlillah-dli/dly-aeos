@@ -42,7 +42,7 @@ from aeos.core.timeutil import utcnow
 from aeos.inventory import scope as scope_reader
 from aeos.inventory.drift import compute_drift, persist_drift
 from aeos.inventory.manifest import MANIFEST_REL, apply_manifest, current_manifest
-from aeos.inventory.observations import UNREGISTERED_PREFIX, record_observation
+from aeos.inventory.observations import UNREGISTERED_PREFIX, component_domain, record_observation
 from aeos.inventory.probes import (
     PROVIDER_ENV_PREFIXES,
     ProbeRefused,
@@ -57,7 +57,7 @@ from aeos.inventory.probes import (
     strip_url_credentials,
     version_tuple,
 )
-from aeos.models.inventory import ComponentReference
+from aeos.models.inventory import ComponentObservation, ComponentReference
 from aeos.models.inventory_ext import ReconciliationRun
 
 OBSERVER = "reconciler"
@@ -534,6 +534,85 @@ def _config_specs(ctx: ReconcileContext, comps: dict[str, ComponentReference]) -
     return out
 
 
+# ---------------------------------------------------------------- change detection / invalidation
+
+IDENTITY_DIMENSIONS = ("installation", "configuration")
+
+
+def _previous_own(session: Session, component_id: str, dimension: str) -> ComponentObservation | None:
+    """Latest earlier observation of this dimension by the reconciler itself (other observers report
+    versions in their own format, so they are not compared, which avoids spurious invalidations)."""
+    return session.scalar(
+        select(ComponentObservation)
+        .where(ComponentObservation.component_id == component_id, ComponentObservation.dimension == dimension,
+               ComponentObservation.observer == OBSERVER)
+        .order_by(ComponentObservation.observed_at.desc()).limit(1)
+    )
+
+
+def identity_change(session: Session, component_id: str, specs: list[Spec]) -> dict[str, Any] | None:
+    """What changed between the previous reconciler observation and *specs* (status, resolved version
+    or identity of the installation/configuration dimensions); None when nothing relevant changed or
+    there is no earlier observation to compare with."""
+    changes: list[dict[str, Any]] = []
+    for dim in IDENTITY_DIMENSIONS:
+        new = next((s for s in specs if s["dimension"] == dim), None)
+        if new is None:
+            continue
+        prev = _previous_own(session, component_id, dim)
+        if prev is None:
+            continue
+        for field_name, before, after in (
+            ("status", prev.status, new["status"]),
+            ("version", prev.observed_version, new.get("observed_version")),
+            ("identity", prev.observed_identity, new.get("observed_identity")),
+        ):
+            if field_name != "status" and (before is None or after is None):
+                continue  # UNKNOWN on either side is not evidence of a change
+            if before != after:
+                changes.append({"dimension": dim, "field": field_name, "before": before, "after": after})
+    return {"changes": changes} if changes else None
+
+
+def invalidators_for(comp: ComponentReference, change: dict[str, Any]) -> list[str]:
+    """Doctor invalidators affected by *change* — only the checks that really depend on it (§38: do not
+    freeze capabilities that do not depend on the change).
+
+    * repository: its resolved version is the HEAD commit, so a new commit only invalidates
+      HEAD-dependent checks (``repo:head``); an origin change the identity checks (``repo:origin``);
+    * binary probes: ``binary:<name>`` for each probed executable (e.g. ``binary:claude`` marks
+      claude.binary/claude.auth/claude.capability_test, but not the environment check);
+    * anything else: ``component:<id>`` (every check about that component).
+    """
+    if comp.kind == "repository":
+        return sorted({"repo:origin" if c["field"] == "identity" else "repo:head" for c in change["changes"]})
+    probe = comp.probe or {}
+    if probe.get("type") == "binary" and probe.get("binaries"):
+        return sorted({f"binary:{b['name']}" for b in probe["binaries"] if b.get("name")})
+    return [f"component:{comp.component_id}"]
+
+
+def _invalidate_component(session: Session, comp: ComponentReference, change: dict[str, Any]) -> dict[str, Any]:
+    """Mark the affected readiness checks STALE through the doctor facade and announce the change."""
+    from aeos.events import service as events
+
+    summary = "; ".join(f"{c['dimension']}.{c['field']}: {c['before']} -> {c['after']}" for c in change["changes"])
+    reason = redact_text(f"rekonsiliasi melihat perubahan ({summary})")[:200]
+    invalidators = invalidators_for(comp, change)
+    n = 0
+    try:
+        from aeos.doctor import facade as doctor
+
+        for inv in invalidators:
+            n += doctor.invalidate(session, invalidator=inv, reason=reason)
+    except (ImportError, ModuleNotFoundError):  # doctor absent: nothing was fresh to begin with
+        n = 0
+    events.emit(session, source="inventory", kind="inventory.component.changed", entity_type="component",
+                entity_id=comp.component_id, domain=component_domain(session, comp.component_id),
+                payload={"changes": change["changes"], "invalidators": invalidators, "checks_marked_stale": n})
+    return {**change, "invalidators": invalidators, "checks_marked_stale": n}
+
+
 # ---------------------------------------------------------------- entry point
 
 
@@ -573,6 +652,7 @@ def reconcile(
     session.flush()
 
     component_status: dict[str, Any] = {}
+    invalidated: dict[str, Any] = {}
     recorded = 0
     for comp in targets:
         cid = comp.component_id
@@ -583,6 +663,12 @@ def reconcile(
             continue
         try:
             specs = probe_component(ctx, comp)
+            change = identity_change(session, cid, specs)
+            if change:
+                # §08/§38: a changed binary/version/identity makes the affected readiness checks STALE
+                # before the capability is used again. Done before recording, so only the older
+                # observations are expired.
+                invalidated[cid] = _invalidate_component(session, comp, change)
             for spec in specs:
                 record_observation(session, component_id=cid, observer=OBSERVER, scope={"run_id": run.id}, **spec)
                 recorded += 1
@@ -625,6 +711,7 @@ def reconcile(
         "failed": statuses.count("FAILED"),
         "unknown": statuses.count("UNKNOWN"),
         "drift": drift_summary,
+        "invalidated": invalidated,
     }
     run.finished_at = utcnow()
     session.flush()

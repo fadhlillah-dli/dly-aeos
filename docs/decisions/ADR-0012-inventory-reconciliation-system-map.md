@@ -44,6 +44,18 @@ edges, and immutable ArchitectureSnapshots for render/diff/audit.
    hashes, active decisions and the DESIGN/CONFIG nodes/edges of the snapshot's domain; the hash excludes
    the timestamp so identical states compare equal. The table is append-only through SQLite triggers
    installed with the table (same names `aeos.core.db` would use).
+8. **Inventory changes invalidate readiness** (§08, §38 "Drift dan kegagalan"). When reconciliation
+   sees the installation/configuration status, resolved version or identity of a component change
+   relative to its own previous observation, it calls `aeos.doctor.facade.invalidate` before recording
+   the new observation, with only the invalidators that depend on it: `binary:<name>` for binary
+   probes, `repo:head` / `repo:origin` for the platform repository (a new commit does not stale the
+   origin check), otherwise `component:<id>`. A new InstallManifest content hash invalidates
+   `manifest`. Changes are announced with `inventory.component.changed` and listed in the run summary.
+9. **OBSERVED lens precedence.** The most significant fresh fact wins by dimension (usage >
+   connectivity > installation > declaration > discovery), not by timestamp, and a fresh
+   NOT_INSTALLED/REMOVED/INSTALL_FAILED is never hidden by a later lockfile declaration (§50 "Tool
+   ditemukan dalam README atau lockfile"). Probe subprocesses never inherit `ANTHROPIC_*` variables,
+   even when the caller passes no explicit environment.
 
 ## Consequences
 

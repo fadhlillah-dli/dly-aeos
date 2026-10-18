@@ -294,12 +294,14 @@ def list_components(
     basis = config_basis(session, {c.component_id: c for c in window}, latest, now, domain=domain) if ids else {}
     rec = current_manifest(session)
     last = latest_run(session)
-    any_obs = session.scalar(select(func.count()).select_from(ComponentObservation)) or 0
+    cov = coverage(session, domain=domain, compact=True)
+    # LIVE only when a component visible in THIS domain has observations (no cross-domain signal).
+    any_obs = (cov["totals"]["observed_fresh"] or 0) + (cov["totals"]["stale_only"] or 0)
     return {
         "items": [component_row(c, latest, drift, now, advanced=advanced, relation_counts=rel_counts,
                                 basis=basis.get(c.component_id)) for c in window],
         "total": len(filtered), "page": page, "page_size": page_size, "view": view, "facets": facets,
-        "coverage": coverage(session, domain=domain, compact=True),
+        "coverage": cov,
         "manifest": {"record_id": rec.id, "content_hash": rec.content_hash, "loaded_at": _iso(rec.created_at),
                      "manifest_version": rec.manifest_version} if rec else None,
         "source": "InstallManifest (DESIGN) + observasi bertanggal",
@@ -611,20 +613,34 @@ def component_detail(session: Session, component_id: str, *, domain: str | None)
 # ---------------------------------------------------------------- system map
 
 
+OBSERVED_PRIORITY = ("usage", "connectivity", "installation", "declaration", "discovery")
+OBSERVED_POSITIVE = frozenset({"INSTALLED", "CONNECTED", "IN_USE", "LAST_USED", "IDLE", "DECLARED", "UNREGISTERED"})
+INSTALL_NEGATIVE = frozenset({"NOT_INSTALLED", "REMOVED", "INSTALL_FAILED"})
+
+
 def _observed_status(cid: str, latest: dict[tuple[str, str], ComponentObservation], now: datetime
                      ) -> tuple[bool, str, str | None, bool]:
-    """(present, status, at, stale) for the OBSERVED lens."""
-    best: ComponentObservation | None = None
-    for dim in ("usage", "connectivity", "installation", "declaration", "discovery"):
-        o = latest.get((cid, dim))
-        if o is not None and (best is None or o.observed_at > best.observed_at):
-            best = o
-    if best is None:
+    """(present, status, at, stale) for the OBSERVED lens.
+
+    The most significant FRESH fact wins by dimension, not by timestamp: a lockfile/config
+    declaration (read after the probes) never hides a fresh NOT_INSTALLED/UNREACHABLE result
+    (§50 "Tool ditemukan dalam README atau lockfile ... bukan bukti proses aktif"). Only when every
+    observation has expired is the newest one shown, as STALE.
+    """
+    fresh = {dim: o for dim in OBSERVED_PRIORITY
+             if (o := latest.get((cid, dim))) is not None and not is_stale(o, now)}
+    inst = fresh.get("installation")
+    if inst is not None and inst.status in INSTALL_NEGATIVE:
+        return False, inst.status, _iso(inst.observed_at), False
+    for dim in OBSERVED_PRIORITY:
+        o = fresh.get(dim)
+        if o is not None:
+            return o.status in OBSERVED_POSITIVE, o.status, _iso(o.observed_at), False
+    expired = [o for dim in OBSERVED_PRIORITY if (o := latest.get((cid, dim))) is not None]
+    if not expired:
         return False, "UNKNOWN", None, False
-    stale = is_stale(best, now)
-    positive = best.status in ("INSTALLED", "CONNECTED", "IN_USE", "LAST_USED", "IDLE", "DECLARED", "UNREGISTERED")
-    status = "STALE" if stale else best.status
-    return positive and not stale, status, _iso(best.observed_at), stale
+    newest = max(expired, key=lambda o: ensure_aware(o.observed_at) or now)
+    return False, "STALE", _iso(newest.observed_at), True
 
 
 def system_map(session: Session, *, lens: str, domain: str | None, category: str | None = None) -> dict[str, Any]:

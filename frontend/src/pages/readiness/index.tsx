@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { RemedyPanel } from "../../components/doctor/RemedyPanel";
+import { isOk } from "../../components/doctor/status";
 import type { CapabilitiesResponse, CapabilityItem, CheckItem, ChecksResponse, HistoryResponse } from "../../components/doctor/types";
 import { Badge, SeverityBadge } from "../../components/inventory/labels";
 import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, Loading, Mono, Notice, PageHeader } from "../../components/ui";
@@ -88,7 +89,8 @@ function CheckDetail({ check, onClose }: { check: CheckItem; onClose: () => void
             ["Komponen", check.component_id ? <Link className="text-accent hover:underline" to={`/tools/${check.component_id}`}>{check.component_id}</Link> : "—"],
             ["Versi komponen", check.component_version ?? "UNKNOWN"],
             ["Target", check.target_identity ?? "—"],
-            ["Scope", Object.keys(check.scope ?? {}).length ? JSON.stringify(check.scope) : "platform"],
+            ["Scope domain", typeof check.scope?.domain === "string" ? check.scope.domain : "platform (semua domain)"],
+            ["Capability yang membaca hasil ini", Array.isArray(check.scope?.capabilities) && check.scope.capabilities.length ? (check.scope.capabilities as string[]).join(", ") : "—"],
             ["Diperiksa", <Freshness key="f" at={check.last_checked_at} staleAfterSeconds={3600} />],
             ["Berlaku sampai", check.expires_at ? `${absoluteTime(check.expires_at)} (${relativeTime(check.expires_at)})` : "—"],
             ["Invalidator", check.invalidators.length ? check.invalidators.join(", ") : "—"],
@@ -177,7 +179,7 @@ export default function ReadinessPage() {
 
   const grouped = useMemo(() => {
     const items = checks.data?.items ?? [];
-    const filtered = onlyProblems ? items.filter((i) => !["VERIFIED", "CONFIGURED", "CONNECTED", "NOT_APPLICABLE"].includes(i.effective_status)) : items;
+    const filtered = onlyProblems ? items.filter((i) => !isOk(i)) : items;
     return (checks.data?.groups ?? [])
       .map((g) => ({ ...g, items: filtered.filter((i) => i.group === g.id) }))
       .filter((g) => g.items.length > 0);
@@ -293,6 +295,11 @@ export default function ReadinessPage() {
                         <td className="px-2 py-2">
                           <Badge status={c.effective_status} />
                           {c.never_run && <div className="mt-0.5 text-xs text-ink-3">belum diperiksa</div>}
+                          {!c.never_run && !isOk(c) && (
+                            <div className="mt-0.5 text-xs text-warn" data-testid={`not-ok-${c.check_id}`}>
+                              belum memenuhi syarat ({(c.ok_statuses ?? []).join("/") || "tidak pernah lulus otomatis"})
+                            </div>
+                          )}
                         </td>
                         <td className="px-2 py-2">
                           <SeverityBadge severity={c.severity} />

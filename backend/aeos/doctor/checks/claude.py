@@ -95,12 +95,16 @@ def claude_env(ctx: CheckContext) -> Outcome:
     present = sorted(k for k in FORBIDDEN_ENV if ctx.env.get(k))
     evidence = {"variables_present": present, "values_shown": False}
     if present:
-        cmds = ("; ".join(f"[Environment]::SetEnvironmentVariable('{k}', $null, 'User')" for k in present)
-                if sys.platform == "win32" else
-                "hapus baris export " + ", ".join(present) + " dari ~/.zshrc / ~/.bash_profile lalu buka terminal baru")
+        if sys.platform == "win32":
+            cmds = "; ".join(f"[Environment]::SetEnvironmentVariable('{k}', $null, 'User')" for k in present)
+            operation = "Hapus variabel provider dari environment pengguna (PowerShell), lalu buka terminal baru"
+        else:
+            cmds = "unset " + " ".join(present)
+            operation = ("Hapus variabel provider: unset untuk shell ini, lalu hapus baris export-nya dari profil shell "
+                         "(~/.zshrc, ~/.bash_profile atau ~/.profile) dan buka terminal baru")
         return Outcome("FAILED", f"Variabel provider ada di environment: {', '.join(present)} (nilai tidak ditampilkan). "
                        "Sesi Max bisa beralih ke API berbayar.", evidence=evidence, error_code="PROVIDER_ENV_PRESENT",
-                       remedy=Remedy(operation="Hapus variabel provider dari environment pengguna", command=cmds,
+                       remedy=Remedy(operation=operation, command=cmds,
                                      target="environment pengguna", privilege="pengguna lokal",
                                      rollback="set ulang variabel (tidak disarankan)",
                                      evidence_to_collect="claude.env VERIFIED"))

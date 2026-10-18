@@ -97,3 +97,27 @@ def test_inventory_cli_reconcile_list_show(settings, db, fake_host):
     assert res.exit_code == 0 and "Claude Code" in res.output and res.output.isascii()
     res = CliRunner().invoke(_cli(), ["inventory", "show", "jira"])  # OFFICE-only in PERSONAL view
     assert res.exit_code == 1
+
+
+def test_outdated_database_schema_is_reported_not_a_crash(settings, db, fake_host):
+    """§50 'Dependency inti belum terpasang' for an existing DB created before a column existed (no
+    Alembic revision yet): the bootstrap layer still prints every result and names the gap."""
+    import sqlite3
+
+    db.close()
+    con = sqlite3.connect(str(settings.layout.db_path))
+    try:
+        con.execute("ALTER TABLE check_results DROP COLUMN title")
+        con.commit()
+    finally:
+        con.close()
+    res = CliRunner().invoke(_cli(), ["doctor", "--json"])
+    assert res.exit_code == 1, res.output
+    payload = json.loads(res.output)
+    assert payload["database"] == "schema-outdated" and payload["persisted"] is False
+    by_id = {r["check_id"]: r for r in payload["results"]}
+    assert by_id["runtime.db"]["status"] == "FAILED" and by_id["runtime.db"]["error_code"] == "SCHEMA_OUTDATED"
+    assert "check_results.title" in by_id["runtime.db"]["observed_evidence"]["columns_missing"]
+    assert "runtime.db" in payload["dashboard_critical_failures"]
+    text = CliRunner().invoke(_cli(), ["doctor"])
+    assert "schema is older than this version" in text.output and text.output.isascii()

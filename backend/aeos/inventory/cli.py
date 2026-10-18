@@ -52,6 +52,9 @@ def reconcile_cmd(
     for cls, n in sorted((drift.get("by_class") or {}).items()):
         if n:
             typer.echo(ascii_safe(f"  {cls}: {n}"))
+    for cid, inv in sorted(((view.get("summary") or {}).get("invalidated") or {}).items()):
+        typer.echo(ascii_safe(f"Changed: {cid} ({', '.join(inv.get('invalidators') or [])}) -> "
+                              f"{inv.get('checks_marked_stale', 0)} readiness check(s) STALE; run: aeos doctor"))
     for src in view.get("sources") or []:
         if src.get("status") != "READ":
             typer.echo(ascii_safe(f"Coverage gap: {src.get('source')} {src.get('status')}"))

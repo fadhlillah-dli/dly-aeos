@@ -56,9 +56,10 @@ def run(body: RunIn, request: Request, db: DB, principal: AdminPrincipal, settin
                           "counts": report.counts(), "skipped": len(report.skipped)})
     db.commit()
     domain = _domain(principal)
-    items = [row_view(r) for r in report.results if (r.scope or {}).get("domain") in (None, domain)]
+    hidden = views.hidden_check_ids(domain)
+    items = [row_view(r) for r in report.results if r.check_id not in hidden]
     return {"run": {"id": report.run_id, "started_at": report.started_at, "finished_at": report.finished_at,
                     "functional": report.functional, "groups": report.groups, "capability": report.capability,
-                    "counts": report.counts()},
-            "items": items, "skipped": report.skipped,
+                    "counts": views.visible_counts([i["status"] for i in items])},
+            "items": items, "skipped": [s for s in report.skipped if s["check_id"] not in hidden],
             "capabilities": views.capabilities_view(db, domain=domain)["items"]}

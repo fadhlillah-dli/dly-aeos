@@ -11,8 +11,9 @@ import { absoluteTime, relativeTime, shortHash } from "../../lib/format";
 
 export function NodeCard({ node, lensLabel, onClose }: { node: MapNode; lensLabel: string; onClose: () => void }) {
   const unregistered = node.kind === "unregistered";
+  const { domain } = useAuth();
   const detail = useQuery({
-    queryKey: ["inventory", "component", "card", node.id],
+    queryKey: ["inventory", "component", "card", domain, node.id],
     queryFn: () => get<ComponentDetail>(`/api/inventory/components/${encodeURIComponent(node.id)}`),
     enabled: !unregistered,
     retry: false,
@@ -192,7 +193,7 @@ export function SnapshotPanel() {
     },
   });
   const diff = useQuery({
-    queryKey: ["inventory", "snapshot-diff", a, b],
+    queryKey: ["inventory", "snapshot-diff", domain, a, b],
     queryFn: () => get<SnapshotDiff>(`/api/inventory/snapshots/diff?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
     enabled: !!a && !!b && a !== b,
   });
