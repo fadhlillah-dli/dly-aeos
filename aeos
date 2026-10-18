@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# DLY AEOS launcher for macOS/Linux. Usage: ./aeos <command> [args]
+set -e
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+EXE="$ROOT/.venv/bin/aeos"
+if [ ! -x "$EXE" ]; then
+  echo "Virtual environment not found. Run: ./scripts/bootstrap.sh" >&2
+  exit 1
+fi
+exec "$EXE" "$@"

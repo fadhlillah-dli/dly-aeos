@@ -1,0 +1,9 @@
+# OFFICE domain defaults (master §23). Changing these requires a recorded company authorisation
+# Decision (kind POLICY, domain OFFICE) — not a config edit and never model output.
+office:
+  external_worker_allowed: false
+  approved_worker_routes: []
+  claude_max_allowed_for_office_data: false   # §51 P1: company approval not proven
+  trace_destinations_allowed: []
+  requires_isolated_runtime: true
+  atlassian_deployment: UNKNOWN                # Cloud vs Data Center must be verified per tenant

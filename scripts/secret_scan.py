@@ -1,0 +1,65 @@
+"""G1 secret scan over tracked files (master §31). Uses the same credential patterns as runtime
+redaction. Exit 1 when a likely secret is found. Runs without network or third-party tools."""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "backend"))
+
+from aeos.core.redaction import _PATTERNS  # noqa: E402
+
+# Files that legitimately contain pattern-shaped examples (tests of the redactor itself).
+ALLOW = {
+    "tests/unit/test_core.py",
+    "tests/unit/test_identity.py",
+    "backend/aeos/core/redaction.py",
+    "scripts/secret_scan.py",
+}
+BINARY_SUFFIXES = {".png", ".jpg", ".ico", ".docx", ".sqlite3", ".woff", ".woff2", ".lock"}
+
+# Token-shaped patterns (no capture groups) are high confidence; the generic "key=value" runtime
+# redaction rule is too noisy for source code, so source uses a literal-string assignment check.
+HIGH_CONFIDENCE = [p for p in _PATTERNS if not p.groups]
+LITERAL_ASSIGNMENT = re.compile(
+    r"(?i)\b(api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token)\b\s*[:=]\s*"
+    r"[\"']([^\"'\s]{16,})[\"']"
+)
+
+
+def tracked_files() -> list[str]:
+    out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    return [line for line in out.splitlines() if line]
+
+
+def main() -> int:
+    findings: list[str] = []
+    for rel in tracked_files():
+        if rel in ALLOW or Path(rel).suffix in BINARY_SUFFIXES or rel.endswith("package-lock.json"):
+            continue
+        path = ROOT / rel
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, FileNotFoundError):
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for pat in HIGH_CONFIDENCE:
+                if pat.search(line):
+                    findings.append(f"{rel}:{lineno}: matches {pat.pattern[:40]}...")
+            m = LITERAL_ASSIGNMENT.search(line)
+            if m and not any(w in m.group(2) for w in ("example", "placeholder", "changeme", "xxx", "<", "${")):
+                findings.append(f"{rel}:{lineno}: literal credential assignment")
+    if findings:
+        print("Possible secrets found:")
+        print("\n".join(findings))
+        return 1
+    print(f"secret scan: {len(tracked_files())} tracked files, no findings")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
