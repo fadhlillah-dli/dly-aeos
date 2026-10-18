@@ -3,7 +3,7 @@
 Append-only / immutable-column triggers are installed by aeos.core.migrate after each upgrade.
 
 Revision ID: 0001_initial
-Revises: 
+Revises: (none)
 Create Date: 2026-10-19 03:57:55.837972
 """
 from __future__ import annotations
@@ -11,8 +11,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-import aeos.core.db  # noqa: F401  (UTCDateTime column type)
-
+import aeos.core.db
 
 revision = '0001_initial'
 down_revision = None
