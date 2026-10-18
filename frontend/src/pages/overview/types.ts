@@ -129,11 +129,3 @@ export interface IntegrationList {
   checked_at: string;
   evidence_limit: string;
 }
-
-export interface SearchHit {
-  type: string;
-  id: string;
-  title: string;
-  subtitle: string;
-  link: string;
-}

@@ -30,3 +30,24 @@ must not see metadata or counts.
 
 * LIKE scans are adequate for the local single-user metadata volume; FTS5 can be added behind the
   same endpoint later without changing scoping rules.
+
+## Amendment 2026-10-18 (integration)
+
+Seam W4 (Control Center UI end to end, real browser). Two search contracts had grown on either
+side of the seam: the Control Center "Ringkasan" card called `GET /api/control-center/search`
+(control-center projection: `{items: [{type, link}], truncated}`, no counts, no pagination, no
+project scope), while this ADR defines `GET /api/search` as the domain-scoped metadata search.
+
+Reconciliation:
+
+1. `GET /api/search` (this ADR) is the single metadata-search contract consumed by the UI. The
+   global search box in the AppShell header (§35 "pencarian … global") and the Ringkasan card
+   (now with an explicit "Hanya proyek aktif" toggle -> `project=<id>`) both call it and render
+   `kind`, `title`, `subtitle`, `status`, `url`, `total`, `counts` and `has_more` as returned. The
+   shared client types live in `frontend/src/lib/search.ts`.
+2. `GET /api/control-center/search` is kept unchanged for backward compatibility (API clients and
+   its unit tests); it has no UI consumer any more and must not gain one. New searchable kinds are
+   added to `/api/search` with the same backend scoping rules (rows, counts and pagination filtered
+   by the active domain and project scope).
+3. Results are links into existing pages; the box never infers or switches the domain and is
+   disabled until the human has chosen one (U-05).

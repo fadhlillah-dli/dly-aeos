@@ -44,6 +44,8 @@ dev = [
   "mypy>=1.11",
   "types-PyYAML",
   "types-psutil",
+  # Real-browser UI smoke test (tests/e2e, marked integration); also run: python -m playwright install chromium
+  "playwright",
 ]
 
 [project.scripts]
