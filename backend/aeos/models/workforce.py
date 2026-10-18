@@ -3,6 +3,10 @@
 RoleSkillPack = competence definition; AgentDefinition = configured executor (may be enabled but
 idle); WorkerRun/Lease = actual activity. The organisation view is a projection and carries no
 authority (§17).
+
+Separate status fields are kept deliberately (§13, §35): TaskExecution.state is the canonical
+runtime state of a task; WorkerRun.execution_status is the state of one attempt; worker-reported,
+verifier, review, acceptance and merged status are independent observed fields.
 """
 
 from __future__ import annotations
@@ -10,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aeos.core.db import Base
@@ -37,6 +41,9 @@ class RoleSkillPack(IdMixin, TimestampMixin, Base):
     revision_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     eval_status: Mapped[str] = mapped_column(String(32), default="NOT_EVALUATED")
     mode: Mapped[str] = mapped_column(String(16), default="DESIGN")
+    # Model/engine guidance from §15 (e.g. "Opus family") — descriptive, never a route activation.
+    engine_hint: Mapped[str] = mapped_column(String(160), default="")
+    source_section: Mapped[str] = mapped_column(String(16), default="")  # §15 / §16
 
 
 class AgentDefinition(IdMixin, TimestampMixin, Base):
@@ -53,13 +60,17 @@ class AgentDefinition(IdMixin, TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     revision: Mapped[str] = mapped_column(String(32), default="1")
     mode: Mapped[str] = mapped_column(String(16), default="DESIGN")
+    description: Mapped[str] = mapped_column(Text, default="")
+    deterministic: Mapped[bool] = mapped_column(Boolean, default=False)
+    revision_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    enabled_reason: Mapped[str] = mapped_column(Text, default="")
 
 
 class TaskExecution(IdMixin, TimestampMixin, Base):
     """Runtime execution state for one TaskSpec (separate from planning/publication/acceptance)."""
 
     __tablename__ = "task_executions"
-    __table_args__ = (UniqueConstraint("task_id"),)
+    __table_args__ = (UniqueConstraint("task_id"), Index("ix_task_exec_state", "state"))
 
     task_id: Mapped[str] = mapped_column(ForeignKey("task_specs.id"), nullable=False)
     project_id: Mapped[str] = mapped_column(String(36), nullable=False)
@@ -70,6 +81,19 @@ class TaskExecution(IdMixin, TimestampMixin, Base):
     active_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     accepted_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     row_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)  # optimistic concurrency
+    plan_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    plan_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    task_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Machine-readable wait/block reason (e.g. SHARED_WRITE_CONFLICT, NEEDS_DECISION, LEASE_LOST).
+    reason_code: Mapped[str] = mapped_column(String(48), default="")
+    state_changed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    assigned_agent_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pending_findings: Mapped[list[Any]] = mapped_column(JSON, default=list)  # reviewer findings for repair
+    review_record_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    extra_attempts: Mapped[int] = mapped_column(Integer, default=0)  # only via an owner EXCEPTION decision
+    extra_attempts_decision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    requested_by: Mapped[str | None] = mapped_column(String(64), nullable=True)  # human who executed the plan
+    mode: Mapped[str] = mapped_column(String(16), default="LIVE")
 
 
 class WorkerRun(IdMixin, TimestampMixin, Base):
@@ -113,6 +137,21 @@ class WorkerRun(IdMixin, TimestampMixin, Base):
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str] = mapped_column(Text, default="")
     mode: Mapped[str] = mapped_column(String(16), default="LIVE")
+    # --- module E extensions (§14 reconciliation, §21 scope, §35 Run Detail) ---
+    lease_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    plan_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    task_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pid_create_time: Mapped[float | None] = mapped_column(Float, nullable=True)  # psutil identity of the pid
+    quarantined: Mapped[bool] = mapped_column(Boolean, default=False)
+    quarantine_reasons: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    diff_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    evidence_refs: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    review_record_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    acceptance_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    usage_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    quota_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    requested_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    outcome_code: Mapped[str] = mapped_column(String(48), default="")
 
 
 class Lease(IdMixin, TimestampMixin, Base):
@@ -127,3 +166,5 @@ class Lease(IdMixin, TimestampMixin, Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(nullable=True)
     released_at: Mapped[datetime | None] = mapped_column(nullable=True)
     state: Mapped[str] = mapped_column(String(16), default="ACTIVE")  # ACTIVE|RELEASED|EXPIRED|REVOKED
+    ttl_seconds: Mapped[int] = mapped_column(Integer, default=120)
+    release_reason: Mapped[str] = mapped_column(Text, default="")

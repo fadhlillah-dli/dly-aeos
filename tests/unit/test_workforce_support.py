@@ -1,0 +1,300 @@
+"""Shared helpers for module-E tests (workforce / broker / worker_runtime).
+
+Other modules' implementation modules do not exist in this worktree; ``FakeModules`` injects
+minimal deterministic stand-ins into ``sys.modules`` so the frozen facades resolve. Tests that
+check fail-closed behaviour simply do not install them.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import types
+from dataclasses import dataclass, field
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from aeos.core.hashing import content_hash
+from aeos.core.ids import new_id
+from aeos.core.timeutil import utcnow
+from aeos.models.cost import BudgetReservation, UsageLedgerEntry
+from aeos.models.decisions import Decision
+from aeos.models.evidence import EvidenceArtifact
+from aeos.models.planning import Plan, PlanVersion, TaskSpec
+from aeos.models.portfolio import Project, RepositoryReference
+from aeos.models.routing import ModelRoute
+from aeos.models.workforce import AgentDefinition
+
+
+@dataclass
+class FakeModules:
+    approved: dict[str, str] = field(default_factory=dict)  # plan_id -> plan_version_id
+    accepted: set[str] = field(default_factory=set)  # task ids whose acceptance is valid
+    capability: str = "READY"
+    route_key: str | None = None
+    reserve_error: str | None = None
+    office_allowed: bool = False
+    interlock_allowed: bool = True
+    evidence: bool = True
+    calls: dict[str, int] = field(default_factory=dict)
+
+    def _count(self, name: str) -> None:
+        self.calls[name] = self.calls.get(name, 0) + 1
+
+    def install(self, monkeypatch: pytest.MonkeyPatch, *, skip: tuple[str, ...] = ()) -> FakeModules:
+        mods: dict[str, types.ModuleType] = {}
+        fake = self
+
+        planning = types.ModuleType("aeos.planning.service")
+
+        def get_approved_version(session: Session, plan_id: str):
+            vid = fake.approved.get(plan_id)
+            return session.get(PlanVersion, vid) if vid else None
+
+        planning.get_approved_version = get_approved_version
+        mods["aeos.planning.service"] = planning
+
+        acc = types.ModuleType("aeos.verification.acceptance")
+        acc.acceptance_is_valid = lambda session, task_id, **kw: task_id in fake.accepted
+        acc.latest_acceptance = lambda session, task_id: None
+        mods["aeos.verification.acceptance"] = acc
+
+        if fake.evidence:
+            col = types.ModuleType("aeos.verification.collector")
+
+            def collect_evidence(session: Session, *, kind, origin, collector_identity, claim, content=None,
+                                 evidence_level="E0", subject_type="", subject_id="", project_id=None, domain=None,
+                                 run_id=None, task_id=None, environment=None, classification="INTERNAL", mode="LIVE",
+                                 **_ignored):  # frozen facade passes impl=... via **locals()
+                ev = EvidenceArtifact(kind=kind, origin=origin, collector_identity=collector_identity, claim=claim,
+                                      trusted=origin in {"verifier", "collector", "doctor"},
+                                      content_hash=content_hash(str(content)), evidence_level=evidence_level,
+                                      subject_type=subject_type, subject_id=subject_id, project_id=project_id,
+                                      domain=domain, run_id=run_id, task_id=task_id, environment=environment or {},
+                                      mode=mode)
+                session.add(ev)
+                session.flush()
+                return ev
+
+            col.collect_evidence = collect_evidence
+            mods["aeos.verification.collector"] = col
+
+        doc = types.ModuleType("aeos.doctor.capabilities")
+
+        def capability_state(session: Session, capability, *, domain=None, project_id=None):
+            from aeos.doctor.facade import CapabilityState
+
+            return CapabilityState(capability=capability, status=fake.capability,
+                                   reasons=[] if fake.capability == "READY" else ["fake doctor says not ready"])
+
+        doc.capability_state = capability_state
+        doc.invalidate = lambda session, invalidator, reason="": 0
+        mods["aeos.doctor.capabilities"] = doc
+
+        routing = types.ModuleType("aeos.routing.service")
+
+        def select_route(session: Session, *, task):
+            from aeos.core.errors import Blocked
+            from aeos.routing.facade import RouteDecision
+
+            if not fake.route_key:
+                raise Blocked("no approved route", code="NO_ROUTE")
+            route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == fake.route_key))
+            return RouteDecision(route=route, eligible=[fake.route_key])
+
+        def eligible_routes(session: Session, **kw):
+            from aeos.routing.facade import RouteDecision
+
+            return RouteDecision(route=None, eligible=[fake.route_key] if fake.route_key else [])
+
+        routing.select_route = select_route
+        routing.eligible_routes = eligible_routes
+        mods["aeos.routing.service"] = routing
+
+        cost = types.ModuleType("aeos.cost.service")
+
+        def reserve(session: Session, req):
+            from aeos.core.errors import Blocked
+
+            fake._count("reserve")
+            if fake.reserve_error:
+                raise Blocked(fake.reserve_error, code="BUDGET_EXCEEDED")
+            r = BudgetReservation(budget_id="fake-budget", run_id=req.run_id, reserved_usd=req.est_usd,
+                                  reserved_tokens=req.est_tokens, reserved_requests=req.est_requests)
+            session.add(r)
+            session.flush()
+            return r
+
+        def release(session: Session, reservation_id: str):
+            fake._count("release")
+            r = session.get(BudgetReservation, reservation_id)
+            if r is not None:
+                r.status = "RELEASED"
+
+        def record_usage(session: Session, **kw):
+            fake._count("record_usage")
+            kw.pop("reservation_id", None)
+            e = UsageLedgerEntry(**{k: v for k, v in kw.items() if k not in ("session", "impl")})
+            session.add(e)
+            session.flush()
+            return e
+
+        cost.reserve, cost.release, cost.record_usage = reserve, release, record_usage
+        mods["aeos.cost.service"] = cost
+
+        dec = types.ModuleType("aeos.policy.decisions")
+
+        def record_decision(session: Session, **kw):
+            d = Decision(**{k: v for k, v in kw.items() if k not in ("session", "impl") and v is not None})
+            session.add(d)
+            session.flush()
+            return d
+
+        def find_active_decision(session: Session, *, kind, target_type, target_id, target_hash=None, operation=None,
+                                 **_ignored):
+            return session.scalar(select(Decision).where(Decision.kind == kind, Decision.target_type == target_type,
+                                                         Decision.target_id == target_id, Decision.status == "ACTIVE")
+                                  .order_by(Decision.created_at.desc()))
+
+        dec.record_decision = record_decision
+        dec.find_active_decision = find_active_decision
+        dec.invalidate_decisions = lambda session, **kw: 0
+        mods["aeos.policy.decisions"] = dec
+
+        office = types.ModuleType("aeos.policy.office")
+        office.office_policy = lambda session: {"external_worker_allowed": fake.office_allowed,
+                                                "approved_worker_routes": []}
+        mods["aeos.policy.office"] = office
+
+        inter = types.ModuleType("aeos.policy.interlock")
+
+        def check_external_write(session: Session, intent):
+            from aeos.policy.facade import InterlockResult
+
+            fake._count("interlock")
+            return InterlockResult(allowed=fake.interlock_allowed, reasons=[] if fake.interlock_allowed else ["denied"])
+
+        inter.check_external_write = check_external_write
+        mods["aeos.policy.interlock"] = inter
+
+        for name, mod in mods.items():
+            if name not in skip:
+                monkeypatch.setitem(sys.modules, name, mod)
+        return self
+
+
+# ----------------------------------------------------------------------------- builders
+def make_project(db: Session, *, domain: str = "PERSONAL", key: str | None = None, platform: bool = False) -> Project:
+    p = Project(project_key=key or f"proj-{new_id()[:8]}", name="Test project", domain=domain, is_platform=platform)
+    db.add(p)
+    db.flush()
+    return p
+
+
+def make_plan(db: Session, project: Project, tasks: list[dict[str, Any]]) -> tuple[Plan, PlanVersion, list[TaskSpec]]:
+    plan = Plan(project_id=project.id, domain=project.domain, title="Plan", state="APPROVED")
+    db.add(plan)
+    db.flush()
+    content = {"tasks": tasks}
+    pv = PlanVersion(plan_id=plan.id, project_id=project.id, domain=project.domain, version=1, content=content,
+                     manifest_hash=content_hash(content))
+    db.add(pv)
+    db.flush()
+    specs = []
+    for t in tasks:
+        spec = {"plan_version_id": pv.id, **t}
+        ts = TaskSpec(plan_version_id=pv.id, plan_version_hash=pv.manifest_hash, project_id=project.id,
+                      domain=project.domain, task_key=t["task_key"], title=t.get("title", t["task_key"]),
+                      goal=t.get("goal", "do the thing"), depends_on=t.get("depends_on", []),
+                      allowed_paths=t.get("allowed_paths", []), forbidden_paths=t.get("forbidden_paths", []),
+                      tools_allowed=t.get("tools_allowed", []), egress_allowed=t.get("egress_allowed", []),
+                      limits=t.get("limits", {}), capability_scope=t.get("capability_scope", {}),
+                      acceptance_criteria=t.get("acceptance_criteria", ["AC1"]),
+                      input_artifacts=t.get("input_artifacts", []), base_commit=t.get("base_commit"),
+                      capability_ttl_seconds=t.get("capability_ttl_seconds", 600), spec_hash=content_hash(spec))
+        db.add(ts)
+        specs.append(ts)
+    db.flush()
+    plan.approved_version_id = pv.id
+    return plan, pv, specs
+
+
+def make_route(db: Session, *, key: str = "worker.test-free", provider: str = "openrouter",
+               model_id: str = "vendor/test-model:free", status: str = "APPROVED", domains: list[str] | None = None,
+               is_free: str = "YES", endpoint: str | None = None, mode_params: dict | None = None) -> ModelRoute:
+    r = ModelRoute(route_key=key, pool="WORKER", provider=provider, model_id=model_id, status=status,
+                   eligible_domains=domains if domains is not None else ["PERSONAL"], is_free=is_free,
+                   endpoint=endpoint, mode_params=mode_params or {})
+    db.add(r)
+    db.flush()
+    return r
+
+
+def seed_and_enable_implementer(db: Session) -> AgentDefinition:
+    from aeos.workforce import seed
+
+    seed.run(db)
+    a = db.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == "opencode-implementer"))
+    a.enabled = True
+    db.flush()
+    return a
+
+
+def make_owner(db: Session, username: str = "owner-x") -> str:
+    from aeos.models.identity import User
+
+    u = User(username=username, password_hash="x", role="SUPER_ADMIN")
+    db.add(u)
+    db.flush()
+    return u.id
+
+
+def process_sandbox_exception(db: Session, *, domain: str = "PERSONAL", allow: bool = True,
+                              expires_in: int | None = None) -> Decision:
+    d = Decision(kind="EXCEPTION", actor_user_id="owner", actor_kind="HUMAN", target_type="worker_sandbox",
+                 target_id="process", domain=domain, rationale="pilot on owner laptop",
+                 details={"allow_process_sandbox": allow},
+                 expires_at=(utcnow() + timedelta(seconds=expires_in)) if expires_in is not None else None)
+    db.add(d)
+    db.flush()
+    return d
+
+
+def init_git_repo(path: Path, files: dict[str, str] | None = None) -> str:
+    path.mkdir(parents=True, exist_ok=True)
+
+    def g(*args: str) -> str:
+        return subprocess.run(["git", *args], cwd=path, capture_output=True, text=True, check=True).stdout.strip()
+
+    g("init", "-q", "-b", "main")
+    g("config", "user.email", "test@example.invalid")
+    g("config", "user.name", "Test")
+    g("config", "commit.gpgsign", "false")
+    for rel, text in (files or {"README.md": "hello\n"}).items():
+        f = path / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text, encoding="utf-8")
+    g("add", "-A")
+    g("commit", "-q", "-m", "init")
+    return g("rev-parse", "HEAD")
+
+
+def attach_repo(db: Session, project: Project, repo: Path) -> RepositoryReference:
+    ref = RepositoryReference(project_id=project.id, provider="GITHUB", full_name="owner/repo",
+                              local_path_ref=str(repo), default_branch="main")
+    db.add(ref)
+    db.flush()
+    return ref
+
+
+SLEEP_TREE = (
+    "import subprocess, sys, time\n"
+    "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+    "print(g.pid, flush=True)\n"
+    "time.sleep(120)\n"
+)
