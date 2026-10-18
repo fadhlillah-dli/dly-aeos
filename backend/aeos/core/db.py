@@ -108,7 +108,9 @@ def session_scope() -> Iterator[Session]:
 
 # Tables whose rows must never be updated or deleted through the application (§34: local
 # append-only table — explicitly NOT a WORM/tamper-proof claim against a host administrator).
-APPEND_ONLY_TABLES = ("audit_events", "events", "evidence_artifacts", "plan_versions", "task_specs")
+APPEND_ONLY_TABLES = (
+    "audit_events", "events", "evidence_artifacts", "plan_versions", "task_specs", "architecture_snapshots",
+)
 
 # Tables whose binding columns are immutable once written; lifecycle/status columns may change.
 IMMUTABLE_COLUMNS: dict[str, tuple[str, ...]] = {
