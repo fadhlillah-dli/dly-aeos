@@ -63,6 +63,7 @@ _ROOT_PATTERNS = {
 _GENERIC_ID = re.compile(r"^[A-Za-z0-9._:/@-]{1,256}$")
 _TENANT = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 _SENSITIVE_KEY = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|credential|cookie|private[_-]?key)")
+_TARGET_KEY = re.compile(r"(?i)(parent|root|folder|target|alias|page[_-]?id)")
 REMEDIES = {
     ("GOOGLE_DRIVE", "root"): "aeos publish google-connect",
     ("GOOGLE_DOCS", "root"): "aeos publish google-connect",
@@ -93,24 +94,30 @@ def _validate_id(value: Any, *, field: str, pattern: re.Pattern[str] | None) -> 
     return v
 
 
-def _validate_credential_ref(ref: Any, domain: str) -> str | None:
+def _validate_credential_ref(ref: Any, project: Project) -> str | None:
     if ref in (None, ""):
         return None
     if not isinstance(ref, str):
         raise ValidationFailed("credential_ref must be a string", code="INVALID_CREDENTIAL_REF")
     from aeos.secrets.facade import validate_ref
 
+    value = ref.strip()
     try:
-        ns, _ = validate_ref(ref.strip())
+        ns, name = validate_ref(value)
     except ValueError as exc:
         raise ValidationFailed(str(exc), code="INVALID_CREDENTIAL_REF") from exc
-    if contains_secret(ref):
+    if contains_secret(value):
         raise ValidationFailed("credential_ref must be a reference such as personal/github, never a value",
                                code="SECRET_IN_FIELD")
+    domain = project.domain
     if ns not in CREDENTIAL_NAMESPACES[domain]:
         raise ValidationFailed(f"{domain} integrations use credential namespaces {CREDENTIAL_NAMESPACES[domain]}",
                                code="CREDENTIAL_NAMESPACE_MISMATCH")
-    return ref.strip()
+    if ns == "projects" and name.split("/", 1)[0] not in {project.id, project.project_key}:
+        # per-project credentials are bound to their own project: projects/<project_key>/<name>
+        raise ValidationFailed(f"project credentials must be under projects/{project.project_key}/...",
+                               code="CREDENTIAL_PROJECT_MISMATCH")
+    return value
 
 
 def _validate_config(config: Any) -> dict[str, Any]:
@@ -123,6 +130,11 @@ def _validate_config(config: Any) -> dict[str, Any]:
         if not isinstance(k, str) or _SENSITIVE_KEY.search(k):
             raise ValidationFailed(f"config key {k!r} is not allowed (credentials go to the secret store)",
                                    code="SECRET_IN_FIELD")
+        if _TARGET_KEY.search(k):
+            # §04: the target lives only in root_id (e.g. CONFLUENCE_PROJECTS_PARENT_ID); a legacy alias in
+            # config must never become a second target.
+            raise ValidationFailed(f"config key {k!r} looks like a target id; set it as root_id instead",
+                                   code="TARGET_IN_CONFIG")
         if isinstance(v, (dict, list)):
             raise ValidationFailed("config values must be scalars", code="INVALID_CONFIG")
         if isinstance(v, str) and (contains_secret(v) or len(v) > 512):
@@ -211,7 +223,7 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
         raise ValidationFailed(f"unknown fields: {', '.join(unknown)}", code="FIELD_NOT_EDITABLE")
     tenant = _validate_id(body.get("tenant_id"), field="tenant_id", pattern=_TENANT)
     root = _validate_id(body.get("root_id"), field="root_id", pattern=_ROOT_PATTERNS.get(provider))
-    cred_ref = _validate_credential_ref(body.get("credential_ref"), project.domain)
+    cred_ref = _validate_credential_ref(body.get("credential_ref"), project)
     config = _validate_config(body.get("config"))
 
     integ = session.scalar(select(ProjectIntegration).where(

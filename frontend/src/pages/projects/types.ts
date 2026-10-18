@@ -14,6 +14,8 @@ export interface Finding {
 
 export interface InventoryView {
   commit: string;
+  head_commit?: string | null;
+  commit_is_head?: boolean;
   branch: string | null;
   checked_at: string;
   source: string;
@@ -194,6 +196,8 @@ export interface ContextPackView {
   warnings: string[];
   forbidden_paths: string[];
   checked_at: string | null;
+  expires_at: string | null;
+  superseded_by: string | null;
   item_count: number;
   kinds: string[];
   items: PackItem[];

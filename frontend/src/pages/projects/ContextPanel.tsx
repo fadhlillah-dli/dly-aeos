@@ -45,6 +45,12 @@ function PackDetail({ id }: { id: string }) {
         </span>
         <ClassificationBadge value={pack.classification} />
         {pack.checked_at && <Freshness at={pack.checked_at} />}
+        {pack.expires_at && <span className="text-xs text-ink-3">berlaku s.d. {absoluteTime(pack.expires_at)}</span>}
+        {pack.superseded_by && (
+          <span className="text-xs text-ink-3">
+            digantikan oleh <Mono>{shortHash(pack.superseded_by, 8)}</Mono>
+          </span>
+        )}
       </div>
       {pack.stale_reason && (
         <div className="flex items-start gap-1 text-warn">
@@ -96,7 +102,7 @@ function PackDetail({ id }: { id: string }) {
           {pack.omitted.length > 5 ? " …" : ""}
         </p>
       )}
-      <p className="text-xs text-ink-3">Forbidden scope: {pack.forbidden_paths.slice(0, 12).join(", ")}</p>
+      <p className="text-xs text-ink-3">Cakupan terlarang (forbidden scope): {pack.forbidden_paths.slice(0, 12).join(", ")}</p>
     </div>
   );
 }
@@ -109,6 +115,7 @@ function BuildForm({ project, onBuilt }: { project: ProjectView; onBuilt: (id: s
   const [budget, setBudget] = useState(8000);
   const [repositoryId, setRepositoryId] = useState(project.repositories[0]?.id ?? "");
   const [baseCommit, setBaseCommit] = useState("");
+  const [ttlHours, setTtlHours] = useState(168);
   const build = useMutation({
     mutationFn: () =>
       post<{ context_pack: ContextPackView }>(`/api/projects/${project.id}/context-packs`, {
@@ -119,6 +126,7 @@ function BuildForm({ project, onBuilt }: { project: ProjectView; onBuilt: (id: s
         token_budget: budget,
         repository_id: repositoryId || null,
         base_commit: baseCommit.trim() || null,
+        ttl_hours: ttlHours,
       }),
     onSuccess: (res) => onBuilt(res.context_pack.id),
   });
@@ -157,11 +165,14 @@ function BuildForm({ project, onBuilt }: { project: ProjectView; onBuilt: (id: s
         <Field label="Berkas yang disertakan (glob)" hint="mis. src/*.py, docs/*.md">
           <input className={inputClass} value={paths} onChange={(e) => setPaths(e.target.value)} />
         </Field>
-        <Field label="Forbidden scope tambahan (glob)" hint="Default selalu: .env*, kunci, credential, file DB">
+        <Field label="Cakupan terlarang tambahan (glob)" hint="Selalu dilarang: .env*, kunci, credential, file DB">
           <input className={inputClass} value={forbidden} onChange={(e) => setForbidden(e.target.value)} />
         </Field>
         <Field label="Anggaran token">
           <input className={inputClass} type="number" min={1024} max={200000} value={budget} onChange={(e) => setBudget(Number(e.target.value))} />
+        </Field>
+        <Field label="Masa berlaku (jam)" hint="Setelah lewat, pack ditandai usang dan harus dibangun ulang (maks. 720).">
+          <input className={inputClass} type="number" min={1} max={720} value={ttlHours} onChange={(e) => setTtlHours(Number(e.target.value))} />
         </Field>
         {build.error ? (
           <div className="sm:col-span-2">

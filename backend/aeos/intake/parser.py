@@ -4,8 +4,12 @@ Each attachment is parsed by a fresh ``python -I`` process (``parse_worker.py``)
 * a minimal environment (no AEOS/credential variables, no PYTHON* variables);
 * a private temporary working directory;
 * a wall-clock timeout, a memory cap (process-tree RSS, polled with psutil on every OS; plus
-  self-imposed RLIMIT_AS/CPU/FSIZE in the worker on POSIX) and an output-size cap;
+  self-imposed RLIMIT_AS/CPU/FSIZE in the worker on POSIX) and an output-size cap that is also
+  polled while the worker runs (Windows has no RLIMIT_FSIZE);
 * process-tree kill on any violation (the Windows venv launcher spawns a child interpreter).
+
+Everything the worker returns is untrusted: error messages and metadata can echo file content
+(e.g. a YAML error quoting the offending line), so they are redacted before they are persisted.
 """
 
 from __future__ import annotations
@@ -22,6 +26,8 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+
+from aeos.core.redaction import redact, redact_text
 
 WORKER_PATH = Path(__file__).resolve().with_name("parse_worker.py")
 PARSE_TIMEOUT_SECONDS = 30.0
@@ -61,15 +67,20 @@ def _minimal_env(tmp: Path) -> dict[str, str]:
 
 
 def kill_tree(pid: int) -> None:
+    """Kill *pid* and all its descendants; tolerant of processes exiting concurrently."""
     try:
         parent = psutil.Process(pid)
     except psutil.Error:
         return
-    procs = [*parent.children(recursive=True), parent]
+    children: list[psutil.Process] = []
+    with contextlib.suppress(psutil.Error):
+        children = parent.children(recursive=True)
+    procs = [*children, parent]
     for p in procs:
         with contextlib.suppress(psutil.Error):
             p.kill()
-    psutil.wait_procs(procs, timeout=5)
+    with contextlib.suppress(psutil.Error):
+        psutil.wait_procs(procs, timeout=5)
 
 
 def _tree_rss(pid: int) -> int:
@@ -82,6 +93,14 @@ def _tree_rss(pid: int) -> int:
     for p in procs:
         with contextlib.suppress(psutil.Error):
             total += p.memory_info().rss
+    return total
+
+
+def _output_size(dst: Path) -> int:
+    total = 0
+    for f in (dst, dst.with_suffix(".partial")):
+        with contextlib.suppress(OSError):
+            total = max(total, f.stat().st_size)
     return total
 
 
@@ -120,6 +139,8 @@ def run_parser(
                 violation = "PARSE_TIMEOUT"
             elif _tree_rss(proc.pid) > max_memory_bytes:
                 violation = "PARSE_MEMORY_LIMIT"
+            elif _output_size(dst) > max_output_bytes:
+                violation = "PARSE_OUTPUT_TOO_LARGE"
             if violation:
                 kill_tree(proc.pid)
                 with contextlib.suppress(subprocess.TimeoutExpired):
@@ -128,6 +149,9 @@ def run_parser(
         duration = int((time.monotonic() - started) * 1000)
         if violation == "PARSE_TIMEOUT":
             return ParseOutcome("FAILED", error=f"parser exceeded {timeout:.0f}s and was killed",
+                                error_code=violation, duration_ms=duration)
+        if violation == "PARSE_OUTPUT_TOO_LARGE":
+            return ParseOutcome("FAILED", error="parser output exceeded the size cap and the parser was killed",
                                 error_code=violation, duration_ms=duration)
         if violation:
             return ParseOutcome("FAILED", error="parser exceeded its memory cap and was killed",
@@ -148,7 +172,8 @@ def run_parser(
         return ParseOutcome("FAILED", error="parser output has an unexpected shape", error_code="PARSE_BAD_OUTPUT",
                             duration_ms=duration)
     text = data.get("text") if isinstance(data.get("text"), str) else ""
-    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
-    error = str(data.get("error") or "")[:500]
+    raw_meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    meta = redact(raw_meta)  # e.g. json_error/yaml_error can quote a credential from the file
+    error = redact_text(str(data.get("error") or ""))[:500]
     return ParseOutcome(status, text=text[:max_chars], meta=meta, error=error,
                         error_code="PARSE_ERROR" if status == "FAILED" else "", duration_ms=duration)

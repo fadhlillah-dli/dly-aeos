@@ -12,6 +12,7 @@ import { ContextPanel } from "./ContextPanel";
 import { IntegrationsPanel } from "./IntegrationsPanel";
 import { MemoryPanel } from "./MemoryPanel";
 import { RepositoriesPanel } from "./RepositoriesPanel";
+import { SearchPanel } from "./SearchPanel";
 import type { ProjectView } from "./types";
 
 const TRANSITIONS: Record<string, string[]> = {
@@ -78,7 +79,16 @@ function Overview({ project, isAdmin }: { project: ProjectView; isAdmin: boolean
         className="lg:col-span-2"
         actions={
           isAdmin && !editing ? (
-            <Button variant="ghost" onClick={() => setEditing(true)}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                // start from the latest saved values, not from what was loaded when the page opened
+                setName(project.name);
+                setDescription(project.description ?? "");
+                setIdea(project.idea ?? "");
+                setEditing(true);
+              }}
+            >
               Ubah
             </Button>
           ) : undefined
@@ -139,6 +149,9 @@ function Overview({ project, isAdmin }: { project: ProjectView; isAdmin: boolean
           </div>
         )}
       </Card>
+      <div className="lg:col-span-3">
+        <SearchPanel projectId={project.id} />
+      </div>
     </div>
   );
 }

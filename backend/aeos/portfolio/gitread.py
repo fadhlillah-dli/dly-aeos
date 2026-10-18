@@ -1,14 +1,15 @@
 """Read-only git access for repository references, inventory and retrieval (§24, §37).
 
 Rules:
-* only read commands (rev-parse, status, ls-tree, grep, show, remote get-url) — never checkout,
-  fetch, commit or anything that writes the repository;
-* list arguments, no shell, hard timeouts and output caps (Windows + macOS + Linux);
+* only read commands (rev-parse, status, ls-tree, grep, cat-file, remote get-url) — never
+  checkout, fetch, commit or anything that writes the repository;
+* list arguments, no shell, hard timeouts and streamed output caps (Windows + macOS + Linux);
 * inherited ``GIT_*`` variables are dropped so a caller's environment (hooks, worktrees, CI) can
   never redirect the command to another repository; ``core.fsmonitor`` is forced off because a
   repository-local fsmonitor hook would otherwise execute on ``git status``;
-* content is read from the object database at an exact commit (``git show <sha>:<path>``), so a
-  symlink in the working tree cannot make AEOS read a file outside the repository.
+* content is read from the object database at an exact commit (``git cat-file blob <sha>:<path>``,
+  no textconv/filters), so a symlink in the working tree cannot make AEOS read a file outside the
+  repository.
 
 Residual risk (ADR-0022): repository-local clean/smudge filter drivers may run during
 ``git status`` on racily-clean files; repositories are chosen explicitly by the human admin.
@@ -16,10 +17,13 @@ Residual risk (ADR-0022): repository-local clean/smudge filter drivers may run d
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
 import subprocess
+import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +31,7 @@ from aeos.core.errors import Blocked, ValidationFailed
 
 DEFAULT_TIMEOUT = 20.0
 MAX_OUTPUT_BYTES = 32 * 1024 * 1024
+MAX_STDERR_BYTES = 64 * 1024
 SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
 _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,199}$")
 
@@ -60,31 +65,83 @@ def _env() -> dict[str, str]:
     return env
 
 
+def _popen_kwargs() -> dict[str, object]:
+    if sys.platform == "win32":  # no console window flashes when the server runs detached
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 def run_git(
     repo: Path, args: list[str], *, timeout: float = DEFAULT_TIMEOUT, max_output: int = MAX_OUTPUT_BYTES,
     check: bool = True,
 ) -> GitResult:
     """Run one read-only git command inside *repo*. Raises ``Blocked`` on timeout/unavailability and
-    ``ValidationFailed`` on a non-zero exit when *check* is set."""
+    ``ValidationFailed`` on a non-zero exit when *check* is set.
+
+    stdout is streamed and capped at *max_output* bytes: once the cap is reached the process is
+    killed and the result is marked ``truncated`` (a huge blob or grep line is never buffered whole).
+    """
     cmd = [git_binary(), "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--no-pager",
            "-C", str(repo), *args]
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, timeout=timeout, env=_env(), stdin=subprocess.DEVNULL, check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise Blocked(f"git {args[0]} timed out after {timeout:.0f}s", code="GIT_TIMEOUT") from exc
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=_env(), **_popen_kwargs())  # type: ignore[call-overload]
     except OSError as exc:
         raise GitUnavailable(f"git could not be started: {exc.__class__.__name__}") from exc
-    out = proc.stdout or b""
-    truncated = len(out) > max_output
-    if truncated:
-        out = out[:max_output]
-    err = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
-    if check and proc.returncode != 0:
-        raise ValidationFailed(f"git {args[0]} failed: {err[:300]}", code="GIT_FAILED",
-                               details={"returncode": proc.returncode})
-    return GitResult(proc.returncode, out, err, truncated)
+    timed_out = threading.Event()
+
+    def _on_timeout() -> None:
+        timed_out.set()
+        with contextlib.suppress(OSError):
+            proc.kill()
+
+    err = bytearray()
+
+    def _drain_stderr() -> None:
+        assert proc.stderr is not None
+        for chunk in iter(lambda: proc.stderr.read(8192), b""):  # type: ignore[union-attr]
+            if len(err) < MAX_STDERR_BYTES:
+                err.extend(chunk[: MAX_STDERR_BYTES - len(err)])
+
+    timer = threading.Timer(timeout, _on_timeout)
+    timer.daemon = True
+    drain = threading.Thread(target=_drain_stderr, daemon=True)
+    out = bytearray()
+    truncated = False
+    timer.start()
+    drain.start()
+    try:
+        assert proc.stdout is not None
+        for chunk in iter(lambda: proc.stdout.read(65536), b""):  # type: ignore[union-attr]
+            room = max_output - len(out)
+            if len(chunk) > room:
+                out.extend(chunk[:room])
+                truncated = True
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                break
+            out.extend(chunk)
+        try:
+            proc.wait(timeout=max(1.0, timeout))
+        except subprocess.TimeoutExpired:
+            _on_timeout()
+            proc.wait(timeout=5)
+    finally:
+        timer.cancel()
+        drain.join(timeout=5)
+        for stream in (proc.stdout, proc.stderr):
+            with contextlib.suppress(OSError, ValueError):
+                if stream is not None:
+                    stream.close()
+    if timed_out.is_set() and not truncated:
+        raise Blocked(f"git {args[0]} timed out after {timeout:.0f}s", code="GIT_TIMEOUT")
+    # A process we killed because the output cap was reached is not a git failure.
+    returncode = 0 if truncated else proc.returncode
+    err_text = bytes(err).decode("utf-8", errors="replace").strip()
+    if check and returncode != 0:
+        raise ValidationFailed(f"git {args[0]} failed: {err_text[:300]}", code="GIT_FAILED",
+                               details={"returncode": returncode})
+    return GitResult(returncode, bytes(out), err_text, truncated)
 
 
 def validate_commitish(value: str) -> str:
@@ -170,12 +227,17 @@ def ls_tree(repo: Path, commit: str, *, max_entries: int = 100_000) -> tuple[lis
     return entries, truncated
 
 
-def show_blob(repo: Path, commit: str, path: str, *, max_bytes: int = 512 * 1024) -> bytes | None:
-    """Content of *path* at *commit* from the object DB (never the working tree)."""
+def show_blob(repo: Path, commit: str, path: str, *, max_bytes: int = 512 * 1024,
+              complete_only: bool = False) -> bytes | None:
+    """Content of *path* at *commit* from the object DB (never the working tree).
+
+    ``git cat-file blob`` never runs textconv or clean/smudge filters. With *complete_only* a blob
+    larger than *max_bytes* returns ``None`` instead of a truncated prefix.
+    """
     if path.startswith(("/", "\\")) or ".." in Path(path).parts or ":" in path.split("/")[0]:
         raise ValidationFailed("invalid repository path", code="INVALID_REPO_PATH")
-    res = run_git(repo, ["show", f"{commit}:{path}"], check=False, max_output=max_bytes)
-    if res.returncode != 0:
+    res = run_git(repo, ["cat-file", "blob", f"{commit}:{path}"], check=False, max_output=max_bytes)
+    if res.returncode != 0 or (complete_only and res.truncated):
         return None
     return res.stdout
 

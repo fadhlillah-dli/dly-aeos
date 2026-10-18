@@ -9,7 +9,9 @@ type Kind = "scan" | "parse" | "verify" | "local" | "lifecycle" | "config" | "fr
 
 const MAP: Record<Kind, Record<string, [string, string]>> = {
   scan: {
-    CLEAN: ["PASS", "Bersih (lolos pemindaian)"],
+    // CLEAN = the heuristic scanners found nothing. That is not a pass/trust signal (§50: a green
+    // scanner is NOT-PROVEN), so it renders in the neutral info tone and the file stays DATA.
+    CLEAN: ["CONFIGURED", "Tidak ada temuan (tetap DATA)"],
     FLAGGED: ["DEGRADED", "Ditandai — perlu ditinjau"],
     UNSCANNED: ["UNKNOWN", "Tidak dapat dipindai"],
     REJECTED: ["REJECTED", "Ditolak"],

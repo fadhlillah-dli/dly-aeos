@@ -20,11 +20,12 @@ from sqlalchemy.orm import Session
 from aeos.audit import service as audit
 from aeos.core.config import get_settings
 from aeos.core.enums import DataClassification, Domain
+from aeos.core.errors import AeosError
 from aeos.events import service as events
 from aeos.models.portfolio import Project, RepositoryReference
 from aeos.portfolio.facade import PLATFORM_PROJECT_KEY
 from aeos.portfolio.integrations import ensure_integration
-from aeos.portfolio.repositories import PLATFORM_LOCAL_REF
+from aeos.portfolio.repositories import PLATFORM_LOCAL_REF, validate_identity
 
 PLATFORM_NAME = "DLY AEOS"
 PLATFORM_DESCRIPTION = (
@@ -73,6 +74,16 @@ def run(session: Session) -> dict[str, Any]:
     repo = session.scalar(select(RepositoryReference).where(
         RepositoryReference.project_id == project.id, RepositoryReference.role == "platform"))
     if repo is None:
+        try:  # the configured slug must be an exact owner/name; nothing is guessed or "fixed"
+            _o, _n, checked = validate_identity("GITHUB", owner, name)
+        except AeosError as exc:
+            result["repository"] = "skipped"
+            result["repository_warning"] = f"platform_repo_slug {slug!r} is not a valid GitHub owner/name: {exc.message}"
+            return result
+        if checked != slug:
+            result["repository"] = "skipped"
+            result["repository_warning"] = f"platform_repo_slug {slug!r} must be exactly <owner>/<name>"
+            return result
         repo = RepositoryReference(
             project_id=project.id, provider="GITHUB", full_name=slug, url=f"https://github.com/{slug}",
             default_branch="main", role="platform", local_path_ref=PLATFORM_LOCAL_REF,
@@ -83,6 +94,10 @@ def run(session: Session) -> dict[str, Any]:
         session.add(repo)
         session.flush()
         result["repository"] = "created"
+        audit.record(session, actor_type="system", actor_id="seed", action="portfolio.repository.seed",
+                     target_type="repository", target_id=repo.id, project_id=project.id, domain=project.domain,
+                     details={"provider": "GITHUB", "full_name": slug, "role": "platform",
+                              "verification_status": "UNVERIFIED"})
     else:
         result["repository"] = "exists"
         if repo.full_name.lower() != slug.lower():

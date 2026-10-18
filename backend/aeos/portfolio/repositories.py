@@ -63,13 +63,27 @@ def validate_identity(provider: str, owner: str, name: str) -> tuple[str, str, s
     return owner, name, f"{owner}/{name}"
 
 
-def validate_local_checkout(raw: str, settings: Settings) -> Path:
+def is_network_path(value: str) -> bool:
+    r"""UNC / network-share paths (``\\server\share``, ``\\?\UNC\...``, ``//server/share``).
+    Extended local paths such as ``\\?\C:\...`` are not network paths."""
+    v = value.replace("/", "\\")
+    if v.startswith(("\\\\?\\", "\\\\.\\")):
+        return v[4:].upper().startswith("UNC\\")
+    return v.startswith("\\\\")
+
+
+def _overlaps(a: Path, b: Path) -> bool:
+    return a == b or b in a.parents or a in b.parents
+
+
+def validate_local_checkout(raw: str, settings: Settings, *, domain: str | None = None) -> Path:
     """§50 path traversal/symlink: resolve, then require an existing git top-level directory that is
-    not inside AEOS runtime state and not a network share."""
+    not inside AEOS runtime state and not a network share. An OFFICE checkout must not overlap the
+    PERSONAL platform working tree (§50 "Source Office muncul dalam platform personal working tree")."""
     value = (raw or "").strip()
     if not value:
         raise ValidationFailed("local path is empty", code="INVALID_LOCAL_PATH")
-    if value.startswith(("\\\\", "//")):
+    if is_network_path(value):
         raise ValidationFailed("network (UNC) paths are not accepted; use a local clone", code="INVALID_LOCAL_PATH")
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
@@ -78,12 +92,18 @@ def validate_local_checkout(raw: str, settings: Settings) -> Path:
         resolved = candidate.resolve(strict=True)
     except (FileNotFoundError, OSError) as exc:
         raise ValidationFailed("local path does not exist", code="LOCAL_PATH_NOT_FOUND") from exc
+    if is_network_path(str(resolved)):
+        # e.g. a mapped Windows drive letter that resolves to \\server\share
+        raise ValidationFailed("network (UNC) paths are not accepted; use a local clone", code="INVALID_LOCAL_PATH")
     if not resolved.is_dir():
         raise ValidationFailed("local path is not a directory", code="INVALID_LOCAL_PATH")
     data_root = settings.data_dir.resolve()
-    if resolved == data_root or data_root in resolved.parents or resolved in data_root.parents:
+    if _overlaps(resolved, data_root):
         raise PolicyDenied("local path overlaps the AEOS data directory (runtime state is never a workspace)",
                            code="LOCAL_PATH_IN_DATA_DIR")
+    if domain == Domain.OFFICE.value and _overlaps(resolved, repo_root().resolve()):
+        raise PolicyDenied("an OFFICE checkout cannot live inside (or contain) the PERSONAL DLY AEOS platform "
+                           "working tree; clone it to a separate office location", code="OFFICE_SOURCE_IN_PERSONAL_TREE")
     top = gitread.toplevel(resolved)
     if os.path.normcase(str(top)) != os.path.normcase(str(resolved)):
         raise ValidationFailed("local path must be the repository top-level directory (choose it explicitly)",
@@ -247,7 +267,7 @@ def add_repository(
     if local_path_ref == PLATFORM_LOCAL_REF:
         ref: str | None = PLATFORM_LOCAL_REF
     elif local_path:
-        resolved = validate_local_checkout(local_path, settings)
+        resolved = validate_local_checkout(local_path, settings, domain=project.domain)
         ref = str(resolved)
     else:
         ref = None
@@ -278,7 +298,7 @@ def set_local_path(session: Session, principal: Principal, project: Project, rep
     if repo.local_path_ref == PLATFORM_LOCAL_REF:
         raise PolicyDenied("the platform repository checkout is resolved from the running controller",
                            code="PLATFORM_LOCAL_PATH_FIXED")
-    resolved = validate_local_checkout(local_path, settings)
+    resolved = validate_local_checkout(local_path, settings, domain=project.domain)
     repo.local_path_ref = str(resolved)
     observe_local(session, repo, path=resolved)
     audit.record(session, actor_type="user", actor_id=principal.user.id, action="portfolio.repository.local_path",

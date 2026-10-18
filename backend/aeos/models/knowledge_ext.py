@@ -37,3 +37,7 @@ class ContextPackMeta(TimestampMixin, Base):
     observed_head: Mapped[str | None] = mapped_column(String(64), nullable=True)
     checked_at: Mapped[datetime | None] = mapped_column(nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # §13 ContextPack "TTL/expiry, supersession": a pack is usable only until expires_at, and a newer
+    # pack for the same project/task/role/repository supersedes (and stales) the older one.
+    expires_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    superseded_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
