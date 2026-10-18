@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,10 +40,11 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
-from aeos.core.config import Settings
+from aeos.core.config import Settings, get_settings
 from aeos.core.enums import PlanningState as PS
 from aeos.core.errors import Blocked, Conflict, NotFound, ValidationFailed
 from aeos.core.hashing import content_hash
+from aeos.core.paths import UnsafePathError, ensure_within
 from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.docs_engine import renderer as rnd
@@ -94,7 +97,18 @@ BACKOFF_BASE_S = 30
 BACKOFF_CAP_S = 900
 MAX_RECONCILE_FAILURES = 5
 DECISION_TTL = timedelta(hours=24)
+# An IN_FLIGHT op younger than this may still be executing in another executor (e.g. `aeos publish run`
+# next to the server worker): it is left alone instead of being reconciled as "absent" and re-created.
+# Far above the HTTP timeouts; startup recovery (single server process) converts IN_FLIGHT immediately.
+IN_FLIGHT_STALE_AFTER = timedelta(minutes=15)
+# Startup recovery waits this long after an op's last attempt before its first reconciliation (well above
+# the HTTP connect+read timeouts of the adapters), so a call still running elsewhere can land first.
+RECOVERY_GRACE = timedelta(minutes=2)
 SERVICE_ACTOR = "publisher"
+# Operations whose duplicate would be a second external resource (guarded against cross-run races).
+CREATE_OPS = frozenset({"create_folder", "create_doc", "create_issue"})
+# Idempotent at the provider (GET-then-create label, attachment upsert by filename).
+UPSERT_OPS = frozenset({"ensure_label", "upload_attachment"})
 
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.Lock] = {}
@@ -170,6 +184,27 @@ def _ref(session: Session, project_id: str, provider: str, logical_id: str) -> E
         ExternalReference.logical_id == logical_id))
 
 
+def _unresolved_attempts(session: Session, project_id: str, ref_provider: str, logical_id: str, *,
+                         exclude_key: str | None = None) -> list[PublicationOperation]:
+    """Earlier attempts on the same target whose outcome is still unknown (any publication / version).
+
+    The idempotency key contains the approved hash, so a NEW approved version gets new keys; without this
+    check an UNKNOWN create of v1 could be re-created by v2 and duplicate the resource (§29: reconcile
+    before retry, find by marker — the marker is project + logical id, not the key)."""
+    providers = [p for p, ref in REF_PROVIDER.items() if ref == ref_provider]
+    q = (select(PublicationOperation).join(Publication, Publication.id == PublicationOperation.publication_id)
+         .where(Publication.project_id == project_id, PublicationOperation.provider.in_(providers),
+                PublicationOperation.logical_id == logical_id,
+                PublicationOperation.status.in_((OP_UNKNOWN, OP_IN_FLIGHT))))
+    return [o for o in session.scalars(q) if o.idempotency_key != exclude_key]
+
+
+def _other_running(session: Session, pub: Publication) -> Publication | None:
+    """Another RUNNING publication of the same project (concurrent runs could race on the same targets)."""
+    return session.scalar(select(Publication).where(Publication.project_id == pub.project_id,
+                                                    Publication.status == RUNNING, Publication.id != pub.id))
+
+
 def _human_edit_block(session: Session, rec: DocumentRecord | None, version: PlanVersion) -> str:
     if rec is None:
         return ""
@@ -226,6 +261,12 @@ def _doc_ops(session: Session, project: Project, version: PlanVersion, result: r
             op = PlannedOp(update_provider, "update_doc", doc.logical_doc_id, title, "doc", base_target,
                            {"content_hash": chash}, status=OP_SKIPPED, reason="konten tidak berubah (hash sama)")
         else:
+            if family == "google":
+                # §29: the Docs API update path carries text/headings/bullets only. Embedded images and real
+                # tables need a new DOCX snapshot + its own publication decision — say so BEFORE approval.
+                lossy = (["gambar tersemat"] if rendered else []) + (["tabel (menjadi teks)"] if "\n|" in body else [])
+                if lossy:
+                    payload = {**payload, "lossy_update": lossy}
             op = PlannedOp(update_provider, "update_doc", doc.logical_doc_id, title, "doc",
                            {**base_target, "external_id": ref.external_id, "baseline_revision": ref.external_revision},
                            payload)
@@ -384,6 +425,27 @@ def create_preview(session: Session, settings: Settings, *, plan_id: str, actor_
             planned += iops
             notes += inotes
 
+    # A create/update whose earlier attempt in ANOTHER run (other key, e.g. an older approved version) has an
+    # unknown outcome cannot be planned: the create may already exist (with that run's older content) and an
+    # update's baseline revision may already be stale (the next write would look like a human edit). The
+    # human reconciles that publication first (read-only, by marker/revision) — never a blind second write,
+    # and never "adopting" an older run's resource as if it carried this version's content.
+    unresolved: list[dict[str, Any]] = []
+    for p in planned:
+        if p.status != OP_PENDING or p.operation not in (*CREATE_OPS, "update_doc"):
+            continue
+        key = idempotency_key(project.id, p.provider, p.logical_id, p.operation, version.manifest_hash)
+        for o in _unresolved_attempts(session, project.id, REF_PROVIDER[p.provider], p.logical_id, exclude_key=key):
+            if o.operation == p.operation:
+                unresolved.append({"logical_id": p.logical_id, "operation": o.operation,
+                                   "publication_id": o.publication_id, "operation_id": o.id, "status": o.status})
+    if unresolved:
+        raise Conflict("earlier publication operations on these targets have an unknown outcome; reconcile those "
+                       "publications before a new preview", code="UNRESOLVED_OPERATIONS",
+                       details={"operations": unresolved[:50],
+                                "publication_ids": sorted({u["publication_id"] for u in unresolved}),
+                                "remedy": "POST /api/publications/<publication_id>/reconcile"})
+
     pub = Publication(project_id=project.id, domain=project.domain, plan_id=plan.id, plan_version_id=version.id,
                       plan_version_number=version.version, approved_hash=version.manifest_hash, decision_id=decision.id,
                       targets=[t.to_dict() for t in targets], status=PREVIEW, options=redact(options),
@@ -460,6 +522,10 @@ def create_preview(session: Session, settings: Settings, *, plan_id: str, actor_
     ops = _ops_for(session, pub.id)
     blocked = [t.to_dict() for t in targets if t.status != "READY"]
     executable = [o for o in ops if o.status not in (OP_SKIPPED, OP_CONFLICT)]
+    lossy = [o.title or o.logical_id for o in executable if (o.payload or {}).get("lossy_update")]
+    if lossy:
+        notes.append(f"{len(lossy)} dokumen Google Docs diperbarui inkremental (requiredRevisionId) tanpa gambar/tabel "
+                     "asli — snapshot DOCX baru memerlukan publikasi/keputusan terpisah (§29): " + ", ".join(lossy[:10]))
     counts: dict[str, int] = {}
     for o in ops:
         counts[f"{o.operation}:{o.status}"] = counts.get(f"{o.operation}:{o.status}", 0) + 1
@@ -562,6 +628,34 @@ def _verify_confirmation(pub: Publication, confirm: dict[str, Any]) -> None:
                        details={"mismatched": mismatched})
 
 
+def _target_drift(session: Session, pub: Publication, ops: list[PublicationOperation]) -> list[str]:
+    """Logical ids whose external reference changed after the preview was computed.
+
+    A preview planned ``create_*`` because no reference existed, or ``update_doc`` against a baseline
+    revision. If another run created/updated the target meanwhile, executing the old preview would
+    duplicate the resource or present AEOS' own write as a human edit — the human previews again."""
+    out: list[str] = []
+    for op in ops:
+        if op.status not in (OP_PENDING, OP_UNKNOWN):
+            continue
+        ref = _ref(session, pub.project_id, REF_PROVIDER[op.provider], op.logical_id)
+        if op.operation in CREATE_OPS and op.status == OP_PENDING and ref is not None:
+            out.append(op.logical_id)
+        elif op.operation == "update_doc":
+            baseline = (op.target or {}).get("baseline_revision")
+            if ref is None or ref.external_revision != baseline:
+                out.append(op.logical_id)
+    return out
+
+
+def _require_no_other_run(session: Session, pub: Publication) -> None:
+    other = _other_running(session, pub)
+    if other is not None:
+        raise Conflict(f"publication {other.id} of this project is still RUNNING; wait for it to finish (or reconcile "
+                       "it) before starting another run on the same targets", code="PUBLICATION_RUNNING",
+                       details={"publication_id": other.id})
+
+
 def _still_approved(session: Session, pub: Publication) -> None:
     plan = session.get(Plan, pub.plan_id) if pub.plan_id else None
     if plan is None:
@@ -586,7 +680,12 @@ def execute_publication(session: Session, pub_id: str, *, actor_user_id: str, co
                       code="TARGET_NOT_READY", details={"reasons": [r for b in blocked for r in b.get("reasons", [])],
                                                         "remedies": [r for b in blocked for r in b.get("remedies", [])]})
     _still_approved(session, pub)
+    _require_no_other_run(session, pub)
     ops = [o for o in _ops_for(session, pub.id) if o.status not in (OP_SKIPPED, OP_CONFLICT, OP_SUCCEEDED)]
+    drift = _target_drift(session, pub, ops)
+    if drift:
+        raise Conflict("external targets changed after this preview (another run published them); create a new "
+                       "preview", code="TARGETS_CHANGED", details={"logical_ids": drift[:50]})
     decision = _record_publication_decision(session, pub, actor_user_id, ops,
                                             rationale=f"Approve & Publish PlanVersion v{pub.plan_version_number}")
     pub.publication_decision_id = decision.id
@@ -627,6 +726,28 @@ def execute_publication(session: Session, pub_id: str, *, actor_user_id: str, co
                 payload={"status": pub.status, "operations": len(ops)})
     session.flush()
     return ExecuteOutcome(True, [], pub)
+
+
+def reject_preview(session: Session, pub_id: str, *, actor_user_id: str, reason: str = "") -> Publication:
+    """§05 step 9 "Reject": the human declines this publication preview. A PREVIEW never had side effects,
+    so nothing is written externally; its outbox rows are released (a later preview adopts them)."""
+    pub = session.get(Publication, pub_id)
+    if pub is None:
+        raise NotFound("publication not found")
+    if pub.status != PREVIEW:
+        raise Conflict(f"publication is {pub.status}; only a PREVIEW can be rejected", code="NOT_A_PREVIEW")
+    pub.status = CANCELLED
+    pub.status_reason = ("ditolak oleh manusia" + (f": {redact_text(reason)}" if reason else ""))[:2000]
+    pub.finished_at = utcnow()
+    audit.record(session, actor_type="user", actor_id=actor_user_id, action="publication.reject",
+                 target_type="publication", target_id=pub.id, project_id=pub.project_id, domain=pub.domain,
+                 reason=pub.status_reason, details={"plan_version_id": pub.plan_version_id,
+                                                    "preview_hash": pub.preview_hash})
+    events.emit(session, source="publisher", kind="publication.rejected", entity_type="publication", entity_id=pub.id,
+                entity_version=pub.preview_hash, project_id=pub.project_id, domain=pub.domain,
+                payload={"status": CANCELLED})
+    session.flush()
+    return pub
 
 
 # ---------------------------------------------------------------------------------------------
@@ -670,6 +791,21 @@ class _Run:
                 log.exception("provider close failed")
 
 
+def _managed_file(path: str | None) -> Path | None:
+    """A rendered visual to embed/upload must be a file inside the AEOS data directory (where the
+    renderer writes it). Anything else is refused — an outbox row never makes AEOS read and publish an
+    arbitrary local file."""
+    if not path:
+        return None
+    root = get_settings().layout.root
+    try:
+        resolved = ensure_within(root, Path(path))
+    except UnsafePathError:
+        log.warning("refusing to publish a file outside the data directory: %s", redact_text(str(path)))
+        return None
+    return resolved if resolved.is_file() else None
+
+
 def _context(run: _Run, op: PublicationOperation) -> OpContext:
     s, pub = run.session, run.pub
     tgt = dict(op.target or {})
@@ -692,14 +828,13 @@ def _context(run: _Run, op: PublicationOperation) -> OpContext:
         paths = payload.get("visual_paths") or {}
 
         def resolve(key: str) -> Path | None:
-            p = paths.get(key)
-            return Path(p) if p else None
+            return _managed_file(paths.get(key))
 
         attachments["document.docx"] = markdown_to_docx(payload.get("markdown", ""), title=op.title,
                                                         logical_id=op.logical_id, image_resolver=resolve)
     if op.operation == "upload_attachment":
-        path = Path(payload.get("path") or "")
-        if path.is_file():
+        path = _managed_file(payload.get("path"))
+        if path is not None:
             attachments[payload["filename"]] = path.read_bytes()
     return OpContext(
         operation_id=op.id, publication_id=pub.id, project_id=pub.project_id, project_key=run.project.project_key,
@@ -838,6 +973,33 @@ def _audit_op(run: _Run, op: PublicationOperation, result: str, reason: str = ""
                          "logical_id": op.logical_id})
 
 
+def _in_flight_fresh(op: PublicationOperation, now: datetime) -> bool:
+    started = ensure_aware(op.last_attempt_at)
+    return started is not None and now - started < IN_FLIGHT_STALE_AFTER
+
+
+def _existing_target_guard(run: _Run, op: PublicationOperation) -> bool:
+    """Defence in depth against a duplicate create: if the target's ExternalReference appeared after the
+    preview (another run created it), the op does not write. Same content → SKIPPED; different content →
+    CONFLICT (a new preview plans an update under revision control). Returns True when the op is settled."""
+    if op.operation not in CREATE_OPS or op.status != OP_PENDING:
+        return False
+    ref = _ref(run.session, run.pub.project_id, REF_PROVIDER[op.provider], op.logical_id)
+    if ref is None:
+        return False
+    op.next_attempt_at = None
+    want = (op.payload or {}).get("content_hash")
+    if op.operation == "create_doc" and want and ref.content_hash != want:
+        op.status = OP_CONFLICT
+        op.error = (f"target already exists ({ref.external_id}, publication {ref.last_publication_id}) with other "
+                    "content — not created again; create a new preview to update it under revision control")
+    else:
+        op.status = OP_SKIPPED
+        op.error = f"target already exists ({ref.external_id}, publication {ref.last_publication_id}) — not re-created"
+    op.external_id, op.external_url = ref.external_id, ref.external_url
+    return True
+
+
 def _claim(session: Session, op: PublicationOperation, now: datetime) -> bool:
     res = session.execute(update(PublicationOperation).where(
         PublicationOperation.id == op.id, PublicationOperation.status == op.status,
@@ -860,9 +1022,15 @@ def _interlock_ok(run: _Run, op: PublicationOperation) -> bool:
     if res.allowed:
         return True
     why = "; ".join(res.reasons) or "denied"
-    op.error = f"interlock denied before write: {why}"[:4000]
+    # Nothing was written. The op is FAILED (needs action) instead of a silent PENDING that never runs;
+    # a human retry re-checks the interlock for it (and records a new decision when the old one expired).
+    _fail(op, f"interlock denied before write: {why}",
+          blocked=ProviderBlocked(why, code="INTERLOCK_DENIED",
+                                  remedy="periksa bootstrap/AUTH/write enablement lalu Retry (persetujuan baru bila "
+                                         "kedaluwarsa)"))
     run.denied.append(f"{op.logical_id}: {why}")
     run.denied_ids.add(op.logical_id)
+    _audit_op(run, op, "DENIED", "external-write interlock denied before write")
     return False
 
 
@@ -874,13 +1042,13 @@ def _reconcile_one(run: _Run, op: PublicationOperation) -> str:
     except ProviderConflict as exc:
         _record_conflict(run, op, exc)
         return "conflict"
-    except ProviderBlocked as exc:
-        op.error = f"reconcile blocked: {exc.message}"
-        return "unknown"
-    except ProviderError as exc:
+    except ProviderError as exc:  # incl. ProviderBlocked: absence is not proven → stays UNKNOWN, bounded
         fails = int((op.response or {}).get("reconcile_failures", 0)) + 1
         op.response = {**(op.response or {}), "reconcile_failures": fails}
-        op.error = f"reconcile failed ({fails}x): {exc.message}"[:4000]
+        what = "blocked" if isinstance(exc, ProviderBlocked) else "failed"
+        op.error = f"reconcile {what} ({fails}x): {exc.message}"[:4000]
+        # Back off so a blocked/failing provider is not hammered every worker tick; after
+        # MAX_RECONCILE_FAILURES the op is no longer progressable and needs a human reconcile.
         op.next_attempt_at = run.now + timedelta(seconds=backoff_seconds(fails))
         return "unknown"
     op.reconciled_at = run.now
@@ -950,8 +1118,11 @@ def _process(session: Session, pub_id: str, *, now: datetime | None, max_ops: in
                 continue
             if not ready:
                 continue
-            if op.status == OP_IN_FLIGHT:  # crashed mid-call earlier → outcome unknown
-                op.status = OP_UNKNOWN
+            if op.status == OP_IN_FLIGHT:
+                if _in_flight_fresh(op, run.now):
+                    continue  # may still be executing in another executor — never reconcile it as "absent"
+                op.status = OP_UNKNOWN  # crashed mid-call earlier → outcome unknown
+                op.error = "IN_FLIGHT without outcome — reconcile before retry"
             if op.status == OP_UNKNOWN:
                 outcome = _reconcile_one(run, op)
                 session.commit()
@@ -971,6 +1142,10 @@ def _process(session: Session, pub_id: str, *, now: datetime | None, max_ops: in
                 _fail(op, op.error or "attempt budget exhausted")
                 session.commit()
                 continue
+            if _existing_target_guard(run, op):
+                _audit_op(run, op, "SKIPPED" if op.status == OP_SKIPPED else "FAILED", op.error)
+                session.commit()
+                continue
             if not _interlock_ok(run, op):
                 session.commit()
                 continue
@@ -980,6 +1155,12 @@ def _process(session: Session, pub_id: str, *, now: datetime | None, max_ops: in
             except ProviderBlocked as exc:
                 _fail(op, f"BLOCKED: {exc.message}", blocked=exc)
                 _audit_op(run, op, "FAILED", exc.message)
+                session.commit()
+                continue
+            except Exception as exc:  # e.g. the DOCX snapshot cannot be built: nothing was sent → FAILED, not UNKNOWN
+                log.exception("publication op %s: preparing the request failed", op.id)
+                _fail(op, f"request preparation failed ({exc.__class__.__name__}) — nothing was sent")
+                _audit_op(run, op, "FAILED", op.error)
                 session.commit()
                 continue
             if not _claim(session, op, run.now):
@@ -1031,7 +1212,9 @@ def _progressable_ids(ops: list[PublicationOperation], denied: set[str]) -> set[
     for op in ops:
         if op.status not in (OP_PENDING, OP_UNKNOWN, OP_IN_FLIGHT) or op.logical_id in denied:
             continue
-        if op.status == OP_UNKNOWN:
+        if op.status in (OP_UNKNOWN, OP_IN_FLIGHT):
+            # An outcome is still pending (in flight, or to be reconciled by marker): the publication never
+            # finalises around it, whatever the attempt count — only the reconcile budget bounds it.
             if int((op.response or {}).get("reconcile_failures", 0)) >= MAX_RECONCILE_FAILURES:
                 continue
         elif op.attempts >= op.max_attempts:
@@ -1051,13 +1234,17 @@ def _finalize(run: _Run) -> None:
     pub.status = final_status(ops)
     pub.finished_at = run.now
     reasons = []
-    if run.denied:
-        reasons.append("interlock denied: " + "; ".join(run.denied)[:1000])
+    denied_ops = [o for o in ops if o.status == OP_FAILED
+                  and ((o.response or {}).get("blocked") or {}).get("code") == "INTERLOCK_DENIED"]
+    if run.denied or denied_ops:
+        reasons.append("interlock denied: " + "; ".join(
+            run.denied or [f"{o.logical_id}: {o.error}" for o in denied_ops])[:1000])
     if any(o.status == OP_UNKNOWN for o in ops):
         reasons.append("UNKNOWN operations need manual reconciliation")
-    if any(o.status == OP_FAILED and (o.response or {}).get("blocked") for o in ops):
-        reasons.append("BLOCKED: needs action — " + "; ".join(
-            o.error for o in ops if o.status == OP_FAILED and (o.response or {}).get("blocked"))[:1000])
+    blocked = [o for o in ops if o.status == OP_FAILED and (o.response or {}).get("blocked")
+               and (o.response or {}).get("blocked", {}).get("code") != "INTERLOCK_DENIED"]
+    if blocked:
+        reasons.append("BLOCKED: needs action — " + "; ".join(o.error for o in blocked)[:1000])
     pub.status_reason = " | ".join(reasons)
     target_state = {PUBLISHED: PS.PUBLISHED, PARTIAL: PS.PUBLICATION_PARTIAL, CONFLICT: PS.PUBLICATION_PARTIAL,
                     FAILED: PS.PUBLICATION_FAILED}[pub.status]
@@ -1105,24 +1292,47 @@ def final_status(ops: list[PublicationOperation]) -> str:
 # Retry / reconcile (human-triggered)
 
 
+@contextmanager
+def _exclusive(pub_id: str) -> Iterator[None]:
+    """Human retry/reconcile never interleave with the executor pass of the same publication."""
+    lock = _lock(pub_id)
+    if not lock.acquire(blocking=False):
+        raise Conflict("publication is being processed right now; try again in a moment", code="PUBLICATION_BUSY")
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 def retry_publication(session: Session, pub_id: str, *, actor_user_id: str,
                       confirm: dict[str, Any] | None = None) -> ExecuteOutcome:
+    with _exclusive(pub_id):
+        return _retry_publication(session, pub_id, actor_user_id=actor_user_id, confirm=confirm)
+
+
+def _retry_publication(session: Session, pub_id: str, *, actor_user_id: str,
+                       confirm: dict[str, Any] | None) -> ExecuteOutcome:
     pub = session.get(Publication, pub_id)
     if pub is None:
         raise NotFound("publication not found")
     if pub.status not in (PARTIAL, FAILED, CONFLICT, RUNNING):
         raise Conflict(f"publication is {pub.status}; retry applies to RUNNING/PARTIAL/FAILED/CONFLICT",
                        code="NOT_RETRYABLE")
+    _require_no_other_run(session, pub)
+    now = utcnow()
     ops = _ops_for(session, pub.id)
-    retry_ops = [o for o in ops if o.status in (OP_FAILED, OP_PENDING, OP_UNKNOWN, OP_IN_FLIGHT)]
+    retry_ops = [o for o in ops if o.status in (OP_FAILED, OP_PENDING, OP_UNKNOWN, OP_IN_FLIGHT)
+                 and not (o.status == OP_IN_FLIGHT and _in_flight_fresh(o, now))]
     if not retry_ops:
         raise Conflict("nothing to retry (CONFLICT operations need a new approved version / human resolution)",
                        code="NOTHING_TO_RETRY")
+    # A retry is a new human action: the publication's version must STILL be the approved one (§50 "Approval
+    # PlanVersion lama → Ditolak"), even while the run's PUBLICATION decision has not expired yet.
+    _still_approved(session, pub)
     expires = _decision_expiry(session, pub)
     if expires is None:
         # The run's approval is gone or expired: the human re-confirms the exact version/hash/preview.
         _verify_confirmation(pub, confirm or {})
-        _still_approved(session, pub)
         decision = _record_publication_decision(session, pub, actor_user_id, retry_ops,
                                                 rationale=f"Retry publication {pub.id}")
         pub.publication_decision_id = decision.id
@@ -1135,11 +1345,11 @@ def retry_publication(session: Session, pub_id: str, *, actor_user_id: str,
                      reason="; ".join(reasons)[:2000])
         session.flush()
         return ExecuteOutcome(False, reasons, pub)
-    now = utcnow()
     for o in retry_ops:
         if o.status == OP_FAILED:
             o.status = OP_PENDING
-            o.response = {**(o.response or {}), "previous_error": o.error}
+            # the old BLOCKED marker must not survive into the next attempt's outcome
+            o.response = {**{k: v for k, v in (o.response or {}).items() if k != "blocked"}, "previous_error": o.error}
         if o.status in (OP_UNKNOWN, OP_IN_FLIGHT):
             o.status = OP_UNKNOWN  # reconcile first
             o.response = {**(o.response or {}), "reconcile_failures": 0}
@@ -1163,6 +1373,12 @@ def retry_publication(session: Session, pub_id: str, *, actor_user_id: str,
 def reconcile_publication(session: Session, pub_id: str, *, actor_user_id: str,
                           now: datetime | None = None) -> dict[str, Any]:
     """Read-only reconciliation of uncertain/failed ops (find by marker). No external writes."""
+    with _exclusive(pub_id):
+        return _reconcile_publication(session, pub_id, actor_user_id=actor_user_id, now=now)
+
+
+def _reconcile_publication(session: Session, pub_id: str, *, actor_user_id: str,
+                           now: datetime | None) -> dict[str, Any]:
     pub = session.get(Publication, pub_id)
     if pub is None:
         raise NotFound("publication not found")
@@ -1180,7 +1396,8 @@ def reconcile_publication(session: Session, pub_id: str, *, actor_user_id: str,
                 _inspect_published(run, op, report)
                 continue
             if op.status not in (OP_UNKNOWN, OP_IN_FLIGHT, OP_FAILED, OP_PENDING) or \
-                    (op.status == OP_PENDING and op.attempts == 0):
+                    (op.status == OP_PENDING and op.attempts == 0) or \
+                    (op.status == OP_IN_FLIGHT and _in_flight_fresh(op, run.now)):
                 report["skipped"].append(op.id)
                 continue
             outcome = _reconcile_one(run, op)
@@ -1244,12 +1461,20 @@ def _inspect_published(run: _Run, op: PublicationOperation, report: dict[str, li
     report["human_edits"].append(op.id)
 
 
-def recover_in_flight(session: Session) -> int:
-    """Startup crash recovery: IN_FLIGHT ops of an earlier process are UNKNOWN (reconcile first, §14)."""
+def recover_in_flight(session: Session, *, now: datetime | None = None) -> int:
+    """Startup crash recovery: IN_FLIGHT ops of an earlier process are UNKNOWN (reconcile first, §14).
+
+    The first reconciliation is deferred until RECOVERY_GRACE after the op's last attempt: a call that is
+    still running in another executor (e.g. ``aeos publish run``) must land before AEOS looks for its
+    marker, otherwise "not found yet" could be mistaken for "absent" and lead to a duplicate create."""
+    now = now or utcnow()
     n = 0
     for op in session.scalars(select(PublicationOperation).where(PublicationOperation.status == OP_IN_FLIGHT)):
         op.status = OP_UNKNOWN
         op.error = "controller restarted during the call — outcome unknown, reconcile before retry"
+        started = ensure_aware(op.last_attempt_at)
+        due = (started + RECOVERY_GRACE) if started else now
+        op.next_attempt_at = due if due > now else now
         n += 1
     session.flush()
     return n
@@ -1288,9 +1513,11 @@ def status_dimensions(session: Session, pub: Publication) -> dict[str, dict[str,
         dims["IMPLEMENTED"] = _dimension("UNKNOWN", "belum ada TaskSpec untuk versi ini", "workforce")
         dims["VERIFIED"] = _dimension("UNKNOWN", "belum ada TaskSpec untuk versi ini", "verification")
     else:
-        states = list(session.scalars(select(TaskExecution.state).where(TaskExecution.task_id.in_(task_ids))))
-        done = sum(1 for x in states if x == "DONE")
-        status = "DONE" if done == len(task_ids) else ("IN_PROGRESS" if states else "NOT_STARTED")
+        rows = session.execute(select(TaskExecution.task_id, TaskExecution.state)
+                               .where(TaskExecution.task_id.in_(task_ids))).all()
+        # distinct TaskSpecs with a DONE execution (a task may have several executions/attempts)
+        done = len({tid for tid, state in rows if state == "DONE"})
+        status = "DONE" if done == len(task_ids) else ("IN_PROGRESS" if rows else "NOT_STARTED")
         dims["IMPLEMENTED"] = _dimension(status, f"{done}/{len(task_ids)} task DONE (runtime state)", "workforce")
         try:
             from aeos.verification import facade as verification
@@ -1328,7 +1555,8 @@ def operation_view(op: PublicationOperation) -> dict[str, Any]:
         "depends_on": list(op.depends_on or []), "idempotency_key": op.idempotency_key,
         "payload_hash": op.payload_hash,
         "payload_summary": {"bytes": len(payload.get("markdown", "") or payload.get("body", "") or ""),
-                            "labels": payload.get("labels"), "rendered_visuals": payload.get("rendered_visuals")},
+                            "labels": payload.get("labels"), "rendered_visuals": payload.get("rendered_visuals"),
+                            "lossy_update": payload.get("lossy_update") or []},
         "response": redact({k: v for k, v in (op.response or {}).items() if k != "history"}),
         "history": (op.response or {}).get("history", []),
     }

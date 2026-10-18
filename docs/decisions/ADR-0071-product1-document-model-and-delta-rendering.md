@@ -41,3 +41,18 @@ regenerating the whole Product 1, plus a visible "documentation pending" label.
   aliases in `plan_content.py`). Unknown keys never silently become content.
 * Section-level delta inside a document is not attempted: a changed document is updated as a whole
   under revision control (ADR-0072); human-edited documents are protected by CONFLICT.
+
+## Amendment (completeness review, 2026-10-18)
+
+6. **§28 feature approval "threat/assessment".** When the approved plan gives a feature
+   `security_assessment{...}` (or `needs_security_assessment`) and/or `threat_model{...}`/`threats[]`,
+   the renderer adds `04-security-assessments/security-assessment-<feature>` and
+   `04-threat-models/threat-model-<feature>`. Findings are DYNAMIC (only from real reviews/scans);
+   residual risk and approval are HUMAN_GOVERNED. Nothing is created when the plan gives nothing.
+7. **Last reviewed (§27).** `POST /api/documents/{id}/review` (SUPER_ADMIN) records that a human read
+   one exact `content_hash` (stale view → 409 STALE_CONTENT). A newer render shows REVIEW_STALE. This
+   is review metadata only — never a plan/publication approval — and is not written into the body
+   (that would change the hash it refers to). Renderer version 2 reflects this metadata wording.
+8. **Logical ids from plan data** (RFC/TDD keys) are slugged and de-duplicated, so they are always
+   valid single path segments and two documents never collapse into one. The local preview mirrors
+   the folder nesting of the Product 1 tree.

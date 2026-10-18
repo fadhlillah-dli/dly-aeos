@@ -87,6 +87,7 @@ def connect(client_secret_path: Path, *, actor: str, open_browser: bool = True, 
     Returns a non-secret summary (granted scopes, refs). Raises ``Blocked`` if no secret store.
     """
     client_config = load_client_config(client_secret_path)
+    register_secret(client_config["installed"].get("client_secret"))  # never echoed by logs/errors
     secrets.put_secret(CLIENT_REF, json.dumps(client_config), actor=actor)
     if flow_factory is None:
         from google_auth_oauthlib.flow import InstalledAppFlow

@@ -35,3 +35,15 @@ folders the run is blocked — the structure is never silently changed.
   authorises and provides tenant/space/parent/project IDs and a scoped credential at
   `office/atlassian` (`office/bitbucket` for Bitbucket).
 * A Data Center deployment needs a separate adapter and ADR.
+
+## Amendment (completeness review, 2026-10-18)
+
+7. Confluence titles are unique per space and several projects share one
+   `CONFLUENCE_PROJECTS_PARENT_ID`, so every page and sub-folder title carries the project key
+   (`00. Product Home [<key>]`); the project folder keeps the project name. Create, update and
+   reconcile use the same title function.
+8. The capability probe re-validates the configured parent against the configured space: a parent
+   folder in another space is BLOCKED "needs action" (§04: validated against tenant, space, access and
+   target; never a second target).
+9. Jira reconciliation uses the `search/jql` API, which may be eventually consistent right after a
+   create; absence proof on a real tenant is NOT-PROVEN.

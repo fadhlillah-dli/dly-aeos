@@ -132,9 +132,34 @@ def docx_snapshot(result: r.RenderResult, doc: r.RenderedDocument, body: str) ->
     return markdown_to_docx(body, title=doc.title, logical_id=doc.logical_doc_id, image_resolver=image_resolver(result))
 
 
-def _doc_path(out_dir: Path, logical_id: str, suffix: str) -> Path:
-    parts = [safe_segment(p) for p in logical_id.split("/")]
-    path = out_dir.joinpath(*parts[:-1], parts[-1] + suffix)
+def _segments(result: r.RenderResult) -> dict[str, list[str]]:
+    """Path segments per logical id, following ``parent_logical_id`` so the local preview mirrors the
+    Product 1 folder tree (e.g. ``04-security-privacy/04-threat-models/...``). Every segment is a
+    validated safe segment; the outer folder (``root``) is the output directory itself."""
+    by_id = result.by_id()
+    out: dict[str, list[str]] = {}
+
+    def resolve(lid: str, depth: int = 0) -> list[str]:
+        if lid in out:
+            return out[lid]
+        if lid == "root" or depth > 32:
+            return []
+        doc = by_id.get(lid)
+        parent = doc.parent_logical_id if doc else None
+        own = safe_segment(lid.rsplit("/", 1)[-1])
+        segs = [*(resolve(parent, depth + 1) if parent else []), own]
+        out[lid] = segs
+        return segs
+
+    for d in result.documents:
+        resolve(d.logical_doc_id)
+    return out
+
+
+def _doc_path(out_dir: Path, segments: list[str], suffix: str) -> Path:
+    if not segments:
+        return ensure_within(out_dir, out_dir)
+    path = out_dir.joinpath(*segments[:-1], segments[-1] + suffix)
     path.parent.mkdir(parents=True, exist_ok=True)
     return ensure_within(out_dir, path)
 
@@ -142,25 +167,26 @@ def _doc_path(out_dir: Path, logical_id: str, suffix: str) -> Path:
 def write_preview(session: Session, result: r.RenderResult, out_dir: Path, *, docx: bool = False) -> dict[str, Any]:
     """Write a local preview tree (Markdown + optional DOCX) — never an external publication."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    segs = _segments(result)
     written: list[str] = []
     for doc in result.documents:
         if doc.logical_doc_id == "root":
             continue  # out_dir itself is the project folder
         if doc.is_folder:
-            folder = _doc_path(out_dir, doc.logical_doc_id, "")
+            folder = _doc_path(out_dir, segs[doc.logical_doc_id], "")
             folder.mkdir(parents=True, exist_ok=True)
             continue
         body = document_body(session, result.project_id, doc)
-        md = _doc_path(out_dir, doc.logical_doc_id, ".md")
+        md = _doc_path(out_dir, segs[doc.logical_doc_id], ".md")
         md.write_text(body, encoding="utf-8", newline="\n")
-        written.append(str(md.relative_to(out_dir)))
+        written.append(md.relative_to(out_dir.resolve()).as_posix())
         if docx:
-            dx = _doc_path(out_dir, doc.logical_doc_id, ".docx")
+            dx = _doc_path(out_dir, segs[doc.logical_doc_id], ".docx")
             dx.write_bytes(docx_snapshot(result, doc, body))
     index = ["# " + result.product_title, "",
              "PREVIEW LOKAL — bukan publikasi eksternal." + ("" if result.approved else " Versi BELUM DISETUJUI."), ""]
     for doc in result.documents:
-        depth = doc.logical_doc_id.count("/") + (0 if doc.logical_doc_id == "root" else 1)
+        depth = len(segs.get(doc.logical_doc_id, []))
         marker = "[folder]" if doc.is_folder else "[doc]"
         index.append(f"{'  ' * depth}- {marker} {doc.title} — {doc.status}"
                      + (f" ({len(doc.pending_sections)} section pending)" if doc.pending_sections else ""))

@@ -22,6 +22,7 @@ invented. Specifically:
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ from sqlalchemy.orm import Session
 from aeos.core.enums import ContentType
 from aeos.core.errors import Conflict
 from aeos.core.hashing import content_hash
+from aeos.core.ids import slugify
 from aeos.core.timeutil import utcnow
 from aeos.docs_engine import product1 as p1
 from aeos.docs_engine.plan_content import FeatureView, PlanView, as_list, as_text, build_view, item_text
@@ -41,7 +43,7 @@ from aeos.docs_engine.plan_content import _first as pick
 from aeos.docs_engine.visuals import STATUS_RENDERED, VisualArtifact
 from aeos.models.publishing import DocumentRecord, DocumentRevision
 
-RENDERER_VERSION = "1"
+RENDERER_VERSION = "2"  # part of every input_hash: a renderer change re-renders (never reuses stale bodies)
 
 # DocumentRecord.status values
 ST_DRAFT = "DRAFT"
@@ -351,7 +353,9 @@ class _Ctx:
             ("Source plan / version", src),
             ("External revision / last synced", "dicatat oleh AEOS (DocumentRecord/ExternalReference), tidak ditulis "
                                                  "ke isi dokumen"),
-            ("Last reviewed", "belum direview manusia (dicatat di AEOS)"),
+            # A review is a human record of one exact content hash in AEOS; writing it into the body would
+            # change the hash it refers to (and a stale "belum direview" would be false after a review).
+            ("Last reviewed", "dicatat oleh AEOS per content hash (DocumentRecord), tidak ditulis ke isi dokumen"),
             ("Links", "; ".join(f"{k}: {', '.join(map(str, vals))}" for k, vals in sorted(doc.links.items())
                                 if vals and isinstance(vals, list) and k != "task_ids") or "—"),
             ("Issue / evidence", "dirujuk live di AEOS (Work items, Evidence) — tidak disalin ke dokumen"),
@@ -716,29 +720,94 @@ def _threat_model_input(ctx: _Ctx) -> tuple[dict[str, Any], list[Any]] | None:
     return tm, threats
 
 
-def _threat_model(ctx: _Ctx, parent: str) -> None:
-    data = _threat_model_input(ctx)
-    if data is None:
-        return
-    tm, threats = data
+def _feature_threat_model_input(f: FeatureView) -> tuple[dict[str, Any], list[Any]] | None:
+    tm = f.raw.get("threat_model") if isinstance(f.raw.get("threat_model"), dict) else {}
+    threats = as_list(f.raw.get("threats")) or as_list(tm.get("threats"))
+    if not threats and not tm:
+        return None
+    return tm, threats
+
+
+def _threat_model_doc(ctx: _Ctx, *, logical_id: str, title: str, parent: str, tm: dict[str, Any],
+                      threats: list[Any], with_visuals: bool, links: dict[str, Any] | None = None) -> None:
     spec = p1.DOC_TYPES["THREAT_MODEL"]
-    logical_id = f"{parent}/threat-model-initial"
+    tb = _visuals_text(ctx, "trust_boundary", "data_flow") if with_visuals else ""
 
     def build(doc: RenderedDocument) -> None:
         b = _Doc(spec, doc.logical_doc_id)
         for key in ("assets", "actors", "trust_boundaries", "entry_points", "attack_scenarios", "mitigations"):
             b.put(key, _bullets(as_list(tm.get(key))))
         b.put("threats", _bullets(threats))
-        tb = _visuals_text(ctx, "trust_boundary", "data_flow")
         if tb:
             b.put("trust_boundaries", _join(_bullets(as_list(tm.get("trust_boundaries"))), tb))
-        _compose(doc, b, header_title="Threat Model — Initial", metadata=ctx.metadata(doc))
+        _compose(doc, b, header_title=title, metadata=ctx.metadata(doc))
 
-    ctx.add(logical_id=logical_id, node="04", title="Threat Model — Initial", kind="DOC", doc_type="THREAT_MODEL",
+    ctx.add(logical_id=logical_id, node="04", title=title, kind="DOC", doc_type="THREAT_MODEL",
             parent=parent, timing=p1.Timing.FEATURE_APPROVAL, status=_ok_status(ctx), reason="",
-            owner=ctx.owner("Security Lead"), slice_={"tm": tm, "threats": threats,
-                                                     "visuals": [x.source_hash for x in ctx.visuals]},
-            template_key="threat-model", build=build)
+            owner=ctx.owner("Security Lead"),
+            slice_={"tm": tm, "threats": threats,
+                    "visuals": [x.source_hash for x in ctx.visuals] if with_visuals else []},
+            template_key="threat-model", links=links, build=build)
+
+
+def _threat_model(ctx: _Ctx, parent: str) -> None:
+    data = _threat_model_input(ctx)
+    if data is None:
+        return
+    tm, threats = data
+    _threat_model_doc(ctx, logical_id=f"{parent}/threat-model-initial", title="Threat Model — Initial",
+                      parent=parent, tm=tm, threats=threats, with_visuals=True)
+
+
+def _feature_threat_model(ctx: _Ctx, f: FeatureView, parent: str) -> None:
+    """§28 feature approval "threat/assessment": a threat model per feature when the approved plan gives one."""
+    data = _feature_threat_model_input(f)
+    if data is None:
+        return
+    tm, threats = data
+    _threat_model_doc(ctx, logical_id=f"{parent}/threat-model-{f.key}", title=f"Threat Model — {f.title}",
+                      parent=parent, tm=tm, threats=threats, with_visuals=False, links={"requirement": [f.key]})
+
+
+def _security_assessment_input(f: FeatureView) -> dict[str, Any] | None:
+    raw = f.raw.get("security_assessment")
+    if isinstance(raw, dict):
+        return raw
+    return {} if f.get("needs_security_assessment") else None
+
+
+def _security_assessment(ctx: _Ctx, f: FeatureView, parent: str) -> None:
+    """§27 "Assessments per change" at feature approval (§28). Findings come only from real reviews/scans
+    (DYNAMIC → evidence); residual risk and approval are HUMAN_GOVERNED — never filled by AEOS."""
+    data = _security_assessment_input(f)
+    if data is None:
+        return
+    spec = p1.DOC_TYPES["SECURITY_ASSESSMENT"]
+    logical_id = f"{parent}/security-assessment-{f.key}"
+
+    def text(key: str) -> str:
+        val = data.get(key)
+        return _bullets(val) if isinstance(val, list) else as_text(val)
+
+    def build(doc: RenderedDocument) -> None:
+        b = _Doc(spec, doc.logical_doc_id)
+        b.put("scope", _join(f"Perubahan: fitur **{f.title}** (`{f.key}`).", text("scope")))
+        b.put("requirements", text("requirements"))
+        b.put("risks", text("risks"))
+        b.live("findings", _live("AEOS security review / scanner (EvidenceArtifact tepercaya)",
+                                 "Belum ada temuan yang tercatat. Temuan hanya dari review/scan nyata — tidak "
+                                 "dikarang oleh dokumen atau model.", status="NOT STARTED"))
+        b.put("mitigations", text("mitigations"))
+        b.human("residual_risk")
+        b.human("approval", "Approval security hanya melalui Decision manusia.")
+        _compose(doc, b, header_title=f"Security Assessment — {f.title}", metadata=ctx.metadata(doc))
+
+    ctx.add(logical_id=logical_id, node="04", title=f"Security Assessment — {f.title}", kind="DOC",
+            doc_type="SECURITY_ASSESSMENT", parent=parent, timing=p1.Timing.FEATURE_APPROVAL,
+            status=_ok_status(ctx), reason="", owner=ctx.owner("Security Lead"),
+            slice_={"assessment": data, "feature": f.key, "title": f.title, "team": ctx.view.team,
+                    "owner": ctx.project.owner_name},
+            template_key="security-assessment", links={"requirement": [f.key]}, build=build)
 
 
 def _privacy_assessment(ctx: _Ctx, f: FeatureView, parent: str) -> None:
@@ -902,6 +971,18 @@ def _template_doc(ctx: _Ctx, tpl: p1.TemplateSpec, parent: str) -> None:
 # ---------------------------------------------------------------------------------------------
 
 
+def _unique_key(raw_key: str, used: set[str], *, fallback: str = "item") -> str:
+    """Plan content is DATA: keys become logical ids and path segments, so they are slugged (no separators,
+    no traversal) and de-duplicated (two RFCs/TDDs never collapse into one document)."""
+    base = slugify(raw_key, max_len=40) if re.search(r"[a-z0-9]", raw_key.lower()) else fallback
+    key, n = base, 2
+    while key in used:
+        key = f"{base}-{n}"
+        n += 1
+    used.add(key)
+    return key
+
+
 def render_document_set(*, project: ProjectIdentity, version: VersionIdentity, content: dict[str, Any] | None,
                         tasks: list[TaskInfo] | None = None, visuals: list[VisualArtifact] | None = None,
                         previous_input_hashes: dict[str, str] | None = None) -> RenderResult:
@@ -932,15 +1013,19 @@ def render_document_set(*, project: ProjectIdentity, version: VersionIdentity, c
                 elif child.key in ("03-rfcs", "03-tdds"):
                     kind = "RFC" if child.key == "03-rfcs" else "TDD"
                     entries: list[tuple[str, str, dict[str, Any], FeatureView | None]] = []
-                    for i, raw in enumerate(as_list(view.get("rfcs" if kind == "RFC" else "tdds"))):
-                        if isinstance(raw, dict):
-                            key = as_text(raw.get("key") or raw.get("id")) or f"{kind.lower()}-{i + 1}"
-                            entries.append((key, as_text(raw.get("title")) or key, raw, None))
+                    used: set[str] = set()
+                    # Feature-bound documents first: their key is the (already unique) feature key that
+                    # the PRD links to; plan-level RFC/TDD entries are de-duplicated against them.
                     for f in view.features:
                         flag = f.needs_rfc if kind == "RFC" else f.needs_tdd
                         data = f.raw.get(kind.lower()) if isinstance(f.raw.get(kind.lower()), dict) else {}
                         if flag:
-                            entries.append((f.key, f.title, data, f))
+                            entries.append((_unique_key(f.key, used), f.title, data, f))
+                    for i, raw in enumerate(as_list(view.get("rfcs" if kind == "RFC" else "tdds"))):
+                        if isinstance(raw, dict):
+                            raw_key = as_text(raw.get("key") or raw.get("id")) or f"{kind.lower()}-{i + 1}"
+                            entries.append((_unique_key(raw_key, used, fallback=f"{kind.lower()}-{i + 1}"),
+                                            as_text(raw.get("title")) or raw_key, raw, None))
                     _folder(ctx, child, node.key, has_items=bool(entries),
                             reason=f"Belum ada {kind} yang diperlukan pada rencana yang disetujui (dibuat bila "
                                    "diperlukan saat feature approval).")
@@ -954,10 +1039,16 @@ def render_document_set(*, project: ProjectIdentity, version: VersionIdentity, c
                 elif child.key == "04-security-assessments":
                     _folder(ctx, child, node.key, has_items=True)
                     _initial_risk_assessment(ctx, child.key)
+                    for f in view.features:
+                        _security_assessment(ctx, f, child.key)
                 elif child.key == "04-threat-models":
-                    _folder(ctx, child, node.key, has_items=_threat_model_input(ctx) is not None,
+                    has_tm = _threat_model_input(ctx) is not None or any(
+                        _feature_threat_model_input(f) is not None for f in view.features)
+                    _folder(ctx, child, node.key, has_items=has_tm,
                             reason="Threat model dibuat saat feature approval bila rencana memuat threat/assessment.")
                     _threat_model(ctx, child.key)
+                    for f in view.features:
+                        _feature_threat_model(ctx, f, child.key)
                 elif child.key == "04-vulnerability-assessments":
                     _folder(ctx, child, node.key, has_items=False,
                             reason="Belum ada vulnerability assessment yang dijalankan; hasil VA hanya dari "

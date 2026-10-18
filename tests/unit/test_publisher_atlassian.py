@@ -224,3 +224,47 @@ def test_office_end_to_end_blocks_when_folders_unsupported(settings, db, secrets
     from aeos.models.decisions import Decision
 
     assert db.scalar(select(Decision).where(Decision.kind == "PUBLICATION", Decision.domain == "OFFICE"))
+
+
+@respx.mock
+def test_parent_folder_in_another_space_is_not_a_valid_target():
+    """§04: CONFLUENCE_PROJECTS_PARENT_ID is re-validated against the configured space (never a second target)."""
+    respx.get(f"{BASE}/wiki/api/v2/spaces/SP1").mock(return_value=httpx.Response(200, json={"id": "SP1"}))
+    respx.get(f"{BASE}/wiki/api/v2/folders/PARENT").mock(return_value=httpx.Response(200, json={
+        "id": "PARENT", "spaceId": "OTHER"}))
+    folders = respx.post(f"{BASE}/wiki/api/v2/folders").mock(return_value=httpx.Response(200, json={"id": "X"}))
+    p = _conf()
+    caps = p.check_capabilities()
+    assert caps["status"] == "BLOCKED" and caps["folders"] == "SUPPORTED"
+    assert any("space OTHER" in r and "needs action" in r for r in caps["reasons"])
+    with pytest.raises(ProviderBlocked):
+        p.execute(_ctx())
+    assert not folders.called
+
+
+def test_page_titles_carry_the_project_key_so_projects_can_share_a_space(cloud_ok):
+    """Confluence titles are unique per space: create, update and reconcile use the same keyed title."""
+    page = cloud_ok.post(f"{BASE}/wiki/api/v2/pages").mock(return_value=httpx.Response(200, json={
+        "id": "P1", "version": {"number": 1}}))
+    cloud_ok.post(url__regex=r".*/properties$").mock(return_value=httpx.Response(200, json={}))
+    sub = cloud_ok.post(f"{BASE}/wiki/api/v2/folders").mock(return_value=httpx.Response(200, json={"id": "F2"}))
+    p = _conf()
+    p.execute(_ctx(operation="create_doc", logical_id="00-product-home", title="00. Product Home",
+                   parent_external_id="F1", payload={"markdown": "# x"}))
+    assert json.loads(page.calls[0].request.content)["title"] == "00. Product Home [k]"
+    p.execute(_ctx(logical_id="02-requirements", title="02. Requirements", parent_external_id="F1"))
+    assert json.loads(sub.calls[0].request.content)["title"] == "02. Requirements [k]"
+    p.execute(_ctx())  # the project folder itself keeps the project name
+    assert json.loads(sub.calls[1].request.content)["title"] == "Kantor"
+    search = cloud_ok.get(f"{BASE}/wiki/api/v2/pages").mock(return_value=httpx.Response(200, json={"results": []}))
+    assert p.reconcile(_ctx(operation="create_doc", logical_id="00-product-home", title="00. Product Home")) is None
+    assert search.calls[0].request.url.params["title"] == "00. Product Home [k]"
+    cloud_ok.get(f"{BASE}/wiki/api/v2/pages/P1").mock(return_value=httpx.Response(200, json={
+        "id": "P1", "version": {"number": 1}}))
+    put = cloud_ok.put(f"{BASE}/wiki/api/v2/pages/P1").mock(return_value=httpx.Response(200, json={
+        "id": "P1", "version": {"number": 2}}))
+    p.execute(_ctx(operation="update_doc", logical_id="00-product-home", title="00. Product Home",
+                   existing_external_id="P1", existing_revision="1", payload={"markdown": "# y"}))
+    assert json.loads(put.calls[0].request.content)["title"] == "00. Product Home [k]"
+    assert atl.ConfluenceProvider.title_for(_ctx(title="X [k]", logical_id="a")) == "X [k]"  # idempotent
+    assert len(atl.ConfluenceProvider.title_for(_ctx(title="T" * 400, logical_id="a"))) == 255

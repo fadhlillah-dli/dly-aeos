@@ -7,7 +7,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, Loading, Mono, Notice } from "../../components/ui";
 import { relativeTime, shortHash } from "../../lib/format";
-import { CONTENT_TYPE_LABELS, buildTree, label, type TreeNode } from "./labels";
+import { CONTENT_TYPE_LABELS, buildTree, label, safeHref, type TreeNode } from "./labels";
 import { MarkdownPreview } from "./MarkdownPreview";
 import type { DiffResponse, DocItem, DocumentsResponse, ListResponse, RenderResponse, RevisionItem } from "./types";
 
@@ -15,7 +15,8 @@ function Row({ node, depth, selected, onSelect }: { node: TreeNode; depth: numbe
   const [open, setOpen] = useState(depth < 1 || node.doc.logical_doc_id === "root");
   const d = node.doc;
   const isFolder = d.kind === "FOLDER";
-  const ext = d.external.find((e) => e.url);
+  const ext = d.external.find((e) => safeHref(e.url));
+  const extHref = safeHref(ext?.url);
   return (
     <li>
       <div
@@ -43,8 +44,8 @@ function Row({ node, depth, selected, onSelect }: { node: TreeNode; depth: numbe
         )}
         {d.open_revision_inputs > 0 && <StatusBadge status="CONFLICT" label={`edit manusia: ${d.open_revision_inputs}`} />}
         {d.freshness.external_stale && <StatusBadge status="STALE" label="sinkron eksternal usang" />}
-        {ext?.url && (
-          <a href={ext.url} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-xs text-accent">
+        {ext && extHref && (
+          <a href={extHref} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-xs text-accent">
             <ExternalLink className="h-3.5 w-3.5" aria-hidden /> {ext.provider}
           </a>
         )}
@@ -129,6 +130,37 @@ function HumanEdits({ doc }: { doc: DocItem }) {
   );
 }
 
+const REVIEW_TONE: Record<string, string> = { REVIEWED: "CONFIGURED", REVIEW_STALE: "STALE", NOT_REVIEWED: "NOT_CHECKED" };
+
+/** §27 "last reviewed": a human confirms having read THIS content hash. Review metadata only — not an approval. */
+export function ReviewBox({ doc }: { doc: DocItem }) {
+  const qc = useQueryClient();
+  const { isAdmin } = useAuth();
+  const review = doc.review ?? { reviewed_at: doc.last_reviewed_at, reviewed_by: null, content_hash: null, status: doc.last_reviewed_at ? "REVIEWED" : "NOT_REVIEWED" };
+  const m = useMutation({
+    mutationFn: () => post(`/api/documents/${doc.id}/review`, { content_hash: doc.content_hash ?? "", note: "" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["project-documents"] }),
+  });
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusBadge status={REVIEW_TONE[review.status] ?? review.status} label={label(review.status)} />
+        {review.reviewed_at && <span className="text-xs text-ink-3">{relativeTime(review.reviewed_at)}</span>}
+        {isAdmin && doc.kind === "DOC" && doc.content_hash && review.status !== "REVIEWED" && (
+          <Button className="text-xs" busy={m.isPending} onClick={() => m.mutate()}>
+            Tandai sudah direview (hash ini)
+          </Button>
+        )}
+      </div>
+      {review.status === "REVIEW_STALE" && (
+        <p className="text-xs text-warn">Review tercatat untuk konten lama ({shortHash(review.content_hash)}); konten sekarang belum direview.</p>
+      )}
+      <p className="text-xs text-ink-3">Review hanya metadata baca-ulang; bukan persetujuan rencana atau publikasi.</p>
+      <ErrorBox error={m.error} />
+    </div>
+  );
+}
+
 function DocDetail({ doc }: { doc: DocItem }) {
   const [showDiff, setShowDiff] = useState(false);
   const q = useQuery({
@@ -151,7 +183,7 @@ function DocDetail({ doc }: { doc: DocItem }) {
           ["Revisi eksternal", doc.external_revision ?? "—"],
           ["Dirender", relativeTime(doc.rendered_at)],
           ["Sinkron terakhir", <Freshness key="f" at={doc.last_synced_at} label="Sinkron" staleAfterSeconds={86400 * 7} />],
-          ["Direview manusia", doc.last_reviewed_at ? relativeTime(doc.last_reviewed_at) : "belum direview"],
+          ["Direview manusia", doc.kind === "DOC" ? <ReviewBox key="r" doc={doc} /> : "—"],
         ]}
       />
       {doc.pending_sections.length > 0 && (
@@ -172,8 +204,8 @@ function DocDetail({ doc }: { doc: DocItem }) {
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-ink-3">Issue:</span>
               {issues.map((i) =>
-                i.url ? (
-                  <a key={i.issue_id} href={i.url} target="_blank" rel="noreferrer noopener" className="text-accent">#{i.issue_id}</a>
+                safeHref(i.url) ? (
+                  <a key={i.issue_id} href={safeHref(i.url)} target="_blank" rel="noreferrer noopener" className="text-accent">#{i.issue_id}</a>
                 ) : (
                   <span key={i.issue_id}>#{i.issue_id}</span>
                 ),
@@ -183,8 +215,10 @@ function DocDetail({ doc }: { doc: DocItem }) {
           {(doc.evidence ?? []).length > 0 && (
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-ink-3">Evidence (live):</span>
+              {/* An evidence artefact existing (even from a trusted collector) is not a PASS: the verdict lives in Evidence. */}
               {(doc.evidence ?? []).map((e) => (
-                <StatusBadge key={e.id} status={e.trusted ? "VERIFIED" : "UNVERIFIED"} label={`${e.kind} ${e.evidence_level}${e.trusted ? "" : " (tidak tepercaya)"}`} />
+                <StatusBadge key={e.id} status={e.trusted ? "CONNECTED" : "UNVERIFIED"}
+                  label={`${e.kind} ${e.evidence_level} — ${e.trusted ? "kolektor tepercaya; hasil lihat Evidence" : "tidak tepercaya"}`} />
               ))}
             </div>
           )}
@@ -226,7 +260,8 @@ function DocDetail({ doc }: { doc: DocItem }) {
 }
 
 export function DocumentsPanel({ projectId }: { projectId: string }) {
-  const [selected, setSelected] = useState<DocItem | null>(null);
+  // Keep only the id: the detail always shows the freshest record (SSE/invalidation refetches the list).
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const q = useQuery({
     queryKey: ["project-documents", projectId],
     queryFn: () => get<DocumentsResponse>(`/api/projects/${projectId}/documents`),
@@ -239,6 +274,7 @@ export function DocumentsPanel({ projectId }: { projectId: string }) {
   if (q.isLoading) return <Loading />;
   if (q.error) return <ErrorBox error={q.error} />;
   const data = q.data!;
+  const selected = selectedId ? data.items.find((i) => i.id === selectedId) ?? null : null;
   if (data.items.length === 0) {
     return (
       <div className="space-y-4">
@@ -273,11 +309,11 @@ export function DocumentsPanel({ projectId }: { projectId: string }) {
         <div className="mb-3 flex flex-wrap gap-2 text-xs">
           <StatusBadge status="CONFIGURED" label={`${data.summary.documents} dokumen`} />
           <StatusBadge status="IDLE" label={`${data.summary.folders} folder`} />
-          <StatusBadge status="PUBLISHED" label={`${data.summary.published} terpublikasi`} />
+          <StatusBadge status={data.summary.published > 0 ? "PUBLISHED" : "PENDING"} label={`${data.summary.published} terpublikasi`} />
           {data.summary.pending > 0 && <StatusBadge status="STALE" label={`${data.summary.pending} documentation pending`} />}
           {data.summary.conflicts > 0 && <StatusBadge status="CONFLICT" label={`${data.summary.conflicts} edit manusia terbuka`} />}
         </div>
-        <DocumentTreeView items={data.items} selected={selected?.id ?? null} onSelect={setSelected} />
+        <DocumentTreeView items={data.items} selected={selected?.id ?? null} onSelect={(d) => setSelectedId(d.id)} />
       </Card>
       <Card title={selected ? selected.title : "Detail dokumen"}>
         {selected ? <DocDetail doc={selected} /> : <EmptyState title="Pilih dokumen atau folder">Klik judul di pohon untuk melihat metadata, section dan preview Markdown.</EmptyState>}

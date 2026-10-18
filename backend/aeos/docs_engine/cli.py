@@ -87,6 +87,16 @@ def render(
         try:
             result, delta, state = service.render_version(session, settings, version, persist=True,
                                                           render_visuals=not no_visuals)
+            if delta is not None:  # DocumentRecords changed (approved version only) -> audited like the API
+                from aeos.audit import service as audit
+                from aeos.events import service as events
+
+                audit.record(session, actor_type="cli", actor_id="local-operator", action="documents.render",
+                             target_type="project", target_id=project.id, project_id=project.id,
+                             domain=project.domain, details={"plan_version_id": version.id, **delta.to_dict()})
+                events.emit(session, source="docs_engine", kind="documents.rendered", entity_type="project",
+                            entity_id=project.id, entity_version=version.id, project_id=project.id,
+                            domain=project.domain, payload={k: len(v) for k, v in delta.to_dict().items()})
             session.commit()
         except AeosError as exc:
             session.rollback()

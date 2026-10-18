@@ -309,3 +309,33 @@ def test_cli_docs_render_local_preview(settings, db, monkeypatch, tmp_path):
     text = _ascii(res.output)
     assert "Approved version: yes" in text and "Preview written to" in text
     assert (tmp_path / "prev" / "INDEX.md").is_file() and (tmp_path / "prev" / "00-product-home.md").is_file()
+
+
+def test_owner_can_reject_a_preview_without_any_external_write(personal_client, world):
+    """§05 step 9: Approve & Publish, Request Revision or Reject — reject writes nothing and is audited."""
+    view = _preview(personal_client, world)
+    r = personal_client.post(f"/api/publications/{view['id']}/reject", json={"reason": "target salah"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "CANCELLED" and "ditolak" in r.json()["status_reason"]
+    assert all(not f.calls for f in world["fakes"].values())
+    again = personal_client.post(f"/api/publications/{view['id']}/execute", json=_confirm(view))
+    assert again.status_code == 409 and again.json()["error"]["code"] == "NOT_A_PREVIEW"
+    assert personal_client.post(f"/api/publications/{view['id']}/reject", json={}).status_code == 409
+    db = world["db"]
+    db.expire_all()
+    assert db.scalar(select(AuditEvent).where(AuditEvent.action == "publication.reject")) is not None
+    # a new preview adopts the released outbox rows (one row per side effect)
+    view2 = _preview(personal_client, world)
+    assert view2["status"] == "PREVIEW" and len(view2["operations"]) == len(view["operations"])
+
+
+def test_viewer_cannot_reject_or_review(client, db, world):
+    from tests.conftest import create_admin
+
+    create_admin(db)
+    create_viewer(db)
+    client.login("viewer", VIEWER_PW)
+    client.select_domain(Domain.PERSONAL)
+    for url in ("/api/publications/x/reject", "/api/documents/x/review"):
+        r = client.post(url, json={"content_hash": "x"})
+        assert r.status_code == 403 and r.json()["error"]["code"] == "READ_ONLY_ROLE", url

@@ -22,7 +22,9 @@ Feature keys: ``feature_key|key|id``, ``title|name``, ``summary|description|requ
 ``functional_requirements[]|requirements[]``, ``non_functional[]``, ``user_stories[]``,
 ``acceptance|acceptance_criteria[]``, ``impact``, ``depends_on[]``, ``assumptions[]``, ``risks[]``,
 ``success_metrics[]``, ``rollout``, ``priority``, ``milestone|milestone_key``, ``owner``,
-``needs_rfc``, ``needs_tdd``, ``rfc{}``, ``tdd{}``, ``personal_data``.
+``needs_rfc``, ``needs_tdd``, ``rfc{}``, ``tdd{}``, ``personal_data``, ``privacy{}``,
+``security_assessment{scope, requirements[], risks[], mitigations[]}|needs_security_assessment``,
+``threat_model{assets[], actors[], ...}|threats[]``, ``testing{}``.
 """
 
 from __future__ import annotations

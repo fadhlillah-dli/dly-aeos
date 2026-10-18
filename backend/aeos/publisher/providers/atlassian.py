@@ -270,6 +270,16 @@ class ConfluenceProvider:
     def _v2(self, path: str) -> str:
         return f"{self.cfg.base_url}/wiki/api/v2{path}"
 
+    @staticmethod
+    def title_for(ctx: OpContext) -> str:
+        """Confluence titles are unique per space. Several projects share one CONFLUENCE_PROJECTS_PARENT_ID,
+        so every page/sub-folder title carries the project key ("00. Product Home [abc]"); the project folder
+        itself keeps the project name. Create, update and reconcile all use this same title."""
+        if ctx.logical_id == "root" or not ctx.project_key or ctx.title.endswith(f"[{ctx.project_key}]"):
+            return ctx.title[:255]
+        suffix = f" [{ctx.project_key}]"
+        return ctx.title[:255 - len(suffix)] + suffix
+
     def check_capabilities(self) -> dict[str, Any]:
         """Cloud REST v2 + folder support under CONFLUENCE_PROJECTS_PARENT_ID (read-only probes)."""
         if self._caps is not None:
@@ -288,7 +298,14 @@ class ConfluenceProvider:
                   what="confluence parent folder", headers=self._h())
         if fo.status_code == 200:
             caps["folders"] = "SUPPORTED"
-            caps["status"] = "READY"
+            space_of_parent = str((_json(fo) or {}).get("spaceId") or "")
+            space_ok = str((_json(sp) or {}).get("id") or self.cfg.space_id)
+            if space_of_parent and space_of_parent not in (space_ok, self.cfg.space_id):
+                # §04: the configured parent is re-validated against tenant/space/target — never a second target
+                caps["reasons"].append(f"{CONFLUENCE_PARENT_KEY} berada di space {space_of_parent}, bukan space "
+                                       f"{self.cfg.space_id} yang dikonfigurasi — needs action")
+            else:
+                caps["status"] = "READY"
         elif fo.status_code in (400, 404, 501):
             pg = send(self.client, "GET", self._v2(f"/pages/{quote(self.cfg.parent_id, safe='')}"), write=False,
                       what="confluence parent page", headers=self._h())
@@ -328,7 +345,7 @@ class ConfluenceProvider:
             parent = ctx.parent_external_id or self.cfg.parent_id
             resp = send(self.client, "POST", self._v2("/folders"), write=True, what="confluence create folder",
                         headers=self._h({"Content-Type": "application/json"}),
-                        json={"spaceId": self.cfg.space_id, "title": ctx.title, "parentId": parent})
+                        json={"spaceId": self.cfg.space_id, "title": self.title_for(ctx), "parentId": parent})
             if resp.status_code not in (200, 201):
                 raise classify_http_error(resp, write=True, what="confluence create folder")
             data = resp.json()
@@ -340,7 +357,7 @@ class ConfluenceProvider:
                                           rendered_images=set(ctx.payload.get("rendered_visuals", [])))
             resp = send(self.client, "POST", self._v2("/pages"), write=True, what="confluence create page",
                         headers=self._h({"Content-Type": "application/json"}),
-                        json={"spaceId": self.cfg.space_id, "status": "current", "title": ctx.title,
+                        json={"spaceId": self.cfg.space_id, "status": "current", "title": self.title_for(ctx),
                               "parentId": ctx.parent_external_id or self.cfg.parent_id,
                               "body": {"representation": "storage", "value": storage}})
             if resp.status_code not in (200, 201):
@@ -386,7 +403,7 @@ class ConfluenceProvider:
                                       rendered_images=set(ctx.payload.get("rendered_visuals", [])))
         resp = send(self.client, "PUT", self._v2(f"/pages/{quote(pid, safe='')}"), write=True,
                     what="confluence update page", headers=self._h({"Content-Type": "application/json"}),
-                    json={"id": pid, "status": "current", "title": ctx.title,
+                    json={"id": pid, "status": "current", "title": self.title_for(ctx),
                           "body": {"representation": "storage", "value": storage},
                           "version": {"number": number + 1, "message": f"DLY AEOS publication {ctx.publication_id}"}})
         if resp.status_code == 409:
@@ -439,7 +456,7 @@ class ConfluenceProvider:
                                    expected_revision=ctx.existing_revision, observed_revision=number)
         if ctx.operation == "create_doc":
             resp = send(self.client, "GET", self._v2("/pages"), write=False, what="confluence reconcile pages",
-                        headers=self._h(), params={"space-id": self.cfg.space_id, "title": ctx.title,
+                        headers=self._h(), params={"space-id": self.cfg.space_id, "title": self.title_for(ctx),
                                                    "status": "current"})
             if resp.status_code != 200:
                 raise classify_http_error(resp, write=False, what="confluence reconcile pages")
@@ -458,7 +475,7 @@ class ConfluenceProvider:
             if resp.status_code != 200:
                 raise classify_http_error(resp, write=False, what="confluence reconcile folder")
             for child in resp.json().get("results") or []:
-                if child.get("type") != "folder" or child.get("title") != ctx.title:
+                if child.get("type") != "folder" or child.get("title") != self.title_for(ctx):
                     continue
                 if self._marker_matches("folders", str(child["id"]), ctx):
                     return OpResult(external_id=str(child["id"]), kind="folder", response={"reconciled": True})
@@ -476,6 +493,14 @@ class ConfluenceProvider:
             return OpResult(external_id=str(res[0]["id"]), kind="attachment", response={"reconciled": True}) \
                 if res else None
         raise ProviderError(f"cannot reconcile {ctx.operation}")
+
+
+def _json(resp: httpx.Response) -> dict[str, Any] | None:
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _link(cfg: AtlassianConfig, data: dict[str, Any]) -> str | None:

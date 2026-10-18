@@ -38,6 +38,13 @@ class AcknowledgeIn(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 
+class ReviewIn(BaseModel):
+    """The reviewer confirms the exact content hash they read (a stale view is refused)."""
+
+    content_hash: str = Field(min_length=1, max_length=96)
+    note: str = Field(default="", max_length=2000)
+
+
 def _iso(dt: Any) -> str | None:
     return dt.isoformat() if dt else None
 
@@ -63,6 +70,11 @@ def document_view(rec: DocumentRecord, refs: list[ExternalReference], open_input
         "freshness": {"rendered_at": _iso(rec.rendered_at), "last_synced_at": _iso(rec.last_synced_at),
                       "external_stale": stale},
         "open_revision_inputs": open_inputs,
+        # §27 last reviewed: a human read of a specific content hash; a newer render makes it out of date
+        "review": {"reviewed_at": _iso(rec.last_reviewed_at), "reviewed_by": rec.last_reviewed_by,
+                   "content_hash": rec.reviewed_content_hash,
+                   "status": ("NOT_REVIEWED" if not rec.last_reviewed_at else
+                              "REVIEWED" if rec.reviewed_content_hash == rec.content_hash else "REVIEW_STALE")},
     }
 
 
@@ -194,6 +206,30 @@ def diff(doc_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain,
     return {"document_id": rec.id, "base_revision_id": base.id if base else None,
             "base_kind": base.kind if base else None, "diff": "\n".join(lines[:4000]), "truncated": truncated,
             "changed": bool(lines), "source": SOURCE, "checked_at": utcnow().isoformat()}
+
+
+@router.post("/api/documents/{doc_id}/review")
+def mark_reviewed(doc_id: str, body: ReviewIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    """Record that a human reviewed this exact rendered content (§27 "last reviewed"). This is review
+    metadata only — it is not a plan/publication approval and grants nothing (approvals are Decisions)."""
+    rec = _load_doc(db, principal, domain, doc_id)
+    if rec.kind != "DOC":
+        raise Conflict("only documents can be reviewed", code="NOT_A_DOCUMENT")
+    if body.content_hash != rec.content_hash:
+        raise Conflict("document content changed since it was displayed; reload and review again",
+                       code="STALE_CONTENT", details={"current_content_hash": rec.content_hash})
+    rec.last_reviewed_at = utcnow()
+    rec.last_reviewed_by = principal.user.id
+    rec.reviewed_content_hash = rec.content_hash
+    audit.record(db, actor_type="user", actor_id=principal.user.id, action="document.review", target_type="document",
+                 target_id=rec.id, project_id=rec.project_id, domain=rec.domain,
+                 details={"content_hash": rec.content_hash, "note": body.note})
+    events.emit(db, source="docs_engine", kind="document.reviewed", entity_type="document", entity_id=rec.id,
+                entity_version=rec.content_hash, project_id=rec.project_id, domain=rec.domain,
+                payload={"logical_doc_id": rec.logical_doc_id})
+    db.commit()
+    return {"id": rec.id, "last_reviewed_at": _iso(rec.last_reviewed_at), "reviewed_content_hash":
+            rec.reviewed_content_hash, "status": "REVIEWED"}
 
 
 @router.post("/api/documents/{doc_id}/revision-inputs/{rev_id}/acknowledge")
