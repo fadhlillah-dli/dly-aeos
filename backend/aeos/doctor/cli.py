@@ -1,8 +1,10 @@
 """`aeos doctor` - Readiness Doctor bootstrap layer (§08 layer 1).
 
 Runs without the server, without an LLM, and even when the database is not initialised (results are
-then only printed). Exit code 1 when a critical check for CAN_OPEN_DASHBOARD fails. Remedies are
-printed for the operator to copy; nothing is installed or changed.
+then only printed). Only the opt-in ``--functional`` pass makes one small Claude Code call through the
+native bridge (Max quota) and runs the containment/keyring/GitHub read-only probes. Exit code 1 when a
+critical check for CAN_OPEN_DASHBOARD fails. Remedies are printed for the operator to copy; nothing is
+installed or changed.
 """
 
 from __future__ import annotations
@@ -132,7 +134,11 @@ def doctor(
 def _print_report(settings: Any, db_state: str, persisted: bool, report: Any, matrix: list[dict[str, Any]],
                   failures: list[str]) -> None:
     echo = typer.echo
-    echo("DLY AEOS Readiness Doctor - bootstrap layer (no server, no LLM)")
+    if report.functional:
+        echo("DLY AEOS Readiness Doctor - bootstrap layer (no server; --functional: opt-in checks incl. ONE small "
+             "Claude Code call via the native bridge, using Max quota)")
+    else:
+        echo("DLY AEOS Readiness Doctor - bootstrap layer (no server, no LLM)")
     echo(ascii_safe(f"platform: {sys.platform}   data dir: {data_dir_label(settings)}   database: {db_state}"))
     rows = [[r.group, r.check_id, r.status, r.severity, r.summary] for r in report.results]
     echo(table(["GROUP", "CHECK", "STATUS", "SEV", "SUMMARY"], rows, max_width=90))
