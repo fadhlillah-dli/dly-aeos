@@ -4,7 +4,11 @@
 * verification is a read-only provider lookup of the exact ``owner/name``; any failure, redirect,
   rename or provider-ID change leaves the record UNVERIFIED with the reason (never a guess);
 * a local checkout path is validated (absolute, existing, git top-level, outside the AEOS data dir,
-  no UNC/network share) and observed read-only (branch, head, dirty, origin match);
+  no UNC/network share, not overlapping a checkout registered in the other domain) and observed
+  read-only (branch, head, dirty, origin match);
+* repository content is read only when the checkout still belongs to the project's domain: an
+  origin on the other domain's code provider, or a path overlapping another domain's checkout, is
+  refused (AGENTS.md invariant 9, §50 "Source Office muncul dalam platform personal working tree");
 * local paths are sensitive: views show a logical/redacted name only.
 """
 
@@ -12,12 +16,13 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import quote, urlsplit
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
@@ -31,7 +36,7 @@ from aeos.events import service as events
 from aeos.identity.service import Principal
 from aeos.models.portfolio import Project, RepositoryReference
 from aeos.portfolio import gitread
-from aeos.portfolio.service import deny
+from aeos.portfolio.service import deny, require_writable
 
 CODE_PROVIDER = {Domain.PERSONAL.value: "GITHUB", Domain.OFFICE.value: "BITBUCKET"}
 PROVIDER_HOSTS = {"GITHUB": "github.com", "BITBUCKET": "bitbucket.org"}
@@ -72,14 +77,94 @@ def is_network_path(value: str) -> bool:
     return v.startswith("\\\\")
 
 
+def _norm(p: Path) -> str:
+    # Windows (normcase) and macOS (default APFS/HFS+) compare paths case-insensitively.
+    s = os.path.normcase(str(p))
+    return s.casefold() if sys.platform == "darwin" else s
+
+
 def _overlaps(a: Path, b: Path) -> bool:
-    return a == b or b in a.parents or a in b.parents
+    """True when *a* and *b* are the same directory or one contains the other."""
+    na, nb = _norm(a).rstrip("\\/"), _norm(b).rstrip("\\/")
+    return na == nb or na.startswith(nb + os.sep) or nb.startswith(na + os.sep)
 
 
-def validate_local_checkout(raw: str, settings: Settings, *, domain: str | None = None) -> Path:
+def _same_dir(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return _norm(a) == _norm(b)
+
+
+def _checkout_path(ref: str | None) -> Path | None:
+    if not ref:
+        return None
+    try:
+        return (repo_root() if ref == PLATFORM_LOCAL_REF else Path(ref)).resolve()
+    except OSError:
+        return None
+
+
+def other_domain_overlap(session: Session, path: Path, domain: str, *, exclude_repo_id: str | None = None) -> bool:
+    """Does *path* overlap a local checkout registered by a project of another domain?
+
+    The answer is deliberately a bare boolean: which project/domain owns the other checkout is not
+    revealed to the caller (no cross-domain metadata in errors)."""
+    rows = session.execute(
+        select(RepositoryReference.id, RepositoryReference.local_path_ref)
+        .join(Project, Project.id == RepositoryReference.project_id)
+        .where(Project.domain != domain, RepositoryReference.local_path_ref.is_not(None))
+    ).all()
+    for rid, ref in rows:
+        if rid == exclude_repo_id:
+            continue
+        other = _checkout_path(ref)
+        if other is not None and _overlaps(path, other):
+            return True
+    return False
+
+
+def _split_remote(remote: str | None) -> tuple[str, str]:
+    """(host, path) of a git remote in https or scp-like ssh form; ("", "") when unparseable."""
+    if not remote:
+        return "", ""
+    r = remote.strip()
+    m = re.match(r"^(?:[\w.-]+@)?([\w.-]+):(?!//)(.+)$", r)  # scp-like ssh: git@github.com:owner/name.git
+    if m and "://" not in r:
+        rhost, rpath = m.group(1), m.group(2)
+    else:
+        try:
+            parts = urlsplit(r)
+        except ValueError:
+            return "", ""
+        rhost, rpath = (parts.hostname or ""), parts.path
+    rpath = rpath.strip("/")
+    if rpath.lower().endswith(".git"):
+        rpath = rpath[:-4]
+    return rhost.lower(), rpath
+
+
+def origin_domain_conflict(origin: str | None, domain: str) -> str | None:
+    """Reason text when the checkout's origin is hosted on the *other* domain's code provider
+    (PERSONAL uses GitHub, OFFICE uses Bitbucket: U-02..U-04); ``None`` otherwise."""
+    host, _ = _split_remote(origin)
+    if not host:
+        return None
+    if domain == Domain.PERSONAL.value and "bitbucket" in host:
+        return (f"the checkout's origin is hosted on {host} (OFFICE code provider); Office source is never read "
+                "into a PERSONAL project")
+    if domain == Domain.OFFICE.value and host == PROVIDER_HOSTS["GITHUB"]:
+        return (f"the checkout's origin is hosted on {host} (PERSONAL code provider); it is never read into an "
+                "OFFICE project")
+    return None
+
+
+def validate_local_checkout(raw: str, settings: Settings, *, domain: str | None = None,
+                            session: Session | None = None, exclude_repo_id: str | None = None) -> Path:
     """§50 path traversal/symlink: resolve, then require an existing git top-level directory that is
     not inside AEOS runtime state and not a network share. An OFFICE checkout must not overlap the
-    PERSONAL platform working tree (§50 "Source Office muncul dalam platform personal working tree")."""
+    PERSONAL platform working tree (§50 "Source Office muncul dalam platform personal working tree"),
+    and no checkout may overlap one registered in the other domain (AGENTS.md invariant 9)."""
     value = (raw or "").strip()
     if not value:
         raise ValidationFailed("local path is empty", code="INVALID_LOCAL_PATH")
@@ -104,11 +189,58 @@ def validate_local_checkout(raw: str, settings: Settings, *, domain: str | None 
     if domain == Domain.OFFICE.value and _overlaps(resolved, repo_root().resolve()):
         raise PolicyDenied("an OFFICE checkout cannot live inside (or contain) the PERSONAL DLY AEOS platform "
                            "working tree; clone it to a separate office location", code="OFFICE_SOURCE_IN_PERSONAL_TREE")
+    if session is not None and domain and other_domain_overlap(session, resolved, domain,
+                                                               exclude_repo_id=exclude_repo_id):
+        raise PolicyDenied("this path overlaps a local checkout registered in another domain; PERSONAL and OFFICE "
+                           "sources never share a working tree", code="CHECKOUT_CROSS_DOMAIN")
     top = gitread.toplevel(resolved)
-    if os.path.normcase(str(top)) != os.path.normcase(str(resolved)):
+    if not _same_dir(top, resolved):
         raise ValidationFailed("local path must be the repository top-level directory (choose it explicitly)",
                                code="NOT_REPO_TOPLEVEL")
     return resolved
+
+
+def require_checkout_in_domain(session: Session, principal: Principal | None, project: Project,
+                               repo: RepositoryReference, path: Path, *, action: str) -> None:
+    """Fail closed before repository *content* is read (inventory, context packs): the checkout must
+    not overlap another domain's checkout and its origin must not live on the other domain's provider.
+    Checked at use time because the checkout (or its remote) can change after registration."""
+    resolved = path.resolve()
+    reason: str | None = None
+    code = ""
+    if other_domain_overlap(session, resolved, project.domain, exclude_repo_id=repo.id):
+        code, reason = "CHECKOUT_CROSS_DOMAIN", ("the local checkout overlaps a checkout registered in another "
+                                                 "domain; repository content is not read")
+    elif project.domain == Domain.OFFICE.value and _overlaps(resolved, repo_root().resolve()):
+        code, reason = "OFFICE_SOURCE_IN_PERSONAL_TREE", ("an OFFICE checkout inside the PERSONAL platform working "
+                                                          "tree is not read")
+    else:
+        try:
+            conflict = origin_domain_conflict(gitread.remote_url(resolved), project.domain)
+        except AeosError:
+            conflict = None  # no readable origin: identity stays unconfirmed (local_status), not a domain signal
+        if conflict:
+            code, reason = "CHECKOUT_OTHER_DOMAIN_ORIGIN", conflict + "; review the checkout (§50)"
+    if reason:
+        _refuse(session, principal, project, action=action, code=code, reason=reason, target_id=repo.id)
+
+
+def _refuse(session: Session, principal: Principal | None, project: Project, *, action: str, code: str,
+            reason: str, target_id: str) -> NoReturn:
+    if principal is None:  # CLI / system caller: nothing to attribute; the error itself is the record
+        raise PolicyDenied(reason, code=code)
+    deny(session, principal, action=action, code=code, project=project, target_type="repository",
+         target_id=target_id, reason=reason)
+
+
+def _validated_checkout(session: Session, principal: Principal, project: Project, raw: str, settings: Settings, *,
+                        action: str, exclude_repo_id: str | None = None) -> Path:
+    try:
+        return validate_local_checkout(raw, settings, domain=project.domain, session=session,
+                                       exclude_repo_id=exclude_repo_id)
+    except PolicyDenied as exc:  # domain/data-dir boundary denials are audited (fail closed)
+        deny(session, principal, action=action, code=exc.code, project=project, target_type="repository",
+             target_id=exclude_repo_id, reason=exc.message)
 
 
 def resolve_local_path(repo: RepositoryReference) -> Path | None:
@@ -146,23 +278,8 @@ def _redact_url(url: str | None) -> str | None:
 
 def remote_matches(remote: str | None, provider: str, full_name: str) -> bool:
     """True only for the exact provider host + owner/name (https or ssh forms)."""
-    if not remote:
-        return False
-    host = PROVIDER_HOSTS[provider]
-    r = remote.strip()
-    m = re.match(r"^(?:[\w.-]+@)?([\w.-]+):(?!//)(.+)$", r)  # scp-like ssh: git@github.com:owner/name.git
-    if m and "://" not in r:
-        rhost, rpath = m.group(1), m.group(2)
-    else:
-        try:
-            parts = urlsplit(r)
-        except ValueError:
-            return False
-        rhost, rpath = (parts.hostname or ""), parts.path
-    rpath = rpath.strip("/")
-    if rpath.lower().endswith(".git"):
-        rpath = rpath[:-4]
-    return rhost.lower() == host and rpath.lower() == full_name.lower()
+    rhost, rpath = _split_remote(remote)
+    return bool(rhost) and rhost == PROVIDER_HOSTS[provider] and rpath.lower() == full_name.lower()
 
 
 # ---------------------------------------------------------------- local observation
@@ -192,21 +309,27 @@ def observe_local(session: Session, repo: RepositoryReference, *, path: Path | N
     except AeosError as exc:
         repo.local_status = "FAILED"
         repo.local_checked_at = now
-        repo.details = {**(repo.details or {}), "local": {"error": exc.message[:300]}}
-        return {"status": "FAILED", "error": exc.message}
+        error = redact_text(exc.message)[:300]  # git stderr can echo remote URLs or paths
+        repo.details = {**(repo.details or {}), "local": {"error": error}}
+        return {"status": "FAILED", "error": error}
     matches = remote_matches(origin, repo.provider, repo.full_name)
+    owner_project = session.get(Project, repo.project_id)
+    conflict = origin_domain_conflict(origin, owner_project.domain) if owner_project is not None else None
     repo.head_commit = head
     repo.local_branch = branch
     repo.dirty = dirty
     repo.local_checked_at = now
-    repo.local_status = "OK" if matches else "MISMATCH"
-    local = {
+    repo.local_status = "OK" if matches and not conflict else "MISMATCH"
+    local: dict[str, Any] = {
         "origin_url": _redact_url(origin),
         "origin_matches": matches,
         "dirty_entries": dirty_entries,
         "checked_at": now.isoformat(),
     }
-    if not matches:
+    if conflict:
+        local["reason"] = conflict + "; inventory and context packs are refused until the checkout is reviewed"
+        local["domain_conflict"] = True
+    elif not matches:
         local["reason"] = ("origin remote does not point at the declared repository" if origin
                            else "no origin remote configured; cannot confirm this checkout is the declared repository")
     repo.details = {**(repo.details or {}), "local": local}
@@ -238,6 +361,7 @@ def add_repository(
     local_path_ref: str | None = None,
 ) -> RepositoryReference:
     settings = settings or get_settings()
+    require_writable(project)
     provider_v = (provider or "").strip().upper()
     expected = CODE_PROVIDER[project.domain]
     if provider_v != expected:
@@ -254,9 +378,9 @@ def add_repository(
     branch = (default_branch or "main").strip()
     if not _BRANCH.match(branch) or ".." in branch:
         raise ValidationFailed("invalid default branch name", code="INVALID_BRANCH")
-    existing = session.scalar(select(RepositoryReference).where(
+    existing = session.scalar(select(RepositoryReference).where(  # exact, case-insensitive (no LIKE wildcards)
         RepositoryReference.project_id == project.id, RepositoryReference.provider == provider_v,
-        RepositoryReference.full_name.ilike(full)))
+        func.lower(RepositoryReference.full_name) == full.lower()))
     if existing is not None:
         raise Conflict(f"repository {full} is already registered for this project", code="REPOSITORY_EXISTS")
     if role_v == "platform" and session.scalar(select(RepositoryReference.id).where(
@@ -267,7 +391,8 @@ def add_repository(
     if local_path_ref == PLATFORM_LOCAL_REF:
         ref: str | None = PLATFORM_LOCAL_REF
     elif local_path:
-        resolved = validate_local_checkout(local_path, settings, domain=project.domain)
+        resolved = _validated_checkout(session, principal, project, local_path, settings,
+                                       action="portfolio.repository.add")
         ref = str(resolved)
     else:
         ref = None
@@ -295,10 +420,12 @@ def add_repository(
 def set_local_path(session: Session, principal: Principal, project: Project, repo: RepositoryReference,
                    local_path: str, settings: Settings | None = None) -> RepositoryReference:
     settings = settings or get_settings()
+    require_writable(project)
     if repo.local_path_ref == PLATFORM_LOCAL_REF:
         raise PolicyDenied("the platform repository checkout is resolved from the running controller",
                            code="PLATFORM_LOCAL_PATH_FIXED")
-    resolved = validate_local_checkout(local_path, settings, domain=project.domain)
+    resolved = _validated_checkout(session, principal, project, local_path, settings,
+                                   action="portfolio.repository.local_path", exclude_repo_id=repo.id)
     repo.local_path_ref = str(resolved)
     observe_local(session, repo, path=resolved)
     audit.record(session, actor_type="user", actor_id=principal.user.id, action="portfolio.repository.local_path",
@@ -319,6 +446,8 @@ def _github_token(actor: str) -> tuple[str | None, str]:
         return None, "anonymous (secret store module unavailable)"
     except AeosError as exc:  # Blocked: store unavailable or secret missing -> read-only anonymous lookup
         return None, f"anonymous ({exc.code})"
+    except Exception as exc:  # a broken keyring/vault backend: fall back to the least-privileged lookup
+        return None, f"anonymous (secret store error {exc.__class__.__name__})"
 
 
 def _verify_github(repo: RepositoryReference, actor: str) -> tuple[str, str, dict[str, Any]]:
@@ -382,6 +511,7 @@ def _verify_github(repo: RepositoryReference, actor: str) -> tuple[str, str, dic
 
 def verify_repository(session: Session, principal: Principal, project: Project, repo: RepositoryReference) -> dict[str, Any]:
     """Read-only identity verification + local observation. Never infers a different repository."""
+    require_writable(project)
     if repo.provider == "GITHUB":
         status, reason, attempt = _verify_github(repo, principal.user.id)
     else:
@@ -462,10 +592,12 @@ def inventory_for_repository(session: Session, principal: Principal | None, proj
     from aeos.core.errors import Blocked
     from aeos.portfolio.inventory import inventory_repository
 
+    require_writable(project)
     path = resolve_local_path(repo)
     if path is None:
         raise Blocked("no local checkout is registered for this repository; add its local path first",
                       code="LOCAL_CHECKOUT_MISSING")
+    require_checkout_in_domain(session, principal, project, repo, path, action="portfolio.repository.inventory")
     result = inventory_repository(path, commit=commit)
     result["repository"] = {"id": repo.id, "provider": repo.provider, "full_name": repo.full_name,
                             "verification_status": repo.verification_status}

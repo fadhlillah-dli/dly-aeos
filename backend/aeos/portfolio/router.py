@@ -181,11 +181,8 @@ def get_inventory(repository_id: str, principal: CurrentPrincipal, domain: Activ
 def list_integrations(project_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     project = load_project(db, principal, project_id, domain=domain)
     rows = db.query(ProjectIntegration).filter(ProjectIntegration.project_id == project.id).all()
-    views = []
-    for r in rows:  # credential/root state is re-evaluated on read (configuration only, not persisted)
-        v = integ.integration_view(r)
-        v["capability_status"] = integ.compute_capability_status(r)
-        views.append(v)
+    # credential/root state is re-evaluated on read (configuration only, not persisted)
+    views = [integ.live_integration_view(r) for r in rows]
     return {"items": views, "allowed_providers": {k: sorted(v) for k, v in integ.PROVIDERS[project.domain].items()},
             **_freshness(), "source": "integration-registry (configuration only; connectivity via Doctor)"}
 

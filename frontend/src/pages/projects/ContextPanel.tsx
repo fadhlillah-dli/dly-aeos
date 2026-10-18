@@ -13,6 +13,7 @@ const TRUST_LABEL: Record<string, [string, string]> = {
   POLICY_READ_ONLY: ["CONFIGURED", "Kebijakan (read-only)"],
   AEOS_RECORD: ["LIVE", "Record AEOS"],
   REPO_DATA: ["NOT_CHECKED", "Data repo"],
+  RUNTIME_EVIDENCE: ["NOT_CHECKED", "Bukti runtime (kolektor tepercaya)"],
   MEMORY_DATA: ["NOT_CHECKED", "Memori (bukan kebijakan)"],
   UNTRUSTED_DATA: ["UNVERIFIED", "Data tak tepercaya"],
   DATA: ["UNVERIFIED", "Riset (DATA)"],

@@ -5,7 +5,8 @@ import { StatusBadge } from "../../components/StatusBadge";
 // Module statuses are rendered through the shared StatusBadge (text + icon + colour). Each raw
 // code maps to the canonical badge whose tone carries the same meaning, with an Indonesian label.
 // Unverified/unscanned/unknown never map to a "pass" tone (§34, §35).
-type Kind = "scan" | "parse" | "verify" | "local" | "lifecycle" | "config" | "freshness" | "memory" | "credential";
+export type BadgeKind = "scan" | "parse" | "verify" | "local" | "lifecycle" | "config" | "freshness" | "memory" | "credential";
+type Kind = BadgeKind;
 
 const MAP: Record<Kind, Record<string, [string, string]>> = {
   scan: {

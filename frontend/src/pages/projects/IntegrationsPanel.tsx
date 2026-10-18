@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { get, put } from "../../api/client";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputClass, Loading, Mono, Notice } from "../../components/ui";
+import { absoluteTime } from "../../lib/format";
 import { ModuleBadge } from "./badges";
 import type { IntegrationView, ListResponse, ProjectView } from "./types";
 
@@ -66,6 +67,14 @@ function IntegrationRow({ i }: { i: IntegrationView }) {
         )}
         <dt className="text-ink-3">Credential (referensi)</dt>
         <dd>{i.credential_ref ? <Mono>{i.credential_ref}</Mono> : "—"} <span className="text-xs text-ink-3">nilai secret tidak pernah ditampilkan</span></dd>
+        <dt className="text-ink-3">Masa berlaku credential</dt>
+        <dd>
+          {cap.credential?.expires_at
+            ? `s.d. ${absoluteTime(cap.credential.expires_at)}`
+            : cap.credential?.status === "CONFIGURED"
+              ? "tidak tercatat (UNKNOWN)"
+              : (cap.credential?.reason ?? "—")}
+        </dd>
         <dt className="text-ink-3">Diverifikasi</dt>
         <dd>{i.last_verified_at ? <Freshness at={i.last_verified_at} /> : "belum pernah (dibuktikan Doctor/publisher)"}</dd>
       </dl>

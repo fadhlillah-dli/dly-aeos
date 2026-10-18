@@ -1,6 +1,9 @@
 """Existing-project inventory (§05 step 6, §37): read-only facts about a repository at a known commit.
 
-``inventory_repository(path)`` is the contract planning calls to fill ``PlanningContext.repo_inventory``.
+``inventory_repository(path)`` is the contract planning calls to fill ``PlanningContext.repo_inventory``;
+``inventory_for_project(session, project_id)`` does the same for a registered project (it resolves the
+project's checkout — including the logical ``platform-repo`` — applies the domain checks and records
+the result on the repository reference).
 It never scaffolds, installs, builds or runs tests: it reads the git object database at an exact
 commit (``git ls-tree`` + small ``git cat-file blob`` reads) and reports coverage gaps explicitly instead of
 claiming the whole machine or dependency graph was mapped.
@@ -12,12 +15,17 @@ import json
 import re
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from aeos.core.errors import AeosError
+from aeos.core.errors import AeosError, Blocked, NotFound
 from aeos.core.hashing import content_hash
 from aeos.core.timeutil import utcnow
 from aeos.portfolio import gitread
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+    from aeos.identity.service import Principal
 
 INVENTORY_SCHEMA = "1"
 
@@ -119,7 +127,8 @@ DOC_PATTERNS = [
     (re.compile(r"^docs?/.+\.(md|mdx|rst|txt|adoc)$", re.IGNORECASE), "docs"),
     (re.compile(r"^(AGENTS|CLAUDE)\.md$", re.IGNORECASE), "agent-instructions"),
 ]
-SENSITIVE_NAMES = re.compile(r"(^|/)(\.env(\.[\w-]+)?|id_rsa|id_ed25519|.+\.pem|.+\.key|.+\.p12|.+\.pfx|"
+SENSITIVE_NAMES = re.compile(r"(^|/)(\.env(\.[\w-]+)?|id_rsa|id_dsa|id_ecdsa|id_ed25519|.+\.pem|.+\.key|.+\.p12|"
+                             r".+\.pfx|.+\.ppk|.+\.kdbx|\.npmrc|\.pypirc|\.netrc|.+\.tfstate(\.backup)?|"
                              r"credentials(\.json)?|secrets?\.(ya?ml|json))$", re.IGNORECASE)
 SAMPLE_LIMIT = 50
 MAX_MANIFESTS = 500
@@ -322,3 +331,26 @@ def inventory_repository(path: Path | str, *, commit: str | None = None, max_fil
     volatile = {"checked_at", "working_tree", "head_commit", "commit_is_head", "branch"}
     result["inventory_hash"] = content_hash({k: v for k, v in result.items() if k not in volatile})
     return result
+
+
+def inventory_for_project(session: Session, project_id: str, *, commit: str | None = None,
+                          principal: Principal | None = None) -> dict[str, Any]:
+    """Inventory of a registered project's primary repository (platform repository first).
+
+    The caller (e.g. planning) is responsible for authorising *project_id* for its principal/domain;
+    this function only reads the checkout registered for that project, never a path it guesses.
+    Raises ``NotFound`` for an unknown project and ``Blocked`` when no repository/checkout exists.
+    The result carries ``repository`` identity (provider, full_name, verification_status) so a
+    consumer never presents an UNVERIFIED repository as verified."""
+    from aeos.models.portfolio import Project
+    from aeos.portfolio import repositories
+
+    project = session.get(Project, project_id)
+    if project is None:
+        raise NotFound("project not found")
+    repo = repositories.primary_repository(session, project.id)
+    if repo is None:
+        raise Blocked("no repository is registered for this project; choose it explicitly first",
+                      code="REPOSITORY_MISSING")
+    result = repositories.inventory_for_repository(session, principal, project, repo, commit=commit)
+    return {**result, "project": {"id": project.id, "project_key": project.project_key, "domain": project.domain}}

@@ -6,6 +6,7 @@ import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Card, ErrorBox, Freshness, inputClass, Loading } from "../../components/ui";
+import { type BadgeKind, ModuleBadge } from "./badges";
 import type { SearchResponse } from "./types";
 
 const KIND_LABEL: Record<string, string> = {
@@ -20,6 +21,9 @@ const KIND_LABEL: Record<string, string> = {
   repository: "Repository",
   memory: "Memori",
 };
+// Module statuses use the same honest mapping as the rest of the projects pages (e.g. a CLEAN scan
+// or an ACTIVE lifecycle is never rendered as a green pass); other kinds keep the canonical badge.
+const KIND_BADGE: Partial<Record<string, BadgeKind>> = { project: "lifecycle", attachment: "scan", repository: "verify", memory: "memory" };
 
 /** §35 metadata search, scoped by the backend to the active domain (counts included); with
  * `projectId` it is project-scoped (that project's records plus platform-global ones). */
@@ -87,7 +91,8 @@ export function SearchPanel({ projectId }: { projectId?: string } = {}) {
                     {it.title}
                   </Link>
                   {it.subtitle && <span className="text-xs text-ink-3">{it.subtitle}</span>}
-                  {it.status && <StatusBadge status={it.status} />}
+                  {it.status &&
+                    (KIND_BADGE[it.kind] ? <ModuleBadge kind={KIND_BADGE[it.kind]!} value={it.status} /> : <StatusBadge status={it.status} />)}
                 </li>
               ))}
             </ul>

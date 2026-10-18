@@ -22,7 +22,14 @@ kebijakan" must be rejected.
    are never read and files over 512 KiB are skipped with a warning (never a truncated prefix). Metadata items come from the domain-scoped search, filtered to the project and global
    records. Policy items are the trusted controller's `policy/` files (sha256, `POLICY_READ_ONLY`);
    missing policy is reported. Attachments are `UNTRUSTED_DATA`, research `DATA`, memory
-   `MEMORY_DATA`; none grants permissions.
+   `MEMORY_DATA`; none grants permissions. Runtime context (§24 "test logs, metrics, traces
+   collected by trusted tools") is the metadata and redacted inline summary of `EvidenceArtifact`
+   rows of the same project/domain (and TaskSpec, when given) with `trusted=True` and origin
+   verifier/doctor/collector, labelled `RUNTIME_EVIDENCE`; worker-reported evidence never qualifies
+   and MOCK/DEMO evidence keeps its label. It is part of the reviewer, security-reviewer and
+   feature-implementer profiles (or `include=["runtime"]`). Repository content is read only after
+   the checkout's domain boundary is re-checked (ADR-0022 §4a), and a checkout whose origin is not
+   confirmed adds a warning.
 2. Each item records kind/ref/title/provenance/classification/sha256/token estimate (chars/4 + 16)
    and redaction status. Items are added in priority order until the budget (1 024–200 000,
    default 8 000) is used; truncatable items are cut to fit, the rest are listed as omitted.

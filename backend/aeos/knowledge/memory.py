@@ -33,7 +33,7 @@ from aeos.models.planning import Plan, PlanVersion
 from aeos.models.portfolio import Project
 from aeos.models.research import MemoryRecord
 from aeos.portfolio import classification as cls
-from aeos.portfolio.service import deny
+from aeos.portfolio.service import deny, require_writable
 
 ACCEPTED_SOURCES = ("decision", "plan_version", "adr", "acceptance", "human_statement")
 UNTRUSTED_SOURCES = frozenset({"attachment", "worker_output", "model_output", "research", "external", "tool_output",
@@ -98,6 +98,7 @@ def propose(
     expires_at: datetime | None = None, supersedes_id: str | None = None,
 ) -> MemoryRecord:
     action = "knowledge.memory.propose"
+    require_writable(project)
     text = (content or "").strip()
     if not 3 <= len(text) <= MAX_CONTENT:
         raise ValidationFailed(f"content must be 3..{MAX_CONTENT} characters", code="INVALID_CONTENT")
@@ -157,6 +158,7 @@ def _record_decision(session: Session, principal: Principal, rec: MemoryRecord, 
 def accept(session: Session, principal: Principal, project: Project, rec: MemoryRecord, *, rationale: str = "") -> MemoryRecord:
     if rec.status != "PROPOSED":
         raise Conflict(f"memory is {rec.status}; only PROPOSED memory can be accepted", code="INVALID_TRANSITION")
+    require_writable(project)  # reject/expire stay possible: they never grant anything
     if contains_secret(rec.content):  # registry may know new secret values since the proposal
         deny(session, principal, action="knowledge.memory.accept", code="MEMORY_SECRET", project=project,
              target_type="memory_record", target_id=rec.id, reason="memory content now matches a secret")

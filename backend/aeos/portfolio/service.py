@@ -35,6 +35,11 @@ LIFECYCLE_TRANSITIONS: dict[str, frozenset[str]] = {
     "RETIRING": frozenset({"ACTIVE", "RETIRED"}),
     "RETIRED": frozenset(),  # terminal: history is kept, nothing is deleted
 }
+# ARCHIVED and RETIRED projects are read-only: history stays visible, nothing new is attached to them
+# (repositories, integrations, attachments, context packs, memory). ARCHIVED can be reactivated;
+# RETIRED is terminal. RETIRING still accepts work so the wind-down can be completed.
+READ_ONLY_LIFECYCLES = frozenset({"ARCHIVED", "RETIRED"})
+LIFECYCLE_FIELDS = frozenset({"lifecycle", "lifecycle_reason"})
 PROJECT_KINDS = ("NEW", "EXISTING")
 EDITABLE_FIELDS = frozenset({"name", "description", "idea", "lifecycle", "lifecycle_reason"})
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -43,6 +48,15 @@ MAX_NAME, MAX_IDEA, MAX_DESCRIPTION = 200, 20_000, 5_000
 
 def _actor(principal: Principal) -> str:
     return principal.user.id
+
+
+def require_writable(project: Project) -> None:
+    """Refuse changes to an ARCHIVED/RETIRED project (lifecycle changes go through ``update_project``)."""
+    if project.lifecycle in READ_ONLY_LIFECYCLES:
+        hint = ("reactivate it (lifecycle ACTIVE) first" if project.lifecycle == "ARCHIVED"
+                else "a retired project keeps its history read-only")
+        raise Conflict(f"project is {project.lifecycle} and read-only; {hint}", code="PROJECT_READ_ONLY",
+                       details={"lifecycle": project.lifecycle})
 
 
 def clean_text(value: Any, *, field: str, max_len: int, required: bool = False) -> str:
@@ -204,6 +218,8 @@ def update_project(session: Session, principal: Principal, project: Project, bod
     if unknown:
         raise ValidationFailed(f"fields not editable: {', '.join(unknown)}", code="FIELD_NOT_EDITABLE",
                                details={"fields": unknown, "editable": sorted(EDITABLE_FIELDS)})
+    if set(body) - LIFECYCLE_FIELDS:
+        require_writable(project)  # an ARCHIVED/RETIRED project only accepts a lifecycle change
     changes: dict[str, Any] = {}
     findings: list[dict[str, Any]] = []
     if "name" in body:
@@ -286,6 +302,8 @@ def project_view(session: Session, project: Project, *, detail: bool = False) ->
                                  .order_by(RepositoryReference.role, RepositoryReference.full_name)))  # platform first
     ints = list(session.scalars(select(ProjectIntegration).where(ProjectIntegration.project_id == project.id)
                                 .order_by(ProjectIntegration.purpose, ProjectIntegration.provider)))
+    int_views = [integ.live_integration_view(i) for i in ints]  # credential/root state as of now
+    statuses = {v["id"]: v["capability_status"] for v in int_views}
     view: dict[str, Any] = {
         "id": project.id,
         "project_key": project.project_key,
@@ -301,8 +319,8 @@ def project_view(session: Session, project: Project, *, detail: bool = False) ->
         "created_at": project.created_at.isoformat(),
         "updated_at": project.updated_at.isoformat(),
         "repositories": [repositories.repository_view(r, summary=not detail) for r in repos],
-        "integrations": [integ.integration_view(i) for i in ints],
-        "integration_state": integ.integration_state(ints),
+        "integrations": int_views,
+        "integration_state": integ.integration_state(ints, statuses),
         "links": links(project),
     }
     if detail:

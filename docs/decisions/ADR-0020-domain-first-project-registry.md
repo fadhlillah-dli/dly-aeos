@@ -29,7 +29,11 @@ OFFICE menjadi PERSONAL" as acceptance rows.
    the `projects.domain` DB trigger blocks direct updates as a second layer.
 5. Lifecycle is ACTIVE → ARCHIVED | RETIRING, ARCHIVED → ACTIVE | RETIRING, RETIRING → ACTIVE |
    RETIRED; RETIRED is terminal and nothing is deleted. The platform project cannot be retired
-   through the API (migration decision required).
+   through the API (migration decision required). ARCHIVED and RETIRED projects are **read-only**
+   (`409 PROJECT_READ_ONLY`): no new repositories, local paths, verifications, inventories,
+   integrations, attachments, context packs or memory proposals/acceptances, and PATCH accepts only
+   a lifecycle change. Rejecting or expiring memory stays possible because it never grants anything.
+   ARCHIVED is left by reactivating (ACTIVE); RETIRED stays read-only for good.
 6. EXISTING projects must name their repository explicitly in the create request (§05 step 3);
    project + repository are created in one unit of work, a denied repository aborts both.
 
@@ -39,3 +43,8 @@ OFFICE menjadi PERSONAL" as acceptance rows.
   domain. The UI always sends the session domain and shows it read-only.
 * Moving a project between domains needs a future migration flow (owner Decision + data move);
   it is intentionally not available.
+* `project_key` stays unique across *both* domains on purpose: per-project credential references
+  (`projects/<project_key>/…`) are not domain-qualified, so a shared key would let a PERSONAL and an
+  OFFICE project resolve the same credential. The accepted residual: a creator can observe that a
+  slug is already taken (the new key gets a suffix) without learning which project or domain holds
+  it; names, counts and ids of other-domain projects are never returned.
