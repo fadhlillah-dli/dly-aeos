@@ -170,10 +170,14 @@ class FakeWorkforce:
             session.flush()
             return run
 
-        def transition_task(session, task_id, to_state, *, reason, actor, expected_from=None):
+        def transition_task(session, task_id, to_state, *, reason, actor, expected_from=None, reason_code=""):
             self.calls.append(("transition_task", {"task_id": task_id, "to": to_state, "reason": reason,
-                                                   "expected_from": expected_from}))
+                                                   "expected_from": expected_from, "reason_code": reason_code}))
             return types.SimpleNamespace(task_id=task_id, state=to_state)
+
+        def reopen_for_reverification(session, task_id, *, reason, actor):
+            self.calls.append(("reopen_for_reverification", {"task_id": task_id, "reason": reason, "actor": actor}))
+            return types.SimpleNamespace(task_id=task_id, state="READY")
 
         def request_repair(session, task_id, *, findings, review_record_id, actor):
             self.calls.append(("request_repair", {"task_id": task_id, "findings": findings,
@@ -189,6 +193,7 @@ class FakeWorkforce:
         mod.transition_task = transition_task
         mod.request_repair = request_repair
         mod.mark_accepted = mark_accepted
+        mod.reopen_for_reverification = reopen_for_reverification
         monkeypatch.setitem(sys.modules, "aeos.workforce.scheduler", mod)
         return self
 

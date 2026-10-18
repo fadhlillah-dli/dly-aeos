@@ -325,11 +325,14 @@ def held_usage(session: Session, b: Budget) -> _Usage:
         q = q.where(flt)
     for r in session.scalars(q):
         try:
-            out.usd += money(r.reserved_usd) or ZERO
+            reserved = money(r.reserved_usd) or ZERO
+            # A partially committed run-level hold (``record_usage(partial=True)``) keeps only what is
+            # still unused: the committed part is already in the ledger (no double count).
+            out.usd += max(ZERO, reserved - (money(r.committed_usd) or ZERO))
         except ValueError:
             out.untrusted.append(f"reservation {r.id} has a non-finite amount")
-        out.tokens += int(r.reserved_tokens or 0)
-        out.requests += int(r.reserved_requests or 0)
+        out.tokens += max(0, int(r.reserved_tokens or 0) - int(r.committed_tokens or 0))
+        out.requests += max(0, int(r.reserved_requests or 0) - int(r.committed_requests or 0))
         if (money(r.reserved_usd) or ZERO) < ZERO or (r.reserved_tokens or 0) < 0 or (r.reserved_requests or 0) < 0:
             out.untrusted.append(f"reservation {r.id} has a negative amount")
     return out
@@ -516,18 +519,36 @@ def reserve(session: Session, req: Any) -> BudgetReservation:
     return res
 
 
+def _partially_committed(res: BudgetReservation) -> bool:
+    return any(v is not None for v in (res.committed_usd, res.committed_tokens, res.committed_requests))
+
+
 def release(session: Session, reservation_id: str) -> None:
-    """Release an unused hold. Idempotent: COMMITTED/RELEASED reservations are left unchanged."""
+    """Release an unused hold. Idempotent: COMMITTED/RELEASED reservations are left unchanged.
+
+    A run-level hold that already received partial commits (``record_usage(partial=True)``, one per
+    broker call) is *settled*: it becomes COMMITTED with the committed amounts and the unused rest is
+    freed (integration amendment, ADR-0080)."""
     res = session.get(BudgetReservation, reservation_id)
     if res is None:
         raise NotFound("reservation not found")
     if res.status != "RESERVED":
         return
-    res.status = "RELEASED"
-    res.released_at = utcnow()
+    now = utcnow()
+    if _partially_committed(res):
+        res.status = "COMMITTED"
+        res.committed_at = res.committed_at or now
+        res.released_at = now
+        kind = "cost.reservation.settled"
+    else:
+        res.status = "RELEASED"
+        res.released_at = now
+        kind = "cost.reservation.released"
     session.flush()
-    events.emit(session, source="cost", kind="cost.reservation.released", entity_type="budget_reservation",
-                entity_id=res.id, project_id=res.project_id, domain=res.domain, run_id=res.run_id)
+    events.emit(session, source="cost", kind=kind, entity_type="budget_reservation",
+                entity_id=res.id, project_id=res.project_id, domain=res.domain, run_id=res.run_id,
+                payload={"committed_usd": str(res.committed_usd) if res.committed_usd is not None else None,
+                         "committed_tokens": res.committed_tokens, "committed_requests": res.committed_requests})
 
 
 # --------------------------------------------------------------------------- usage ledger
@@ -555,9 +576,15 @@ def record_usage(
     quantity: float | None = None,
     unit: str | None = None,
     details: dict[str, Any] | None = None,
+    partial: bool = False,
     **extra: Any,
 ) -> UsageLedgerEntry:
-    """Write one ledger entry (actual vs estimate vs UNKNOWN) and commit its reservation, if any."""
+    """Write one ledger entry (actual vs estimate vs UNKNOWN) and commit its reservation, if any.
+
+    ``partial=True`` (one call of a multi-call run, e.g. each broker request) adds the entry to the
+    run-level hold instead of closing it: the reservation stays RESERVED, its committed amounts grow,
+    the remaining hold keeps counting against the budgets, and ``release`` settles it when the run
+    ends (integration amendment, ADR-0080). An UNKNOWN cost charges the remaining reserved estimate."""
     extra.pop("impl", None)  # the facade forwards **locals(), which includes its import alias
     if extra:
         raise TypeError(f"unexpected arguments: {sorted(extra)}")
@@ -603,7 +630,11 @@ def record_usage(
     charged: Decimal | None = cost
     res: BudgetReservation | None = None
     if reservation_id:
-        res = session.get(BudgetReservation, reservation_id)
+        if partial:
+            # Several broker calls of one run commit into the same hold: serialise the read-modify-write
+            # with the admission lock (SQLite write lock until the caller's commit) so no update is lost.
+            _acquire_admission_lock(session)
+        res = session.get(BudgetReservation, reservation_id, populate_existing=True)
         if res is None:
             raise NotFound("reservation not found")
         if res.status != "RESERVED":
@@ -621,7 +652,26 @@ def record_usage(
         route_key = route_key or res.route_key
         run_id = run_id or res.run_id
     domain = _check_domain(session, domain=domain, project_id=project_id, run_id=run_id, required=False)
-    if res is not None:
+    if res is not None and partial:
+        reserved_usd = money(res.reserved_usd) or ZERO
+        already_usd = money(res.committed_usd) or ZERO
+        if cost is None:
+            charged = max(ZERO, reserved_usd - already_usd)
+            info["cost_unknown_charged_reservation"] = True
+        elif already_usd + cost > reserved_usd:
+            info["overrun_usd"] = str(already_usd + cost - reserved_usd)
+        tokens_known = input_tokens is not None or output_tokens is not None
+        if tokens_known:
+            call_tokens = int(input_tokens or 0) + int(output_tokens or 0)
+        else:
+            call_tokens = max(0, int(res.reserved_tokens or 0) - int(res.committed_tokens or 0))
+            info["charged_tokens"] = call_tokens
+        res.committed_usd = already_usd + (charged or ZERO)
+        res.committed_tokens = int(res.committed_tokens or 0) + call_tokens
+        res.committed_requests = int(res.committed_requests or 0) + requests
+        res.committed_at = utcnow()
+        info["partial_commit"] = True
+    elif res is not None:
         reserved_usd = money(res.reserved_usd) or ZERO
         if cost is None:
             charged = reserved_usd

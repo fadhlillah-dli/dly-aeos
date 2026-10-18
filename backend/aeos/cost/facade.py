@@ -48,8 +48,11 @@ def record_usage(
     domain: str | None = None, run_id: str | None = None, route_key: str | None = None, model: str | None = None,
     input_tokens: int | None = None, output_tokens: int | None = None, requests: int = 1,
     cost_usd: float | None = None, is_estimate: bool = False, reservation_id: str | None = None,
-    mode: str = "LIVE",
+    mode: str = "LIVE", partial: bool = False,
 ) -> UsageLedgerEntry:
+    """``partial=True`` (additive, integration 2026-10-18): one call of a multi-call run commits into the
+    run-level reservation without closing it; ``release`` settles the hold when the run ends. MOCK/DEMO
+    usage never commits a reservation — release it instead (``NON_LIVE_RESERVATION_COMMIT``)."""
     kwargs = dict(locals())  # captured before the lazy import adds 'impl'
     from aeos.cost.service import record_usage as impl
 

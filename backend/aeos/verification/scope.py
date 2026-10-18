@@ -73,6 +73,8 @@ SECRET_SCAN_ALLOW = frozenset({
     "scripts/secret_scan.py",
 })
 _HIGH_CONFIDENCE = [p for p in _REDACTION_PATTERNS if not p.groups]
+# Binary content has no word boundaries: the binary scan uses aeos.core.redaction.UNBOUNDED_TOKEN_PATTERNS
+# (no "not after an alphanumeric" guard) so a token glued to arbitrary bytes is still found (ADR-0060).
 
 # Added lines in product code that reach into the test runner itself.
 _TAMPER_CODE = re.compile(

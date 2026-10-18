@@ -97,3 +97,22 @@ context 262144, tools, `expiration_date` 2026-10-31; 16 `:free` models in total)
   was activated under. That needs its own decision: either an "alias observed" field outside the
   identity, or treating the first observation as non-breaking. It also needs a broker/worker-runtime
   reporter. Until then the worker resolved version stays UNKNOWN, as §23 allows.
+
+## Amendment 2026-10-18 (integration)
+
+* **Seed credential references.** Non-OpenRouter OpenAI-compatible routes name their broker credential
+  in `mode_params.credential_ref`: OpenCode Zen routes `workers/opencode-zen`, the Gemini comparator
+  `workers/gemini`. This is part of the configuration identity; `seed.run` backfills it on untouched
+  CANDIDATE seed rows (no approval exists for them, so nothing is invalidated) and recomputes the hash.
+* **Credential eligibility.** A remote non-OpenRouter route without `credential_ref`, or with a reference
+  outside the namespaces the broker allows for the domain (OFFICE -> `office/`; PERSONAL -> `personal/`,
+  `workers/`, own `projects/<id>/`; never `platform/`), is rejected by the hard filter — the route the
+  broker would refuse at call time is never selected (`broker.facade.credential_ref_problem`).
+* **Not verified (gap):** the exact OpenCode Zen chat-completions path and upstream model-id format for a
+  direct broker call (seed endpoint `https://opencode.ai/zen`, model ids `opencode/<model>`) are E1
+  catalog facts not exercised against the real service; the E2E test fakes the upstream at whatever URL
+  the route defines.
+* **Review fix (2026-10-19).** The routing credential filter uses the broker's own loopback test (parsed
+  scheme + host, so `http://localhost.example` is not loopback) and rejects an OpenRouter route without
+  `credential_ref` for OFFICE (the broker's default OpenRouter references are worker/PERSONAL ones and it
+  refuses such a call), so routing never selects a route the broker would refuse.

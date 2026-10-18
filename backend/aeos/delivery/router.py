@@ -44,8 +44,11 @@ def prepare_pr(task_id: str, body: PreparePRIn, principal: AdminPrincipal, domai
     try:
         result = pr_bundle.prepare_pr(db, task.id, actor_user_id=principal.user.id, base_branch=body.base_branch)
     except AeosError as exc:
-        if exc.code == "HEAD_MISMATCH":
-            db.commit()  # keep the acceptance invalidation (STALE) — audit_denied rolls back otherwise
+        if exc.code in pr_bundle.PERSISTED_FAILURE_CODES:
+            # Keep the acceptance invalidation (STALE) and the broker outbox/audit rows of a FAILED or
+            # UNKNOWN push/PR: they are what reconciliation reads before any retry (§14) —
+            # audit_denied rolls back otherwise.
+            db.commit()
         audit_denied(db, principal, "delivery.pr.prepare", exc, target_type="task", target_id=task.id,
                      project_id=task.project_id, domain=task.domain)
         raise

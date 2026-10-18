@@ -14,6 +14,10 @@ const WORKER: Record<string, Spec> = {
 const VERIFIER: Record<string, Spec> = {
   NOT_RUN: { status: "NOT_TESTED", label: "Verifier: belum dijalankan" },
   RUNNING: { status: "RUNNING", label: "Verifier: berjalan" },
+  // The verifier's own vocabulary (ADR-0060 PASS/FAIL/QUARANTINED) — PASSED/FAILED kept for older rows.
+  PASS: { status: "PASS", label: "Verifier: lulus" },
+  FAIL: { status: "FAILED", label: "Verifier: gagal" },
+  QUARANTINED: { status: "BLOCKED", label: "Verifier: karantina (review khusus)" },
   PASSED: { status: "PASS", label: "Verifier: lulus" },
   FAILED: { status: "FAILED", label: "Verifier: gagal" },
   ERROR: { status: "FAILED", label: "Verifier: error" },

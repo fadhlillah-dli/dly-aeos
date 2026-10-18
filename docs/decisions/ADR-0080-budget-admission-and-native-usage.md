@@ -68,3 +68,18 @@ and hash.
   must roll back on `Blocked` and keep the reservation transaction short.
 * New columns on `usage_ledger`, `budgets`, `budget_reservations` and the `cost_admission_lock`
   table need the first Alembic revision (integrator) for databases created before this change.
+
+## Amendment 2026-10-18 (integration)
+
+**Run-level holds with partial commits.** The scheduler reserves once per run (lease time) while the
+broker records one ledger entry per model call; the old "first `record_usage` commits the reservation"
+rule made the second call of every run fail (`Conflict`) and would have released the remaining hold
+mid-run (a concurrency hole for paid routes). The frozen facade `record_usage` gained the additive
+keyword `partial=True`: the entry is added to the hold (committed usd/tokens/requests accumulate under
+the admission lock, the reservation stays RESERVED), `held_usage` counts only the unused remainder (no
+double count with the ledger), and `release` *settles* a partially committed hold (status COMMITTED,
+the unused rest freed; event `cost.reservation.settled`). An UNKNOWN cost charges the remaining reserved
+estimate once (subsequent UNKNOWN calls charge 0), so a paid run is charged at most its admitted
+estimate unless the upstream reports more (overrun recorded). Single-call `record_usage` without
+`partial` behaves as before. MOCK/DEMO usage still never commits a hold (`NON_LIVE_RESERVATION_COMMIT`);
+the broker releases it instead.
