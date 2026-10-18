@@ -67,3 +67,10 @@ Claude API. §14/§50: a changed head/base invalidates acceptance and triggers r
    source="observed-limit")` — never as dollars or a % of Max. A later review of the same run proceeds.
 4. A BLOCKED review verdict moves the task to BLOCKED with reason code `REVIEW_BLOCKED`, which only an
    owner action clears (never a scheduler tick).
+5. **Review fix (2026-10-19): native quota scope.** The observed Max limit is recorded per model family
+   (`scope=fable|opus|...`, else `max`) — the scope the claude bridge itself records and clears — not `*`:
+   a `*` row without reset time was never cleared and showed Max EXHAUSTED forever. The review writes it in
+   its own session (the bridge's separate side-effect transaction cannot while the review holds the SQLite
+   write lock). A later review that COMPLETED sets that family back to `UNKNOWN`
+   (`observed-successful-call`, never `OK`), and the run's `quota_status=WAITING_QUOTA` is cleared as soon
+   as a review got past the quota. MOCK reviews never touch the native quota state.

@@ -89,3 +89,12 @@ made to work end to end (`tests/e2e/test_e2e_execution_chain.py`). Reconciled co
 6. **Reservation lifecycle.** The run-level hold reserved at lease time receives partial commits from the
    broker (ADR-0080 amendment) and is settled by `stop_run_resources` on finish/cancel/crash/policy stop;
    a MOCK run's hold is released, never committed.
+7. **Review fix (2026-10-19): owner-only blocks are sticky.** `refresh_readiness` no longer overwrites a
+   `QUARANTINED` / `REVIEW_BLOCKED` reason code with a co-reason (unreconciled side effect, process still
+   alive, attempt cap). Before, the co-reason replaced the code and, once it cleared, the next tick moved
+   the task READY without the owner's special review.
+8. **Review fix (2026-10-19): an owner retry discards the blocked candidate.** When `retry_task` clears a
+   `QUARANTINED` / `REVIEW_BLOCKED` block, the attempt still in REVIEW ends FAILED (`DISCARDED_BY_OWNER`,
+   lease released). Left in REVIEW it kept showing "waiting for review" and could still be reviewed,
+   accepted (an ACCEPTED record is written before `mark_accepted` refuses) and published by the broker
+   (`_require_publishable` accepts REVIEW runs) although the task had moved on.

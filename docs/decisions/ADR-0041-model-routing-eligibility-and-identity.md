@@ -112,3 +112,7 @@ context 262144, tools, `expiration_date` 2026-10-31; 16 `:free` models in total)
   direct broker call (seed endpoint `https://opencode.ai/zen`, model ids `opencode/<model>`) are E1
   catalog facts not exercised against the real service; the E2E test fakes the upstream at whatever URL
   the route defines.
+* **Review fix (2026-10-19).** The routing credential filter uses the broker's own loopback test (parsed
+  scheme + host, so `http://localhost.example` is not loopback) and rejects an OpenRouter route without
+  `credential_ref` for OFFICE (the broker's default OpenRouter references are worker/PERSONAL ones and it
+  refuses such a call), so routing never selects a route the broker would refuse.

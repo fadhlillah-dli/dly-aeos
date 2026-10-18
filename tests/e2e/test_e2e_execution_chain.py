@@ -41,7 +41,7 @@ from aeos.models.delivery_ext import PullRequestRecord
 from aeos.models.evidence import AcceptanceRecord, EvidenceArtifact
 from aeos.models.routing import CapabilityGrant
 from aeos.models.workforce import WorkerRun
-from tests.e2e.chain_support import FAKE_ZEN_KEY, REPO, ROUTE_KEY, build_chain, git, remote_head
+from tests.e2e.chain_support import FAKE_ZEN_KEY, REPO, ROUTE_KEY, build_chain, git, remote_head, secret_leaks
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is required for the execution chain")
 
@@ -135,7 +135,8 @@ def test_full_chain_plan_to_pr_then_new_commit_reopens(chain):
     with session_factory()() as s:
         assert s.scalar(select(AcceptanceRecord).where(AcceptanceRecord.task_id == chain.task_id)) is None
         q = s.scalar(select(QuotaState).where(QuotaState.provider == "claude-native"))
-        assert q.state == "EXHAUSTED" and q.source == "observed-limit"
+        # recorded per model family — the scope the bridge clears after a later successful call
+        assert q.state == "EXHAUSTED" and q.source == "observed-limit" and q.scope == "fable"
     run_view = chain.ok(chain.client.get(f"/api/runs/{run_id}"))
     assert run_view["ui_state"] == "WAITING_QUOTA"
 
@@ -149,11 +150,20 @@ def test_full_chain_plan_to_pr_then_new_commit_reopens(chain):
     assert reviewed["acceptance"]["base_commit"] == run.base_commit
     te = chain.te()
     assert te.state == "DONE" and te.accepted_run_id == run_id and run.execution_status == "DONE"
+    # the limit lifted: the run no longer waits and Max goes back to UNKNOWN (never "OK", never forever EXHAUSTED)
+    assert run.quota_status is None
+    with session_factory()() as s:
+        q = s.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "fable"))
+        assert q.state == "UNKNOWN" and q.source == "observed-successful-call"
+        assert s.scalar(select(QuotaState).where(QuotaState.provider == "claude-native",
+                                                 QuotaState.state == "EXHAUSTED")) is None
 
-    # ---- delivery: grants -> sha-pinned push to the bare remote -> draft PR via the broker only
+    # ---- delivery: grants -> interlock -> sha-pinned push to the (faked) GitHub remote -> draft PR
     pr = chain.ok(chain.client.post(f"/api/tasks/{chain.task_id}/prepare-pr", json={}))
     assert pr["merge_authority"] == "HUMAN_ONLY"
     assert remote_head(chain.bare, run.branch) == run.head_commit
+    # the real https remote + the push interlock + the owner's token from the secrets contract were used
+    assert chain.git_pushes == [{"remote_url": f"https://github.com/{REPO}.git", "token_is_owner_credential": True}]
     assert len(chain.pr_posts) == 1
     post = chain.pr_posts[0]
     assert post["draft"] is True and post["head"] == run.branch and post["base"] == "main"
@@ -190,6 +200,32 @@ def test_full_chain_plan_to_pr_then_new_commit_reopens(chain):
     # the reopened task is admitted again as a new, bounded attempt (2/2)
     again = chain.tick()
     assert len(again) == 1 and chain.run(again[0]).attempt == 2
+
+    # §26: no upstream credential anywhere at rest — DB/WAL, events, audit, evidence, sandboxes, worktrees,
+    # broker mirrors, the remote (the worker only ever held its capability token)
+    assert secret_leaks(chain.settings.layout.root.parent) == []
+
+
+def test_review_findings_request_a_repair_attempt(chain):
+    """§19/§22: reviewer findings never repair anything themselves — they become a new bounded attempt."""
+    chain.setup("ok", ["backend/e2ecalc/**"])
+    run_id = chain.tick()[0]
+    assert chain.execute(run_id)["status"] == "REVIEW"
+    assert chain.ok(chain.client.post(f"/api/runs/{run_id}/verify", json={}))["status"] == "PASS"
+    chain.bridge.review_verdict = "FAIL"
+    chain.bridge.review_findings = [{"severity": "HIGH", "title": "add() has no overflow note",
+                                     "detail": "document the int contract", "required_action": "add a docstring"}]
+    out = chain.ok(chain.client.post(f"/api/runs/{run_id}/review", json={}))
+    assert out["review"]["verdict"] == "FAIL" and out["acceptance"] is None
+    run = chain.run(run_id)
+    te = chain.te()
+    assert run.execution_status == "FAILED" and run.outcome_code == "REVIEW_FINDINGS"
+    assert te.state == "READY" and te.accepted_run_id is None
+    assert [f["title"] for f in te.pending_findings] == ["add() has no overflow note"]
+    with session_factory()() as s:
+        assert s.scalar(select(AcceptanceRecord).where(AcceptanceRecord.task_id == chain.task_id)) is None
+    repair = chain.tick()
+    assert len(repair) == 1 and chain.run(repair[0]).attempt == 2
 
 
 def test_cancel_mid_run_kills_process_tree_and_releases_reservation(chain):
@@ -229,6 +265,9 @@ def test_upstream_429_waits_for_quota_without_fallback(chain):
     te = chain.te()
     assert run.execution_status == "FAILED" and run.outcome_code == "QUOTA_EXHAUSTED"
     assert te.state == "BLOCKED" and te.reason_code == "QUOTA_EXHAUSTED"
+    from aeos.workforce import views
+
+    assert views.derive_ui_state(None, te) == "WAITING_QUOTA"
     # every upstream call went to the same approved route/model: no fallback model, no paid route
     assert len(chain.upstream_calls) >= 3
     assert {c["model"] for c in chain.upstream_calls} == {chain.route().model_id}
@@ -263,6 +302,8 @@ def test_protected_path_change_is_quarantined_and_never_published(chain):
     assert v["status"] == "QUARANTINED", v
     te = chain.te()
     assert te.state == "BLOCKED" and te.reason_code == "QUARANTINED"
+    # shown as BLOCKED (waiting for the owner), never as "waiting for review"
+    assert chain.ok(chain.client.get(f"/api/runs/{run_id}"))["ui_state"] == "BLOCKED"
     assert chain.tick() == [], "a quarantined patch waits for the owner's special review"
     assert chain.te().state == "BLOCKED"
     with session_factory()() as s:
@@ -275,3 +316,20 @@ def test_protected_path_change_is_quarantined_and_never_published(chain):
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "ACCEPTANCE_REQUIRED"
     assert chain.pr_posts == []
     assert git(chain.bare, "branch", "--list", "aeos/*") == ""
+    assert chain.git_pushes == []
+
+    # the owner chooses a new attempt instead of the special review: the quarantined candidate is discarded
+    # (FAILED, never reviewable/publishable again) and the next tick admits attempt 2
+    retried = chain.ok(chain.client.post(f"/api/tasks/{chain.task_id}/retry",
+                                         json={"rationale": "patch ditolak, coba ulang tanpa workflow"}))
+    assert retried["state"] == "READY"
+    old = chain.run(run_id)
+    assert old.execution_status == "FAILED" and old.outcome_code == "DISCARDED_BY_OWNER"
+    with session_factory()() as s:
+        with pytest.raises(PolicyDenied) as exc:
+            broker.push_task_branch(s, run_id=run_id, worktree=old.workspace_ref, branch=old.branch,
+                                    repo_full_name=REPO, expected_head_sha=old.head_commit)
+        assert exc.value.code == "RUN_NOT_PUBLISHABLE"
+        s.rollback()
+    nxt = chain.tick()
+    assert len(nxt) == 1 and chain.run(nxt[0]).attempt == 2

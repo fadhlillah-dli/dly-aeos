@@ -26,7 +26,7 @@ from aeos.models.delivery_ext import PullRequestRecord
 from aeos.models.evidence import EvidenceArtifact, ReviewRecord
 from aeos.models.planning import TaskSpec
 from aeos.models.portfolio import Project
-from aeos.models.workforce import WorkerRun
+from aeos.models.workforce import TaskExecution, WorkerRun
 from aeos.verification import acceptance as acceptance_mod
 from aeos.verification import collector
 from aeos.verification.integration import call
@@ -245,6 +245,14 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
     if project is None:
         raise NotFound("project not found")
     acc = _require_valid_acceptance(session, task)
+    # §14 "REVIEW --> DONE: penerimaan valid": the scheduler must have accepted exactly this run. An
+    # ACCEPTED record whose mark_accepted was refused (task BLOCKED/READY, another attempt active,
+    # reopened) is not a deliverable result.
+    te = session.scalar(select(TaskExecution).where(TaskExecution.task_id == task.id))
+    if te is None or te.state != "DONE" or te.accepted_run_id != acc.run_id:
+        raise Blocked("PR preparation requires the task DONE on the accepted run (scheduler acceptance)",
+                      code="TASK_NOT_DONE", details={"task_state": te.state if te else None,
+                                                     "accepted_run_id": te.accepted_run_id if te else None})
     run = session.get(WorkerRun, acc.run_id)
     if run is None or not run.branch or not run.branch.startswith(TASK_BRANCH_PREFIX):
         raise Blocked("accepted run has no aeos/* task branch", code="BRANCH_NOT_TASK_BRANCH")
