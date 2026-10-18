@@ -100,6 +100,8 @@ def test_office_always_denied_by_default(routes, monkeypatch, absent_modules):
     r = approve(routes, DS)
     # even if someone had added OFFICE to the route, policy decides — and it is missing here
     r.eligible_domains = ["PERSONAL", "OFFICE"]
+    # §26 (integration amendment, ADR-0041): an OFFICE call only ever uses an office/ credential
+    r.mode_params = {"credential_ref": "office/opencode-zen"}
     service.refresh_config_hash(routes, r, reason="test")
     approve(routes, DS)
     d = eligible_routes(routes, domain="OFFICE", data_classification="INTERNAL")

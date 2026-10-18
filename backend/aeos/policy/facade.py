@@ -22,8 +22,10 @@ class WriteIntent:
     actor_user_id: str
     project_id: str
     domain: str
-    provider: str  # google-drive|google-docs|github-issues|github-repo|confluence|jira|bitbucket
-    operation: str  # create_folder|create_doc|update_doc|create_issue|push_branch|create_pr|...
+    provider: str  # aeos.portfolio.providers: google-drive|github-issues|github-repo|confluence|jira|bitbucket
+    operation: str  # create_folder|create_doc|update_doc|ensure_label|create_issue|push_branch|create_pr|...
+    # target: {"provider": <provider>, "root_id": <exact approved target>, ...} for publication writes
+    # decision_id: the run's PUBLICATION decision (publication writes) or the plan APPROVAL (delivery)
     target: dict[str, Any]
     approved_plan_version_id: str | None
     approved_hash: str | None
@@ -91,6 +93,14 @@ def check_external_write(session: Session, intent: WriteIntent) -> InterlockResu
     from aeos.policy.interlock import check_external_write as impl
 
     return impl(session, intent)
+
+
+def target_in_scope(target: dict[str, Any], approved_targets: list[Any], provider: str) -> bool:
+    """Additive: True when *target* lies inside one approved target scope of *provider* (the exact rule the
+    interlock applies), so callers can refuse before recording anything."""
+    from aeos.policy.catalog import target_in_scope as impl
+
+    return impl(target, approved_targets, provider)
 
 
 def office_policy(session: Session) -> dict[str, Any]:

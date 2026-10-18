@@ -51,3 +51,26 @@ Claude API. §14/§50: a changed head/base invalidates acceptance and triggers r
 * A task that became STALE after DONE needs a new attempt from the scheduler; there is no workforce
   facade to reopen it yet (recorded as a gap).
 * Acceptance is not a human approval: merge to main and release remain human decisions (ADR-0063).
+
+## Amendment 2026-10-18 (integration)
+
+1. **Binding = the WorkerRun's identity.** The AcceptanceRecord stores the run's runtime-recorded
+   `head_commit`/`base_commit` (the verifier's view only when the run has none), exactly what
+   `workforce.mark_accepted` compares; a verification made against another base is REJECTED.
+2. **STALE reopens.** `invalidate` (PR sync, branch-update hook, prepare-pr head mismatch, `recheck`, the
+   loop's periodic recheck of ACCEPTED records) calls `workforce.facade.reopen_for_reverification` when an
+   ACCEPTED record became STALE, closing the gap noted in the Consequences above (ADR-0050 amendment).
+3. **Quota exhausted (§50 "Fable Max quota habis").** The review stays `WAITING_QUOTA` / verdict BLOCKED;
+   the task stays in REVIEW (no repair, no new attempt, no gate); the run carries
+   `review_verdict=BLOCKED`, `quota_status=WAITING_QUOTA` (UI WAITING_QUOTA), and the observed limit is
+   recorded through `aeos.cost.facade.set_quota_state(provider="claude-native", state="EXHAUSTED",
+   source="observed-limit")` — never as dollars or a % of Max. A later review of the same run proceeds.
+4. A BLOCKED review verdict moves the task to BLOCKED with reason code `REVIEW_BLOCKED`, which only an
+   owner action clears (never a scheduler tick).
+5. **Review fix (2026-10-19): native quota scope.** The observed Max limit is recorded per model family
+   (`scope=fable|opus|...`, else `max`) — the scope the claude bridge itself records and clears — not `*`:
+   a `*` row without reset time was never cleared and showed Max EXHAUSTED forever. The review writes it in
+   its own session (the bridge's separate side-effect transaction cannot while the review holds the SQLite
+   write lock). A later review that COMPLETED sets that family back to `UNKNOWN`
+   (`observed-successful-call`, never `OK`), and the run's `quota_status=WAITING_QUOTA` is cleared as soon
+   as a review got past the quota. MOCK reviews never touch the native quota state.

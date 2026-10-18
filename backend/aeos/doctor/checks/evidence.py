@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import sys
 from typing import Any
 
 from aeos.core.enums import Domain
@@ -32,6 +32,11 @@ def evidence_acceptance_suite(ctx: CheckContext) -> Outcome:
 
 @check("evidence.dir_permissions", "EVIDENCE_REVIEW", "Izin direktori evidence per domain", component_id="evidence-store",
        ttl_seconds=3600, ok={"CONFIGURED", "VERIFIED"}, severity_fail="HIGH")
+def _windows() -> bool:
+    # One platform source for every check (sys.platform), so remedies match the OS they are shown on.
+    return sys.platform.startswith("win")
+
+
 def evidence_dir_permissions(ctx: CheckContext) -> Outcome:
     layout = ctx.settings.layout
     roots = {d.value: layout.domain_root(d) for d in Domain}
@@ -49,14 +54,14 @@ def evidence_dir_permissions(ctx: CheckContext) -> Outcome:
         except OSError as exc:
             return Outcome("FAILED", f"Partisi {k} tidak dapat ditulis ({type(exc).__name__}).", evidence=evidence,
                            error_code="EVIDENCE_DIR_NOT_WRITABLE")
-        if os.name == "posix" and p.stat().st_mode & 0o007:
+        if not _windows() and p.stat().st_mode & 0o007:
             evidence.setdefault("other_access", []).append(k)
     if evidence.get("other_access"):
         return Outcome("FAILED", f"Partisi dapat diakses pengguna lain: {', '.join(evidence['other_access'])}.",
                        evidence=evidence, error_code="EVIDENCE_DIR_TOO_OPEN", remedy=Remedy(
                            operation="Batasi izin partisi evidence", command="chmod -R o-rwx <data dir>",
                            privilege="pengguna lokal", evidence_to_collect="tanpa akses other"))
-    if os.name != "posix":
+    if _windows():
         evidence["acl_checked"] = False
         return Outcome("CONFIGURED", "Partisi PERSONAL/OFFICE terpisah dan dapat ditulis; ACL Windows tidak diperiksa.",
                        evidence=evidence)

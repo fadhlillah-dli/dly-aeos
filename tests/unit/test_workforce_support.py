@@ -86,7 +86,7 @@ class FakeModules:
 
         doc = types.ModuleType("aeos.doctor.capabilities")
 
-        def capability_state(session: Session, capability, *, domain=None, project_id=None):
+        def capability_state(session: Session, capability, *, domain=None, project_id=None, **_kw):
             from aeos.doctor.facade import CapabilityState
 
             return CapabilityState(capability=capability, status=fake.capability,
@@ -139,12 +139,28 @@ class FakeModules:
         def record_usage(session: Session, **kw):
             fake._count("record_usage")
             kw.pop("reservation_id", None)
+            kw.pop("partial", None)
             e = UsageLedgerEntry(**{k: v for k, v in kw.items() if k not in ("session", "impl")})
             session.add(e)
             session.flush()
             return e
 
+        def set_quota_state(session: Session, *, provider, state, source, scope="*", details=None, observed_at=None,
+                            resets_at=None):
+            from aeos.models.cost import QuotaState
+
+            fake._count("set_quota_state")
+            row = session.scalar(select(QuotaState).where(QuotaState.provider == provider, QuotaState.scope == scope))
+            if row is None:
+                row = QuotaState(provider=provider, scope=scope)
+                session.add(row)
+            row.state, row.source, row.details = state, source, details or {}
+            row.observed_at, row.resets_at = observed_at or utcnow(), resets_at
+            session.flush()
+            return row
+
         cost.reserve, cost.release, cost.record_usage = reserve, release, record_usage
+        cost.set_quota_state = set_quota_state
         mods["aeos.cost.service"] = cost
 
         dec = types.ModuleType("aeos.policy.decisions")

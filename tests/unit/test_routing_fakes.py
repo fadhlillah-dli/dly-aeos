@@ -24,6 +24,7 @@ class FakeRegistry:
         self.office: dict[str, Any] = {"external_worker_allowed": False, "approved_worker_routes": [],
                                        "claude_max_allowed_for_office_data": False}
         self.usage: list[dict[str, Any]] = []
+        self.quota: list[dict[str, Any]] = []
         self.evidence: list[dict[str, Any]] = []
         self.invalidations: list[dict[str, Any]] = []
         self.observations: list[dict[str, Any]] = []
@@ -92,10 +93,18 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, *, policy: bool = True, cost:
         monkeypatch.setitem(sys.modules, "aeos.policy.office",
                             _simple("aeos.policy.office", office_policy=lambda session: dict(reg.office)))
     if cost:
+        from aeos.cost import service as real_cost  # quota states use the real implementation (recorded)
+
         def record_usage(**kw):
             reg.usage.append({k: v for k, v in kw.items() if k not in _DROP})
             return types.SimpleNamespace(id="usage-1", **{k: v for k, v in kw.items() if k not in _DROP})
-        monkeypatch.setitem(sys.modules, "aeos.cost.service", _simple("aeos.cost.service", record_usage=record_usage))
+
+        def set_quota_state(session, **kw):
+            reg.quota.append(dict(kw))
+            return real_cost.set_quota_state(session, **kw)
+
+        monkeypatch.setitem(sys.modules, "aeos.cost.service", _simple("aeos.cost.service", record_usage=record_usage,
+                                                                      set_quota_state=set_quota_state))
     if verification:
         def collect_evidence(**kw):
             reg.evidence.append({k: v for k, v in kw.items() if k not in _DROP})

@@ -67,7 +67,60 @@ FORBIDDEN_FLAGS = frozenset({
     "--permission-mode", "--add-dir", "--agents", "--system-prompt", "--cloud", "--remote-control",
 })
 REQUIRED_FLAGS = ("-p", "--restricted", "--strict-mcp-config", "--no-session-persistence")
-MAX_SCHEMA_ARG_CHARS = 16_000  # Windows command lines are limited to 32767 characters
+# Windows CreateProcess limits the whole command line to 32,767 characters *after* quoting (every '"' of the
+# JSON schema becomes '\"'). The planning contracts (plan_content/synthesis, ~19k chars compact, ~23k quoted)
+# fit; the limit is checked on the real quoted command line with a margin for the binary path. A schema that
+# does not fit is first sent without validation-neutral annotations (description/title/$comment/examples);
+# the caller still validates the output against its full schema.
+MAX_CMDLINE_CHARS = 32_000
+MAX_SCHEMA_ARG_CHARS = MAX_CMDLINE_CHARS  # kept for compatibility; the quoted command line is what counts
+_SCHEMA_ANNOTATIONS = frozenset({"description", "title", "$comment", "examples"})
+# JSON Schema keywords whose value maps *names* (property names, definition names) to subschemas: the keys are
+# data, never annotations - a property called "title" or "description" must survive the stripping.
+_SCHEMA_NAME_MAPS = frozenset({"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"})
+_SCHEMA_LISTS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+_SCHEMA_SINGLE = frozenset({"items", "additionalProperties", "additionalItems", "not", "if", "then", "else",
+                            "contains", "propertyNames", "unevaluatedItems", "unevaluatedProperties"})
+
+
+def _strip_annotations(schema: Any) -> Any:
+    """Drop validation-neutral annotations from *schema* (a JSON Schema), walking only subschema positions.
+
+    Names under ``properties``/``$defs``/... and literal values (``enum``, ``const``, ``default``) are kept
+    exactly, so the stripped schema accepts and rejects the same documents as the original."""
+    if not isinstance(schema, dict):
+        return schema
+    out: dict[str, Any] = {}
+    for k, v in schema.items():
+        if k in _SCHEMA_ANNOTATIONS:
+            continue
+        if k in _SCHEMA_NAME_MAPS and isinstance(v, dict):
+            out[k] = {name: _strip_annotations(sub) for name, sub in v.items()}
+        elif k in _SCHEMA_LISTS and isinstance(v, list):
+            out[k] = [_strip_annotations(sub) for sub in v]
+        elif k in _SCHEMA_SINGLE:
+            out[k] = [_strip_annotations(sub) for sub in v] if isinstance(v, list) else _strip_annotations(v)
+        else:
+            out[k] = v  # keywords with literal values (type, required, enum, const, default, pattern, ...)
+    return out
+
+
+def cmdline_length(argv: list[str]) -> int:
+    """Length of the command line as Windows sees it (list2cmdline quoting); a safe bound on POSIX too."""
+    import subprocess
+
+    return len(subprocess.list2cmdline(argv))
+
+
+MAX_COMMAND_LINE_CHARS = MAX_CMDLINE_CHARS
+
+
+def command_line_chars(argv: list[str]) -> int:
+    """Length of the command line as Windows receives it (``subprocess.list2cmdline`` quoting).
+    Measured on every OS so the same request is accepted or refused everywhere."""
+    import subprocess
+
+    return len(subprocess.list2cmdline(argv))
 QUOTA_PROVIDER = "claude-native"
 CAPABILITY_TEST_SCHEMA: dict[str, Any] = {
     "type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False,
@@ -225,8 +278,15 @@ def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) 
     if problem:
         return _fail(request, *problem)
     schema_json = json.dumps(request.json_schema, separators=(",", ":"), ensure_ascii=False)
-    if len(schema_json) > MAX_SCHEMA_ARG_CHARS:
-        return _fail(request, "SCHEMA_TOO_LARGE", f"schema is {len(schema_json)} chars (> {MAX_SCHEMA_ARG_CHARS})")
+    probe_argv = build_argv("claude", schema_json=schema_json, model=request.model,
+                            tools=list(request.allowed_tools), effort=request.effort)
+    if cmdline_length(probe_argv) > MAX_CMDLINE_CHARS - 512:  # 512: room for the absolute binary path
+        schema_json = json.dumps(_strip_annotations(request.json_schema), separators=(",", ":"), ensure_ascii=False)
+        probe_argv = build_argv("claude", schema_json=schema_json, model=request.model,
+                                tools=list(request.allowed_tools), effort=request.effort)
+        if cmdline_length(probe_argv) > MAX_CMDLINE_CHARS - 512:
+            return _fail(request, "SCHEMA_TOO_LARGE", f"schema does not fit the command line "
+                                                      f"({cmdline_length(probe_argv)} > {MAX_CMDLINE_CHARS - 512})")
 
     pr = binmod.probe(settings)
     if not pr.usable or pr.binary.path is None:
@@ -234,6 +294,12 @@ def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) 
                      "Claude native bridge is BLOCKED: " + "; ".join(pr.reasons or ["unknown"]) +
                      " - use the manual package (official Claude Code) instead; no API fallback exists",
                      engine_version=pr.binary.version)
+    cmdline = command_line_chars(build_argv(str(pr.binary.path), schema_json=schema_json, model=request.model,
+                                            tools=list(request.allowed_tools), effort=request.effort))
+    if cmdline > MAX_COMMAND_LINE_CHARS:
+        return _fail(request, "SCHEMA_TOO_LARGE",
+                     f"the command line would be {cmdline} chars after quoting (> {MAX_COMMAND_LINE_CHARS}; "
+                     "Windows limit 32767)", engine_version=pr.binary.version)
 
     request_id = new_id()
     try:
@@ -349,22 +415,39 @@ def _record_usage(session: Session, request: ClaudeRequest, result: ClaudeResult
     return True
 
 
-def record_quota_exhausted(session: Session, model: str, *, resets_at: Any = None, reset_text: str | None = None,
-                           message: str = "") -> QuotaState:
-    """§42/§50 'Fable Max quota habis': observed limit -> EXHAUSTED; callers checkpoint and wait."""
-    scope = family_of(model) or "max"
+def _set_quota(session: Session, *, scope: str, state: str, source: str, details: dict[str, Any],
+               resets_at: Any) -> QuotaState:
+    """Native quota observations go through ``aeos.cost.facade.set_quota_state`` (the one QuotaState
+    authority). Only when the cost module is absent is the observation written directly (still recorded,
+    so the review queue keeps waiting — fail closed)."""
+    try:
+        from aeos.cost.facade import set_quota_state
+
+        return set_quota_state(session, provider=QUOTA_PROVIDER, state=state, source=source, scope=scope,
+                               details=details, resets_at=resets_at)
+    except (ImportError, ModuleNotFoundError):
+        pass
     row = session.scalars(select(QuotaState).where(QuotaState.provider == QUOTA_PROVIDER,
                                                    QuotaState.scope == scope)).first()
     if row is None:
         row = QuotaState(provider=QUOTA_PROVIDER, scope=scope)
         session.add(row)
-    row.state = "EXHAUSTED"
-    row.source = "observed-limit-message"
-    row.observed_at = utcnow()
-    row.resets_at = resets_at
-    row.details = {"reset_text": reset_text, "message": redact_text(message)[:300],
-                   "note": "observed from the official client output; remaining quota is not published"}
+    row.state, row.source, row.observed_at, row.resets_at, row.details = state, source, utcnow(), resets_at, details
     session.flush()
+    return row
+
+
+def record_quota_exhausted(session: Session, model: str, *, resets_at: Any = None, reset_text: str | None = None,
+                           message: str = "") -> QuotaState:
+    """§42/§50 'Fable Max quota habis': observed limit -> EXHAUSTED; callers checkpoint and wait.
+
+    Recorded through the cost module's quota contract (one QuotaState authority, ADR-0080 §6): an observed
+    limit message may set EXHAUSTED, never OK/LOW."""
+    scope = family_of(model) or "max"
+    details = {"reset_text": reset_text, "message": redact_text(message)[:300],
+               "note": "observed from the official client output; remaining quota is not published"}
+    row = _set_quota(session, scope=scope, state="EXHAUSTED", source="observed-limit-message", details=details,
+                     resets_at=resets_at)
     try:
         from aeos.events.service import emit
 
@@ -385,12 +468,8 @@ def clear_quota_exhausted(session: Session, model: str) -> bool:
                                                    QuotaState.scope == scope)).first()
     if row is None or row.state != "EXHAUSTED":
         return False
-    row.state = "UNKNOWN"
-    row.source = "observed-successful-call"
-    row.observed_at = utcnow()
-    row.resets_at = None
-    row.details = {"note": "a later call succeeded; remaining quota is not published (UNKNOWN, not OK)"}
-    session.flush()
+    _set_quota(session, scope=scope, state="UNKNOWN", source="observed-successful-call", resets_at=None,
+               details={"note": "a later call succeeded; remaining quota is not published (UNKNOWN, not OK)"})
     try:
         from aeos.events.service import emit
 

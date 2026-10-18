@@ -87,3 +87,33 @@ into a throw-away test data directory:
   `secret_store/interim-keyring` with `details.secret_store_interim_keyring == true` (domain
   PERSONAL).
 * OS-keyring write errors fail closed (`Blocked SECRET_STORE_UNAVAILABLE`) without echoing the value.
+
+## Amendment 2026-10-18 (integration)
+
+* The interim exception is recordable through `POST /api/decisions` (`kind=EXCEPTION`,
+  `exception=secret_store_interim_keyring`), the Decision page preset and `aeos policy decide --kind
+  EXCEPTION --exception secret_store_interim_keyring --domain PERSONAL --days N --as <admin>`. All three
+  produce exactly `secret_store/interim-keyring` with `details.secret_store_interim_keyring = true`,
+  domain PERSONAL and an expiry; OFFICE is refused (`EXCEPTION_DOMAIN_DENIED`). A free-form decision on
+  that target must carry the same boolean or is refused. Revoking it turns the store back to
+  OpenBao-or-BLOCKED immediately (tested).
+
+Found by the trusted acceptance suite (`tests/acceptance`, master §50) when the wave-1 modules ran
+together; the provider contract is unchanged, the callers were reconciled with it.
+
+* **Every caller states the namespace as the purpose scope.** `check_purpose` requires the purpose
+  to start with the reference namespace (`personal:`, `platform:`, `workers:`, `projects:<id>:`).
+  Several callers passed free text ("push main", "google status (scopes only)",
+  "delivery.provider.read"), so every real read was `SECRET_SCOPE_DENIED` and the integrations
+  looked unconfigured. Fixed callers: `broker.git_broker` (push/create-pr/reconcile:
+  `personal:broker.*`), `broker.model_proxy` (scope derived from the ref:
+  `projects:<id>:<use>` for project refs, otherwise the ref namespace), `delivery.provider`,
+  `doctor.checks.adapters`, `portfolio.repositories`, `publisher.providers.github_issues`,
+  `publisher.providers.google`, `publisher.providers.atlassian`. The purpose stays a label for
+  audit; it never widens access (the namespace binding and project scope are still enforced by
+  `check_purpose` and `check_project_scope`).
+* **A status read never creates state.** `interim_exception()` returned the decision by opening a
+  DB session, which created the data directory and an empty database as a side effect of a
+  status read (bootstrap doctor before `aeos init`, §08/§50 "Dependency inti belum terpasang").
+  When the database file does not exist yet no exception can exist, so it now returns `None`
+  without opening a session.

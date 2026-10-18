@@ -7,7 +7,7 @@ from typing import Any
 
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import file_fingerprint
-from aeos.doctor.model import CheckContext, Outcome, Remedy, venv_python
+from aeos.doctor.model import CheckContext, Outcome, Remedy, npm_cmd, shell_chain
 from aeos.inventory import scope as scope_reader
 from aeos.inventory.probes import github_slug_from_remote, strip_url_credentials
 
@@ -86,7 +86,10 @@ def repo_lockfiles(ctx: CheckContext) -> Outcome:
     if npm and py:
         return Outcome("VERIFIED", "Lockfile frontend dan Python tersedia.", evidence=evidence)
     missing = [k for k, v in evidence.items() if not v]
-    cmd = f"{venv_python()} -m pip freeze --exclude-editable > requirements.lock" if not py else "cd frontend; npm install"
+    # ADR-0093: one universal lock compiled from pyproject (no shell redirection: PowerShell 5.1 would write
+    # UTF-16); the frontend lock comes from npm in frontend/.
+    cmd = ("uv pip compile pyproject.toml --universal --extra dev -o requirements.lock" if not py
+           else shell_chain("cd frontend", npm_cmd("install --package-lock-only --no-audit --no-fund")))
     return Outcome("MISSING", f"Lockfile belum ada: {', '.join(missing)} (versi hanya berupa range).", evidence=evidence,
                    error_code="LOCKFILE_MISSING", remedy=Remedy(
                        operation="Buat lockfile dari lingkungan yang sudah diuji lalu commit lewat PR",

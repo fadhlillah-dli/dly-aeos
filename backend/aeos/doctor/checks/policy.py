@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import yaml
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import file_fingerprint
@@ -73,8 +73,10 @@ def policy_snapshot(ctx: CheckContext) -> Outcome:
     assert ctx.session is not None
     snap = ctx.session.scalar(select(PolicySnapshot).where(PolicySnapshot.active.is_(True))
                               .order_by(PolicySnapshot.created_at.desc()).limit(1))
-    decisions = ctx.session.scalar(select(func.count()).select_from(Decision).where(Decision.status == "ACTIVE")) or 0
-    evidence: dict[str, Any] = {"active_decisions": int(decisions)}
+    # Platform-level row shown to every domain: OFFICE decisions are not counted (counts are metadata, §50).
+    decisions = ctx.session.scalar(select(func.count()).select_from(Decision).where(
+        Decision.status == "ACTIVE", or_(Decision.domain.is_(None), Decision.domain != "OFFICE"))) or 0
+    evidence: dict[str, Any] = {"active_decisions": int(decisions), "counted": "platform + PERSONAL (OFFICE tidak)"}
     if snap is None:
         return Outcome("MISSING", "Belum ada policy snapshot aktif.", evidence=evidence, error_code="NO_POLICY_SNAPSHOT",
                        remedy=Remedy(operation="Muat policy default dan keputusan pemilik", command=aeos_cmd("seed"),

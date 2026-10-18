@@ -61,7 +61,7 @@ class GitHubIssuesProvider:
         self._own_client = client is None
         self.client = client or httpx.Client(timeout=DEFAULT_TIMEOUT)
         self._token = token if token is not None else secrets.get_secret(
-            TOKEN_REF, purpose="github issues publication", actor=ACTOR)
+            TOKEN_REF, purpose="personal:publisher.github-issues", actor=ACTOR)
         register_secret(self._token)
 
     def close(self) -> None:

@@ -14,12 +14,16 @@ from aeos.models.workforce import TaskExecution, WorkerRun
 
 
 def transition_task(
-    session: Session, task_id: str, to_state: str, *, reason: str, actor: str, expected_from: str | None = None
+    session: Session, task_id: str, to_state: str, *, reason: str, actor: str, expected_from: str | None = None,
+    reason_code: str = "",
 ) -> TaskExecution:
-    """Apply a legal §14 transition with optimistic concurrency; raise ``Conflict`` otherwise."""
+    """Apply a legal §14 transition with optimistic concurrency; raise ``Conflict`` otherwise.
+    ``reason_code`` (additive, integration 2026-10-18) lets the caller name why, e.g. ``QUARANTINED`` or
+    ``REVIEW_BLOCKED`` — BLOCKED tasks with those codes wait for an owner action instead of being retried."""
     from aeos.workforce.scheduler import transition_task as impl
 
-    return impl(session, task_id, to_state, reason=reason, actor=actor, expected_from=expected_from)
+    return impl(session, task_id, to_state, reason=reason, actor=actor, expected_from=expected_from,
+                reason_code=reason_code)
 
 
 def update_run(session: Session, run_id: str, *, actor: str, **fields: Any) -> WorkerRun:
@@ -40,6 +44,15 @@ def mark_accepted(session: Session, task_id: str, run_id: str, *, acceptance_id:
     from aeos.workforce.scheduler import mark_accepted as impl
 
     return impl(session, task_id, run_id, acceptance_id=acceptance_id, actor=actor)
+
+
+def reopen_for_reverification(session: Session, task_id: str, *, reason: str, actor: str) -> TaskExecution:
+    """DONE -> READY (new bounded attempt) or BLOCKED (no attempt left / plan no longer approved) when the
+    acceptance the task rests on became STALE (head/base/config/plan changed, §14, §50). Idempotent for
+    tasks that are not DONE. Added by the integration of seam group W2 (2026-10-18)."""
+    from aeos.workforce.scheduler import reopen_for_reverification as impl
+
+    return impl(session, task_id, reason=reason, actor=actor)
 
 
 def cancel_run(session: Session, run_id: str, *, reason: str, actor: str) -> WorkerRun:

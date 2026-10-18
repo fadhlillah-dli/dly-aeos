@@ -4,6 +4,7 @@ import { clsx } from "clsx";
 import { AlertTriangle, Layers } from "lucide-react";
 import { memo, useMemo } from "react";
 import { Badge, RELATION_LABELS } from "../../components/inventory/labels";
+import { useTheme } from "../../lib/theme";
 import { absentLabel, edgeVisual, layoutGraph, NODE_H, NODE_W, type GEdge, type GNode } from "./layout";
 
 type CompData = {
@@ -80,6 +81,7 @@ export function MapGraph({
   onNodeClick: (n: GNode) => void;
   onEdgeClick: (e: GEdge) => void;
 }) {
+  const { theme } = useTheme();
   const positions = useMemo(() => layoutGraph(nodes, edges), [nodes, edges]);
   const anyHighlight = highlightNodes.size > 0;
   const rfNodes: CompNode[] = useMemo(
@@ -125,7 +127,7 @@ export function MapGraph({
         nodeTypes={nodeTypes}
         fitView
         minZoom={0.1}
-        colorMode="system"
+        colorMode={theme}
         onNodeClick={(_, n) => {
           const g = byId.get(n.id);
           if (g) onNodeClick(g);

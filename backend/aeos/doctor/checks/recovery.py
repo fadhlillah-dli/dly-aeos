@@ -5,32 +5,55 @@ A backup that was never restored is not "recovery ready" (§33, §50 "Restore ba
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import func, or_, select
 
 from aeos.doctor.checks import check
-from aeos.doctor.model import CheckContext, Outcome, Remedy
+from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
 from aeos.models.evidence import EvidenceArtifact
 
 # Platform-level rows are visible to every domain: OFFICE-domain evidence is never quoted here (§35).
 _NOT_OFFICE = or_(EvidenceArtifact.domain.is_(None), EvidenceArtifact.domain != "OFFICE")
 
 
+def _ops_backups(ctx: CheckContext) -> list[dict[str, Any]]:
+    """Backups made by ``aeos ops backup create`` (directories with manifest.json), read-only."""
+    try:
+        from aeos.operations.backup import list_backups
+
+        return [b for b in list_backups(ctx.settings) if b.get("readiness") != "INCOMPLETE"]
+    except Exception:  # operations module absent or an unreadable manifest: counted as no backup, never green
+        return []
+
+
 @check("recovery.backups", "RECOVERY", "Backup database tersedia", component_id="operations-reliability",
        ttl_seconds=3600, ok={"CONFIGURED", "VERIFIED"}, severity_fail="MEDIUM")
 def recovery_backups(ctx: CheckContext) -> Outcome:
-    d = ctx.settings.layout.backups
-    files = sorted(d.glob("*.sqlite3"), key=lambda p: p.stat().st_mtime, reverse=True) if d.is_dir() else []
-    if not files:
-        return Outcome("MISSING", "Belum ada backup database di <data>/backups.", error_code="NO_BACKUP",
-                       remedy=Remedy(operation="Buat backup SQLite konsisten (runbook operations); backup pra-upgrade "
-                                     "dibuat otomatis oleh aeos db upgrade saat ada migrasi",
-                                     target="<data>/backups", privilege="pengguna lokal",
-                                     evidence_to_collect="file backup + uji restore"))
     from datetime import UTC, datetime
 
-    newest = datetime.fromtimestamp(files[0].stat().st_mtime, UTC)
-    return Outcome("CONFIGURED", f"{len(files)} backup; terbaru {newest.isoformat()} (restore belum tentu diuji).",
-                   evidence={"count": len(files), "newest_at": newest.isoformat(), "location": "<data>/backups"})
+    d = ctx.settings.layout.backups
+    # Two producers: `aeos ops backup create` (directory + manifest, restore-testable) and the automatic
+    # pre-upgrade SQLite copy of `aeos db upgrade` (database only).
+    ops = _ops_backups(ctx)
+    files = sorted(d.glob("*.sqlite3"), key=lambda p: p.stat().st_mtime, reverse=True) if d.is_dir() else []
+    remedy = Remedy(operation="Buat backup konsisten (database + evidence per domain); restore-test setelahnya",
+                    command=aeos_cmd("ops backup create"), source="aeos.operations.backup (runbook operations)",
+                    target="<data>/backups", privilege="pengguna lokal", rollback="hapus direktori backup baru",
+                    evidence_to_collect="recovery.backups CONFIGURED lalu recovery.restore_test VERIFIED")
+    if not ops and not files:
+        return Outcome("MISSING", "Belum ada backup di <data>/backups (ops backup maupun salinan pra-upgrade).",
+                       error_code="NO_BACKUP", remedy=remedy)
+    newest_file = datetime.fromtimestamp(files[0].stat().st_mtime, UTC).isoformat() if files else None
+    newest_ops = ops[0].get("created_at") if ops else None
+    ready = [b["backup_id"] for b in ops if b.get("ready")]
+    evidence = {"ops_backups": len(ops), "pre_upgrade_copies": len(files), "restore_tested": len(ready),
+                "newest_ops_backup_at": newest_ops, "newest_pre_upgrade_at": newest_file, "location": "<data>/backups"}
+    if not ops:
+        return Outcome("CONFIGURED", f"Hanya {len(files)} salinan database pra-upgrade (tanpa evidence/attachment); "
+                       "buat backup lengkap.", evidence=evidence, severity="MEDIUM", remedy=remedy)
+    return Outcome("CONFIGURED", f"{len(ops)} backup ops (terbaru {newest_ops}); {len(ready)} sudah restore-tested.",
+                   evidence=evidence)
 
 
 @check("recovery.restore_test", "RECOVERY", "Restore pernah diuji", component_id="operations-reliability",
@@ -42,9 +65,12 @@ def recovery_restore_test(ctx: CheckContext) -> Outcome:
                                                            EvidenceArtifact.mode == "LIVE", _NOT_OFFICE)
                             .order_by(EvidenceArtifact.created_at.desc()).limit(1))
     if ev is None:
+        ops = _ops_backups(ctx)
+        cmd = aeos_cmd(f"ops backup restore-test {ops[0]['backup_id']}") if ops else aeos_cmd("ops backup create")
         return Outcome("MISSING", "Restore belum diuji; recovery tidak diklaim siap.", error_code="RESTORE_NOT_TESTED",
-                       remedy=Remedy(operation="Jalankan uji restore ke lokasi terpisah dan simpan bukti RESTORE_TEST",
-                                     target="<data>/backups", privilege="pemilik",
+                       remedy=Remedy(operation="Uji restore backup ke direktori sementara terpisah dan simpan bukti "
+                                     "RESTORE_TEST" + ("" if ops else " (buat backup dulu)"), command=cmd,
+                                     source="aeos.operations.backup", target="<data>/backups", privilege="pemilik",
                                      evidence_to_collect="EvidenceArtifact kind RESTORE_TEST (trusted)"))
     return Outcome("VERIFIED", f"Bukti restore {ev.id[:8]} pada {ev.created_at.isoformat()}.",
                    evidence={"evidence_id": ev.id, "level": ev.evidence_level})

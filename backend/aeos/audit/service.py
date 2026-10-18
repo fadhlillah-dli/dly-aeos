@@ -39,8 +39,8 @@ def record(
         target_id=str(target_id),
         project_id=project_id,
         domain=domain,
-        reason=redact(reason) if reason else "",
-        details=redact(details or {}),
+        reason=redact(reason, pii=True) if reason else "",
+        details=redact(details or {}, pii=True),
         request_id=request_id,
     )
     session.add(ev)

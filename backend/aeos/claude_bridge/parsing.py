@@ -48,15 +48,15 @@ _RESET_EPOCH_RE = re.compile(r"\|(\d{10})\b")
 _RESET_TEXT_RE = re.compile(r"resets?\s+(?:at\s+|in\s+|on\s+)?([^\n.]{1,60})", re.IGNORECASE)
 
 
-def redact_strings(value: Any) -> Any:
+def redact_strings(value: Any, *, pii: bool = False) -> Any:
     """Redact string leaves only. ``redact()`` would also mask whole values under keys such as
     ``max_tokens``/``token_budget`` and corrupt structured output and usage numbers."""
     if isinstance(value, str):
-        return redact_text(value)
+        return redact_text(value, pii=pii)
     if isinstance(value, dict):
-        return {k: redact_strings(v) for k, v in value.items()}
+        return {k: redact_strings(v, pii=pii) for k, v in value.items()}
     if isinstance(value, list):
-        return [redact_strings(v) for v in value]
+        return [redact_strings(v, pii=pii) for v in value]
     return value
 
 

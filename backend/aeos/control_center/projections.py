@@ -122,8 +122,14 @@ def integrations(session: Session, principal: Principal, domain: Domain, project
             continue
         latest.setdefault(c.check_id, c)
     items: list[dict[str, Any]] = []
+    from aeos.portfolio import providers as pv
+
     for integ in rows:
-        related = [c for c in latest.values() if integ.provider.lower() in (c.check_id or "").lower()
+        # One provider vocabulary (aeos.portfolio.providers): the Doctor checks that probe this provider.
+        # "github-issues" is probed by adapter.github_token, which no substring of the provider id matches.
+        probes = set(pv.DOCTOR_CHECKS.get(pv.normalize(integ.provider), ()))
+        related = [c for c in latest.values() if c.check_id in probes
+                   or integ.provider.lower() in (c.check_id or "").lower()
                    or integ.provider.lower() in (c.component_id or "").lower()]
         items.append({
             "id": integ.id, "project_id": integ.project_id,

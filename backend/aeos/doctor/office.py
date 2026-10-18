@@ -27,7 +27,18 @@ def read_office_policy(session: Session | None, root: Path | None = None) -> tup
 
             data = policy.office_policy(session)
             if isinstance(data, dict):
-                return {**DEFAULT_DENY, **data}, "policy-module"
+                merged = {**DEFAULT_DENY, **data}
+                # Integration contract (ADR-0011 amendment 2026-10-18): the policy module expresses OFFICE
+                # integrations as a recorded company authorisation listing allowed providers; there is no
+                # free-standing ``integrations_allowed`` flag. Derived here, never from config files.
+                if "integrations_allowed" not in data:
+                    merged["integrations_allowed"] = bool(data.get("office_authorization") is True
+                                                          and data.get("authorized_providers"))
+                # A worker on OFFICE data also needs at least one route the company approved (§23).
+                if merged.get("external_worker_allowed") is True and not merged.get("approved_worker_routes"):
+                    merged["external_worker_allowed"] = False
+                    merged["external_worker_note"] = "external_worker_allowed tanpa approved_worker_routes"
+                return merged, "policy-module"
         except (ImportError, ModuleNotFoundError):
             pass
         except Exception:

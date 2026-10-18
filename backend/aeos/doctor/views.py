@@ -62,6 +62,24 @@ def run_meta(run: DoctorRun | None, counts: dict[str, int] | None = None) -> dic
             "counts": counts if counts is not None else {}}
 
 
+def last_failure(session: Session, run: DoctorRun | None) -> dict[str, Any] | None:
+    """Latest ``doctor.run.failed`` event (e.g. the startup pass) newer than the last completed run, so the
+    page never presents an older run as if it were the current state. Platform-level, no details."""
+    from sqlalchemy import select
+
+    from aeos.core.timeutil import ensure_aware
+    from aeos.models.audit import Event
+
+    ev = session.scalar(select(Event).where(Event.kind == "doctor.run.failed", Event.domain.is_(None))
+                        .order_by(Event.seq.desc()).limit(1))
+    if ev is None:
+        return None
+    if run is not None and ensure_aware(run.started_at) >= ensure_aware(ev.at):
+        return None
+    payload = ev.payload or {}
+    return {"at": ensure_aware(ev.at).isoformat(), "trigger": payload.get("trigger"), "error": payload.get("error")}
+
+
 def checks_view(session: Session, *, domain: str | None, group: str | None = None) -> dict[str, Any]:
     specs = [s for s in ordered_specs() if _visible(dict(s.scope), domain)]
     if group:
@@ -95,6 +113,7 @@ def checks_view(session: Session, *, domain: str | None, group: str | None = Non
         "items": items,
         "groups": [{"id": g, "label": label, "order": i} for i, (g, label) in enumerate(GROUPS)],
         "last_run": run_meta(last, counts),
+        "last_failure": last_failure(session, last),
         "source": "Readiness Doctor: probe kode tanpa LLM (CheckResult)",
         "checked_at": last.finished_at.isoformat() if last and last.finished_at else None,
         "mode": "LIVE",
@@ -121,6 +140,11 @@ def capabilities_view(session: Session, *, domain: str | None) -> dict[str, Any]
         # domain so their metadata (e.g. whether an OFFICE credential exists) never reaches this view.
         it["reasons"] = [r for r in it["reasons"] if _reason_check_id(r) not in hidden]
         it["remedies"] = [r for r in it["remedies"] if r.get("check_id") not in hidden]
+        # Residual risks quote check evidence too (e.g. PERSONAL branch protection): keep only those of the
+        # checks this session may see.
+        seen: set[str] = set()
+        it["residual_risks"] = [r for c in it["checks"] for r in (c.get("residual_risks") or [])
+                                if not (r in seen or seen.add(r))]
         if len(it["checks"]) < before:
             it["reasons"].append("catatan: pemeriksaan ber-scope domain lain tidak ditampilkan; pilih domain "
                                  "PERSONAL/OFFICE untuk melihat detailnya")

@@ -61,6 +61,19 @@ MAX_ATTACHMENTS = 20
 STAGE_TIMEOUT_SECONDS = 900
 STALE_RUN_GRACE = timedelta(seconds=STAGE_TIMEOUT_SECONDS + 300)
 ACTIONS = ("APPROVE_AND_PUBLISH", "APPROVE", "REQUEST_REVISION", "REJECT")
+# Bridge refusals that are hard stops (ADR-0030/0040 amendments): the stage is checkpointed and the plan
+# waits in NEEDS_DECISION. Nothing is retried with another model, no stage is skipped, no manual package is
+# offered as a way around the refusal (the manual path has the same preflight). code -> PlanningRun.status
+HARD_STOP_CODES: dict[str, str] = {
+    "MODEL_POLICY_MISMATCH": "MODEL_MISMATCH",
+    "DOMAIN_REQUIRED": "BLOCKED",
+    "DOMAIN_MISMATCH": "BLOCKED",
+    "DOMAIN_UNVERIFIED": "BLOCKED",
+    "PROJECT_NOT_FOUND": "BLOCKED",
+    "CONTEXT_DOMAIN_DENIED": "BLOCKED",
+    "OFFICE_POLICY_DENIED": "BLOCKED",
+    "SECRET_IN_PROMPT": "BLOCKED",
+}
 BRIDGE_UNAVAILABLE_CODES = frozenset({
     "BLOCKED", "BRIDGE_BLOCKED", "BRIDGE_UNAVAILABLE", "BRIDGE_NOT_PROVEN", "NOT_PROVEN", "CAPABILITY_NOT_READY",
     "CLAUDE_NOT_FOUND", "CLAUDE_MISSING", "AUTH_REQUIRED", "NOT_AUTHENTICATED", "NOT_LOGGED_IN",
@@ -197,15 +210,25 @@ def _repo_inventory(session: Session, project: Project) -> dict[str, Any]:
         return {"status": "NOT_APPLICABLE", "reason": "new project", "repositories": repos}
     if not repos:
         return {"status": "UNKNOWN", "reason": "existing project without a selected repository", "repositories": []}
-    try:
-        from aeos.portfolio.inventory import inventory_repository  # type: ignore[import-not-found]
-    except (ImportError, ModuleNotFoundError):
+    inventory_for_project = getattr(portfolio, "inventory_for_project", None)
+    if inventory_for_project is None:
         return {"status": "UNKNOWN", "reason": "repository inventory not available in this build", "repositories": repos}
     try:
-        inv = inventory_repository(session, project.id)
-    except (AeosError, TypeError, ValueError, OSError) as exc:
-        return {"status": "UNKNOWN", "reason": redact_text(f"inventory failed: {exc}"), "repositories": repos}
-    return {"status": "AVAILABLE", "repositories": repos, "inventory": prompts.scrub(inv if isinstance(inv, dict) else {"value": inv})}
+        # ADR-0022 §6: the registered checkout of the project's primary repository (domain checks applied);
+        # planning never resolves or guesses a path itself.
+        inv = inventory_for_project(session, project.id)
+    except AeosError as exc:
+        return {"status": "UNKNOWN", "reason": redact_text(f"inventory unavailable [{exc.code}]: {exc.message}"),
+                "repositories": repos}
+    except (ImportError, ModuleNotFoundError):
+        return {"status": "UNKNOWN", "reason": "repository inventory not available in this build", "repositories": repos}
+    except (ValueError, OSError) as exc:
+        return {"status": "UNKNOWN", "reason": redact_text(f"inventory failed: {type(exc).__name__}"),
+                "repositories": repos}
+    inv = inv if isinstance(inv, dict) else {"value": inv}
+    # The inventory contract is already bounded (samples, coverage gaps); its hash covers commit content only.
+    return {"status": "AVAILABLE", "repositories": repos, "commit": inv.get("commit"),
+            "inventory_hash": inv.get("inventory_hash"), "inventory": prompts.scrub(inv)}
 
 
 def _integration_caps(session: Session, project: Project) -> dict[str, Any]:
@@ -490,19 +513,36 @@ def diff_versions(session: Session, plan_id: str, version_id: str, against_id: s
 # ================================================================ approval (§05 step 9, §14)
 
 
+_TARGET_DISPLAY_KEYS = ("label", "title", "kind", "display_name", "name")
+
+
 def _validate_targets(plan: Plan, action: str, targets: list[Any]) -> list[dict[str, Any]]:
+    """Exact targets in the one provider vocabulary (``aeos.portfolio.providers``).
+
+    Publication targets are ``{"provider", "root_id"}`` — the same identity the Integration Registry stores
+    (``ProjectIntegration.root_id``) and the publisher names in every write, so the interlock can prove each
+    operation lies inside what the human approved (U-10). Legacy spellings (``google-docs``) are accepted
+    and stored canonical; repository (delivery) targets keep their ``repo`` identifier."""
     allowed = catalog.providers_for(plan.domain)
     clean: list[dict[str, Any]] = []
     for t in targets or []:
-        if not isinstance(t, dict) or t.get("provider") not in allowed:
+        provider = catalog.normalize_provider(t.get("provider")) if isinstance(t, dict) else ""
+        if not isinstance(t, dict) or provider not in allowed:
             raise ValidationFailed(f"target provider must be one of {list(allowed)} for domain {plan.domain}",
                                    code="TARGET_INVALID", details={"target": redact(t)})
         ids = {k: v for k, v in t.items() if k != "provider" and v not in (None, "")}
-        ident = [k for k in ids if k not in ("label", "title", "kind", "display_name", "name")]
+        ident = [k for k in ids if k not in _TARGET_DISPLAY_KEYS]
         if not ident:
-            raise ValidationFailed("each target needs an exact identifier (root_id/folder_id/repo/project_key/...)",
-                                   code="TARGET_NOT_EXACT", details={"target": redact(t)})
-        clean.append(redact({"provider": t["provider"], **{k: str(v) for k, v in ids.items()}}))
+            raise ValidationFailed("each target needs an exact identifier (root_id for documents/issues, repo for "
+                                   "repositories)", code="TARGET_NOT_EXACT", details={"target": redact(t)})
+        if provider in catalog.PUBLISH_OPERATIONS and ident != ["root_id"]:
+            raise ValidationFailed("publication targets are {provider, root_id}: the exact root id of the project "
+                                   "integration (Drive folder id or 'root', owner/repo, CONFLUENCE_PROJECTS_PARENT_ID, "
+                                   "Jira project key)", code="TARGET_NOT_EXACT",
+                                   details={"target": redact(t), "unexpected_keys": [k for k in ident if k != "root_id"]})
+        entry = redact({"provider": provider, **{k: str(v) for k, v in ids.items()}})
+        if entry not in clean:
+            clean.append(entry)
     if action == "APPROVE_AND_PUBLISH" and not any(t["provider"] in catalog.PUBLISH_OPERATIONS for t in clean):
         raise ValidationFailed("Approve & Publish needs at least one publication target", code="TARGET_MISSING")
     if action == "APPROVE" and any(t["provider"] in catalog.PUBLISH_OPERATIONS for t in clean):
@@ -533,12 +573,15 @@ def decide(session: Session, plan_id: str, *, action: str, version_id: str, vers
         raise NotFound("plan version not found")
     latest = session.get(PlanVersion, plan.current_version_id) if plan.current_version_id else None
     if latest is None or version.id != latest.id or version.manifest_hash != version_hash:
+        details = _latest_details(latest, requested_version_id=version_id, requested_hash=version_hash)
         audit.record(session, actor_type="user", actor_id=actor_user_id, action="plan.decision", result="DENIED",
                      target_type="plan_version", target_id=version_id, project_id=plan.project_id, domain=plan.domain,
                      reason="stale version or hash", details={"action": action, "requested_hash": version_hash})
+        # Nothing else was written by this request; the denial stays in the audit trail although the request
+        # fails (the API rolls back the unit of work on error), like office_gate below.
+        session.commit()
         raise Conflict("the decision must reference the current plan version and its exact hash",
-                       code="STALE_PLAN_VERSION",
-                       details=_latest_details(latest, requested_version_id=version_id, requested_hash=version_hash))
+                       code="STALE_PLAN_VERSION", details=details)
     if content_hash(version.content) != version.manifest_hash:
         raise Conflict("plan version content does not match its manifest hash (integrity)", code="VERSION_INTEGRITY")
     state = S(plan.state)
@@ -551,6 +594,14 @@ def decide(session: Session, plan_id: str, *, action: str, version_id: str, vers
         clean = _validate_targets(plan, action, targets or [])
         dag.require_valid_graph(version.content)
         ops = operations_for(action, clean)
+        configured = {(t["provider"], t["root_id"]) for t in publication_targets(session, plan.project_id)}
+        unconfigured = [t for t in clean if t["provider"] in catalog.PUBLISH_OPERATIONS
+                        and (t["provider"], t.get("root_id")) not in configured]
+        if unconfigured:
+            # Not an error: the human may approve before configuring. The publisher only writes where the
+            # configured integration AND this approval agree, so these targets stay BLOCKED until then.
+            result["warnings"] = [f"target {t['provider']} {t.get('root_id')} is not a configured integration of this "
+                                  "project; the publisher will not write there until it is" for t in unconfigured]
         previous = [d for d in session.scalars(select(Decision).where(
             Decision.kind == "APPROVAL", Decision.target_type == catalog.TARGET_PLAN_VERSION,
             Decision.target_id.in_([v.id for v in _versions(session, plan.id)]), Decision.status == "ACTIVE"))]
@@ -602,6 +653,16 @@ def decide(session: Session, plan_id: str, *, action: str, version_id: str, vers
                           "manifest_hash": version.manifest_hash})
     result["decision"] = registry.decision_view(session, decision)
     return result
+
+
+def publication_targets(session: Session, project_id: str) -> list[dict[str, Any]]:
+    """Configured publication targets of the project (Integration Registry), for approval binding."""
+    try:
+        from aeos.portfolio import facade as portfolio
+
+        return portfolio.publication_targets(session, project_id)
+    except (ImportError, ModuleNotFoundError):  # registry absent: nothing to suggest (approval still explicit)
+        return []
 
 
 def get_approved_version(session: Session, plan_id: str) -> PlanVersion | None:
@@ -716,6 +777,9 @@ def prepare_run(session: Session, plan: Plan, *, actor: str) -> StageSpec:
         if cp.get("stage") not in [s.value for s in PIPELINE_STAGES]:
             raise Conflict("nothing to resume: this plan waits for a human decision", code="PLAN_NOT_RUNNABLE")
         cp.pop("blocked_reasons", None)
+        stopped = cp.pop("hard_stop", None)
+        if stopped:  # resume the SAME stage with the SAME policy model (never another model, never skipped)
+            cp["resumed_after"] = {"code": stopped.get("code"), "run_id": stopped.get("run_id")}
     elif state == S.AWAITING_MANUAL_CLAUDE:
         run = session.get(PlanningRun, cp.get("run_id")) if cp.get("run_id") else None
         if run is not None and run.status == "AWAITING_MANUAL":
@@ -887,6 +951,30 @@ def _fail_stage(session: Session, plan: Plan, run: PlanningRun, spec: StageSpec,
     return False
 
 
+def _hard_stop(session: Session, plan: Plan, run: PlanningRun, spec: StageSpec, *, code: str, status: str, error: str,
+               actor: str, reason: str | None = None) -> bool:
+    """Checkpoint the stage and wait for a human (NEEDS_DECISION). The same stage with the same policy model
+    is re-run on resume; there is no retry with another model and no skipped stage (§12, §50)."""
+    run.status = status
+    run.error_code = code[:64]
+    run.error = redact_text(error or "")[:4000]
+    run.finished_at = run.finished_at or utcnow()
+    why = f"{run.error_code}: {run.error[:500]}"
+    _set_cp(plan, stage=spec.state.value, run_id=run.id, blocked_reasons=[why],
+            hard_stop={"code": run.error_code, "stage": spec.state.value, "model_requested": spec.model,
+                       "model_resolved": run.model_resolved, "run_id": run.id})
+    _emit_run(session, plan, run)
+    audit.record(session, actor_type="system", actor_id="planning", action="plan.stage.hard_stop", result="DENIED",
+                 target_type="planning_run", target_id=run.id, project_id=plan.project_id, domain=plan.domain,
+                 reason=why, details={"stage": spec.state.value, "model_requested": spec.model,
+                                      "model_resolved": run.model_resolved})
+    transition(session, plan, S.NEEDS_DECISION, actor=actor, reason=reason or (
+        f"Tahap {spec.state.value} ({spec.role}, {spec.model}) dihentikan [{run.error_code}]: {run.error[:300]}. "
+        "Checkpoint disimpan; tidak ada percobaan ulang dengan model lain dan tidak ada tahap yang dilewati. "
+        "Perubahan pengawas memerlukan keputusan POLICY yang dievaluasi."))
+    return False
+
+
 def _manual_fallback(session: Session, plan: Plan, run: PlanningRun, spec: StageSpec, request: Any, *, reason: str,
                      code: str, actor: str) -> bool:
     bridge = _bridge()
@@ -944,17 +1032,18 @@ def _complete_stage(session: Session, plan: Plan, run: PlanningRun, spec: StageS
     run.mode = "MANUAL_FALLBACK" if manual else (result.mode or "NATIVE")
     run.finished_at = utcnow()
     if not result.ok:
-        if result.quota_exhausted:
-            run.status = "QUOTA_EXHAUSTED"
-            run.error_code = (result.error_code or "QUOTA_EXHAUSTED")[:64]
-            run.error = redact_text(result.error or "")[:4000]
-            _set_cp(plan, stage=spec.state.value, run_id=run.id)
-            _emit_run(session, plan, run)
-            transition(session, plan, S.NEEDS_DECISION, actor=actor,
-                       reason=f"Kuota Claude habis pada tahap {spec.state.value}; checkpoint disimpan. Tahap tidak "
-                              "dilewati - jalankan lagi setelah kuota tersedia (tanpa fallback berbayar).")
-            return False
-        if not manual and (result.error_code or "").upper() in BRIDGE_UNAVAILABLE_CODES:
+        if result.quota_exhausted or (result.error_code or "").upper() == "QUOTA_EXHAUSTED":
+            return _hard_stop(session, plan, run, spec, code=result.error_code or "QUOTA_EXHAUSTED",
+                              status="QUOTA_EXHAUSTED", error=result.error or "Claude usage limit reached",
+                              actor=actor,
+                              reason=f"Kuota Claude habis pada tahap {spec.state.value}; checkpoint disimpan. Tahap tidak "
+                                     "dilewati - jalankan lagi setelah kuota tersedia (tanpa fallback berbayar, tanpa "
+                                     "model lain).")
+        code = (result.error_code or "").upper()
+        if code in HARD_STOP_CODES:
+            return _hard_stop(session, plan, run, spec, code=code, status=HARD_STOP_CODES[code],
+                              error=result.error or code, actor=actor)
+        if not manual and code in BRIDGE_UNAVAILABLE_CODES:
             req, _ = _build_request(session, plan, spec)
             return _manual_fallback(session, plan, run, spec, req, reason=result.error or result.error_code,
                                     code=result.error_code, actor=actor)
@@ -964,9 +1053,9 @@ def _complete_stage(session: Session, plan: Plan, run: PlanningRun, spec: StageS
     if structured is not None:
         run.output_hash = content_hash(structured)
     if not model_matches(spec.family, run.model_resolved):
-        return _fail_stage(session, plan, run, spec, code="MODEL_MISMATCH", status="MODEL_MISMATCH", actor=actor,
-                           error=f"resolved model {run.model_resolved or 'UNKNOWN'} is not in the policy family "
-                                 f"{spec.family!r}; result rejected (§12)")
+        return _hard_stop(session, plan, run, spec, code="MODEL_POLICY_MISMATCH", status="MODEL_MISMATCH", actor=actor,
+                          error=f"resolved model {run.model_resolved or 'UNKNOWN'} is not in the policy family "
+                                f"{spec.family!r}; result rejected (§12)")
     if structured is None:
         return _fail_stage(session, plan, run, spec, code="OUTPUT_MISSING", status="OUTPUT_INVALID", actor=actor,
                            error="no structured output returned")
@@ -1219,6 +1308,9 @@ def plan_detail(session: Session, plan: Plan) -> dict[str, Any]:
             "publish": {p: list(catalog.PUBLISH_OPERATIONS.get(p, ())) for p in catalog.providers_for(plan.domain)},
             "delivery": {p: list(catalog.DELIVERY_OPERATIONS.get(p, ())) for p in catalog.providers_for(plan.domain)},
             "plan": list(catalog.PLAN_OPERATIONS),
+            # Exact targets configured in the Integration Registry ({provider, root_id}); the human still
+            # selects them explicitly for Approve & Publish (U-10).
+            "configured_targets": publication_targets(session, plan.project_id),
         },
         "evidence_limit": "Output model = DATA/proposal; verdict reviewer bukan persetujuan; persetujuan hanya oleh "
                           "manusia dan terikat versi + hash.",

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { ArrowLeft, Lightbulb, RefreshCw } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { get, post } from "../../api/client";
@@ -8,7 +8,8 @@ import { ExplainButtons } from "../../components/ExplainButtons";
 import { DomainRequired } from "../../components/inventory/DomainRequired";
 import { Badge, DIMENSION_LABELS, RELATION_LABELS, REQUIREMENT_LABELS, SeverityBadge } from "../../components/inventory/labels";
 import type { BlastRadius, ComponentDetail, RelationView } from "../../components/inventory/types";
-import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
+import { proposeComponentHref } from "../../components/proposals/PageLinks";
+import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, LinkButton, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { absoluteTime, relativeTime, shortHash } from "../../lib/format";
 
 function Unknown({ v }: { v: { value?: string | null; status: string; reason?: string | null } }) {
@@ -113,9 +114,14 @@ export default function ComponentDetailPage() {
         mode={d.mode}
         actions={
           isAdmin ? (
-            <Button busy={refresh.isPending} onClick={() => refresh.mutate()}>
-              <RefreshCw className="h-4 w-4" aria-hidden /> Segarkan komponen ini
-            </Button>
+            <>
+              <Button busy={refresh.isPending} onClick={() => refresh.mutate()}>
+                <RefreshCw className="h-4 w-4" aria-hidden /> Segarkan komponen ini
+              </Button>
+              <LinkButton to={proposeComponentHref(componentId)} variant="primary" title="Add/Replace/Upgrade/Remove/Compare; review tidak memasang apa pun">
+                <Lightbulb className="h-4 w-4" aria-hidden /> Usulkan perubahan
+              </LinkButton>
+            </>
           ) : undefined
         }
       />
@@ -176,7 +182,12 @@ export default function ComponentDetailPage() {
             propose: (
               <p>
                 Usulan Add/Replace/Upgrade/Remove/Compare tidak memasang apa pun.{" "}
-                <Link className="text-accent hover:underline" to={d.changes.propose_url}>Buka formulir usulan untuk komponen ini</Link>.
+                {isAdmin ? (
+                  <Link className="text-accent hover:underline" to={proposeComponentHref(componentId)}>Buka formulir usulan untuk komponen ini</Link>
+                ) : (
+                  "Pengajuan usulan memerlukan SUPER_ADMIN"
+                )}
+                .
               </p>
             ),
           }}
@@ -256,6 +267,7 @@ export default function ComponentDetailPage() {
           />
         </Card>
         <Card title="Lifecycle (dimensi terpisah)">
+          <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <tbody className="divide-y divide-line">
               {Object.entries(d.lifecycle).map(([k, v]) => (
@@ -274,6 +286,7 @@ export default function ComponentDetailPage() {
               ))}
             </tbody>
           </table>
+          </div>
         </Card>
         <Card title="Akses dan data">
           <KeyValue items={Object.entries(d.access).map(([k, v]) => [k, asText(v)])} />
@@ -405,7 +418,11 @@ export default function ComponentDetailPage() {
           <div className="mt-3">
             {d.changes.proposals.length === 0 ? (
               <EmptyState title="Belum ada usulan untuk komponen ini">
-                <Link className="text-accent hover:underline" to={d.changes.propose_url}>Usulkan perubahan</Link>
+                {isAdmin ? (
+                  <Link className="text-accent hover:underline" to={proposeComponentHref(componentId)}>Usulkan perubahan</Link>
+                ) : (
+                  "Pengajuan usulan memerlukan SUPER_ADMIN."
+                )}
               </EmptyState>
             ) : (
               <ul className="space-y-1 text-sm">

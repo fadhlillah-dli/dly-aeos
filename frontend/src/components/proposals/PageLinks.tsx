@@ -9,6 +9,14 @@ export function decisionHref(decisionId?: string | null): string {
   return decisionId ? `/decisions?decision=${encodeURIComponent(decisionId)}` : "/decisions";
 }
 
+/**
+ * §39 "Usulkan perubahan" on Tools & Repos, component detail and System Map: opens the proposal form
+ * prefilled with this component as the existing one. Submitting a proposal never installs anything.
+ */
+export function proposeComponentHref(componentId: string): string {
+  return `/proposals?component=${encodeURIComponent(componentId)}`;
+}
+
 /** Link that opens the "Usulkan perubahan" form prefilled as a COMPARE/RESEARCH review of `subject`. */
 export function correctionHref(subject: string): string {
   return `/proposals?kind=COMPARE&source=${encodeURIComponent(subject)}`;

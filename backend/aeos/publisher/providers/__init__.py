@@ -1,16 +1,19 @@
 """Publication adapters (PERSONAL: Google Drive/Docs + GitHub Issues; OFFICE: Confluence + Jira + Bitbucket).
 
-Operation provider names (what the interlock sees) map onto adapter families:
+Operation provider names (what the interlock sees; the one vocabulary of ``aeos.portfolio.providers``)
+map onto adapter families:
 
 =================  ==============  =========================================
 op.provider        family          ExternalReference.provider
 =================  ==============  =========================================
-google-drive       google          google-drive (folders + docs; doc id = file id)
-google-docs        google          google-drive (incremental updates)
+google-drive       google          google-drive (folders + docs create/update; doc id = file id)
 github-issues      github-issues   github-issues (labels + issues)
 confluence         confluence      confluence (folders/pages/attachments)
 jira               jira            jira (work items)
 =================  ==============  =========================================
+
+``google-docs`` is a legacy spelling of outbox rows planned by earlier builds (Docs API updates); it maps
+to the same family/reference and is sent to the interlock as ``google-drive``.
 """
 
 from __future__ import annotations

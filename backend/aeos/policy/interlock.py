@@ -13,16 +13,16 @@ only when the list of reasons is empty. Conditions:
 6. write enablement: ``write_enabled.<provider>`` flag AND an ACTIVE human WRITE_ENABLEMENT decision;
 7. an approved, immutable, LIVE (never MOCK/DEMO) PlanVersion whose stored content still hashes to
    its manifest hash and whose manifest hash equals ``intent.approved_hash``, bound by the ACTIVE
-   APPROVAL decision ``intent.decision_id`` that covers the operation and the target scope, and that
-   is still the plan's approved version;
+   APPROVAL decision that covers the operation and the target scope, and that is still the plan's
+   approved version. Delivery writes reference that APPROVAL as ``intent.decision_id``; publication
+   writes reference the run's human PUBLICATION decision (exact publication, preview hash, operation
+   ids, targets, expiry), which in turn names its APPROVE_AND_PUBLISH approval (ADR-0074 amendment);
 8. an unexpired capability (``capability_expires_at`` present and in the future).
 
 Reason strings start with a stable code (``CODE: explanation``) so callers/tests can match them.
 """
 
 from __future__ import annotations
-
-from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -38,25 +38,7 @@ from aeos.policy import catalog, enablement
 from aeos.policy.facade import InterlockResult, WriteIntent
 
 _INACTIVE_LIFECYCLES = {"ARCHIVED", "RETIRED"}
-_TARGET_META_KEYS = {"provider", "label", "title", "kind", "display_name", "name"}
-
-
-def target_in_scope(target: dict[str, Any], approved_targets: list[Any], provider: str) -> bool:
-    """True when *target* lies within one approved target scope of the same provider.
-
-    An approved target is a scope (e.g. ``{"provider": "google-drive", "root_id": "F1"}``); every
-    identifying key it names must be present in the intent target with an equal value."""
-    if not isinstance(target, dict) or not target:
-        return False
-    for scope in approved_targets or []:
-        if not isinstance(scope, dict) or scope.get("provider") != provider:
-            continue
-        keys = [k for k in scope if k not in _TARGET_META_KEYS]
-        if not keys:
-            continue  # a provider-only scope is too broad to bind a write
-        if all(k in target and str(target[k]) == str(scope[k]) for k in keys):
-            return True
-    return False
+target_in_scope = catalog.target_in_scope  # re-exported (the rule lives with the static vocabularies)
 
 
 def _actor_reasons(session: Session, intent: WriteIntent, reasons: list[str]) -> None:
@@ -74,7 +56,59 @@ def _actor_reasons(session: Session, intent: WriteIntent, reasons: list[str]) ->
         reasons.append("ACTOR_PROJECT_SCOPE: actor's project scope does not include the project")
 
 
-def _approval_reasons(session: Session, intent: WriteIntent, reasons: list[str]) -> Decision | None:
+def _publication_reasons(session: Session, intent: WriteIntent, d: Decision, reasons: list[str]) -> str | None:
+    """Validate the run's human PUBLICATION decision (ADR-0074) and return the id of the APPROVE_AND_PUBLISH
+    approval it was recorded under. One run decision covers exactly the previewed operations of one
+    publication (U-10): any other publication, operation, target, preview or version is refused."""
+    from aeos.models.publishing import Publication
+    from aeos.policy.decisions import effective_status
+
+    extra = intent.extra or {}
+    scope = d.auth_scope or {}
+    status = effective_status(d)
+    if d.actor_kind != "HUMAN":
+        reasons.append(f"DECISION_ACTOR_NOT_HUMAN: publication decision actor kind is {d.actor_kind}, not a human "
+                       "SUPER_ADMIN")
+    if status != "ACTIVE":
+        reasons.append(f"PUBLICATION_DECISION_NOT_ACTIVE: publication decision is {status}")
+    if d.expires_at is None:
+        reasons.append("PUBLICATION_DECISION_NO_EXPIRY: a publication run decision must expire (capability, §26)")
+    pub_id = extra.get("publication_id")
+    if d.target_type != catalog.TARGET_PUBLICATION or not pub_id or d.target_id != str(pub_id):
+        reasons.append("PUBLICATION_MISMATCH: the decision covers another publication run")
+    if d.target_version != intent.approved_plan_version_id or d.target_hash != intent.approved_hash:
+        reasons.append("PUBLICATION_BINDING_MISMATCH: the run decision is bound to another plan version/hash")
+    if d.project_id != intent.project_id or d.domain != intent.domain:
+        reasons.append("DECISION_SCOPE_MISMATCH: publication decision belongs to another project/domain")
+    if intent.operation not in (d.allowed_operations or []):
+        reasons.append(f"OPERATION_NOT_IN_RUN: the run decision does not include operation {intent.operation!r}")
+    op_id = extra.get("operation_id")
+    if not op_id or op_id not in (scope.get("operation_ids") or []):
+        reasons.append("OPERATION_NOT_IN_RUN: this outbox operation was not part of the approved preview")
+    if not extra.get("preview_hash") or extra.get("preview_hash") != scope.get("preview_hash"):
+        reasons.append("PREVIEW_HASH_MISMATCH: the operation does not belong to the previewed run")
+    if not target_in_scope(intent.target, scope.get("targets") or [], intent.provider):
+        reasons.append("TARGET_NOT_IN_RUN: target is outside the targets of this publication run")
+    pub = session.get(Publication, str(pub_id)) if pub_id else None
+    if pub is None:
+        reasons.append("PUBLICATION_UNKNOWN: publication run not found")
+    elif (pub.plan_version_id != intent.approved_plan_version_id or pub.approved_hash != intent.approved_hash
+          or pub.publication_decision_id != d.id or pub.preview_hash != scope.get("preview_hash")):
+        reasons.append("PUBLICATION_MISMATCH: publication record does not match the run decision")
+    approval_id = scope.get("approval_decision_id")
+    if not approval_id:
+        reasons.append("APPROVAL_LINK_MISSING: the run decision does not reference the plan approval it executes")
+    return str(approval_id) if approval_id else None
+
+
+def _approval_reasons(session: Session, intent: WriteIntent, reasons: list[str], *,
+                      approval_id: str | None = None, publication: bool = False) -> Decision | None:
+    """Approved immutable version + the human APPROVAL decision covering the operation and target.
+
+    ``approval_id`` is the approval to check (the intent's own decision for delivery writes, the
+    approval referenced by the run decision for publication writes)."""
+    if approval_id is None and not publication:
+        approval_id = intent.decision_id
     if not intent.approved_plan_version_id or not intent.approved_hash:
         reasons.append("APPROVED_VERSION_MISSING: no approved plan version/hash bound to the write")
         return None
@@ -94,10 +128,11 @@ def _approval_reasons(session: Session, intent: WriteIntent, reasons: list[str])
     plan = session.get(Plan, version.plan_id)
     if plan is None or plan.approved_version_id != version.id:
         reasons.append("VERSION_NOT_APPROVED: the plan's approved version is not this version (stale or revoked)")
-    if not intent.decision_id:
-        reasons.append("DECISION_MISSING: no approval decision referenced")
+    if not approval_id:
+        if not publication:  # a publication write already reported the missing run decision/approval link
+            reasons.append("DECISION_MISSING: no approval decision referenced")
         return None
-    d = session.get(Decision, intent.decision_id)
+    d = session.get(Decision, approval_id)
     if d is None:
         reasons.append("DECISION_UNKNOWN: approval decision not found")
         return None
@@ -121,6 +156,31 @@ def _approval_reasons(session: Session, intent: WriteIntent, reasons: list[str])
         reasons.append(f"OPERATION_NOT_APPROVED: approval does not include operation {intent.operation!r}")
     if not target_in_scope(intent.target, (d.auth_scope or {}).get("targets") or [], intent.provider):
         reasons.append("TARGET_NOT_APPROVED: target is outside the approved target scope")
+    if publication and (d.auth_scope or {}).get("action") != "APPROVE_AND_PUBLISH":
+        reasons.append("APPROVAL_NOT_FOR_PUBLICATION: the plan was approved without publication (APPROVE); "
+                       "publishing needs Approve & Publish of this version and its targets")
+    return d
+
+
+def _authority_reasons(session: Session, intent: WriteIntent, reasons: list[str]) -> Decision | None:
+    """One model (§05 step 9-10, §14, U-10, ADR-0031/0074 amendments):
+
+    * delivery writes (push_branch/create_pr) are authorised by the plan APPROVAL decision itself;
+    * publication writes need the run's human PUBLICATION decision (exact publication + preview +
+      operation ids + targets, short expiry) **and** the APPROVE_AND_PUBLISH approval it references,
+      which must still be ACTIVE and bind the same version/hash/targets/operation kinds. A stale or
+      revoked approval, or a newer unapproved version, therefore stops every write of the run."""
+    if not catalog.is_publication_write(intent.provider, intent.operation):
+        return _approval_reasons(session, intent, reasons)
+    d = session.get(Decision, intent.decision_id) if intent.decision_id else None
+    if d is None or d.kind != "PUBLICATION":
+        reasons.append("PUBLICATION_DECISION_REQUIRED: publication writes need the human PUBLICATION decision of "
+                       "this run (ADR-0074); a plan approval alone does not authorise a concrete run")
+        _approval_reasons(session, intent, reasons, approval_id=d.id if d is not None and d.kind == "APPROVAL"
+                          else None, publication=True)
+        return d
+    approval_id = _publication_reasons(session, intent, d, reasons)
+    _approval_reasons(session, intent, reasons, approval_id=approval_id, publication=True)
     return d
 
 
@@ -175,7 +235,7 @@ def check_external_write(session: Session, intent: WriteIntent) -> InterlockResu
     elif enablement.active_enablement_decision(session, intent.provider) is None:
         reasons.append(f"WRITE_ENABLEMENT_DECISION_MISSING: no ACTIVE human decision enables {intent.provider!r}")
 
-    decision = _approval_reasons(session, intent, reasons)
+    decision = _authority_reasons(session, intent, reasons)
 
     cap_exp = ensure_aware(intent.capability_expires_at)
     if cap_exp is None:
@@ -191,6 +251,8 @@ def check_external_write(session: Session, intent: WriteIntent) -> InterlockResu
         reason="; ".join(reasons)[:2000],
         details={"operation": intent.operation, "plan_version_id": intent.approved_plan_version_id,
                  "approved_hash": intent.approved_hash, "decision_id": intent.decision_id,
+                 "publication_id": (intent.extra or {}).get("publication_id"),
+                 "operation_id": (intent.extra or {}).get("operation_id"),
                  "checked_at": utcnow().isoformat(), "reason_codes": [r.split(":", 1)[0] for r in reasons]},
     )
     return InterlockResult(allowed=allowed, reasons=reasons, decision=decision)

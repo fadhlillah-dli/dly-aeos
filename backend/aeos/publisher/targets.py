@@ -21,24 +21,22 @@ from sqlalchemy.orm import Session
 from aeos.core.errors import Blocked
 from aeos.models.portfolio import Project, ProjectIntegration
 from aeos.portfolio import facade as portfolio
+from aeos.portfolio import providers as pv
 from aeos.publisher.providers import atlassian as atl
 from aeos.publisher.providers import github_issues as gh
 from aeos.publisher.providers import google as gg
 from aeos.secrets import facade as secrets
 
 PURPOSES = ("docs", "issues")
+# purpose -> adapter family per domain profile (§04). The family is the adapter key; ``provider`` (the one
+# vocabulary of aeos.portfolio.providers) is what integrations, approvals, the interlock and the UI use.
 PROFILE: dict[str, dict[str, str]] = {
     "PERSONAL": {"docs": "google", "issues": "github-issues"},
     "OFFICE": {"docs": "confluence", "issues": "jira"},
 }
-INTEGRATION_PROVIDERS: dict[str, tuple[str, ...]] = {
-    "google": ("google-drive", "google", "google-docs"),
-    "github-issues": ("github-issues", "github"),
-    "confluence": ("confluence",),
-    "jira": ("jira",),
-}
-PROVIDER_LABEL = {"google": "Google Drive / Google Docs", "github-issues": "GitHub Issues",
-                  "confluence": "Confluence", "jira": "Jira"}
+FAMILY_PROVIDER: dict[str, str] = {"google": pv.GOOGLE_DRIVE, "github-issues": pv.GITHUB_ISSUES,
+                                   "confluence": pv.CONFLUENCE, "jira": pv.JIRA}
+PROVIDER_LABEL = {fam: pv.LABELS[p] for fam, p in FAMILY_PROVIDER.items()}
 
 
 @dataclass
@@ -51,16 +49,20 @@ class Target:
     remedies: list[str] = field(default_factory=list)
     config: dict[str, Any] = field(default_factory=dict)  # non-secret
     integration_id: str | None = None
+    provider: str = ""  # canonical provider id (aeos.portfolio.providers)
+    root_id: str = ""  # exact target identifier an approval binds ({provider, root_id})
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def identity(self) -> dict[str, str]:
+        return {"provider": self.provider, "root_id": self.root_id}
+
 
 def _integration(session: Session, project: Project, family: str, purpose: str) -> ProjectIntegration | None:
-    rows = list(session.scalars(select(ProjectIntegration).where(
-        ProjectIntegration.project_id == project.id,
-        ProjectIntegration.provider.in_(INTEGRATION_PROVIDERS[family]))))
-    rows = [r for r in rows if r.domain == project.domain]  # never cross-domain
+    provider = FAMILY_PROVIDER[family]
+    rows = [r for r in session.scalars(select(ProjectIntegration).where(ProjectIntegration.project_id == project.id))
+            if r.domain == project.domain and pv.normalize(r.provider) == provider]  # never cross-domain
     for r in rows:
         if r.purpose in (purpose, "default"):
             return r
@@ -78,10 +80,12 @@ def _secret_exists(ref: str) -> tuple[bool, str]:
 
 
 def _github_repo(session: Session, project: Project, integ: ProjectIntegration | None) -> str:
+    if integ is not None and integ.root_id:
+        return str(integ.root_id)  # GITHUB_REPOSITORY of the github-issues integration (exact target)
     if integ is not None and (integ.config or {}).get("repo"):
-        return str(integ.config["repo"])
+        return str(integ.config["repo"])  # legacy rows only (new config refuses a second target key)
     repos = [r for r in portfolio.repositories(session, project.id) if r.provider.upper() == "GITHUB"]
-    repos.sort(key=lambda r: (r.role != "project", r.full_name))
+    repos.sort(key=lambda r: (r.role not in ("project", "platform"), r.full_name))
     return repos[0].full_name if repos else ""
 
 
@@ -89,10 +93,11 @@ def resolve_target(session: Session, project: Project, purpose: str) -> Target:
     family = PROFILE[project.domain][purpose]
     integ = _integration(session, project, family, purpose)
     t = Target(purpose=purpose, family=family, label=PROVIDER_LABEL[family], status="READY",
-               integration_id=integ.id if integ else None)
+               integration_id=integ.id if integ else None, provider=FAMILY_PROVIDER[family])
     if family == "google":
-        root = (integ.root_id if integ else None) or "root"
-        t.config = {"root_folder_id": root, "root_label": "My Drive (root)" if root == "root" else root,
+        root = pv.target_identity(pv.GOOGLE_DRIVE, integ.root_id if integ else None)["root_id"]
+        t.root_id = root
+        t.config = {"root_folder_id": root, "root_label": "My Drive (root)" if root == pv.MY_DRIVE_ROOT else root,
                     "scope": gg.DRIVE_FILE_SCOPE}
         for ref in (gg.CLIENT_REF, gg.TOKEN_REF):
             ok, why = _secret_exists(ref)
@@ -103,6 +108,7 @@ def resolve_target(session: Session, project: Project, purpose: str) -> Target:
             t.remedies.append(gg.CONNECT_REMEDY)
     elif family == "github-issues":
         repo = _github_repo(session, project, integ)
+        t.root_id = repo
         cfg = dict(integ.config or {}) if integ else {}
         t.config = {"repo": repo, "issue_granularity": cfg.get("issue_granularity", "task"),
                     "milestone_labels": bool(cfg.get("milestone_labels", False)),
@@ -118,7 +124,9 @@ def resolve_target(session: Session, project: Project, purpose: str) -> Target:
             t.remedies.append(gh.CONNECT_REMEDY)
     else:
         cfg = atl.AtlassianConfig.from_integration(integ.tenant_id if integ else None,
-                                                   integ.root_id if integ else None, integ.config if integ else None)
+                                                   integ.root_id if integ else None, integ.config if integ else None,
+                                                   product=family)
+        t.root_id = cfg.parent_id if family == "confluence" else cfg.project_key
         status, reasons, remedy = atl.readiness(cfg, product=family)
         t.config = {"atlassian": asdict(cfg) | {"extra": {}}, "deployment": cfg.deployment, "enabled": cfg.enabled,
                     "parent_key": atl.CONFLUENCE_PARENT_KEY}

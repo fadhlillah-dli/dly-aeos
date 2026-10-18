@@ -83,6 +83,9 @@ def _git_env() -> dict[str, str]:
 def git(args: list[str], *, cwd: Path, timeout: int = GIT_TIMEOUT, check: bool = True,
         hooks_dir: Path | None = None) -> subprocess.CompletedProcess[str]:
     cmd = ["git"]
+    if sys.platform == "win32":
+        # Candidate workspaces live deep in the data dir; git refuses paths over MAX_PATH unless asked.
+        cmd += ["-c", "core.longpaths=true"]
     if hooks_dir is not None:
         cmd += ["-c", f"core.hooksPath={hooks_dir.as_posix()}"]
     cmd += args

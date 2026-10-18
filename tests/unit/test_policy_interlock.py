@@ -24,8 +24,8 @@ from aeos.policy.facade import WriteIntent, check_external_write
 from tests.conftest import create_admin, create_viewer
 from tests.unit.test_planning_support import make_project, sample_content
 
-DOC_TARGET = {"provider": "google-docs", "root_id": "F1"}
-CONF_TARGET = {"provider": "confluence", "space": "ENG", "parent_id": "123"}
+DOC_TARGET = {"provider": "google-drive", "root_id": "F1"}
+CONF_TARGET = {"provider": "confluence", "root_id": "123"}
 
 
 def _approved_plan(db, owner, project, *, targets, action="APPROVE_AND_PUBLISH", mode="LIVE"):
@@ -52,6 +52,27 @@ def _enable(db, owner, provider, domain):
     db.commit()
 
 
+def _publication_run(db, owner, project, v, approval_id, *, target, operations, expires=timedelta(hours=1)):
+    """The human Approve & Publish of one concrete preview: Publication + its PUBLICATION decision (ADR-0074)."""
+    from aeos.models.publishing import Publication
+
+    pub = Publication(project_id=project.id, domain=project.domain, plan_id=v.plan_id, plan_version_id=v.id,
+                      approved_hash=v.manifest_hash, decision_id=approval_id, preview_hash="sha256:" + "a" * 64,
+                      targets=[{**target, "status": "READY"}], status="RUNNING")
+    db.add(pub)
+    db.flush()
+    op_id = "op-" + pub.id[:8]
+    d = registry.record_decision(
+        db, kind="PUBLICATION", actor_user_id=owner.id, target_type="publication", target_id=pub.id,
+        target_version=v.id, target_hash=v.manifest_hash, allowed_operations=operations,
+        auth_scope={"publication_id": pub.id, "preview_hash": pub.preview_hash, "operation_ids": [op_id],
+                    "targets": [target], "approval_decision_id": approval_id},
+        project_id=project.id, domain=project.domain, rationale="Approve & Publish", expires_at=utcnow() + expires)
+    pub.publication_decision_id = d.id
+    db.commit()
+    return pub, d, {"publication_id": pub.id, "operation_id": op_id, "preview_hash": pub.preview_hash}
+
+
 @pytest.fixture
 def owner(db):
     return create_admin(db)
@@ -61,14 +82,17 @@ def owner(db):
 def personal(db, owner):
     project = make_project(db)
     plan, v, decision_id = _approved_plan(db, owner, project, targets=[DOC_TARGET])
-    _enable(db, owner, "google-docs", "PERSONAL")
+    _enable(db, owner, "google-drive", "PERSONAL")
+    pub, run, extra = _publication_run(db, owner, project, v, decision_id, target=DOC_TARGET,
+                                       operations=["create_folder", "create_doc"])
     intent = WriteIntent(
-        actor_user_id=owner.id, project_id=project.id, domain="PERSONAL", provider="google-docs",
-        operation="create_doc", target={"provider": "google-docs", "root_id": "F1", "logical_id": "00-product-home"},
-        approved_plan_version_id=v.id, approved_hash=v.manifest_hash, decision_id=decision_id,
-        capability_expires_at=utcnow() + timedelta(minutes=10),
+        actor_user_id=owner.id, project_id=project.id, domain="PERSONAL", provider="google-drive",
+        operation="create_doc", target={**DOC_TARGET, "logical_id": "00-product-home"},
+        approved_plan_version_id=v.id, approved_hash=v.manifest_hash, decision_id=run.id,
+        capability_expires_at=utcnow() + timedelta(minutes=10), extra=extra,
     )
-    return {"project": project, "plan": plan, "version": v, "decision_id": decision_id, "intent": intent}
+    return {"project": project, "plan": plan, "version": v, "decision_id": decision_id, "run_id": run.id,
+            "publication": pub, "intent": intent}
 
 
 def _codes(result):
@@ -78,7 +102,7 @@ def _codes(result):
 def test_full_valid_personal_write_is_allowed(db, personal):
     res = check_external_write(db, personal["intent"])
     assert res.allowed is True and res.reasons == []
-    assert res.decision is not None and res.decision.id == personal["decision_id"]
+    assert res.decision is not None and res.decision.id == personal["run_id"]  # the run's PUBLICATION decision
     audit = db.query(AuditEvent).filter(AuditEvent.action == "policy.interlock.check").all()
     assert audit and audit[-1].result == "SUCCESS"
 
@@ -151,15 +175,15 @@ def test_wrong_provider_denied(db, personal):
 
 
 def test_write_disabled_and_missing_enablement_decision(db, personal):
-    enablement.set_flag(db, "google-docs", False)
+    enablement.set_flag(db, "google-drive", False)
     db.commit()
     assert "WRITE_DISABLED" in _codes(check_external_write(db, personal["intent"]))
-    enablement.set_flag(db, "google-docs", True)
-    registry.invalidate_decisions(db, target_type="provider_write", target_id="google-docs", reason="revoked")
+    enablement.set_flag(db, "google-drive", True)
+    registry.invalidate_decisions(db, target_type="provider_write", target_id="google-drive", reason="revoked")
     db.commit()
     res = check_external_write(db, personal["intent"])
     # invalidating the enabling decision also turns the flag off (fail closed)
-    assert "WRITE_DISABLED" in _codes(res) and enablement.flag(db, "google-docs") is False
+    assert "WRITE_DISABLED" in _codes(res) and enablement.flag(db, "google-drive") is False
 
 
 def test_wrong_hash_denied(db, personal):
@@ -186,30 +210,37 @@ def test_invalidated_decision_denied(db, personal):
 
 def test_operation_not_allowed_and_target_out_of_scope(db, personal):
     assert "OPERATION_UNKNOWN" in _codes(check_external_write(db, replace(personal["intent"], operation="delete_doc")))
-    res = check_external_write(db, replace(personal["intent"], target={"provider": "google-docs", "root_id": "F2"}))
-    assert "TARGET_NOT_APPROVED" in _codes(res)
+    res = check_external_write(db, replace(personal["intent"], target={"provider": "google-drive", "root_id": "F2"}))
+    assert {"TARGET_NOT_APPROVED", "TARGET_NOT_IN_RUN"} <= _codes(res)
 
 
 def test_operation_not_in_approval_denied(db, owner):
+    """A run decision can never widen the plan approval: Drive writes under an approval that only names
+    GitHub Issues are refused even though the run decision itself lists them."""
     project = make_project(db)
-    _plan, v, did = _approved_plan(db, owner, project, targets=[{"provider": "github-issues", "repo": "o/r"}])
-    _enable(db, owner, "google-docs", "PERSONAL")
-    intent = WriteIntent(actor_user_id=owner.id, project_id=project.id, domain="PERSONAL", provider="google-docs",
+    _plan, v, did = _approved_plan(db, owner, project, targets=[{"provider": "github-issues", "root_id": "o/r"}])
+    _enable(db, owner, "google-drive", "PERSONAL")
+    _pub, run, extra = _publication_run(db, owner, project, v, did, target=DOC_TARGET, operations=["create_doc"])
+    intent = WriteIntent(actor_user_id=owner.id, project_id=project.id, domain="PERSONAL", provider="google-drive",
                          operation="create_doc", target=DOC_TARGET, approved_plan_version_id=v.id,
-                         approved_hash=v.manifest_hash, decision_id=did,
-                         capability_expires_at=utcnow() + timedelta(minutes=5))
+                         approved_hash=v.manifest_hash, decision_id=run.id,
+                         capability_expires_at=utcnow() + timedelta(minutes=5), extra=extra)
     assert {"OPERATION_NOT_APPROVED", "TARGET_NOT_APPROVED"} <= _codes(check_external_write(db, intent))
+    # a plan approval alone (no run decision) never authorises a concrete publication write
+    plain = replace(intent, decision_id=did)
+    assert "PUBLICATION_DECISION_REQUIRED" in _codes(check_external_write(db, plain))
 
 
 def test_mock_plan_version_is_never_published(db, owner):
     """§35/§49: fixture (MOCK) plan content is never written externally, even when approved."""
     project = make_project(db)
     _plan, v, did = _approved_plan(db, owner, project, targets=[DOC_TARGET], mode="MOCK")
-    _enable(db, owner, "google-docs", "PERSONAL")
-    intent = WriteIntent(actor_user_id=owner.id, project_id=project.id, domain="PERSONAL", provider="google-docs",
+    _enable(db, owner, "google-drive", "PERSONAL")
+    _pub, run, extra = _publication_run(db, owner, project, v, did, target=DOC_TARGET, operations=["create_doc"])
+    intent = WriteIntent(actor_user_id=owner.id, project_id=project.id, domain="PERSONAL", provider="google-drive",
                          operation="create_doc", target=DOC_TARGET, approved_plan_version_id=v.id,
-                         approved_hash=v.manifest_hash, decision_id=did,
-                         capability_expires_at=utcnow() + timedelta(minutes=5))
+                         approved_hash=v.manifest_hash, decision_id=run.id,
+                         capability_expires_at=utcnow() + timedelta(minutes=5), extra=extra)
     res = check_external_write(db, intent)
     assert not res.allowed and _codes(res) == {"VERSION_NOT_LIVE"}
 
@@ -242,10 +273,11 @@ def office(db, owner):
     project = make_project(db, domain=Domain.OFFICE)
     plan, v, did = _approved_plan(db, owner, project, targets=[CONF_TARGET])
     _enable(db, owner, "confluence", "OFFICE")
+    _pub, run, extra = _publication_run(db, owner, project, v, did, target=CONF_TARGET, operations=["create_doc"])
     intent = WriteIntent(actor_user_id=owner.id, project_id=project.id, domain="OFFICE", provider="confluence",
-                         operation="create_page", target={**CONF_TARGET, "logical_id": "00-product-home"},
-                         approved_plan_version_id=v.id, approved_hash=v.manifest_hash, decision_id=did,
-                         capability_expires_at=utcnow() + timedelta(minutes=5))
+                         operation="create_doc", target={**CONF_TARGET, "logical_id": "00-product-home"},
+                         approved_plan_version_id=v.id, approved_hash=v.manifest_hash, decision_id=run.id,
+                         capability_expires_at=utcnow() + timedelta(minutes=5), extra=extra)
     return intent
 
 
@@ -263,5 +295,5 @@ def test_office_with_authorisation_and_known_deployment_allowed(db, owner, offic
     db.commit()
     res = check_external_write(db, office)
     assert res.allowed, res.reasons
-    other = replace(office, provider="jira", operation="create_issue", target={"provider": "jira", "project_key": "ENG"})
+    other = replace(office, provider="jira", operation="create_issue", target={"provider": "jira", "root_id": "ENG"})
     assert "OFFICE_PROVIDER_NOT_AUTHORISED" in _codes(check_external_write(db, other))

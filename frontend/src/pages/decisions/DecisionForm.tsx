@@ -6,9 +6,26 @@ import { Button, Card, ErrorBox, Field, inputClass, Notice } from "../../compone
 
 export type DecisionKind = "EXCEPTION" | "RISK_ACCEPTANCE" | "WRITE_ENABLEMENT" | "POLICY" | "BUDGET";
 
-const PROVIDERS: Record<Domain, string[]> = {
-  PERSONAL: ["google-drive", "google-docs", "github-issues", "github-repo"],
+/** One provider vocabulary (backend aeos.portfolio.providers): Google Docs live in the google-drive target. */
+export const PROVIDERS: Record<Domain, string[]> = {
+  PERSONAL: ["google-drive", "github-issues", "github-repo"],
   OFFICE: ["confluence", "jira", "bitbucket"],
+};
+
+/** Exception presets with the exact target shape their consumer reads (PERSONAL only). */
+export const EXCEPTION_PRESETS: Record<string, { label: string; target: string; consumer: string; risk: string }> = {
+  secret_store_interim_keyring: {
+    label: "Secret store sementara di OS keyring (OpenBao belum tersedia)",
+    target: "secret_store/interim-keyring",
+    consumer: "aeos.secrets.provider",
+    risk: "Tanpa TTL/lease, audit vault dan ACL per namespace; proses dengan user OS yang sama dapat membaca nilai. OFFICE tidak pernah diterima.",
+  },
+  worker_sandbox_process: {
+    label: "Worker di process sandbox (WEAK) untuk PERSONAL",
+    target: "worker_sandbox/process",
+    consumer: "aeos.worker_runtime.sandbox",
+    risk: "Tidak ada penegakan egress/filesystem oleh OS; user OS sama. bash hanya bila allow_bash dicentang (ADR-0051).",
+  },
 };
 
 const OFFICE_KEYS = ["external_worker_allowed", "approved_worker_routes", "claude_max_allowed_for_office_data", "trace_destinations_allowed", "requires_isolated_runtime", "atlassian_deployment"];
@@ -45,7 +62,10 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
   const [companyRef, setCompanyRef] = useState("");
   const [allowedProviders, setAllowedProviders] = useState<string[]>([]);
   const [officeOverrides, setOfficeOverrides] = useState("");
+  const [preset, setPreset] = useState<string>("");
+  const [allowBash, setAllowBash] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const usePreset = kind === "EXCEPTION" && domain === "PERSONAL" && !!preset;
 
   const save = useMutation({
     mutationFn: (body: Record<string, unknown>) => post("/api/decisions", body),
@@ -83,6 +103,9 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
     if (kind === "WRITE_ENABLEMENT") {
       body.provider = provider;
       body.enabled = enabled;
+    } else if (usePreset) {
+      body.exception = preset;
+      if (preset === "worker_sandbox_process") body.allow_bash = allowBash;
     } else if (kind === "POLICY" && domain === "OFFICE" && (officeAuth || overrides)) {
       body.office_authorization = officeAuth;
       if (officeAuth) {
@@ -98,7 +121,7 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
     save.mutate(body);
   };
 
-  const needsTarget = kind !== "WRITE_ENABLEMENT" && !(kind === "POLICY" && domain === "OFFICE" && officeAuth);
+  const needsTarget = kind !== "WRITE_ENABLEMENT" && !usePreset && !(kind === "POLICY" && domain === "OFFICE" && officeAuth);
   return (
     <Card title="Catat keputusan manusia">
       <div className="grid gap-3">
@@ -115,6 +138,35 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
             <option value="BUDGET">BUDGET — keputusan anggaran (diproses modul biaya)</option>
           </select>
         </Field>
+        {kind === "EXCEPTION" &&
+          (domain === "PERSONAL" ? (
+            <div className="grid gap-3 rounded-md border border-line p-3">
+              <Field label="Jenis pengecualian" hint="Preset memakai target persis yang dibaca modul pemakainya.">
+                <select aria-label="Jenis pengecualian" className={inputClass} value={preset} onChange={(e) => setPreset(e.target.value)}>
+                  <option value="">Lainnya (target manual)</option>
+                  {Object.entries(EXCEPTION_PRESETS).map(([k, v]) => (
+                    <option key={k} value={k}>
+                      {v.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {usePreset && (
+                <Notice tone="warn">
+                  Target <strong>{EXCEPTION_PRESETS[preset].target}</strong> (dibaca oleh {EXCEPTION_PRESETS[preset].consumer}). Risiko residual:{" "}
+                  {EXCEPTION_PRESETS[preset].risk} Wajib berlaku sampai tanggal tertentu.
+                </Notice>
+              )}
+              {preset === "worker_sandbox_process" && (
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={allowBash} onChange={(e) => setAllowBash(e.target.checked)} /> Izinkan bash (allow_bash) — worker
+                  menjalankan perintah sebagai user OS yang sama
+                </label>
+              )}
+            </div>
+          ) : (
+            <Notice tone="info">Pengecualian secret store sementara dan process sandbox hanya untuk PERSONAL; OFFICE selalu ditolak.</Notice>
+          ))}
         {kind === "WRITE_ENABLEMENT" && (
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Provider">

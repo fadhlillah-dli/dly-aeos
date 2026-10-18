@@ -175,11 +175,21 @@ export interface ManualInfo {
   note: string;
 }
 
+export interface ConfiguredTarget {
+  provider: string;
+  root_id: string;
+  purpose?: string;
+  integration_id?: string;
+  label?: string;
+}
+
 export interface OperationCatalog {
   providers: string[];
   publish: Record<string, string[]>;
   delivery: Record<string, string[]>;
   plan: string[];
+  /** Exact {provider, root_id} targets configured in the Integration Registry. */
+  configured_targets?: ConfiguredTarget[];
 }
 
 export interface PlanDetail extends PlanSummary {

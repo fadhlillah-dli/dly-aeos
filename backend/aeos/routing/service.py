@@ -21,6 +21,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -106,12 +107,7 @@ def refresh_config_hash(session: Session, route: ModelRoute, *, reason: str) -> 
                              reason=f"route configuration changed: {reason}")
     except (ImportError, ModuleNotFoundError):
         pass  # hash binding already makes old approvals ineffective
-    try:
-        from aeos.doctor.facade import invalidate
-
-        invalidate(session, invalidator="config:routes", reason=f"{route.route_key}: {reason}")
-    except (ImportError, ModuleNotFoundError):
-        pass
+    notify_readiness(session, route.route_key, reason=reason, pool=route.pool)
     try:
         from aeos.events.service import emit
 
@@ -120,6 +116,29 @@ def refresh_config_hash(session: Session, route: ModelRoute, *, reason: str) -> 
     except Exception:  # pragma: no cover
         log.exception("emit route.config_changed failed")
     return True
+
+
+READINESS_INVALIDATORS = ("config:routes", "model:route")
+
+
+def readiness_invalidators(pool: str | None) -> tuple[str, ...]:
+    """``config:routes`` + ``model:route`` for every route change, plus ``model:route:<POOL>`` so a check can depend
+    on one pool only (the Claude bridge proof on SUPERVISOR routes). Unknown pool -> wildcard (conservative)."""
+    return (*READINESS_INVALIDATORS, f"model:route:{pool.upper()}" if pool else "model:route:*")
+
+
+def notify_readiness(session: Session, route_key: str, *, reason: str, pool: str | None = None) -> int:
+    """§08/§50 "Model alias/provider route berubah": a route status, pin (resolved model) or configuration
+    change (eligible_domains, data terms, ...) marks the dependent Doctor checks STALE in the same
+    transaction, so CAN_RUN_WORKER / review gates stop being READY until rechecked."""
+    try:
+        from aeos.doctor.facade import invalidate
+    except (ImportError, ModuleNotFoundError):
+        return 0
+    if pool is None:
+        pool = session.scalar(select(ModelRoute.pool).where(ModelRoute.route_key == route_key))
+    return sum(invalidate(session, invalidator=inv, reason=f"{route_key}: {reason}"[:200])
+               for inv in readiness_invalidators(pool))
 
 
 def get_route(session: Session, route_key: str) -> ModelRoute:
@@ -226,6 +245,36 @@ def quota_exhausted(session: Session, route: ModelRoute) -> QuotaState | None:
     return None
 
 
+def credential_rejections(route: ModelRoute, *, domain: str) -> list[str]:
+    """§26 credential paths (integration amendment, ADR-0041): a route the broker could not authenticate
+    for *domain* is never eligible. OpenRouter routes may use the default worker refs; any other remote
+    OpenAI-compatible upstream must name ``mode_params.credential_ref`` in a namespace the broker allows
+    for the domain (loopback test endpoints may run without a key)."""
+    if route.provider == "claude-native":
+        return []
+    ref = (route.mode_params or {}).get("credential_ref")
+    if not ref:
+        endpoint = urlparse(route.endpoint or "")
+        # same test as the broker (scheme + parsed host): "http://localhost.example" is not loopback
+        loopback = endpoint.scheme == "http" and endpoint.hostname in {"127.0.0.1", "localhost", "::1"}
+        if route.provider == "openrouter":
+            # the broker's default OpenRouter references are worker/PERSONAL ones; OFFICE has none
+            return ["OFFICE routes need an office/ mode_params.credential_ref"] if domain == Domain.OFFICE.value else []
+        if route.provider == "local" or loopback:
+            return []
+        return ["no mode_params.credential_ref: the broker has no credential for this upstream"]
+    ref = str(ref)
+    try:
+        from aeos.broker.facade import credential_ref_problem
+
+        # a projects/<id>/ reference is bound to its project; the broker re-checks the exact run project
+        project_id = ref.split("/")[1] if ref.startswith("projects/") and ref.count("/") >= 2 else None
+        problem = credential_ref_problem(domain, ref, project_id=project_id)
+    except (ImportError, ModuleNotFoundError):
+        return ["broker unavailable: credential reference cannot be checked (fail closed)"]
+    return [f"credential_ref {ref}: {problem}"] if problem else []
+
+
 def _validate_inputs(domain: str, data_classification: str, pool: str) -> None:
     if domain not in {d.value for d in Domain}:
         raise ValidationFailed("domain must be PERSONAL or OFFICE (explicit human choice)", code="DOMAIN_REQUIRED")
@@ -289,6 +338,7 @@ def route_rejections(
             reasons.append(f"context window {route.context_window} < required {min_context}")
     if route.availability == "MISSING":
         reasons.append("route missing from the provider catalog at the last refresh")
+    reasons += credential_rejections(route, domain=domain)
     q = quota_exhausted(session, route)
     if q is not None:
         resets = q.resets_at.isoformat() if q.resets_at else "UNKNOWN"
@@ -510,6 +560,10 @@ def observe_supervisor_resolution(session: Session, *, route_key: str, requested
         route.notes = (route.notes + "\n" if route.notes else "") + (
             f"{utcnow().date().isoformat()}: alias {requested} now resolves to {resolved} (was {previous})")
         return refresh_config_hash(session, route, reason=f"alias {requested} resolved {previous} -> {resolved}")
+    # The first observation (no previously known identity) is not a pin change: nothing was bound to an earlier
+    # identity, and the bridge proof that observed it records the model itself. Invalidating here would mark
+    # claude.capability_test STALE on the first call of every other supervisor alias (e.g. fable after an opus
+    # test) and push reviews to the manual fallback. A real re-resolution goes through refresh_config_hash above.
     route.config_hash = compute_config_hash(route)
     return False
 
@@ -588,13 +642,16 @@ def activate_route(
     except (ImportError, ModuleNotFoundError) as exc:
         raise Blocked("decision registry (aeos.policy) unavailable - activation cannot be recorded",
                       code="DECISION_REGISTRY_UNAVAILABLE") from exc
+    previous_status = route.status
     route.status = mode
     session.flush()
+    notify_readiness(session, route.route_key, reason=f"status {previous_status} -> {mode}", pool=route.pool)
     return route, decision
 
 
 def disable_route(session: Session, route_key: str, *, reason: str) -> ModelRoute:
     route = get_route(session, route_key)
+    previous_status = route.status
     route.status = "DISABLED"
     try:
         from aeos.policy.facade import invalidate_decisions
@@ -604,4 +661,6 @@ def disable_route(session: Session, route_key: str, *, reason: str) -> ModelRout
     except (ImportError, ModuleNotFoundError):
         pass  # DISABLED status alone already excludes the route
     session.flush()
+    notify_readiness(session, route.route_key, reason=f"status {previous_status} -> DISABLED: {reason}",
+                     pool=route.pool)
     return route
