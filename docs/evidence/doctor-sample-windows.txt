@@ -1,0 +1,795 @@
+DLY AEOS Readiness Doctor - sample output (Windows)
+=====================================================
+commit : eac9f80 (all sections except --functional); --functional: e145907
+date   : 2026-10-18 (integration day; local clock 2026-10-19 00:57 +07:00, --functional 00:54 +07:00)
+OS     : Windows 11 Pro 10.0.26200 (win32, AMD64), Windows PowerShell 5.1
+tools  : (environment, not Doctor output) git, Python 3.13, Node 24, gh, Claude Code 2.1.302 (Max login);
+         absent: OpenBao, OpenCode, Docker
+
+EVIDENCE LEVEL: E3 runtime observation of THIS machine only, at the time above. It proves nothing about
+another host, OS, tool version or configuration, and it is not a functional proof of anything the checks
+themselves do not claim (CONNECTED != VERIFIED; UNKNOWN/NOT-PROVEN are not passes).
+Data directory: a fresh temporary AEOS_DATA_DIR (not the owner's real data dir).
+Redaction: user name, home and absolute paths -> logical names (<home>, <data>, <repo>), GitHub owner ->
+<owner>; checked against the aeos.core.redaction credential patterns (none found); no secret was
+stored or printed. ASCII only.
+Exit codes: 00-doctor-before-db exit=1; 01-db-upgrade exit=0; 02-seed exit=0; 03-reconcile exit=0; 04-doctor exit=1; 05-doctor-json exit=1; 06-doctor-functional exit=1 (at e145907; CAN_OPEN_DASHBOARD critical: frontend not built)
+
+
+##### aeos doctor  (fresh data dir, BEFORE `db upgrade`: print-only, nothing created)
+
+DLY AEOS Readiness Doctor - bootstrap layer (no server, no LLM)
+platform: win32   data dir: <home>/.../data (AEOS_DATA_DIR)   database: missing
++------------------+----------------------------------+----------------+----------+--------------------------------------------------------------------------------------------+
+| GROUP            | CHECK                            | STATUS         | SEV      | SUMMARY                                                                                    |
++------------------+----------------------------------+----------------+----------+--------------------------------------------------------------------------------------------+
+| HOST             | host.clock                       | UNKNOWN        | LOW      | Tidak ada database untuk membandingkan waktu tercatat; NTP tidak diperiksa.                |
+| HOST             | host.data_dir                    | MISSING        | CRITICAL | Data directory belum dibuat.                                                               |
+| HOST             | host.disk                        | VERIFIED       | INFO     | Ruang kosong 189.26 GiB pada lokasi data.                                                  |
+| HOST             | host.platform                    | VERIFIED       | INFO     | Windows AMD64, 12 CPU, RAM 15.4 GiB (skenario: platform didukung).                         |
+| HOST             | host.port                        | VERIFIED       | INFO     | Port 8787 di 127.0.0.1 tersedia.                                                           |
+| REPOSITORY       | repo.hooks                       | VERIFIED       | INFO     | 0 git hook aktif; konfigurasi agent/MCP proyek: tidak ada.                                 |
+| REPOSITORY       | repo.install_manifest            | CONFIGURED     | INFO     | Manifest valid (100 komponen); database belum ada sehingga belum dimuat.                   |
+| REPOSITORY       | repo.lockfiles                   | VERIFIED       | INFO     | Lockfile frontend dan Python tersedia.                                                     |
+| REPOSITORY       | repo.origin                      | VERIFIED       | INFO     | Remote origin cocok dengan github:<owner>       /dly-aeos.                                 |
+| REPOSITORY       | repo.root                        | VERIFIED       | INFO     | Root repository platform ditemukan (pyproject, backend, AGENTS.md, manifest).              |
+| REPOSITORY       | repo.state                       | VERIFIED       | INFO     | Branch worktree-wf_48a549c3-5c7-3 @ eac9f80782c9; bersih.                                  |
+| RUNTIME          | runtime.backend_deps             | VERIFIED       | INFO     | 22 dependensi runtime terpasang dan sesuai spesifikasi.                                    |
+| RUNTIME          | runtime.db                       | MISSING        | CRITICAL | Database lokal belum dibuat.                                                               |
+| RUNTIME          | runtime.frontend_dist            | MISSING        | CRITICAL | Frontend belum di-build; dashboard tidak dapat dibuka (API tetap berjalan).                |
+| RUNTIME          | runtime.node                     | VERIFIED       | INFO     | Node.js 24.15.0 ditemukan (skenario: perintah versi berhasil; keaslian distribusi tidak... |
+| RUNTIME          | runtime.python                   | VERIFIED       | INFO     | Python 3.13.12 (CPython).                                                                  |
+| RUNTIME          | runtime.storage                  | MISSING        | CRITICAL | Database belum ada; tes tulis tidak dijalankan.                                            |
+| LOCAL_AUTH       | auth.admins                      | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| LOCAL_AUTH       | auth.bootstrap                   | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| LOCAL_AUTH       | auth.default_credentials         | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| LOCAL_AUTH       | auth.interlock                   | CONFIGURED     | INFO     | Interlock tersedia; efektivitas penegakan dibuktikan oleh uji negatif modul policy (buk... |
+| LOCAL_AUTH       | auth.sessions                    | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| CANONICAL_POLICY | policy.mci                       | MISSING        | HIGH     | MCI_V2_SOURCE_OF_TRUTH belum tersedia; kepatuhan kanonik UNVERIFIED (bukan PASS).          |
+| CANONICAL_POLICY | policy.office_defaults           | VERIFIED       | INFO     | OFFICE default deny berlaku: external_worker_allowed=false, approved_worker_routes=[].     |
+| CANONICAL_POLICY | policy.snapshot                  | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| CLAUDE_NATIVE    | claude.auth                      | CONNECTED      | INFO     | Login native Claude.ai (firstParty, Max) terdeteksi; fungsi bridge belum dibuktikan ole... |
+| CLAUDE_NATIVE    | claude.binary                    | VERIFIED       | INFO     | Claude Code 2.1.302 ditemukan (skenario: perintah versi berhasil; keaslian distribusi t... |
+| CLAUDE_NATIVE    | claude.capability_test           | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| CLAUDE_NATIVE    | claude.env                       | VERIFIED       | INFO     | ANTHROPIC_API_KEY/AUTH_TOKEN/BASE_URL dan variabel provider alternatif tidak ada.          |
+| CLAUDE_NATIVE    | claude.extra_billing             | UNKNOWN        | MEDIUM   | Pengaturan extra usage berbayar tidak dapat dibaca secara resmi oleh AEOS; status UNKNOWN. |
+| CLAUDE_NATIVE    | claude.quota                     | UNKNOWN        | LOW      | Kuota mingguan Max (termasuk Fable) tidak diekspos secara resmi; ditampilkan UNKNOWN. S... |
+| SECRET           | secret.keyring                   | CONFIGURED     | INFO     | Backend WinVaultKeyring tersedia (tes tulis hanya dengan --functional).                    |
+| SECRET           | secret.no_raw_exposure           | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| SECRET           | secret.openbao_binary            | MISSING        | MEDIUM   | OpenBao tidak ditemukan (<data>/bin dan PATH).                                             |
+| SECRET           | secret.openbao_health            | MISSING        | HIGH     | OpenBao tidak terjangkau di http://127.0.0.1:8200 (UNREACHABLE; biner OpenBao belum ter... |
+| SECRET           | secret.status                    | MISSING        | HIGH     | Secret store tidak tersedia (OpenBao belum siap dan tidak ada pengecualian interim OS k... |
+| WORKER           | worker.agent_definition          | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| WORKER           | worker.contract                  | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| WORKER           | worker.opencode                  | MISSING        | HIGH     | OpenCode tidak ditemukan (versi yang dipin: 1.19.3).                                       |
+| CONTAINMENT      | containment.docker               | MISSING        | LOW      | Docker tidak ditemukan (opsional; tidak memblokir capability lain).                        |
+| CONTAINMENT      | containment.protected_paths      | CONFIGURED     | INFO     | 9 protected path terdefinisi; penegakan oleh broker/verifier dibuktikan terpisah (NOT-P... |
+| CONTAINMENT      | containment.sandbox              | UNKNOWN        | LOW      | Level tersedia: process (WEAK); syarat policy (keputusan pengecualian) tidak dapat dini... |
+| MODEL_ROUTE      | route.budget_admission           | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| MODEL_ROUTE      | route.catalog_freshness          | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| MODEL_ROUTE      | route.registry                   | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| MODEL_ROUTE      | route.worker_key                 | MISSING        | HIGH     | Secret store tidak tersedia; status kunci tidak dapat dibaca (fail closed).                |
+| PROJECT_ADAPTERS | adapter.github_token             | MISSING        | HIGH     | Secret store tidak tersedia; token GitHub tidak dapat dibaca (fail closed).                |
+| PROJECT_ADAPTERS | adapter.google_oauth             | MISSING        | HIGH     | Secret store tidak tersedia; credential Google tidak dapat diperiksa (fail closed).        |
+| PROJECT_ADAPTERS | adapter.office_bitbucket         | NOT_APPLICABLE | INFO     | Adapter Bitbucket belum dikonfigurasi (OFFICE belum diotorisasi).                          |
+| PROJECT_ADAPTERS | adapter.office_confluence        | NOT_APPLICABLE | INFO     | Adapter Confluence belum dikonfigurasi (OFFICE belum diotorisasi).                         |
+| PROJECT_ADAPTERS | adapter.office_jira              | NOT_APPLICABLE | INFO     | Adapter Jira belum dikonfigurasi (OFFICE belum diotorisasi).                               |
+| PROJECT_ADAPTERS | adapter.write_enablement         | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| DELIVERY         | delivery.branch_protection       | UNKNOWN        | LOW      | Database belum ada; bukti kemampuan provider tidak dapat dibaca.                           |
+| DELIVERY         | delivery.ci_workflow             | VERIFIED       | INFO     | 4 action di workflow CI dipin ke commit SHA (bukti statis E1).                             |
+| DELIVERY         | delivery.staging_target          | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| EVIDENCE_REVIEW  | evidence.acceptance_suite        | CONFIGURED     | INFO     | 5 file test acceptance (read-only bagi worker); belum dijalankan oleh Doctor.              |
+| EVIDENCE_REVIEW  | evidence.dir_permissions         | CONFIGURED     | INFO     | Partisi PERSONAL/OFFICE terpisah dan dapat ditulis; ACL Windows tidak diperiksa.           |
+| EVIDENCE_REVIEW  | evidence.trace_redaction         | VERIFIED       | INFO     | Redaksi pola credential dan kunci sensitif berfungsi (uji sintetis).                       |
+| EVIDENCE_REVIEW  | evidence.verifier                | CONFIGURED     | INFO     | Collector dan acceptance tersedia; independensi dibuktikan oleh uji modul verification.    |
+| RECOVERY         | recovery.backups                 | MISSING        | MEDIUM   | Belum ada backup di <data>/backups (ops backup maupun salinan pra-upgrade).                |
+| RECOVERY         | recovery.config_rollback         | MISSING        | LOW      | Belum ada released controller artifact; rollback controller/konfigurasi belum tersedia.    |
+| RECOVERY         | recovery.leases                  | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| RECOVERY         | recovery.publication_idempotency | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
+| RECOVERY         | recovery.restore_test            | UNKNOWN        | LOW      | Database belum diinisialisasi; pemeriksaan ini membutuhkan database.                       |
++------------------+----------------------------------+----------------+----------+--------------------------------------------------------------------------------------------+
+Skipped (opt-in): containment.report  -> run with --functional
+
+Capabilities (READY only when every critical check is OK):
++-----------------------------+---------+------------------------------------------------------------------------------------------------------+
+| CAPABILITY                  | STATUS  | FIRST REASON                                                                                         |
++-----------------------------+---------+------------------------------------------------------------------------------------------------------+
+| CAN_OPEN_DASHBOARD          | BLOCKED | host.data_dir: MISSING - Data directory belum dibuat.                                                |
+| CAN_PLAN_PERSONAL           | BLOCKED | host.data_dir: MISSING - Data directory belum dibuat.                                                |
+| CAN_PLAN_OFFICE             | BLOCKED | OFFICE default deny (S23): claude_max_allowed_for_office_data=false menurut policy/office-default... |
+| CAN_PUBLISH_PERSONAL        | BLOCKED | host.data_dir: MISSING - Data directory belum dibuat.                                                |
+| CAN_RUN_WORKER              | BLOCKED | host.data_dir: MISSING - Data directory belum dibuat.                                                |
+| CAN_REVIEW_WITH_MAX         | BLOCKED | host.data_dir: MISSING - Data directory belum dibuat.                                                |
+| CAN_PREPARE_PR              | BLOCKED | host.data_dir: MISSING - Data directory belum dibuat.                                                |
+| CAN_USE_OFFICE_INTEGRATIONS | BLOCKED | OFFICE default deny (S23): integrations_allowed=false menurut policy/office-defaults.yaml; butuh ... |
+| CAN_VALIDATE_STAGING        | BLOCKED | host.data_dir: MISSING - Data directory belum dibuat.                                                |
++-----------------------------+---------+------------------------------------------------------------------------------------------------------+
+
+Residual risks (true even when a gate is READY; never counted as a pass):
+  [CAN_PLAN_PERSONAL] Extra usage berbayar akun Claude UNKNOWN: bila aktif, pemakaian di atas kuota Max dapat ditagih; pastikan nonaktif di pengaturan akun (S12)
+  [CAN_PLAN_OFFICE] Extra usage berbayar akun Claude UNKNOWN: bila aktif, pemakaian di atas kuota Max dapat ditagih; pastikan nonaktif di pengaturan akun (S12)
+  [CAN_REVIEW_WITH_MAX] Extra usage berbayar akun Claude UNKNOWN: bila aktif, pemakaian di atas kuota Max dapat ditagih; pastikan nonaktif di pengaturan akun (S12)
+  [CAN_PREPARE_PR] Merge ke main tidak ditegakkan provider; human-only merge bergantung pada broker tanpa operasi merge dan owner credential di luar runtime agent (S31).
+
+Remedies (copy and run yourself; DLY AEOS never runs them):
+  [host.data_dir] Buat data dir dan database lokal (dengan backup bila sudah ada)
+      command : .\aeos.ps1 db upgrade
+      source  : aeos.core.migrate
+      target  : <data>
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: hapus data dir baru (belum berisi data)
+      evidence: data dir ada dan dapat ditulis
+  [runtime.db] Buat/upgrade database (backup otomatis sebelum migrasi)
+      command : .\aeos.ps1 db upgrade
+      source  : aeos.core.migrate (Alembic)
+      target  : <data>/aeos.sqlite3
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: restore backup pra-upgrade dari <data>/backups
+      evidence: aeos db status
+  [runtime.frontend_dist] Build Control Center dari lockfile (dari root repo)
+      command : cd frontend; npm.cmd ci --no-audit --no-fund; npm.cmd run build
+      source  : frontend/package-lock.json
+      target  : <repo>/frontend/dist
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: hapus frontend/dist
+      evidence: frontend/dist/index.html ada
+  [runtime.storage] Buat database lokal
+      command : .\aeos.ps1 db upgrade
+      target  : <data>/aeos.sqlite3
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: tidak diperlukan
+      evidence: tes tulis berhasil
+  [auth.admins, auth.bootstrap, auth.default_credentials, auth.sessions, policy.snapshot, claude.capability_test, secret.no_raw_exposure, worker.agent_definition, worker.contract, route.budget_admission, route.catalog_freshness, route.registry, adapter.write_enablement, delivery.staging_target, recovery.leases, recovery.publication_idempotency, recovery.restore_test] Buat database lokal lalu jalankan ulang Doctor
+      command : .\aeos.ps1 db upgrade
+      target  : <data>/aeos.sqlite3
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: tidak diperlukan
+      evidence: pemeriksaan ini tidak UNKNOWN lagi
+  [policy.mci] Pemilik menyediakan sumber MCI kanonik (tidak direkonstruksi dari ingatan model)
+      target  : policy/mci-reference.yaml
+      privilege: pemilik
+      cost    : tidak ada
+      rollback: tidak diperlukan
+      evidence: hash sumber MCI
+  [claude.extra_billing] Periksa manual pengaturan usage di akun Claude dan pastikan extra usage berbayar nonaktif (S12)
+      source  : S03: https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-or-max-plan
+      privilege: pemilik akun
+      cost    : mencegah tagihan tambahan
+      rollback: tidak diperlukan
+      evidence: catatan keputusan pemilik
+  [secret.openbao_binary, secret.openbao_health] Pasang biner OpenBao resmi ke <data>/bin (rencana ditampilkan dan dikonfirmasi dulu; SHA256 dicocokkan dengan checksums.txt, tanda tangan GPG belum diverifikasi)
+      command : .\aeos.ps1 vault install
+      source  : S24: https://github.com/openbao/openbao/releases / https://openbao.org/docs/auth/approle/
+      target  : <data>/bin, 127.0.0.1:8200
+      privilege: pemilik (pengguna lokal, tanpa elevasi)
+      cost    : tidak ada
+      rollback: hapus <data>/bin/bao
+      evidence: secret.openbao_binary VERIFIED
+  [secret.status] Pasang biner OpenBao resmi ke <data>/bin (rencana ditampilkan dan dikonfirmasi dulu; SHA256 dicocokkan dengan checksums.txt, tanda tangan GPG belum diverifikasi); lalu .\aeos.ps1 vault init. Alternatif sementara (PERSONAL saja, residual risk): keputusan EXCEPTION pemilik untuk OS keyring - lihat .\aeos.ps1 secrets interim-keyring
+      command : .\aeos.ps1 vault install
+      source  : S24: https://github.com/openbao/openbao/releases / https://openbao.org/docs/auth/approle/
+      target  : <data>/bin, 127.0.0.1:8200
+      privilege: pemilik (pengguna lokal, tanpa elevasi)
+      cost    : tidak ada
+      rollback: hapus <data>/bin/bao
+      evidence: secret.openbao_binary VERIFIED
+  [worker.opencode] Pasang OpenCode versi yang dipin (worker engine pertama, S07 langkah 5); fungsi dibuktikan terpisah oleh uji kontrak worker
+      command : npm.cmd install -g opencode-ai@1.19.3
+      source  : S28: https://github.com/anomalyco/opencode (paket npm opencode-ai; install-manifest/ otoritatif)
+      target  : PATH atau setelan opencode_binary (AEOS_OPENCODE_BINARY)
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: npm.cmd uninstall -g opencode-ai
+      evidence: worker.opencode VERIFIED (opencode --version)
+  [containment.docker] Opsional: pasang Docker Desktop/Engine bila sandbox container dibutuhkan
+      command : winget install --id Docker.DockerDesktop -e
+      source  : docs.docker.com (Docker Desktop; Linux: Docker Engine dari paket resmi)
+      privilege: admin OS
+      cost    : lisensi Docker Desktop belum diperiksa
+      rollback: uninstall Docker
+      evidence: docker --version
+  [recovery.backups] Buat backup konsisten (database + evidence per domain); restore-test setelahnya
+      command : .\aeos.ps1 ops backup create
+      source  : aeos.operations.backup (runbook operations)
+      target  : <data>/backups
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: hapus direktori backup baru
+      evidence: recovery.backups CONFIGURED lalu recovery.restore_test VERIFIED
+
+Results were NOT stored (database not initialised). Create it with: .\aeos.ps1 db upgrade
+EXIT 1: critical check(s) for CAN_OPEN_DASHBOARD not OK: host.data_dir, runtime.db, runtime.frontend_dist, runtime.storage, auth.bootstrap, auth.default_credentials
+
+
+##### aeos db upgrade
+
+Database is at the latest schema.
+
+
+##### aeos seed  (design catalog; output shortened)
+
+aeos.policy.seed: {'adrs': {'created': 40, 'updated': 0, 'unchanged': 0, 
+'skipped': []}, 'adr_0003_exception': 'created', 'policy_snapshot': {'version':
+'1', 'content_hash': 
+'sha256:6b7af72ba7ab83c243fcd51417c7a16ff0be48aea67f1cdddec1109a57b14b23'}, 
+'mci': 'UNVERIFIED'}
+aeos.inventory.seed: {'manifest_hash': 
+'sha256:fa43d3f853d52be8f74ca4d56d3f60c59557caa8dda5818db267623ce6001222', 
+'components': 100, 'created': 100, 'updated': 0, 'tombstoned': 0, 
+...
+
+
+##### aeos inventory reconcile  (read-only probes; output shortened)
+
++------------------------------+---------+-----+------+
+| COMPONENT                    | PROBE   | OBS | NOTE |
++------------------------------+---------+-----+------+
+| capability-broker            | OK      | 1   |      |
+| claude-code                  | OK      | 1   |      |
+| claude-native-bridge         | OK      | 1   |      |
+| control-center-frontend      | OK      | 1   |      |
+| cost-evaluation              | OK      | 1   |      |
+| delivery-ci                  | OK      | 1   |      |
+| dly-aeos-control-plane       | OK      | 1   |      |
+| dly-aeos-platform-repo       | OK      | 2   |      |
+| docker                       | OK      | 1   |      |
+...
+
+
+##### aeos doctor  (after db upgrade + seed + reconcile; no SUPER_ADMIN yet)
+
+DLY AEOS Readiness Doctor - bootstrap layer (no server, no LLM)
+platform: win32   data dir: <home>/.../data (AEOS_DATA_DIR)   database: present
++------------------+----------------------------------+----------------+----------+--------------------------------------------------------------------------------------------+
+| GROUP            | CHECK                            | STATUS         | SEV      | SUMMARY                                                                                    |
++------------------+----------------------------------+----------------+----------+--------------------------------------------------------------------------------------------+
+| HOST             | host.clock                       | VERIFIED       | INFO     | Tidak ada tanda jam mundur terhadap record terakhir (NTP tidak dibandingkan).              |
+| HOST             | host.data_dir                    | VERIFIED       | INFO     | Data directory ada dan tes tulis berhasil.                                                 |
+| HOST             | host.disk                        | VERIFIED       | INFO     | Ruang kosong 189.15 GiB pada lokasi data.                                                  |
+| HOST             | host.platform                    | VERIFIED       | INFO     | Windows AMD64, 12 CPU, RAM 15.4 GiB (skenario: platform didukung).                         |
+| HOST             | host.port                        | VERIFIED       | INFO     | Port 8787 di 127.0.0.1 tersedia.                                                           |
+| REPOSITORY       | repo.hooks                       | VERIFIED       | INFO     | 0 git hook aktif; konfigurasi agent/MCP proyek: tidak ada.                                 |
+| REPOSITORY       | repo.install_manifest            | VERIFIED       | INFO     | Manifest valid dan termuat (100 komponen).                                                 |
+| REPOSITORY       | repo.lockfiles                   | VERIFIED       | INFO     | Lockfile frontend dan Python tersedia.                                                     |
+| REPOSITORY       | repo.origin                      | VERIFIED       | INFO     | Remote origin cocok dengan github:<owner>       /dly-aeos.                                 |
+| REPOSITORY       | repo.root                        | VERIFIED       | INFO     | Root repository platform ditemukan (pyproject, backend, AGENTS.md, manifest).              |
+| REPOSITORY       | repo.state                       | VERIFIED       | INFO     | Branch worktree-wf_48a549c3-5c7-3 @ eac9f80782c9; bersih.                                  |
+| RUNTIME          | runtime.backend_deps             | VERIFIED       | INFO     | 22 dependensi runtime terpasang dan sesuai spesifikasi.                                    |
+| RUNTIME          | runtime.db                       | VERIFIED       | INFO     | Database ada; belum ada revisi Alembic; skema dari bootstrap create_all.                   |
+| RUNTIME          | runtime.frontend_dist            | MISSING        | CRITICAL | Frontend belum di-build; dashboard tidak dapat dibuka (API tetap berjalan).                |
+| RUNTIME          | runtime.node                     | VERIFIED       | INFO     | Node.js 24.15.0 ditemukan (skenario: perintah versi berhasil; keaslian distribusi tidak... |
+| RUNTIME          | runtime.python                   | VERIFIED       | INFO     | Python 3.13.12 (CPython).                                                                  |
+| RUNTIME          | runtime.storage                  | VERIFIED       | INFO     | Tes tulis database (BEGIN IMMEDIATE + rollback) dan file data dir berhasil.                |
+| LOCAL_AUTH       | auth.admins                      | MISSING        | MEDIUM   | Tidak ada SUPER_ADMIN aktif.                                                               |
+| LOCAL_AUTH       | auth.bootstrap                   | MISSING        | CRITICAL | Belum ada SUPER_ADMIN; login dan publish diblokir sampai bootstrap lokal.                  |
+| LOCAL_AUTH       | auth.default_credentials         | VERIFIED       | INFO     | 0 akun aktif diperiksa; tidak ada password default yang dikenal.                           |
+| LOCAL_AUTH       | auth.interlock                   | CONFIGURED     | INFO     | Interlock tersedia; efektivitas penegakan dibuktikan oleh uji negatif modul policy (buk... |
+| LOCAL_AUTH       | auth.sessions                    | VERIFIED       | INFO     | 0 sesi aktif (server-side, token hanya hash); 0 sesi dicabut.                              |
+| CANONICAL_POLICY | policy.mci                       | MISSING        | HIGH     | MCI_V2_SOURCE_OF_TRUTH belum tersedia; kepatuhan kanonik UNVERIFIED (bukan PASS).          |
+| CANONICAL_POLICY | policy.office_defaults           | VERIFIED       | INFO     | OFFICE default deny berlaku: external_worker_allowed=false, approved_worker_routes=[].     |
+| CANONICAL_POLICY | policy.snapshot                  | CONFIGURED     | INFO     | Policy snapshot 1 aktif (sha256:6b7af72ba7ab); MCI tetap UNVERIFIED.                       |
+| CLAUDE_NATIVE    | claude.auth                      | CONNECTED      | INFO     | Login native Claude.ai (firstParty, Max) terdeteksi; fungsi bridge belum dibuktikan ole... |
+| CLAUDE_NATIVE    | claude.binary                    | VERIFIED       | INFO     | Claude Code 2.1.302 ditemukan (skenario: perintah versi berhasil; keaslian distribusi t... |
+| CLAUDE_NATIVE    | claude.capability_test           | UNKNOWN        | LOW      | Bridge belum pernah diuji pada mesin ini (NOT-PROVEN); jalur paket manual S12 tetap ter... |
+| CLAUDE_NATIVE    | claude.env                       | VERIFIED       | INFO     | ANTHROPIC_API_KEY/AUTH_TOKEN/BASE_URL dan variabel provider alternatif tidak ada.          |
+| CLAUDE_NATIVE    | claude.extra_billing             | UNKNOWN        | MEDIUM   | Pengaturan extra usage berbayar tidak dapat dibaca secara resmi oleh AEOS; status UNKNOWN. |
+| CLAUDE_NATIVE    | claude.quota                     | UNKNOWN        | LOW      | Kuota mingguan Max (termasuk Fable) tidak diekspos secara resmi; ditampilkan UNKNOWN. S... |
+| SECRET           | secret.keyring                   | CONFIGURED     | INFO     | Backend WinVaultKeyring tersedia (tes tulis hanya dengan --functional).                    |
+| SECRET           | secret.no_raw_exposure           | VERIFIED       | INFO     | 203 record terbaru dipindai; tidak ada pola credential.                                    |
+| SECRET           | secret.openbao_binary            | MISSING        | MEDIUM   | OpenBao tidak ditemukan (<data>/bin dan PATH).                                             |
+| SECRET           | secret.openbao_health            | MISSING        | HIGH     | OpenBao tidak terjangkau di http://127.0.0.1:8200 (UNREACHABLE; biner OpenBao belum ter... |
+| SECRET           | secret.status                    | MISSING        | HIGH     | Secret store tidak tersedia (OpenBao belum siap dan tidak ada pengecualian interim OS k... |
+| WORKER           | worker.agent_definition          | MISSING        | HIGH     | Agent opencode-implementer nonaktif (default katalog); scheduler tidak akan menjalankan... |
+| WORKER           | worker.contract                  | UNKNOWN        | LOW      | Belum ada bukti tepercaya uji kontrak worker (tool/schema/patch, caps); NOT-PROVEN. Has... |
+| WORKER           | worker.opencode                  | MISSING        | HIGH     | OpenCode tidak ditemukan (versi yang dipin: 1.19.3).                                       |
+| CONTAINMENT      | containment.docker               | MISSING        | LOW      | Docker tidak ditemukan (opsional; tidak memblokir capability lain).                        |
+| CONTAINMENT      | containment.protected_paths      | CONFIGURED     | INFO     | 9 protected path terdefinisi; penegakan oleh broker/verifier dibuktikan terpisah (NOT-P... |
+| CONTAINMENT      | containment.sandbox              | MISSING        | HIGH     | Sandbox worker BLOCKED untuk PERSONAL: container sandbox not available: docker CLI not ... |
+| MODEL_ROUTE      | route.budget_admission           | CONFIGURED     | INFO     | 0 budget aktif dapat dipercaya; belum ada budget GLOBAL; reservasi pertama memakai defa... |
+| MODEL_ROUTE      | route.catalog_freshness          | NOT_APPLICABLE | INFO     | Belum ada route pekerja APPROVED/TRIAL; kesegaran harga/terms dinilai saat ada keputusa... |
+| MODEL_ROUTE      | route.registry                   | MISSING        | HIGH     | Belum ada route pekerja APPROVED/TRIAL; kandidat tidak otomatis aktif (S23).               |
+| MODEL_ROUTE      | route.worker_key                 | MISSING        | HIGH     | Secret store tidak tersedia; status kunci tidak dapat dibaca (fail closed).                |
+| PROJECT_ADAPTERS | adapter.github_token             | MISSING        | HIGH     | Secret store tidak tersedia; token GitHub tidak dapat dibaca (fail closed).                |
+| PROJECT_ADAPTERS | adapter.google_oauth             | MISSING        | HIGH     | Secret store tidak tersedia; credential Google tidak dapat diperiksa (fail closed).        |
+| PROJECT_ADAPTERS | adapter.office_bitbucket         | NOT_APPLICABLE | INFO     | Adapter Bitbucket belum dikonfigurasi (OFFICE belum diotorisasi).                          |
+| PROJECT_ADAPTERS | adapter.office_confluence        | NOT_APPLICABLE | INFO     | Adapter Confluence belum dikonfigurasi (OFFICE belum diotorisasi).                         |
+| PROJECT_ADAPTERS | adapter.office_jira              | NOT_APPLICABLE | INFO     | Adapter Jira belum dikonfigurasi (OFFICE belum diotorisasi).                               |
+| PROJECT_ADAPTERS | adapter.write_enablement         | MISSING        | HIGH     | Write enablement belum efektif untuk: google-drive, google-docs, github-issues (butuh f... |
+| DELIVERY         | delivery.branch_protection       | UNKNOWN        | LOW      | Kemampuan merge gate github:<owner>       /dly-aeos belum pernah diprobe (NOT-PROVEN); ... |
+| DELIVERY         | delivery.ci_workflow             | VERIFIED       | INFO     | 4 action di workflow CI dipin ke commit SHA (bukti statis E1).                             |
+| DELIVERY         | delivery.staging_target          | MISSING        | LOW      | Belum ada target staging yang dikonfigurasi; validasi staging tidak tersedia.              |
+| EVIDENCE_REVIEW  | evidence.acceptance_suite        | CONFIGURED     | INFO     | 5 file test acceptance (read-only bagi worker); belum dijalankan oleh Doctor.              |
+| EVIDENCE_REVIEW  | evidence.dir_permissions         | CONFIGURED     | INFO     | Partisi PERSONAL/OFFICE terpisah dan dapat ditulis; ACL Windows tidak diperiksa.           |
+| EVIDENCE_REVIEW  | evidence.trace_redaction         | VERIFIED       | INFO     | Redaksi pola credential dan kunci sensitif berfungsi (uji sintetis).                       |
+| EVIDENCE_REVIEW  | evidence.verifier                | CONFIGURED     | INFO     | Collector dan acceptance tersedia; independensi dibuktikan oleh uji modul verification.    |
+| RECOVERY         | recovery.backups                 | MISSING        | MEDIUM   | Belum ada backup di <data>/backups (ops backup maupun salinan pra-upgrade).                |
+| RECOVERY         | recovery.config_rollback         | MISSING        | LOW      | Belum ada released controller artifact; rollback controller/konfigurasi belum tersedia.    |
+| RECOVERY         | recovery.leases                  | VERIFIED       | INFO     | Tidak ada lease kedaluwarsa (0 aktif).                                                     |
+| RECOVERY         | recovery.publication_idempotency | UNKNOWN        | LOW      | Pencegahan publikasi ganda (timeout/partial/replay) belum dibuktikan.                      |
+| RECOVERY         | recovery.restore_test            | MISSING        | MEDIUM   | Restore belum diuji; recovery tidak diklaim siap.                                          |
++------------------+----------------------------------+----------------+----------+--------------------------------------------------------------------------------------------+
+Skipped (opt-in): containment.report  -> run with --functional
+
+Capabilities (READY only when every critical check is OK):
++-----------------------------+---------+------------------------------------------------------------------------------------------------------+
+| CAPABILITY                  | STATUS  | FIRST REASON                                                                                         |
++-----------------------------+---------+------------------------------------------------------------------------------------------------------+
+| CAN_OPEN_DASHBOARD          | BLOCKED | auth.bootstrap: MISSING - Belum ada SUPER_ADMIN; login dan publish diblokir sampai bootstrap lokal.  |
+| CAN_PLAN_PERSONAL           | BLOCKED | auth.bootstrap: MISSING - Belum ada SUPER_ADMIN; login dan publish diblokir sampai bootstrap lokal.  |
+| CAN_PLAN_OFFICE             | BLOCKED | OFFICE default deny (S23): claude_max_allowed_for_office_data=false menurut policy-module; butuh ... |
+| CAN_PUBLISH_PERSONAL        | BLOCKED | auth.bootstrap: MISSING - Belum ada SUPER_ADMIN; login dan publish diblokir sampai bootstrap lokal.  |
+| CAN_RUN_WORKER              | BLOCKED | auth.bootstrap: MISSING - Belum ada SUPER_ADMIN; login dan publish diblokir sampai bootstrap lokal.  |
+| CAN_REVIEW_WITH_MAX         | BLOCKED | auth.bootstrap: MISSING - Belum ada SUPER_ADMIN; login dan publish diblokir sampai bootstrap lokal.  |
+| CAN_PREPARE_PR              | BLOCKED | auth.bootstrap: MISSING - Belum ada SUPER_ADMIN; login dan publish diblokir sampai bootstrap lokal.  |
+| CAN_USE_OFFICE_INTEGRATIONS | BLOCKED | OFFICE default deny (S23): integrations_allowed=false menurut policy-module; butuh Decision otori... |
+| CAN_VALIDATE_STAGING        | BLOCKED | auth.bootstrap: MISSING - Belum ada SUPER_ADMIN; login dan publish diblokir sampai bootstrap lokal.  |
++-----------------------------+---------+------------------------------------------------------------------------------------------------------+
+
+Residual risks (true even when a gate is READY; never counted as a pass):
+  [CAN_PLAN_PERSONAL] Extra usage berbayar akun Claude UNKNOWN: bila aktif, pemakaian di atas kuota Max dapat ditagih; pastikan nonaktif di pengaturan akun (S12)
+  [CAN_PLAN_OFFICE] Extra usage berbayar akun Claude UNKNOWN: bila aktif, pemakaian di atas kuota Max dapat ditagih; pastikan nonaktif di pengaturan akun (S12)
+  [CAN_RUN_WORKER] Kontrak tool/schema/patch worker NOT-PROVEN pada host ini; output worker hanya REVIEW sampai verifier independen lulus
+  [CAN_RUN_WORKER] bila process sandbox diizinkan: Tidak ada penegakan egress jaringan: proses worker dapat menghubungi host selain broker.
+  [CAN_RUN_WORKER] bila process sandbox diizinkan: User OS yang sama dengan controller: file yang dapat dibaca user (DB data dir, ~/.ssh asli, keyring OS) tidak diblokir oleh sistem operasi; hanya izin tool OpenCode (external_directory=deny) yang membatasi.
+  [CAN_RUN_WORKER] bila process sandbox diizinkan: Penulisan di luar worktree tidak dicegah OS; hanya terdeteksi untuk path di dalam repository.
+  [CAN_RUN_WORKER] bila process sandbox diizinkan: Isolasi bergantung pada env yang dibersihkan dan HOME yang dialihkan, bukan batas keamanan kernel.
+  [CAN_RUN_WORKER] bila process sandbox diizinkan: Jika bash diizinkan, worker menjalankan perintah sebagai user OS yang sama, termasuk credential helper OS (mis. Git Credential Manager): direct push/credential escape tidak dicegah (master s31: NOT-PROVEN). Karena itu bash di process sandbox memerlukan details.allow_bash=true pada keputusan pengecualian.
+  [CAN_REVIEW_WITH_MAX] Extra usage berbayar akun Claude UNKNOWN: bila aktif, pemakaian di atas kuota Max dapat ditagih; pastikan nonaktif di pengaturan akun (S12)
+  [CAN_PREPARE_PR] Merge ke main tidak ditegakkan provider; human-only merge bergantung pada broker tanpa operasi merge dan owner credential di luar runtime agent (S31).
+
+Remedies (copy and run yourself; DLY AEOS never runs them):
+  [runtime.frontend_dist] Build Control Center dari lockfile (dari root repo)
+      command : cd frontend; npm.cmd ci --no-audit --no-fund; npm.cmd run build
+      source  : frontend/package-lock.json
+      target  : <repo>/frontend/dist
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: hapus frontend/dist
+      evidence: frontend/dist/index.html ada
+  [auth.admins] Buat SUPER_ADMIN
+      command : .\aeos.ps1 admin create
+      privilege: operator lokal
+      cost    : tidak ada
+      rollback: tidak diperlukan
+      evidence: auth.admins VERIFIED
+  [auth.bootstrap] Buat SUPER_ADMIN pertama secara lokal (password dimasukkan sendiri)
+      command : .\aeos.ps1 admin create
+      source  : aeos.identity
+      target  : database lokal
+      privilege: operator lokal (akses data dir)
+      cost    : tidak ada
+      rollback: .\aeos.ps1 admin recover <username>
+      evidence: auth.bootstrap VERIFIED
+  [policy.mci] Pemilik menyediakan sumber MCI kanonik (tidak direkonstruksi dari ingatan model)
+      target  : policy/mci-reference.yaml
+      privilege: pemilik
+      cost    : tidak ada
+      rollback: tidak diperlukan
+      evidence: hash sumber MCI
+  [claude.extra_billing] Periksa manual pengaturan usage di akun Claude dan pastikan extra usage berbayar nonaktif (S12)
+      source  : S03: https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-or-max-plan
+      privilege: pemilik akun
+      cost    : mencegah tagihan tambahan
+      rollback: tidak diperlukan
+      evidence: catatan keputusan pemilik
+  [secret.openbao_binary, secret.openbao_health] Pasang biner OpenBao resmi ke <data>/bin (rencana ditampilkan dan dikonfirmasi dulu; SHA256 dicocokkan dengan checksums.txt, tanda tangan GPG belum diverifikasi)
+      command : .\aeos.ps1 vault install
+      source  : S24: https://github.com/openbao/openbao/releases / https://openbao.org/docs/auth/approle/
+      target  : <data>/bin, 127.0.0.1:8200
+      privilege: pemilik (pengguna lokal, tanpa elevasi)
+      cost    : tidak ada
+      rollback: hapus <data>/bin/bao
+      evidence: secret.openbao_binary VERIFIED
+  [secret.status] Pasang biner OpenBao resmi ke <data>/bin (rencana ditampilkan dan dikonfirmasi dulu; SHA256 dicocokkan dengan checksums.txt, tanda tangan GPG belum diverifikasi); lalu .\aeos.ps1 vault init. Alternatif sementara (PERSONAL saja, residual risk): keputusan EXCEPTION pemilik untuk OS keyring - lihat .\aeos.ps1 secrets interim-keyring
+      command : .\aeos.ps1 vault install
+      source  : S24: https://github.com/openbao/openbao/releases / https://openbao.org/docs/auth/approle/
+      target  : <data>/bin, 127.0.0.1:8200
+      privilege: pemilik (pengguna lokal, tanpa elevasi)
+      cost    : tidak ada
+      rollback: hapus <data>/bin/bao
+      evidence: secret.openbao_binary VERIFIED
+  [worker.agent_definition] Aktifkan agent di Workforce Console (Agen -> opencode-implementer -> Aktifkan) setelah OpenCode, sandbox dan route siap; endpoint menolak bila prasyarat belum READY
+      target  : AgentDefinition opencode-implementer
+      privilege: SUPER_ADMIN
+      cost    : tidak ada
+      rollback: nonaktifkan agent
+      evidence: worker.agent_definition CONFIGURED
+  [worker.opencode] Pasang OpenCode versi yang dipin (worker engine pertama, S07 langkah 5); fungsi dibuktikan terpisah oleh uji kontrak worker
+      command : npm.cmd install -g opencode-ai@1.19.3
+      source  : S28: https://github.com/anomalyco/opencode (paket npm opencode-ai; install-manifest/ otoritatif)
+      target  : PATH atau setelan opencode_binary (AEOS_OPENCODE_BINARY)
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: npm.cmd uninstall -g opencode-ai
+      evidence: worker.opencode VERIFIED (opencode --version)
+  [containment.docker] Opsional: pasang Docker Desktop/Engine bila sandbox container dibutuhkan
+      command : winget install --id Docker.DockerDesktop -e
+      source  : docs.docker.com (Docker Desktop; Linux: Docker Engine dari paket resmi)
+      privilege: admin OS
+      cost    : lisensi Docker Desktop belum diperiksa
+      rollback: uninstall Docker
+      evidence: docker --version
+  [containment.sandbox] Pasang/jalankan Docker lalu buktikan containment container, ATAU catat keputusan EXCEPTION pemilik: target worker_sandbox/process, domain PERSONAL, details.allow_process_sandbox=true (ADR-0051; residual risk diterima secara eksplisit) lewat halaman Keputusan
+      command : .\aeos.ps1 worker containment --kind container
+      source  : ADR-0051 (persyaratan sandbox worker)
+      target  : sandbox worker host ini
+      privilege: pemilik (keputusan manusia)
+      cost    : tidak ada
+      rollback: cabut keputusan pengecualian
+      evidence: containment.sandbox CONFIGURED/VERIFIED
+  [route.registry] Evaluasi lalu aktifkan satu route pekerja lewat keputusan manusia (ROUTE_ACTIVATION atau TRIAL terikat hash konfigurasi; route berbayar butuh keputusan BUDGET)
+      command : .\aeos.ps1 routes activate <route_key>
+      target  : Models & Routes
+      privilege: pemilik
+      cost    : sesuai route; paid nonaktif tanpa budget
+      rollback: .\aeos.ps1 routes disable <route_key>
+      evidence: Decision ROUTE_ACTIVATION/TRIAL + route.registry CONFIGURED
+  [adapter.write_enablement] Pemilik mencatat keputusan WRITE_ENABLEMENT per provider di halaman Keputusan (Policy & Decisions); tidak ada perintah otomatis
+      target  : google-drive, google-docs, github-issues
+      privilege: SUPER_ADMIN (keputusan manusia)
+      cost    : tidak ada
+      rollback: cabut keputusan (flag otomatis kembali false)
+      evidence: adapter.write_enablement CONFIGURED
+  [delivery.branch_protection] Probe read-only kemampuan provider dan simpan sebagai bukti
+      command : .\aeos.ps1 delivery capabilities --record
+      source  : S22: https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches
+      target  : github:<owner>/dly-aeos
+      privilege: pengguna lokal (token read-only)
+      cost    : tidak ada (GET saja)
+      rollback: tidak diperlukan
+      evidence: EvidenceArtifact PROVIDER_CAPABILITY
+  [recovery.backups] Buat backup konsisten (database + evidence per domain); restore-test setelahnya
+      command : .\aeos.ps1 ops backup create
+      source  : aeos.operations.backup (runbook operations)
+      target  : <data>/backups
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: hapus direktori backup baru
+      evidence: recovery.backups CONFIGURED lalu recovery.restore_test VERIFIED
+  [recovery.restore_test] Uji restore backup ke direktori sementara terpisah dan simpan bukti RESTORE_TEST (buat backup dulu)
+      command : .\aeos.ps1 ops backup create
+      source  : aeos.operations.backup
+      target  : <data>/backups
+      privilege: pemilik
+      cost    : tidak ada
+      rollback: tidak diperlukan
+      evidence: EvidenceArtifact kind RESTORE_TEST (trusted)
+
+EXIT 1: critical check(s) for CAN_OPEN_DASHBOARD not OK: runtime.frontend_dist, auth.bootstrap
+
+
+##### aeos doctor --json  (summarised: check id, status, error code)
+
+database=present persisted=True functional=False exit_code=1 dashboard_critical_failures=['runtime.frontend_dist', 'auth.bootstrap']
+  host.clock                         VERIFIED        -
+  host.data_dir                      VERIFIED        -
+  host.disk                          VERIFIED        -
+  host.platform                      VERIFIED        -
+  host.port                          VERIFIED        -
+  repo.hooks                         VERIFIED        -
+  repo.install_manifest              VERIFIED        -
+  repo.lockfiles                     VERIFIED        -
+  repo.origin                        VERIFIED        -
+  repo.root                          VERIFIED        -
+  repo.state                         VERIFIED        -
+  runtime.backend_deps               VERIFIED        -
+  runtime.db                         VERIFIED        -
+  runtime.frontend_dist              MISSING         FRONTEND_NOT_BUILT
+  runtime.node                       VERIFIED        -
+  runtime.python                     VERIFIED        -
+  runtime.storage                    VERIFIED        -
+  auth.admins                        MISSING         NO_ADMIN
+  auth.bootstrap                     MISSING         BOOTSTRAP_INCOMPLETE
+  auth.default_credentials           VERIFIED        -
+  auth.interlock                     CONFIGURED      -
+  auth.sessions                      VERIFIED        -
+  policy.mci                         MISSING         MCI_UNAVAILABLE
+  policy.office_defaults             VERIFIED        -
+  policy.snapshot                    CONFIGURED      -
+  claude.auth                        CONNECTED       -
+  claude.binary                      VERIFIED        -
+  claude.capability_test             UNKNOWN         CAPABILITY_TEST_NOT_RUN
+  claude.env                         VERIFIED        -
+  claude.extra_billing               UNKNOWN         -
+  claude.quota                       UNKNOWN         -
+  secret.keyring                     CONFIGURED      -
+  secret.no_raw_exposure             VERIFIED        -
+  secret.openbao_binary              MISSING         BINARY_MISSING
+  secret.openbao_health              MISSING         OPENBAO_UNREACHABLE
+  secret.status                      MISSING         SECRET_STORE_UNAVAILABLE
+  worker.agent_definition            MISSING         AGENT_DISABLED
+  worker.contract                    UNKNOWN         WORKER_CONTRACT_NOT_PROVEN
+  worker.opencode                    MISSING         OPENCODE_MISSING
+  containment.docker                 MISSING         DOCKER_MISSING
+  containment.protected_paths        CONFIGURED      -
+  containment.sandbox                MISSING         SANDBOX_NOT_READY
+  route.budget_admission             CONFIGURED      -
+  route.catalog_freshness            NOT_APPLICABLE  -
+  route.registry                     MISSING         NO_APPROVED_WORKER_ROUTE
+  route.worker_key                   MISSING         SECRET_STORE_UNAVAILABLE
+  adapter.github_token               MISSING         SECRET_STORE_UNAVAILABLE
+  adapter.google_oauth               MISSING         SECRET_STORE_UNAVAILABLE
+  adapter.office_bitbucket           NOT_APPLICABLE  -
+  adapter.office_confluence          NOT_APPLICABLE  -
+  adapter.office_jira                NOT_APPLICABLE  -
+  adapter.write_enablement           MISSING         WRITE_NOT_ENABLED
+  delivery.branch_protection         UNKNOWN         PROVIDER_CAPABILITY_NOT_CHECKED
+  delivery.ci_workflow               VERIFIED        -
+  delivery.staging_target            MISSING         NO_STAGING_TARGET
+  evidence.acceptance_suite          CONFIGURED      -
+  evidence.dir_permissions           CONFIGURED      -
+  evidence.trace_redaction           VERIFIED        -
+  evidence.verifier                  CONFIGURED      -
+  recovery.backups                   MISSING         NO_BACKUP
+  recovery.config_rollback           MISSING         NO_RELEASE_ARTIFACT
+  recovery.leases                    VERIFIED        -
+  recovery.publication_idempotency   UNKNOWN         IDEMPOTENCY_NOT_PROVEN
+  recovery.restore_test              MISSING         RESTORE_NOT_TESTED
+capabilities (no domain selected; CAN_RUN_WORKER sandbox evaluated for PERSONAL):
+  CAN_OPEN_DASHBOARD           BLOCKED         risks=0
+  CAN_PLAN_PERSONAL            BLOCKED         risks=1
+  CAN_PLAN_OFFICE              BLOCKED         risks=1
+  CAN_PUBLISH_PERSONAL         BLOCKED         risks=0
+  CAN_RUN_WORKER               BLOCKED         risks=6
+  CAN_REVIEW_WITH_MAX          BLOCKED         risks=1
+  CAN_PREPARE_PR               BLOCKED         risks=1
+  CAN_USE_OFFICE_INTEGRATIONS  BLOCKED         risks=0
+  CAN_VALIDATE_STAGING         BLOCKED         risks=0
+
+
+##### Dashboard API  (TestClient against the full app lifespan on 127.0.0.1:8787; a throw-away local SUPER_ADMIN with a random password was created in the temporary data dir only)
+
+lifespan entered in 0.07s (startup doctor runs in the background)
+GET /api/health -> 200
+startup run: trigger=startup functional=False counts={'VERIFIED': 27, 'MISSING': 18, 'CONFIGURED': 8, 'CONNECTED': 1, 'UNKNOWN': 6, 'NOT_APPLICABLE': 1}
+POST /api/doctor/run -> 200 trigger=api counts={'VERIFIED': 27, 'MISSING': 18, 'CONFIGURED': 8, 'CONNECTED': 1, 'UNKNOWN': 6, 'NOT_APPLICABLE': 1} skipped=['containment.report']
+GET /api/doctor/capabilities -> domain=PERSONAL source=Capability gates dari CheckResult terbaru (S08)
+  CAN_OPEN_DASHBOARD           BLOCKED        runtime.frontend_dist: MISSING - Frontend belum di-build; dashboard tidak dapat dibuka (API tetap berjalan).
+  CAN_PLAN_PERSONAL            DEGRADED       claude.capability_test: UNKNOWN - Bridge belum pernah diuji pada mesin ini (NOT-PROVEN); jalur paket manual S12 tetap tersedia (dijalankan pemilik di 
+      residual risk: Extra usage berbayar akun Claude UNKNOWN: bila aktif, pemakaian di atas kuota Max dapat ditagih; pastikan nonaktif di pengaturan akun (S12)
+  CAN_PLAN_OFFICE              NOT_APPLICABLE Capability ini hanya untuk domain OFFICE.
+  CAN_PUBLISH_PERSONAL         BLOCKED        secret.status: MISSING - Secret store tidak tersedia (OpenBao belum siap dan tidak ada pengecualian interim OS keyring); operasi yang butuh credential
+  CAN_RUN_WORKER               BLOCKED        worker.opencode: MISSING - OpenCode tidak ditemukan (versi yang dipin: 1.19.3).
+      residual risk: Kontrak tool/schema/patch worker NOT-PROVEN pada host ini; output worker hanya REVIEW sampai verifier independen lulus
+      residual risk: bila process sandbox diizinkan: Tidak ada penegakan egress jaringan: proses worker dapat menghubungi host selain broker.
+      residual risk: bila process sandbox diizinkan: User OS yang sama dengan controller: file yang dapat dibaca user (DB data dir, ~/.ssh asli, keyring OS) tidak diblokir oleh sist
+      residual risk: bila process sandbox diizinkan: Penulisan di luar worktree tidak dicegah OS; hanya terdeteksi untuk path di dalam repository.
+      residual risk: bila process sandbox diizinkan: Isolasi bergantung pada env yang dibersihkan dan HOME yang dialihkan, bukan batas keamanan kernel.
+      residual risk: bila process sandbox diizinkan: Jika bash diizinkan, worker menjalankan perintah sebagai user OS yang sama, termasuk credential helper OS (mis. Git Credential M
+  CAN_REVIEW_WITH_MAX          DEGRADED       claude.capability_test: UNKNOWN - Bridge belum pernah diuji pada mesin ini (NOT-PROVEN); jalur paket manual S12 tetap tersedia (dijalankan pemilik di 
+      residual risk: Extra usage berbayar akun Claude UNKNOWN: bila aktif, pemakaian di atas kuota Max dapat ditagih; pastikan nonaktif di pengaturan akun (S12)
+  CAN_PREPARE_PR               BLOCKED        adapter.github_token: MISSING - Secret store tidak tersedia; token GitHub tidak dapat dibaca (fail closed).
+      residual risk: Merge ke main tidak ditegakkan provider; human-only merge bergantung pada broker tanpa operasi merge dan owner credential di luar runtime agent (S31).
+  CAN_USE_OFFICE_INTEGRATIONS  NOT_APPLICABLE Capability ini hanya untuk domain OFFICE.
+  CAN_VALIDATE_STAGING         BLOCKED        delivery.staging_target: MISSING - Belum ada target staging yang dikonfigurasi; validasi staging tidak tersedia.
+events visible to this PERSONAL session: doctor.run.completed=4 doctor.check=63 doctor.check.stale=0
+
+
+##### aeos doctor --functional  (run ONCE, at commit e145907, in its own fresh data dir after the dashboard pass created the throw-away SUPER_ADMIN: ONE tiny `claude -p` capability call through the ClaudeNativeBridge; containment negative tests; keyring round-trip with a random probe entry; no GitHub call because no token is stored). Not repeated for the later commit to spend Max quota only once: that commit only changed the header line (it still says 'no LLM' here, which was wrong for --functional) and added the extra-billing residual risk.
+
+DLY AEOS Readiness Doctor - bootstrap layer (no server, no LLM)
+platform: win32   data dir: <home>/.../data (AEOS_DATA_DIR)   database: present
++------------------+----------------------------------+----------------+----------+--------------------------------------------------------------------------------------------+
+| GROUP            | CHECK                            | STATUS         | SEV      | SUMMARY                                                                                    |
++------------------+----------------------------------+----------------+----------+--------------------------------------------------------------------------------------------+
+| HOST             | host.clock                       | VERIFIED       | INFO     | Tidak ada tanda jam mundur terhadap record terakhir (NTP tidak dibandingkan).              |
+| HOST             | host.data_dir                    | VERIFIED       | INFO     | Data directory ada dan tes tulis berhasil.                                                 |
+| HOST             | host.disk                        | VERIFIED       | INFO     | Ruang kosong 188.42 GiB pada lokasi data.                                                  |
+| HOST             | host.platform                    | VERIFIED       | INFO     | Windows AMD64, 12 CPU, RAM 15.4 GiB (skenario: platform didukung).                         |
+| HOST             | host.port                        | VERIFIED       | INFO     | Port 8787 di 127.0.0.1 tersedia.                                                           |
+| REPOSITORY       | repo.hooks                       | VERIFIED       | INFO     | 0 git hook aktif; konfigurasi agent/MCP proyek: tidak ada.                                 |
+| REPOSITORY       | repo.install_manifest            | VERIFIED       | INFO     | Manifest valid dan termuat (100 komponen).                                                 |
+| REPOSITORY       | repo.lockfiles                   | VERIFIED       | INFO     | Lockfile frontend dan Python tersedia.                                                     |
+| REPOSITORY       | repo.origin                      | VERIFIED       | INFO     | Remote origin cocok dengan github:<owner>       /dly-aeos.                                 |
+| REPOSITORY       | repo.root                        | VERIFIED       | INFO     | Root repository platform ditemukan (pyproject, backend, AGENTS.md, manifest).              |
+| REPOSITORY       | repo.state                       | VERIFIED       | INFO     | Branch worktree-wf_48a549c3-5c7-3 @ e145907739fb; bersih.                                  |
+| RUNTIME          | runtime.backend_deps             | VERIFIED       | INFO     | 22 dependensi runtime terpasang dan sesuai spesifikasi.                                    |
+| RUNTIME          | runtime.db                       | VERIFIED       | INFO     | Database ada; belum ada revisi Alembic; skema dari bootstrap create_all.                   |
+| RUNTIME          | runtime.frontend_dist            | MISSING        | CRITICAL | Frontend belum di-build; dashboard tidak dapat dibuka (API tetap berjalan).                |
+| RUNTIME          | runtime.node                     | VERIFIED       | INFO     | Node.js 24.15.0 ditemukan (skenario: perintah versi berhasil; keaslian distribusi tidak... |
+| RUNTIME          | runtime.python                   | VERIFIED       | INFO     | Python 3.13.12 (CPython).                                                                  |
+| RUNTIME          | runtime.storage                  | VERIFIED       | INFO     | Tes tulis database (BEGIN IMMEDIATE + rollback) dan file data dir berhasil.                |
+| LOCAL_AUTH       | auth.admins                      | VERIFIED       | INFO     | 1 SUPER_ADMIN, 0 VIEWER (read-only ditegakkan backend).                                    |
+| LOCAL_AUTH       | auth.bootstrap                   | VERIFIED       | INFO     | Bootstrap selesai: SUPER_ADMIN aktif ada (tanpa credential default).                       |
+| LOCAL_AUTH       | auth.default_credentials         | VERIFIED       | INFO     | 1 akun aktif diperiksa; tidak ada password default yang dikenal.                           |
+| LOCAL_AUTH       | auth.interlock                   | CONFIGURED     | INFO     | Interlock tersedia; efektivitas penegakan dibuktikan oleh uji negatif modul policy (buk... |
+| LOCAL_AUTH       | auth.sessions                    | VERIFIED       | INFO     | 1 sesi aktif (server-side, token hanya hash); 0 sesi dicabut.                              |
+| CANONICAL_POLICY | policy.mci                       | MISSING        | HIGH     | MCI_V2_SOURCE_OF_TRUTH belum tersedia; kepatuhan kanonik UNVERIFIED (bukan PASS).          |
+| CANONICAL_POLICY | policy.office_defaults           | VERIFIED       | INFO     | OFFICE default deny berlaku: external_worker_allowed=false, approved_worker_routes=[].     |
+| CANONICAL_POLICY | policy.snapshot                  | CONFIGURED     | INFO     | Policy snapshot 1 aktif (sha256:0472bd714fae); MCI tetap UNVERIFIED.                       |
+| CLAUDE_NATIVE    | claude.auth                      | CONNECTED      | INFO     | Login native Claude.ai (firstParty, Max) terdeteksi; fungsi bridge belum dibuktikan ole... |
+| CLAUDE_NATIVE    | claude.binary                    | VERIFIED       | INFO     | Claude Code 2.1.302 ditemukan (skenario: perintah versi berhasil; keaslian distribusi t... |
+| CLAUDE_NATIVE    | claude.capability_test           | VERIFIED       | INFO     | Bridge berhasil: model teresolusi claude-opus-5-5, CLI 2.1.302 (skenario: satu panggila... |
+| CLAUDE_NATIVE    | claude.env                       | VERIFIED       | INFO     | ANTHROPIC_API_KEY/AUTH_TOKEN/BASE_URL dan variabel provider alternatif tidak ada.          |
+| CLAUDE_NATIVE    | claude.extra_billing             | UNKNOWN        | MEDIUM   | Pengaturan extra usage berbayar tidak dapat dibaca secara resmi oleh AEOS; status UNKNOWN. |
+| CLAUDE_NATIVE    | claude.quota                     | UNKNOWN        | LOW      | Kuota mingguan Max (termasuk Fable) tidak diekspos secara resmi; ditampilkan UNKNOWN. S... |
+| SECRET           | secret.keyring                   | VERIFIED       | INFO     | Tes tulis/baca/hapus entri uji keyring berhasil.                                           |
+| SECRET           | secret.no_raw_exposure           | VERIFIED       | INFO     | 672 record terbaru dipindai; tidak ada pola credential.                                    |
+| SECRET           | secret.openbao_binary            | MISSING        | MEDIUM   | OpenBao tidak ditemukan (<data>/bin dan PATH).                                             |
+| SECRET           | secret.openbao_health            | MISSING        | HIGH     | OpenBao tidak terjangkau di http://127.0.0.1:8200 (UNREACHABLE; biner OpenBao belum ter... |
+| SECRET           | secret.status                    | MISSING        | HIGH     | Secret store tidak tersedia (OpenBao belum siap dan tidak ada pengecualian interim OS k... |
+| WORKER           | worker.agent_definition          | MISSING        | HIGH     | Agent opencode-implementer nonaktif (default katalog); scheduler tidak akan menjalankan... |
+| WORKER           | worker.contract                  | UNKNOWN        | LOW      | Belum ada bukti tepercaya uji kontrak worker (tool/schema/patch, caps); NOT-PROVEN. Has... |
+| WORKER           | worker.opencode                  | MISSING        | HIGH     | OpenCode tidak ditemukan (versi yang dipin: 1.19.3).                                       |
+| CONTAINMENT      | containment.docker               | MISSING        | LOW      | Docker tidak ditemukan (opsional; tidak memblokir capability lain).                        |
+| CONTAINMENT      | containment.protected_paths      | CONFIGURED     | INFO     | 9 protected path terdefinisi; penegakan oleh broker/verifier dibuktikan terpisah (NOT-P... |
+| CONTAINMENT      | containment.report               | CONFIGURED     | HIGH     | Process sandbox WEAK: 5 lulus, 5 NOT_ENFORCED (read_outside_worktree, read_data_db, wri... |
+| CONTAINMENT      | containment.sandbox              | MISSING        | HIGH     | Sandbox worker BLOCKED untuk PERSONAL: container sandbox not available: docker CLI not ... |
+| MODEL_ROUTE      | route.budget_admission           | CONFIGURED     | INFO     | 0 budget aktif dapat dipercaya; belum ada budget GLOBAL; reservasi pertama memakai defa... |
+| MODEL_ROUTE      | route.catalog_freshness          | NOT_APPLICABLE | INFO     | Belum ada route pekerja APPROVED/TRIAL; kesegaran harga/terms dinilai saat ada keputusa... |
+| MODEL_ROUTE      | route.registry                   | MISSING        | HIGH     | Belum ada route pekerja APPROVED/TRIAL; kandidat tidak otomatis aktif (S23).               |
+| MODEL_ROUTE      | route.worker_key                 | MISSING        | HIGH     | Secret store tidak tersedia; status kunci tidak dapat dibaca (fail closed).                |
+| PROJECT_ADAPTERS | adapter.github_token             | MISSING        | HIGH     | Secret store tidak tersedia; token GitHub tidak dapat dibaca (fail closed).                |
+| PROJECT_ADAPTERS | adapter.google_oauth             | MISSING        | HIGH     | Secret store tidak tersedia; credential Google tidak dapat diperiksa (fail closed).        |
+| PROJECT_ADAPTERS | adapter.office_bitbucket         | NOT_APPLICABLE | INFO     | Adapter Bitbucket belum dikonfigurasi (OFFICE belum diotorisasi).                          |
+| PROJECT_ADAPTERS | adapter.office_confluence        | NOT_APPLICABLE | INFO     | Adapter Confluence belum dikonfigurasi (OFFICE belum diotorisasi).                         |
+| PROJECT_ADAPTERS | adapter.office_jira              | NOT_APPLICABLE | INFO     | Adapter Jira belum dikonfigurasi (OFFICE belum diotorisasi).                               |
+| PROJECT_ADAPTERS | adapter.write_enablement         | MISSING        | HIGH     | Write enablement belum efektif untuk: google-drive, google-docs, github-issues (butuh f... |
+| DELIVERY         | delivery.branch_protection       | UNKNOWN        | LOW      | Token GitHub tidak tersedia; kemampuan merge gate tidak diketahui (tidak ada panggilan).   |
+| DELIVERY         | delivery.ci_workflow             | VERIFIED       | INFO     | 4 action di workflow CI dipin ke commit SHA (bukti statis E1).                             |
+| DELIVERY         | delivery.staging_target          | MISSING        | LOW      | Belum ada target staging yang dikonfigurasi; validasi staging tidak tersedia.              |
+| EVIDENCE_REVIEW  | evidence.acceptance_suite        | CONFIGURED     | INFO     | 5 file test acceptance (read-only bagi worker); belum dijalankan oleh Doctor.              |
+| EVIDENCE_REVIEW  | evidence.dir_permissions         | CONFIGURED     | INFO     | Partisi PERSONAL/OFFICE terpisah dan dapat ditulis; ACL Windows tidak diperiksa.           |
+| EVIDENCE_REVIEW  | evidence.trace_redaction         | VERIFIED       | INFO     | Redaksi pola credential dan kunci sensitif berfungsi (uji sintetis).                       |
+| EVIDENCE_REVIEW  | evidence.verifier                | CONFIGURED     | INFO     | Collector dan acceptance tersedia; independensi dibuktikan oleh uji modul verification.    |
+| RECOVERY         | recovery.backups                 | MISSING        | MEDIUM   | Belum ada backup di <data>/backups (ops backup maupun salinan pra-upgrade).                |
+| RECOVERY         | recovery.config_rollback         | MISSING        | LOW      | Belum ada released controller artifact; rollback controller/konfigurasi belum tersedia.    |
+| RECOVERY         | recovery.leases                  | VERIFIED       | INFO     | Tidak ada lease kedaluwarsa (0 aktif).                                                     |
+| RECOVERY         | recovery.publication_idempotency | UNKNOWN        | LOW      | Pencegahan publikasi ganda (timeout/partial/replay) belum dibuktikan.                      |
+| RECOVERY         | recovery.restore_test            | MISSING        | MEDIUM   | Restore belum diuji; recovery tidak diklaim siap.                                          |
++------------------+----------------------------------+----------------+----------+--------------------------------------------------------------------------------------------+
+
+Capabilities (READY only when every critical check is OK):
++-----------------------------+---------+------------------------------------------------------------------------------------------------------+
+| CAPABILITY                  | STATUS  | FIRST REASON                                                                                         |
++-----------------------------+---------+------------------------------------------------------------------------------------------------------+
+| CAN_OPEN_DASHBOARD          | BLOCKED | runtime.frontend_dist: MISSING - Frontend belum di-build; dashboard tidak dapat dibuka (API tetap... |
+| CAN_PLAN_PERSONAL           | READY   | catatan: policy.mci: MISSING - MCI_V2_SOURCE_OF_TRUTH belum tersedia; kepatuhan kanonik UNVERIFIE... |
+| CAN_PLAN_OFFICE             | BLOCKED | OFFICE default deny (S23): claude_max_allowed_for_office_data=false menurut policy-module; butuh ... |
+| CAN_PUBLISH_PERSONAL        | BLOCKED | secret.status: MISSING - Secret store tidak tersedia (OpenBao belum siap dan tidak ada pengecuali... |
+| CAN_RUN_WORKER              | BLOCKED | worker.opencode: MISSING - OpenCode tidak ditemukan (versi yang dipin: 1.19.3).                      |
+| CAN_REVIEW_WITH_MAX         | READY   | catatan: claude.extra_billing: UNKNOWN - Pengaturan extra usage berbayar tidak dapat dibaca secar... |
+| CAN_PREPARE_PR              | BLOCKED | adapter.github_token: MISSING - Secret store tidak tersedia; token GitHub tidak dapat dibaca (fai... |
+| CAN_USE_OFFICE_INTEGRATIONS | BLOCKED | OFFICE default deny (S23): integrations_allowed=false menurut policy-module; butuh Decision otori... |
+| CAN_VALIDATE_STAGING        | BLOCKED | delivery.staging_target: MISSING - Belum ada target staging yang dikonfigurasi; validasi staging ... |
++-----------------------------+---------+------------------------------------------------------------------------------------------------------+
+
+Residual risks (true even when a gate is READY; never counted as a pass):
+  [CAN_RUN_WORKER] containment read_outside_worktree: NOT_ENFORCED (process sandbox tanpa batas OS)
+  [CAN_RUN_WORKER] containment read_data_db: NOT_ENFORCED (process sandbox tanpa batas OS)
+  [CAN_RUN_WORKER] containment write_outside_worktree: NOT_ENFORCED (process sandbox tanpa batas OS)
+  [CAN_RUN_WORKER] containment egress_non_broker: NOT_ENFORCED (process sandbox tanpa batas OS)
+  [CAN_RUN_WORKER] containment keyring_unreachable: NOT_ENFORCED (process sandbox tanpa batas OS)
+  [CAN_RUN_WORKER] Kontrak tool/schema/patch worker NOT-PROVEN pada host ini; output worker hanya REVIEW sampai verifier independen lulus
+  [CAN_RUN_WORKER] bila process sandbox diizinkan: Tidak ada penegakan egress jaringan: proses worker dapat menghubungi host selain broker.
+  [CAN_RUN_WORKER] bila process sandbox diizinkan: User OS yang sama dengan controller: file yang dapat dibaca user (DB data dir, ~/.ssh asli, keyring OS) tidak diblokir oleh sistem operasi; hanya izin tool OpenCode (external_directory=deny) yang membatasi.
+  [CAN_RUN_WORKER] bila process sandbox diizinkan: Penulisan di luar worktree tidak dicegah OS; hanya terdeteksi untuk path di dalam repository.
+  [CAN_RUN_WORKER] bila process sandbox diizinkan: Isolasi bergantung pada env yang dibersihkan dan HOME yang dialihkan, bukan batas keamanan kernel.
+  [CAN_RUN_WORKER] bila process sandbox diizinkan: Jika bash diizinkan, worker menjalankan perintah sebagai user OS yang sama, termasuk credential helper OS (mis. Git Credential Manager): direct push/credential escape tidak dicegah (master s31: NOT-PROVEN). Karena itu bash di process sandbox memerlukan details.allow_bash=true pada keputusan pengecualian.
+  [CAN_PREPARE_PR] Merge ke main tidak ditegakkan provider; human-only merge bergantung pada broker tanpa operasi merge dan owner credential di luar runtime agent (S31).
+
+Remedies (copy and run yourself; DLY AEOS never runs them):
+  [runtime.frontend_dist] Build Control Center dari lockfile (dari root repo)
+      command : cd frontend; npm.cmd ci --no-audit --no-fund; npm.cmd run build
+      source  : frontend/package-lock.json
+      target  : <repo>/frontend/dist
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: hapus frontend/dist
+      evidence: frontend/dist/index.html ada
+  [policy.mci] Pemilik menyediakan sumber MCI kanonik (tidak direkonstruksi dari ingatan model)
+      target  : policy/mci-reference.yaml
+      privilege: pemilik
+      cost    : tidak ada
+      rollback: tidak diperlukan
+      evidence: hash sumber MCI
+  [claude.extra_billing] Periksa manual pengaturan usage di akun Claude dan pastikan extra usage berbayar nonaktif (S12)
+      source  : S03: https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-or-max-plan
+      privilege: pemilik akun
+      cost    : mencegah tagihan tambahan
+      rollback: tidak diperlukan
+      evidence: catatan keputusan pemilik
+  [secret.openbao_binary, secret.openbao_health] Pasang biner OpenBao resmi ke <data>/bin (rencana ditampilkan dan dikonfirmasi dulu; SHA256 dicocokkan dengan checksums.txt, tanda tangan GPG belum diverifikasi)
+      command : .\aeos.ps1 vault install
+      source  : S24: https://github.com/openbao/openbao/releases / https://openbao.org/docs/auth/approle/
+      target  : <data>/bin, 127.0.0.1:8200
+      privilege: pemilik (pengguna lokal, tanpa elevasi)
+      cost    : tidak ada
+      rollback: hapus <data>/bin/bao
+      evidence: secret.openbao_binary VERIFIED
+  [secret.status] Pasang biner OpenBao resmi ke <data>/bin (rencana ditampilkan dan dikonfirmasi dulu; SHA256 dicocokkan dengan checksums.txt, tanda tangan GPG belum diverifikasi); lalu .\aeos.ps1 vault init. Alternatif sementara (PERSONAL saja, residual risk): keputusan EXCEPTION pemilik untuk OS keyring - lihat .\aeos.ps1 secrets interim-keyring
+      command : .\aeos.ps1 vault install
+      source  : S24: https://github.com/openbao/openbao/releases / https://openbao.org/docs/auth/approle/
+      target  : <data>/bin, 127.0.0.1:8200
+      privilege: pemilik (pengguna lokal, tanpa elevasi)
+      cost    : tidak ada
+      rollback: hapus <data>/bin/bao
+      evidence: secret.openbao_binary VERIFIED
+  [worker.agent_definition] Aktifkan agent di Workforce Console (Agen -> opencode-implementer -> Aktifkan) setelah OpenCode, sandbox dan route siap; endpoint menolak bila prasyarat belum READY
+      target  : AgentDefinition opencode-implementer
+      privilege: SUPER_ADMIN
+      cost    : tidak ada
+      rollback: nonaktifkan agent
+      evidence: worker.agent_definition CONFIGURED
+  [worker.opencode] Pasang OpenCode versi yang dipin (worker engine pertama, S07 langkah 5); fungsi dibuktikan terpisah oleh uji kontrak worker
+      command : npm.cmd install -g opencode-ai@1.19.3
+      source  : S28: https://github.com/anomalyco/opencode (paket npm opencode-ai; install-manifest/ otoritatif)
+      target  : PATH atau setelan opencode_binary (AEOS_OPENCODE_BINARY)
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: npm.cmd uninstall -g opencode-ai
+      evidence: worker.opencode VERIFIED (opencode --version)
+  [containment.docker] Opsional: pasang Docker Desktop/Engine bila sandbox container dibutuhkan
+      command : winget install --id Docker.DockerDesktop -e
+      source  : docs.docker.com (Docker Desktop; Linux: Docker Engine dari paket resmi)
+      privilege: admin OS
+      cost    : lisensi Docker Desktop belum diperiksa
+      rollback: uninstall Docker
+      evidence: docker --version
+  [containment.sandbox] Pasang/jalankan Docker lalu buktikan containment container, ATAU catat keputusan EXCEPTION pemilik: target worker_sandbox/process, domain PERSONAL, details.allow_process_sandbox=true (ADR-0051; residual risk diterima secara eksplisit) lewat halaman Keputusan
+      command : .\aeos.ps1 worker containment --kind container
+      source  : ADR-0051 (persyaratan sandbox worker)
+      target  : sandbox worker host ini
+      privilege: pemilik (keputusan manusia)
+      cost    : tidak ada
+      rollback: cabut keputusan pengecualian
+      evidence: containment.sandbox CONFIGURED/VERIFIED
+  [route.registry] Evaluasi lalu aktifkan satu route pekerja lewat keputusan manusia (ROUTE_ACTIVATION atau TRIAL terikat hash konfigurasi; route berbayar butuh keputusan BUDGET)
+      command : .\aeos.ps1 routes activate <route_key>
+      target  : Models & Routes
+      privilege: pemilik
+      cost    : sesuai route; paid nonaktif tanpa budget
+      rollback: .\aeos.ps1 routes disable <route_key>
+      evidence: Decision ROUTE_ACTIVATION/TRIAL + route.registry CONFIGURED
+  [adapter.write_enablement] Pemilik mencatat keputusan WRITE_ENABLEMENT per provider di halaman Keputusan (Policy & Decisions); tidak ada perintah otomatis
+      target  : google-drive, google-docs, github-issues
+      privilege: SUPER_ADMIN (keputusan manusia)
+      cost    : tidak ada
+      rollback: cabut keputusan (flag otomatis kembali false)
+      evidence: adapter.write_enablement CONFIGURED
+  [recovery.backups] Buat backup konsisten (database + evidence per domain); restore-test setelahnya
+      command : .\aeos.ps1 ops backup create
+      source  : aeos.operations.backup (runbook operations)
+      target  : <data>/backups
+      privilege: pengguna lokal
+      cost    : tidak ada
+      rollback: hapus direktori backup baru
+      evidence: recovery.backups CONFIGURED lalu recovery.restore_test VERIFIED
+  [recovery.restore_test] Uji restore backup ke direktori sementara terpisah dan simpan bukti RESTORE_TEST (buat backup dulu)
+      command : .\aeos.ps1 ops backup create
+      source  : aeos.operations.backup
+      target  : <data>/backups
+      privilege: pemilik
+      cost    : tidak ada
+      rollback: tidak diperlukan
+      evidence: EvidenceArtifact kind RESTORE_TEST (trusted)
+
+EXIT 1: critical check(s) for CAN_OPEN_DASHBOARD not OK: runtime.frontend_dist
+
+
+##### Reading notes  (what this run shows for this machine; derived from the outputs above)
+
+* OpenBao, OpenCode and Docker are absent: secret.openbao_* / worker.opencode / containment.docker are
+  MISSING with copyable Windows remedies (.\aeos.ps1 vault install, npm.cmd install -g opencode-ai@<pin>,
+  winget for Docker Desktop); nothing was installed by the Doctor.
+* Secret store: no OpenBao and no owner EXCEPTION for the interim OS keyring -> every credential-dependent
+  check fails closed (MISSING), never a guessed status. The OS keyring backend itself is CONFIGURED, and
+  its write/read/delete round-trip is VERIFIED only in the --functional pass.
+* Sandbox: only the process level exists and it is WEAK; containment.report (functional) is CONFIGURED
+  with 5 NOT_ENFORCED items, never VERIFIED; without an owner exception the live ADR-0051 requirement is
+  BLOCKED, so CAN_RUN_WORKER is BLOCKED.
+* Claude Code: binary VERIFIED (version command), native Max login CONNECTED (not VERIFIED), no
+  ANTHROPIC_* variables. Before the functional pass the bridge is NOT-PROVEN -> CAN_REVIEW_WITH_MAX and
+  CAN_PLAN_PERSONAL DEGRADED (manual package fallback); after the single recorded capability test they
+  are READY, with the paid extra-usage setting still UNKNOWN (residual risk, not a pass).
+* MCI stays UNVERIFIED (policy.mci MISSING); no default credentials (0 accounts before the API pass, then
+  the one random-password account); port 8787 free (the TestClient does not bind a socket).
+* frontend/dist is not built in this worktree -> runtime.frontend_dist MISSING -> CAN_OPEN_DASHBOARD
+  BLOCKED and exit code 1, although the API itself answers.
+* OFFICE gates are BLOCKED by default through the policy module; staging validation is BLOCKED (no
+  staging target).
