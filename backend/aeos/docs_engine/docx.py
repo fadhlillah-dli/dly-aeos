@@ -39,6 +39,7 @@ FIDELITY_LIMITS: tuple[str, ...] = (
     "Only http(s)/mailto links become hyperlinks; other targets stay plain text.",
     "Section anchors become Word bookmarks; whether Google Docs keeps them after import is NOT-PROVEN.",
     "Google Docs conversion fidelity (heading/table/link/image) must be checked per tenant (master §51 P2).",
+    "Control characters that XML 1.0 forbids are dropped from the snapshot (the Markdown source keeps them).",
 )
 __doc__ = (__doc__ or "") + "\n".join(f"* {x}" for x in FIDELITY_LIMITS) + "\n"
 
@@ -49,6 +50,8 @@ _IMAGE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$")
 _ANCHOR = re.compile(r"<!--\s*aeos:section=\S+\s+anchor=(\S+)")
 _INLINE = re.compile(r"(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\)|\*[^*\s][^*]*\*|_[^_\s][^_]*_)")
 _SAFE_URL = re.compile(r"^(https?://|mailto:)", re.IGNORECASE)
+# Characters XML 1.0 forbids (python-docx refuses them). Plan content is DATA and may contain them.
+_XML_INVALID = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
 
 ImageResolver = Callable[[str], Path | None]
 
@@ -132,10 +135,10 @@ def markdown_to_docx(markdown: str, *, title: str = "", logical_id: str = "",
     """Convert canonical renderer Markdown into DOCX bytes."""
     doc = new_document()
     if title:
-        doc.core_properties.title = title[:250]
+        doc.core_properties.title = _XML_INVALID.sub("", title)[:250]
     if logical_id:
         doc.core_properties.keywords = f"aeos:logical_id={logical_id}"
-    lines = markdown.replace("\r\n", "\n").split("\n")
+    lines = _XML_INVALID.sub("", markdown.replace("\r\n", "\n")).split("\n")
     i = 0
     last_heading: Paragraph | None = None
     bm_id = 0

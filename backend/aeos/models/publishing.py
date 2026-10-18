@@ -167,6 +167,9 @@ class DocumentRecord(IdMixin, TimestampMixin, Base):
     order_index: Mapped[int] = mapped_column(Integer, default=0)
     rendered_at: Mapped[datetime | None] = mapped_column(nullable=True)
     mode: Mapped[str] = mapped_column(String(16), default="LIVE")
+    # §27 "last reviewed": a human review of exactly this content hash (not an approval; audited).
+    last_reviewed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reviewed_content_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
 class DocumentRevision(IdMixin, CreatedMixin, Base):

@@ -47,3 +47,35 @@ retry after a provider timeout, the approved version kept even when a newer revi
 * Superseded documents are not deleted externally; deletion would need its own decision flow.
 * Real-provider behaviour (eventual consistency, quota) is NOT-PROVEN until exercised against real
   accounts; tests use respx-mocked HTTP.
+
+## Amendment (completeness review, 2026-10-18)
+
+7. **One run per project at a time.** Execute and retry are refused (409 PUBLICATION_RUNNING) while
+   another publication of the same project is RUNNING; human retry/reconcile never interleave with
+   the executor pass of the same publication (409 PUBLICATION_BUSY).
+8. **Unknown outcomes across runs/versions.** The idempotency key contains the approved hash, so a
+   newer version gets new keys. A new preview is therefore refused (409 UNRESOLVED_OPERATIONS, with
+   the publication ids to reconcile) when an earlier run's create/update on the same logical id is
+   still UNKNOWN/IN_FLIGHT. The human reconciles that run first (read-only, by marker); the newer
+   version then plans an update under revision control. An older run's resource is never adopted as
+   if it carried the newer content, and never re-created.
+9. **Preview drift.** Execute is refused (409 TARGETS_CHANGED) when a target the preview planned to
+   create now has an ExternalReference, or an update's baseline revision changed. As defence in
+   depth the executor never runs a create whose target appeared meanwhile (same content → SKIPPED,
+   other content → CONFLICT; a new preview plans the update).
+10. **Interlock denial mid-run** marks the op FAILED with `blocked.code=INTERLOCK_DENIED` and a DENIED
+    audit entry (no silent PENDING); a human retry re-checks it.
+11. **Bounded reconciliation.** A blocked or failing reconciliation backs off exponentially and counts
+    toward `MAX_RECONCILE_FAILURES`; afterwards the op stays UNKNOWN for a human and the publication
+    finalises (PARTIAL/FAILED) instead of polling forever. IN_FLIGHT/UNKNOWN ops keep a run open
+    regardless of their attempt count. A request that cannot even be prepared (e.g. DOCX snapshot)
+    is FAILED with "nothing was sent", not UNKNOWN.
+12. **Crash recovery grace.** Startup recovery turns IN_FLIGHT into UNKNOWN but defers the first
+    reconciliation until `RECOVERY_GRACE` after the last attempt; an IN_FLIGHT op younger than
+    `IN_FLIGHT_STALE_AFTER` is never reconciled as absent (it may still run in `aeos publish run`).
+13. **Retry needs the current approval.** A retry is a new human action: it is refused
+    (409 APPROVAL_STALE) when the publication's version is no longer the approved one, even while the
+    run's PUBLICATION decision has not expired.
+14. **Reject.** `POST /api/publications/{id}/reject` (SUPER_ADMIN) cancels a PREVIEW (§05 step 9
+    "Reject"); nothing is written externally and its outbox rows are adopted by a later preview.
+15. Only files inside the AEOS data directory are ever embedded/uploaded from an outbox row.

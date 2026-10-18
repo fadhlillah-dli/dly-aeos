@@ -4,14 +4,8 @@ import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, ErrorBox, Freshness, Loading, Mono, Notice, Table } from "../../components/ui";
-import { label, shortId } from "./labels";
+import { label, safeHref, shortId, trackerStatusCode } from "./labels";
 import type { WorkItemsResponse } from "./types";
-
-function externalTone(status: string): string {
-  if (status.startsWith("closed")) return "DONE";
-  if (status === "open") return "QUEUED";
-  return status || "UNKNOWN";
-}
 
 export function WorkItemsPanel({ projectId }: { projectId: string }) {
   const qc = useQueryClient();
@@ -55,8 +49,8 @@ export function WorkItemsPanel({ projectId }: { projectId: string }) {
             {
               header: "Issue",
               cell: (w) =>
-                w.issue_url ? (
-                  <a href={w.issue_url} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-accent">
+                safeHref(w.issue_url) ? (
+                  <a href={safeHref(w.issue_url)} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-accent">
                     <ExternalLink className="h-3.5 w-3.5" aria-hidden /> #{w.issue_id}
                   </a>
                 ) : (
@@ -67,7 +61,7 @@ export function WorkItemsPanel({ projectId }: { projectId: string }) {
             { header: "TaskSpec", cell: (w) => (w.task_id ? <Mono>{shortId(w.task_id)}</Mono> : w.feature_key ?? "—") },
             {
               header: "Status di tracker",
-              cell: (w) => <StatusBadge status={externalTone(w.external_status)} label={`${w.external_status} (tracker)`} />,
+              cell: (w) => <StatusBadge status={trackerStatusCode(w.external_status)} label={`${w.external_status} (tracker, proyeksi)`} />,
             },
             {
               header: "Sinkron",

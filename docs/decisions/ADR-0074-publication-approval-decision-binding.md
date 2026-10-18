@@ -38,3 +38,11 @@ bound to `approved_plan_version_id`, target, manifest hash and operation scope.
   project/domain, ACTIVE, unexpired, human actor).
 * Model/agent output can never create this decision: it is recorded only from an authenticated
   SUPER_ADMIN session with CSRF.
+
+## Amendment (completeness review, 2026-10-18)
+
+6. A human retry always re-checks that the publication's version is still the approved one
+   (APPROVAL_STALE otherwise); with an expired run decision it also re-confirms version, approved
+   hash and preview hash and records a new PUBLICATION decision for exactly those values.
+7. An interlock denial before a single write is persisted per operation (FAILED,
+   `INTERLOCK_DENIED`) and audited with result DENIED.

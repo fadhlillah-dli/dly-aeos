@@ -48,6 +48,7 @@ export interface DocItem {
   freshness: { rendered_at: string | null; last_synced_at: string | null; external_stale: boolean };
   open_revision_inputs: number;
   evidence?: { id: string; kind: string; trusted: boolean; evidence_level: string; origin: string; mode: string }[];
+  review?: { reviewed_at: string | null; reviewed_by: string | null; content_hash: string | null; status: "NOT_REVIEWED" | "REVIEWED" | "REVIEW_STALE" };
 }
 
 export interface DiffResponse {
@@ -126,6 +127,7 @@ export interface OperationView {
   depends_on: string[];
   idempotency_key: string;
   payload_hash: string;
+  payload_summary?: { bytes: number; labels?: string[] | null; rendered_visuals?: string[] | null; lossy_update?: string[] };
 }
 
 export interface PublicationView {
@@ -154,6 +156,8 @@ export interface PublicationView {
     operations_executable?: number;
     notes?: string[];
     documents_delta?: Record<string, string[]>;
+    documents_total?: number;
+    folders_total?: number;
     visuals?: { key: string; title: string; status: string; reason: string }[];
     already_done?: unknown[];
   };

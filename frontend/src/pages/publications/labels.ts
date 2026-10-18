@@ -20,7 +20,24 @@ export const STATUS_LABELS: Record<string, string> = {
   NOT_SUPPORTED: "Tidak didukung",
   NOT_APPROVED: "Belum disetujui",
   PROJECTION_ONLY: "Proyeksi (bukan authority)",
+  RENDERED: "Dirender (desain, bukan bukti runtime)",
+  REVIEWED: "Direview manusia (hash ini)",
+  REVIEW_STALE: "Review untuk konten lama",
+  NOT_REVIEWED: "Belum direview manusia",
 };
+
+/** Provider URLs (Drive/Docs/GitHub/Confluence) are data from an external API: only http(s) becomes a link. */
+export function safeHref(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  return /^https?:\/\//i.test(url.trim()) ? url.trim() : undefined;
+}
+
+/** Tracker status is a projection: closed/Done is shown neutrally, never as AEOS DONE/accepted (§14, §50). */
+export function trackerStatusCode(status: string): string {
+  if (status.startsWith("closed") || /^(done|selesai|resolved|closed)$/i.test(status)) return "TRACKER_CLOSED";
+  if (status === "open") return "QUEUED";
+  return status || "UNKNOWN";
+}
 
 export const CONTENT_TYPE_LABELS: Record<string, string> = {
   STATIC: "Statis",

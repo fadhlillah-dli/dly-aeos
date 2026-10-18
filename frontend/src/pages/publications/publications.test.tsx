@@ -3,8 +3,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { vi } from "vitest";
-import { DocumentTreeView } from "./DocumentTree";
-import { buildTree, needsAttention } from "./labels";
+import { DocumentTreeView, ReviewBox } from "./DocumentTree";
+import { buildTree, needsAttention, safeHref, trackerStatusCode } from "./labels";
 import { MarkdownPreview } from "./MarkdownPreview";
 import type { DocItem, PublicationView } from "./types";
 
@@ -76,6 +76,53 @@ describe("DocumentTreeView", () => {
     expect(screen.getByText("Terpublikasi")).toBeInTheDocument();
     expect(screen.getByText("Belum dimulai")).toBeInTheDocument();
     expect(screen.getByText("google-drive").closest("a")).toHaveAttribute("href", "https://docs.google.com/document/d/D1/edit");
+  });
+
+  it("never turns a non-http provider URL into a link", () => {
+    const evil = doc({ logical_doc_id: "x1", title: "Evil", status: "PUBLISHED",
+      external: [{ provider: "confluence", external_id: "E", url: "javascript:alert(1)", revision: "1", sync_status: "SYNCED", last_synced_at: null }] });
+    const { container } = render(<DocumentTreeView items={[evil]} selected={null} onSelect={() => {}} />);
+    expect(container.querySelector("a")).toBeNull();
+    expect(safeHref("javascript:alert(1)")).toBeUndefined();
+    expect(safeHref(" https://example.org/x ")).toBe("https://example.org/x");
+  });
+});
+
+describe("tracker projection", () => {
+  it("never shows a closed/Done issue as AEOS DONE", () => {
+    for (const s of ["closed", "closed:completed", "Done", "Selesai", "Resolved"]) expect(trackerStatusCode(s)).toBe("TRACKER_CLOSED");
+    expect(trackerStatusCode("open")).toBe("QUEUED");
+    expect(trackerStatusCode("")).toBe("UNKNOWN");
+  });
+});
+
+describe("ReviewBox", () => {
+  const stale = doc({ id: "d9", logical_doc_id: "d9", content_hash: "sha256:new", last_reviewed_at: new Date().toISOString(),
+    review: { reviewed_at: new Date().toISOString(), reviewed_by: "u1", content_hash: "sha256:old", status: "REVIEW_STALE" } });
+
+  it("shows a stale review honestly and hides the action for VIEWER", () => {
+    render(wrap(<ReviewBox doc={stale} />));
+    expect(screen.getByText("Review untuk konten lama")).toBeInTheDocument();
+    expect(screen.getByText(/bukan persetujuan/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Tandai sudah direview/ })).toBeNull();
+  });
+
+  it("lets an admin record a review bound to the exact content hash", async () => {
+    auth.isAdmin = true;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: "d9", status: "REVIEWED" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      render(wrap(<ReviewBox doc={stale} />));
+      screen.getByRole("button", { name: /Tandai sudah direview/ }).click();
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(url).toBe("/api/documents/d9/review");
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(String(init.body))).toMatchObject({ content_hash: "sha256:new" });
+    } finally {
+      auth.isAdmin = false;
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -163,5 +210,31 @@ describe("PublicationPanel", () => {
     expect(screen.queryByRole("button", { name: /Approve & Publish/ })).toBeNull();
     expect(screen.getByText(/Hanya SUPER_ADMIN/)).toBeInTheDocument();
     vi.unstubAllGlobals();
+  });
+
+  it("offers the owner Approve & Publish, Reject and Request Revision for a preview (§05 step 9)", async () => {
+    auth.isAdmin = true;
+    const fetchMock = vi.fn(async (url: string) => {
+      const body = url.includes("publication-candidates")
+        ? { items: [], checked_at: null }
+        : url.startsWith("/api/publications/pub1")
+          ? { ...PUB, checked_at: new Date().toISOString() }
+          : { items: [PUB], checked_at: null };
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { PublicationPanel } = await import("./PublicationPanel");
+      render(wrap(<PublicationPanel projectId="p1" />));
+      (await screen.findAllByText("Preview (belum disetujui)"))[0].closest("tr")!.click();
+      const approve = await screen.findByRole("button", { name: /Approve & Publish/ });
+      expect(approve).toBeDisabled(); // needs the explicit confirmation checkbox first
+      expect(screen.getByRole("button", { name: /Tolak preview/ })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /Minta revisi rencana/ })).toHaveAttribute("href", "/plans/plan1");
+      expect(screen.getByText(PUB.approval_statement)).toBeInTheDocument();
+    } finally {
+      auth.isAdmin = false;
+      vi.unstubAllGlobals();
+    }
   });
 });

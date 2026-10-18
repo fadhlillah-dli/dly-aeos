@@ -44,6 +44,10 @@ class ConfirmIn(BaseModel):
     preview_hash: str = Field(min_length=1, max_length=96)
 
 
+class RejectIn(BaseModel):
+    reason: str = Field(default="", max_length=2000)
+
+
 class RetryIn(BaseModel):
     plan_version_id: str | None = None
     approved_hash: str | None = None
@@ -103,6 +107,15 @@ def execute(pub_id: str, body: ConfirmIn, db: DB, principal: AdminPrincipal, dom
                            code="INTERLOCK_DENIED", details={"reasons": outcome.reasons})
     pub_worker.wake()
     return jobs.publication_view(db, outcome.publication)
+
+
+@router.post("/api/publications/{pub_id}/reject")
+def reject(pub_id: str, body: RejectIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    """§05 step 9: the owner rejects this preview (nothing was or will be published from it)."""
+    _load_pub(db, principal, domain, pub_id)
+    pub = jobs.reject_preview(db, pub_id, actor_user_id=principal.user.id, reason=body.reason)
+    db.commit()
+    return jobs.publication_view(db, pub)
 
 
 @router.post("/api/publications/{pub_id}/reconcile")
