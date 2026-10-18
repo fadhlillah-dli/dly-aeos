@@ -38,10 +38,44 @@ const checks = {
       functional_only: false,
       network: false,
       critical_for: ["CAN_OPEN_DASHBOARD"],
+      ok_statuses: ["VERIFIED"],
       component_link: "/tools/sqlite-metadata-store",
     },
+    {
+      check_id: "policy.mci",
+      title: "Referensi MCI kanonik",
+      group: "CANONICAL_POLICY",
+      group_label: "Canonical policy",
+      component_id: null,
+      component_version: "2",
+      scope: {},
+      target_identity: null,
+      status: "CONFIGURED",
+      effective_status: "CONFIGURED",
+      stale_reason: null,
+      severity: "INFO",
+      summary: "Referensi MCI tercatat; keselarasan isi tetap UNVERIFIED oleh Doctor.",
+      observed_evidence: { alignment: "UNVERIFIED" },
+      last_checked_at: "2026-10-18T00:00:00+00:00",
+      expires_at: "2026-10-19T00:00:00+00:00",
+      invalidators: [],
+      fingerprint: null,
+      error_code: null,
+      remediation: {},
+      requires_destructive: false,
+      requires_paid_write: false,
+      never_run: false,
+      functional_only: false,
+      network: false,
+      critical_for: [],
+      ok_statuses: [],
+      component_link: null,
+    },
   ],
-  groups: [{ id: "RUNTIME", label: "Runtime aplikasi", order: 2 }],
+  groups: [
+    { id: "RUNTIME", label: "Runtime aplikasi", order: 2 },
+    { id: "CANONICAL_POLICY", label: "Canonical policy", order: 4 },
+  ],
   last_run: null,
   source: "Readiness Doctor",
   checked_at: null,
@@ -96,5 +130,7 @@ describe("Readiness page", () => {
     expect(screen.queryByRole("button", { name: /Jalankan pemeriksaan/ })).not.toBeInTheDocument();
     expect(screen.getByText("VIEWER: hanya baca")).toBeInTheDocument();
     expect(screen.getAllByText("Tidak diketahui").length).toBeGreaterThan(0);
+    // CONFIGURED is not a pass for a check whose ok-set excludes it (MCI alignment is never automatic)
+    expect(screen.getByTestId("not-ok-policy.mci")).toHaveTextContent(/belum memenuhi syarat/);
   });
 });

@@ -5,10 +5,14 @@ A backup that was never restored is not "recovery ready" (§33, §50 "Restore ba
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from aeos.doctor.checks import check
 from aeos.doctor.model import CheckContext, Outcome, Remedy
+from aeos.models.evidence import EvidenceArtifact
+
+# Platform-level rows are visible to every domain: OFFICE-domain evidence is never quoted here (§35).
+_NOT_OFFICE = or_(EvidenceArtifact.domain.is_(None), EvidenceArtifact.domain != "OFFICE")
 
 
 @check("recovery.backups", "RECOVERY", "Backup database tersedia", component_id="operations-reliability",
@@ -32,12 +36,10 @@ def recovery_backups(ctx: CheckContext) -> Outcome:
 @check("recovery.restore_test", "RECOVERY", "Restore pernah diuji", component_id="operations-reliability",
        needs_db=True, ttl_seconds=86400, severity_fail="MEDIUM", observation="functional")
 def recovery_restore_test(ctx: CheckContext) -> Outcome:
-    from aeos.models.evidence import EvidenceArtifact
-
     assert ctx.session is not None
     ev = ctx.session.scalar(select(EvidenceArtifact).where(EvidenceArtifact.kind == "RESTORE_TEST",
                                                            EvidenceArtifact.trusted.is_(True),
-                                                           EvidenceArtifact.mode == "LIVE")
+                                                           EvidenceArtifact.mode == "LIVE", _NOT_OFFICE)
                             .order_by(EvidenceArtifact.created_at.desc()).limit(1))
     if ev is None:
         return Outcome("MISSING", "Restore belum diuji; recovery tidak diklaim siap.", error_code="RESTORE_NOT_TESTED",
@@ -67,11 +69,11 @@ def recovery_leases(ctx: CheckContext) -> Outcome:
 @check("recovery.publication_idempotency", "RECOVERY", "Pencegahan publikasi ganda terbukti", component_id="publisher",
        needs_db=True, ttl_seconds=86400, severity_fail="MEDIUM")
 def recovery_publication_idempotency(ctx: CheckContext) -> Outcome:
-    from aeos.models.evidence import EvidenceArtifact
-
     assert ctx.session is not None
+    # MOCK/DEMO fixtures never count as proof (AGENTS.md invariant 7): LIVE trusted evidence only.
     ev = ctx.session.scalar(select(EvidenceArtifact).where(EvidenceArtifact.kind == "PUBLICATION_IDEMPOTENCY_TEST",
-                                                           EvidenceArtifact.trusted.is_(True))
+                                                           EvidenceArtifact.trusted.is_(True),
+                                                           EvidenceArtifact.mode == "LIVE", _NOT_OFFICE)
                             .order_by(EvidenceArtifact.created_at.desc()).limit(1))
     if ev is None:
         return Outcome("UNKNOWN", "Pencegahan publikasi ganda (timeout/partial/replay) belum dibuktikan.",

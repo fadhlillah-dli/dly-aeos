@@ -52,12 +52,20 @@ OFFICE_FLAGS = {
 
 
 def office_gate(capability: str, session: Session | None, root: Path | None = None) -> tuple[bool, str]:
-    """(allowed, reason) for an OFFICE-scoped capability."""
+    """(allowed, reason) for an OFFICE-scoped capability.
+
+    Only the policy module (which binds OFFICE permissions to a recorded company-authorisation
+    Decision) can open the gate. A flag set in the reviewed defaults file is NOT a recorded
+    authorisation (AGENTS.md invariant 9), so a file-sourced ``true`` keeps the gate closed.
+    """
     flag = OFFICE_FLAGS.get(capability)
     pol, source = read_office_policy(session, root)
     if flag is None:
         return False, f"OFFICE default deny (§23); sumber {source}"
-    if pol.get(flag) is True:
+    if pol.get(flag) is True and source == "policy-module":
         return True, f"{flag}=true (sumber {source})"
+    if pol.get(flag) is True:
+        return False, (f"OFFICE default deny (§23): {flag}=true hanya ada di {source}, bukan keputusan otorisasi "
+                       "perusahaan yang tercatat; gate tetap tertutup")
     return False, (f"OFFICE default deny (§23): {flag}=false menurut {source}; butuh Decision otorisasi perusahaan "
                    "yang tercatat")

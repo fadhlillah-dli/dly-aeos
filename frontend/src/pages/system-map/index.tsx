@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
+import { DomainRequired } from "../../components/inventory/DomainRequired";
 import { Badge, LENS_LABELS, RELATION_LABELS } from "../../components/inventory/labels";
 import type { BlastRadius, MapNode, PathResult, RelationView, SystemMap } from "../../components/inventory/types";
 import { Button, Card, EmptyState, ErrorBox, inputClass, Loading, Notice, PageHeader, Table } from "../../components/ui";
@@ -40,16 +41,20 @@ export default function SystemMapPage() {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GEdge | null>(null);
 
-  const map = useQuery({ queryKey: ["inventory", "map", domain, lens], queryFn: () => get<SystemMap>(`/api/inventory/map?lens=${lens}`) });
+  const map = useQuery({
+    queryKey: ["inventory", "map", domain, lens],
+    queryFn: () => get<SystemMap>(`/api/inventory/map?lens=${lens}`),
+    enabled: !!domain,
+  });
   const path = useQuery({
     queryKey: ["inventory", "path", domain, lens, pathFrom, pathTo],
     queryFn: () => get<PathResult>(`/api/inventory/path?from=${encodeURIComponent(pathFrom)}&to=${encodeURIComponent(pathTo)}`),
-    enabled: !!pathFrom && !!pathTo && pathFrom !== pathTo,
+    enabled: !!domain && !!pathFrom && !!pathTo && pathFrom !== pathTo,
   });
   const blast = useQuery({
     queryKey: ["inventory", "blast", domain, blastRoot, direction],
     queryFn: () => get<BlastRadius>(`/api/inventory/blast-radius/${encodeURIComponent(blastRoot)}?direction=${direction}`),
-    enabled: !!blastRoot,
+    enabled: !!domain && !!blastRoot,
   });
   useEventStream((e) => {
     if (e.kind === "inventory.reconcile.completed" || e.kind.startsWith("inventory.drift")) qc.invalidateQueries({ queryKey: ["inventory", "map"] });
@@ -151,10 +156,11 @@ export default function SystemMapPage() {
           </Button>
         </div>
       </div>
+      {!domain && <DomainRequired />}
       {data && <p className="mb-3 text-xs text-ink-3">{data.note}</p>}
       {lens === "DESIGN" && <Notice tone="mock">Lensa Rancangan berasal dari InstallManifest/ADR: komponen yang direncanakan, belum bukti instalasi atau penggunaan.</Notice>}
 
-      {map.isLoading ? (
+      {!domain ? null : map.isLoading ? (
         <Loading />
       ) : map.error ? (
         <ErrorBox error={map.error} />
@@ -356,7 +362,7 @@ export default function SystemMapPage() {
           </Card>
         </>
       )}
-      <SnapshotPanel />
+      {domain && <SnapshotPanel />}
     </div>
   );
 }

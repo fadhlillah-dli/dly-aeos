@@ -117,10 +117,13 @@ class SystemProbeRunner:
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # A probe never inherits provider credentials/routing variables, even when the caller passes no
+        # explicit environment (§12: no ANTHROPIC_* in any child process the control plane starts).
+        child_env = scrubbed_env(env if env is not None else os.environ)
         try:
             proc = subprocess.Popen(
                 list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                env=dict(env) if env is not None else None, cwd=str(cwd) if cwd else None, **kwargs,
+                env=child_env, cwd=str(cwd) if cwd else None, **kwargs,
             )
         except FileNotFoundError:
             return RunResult(None, "", "", "NOT_FOUND", 0)

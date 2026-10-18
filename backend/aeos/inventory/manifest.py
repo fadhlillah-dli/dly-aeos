@@ -362,8 +362,22 @@ def apply_manifest(session: Session, *, actor: str = "cli", path: Path | None = 
     from aeos.events import service as events
 
     load = load_manifest(path, root=root)
+    previous = current_manifest(session)
     record, stored = store_manifest(session, load, loaded_by=actor)
     counts = upsert_components(session, load.data, manifest_hash=load.content_hash)
+    invalidated = 0
+    if stored and previous is not None:
+        # The desired state changed: readiness results computed against the old manifest are STALE
+        # until rechecked (§08 "Perubahan ... konfigurasi yang relevan membuat pemeriksaan terdampak STALE").
+        try:
+            from aeos.doctor import facade as doctor
+
+            invalidated = doctor.invalidate(
+                session, invalidator="manifest",
+                reason=f"InstallManifest berubah {previous.content_hash[:19]} -> {load.content_hash[:19]}")
+        except (ImportError, ModuleNotFoundError):
+            invalidated = 0
+    counts["checks_marked_stale"] = invalidated
     if stored:
         audit.record(
             session, actor_type="cli" if actor in ("cli", "seed") else "user", actor_id=actor,

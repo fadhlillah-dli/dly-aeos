@@ -39,6 +39,8 @@ export interface CheckItem {
   functional_only: boolean;
   network: boolean;
   critical_for: string[];
+  /** Statuses that count as OK for this check (e.g. CONFIGURED is not OK for policy.mci). */
+  ok_statuses: string[];
   component_link: string | null;
 }
 

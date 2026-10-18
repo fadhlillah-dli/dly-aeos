@@ -5,6 +5,7 @@ import { Link, useParams } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { ExplainButtons } from "../../components/ExplainButtons";
+import { DomainRequired } from "../../components/inventory/DomainRequired";
 import { Badge, DIMENSION_LABELS, RELATION_LABELS, REQUIREMENT_LABELS, SeverityBadge } from "../../components/inventory/labels";
 import type { BlastRadius, ComponentDetail, RelationView } from "../../components/inventory/types";
 import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
@@ -64,6 +65,7 @@ export default function ComponentDetailPage() {
     queryKey: ["inventory", "component", domain, componentId],
     queryFn: () => get<ComponentDetail>(`/api/inventory/components/${encodeURIComponent(componentId)}`),
     retry: false,
+    enabled: !!domain,
   });
   const blast = useQuery({
     queryKey: ["inventory", "blast", domain, componentId],
@@ -75,6 +77,13 @@ export default function ComponentDetailPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory"] }),
   });
 
+  if (!domain)
+    return (
+      <div>
+        <PageHeader title="Detail komponen" question="Fungsi, sumber, versi, akses, bukti dan perubahan komponen" />
+        <DomainRequired />
+      </div>
+    );
   if (detail.isLoading) return <Loading />;
   if (detail.error)
     return (

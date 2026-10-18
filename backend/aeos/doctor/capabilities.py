@@ -106,6 +106,15 @@ def checks_for_capability(capability: str | Capability) -> list[str]:
     return seen
 
 
+def capability_index() -> dict[str, list[str]]:
+    """check_id -> capabilities whose gate reads it (the §08 'capability scope' of a CheckResult)."""
+    out: dict[str, list[str]] = {}
+    for cap in RULES:
+        for cid in checks_for_capability(cap):
+            out.setdefault(cid, []).append(cap.value)
+    return out
+
+
 def _parse(ts: Any) -> datetime | None:
     if ts is None:
         return None
@@ -154,6 +163,8 @@ def _office_gate_key(capability: Capability, rule: CapRule, domain: str | None) 
         return "CAN_RUN_WORKER"  # external_worker_allowed
     if domain == "OFFICE" and capability == Capability.CAN_REVIEW_WITH_MAX:
         return "CAN_PLAN_OFFICE"  # Claude Max on Office data needs company approval (§51 P1)
+    if domain == "OFFICE" and capability == Capability.CAN_VALIDATE_STAGING:
+        return "CAN_USE_OFFICE_INTEGRATIONS"  # Office execution stays off until authorised (§23, §49 M5)
     return None
 
 
@@ -260,9 +271,25 @@ def _matches(invalidator: str, declared: list[str]) -> bool:
     return False
 
 
+COMPONENT_INVALIDATOR = "component:"
+
+
+def _depends(invalidator: str, row: Any) -> bool:
+    """A result depends on *invalidator* when it declares it (exact or wildcard), or - for
+    ``component:<id>`` (the observed identity/version of that component changed) - when the check is
+    about that component."""
+    if invalidator.startswith(COMPONENT_INVALIDATOR):
+        return bool(row.component_id) and row.component_id == invalidator[len(COMPONENT_INVALIDATOR):]
+    return _matches(invalidator, row.invalidators or [])
+
+
 def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
     """Mark the latest results that depend on *invalidator* as STALE (recheck required) and expire the
-    related component observations. Returns the number of results marked STALE."""
+    related component observations. Returns the number of results marked STALE.
+
+    Invalidators are declared per check (``binary:claude``, ``config:routes``, ``secret:<ref>``,
+    ``manifest`` ...); ``component:<id>`` marks every check about that component (used by inventory
+    reconciliation when an observed version/identity changes, §38 "Drift dan kegagalan")."""
     from aeos.doctor.runner import latest_results
     from aeos.events import service as events
     from aeos.inventory.observations import expire_component_observations
@@ -271,7 +298,7 @@ def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
     components: set[str] = set()
     why = reason or f"invalidated by {invalidator}"
     for cid, row in latest_results(session).items():
-        if row.status == "STALE" or not _matches(invalidator, row.invalidators or []):
+        if row.status == "STALE" or not _depends(invalidator, row):
             continue
         row.observed_evidence = {**(row.observed_evidence or {}), "status_before_stale": row.status,
                                  "stale_reason": f"{why} ({invalidator})"[:300]}

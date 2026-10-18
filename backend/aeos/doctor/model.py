@@ -49,6 +49,16 @@ def aeos_cmd(args: str) -> str:
     return f".\\aeos.ps1 {args}" if sys.platform == "win32" else f"./aeos {args}"
 
 
+def os_install_command(*, windows: str | None, macos: str | None, linux: str | None = None) -> str | None:
+    """Copyable install command for the current OS, or None when no single official command applies
+    (e.g. Linux distributions differ: the remedy then points to the official source instead of guessing)."""
+    if sys.platform == "win32":
+        return windows
+    if sys.platform == "darwin":
+        return macos
+    return linux
+
+
 def venv_python() -> str:
     return ".\\.venv\\Scripts\\python.exe" if sys.platform == "win32" else ".venv/bin/python"
 

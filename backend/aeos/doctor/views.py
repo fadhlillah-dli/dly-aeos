@@ -14,7 +14,7 @@ from aeos.doctor.capabilities import (
     effective_status,
     live_fingerprints,
 )
-from aeos.doctor.checks import REGISTRY, ordered_specs
+from aeos.doctor.checks import REGISTRY, load_all, ordered_specs
 from aeos.doctor.model import GROUP_LABELS, GROUPS
 from aeos.doctor.runner import latest_results, latest_run, row_view
 from aeos.models.doctor_ext import DoctorRun
@@ -25,6 +25,17 @@ def _visible(scope: dict[str, Any] | None, domain: str | None) -> bool:
     return d is None or d == domain
 
 
+def hidden_check_ids(domain: str | None) -> set[str]:
+    """Checks scoped to a domain other than the session's (never shown, counted or quoted)."""
+    load_all()
+    return {cid for cid, s in REGISTRY.items() if not _visible(dict(s.scope), domain)}
+
+
+def _reason_check_id(reason: str) -> str:
+    text = reason[len("catatan: "):] if reason.startswith("catatan: ") else reason
+    return text.split(":", 1)[0].strip()
+
+
 def _critical_for() -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for cap, rule in RULES.items():
@@ -33,12 +44,22 @@ def _critical_for() -> dict[str, list[str]]:
     return out
 
 
-def run_meta(run: DoctorRun | None) -> dict[str, Any] | None:
+def visible_counts(statuses: list[str]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for st in statuses:
+        out[st] = out.get(st, 0) + 1
+    return out
+
+
+def run_meta(run: DoctorRun | None, counts: dict[str, int] | None = None) -> dict[str, Any] | None:
+    """Run metadata. ``counts`` should be computed over the checks visible to the session; the stored
+    all-domain counts are never returned to a domain view (counts are metadata too, §50)."""
     if run is None:
         return None
     return {"id": run.id, "started_at": run.started_at.isoformat(),
             "finished_at": run.finished_at.isoformat() if run.finished_at else None, "trigger": run.trigger,
-            "functional": run.functional, "groups": run.groups, "capability": run.capability, "counts": run.counts}
+            "functional": run.functional, "groups": run.groups, "capability": run.capability,
+            "counts": counts if counts is not None else {}}
 
 
 def checks_view(session: Session, *, domain: str | None, group: str | None = None) -> dict[str, Any]:
@@ -69,10 +90,11 @@ def checks_view(session: Session, *, domain: str | None, group: str | None = Non
                       "ok_statuses": sorted(s.ok_statuses),
                       "component_link": f"/tools/{s.component_id}" if s.component_id else None})
     last = latest_run(session)
+    counts = visible_counts([i["status"] for i in items if last is not None and i.get("run_id") == last.id])
     return {
         "items": items,
         "groups": [{"id": g, "label": label, "order": i} for i, (g, label) in enumerate(GROUPS)],
-        "last_run": run_meta(last),
+        "last_run": run_meta(last, counts),
         "source": "Readiness Doctor: probe kode tanpa LLM (CheckResult)",
         "checked_at": last.finished_at.isoformat() if last and last.finished_at else None,
         "mode": "LIVE",
@@ -91,9 +113,17 @@ def capabilities_view(session: Session, *, domain: str | None) -> dict[str, Any]
     from aeos.doctor.capabilities import HUMAN_ONLY
 
     items = capability_matrix(session, domain=domain)
+    hidden = hidden_check_ids(domain)
     for it in items:
-        it["checks"] = [c for c in it["checks"] if _visible(dict(REGISTRY[c["check_id"]].scope), domain)
-                        or c["check_id"] not in REGISTRY]
+        before = len(it["checks"])
+        it["checks"] = [c for c in it["checks"] if c["check_id"] not in hidden]
+        # Reasons and remedies quote check summaries/evidence: strip those of checks scoped to another
+        # domain so their metadata (e.g. whether an OFFICE credential exists) never reaches this view.
+        it["reasons"] = [r for r in it["reasons"] if _reason_check_id(r) not in hidden]
+        it["remedies"] = [r for r in it["remedies"] if r.get("check_id") not in hidden]
+        if len(it["checks"]) < before:
+            it["reasons"].append("catatan: pemeriksaan ber-scope domain lain tidak ditampilkan; pilih domain "
+                                 "PERSONAL/OFFICE untuk melihat detailnya")
     last = latest_run(session)
     return {
         "items": items,

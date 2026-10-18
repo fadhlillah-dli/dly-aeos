@@ -12,6 +12,7 @@ import sys
 from typing import Any
 
 import typer
+from sqlalchemy.exc import SQLAlchemyError
 
 from aeos.inventory.asciitext import ascii_safe, table
 
@@ -73,8 +74,19 @@ def doctor(
     settings = get_settings()
     session, db_state = _open_session(settings)
     try:
-        report = run_doctor(settings, session, groups=group or None, capability=capability, functional=functional,
-                            trigger="cli")
+        try:
+            report = run_doctor(settings, session, groups=group or None, capability=capability,
+                                functional=functional, trigger="cli")
+        except SQLAlchemyError:
+            # An existing database whose schema predates this version (e.g. a column added without a
+            # migration): still report everything, print-only, instead of crashing before the UI (§50).
+            if session is None:
+                raise
+            session.rollback()
+            session.close()
+            session, db_state = None, "schema-outdated"
+            report = run_doctor(settings, None, groups=group or None, capability=capability,
+                                functional=functional, trigger="cli")
         persisted = False
         if session is not None:
             try:
@@ -137,7 +149,10 @@ def _print_report(settings: Any, db_state: str, persisted: bool, report: Any, ma
                 if rem.get(key):
                     echo(ascii_safe(f"      {label}: {rem[key]}"))
     echo("")
-    if not persisted:
+    if not persisted and db_state == "schema-outdated":
+        echo("Results were NOT stored: the database schema is older than this version. Back up and migrate it "
+             "with: aeos db upgrade")
+    elif not persisted:
         echo("Results were NOT stored (database not initialised). Create it with: aeos db upgrade")
     if failures:
         echo(ascii_safe("EXIT 1: critical check(s) for CAN_OPEN_DASHBOARD not OK: " + ", ".join(failures)))
