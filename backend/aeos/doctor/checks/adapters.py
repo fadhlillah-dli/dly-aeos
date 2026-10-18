@@ -11,7 +11,7 @@ from typing import Any
 
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import secret_ref_status, set_secret_remedy
-from aeos.doctor.model import CheckContext, Outcome
+from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
 
 GITHUB_REF = "personal/github"
 # The OAuth token written by `aeos publish google-connect` and read by the publisher (provider
@@ -85,10 +85,18 @@ def adapter_google(ctx: CheckContext) -> Outcome:
         return Outcome("MISSING", "Secret store tidak tersedia (fail closed).", evidence=evidence,
                        error_code="SECRET_STORE_UNAVAILABLE")
     if state == "ABSENT":
-        return Outcome("MISSING", f"OAuth client {GOOGLE_REF} belum disimpan; consent dilakukan pemilik lewat alur Google.",
-                       evidence=evidence, error_code="GOOGLE_OAUTH_MISSING",
-                       remedy=set_secret_remedy(GOOGLE_REF, "OAuth client Google (Desktop app)"))
-    return Outcome("CONFIGURED", f"OAuth client {GOOGLE_REF} tersimpan; token/consent dan root folder diverifikasi oleh "
+        # The token (and the client config next to it) is written only by the official consent flow of
+        # `aeos publish google-connect`, never typed in with `aeos secrets set`.
+        return Outcome("MISSING", f"Token OAuth Google {GOOGLE_REF} belum ada; consent dilakukan pemilik lewat alur "
+                       "Google (aeos publish google-connect).", evidence=evidence, error_code="GOOGLE_OAUTH_MISSING",
+                       remedy=Remedy(
+                           operation="Hubungkan Google Drive melalui consent OAuth resmi (scope drive.file saja)",
+                           command=aeos_cmd("publish google-connect --client-secret <client_secret.json>"),
+                           source="Google OAuth 2.0 untuk aplikasi Desktop (redirect 127.0.0.1)",
+                           target=GOOGLE_REF, privilege="pemilik akun Google", cost="tidak ada",
+                           rollback="cabut akses aplikasi di myaccount.google.com/permissions",
+                           evidence_to_collect="status ref tanpa nilai; jalankan ulang Doctor"))
+    return Outcome("CONFIGURED", f"Token OAuth {GOOGLE_REF} tersimpan; scope dan root folder diverifikasi oleh "
                    "adapter publisher.", evidence=evidence)
 
 

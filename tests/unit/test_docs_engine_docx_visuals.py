@@ -119,7 +119,7 @@ def test_mmdc_render_success_and_cache(tmp_path, monkeypatch):
 
     def run(args, **kw):
         calls.append(args)
-        assert kw.get("timeout") and "shell" not in kw  # bounded, list args, no shell
+        assert isinstance(args, list) and kw.get("timeout") and "shell" not in kw  # bounded, list args, no shell
         if "--version" in args:
             return subprocess.CompletedProcess(args, 0, "11.4.0\n", "")
         out = args[args.index("-o") + 1]
@@ -127,7 +127,7 @@ def test_mmdc_render_success_and_cache(tmp_path, monkeypatch):
             fh.write(PNG)
         return subprocess.CompletedProcess(args, 0, "", "")
 
-    monkeypatch.setattr(vis.subprocess, "run", run)
+    monkeypatch.setattr(vis, "run_bounded", run)
     monkeypatch.setenv("AEOS_MMDC_BINARY", str(fake))
     [art] = vis.render_visuals([DIAG], tmp_path / "v")
     assert art.status == vis.STATUS_RENDERED and art.png_path and art.svg_path and "11.4.0" in (art.renderer or "")
@@ -145,10 +145,43 @@ def test_mmdc_timeout_is_failed_not_fake(tmp_path, monkeypatch):
             return subprocess.CompletedProcess(args, 0, "11\n", "")
         raise subprocess.TimeoutExpired(args, kw["timeout"])
 
-    monkeypatch.setattr(vis.subprocess, "run", run)
+    monkeypatch.setattr(vis, "run_bounded", run)
     monkeypatch.setenv("AEOS_MMDC_BINARY", str(fake))
     [art] = vis.render_visuals([DIAG], tmp_path / "v", )
     assert art.status == vis.STATUS_FAILED and "timeout" in art.reason and art.png_path is None
+
+
+def test_mmdc_timeout_kills_the_whole_process_tree(tmp_path):
+    """mmdc is an npm shim on Windows (mmdc.cmd -> node -> Chromium): a timeout must not leave children."""
+    import sys
+    import time
+
+    import psutil
+
+    pid_file = tmp_path / "child.pid"
+    script = ("import subprocess, sys, time; "
+              "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+              f"open(r'{pid_file}', 'w').write(str(c.pid)); time.sleep(60)")
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        vis.run_bounded([sys.executable, "-c", script], timeout=6)
+    assert time.monotonic() - started < 30
+    child = int(pid_file.read_text())
+    deadline = time.monotonic() + 10
+    while psutil.pid_exists(child) and time.monotonic() < deadline:
+        try:
+            if psutil.Process(child).status() == psutil.STATUS_ZOMBIE:
+                break
+        except psutil.Error:
+            break
+        time.sleep(0.1)
+    alive = psutil.pid_exists(child)
+    if alive:
+        try:
+            alive = psutil.Process(child).status() != psutil.STATUS_ZOMBIE
+        except psutil.Error:
+            alive = False
+    assert not alive, "grandchild survived the timeout"
 
 
 def test_renderer_embeds_rendered_or_pending_visuals(tmp_path, no_mmdc):

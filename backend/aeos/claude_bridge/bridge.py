@@ -75,14 +75,34 @@ REQUIRED_FLAGS = ("-p", "--restricted", "--strict-mcp-config", "--no-session-per
 MAX_CMDLINE_CHARS = 32_000
 MAX_SCHEMA_ARG_CHARS = MAX_CMDLINE_CHARS  # kept for compatibility; the quoted command line is what counts
 _SCHEMA_ANNOTATIONS = frozenset({"description", "title", "$comment", "examples"})
+# JSON Schema keywords whose value maps *names* (property names, definition names) to subschemas: the keys are
+# data, never annotations - a property called "title" or "description" must survive the stripping.
+_SCHEMA_NAME_MAPS = frozenset({"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"})
+_SCHEMA_LISTS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+_SCHEMA_SINGLE = frozenset({"items", "additionalProperties", "additionalItems", "not", "if", "then", "else",
+                            "contains", "propertyNames", "unevaluatedItems", "unevaluatedProperties"})
 
 
-def _strip_annotations(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {k: _strip_annotations(v) for k, v in value.items() if k not in _SCHEMA_ANNOTATIONS}
-    if isinstance(value, list):
-        return [_strip_annotations(v) for v in value]
-    return value
+def _strip_annotations(schema: Any) -> Any:
+    """Drop validation-neutral annotations from *schema* (a JSON Schema), walking only subschema positions.
+
+    Names under ``properties``/``$defs``/... and literal values (``enum``, ``const``, ``default``) are kept
+    exactly, so the stripped schema accepts and rejects the same documents as the original."""
+    if not isinstance(schema, dict):
+        return schema
+    out: dict[str, Any] = {}
+    for k, v in schema.items():
+        if k in _SCHEMA_ANNOTATIONS:
+            continue
+        if k in _SCHEMA_NAME_MAPS and isinstance(v, dict):
+            out[k] = {name: _strip_annotations(sub) for name, sub in v.items()}
+        elif k in _SCHEMA_LISTS and isinstance(v, list):
+            out[k] = [_strip_annotations(sub) for sub in v]
+        elif k in _SCHEMA_SINGLE:
+            out[k] = [_strip_annotations(sub) for sub in v] if isinstance(v, list) else _strip_annotations(v)
+        else:
+            out[k] = v  # keywords with literal values (type, required, enum, const, default, pattern, ...)
+    return out
 
 
 def cmdline_length(argv: list[str]) -> int:
@@ -90,6 +110,8 @@ def cmdline_length(argv: list[str]) -> int:
     import subprocess
 
     return len(subprocess.list2cmdline(argv))
+
+
 QUOTA_PROVIDER = "claude-native"
 CAPABILITY_TEST_SCHEMA: dict[str, Any] = {
     "type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False,
