@@ -1,11 +1,46 @@
-import { EmptyState, PageHeader } from "../../components/ui";
+import { useQuery } from "@tanstack/react-query";
+import { RefreshCw } from "lucide-react";
+import { get } from "../../api/client";
+import { useAuth } from "../../auth/AuthContext";
+import { RelatedLinks } from "../../components/control_center/Provenance";
+import { Button, ErrorBox, Loading, PageHeader } from "../../components/ui";
+import { ActivityFeed } from "./ActivityFeed";
+import { OverviewView } from "./OverviewView";
+import { SearchBox } from "./SearchBox";
+import type { Overview } from "./types";
 
-// PLACEHOLDER — replaced by the owning module's implementation.
+// Ringkasan (§35 Overview / Readiness): "Apakah proyek ini dapat berjalan dan apa yang belum siap?"
 export default function Page() {
+  const { domain, projectId } = useAuth();
+  const q = useQuery({
+    queryKey: ["cc-overview", domain, projectId],
+    queryFn: () => get<Overview>("/api/control-center/overview"),
+    refetchInterval: 30_000,
+    enabled: !!domain,
+  });
   return (
     <div>
-      <PageHeader title="Ringkasan" question="Apakah proyek ini dapat berjalan dan apa yang belum siap?" />
-      <EmptyState title="Belum diimplementasikan">Halaman ini belum tersedia pada build ini.</EmptyState>
+      <PageHeader
+        title="Ringkasan"
+        question="Apakah proyek ini dapat berjalan dan apa yang belum siap?"
+        source={q.data?.source ?? "Control Center projection"}
+        checkedAt={q.data?.generated_at ?? null}
+        evidenceLimit="Status dihitung kode dari record; UNKNOWN/NOT-PROVEN tidak pernah dianggap lulus."
+        mode={q.data?.mode}
+        actions={
+          <Button onClick={() => q.refetch()} busy={q.isFetching}>
+            <RefreshCw className="h-4 w-4" aria-hidden /> Periksa ulang
+          </Button>
+        }
+      />
+      {q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : q.data ? <OverviewView data={q.data} /> : null}
+      {domain && (
+        <div className="mt-4 grid gap-4 xl:grid-cols-2">
+          <ActivityFeed domain={domain} />
+          <SearchBox domain={domain} />
+        </div>
+      )}
+      <RelatedLinks />
     </div>
   );
 }

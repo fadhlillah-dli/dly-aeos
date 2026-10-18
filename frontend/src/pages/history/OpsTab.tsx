@@ -1,0 +1,127 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { get, post, put } from "../../api/client";
+import { useAuth } from "../../auth/AuthContext";
+import { OpsBadge } from "../../components/control_center/OpsBadge";
+import { Provenance } from "../../components/control_center/Provenance";
+import { StatusBadge } from "../../components/StatusBadge";
+import { Button, Card, ErrorBox, Loading, Mono, Table } from "../../components/ui";
+import { relativeTime } from "../../lib/format";
+import type { AlertRow, FlagRow, ListMeta, SliItem } from "./types";
+
+function fmt(item: SliItem): string {
+  if (item.value === null) return "UNKNOWN";
+  if (item.unit === "ratio") return `${(item.value * 100).toFixed(1)}%`;
+  if (item.unit === "usd") return `$${item.value.toFixed(4)}`;
+  if (item.unit === "seconds") return item.value >= 3600 ? `${(item.value / 3600).toFixed(1)} jam` : `${Math.round(item.value)} dtk`;
+  return String(item.value);
+}
+
+export function OpsTab() {
+  const { isAdmin } = useAuth();
+  const qc = useQueryClient();
+  const sli = useQuery({ queryKey: ["ops-sli"], queryFn: () => get<ListMeta & { items: SliItem[]; targets_note: string }>("/api/ops/sli") });
+  const alerts = useQuery({ queryKey: ["ops-alerts"], queryFn: () => get<ListMeta & { items: AlertRow[] }>("/api/ops/alerts") });
+  const flags = useQuery({ queryKey: ["ops-flags"], queryFn: () => get<ListMeta & { items: FlagRow[]; notice: string }>("/api/ops/flags") });
+  const evaluate = useMutation({
+    mutationFn: () => post("/api/ops/sli/evaluate"),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ops-alerts"] }),
+  });
+  const toggle = useMutation({
+    mutationFn: (f: FlagRow) => put(`/api/ops/flags/${f.key}`, { value: !f.value, reason: "dashboard" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ops-flags"] }),
+  });
+
+  return (
+    <div className="space-y-4">
+      <Card
+        title="SLI (target = keputusan pemilik)"
+        actions={
+          <Button className="text-xs" disabled={!isAdmin} busy={evaluate.isPending} onClick={() => evaluate.mutate()}>
+            Evaluasi & perbarui alert
+          </Button>
+        }
+      >
+        {sli.isLoading ? (
+          <Loading />
+        ) : sli.error ? (
+          <ErrorBox error={sli.error} />
+        ) : (
+          <>
+            <Table
+              rows={sli.data?.items ?? []}
+              rowKey={(r) => r.key}
+              columns={[
+                { header: "Indikator", cell: (r) => <span title={r.key}>{r.title}</span> },
+                { header: "Nilai", cell: (r) => (r.value === null ? <StatusBadge status="UNKNOWN" /> : fmt(r)) },
+                { header: "Target", cell: (r) => (r.target ? `${r.target.max != null ? `≤ ${r.target.max}` : ""}${r.target.min != null ? ` ≥ ${r.target.min}` : ""}` : "—") },
+                { header: "Status", cell: (r) => <OpsBadge status={r.status} /> },
+                { header: "Scope", cell: (r) => r.scope },
+              ]}
+            />
+            <p className="mt-2 text-xs text-ink-3">
+              {sli.data?.targets_note} Contoh: <Mono>aeos ops sli target queue_age_seconds --max 1800</Mono>
+            </p>
+          </>
+        )}
+        {evaluate.error ? <ErrorBox error={evaluate.error} /> : null}
+        <Provenance source={sli.data?.source} checkedAt={sli.data?.checked_at} evidenceLimit="Dihitung dari record controller; tanpa target pemilik tidak ada status 'dalam target'." />
+      </Card>
+
+      <Card title="Alert terbuka">
+        {alerts.isLoading ? (
+          <Loading />
+        ) : alerts.error ? (
+          <ErrorBox error={alerts.error} />
+        ) : (
+          <Table
+            rows={alerts.data?.items ?? []}
+            rowKey={(r) => r.id}
+            empty="Tidak ada alert terbuka tercatat"
+            columns={[
+              { header: "Alert", cell: (r) => r.title },
+              { header: "Tingkat", cell: (r) => <StatusBadge status={r.severity === "CRITICAL" || r.severity === "HIGH" ? "FAILED" : "DEGRADED"} label={r.severity} /> },
+              { header: "Status", cell: (r) => <OpsBadge status={r.status} /> },
+              { header: "Kejadian", cell: (r) => `${r.occurrences}× · ${relativeTime(r.last_seen_at)}` },
+              { header: "Scope", cell: (r) => r.domain ?? "PLATFORM" },
+            ]}
+          />
+        )}
+        <Provenance source={alerts.data?.source} checkedAt={alerts.data?.checked_at} />
+      </Card>
+
+      <Card title="Feature flag">
+        {flags.isLoading ? (
+          <Loading />
+        ) : flags.error ? (
+          <ErrorBox error={flags.error} />
+        ) : (
+          <>
+            <p className="mb-2 text-xs text-ink-3">{flags.data?.notice}</p>
+            <Table
+              rows={flags.data?.items ?? []}
+              rowKey={(r) => r.key}
+              columns={[
+                { header: "Flag", cell: (r) => <Mono>{r.key}</Mono> },
+                { header: "Fungsi", cell: (r) => r.description },
+                { header: "Consumer", cell: (r) => r.consumer },
+                { header: "Nilai", cell: (r) => `${String(r.value)}${r.is_default ? " (default)" : ""}` },
+                {
+                  header: "Ubah",
+                  cell: (r) =>
+                    r.kind === "bool" ? (
+                      <Button className="text-xs" disabled={!isAdmin} busy={toggle.isPending && toggle.variables?.key === r.key} onClick={() => toggle.mutate(r)}>
+                        {r.value ? "Nonaktifkan" : "Aktifkan"}
+                      </Button>
+                    ) : (
+                      <span className="text-xs text-ink-3">via API</span>
+                    ),
+                },
+              ]}
+            />
+          </>
+        )}
+        {toggle.error ? <ErrorBox error={toggle.error} /> : null}
+      </Card>
+    </div>
+  );
+}
