@@ -25,18 +25,26 @@ Bitbucket. §05 step 6 requires an inventory of an existing repository without r
 3. Bitbucket verification is not implemented in this build (OFFICE, M5): it reports UNVERIFIED
    with the reason and makes no network call.
 4. Local checkouts must be absolute, existing, the git top-level, outside the AEOS data dir and
-   not a UNC/network path. Observation is read-only (`rev-parse`, `status --porcelain`, `remote
+   not a UNC/network path (checked before and after resolving, so a mapped Windows drive that
+   resolves to `\\server\share` is refused too). Observation is read-only (`rev-parse`, `status --porcelain`, `remote
    get-url`); the origin must point at the declared provider/owner/name or the checkout is
    `MISMATCH`. Credentials embedded in remote URLs are stripped; views show a logical/redacted
    path. The platform repository uses the logical ref `platform-repo` resolved from
    `aeos.core.paths.repo_root()` at use time.
-5. All git calls go through `aeos.portfolio.gitread`: list args, timeouts, output caps, inherited
-   `GIT_*` variables removed, `core.fsmonitor=false`, content read from the object DB at an exact
-   commit (`git show <sha>:<path>`) so working-tree symlinks cannot escape the repository.
+5. All git calls go through `aeos.portfolio.gitread`: list args, timeouts, stdout streamed with a
+   hard cap (the process is killed at the cap, so a huge blob or grep line is never buffered whole),
+   inherited `GIT_*` variables removed, `core.fsmonitor=false`, no console window on Windows,
+   content read from the object DB at an exact commit (`git cat-file blob <sha>:<path>`, which runs
+   no textconv or clean/smudge filters) so working-tree symlinks cannot escape the repository.
 6. `aeos.portfolio.inventory.inventory_repository(path, commit=None)` is the read-only inventory
    contract planning uses for `PlanningContext.repo_inventory` (languages, manifests + lockfile
    pairing, test dirs/frameworks, CI, deployment/IaC, docs, contracts/schemas, symlinks, sensitive
-   paths, head/branch/dirty, explicit coverage gaps; tests are never executed).
+   paths, head/branch/dirty, explicit coverage gaps; tests are never executed). The result records
+   the inventoried `commit` and the checkout's `head_commit` separately (`commit_is_head`), and its
+   hash covers commit content only (not branch or working-tree state).
+7. The project key `dly-aeos` is reserved for the §09 seed; a human-created project named
+   "DLY AEOS" gets a suffixed key. The CLI (`aeos project show|inventory`) requires `--domain` and
+   reports a project of another domain as not found, like the API's 404.
 
 ## Consequences
 

@@ -13,13 +13,16 @@ must not see metadata or counts.
 
 ## Decision
 
-1. `GET /api/search?q=&kind=&limit=&offset=` searches projects, plans, task specs, components,
+1. `GET /api/search?q=&kind=&limit=&offset=&project=` searches projects, plans, task specs, components,
    decisions, ADRs, documents, attachments (filename), repositories and memory with
    case-insensitive `LIKE` (wildcards escaped) — no FTS5 virtual tables in V1.
 2. Every query is filtered on the backend by the ACTIVE domain and the principal's
    `project_scope`; counts, totals and pagination are computed with the same filter. Global records
-   (ADRs, decisions without domain/project, components without a domain scope) are included;
-   domain-scoped components only for their domain.
+   (ADRs, decisions without domain/project, components without a domain/project scope) are
+   included; domain- or project-scoped components only when that domain/project is visible (a
+   component scoped to an OFFICE project is neither listed nor counted in a PERSONAL search).
+   `project=<id>` makes the search project-scoped (that project's rows plus global records); a
+   project outside the domain/scope is a 404.
 3. Ordering is deterministic per kind so offset pagination is stable; responses carry
    `source`, `checked_at` and `mode`.
 

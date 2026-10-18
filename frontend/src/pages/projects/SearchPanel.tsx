@@ -21,8 +21,9 @@ const KIND_LABEL: Record<string, string> = {
   memory: "Memori",
 };
 
-/** §35 metadata search, scoped by the backend to the active domain (counts included). */
-export function SearchPanel() {
+/** §35 metadata search, scoped by the backend to the active domain (counts included); with
+ * `projectId` it is project-scoped (that project's records plus platform-global ones). */
+export function SearchPanel({ projectId }: { projectId?: string } = {}) {
   const { domain } = useAuth();
   const [text, setText] = useState("");
   const [q, setQ] = useState("");
@@ -36,12 +37,15 @@ export function SearchPanel() {
   }, [text]);
   const enabled = q.length >= 2;
   const res = useQuery({
-    queryKey: ["search", domain, q, offset],
-    queryFn: () => get<SearchResponse>(`/api/search?q=${encodeURIComponent(q)}&limit=20&offset=${offset}`),
+    queryKey: ["search", domain, projectId ?? null, q, offset],
+    queryFn: () =>
+      get<SearchResponse>(
+        `/api/search?q=${encodeURIComponent(q)}&limit=20&offset=${offset}${projectId ? `&project=${encodeURIComponent(projectId)}` : ""}`,
+      ),
     enabled,
   });
   return (
-    <Card title={`Cari metadata di domain ${domain ?? "?"}`}>
+    <Card title={projectId ? "Cari metadata proyek ini" : `Cari metadata di domain ${domain ?? "?"}`}>
       <label className="relative block">
         <span className="sr-only">Kata kunci</span>
         <Search className="pointer-events-none absolute left-2.5 top-2 h-4 w-4 text-ink-3" aria-hidden />
@@ -52,7 +56,11 @@ export function SearchPanel() {
           onChange={(e) => setText(e.target.value)}
         />
       </label>
-      <p className="mt-1 text-xs text-ink-3">Hanya metadata domain aktif; jumlah dan hasil domain lain tidak pernah ditampilkan.</p>
+      <p className="mt-1 text-xs text-ink-3">
+        {projectId
+          ? "Record proyek ini ditambah record global platform (ADR, komponen); proyek dan domain lain tidak ditampilkan."
+          : "Hanya metadata domain aktif; jumlah dan hasil domain lain tidak pernah ditampilkan."}
+      </p>
       {enabled && res.isLoading && <Loading label="Mencari…" />}
       {res.error && <ErrorBox error={res.error} />}
       {enabled && res.data && (

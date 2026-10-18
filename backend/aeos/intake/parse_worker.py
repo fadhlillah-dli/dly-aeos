@@ -96,7 +96,25 @@ def _parse_docx(path: Path) -> tuple[str, dict[str, Any]]:
             cells = [c.text.strip() for c in row.cells]
             if any(cells):
                 parts.append(" | ".join(cells))
-    return "\n".join(parts), {"paragraphs": len(doc.paragraphs), "tables": tables}
+    # Headers/footers are extracted too, so the parent's secret/instruction scan covers them.
+    seen: set[str] = set()
+    hf_parts = 0
+    for section in doc.sections:
+        for part in (section.header, section.footer, section.first_page_header, section.first_page_footer,
+                     section.even_page_header, section.even_page_footer):
+            texts: list[str] = []
+            try:
+                if not part.is_linked_to_previous:
+                    texts = [p.text for p in part.paragraphs if p.text]
+            except Exception as exc:  # a malformed header part must not hide the body text
+                sys.stderr.write(f"header/footer skipped: {exc.__class__.__name__}\n")
+            for t in texts:
+                if t not in seen:
+                    seen.add(t)
+                    parts.append(t)
+                    hf_parts += 1
+    meta = {"paragraphs": len(doc.paragraphs), "tables": tables, "header_footer_paragraphs": hf_parts}
+    return "\n".join(parts), meta
 
 
 def _parse_pdf(path: Path) -> tuple[str, dict[str, Any]]:

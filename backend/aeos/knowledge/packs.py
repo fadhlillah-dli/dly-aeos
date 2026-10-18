@@ -3,7 +3,7 @@
 A pack is the minimum, provenance-carrying context for one task/role:
 
 * repository context = file/symbol subset of an EXACT commit (``git ls-tree`` / ``git grep -n`` /
-  ``git show <sha>:<path>``), never a dump of the repo and never the working tree (symlinks and
+  ``git cat-file blob <sha>:<path>``), never a dump of the repo and never the working tree (symlinks and
   submodules are skipped, so nothing outside the repository can be read);
 * project context = metadata search over this project's plans/tasks/decisions/docs (+ global ADRs);
 * policy context = the trusted controller's ``policy/`` files, read-only with hashes; missing policy
@@ -11,8 +11,8 @@ A pack is the minimum, provenance-carrying context for one task/role:
 * research and attachments are labelled DATA / UNTRUSTED_DATA; memory is MEMORY_DATA (never policy);
 * every item has kind/ref/provenance/classification/hash and a token estimate (chars/4) checked
   against the budget; forbidden scope (defaults + request + TaskSpec) is always respected;
-* the pack is hashed; it becomes STALE when the repository head moves off its base commit or the
-  policy files change.
+* the pack is hashed; it becomes STALE when the repository head moves off its base commit, the
+  policy file set changes, its TTL expires, or a newer pack for the same scope supersedes it.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from __future__ import annotations
 import fnmatch
 import math
 import re
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ from aeos.core.errors import AeosError, NotFound, ValidationFailed
 from aeos.core.hashing import content_hash, file_sha256, sha256_text
 from aeos.core.paths import UnsafePathError, ensure_within, repo_root
 from aeos.core.redaction import redact_text
-from aeos.core.timeutil import utcnow
+from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.events import service as events
 from aeos.identity.service import Principal
 from aeos.knowledge import memory as memory_mod
@@ -45,6 +46,8 @@ from aeos.portfolio import gitread
 from aeos.portfolio import repositories as repos
 
 DEFAULT_BUDGET = 8000
+DEFAULT_TTL_HOURS, MAX_TTL_HOURS = 168, 720
+MAX_REPO_READ_BYTES = 512 * 1024
 MIN_BUDGET, MAX_BUDGET = 1024, 200_000
 ITEM_OVERHEAD_TOKENS = 16
 INCLUDE_KINDS = ("policy", "task", "symbol", "repo_file", "code_match", "metadata", "memory", "attachment", "research")
@@ -228,9 +231,16 @@ class _RepoReader:
     def ok(self, path: str) -> bool:
         return path in self.files
 
+    def too_large(self, path: str) -> bool:
+        e = self.files.get(path)
+        return bool(e and e.size is not None and e.size > MAX_REPO_READ_BYTES)
+
     def lines(self, path: str) -> list[str] | None:
         if path not in self._blobs:
-            raw = gitread.show_blob(self.path, self.commit, path, max_bytes=512 * 1024) if self.ok(path) else None
+            raw = None
+            if self.ok(path) and not self.too_large(path):  # never a truncated prefix presented as the file
+                raw = gitread.show_blob(self.path, self.commit, path, max_bytes=MAX_REPO_READ_BYTES,
+                                        complete_only=True)
             if raw is None or b"\x00" in raw[:8192]:
                 self._blobs[path] = None
             else:
@@ -284,7 +294,8 @@ def _collect_files(col: _Collector, reader: _RepoReader, patterns: list[str], fu
                 return
             lines = reader.lines(path)
             if lines is None:
-                warnings.append(f"{path} skipped (binary or unreadable)")
+                why = f"larger than {MAX_REPO_READ_BYTES} bytes" if reader.too_large(path) else "binary or unreadable"
+                warnings.append(f"{path} skipped ({why})")
                 continue
             body = "\n".join(lines[:400]) + ("\n[... more lines omitted]" if len(lines) > 400 else "")
             if col.add(kind="repo_file", ref=f"{path}@{reader.commit[:12]}", content=body, trust="REPO_DATA",
@@ -336,7 +347,7 @@ def _collect_metadata(col: _Collector, session: Session, principal: Principal, p
     for term in terms:
         try:
             res = search(session, principal, Domain(project.domain), q=term, kind="plan,task,decision,adr,document",
-                         limit=20)
+                         limit=20, project_id=project.id)
         except ValidationFailed:
             continue
         for it in res["items"]:
@@ -352,8 +363,9 @@ def _collect_metadata(col: _Collector, session: Session, principal: Principal, p
                 n += 1
 
 
-def _collect_memory(col: _Collector, session: Session, project: Project, terms: list[str]) -> None:
-    rows = memory_mod.usable_for_context(session, project)
+def _collect_memory(col: _Collector, session: Session, principal: Principal, project: Project,
+                    terms: list[str]) -> None:
+    rows = memory_mod.usable_for_context(session, project, allowed_project_ids=principal.allowed_project_ids)
     if terms:
         low = [t.lower() for t in terms]
         rows = [r for r in rows if any(t in r.content.lower() for t in low)]
@@ -426,11 +438,14 @@ def build_pack(
     session: Session, principal: Principal, project: Project, *, task_id: str | None = None,
     role_key: str | None = None, repository_id: str | None = None, base_commit: str | None = None,
     query: Any = None, paths: Any = None, forbidden_paths: Any = None, token_budget: int | None = None,
-    include: Any = None,
+    include: Any = None, ttl_hours: int | None = None,
 ) -> tuple[ContextPack, ContextPackMeta]:
     budget = int(token_budget or DEFAULT_BUDGET)
     if not MIN_BUDGET <= budget <= MAX_BUDGET:
         raise ValidationFailed(f"token_budget must be {MIN_BUDGET}..{MAX_BUDGET}", code="INVALID_BUDGET")
+    ttl = DEFAULT_TTL_HOURS if ttl_hours is None else int(ttl_hours)
+    if not 1 <= ttl <= MAX_TTL_HOURS:
+        raise ValidationFailed(f"ttl_hours must be 1..{MAX_TTL_HOURS}", code="INVALID_TTL")
     role = (role_key or "default").strip()
     if not re.match(r"^[a-z0-9][a-z0-9-]{0,63}$", role):
         raise ValidationFailed("invalid role_key", code="INVALID_ROLE")
@@ -480,6 +495,7 @@ def build_pack(
             if repo.verification_status != "VERIFIED":
                 warnings.append(f"repository {repo.full_name} identity is {repo.verification_status}")
 
+    policy_snapshot = policy_hashes() if "policy" in kinds else {}
     col = _Collector(project, budget)
     for kind in kinds:
         if kind == "policy":
@@ -495,7 +511,7 @@ def build_pack(
         elif kind == "metadata":
             _collect_metadata(col, session, principal, project, terms)
         elif kind == "memory":
-            _collect_memory(col, session, project, terms)
+            _collect_memory(col, session, principal, project, terms)
         elif kind == "attachment":
             _collect_attachments(col, session, project, terms)
         elif kind == "research":
@@ -517,22 +533,26 @@ def build_pack(
     })
     session.add(pack)
     session.flush()
+    now = utcnow()
     meta = ContextPackMeta(
         context_pack_id=pack.id, repository_id=repo.id if repo and reader else None,
         repository_full_name=repo.full_name if repo else None,
-        request={"query": terms, "paths": path_patterns, "base_ref": base_ref, "include": include or None},
+        request={"query": terms, "paths": path_patterns, "base_ref": base_ref, "include": include or None,
+                 "ttl_hours": ttl, "policy_snapshot": policy_snapshot},
         include_kinds=kinds, allowed_paths=allowed, forbidden_paths=forbidden, token_estimate=col.used,
-        omitted=col.omitted, warnings=warnings, observed_head=resolved_commit, checked_at=utcnow(),
-        created_by=principal.user.id,
+        omitted=col.omitted, warnings=warnings, observed_head=resolved_commit, checked_at=now,
+        created_by=principal.user.id, expires_at=now + timedelta(hours=ttl),
     )
     if reader:
         meta.request["skipped"] = {"symlinks": reader.skipped_symlinks, "forbidden": reader.skipped_forbidden}
     session.add(meta)
     session.flush()
+    superseded = _supersede_older(session, pack, meta)
     audit.record(session, actor_type="user", actor_id=principal.user.id, action="knowledge.context_pack.build",
                  target_type="context_pack", target_id=pack.id, project_id=project.id, domain=project.domain,
                  details={"role": role, "task_id": pack.task_id, "base_commit": resolved_commit, "items": len(col.items),
-                          "tokens": col.used, "budget": budget, "omitted": len(col.omitted), "hash": pack.pack_hash})
+                          "tokens": col.used, "budget": budget, "omitted": len(col.omitted), "hash": pack.pack_hash,
+                          "ttl_hours": ttl, "superseded": superseded})
     events.emit(session, source="knowledge", kind="knowledge.context_pack.created", entity_type="context_pack",
                 entity_id=pack.id, entity_version=pack.pack_hash, project_id=project.id, domain=project.domain,
                 payload={"items": len(col.items), "tokens": col.used, "budget": budget})
@@ -542,18 +562,39 @@ def build_pack(
 # ---------------------------------------------------------------- staleness
 
 
+def _policy_changes(pack: ContextPack, meta: ContextPackMeta | None) -> list[str]:
+    if not any(i.get("kind") == "policy" for i in pack.items or []):
+        return []
+    current = policy_hashes()
+    snapshot = (meta.request or {}).get("policy_snapshot") if meta is not None else None
+    reasons: list[str] = []
+    if isinstance(snapshot, dict):  # the whole policy file set as seen at build time
+        for rel in sorted(set(snapshot) | set(current)):
+            if rel not in current:
+                reasons.append(f"policy file policy/{rel} was removed")
+            elif rel not in snapshot:
+                reasons.append(f"policy file policy/{rel} was added")
+            elif current[rel] != snapshot[rel]:
+                reasons.append(f"policy file policy/{rel} changed")
+        return reasons
+    for item in pack.items or []:  # packs built before the snapshot existed: compare included items
+        if item.get("kind") == "policy" and item.get("ref", "").startswith("policy/"):
+            rel = item["ref"][len("policy/"):]
+            if current.get(rel) != (item.get("provenance") or {}).get("sha256"):
+                reasons.append(f"policy file {item['ref']} changed or was removed")
+    return reasons
+
+
 def check_freshness(session: Session, pack: ContextPack, meta: ContextPackMeta | None) -> str:
-    """CURRENT | STALE | UNKNOWN. Marks the pack STALE (sticky) when its base or policy moved."""
+    """CURRENT | STALE | UNKNOWN. Marks the pack STALE (sticky) when its base or policy moved, its
+    TTL expired or it was superseded."""
     if pack.stale:
         return "STALE"
     reasons: list[str] = []
     unknown = False
-    current_policy = policy_hashes()
-    for item in pack.items or []:
-        if item.get("kind") == "policy" and item.get("ref", "").startswith("policy/"):
-            rel = item["ref"][len("policy/"):]
-            if current_policy.get(rel) != (item.get("provenance") or {}).get("sha256"):
-                reasons.append(f"policy file {item['ref']} changed or was removed")
+    if meta is not None and meta.expires_at is not None and ensure_aware(meta.expires_at) <= utcnow():  # type: ignore[operator]
+        reasons.append("pack TTL expired; build a new pack")
+    reasons.extend(_policy_changes(pack, meta))
     head: str | None = None
     if meta is not None and meta.repository_id and pack.base_commit:
         repo = session.get(RepositoryReference, meta.repository_id)
@@ -575,6 +616,30 @@ def check_freshness(session: Session, pack: ContextPack, meta: ContextPackMeta |
         _mark_stale(session, pack, meta, "; ".join(reasons))
         return "STALE"
     return "UNKNOWN" if unknown else "CURRENT"
+
+
+def _supersede_older(session: Session, pack: ContextPack, meta: ContextPackMeta) -> list[str]:
+    """A new pack for the same project/task/role/repository supersedes older non-stale ones.
+
+    Only task-scoped packs supersede: ad-hoc packs (no TaskSpec) with different queries are separate
+    explorations and simply expire through their TTL."""
+    if pack.task_id is None:
+        return []
+    task_cond = ContextPack.task_id == pack.task_id
+    repo_cond = (ContextPackMeta.repository_id.is_(None) if meta.repository_id is None
+                 else ContextPackMeta.repository_id == meta.repository_id)
+    rows = session.execute(
+        select(ContextPack, ContextPackMeta).join(ContextPackMeta, ContextPackMeta.context_pack_id == ContextPack.id)
+        .where(ContextPack.project_id == pack.project_id, ContextPack.domain == pack.domain,
+               ContextPack.id != pack.id, ContextPack.stale.is_(False), ContextPack.role_key == pack.role_key,
+               task_cond, repo_cond)
+    ).all()
+    out: list[str] = []
+    for old, old_meta in rows:
+        old_meta.superseded_by = pack.id
+        _mark_stale(session, old, old_meta, f"superseded by context pack {pack.id}")
+        out.append(old.id)
+    return out
 
 
 def _mark_stale(session: Session, pack: ContextPack, meta: ContextPackMeta | None, reason: str) -> None:
@@ -643,6 +708,8 @@ def pack_view(pack: ContextPack, meta: ContextPackMeta | None, *, freshness: str
         "omitted": meta.omitted if meta else [],
         "warnings": meta.warnings if meta else [],
         "checked_at": meta.checked_at.isoformat() if meta and meta.checked_at else None,
+        "expires_at": meta.expires_at.isoformat() if meta and meta.expires_at else None,
+        "superseded_by": meta.superseded_by if meta else None,
         "item_count": len(pack.items or []),
         "kinds": sorted({i.get("kind") for i in pack.items or []}),
         "items": items,

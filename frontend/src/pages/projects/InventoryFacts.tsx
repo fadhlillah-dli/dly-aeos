@@ -38,6 +38,9 @@ export function InventoryFacts({ inv }: { inv: InventoryView }) {
             branch <Mono>{inv.branch}</Mono>
           </span>
         )}
+        {inv.commit_is_head === false && (
+          <StatusBadge status="DRIFTED" label={`bukan HEAD (HEAD ${inv.head_commit ? shortHash(inv.head_commit, 12) : "tidak diketahui"})`} />
+        )}
         <span>
           {inv.files} berkas · {formatBytes(inv.total_bytes)}
         </span>

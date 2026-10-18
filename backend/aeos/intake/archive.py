@@ -19,6 +19,7 @@ from aeos.intake.filetypes import ACTIVE_EXTENSIONS, UploadRejected, suffixes
 MAX_RATIO = 100  # uncompressed/compressed per member
 RATIO_MIN_BYTES = 1 << 20  # ratios below 1 MiB uncompressed are not suspicious
 NESTED_ARCHIVES = frozenset({".zip", ".7z", ".rar", ".gz", ".tgz", ".bz2", ".xz", ".tar", ".cab", ".zst"})
+DOCX_MEDIA = frozenset({".svg"})
 
 
 @dataclass
@@ -90,6 +91,11 @@ def inspect_zip(
                 if container == "docx" and PurePosixPath(name).name.lower() in {"vbaproject.bin", "vbadata.xml"}:
                     report.macro_content = True
                     reasons.append("document contains macros (vbaProject); active content is not accepted")
+                if container == "docx" and (any(s in ACTIVE_EXTENSIONS - DOCX_MEDIA for s in sfx)
+                                            or name.lower().startswith("word/activex/")):
+                    # embedded executables/scripts or ActiveX controls inside the OOXML package
+                    # (SVG images are ordinary Word media and are never rendered by AEOS)
+                    reasons.append(f"document member {name!r}: embedded active content is not accepted")
                 report.names.append(name)
         if report.total_uncompressed > max_total_uncompressed:
             reasons.append(

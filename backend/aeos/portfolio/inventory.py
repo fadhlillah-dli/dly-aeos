@@ -2,7 +2,7 @@
 
 ``inventory_repository(path)`` is the contract planning calls to fill ``PlanningContext.repo_inventory``.
 It never scaffolds, installs, builds or runs tests: it reads the git object database at an exact
-commit (``git ls-tree`` + small ``git show`` reads) and reports coverage gaps explicitly instead of
+commit (``git ls-tree`` + small ``git cat-file blob`` reads) and reports coverage gaps explicitly instead of
 claiming the whole machine or dependency graph was mapped.
 """
 
@@ -14,6 +14,7 @@ from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from aeos.core.errors import AeosError
 from aeos.core.hashing import content_hash
 from aeos.core.timeutil import utcnow
 from aeos.portfolio import gitread
@@ -121,6 +122,7 @@ DOC_PATTERNS = [
 SENSITIVE_NAMES = re.compile(r"(^|/)(\.env(\.[\w-]+)?|id_rsa|id_ed25519|.+\.pem|.+\.key|.+\.p12|.+\.pfx|"
                              r"credentials(\.json)?|secrets?\.(ya?ml|json))$", re.IGNORECASE)
 SAMPLE_LIMIT = 50
+MAX_MANIFESTS = 500
 _SMALL_READ = 256 * 1024
 
 
@@ -139,7 +141,7 @@ def _push(bucket: dict[str, list[str]], key: str, path: str) -> None:
 def _js_test_frameworks(repo: Path, commit: str, package_jsons: list[str]) -> set[str]:
     found: set[str] = set()
     for pj in package_jsons[:10]:
-        raw = gitread.show_blob(repo, commit, pj, max_bytes=_SMALL_READ)
+        raw = gitread.show_blob(repo, commit, pj, max_bytes=_SMALL_READ, complete_only=True)
         if not raw:
             continue
         try:
@@ -156,7 +158,7 @@ def _js_test_frameworks(repo: Path, commit: str, package_jsons: list[str]) -> se
 
 def _pyproject_pytest(repo: Path, commit: str, paths: list[str]) -> bool:
     for p in paths[:5]:
-        raw = gitread.show_blob(repo, commit, p, max_bytes=_SMALL_READ)
+        raw = gitread.show_blob(repo, commit, p, max_bytes=_SMALL_READ, complete_only=True)
         if raw and b"[tool.pytest" in raw:
             return True
     return False
@@ -166,6 +168,10 @@ def inventory_repository(path: Path | str, *, commit: str | None = None, max_fil
     """Read-only inventory of the repository at *path* at an exact commit (default: HEAD)."""
     top = gitread.toplevel(Path(path).expanduser().resolve())
     sha = gitread.resolve_commit(top, commit or "HEAD")
+    try:
+        head: str | None = sha if not commit else gitread.resolve_commit(top, "HEAD")
+    except AeosError:  # empty repository has no HEAD commit
+        head = None
     entries, truncated = gitread.ls_tree(top, sha, max_entries=max_files)
     branch = gitread.current_branch(top)
     try:
@@ -277,10 +283,16 @@ def inventory_repository(path: Path | str, *, commit: str | None = None, max_fil
         gaps.insert(0, f"Tree listing truncated at {max_files} entries.")
     if submodules:
         gaps.append("Submodule contents are not inventoried.")
+    if len(manifests) > MAX_MANIFESTS:
+        gaps.append(f"{len(manifests)} dependency manifests found; only the first {MAX_MANIFESTS} are listed.")
+        manifests = manifests[:MAX_MANIFESTS]
     result: dict[str, Any] = {
         "schema": INVENTORY_SCHEMA,
         "source": f"git ls-tree {sha}",
         "commit": sha,
+        # The checkout's HEAD when the inventory ran; differs from "commit" for a pinned older commit.
+        "head_commit": head,
+        "commit_is_head": head == sha,
         "branch": branch,
         "working_tree": dirty_state,
         "checked_at": utcnow().isoformat(),
@@ -307,5 +319,6 @@ def inventory_repository(path: Path | str, *, commit: str | None = None, max_fil
         "scaffolded": False,
         "evidence_level": "E1",
     }
-    result["inventory_hash"] = content_hash({k: v for k, v in result.items() if k not in {"checked_at", "working_tree"}})
+    volatile = {"checked_at", "working_tree", "head_commit", "commit_is_head", "branch"}
+    result["inventory_hash"] = content_hash({k: v for k, v in result.items() if k not in volatile})
     return result

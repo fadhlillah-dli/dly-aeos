@@ -4,7 +4,9 @@ SQLite ``LIKE`` over metadata columns of canonical records, scoped on the backen
 domain and the principal's project scope. Counts, totals and pagination are computed with the same
 filter, so the existence of other-domain rows never leaks (§35, §50 "Viewer mengakses detail/
 search/export inventory Office"). Platform-global records (ADRs, global decisions, components
-without a domain scope) are included; domain-scoped components only for their domain.
+without a domain scope) are included; domain- or project-scoped components only when that domain /
+project is visible. With ``project_id`` the search is project-scoped (that project's rows plus the
+platform-global records), §35 "project-scoped/global metadata search".
 """
 
 from __future__ import annotations
@@ -51,10 +53,16 @@ def _snippet(text: str | None, q: str, width: int = 140) -> str:
 
 
 @dataclass(frozen=True)
+class _Visibility:
+    domain: str
+    project_refs: frozenset[str]  # ids and keys of the projects this search may show
+
+
+@dataclass(frozen=True)
 class _Kind:
     build: Callable[[str, str, list[str] | None], Select[Any]]
     row: Callable[[Any, str], dict[str, Any]]
-    python_filter: Callable[[Any, str], bool] | None = None
+    python_filter: Callable[[Any, _Visibility], bool] | None = None
 
 
 def _scope(q: Select[Any], col: Any, project_ids: list[str] | None) -> Select[Any]:
@@ -84,13 +92,21 @@ def _components(pat: str, domain: str, pids: list[str] | None) -> Select[Any]:
                ComponentReference.component_id, ComponentReference.category))
 
 
-def _component_visible(c: ComponentReference, domain: str) -> bool:
-    scope = c.scope or {}
-    domains = scope.get("domains") if isinstance(scope, dict) else None
-    if isinstance(domains, list) and domains:
-        return domain in domains
-    if isinstance(scope, dict) and isinstance(scope.get("domain"), str):
-        return scope["domain"] == domain
+def _component_visible(c: ComponentReference, vis: _Visibility) -> bool:
+    scope = c.scope if isinstance(c.scope, dict) else {}
+    domains = scope.get("domains")
+    if isinstance(domains, list) and domains and vis.domain not in domains:
+        return False
+    if "domain" in scope and scope.get("domain") not in (None, "", vis.domain):
+        return False
+    refs: list[Any] = []
+    for key in ("project_id", "project"):
+        if scope.get(key):
+            refs.append(scope[key])
+    if isinstance(scope.get("project_ids"), list):
+        refs.extend(scope["project_ids"])
+    if refs:  # project-scoped component: only when one of its projects is visible (fail closed)
+        return any(isinstance(r, str) and r in vis.project_refs for r in refs)
     return True  # platform-global component
 
 
@@ -192,10 +208,21 @@ ORDERING: dict[str, tuple[Any, ...]] = {
 }
 
 
+def _visibility(session: Session, domain: str, pids: list[str] | None) -> _Visibility:
+    q = select(Project.id, Project.project_key).where(Project.domain == domain)
+    if pids is not None:
+        q = q.where(Project.id.in_(pids))
+    refs: set[str] = set()
+    for pid, key in session.execute(q).all():
+        refs.update((pid, key))
+    return _Visibility(domain, frozenset(refs))
+
+
 def search(
     session: Session, principal: Principal, domain: Domain, *, q: str, kind: str | None = None,
-    limit: int = 20, offset: int = 0,
+    limit: int = 20, offset: int = 0, project_id: str | None = None,
 ) -> dict[str, Any]:
+    """*project_id* must already be authorised by the caller (``load_project``)."""
     query = (q or "").strip()
     if len(query) < 2:
         raise ValidationFailed("search query needs at least 2 characters", code="QUERY_TOO_SHORT")
@@ -211,7 +238,8 @@ def search(
     limit = max(1, min(int(limit), MAX_LIMIT))
     offset = max(0, int(offset))
     pat = _like(query)
-    pids = principal.allowed_project_ids
+    pids = [project_id] if project_id else principal.allowed_project_ids
+    vis: _Visibility | None = None
     counts: dict[str, int] = {}
     collected: list[dict[str, Any]] = []
     need = offset + limit
@@ -219,7 +247,8 @@ def search(
         spec = KIND_SPECS[k]
         stmt = spec.build(pat, domain.value, pids)
         if spec.python_filter is not None:
-            rows = [r for r in session.scalars(stmt.order_by(*ORDERING[k])) if spec.python_filter(r, domain.value)]
+            vis = vis or _visibility(session, domain.value, pids)
+            rows = [r for r in session.scalars(stmt.order_by(*ORDERING[k])) if spec.python_filter(r, vis)]
             counts[k] = len(rows)
             rows = rows[:need]
         else:
@@ -237,6 +266,7 @@ def search(
         "has_more": offset + limit < total,
         "query": query,
         "domain": domain.value,
+        "project_id": project_id,
         "source": "sqlite-like (metadata only, active domain)",
         "checked_at": utcnow().isoformat(),
         "mode": "LIVE",

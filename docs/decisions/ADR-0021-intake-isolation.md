@@ -24,11 +24,16 @@ cannot change goal, policy, permission, memory or routing; parser isolation is a
 3. **Archives** (`.zip` and the `.docx` container) are inspected from the central directory only:
    absolute/drive paths, `..`, symlink entries (`external_attr`), encrypted, nested-archive and
    active members, more than `settings.max_archive_members`, per-member ratio > 100:1 (≥ 1 MiB) or
-   total expansion > max(10 × upload limit, 64 MiB) are rejected. Macro parts (`vbaProject.bin`)
-   reject a `.docx`.
+   total expansion > max(10 × upload limit, 64 MiB) are rejected. Macro parts (`vbaProject.bin`),
+   ActiveX parts (`word/activeX/`) and embedded members with an active suffix reject a `.docx`
+   (SVG media inside a `.docx` is ordinary Word media and is accepted; AEOS never renders it).
 4. **Storage**: `DataLayout.attachments(domain, project_key)/<uuid>.blob`; the user filename is a
-   sanitised display name only. sha256, uploader, time, source and classification (never below the
-   project's) are recorded. Text blobs containing secrets are stored redacted.
+   sanitised, redacted display name only. sha256, uploader, time, source and classification (never
+   below the project's) are recorded, and a `context_id` must reference a PlanningContext of the same
+   project. Text blobs containing secrets are stored redacted; when the text extracted from a binary
+   (pdf/docx/zip) contains a secret, the original binary is replaced by the redacted extracted text
+   (`parse_detail.original_discarded`; sha256 still names the original upload). Files written for an
+   upload whose recording fails are removed.
 5. **Scanning**: `contains_secret` → `FLAGGED` + redaction; instruction-injection markers (English
    and Indonesian) → `UNTRUSTED_INSTRUCTION` findings. Attachments are always `trusted=false`; a
    finding is data for review and never authority. Content that could not be inspected is
@@ -36,9 +41,12 @@ cannot change goal, policy, permission, memory or routing; parser isolation is a
 6. **Parser isolation**: a fresh `python -I parse_worker.py <in> <out> <kind> <max_chars>` per
    file (the worker imports nothing from `aeos`), private temp cwd, minimal environment (no AEOS or
    credential variables), wall-clock timeout (30 s), process-tree RSS cap polled with psutil on
-   every OS plus RLIMIT_AS/CPU/FSIZE on POSIX, output-size cap (8 MiB), process-tree kill on any
-   violation. md/txt/json/yaml(safe_load)/csv/docx(python-docx)/pdf(pypdf) are extracted; images
-   are stored with metadata only (no OCR); zip yields a member listing only.
+   every OS plus RLIMIT_AS/CPU/FSIZE on POSIX, output-size cap (8 MiB, also polled while the
+   worker runs because Windows has no RLIMIT_FSIZE), process-tree kill on any violation.
+   md/txt/json/yaml(safe_load)/csv/docx(python-docx, body + tables + headers/footers)/pdf(pypdf)
+   are extracted; images are stored with metadata only (no OCR); zip yields a member listing only.
+   Worker error messages and metadata are treated as untrusted (they can quote file content) and
+   are redacted before they are persisted.
 7. Rejections are audited and committed before the error response. Deleting attachments is not
    exposed (retention policy).
 

@@ -52,7 +52,8 @@ describe("module status mapping (§34/§35 evidence honesty)", () => {
       expect(statusSpec(mapStatus(kind, value)[0]).tone).not.toBe("ok");
     }
     expect(statusSpec(mapStatus("verify", "VERIFIED")[0]).tone).toBe("ok");
-    expect(statusSpec(mapStatus("scan", "CLEAN")[0]).tone).toBe("ok");
+    // a scanner without findings is not a pass: the attachment stays untrusted DATA
+    expect(statusSpec(mapStatus("scan", "CLEAN")[0]).tone).not.toBe("ok");
     expect(mapStatus("scan", undefined)[0]).toBe("UNKNOWN");
   });
 });
@@ -155,5 +156,64 @@ describe("ProjectsPage", () => {
     wrap(<ProjectsPage />);
     expect(await screen.findByText(/Belum ada proyek di domain PERSONAL/)).toBeInTheDocument();
     expect(screen.getByText("aeos seed")).toBeInTheDocument();
+  });
+});
+
+describe("SearchPanel", () => {
+  it("scopes the backend search to the project when a projectId is given", async () => {
+    auth.domain = "PERSONAL";
+    const { SearchPanel } = await import("./SearchPanel");
+    const fn = mockFetch(() => ({ items: [], total: 0, counts: {}, has_more: false, limit: 20, offset: 0, checked_at: new Date().toISOString(), source: "t" }));
+    wrap(<SearchPanel projectId="proj-1" />);
+    expect(screen.getByText("Cari metadata proyek ini")).toBeInTheDocument();
+    await userEvent.type(screen.getByPlaceholderText(/Cari proyek/), "billing");
+    await waitFor(() => expect(fn).toHaveBeenCalled());
+    const url = String(fn.mock.calls.at(-1)?.[0]);
+    expect(url).toContain("q=billing");
+    expect(url).toContain("&project=proj-1");
+  });
+});
+
+describe("IntegrationsPanel", () => {
+  it("never labels a configuration-only integration as connected or verified", async () => {
+    auth.domain = "PERSONAL";
+    auth.isAdmin = false;
+    const { IntegrationsPanel } = await import("./IntegrationsPanel");
+    mockFetch(() => ({
+      items: [
+        {
+          id: "i1",
+          project_id: "p1",
+          domain: "PERSONAL",
+          provider: "GOOGLE_DRIVE",
+          purpose: "docs",
+          tenant_id: null,
+          root_id: null,
+          root_id_name: "GOOGLE_DRIVE_FOLDER_ID",
+          credential_ref: "personal/google-oauth",
+          config: {},
+          target_url: null,
+          last_verified_at: null,
+          updated_at: null,
+          capability_status: {
+            configuration: "MISSING",
+            credential: { status: "MISSING" },
+            connectivity: "NOT_CHECKED",
+            functional: "NOT_TESTED",
+            remedies: [{ issue: "GOOGLE_DRIVE_FOLDER_ID belum diatur", command: "aeos publish google-connect" }],
+          },
+        },
+      ],
+      allowed_providers: { GOOGLE_DRIVE: ["docs"] },
+      checked_at: new Date().toISOString(),
+      mode: "LIVE",
+    }));
+    const project = { id: "p1", domain: "PERSONAL" } as unknown as import("./types").ProjectView;
+    wrap(<IntegrationsPanel project={project} isAdmin={false} />);
+    expect(await screen.findByText("Koneksi belum diperiksa")).toBeInTheDocument();
+    expect(screen.getByText("Fungsi belum diuji")).toBeInTheDocument();
+    expect(screen.queryByText(/Terverifikasi/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("aeos publish google-connect").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Atur integrasi")).not.toBeInTheDocument(); // VIEWER: no admin form
   });
 });

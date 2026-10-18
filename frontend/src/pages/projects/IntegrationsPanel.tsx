@@ -31,8 +31,15 @@ function IntegrationRow({ i }: { i: IntegrationView }) {
         <span className="text-xs text-ink-3">{PURPOSE_LABEL[i.purpose] ?? i.purpose}</span>
         <ModuleBadge kind="config" value={i.last_verified_at ? "VERIFIED" : cap.configuration} />
         <ModuleBadge kind="credential" value={cap.credential?.status} />
-        <StatusBadge status={cap.connectivity ?? "NOT_CHECKED"} label="Koneksi belum diperiksa" />
-        <StatusBadge status={cap.functional ?? "NOT_TESTED"} label="Fungsi belum diuji" />
+        {/* Labels follow the actual status code; only NOT_CHECKED/NOT_TESTED get the "belum" wording. */}
+        <StatusBadge
+          status={cap.connectivity ?? "NOT_CHECKED"}
+          label={(cap.connectivity ?? "NOT_CHECKED") === "NOT_CHECKED" ? "Koneksi belum diperiksa" : `Koneksi: ${cap.connectivity}`}
+        />
+        <StatusBadge
+          status={cap.functional ?? "NOT_TESTED"}
+          label={(cap.functional ?? "NOT_TESTED") === "NOT_TESTED" ? "Fungsi belum diuji" : `Fungsi: ${cap.functional}`}
+        />
         {cap.office_default_deny && <StatusBadge status="BLOCKED" label="OFFICE: default deny" />}
         {cap.atlassian_deployment && (
           <StatusBadge

@@ -30,6 +30,7 @@ class PackIn(BaseModel):
     forbidden_paths: list[str] | None = None
     token_budget: int | None = None
     include: list[str] | None = None
+    ttl_hours: int | None = None
 
 
 class MemoryIn(BaseModel):

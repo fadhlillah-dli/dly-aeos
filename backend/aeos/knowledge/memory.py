@@ -238,16 +238,23 @@ def list_for_project(session: Session, project: Project, *, status: str | None =
     return list(session.scalars(q.order_by(MemoryRecord.created_at.desc())))
 
 
-def usable_for_context(session: Session, project: Project) -> list[MemoryRecord]:
+def usable_for_context(session: Session, project: Project, *,
+                       allowed_project_ids: list[str] | None = None) -> list[MemoryRecord]:
     """ACCEPTED, unexpired memory visible to *project*: its own records plus non-sensitive DOMAIN-scope
-    records of the same domain. Never another domain; never another project's sensitive data."""
+    records of the same domain. Never another domain; never another project's sensitive data.
+
+    *allowed_project_ids* is the requesting principal's project scope (``None`` = all projects of the
+    domain): DOMAIN-scope records owned by a project outside that scope are not returned, so a
+    project-scoped user cannot read another project's memory through a context pack."""
     now = utcnow()
+    shared = (MemoryRecord.scope == "DOMAIN") & MemoryRecord.classification.not_in(tuple(cls.SENSITIVE))
+    if allowed_project_ids is not None:
+        shared = shared & MemoryRecord.project_id.in_(allowed_project_ids)
     q = select(MemoryRecord).where(
         MemoryRecord.domain == project.domain,
         MemoryRecord.status == "ACCEPTED",
         or_(MemoryRecord.expires_at.is_(None), MemoryRecord.expires_at > now),
-        or_(MemoryRecord.project_id == project.id,
-            (MemoryRecord.scope == "DOMAIN") & MemoryRecord.classification.not_in(tuple(cls.SENSITIVE))),
+        or_(MemoryRecord.project_id == project.id, shared),
     ).order_by(MemoryRecord.created_at.desc())
     return list(session.scalars(q))
 

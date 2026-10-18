@@ -25,7 +25,9 @@ from aeos.identity.service import Principal
 from aeos.intake.scan import scan_text
 from aeos.models.portfolio import Project, ProjectIntegration, RepositoryReference
 from aeos.portfolio import classification as cls
+from aeos.portfolio.facade import PLATFORM_PROJECT_KEY
 
+RESERVED_KEYS = frozenset({PLATFORM_PROJECT_KEY})
 LIFECYCLES = ("ACTIVE", "ARCHIVED", "RETIRING", "RETIRED")
 LIFECYCLE_TRANSITIONS: dict[str, frozenset[str]] = {
     "ACTIVE": frozenset({"ARCHIVED", "RETIRING"}),
@@ -79,13 +81,21 @@ def deny(session: Session, principal: Principal, *, action: str, reason: str, co
 _deny = deny
 
 
+def _key_taken(session: Session, key: str) -> bool:
+    # The platform key is reserved for the §09 self-build project registered by the seed, so a
+    # human-created "DLY AEOS" project can never occupy it (the seed would then refuse to register).
+    if key in RESERVED_KEYS:
+        return True
+    return bool(session.scalar(select(func.count()).select_from(Project).where(Project.project_key == key)))
+
+
 def unique_project_key(session: Session, name: str) -> str:
     base = slugify(name)
     if not base[0].isalnum():  # pragma: no cover - slugify strips leading dashes
         base = "p-" + base
     key = safe_segment(base)
     n = 2
-    while session.scalar(select(func.count()).select_from(Project).where(Project.project_key == key)):
+    while _key_taken(session, key):
         suffix = f"-{n}"
         key = safe_segment(base[: 48 - len(suffix)].rstrip("-") + suffix)
         n += 1
@@ -145,9 +155,10 @@ def create_project(
         if text:
             res = scan_text(text, source=fname)
             findings.extend(res.findings)
+    safe_name = redact_text(name_v)
     project = Project(
-        project_key=unique_project_key(session, name_v),
-        name=redact_text(name_v),
+        project_key=unique_project_key(session, safe_name),  # never derived from an unredacted secret
+        name=safe_name,
         domain=chosen.value,  # the human's explicit choice; findings above never influence this
         owner_user_id=principal.user.id,
         lifecycle="ACTIVE",

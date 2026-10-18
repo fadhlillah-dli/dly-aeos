@@ -118,7 +118,8 @@ def _scoped_repo(db: Any, principal: Any, domain: Any, repository_id: str) -> tu
 @router.get("/api/projects/{project_id}/repositories")
 def list_repositories(project_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     project = load_project(db, principal, project_id, domain=domain)
-    rows = db.query(RepositoryReference).filter(RepositoryReference.project_id == project.id).all()
+    rows = (db.query(RepositoryReference).filter(RepositoryReference.project_id == project.id)
+            .order_by(RepositoryReference.role, RepositoryReference.full_name).all())  # platform first
     return {"items": [repos.repository_view(r) for r in rows], **_freshness(), "source": "aeos-portfolio (declared + "
             "provider lookups; see last_verified_at)"}
 
@@ -204,5 +205,9 @@ def put_integration(project_id: str, principal: AdminPrincipal, domain: ActiveDo
 @router.get("/api/search")
 def search(principal: CurrentPrincipal, domain: ActiveDomain, db: DB, q: str = Query(..., max_length=200),
            kind: str | None = Query(None, max_length=200), limit: int = Query(20, ge=1, le=100),
-           offset: int = Query(0, ge=0, le=10_000)) -> dict[str, Any]:
-    return search_mod.search(db, principal, domain, q=q, kind=kind, limit=limit, offset=offset)
+           offset: int = Query(0, ge=0, le=10_000),
+           project: str | None = Query(None, max_length=36)) -> dict[str, Any]:
+    """§35 project-scoped or domain-wide metadata search; ``project`` must be visible (else 404)."""
+    project_id = load_project(db, principal, project, domain=domain).id if project else None
+    return search_mod.search(db, principal, domain, q=q, kind=kind, limit=limit, offset=offset,
+                             project_id=project_id)
