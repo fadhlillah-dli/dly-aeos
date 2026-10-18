@@ -10,6 +10,7 @@
 * 2.4 "CTO/manager" title -> no privilege; 2.5 agent message claiming owner approval -> DATA;
 * 2.6 worker done but verifier failed -> failure shown, not accepted;
 * 2.7 stale lease events after retry/reassign -> do not overwrite the new attempt, audited;
+* 2.10 Personal dashboard reaching for Office runs/evidence -> backend refuses (404) by scope;
 * 2.11 fixture roster/runs -> MOCK/DEMO, not counted; 2.12 role/model change -> versioned, history kept.
 
 Every module runs for real (planning approval, policy decisions, routing activation, cost reservation,
@@ -376,3 +377,28 @@ def test_role_model_change_is_versioned_and_history_is_unchanged(personal_client
     again = _run(db, first.id)
     assert (again.model_route_key, again.agent_revision_hash, again.role_revision_hash, dict(again.caps or {})) == \
         snapshot, "history of the earlier attempt is unchanged"
+
+
+# ---------------------------------------------------------------------------------------------- 2.10
+def test_personal_dashboard_cannot_reach_office_runs_or_evidence(personal_client: AuthedClient, db):
+    from aeos.events import service as events
+    from aeos.verification import facade as verification
+    from tests.acceptance.support import make_records
+
+    office = make_records(db, domain="OFFICE", key="office-console")
+    ev = verification.collect_evidence(db, kind="LOG", origin="collector", collector_identity="acc",
+                                       claim="office run log", content="office data", project_id=office.project.id,
+                                       domain="OFFICE", run_id=office.run.id)
+    events.emit(db, source="acc", kind="acc.office.run", project_id=office.project.id, domain="OFFICE")
+    db.commit()
+    runs = personal_client.get("/api/runs").json()
+    assert all(r.get("run_id") != office.run.id for r in runs["items"])
+    assert personal_client.get(f"/api/runs/{office.run.id}").status_code == 404
+    for path in ("cancel", "verify", "review", "acceptance/evaluate", "quarantine-release"):
+        r = personal_client.post(f"/api/runs/{office.run.id}/{path}",
+                                 json={"reason": "probe from personal", "rationale": "probe from personal"})
+        assert r.status_code == 404, (path, r.status_code, r.text)
+    assert personal_client.get(f"/api/evidence/{ev.id}").status_code == 404
+    activity = personal_client.get("/api/control-center/activity").json()
+    assert office.project.id not in str(activity) and "acc.office.run" not in str(activity)
+    assert _run(db, office.run.id).execution_status == "REVIEW", "nothing changed in the other domain"

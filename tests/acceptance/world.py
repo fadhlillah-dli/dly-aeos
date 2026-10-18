@@ -394,3 +394,19 @@ def git_repo(path: Any, files: dict[str, str], *, origin: str | None = None) -> 
     if origin:
         g("remote", "add", "origin", origin)
     return g("rev-parse", "HEAD")
+
+
+def manifest_with_pin(tmp_path: Any, component_id: str, pin: str) -> Any:
+    """A copy of the reviewed InstallManifest in which the owner re-declares *component_id*'s approved pin
+    (the desired-state change ``aeos inventory`` loads with ``apply_manifest``)."""
+    from pathlib import Path
+
+    from aeos.core.paths import repo_root
+
+    text = (Path(repo_root()) / "install-manifest" / "manifest.yaml").read_text(encoding="utf-8")
+    start = text.index(f"  - component_id: {component_id}\n")
+    old = "    approved_pin: null\n"
+    at = text.index(old, start)
+    out = Path(tmp_path) / f"manifest-{component_id}-{pin}.yaml"
+    out.write_text(text[:at] + f'    approved_pin: "{pin}"\n' + text[at + len(old):], encoding="utf-8", newline="\n")
+    return out
