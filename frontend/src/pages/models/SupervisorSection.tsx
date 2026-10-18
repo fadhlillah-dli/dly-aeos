@@ -2,7 +2,7 @@ import { FlaskConical } from "lucide-react";
 import { useState } from "react";
 import { useAuth } from "../../auth/AuthContext";
 import { StatusBadge } from "../../components/StatusBadge";
-import { Button, Card, ErrorBox, Freshness, KeyValue, Loading, Mono, Notice, inputClass } from "../../components/ui";
+import { Button, Card, ErrorBox, Freshness, inputBase, KeyValue, Loading, Mono, Notice } from "../../components/ui";
 import { CopyCommand } from "../integrations/CopyCommand";
 import { useCapabilityTest, useClaudeStatus } from "./api";
 import { Badge } from "./badges";
@@ -111,7 +111,7 @@ export function SupervisorSection() {
           </div>
           {isAdmin ? (
             <div className="flex flex-wrap items-center gap-2">
-              <select className={inputClass + " w-auto"} value={model} onChange={(e) => setModel(e.target.value as "opus" | "fable")} aria-label="Model uji">
+              <select className={inputBase + " w-auto"} value={model} onChange={(e) => setModel(e.target.value as "opus" | "fable")} aria-label="Model uji">
                 <option value="opus">opus</option>
                 <option value="fable">fable</option>
               </select>

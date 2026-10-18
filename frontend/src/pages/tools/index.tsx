@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw, Search } from "lucide-react";
+import { Lightbulb, RefreshCw, Search } from "lucide-react";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { get, post } from "../../api/client";
@@ -8,7 +8,8 @@ import { CoverageBanner } from "../../components/inventory/CoverageBanner";
 import { DomainRequired } from "../../components/inventory/DomainRequired";
 import { Badge, DIMENSION_LABELS, REQUIREMENT_LABELS } from "../../components/inventory/labels";
 import type { ComponentList, ComponentRow, DimensionValue } from "../../components/inventory/types";
-import { Button, ErrorBox, inputClass, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
+import { proposeComponentHref } from "../../components/proposals/PageLinks";
+import { Button, ErrorBox, inputClass, LinkButton, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { useEventStream } from "../../lib/events";
 import { relativeTime, shortHash } from "../../lib/format";
 
@@ -87,6 +88,17 @@ export default function ToolsPage() {
             {r.kind} · {r.category_label}
             {r.domains.includes("PLATFORM") ? "" : ` · ${r.domains.join("/")}`}
           </div>
+          {isAdmin && (
+            // §39: "Usulkan perubahan" per component (SUPER_ADMIN only; a VIEWER cannot submit proposals).
+            <Link
+              to={proposeComponentHref(r.component_id)}
+              onClick={(e) => e.stopPropagation()}
+              className="mt-0.5 inline-flex items-center gap-1 whitespace-nowrap text-xs text-accent hover:underline"
+              title={`Usulkan perubahan (ADD/REPLACE/UPGRADE/REMOVE/COMPARE) untuk ${r.friendly_name || r.name}; tidak memasang apa pun`}
+            >
+              <Lightbulb className="h-3.5 w-3.5" aria-hidden /> Usulkan perubahan
+            </Link>
+          )}
           {r.drift.length > 0 && (
             <div className="mt-1 flex flex-wrap gap-1">
               {r.drift.map((d) => (
@@ -150,9 +162,14 @@ export default function ToolsPage() {
       mode={data?.mode}
       actions={
         isAdmin && domain ? (
-          <Button busy={refresh.isPending} onClick={() => refresh.mutate()} title="Probe read-only; tidak memasang apa pun">
-            <RefreshCw className="h-4 w-4" aria-hidden /> Segarkan (rekonsiliasi)
-          </Button>
+          <>
+            <Button busy={refresh.isPending} onClick={() => refresh.mutate()} title="Probe read-only; tidak memasang apa pun">
+              <RefreshCw className="h-4 w-4" aria-hidden /> Segarkan (rekonsiliasi)
+            </Button>
+            <LinkButton to="/proposals?new=1&kind=ADD" title="Usulkan komponen baru; mengajukan URL tidak memasang apa pun">
+              <Lightbulb className="h-4 w-4" aria-hidden /> Usulkan komponen baru
+            </LinkButton>
+          </>
         ) : undefined
       }
     />

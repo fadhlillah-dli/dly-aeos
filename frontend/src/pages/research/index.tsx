@@ -7,7 +7,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { IDENTITY_STATUS, MappedBadge, RESEARCH_LIFECYCLE, UPSTREAM_STATUS } from "../../components/proposals/MappedBadge";
 import { RelatedLinks } from "../../components/proposals/PageLinks";
 import { StatusBadge } from "../../components/StatusBadge";
-import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table, Tabs } from "../../components/ui";
+import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputBase, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table, Tabs } from "../../components/ui";
 
 interface Entry {
   id: string;
@@ -258,8 +258,8 @@ export default function ResearchPage() {
               <Card
                 actions={
                   <div className="flex flex-wrap gap-2">
-                    <input aria-label="Cari" className={inputClass + " w-48"} placeholder="Cari…" value={q} onChange={(e) => setQ(e.target.value)} />
-                    <select aria-label="Filter lifecycle" className={inputClass + " w-52"} value={lifecycle} onChange={(e) => setLifecycle(e.target.value)}>
+                    <input aria-label="Cari" className={inputBase + " w-full sm:w-48"} placeholder="Cari…" value={q} onChange={(e) => setQ(e.target.value)} />
+                    <select aria-label="Filter lifecycle" className={inputBase + " w-full sm:w-52"} value={lifecycle} onChange={(e) => setLifecycle(e.target.value)}>
                       <option value="">Semua lifecycle</option>
                       {(cands.data?.lifecycles ?? Object.keys(RESEARCH_LIFECYCLE)).map((l) => (
                         <option key={l} value={l}>
@@ -267,7 +267,7 @@ export default function ResearchPage() {
                         </option>
                       ))}
                     </select>
-                    <select aria-label="Filter bukti" className={inputClass + " w-36"} value={evidence} onChange={(e) => setEvidence(e.target.value)}>
+                    <select aria-label="Filter bukti" className={inputBase + " w-full sm:w-36"} value={evidence} onChange={(e) => setEvidence(e.target.value)}>
                       <option value="">Semua bukti</option>
                       <option value="E0">E0 — klaim</option>
                       <option value="E1">E1 — terdokumentasi</option>
