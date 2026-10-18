@@ -248,6 +248,38 @@ def logical_location(path: str | os.PathLike[str] | None, *, repo: Path | None =
     return f"<system>/.../{resolved.name}" if resolved.name else "<system>"
 
 
+# The foundation marked unfinished modules with a module docstring whose FIRST line carries
+# ``PLACEHOLDER <em dash> owned and completed by the <x> module agent``. Only that marker counts: a real
+# module that merely mentions the word (docstrings about placeholder detection, ``VISUAL_PENDING`` notes, a
+# string constant) is never reported as a skeleton (§38: no false NOT_INSTALLED for real code).
+# Code points spelled numerically (em dash, en dash) so the source stays ASCII (same as asciitext).
+_PLACEHOLDER_MARKER = re.compile(r"\bPLACEHOLDER\b\s*(?:" + chr(0x2014) + "|" + chr(0x2013) + r"|--|-|:)")
+_DOCSTRING_START = re.compile(r"^\s*(?:#[^\n]*\n\s*)*(?:[rRuU]{0,2})(\"\"\"|''')", re.S)
+
+
+def source_is_placeholder(text: str) -> bool:
+    """True when the module source declares itself a PLACEHOLDER in the first line of its docstring."""
+    m = _DOCSTRING_START.match(text or "")
+    if not m:
+        return False
+    body = text[m.end():]
+    end = body.find(m.group(1))
+    doc = body if end < 0 else body[:end]
+    first_line = doc.strip().splitlines()[0] if doc.strip() else ""
+    return bool(_PLACEHOLDER_MARKER.search(first_line))
+
+
+def file_is_placeholder(path: str | os.PathLike[str] | None) -> bool:
+    """``source_is_placeholder`` for a ``.py`` file (unreadable or non-Python files are not placeholders)."""
+    if not path or not str(path).endswith(".py"):
+        return False
+    try:
+        head = Path(path).read_text(encoding="utf-8", errors="replace")[:4096]
+    except OSError:
+        return False
+    return source_is_placeholder(head)
+
+
 def path_fingerprint(runner: ProbeRunner, path: str | None) -> dict[str, Any]:
     """Cheap identity of a binary/file (hash of path + size + mtime); no process is spawned."""
     if not path:

@@ -54,6 +54,13 @@ def load_defaults() -> tuple[dict[str, Any], str]:
     return merged, "policy/office-defaults.yaml"
 
 
+def is_office_policy_decision(decision: Any) -> bool:
+    """True when *decision* can change the effective OFFICE policy (readiness invalidation hook): a
+    decision about the office policy target or any POLICY decision for the OFFICE domain."""
+    return (getattr(decision, "target_type", None) == catalog.TARGET_OFFICE_POLICY
+            or (getattr(decision, "kind", None) == "POLICY" and getattr(decision, "domain", None) == Domain.OFFICE.value))
+
+
 def _office_policy_decisions(session: Session) -> list[Any]:
     """ACTIVE human POLICY decisions recorded for the OFFICE policy target (the only target the OFFICE
     authorisation/override endpoint writes). POLICY decisions about other targets never relax OFFICE."""

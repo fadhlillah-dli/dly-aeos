@@ -20,26 +20,39 @@ class CapabilityState:
     reasons: list[str] = field(default_factory=list)
     checks: list[dict[str, Any]] = field(default_factory=list)  # check_id/status/last_checked_at
     remedies: list[dict[str, Any]] = field(default_factory=list)
+    # additive (integration 2026-10-18): accepted/observed residual risks that stay true even when READY,
+    # e.g. WEAK process sandbox, branch protection NOT_ENFORCEABLE. Never a reason to show green.
+    residual_risks: list[str] = field(default_factory=list)
 
 
 def capability_state(
-    session: Session, capability: Capability, *, domain: str | None = None, project_id: str | None = None
+    session: Session, capability: Capability, *, domain: str | None = None, project_id: str | None = None,
+    exclude_checks: tuple[str, ...] = (),
 ) -> CapabilityState:
+    """``exclude_checks`` (additive) evaluates the gate without the named checks — only for a caller that is
+    itself the excluded prerequisite (e.g. enabling the implementer agent asks CAN_RUN_WORKER without
+    ``worker.agent_definition``); every other check still applies."""
     from aeos.doctor.capabilities import capability_state as impl
 
-    return impl(session, capability, domain=domain, project_id=project_id)
+    if exclude_checks:
+        return impl(session, capability, domain=domain, project_id=project_id, exclude_checks=tuple(exclude_checks))
+    return impl(session, capability, domain=domain, project_id=project_id)  # original call shape (stand-ins)
 
 
 def require_capability(
-    session: Session, capability: Capability, *, domain: str | None = None, project_id: str | None = None
+    session: Session, capability: Capability, *, domain: str | None = None, project_id: str | None = None,
+    exclude_checks: tuple[str, ...] = (),
 ) -> CapabilityState:
     """Raise ``Blocked`` (with reasons) unless the capability is READY."""
     from aeos.core.errors import Blocked
 
-    state = capability_state(session, capability, domain=domain, project_id=project_id)
+    state = (capability_state(session, capability, domain=domain, project_id=project_id,
+                              exclude_checks=tuple(exclude_checks)) if exclude_checks
+             else capability_state(session, capability, domain=domain, project_id=project_id))
     if state.status != "READY":
         raise Blocked(f"{capability.value} is {state.status}", code="CAPABILITY_NOT_READY",
-                      details={"capability": capability.value, "reasons": state.reasons, "remedies": state.remedies})
+                      details={"capability": capability.value, "reasons": state.reasons, "remedies": state.remedies,
+                               "residual_risks": list(getattr(state, "residual_risks", []) or [])})
     return state
 
 
