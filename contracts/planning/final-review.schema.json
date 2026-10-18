@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "aeos.planning.final-review/1",
+  "type": "object",
+  "properties": {
+    "review": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string"
+        },
+        "change_summary": {
+          "type": "string"
+        },
+        "architecture_impact": {
+          "type": "string"
+        },
+        "owner_auth": {
+          "type": "string"
+        },
+        "blast_radius": {
+          "type": "string"
+        },
+        "baseline": {
+          "type": "string"
+        },
+        "contradictions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome",
+        "change_summary",
+        "architecture_impact",
+        "owner_auth",
+        "blast_radius",
+        "baseline",
+        "contradictions",
+        "scope"
+      ],
+      "additionalProperties": false
+    },
+    "verify": {
+      "type": "object",
+      "properties": {
+        "claims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "claim": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "SUPPORTED",
+                  "UNSUPPORTED",
+                  "UNKNOWN"
+                ]
+              }
+            },
+            "required": [
+              "claim",
+              "evidence",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "test_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "type": "string"
+        },
+        "old_behavior": {
+          "type": "string"
+        },
+        "unknowns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "claims",
+        "test_ids",
+        "environment",
+        "old_behavior",
+        "unknowns"
+      ],
+      "additionalProperties": false
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "PASS-STATIC",
+        "NOT-PROVEN",
+        "BLOCKED",
+        "FAIL"
+      ],
+      "description": "A plan package can at most be PASS-STATIC; no tests were executed"
+    },
+    "verdict_rationale": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "INFO",
+              "LOW",
+              "MEDIUM",
+              "HIGH",
+              "CRITICAL"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "recommendation": {
+            "type": "string"
+          },
+          "blocking": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key",
+          "severity",
+          "description",
+          "recommendation",
+          "blocking"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "review",
+    "verify",
+    "verdict",
+    "verdict_rationale",
+    "findings"
+  ],
+  "additionalProperties": false,
+  "description": "Final Planning Reviewer REVIEW + VERIFY + VERDICT (§34); a verdict is not human approval"
+}
