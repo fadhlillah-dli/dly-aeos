@@ -18,14 +18,14 @@ _PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?<![A-Za-z0-9])sk-or-v1-[A-Za-z0-9]{20,}"),  # OpenRouter
     re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_\-]{20,}"),  # Anthropic
     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{20,}"),  # OpenAI-style
-    re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
-    re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}"),  # AWS access key id
-    re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_\-]{35}"),  # Google API key
-    re.compile(r"(?<![A-Za-z0-9])ya29\.[0-9A-Za-z_\-]{20,}"),  # Google OAuth access token
-    re.compile(r"(?<![A-Za-z0-9])1//[0-9A-Za-z_\-]{20,}"),  # Google refresh token
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
+    re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
+    re.compile(r"ya29\.[0-9A-Za-z_\-]{20,}"),  # Google OAuth access token
+    re.compile(r"1//[0-9A-Za-z_\-]{20,}"),  # Google refresh token
     re.compile(r"(?:hvs|s|b)\.[A-Za-z0-9]{24,}"),  # Vault/OpenBao tokens
-    re.compile(r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-~+/]{16,}=*"),
     re.compile(r"(?i)((?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)[^\s,;\"']{6,}"),
@@ -34,6 +34,12 @@ _PATTERNS: list[re.Pattern[str]] = [
 # Key-name rule: a mapping value is masked when its key names a credential as a whole word
 # (csrf_token, api_key, client_secret, Authorization) — but not counters/flags/hashes such as
 # input_tokens, max_output_tokens, token_hash or office_authorization=True.
+# Token shapes without the word-boundary guard, for scanning opaque/binary content where a credential
+# can sit directly after arbitrary bytes (verifier binary scan). Never used for prose redaction.
+UNBOUNDED_TOKEN_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(p.pattern.replace("(?<![A-Za-z0-9])", "")) for p in _PATTERNS if not p.groups
+]
+
 _SENSITIVE_WORDS = frozenset(
     {"password", "passwd", "passphrase", "secret", "token", "authorization", "cookie", "credential", "credentials", "pat"}
 )

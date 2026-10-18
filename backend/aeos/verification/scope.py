@@ -15,6 +15,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from aeos.core.redaction import _PATTERNS as _REDACTION_PATTERNS
+from aeos.core.redaction import UNBOUNDED_TOKEN_PATTERNS
 
 # AGENTS.md "Protected paths (self-build, §09)" — the platform's own self-build list.
 PLATFORM_PROTECTED_PATHS: tuple[str, ...] = (
@@ -337,7 +338,8 @@ def scan_binary_secrets(path: str, data: bytes) -> list[dict[str, Any]]:
         return []
     text = data[:BINARY_SCAN_MAX_BYTES].decode("latin-1")
     findings: list[dict[str, Any]] = []
-    for pat in _HIGH_CONFIDENCE:
+    # Unbounded shapes: inside binaries a token can follow arbitrary bytes (e.g. b"PKghp_...").
+    for pat in UNBOUNDED_TOKEN_PATTERNS:
         m = pat.search(text)
         if m:
             findings.append({"path": path, "line": None, "offset": m.start(), "pattern": pat.pattern[:32] + "...",
