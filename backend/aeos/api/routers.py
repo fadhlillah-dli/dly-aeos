@@ -35,3 +35,11 @@ MODULE_ROUTERS: list[str] = [
     "aeos.operations.router",
     "aeos.control_center.router",
 ]
+
+# Background services started with the app (modules expose ``start(settings)`` / ``stop()``).
+# Missing modules are skipped; a failing hook is logged and surfaces through the Doctor, it never
+# silently disables auth or policy.
+LIFECYCLE_HOOKS: list[str] = [
+    "aeos.workforce.loop",
+    "aeos.publisher.worker",
+]
