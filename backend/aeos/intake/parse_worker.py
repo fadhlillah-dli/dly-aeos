@@ -20,6 +20,30 @@ from pathlib import Path
 from typing import Any
 
 MAX_PDF_PAGES = 500
+# Self-imposed POSIX limits (the parent also enforces wall-clock/RSS/output caps on every OS).
+LIMIT_AS_BYTES = 2 * 1024 * 1024 * 1024
+LIMIT_CPU_SECONDS = 35
+LIMIT_FSIZE_BYTES = 16 * 1024 * 1024
+
+
+def _apply_limits() -> None:
+    if sys.platform == "win32":
+        return
+    try:
+        import resource
+    except ImportError:  # pragma: no cover
+        return
+    for name, value in (("RLIMIT_AS", LIMIT_AS_BYTES), ("RLIMIT_CPU", LIMIT_CPU_SECONDS),
+                        ("RLIMIT_FSIZE", LIMIT_FSIZE_BYTES)):
+        res = getattr(resource, name, None)
+        if res is None:
+            continue
+        try:
+            _soft, hard = resource.getrlimit(res)
+            cap = value if hard == resource.RLIM_INFINITY else min(value, hard)
+            resource.setrlimit(res, (cap, hard))
+        except (ValueError, OSError):  # e.g. RLIMIT_AS unsupported on macOS
+            continue
 
 
 def _text_file(data: bytes) -> str:
@@ -134,11 +158,13 @@ def parse(path: Path, kind: str, max_chars: int) -> dict[str, Any]:
     return {"status": "PARSED", "text": text[:max_chars], "meta": meta, "error": ""}
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str], *, limits: bool = True) -> int:
     if len(argv) != 4:
         sys.stderr.write("usage: parse_worker.py <input> <output.json> <kind> <max_chars>\n")
         return 2
     src, dst, kind, max_chars = Path(argv[0]), Path(argv[1]), argv[2], int(argv[3])
+    if limits:  # only in the dedicated worker process, never when imported in-process
+        _apply_limits()
     try:
         result = parse(src, kind, max_chars)
     except Exception as exc:

@@ -4,7 +4,7 @@ Each attachment is parsed by a fresh ``python -I`` process (``parse_worker.py``)
 * a minimal environment (no AEOS/credential variables, no PYTHON* variables);
 * a private temporary working directory;
 * a wall-clock timeout, a memory cap (process-tree RSS, polled with psutil on every OS; plus
-  RLIMIT_AS/CPU on POSIX) and an output-size cap;
+  self-imposed RLIMIT_AS/CPU/FSIZE in the worker on POSIX) and an output-size cap;
 * process-tree kill on any violation (the Windows venv launcher spawns a child interpreter).
 """
 
@@ -60,14 +60,6 @@ def _minimal_env(tmp: Path) -> dict[str, str]:
     return env
 
 
-def _posix_limits() -> None:  # pragma: no cover - runs in the child on POSIX only
-    import resource
-
-    resource.setrlimit(resource.RLIMIT_AS, (MAX_MEMORY_BYTES * 2, MAX_MEMORY_BYTES * 2))
-    resource.setrlimit(resource.RLIMIT_CPU, (int(PARSE_TIMEOUT_SECONDS) + 5, int(PARSE_TIMEOUT_SECONDS) + 5))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_OUTPUT_BYTES * 2, MAX_OUTPUT_BYTES * 2))
-
-
 def kill_tree(pid: int) -> None:
     try:
         parent = psutil.Process(pid)
@@ -109,8 +101,8 @@ def run_parser(
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         else:
+            # No preexec_fn (unsafe with threads); the worker sets its own rlimits on start.
             kwargs["start_new_session"] = True
-            kwargs["preexec_fn"] = _posix_limits
         try:
             proc = subprocess.Popen(worker_command(src, dst, kind, max_chars), **kwargs)
         except OSError as exc:

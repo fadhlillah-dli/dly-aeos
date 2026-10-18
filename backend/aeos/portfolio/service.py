@@ -272,7 +272,7 @@ def project_view(session: Session, project: Project, *, detail: bool = False) ->
     from aeos.portfolio import repositories
 
     repos = list(session.scalars(select(RepositoryReference).where(RepositoryReference.project_id == project.id)
-                                 .order_by(RepositoryReference.role.desc(), RepositoryReference.full_name)))
+                                 .order_by(RepositoryReference.role, RepositoryReference.full_name)))  # platform first
     ints = list(session.scalars(select(ProjectIntegration).where(ProjectIntegration.project_id == project.id)
                                 .order_by(ProjectIntegration.purpose, ProjectIntegration.provider)))
     view: dict[str, Any] = {

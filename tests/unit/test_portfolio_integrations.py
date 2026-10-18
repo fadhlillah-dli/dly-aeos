@@ -27,6 +27,7 @@ def test_personal_drive_docs_with_remedy(personal_client: AuthedClient, secrets_
     r = _put(personal_client, p["id"], provider="GOOGLE_DRIVE", purpose="docs", root_id=DRIVE_FOLDER,
              credential_ref="personal/google-oauth")
     assert r.json()["integration"]["capability_status"]["root"] == "CONFIGURED"
+    assert r.json()["integration"]["target_url"] == f"https://drive.google.com/drive/folders/{DRIVE_FOLDER}"
     secrets_memory.put("personal/google-oauth", "refresh-value-not-shown-123456", actor="test")
     listed = personal_client.get(f"/api/projects/{p['id']}/integrations").json()
     assert listed["items"][0]["capability_status"]["configuration"] == "CONFIGURED"
@@ -54,6 +55,8 @@ def test_office_confluence_parent_and_default_deny(admin_client: AuthedClient, s
     integ = r.json()["integration"]
     assert integ["root_id_name"] == "CONFLUENCE_PROJECTS_PARENT_ID"
     assert integ["capability_status"]["office_default_deny"] is True
+    assert integ["capability_status"]["atlassian_deployment"] == "UNKNOWN"  # §04: Cloud is an assumption
+    assert integ["target_url"] == "https://company.atlassian.net/wiki/pages/viewpage.action?pageId=123456789"
     assert any("OFFICE default deny" in x["issue"] for x in integ["capability_status"]["remedies"])
     assert _put(admin_client, p["id"], provider="CONFLUENCE", purpose="docs", root_id="not-a-number").status_code == 422
     assert _put(admin_client, p["id"], provider="GOOGLE_DRIVE", purpose="docs").status_code == 403

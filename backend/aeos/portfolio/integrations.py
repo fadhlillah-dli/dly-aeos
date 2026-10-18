@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import quote
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -43,6 +44,7 @@ PROVIDERS: dict[str, dict[str, frozenset[str]]] = {
     },
 }
 OFFICE_PROVIDERS = frozenset(PROVIDERS[Domain.OFFICE.value])
+ATLASSIAN_PROVIDERS = frozenset({"JIRA", "CONFLUENCE"})
 CREDENTIAL_NAMESPACES = {Domain.PERSONAL.value: ("personal", "projects"), Domain.OFFICE.value: ("office", "projects")}
 ROOT_ID_NAMES = {"GOOGLE_DRIVE": "GOOGLE_DRIVE_FOLDER_ID", "GOOGLE_DOCS": "GOOGLE_DRIVE_FOLDER_ID",
                  "CONFLUENCE": "CONFLUENCE_PROJECTS_PARENT_ID", "JIRA": "JIRA_PROJECT_KEY",
@@ -160,8 +162,17 @@ def compute_capability_status(integration: ProjectIntegration) -> dict[str, Any]
     if office:
         remedies.append({"issue": "OFFICE default deny (§23): needs a recorded company authorisation",
                          "command": "aeos policy show office"})
+    extra: dict[str, Any] = {}
+    if integration.provider in ATLASSIAN_PROVIDERS:
+        # §04: Atlassian Cloud is a blueprint assumption, not a fact about the tenant.
+        deployment = str((integration.config or {}).get("deployment") or "UNKNOWN").upper()
+        extra["atlassian_deployment"] = deployment if deployment in {"CLOUD", "DATA_CENTER"} else "UNKNOWN"
+        if extra["atlassian_deployment"] == "UNKNOWN":
+            remedies.append({"issue": "Atlassian Cloud vs Data Center belum diverifikasi untuk tenant ini",
+                             "command": "Doctor: Project adapters capability check (tenant/space/parent)"})
     configured = root_state != "MISSING" and cred["status"] == "CONFIGURED"
     return {
+        **extra,
         "configuration": "CONFIGURED" if configured else "MISSING",
         "root": root_state,
         "root_id_name": ROOT_ID_NAMES.get(integration.provider),
@@ -266,8 +277,29 @@ def ensure_integration(session: Session, project: Project, *, provider: str, pur
     return integ, True
 
 
+def target_link(integ: ProjectIntegration) -> str | None:
+    """Official folder/page/tracker link built from the exact stored identifiers (§37); never guessed."""
+    root, tenant = integ.root_id, integ.tenant_id
+    if not root:
+        return None
+    if integ.provider in {"GOOGLE_DRIVE", "GOOGLE_DOCS"}:
+        return f"https://drive.google.com/drive/folders/{quote(root, safe='')}"
+    if integ.provider == "GITHUB_ISSUES":
+        return f"https://github.com/{root}/issues"
+    if integ.provider == "GITHUB":
+        return f"https://github.com/{root}"
+    if integ.provider == "BITBUCKET":
+        return f"https://bitbucket.org/{root}"
+    if integ.provider == "CONFLUENCE" and tenant:
+        return f"https://{tenant}/wiki/pages/viewpage.action?pageId={quote(root, safe='')}"
+    if integ.provider == "JIRA" and tenant:
+        return f"https://{tenant}/browse/{quote(root, safe='')}"
+    return None
+
+
 def integration_view(integ: ProjectIntegration) -> dict[str, Any]:
     return {
+        "target_url": target_link(integ),
         "id": integ.id,
         "project_id": integ.project_id,
         "domain": integ.domain,
