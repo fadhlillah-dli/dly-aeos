@@ -1,0 +1,1077 @@
+"""Deterministic scheduler (§14, §19, §21, §22): readiness, admission, atomic leases, heartbeats,
+reconciliation, cancel/repair/accept. No LLM is involved anywhere in this module.
+
+Services take a Session and never commit (callers commit). Every state change is audited and
+emitted as an event (task.state_changed / run.state_changed / run.heartbeat / run.action).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import socket
+from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import Any
+
+from sqlalchemy import func, select, update
+from sqlalchemy.orm import Session
+
+from aeos.audit import service as audit
+from aeos.core.enums import TERMINAL_EXECUTION_STATES, Capability, DataMode, ExecutionState, Verdict
+from aeos.core.errors import Blocked, Conflict, NotFound, ValidationFailed
+from aeos.core.ids import new_id
+from aeos.core.redaction import redact, redact_text
+from aeos.core.timeutil import ensure_aware, utcnow
+from aeos.events import service as events
+from aeos.models.decisions import Decision
+from aeos.models.evidence import AcceptanceRecord
+from aeos.models.identity import SystemSetting
+from aeos.models.planning import PlanVersion, TaskSpec
+from aeos.models.routing import ModelRoute
+from aeos.models.workforce import AgentDefinition, Lease, TaskExecution, WorkerRun
+from aeos.workforce import integrations as ext
+from aeos.workforce.catalog import IMPLEMENTER_AGENT_KEY, REVIEWER_AGENT_KEYS
+from aeos.workforce.states import ACTIVE_STATES, RUN_TERMINAL, RUNNING_STOP_CODES, is_legal
+
+log = logging.getLogger("aeos.workforce.scheduler")
+S = ExecutionState
+
+CONTROLLER_ID = f"{socket.gethostname()}:{os.getpid()}:{new_id()[:8]}"
+KEY_PAUSED = "scheduler.paused"
+KEY_ENABLED = "scheduler.enabled"
+KEY_CONCURRENCY = "workforce.concurrency"
+KEY_LEASE_TTL = "workforce.lease_ttl_seconds"
+DEFAULT_LEASE_TTL = 120
+DEFAULT_MAX_ATTEMPTS = 2
+HARD_MAX_ACTIVE = 2  # §19/§21 pilot: 1 by default, 2 only with a recorded decision
+DEFAULT_MAX_REQUESTS = 300
+DEFAULT_MAX_TOKENS = 2_000_000
+
+# Reason codes that keep a task waiting in READY (re-evaluated every tick, no state churn).
+WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CONFLICT", "PLAN_NOT_APPROVED",
+                        "DEPENDENCY_NOT_ACCEPTED", "AGENT_DISABLED", "OFFICE_DENIED", "CAPABILITY_NOT_READY",
+                        "SANDBOX_NOT_READY", "ROUTE_INELIGIBLE", "COST_UNKNOWN", "BUDGET_EXCEEDED",
+                        "MODULE_UNAVAILABLE"})
+QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED"})
+
+
+# ----------------------------------------------------------------------------- small helpers
+def _actor_type(actor: str) -> str:
+    head = actor.split(":", 1)[0]
+    return head if head in {"user", "system", "worker", "service", "cli"} else "system"
+
+
+def _audit(session: Session, actor: str, action: str, *, target_type: str, target_id: str, project_id: str | None,
+           domain: str | None, result: str = "SUCCESS", reason: str = "", details: dict[str, Any] | None = None) -> None:
+    audit.record(session, actor_type=_actor_type(actor), actor_id=actor, action=action, result=result,
+                 target_type=target_type, target_id=target_id, project_id=project_id, domain=domain,
+                 reason=reason, details=details or {})
+
+
+def _setting(session: Session, key: str, default: Any = None) -> Any:
+    row = session.get(SystemSetting, key)
+    return default if row is None else row.value
+
+
+def _set_setting(session: Session, key: str, value: Any) -> None:
+    row = session.get(SystemSetting, key)
+    if row is None:
+        session.add(SystemSetting(key=key, value=value))
+    else:
+        row.value = value
+        row.version = (row.version or 1) + 1
+    session.flush()
+
+
+def get_te(session: Session, task_id: str, *, fresh: bool = True) -> TaskExecution:
+    q = select(TaskExecution).where(TaskExecution.task_id == task_id)
+    if fresh:
+        q = q.execution_options(populate_existing=True)
+    te = session.scalar(q)
+    if te is None:
+        raise NotFound("task execution not found")
+    return te
+
+
+def get_run(session: Session, run_id: str) -> WorkerRun:
+    run = session.get(WorkerRun, run_id, populate_existing=True)
+    if run is None:
+        raise NotFound("run not found")
+    return run
+
+
+def max_attempts(task: TaskSpec, te: TaskExecution | None = None) -> int:
+    try:
+        base = int((task.limits or {}).get("max_attempts", DEFAULT_MAX_ATTEMPTS))
+    except (TypeError, ValueError):
+        base = DEFAULT_MAX_ATTEMPTS
+    return max(1, base) + (te.extra_attempts if te else 0)
+
+
+def lease_ttl(session: Session) -> int:
+    try:
+        return max(30, min(int(_setting(session, KEY_LEASE_TTL, DEFAULT_LEASE_TTL)), 3600))
+    except (TypeError, ValueError):
+        return DEFAULT_LEASE_TTL
+
+
+# ----------------------------------------------------------------------------- scheduling settings
+def scheduling_paused(session: Session) -> bool:
+    v = _setting(session, KEY_PAUSED)
+    return bool(v.get("paused")) if isinstance(v, dict) else bool(v)
+
+
+def pause_info(session: Session) -> dict[str, Any]:
+    v = _setting(session, KEY_PAUSED)
+    return v if isinstance(v, dict) else {"paused": bool(v)}
+
+
+def set_scheduling_paused(session: Session, paused: bool, *, actor: str, reason: str = "") -> None:
+    _set_setting(session, KEY_PAUSED, {"paused": bool(paused), "reason": redact_text(reason)[:300], "by": actor,
+                                       "at": utcnow().isoformat()})
+    _audit(session, actor, "workforce.scheduling.pause" if paused else "workforce.scheduling.resume",
+           target_type="scheduler", target_id="scheduler", project_id=None, domain=None, reason=reason)
+    events.emit(session, source="controller", kind="scheduler.paused" if paused else "scheduler.resumed",
+                entity_type="scheduler", entity_id="scheduler", payload={"paused": bool(paused), "reason": reason})
+
+
+def scheduler_enabled(session: Session) -> bool:
+    return bool(_setting(session, KEY_ENABLED, False))
+
+
+def set_scheduler_enabled(session: Session, enabled: bool, *, actor: str) -> None:
+    _set_setting(session, KEY_ENABLED, bool(enabled))
+    _audit(session, actor, "workforce.scheduler.enable" if enabled else "workforce.scheduler.disable",
+           target_type="scheduler", target_id="scheduler", project_id=None, domain=None)
+    events.emit(session, source="controller", kind="scheduler.enabled_changed", entity_type="scheduler",
+                entity_id="scheduler", payload={"enabled": bool(enabled)})
+
+
+def concurrency_cap(session: Session) -> tuple[int, str | None]:
+    """1 active implementation worker; 2 only with an ACTIVE human decision (§19, §21)."""
+    v = _setting(session, KEY_CONCURRENCY)
+    if not isinstance(v, dict):
+        return 1, None
+    try:
+        wanted = min(int(v.get("max_active", 1)), HARD_MAX_ACTIVE)
+    except (TypeError, ValueError):
+        return 1, None
+    if wanted <= 1:
+        return 1, None
+    d = session.get(Decision, str(v.get("decision_id") or ""))
+    if d is None or d.status != "ACTIVE" or d.actor_kind != "HUMAN":
+        return 1, None
+    exp = ensure_aware(d.expires_at)
+    if exp is not None and exp <= utcnow():
+        return 1, None
+    try:
+        allowed = int((d.details or {}).get("max_active_workers", 1))
+    except (TypeError, ValueError):
+        allowed = 1
+    return (min(wanted, allowed), d.id) if allowed >= 2 else (1, None)
+
+
+# ----------------------------------------------------------------------------- transitions
+def _emit_task(session: Session, te: TaskExecution, src: str, dst: str, reason: str, actor: str) -> None:
+    _audit(session, actor, "workforce.task.transition", target_type="task", target_id=te.task_id,
+           project_id=te.project_id, domain=te.domain, reason=reason,
+           details={"from": src, "to": dst, "reason_code": te.reason_code, "row_version": te.row_version})
+    events.emit(session, source="scheduler", kind="task.state_changed", entity_type="task", entity_id=te.task_id,
+                entity_version=str(te.row_version), project_id=te.project_id, domain=te.domain,
+                run_id=te.active_run_id, mode=te.mode,
+                payload={"from": src, "to": dst, "reason": redact_text(reason)[:500], "reason_code": te.reason_code,
+                         "task_key": te.task_key})
+
+
+def _emit_run(session: Session, run: WorkerRun, src: str, dst: str, reason: str, actor: str) -> None:
+    _audit(session, actor, "workforce.run.transition", target_type="run", target_id=run.id,
+           project_id=run.project_id, domain=run.domain, reason=reason, details={"from": src, "to": dst})
+    events.emit(session, source="scheduler", kind="run.state_changed", entity_type="run", entity_id=run.id,
+                project_id=run.project_id, domain=run.domain, run_id=run.id, attempt=run.attempt,
+                lease_id=run.lease_id, mode=run.mode,
+                payload={"from": src, "to": dst, "reason": redact_text(reason)[:500], "task_id": run.task_id})
+
+
+def set_run_status(session: Session, run: WorkerRun, status: str, *, reason: str, actor: str,
+                   outcome_code: str | None = None) -> None:
+    src = run.execution_status
+    if src == status:
+        return
+    if src in RUN_TERMINAL:
+        raise Conflict(f"run {run.id} is already {src}")
+    run.execution_status = status
+    if outcome_code is not None:
+        run.outcome_code = outcome_code
+    if status in RUN_TERMINAL or status == S.REVIEW.value:
+        run.finished_at = run.finished_at or utcnow()
+    if reason and status in (S.FAILED.value, S.CANCELLED.value, S.BLOCKED.value):
+        run.block_reason = redact_text(reason)[:2000]
+    session.flush()
+    _emit_run(session, run, src, status, reason, actor)
+
+
+def transition_task(
+    session: Session, task_id: str, to_state: str, *, reason: str, actor: str, expected_from: str | None = None,
+    reason_code: str = "", _allow_done: bool = False, **set_fields: Any,
+) -> TaskExecution:
+    """Apply a legal §14 transition with optimistic concurrency; raise ``Conflict`` otherwise."""
+    te = get_te(session, task_id)
+    src = te.state
+    try:
+        dst = S(to_state).value
+    except ValueError as exc:
+        raise ValidationFailed(f"unknown execution state {to_state!r}") from exc
+    if dst == S.DONE.value and not _allow_done:
+        raise Conflict("DONE is reachable only through mark_accepted with a valid AcceptanceRecord",
+                       code="DONE_REQUIRES_ACCEPTANCE")
+    if expected_from is not None and src != expected_from:
+        raise Conflict(f"task is {src}, expected {expected_from}", code="STATE_CHANGED")
+    if not is_legal(src, dst, reason_code=reason_code):
+        _audit(session, actor, "workforce.task.transition", result="DENIED", target_type="task", target_id=task_id,
+               project_id=te.project_id, domain=te.domain, reason=f"illegal {src}->{dst}",
+               details={"reason_code": reason_code})
+        raise Conflict(f"illegal transition {src} -> {dst}", code="ILLEGAL_TRANSITION",
+                       details={"from": src, "to": dst})
+    values: dict[str, Any] = {
+        "state": dst, "reason": redact_text(reason)[:2000], "reason_code": reason_code,
+        "row_version": te.row_version + 1, "state_changed_at": utcnow(), "updated_at": utcnow(),
+    }
+    values.update(set_fields)
+    res = session.execute(update(TaskExecution).where(TaskExecution.id == te.id, TaskExecution.state == src,
+                                                      TaskExecution.row_version == te.row_version).values(**values))
+    if res.rowcount != 1:
+        raise Conflict("task execution changed concurrently", code="CONCURRENT_UPDATE")
+    te = get_te(session, task_id)
+    _emit_task(session, te, src, dst, reason, actor)
+    return te
+
+
+def _set_wait_reason(session: Session, te: TaskExecution, code: str, reason: str) -> None:
+    """Annotate a READY task with why it waits — not a state change, so no row_version bump."""
+    reason = redact_text(reason)[:2000]
+    if te.reason_code == code and te.reason == reason:
+        return
+    te.reason_code = code
+    te.reason = reason
+    session.flush()
+    events.emit(session, source="scheduler", kind="task.wait_reason", entity_type="task", entity_id=te.task_id,
+                project_id=te.project_id, domain=te.domain, mode=te.mode,
+                payload={"state": te.state, "reason_code": code, "reason": reason, "task_key": te.task_key})
+
+
+# ----------------------------------------------------------------------------- observed run fields
+_RUN_FIELD_VOCAB: dict[str, set[str] | None] = {
+    "verifier_status": {"NOT_RUN", "RUNNING", "PASSED", "FAILED", "ERROR", "NOT_PROVEN", "BLOCKED"},
+    "review_verdict": {*(v.value for v in Verdict), "PENDING"},
+    "acceptance_status": {"PENDING", "ACCEPTED", "REJECTED", "STALE", "INVALIDATED"},
+    "merged_status": {"NOT_MERGED", "PR_OPEN", "MERGED", "RELEASED", "UNKNOWN"},
+    "worker_reported_status": None,
+    "quota_status": None,
+}
+_RUN_FREE_FIELDS = {"current_action", "touched_paths", "review_record_id", "acceptance_id", "evidence_refs",
+                    "model_resolved", "engine_version", "head_commit", "usage_summary"}
+
+
+def update_run(session: Session, run_id: str, *, actor: str, **fields: Any) -> WorkerRun:
+    """Update observed run fields. Each status stays a separate field (§35); none of them moves
+    the canonical execution state — DONE needs mark_accepted."""
+    run = get_run(session, run_id)
+    unknown = set(fields) - set(_RUN_FIELD_VOCAB) - _RUN_FREE_FIELDS
+    if unknown:
+        raise ValidationFailed(f"fields not updatable via update_run: {sorted(unknown)}")
+    changes: dict[str, Any] = {}
+    for k, v in fields.items():
+        if k in _RUN_FIELD_VOCAB:
+            if v is None:
+                setattr(run, k, None)
+                changes[k] = None
+                continue
+            val = str(v).upper()[:32]
+            vocab = _RUN_FIELD_VOCAB[k]
+            if vocab is not None and val not in vocab:
+                raise ValidationFailed(f"{k} must be one of {sorted(vocab)}")
+            setattr(run, k, val)
+            changes[k] = val
+        elif k == "touched_paths":
+            merged = list(dict.fromkeys([*(run.touched_paths or []), *[str(p)[:400] for p in (v or [])]]))
+            run.touched_paths = merged[:2000]
+            changes[k] = len(merged)
+        elif k == "evidence_refs":
+            run.evidence_refs = [*(run.evidence_refs or []), *list(v or [])][:500]
+            changes[k] = len(run.evidence_refs)
+        elif k == "usage_summary":
+            run.usage_summary = redact(dict(v or {}))
+            changes[k] = "updated"
+        else:
+            sv = redact_text(str(v)) if v is not None else None
+            setattr(run, k, sv[:4000] if isinstance(sv, str) else sv)
+            changes[k] = (sv or "")[:200] if isinstance(sv, str) else sv
+    session.flush()
+    _audit(session, actor, "workforce.run.update", target_type="run", target_id=run.id, project_id=run.project_id,
+           domain=run.domain, details=changes)
+    events.emit(session, source="scheduler", kind="run.updated", entity_type="run", entity_id=run.id,
+                run_id=run.id, attempt=run.attempt, project_id=run.project_id, domain=run.domain, mode=run.mode,
+                payload=changes)
+    return run
+
+
+# ----------------------------------------------------------------------------- executions & readiness
+def ensure_executions(session: Session, plan_version_id: str, *, actor: str, requested_by: str | None = None,
+                      mode: str = DataMode.LIVE.value) -> list[TaskExecution]:
+    version = session.get(PlanVersion, plan_version_id)
+    if version is None:
+        raise NotFound("plan version not found")
+    tasks = list(session.scalars(select(TaskSpec).where(TaskSpec.plan_version_id == plan_version_id)))
+    out = []
+    for t in tasks:
+        te = session.scalar(select(TaskExecution).where(TaskExecution.task_id == t.id))
+        if te is None:
+            te = TaskExecution(task_id=t.id, project_id=t.project_id, domain=t.domain, state=S.QUEUED.value,
+                               plan_id=version.plan_id, plan_version_id=plan_version_id, task_key=t.task_key,
+                               requested_by=requested_by, mode=mode, state_changed_at=utcnow(),
+                               assigned_agent_key=IMPLEMENTER_AGENT_KEY)
+            session.add(te)
+            session.flush()
+            _audit(session, actor, "workforce.task.enqueue", target_type="task", target_id=t.id,
+                   project_id=t.project_id, domain=t.domain, details={"plan_version_id": plan_version_id})
+            events.emit(session, source="scheduler", kind="task.state_changed", entity_type="task", entity_id=t.id,
+                        entity_version="1", project_id=t.project_id, domain=t.domain, mode=mode,
+                        payload={"from": None, "to": S.QUEUED.value, "task_key": t.task_key})
+        out.append(te)
+    return out
+
+
+def validate_dag(tasks: list[TaskSpec]) -> dict[str, str]:
+    """§14: unknown nodes, self-dependency and cycles are rejected (task_key -> problem)."""
+    keys = {t.task_key for t in tasks}
+    deps = {t.task_key: list(t.depends_on or []) for t in tasks}
+    problems: dict[str, str] = {}
+    for k, ds in deps.items():
+        if k in ds:
+            problems[k] = "self-dependency"
+        unknown = [d for d in ds if d not in keys]
+        if unknown:
+            problems[k] = f"unknown dependency {unknown}"
+    color: dict[str, int] = {}
+
+    def visit(n: str, stack: list[str]) -> None:
+        color[n] = 1
+        for d in deps.get(n, []):
+            if d not in deps:
+                continue
+            if color.get(d) == 1:
+                for m in stack[stack.index(d):] if d in stack else [n, d]:
+                    problems.setdefault(m, "dependency cycle")
+                problems.setdefault(n, "dependency cycle")
+            elif color.get(d) is None:
+                visit(d, [*stack, d])
+        color[n] = 2
+
+    for k in deps:
+        if color.get(k) is None:
+            visit(k, [k])
+    return problems
+
+
+def _previous_worker_alive(session: Session, task_id: str) -> WorkerRun | None:
+    from aeos.worker_runtime import processes
+
+    for r in session.scalars(select(WorkerRun).where(WorkerRun.task_id == task_id, WorkerRun.pid.is_not(None))):
+        if processes.is_alive(r.pid, r.pid_create_time):
+            return r
+    return None
+
+
+def _fan_out_problem(task: TaskSpec) -> str | None:
+    tools = {str(t).split(":", 1)[0].lower() for t in (task.tools_allowed or [])}
+    if tools & {"task", "subagent", "spawn", "delegate"}:
+        return "TaskSpec requests nested agents/fan-out (not allowed, §19/§21)"
+    scope = task.capability_scope or {}
+    if scope.get("fan_out") or scope.get("subtasks"):
+        return "TaskSpec capability scope requests fan-out (not allowed)"
+    return None
+
+
+def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, approved_ok: bool, approval_reason: str,
+                       by_key: dict[str, TaskSpec], te_by_task: dict[str, TaskExecution],
+                       dag: dict[str, str]) -> list[tuple[str, str]]:
+    reasons: list[tuple[str, str]] = []
+    if not approved_ok:
+        reasons.append(("PLAN_NOT_APPROVED", approval_reason or "plan version is not the ACTIVE approved version"))
+    if task.task_key in dag:
+        reasons.append(("INVALID_DAG", dag[task.task_key]))
+    for dep_key in task.depends_on or []:
+        dep = by_key.get(dep_key)
+        if dep is None:
+            continue
+        dep_te = te_by_task.get(dep.id)
+        if dep_te is None or dep_te.state != S.DONE.value:
+            reasons.append(("DEPENDENCY_NOT_ACCEPTED", f"dependency {dep_key} is {dep_te.state if dep_te else 'not queued'}"))
+            continue
+        ok, why = ext.acceptance_valid(session, dep)
+        if not ok:
+            reasons.append(("DEPENDENCY_NOT_ACCEPTED", f"dependency {dep_key}: {why}"))
+    fan = _fan_out_problem(task)
+    if fan:
+        reasons.append(("FAN_OUT_FORBIDDEN", fan))
+    if te.attempts_used >= max_attempts(task, te):
+        reasons.append(("NEEDS_DECISION", f"attempt cap reached ({te.attempts_used}/{max_attempts(task, te)})"))
+    alive = _previous_worker_alive(session, task.id)
+    if alive is not None:
+        reasons.append(("LEASE_LOST_PROCESS_ALIVE", f"previous worker of run {alive.id} (pid {alive.pid}) is still alive"))
+    if te.reason_code == "QUOTA_EXHAUSTED" and te.state == S.BLOCKED.value:
+        wait = _quota_wait(session, te)
+        if wait:
+            reasons.append(("QUOTA_EXHAUSTED", wait))
+    return reasons
+
+
+def _quota_wait(session: Session, te: TaskExecution) -> str | None:
+    from aeos.models.cost import QuotaState
+
+    run = session.get(WorkerRun, te.active_run_id) if te.active_run_id else None
+    if run is None or not run.model_route_key:
+        return None
+    q = session.scalar(select(QuotaState).where(QuotaState.scope == run.model_route_key))
+    resets = ensure_aware(q.resets_at) if q else None
+    if q and q.state == "EXHAUSTED" and resets and resets > utcnow():
+        return f"quota for {run.model_route_key} exhausted until {resets.isoformat()}"
+    return None
+
+
+def refresh_readiness(session: Session, plan_version_id: str, *, actor: str = "system:scheduler") -> dict[str, int]:
+    """QUEUED/BLOCKED -> READY when every dependency is DONE with a still-valid acceptance AND the
+    version is the plan's ACTIVE approved version; otherwise BLOCKED / annotated with reasons.
+    External tracker "Done" (OperationalWorkProjection) is never consulted (§14, §50)."""
+    version = session.get(PlanVersion, plan_version_id)
+    if version is None:
+        raise NotFound("plan version not found")
+    approved, why = ext.approved_version(session, version.plan_id)
+    approved_ok = approved is not None and approved.id == plan_version_id
+    if approved is not None and not approved_ok:
+        why = f"approved version is {approved.id}, not {plan_version_id}"
+    tasks = list(session.scalars(select(TaskSpec).where(TaskSpec.plan_version_id == plan_version_id)))
+    by_key = {t.task_key: t for t in tasks}
+    tes = {te.task_id: te for te in session.scalars(
+        select(TaskExecution).where(TaskExecution.task_id.in_([t.id for t in tasks])))}
+    dag = validate_dag(tasks)
+    counts = {"ready": 0, "blocked": 0, "unchanged": 0}
+    for t in tasks:
+        te = tes.get(t.id)
+        if te is None or te.state not in (S.QUEUED.value, S.BLOCKED.value, S.READY.value):
+            continue
+        reasons = _readiness_reasons(session, te, t, approved_ok=approved_ok, approval_reason=why, by_key=by_key,
+                                     te_by_task=tes, dag=dag)
+        text = "; ".join(r for _, r in reasons)
+        if te.state == S.QUEUED.value:
+            if reasons:
+                transition_task(session, t.id, S.BLOCKED.value, reason=text, actor=actor, reason_code=reasons[0][0])
+                counts["blocked"] += 1
+            else:
+                transition_task(session, t.id, S.READY.value, reason="dependencies accepted and plan approved",
+                                actor=actor)
+                counts["ready"] += 1
+        elif te.state == S.BLOCKED.value:
+            if not reasons:
+                transition_task(session, t.id, S.READY.value, reason=f"blocker resolved ({te.reason_code})", actor=actor)
+                counts["ready"] += 1
+            else:
+                _set_wait_reason(session, te, reasons[0][0], text)
+                counts["unchanged"] += 1
+        else:  # READY: never moves back (no READY->BLOCKED edge in §14) — admission re-checks
+            if reasons:
+                _set_wait_reason(session, te, reasons[0][0], text)
+            elif te.reason_code in ("PLAN_NOT_APPROVED", "DEPENDENCY_NOT_ACCEPTED", "INVALID_DAG"):
+                _set_wait_reason(session, te, "", "")
+            counts["unchanged"] += 1
+        tes[t.id] = get_te(session, t.id)
+    return counts
+
+
+def active_plan_versions(session: Session) -> list[str]:
+    rows = session.scalars(select(TaskExecution.plan_version_id).where(
+        TaskExecution.state.in_([S.QUEUED.value, S.BLOCKED.value, S.READY.value, S.REVIEW.value]),
+        TaskExecution.mode == DataMode.LIVE.value, TaskExecution.plan_version_id.is_not(None)).distinct())
+    return [r for r in rows if r]
+
+
+# ----------------------------------------------------------------------------- admission (§19)
+@dataclass
+class Admission:
+    task_id: str
+    admitted: bool = False
+    waits: list[tuple[str, str]] = field(default_factory=list)
+    blocks: list[tuple[str, str]] = field(default_factory=list)
+    route: ModelRoute | None = None
+    agent: AgentDefinition | None = None
+    est_usd: float = 0.0
+    est_tokens: int = 0
+    cap: int = 1
+
+    @property
+    def reasons(self) -> list[str]:
+        return [f"{c}: {m}" for c, m in [*self.blocks, *self.waits]]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"task_id": self.task_id, "admitted": self.admitted, "blocks": self.blocks, "waits": self.waits,
+                "route": self.route.route_key if self.route else None,
+                "agent": self.agent.agent_key if self.agent else None, "cap": self.cap}
+
+
+def active_executions(session: Session, *, exclude_task: str | None = None) -> list[TaskExecution]:
+    q = select(TaskExecution).where(TaskExecution.state.in_([s.value for s in ACTIVE_STATES]),
+                                    TaskExecution.mode == DataMode.LIVE.value)
+    rows = list(session.scalars(q))
+    return [r for r in rows if r.task_id != exclude_task]
+
+
+def write_set_conflicts(session: Session, task: TaskSpec) -> list[dict[str, Any]]:
+    from aeos.worker_runtime.scope import write_sets_overlap
+
+    out = []
+    for other in active_executions(session, exclude_task=task.id):
+        ot = session.get(TaskSpec, other.task_id)
+        if ot is None or ot.project_id != task.project_id:
+            continue
+        pairs = write_sets_overlap(list(task.allowed_paths or []), list(ot.allowed_paths or []))
+        if pairs:
+            out.append({"task_id": ot.id, "task_key": ot.task_key, "pairs": pairs[:5]})
+    return out
+
+
+def _cost_estimate(task: TaskSpec, route: ModelRoute) -> tuple[float | None, int]:
+    limits = task.limits or {}
+    tokens = int(limits.get("max_tokens", DEFAULT_MAX_TOKENS) or DEFAULT_MAX_TOKENS)
+    if route.is_free == "YES":
+        return 0.0, tokens
+    if limits.get("max_cost_usd") is not None:
+        return float(limits["max_cost_usd"]), tokens
+    return None, tokens
+
+
+def admission_check(session: Session, task_id: str) -> Admission:
+    te = get_te(session, task_id)
+    task = session.get(TaskSpec, task_id)
+    adm = Admission(task_id=task_id)
+    if task is None:
+        adm.blocks.append(("NOT_FOUND", "task spec missing"))
+        return adm
+    if te.state != S.READY.value:
+        adm.blocks.append(("NOT_READY", f"task is {te.state}"))
+        return adm
+    if scheduling_paused(session):
+        adm.waits.append(("SCHEDULING_PAUSED", "scheduling is paused by the owner"))
+    approved, why = ext.approved_version(session, te.plan_id)
+    if approved is None or approved.id != task.plan_version_id:
+        adm.waits.append(("PLAN_NOT_APPROVED", why or "task version is not the approved version"))
+    for dep_key in task.depends_on or []:
+        dep = session.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == task.plan_version_id,
+                                                    TaskSpec.task_key == dep_key))
+        dep_te = session.scalar(select(TaskExecution).where(TaskExecution.task_id == dep.id)) if dep else None
+        ok = bool(dep and dep_te and dep_te.state == S.DONE.value and ext.acceptance_valid(session, dep)[0])
+        if not ok:
+            adm.waits.append(("DEPENDENCY_NOT_ACCEPTED", f"dependency {dep_key} not DONE with valid acceptance"))
+    if te.attempts_used >= max_attempts(task, te):
+        adm.blocks.append(("ATTEMPTS_EXHAUSTED", f"{te.attempts_used}/{max_attempts(task, te)} attempts used"))
+    fan = _fan_out_problem(task)
+    if fan:
+        adm.blocks.append(("FAN_OUT_FORBIDDEN", fan))
+    agent_key = te.assigned_agent_key or IMPLEMENTER_AGENT_KEY
+    agent = session.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == agent_key))
+    if agent is None or agent.harness != "opencode" or agent_key in REVIEWER_AGENT_KEYS:
+        adm.waits.append(("AGENT_DISABLED", f"agent {agent_key} is not an implementation agent"))
+    elif not agent.enabled:
+        adm.waits.append(("AGENT_DISABLED", f"agent {agent_key} is disabled: {agent.enabled_reason}"))
+    adm.agent = agent
+    if task.domain == "OFFICE":
+        ok, why = ext.office_external_allowed(session)
+        if not ok:
+            adm.waits.append(("OFFICE_DENIED", why))
+    ok, reasons = ext.capability_ready(session, Capability.CAN_RUN_WORKER, domain=task.domain, project_id=task.project_id)
+    if not ok:
+        adm.waits.append(("CAPABILITY_NOT_READY", "; ".join(reasons)))
+    from aeos.worker_runtime.sandbox import sandbox_readiness
+
+    sb = sandbox_readiness(session, domain=task.domain)
+    if sb["status"] != "READY":
+        adm.waits.append(("SANDBOX_NOT_READY", "; ".join(sb["reasons"])))
+    cap, _decision = concurrency_cap(session)
+    adm.cap = cap
+    active = active_executions(session, exclude_task=task.id)
+    if len(active) >= cap:
+        adm.waits.append(("CONCURRENCY_CAP", f"{len(active)} active implementation worker(s); cap {cap}"))
+    conflicts = write_set_conflicts(session, task)
+    if conflicts:
+        adm.waits.append(("SHARED_WRITE_CONFLICT", "shared-write conflict with " +
+                          ", ".join(c["task_key"] for c in conflicts) + " (serialised)"))
+    route, rreasons = ext.select_route(session, task)
+    if route is None:
+        adm.waits.append(("ROUTE_INELIGIBLE", "; ".join(rreasons)))
+    else:
+        adm.route = route
+        est_usd, est_tokens = _cost_estimate(task, route)
+        if est_usd is None:
+            adm.waits.append(("COST_UNKNOWN", f"route {route.route_key} is not free and the TaskSpec has no "
+                                              "limits.max_cost_usd; no paid run without a cost decision"))
+        else:
+            adm.est_usd, adm.est_tokens = est_usd, est_tokens
+    adm.admitted = not adm.waits and not adm.blocks
+    return adm
+
+
+def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admission | None = None,
+                  owner: str = CONTROLLER_ID, ttl_seconds: int | None = None) -> WorkerRun:
+    """READY -> LEASED with reservation + lease in ONE transaction (§14 "reservasi dan lease
+    atomik"). Exactly one concurrent caller wins (conditional UPDATE on state + row_version)."""
+    te = get_te(session, task_id)
+    task = session.get(TaskSpec, task_id)
+    if task is None:
+        raise NotFound("task spec missing")
+    if te.state != S.READY.value:
+        raise Conflict(f"task is {te.state}, not READY", code="NOT_READY")
+    adm = admission or admission_check(session, task_id)
+    if not adm.admitted:
+        raise Blocked("admission refused: " + "; ".join(adm.reasons), code="ADMISSION_REFUSED",
+                      details={"reasons": adm.reasons})
+    assert adm.route is not None and adm.agent is not None
+    run_id = new_id()
+    expected_rv = te.row_version
+    reservation = ext.reserve(session, run_id=run_id, project_id=task.project_id, domain=task.domain,
+                              route_key=adm.route.route_key, est_usd=adm.est_usd, est_tokens=adm.est_tokens,
+                              est_requests=int((task.limits or {}).get("max_requests", DEFAULT_MAX_REQUESTS)))
+    now = utcnow()
+    res = session.execute(
+        update(TaskExecution)
+        .where(TaskExecution.id == te.id, TaskExecution.state == S.READY.value, TaskExecution.row_version == expected_rv)
+        .values(state=S.LEASED.value, row_version=expected_rv + 1, active_run_id=run_id,
+                attempts_used=TaskExecution.attempts_used + 1, reason="lease acquired", reason_code="",
+                state_changed_at=now, updated_at=now)
+    )
+    if res.rowcount != 1:
+        ext.release(session, getattr(reservation, "id", None))
+        raise Conflict("lost the lease to a concurrent admission", code="LEASE_CONFLICT")
+    te = get_te(session, task_id)
+    ttl = ttl_seconds or lease_ttl(session)
+    lease_id = new_id()
+    limits = task.limits or {}
+    run = WorkerRun(
+        id=run_id, task_id=task.id, project_id=task.project_id, domain=task.domain, attempt=te.attempts_used,
+        run_type="IMPLEMENTATION", agent_key=adm.agent.agent_key, role_key=task.role_key,
+        execution_status=S.LEASED.value, model_route_key=adm.route.route_key,
+        model_resolved=adm.route.resolved_version or None, engine=adm.agent.harness, lease_id=lease_id,
+        plan_version_id=task.plan_version_id, task_key=task.task_key, requested_by=te.requested_by,
+        budget_reservation_id=getattr(reservation, "id", None), mode=te.mode,
+        caps={"max_requests": int(limits.get("max_requests", DEFAULT_MAX_REQUESTS)),
+              "max_tokens": int(limits.get("max_tokens", DEFAULT_MAX_TOKENS)),
+              "max_cost_usd": adm.est_usd, "timeout_seconds": int(limits.get("timeout_seconds", 1800)),
+              "max_attempts": max_attempts(task, te), "capability_ttl_seconds": task.capability_ttl_seconds,
+              "concurrency_cap": adm.cap},
+    )
+    session.add(run)
+    session.add(Lease(id=lease_id, task_id=task.id, run_id=run_id, owner=owner, acquired_at=now,
+                      expires_at=now + timedelta(seconds=ttl), heartbeat_at=now, state="ACTIVE", ttl_seconds=ttl))
+    session.flush()
+    _emit_task(session, te, S.READY.value, S.LEASED.value, "lease acquired", actor)
+    _emit_run(session, run, S.QUEUED.value, S.LEASED.value, "lease acquired", actor)
+    return run
+
+
+def admit_ready_tasks(session: Session, *, actor: str = "system:scheduler", limit: int | None = None) -> list[str]:
+    """Admit READY LIVE tasks up to the concurrency cap. Returns leased run ids."""
+    leased: list[str] = []
+    ready = list(session.scalars(select(TaskExecution).where(TaskExecution.state == S.READY.value,
+                                                             TaskExecution.mode == DataMode.LIVE.value)
+                                 .order_by(TaskExecution.state_changed_at.asc())))
+    for te in ready:
+        if limit is not None and len(leased) >= limit:
+            break
+        adm = admission_check(session, te.task_id)
+        if not adm.admitted:
+            # READY has no edge to BLOCKED in §14: the task keeps waiting with an explicit reason
+            # that the UI turns into WAITING_QUOTA / BLOCKED (derived, canonical state stays READY).
+            code = (adm.blocks or adm.waits)[0][0]
+            _set_wait_reason(session, get_te(session, te.task_id), code, "; ".join(adm.reasons))
+            continue
+        try:
+            run = acquire_lease(session, te.task_id, actor=actor, admission=adm)
+        except Blocked as exc:
+            _set_wait_reason(session, get_te(session, te.task_id), "BUDGET_EXCEEDED"
+                             if exc.code not in ("BUDGET_UNAVAILABLE",) else "MODULE_UNAVAILABLE", exc.message)
+            continue
+        except Conflict:
+            continue
+        leased.append(run.id)
+    return leased
+
+
+# ----------------------------------------------------------------------------- heartbeat & observed actions
+def _stale(session: Session, run: WorkerRun, lease_id: str | None) -> str | None:
+    lease = session.get(Lease, lease_id) if lease_id else None
+    if lease is None or lease.run_id != run.id:
+        return "unknown lease"
+    if lease.state != "ACTIVE":
+        return f"lease {lease.state}"
+    te = session.scalar(select(TaskExecution).where(TaskExecution.task_id == run.task_id)) if run.task_id else None
+    if te is not None and te.active_run_id != run.id:
+        return "run is no longer the task's active attempt"
+    if run.execution_status in RUN_TERMINAL:
+        return f"run is {run.execution_status}"
+    return None
+
+
+def _reject_stale(session: Session, run: WorkerRun, why: str, kind: str, payload: dict[str, Any]) -> None:
+    _audit(session, f"worker:run:{run.id}", f"workforce.run.{kind}.stale", result="DENIED", target_type="run",
+           target_id=run.id, project_id=run.project_id, domain=run.domain, reason=why)
+    events.emit(session, source="scheduler", kind="run.stale_event", entity_type="run", entity_id=run.id,
+                run_id=run.id, attempt=run.attempt, lease_id=run.lease_id, project_id=run.project_id,
+                domain=run.domain, mode=run.mode, payload={"rejected": kind, "why": why, **payload})
+
+
+def heartbeat(session: Session, run_id: str, *, lease_id: str | None) -> bool:
+    """Extend the lease. Returns False (and audits) for a stale attempt/lease (§50)."""
+    run = get_run(session, run_id)
+    why = _stale(session, run, lease_id)
+    if why:
+        _reject_stale(session, run, why, "heartbeat", {})
+        return False
+    lease = session.get(Lease, lease_id)
+    now = utcnow()
+    lease.heartbeat_at = now
+    lease.expires_at = now + timedelta(seconds=lease.ttl_seconds or DEFAULT_LEASE_TTL)
+    run.last_heartbeat_at = now
+    session.flush()
+    events.emit(session, source="runner", kind="run.heartbeat", entity_type="run", entity_id=run.id, run_id=run.id,
+                attempt=run.attempt, lease_id=lease.id, project_id=run.project_id, domain=run.domain, mode=run.mode,
+                payload={"lease_expires_at": lease.expires_at.isoformat(),
+                         "note": "liveness only - not progress or quality"})
+    return True
+
+
+def record_action(session: Session, run_id: str, *, lease_id: str | None, action: dict[str, Any]) -> bool:
+    run = get_run(session, run_id)
+    why = _stale(session, run, lease_id)
+    if why:
+        _reject_stale(session, run, why, "action", {"action_kind": action.get("kind")})
+        return False
+    clean = redact(action)
+    if not action.get("is_narration") and action.get("kind") not in ("narration", "step"):
+        run.current_action = str(clean.get("label", ""))[:500]
+    path = clean.get("path")
+    if action.get("kind") == "edit_file" and path and clean.get("status") == "completed":
+        run.touched_paths = list(dict.fromkeys([*(run.touched_paths or []), str(path)[:400]]))[:2000]
+    session.flush()
+    events.emit(session, source="runner", kind="run.action", entity_type="run", entity_id=run.id, run_id=run.id,
+                attempt=run.attempt, lease_id=run.lease_id, project_id=run.project_id, domain=run.domain,
+                mode=run.mode, payload=clean)
+    return True
+
+
+# ----------------------------------------------------------------------------- cancel / reassign / repair / accept
+def _revoke(session: Session, run_id: str, reason: str) -> int:
+    from aeos.broker import facade as broker
+
+    return broker.revoke_grants(session, run_id=run_id, reason=reason)
+
+
+def _kill(run_id: str) -> dict[str, Any]:
+    from aeos.worker_runtime import facade as runtime
+
+    try:
+        return runtime.kill_run_processes(run_id)
+    except Exception as exc:  # never hide a failed kill
+        log.exception("kill_run_processes failed for %s", run_id)
+        return {"run_id": run_id, "found": True, "killed": [], "remaining": ["UNKNOWN"], "error": type(exc).__name__}
+
+
+def _end_lease(session: Session, run: WorkerRun, state: str, reason: str) -> None:
+    if not run.lease_id:
+        return
+    lease = session.get(Lease, run.lease_id)
+    if lease is not None and lease.state == "ACTIVE":
+        lease.state = state
+        lease.released_at = utcnow()
+        lease.release_reason = reason[:500]
+        session.flush()
+
+
+def stop_run_resources(session: Session, run: WorkerRun, *, reason: str, lease_state: str) -> dict[str, Any]:
+    """Revoke capabilities FIRST, then kill the process tree, end the lease, release the reservation."""
+    revoked = _revoke(session, run.id, reason)
+    kill = _kill(run.id)
+    _end_lease(session, run, lease_state, reason)
+    released = ext.release(session, run.budget_reservation_id)
+    return {"grants_revoked": revoked, "kill": kill, "reservation": released}
+
+
+def _side_effects(session: Session, run_id: str) -> list[dict[str, Any]]:
+    from aeos.models.broker_ext import BrokerSideEffect
+
+    return [{"kind": se.kind, "status": se.status, "target": se.target, "external_url": se.external_url}
+            for se in session.scalars(select(BrokerSideEffect).where(BrokerSideEffect.run_id == run_id))]
+
+
+def cancel_run(session: Session, run_id: str, *, reason: str, actor: str) -> WorkerRun:
+    """Revoke capabilities, kill the process tree/sandbox, release reservations, keep evidence.
+    External side effects that already happened are NOT assumed undone (§35)."""
+    run = get_run(session, run_id)
+    if run.execution_status in RUN_TERMINAL:
+        return run
+    res = stop_run_resources(session, run, reason=f"cancelled: {reason}", lease_state="REVOKED")
+    effects = _side_effects(session, run.id)
+    still = [p for p in res["kill"].get("remaining", [])]
+    note = f"cancelled by {actor}: {reason}"
+    if still:
+        note += f" | WARNING processes still alive: {still}"
+    run.current_action = "cancelled"
+    set_run_status(session, run, S.CANCELLED.value, reason=note, actor=actor, outcome_code="CANCELLED")
+    if run.task_id:
+        te = get_te(session, run.task_id)
+        if te.active_run_id == run.id and te.state not in {s.value for s in TERMINAL_EXECUTION_STATES}:
+            transition_task(session, run.task_id, S.CANCELLED.value, reason=note, actor=actor)
+    _audit(session, actor, "workforce.run.cancel", target_type="run", target_id=run.id, project_id=run.project_id,
+           domain=run.domain, reason=reason, details={**res, "external_side_effects_not_undone": effects})
+    events.emit(session, source="scheduler", kind="run.action", entity_type="run", entity_id=run.id, run_id=run.id,
+                attempt=run.attempt, project_id=run.project_id, domain=run.domain, mode=run.mode,
+                payload={"kind": "cancel", "label": "Run dibatalkan (capability dicabut, proses dihentikan)",
+                         "grants_revoked": res["grants_revoked"], "processes_killed": len(res["kill"].get("killed", [])),
+                         "processes_remaining": still, "reservation": res["reservation"],
+                         "external_side_effects_not_undone": effects})
+    return run
+
+
+def cancel_task(session: Session, task_id: str, *, reason: str, actor: str) -> TaskExecution:
+    te = get_te(session, task_id)
+    if te.active_run_id:
+        run = session.get(WorkerRun, te.active_run_id)
+        if run is not None and run.execution_status not in RUN_TERMINAL:
+            cancel_run(session, run.id, reason=reason, actor=actor)
+            return get_te(session, task_id)
+    return transition_task(session, task_id, S.CANCELLED.value, reason=f"cancelled by {actor}: {reason}", actor=actor)
+
+
+def request_repair(session: Session, task_id: str, *, findings: list[Any], review_record_id: str | None,
+                   actor: str) -> TaskExecution:
+    """Reviewer findings -> a new bounded attempt (READY) or BLOCKED/NEEDS_DECISION when attempts are
+    used up. The repair is done by a new implementer attempt — never by the reviewer (§19, §22)."""
+    te = get_te(session, task_id)
+    task = session.get(TaskSpec, task_id)
+    if task is None:
+        raise NotFound("task spec missing")
+    if te.state != S.REVIEW.value:
+        raise Conflict(f"repair requires REVIEW, task is {te.state}", code="NOT_IN_REVIEW")
+    agent = te.assigned_agent_key or IMPLEMENTER_AGENT_KEY
+    if agent in REVIEWER_AGENT_KEYS:
+        agent = IMPLEMENTER_AGENT_KEY
+    clean = redact(list(findings or []))[:100]
+    cap = max_attempts(task, te)
+    if te.attempts_used < cap:
+        return transition_task(session, task_id, S.READY.value,
+                               reason=f"repair attempt {te.attempts_used + 1}/{cap} requested ({len(clean)} findings)",
+                               actor=actor, pending_findings=clean, review_record_id=review_record_id,
+                               active_run_id=None, assigned_agent_key=agent)
+    return transition_task(session, task_id, S.BLOCKED.value,
+                           reason=f"attempt cap reached ({te.attempts_used}/{cap}); owner decision required",
+                           actor=actor, reason_code="NEEDS_DECISION", pending_findings=clean,
+                           review_record_id=review_record_id)
+
+
+def mark_accepted(session: Session, task_id: str, run_id: str, *, acceptance_id: str, actor: str) -> TaskExecution:
+    """The ONLY path to DONE: REVIEW + an ACCEPTED AcceptanceRecord for this task/run that the
+    verification module still considers valid for the run's base and the plan version hash."""
+    te = get_te(session, task_id)
+    task = session.get(TaskSpec, task_id)
+    run = get_run(session, run_id)
+    if task is None or run.task_id != task_id:
+        raise Conflict("run does not belong to task", code="RUN_TASK_MISMATCH")
+    if te.state != S.REVIEW.value:
+        raise Conflict(f"task is {te.state}; DONE requires REVIEW", code="NOT_IN_REVIEW")
+    if te.active_run_id not in (None, run_id):
+        raise Conflict("acceptance must target the task's current attempt", code="STALE_ATTEMPT")
+    rec = session.get(AcceptanceRecord, acceptance_id)
+    if rec is None or rec.task_id != task_id or rec.run_id != run_id:
+        raise Conflict("acceptance record does not match task/run", code="ACCEPTANCE_MISMATCH")
+    if rec.acceptance_status != "ACCEPTED":
+        raise Conflict(f"acceptance record is {rec.acceptance_status}", code="ACCEPTANCE_NOT_ACCEPTED")
+    ok, why = ext.acceptance_valid_for_run(session, task, run.base_commit)
+    if not ok:
+        raise Blocked(f"acceptance not valid: {why}", code="ACCEPTANCE_INVALID")
+    te = transition_task(session, task_id, S.DONE.value, reason=f"accepted ({acceptance_id})", actor=actor,
+                         _allow_done=True, accepted_run_id=run_id)
+    run.acceptance_status = "ACCEPTED"
+    run.acceptance_id = acceptance_id
+    if run.execution_status == S.REVIEW.value:
+        set_run_status(session, run, S.DONE.value, reason="acceptance valid", actor=actor, outcome_code="ACCEPTED")
+    _end_lease(session, run, "RELEASED", "accepted")
+    return te
+
+
+def retry_task(session: Session, task_id: str, *, actor: str, extra_attempts: int = 0, rationale: str = "",
+               actor_user_id: str | None = None) -> TaskExecution:
+    """Operator retry (§35). REVIEW -> repair path; BLOCKED -> re-evaluate; attempt-cap blocks need
+    an owner EXCEPTION decision (recorded through the policy module) — never silent."""
+    te = get_te(session, task_id)
+    task = session.get(TaskSpec, task_id)
+    if task is None:
+        raise NotFound("task spec missing")
+    if te.state == S.REVIEW.value:
+        return request_repair(session, task_id, findings=list(te.pending_findings or []),
+                              review_record_id=te.review_record_id, actor=actor)
+    if te.state != S.BLOCKED.value:
+        raise Conflict(f"nothing to retry: task is {te.state}"
+                       + ("; terminal states need a new plan version" if te.state in
+                          {s.value for s in TERMINAL_EXECUTION_STATES} else ""), code="NOT_RETRYABLE")
+    if te.attempts_used >= max_attempts(task, te):
+        if extra_attempts < 1 or not rationale.strip() or not actor_user_id:
+            raise Blocked("attempt cap reached: an owner decision (extra_attempts + rationale) is required",
+                          code="NEEDS_DECISION", details={"reasons": [te.reason]})
+        d = ext.record_decision(session, kind="EXCEPTION", actor_user_id=actor_user_id, target_type="task",
+                                target_id=task_id, target_hash=task.spec_hash, allowed_operations=["retry"],
+                                project_id=task.project_id, domain=task.domain, rationale=rationale,
+                                details={"extra_attempts": int(extra_attempts)})
+        te.extra_attempts = (te.extra_attempts or 0) + int(min(extra_attempts, 3))
+        te.extra_attempts_decision_id = d.id
+        session.flush()
+    refresh_readiness(session, task.plan_version_id, actor=actor)
+    te = get_te(session, task_id)
+    if te.state != S.READY.value:
+        raise Blocked("task is still blocked: " + te.reason, code="STILL_BLOCKED", details={"reasons": [te.reason]})
+    return te
+
+
+def reassign_task(session: Session, task_id: str, *, agent_key: str, actor: str, reason: str = "") -> TaskExecution:
+    """Stop the old lease and revoke its capability BEFORE a new lease can be taken (§35)."""
+    agent = session.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == agent_key))
+    if agent is None:
+        raise NotFound("agent definition not found")
+    if agent.harness != "opencode" or agent_key in REVIEWER_AGENT_KEYS:
+        raise ValidationFailed("only implementation agents can take a task (reviewers never repair)")
+    if not agent.enabled:
+        raise Blocked(f"agent {agent_key} is disabled", code="AGENT_DISABLED", details={"reasons": [agent.enabled_reason]})
+    te = get_te(session, task_id)
+    if te.state in {s.value for s in TERMINAL_EXECUTION_STATES} or te.state == S.REVIEW.value:
+        raise Conflict(f"cannot reassign a task in {te.state}", code="NOT_REASSIGNABLE")
+    note = f"reassigned to {agent_key} by {actor}: {reason}"
+    if te.state in (S.LEASED.value, S.RUNNING.value) and te.active_run_id:
+        run = get_run(session, te.active_run_id)
+        res = stop_run_resources(session, run, reason=note, lease_state="REVOKED")
+        set_run_status(session, run, S.CANCELLED.value, reason=note, actor=actor, outcome_code="REASSIGNED")
+        te = transition_task(session, task_id, S.BLOCKED.value, reason=note, actor=actor, reason_code="REASSIGNED",
+                             assigned_agent_key=agent_key)
+        if res["kill"].get("remaining"):
+            return te  # old process still alive: no new lease until it is gone
+        return transition_task(session, task_id, S.READY.value, reason=note, actor=actor, active_run_id=None)
+    te.assigned_agent_key = agent_key
+    session.flush()
+    _audit(session, actor, "workforce.task.reassign", target_type="task", target_id=task_id,
+           project_id=te.project_id, domain=te.domain, reason=reason, details={"agent_key": agent_key})
+    return te
+
+
+# ----------------------------------------------------------------------------- reconciliation (§14, §50)
+def reconcile(session: Session, *, actor: str = "system:reconciler") -> dict[str, Any]:
+    """After a crash/restart or lease expiry: read leases/reservations/runs and check whether the old
+    process is alive BEFORE any retry. Never starts a duplicate while an old worker may be active."""
+    from aeos.worker_runtime import processes
+
+    now = utcnow()
+    summary: dict[str, Any] = {"expired": 0, "alive": 0, "orphans_resolved": 0}
+    expired = [lz for lz in session.scalars(select(Lease).where(Lease.state == "ACTIVE"))
+               if ensure_aware(lz.expires_at) <= now]
+    for lease in expired:
+        run = session.get(WorkerRun, lease.run_id)
+        if run is None:
+            lease.state = "EXPIRED"
+            continue
+        summary["expired"] += 1
+        _revoke(session, run.id, "lease expired")
+        alive = processes.is_alive(run.pid, run.pid_create_time)
+        kill: dict[str, Any] = {}
+        if alive:
+            kill = _kill(run.id)
+            alive = processes.is_alive(run.pid, run.pid_create_time)
+        lease.state = "EXPIRED"
+        lease.released_at = now
+        lease.release_reason = "expired without heartbeat"
+        ext.release(session, run.budget_reservation_id)
+        code = "LEASE_LOST_PROCESS_ALIVE" if alive else "LEASE_LOST"
+        if alive:
+            summary["alive"] += 1
+            run.outcome_code = "ORPHANED_ALIVE"
+            run.block_reason = f"lease expired; worker pid {run.pid} still alive after kill attempt"
+        elif run.execution_status not in RUN_TERMINAL:
+            set_run_status(session, run, S.FAILED.value, reason="lease expired; worker process not alive",
+                           actor=actor, outcome_code="LEASE_LOST")
+        te = session.scalar(select(TaskExecution).where(TaskExecution.task_id == run.task_id)) if run.task_id else None
+        if te is not None and te.active_run_id == run.id and te.state in (S.LEASED.value, S.RUNNING.value):
+            transition_task(session, te.task_id, S.BLOCKED.value, actor=actor, reason_code=code,
+                            reason=f"lease expired ({code}); kill={kill.get('methods', [])} - no duplicate started")
+        _audit(session, actor, "workforce.lease.expired", target_type="run", target_id=run.id,
+               project_id=run.project_id, domain=run.domain, details={"alive": alive, "kill": kill})
+    for run in session.scalars(select(WorkerRun).where(WorkerRun.outcome_code == "ORPHANED_ALIVE")):
+        if not processes.is_alive(run.pid, run.pid_create_time) and run.execution_status not in RUN_TERMINAL:
+            set_run_status(session, run, S.FAILED.value, reason="orphaned worker process ended", actor=actor,
+                           outcome_code="LEASE_LOST")
+            summary["orphans_resolved"] += 1
+    session.flush()
+    return summary
+
+
+# ----------------------------------------------------------------------------- plan execution
+def execute_plan(session: Session, plan_id: str, *, actor: str, user_id: str | None) -> dict[str, Any]:
+    from aeos.models.planning import Plan
+
+    plan = session.get(Plan, plan_id)
+    if plan is None:
+        raise NotFound("plan not found")
+    approved, why = ext.approved_version(session, plan_id)
+    if approved is None:
+        raise Blocked(f"plan cannot execute: {why}", code="PLAN_NOT_APPROVED", details={"reasons": [why]})
+    ok, reasons = ext.capability_ready(session, Capability.CAN_RUN_WORKER, domain=plan.domain, project_id=plan.project_id)
+    if not ok:
+        raise Blocked("CAN_RUN_WORKER is not READY", code="CAPABILITY_NOT_READY", details={"reasons": reasons})
+    tes = ensure_executions(session, approved.id, actor=actor, requested_by=user_id)
+    counts = refresh_readiness(session, approved.id, actor=actor)
+    _audit(session, actor, "workforce.plan.execute", target_type="plan", target_id=plan_id, project_id=plan.project_id,
+           domain=plan.domain, details={"plan_version_id": approved.id, **counts})
+    return {"plan_id": plan_id, "plan_version_id": approved.id, "tasks": len(tes), **counts,
+            "scheduler_enabled": scheduler_enabled(session), "paused": scheduling_paused(session),
+            "note": "READY tasks are admitted by the scheduler loop (or `aeos work run-once`)"}
+
+
+def counts_by_state(session: Session, *, domain: str, project_ids: list[str] | None = None) -> dict[str, int]:
+    q = select(TaskExecution.state, func.count()).where(TaskExecution.domain == domain,
+                                                        TaskExecution.mode == DataMode.LIVE.value)
+    if project_ids is not None:
+        q = q.where(TaskExecution.project_id.in_(project_ids))
+    out = {s.value: 0 for s in S}
+    for state, n in session.execute(q.group_by(TaskExecution.state)):
+        out[state] = int(n)
+    return out
+
+
+__all__ = [
+    "CONTROLLER_ID",
+    "RUNNING_STOP_CODES",
+    "Admission",
+    "acquire_lease",
+    "admission_check",
+    "admit_ready_tasks",
+    "cancel_run",
+    "cancel_task",
+    "concurrency_cap",
+    "ensure_executions",
+    "execute_plan",
+    "heartbeat",
+    "mark_accepted",
+    "reassign_task",
+    "reconcile",
+    "record_action",
+    "refresh_readiness",
+    "request_repair",
+    "retry_task",
+    "scheduling_paused",
+    "set_scheduling_paused",
+    "transition_task",
+    "update_run",
+]

@@ -31,3 +31,12 @@ def opencode_status() -> dict[str, Any]:
     from aeos.worker_runtime.opencode import opencode_status as impl
 
     return impl()
+
+
+def sandbox_readiness(session: Any, *, domain: str) -> dict[str, Any]:
+    """Policy requirement for CAN_RUN_WORKER: READY only with a proven container or, for PERSONAL,
+    an ACTIVE owner EXCEPTION allowing the weak process sandbox (ADR-0051). Added by module E;
+    existing signatures unchanged."""
+    from aeos.worker_runtime.sandbox import sandbox_readiness as impl
+
+    return impl(session, domain=domain)
