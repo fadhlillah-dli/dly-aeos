@@ -1,0 +1,303 @@
+{
+ "items": [
+  {
+   "key": "A",
+   "name": "Sequential",
+   "compares": "Satu implementer per slice, verifier independen dan checkpoint Claude",
+   "max_parallel_workers": 1,
+   "specialists": "tidak ada",
+   "status": "DEFINITION",
+   "gates": {
+    "policy_authority": "Snapshot policy/MCI dan OWN/AUTH/CAP/ENF yang sama; tidak dilemahkan untuk riset",
+    "review": "Checkpoint Claude dan verifier independen yang sama",
+    "security": "Containment, egress, secret broker dan scope gates yang sama",
+    "human_approval": "Approval manusia tetap diperlukan sesuai baseline; tidak dilewati",
+    "planning_baseline": "Empat tahap planning baseline tetap sama",
+    "paid_routes": "Tidak menambah paid route",
+    "agent_count": "Tidak menjalankan puluhan agent; batas fan-out dideklarasikan"
+   },
+   "fixed_configuration_required": true,
+   "suites": [
+    "eval.small-bugfix",
+    "eval.feature-fe-api",
+    "eval.shared-schema-auth-change",
+    "eval.independent-readonly-reviews",
+    "eval.docs-only-change",
+    "eval.provider-quota-interruption",
+    "eval.self-build-controller-change",
+    "eval.crash-recovery"
+   ],
+   "measures": [
+    "accepted outcomes",
+    "critical/adjacent regression",
+    "security/permission violations",
+    "context/coordination tokens",
+    "worker usage",
+    "review consumption Claude",
+    "total latency/queue wait",
+    "repair/merge conflict",
+    "doc accuracy",
+    "compute/CI",
+    "intervensi manusia"
+   ],
+   "not_measured": [
+    "jumlah agent",
+    "jumlah pesan",
+    "jumlah baris kode"
+   ],
+   "promotion_rule": "Dipromosikan hanya untuk kelas tugas yang menunjukkan manfaat terhadap baseline dan memiliki rollback; tidak otomatis diperluas ke semua proyek/peran.",
+   "gates_hash": "sha256:70041d2e94d1994e04e41ad428734c4680b94c3b0c3fcb7ad5cd88a412ffe35d"
+  },
+  {
+   "key": "B",
+   "name": "Specialist on-demand",
+   "compares": "Tambahkan specialist hanya pada subproblem yang memenuhi kontrak",
+   "max_parallel_workers": 1,
+   "specialists": "on-demand per kontrak",
+   "status": "DEFINITION",
+   "gates": {
+    "policy_authority": "Snapshot policy/MCI dan OWN/AUTH/CAP/ENF yang sama; tidak dilemahkan untuk riset",
+    "review": "Checkpoint Claude dan verifier independen yang sama",
+    "security": "Containment, egress, secret broker dan scope gates yang sama",
+    "human_approval": "Approval manusia tetap diperlukan sesuai baseline; tidak dilewati",
+    "planning_baseline": "Empat tahap planning baseline tetap sama",
+    "paid_routes": "Tidak menambah paid route",
+    "agent_count": "Tidak menjalankan puluhan agent; batas fan-out dideklarasikan"
+   },
+   "fixed_configuration_required": true,
+   "suites": [
+    "eval.small-bugfix",
+    "eval.feature-fe-api",
+    "eval.shared-schema-auth-change",
+    "eval.independent-readonly-reviews",
+    "eval.docs-only-change",
+    "eval.provider-quota-interruption",
+    "eval.self-build-controller-change",
+    "eval.crash-recovery"
+   ],
+   "measures": [
+    "accepted outcomes",
+    "critical/adjacent regression",
+    "security/permission violations",
+    "context/coordination tokens",
+    "worker usage",
+    "review consumption Claude",
+    "total latency/queue wait",
+    "repair/merge conflict",
+    "doc accuracy",
+    "compute/CI",
+    "intervensi manusia"
+   ],
+   "not_measured": [
+    "jumlah agent",
+    "jumlah pesan",
+    "jumlah baris kode"
+   ],
+   "promotion_rule": "Dipromosikan hanya untuk kelas tugas yang menunjukkan manfaat terhadap baseline dan memiliki rollback; tidak otomatis diperluas ke semua proyek/peran.",
+   "gates_hash": "sha256:70041d2e94d1994e04e41ad428734c4680b94c3b0c3fcb7ad5cd88a412ffe35d"
+  },
+  {
+   "key": "C",
+   "name": "Bounded parallel",
+   "compares": "Pekerjaan independen paralel dengan write sets dan interface terkunci",
+   "max_parallel_workers": 2,
+   "specialists": "sesuai kontrak",
+   "status": "DEFINITION",
+   "note": "Dua worker aktif adalah langkah eksperimen; perlu admission/budget sah dan bukti integrasi (§19).",
+   "gates": {
+    "policy_authority": "Snapshot policy/MCI dan OWN/AUTH/CAP/ENF yang sama; tidak dilemahkan untuk riset",
+    "review": "Checkpoint Claude dan verifier independen yang sama",
+    "security": "Containment, egress, secret broker dan scope gates yang sama",
+    "human_approval": "Approval manusia tetap diperlukan sesuai baseline; tidak dilewati",
+    "planning_baseline": "Empat tahap planning baseline tetap sama",
+    "paid_routes": "Tidak menambah paid route",
+    "agent_count": "Tidak menjalankan puluhan agent; batas fan-out dideklarasikan"
+   },
+   "fixed_configuration_required": true,
+   "suites": [
+    "eval.small-bugfix",
+    "eval.feature-fe-api",
+    "eval.shared-schema-auth-change",
+    "eval.independent-readonly-reviews",
+    "eval.docs-only-change",
+    "eval.provider-quota-interruption",
+    "eval.self-build-controller-change",
+    "eval.crash-recovery"
+   ],
+   "measures": [
+    "accepted outcomes",
+    "critical/adjacent regression",
+    "security/permission violations",
+    "context/coordination tokens",
+    "worker usage",
+    "review consumption Claude",
+    "total latency/queue wait",
+    "repair/merge conflict",
+    "doc accuracy",
+    "compute/CI",
+    "intervensi manusia"
+   ],
+   "not_measured": [
+    "jumlah agent",
+    "jumlah pesan",
+    "jumlah baris kode"
+   ],
+   "promotion_rule": "Dipromosikan hanya untuk kelas tugas yang menunjukkan manfaat terhadap baseline dan memiliki rollback; tidak otomatis diperluas ke semua proyek/peran.",
+   "gates_hash": "sha256:70041d2e94d1994e04e41ad428734c4680b94c3b0c3fcb7ad5cd88a412ffe35d"
+  },
+  {
+   "key": "D",
+   "name": "Company-role workflow",
+   "compares": "Peran berurutan yang lebih lengkap; eksperimen saja sebelum manfaat terbukti",
+   "max_parallel_workers": 1,
+   "specialists": "peran berurutan",
+   "status": "EXPERIMENT_ONLY",
+   "gates": {
+    "policy_authority": "Snapshot policy/MCI dan OWN/AUTH/CAP/ENF yang sama; tidak dilemahkan untuk riset",
+    "review": "Checkpoint Claude dan verifier independen yang sama",
+    "security": "Containment, egress, secret broker dan scope gates yang sama",
+    "human_approval": "Approval manusia tetap diperlukan sesuai baseline; tidak dilewati",
+    "planning_baseline": "Empat tahap planning baseline tetap sama",
+    "paid_routes": "Tidak menambah paid route",
+    "agent_count": "Tidak menjalankan puluhan agent; batas fan-out dideklarasikan"
+   },
+   "fixed_configuration_required": true,
+   "suites": [
+    "eval.small-bugfix",
+    "eval.feature-fe-api",
+    "eval.shared-schema-auth-change",
+    "eval.independent-readonly-reviews",
+    "eval.docs-only-change",
+    "eval.provider-quota-interruption",
+    "eval.self-build-controller-change",
+    "eval.crash-recovery"
+   ],
+   "measures": [
+    "accepted outcomes",
+    "critical/adjacent regression",
+    "security/permission violations",
+    "context/coordination tokens",
+    "worker usage",
+    "review consumption Claude",
+    "total latency/queue wait",
+    "repair/merge conflict",
+    "doc accuracy",
+    "compute/CI",
+    "intervensi manusia"
+   ],
+   "not_measured": [
+    "jumlah agent",
+    "jumlah pesan",
+    "jumlah baris kode"
+   ],
+   "promotion_rule": "Dipromosikan hanya untuk kelas tugas yang menunjukkan manfaat terhadap baseline dan memiliki rollback; tidak otomatis diperluas ke semua proyek/peran.",
+   "gates_hash": "sha256:70041d2e94d1994e04e41ad428734c4680b94c3b0c3fcb7ad5cd88a412ffe35d"
+  }
+ ],
+ "common_gates": {
+  "policy_authority": "Snapshot policy/MCI dan OWN/AUTH/CAP/ENF yang sama; tidak dilemahkan untuk riset",
+  "review": "Checkpoint Claude dan verifier independen yang sama",
+  "security": "Containment, egress, secret broker dan scope gates yang sama",
+  "human_approval": "Approval manusia tetap diperlukan sesuai baseline; tidak dilewati",
+  "planning_baseline": "Empat tahap planning baseline tetap sama",
+  "paid_routes": "Tidak menambah paid route",
+  "agent_count": "Tidak menjalankan puluhan agent; batas fan-out dideklarasikan"
+ },
+ "measures": [
+  "accepted outcomes",
+  "critical/adjacent regression",
+  "security/permission violations",
+  "context/coordination tokens",
+  "worker usage",
+  "review consumption Claude",
+  "total latency/queue wait",
+  "repair/merge conflict",
+  "doc accuracy",
+  "compute/CI",
+  "intervensi manusia"
+ ],
+ "not_measured": [
+  "jumlah agent",
+  "jumlah pesan",
+  "jumlah baris kode"
+ ],
+ "dimensions": [
+  {
+   "key": "outcome",
+   "label": "Outcome",
+   "explain": "First-pass acceptance, final accepted tasks, regresi",
+   "metrics": [
+    "first_pass_acceptance_rate",
+    "final_acceptance_rate",
+    "regressions"
+   ]
+  },
+  {
+   "key": "contract",
+   "label": "Contract",
+   "explain": "Scope adherence, permission attempts, false evidence/claim",
+   "metrics": [
+    "scope_adherence_rate",
+    "permission_attempts",
+    "false_claims"
+   ]
+  },
+  {
+   "key": "reliability",
+   "label": "Reliability",
+   "explain": "Completion, tool/schema failures, repair count, provider availability",
+   "metrics": [
+    "completion_rate",
+    "tool_schema_failures",
+    "repair_count",
+    "quota_interrupted"
+   ]
+  },
+  {
+   "key": "product_quality",
+   "label": "Product quality",
+   "explain": "UI/accessibility, API/data behavior, maintainability, doc accuracy sesuai tugas",
+   "metrics": [
+    "ui_a11y",
+    "api_data_behavior",
+    "maintainability",
+    "doc_accuracy"
+   ]
+  },
+  {
+   "key": "oversight",
+   "label": "Oversight",
+   "explain": "Konsumsi review Claude, jumlah intervensi dan koreksi manusia",
+   "metrics": [
+    "claude_reviews",
+    "human_interventions",
+    "human_corrections"
+   ]
+  },
+  {
+   "key": "economics",
+   "label": "Economics",
+   "explain": "Worker API/compute/CI cost per accepted outcome, terpisah dari kuota langganan",
+   "metrics": [
+    "worker_cost_per_accepted_usd",
+    "compute_ci_cost_usd"
+   ]
+  },
+  {
+   "key": "performance",
+   "label": "Performance",
+   "explain": "End-to-end p50/p95 latency dan queue/quota delays, dengan ukuran sampel",
+   "metrics": [
+    "latency_p50_s",
+    "latency_p95_s",
+    "queue_wait_p50_s",
+    "quota_delay_total_s",
+    "sample_size"
+   ]
+  }
+ ],
+ "source": "§44 experiment definitions",
+ "checked_at": "2026-10-18T12:09:15.228423+00:00",
+ "mode": "DESIGN",
+ "note": "Keempat eksperimen memakai gate policy/authority, review dan security yang sama; belum ada hasil."
+}

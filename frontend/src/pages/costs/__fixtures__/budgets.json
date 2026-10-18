@@ -1,0 +1,79 @@
+{
+ "items": [
+  {
+   "id": "54ab7690-fc2c-4c53-abb1-eb6dcc8daa18",
+   "scope_type": "GLOBAL",
+   "scope_id": "*",
+   "period": "MONTH",
+   "period_start": "2026-10-01T00:00:00+00:00",
+   "limit_usd": 5.0,
+   "limit_tokens": null,
+   "limit_requests": null,
+   "hard_stop": true,
+   "status": "ACTIVE",
+   "is_default": false,
+   "implicit": false,
+   "state": "UNTRUSTED",
+   "trust_reasons": [
+    "ledger entry 1bc5aa5e-b5f2-4caa-b3c6-c1c7ef30e3b4 has UNKNOWN cost on a non-free route"
+   ],
+   "decision": {
+    "id": "aa9f5bd8-d021-45c8-a992-394c5eba0504",
+    "kind": "BUDGET",
+    "actor_user_id": "f3c1ab05-0300-4f52-9303-2297ee34d374",
+    "status": "ACTIVE",
+    "created_at": "2026-10-18T12:09:14.636709+00:00",
+    "rationale": "pilot",
+    "target_hash": "sha256:449d8ed1429be12561a7e739925e276c9692a7e6a4944a94ae692b24471a536e"
+   },
+   "notes": "pilot",
+   "created_at": "2026-10-18T12:09:14.892208+00:00",
+   "superseded_by": null,
+   "spent_usd": 0.42,
+   "held_usd": 0.0,
+   "headroom_usd": 4.58,
+   "spent_tokens": 1500,
+   "held_tokens": 0,
+   "spent_requests": 2,
+   "held_requests": 0
+  },
+  {
+   "id": "c8877c31-a3fe-4db9-b9ba-823e772b615c",
+   "scope_type": "GLOBAL",
+   "scope_id": "*",
+   "period": "MONTH",
+   "period_start": "2026-10-01T00:00:00+00:00",
+   "limit_usd": 0.0,
+   "limit_tokens": null,
+   "limit_requests": null,
+   "hard_stop": true,
+   "status": "SUPERSEDED",
+   "is_default": true,
+   "implicit": false,
+   "state": "UNTRUSTED",
+   "trust_reasons": [
+    "ledger entry 1bc5aa5e-b5f2-4caa-b3c6-c1c7ef30e3b4 has UNKNOWN cost on a non-free route"
+   ],
+   "decision": null,
+   "notes": "Default: anggaran tunai worker $0 dengan hard stop - hanya rute gratis yang dapat berjalan sampai keputusan BUDGET pemilik menaikkannya (§42).",
+   "created_at": "2026-10-18T12:09:14.632749+00:00",
+   "superseded_by": "54ab7690-fc2c-4c53-abb1-eb6dcc8daa18",
+   "spent_usd": 0.42,
+   "held_usd": 0.0,
+   "headroom_usd": -0.42,
+   "spent_tokens": 1500,
+   "held_tokens": 0,
+   "spent_requests": 2,
+   "held_requests": 0
+  }
+ ],
+ "source": "budgets + BUDGET decisions",
+ "checked_at": "2026-10-18T12:09:15.001923+00:00",
+ "mode": "LIVE",
+ "policy": {
+  "default": "GLOBAL $0 hard stop",
+  "paid_fallback": false,
+  "auto_topup": false,
+  "key_rotation_to_bypass_limits": false
+ }
+}
