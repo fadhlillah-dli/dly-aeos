@@ -105,7 +105,10 @@ def test_one_approval_and_one_run_decision_publish_every_operation(env):
     ops = jobs._ops_for(db, pub.id)
     checks = list(db.scalars(select(AuditEvent).where(AuditEvent.action == "policy.interlock.check",
                                                       AuditEvent.result == "SUCCESS")))
-    assert {c.details["operation_id"] for c in checks} >= {o.id for o in ops if o.status == "SUCCEEDED"}
+    checked = {c.details["operation_id"] for c in checks}
+    unchecked = [(o.id, o.operation, o.provider, o.attempts, o.error) for o in ops
+                 if o.status == "SUCCEEDED" and o.id not in checked]
+    assert not unchecked, unchecked  # every write went through the interlock
     assert all(c.details["decision_id"] == runs[0].id for c in checks)  # no per-API re-prompt (U-10)
 
 

@@ -1086,6 +1086,9 @@ def _interlock_ok(run: _Run, op: PublicationOperation) -> bool:
     except (ImportError, ModuleNotFoundError):
         res = policy.InterlockResult(False, ["external-write interlock unavailable — fail closed"])
     if res.allowed:
+        # The interlock's audit row is committed now: a later rollback (e.g. a lost claim race) must never
+        # erase the record that this exact write was checked (§26 audit, U-10).
+        run.session.commit()
         return True
     why = "; ".join(res.reasons) or "denied"
     # Nothing was written. The op is FAILED (needs action) instead of a silent PENDING that never runs;

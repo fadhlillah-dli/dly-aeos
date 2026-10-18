@@ -312,7 +312,15 @@ def is_alive(pid: int | None, create_time: float | None) -> bool:
         p = psutil.Process(pid)
         if create_time and abs(p.create_time() - create_time) > CREATE_TIME_TOLERANCE:
             return False
-        return p.status() != psutil.STATUS_ZOMBIE
+        if p.status() == psutil.STATUS_ZOMBIE:
+            return False
+        # Windows has no zombie state: an exited process stays visible while any handle to it is open
+        # (e.g. a Popen object), so ask for its exit status without blocking.
+        try:
+            p.wait(timeout=0)
+        except psutil.TimeoutExpired:
+            return True
+        return False
     except psutil.Error:
         return False
 
