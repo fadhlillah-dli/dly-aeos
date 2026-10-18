@@ -9,9 +9,11 @@ Lifecycle
    documents/existing folders/issues are ``SKIPPED``; documents with an open human edit are planned
    as ``CONFLICT`` (a stale snapshot never overwrites newer human content).
 2. ``execute_publication`` — the human confirms the exact plan version, approved hash and preview hash.
-   That records ONE ``PUBLICATION`` decision covering the concrete operations of this run (U-10);
-   ``policy.facade.check_external_write`` must allow EVERY operation (bootstrap, AUTH, domain,
-   provider, target, write enablement, approved version/hash, unexpired) or nothing runs.
+   That records ONE ``PUBLICATION`` decision covering the concrete operations of this run (U-10) and
+   referencing the plan's APPROVE_AND_PUBLISH approval (version + hash + ``{provider, root_id}`` targets +
+   operation kinds); ``policy.facade.check_external_write`` checks both for EVERY operation (bootstrap,
+   AUTH, domain, provider, target, write enablement, approved version/hash, unexpired) or nothing runs
+   (ADR-0074 amendment). Only targets that are configured AND approved are planned.
 3. ``process_publication`` — runs ops in dependency order (folder before documents, labels before
    issues). Per-op states PENDING/IN_FLIGHT/SUCCEEDED/FAILED/UNKNOWN/CONFLICT/SKIPPED. A timeout or
    unknown result becomes UNKNOWN and is reconciled (find by marker) BEFORE any retry; retries are
@@ -66,6 +68,7 @@ from aeos.models.publishing import (
 from aeos.models.workforce import TaskExecution
 from aeos.planning import facade as planning
 from aeos.policy import facade as policy
+from aeos.portfolio import providers as pv
 from aeos.publisher import plan_state
 from aeos.publisher.providers import FAMILY_OF, REF_PROVIDER, build_provider
 from aeos.publisher.providers.atlassian import attachment_filename
@@ -145,18 +148,47 @@ def approved_version(session: Session, plan: Plan) -> PlanVersion:
     return version
 
 
-def approval_decision(session: Session, version: PlanVersion):
-    """The ACTIVE plan APPROVAL decision bound to this exact version hash."""
-    for target_type, target_id in (("plan_version", version.id), ("plan", version.plan_id)):
-        try:
-            d = policy.find_active_decision(session, kind="APPROVAL", target_type=target_type, target_id=target_id,
-                                            target_hash=version.manifest_hash)
-        except (ImportError, ModuleNotFoundError) as exc:
-            raise Blocked("policy/decision registry unavailable (fail closed)", code="POLICY_UNAVAILABLE") from exc
-        if d is not None:
-            return d
-    raise Blocked("no ACTIVE human approval decision is bound to this plan version hash",
-                  code="APPROVAL_DECISION_MISSING")
+def approval_decision(session: Session, version: PlanVersion, *, for_publication: bool = True):
+    """The ACTIVE plan APPROVAL decision bound to this exact version + hash (planning records it on the
+    ``plan_version`` target). For a publication it must be Approve & Publish: an APPROVE (execution only)
+    never authorises an external publication (§05 step 9, U-10)."""
+    try:
+        d = policy.find_active_decision(session, kind="APPROVAL", target_type="plan_version", target_id=version.id,
+                                        target_hash=version.manifest_hash)
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise Blocked("policy/decision registry unavailable (fail closed)", code="POLICY_UNAVAILABLE") from exc
+    if d is None:
+        raise Blocked("no ACTIVE human approval decision is bound to this plan version hash",
+                      code="APPROVAL_DECISION_MISSING")
+    if for_publication and (d.auth_scope or {}).get("action") != "APPROVE_AND_PUBLISH":
+        raise Conflict("this version was approved without publication (APPROVE); publishing needs Approve & Publish "
+                       "of this version and its targets", code="PUBLICATION_NOT_APPROVED",
+                       details={"decision_id": d.id})
+    return d
+
+
+def approved_targets(decision) -> list[dict[str, Any]]:
+    return [t for t in ((decision.auth_scope or {}).get("targets") or []) if isinstance(t, dict)]
+
+
+def _approve_targets(targets: list[Target], decision, requested: list[str] | None) -> list[Target]:
+    """The publisher writes only where the configured integration AND the human approval agree (U-10).
+
+    Without an explicit request, only purposes whose provider the approval names are planned; a requested
+    or configured target outside the approved scope is BLOCKED (never silently published)."""
+    scope = approved_targets(decision)
+    named = {pv.normalize(t.get("provider")) for t in scope}
+    out: list[Target] = []
+    for t in targets:
+        if requested is None and t.provider not in named:
+            continue
+        if t.status == "READY" and not policy.target_in_scope(t.identity(), scope, t.provider):
+            t.status = "BLOCKED"
+            t.reasons.append(f"TARGET_NOT_APPROVED: persetujuan rencana tidak mencakup {t.provider} {t.root_id or '-'}"
+                             "; setujui ulang (Approve & Publish) dengan target ini")
+            t.remedies.append("Approve & Publish versi ini dengan target {provider, root_id} yang terkonfigurasi")
+        out.append(t)
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -224,16 +256,17 @@ def _human_edit_block(session: Session, rec: DocumentRecord | None, version: Pla
 def _doc_ops(session: Session, project: Project, version: PlanVersion, result: rnd.RenderResult,
              target: Target) -> list[PlannedOp]:
     family = target.family
-    ref_provider = "google-drive" if family == "google" else "confluence"
-    create_provider = "google-drive" if family == "google" else "confluence"
-    update_provider = "google-docs" if family == "google" else "confluence"
+    # One provider per target (aeos.portfolio.providers): Google Docs are files in the project's Drive folder,
+    # so creating (DOCX import) and updating (Docs API) a document are both ``google-drive`` writes.
+    ref_provider = create_provider = update_provider = target.provider
+    ident = target.identity()  # {provider, root_id}: what the approval binds and the interlock checks
     records = {r.logical_doc_id: r for r in session.scalars(
         select(DocumentRecord).where(DocumentRecord.project_id == project.id))}
     visuals = {v.key: v for v in result.visuals}
     ops: list[PlannedOp] = []
     for doc in result.documents:
         parent = (ref_provider, doc.parent_logical_id) if doc.parent_logical_id else None
-        base_target = {"family": family, "logical_id": doc.logical_doc_id, "title": doc.title,
+        base_target = {**ident, "family": family, "logical_id": doc.logical_doc_id, "title": doc.title,
                        "parent_logical_id": doc.parent_logical_id, "root_parent_id": target.config.get(
                            "root_folder_id") if family == "google" else None,
                        "doc_type": doc.doc_type}
@@ -280,7 +313,7 @@ def _doc_ops(session: Session, project: Project, version: PlanVersion, result: r
             for k in rendered:
                 ops.append(PlannedOp("confluence", "upload_attachment", f"{doc.logical_doc_id}#{k}",
                                      attachment_filename(k), "attachment",
-                                     {"family": family, "page_logical_id": doc.logical_doc_id},
+                                     {**ident, "family": family, "page_logical_id": doc.logical_doc_id},
                                      {"filename": attachment_filename(k), "path": visuals[k].png_path},
                                      parent_ref=(ref_provider, doc.logical_doc_id)))
     return ops
@@ -306,6 +339,7 @@ def _label(name: str) -> str:
 def _issue_ops(session: Session, project: Project, version: PlanVersion, target: Target,
                options: dict[str, Any]) -> tuple[list[PlannedOp], list[str]]:
     family = target.family
+    ident = target.identity()  # {provider, root_id} named in every write (interlock target scope)
     notes: list[str] = []
     view = build_view(version.content)
     tasks = sorted(planning.tasks_for_version(session, version.id), key=lambda t: t.task_key)
@@ -323,7 +357,7 @@ def _issue_ops(session: Session, project: Project, version: PlanVersion, target:
         lid = f"label:{_label(name)}"
         if family == "github-issues" and all(o.logical_id != lid for o in ops):
             ref = _ref(session, project.id, "github-issues", lid)
-            op = PlannedOp("github-issues", "ensure_label", lid, _label(name), "label", {"family": family},
+            op = PlannedOp("github-issues", "ensure_label", lid, _label(name), "label", {**ident, "family": family},
                            {"name": _label(name), "description": desc, "color": "2f5bd3" if name == "aeos" else "5b6270"})
             if ref is not None:
                 op.status, op.reason = OP_SKIPPED, "label sudah ada"
@@ -339,7 +373,7 @@ def _issue_ops(session: Session, project: Project, version: PlanVersion, target:
     def issue(lid: str, title: str, body: str, labels: list[str], deps: list[tuple[str, str]],
               meta: dict[str, Any]) -> None:
         ref = _ref(session, project.id, ref_provider, lid)
-        op = PlannedOp(provider, "create_issue", lid, title, "issue", {"family": family, **meta},
+        op = PlannedOp(provider, "create_issue", lid, title, "issue", {**ident, "family": family, **meta},
                        {"title": title, "body": body, "labels": labels, **meta}, dep_refs=deps)
         if ref is not None:
             op.status, op.reason = OP_SKIPPED, f"issue sudah ada ({ref.external_id}); body tidak disinkronkan di V1"
@@ -412,7 +446,12 @@ def create_preview(session: Session, settings: Settings, *, plan_id: str, actor_
                                                        render_visuals=render_visuals, decision_id=decision.id)
     if not state.approved:  # defensive: approval changed between lookups
         raise Conflict(state.reason or "version not approved", code="PLAN_NOT_APPROVED")
-    targets = resolve_targets(session, project, options.get("targets"))
+    requested = options.get("targets")
+    targets = _approve_targets(resolve_targets(session, project, requested), decision, requested)
+    if not targets:
+        raise Conflict("the approval names no publication target of this project's domain profile; approve the "
+                       "version again with its configured targets", code="NO_APPROVED_TARGET",
+                       details={"approved_targets": approved_targets(decision)})
     planned: list[PlannedOp] = []
     notes: list[str] = []
     for t in targets:
@@ -575,10 +614,27 @@ class ExecuteOutcome:
     publication: Publication
 
 
+def _write_target(pub: Publication, op: PublicationOperation) -> tuple[str, dict[str, Any]]:
+    """(canonical provider, target incl. the exact {provider, root_id} identity) of an outbox row.
+
+    Rows planned by earlier builds may carry a legacy provider spelling (``google-docs``) or lack the
+    identity; it is taken from the publication's resolved target of the same family — never guessed."""
+    provider = pv.normalize(op.provider)
+    target = dict(op.target or {})
+    if not target.get("root_id"):
+        fam = FAMILY_OF.get(op.provider)
+        resolved = next((t for t in pub.targets or [] if t.get("family") == fam), {})
+        if resolved.get("root_id"):
+            target["root_id"] = resolved["root_id"]
+    target["provider"] = provider
+    return provider, target
+
+
 def _intent(pub: Publication, op: PublicationOperation, decision_expires: datetime | None) -> policy.WriteIntent:
+    provider, target = _write_target(pub, op)
     return policy.WriteIntent(
-        actor_user_id=pub.executed_by or "", project_id=pub.project_id, domain=pub.domain, provider=op.provider,
-        operation=op.operation, target=dict(op.target or {}), approved_plan_version_id=pub.plan_version_id,
+        actor_user_id=pub.executed_by or "", project_id=pub.project_id, domain=pub.domain, provider=provider,
+        operation=op.operation, target=target, approved_plan_version_id=pub.plan_version_id,
         approved_hash=pub.approved_hash, decision_id=pub.publication_decision_id,
         capability_expires_at=decision_expires,
         extra={"publication_id": pub.id, "operation_id": op.id, "idempotency_key": op.idempotency_key,
@@ -602,18 +658,23 @@ def _check_all(session: Session, pub: Publication, ops: list[PublicationOperatio
 
 def _record_publication_decision(session: Session, pub: Publication, actor_user_id: str,
                                  ops: list[PublicationOperation], rationale: str):
+    # One human decision covers exactly the previewed operations of this run (U-10), inside the plan's
+    # APPROVE_AND_PUBLISH approval it references (version + hash + targets + operation kinds, ADR-0074 amendment).
+    targets = [{"provider": t.get("provider"), "root_id": t.get("root_id")} for t in pub.targets or []
+               if t.get("status") == "READY" and t.get("provider") and t.get("root_id")]
     try:
         return policy.record_decision(
             session, kind="PUBLICATION", actor_user_id=actor_user_id, target_type="publication", target_id=pub.id,
             target_version=pub.plan_version_id, target_hash=pub.approved_hash,
             allowed_operations=sorted({o.operation for o in ops}),
             auth_scope={"publication_id": pub.id, "preview_hash": pub.preview_hash, "project_id": pub.project_id,
-                        "domain": pub.domain, "providers": sorted({o.provider for o in ops}),
-                        "operation_ids": [o.id for o in ops],
-                        "targets": [{"family": t.get("family"), "purpose": t.get("purpose")} for t in pub.targets]},
+                        "domain": pub.domain, "providers": sorted({pv.normalize(o.provider) for o in ops}),
+                        "operation_ids": [o.id for o in ops], "targets": targets,
+                        "approval_decision_id": pub.decision_id},
             project_id=pub.project_id, domain=pub.domain, rationale=rationale,
             expires_at=utcnow() + DECISION_TTL,
-            details={"plan_version_number": pub.plan_version_number, "operation_count": len(ops)},
+            details={"plan_version_number": pub.plan_version_number, "operation_count": len(ops),
+                     "approval_decision_id": pub.decision_id},
         )
     except (ImportError, ModuleNotFoundError) as exc:
         raise Blocked("decision registry unavailable — publication approval cannot be recorded (fail closed)",
@@ -664,6 +725,11 @@ def _still_approved(session: Session, pub: Publication) -> None:
     if current.id != pub.plan_version_id or current.manifest_hash != pub.approved_hash:
         raise Conflict("the approved plan version changed after this preview; create a new preview",
                        code="APPROVAL_STALE", details={"approved_version_id": current.id})
+    decision = approval_decision(session, current)
+    if pub.decision_id and decision.id != pub.decision_id:
+        # Re-approved (other targets/operations) after the preview: the preview no longer shows what is approved.
+        raise Conflict("the plan approval changed after this preview; create a new preview", code="APPROVAL_STALE",
+                       details={"approval_decision_id": decision.id, "preview_decision_id": pub.decision_id})
 
 
 def execute_publication(session: Session, pub_id: str, *, actor_user_id: str, confirm: dict[str, Any]) -> ExecuteOutcome:

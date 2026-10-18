@@ -57,3 +57,13 @@ cannot change goal, policy, permission, memory or routing; parser isolation is a
 * Python `-I` + psutil limits are process isolation, not a sandbox; a stronger boundary (container
   /VM) for hostile documents remains a future option (§25 "Container standar tidak dianggap
   jaminan isolasi kuat").
+
+## Amendment 2026-10-18 (integration)
+
+8. **Proposal attachments.** The additive facade `aeos.intake.facade.link_attachment(session,
+   attachment_id, *, proposal_id)` records a change proposal as the attachment's `proposal_id` (e.g. a
+   `.md` brief, U-11). It refuses an unknown or other-domain attachment (`NotFound`, no metadata leak),
+   another project's attachment for a project-scoped proposal, a REJECTED attachment (`Blocked`) and an
+   attachment already linked to another proposal (`Conflict`); relinking the same proposal is
+   idempotent; the link is audited. `aeos.proposals.service.create_proposal` uses it for every
+   attachment id. Linking is provenance only — the content stays untrusted DATA.

@@ -260,6 +260,11 @@ def create_proposal(
     )
     session.add(p)
     session.flush()
+    if atts:
+        from aeos.intake import facade as intake
+
+        for aid in atts:  # provenance link (.md briefs etc., U-11); the attachment stays untrusted DATA
+            intake.link_attachment(session, aid, proposal_id=p.id)
     if parts:
         _create_parts(session, p, parts, actor_user_id=actor_user_id)
     if emit:

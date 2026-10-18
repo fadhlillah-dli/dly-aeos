@@ -47,3 +47,12 @@ folders the run is blocked — the structure is never silently changed.
    target; never a second target).
 9. Jira reconciliation uses the `search/jql` API, which may be eventually consistent right after a
    create; absence proof on a real tenant is NOT-PROVEN.
+
+## Amendment 2026-10-18 (integration)
+
+10. The adapters read the Integration Registry shape: Confluence parent = `root_id`
+    (CONFLUENCE_PROJECTS_PARENT_ID), Jira project key = `root_id` (JIRA_PROJECT_KEY), tenant
+    `<site>.atlassian.net` is always called over `https://`; `space_id`, `deployment` and the boolean
+    `enabled` come from the integration config. Approvals bind `{provider: "confluence"|"jira",
+    root_id}`; OFFICE writes still need the company authorisation POLICY decision (now recordable through
+    the decisions API/UI/CLI with exactly the `office_policy/OFFICE` shape the office policy reads).

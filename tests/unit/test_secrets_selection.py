@@ -154,6 +154,28 @@ def test_integrations_overview_cards(personal_client: AuthedClient, secrets_memo
     assert "VERIFIED" not in {c["status"] for c in cards.values()}
 
 
+def test_google_card_reads_the_refs_google_connect_writes(personal_client: AuthedClient, secrets_memory, monkeypatch):
+    """W1 seam: the card follows the refs `aeos publish google-connect` writes and the publisher reads
+    (personal/google-oauth-client + personal/google-oauth-token); both are needed for CONFIGURED."""
+    from aeos.claude_bridge import binary as binmod
+    from tests.unit.test_claude_bridge_run import _probe
+
+    monkeypatch.setattr(binmod, "probe", lambda settings, refresh=False: _probe())
+
+    def google() -> dict:
+        r = personal_client.get("/api/secrets/integrations")
+        assert r.status_code == 200 and VALUE not in r.text
+        return next(c for c in r.json()["items"] if c["id"] == "google")
+
+    card = google()
+    assert {x["ref"] for x in card["credential_refs"]} == {"personal/google-oauth-client", "personal/google-oauth-token"}
+    assert card["status"] == "MISSING"
+    secrets_memory.put("personal/google-oauth-client", '{"installed": {"client_id": "fake-id"}}', actor="t")
+    assert google()["status"] == "MISSING"  # the client alone cannot publish: no consented token yet
+    secrets_memory.put("personal/google-oauth-token", VALUE, actor="t")
+    assert google()["status"] == "CONFIGURED"  # configuration, never VERIFIED
+
+
 def _two_projects(db):
     from aeos.models.portfolio import Project
 

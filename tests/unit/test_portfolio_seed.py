@@ -32,9 +32,10 @@ def test_seed_registers_platform_project(db, secrets_memory):
                                                                      "platform-repo")
     assert r.verification_status == "UNVERIFIED"  # seeding is never verification evidence
     ints = {(i.provider, i.purpose): i for i in db.scalars(select(ProjectIntegration))}
-    drive = ints[("GOOGLE_DRIVE", "docs")]
+    drive = ints[("google-drive", "docs")]
     assert drive.root_id is None and drive.capability_status["configuration"] == "MISSING"
-    assert ints[("GITHUB_ISSUES", "issues")].root_id == "fadhlillah-dli/dly-aeos"
+    assert drive.credential_ref == "personal/google-oauth-token"  # the ref google-connect actually writes
+    assert ints[("github-issues", "issues")].root_id == "fadhlillah-dli/dly-aeos"
     assert all(i.last_verified_at is None for i in ints.values())
 
 
@@ -46,7 +47,7 @@ def test_seed_is_idempotent(db, secrets_memory):
     db.commit()
     assert second["project"] == "exists" and second["project_id"] == first["project_id"]
     assert second["repository_id"] == first["repository_id"]
-    assert second["integrations"] == {"GOOGLE_DRIVE/docs": "exists", "GITHUB_ISSUES/issues": "exists"}
+    assert second["integrations"] == {"google-drive/docs": "exists", "github-issues/issues": "exists"}
     assert _counts(db) == counts
 
 

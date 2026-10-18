@@ -134,6 +134,7 @@ function TargetsAndDelta({ pub }: { pub: PublicationView }) {
             {pub.targets.map((t) => (
               <li key={`${t.purpose}-${t.family}`} className="flex flex-wrap items-center gap-2">
                 <span className="font-medium">{t.purpose === "docs" ? "Dokumen" : "Work item"}: {t.label}</span>
+                {t.provider && <Mono>{`${t.provider} → ${t.root_id || "-"}`}</Mono>}
                 <StatusBadge
                   status={t.status === "READY" ? "CONFIGURED" : t.status}
                   label={t.status === "READY" ? "Terkonfigurasi (belum diverifikasi)" : label(t.status)}

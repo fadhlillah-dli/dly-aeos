@@ -6,24 +6,29 @@ or exception is invented here (§02, §20).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
 from aeos.core.enums import Domain
+from aeos.portfolio import providers as pv
 
-# §04 domain profiles: which external providers a domain may write to.
-PROVIDERS_BY_DOMAIN: dict[str, tuple[str, ...]] = {
-    Domain.PERSONAL.value: ("google-drive", "google-docs", "github-issues", "github-repo"),
-    Domain.OFFICE.value: ("confluence", "jira", "bitbucket"),
-}
+# §04 domain profiles: which external providers a domain may write to. One vocabulary for the
+# Integration Registry, publisher, interlock, doctor and UI lives in ``aeos.portfolio.providers``.
+PROVIDERS_BY_DOMAIN: dict[str, tuple[str, ...]] = dict(pv.WRITE_PROVIDERS)
 ALL_PROVIDERS: tuple[str, ...] = tuple(p for ps in PROVIDERS_BY_DOMAIN.values() for p in ps)
-ATLASSIAN_PROVIDERS = frozenset({"confluence", "jira", "bitbucket"})
+ATLASSIAN_PROVIDERS = frozenset({pv.CONFLUENCE, pv.JIRA, pv.BITBUCKET})
 
-# Publication operations (U-10: one approval covers the explicit operations of one publication).
+# Publication operations (U-10: one approval covers the explicit operations of one publication run).
+# These are exactly the operation kinds the publisher's outbox rows carry (aeos.publisher.jobs).
 PUBLISH_OPERATIONS: dict[str, tuple[str, ...]] = {
-    "google-drive": ("create_folder", "update_folder"),
-    "google-docs": ("create_doc", "update_doc"),
-    "github-issues": ("create_issue", "update_issue"),
-    "confluence": ("create_folder", "create_page", "update_page"),
-    "jira": ("create_issue", "update_issue"),
+    pv.GOOGLE_DRIVE: ("create_folder", "create_doc", "update_doc"),
+    pv.GITHUB_ISSUES: ("ensure_label", "create_issue", "update_issue"),
+    pv.CONFLUENCE: ("create_folder", "create_doc", "update_doc", "upload_attachment"),
+    pv.JIRA: ("create_issue", "update_issue"),
 }
+# Publication writes need the run's PUBLICATION decision (ADR-0074) under an APPROVE_AND_PUBLISH approval.
+TARGET_PUBLICATION = "publication"
 # Delivery operations performed only by the trusted broker on task branches (§31). No merge.
 DELIVERY_OPERATIONS: dict[str, tuple[str, ...]] = {
     "github-repo": ("push_branch", "create_pr"),
@@ -75,9 +80,73 @@ def providers_for(domain: str | Domain) -> tuple[str, ...]:
     return PROVIDERS_BY_DOMAIN.get(Domain(domain).value, ())
 
 
+def normalize_provider(provider: str | None) -> str:
+    """Canonical provider id for human input (legacy spellings such as ``google-docs`` are accepted on
+    input and stored canonical). The interlock itself compares exact ids (fail closed)."""
+    return pv.normalize(provider)
+
+
 def operations_for_provider(provider: str) -> tuple[str, ...]:
     return PUBLISH_OPERATIONS.get(provider, ()) + DELIVERY_OPERATIONS.get(provider, ())
 
 
 def known_operation(provider: str, operation: str) -> bool:
     return operation in operations_for_provider(provider)
+
+
+def is_publication_write(provider: str, operation: str) -> bool:
+    return operation in PUBLISH_OPERATIONS.get(provider, ())
+
+
+TARGET_META_KEYS = frozenset({"provider", "label", "title", "kind", "display_name", "name"})
+
+
+def target_in_scope(target: dict[str, Any], approved_targets: list[Any], provider: str) -> bool:
+    """True when *target* lies within one approved target scope of the same provider.
+
+    An approved target is a scope (e.g. ``{"provider": "google-drive", "root_id": "F1"}``); every
+    identifying key it names must be present in the intent target with an equal value."""
+    if not isinstance(target, dict) or not target:
+        return False
+    for scope in approved_targets or []:
+        if not isinstance(scope, dict) or scope.get("provider") != provider:
+            continue
+        keys = [k for k in scope if k not in TARGET_META_KEYS]
+        if not keys:
+            continue  # a provider-only scope is too broad to bind a write
+        if all(k in target and str(target[k]) == str(scope[k]) for k in keys):
+            return True
+    return False
+
+
+# ---- exception decisions read by other modules (exact target shapes, ADR-0042 / ADR-0051) -------------
+
+@dataclass(frozen=True)
+class ExceptionPreset:
+    target_type: str
+    target_id: str
+    domains: tuple[str, ...]
+    details: Mapping[str, bool]  # fixed detail values the consumer requires
+    flags: tuple[str, ...] = ()  # optional boolean details the owner chooses
+    allowed_operations: tuple[str, ...] = ()
+    consumer: str = ""
+
+
+EXCEPTION_PRESETS: dict[str, ExceptionPreset] = {
+    "secret_store_interim_keyring": ExceptionPreset(
+        "secret_store", "interim-keyring", (Domain.PERSONAL.value,), {"secret_store_interim_keyring": True},
+        allowed_operations=("store_personal_secrets",), consumer="aeos.secrets.provider.interim_exception"),
+    "worker_sandbox_process": ExceptionPreset(
+        "worker_sandbox", "process", (Domain.PERSONAL.value,), {"allow_process_sandbox": True}, ("allow_bash",),
+        allowed_operations=("run_worker_process_sandbox",),
+        consumer="aeos.worker_runtime.sandbox.process_sandbox_exception"),
+}
+# Detail keys whose meaning a consumer reads; they are accepted only on their preset target.
+EXCEPTION_DETAIL_KEYS = frozenset({"secret_store_interim_keyring", "allow_process_sandbox", "allow_bash"})
+
+
+def exception_preset_for_target(target_type: str | None, target_id: str | None) -> str | None:
+    for name, spec in EXCEPTION_PRESETS.items():
+        if spec.target_type == target_type and spec.target_id == target_id:
+            return name
+    return None

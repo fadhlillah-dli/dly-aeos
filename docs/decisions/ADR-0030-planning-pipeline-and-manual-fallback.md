@@ -61,3 +61,25 @@ skipping a gate, and that a changed model alias is not accepted as the old basel
   `planning.run.updated` events); CLI/tests run it synchronously. A RUNNING run younger than the
   timeout blocks duplicate runs across processes; an older one is treated as interrupted and the
   stage is re-run (not skipped).
+
+## Amendment 2026-10-18 (integration)
+
+* **Hard stops.** `MODEL_POLICY_MISMATCH` (from the bridge, or the planning-side family check that
+  previously failed the stage), `QUOTA_EXHAUSTED` and the bridge's domain refusals (`DOMAIN_REQUIRED`,
+  `DOMAIN_MISMATCH`, `DOMAIN_UNVERIFIED`, `PROJECT_NOT_FOUND`, `CONTEXT_DOMAIN_DENIED`,
+  `OFFICE_POLICY_DENIED`, `SECRET_IN_PROMPT`) checkpoint the stage (`checkpoint.hard_stop`,
+  `blocked_reasons`) and move the plan to `NEEDS_DECISION`. No other model is tried, no stage is
+  skipped and no manual package is offered as a way around the refusal; a later run resumes the same
+  stage with the same policy model. This supersedes point 3's PLANNING_FAILED/REVIEW_FAILED for a
+  model-family mismatch (the output is still never accepted).
+* **Requests.** Every stage request carries the plan's human-selected domain and its registered
+  `project_id`; context files are none (attachments are fenced DATA inside the prompt), so nothing
+  outside the domain partition can be attached.
+* **Repository inventory.** `PlanningContext.repo_inventory` comes from the additive
+  `aeos.portfolio.facade.inventory_for_project` (registered checkout, domain checks, ADR-0022 §6);
+  the earlier call passed `(session, project_id)` to `inventory_repository(path)` and always recorded
+  UNKNOWN. Failures are recorded with their error code (e.g. `LOCAL_CHECKOUT_MISSING`).
+* **Publication states.** `PUBLISHED -> PUBLISHING` is legal (another run of the same approved version,
+  still gated by an ACTIVE approval in `facade.transition_plan`). The plan detail exposes the project's
+  configured `{provider, root_id}` targets (`operation_catalog.configured_targets`) so the owner approves
+  exact targets; approving an unconfigured target returns a warning, never a silent write.
