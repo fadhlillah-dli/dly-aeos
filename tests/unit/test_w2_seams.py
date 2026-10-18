@@ -150,12 +150,20 @@ def test_scope_contract_allows_carve_outs(db, fakes):
 @pytest.mark.parametrize("code", ["QUARANTINED", "REVIEW_BLOCKED"])
 def test_quarantine_and_review_blocks_wait_for_an_owner_action(db, fakes, code):
     _plan, pv, task = _task_in(db, fakes, "REVIEW", attempts_used=1)
+    old = WorkerRun(task_id=task.id, project_id=task.project_id, domain="PERSONAL", execution_status="REVIEW",
+                    head_commit="c" * 40)
+    db.add(old)
+    db.flush()
+    db.execute(update(TaskExecution).where(TaskExecution.task_id == task.id).values(active_run_id=old.id))
     scheduler.transition_task(db, task.id, "BLOCKED", reason=f"{code}: special review", actor="verifier",
                               reason_code=code)
     scheduler.refresh_readiness(db, pv.id)
     assert scheduler.get_te(db, task.id).state == "BLOCKED", "never retried by a scheduler tick"
+    assert old.execution_status == "REVIEW"
     te = scheduler.retry_task(db, task.id, actor="user:owner", rationale="discard patch, new attempt")
     assert te.state == "READY"
+    # the replaced candidate can never be reviewed, accepted or published later
+    assert old.execution_status == "FAILED" and old.outcome_code == "DISCARDED_BY_OWNER"
 
 
 # ----------------------------------------------------------------------------- 5. run-level reservation (§22, §42)
@@ -306,7 +314,8 @@ def test_seed_sets_and_backfills_credential_ref(db):
 
 # ----------------------------------------------------------------------------- 8. sha-pinned push (§31)
 def _git(cwd: Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True,
+                          timeout=60).stdout.strip()
 
 
 def test_refspec_accepts_only_full_sha_pinned_sources():
@@ -328,7 +337,7 @@ def test_push_is_sha_pinned_returns_head_sha_and_notifies_delivery(db, fakes, tm
     _git(src, "commit", "-q", "-m", "candidate")
     head = _git(src, "rev-parse", "HEAD")
     bare = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True, timeout=60)
     p = make_project(db)
     run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="REVIEW", workspace_ref=str(src),
                     branch=branch, head_commit=head)
@@ -512,3 +521,87 @@ def test_binary_scan_finds_tokens_glued_to_other_bytes():
 
     token = "gh" + "p_" + "Q7w" * 12
     assert scope.scan_binary_secrets("blob.bin", b"\x00PK" + token.encode() + b"\x00")
+
+
+# ----------------------------------------------------------------------------- 11. review hardening (2026-10-19)
+def test_owner_block_survives_a_transient_co_reason(db, fakes):
+    """A quarantine/review block keeps its code while e.g. a side effect is unreconciled; once that
+    co-reason clears the task must still wait for the owner, never become READY on a tick."""
+    from aeos.models.broker_ext import BrokerSideEffect
+
+    _plan, pv, task = _task_in(db, fakes, "REVIEW", attempts_used=1)
+    scheduler.transition_task(db, task.id, "BLOCKED", reason="QUARANTINED: special review", actor="verifier",
+                              reason_code="QUARANTINED")
+    run = WorkerRun(task_id=task.id, project_id=task.project_id, domain="PERSONAL", execution_status="REVIEW")
+    db.add(run)
+    db.flush()
+    se = BrokerSideEffect(run_id=run.id, project_id=task.project_id, domain="PERSONAL", kind="PUSH_BRANCH",
+                          idempotency_key="k-transient", status="UNKNOWN", target={})
+    db.add(se)
+    db.flush()
+    scheduler.refresh_readiness(db, pv.id)
+    te = scheduler.get_te(db, task.id)
+    assert te.state == "BLOCKED" and te.reason_code == "QUARANTINED"
+    se.status = "SUCCEEDED"
+    db.flush()
+    for _ in range(2):
+        scheduler.refresh_readiness(db, pv.id)
+    te = scheduler.get_te(db, task.id)
+    assert te.state == "BLOCKED" and te.reason_code == "QUARANTINED" and te.reason == "QUARANTINED: special review"
+
+
+def test_review_quota_is_scoped_per_family_and_lifted_by_the_next_completed_review(db, monkeypatch):
+    """§42/§50: an observed Max limit waits the review; it must not stay EXHAUSTED forever (scope ``*``
+    without a reset time was never cleared) and the run stops showing WAITING_QUOTA once a review got through."""
+    from aeos.verification import review
+    from tests.unit.test_verification_support import (
+        FakeBridge,
+        FakeWorkforce,
+        claude_result,
+        install_doctor,
+        make_world,
+        record_verification,
+        review_payload,
+    )
+
+    FakeWorkforce().install(monkeypatch)
+    install_doctor(monkeypatch)
+    w = make_world(db)
+    record_verification(db, w)
+    FakeBridge(result=claude_result(None, ok=False, quota=True, model=None)).install(monkeypatch)
+    out = review.review_run(db, w.run.id, actor="t")
+    assert out.review.status == "WAITING_QUOTA" and w.run.quota_status == "WAITING_QUOTA"
+    rows = list(db.scalars(select(QuotaState).where(QuotaState.provider == "claude-native")))
+    assert [(r.scope, r.state, r.source) for r in rows] == [("fable", "EXHAUSTED", "observed-limit")]
+    FakeBridge(result=claude_result(review_payload())).install(monkeypatch)
+    out = review.review_run(db, w.run.id, actor="t")
+    assert out.review.status == "COMPLETED" and w.run.quota_status is None
+    q = db.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "fable"))
+    assert q.state == "UNKNOWN" and q.source == "observed-successful-call"  # never "OK" for Max
+    assert review.native_quota_scope("claude-opus-5-5") == "opus" and review.native_quota_scope(None) == "max"
+
+
+def test_branch_update_observation_failure_never_hides_a_landed_push(db, monkeypatch):
+    def refuse(session, **kw):
+        raise Conflict("observation refused", code="OBSERVATION_REFUSED")
+
+    monkeypatch.setattr(sync, "on_branch_updated", refuse)
+    assert git_broker._branch_updated(db, "owner/repo", "aeos/t-1", "a" * 40) == \
+        "OBSERVATION_FAILED (OBSERVATION_REFUSED)"
+
+
+def test_routing_credential_rule_matches_the_broker(db):
+    """Routing must not select a route the broker refuses: host parsing for loopback (not a prefix
+    match) and no default OpenRouter credential for OFFICE (§26)."""
+    from aeos.routing.service import credential_rejections
+
+    look_alike = ModelRoute(route_key="e", pool="WORKER", provider="local-test", model_id="m", mode_params={},
+                            endpoint="http://localhost.attacker.example/v1")
+    assert credential_rejections(look_alike, domain="PERSONAL")
+    assert model_proxy._is_loopback_http("http://localhost.attacker.example/v1") is False
+    real_loop = ModelRoute(route_key="l2", pool="WORKER", provider="local-test", model_id="m", mode_params={},
+                           endpoint="http://localhost:8099/v1")
+    assert credential_rejections(real_loop, domain="PERSONAL") == []
+    openrouter = ModelRoute(route_key="o", pool="WORKER", provider="openrouter", model_id="m", mode_params={})
+    assert credential_rejections(openrouter, domain="PERSONAL") == []
+    assert credential_rejections(openrouter, domain="OFFICE")

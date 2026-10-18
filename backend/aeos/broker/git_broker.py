@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
 from aeos.broker import grants
-from aeos.core.errors import Blocked, NotFound, PolicyDenied, ValidationFailed
+from aeos.core.errors import AeosError, Blocked, NotFound, PolicyDenied, ValidationFailed
 from aeos.core.ids import new_id
 from aeos.core.redaction import redact_text, register_secret
 from aeos.core.timeutil import utcnow
@@ -378,7 +378,15 @@ def _branch_updated(session: Session, repo: str, branch: str, head_sha: str) -> 
         from aeos.delivery import sync
     except ImportError:
         return "DELIVERY_UNAVAILABLE"
-    changed = sync.on_branch_updated(session, repo=repo, branch=branch, head_sha=head_sha, actor="broker")
+    try:
+        changed = sync.on_branch_updated(session, repo=repo, branch=branch, head_sha=head_sha, actor="broker")
+    except AeosError as exc:
+        # The push already landed: its outbox row (SUCCEEDED) must persist with the caller's commit, so a
+        # refused observation is reported, never raised over the side effect. PR sync re-observes later.
+        audit.record(session, actor_type="service", actor_id="broker", action="broker.git.branch_updated_hook",
+                     result="FAILED", target_type="branch", target_id=branch[:200],
+                     reason=f"{exc.code}: {exc.message}"[:500], details={"repo": repo, "head_sha": head_sha})
+        return f"OBSERVATION_FAILED ({exc.code})"
     return f"OBSERVED ({changed} PR record(s) invalidated)"
 
 

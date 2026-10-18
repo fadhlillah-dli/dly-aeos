@@ -21,6 +21,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -235,9 +236,13 @@ def credential_rejections(route: ModelRoute, *, domain: str) -> list[str]:
         return []
     ref = (route.mode_params or {}).get("credential_ref")
     if not ref:
-        endpoint = route.endpoint or ""
-        loopback = endpoint.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]"))
-        if route.provider in ("openrouter", "local") or loopback:
+        endpoint = urlparse(route.endpoint or "")
+        # same test as the broker (scheme + parsed host): "http://localhost.example" is not loopback
+        loopback = endpoint.scheme == "http" and endpoint.hostname in {"127.0.0.1", "localhost", "::1"}
+        if route.provider == "openrouter":
+            # the broker's default OpenRouter references are worker/PERSONAL ones; OFFICE has none
+            return ["OFFICE routes need an office/ mode_params.credential_ref"] if domain == Domain.OFFICE.value else []
+        if route.provider == "local" or loopback:
             return []
         return ["no mode_params.credential_ref: the broker has no credential for this upstream"]
     ref = str(ref)

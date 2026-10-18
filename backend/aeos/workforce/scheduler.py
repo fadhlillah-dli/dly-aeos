@@ -469,7 +469,7 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
         # A quarantined patch waits for its special review, a BLOCKED review verdict for evidence or a
         # decision (§14 "REVIEW --> BLOCKED: bukti atau keputusan kurang", §21). Starting a new attempt
         # on the next tick would silently discard that; only an owner action (retry/release) clears it.
-        reasons.append((te.reason_code, te.reason or "waiting for an owner action (retry / special review)"))
+        reasons.insert(0, (te.reason_code, te.reason or "waiting for an owner action (retry / special review)"))
     return reasons
 
 
@@ -533,6 +533,11 @@ def refresh_readiness(session: Session, plan_version_id: str, *, actor: str = "s
             if not reasons:
                 transition_task(session, t.id, S.READY.value, reason=f"blocker resolved ({te.reason_code})", actor=actor)
                 counts["ready"] += 1
+            elif te.reason_code in HUMAN_BLOCK_CODES:
+                # The owner-only block keeps its own code and reason: a transient co-reason (unreconciled
+                # side effect, process still alive, attempt cap) must never overwrite it, or the task would
+                # become READY without the special review once that co-reason cleared.
+                counts["unchanged"] += 1
             else:
                 _set_wait_reason(session, te, reasons[0][0], text)
                 counts["unchanged"] += 1
@@ -1006,6 +1011,19 @@ def _close_reviewed_run(session: Session, te: TaskExecution, *, review_record_id
                    actor=actor, outcome_code="REVIEW_FINDINGS")
 
 
+def _discard_blocked_attempt(session: Session, te: TaskExecution, *, actor: str, why: str) -> None:
+    """The owner replaced a quarantined / review-blocked attempt with a new one: the old candidate ends
+    FAILED (``DISCARDED_BY_OWNER``). Left in REVIEW it would still look like it waits for review and could
+    still be reviewed, accepted and published although the task moved on (§35, §50)."""
+    if not te.active_run_id:
+        return
+    run = session.get(WorkerRun, te.active_run_id)
+    if run is None or run.execution_status != S.REVIEW.value:
+        return
+    _end_lease(session, run, "RELEASED", "discarded by owner retry")
+    set_run_status(session, run, S.FAILED.value, reason=why[:1000], actor=actor, outcome_code="DISCARDED_BY_OWNER")
+
+
 def request_repair(session: Session, task_id: str, *, findings: list[Any], review_record_id: str | None,
                    actor: str) -> TaskExecution:
     """Reviewer findings -> a new bounded attempt (READY) or BLOCKED/NEEDS_DECISION when attempts are
@@ -1175,8 +1193,10 @@ def retry_task(session: Session, task_id: str, *, actor: str, extra_attempts: in
         # The owner explicitly asks for a new attempt instead of the pending special review / decision.
         _audit(session, actor, "workforce.task.retry_clears_block", target_type="task", target_id=task_id,
                project_id=te.project_id, domain=te.domain, reason=rationale, details={"code": te.reason_code})
+        code = te.reason_code
         te.reason_code = ""
         session.flush()
+        _discard_blocked_attempt(session, te, actor=actor, why=f"owner retry instead of {code} review: {rationale}")
     refresh_readiness(session, task.plan_version_id, actor=actor)
     te = get_te(session, task_id)
     if te.state != S.READY.value:

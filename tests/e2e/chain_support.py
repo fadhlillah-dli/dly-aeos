@@ -5,7 +5,9 @@ Everything *inside* AEOS is the real module code. Only the edges are faked:
 * the OpenCode engine: a scripted ``opencode`` executable placed on PATH (a real child process that
   emits the ``--format json`` events the adapter parses and calls the broker with its capability token);
 * the model upstream and the GitHub REST API: respx (process-wide httpx mock, no network);
-* the GitHub git remote: a local bare repository (``git_broker.github_remote`` points there);
+* the GitHub git transport: the broker builds the real ``https://github.com/...`` remote, passes the
+  real push interlock and fetches the token through the secrets contract; only the transfer itself is
+  redirected into a local bare repository (``git_broker.push_from_mirror`` wrapper);
 * the official ``claude`` binary: ``aeos.claude_bridge.facade.run_structured`` returns scripted NATIVE
   results (planning stages + checkpoint review) — never the Claude API;
 * the Readiness Doctor's *host probes* (claude login, docker, GitHub token): the three capabilities the
@@ -180,6 +182,8 @@ class FakeClaude:
     outputs: dict[str, Any]
     calls: list[str] = field(default_factory=list)
     review_quota_exhausted: bool = False
+    review_verdict: str = "PASS-CONTROLLED"
+    review_findings: list[dict[str, Any]] = field(default_factory=list)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeClaude:
         monkeypatch.setattr(bridge_facade, "run_structured", self.run_structured)
@@ -200,7 +204,8 @@ class FakeClaude:
             if self.review_quota_exhausted:
                 return self._result(req, None, ok=False, model_resolved=None, error_code="QUOTA_EXHAUSTED",
                                     error="weekly limit reached", quota_exhausted=True)
-            return self._result(req, review_payload("PASS-CONTROLLED"), model_resolved="claude-fable-5-1")
+            return self._result(req, review_payload(self.review_verdict, copy.deepcopy(self.review_findings)),
+                                model_resolved="claude-fable-5-1")
         raise AssertionError(f"unexpected bridge purpose {req.purpose}")
 
 
@@ -276,7 +281,7 @@ def git(cwd: Path, *args: str) -> str:
     env.update(GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1")
     proc = subprocess.run(["git", "-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid",
                            "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", "-c", "core.hooksPath=",
-                           *args], cwd=str(cwd), capture_output=True, text=True, env=env, check=False)
+                           *args], cwd=str(cwd), capture_output=True, text=True, env=env, check=False, timeout=120)
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr}")
     return proc.stdout.strip()
@@ -303,6 +308,25 @@ def remote_head(bare: Path, branch: str) -> str:
     return git(bare, "rev-parse", f"refs/heads/{branch}")
 
 
+def secret_leaks(root: Path) -> list[str]:
+    """Files under *root* (data dir with the SQLite DB/WAL, evidence, sandboxes, worktrees, mirrors,
+    the bare remote) that contain an upstream credential in any form (§26: never in logs, events,
+    evidence, sandboxes or config files)."""
+    import base64
+
+    needles = [FAKE_ZEN_KEY.encode(), FAKE_GITHUB_TOKEN.encode(),
+               base64.b64encode(f"x-access-token:{FAKE_GITHUB_TOKEN}".encode())]
+    hits: list[str] = []
+    for p in root.rglob("*"):
+        try:
+            data = p.read_bytes() if p.is_file() else b""
+        except OSError:
+            continue
+        if any(n in data for n in needles):
+            hits.append(str(p.relative_to(root)))
+    return hits
+
+
 # ----------------------------------------------------------------------------- the chain
 @dataclass
 class Chain:
@@ -317,6 +341,7 @@ class Chain:
     task_id: str = ""
     upstream_calls: list[dict[str, Any]] = field(default_factory=list)
     pr_posts: list[dict[str, Any]] = field(default_factory=list)
+    git_pushes: list[dict[str, Any]] = field(default_factory=list)
     upstream_status: int = 200
 
     # ------------------------------------------------------------ helpers
@@ -470,7 +495,19 @@ def build_chain(settings: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, 
     repo, bare = make_repositories(tmp_path / "work")
     from aeos.broker import git_broker
 
-    monkeypatch.setattr(git_broker, "github_remote", lambda repo_full_name: str(bare))
+    # The GitHub git transport is the edge: the broker builds the real https remote, runs the real
+    # external-write interlock and fetches the token through the real secrets contract; only the git
+    # transfer itself lands in the local bare repository (a stand-in for github.com).
+    git_pushes: list[dict[str, Any]] = []
+    real_push_from_mirror = git_broker.push_from_mirror
+
+    def push_via_fake_github(*, remote_url: str, token: str | None, **kw: Any) -> dict[str, Any]:
+        git_pushes.append({"remote_url": remote_url, "token_is_owner_credential": token == FAKE_GITHUB_TOKEN})
+        if remote_url != f"https://github.com/{REPO}.git":
+            raise AssertionError(f"unexpected push remote {remote_url}")
+        return real_push_from_mirror(remote_url=str(bare), token=token, **kw)
+
+    monkeypatch.setattr(git_broker, "push_from_mirror", push_via_fake_github)
 
     with session_factory()() as s:  # bootstrap seeds (what `aeos init` materialises)
         from aeos.routing import seed as routing_seed
@@ -489,7 +526,8 @@ def build_chain(settings: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, 
             client = AuthedClient(tc)
             client.login("owner", ADMIN_PW)
             client.select_domain(Domain.PERSONAL)
-            chain = Chain(settings=settings, client=client, bridge=bridge, respx_mock=respx_mock, repo=repo, bare=bare)
+            chain = Chain(settings=settings, client=client, bridge=bridge, respx_mock=respx_mock, repo=repo, bare=bare,
+                          git_pushes=git_pushes)
             chain.mock_upstream()
             chain.mock_github()
             yield chain

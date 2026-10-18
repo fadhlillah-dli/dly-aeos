@@ -76,3 +76,8 @@ quota exhaustion/429 there is no paid fallback.
 6. **Secret purposes.** The broker uses the secrets contract's `<namespace>:<use>` purposes
    (`workers:broker.model-proxy`, `personal:broker.github`, `projects:<id>:broker.model-proxy`); the
    previous free-text purposes were refused by the real OpenBao/keyring providers (`SECRET_SCOPE_DENIED`).
+7. **Review fix (2026-10-19).** A refused branch-update observation (delivery hook) is audited and
+   reported (`pr_observation: OBSERVATION_FAILED (<code>)`), never raised over a push that already landed:
+   the SUCCEEDED outbox row must persist with the caller's commit. The E2E now pushes through the real
+   `https://github.com/...` remote path (push interlock + owner token through the secrets contract); only
+   the git transfer is redirected into a local bare repository.

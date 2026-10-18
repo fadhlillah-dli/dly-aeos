@@ -66,3 +66,8 @@ inspected.
 4. The API commits before raising for these broker failure codes (and HEAD_MISMATCH), so the outbox and
    audit rows that later reconciliation reads are never rolled back.
 5. The GitHub read token uses the secrets purpose `personal:delivery.provider-read`.
+6. **Review fix (2026-10-19): delivery needs the scheduler's acceptance.** `prepare_pr` additionally
+   requires the TaskExecution to be DONE with `accepted_run_id` = the acceptance's run (`TASK_NOT_DONE`
+   otherwise). `evaluate_acceptance` writes an ACCEPTED record before `mark_accepted` runs, so a refused
+   `mark_accepted` (task BLOCKED after a review block, another attempt active, reopened) used to leave a
+   record that delivery would still publish.
