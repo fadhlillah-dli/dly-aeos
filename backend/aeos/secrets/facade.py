@@ -1,7 +1,7 @@
 """Cross-module contract for secrets (§26). Owned by ``aeos.secrets``.
 
 Secret references are logical names inside a namespace, e.g. ``personal/openrouter``,
-``personal/github``, ``personal/google-oauth``, ``office/atlassian``, ``workers/openrouter``.
+``personal/github``, ``personal/google-oauth-token``, ``office/atlassian``, ``workers/openrouter``.
 Namespaces keep OFFICE, PERSONAL, worker models and per-project credentials apart.
 
 Rules every implementation must keep:

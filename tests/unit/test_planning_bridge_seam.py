@@ -152,6 +152,64 @@ def test_planning_contract_schemas_fit_the_windows_command_line():
         assert bridge.cmdline_length(argv) < bridge.MAX_CMDLINE_CHARS - 512, name
 
 
+def _property_paths(schema, path=""):
+    out = set()
+    if isinstance(schema, dict):
+        for name, sub in (schema.get("properties") or {}).items():
+            out.add(f"{path}/{name}")
+            out |= _property_paths(sub, f"{path}/{name}")
+        for key in ("items", "additionalProperties"):
+            if isinstance(schema.get(key), dict):
+                out |= _property_paths(schema[key], f"{path}[{key}]")
+        for key in ("allOf", "anyOf", "oneOf"):
+            for i, sub in enumerate(schema.get(key) or []):
+                out |= _property_paths(sub, f"{path}<{key}{i}>")
+    return out
+
+
+@pytest.mark.parametrize("name", ["plan_content", "challenge_findings", "synthesis", "final_review"])
+def test_annotation_stripping_keeps_property_names_and_validation(name):
+    """The fallback for an over-long command line drops only annotations: properties *named* title/description
+    (plan_content has eleven) stay defined, so the stripped schema accepts/rejects the same documents."""
+    from aeos.claude_bridge.parsing import schema_errors
+
+    full = contracts.schema(name)
+    stripped = bridge._strip_annotations(full)
+    assert _property_paths(stripped) == _property_paths(full)
+    assert len(json.dumps(stripped)) < len(json.dumps(full))
+    sample = {"plan_content": sample_content(), "challenge_findings": challenge_output(),
+              "synthesis": synthesis_output(), "final_review": final_output()}[name]
+    assert schema_errors(full, sample) == [] and schema_errors(stripped, sample) == []
+    broken = json.loads(json.dumps(sample))
+    if name == "plan_content":
+        broken["requirements"][0].pop("title")
+    elif name == "synthesis":
+        broken["content"]["requirements"][0].pop("title")
+    else:
+        broken["findings" if name == "final_review" else "risks"] = [{"severity": "HIGH"}]
+    assert schema_errors(full, broken) and schema_errors(stripped, broken)  # still refused without annotations
+
+
+def test_schema_over_the_command_line_limit_is_sent_stripped_and_still_valid(db, claude, monkeypatch):
+    """When the full schema does not fit the Windows command line, the bridge sends the stripped schema; the
+    official client (here the fake) still receives every property, and the output is validated in full."""
+    project = make_project(db)
+    full = contracts.schema("plan_content")
+    full_len = bridge.cmdline_length(bridge.build_argv(
+        "claude", schema_json=json.dumps(full, separators=(",", ":"), ensure_ascii=False), model="opus", tools=[],
+        effort=None))
+    monkeypatch.setattr(bridge, "MAX_CMDLINE_CHARS", full_len)  # full schema no longer fits (512 margin)
+    res = bridge.run_structured(bridge_facade.ClaudeRequest(
+        purpose="planning.primary", role="Primary Planner", model="opus", prompt=PROMPT, json_schema=full,
+        project_id=project.id, domain=Domain.PERSONAL.value))
+    assert res.ok, (res.error_code, res.error)
+    argv = claude.calls()[0]["argv"]
+    sent = json.loads(argv[argv.index("--json-schema") + 1])
+    assert {"title", "description"} <= set(full) and not {"title", "description"} & set(sent)  # annotations dropped
+    assert _property_paths(sent) == _property_paths(full)  # ... but no property definition
+    assert "title" in sent["properties"]["requirements"]["items"]["properties"]  # a property named "title"
+
+
 def test_existing_project_inventory_uses_the_registered_checkout(db, owner):
     from aeos.portfolio import seed
 

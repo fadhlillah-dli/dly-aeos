@@ -182,6 +182,27 @@ def test_integrations_show_status_never_values(personal_client, db, secrets_memo
     assert by["github"]["verification"] == "NOT_TESTED"
 
 
+def test_integrations_list_the_doctor_checks_of_their_provider(personal_client, db):
+    """W1 seam: one provider vocabulary - the github-issues integration shows adapter.github_token (no substring
+    of "github-issues" matches it) and google-drive shows adapter.google_oauth (aeos.portfolio.providers)."""
+    p = _project(db)
+    db.add(ProjectIntegration(project_id=p.id, domain="PERSONAL", provider="github-issues", purpose="issues",
+                              root_id="fadhlillah-dli/dly-aeos", credential_ref="personal/github"))
+    db.add(ProjectIntegration(project_id=p.id, domain="PERSONAL", provider="google-drive", purpose="docs",
+                              credential_ref="personal/google-oauth-token"))
+    db.add(CheckResult(check_id="adapter.github_token", group="PROJECT_ADAPTERS", component_id="github",
+                       status="CONNECTED", severity="INFO", summary="token ok", scope={"domain": "PERSONAL"}))
+    db.add(CheckResult(check_id="adapter.google_oauth", group="PROJECT_ADAPTERS", component_id="google-drive",
+                       status="MISSING", severity="HIGH", summary="token missing", scope={"domain": "PERSONAL"}))
+    db.add(CheckResult(check_id="adapter.office_jira", group="PROJECT_ADAPTERS", component_id="jira",
+                       status="NOT_APPLICABLE", severity="INFO", summary="office"))
+    db.commit()
+    by = {i["provider"]: i for i in personal_client.get("/api/control-center/integrations").json()["items"]}
+    assert [c["check_id"] for c in by["github-issues"]["checks"]] == ["adapter.github_token"]
+    assert [c["check_id"] for c in by["google-drive"]["checks"]] == ["adapter.google_oauth"]
+    assert by["google-drive"]["checks"][0]["status"] == "MISSING"  # shown as it is, never as a pass
+
+
 def test_search_is_domain_scoped(personal_client, db):
     _project(db, "alpha-app")
     _project(db, "alpha-office", "OFFICE")

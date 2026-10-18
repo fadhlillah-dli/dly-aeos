@@ -213,6 +213,20 @@ def test_github_adapter_states_and_token_never_exposed(settings, db, secrets_mem
     assert check("adapter.github_token", _ctx(settings, db, r, functional=True)).status == "EXPIRED"
 
 
+def test_google_adapter_reads_the_token_google_connect_writes(settings, db, secrets_memory):
+    """W1 seam: the check reads personal/google-oauth-token (written by `aeos publish google-connect`, read by
+    the publisher) and its remedy is that consent flow - never `aeos secrets set` of a typed-in token."""
+    r = base_runner()
+    res = check("adapter.google_oauth", _ctx(settings, db, r))
+    assert res.status == "MISSING" and res.error_code == "GOOGLE_OAUTH_MISSING"
+    assert "publish google-connect" in res.remediation["command"] and "secrets set" not in res.remediation["command"]
+    assert res.remediation["executed_by"].startswith("MANUSIA") and res.remediation["command"].isascii()
+    secrets_memory.put("personal/google-oauth-token", '{"token": "fake-not-real"}', actor="test")
+    res = check("adapter.google_oauth", _ctx(settings, db, r))
+    assert res.status == "CONFIGURED" and "fake-not-real" not in json.dumps(res.as_dict())
+    assert r.http_calls == []  # configuration only; no network
+
+
 @pytest.mark.parametrize("status,body,code", [
     (403, {"message": "Upgrade to GitHub Pro or make this repository public to enable this feature."},
      "BRANCH_PROTECTION_NOT_ENFORCEABLE"),

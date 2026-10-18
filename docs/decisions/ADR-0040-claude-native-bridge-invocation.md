@@ -130,4 +130,7 @@ Decisions added after the review of the first implementation (same status, same 
   (`subprocess.list2cmdline`, every `"` escaped) against 32,000 characters minus a 512-character margin
   for the binary path; a schema that does not fit is first sent without validation-neutral annotations
   (`description`, `title`, `$comment`, `examples`) — the caller still validates the output against its
-  full schema — and is refused with `SCHEMA_TOO_LARGE` only when it still does not fit.
+  full schema — and is refused with `SCHEMA_TOO_LARGE` only when it still does not fit. Annotations are
+  removed only in subschema positions: names under `properties`/`$defs`/`patternProperties` (the plan
+  contracts have properties called `title` and `description`) and literal values (`enum`, `const`,
+  `default`) are kept, so the stripped schema accepts and rejects exactly the same documents (tested).

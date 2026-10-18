@@ -59,7 +59,11 @@ PERSONAL `google-drive` (docs), `github-issues` (issues), `github-repo` (code), 
 `google-docs`) are accepted as input and stored canonical; `aeos seed` migrates existing rows (target ids
 untouched; a legacy row whose canonical twin exists is reported, never merged) and moves the seeded
 Google credential reference to `personal/google-oauth-token` (the ref `aeos publish google-connect`
-writes; the Doctor adapter check reads the same ref).
+writes; the Doctor adapter check, its remedy (`aeos publish google-connect`, never `aeos secrets set`) and
+the Integrations & Access card read the same refs - the card shows CONFIGURED only when both
+`personal/google-oauth-client` and `personal/google-oauth-token` exist). The Control Center integrations
+view lists a provider's Doctor checks from `providers.DOCTOR_CHECKS` (`github-issues` ->
+`adapter.github_token`), not from a substring of the provider id.
 
 * The exact target of an integration is `{provider, root_id}` (shown as `capability_status.target`); an
   approval binds it and the publisher writes only inside it. The Google Drive root folder is optional
