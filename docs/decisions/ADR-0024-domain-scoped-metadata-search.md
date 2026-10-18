@@ -51,3 +51,22 @@ Reconciliation:
    by the active domain and project scope).
 3. Results are links into existing pages; the box never infers or switches the domain and is
    disabled until the human has chosen one (U-05).
+
+### Review addendum (same seam): the event stream is scoped like search
+
+The Control Center now keeps ONE shared `GET /api/events/stream` connection per browser tab
+(`frontend/src/lib/events.ts`). Events are metadata too (§50: "counts/cache/events"), so the
+stream follows the same backend scoping rules as this search, with three clarifications:
+
+1. **Scope is re-checked while the stream is open.** The stream is scoped to the session's active
+   domain when it opens; it re-resolves its session on every heartbeat and before every live event
+   and ENDS when the session was logged out, expired, revoked or switched domain elsewhere (another
+   tab sharing the session). It never delivers events of the old scope. The client reconnects with
+   its cursor and gets the new scope (or 401). The re-check is read-only: an open stream does not
+   extend the session idle timeout.
+2. **Cursor guarantee.** Every visible event after the cursor is delivered: the backlog and the gap
+   replay are paged (`REPLAY_PAGE`) instead of being cut at 2000/500 rows.
+3. **No history download on page load.** A fresh client start reads the head (`latest_seq` of
+   `GET /api/events?limit=1`) and opens the stream there; pages fetch their own fresh data on
+   mount. Logout closes the stream immediately and forgets the cursor (`stopEventStream()`); a
+   domain/project switch restarts it (`restartEventStream()`).

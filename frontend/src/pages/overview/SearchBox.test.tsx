@@ -1,6 +1,9 @@
-import { screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, vi } from "vitest";
+import { AuthProvider } from "../../auth/AuthContext";
 import { mockApi, renderPage, sessionFor } from "../../components/proposals/testUtils";
 import { SearchBox } from "./SearchBox";
 
@@ -29,5 +32,44 @@ describe("Ringkasan metadata search (ADR-0024 /api/search)", () => {
     await waitFor(() => expect(scope).toBeEnabled());
     await user.click(scope);
     await waitFor(() => expect(calls.some((c) => c.url.includes("project=p1"))).toBe(true));
+  });
+});
+
+describe("Ringkasan search never carries rows across domains", () => {
+  it("drops PERSONAL rows while the OFFICE search is loading (no placeholder from another domain)", async () => {
+    const session = { ...sessionFor("SUPER_ADMIN"), context: { domain: "PERSONAL", project_id: null } };
+    let searches = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith("/api/search")) {
+          searches += 1;
+          if (searches > 1) return new Promise<Response>(() => {}); // the OFFICE answer is still pending
+          return { ok: true, status: 200, text: async () => JSON.stringify(result) } as Response;
+        }
+        return { ok: true, status: 200, text: async () => JSON.stringify(session) } as Response;
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = (domain: string) => (
+      <QueryClientProvider client={qc}>
+        <AuthProvider>
+          <MemoryRouter>
+            <SearchBox domain={domain} />
+          </MemoryRouter>
+        </AuthProvider>
+      </QueryClientProvider>
+    );
+    const view = render(tree("PERSONAL"));
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox", { name: "Kata kunci pencarian" }), "claude");
+    await user.click(screen.getByRole("button", { name: /Cari/ }));
+    expect(await screen.findByRole("link", { name: "Claude Code" })).toBeInTheDocument();
+
+    view.rerender(tree("OFFICE"));
+    await waitFor(() => expect(searches).toBe(2));
+    expect(screen.queryByRole("link", { name: "Claude Code" })).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Mencari");
   });
 });

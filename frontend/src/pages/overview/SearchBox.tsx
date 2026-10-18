@@ -21,11 +21,15 @@ export function SearchBox({ domain }: { domain: string }) {
   const [onlyProject, setOnlyProject] = useState(false);
   const [limit, setLimit] = useState(PAGE);
   const scoped = onlyProject && !!projectId;
+  const scopeKey = ["search", domain, term, scoped ? projectId : null] as const;
   const q = useQuery({
-    queryKey: ["search", domain, term, scoped ? projectId : null, limit],
+    queryKey: [...scopeKey, limit],
     queryFn: () => get<SearchResult>(searchUrl(term, { limit, project: scoped ? projectId : null })),
     enabled: term.length >= 2,
-    placeholderData: (prev) => prev,
+    // Keep the current rows only while "Tampilkan lebih banyak" loads the next page of the SAME
+    // search; never carry rows over into another domain, project scope or term (§35 no cross-domain).
+    placeholderData: (prev, prevQuery) =>
+      prevQuery && scopeKey.every((part, i) => prevQuery.queryKey[i] === part) ? prev : undefined,
   });
   const submit = (e: FormEvent) => {
     e.preventDefault();

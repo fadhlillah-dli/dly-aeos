@@ -15,6 +15,11 @@ Captured by `tests/e2e/test_ui_smoke.py` (`AEOS_UI_EVIDENCE=1`) against the real
 Evidence level: E1 visual smoke (pages render without page/console errors or 5xx; labels visible).
 It does not prove functional readiness of any component; DESIGN/DEMO rows remain DESIGN/DEMO.
 
+Note: these images were captured before the W4 review commit. The only visible change since then is
+the header data-mode label for `MIXED`, which now reads "LIVE + MOCK/DEMO" (the images show
+"LIVE + DEMO"); the projection does not tell MOCK and DEMO rows apart. Re-run with
+`AEOS_UI_EVIDENCE=1` to refresh the set.
+
 | Page | Route | Desktop | Mobile | Dark |
 |---|---|---|---|---|
 | ringkasan | `/` | [1440](ringkasan-1440.jpg) | [390](ringkasan-390.jpg) | [dark](ringkasan-dark.jpg) |
@@ -39,4 +44,5 @@ AEOS_UI_EVIDENCE=1 python -m pytest tests/e2e/test_ui_smoke.py -m integration -q
 
 The test builds `frontend/dist` when it is missing or older than `frontend/src`, starts its own
 server on a free 127.0.0.1 port with a fresh data directory, and never calls Claude, OpenCode,
-OpenBao, GitHub, Google or Atlassian (their binaries/addresses point at absent paths).
+OpenBao, GitHub, Google or Atlassian: claude/opencode/bao/mmdc point at absent paths, OpenBao at a
+closed loopback port, and no GitHub/Google/Atlassian account or credential is configured.
