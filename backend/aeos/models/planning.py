@@ -30,6 +30,8 @@ class PlanningContext(IdMixin, TimestampMixin, Base):
     facts: Mapped[list[Any]] = mapped_column(JSON, default=list)
     questions: Mapped[list[Any]] = mapped_column(JSON, default=list)  # material questions only (§05)
     attachment_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Attachment provenance + redacted text excerpts. Untrusted DATA (U-11, §25): never instructions.
+    inputs: Mapped[list[Any]] = mapped_column(JSON, default=list)
     repo_inventory: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # §05 step 6 existing project
     integration_capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     policy_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -52,6 +54,10 @@ class Plan(IdMixin, TimestampMixin, Base):
     current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     approved_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     policy_baseline: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # e.g. 4-stage Opus/Fable
+    # Pipeline checkpoint (stage to resume, cycle artefact ids, manual package) — quota/bridge
+    # interruptions resume here instead of skipping a stage (§12, §50 "Fable Max quota habis").
+    checkpoint: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class PlanningRun(IdMixin, TimestampMixin, Base):
@@ -75,6 +81,13 @@ class PlanningRun(IdMixin, TimestampMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
     error: Mapped[str] = mapped_column(Text, default="")
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cycle: Mapped[int] = mapped_column(Integer, default=1)
+    session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)  # reviewer != synthesizer
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    output_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    manual_package_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class PlanningArtifact(IdMixin, CreatedMixin, Base):
@@ -143,6 +156,9 @@ class TaskSpec(Base):
     evidence_requirements: Mapped[list[Any]] = mapped_column(JSON, default=list)
     risk_class: Mapped[str] = mapped_column(String(4), default="R1")
     artifact_schema_version: Mapped[str] = mapped_column(String(16), default="1")
+    # Provenance copied from the PlanVersion (LIVE|MOCK|DEMO): a TaskSpec compiled from fixture plan
+    # content is itself a fixture and must never be admitted as real work (§35, §49).
+    mode: Mapped[str] = mapped_column(String(16), default="LIVE")
     spec_hash: Mapped[str] = mapped_column(String(80), nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
 

@@ -1,0 +1,1624 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "aeos.planning.plan-content/1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "1"
+      ]
+    },
+    "product_home": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Product name (display only; identity is the project UUID)"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "product_owner": {
+          "type": "string",
+          "description": "Named only if given in the input; otherwise UNKNOWN (never invent stakeholders)"
+        },
+        "engineering_lead": {
+          "type": "string",
+          "description": "UNKNOWN unless provided"
+        },
+        "tech_lead": {
+          "type": "string",
+          "description": "UNKNOWN unless provided"
+        },
+        "repository": {
+          "type": "string",
+          "description": "Repository reference from the context, or UNKNOWN"
+        },
+        "issue_tracker": {
+          "type": "string",
+          "description": "GitHub Issues (PERSONAL) / Jira (OFFICE) target, or UNKNOWN"
+        },
+        "service": {
+          "type": "string"
+        },
+        "criticality": {
+          "type": "string",
+          "enum": [
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "UNKNOWN"
+          ]
+        },
+        "data_classification": {
+          "type": "string",
+          "enum": [
+            "PUBLIC",
+            "INTERNAL",
+            "CONFIDENTIAL",
+            "RESTRICTED"
+          ]
+        },
+        "stack": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "quick_links": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "current_development": {
+          "type": "string"
+        },
+        "active_features": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Feature keys"
+        },
+        "open_risks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Risk keys from security_privacy.initial_risks"
+        },
+        "sdlc_lifecycle": {
+          "type": "string"
+        },
+        "governance_links": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "summary",
+        "product_owner",
+        "engineering_lead",
+        "tech_lead",
+        "repository",
+        "issue_tracker",
+        "service",
+        "criticality",
+        "data_classification",
+        "stack",
+        "quick_links",
+        "current_development",
+        "active_features",
+        "open_risks",
+        "sdlc_lifecycle",
+        "governance_links"
+      ],
+      "additionalProperties": false,
+      "description": "00. Product Home"
+    },
+    "overview": {
+      "type": "object",
+      "properties": {
+        "overview": {
+          "type": "string"
+        },
+        "vision": {
+          "type": "string"
+        },
+        "objectives": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scope_in": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scope_out": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "team_ownership": {
+          "type": "string"
+        },
+        "stakeholders": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Only stakeholders named in the input; mark assumptions"
+        },
+        "roadmap": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Milestone-ordered roadmap lines"
+        },
+        "system_inventory": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "data_overview": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "overview",
+        "vision",
+        "objectives",
+        "scope_in",
+        "scope_out",
+        "team_ownership",
+        "stakeholders",
+        "roadmap",
+        "system_inventory",
+        "data_overview"
+      ],
+      "additionalProperties": false,
+      "description": "01. Product Overview"
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "feature_key": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "overview": {
+            "type": "string"
+          },
+          "problem": {
+            "type": "string"
+          },
+          "background": {
+            "type": "string"
+          },
+          "goals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "non_goals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "business_requirements": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "functional_requirements": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "non_functional_requirements": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "user_stories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "user_impact": {
+            "type": "string"
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "assumptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "risks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "success_metrics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rollout_considerations": {
+            "type": "string"
+          },
+          "related_work": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Related work items / RFC / TDD references"
+          }
+        },
+        "required": [
+          "feature_key",
+          "title",
+          "overview",
+          "problem",
+          "background",
+          "goals",
+          "non_goals",
+          "business_requirements",
+          "functional_requirements",
+          "non_functional_requirements",
+          "user_stories",
+          "acceptance_criteria",
+          "user_impact",
+          "dependencies",
+          "assumptions",
+          "risks",
+          "success_metrics",
+          "rollout_considerations",
+          "related_work"
+        ],
+        "additionalProperties": false,
+        "description": "02. Requirements: one PRD per feature"
+      }
+    },
+    "architecture": {
+      "type": "object",
+      "properties": {
+        "overview": {
+          "type": "object",
+          "properties": {
+            "context": {
+              "type": "string"
+            },
+            "high_level_architecture": {
+              "type": "string"
+            },
+            "component_architecture": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "data_architecture": {
+              "type": "string"
+            },
+            "data_flow": {
+              "type": "string"
+            },
+            "external_integrations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "api_landscape": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "infrastructure": {
+              "type": "string"
+            },
+            "security_architecture": {
+              "type": "string"
+            },
+            "principles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "decisions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Architecture decisions proposed (become ADR/Decision only after human approval)"
+            }
+          },
+          "required": [
+            "context",
+            "high_level_architecture",
+            "component_architecture",
+            "data_architecture",
+            "data_flow",
+            "external_integrations",
+            "api_landscape",
+            "infrastructure",
+            "security_architecture",
+            "principles",
+            "decisions"
+          ],
+          "additionalProperties": false
+        },
+        "diagrams": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "context",
+                  "component",
+                  "sequence",
+                  "erd",
+                  "data_flow",
+                  "trust_boundary",
+                  "deployment",
+                  "journey"
+                ]
+              },
+              "mermaid": {
+                "type": "string",
+                "description": "Mermaid source (diffable); rendered by the platform, never treated as runtime evidence"
+              },
+              "verification_source": {
+                "type": "string",
+                "description": "What the diagram must be checked against (contract/manifest/schema/threat model)"
+              }
+            },
+            "required": [
+              "key",
+              "title",
+              "kind",
+              "mermaid",
+              "verification_source"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "overview",
+        "diagrams"
+      ],
+      "additionalProperties": false,
+      "description": "03. Architecture & Design"
+    },
+    "security_privacy": {
+      "type": "object",
+      "properties": {
+        "overview": {
+          "type": "object",
+          "properties": {
+            "ownership": {
+              "type": "string"
+            },
+            "authn_authz": {
+              "type": "string"
+            },
+            "encryption": {
+              "type": "string"
+            },
+            "secrets": {
+              "type": "string"
+            },
+            "logging_monitoring": {
+              "type": "string"
+            },
+            "controls": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "ownership",
+            "authn_authz",
+            "encryption",
+            "secrets",
+            "logging_monitoring",
+            "controls"
+          ],
+          "additionalProperties": false
+        },
+        "initial_risks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "likelihood": {
+                "type": "string",
+                "enum": [
+                  "LOW",
+                  "MEDIUM",
+                  "HIGH",
+                  "UNKNOWN"
+                ]
+              },
+              "impact": {
+                "type": "string",
+                "enum": [
+                  "LOW",
+                  "MEDIUM",
+                  "HIGH",
+                  "UNKNOWN"
+                ]
+              },
+              "mitigation": {
+                "type": "string"
+              },
+              "residual_risk": {
+                "type": "string",
+                "description": "Residual risk is accepted only by a human RISK_ACCEPTANCE decision"
+              },
+              "owner": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "title",
+              "description",
+              "likelihood",
+              "impact",
+              "mitigation",
+              "residual_risk",
+              "owner"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "threat_model": {
+          "type": "object",
+          "properties": {
+            "assets": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "actors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "trust_boundaries": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "entry_points": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "threats": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "threat": {
+                    "type": "string"
+                  },
+                  "scenario": {
+                    "type": "string"
+                  },
+                  "mitigation": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key",
+                  "threat",
+                  "scenario",
+                  "mitigation"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "assets",
+            "actors",
+            "trust_boundaries",
+            "entry_points",
+            "threats"
+          ],
+          "additionalProperties": false
+        },
+        "data_inventory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "data_type": {
+                "type": "string"
+              },
+              "classification": {
+                "type": "string",
+                "enum": [
+                  "PUBLIC",
+                  "INTERNAL",
+                  "CONFIDENTIAL",
+                  "RESTRICTED"
+                ]
+              },
+              "owner": {
+                "type": "string"
+              },
+              "storage": {
+                "type": "string"
+              },
+              "access": {
+                "type": "string"
+              },
+              "retention": {
+                "type": "string"
+              },
+              "disposal": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "data_type",
+              "classification",
+              "owner",
+              "storage",
+              "access",
+              "retention",
+              "disposal"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "open_questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "overview",
+        "initial_risks",
+        "threat_model",
+        "data_inventory",
+        "open_questions"
+      ],
+      "additionalProperties": false,
+      "description": "04. Security & Privacy: initial risk/threat notes (no VA/PT results are claimed)"
+    },
+    "development_baseline": {
+      "type": "object",
+      "properties": {
+        "guidelines": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "coding_standards": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "secure_coding": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "branching": {
+          "type": "string"
+        },
+        "pr_review": {
+          "type": "string"
+        },
+        "dependency_management": {
+          "type": "string"
+        },
+        "dev_environment": {
+          "type": "string"
+        },
+        "secrets_handling": {
+          "type": "string"
+        },
+        "ci_cd_requirements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "guidelines",
+        "coding_standards",
+        "secure_coding",
+        "branching",
+        "pr_review",
+        "dependency_management",
+        "dev_environment",
+        "secrets_handling",
+        "ci_cd_requirements"
+      ],
+      "additionalProperties": false,
+      "description": "05. Development baseline"
+    },
+    "testing": {
+      "type": "object",
+      "properties": {
+        "test_plans": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "feature_keys": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "overview": {
+                "type": "string"
+              },
+              "objectives": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "scope": {
+                "type": "string"
+              },
+              "test_strategy": {
+                "type": "object",
+                "properties": {
+                  "approach": {
+                    "type": "string"
+                  },
+                  "levels": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "types": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "environments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "data": {
+                    "type": "string"
+                  },
+                  "tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "approach",
+                  "levels",
+                  "types",
+                  "environments",
+                  "data",
+                  "tools"
+                ],
+                "additionalProperties": false,
+                "description": "Test Strategy is a section of the Test Plan (U-08)"
+              },
+              "scenarios": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "functional",
+                        "regression",
+                        "integration",
+                        "negative",
+                        "edge",
+                        "performance",
+                        "security",
+                        "accessibility",
+                        "uat"
+                      ]
+                    },
+                    "steps": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "expected_result": {
+                      "type": "string"
+                    },
+                    "acceptance_criteria_refs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "title",
+                    "type",
+                    "steps",
+                    "expected_result",
+                    "acceptance_criteria_refs"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "acceptance_criteria": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "exit_criteria": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "defect_management": {
+                "type": "string"
+              },
+              "evidence_requirements": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "key",
+              "title",
+              "feature_keys",
+              "overview",
+              "objectives",
+              "scope",
+              "test_strategy",
+              "scenarios",
+              "acceptance_criteria",
+              "exit_criteria",
+              "defect_management",
+              "evidence_requirements"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "test_plans"
+      ],
+      "additionalProperties": false,
+      "description": "06. Testing (no execution results or sign-off are produced by planning)"
+    },
+    "release": {
+      "type": "object",
+      "properties": {
+        "release_plans": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "overview": {
+                "type": "string"
+              },
+              "scope": {
+                "type": "string"
+              },
+              "features": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "enhancements": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "fixes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "breaking_changes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "related_requirements": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "known_issues": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "risks": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "release_notes": {
+                "type": "object",
+                "properties": {
+                  "summary": {
+                    "type": "string"
+                  },
+                  "highlights": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "upgrade_notes": {
+                    "type": "string"
+                  },
+                  "known_limitations": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "summary",
+                  "highlights",
+                  "upgrade_notes",
+                  "known_limitations"
+                ],
+                "additionalProperties": false,
+                "description": "Release Notes are a section of the Release Plan (U-08)"
+              },
+              "deployment": {
+                "type": "string"
+              },
+              "migration": {
+                "type": "string"
+              },
+              "rollback": {
+                "type": "string"
+              },
+              "production_readiness": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "post_release_validation": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "key",
+              "version",
+              "title",
+              "overview",
+              "scope",
+              "features",
+              "enhancements",
+              "fixes",
+              "breaking_changes",
+              "related_requirements",
+              "known_issues",
+              "risks",
+              "release_notes",
+              "deployment",
+              "migration",
+              "rollback",
+              "production_readiness",
+              "post_release_validation"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "release_plans"
+      ],
+      "additionalProperties": false,
+      "description": "07. Release & Deployment"
+    },
+    "operations": {
+      "type": "object",
+      "properties": {
+        "overview": {
+          "type": "string"
+        },
+        "ownership": {
+          "type": "string"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "criticality": {
+          "type": "string",
+          "enum": [
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "UNKNOWN"
+          ]
+        },
+        "sli_slo_proposals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "indicator": {
+                "type": "string"
+              },
+              "objective": {
+                "type": "string"
+              },
+              "rationale": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "indicator",
+              "objective",
+              "rationale"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "runbooks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "purpose": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "title",
+              "purpose"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "monitoring": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "logging": {
+          "type": "string"
+        },
+        "alerting": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "backup": {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "type": "string"
+            },
+            "frequency": {
+              "type": "string"
+            },
+            "retention": {
+              "type": "string"
+            },
+            "restore_procedure": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope",
+            "frequency",
+            "retention",
+            "restore_procedure"
+          ],
+          "additionalProperties": false
+        },
+        "maintenance": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "overview",
+        "ownership",
+        "dependencies",
+        "criticality",
+        "sli_slo_proposals",
+        "runbooks",
+        "monitoring",
+        "logging",
+        "alerting",
+        "backup",
+        "maintenance"
+      ],
+      "additionalProperties": false,
+      "description": "08. Operations (proposals; restore/SLO evidence comes from runtime only)"
+    },
+    "milestones": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "exit_evidence": {
+            "type": "string"
+          },
+          "order": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "title",
+          "exit_evidence",
+          "order"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Stable feature key, e.g. F1"
+          },
+          "title": {
+            "type": "string"
+          },
+          "requirement": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "P0",
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
+          "acceptance": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Feature keys"
+          },
+          "milestone": {
+            "type": "string",
+            "description": "Milestone key"
+          }
+        },
+        "required": [
+          "key",
+          "title",
+          "requirement",
+          "priority",
+          "acceptance",
+          "depends_on",
+          "milestone"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Stable task key, e.g. T1"
+          },
+          "feature_key": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "goal": {
+            "type": "string"
+          },
+          "role_key": {
+            "type": "string",
+            "description": "RoleSkillPack key, e.g. feature-implementer, backend-api-engineer, qa-test-designer"
+          },
+          "input_artifacts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expected_outputs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Task keys within this plan (must form a DAG)"
+          },
+          "allowed_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Repository paths/globs this task may write"
+          },
+          "forbidden_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tools_allowed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "egress_allowed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Hosts; default deny (empty)"
+          },
+          "capability_scope": {
+            "type": "object",
+            "properties": {
+              "operations": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notes": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "operations",
+              "paths",
+              "notes"
+            ],
+            "additionalProperties": false
+          },
+          "capability_ttl_seconds": {
+            "type": "integer"
+          },
+          "data_classification": {
+            "type": "string",
+            "enum": [
+              "PUBLIC",
+              "INTERNAL",
+              "CONFIDENTIAL",
+              "RESTRICTED"
+            ]
+          },
+          "model_route_policy": {
+            "type": "object",
+            "properties": {
+              "pool": {
+                "type": "string",
+                "enum": [
+                  "WORKER",
+                  "LOCAL"
+                ]
+              },
+              "requires_tools": {
+                "type": "boolean"
+              },
+              "min_context_tokens": {
+                "type": "integer",
+                "description": "0 = no minimum"
+              },
+              "notes": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "pool",
+              "requires_tools",
+              "min_context_tokens",
+              "notes"
+            ],
+            "additionalProperties": false
+          },
+          "reviewer_policy": {
+            "type": "object",
+            "properties": {
+              "required": {
+                "type": "boolean"
+              },
+              "reviewer_role": {
+                "type": "string"
+              },
+              "checkpoint": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "required",
+              "reviewer_role",
+              "checkpoint"
+            ],
+            "additionalProperties": false
+          },
+          "verifier_policy": {
+            "type": "object",
+            "properties": {
+              "required": {
+                "type": "boolean"
+              },
+              "suites": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "negative_tests_required": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "required",
+              "suites",
+              "negative_tests_required"
+            ],
+            "additionalProperties": false
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "max_attempts": {
+                "type": "integer",
+                "description": "Pilot cap: at most 2"
+              },
+              "timeout_seconds": {
+                "type": "integer"
+              },
+              "max_output_tokens": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "max_attempts",
+              "timeout_seconds",
+              "max_output_tokens"
+            ],
+            "additionalProperties": false
+          },
+          "stop_conditions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "evidence_requirements": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "risk_class": {
+            "type": "string",
+            "enum": [
+              "R0",
+              "R1",
+              "R2",
+              "R3",
+              "R4"
+            ]
+          },
+          "artifact_schema_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "feature_key",
+          "title",
+          "goal",
+          "role_key",
+          "input_artifacts",
+          "expected_outputs",
+          "acceptance_criteria",
+          "depends_on",
+          "allowed_paths",
+          "forbidden_paths",
+          "tools_allowed",
+          "egress_allowed",
+          "capability_scope",
+          "capability_ttl_seconds",
+          "data_classification",
+          "model_route_policy",
+          "reviewer_policy",
+          "verifier_policy",
+          "limits",
+          "stop_conditions",
+          "evidence_requirements",
+          "risk_class",
+          "artifact_schema_version"
+        ],
+        "additionalProperties": false,
+        "description": "TaskSpec draft with every §21 field"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "statement": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "statement",
+          "source"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "statement": {
+            "type": "string"
+          },
+          "impact": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "statement",
+          "impact"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "material_questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "architecture",
+              "scope",
+              "cost",
+              "security",
+              "legal",
+              "external_target"
+            ]
+          },
+          "blocking": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "question",
+          "category",
+          "blocking"
+        ],
+        "additionalProperties": false
+      },
+      "description": "Only ambiguities material to architecture/scope/cost/security/legal/target"
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "statement": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "statement",
+          "source"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "product_home",
+    "overview",
+    "requirements",
+    "architecture",
+    "security_privacy",
+    "development_baseline",
+    "testing",
+    "release",
+    "operations",
+    "milestones",
+    "features",
+    "tasks",
+    "assumptions",
+    "unknowns",
+    "material_questions",
+    "facts"
+  ],
+  "additionalProperties": false,
+  "description": "DLY AEOS PlanVersion content (Product 1 nodes 00-08 + DAG)"
+}

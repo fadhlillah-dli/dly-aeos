@@ -56,9 +56,11 @@ def record_decision(
     expires_at: datetime | None = None,
     details: dict[str, Any] | None = None,
 ) -> Decision:
+    # Capture arguments before the lazy import so the implementation is not passed as a kwarg.
+    kwargs = dict(locals())
     from aeos.policy.decisions import record_decision as impl
 
-    return impl(**locals())
+    return impl(**kwargs)
 
 
 def find_active_decision(
@@ -70,15 +72,17 @@ def find_active_decision(
     target_hash: str | None = None,
     operation: str | None = None,
 ) -> Decision | None:
+    kwargs = dict(locals())
     from aeos.policy.decisions import find_active_decision as impl
 
-    return impl(**locals())
+    return impl(**kwargs)
 
 
 def invalidate_decisions(session: Session, *, target_type: str, target_id: str, reason: str) -> int:
+    kwargs = dict(locals())
     from aeos.policy.decisions import invalidate_decisions as impl
 
-    return impl(**locals())
+    return impl(**kwargs)
 
 
 def check_external_write(session: Session, intent: WriteIntent) -> InterlockResult:
@@ -94,3 +98,33 @@ def office_policy(session: Session) -> dict[str, Any]:
     from aeos.policy.office import office_policy as impl
 
     return impl(session)
+
+
+# ---- additive (non-breaking) contract: raise a request for a human decision -----------------------
+
+
+def request_decision(
+    session: Session,
+    *,
+    kind: str,
+    title: str,
+    reason: str,
+    requested_by: str,
+    requested_by_kind: str = "SYSTEM",
+    project_id: str | None = None,
+    domain: str | None = None,
+    target_type: str = "",
+    target_id: str = "",
+    target_hash: str | None = None,
+    requested_operations: list[str] | None = None,
+    details: dict[str, Any] | None = None,
+) -> str:
+    """File a request into the single Human Decision Queue (U-12) and return its id.
+
+    A request is DATA and grants nothing; only a human Decision resolves it (§19, §21 blocker/decision
+    request). Kinds: EXCEPTION, RISK_ACCEPTANCE, POLICY, BUDGET, WRITE_ENABLEMENT, ROUTE_ACTIVATION,
+    TRIAL, PROMOTION."""
+    kwargs = dict(locals())
+    from aeos.policy.requests import create_request as impl
+
+    return impl(**kwargs).id
