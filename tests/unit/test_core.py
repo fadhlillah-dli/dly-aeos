@@ -59,3 +59,17 @@ def test_redaction_patterns_and_registry():
     register_secret("my-very-custom-secret-value")
     assert "my-very-custom" not in redact_text("leaked my-very-custom-secret-value here")
     assert redact({"password": "x" * 8, "nested": {"token": "abcdefgh"}})["nested"]["token"] == "[REDACTED]"
+
+
+def test_sensitive_key_rule_spares_counters_and_flags():
+    from aeos.core.redaction import contains_high_confidence_secret, is_sensitive_key
+
+    for k in ("password", "csrf_token", "api_key", "apiKey", "client_secret", "clientSecret", "refreshToken",
+              "Authorization", "secret_id", "github_pat", "capability_token"):
+        assert is_sensitive_key(k), k
+    for k in ("input_tokens", "max_output_tokens", "maxTokens", "token_hash", "tokens_used", "credential_ref"):
+        assert not is_sensitive_key(k), k
+    # booleans/ints under sensitive-looking keys are flags, not secrets
+    assert redact({"office_authorization": True, "token_count": 3}) == {"office_authorization": True, "token_count": 3}
+    assert not contains_high_confidence_secret("token: string")
+    assert contains_high_confidence_secret("sk-or-v1-abcdefghijklmnopqrstuvwxyz0123")
