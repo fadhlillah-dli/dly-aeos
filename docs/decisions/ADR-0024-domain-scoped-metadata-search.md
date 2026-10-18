@@ -30,3 +30,43 @@ must not see metadata or counts.
 
 * LIKE scans are adequate for the local single-user metadata volume; FTS5 can be added behind the
   same endpoint later without changing scoping rules.
+
+## Amendment 2026-10-18 (integration)
+
+Seam W4 (Control Center UI end to end, real browser). Two search contracts had grown on either
+side of the seam: the Control Center "Ringkasan" card called `GET /api/control-center/search`
+(control-center projection: `{items: [{type, link}], truncated}`, no counts, no pagination, no
+project scope), while this ADR defines `GET /api/search` as the domain-scoped metadata search.
+
+Reconciliation:
+
+1. `GET /api/search` (this ADR) is the single metadata-search contract consumed by the UI. The
+   global search box in the AppShell header (§35 "pencarian … global") and the Ringkasan card
+   (now with an explicit "Hanya proyek aktif" toggle -> `project=<id>`) both call it and render
+   `kind`, `title`, `subtitle`, `status`, `url`, `total`, `counts` and `has_more` as returned. The
+   shared client types live in `frontend/src/lib/search.ts`.
+2. `GET /api/control-center/search` is kept unchanged for backward compatibility (API clients and
+   its unit tests); it has no UI consumer any more and must not gain one. New searchable kinds are
+   added to `/api/search` with the same backend scoping rules (rows, counts and pagination filtered
+   by the active domain and project scope).
+3. Results are links into existing pages; the box never infers or switches the domain and is
+   disabled until the human has chosen one (U-05).
+
+### Review addendum (same seam): the event stream is scoped like search
+
+The Control Center now keeps ONE shared `GET /api/events/stream` connection per browser tab
+(`frontend/src/lib/events.ts`). Events are metadata too (§50: "counts/cache/events"), so the
+stream follows the same backend scoping rules as this search, with three clarifications:
+
+1. **Scope is re-checked while the stream is open.** The stream is scoped to the session's active
+   domain when it opens; it re-resolves its session on every heartbeat and before every live event
+   and ENDS when the session was logged out, expired, revoked or switched domain elsewhere (another
+   tab sharing the session). It never delivers events of the old scope. The client reconnects with
+   its cursor and gets the new scope (or 401). The re-check is read-only: an open stream does not
+   extend the session idle timeout.
+2. **Cursor guarantee.** Every visible event after the cursor is delivered: the backlog and the gap
+   replay are paged (`REPLAY_PAGE`) instead of being cut at 2000/500 rows.
+3. **No history download on page load.** A fresh client start reads the head (`latest_seq` of
+   `GET /api/events?limit=1`) and opens the stream there; pages fetch their own fresh data on
+   mount. Logout closes the stream immediately and forgets the cursor (`stopEventStream()`); a
+   domain/project switch restarts it (`restartEventStream()`).

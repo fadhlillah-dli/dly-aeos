@@ -5,7 +5,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { OpsBadge } from "../../components/control_center/OpsBadge";
 import { Provenance } from "../../components/control_center/Provenance";
 import { StatusBadge } from "../../components/StatusBadge";
-import { Button, Card, ErrorBox, inputClass, Loading, Mono, Table } from "../../components/ui";
+import { Button, Card, ErrorBox, inputBase, Loading, Mono, Table } from "../../components/ui";
 import { relativeTime } from "../../lib/format";
 import type { AlertRow, FlagRow, ListMeta, SliItem } from "./types";
 
@@ -25,7 +25,7 @@ export function IntFlagEditor({ flag, disabled, onSave, busy }: { flag: FlagRow;
   return (
     <span className="inline-flex items-center gap-1">
       <input
-        className={`${inputClass} w-24`}
+        className={`${inputBase} w-24`}
         inputMode="numeric"
         value={text}
         disabled={disabled}

@@ -7,7 +7,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { IDENTITY_STATUS, MappedBadge, PROPOSAL_STATUS, RESEARCH_LIFECYCLE } from "../../components/proposals/MappedBadge";
 import { decisionHref, RelatedLinks } from "../../components/proposals/PageLinks";
 import { StatusBadge } from "../../components/StatusBadge";
-import { Button, Card, EmptyState, ErrorBox, Field, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
+import { Button, Card, EmptyState, ErrorBox, Field, inputBase, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { absoluteTime, shortHash } from "../../lib/format";
 import { DecisionPanel } from "./DecisionPanel";
 import {
@@ -39,7 +39,7 @@ function ReviewControls({ p }: { p: ProposalDetail }) {
   return (
     <form onSubmit={submit} className="flex flex-wrap items-end gap-3">
       <Field label="Pin/digest kandidat" hint="Perubahan pin membatalkan keputusan yang terikat">
-        <input className={inputClass + " w-56"} value={pin} onChange={(e) => setPin(e.target.value)} placeholder="UNKNOWN" />
+        <input className={inputBase + " w-full sm:w-56"} value={pin} onChange={(e) => setPin(e.target.value)} placeholder="UNKNOWN" />
       </Field>
       <label className="flex items-center gap-2 pb-2 text-sm">
         <input type="checkbox" checked={withClaude} onChange={(e) => setWithClaude(e.target.checked)} disabled={p.domain === "OFFICE"} />
@@ -69,7 +69,7 @@ function EvidenceForm({ id }: { id: string }) {
       }}
     >
       <Field label="ID bukti terpercaya (verifier/collector)" hint="Bukti worker/MOCK ditolak">
-        <input className={inputClass + " w-80"} value={ids} onChange={(e) => setIds(e.target.value)} required />
+        <input className={inputBase + " w-full sm:w-80"} value={ids} onChange={(e) => setIds(e.target.value)} required />
       </Field>
       <Button type="submit" busy={m.isPending}>
         Lampirkan bukti trial

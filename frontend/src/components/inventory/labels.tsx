@@ -39,7 +39,8 @@ export function badgeProps(status: string | null | undefined): { status: string 
 
 export function Badge({ status, className }: { status: string | null | undefined; className?: string }) {
   const p = badgeProps(status);
-  return <StatusBadge status={p.status} label={p.label} className={className} />;
+  // Aliased vocabularies keep their own canonical code in the tooltip (e.g. REFERENCE_ONLY, not NOT_APPLICABLE).
+  return <StatusBadge status={p.status} label={p.label} className={className} title={status ?? undefined} />;
 }
 
 export const LENS_LABELS: Record<string, string> = {
