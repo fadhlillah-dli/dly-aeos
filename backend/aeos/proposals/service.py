@@ -19,6 +19,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
+from aeos.core.enums import Domain
 from aeos.core.errors import Blocked, Conflict, NotFound, PolicyDenied, ValidationFailed
 from aeos.core.hashing import content_hash
 from aeos.core.redaction import redact, redact_text
@@ -330,7 +331,9 @@ def review(session: Session, p: ChangeProposal, *, actor_user_id: str, with_clau
         p.candidate_pin = pin or None
         p.unknown_fields = [u for u in (p.unknown_fields or []) if u != "candidate_pin" or not pin]
     children = _children(session, p)
-    package, bh, ch = R.build_package(session, p, children, with_claude=with_claude, domain=domain or p.domain)
+    _refresh_research_links(session, p, children)
+    package, bh, ch = R.build_package(session, p, children, with_claude=with_claude, domain=domain or p.domain,
+                                      previous_claude=(p.review_package or {}).get("claude_review"))
     changed = (p.baseline_hash is not None and p.baseline_hash != bh) or (p.candidate_hash is not None and p.candidate_hash != ch)
     invalidated = 0
     if changed:
@@ -354,6 +357,20 @@ def review(session: Session, p: ChangeProposal, *, actor_user_id: str, with_clau
                 project_id=p.project_id, domain=p.domain, entity_version=p.review_hash,
                 payload={"status": p.status, "baseline_hash": bh, "candidate_hash": ch})
     return p
+
+
+def _refresh_research_links(session: Session, p: ChangeProposal, children: list[ChangeProposal]) -> None:
+    """Link registry entries (visible in the proposal's domain) for every canonical identity, so an entry
+    added or checked after submission is part of the review. Changed links change the candidate hash."""
+    ids = list(p.research_entry_ids or [])
+    for ident in p.canonical_identities or []:
+        e = research.find_by_identity(session, ident, domain=p.domain)
+        if e is not None and e.id not in ids:
+            ids.append(e.id)
+    for c in children:
+        ids += [i for i in c.research_entry_ids or [] if i not in ids]
+    if sorted(ids) != sorted(p.research_entry_ids or []):
+        p.research_entry_ids = sorted(ids)
 
 
 # --------------------------------------------------------------------------- decisions
@@ -407,6 +424,10 @@ def decide(session: Session, p: ChangeProposal, *, actor_user_id: str, action: s
         if not p.candidate_pin:
             raise Blocked("candidate pin/digest is UNKNOWN; pin the candidate and re-review first",
                           code="CANDIDATE_NOT_PINNED")
+        gate = R.source_identity_gate(session, p)
+        if gate["status"] != "OK":
+            raise Blocked("source identity UNVERIFIED/CHANGED/NOT_FOUND; admission blocked until verified (§50)",
+                          code="SOURCE_IDENTITY_UNVERIFIED", details=gate)
     if action == "TRIAL_APPROVE" and p.status != "REVIEWED":
         raise Conflict(f"TRIAL_APPROVE needs status REVIEWED (current {p.status})")
     if action == "PROMOTE":
@@ -419,7 +440,11 @@ def decide(session: Session, p: ChangeProposal, *, actor_user_id: str, action: s
         if not _trusted_evidence(session, p, p.evidence_ids or []):
             raise Blocked("NOT-PROVEN: no trusted trial evidence attached; promotion refused", code="NOT_PROVEN")
 
-    if action not in ("TRIAL_APPROVE", "PROMOTE"):
+    if action != "PROMOTE":
+        # One proposal never holds contradictory ACTIVE decisions (§39 "jangan membuat beberapa
+        # approval yang saling bertentangan"): KEEP/REJECT/DEFER/... supersede an earlier trial, and a
+        # TRIAL_APPROVE (only reachable from REVIEWED, so no trial/promotion is active) supersedes an
+        # earlier KEEP/REJECT/DEFER/REFERENCE_ONLY. PROMOTE keeps the trial it builds on.
         _invalidate(session, p, f"superseded by {action}")
     bind = binding_hash(p.id, action, p.baseline_hash, p.candidate_hash, norm)
     decision = _record_decision(
@@ -464,10 +489,21 @@ def verify_binding(session: Session, p: ChangeProposal, *, action: str) -> Decis
     return d if expected == d.target_hash else None
 
 
+def _syncable(e: ResearchEntry | None, p: ChangeProposal) -> bool:
+    """Registry rows a proposal decision may update: rows of the same domain, and shared (platform)
+    rows only from a non-OFFICE proposal - Office decisions never leak into the shared registry that
+    Personal views read (§23, §35)."""
+    if e is None or e.category == research.REFERENCE_CATEGORY:
+        return False
+    if e.submitted_domain is None:
+        return p.domain != Domain.OFFICE.value
+    return e.submitted_domain == p.domain
+
+
 def _sync_research(session: Session, p: ChangeProposal, lifecycle: str, decision_id: str) -> None:
     for eid in p.research_entry_ids or []:
         e = session.get(ResearchEntry, eid)
-        if e is None or e.category == research.REFERENCE_CATEGORY or e.lifecycle == "ENABLED":
+        if e is None or not _syncable(e, p) or e.lifecycle == "ENABLED":
             continue
         e.history = [*(e.history or []), {"at": utcnow().isoformat(), "event": "OWNER_DECISION", "from": e.lifecycle,
                                           "to": lifecycle, "proposal_id": p.id, "decision_id": decision_id}]
@@ -596,7 +632,7 @@ def record_outcome(
 def _sync_outcome_research(session: Session, p: ChangeProposal, status: str, decision_id: str | None) -> None:
     for eid in p.research_entry_ids or []:
         e = session.get(ResearchEntry, eid)
-        if e is None or e.category == research.REFERENCE_CATEGORY:
+        if e is None or not _syncable(e, p):
             continue
         if status == "ACCEPTED":
             e.history = [*(e.history or []), {"at": utcnow().isoformat(), "event": "PROMOTED", "from": e.lifecycle,

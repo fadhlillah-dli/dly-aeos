@@ -321,14 +321,27 @@ export function ClaudeSection({ pkg }: { pkg: ReviewPackage }) {
       <Notice tone="warn">{c.label}</Notice>
       <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
         <StatusBadge
-          status={c.status === "COMPLETED" ? "CONFIGURED" : c.status === "NOT_REQUESTED" ? "NOT_CHECKED" : c.status === "QUOTA_WAIT" ? "DEGRADED" : "UNKNOWN"}
-          label={{ COMPLETED: "Selesai (data review)", NOT_REQUESTED: "Belum diminta", NOT_RUN: "Tidak dijalankan", FAILED: "Gagal", QUOTA_WAIT: "Menunggu kuota" }[c.status] ?? c.status}
+          status={
+            c.status === "COMPLETED" ? "CONFIGURED" : c.status === "NOT_REQUESTED" ? "NOT_CHECKED" : c.status === "QUOTA_WAIT" ? "DEGRADED" : c.status === "STALE" ? "STALE" : "UNKNOWN"
+          }
+          label={
+            {
+              COMPLETED: c.reused ? "Selesai (dipakai ulang, hash sama)" : "Selesai (data review)",
+              NOT_REQUESTED: "Belum diminta",
+              NOT_RUN: "Tidak dijalankan",
+              FAILED: "Gagal",
+              QUOTA_WAIT: "Menunggu kuota",
+              STALE: "Usang — metadata berubah",
+            }[c.status] ?? c.status
+          }
         />
-        {c.verdict && <StatusBadge status={c.verdict} />}
+        {c.verdict && <StatusBadge status={c.verdict} label={`Verdict Claude (data): ${c.verdict}`} />}
+        {c.status === "STALE" && c.previous_verdict && <span className="text-xs text-ink-3">verdict lama {c.previous_verdict} tidak berlaku</span>}
         {c.recommendation && <span>Rekomendasi: <Mono>{c.recommendation}</Mono></span>}
         {c.model_resolved !== undefined && <span className="text-xs text-ink-3">model: {c.model_resolved ?? `${c.model_requested} (resolved UNKNOWN)`}</span>}
       </div>
       {c.reason && <p className="mt-1 text-sm text-ink-2">{c.reason}</p>}
+      {c.reused && c.reuse_note && <p className="mt-1 text-xs text-ink-3">{c.reuse_note}</p>}
       {c.review && (
         <div className="mt-3 space-y-2 text-sm">
           <div>

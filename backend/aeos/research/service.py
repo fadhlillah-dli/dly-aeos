@@ -37,6 +37,8 @@ LIFECYCLES = ("DISCOVERED", "SOURCE_VERIFIED", "CONTROLLED_EVAL", "CANARY", "REC
               "REJECTED", "DEFERRED", "ENABLED", "REFERENCE_ONLY")
 TRUSTED_LIFECYCLES = ("SOURCE_VERIFIED", "CONTROLLED_EVAL", "CANARY", "RECOMMENDED_FOR_PROMOTION")
 REFERENCE_CATEGORY = "source-reference"
+PLATFORM_ENTRY_KEY = "tool:dly-aeos"
+HISTORY_CHECK_EVENTS_KEPT = 50  # routine UPSTREAM_CHECK rows are capped; trust events are never dropped
 _DESCRIPTIVE = ("name", "category", "placement", "relevance", "claims", "limitations", "source_refs", "section_refs",
                 "evidence_level", "research_date", "release_date", "source_kind")
 
@@ -57,13 +59,18 @@ def _seed_rows(platform_repo_slug: str | None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for e in catalog.ENTRIES:
         urls = list(e.urls)
-        if e.key == "tool:dly-aeos" and platform_repo_slug:
-            urls = [f"https://github.com/{platform_repo_slug}"]  # from owner configuration, not a guess
-        if e.identity_status == catalog.UNV:
+        identity_status = e.identity_status
+        if e.key == PLATFORM_ENTRY_KEY:
+            slug = (platform_repo_slug or "").strip().strip("/")
+            if slug and github_repo(f"github:{slug.lower()}") is not None:
+                urls = [f"https://github.com/{slug}"]  # from owner configuration, not a guess
+            else:
+                urls, identity_status = [], catalog.UNV  # §45: repository not given -> UNVERIFIED
+        if identity_status == catalog.UNV:
             urls = []  # unresolved identities never get a URL (§45, §50)
         rows.append({
             "entry_key": e.key, "name": e.name, "category": e.category, "placement": e.placement,
-            "lifecycle": e.lifecycle, "identity_status": e.identity_status, "source_kind": e.source_kind,
+            "lifecycle": e.lifecycle, "identity_status": identity_status, "source_kind": e.source_kind,
             "urls": urls, "source_refs": list(e.source_refs), "evidence_level": e.evidence,
             "relevance": e.relevance, "claims": list(e.claims), "limitations": e.limitations,
             "section_refs": list(e.sections), "research_date": catalog.MASTER_RESEARCH_DATE, "release_date": None,
@@ -108,6 +115,12 @@ def seed_registry(session: Session, *, platform_repo_slug: str | None = None) ->
             if getattr(existing, f) != row[f]:
                 setattr(existing, f, row[f])
                 changed = True
+        if (row["entry_key"] == PLATFORM_ENTRY_KEY and existing.upstream_status == "NOT_CHECKED"
+                and (existing.urls or []) != row["urls"]):
+            # The platform repo comes from owner configuration; follow it until a live check exists.
+            existing.urls, existing.identity = row["urls"], row["identity"]
+            existing.identity_status = row["identity_status"]
+            changed = True
         if changed:
             updated += 1
     session.flush()
@@ -258,6 +271,8 @@ def add_by_url(session: Session, *, url: str, name: str | None, category: str | 
         clean = f"https://github.com/{gh[0]}/{gh[1]}" if gh else safe_public_url(url)
     except IdentityError as exc:
         raise ValidationFailed(str(exc)) from exc
+    if (category or "").strip().lower() == REFERENCE_CATEGORY:
+        raise ValidationFailed(f"category {REFERENCE_CATEGORY!r} is reserved for the master §52 references")
     existing = find_by_identity(session, identity, domain=domain)
     if existing is not None:
         return existing, True
@@ -314,6 +329,13 @@ def _client() -> httpx.Client:
     )
 
 
+def _json(resp: httpx.Response) -> Any:
+    try:
+        return resp.json()
+    except ValueError:
+        return None
+
+
 def _rate_limited(resp: httpx.Response) -> bool:
     return resp.status_code == 429 or (resp.status_code == 403 and resp.headers.get("x-ratelimit-remaining") == "0")
 
@@ -361,7 +383,15 @@ def check_upstream(session: Session, entry: ResearchEntry, *, actor_type: str, a
             entry.upstream = upstream | {"http_status": resp.status_code}
             entry.upstream_status = "ERROR"
             return _finish(session, entry, actor_type, actor_id, domain, status="ERROR", touch=False)
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            entry.upstream = (entry.upstream or {}) | {"last_error": "unparseable GitHub response",
+                                                       "last_attempt_at": now.isoformat()}
+            entry.upstream_status = "ERROR"
+            return _finish(session, entry, actor_type, actor_id, domain, status="ERROR", touch=False)
         full_name = str(data.get("full_name") or "")
         observed = f"github:{full_name.lower()}" if full_name else None
         redirected = bool(fetch.redirects)
@@ -369,15 +399,15 @@ def check_upstream(session: Session, entry: ResearchEntry, *, actor_type: str, a
         release: dict[str, Any] | None = None
         try:
             rel = fetch.get(f"{GITHUB_API}/repos/{full_name or f'{owner}/{repo}'}/releases/latest")
-            if rel.status_code == 200:
-                rj = rel.json()
+            if rel.status_code == 200 and isinstance(rj := _json(rel), dict):
                 release = {"tag": rj.get("tag_name"), "name": rj.get("name"), "published_at": rj.get("published_at"),
                            "url": rj.get("html_url"), "prerelease": rj.get("prerelease")}
                 latest_tag = rj.get("tag_name")
             elif rel.status_code == 404:
                 tags = fetch.get(f"{GITHUB_API}/repos/{full_name or f'{owner}/{repo}'}/tags?per_page=1")
-                if tags.status_code == 200 and isinstance(tags.json(), list) and tags.json():
-                    latest_tag = tags.json()[0].get("name")
+                tj = _json(tags) if tags.status_code == 200 else None
+                if isinstance(tj, list) and tj and isinstance(tj[0], dict):
+                    latest_tag = tj[0].get("name")
         except httpx.HTTPError as exc:
             upstream["release_error"] = redact_text(str(exc))[:200]
         parent = (data.get("parent") or {}).get("full_name")
@@ -422,6 +452,13 @@ def check_upstream(session: Session, entry: ResearchEntry, *, actor_type: str, a
             http.close()
 
 
+def _cap_history(history: list[Any]) -> list[Any]:
+    """Keep every identity/lifecycle/decision event; only routine UPSTREAM_CHECK rows are capped."""
+    checks = [i for i, h in enumerate(history) if isinstance(h, dict) and h.get("event") == "UPSTREAM_CHECK"]
+    drop = set(checks[:-HISTORY_CHECK_EVENTS_KEPT]) if len(checks) > HISTORY_CHECK_EVENTS_KEPT else set()
+    return [h for i, h in enumerate(history) if i not in drop]
+
+
 def _demote(entry: ResearchEntry, *, reason: str) -> None:
     if entry.lifecycle in TRUSTED_LIFECYCLES:
         entry.history = [*(entry.history or []), {"at": utcnow().isoformat(), "event": "LIFECYCLE_RESET",
@@ -431,17 +468,18 @@ def _demote(entry: ResearchEntry, *, reason: str) -> None:
 
 def _finish(session: Session, entry: ResearchEntry, actor_type: str, actor_id: str, domain: str | None, *,
             status: str, touch: bool = True) -> dict[str, Any]:
-    entry.history = [*(entry.history or []), {"at": utcnow().isoformat(), "event": "UPSTREAM_CHECK", "status": status}][-50:]
+    entry.history = _cap_history([*(entry.history or []),
+                                  {"at": utcnow().isoformat(), "event": "UPSTREAM_CHECK", "status": status}])
     session.flush()
     audit.record(session, actor_type=actor_type, actor_id=actor_id, action="research.upstream.check",
                  result="SUCCESS" if status in ("OK", "ARCHIVED", "IDENTITY_CHANGED", "FORK", "NOT_FOUND") else "FAILED",
                  target_type="research_entry", target_id=entry.id, domain=domain,
                  details={"identity": entry.identity, "status": status, "installed": False, "activated": False})
     events.emit(session, source="research", kind="research.upstream.checked", entity_type="research_entry",
-                entity_id=entry.id, payload={"status": status, "identity": entry.identity})
+                entity_id=entry.id, domain=entry.submitted_domain, payload={"status": status, "identity": entry.identity})
     if (entry.upstream or {}).get("update_available"):
         events.emit(session, source="research", kind="research.upstream.update_detected", entity_type="research_entry",
-                    entity_id=entry.id, payload={"latest_tag": entry.upstream.get("latest_tag"),
+                    entity_id=entry.id, domain=entry.submitted_domain, payload={"latest_tag": entry.upstream.get("latest_tag"),
                                                   "pinned": entry.source_version,
                                                   "action": "notification only; propose an UPGRADE to review"})
     view = entry_view(entry, detail=True)

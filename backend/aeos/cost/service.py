@@ -33,7 +33,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
-from aeos.core.enums import DataMode
+from aeos.core.enums import DataMode, Domain
 from aeos.core.errors import Blocked, Conflict, NotFound, ValidationFailed
 from aeos.core.hashing import content_hash
 from aeos.core.redaction import redact, redact_text
@@ -351,6 +351,10 @@ def applicable_budgets(session: Session, *, project_id: str | None, route_key: s
 def _pricing_check(session: Session, route_key: str | None, est_usd: Decimal, est_tokens: int,
                    est_requests: int) -> tuple[str, list[str]]:
     if not route_key:
+        if est_usd <= ZERO and (est_tokens > 0 or est_requests > 0):
+            # "$0" without a registered route cannot be proven to be a free route; under the $0
+            # hard-stop default that would be a way around the budget (fail closed, §42/§50).
+            return "UNKNOWN", ["request has no route_key: a $0 estimate cannot be verified as a free route"]
         return "CALLER_ESTIMATE", []
     route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
     if route is None:
@@ -401,6 +405,36 @@ def _validate_amounts(est_usd: Any, est_tokens: Any, est_requests: Any) -> tuple
     return usd, int(est_tokens), int(est_requests)
 
 
+_DOMAINS = frozenset(d.value for d in Domain)
+
+
+def _check_domain(session: Session, *, domain: str | None, project_id: str | None, run_id: str | None,
+                  required: bool) -> str | None:
+    """Domain-first (U-05): the domain is the caller's explicit choice and must match the project's
+    (immutable, human-chosen) domain and the run's domain when those records exist. It is never
+    taken from model output or rewritten.
+
+    Returns the effective domain: the given one, or — only when ``required`` is False and none was
+    given — the recorded domain of the project/run the usage belongs to, so an Office entry or its
+    dashboard event is never domain-less (domain-less events reach every session, §35/§50)."""
+    project = session.get(Project, project_id) if project_id else None
+    run = session.get(WorkerRun, run_id) if run_id else None
+    recorded = {d for d in ((project.domain if project else None), (run.domain if run else None)) if d}
+    if len(recorded) > 1:
+        raise ValidationFailed("the project and the run belong to different domains", code="DOMAIN_MISMATCH")
+    if domain is None:
+        if required:
+            raise ValidationFailed("domain (PERSONAL/OFFICE) is required", code="DOMAIN_REQUIRED")
+        return next(iter(recorded), None)
+    if domain not in _DOMAINS:
+        raise ValidationFailed(f"domain must be one of {sorted(_DOMAINS)}")
+    if project is not None and project.domain != domain:
+        raise ValidationFailed("domain does not match the project's domain", code="DOMAIN_MISMATCH")
+    if run is not None and run.domain and run.domain != domain:
+        raise ValidationFailed("domain does not match the run's domain", code="DOMAIN_MISMATCH")
+    return domain
+
+
 # --------------------------------------------------------------------------- reserve / release
 
 
@@ -412,6 +446,8 @@ def reserve(session: Session, req: Any) -> BudgetReservation:
     if not getattr(req, "run_id", None):
         raise ValidationFailed("run_id is required for a reservation")
     est_usd, est_tokens, est_requests = _validate_amounts(req.est_usd, req.est_tokens, req.est_requests)
+    _check_domain(session, domain=getattr(req, "domain", None), project_id=req.project_id, run_id=req.run_id,
+                  required=True)
 
     _acquire_admission_lock(session)
     default = ensure_default_budget(session)
@@ -542,6 +578,17 @@ def record_usage(
         raise ValidationFailed(str(exc)) from exc
     if cost is not None and cost < ZERO:
         raise ValidationFailed("cost_usd must be >= 0")
+    if qty is not None:
+        if qty < ZERO:
+            raise ValidationFailed("quantity must be >= 0")
+        if not unit or not str(unit).strip() or len(str(unit)) > 32:
+            raise ValidationFailed("a quantity needs its unit (e.g. minutes, seconds, bytes), max 32 chars")
+        unit = str(unit).strip()
+    if reservation_id and mode != LIVE:
+        # A MOCK/DEMO entry never counts against budgets, so letting it commit a LIVE hold would
+        # make real spend vanish from the budget (§50 "Mock ... tidak menambah usage actual").
+        raise ValidationFailed("only LIVE usage can commit a budget reservation; release it instead",
+                               code="NON_LIVE_RESERVATION_COMMIT")
     info: dict[str, Any] = dict(redact(details or {}))
 
     if category == "NATIVE_CLAUDE":
@@ -563,12 +610,18 @@ def record_usage(
             raise Conflict(f"reservation is already {res.status}")
         if run_id and res.run_id != run_id:
             raise Conflict("reservation belongs to a different run")
+        for name, given, held in (("project", project_id, res.project_id), ("domain", domain, res.domain),
+                                  ("route", route_key, res.route_key)):
+            if given and held and given != held:
+                raise Conflict(f"reservation belongs to a different {name}")
         if category not in BUDGETED_CATEGORIES:
             raise ValidationFailed("only WORKER_API usage commits a budget reservation")
         project_id = project_id or res.project_id
         domain = domain or res.domain
         route_key = route_key or res.route_key
         run_id = run_id or res.run_id
+    domain = _check_domain(session, domain=domain, project_id=project_id, run_id=run_id, required=False)
+    if res is not None:
         reserved_usd = money(res.reserved_usd) or ZERO
         if cost is None:
             charged = reserved_usd
@@ -867,9 +920,21 @@ def _visible_ledger(session: Session, *, domain: str | None, allowed_project_ids
     rows = list(session.scalars(q))
     if allowed_project_ids is not None:
         rows = [e for e in rows if e.project_id is None or e.project_id in allowed_project_ids]
-    # Defence in depth: a project-scoped entry must belong to a project of the active domain.
+    # Defence in depth: a project-/run-scoped entry must belong to a project/run of the active domain,
+    # even when the entry itself carries no domain (Office usage never reaches a Personal view).
     project_domains = {p.id: p.domain for p in session.scalars(select(Project))}
-    return [e for e in rows if e.project_id is None or project_domains.get(e.project_id, e.domain) == domain]
+    run_ids = {e.run_id for e in rows if e.run_id}
+    run_domains = ({r.id: r.domain for r in session.scalars(select(WorkerRun).where(WorkerRun.id.in_(run_ids)))}
+                   if run_ids else {})
+    out = []
+    for e in rows:
+        if e.project_id is not None and project_domains.get(e.project_id, e.domain) != domain:
+            continue
+        rd = run_domains.get(e.run_id or "")
+        if rd and rd != domain:
+            continue
+        out.append(e)
+    return out
 
 
 def _bucket() -> dict[str, Any]:
@@ -1012,7 +1077,9 @@ def summary(session: Session, *, domain: str | None, allowed_project_ids: list[s
 
 
 def ledger_view(e: UsageLedgerEntry) -> dict[str, Any]:
-    if e.category == "NATIVE_CLAUDE":
+    if e.mode != LIVE:
+        cost_kind = e.mode  # MOCK/DEMO/DESIGN/ESTIMATE fixture: never labelled as actual usage (§50)
+    elif e.category == "NATIVE_CLAUDE":
         cost_kind = "SUBSCRIPTION"
     elif e.cost_usd is None:
         cost_kind = "UNKNOWN"

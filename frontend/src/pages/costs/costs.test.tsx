@@ -75,6 +75,25 @@ describe("Costs & Quotas page (§42)", () => {
     expect(screen.queryByText(/%/)).not.toBeInTheDocument();
   });
 
+  it("labels MOCK ledger rows as MOCK, links the deciding Decision and offers a correction (§41, §50)", async () => {
+    const decided = { ...budget, id: "b1", is_default: false, implicit: false, limit_usd: 5, state: "OK",
+      decision: { id: "dec-123456789", kind: "BUDGET", actor_user_id: "owner", status: "ACTIVE", created_at: "2026-10-18T00:00:00Z", rationale: "pilot" } };
+    const row = { id: "l1", at: "2026-10-18T00:00:00Z", category: "WORKER_API", provider: "openrouter", model: "m", route_key: null,
+      project_id: null, run_id: null, input_tokens: 1, output_tokens: 1, requests: 1, cost_usd: 9.99, cost_kind: "MOCK",
+      charged_usd: 9.99, quantity: null, unit: null, source: "fixture", mode: "MOCK" };
+    mockApi({
+      "/api/costs/summary": { ...summary, stop_caps: [decided] },
+      "/api/budgets": { items: [decided] },
+      "/api/costs/ledger": { items: [row], checked_at: "2026-10-18T00:00:00Z" },
+      "/api/quotas": { items: [], note: "n" },
+    });
+    renderPage(<CostsPage />);
+    expect(await screen.findByText("MOCK — bukan usage aktual")).toBeInTheDocument();
+    const decisionLink = await screen.findByRole("link", { name: /dec-1234/ });
+    expect(decisionLink).toHaveAttribute("href", "/decisions?decision=dec-123456789");
+    expect(screen.getByRole("link", { name: /Usulkan koreksi/ }).getAttribute("href")).toMatch(/^\/proposals\?kind=COMPARE&source=/);
+  });
+
   it("offers the budget form only to SUPER_ADMIN", async () => {
     mockApi(
       {

@@ -36,6 +36,27 @@ describe("Upgrade Proposals (§39)", () => {
     expect(body.sources).toEqual(["https://github.com/anomalyco/opencode"]);
   });
 
+  it("'Usulkan koreksi' opens a COMPARE proposal prefilled with the subject (§41)", async () => {
+    const calls = mockApi({ "/api/proposals/meta": meta, "GET /api/proposals": { items: [], checked_at: null, source: "x" }, "POST /api/proposals": { id: "p2" } });
+    renderPage(<ProposalsPage />, { path: "/proposals", route: "/proposals?kind=COMPARE&source=DLY%20AEOS%20Biaya%20%26%20Kuota" });
+    const sources = (await screen.findByPlaceholderText("https://github.com/owner/repo")) as HTMLTextAreaElement;
+    expect(sources.value).toBe("DLY AEOS Biaya & Kuota");
+    expect(screen.getByRole("link", { name: /Keputusan terkait/ })).toHaveAttribute("href", "/decisions");
+    expect(screen.getByRole("link", { name: /Usulkan koreksi/ }).getAttribute("href")).toContain("/proposals?kind=COMPARE&source=");
+    fireEvent.click(screen.getByText("Kirim usulan"));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.url === "/api/proposals")).toBe(true));
+    const body = calls.find((c) => c.method === "POST" && c.url === "/api/proposals")!.body as Record<string, unknown>;
+    expect(body.kind).toBe("COMPARE");
+    expect(body.sources).toEqual(["DLY AEOS Biaya & Kuota"]);
+  });
+
+  it("ignores an unknown ?kind= value instead of trusting it", async () => {
+    mockApi({ "/api/proposals/meta": meta, "GET /api/proposals": { items: [], checked_at: null, source: "x" } });
+    renderPage(<ProposalsPage />, { path: "/proposals", route: "/proposals?kind=INSTALL_NOW&source=x" });
+    const select = (await screen.findByDisplayValue(/ADD — tambah capability/)) as HTMLSelectElement;
+    expect(select.value).toBe("ADD");
+  });
+
   it("hides the submit action for VIEWER", async () => {
     mockApi({ "/api/proposals/meta": meta, "/api/proposals": { items: [], checked_at: null, source: "x" } }, "VIEWER");
     renderPage(<ProposalsPage />, { path: "/proposals", route: "/proposals" });

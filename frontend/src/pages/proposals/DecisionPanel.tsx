@@ -34,6 +34,7 @@ export function DecisionPanel({ proposalId, pkg, allowed, isAdmin }: { proposalI
   const [rationale, setRationale] = useState("");
   const [scope, setScope] = useState<Record<string, string>>({ environment: "sandbox", budget_usd: "0" });
   const bind = pkg.human_decision.bind;
+  const gate = pkg.human_decision.source_identity_gate;
   const needsScope = action === "TRIAL_APPROVE" || action === "PROMOTE";
   const m = useMutation({
     mutationFn: () =>
@@ -77,6 +78,20 @@ export function DecisionPanel({ proposalId, pkg, allowed, isAdmin }: { proposalI
           <li key={r}>{r}</li>
         ))}
       </ul>
+      {gate?.status === "BLOCKED" && (
+        <Notice tone="warn">
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge status="BLOCKED" label="Admission TRIAL/PROMOTE diblokir" />
+            <span>Identitas sumber belum terverifikasi:</span>
+            {gate.blocking.map((b) => (
+              <span key={b.identity} className="inline-flex items-center gap-1">
+                <Mono>{b.identity}</Mono> <StatusBadge status={b.status === "CHANGED" ? "DRIFTED" : b.status === "NOT_FOUND" ? "MISSING" : "UNVERIFIED"} label={b.status} />
+              </span>
+            ))}
+          </div>
+          {gate.remedy && <p className="mt-1 text-xs">{gate.remedy}</p>}
+        </Notice>
+      )}
       {pkg.human_decision.next_actions.length > 0 && <Notice>{pkg.human_decision.next_actions.join(" · ")}</Notice>}
       {!isAdmin ? (
         <Notice>Keputusan hanya dapat dibuat oleh SUPER_ADMIN (manusia). Model/agent tidak dapat memberi approval.</Notice>

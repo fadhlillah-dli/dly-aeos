@@ -10,6 +10,7 @@ from aeos.core.enums import Domain
 from aeos.models.decisions import Decision
 from aeos.models.evidence import EvidenceArtifact
 from aeos.models.inventory import ComponentReference
+from aeos.research import service as research
 from tests.conftest import VIEWER_PW, AuthedClient, create_admin, create_viewer
 from tests.unit.test_cost_fakes import install_fake_policy
 
@@ -24,6 +25,8 @@ def policy(monkeypatch):
 
 def _comp(db):
     db.add(ComponentReference(component_id="opencode", kind="worker-engine", name="OpenCode", approved_pin="1.3.0"))
+    db.commit()
+    research.seed_registry(db)  # github:anomalyco/opencode is stated by the master -> passes the identity gate
     db.commit()
 
 

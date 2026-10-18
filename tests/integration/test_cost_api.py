@@ -8,7 +8,7 @@ import pytest
 from aeos.core.enums import Domain
 from aeos.cost import facade
 from aeos.models.portfolio import Project
-from tests.conftest import VIEWER_PW, AuthedClient, create_viewer
+from tests.conftest import ADMIN_PW, VIEWER_PW, AuthedClient, create_viewer
 from tests.unit.test_cost_fakes import install_fake_policy, remove_policy
 
 
@@ -96,3 +96,52 @@ def test_native_estimate_endpoint_reports_not_available(personal_client: AuthedC
     monkeypatch.setattr("aeos.cost.ccusage.find_command", lambda: None)
     body = personal_client.post("/api/costs/native-estimate").json()
     assert body["status"] == "NOT_AVAILABLE" and body["mode"] == "ESTIMATE"
+
+
+def test_global_spend_hidden_from_project_scoped_viewer(client: AuthedClient, db, policy):
+    """§50 'Viewer mengakses ... -> Backend scope diterapkan termasuk counts': GLOBAL/ROUTE budget
+    spend aggregates every project, so a viewer limited to some projects never sees the total."""
+    from tests.conftest import create_admin
+
+    create_admin(db)
+    viewer = create_viewer(db)
+    db.add(Project(id="pa", project_key="a", name="A", domain="PERSONAL"))
+    db.add(Project(id="pb", project_key="b", name="B", domain="PERSONAL"))
+    viewer.project_scope = ["pa"]
+    db.commit()
+    facade.record_usage(db, provider="openrouter", category="WORKER_API", source="provider", cost_usd=7.0,
+                        project_id="pb", domain="PERSONAL")
+    db.commit()
+    client.login("viewer", VIEWER_PW)
+    client.select_domain(Domain.PERSONAL)
+    caps = client.get("/api/budgets").json()["items"]
+    glob = next(b for b in caps if b["scope_type"] == "GLOBAL")
+    assert glob["spent_usd"] is None and glob["spend_hidden"] is True
+    summary = client.get("/api/costs/summary").json()
+    assert summary["totals"]["actual_usd"] == 0  # project B usage is outside the viewer's scope
+    assert "7.0" not in str(summary["stop_caps"])
+
+
+def test_scope_limited_admin_cannot_change_global_or_route_budgets(personal_client: AuthedClient, db, policy):
+    """A GLOBAL/ROUTE cap governs every domain/project: a SUPER_ADMIN limited to PERSONAL is refused
+    (backend enforcement, not a hidden button); a PROJECT budget in its own scope still works."""
+    from aeos.models.identity import User
+    from aeos.models.routing import ModelRoute
+
+    owner = db.query(User).filter(User.username == "owner").one()
+    owner.domain_scope = ["PERSONAL"]
+    db.add(Project(id="pp", project_key="pp", name="Personal P", domain="PERSONAL"))
+    db.add(ModelRoute(route_key="paid-pro", pool="WORKER", provider="openrouter", model_id="pro", is_free="NO"))
+    db.commit()
+    personal_client.login("owner", ADMIN_PW)  # fresh session with the narrowed user scope
+    personal_client.select_domain(Domain.PERSONAL)
+    for body in ({"scope_type": "GLOBAL", "limit_usd": 50, "rationale": "raise all"},
+                 {"scope_type": "ROUTE", "scope_id": "paid-pro", "limit_usd": 50, "rationale": "raise route"}):
+        r = personal_client.post("/api/budgets", json=body)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "BUDGET_SCOPE_DENIED", r.text
+    assert not policy["record"]  # no decision was recorded
+    ok = personal_client.post("/api/budgets", json={"scope_type": "PROJECT", "scope_id": "pp", "limit_usd": 1,
+                                                    "rationale": "project cap"})
+    assert ok.status_code == 200, ok.text
+    est = personal_client.post("/api/costs/native-estimate")  # cross-domain aggregate of local sessions
+    assert est.status_code == 403 and est.json()["error"]["code"] == "ESTIMATOR_SCOPE_DENIED"

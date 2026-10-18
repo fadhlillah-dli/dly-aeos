@@ -5,6 +5,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { IDENTITY_STATUS, MappedBadge, RESEARCH_LIFECYCLE, UPSTREAM_STATUS } from "../../components/proposals/MappedBadge";
+import { RelatedLinks } from "../../components/proposals/PageLinks";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table, Tabs } from "../../components/ui";
 
@@ -241,6 +242,7 @@ export default function ResearchPage() {
         checkedAt={cands.data?.checked_at ?? null}
         evidenceLimit={cands.data?.evidence_limit ?? "Tahap riset bukan bukti instalasi/koneksi/penggunaan"}
         mode="DESIGN"
+        actions={<RelatedLinks subject="DLY AEOS Research & Technology Registry" />}
       />
       <Notice tone="mock">
         Katalog bertanggal dari master (§45, §47, §52; riset 17–18 Oktober 2026) — watchlist desain, bukan daftar komponen terpasang. Check Upstream hanya

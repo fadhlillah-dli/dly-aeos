@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { ELIGIBILITY, MappedBadge } from "../../components/proposals/MappedBadge";
+import { RelatedLinks } from "../../components/proposals/PageLinks";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table, Tabs } from "../../components/ui";
 import { absoluteTime, shortHash } from "../../lib/format";
@@ -302,6 +303,7 @@ export default function EvaluationPage() {
         source={suites.data?.source ?? "eval_suites / eval_runs"}
         checkedAt={suites.data?.checked_at ?? null}
         evidenceLimit="Peringkat hanya dari EvalRun tercatat; unit evaluasi = AIConfiguration lengkap; tidak ada juara yang dinyatakan tanpa hasil"
+        actions={<RelatedLinks subject="DLY AEOS Evaluasi Model (suite, leaderboard)" />}
       />
       <Tabs
         tabs={[

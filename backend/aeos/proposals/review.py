@@ -23,6 +23,9 @@ from aeos.models.inventory import ComponentObservation, ComponentReference, Comp
 from aeos.models.research import ChangeProposal, EvalSuite, ResearchEntry
 
 UNKNOWN = "UNKNOWN"
+# §50 "Nama repo ambigu atau sumber tidak terverifikasi -> UNVERIFIED dan blocked admission";
+# "Source repo rename/redirect/fork -> tidak mewarisi trust otomatis".
+ADMISSION_BLOCKING_IDENTITY = ("UNVERIFIED", "CHANGED", "NOT_FOUND")
 REVIEW_MODEL = "fable"  # §15/§39: highest Claude per policy; the bridge records the resolved model
 KIND_QUESTIONS = {
     "ADD": "Capability baru apa yang dibutuhkan dan mengapa komponen yang ada tidak cukup?",
@@ -201,6 +204,19 @@ def _source_identity(session: Session, p: ChangeProposal) -> list[dict[str, Any]
                      else ""),
         })
     return out
+
+
+def source_identity_gate(session: Session, p: ChangeProposal) -> dict[str, Any]:
+    """Live admission gate for TRIAL/PROMOTION: every candidate source identity must be stated by the
+    master, configured by the owner, internal, or checked live - never UNVERIFIED/CHANGED/NOT_FOUND."""
+    blocking = [{"identity": s["identity"], "status": s["status"]} for s in _source_identity(session, p)
+                if s["status"] in ADMISSION_BLOCKING_IDENTITY]
+    return {
+        "status": "BLOCKED" if blocking else "OK", "blocking": blocking,
+        "remedy": ("Tambahkan URL kanonik di Research & Technology Registry lalu jalankan Check Upstream "
+                   "(atau perbaiki sumber usulan), kemudian review ulang. Tidak ada URL/lisensi/versi yang ditebak.")
+        if blocking else None,
+    }
 
 
 def _alternatives(p: ChangeProposal, has_existing: bool) -> list[dict[str, Any]]:
@@ -408,7 +424,11 @@ def allowed_actions(p: ChangeProposal) -> list[str]:
     return base
 
 
-def _human_decision(p: ChangeProposal, baseline_hash: str, candidate_hash: str) -> dict[str, Any]:
+def _human_decision(p: ChangeProposal, baseline_hash: str, candidate_hash: str,
+                    identity_gate: dict[str, Any]) -> dict[str, Any]:
+    blocked = identity_gate["status"] == "BLOCKED" and p.kind != "COMPARE"
+    blocked_note = ([f"Identitas sumber belum terverifikasi ({', '.join(b['identity'] for b in identity_gate['blocking'])}): "
+                     "TRIAL/PROMOTE diblokir. " + str(identity_gate["remedy"])] if blocked else [])
     return {
         "required": True,
         "bind": {"baseline_hash": baseline_hash, "candidate_hash": candidate_hash},
@@ -426,8 +446,9 @@ def _human_decision(p: ChangeProposal, baseline_hash: str, candidate_hash: str) 
             "Budget tidak naik dari keputusan ini; kenaikan budget memerlukan keputusan BUDGET terpisah",
             "Pengusul/implementer/model tidak dapat memberi approval",
         ],
+        "source_identity_gate": identity_gate,
         "next_actions": (["Pin candidate (versi/digest) lalu review ulang"] if not p.candidate_pin and p.kind != "COMPARE"
-                         else []) + ["Pilih keputusan dan scope; sistem merekam Decision terikat hash"],
+                         else []) + blocked_note + ["Pilih keputusan dan scope; sistem merekam Decision terikat hash"],
     }
 
 
@@ -442,11 +463,14 @@ def _outcome_placeholder() -> dict[str, Any]:
 
 def _public_metadata(p: ChangeProposal, package: dict[str, Any]) -> dict[str, Any]:
     """Only generic public metadata: no problem text, no attachments, no project names/data."""
+    public = [s for s in package["source_identity"] if not s["identity"].startswith("name:")]
     return {
         "proposal_kind": p.kind,
-        "public_sources": [s["identity"] for s in package["source_identity"] if not s["identity"].startswith("name:")],
+        "public_sources": [s["identity"] for s in public],
+        # Free-text names (name:...) may be internal project/tool names: never sent (§39 public research).
         "source_status": [{"identity": s["identity"], "status": s["status"], "release": s["release_or_commit"],
-                           "license": s["license"]} for s in package["source_identity"]],
+                           "license": s["license"]} for s in public],
+        "unnamed_sources": len(package["source_identity"]) - len(public),
         "baseline_components": [{"component_id": b["component_id"], "name": b.get("name"), "approved_pin": b.get("approved_pin"),
                                  "status": b.get("status")} for b in package["baseline"]["components"]],
         "impact_status": {k: v["status"] for k, v in package["impact"].items() if isinstance(v, dict) and "status" in v},
@@ -460,6 +484,7 @@ def claude_review(p: ChangeProposal, package: dict[str, Any], *, domain: str | N
         return {"status": "NOT_RUN", "label": label,
                 "reason": "OFFICE: metadata usulan tidak dikirim ke Claude tanpa otorisasi data/provider kantor (§23)"}
     meta = _public_metadata(p, package)
+    meta_hash = content_hash(meta)
     prompt = (
         "You review a proposed change to the DLY AEOS control plane. Use ONLY the JSON metadata below. "
         "Return REVIEW / VERIFY / VERDICT. Claims without evidence are UNKNOWN. You cannot approve anything; "
@@ -472,12 +497,12 @@ def claude_review(p: ChangeProposal, package: dict[str, Any], *, domain: str | N
                                            prompt=prompt, json_schema=CLAUDE_SCHEMA, project_id=None, domain=domain,
                                            timeout_seconds=600, allowed_tools=[]))
     except (ImportError, ModuleNotFoundError):
-        return {"status": "NOT_RUN", "label": label, "sent_metadata": sorted(meta),
+        return {"status": "NOT_RUN", "label": label, "sent_metadata": sorted(meta), "metadata_hash": meta_hash,
                 "reason": "ClaudeNativeBridge belum tersedia; gunakan paket manual Claude Code resmi (tanpa Claude API)"}
     except AeosError as exc:
-        return {"status": "NOT_RUN", "label": label, "reason": f"{exc.code}: {exc.message}"}
+        return {"status": "NOT_RUN", "label": label, "metadata_hash": meta_hash, "reason": f"{exc.code}: {exc.message}"}
     base = {"label": label, "model_requested": res.model_requested, "model_resolved": res.model_resolved,
-            "mode": res.mode, "sent_metadata": sorted(meta), "at": utcnow().isoformat()}
+            "mode": res.mode, "sent_metadata": sorted(meta), "metadata_hash": meta_hash, "at": utcnow().isoformat()}
     if not res.ok or not isinstance(res.structured, dict):
         return base | {"status": "QUOTA_WAIT" if res.quota_exhausted else "FAILED",
                        "reason": res.error_code or res.error or "no structured result"}
@@ -495,8 +520,25 @@ def claude_review(p: ChangeProposal, package: dict[str, Any], *, domain: str | N
 # --------------------------------------------------------------------------- package
 
 
+def _carry_claude(previous: dict[str, Any] | None, meta_hash: str) -> dict[str, Any] | None:
+    """§41/§42: a completed Claude review is reused while the public metadata it judged is unchanged
+    (same hash); once that input changes the old result is shown as STALE, never as current."""
+    if previous and previous.get("status") == "STALE":
+        return previous  # stays STALE until a new Claude review replaces it
+    if not previous or previous.get("status") != "COMPLETED":
+        return None
+    if previous.get("metadata_hash") == meta_hash:
+        return {**previous, "reused": True,
+                "reuse_note": "Dipakai ulang: metadata publik (hash) sama dengan review Claude sebelumnya; "
+                              "tidak ada panggilan Claude baru."}
+    return {"status": "STALE", "label": previous.get("label"), "previous_at": previous.get("at"),
+            "previous_verdict": previous.get("verdict"), "metadata_hash": previous.get("metadata_hash"),
+            "reason": "Metadata publik berubah sejak review Claude terakhir; hasil lama tidak berlaku. "
+                      "Minta rekomendasi ulang bila diperlukan."}
+
+
 def build_package(session: Session, p: ChangeProposal, children: list[ChangeProposal], *, with_claude: bool,
-                  domain: str | None) -> tuple[dict[str, Any], str, str]:
+                  domain: str | None, previous_claude: dict[str, Any] | None = None) -> tuple[dict[str, Any], str, str]:
     baseline, baseline_hash, extra = compute_baseline(session, p)
     _cand, candidate_hash = compute_candidate(session, p, children)
     entries = research_entries(session, p)
@@ -520,15 +562,21 @@ def build_package(session: Session, p: ChangeProposal, children: list[ChangeProp
         "cost": _cost(p, baseline),
         "claude_review": {"status": "NOT_REQUESTED",
                           "label": "Rekomendasi Claude adalah DATA review; findings bukan persetujuan pemilik"},
-        "human_decision": _human_decision(p, baseline_hash, candidate_hash),
+        "human_decision": _human_decision(p, baseline_hash, candidate_hash, source_identity_gate(session, p)),
         "outcome": (p.outcome or {}).get("current") or _outcome_placeholder(),
         "parts": [{"child_id": c.id, "title": c.title, "kind": c.kind} for c in children],
         "unknown_fields": p.unknown_fields or [],
         "generated_at": utcnow().isoformat(),
         "generated_by": "deterministic review builder (kode, bukan LLM)",
     }
-    if with_claude:
+    carried = None if domain == Domain.OFFICE.value else _carry_claude(previous_claude,
+                                                                        content_hash(_public_metadata(p, package)))
+    if carried is not None and carried["status"] == "COMPLETED":
+        package["claude_review"] = carried
+    elif with_claude:
         package["claude_review"] = claude_review(p, package, domain=domain)
+    elif carried is not None:
+        package["claude_review"] = carried  # STALE: shown as history, never as the current recommendation
     package["review_contributors"] = review_contributors(package)
     return package, baseline_hash, candidate_hash
 

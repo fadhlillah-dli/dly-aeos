@@ -5,6 +5,7 @@ import { Link, useParams } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { IDENTITY_STATUS, MappedBadge, PROPOSAL_STATUS, RESEARCH_LIFECYCLE } from "../../components/proposals/MappedBadge";
+import { decisionHref, RelatedLinks } from "../../components/proposals/PageLinks";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { absoluteTime, shortHash } from "../../lib/format";
@@ -250,7 +251,14 @@ export default function ProposalDetailPage() {
         source="change_proposals + inventory + research registry + decisions"
         checkedAt={p.reviewed_at}
         evidenceLimit={p.guarantees.note}
-        actions={<Link to="/proposals">← Semua usulan</Link>}
+        actions={
+          <>
+            <Link to="/proposals" className="self-center">
+              ← Semua usulan
+            </Link>
+            <RelatedLinks subject={`Koreksi usulan: ${p.title}`} decisionId={p.decisions.length ? p.decisions[p.decisions.length - 1].id : null} />
+          </>
+        }
       />
       <Card title="Ringkasan usulan">
         <KeyValue
@@ -352,7 +360,14 @@ export default function ProposalDetailPage() {
           empty="Belum ada keputusan"
           columns={[
             { header: "Waktu", cell: (d) => absoluteTime(d.created_at) },
-            { header: "Jenis", cell: (d) => <span><Mono>{d.kind}</Mono> {d.action}</span> },
+            {
+              header: "Jenis",
+              cell: (d) => (
+                <Link to={decisionHref(d.id)}>
+                  <Mono>{d.kind}</Mono> {d.action}
+                </Link>
+              ),
+            },
             { header: "Status", cell: (d) => <StatusBadge status={d.status === "ACTIVE" ? "CONFIGURED" : d.status === "INVALIDATED" ? "STALE" : d.status} label={d.status} /> },
             { header: "Terikat", cell: (d) => <span className="text-xs">baseline <Mono>{shortHash(d.baseline_hash)}</Mono> · candidate <Mono>{shortHash(d.candidate_hash)}</Mono></span> },
             { header: "Oleh / alasan", cell: (d) => <span className="text-xs">{d.actor_user_id} — {d.rationale}{d.invalidation_reason ? ` (dibatalkan: ${d.invalidation_reason})` : ""}</span> },

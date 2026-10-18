@@ -4,6 +4,8 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { BUDGET_STATE, COST_KIND, MappedBadge, QUOTA_STATE } from "../../components/proposals/MappedBadge";
+import { decisionHref, RelatedLinks } from "../../components/proposals/PageLinks";
+import { Link } from "react-router-dom";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { absoluteTime, shortHash, usd } from "../../lib/format";
@@ -312,13 +314,16 @@ export default function CostsPage() {
         checkedAt={s?.checked_at ?? null}
         evidenceLimit="Angka dari ledger/provider; aktual, estimasi dan UNKNOWN tidak dijumlahkan; langganan Max tidak dikonversi ke dolar"
         actions={
-          <select aria-label="Periode" className={inputClass + " w-44"} value={period} onChange={(e) => setPeriod(e.target.value)}>
-            {PERIODS.map(([k, l]) => (
-              <option key={k} value={k}>
-                {l}
-              </option>
-            ))}
-          </select>
+          <>
+            <select aria-label="Periode" className={inputClass + " w-44"} value={period} onChange={(e) => setPeriod(e.target.value)}>
+              {PERIODS.map(([k, l]) => (
+                <option key={k} value={k}>
+                  {l}
+                </option>
+              ))}
+            </select>
+            <RelatedLinks subject="DLY AEOS Biaya & Kuota (cost ledger, budget, quota)" />
+          </>
         }
       />
       {summary.isLoading && <Loading />}
@@ -490,7 +495,10 @@ export default function CostsPage() {
                 cell: (b) =>
                   b.decision ? (
                     <div className="text-xs">
-                      <Mono>{shortHash(b.decision.id, 8)}</Mono> {b.decision.kind} oleh {b.decision.actor_user_id}
+                      <Link to={decisionHref(b.decision.id)}>
+                        <Mono>{shortHash(b.decision.id, 8)}</Mono>
+                      </Link>{" "}
+                      {b.decision.kind} oleh {b.decision.actor_user_id}
                       <div className="text-ink-3">{absoluteTime(b.decision.created_at)} — {b.decision.rationale}</div>
                     </div>
                   ) : b.is_default ? (

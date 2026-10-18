@@ -24,6 +24,10 @@ REJECTED/DEFERRED; ENABLED only after a legitimate decision and configuration ch
    DISCOVERED otherwise. Unresolved identities (DDorchestrator, codebase-memory-mcp, Goose, Pi,
    OpenHands, Deep Agents, Docker MCP Gateway, Infisical, Langfuse, OpenTelemetry, Promptfoo, Copier,
    SOPS, age, …) are `UNVERIFIED` with **no URL**. Tests compare the catalog against the master text.
+   The DLY AEOS entry takes its URL only from the owner's `platform_repo_slug` configuration
+   (identity `CONFIGURED`, followed until a live check exists); without it the entry is
+   `UNVERIFIED` with no URL (§45 "Repository pengguna belum diberikan"). The `source-reference`
+   category is reserved for the master's S01–S64; manual entries cannot pose as references.
 2. Entries link to inventory `component_id` only when an existing ComponentReference matches by id
    hint, name or canonical source identity — never invented.
 3. **Check Upstream** (admin, manual) supports GitHub-hosted identities only: unauthenticated
@@ -36,7 +40,9 @@ REJECTED/DEFERRED; ENABLED only after a legitimate decision and configuration ch
    event only; compatibility stays UNKNOWN and nothing is installed, updated or activated.
 4. Add-by-URL creates a DISCOVERED entry without any network call; credentials in URLs are rejected.
    Entries added from an OFFICE session are visible only in OFFICE and can never be checked publicly;
-   OFFICE sessions cannot run public upstream checks at all.
+   OFFICE sessions cannot run public upstream checks at all. List freshness (`checked_at`) and
+   upstream events are computed/emitted only within the entry's domain scope. Routine
+   UPSTREAM_CHECK history rows are capped at 50; identity/lifecycle/decision history is never dropped.
 5. Entries older than 30 days since the last live check are shown STALE; never-checked entries show
    "NOT_CHECKED" with the master research date.
 

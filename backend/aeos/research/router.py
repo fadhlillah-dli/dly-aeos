@@ -7,11 +7,9 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
 
 from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal
 from aeos.core.timeutil import utcnow
-from aeos.models.research import ResearchEntry
 from aeos.research import service
 
 router = APIRouter(tags=["research"])
@@ -25,10 +23,11 @@ def list_research(
 ) -> dict[str, Any]:
     items = service.list_entries(db, domain=domain.value, lifecycle=lifecycle, category=category, evidence=evidence,
                                  q=q, kind=kind)
-    last = db.scalar(select(func.max(ResearchEntry.checked_at)))
+    # Freshness only from rows visible in this domain (no metadata from the other domain, §35/§50).
+    checked = [i["checked_at"] for i in service.list_entries(db, domain=domain.value) if i["checked_at"]]
     return {
         "items": items, "source": "research_entries (katalog master §45/§47/§52 + entri manual)",
-        "checked_at": last.isoformat() if last else None, "mode": "DESIGN",
+        "checked_at": max(checked) if checked else None, "mode": "DESIGN",
         "lifecycles": list(service.LIFECYCLES),
         "evidence_limit": "Tahap riset bukan bukti instalasi/koneksi/penggunaan; E1 = kemampuan terdokumentasi, "
                           "E0 = klaim komunitas.",

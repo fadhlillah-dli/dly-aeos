@@ -26,8 +26,10 @@ ACCEPTED / ROLLED_BACK / FAILED / PARTIAL where a rollback is never shown as acc
    (5) impact dimensions (KNOWN from relations or UNKNOWN with reason), (6) experiment plan plus the
    §40 replacement/rollback plan, (7) costs as actual/estimate/UNKNOWN, (8) optional Claude
    REVIEW/VERIFY/VERDICT via `aeos.claude_bridge.facade.run_structured` with generic public metadata
-   only (never problem text, attachments or Office data; OFFICE is never sent), (9) required human
-   decision with the exact hashes, (10) outcome placeholder.
+   only (never problem text, attachments, free-text `name:` identities or Office data; OFFICE is
+   never sent; a completed review is reused while the hash of that metadata is unchanged and
+   marked STALE once it changes, so no Claude quota is spent on an unchanged input, §41/§42),
+   (9) required human decision with the exact hashes, (10) outcome placeholder.
 3. **Hashes.** `baseline_hash` = hash of the existing components' desired/config identity (pin,
    manifest hash, admission/enablement/lifecycle, access, DESIGN/CONFIG relations, observed installed/
    configured versions; for ADD the latest ArchitectureSnapshot). `candidate_hash` = hash of kind,
@@ -41,13 +43,20 @@ ACCEPTED / ROLLED_BACK / FAILED / PARTIAL where a rollback is never shown as acc
    (target/environment/provider/data_class/budget_usd); PROMOTE additionally requires an ACTIVE TRIAL
    decision on the same hashes and trusted LIVE evidence. COMPARE can never be trial-approved,
    promoted or given an outcome. No decision raises a budget, installs, activates or changes routes.
+   TRIAL_APPROVE/PROMOTE also pass a **source identity gate**: every candidate identity must be
+   stated by the master, configured by the owner, internal or checked live; UNVERIFIED, CHANGED
+   (rename/redirect/fork) or NOT_FOUND blocks admission (`SOURCE_IDENTITY_UNVERIFIED`, §50).
+   Registry entries added or checked after submission are linked at re-review. Every decision
+   except PROMOTE first invalidates the proposal's other ACTIVE decisions, so a proposal never
+   holds contradictory active approvals (§39); PROMOTE keeps the trial it builds on.
 5. **Outcomes** ACCEPTED (requires an ACTIVE PROMOTION decision for this candidate + trusted evidence
    + accepted configuration, and no rollback data), ROLLED_BACK (explicit data-rollback status; closes
    the proposal and invalidates decisions), FAILED, PARTIAL (lists failed parts). History is kept; the
    timeline shows before → after with ArchitectureSnapshot references, and §41 delivery dimensions
    (APPROVED, IMPLEMENTED, ACTIVE, VERIFIED, ARCHITECTURE_SOURCE_UPDATED, DOCS_PUBLISHED) are shown
    separately. Owner decisions sync the linked research entries' lifecycle (REJECTED/DEFERRED/
-   REFERENCE_ONLY/ENABLED) with history.
+   REFERENCE_ONLY/ENABLED) with history — shared registry rows only from non-OFFICE proposals, so
+   Office decisions never surface in Personal views.
 
 ## Consequences
 
