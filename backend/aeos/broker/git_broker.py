@@ -157,6 +157,34 @@ def _interlock(session: Session, run: WorkerRun, *, provider: str, operation: st
                            details={"reasons": res.reasons})
 
 
+PUBLISHABLE_RUN_STATES = frozenset({"REVIEW", "DONE"})
+
+
+def _require_publishable(session: Session, run: WorkerRun, operation: str) -> None:
+    """Only a runtime-collected candidate may leave the machine (§21, §50 "Worker mengubah
+    grader/policy/pipeline di luar kontrak -> Ditolak sebelum promotion/remote publication").
+
+    * the run finished its execution phase (REVIEW/DONE) — never a running, failed or cancelled one;
+    * the runtime recorded the candidate head commit (what verification/review looked at);
+    * a quarantined patch needs an ACTIVE human EXCEPTION decision bound to this run and that exact
+      head commit (special review, ADR-0054)."""
+    from aeos.workforce.integrations import quarantine_release
+
+    if run.execution_status not in PUBLISHABLE_RUN_STATES:
+        raise PolicyDenied(f"run is {run.execution_status}; only REVIEW/DONE candidates are published",
+                           code="RUN_NOT_PUBLISHABLE")
+    if not run.head_commit:
+        raise PolicyDenied("no runtime-recorded head commit for this run", code="NO_RUNTIME_HEAD")
+    if run.quarantined and quarantine_release(session, run) is None:
+        audit.record(session, actor_type="service", actor_id="broker", action=f"broker.{operation}",
+                     result="DENIED", target_type="run", target_id=run.id, project_id=run.project_id,
+                     domain=run.domain, reason="quarantined patch without special-review release decision",
+                     details={"head_commit": run.head_commit, "reasons": run.quarantine_reasons[:20]})
+        raise PolicyDenied("patch is quarantined: special review + owner release decision bound to the head "
+                           "commit is required before remote publication", code="QUARANTINED",
+                           details={"reasons": [str(r) for r in (run.quarantine_reasons or [])[:20]]})
+
+
 def _side_effect(session: Session, run: WorkerRun, *, kind: str, key: str, target: dict[str, Any]) -> BrokerSideEffect:
     se = session.scalar(select(BrokerSideEffect).where(BrokerSideEffect.idempotency_key == key))
     if se is None:
@@ -187,7 +215,7 @@ def git_auth_env(remote_url: str, token: str | None, *, empty_global: Path) -> d
 
 
 def _git(args: list[str], *, cwd: Path, env: dict[str, str], hooks: Path) -> subprocess.CompletedProcess[str]:
-    cmd = ["git", "-c", f"core.hooksPath={hooks.as_posix()}", "-c", "credential.helper=",
+    cmd = ["git", "-c", f"core.hooksPath={hooks.as_posix()}", "-c", "credential.helper=", "-c", "core.fsmonitor=false",
            "-c", "http.followRedirects=false", "-c", "protocol.ext.allow=never", *args]
     return subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=GIT_TIMEOUT, check=False)
@@ -206,10 +234,13 @@ def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: 
     empty_global = work_root / "empty-gitconfig"
     empty_global.write_text("", encoding="utf-8")
     base_env = git_auth_env(remote_url, None, empty_global=empty_global)
+    stage = "init"
+    head: str | None = None
     try:
         init = _git(["init", "--bare", "--quiet", mirror.as_posix()], cwd=work_root, env=base_env, hooks=hooks)
         if init.returncode != 0:
             return {"ok": False, "stage": "init", "error": redact_text(init.stderr)[:400]}
+        stage = "fetch"
         fetch = _git(["fetch", "--no-tags", "--no-recurse-submodules", "--quiet", source_repo.as_posix(),
                       f"{src}:{dst}"], cwd=mirror, env=base_env, hooks=hooks)
         if fetch.returncode != 0:
@@ -217,13 +248,17 @@ def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: 
         head = _git(["rev-parse", dst], cwd=mirror, env=base_env, hooks=hooks).stdout.strip()
         if expected_head and head != expected_head:
             return {"ok": False, "stage": "verify", "error": "task branch head differs from the runtime-recorded head"}
+        stage = "push"
         env = git_auth_env(remote_url, token, empty_global=empty_global)
         push = _git(["push", "--porcelain", "--no-verify", remote_url, f"{src}:{dst}"], cwd=mirror, env=env, hooks=hooks)
         out = redact_text((push.stdout or "") + (push.stderr or ""))[:800]
         return {"ok": push.returncode == 0, "stage": "push", "commit": head, "output": out,
                 "error": "" if push.returncode == 0 else out}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "stage": "timeout", "error": "git timed out"}
+        # A push that timed out may still have landed on the remote: the outcome is UNKNOWN until
+        # reconciled (§14 outbox/reconciliation, no exactly-once claim). Earlier stages never wrote.
+        return {"ok": False, "stage": f"timeout:{stage}", "commit": head, "unknown": stage == "push",
+                "error": f"git timed out during {stage}"}
     finally:
         _rmtree(mirror)
 
@@ -262,9 +297,19 @@ def push_task_branch(
         raise PolicyDenied("branch does not belong to this run", code="BRANCH_NOT_ALLOWED")
     if not run.workspace_ref or Path(worktree).resolve() != Path(run.workspace_ref).resolve():
         raise PolicyDenied("worktree does not belong to this run", code="WORKTREE_MISMATCH")
+    _require_publishable(session, run, "git.push_branch")
+    # Push exactly what the runtime committed (and verification/review saw), never a later change.
+    if expected_head and expected_head != run.head_commit:
+        raise PolicyDenied("expected head differs from the runtime-recorded head", code="HEAD_MISMATCH")
+    expected_head = run.head_commit
+    # Fetch from the trusted git dir recorded by the runtime; the candidate's own ``.git`` pointer
+    # is worker-editable and never followed (ADR-0054).
+    source = Path(run.git_dir_ref) if run.git_dir_ref and Path(run.git_dir_ref).is_dir() else Path(worktree)
     url = validate_remote_url(remote_url or github_remote(repo_full_name))
     local = _is_local_remote(url)
-    target = {"repo": repo_full_name, "branch": branch, "remote": "local" if local else url}
+    # Credential-free remote + the exact commit are kept in the outbox for later reconciliation.
+    target = {"repo": repo_full_name, "branch": branch, "remote": "local" if local else url, "remote_url": url,
+              "expected_head": expected_head}
     grant = _require_grant(session, run, "GIT_BRANCH", {"repo": repo_full_name, "branch": branch})
     token: str | None = None
     if not local:
@@ -278,9 +323,9 @@ def push_task_branch(
                       target=target)
     work_root = get_settings().layout.root / "broker" / "git"
     work_root.mkdir(parents=True, exist_ok=True)
-    res = push_from_mirror(source_repo=Path(worktree), branch=branch, remote_url=url, token=token, work_root=work_root,
+    res = push_from_mirror(source_repo=source, branch=branch, remote_url=url, token=token, work_root=work_root,
                            expected_head=expected_head)
-    se.status = "SUCCEEDED" if res["ok"] else "FAILED"
+    se.status = "SUCCEEDED" if res["ok"] else ("UNKNOWN" if res.get("unknown") else "FAILED")
     se.commit_sha = res.get("commit")
     se.result_summary = (res.get("output") or res.get("error") or "")[:500]
     audit.record(session, actor_type="service", actor_id="broker", action="broker.git.push_branch",
@@ -291,14 +336,15 @@ def push_task_branch(
                 project_id=run.project_id, domain=run.domain,
                 payload={"kind": "PUSH_BRANCH", "status": se.status, "branch": branch, "commit": res.get("commit")})
     # Failures are returned (not raised) so the audit/outbox records persist with the caller's commit.
-    return {"status": "PUSHED" if res["ok"] else "FAILED", "ok": bool(res["ok"]), "branch": branch,
+    return {"status": "PUSHED" if res["ok"] else se.status, "ok": bool(res["ok"]), "branch": branch,
             "commit": res.get("commit"), "side_effect_id": se.id, "remote": target["remote"],
             "error": "" if res["ok"] else f"{res['stage']}: {res.get('error', '')}"[:300]}
 
 
-def _find_open_pr(client: httpx.Client, api: str, repo: str, head: str, base: str, headers: dict[str, str]) -> dict | None:
+def _find_open_pr(client: httpx.Client, api: str, repo: str, head: str, base: str, headers: dict[str, str],
+                  *, state: str = "open") -> dict | None:
     owner = repo.split("/", 1)[0]
-    r = client.get(f"{api}/repos/{repo}/pulls", params={"head": f"{owner}:{head}", "base": base, "state": "open"},
+    r = client.get(f"{api}/repos/{repo}/pulls", params={"head": f"{owner}:{head}", "base": base, "state": state},
                    headers=headers)
     if r.status_code == 200 and isinstance(r.json(), list) and r.json():
         return r.json()[0]
@@ -320,12 +366,19 @@ def create_pull_request(
         raise PolicyDenied("invalid PR base", code="PR_BASE_REJECTED")
     if run.domain != "PERSONAL":
         raise PolicyDenied("GitHub personal credentials are PERSONAL-only", code="DOMAIN_CREDENTIAL")
+    if run.branch and head != run.branch:
+        raise PolicyDenied("PR head does not belong to this run", code="BRANCH_NOT_ALLOWED")
+    _require_publishable(session, run, "github.create_pr")
     target = {"repo": repo_full_name, "head": head, "base": base}
     grant = _require_grant(session, run, "PR_CREATE", target)
     _interlock(session, run, provider="github-repo", operation="create_pr", target=target, grant=grant)
     key = f"pr:{repo_full_name}:{head}:{base}"
     existing = session.scalar(select(BrokerSideEffect).where(BrokerSideEffect.idempotency_key == key))
     if existing is not None and existing.status == "SUCCEEDED":
+        audit.record(session, actor_type="service", actor_id="broker", action="broker.github.create_pr",
+                     result="SUCCESS", target_type="run", target_id=run.id, project_id=run.project_id,
+                     domain=run.domain, reason="already created (idempotent outbox); no API call",
+                     details={"repo": repo_full_name, "head": head, "base": base, "number": existing.external_id})
         return {"status": "EXISTS", "number": existing.external_id, "url": existing.external_url,
                 "side_effect_id": existing.id}
     from aeos.secrets import facade as secrets
@@ -375,3 +428,107 @@ def create_pull_request(
     return {"status": "CREATED" if outcome == "SUCCEEDED" else outcome, "ok": outcome == "SUCCEEDED",
             "number": se.external_id, "url": se.external_url, "side_effect_id": se.id, "error": detail[:300],
             "note": "draft PR; integration into the base branch is a human-only action"}
+
+
+# ----------------------------------------------------------------------------- reconciliation (read-only)
+def _ls_remote_head(url: str, branch: str, token: str | None) -> str | None:
+    """Commit of ``refs/heads/<branch>`` on the remote (None = absent). Read-only; the credential
+    exists only in this one child's environment."""
+    from aeos.core.config import get_settings
+
+    work = get_settings().layout.root / "broker" / "git"
+    work.mkdir(parents=True, exist_ok=True)
+    hooks = work / "nohooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    empty_global = work / "empty-gitconfig"
+    empty_global.write_text("", encoding="utf-8")
+    if token:
+        register_secret(token)
+    proc = _git(["ls-remote", "--heads", url, f"refs/heads/{branch}"], cwd=work,
+                env=git_auth_env(url, token, empty_global=empty_global), hooks=hooks)
+    if proc.returncode != 0:
+        raise Blocked("remote could not be read: " + redact_text(proc.stderr or "")[:300], code="REMOTE_UNREADABLE")
+    for line in (proc.stdout or "").splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.strip() == f"refs/heads/{branch}":
+            return sha.strip()
+    return None
+
+
+def reconcile_side_effect(session: Session, side_effect_id: str, *, actor: str,
+                          api_base: str = GITHUB_API) -> dict[str, Any]:
+    """§14 "Crash recovery membaca ... publication records, dan status eksternal sebelum retry" /
+    §50 "Provider timeout setelah create resource -> Rekonsiliasi ID/target sebelum retry".
+
+    Reads the external state of a PENDING/UNKNOWN push or PR and records what is actually there.
+    Strictly read-only towards the provider: it never pushes, creates, updates or merges anything.
+    A read failure keeps the outcome UNKNOWN (fail closed: the scheduler keeps waiting)."""
+    se = session.get(BrokerSideEffect, side_effect_id)
+    if se is None:
+        raise NotFound("side effect not found")
+    if se.status not in ("PENDING", "UNKNOWN"):
+        return {"id": se.id, "kind": se.kind, "status": se.status, "changed": False}
+    target = dict(se.target or {})
+    before = se.status
+    detail = ""
+    if se.kind == "PUSH_BRANCH":
+        branch = validate_branch(str(target.get("branch", "")))
+        url = target.get("remote_url") or (github_remote(str(target.get("repo"))) if target.get("remote") != "local"
+                                           else None)
+        if not url:
+            raise Blocked("remote of this push was not recorded; reconcile manually", code="REMOTE_UNKNOWN")
+        url = validate_remote_url(str(url))
+        token = None
+        if not _is_local_remote(url):
+            if se.domain != "PERSONAL":
+                raise PolicyDenied("GitHub personal credentials are PERSONAL-only", code="DOMAIN_CREDENTIAL")
+            from aeos.secrets import facade as secrets
+
+            token = secrets.get_secret("personal/github", purpose=f"reconcile push {branch}", actor="service:broker")
+        try:
+            sha = _ls_remote_head(url, branch, token)
+        except subprocess.TimeoutExpired:
+            sha, detail = None, "ls-remote timed out; outcome stays UNKNOWN"
+        else:
+            expected = target.get("expected_head") or se.commit_sha
+            if sha and (not expected or sha == expected):
+                se.status, se.commit_sha, detail = "SUCCEEDED", sha, f"remote branch at {sha[:12]} (reconciled)"
+            elif sha:
+                se.status, detail = "FAILED", f"remote branch at {sha[:12]}, not the expected {str(expected)[:12]}"
+            else:
+                se.status, detail = "FAILED", "branch not present on the remote (push did not land)"
+    elif se.kind == "CREATE_PR":
+        if se.domain != "PERSONAL":
+            raise PolicyDenied("GitHub personal credentials are PERSONAL-only", code="DOMAIN_CREDENTIAL")
+        repo = validate_repo(str(target.get("repo", "")))
+        head = validate_branch(str(target.get("head", "")))
+        base = str(target.get("base", ""))
+        from aeos.secrets import facade as secrets
+
+        token = secrets.get_secret("personal/github", purpose=f"reconcile PR {head}", actor="service:broker")
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                   "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "dly-aeos-broker"}
+        with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False, trust_env=False) as client:
+            try:
+                pr = _find_open_pr(client, api_base, repo, head, base, headers, state="all")
+            except (httpx.HTTPError, ValueError):
+                pr, detail = None, "GitHub could not be read; outcome stays UNKNOWN"
+            else:
+                if pr:
+                    se.status = "SUCCEEDED"
+                    se.external_id = str(pr.get("number"))
+                    se.external_url = str(pr.get("html_url") or "")
+                    detail = f"PR #{se.external_id} exists (reconciled)"
+                else:
+                    se.status, detail = "FAILED", "no PR exists for this head/base (creation did not happen)"
+    else:
+        raise ValidationFailed(f"unknown side effect kind {se.kind!r}")
+    se.result_summary = redact_text(detail)[:500]
+    audit.record(session, actor_type="user" if actor.startswith("user:") else "service", actor_id=actor,
+                 action="broker.side_effect.reconcile", result="SUCCESS" if se.status != before else "FAILED",
+                 target_type="broker_side_effect", target_id=se.id, project_id=se.project_id, domain=se.domain,
+                 reason=detail, details={"kind": se.kind, "from": before, "to": se.status})
+    events.emit(session, source="broker", kind="run.side_effect", entity_type="run", entity_id=se.run_id,
+                run_id=se.run_id, project_id=se.project_id, domain=se.domain,
+                payload={"kind": se.kind, "status": se.status, "reconciled": True, "detail": se.result_summary})
+    return {"id": se.id, "kind": se.kind, "status": se.status, "changed": se.status != before, "detail": detail}

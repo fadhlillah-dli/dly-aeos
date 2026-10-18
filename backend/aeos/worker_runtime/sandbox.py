@@ -36,7 +36,26 @@ PROCESS_RESIDUAL_RISKS = [
     "tidak diblokir oleh sistem operasi; hanya izin tool OpenCode (external_directory=deny) yang membatasi.",
     "Penulisan di luar worktree tidak dicegah OS; hanya terdeteksi untuk path di dalam repository.",
     "Isolasi bergantung pada env yang dibersihkan dan HOME yang dialihkan, bukan batas keamanan kernel.",
+    "Jika bash diizinkan, worker menjalankan perintah sebagai user OS yang sama, termasuk credential helper OS "
+    "(mis. Git Credential Manager): direct push/credential escape tidak dicegah (master s31: NOT-PROVEN). "
+    "Karena itu bash di process sandbox memerlukan details.allow_bash=true pada keputusan pengecualian.",
 ]
+SHELL_TOOLS = ("bash",)
+
+
+def task_wants_shell(tools_allowed: list[str] | None) -> bool:
+    """True when the TaskSpec grants a shell tool (``bash`` or ``bash:<pattern>``)."""
+    return any(str(t).split(":", 1)[0].strip().lower() in SHELL_TOOLS for t in (tools_allowed or []))
+
+
+def process_shell_allowed(session: Session, decision_id: str | None) -> bool:
+    """A shell under the WEAK process sandbox needs the owner's exception to say so explicitly
+    (``details.allow_bash is True``): with a shell the worker acts as the same OS user (ADR-0051)."""
+    from aeos.models.decisions import Decision
+
+    d = session.get(Decision, decision_id) if decision_id else None
+    return bool(d is not None and d.status == "ACTIVE" and (d.details or {}).get("allow_bash") is True)
+
 
 _cache_lock = threading.Lock()
 _cache: dict[str, Any] = {"at": 0.0, "value": None}
@@ -124,7 +143,7 @@ def sandbox_readiness(session: Session, *, domain: str) -> dict[str, Any]:
 
     if domain == Domain.OFFICE.value:
         # §11/§23: OFFICE needs a verified strong boundary incl. egress; nothing in V1 proves that.
-        reasons = ["OFFICE requires verified container/VM isolation with egress enforcement (§11, §23)"]
+        reasons = ["OFFICE requires verified container/VM isolation with egress enforcement (master s11/s23)"]
         if not container["available"]:
             reasons.append("container runtime not available: " + container["evidence"])
         elif not container_proven:

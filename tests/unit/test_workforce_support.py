@@ -216,7 +216,8 @@ def make_plan(db: Session, project: Project, tasks: list[dict[str, Any]]) -> tup
                       limits=t.get("limits", {}), capability_scope=t.get("capability_scope", {}),
                       acceptance_criteria=t.get("acceptance_criteria", ["AC1"]),
                       input_artifacts=t.get("input_artifacts", []), base_commit=t.get("base_commit"),
-                      capability_ttl_seconds=t.get("capability_ttl_seconds", 600), spec_hash=content_hash(spec))
+                      capability_ttl_seconds=t.get("capability_ttl_seconds", 600), spec_hash=content_hash(spec),
+                      **({"role_key": t["role_key"]} if t.get("role_key") else {}))
         db.add(ts)
         specs.append(ts)
     db.flush()

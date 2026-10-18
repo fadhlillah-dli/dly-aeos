@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from sqlalchemy import select
 
 app = typer.Typer(help="Trusted capability broker (grants, revocation).", no_args_is_help=True)
 console = Console()
+
+
+def _out(text: str) -> None:
+    """ASCII-only, markup-safe output (AGENTS.md: legacy Windows consoles). Reasons can come from
+    other modules and contain non-ASCII characters or square brackets."""
+    clean = str(text).replace("\u00a7", "s").replace("\u2014", "-").replace("\u2192", "->")
+    console.print(escape(clean.encode("ascii", "replace").decode("ascii")), highlight=False)
 
 
 @app.command("grants")
@@ -28,9 +36,9 @@ def grants_cmd(active: bool = typer.Option(False, help="Only active grants"),
             q = q.where(CapabilityGrant.run_id == run)
         rows = [grant_view(g) for g in s.scalars(q)]
     if not rows:
-        console.print("No capability grants.")
+        _out("No capability grants.")
     for g in rows:
-        console.print(f"{g['id']}  run={g['run_id']}  kind={g['kind']}  active={g['active']}  "
+        _out(f"{g['id']}  run={g['run_id']}  kind={g['kind']}  active={g['active']}  "
                       f"expires={g['expires_at']}  used={g['used']}")
 
 
@@ -45,4 +53,4 @@ def revoke_cmd(run: str = typer.Argument(..., help="Run id"),
     ensure_database()
     with session_scope() as s:
         n = revoke_grants(s, run_id=run, reason=reason, actor="cli:local-operator")
-    console.print(f"Revoked {n} grant(s) for run {run}.")
+    _out(f"Revoked {n} grant(s) for run {run}.")

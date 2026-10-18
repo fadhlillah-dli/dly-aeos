@@ -157,6 +157,65 @@ describe("Run detail page", () => {
   });
 });
 
+describe("Run detail quarantine release and reconciliation", () => {
+  const base = {
+    ...row,
+    mode: "LIVE",
+    execution_state: "REVIEW",
+    ui_state: "WAITING_REVIEW",
+    checked_at: new Date().toISOString(),
+    quarantined: true,
+    quarantine_reasons: [{ path: "backend/aeos/broker/x.py", rule: "protected-path", detail: "backend/aeos/broker/**" }],
+    task_spec: null,
+    task_execution: null,
+    base_commit: "aaaaaaaaaaaa",
+    head_commit: "bbbbbbbbbbbbbbbb",
+    branch: "aeos/demo-1",
+    workspace: { sandbox_kind: "process", strategy: "isolated-clone", present: true },
+    lease: null,
+    diff_summary: {},
+    actions: [],
+    attempts: [],
+    evidence: [],
+    reviews: [],
+    acceptance: [],
+    decisions: [] as unknown[],
+    side_effects: [{ id: "se1", kind: "PUSH_BRANCH", status: "UNKNOWN", target: { branch: "aeos/demo-1" }, external_url: null, commit_sha: null, updated_at: null, note: "" }],
+    model_calls: [],
+    error: "",
+    block_reason: "",
+  };
+
+  it("offers the owner special-review release (disabled for VIEWER) and flags unreconciled side effects", async () => {
+    responses[`/api/runs/${row.run_id}`] = base;
+    wrap(<RunDetailPage />, `/runs/${row.run_id}`);
+    const btn = await screen.findByRole("button", { name: /Catat hasil review khusus/ });
+    expect(btn).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Periksa status eksternal/ })).toBeDisabled();
+    expect(screen.getByText(/SIDE_EFFECT_UNRECONCILED/)).toBeInTheDocument();
+  });
+
+  it("shows a recorded release only when it is bound to the current head", async () => {
+    responses[`/api/runs/${row.run_id}`] = {
+      ...base,
+      decisions: [{ id: "d1", kind: "EXCEPTION", target_type: "run_quarantine", target_id: row.run_id, target_hash: "bbbbbbbbbbbbbbbb", status: "ACTIVE", rationale: "reviewed", created_at: null }],
+    };
+    wrap(<RunDetailPage />, `/runs/${row.run_id}`);
+    expect(await screen.findByText(/Hasil review khusus tercatat/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Catat hasil review khusus/ })).not.toBeInTheDocument();
+  });
+
+  it("does not treat a release for another head as valid", async () => {
+    responses[`/api/runs/${row.run_id}`] = {
+      ...base,
+      decisions: [{ id: "d1", kind: "EXCEPTION", target_type: "run_quarantine", target_id: row.run_id, target_hash: "ffffffff", status: "ACTIVE", rationale: "old", created_at: null }],
+    };
+    wrap(<RunDetailPage />, `/runs/${row.run_id}`);
+    expect(await screen.findByRole("button", { name: /Catat hasil review khusus/ })).toBeInTheDocument();
+    expect(screen.queryByText(/Hasil review khusus tercatat/)).not.toBeInTheDocument();
+  });
+});
+
 describe("Organization page", () => {
   it("shows inactive roles as available, never as working, and says org lines grant no permission", async () => {
     responses["/api/workforce/roles"] = {

@@ -47,10 +47,17 @@ class SchedulerLoop:
     def tick(self, *, admit: bool = True, start_threads: bool = True) -> dict[str, Any]:
         from aeos.workforce import scheduler
 
-        info: dict[str, Any] = {"reconcile": None, "refreshed": 0, "leased": []}
+        info: dict[str, Any] = {"reconcile": None, "refreshed": 0, "leased": [], "policy_stops": []}
         with session_factory()() as s:
             info["reconcile"] = scheduler.reconcile(s)
             s.commit()
+            # Safety checks run even while paused/disabled: a run whose authorisation changed stops.
+            try:
+                info["policy_stops"] = scheduler.enforce_stop_conditions(s)["stopped"]
+                s.commit()
+            except Exception as exc:
+                s.rollback()
+                log.warning("enforce_stop_conditions failed: %s", exc)
             for pv in scheduler.active_plan_versions(s):
                 try:
                     scheduler.refresh_readiness(s, pv)

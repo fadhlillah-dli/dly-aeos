@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 app = typer.Typer(help="Worker runtime: sandbox, OpenCode engine, containment tests.", no_args_is_help=True)
 console = Console()
+
+
+def _out(text: str) -> None:
+    """ASCII-only, markup-safe output (AGENTS.md: legacy Windows consoles). Reasons can come from
+    other modules and contain non-ASCII characters or square brackets."""
+    clean = str(text).replace("\u00a7", "s").replace("\u2014", "-").replace("\u2192", "->")
+    console.print(escape(clean.encode("ascii", "replace").decode("ascii")), highlight=False)
 
 
 @app.command("status")
@@ -21,14 +29,14 @@ def status(domain: str = typer.Option("PERSONAL", help="PERSONAL or OFFICE")) ->
     with session_scope() as s:
         sb = sandbox_readiness(s, domain=domain.upper())
     for kind, lvl in sb["capabilities"].items():
-        console.print(f"sandbox {kind:9s} available={lvl['available']}  strength={lvl['strength']}  {lvl['evidence']}")
-    console.print(f"requirement for {domain.upper()}: {sb['status']} (kind={sb.get('kind')})")
+        _out(f"sandbox {kind:9s} available={lvl['available']}  strength={lvl['strength']}  {lvl['evidence']}")
+    _out(f"requirement for {domain.upper()}: {sb['status']} (kind={sb.get('kind')})")
     for r in sb.get("reasons", []):
-        console.print(f"  - {r}")
+        _out(f"  - {r}")
     for r in sb.get("residual_risks", []):
-        console.print(f"  residual risk: {r}")
+        _out(f"  residual risk: {r}")
     oc = opencode_status(refresh=True)
-    console.print(f"opencode: {oc['status']} version={oc.get('version')} pinned={oc.get('pinned_version')} "
+    _out(f"opencode: {oc['status']} version={oc.get('version')} pinned={oc.get('pinned_version')} "
                   f"functional={oc.get('functional')}")
 
 
@@ -43,6 +51,6 @@ def containment(kind: str = typer.Option("process", help="process or container")
     report = containment_report(kind)
     with session_scope() as s:
         record_containment_report(s, report, actor="cli:local-operator")
-    console.print(f"containment ({report['kind']}): overall={report['overall']}  {report.get('summary')}")
+    _out(f"containment ({report['kind']}): overall={report['overall']}  {report.get('summary')}")
     for r in report["results"]:
-        console.print(f"  [{r['status']:12s}] {r['check']}: {r['evidence']}")
+        _out(f"  [{r['status']:12s}] {r['check']}: {r['evidence']}")

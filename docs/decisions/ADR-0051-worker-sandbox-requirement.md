@@ -42,6 +42,12 @@ machines are Windows and macOS; Docker is not installed on the build host.
   diff (scope check + quarantine). User-project worktrees share `.git` with the source repository.
 * The capability token sits in the per-run config file readable by the worker (run-bound, scoped,
   capped, short TTL, revoked at the end of the run, file deleted afterwards).
+* **Shell = same OS user**: with `bash` a worker can run any program as the owner, including OS
+  credential helpers (e.g. Git Credential Manager) — a direct push / credential escape is then not
+  prevented by this sandbox (§31 enforcement NOT-PROVEN). Therefore a TaskSpec that grants `bash`
+  (or `bash:<pattern>`) is admitted under the process sandbox only when the exception decision also
+  carries `details.allow_bash=true`; otherwise admission waits with `SANDBOX_NOT_READY` and the
+  executor refuses to start (completeness review, ADR-0054).
 
 ## Consequences
 

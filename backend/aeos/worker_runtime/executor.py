@@ -147,6 +147,11 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
         raise StartError("SANDBOX_NOT_READY", "; ".join(sb["reasons"]))
     if sb["kind"] != "process":
         raise StartError("SANDBOX_NOT_IMPLEMENTED", f"sandbox kind {sb['kind']} launch is NOT_PROVEN in this build")
+    from aeos.worker_runtime.sandbox import process_shell_allowed, task_wants_shell
+
+    if task_wants_shell(task.tools_allowed) and not process_shell_allowed(s, sb.get("decision_id")):
+        raise StartError("SANDBOX_NOT_READY", "bash under the process sandbox needs details.allow_bash=true "
+                                              "on the owner exception (ADR-0051)")
     status = opencode.opencode_status(binary or settings.opencode_binary)
     if status["status"] != "INSTALLED":
         raise StartError("ENGINE_MISSING", f"OpenCode {status['status']}: {status['evidence']}")
@@ -181,6 +186,7 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
     argv = opencode.build_command(status["binary"], model=exposed, worktree=ws.repo, task_file=task_file)
     run.capability_id = grant.id
     run.workspace_ref = str(ws.repo)
+    run.git_dir_ref = str(ws.common_dir) if ws.common_dir else None  # trusted git dir (ADR-0054)
     run.sandbox_kind = "process"
     run.sandbox_ref = str(sandbox.root)
     run.branch = ws.branch
@@ -288,6 +294,18 @@ def execute_run(settings: Settings, run_id: str, *, shutdown: threading.Event | 
         except AeosError:
             s.rollback()
             processes.kill_run_processes(run_id)
+            # A cancel/policy stop that landed while we prepared revoked only the grants that existed
+            # then: revoke the one issued in _prepare too and remove the token file.
+            from aeos.broker import facade as broker
+
+            with sf() as s2:
+                broker.revoke_grants(s2, run_id=run_id, reason="attempt changed before binding")
+                s2.commit()
+            try:
+                prep.config_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            processes.unregister(run_id)
             return {"run_id": run_id, "status": "SKIPPED", "reason": "attempt changed before binding"}
     # ---------------- phase 3: monitor (observed actions, heartbeat, timeout, quota, cancel)
     parser = opencode.EventParser(worktree=prep.ws.repo)
@@ -433,6 +451,19 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
                                     claim=f"runtime-computed diff {run.base_commit}..{head}", content=changes["patch"] or "",
                                     level="E1", fallback_dir=evidence_dir, name="candidate.patch")
             run.evidence_refs = [*(run.evidence_refs or []), ref]
+        except workspace.GitControlTampered as exc:
+            # A planted git config/hook would execute in the controller's context: git is never run
+            # on this candidate again, the original control files are restored, and the run fails
+            # and is quarantined (ADR-0054).
+            detail = ", ".join(exc.changed) + (f"; restored: {', '.join(exc.restored)}" if exc.restored else "")
+            violations.append({"path": ".git", "rule": "git-control-modified", "detail": redact_text(detail)[:300]})
+            from aeos.audit import service as audit
+
+            audit.record(s, actor_type="service", actor_id="worker_runtime.executor",
+                         action="worker_runtime.git_control_tampered", result="DENIED", target_type="run",
+                         target_id=run.id, project_id=run.project_id, domain=run.domain,
+                         reason="candidate changed git control files; runtime git refused",
+                         details={"changed": exc.changed[:20], "restored": exc.restored[:20]})
         except workspace.WorkspaceError as exc:
             violations.append({"path": "*", "rule": "diff-unavailable", "detail": redact_text(str(exc))[:300]})
         # Worker-provided material is untrusted evidence.

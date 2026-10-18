@@ -33,7 +33,7 @@ LEGAL_TRANSITIONS: dict[ExecutionState, frozenset[ExecutionState]] = {
 
 # Reason codes that justify RUNNING -> BLOCKED (controller-enforced stop conditions, §22).
 RUNNING_STOP_CODES = frozenset({"LEASE_LOST", "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED", "REASSIGNED",
-                                "CONTROLLER_SHUTDOWN"})
+                                "CONTROLLER_SHUTDOWN", "POLICY_CHANGED"})
 
 # Execution states in which a worker may hold resources (used for caps / write-set checks).
 ACTIVE_STATES = frozenset({S.LEASED, S.RUNNING})

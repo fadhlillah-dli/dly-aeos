@@ -57,14 +57,15 @@ def workforce_summary(principal: CurrentPrincipal, domain: ActiveDomain, db: DB)
 
 @router.get("/api/workforce/roles")
 def workforce_roles(principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
-    data = views.roles_view(db, domain=domain.value)
+    data = views.roles_view(db, domain=domain.value, project_ids=principal.allowed_project_ids)
     return {"items": data["groups"], "note": data["note"], "source": "RoleSkillPack catalog (seed, DESIGN)",
             "checked_at": utcnow().isoformat(), "mode": "DESIGN"}
 
 
 @router.get("/api/workforce/agents")
 def workforce_agents(principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
-    return {"items": views.agents_view(db, domain=domain.value), "source": "AgentDefinition records",
+    return {"items": views.agents_view(db, domain=domain.value, project_ids=principal.allowed_project_ids),
+            "source": "AgentDefinition records",
             "checked_at": utcnow().isoformat(), "mode": "DESIGN"}
 
 
@@ -156,6 +157,25 @@ def cancel_run(run_id: str, body: Reason, principal: AdminPrincipal, domain: Act
     db.commit()
     return views.run_row(db, run) | {"note": "capability dicabut dan proses dihentikan; efek eksternal yang sudah "
                                               "terjadi tidak dibatalkan otomatis"}
+
+
+class QuarantineRelease(BaseModel):
+    rationale: str = Field(min_length=10, max_length=2000)
+
+
+@router.post("/api/runs/{run_id}/quarantine-release")
+def quarantine_release(run_id: str, body: QuarantineRelease, principal: AdminPrincipal, domain: ActiveDomain,
+                       db: DB) -> dict[str, Any]:
+    """The human owner records the outcome of the special review of a quarantined patch (§21) as an
+    EXCEPTION Decision bound to this run and its exact runtime head commit. It never accepts the
+    task by itself: verification + review + AcceptanceRecord are still required, and a different
+    patch (new head) needs a new decision."""
+    _visible_run(db, principal, domain, run_id)
+    d = scheduler.release_quarantine(db, run_id, actor=_actor(principal), actor_user_id=principal.user.id,
+                                     rationale=body.rationale)
+    db.commit()
+    return {"run_id": run_id, "decision_id": d.id, "target_hash": d.target_hash,
+            "note": "keputusan pemilik tercatat; acceptance tetap memerlukan verifier + review"}
 
 
 @router.post("/api/workforce/pause")

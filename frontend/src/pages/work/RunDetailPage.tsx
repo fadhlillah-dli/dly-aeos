@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Ban, RefreshCw, UserCog } from "lucide-react";
+import { ArrowLeft, Ban, RefreshCw, SearchCheck, ShieldCheck, UserCog } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { get, post } from "../../api/client";
@@ -154,6 +154,48 @@ function OperatorActions({ run, isAdmin, onDone }: { run: RunDetail; isAdmin: bo
   );
 }
 
+function QuarantineNotice({ run, isAdmin, onDone }: { run: RunDetail; isAdmin: boolean; onDone: () => void }) {
+  const release = run.decisions.find(
+    (d) => d.target_type === "run_quarantine" && d.status === "ACTIVE" && d.target_hash && d.target_hash === run.head_commit,
+  );
+  const releasable = ["REVIEW", "DONE"].includes(run.execution_state) && Boolean(run.head_commit);
+  return (
+    <Notice tone="warn">
+      <strong>Patch dikarantina</strong> — memerlukan review khusus sebelum diterima atau dipublikasikan (push/PR).
+      <ul className="mt-1 list-disc pl-5">
+        {run.quarantine_reasons.map((q2, i) => (
+          <li key={i}>
+            <Mono>{q2.path}</Mono> — {q2.rule} {q2.detail ? `(${q2.detail})` : ""}
+          </li>
+        ))}
+      </ul>
+      {release ? (
+        <p className="mt-2 inline-flex items-center gap-1">
+          <ShieldCheck className="h-4 w-4" aria-hidden />
+          Hasil review khusus tercatat sebagai keputusan pemilik untuk head <Mono>{shortHash(run.head_commit)}</Mono>. Acceptance tetap
+          memerlukan verifier dan review.
+        </p>
+      ) : releasable ? (
+        <div className="mt-2">
+          <ConfirmAction
+            label="Catat hasil review khusus"
+            icon={<ShieldCheck className="h-4 w-4" aria-hidden />}
+            isAdmin={isAdmin}
+            requireReason
+            confirmText={`Keputusan pemilik (EXCEPTION) terikat ke run ini dan head ${shortHash(run.head_commit)}. Ini bukan acceptance: verifier + review tetap wajib. Tulis alasan/temuan review (min. 10 karakter).`}
+            onConfirm={async (reason) => {
+              await post(`/api/runs/${run.run_id}/quarantine-release`, { rationale: reason });
+              onDone();
+            }}
+          />
+        </div>
+      ) : (
+        <p className="mt-2 text-xs">Belum dapat dirilis: run harus REVIEW dengan head commit dari runtime.</p>
+      )}
+    </Notice>
+  );
+}
+
 export default function RunDetailPage() {
   const { runId = "" } = useParams();
   const { isAdmin, domain } = useAuth();
@@ -196,18 +238,7 @@ export default function RunDetailPage() {
               </p>
             )}
           </Card>
-          {r.quarantined && (
-            <Notice tone="warn">
-              <strong>Patch dikarantina</strong> — memerlukan review khusus sebelum promosi.
-              <ul className="mt-1 list-disc pl-5">
-                {r.quarantine_reasons.map((q2, i) => (
-                  <li key={i}>
-                    <Mono>{q2.path}</Mono> — {q2.rule} {q2.detail ? `(${q2.detail})` : ""}
-                  </li>
-                ))}
-              </ul>
-            </Notice>
-          )}
+          {r.quarantined && <QuarantineNotice run={r} isAdmin={isAdmin} onDone={() => qc.invalidateQueries({ queryKey: key })} />}
           {r.mode !== "LIVE" && <Notice tone="mock">Run ini adalah fixture {r.mode}; bukan pekerjaan nyata dan tidak dihitung.</Notice>}
 
           <OperatorActions run={r} isAdmin={isAdmin} onDone={() => qc.invalidateQueries({ queryKey: key })} />
@@ -363,8 +394,31 @@ export default function RunDetailPage() {
                   { header: "Status", cell: (s) => <StatusBadge status={s.status === "SUCCEEDED" ? "SUCCEEDED" : s.status} /> },
                   { header: "Target", cell: (s) => <span className="text-xs">{JSON.stringify(s.target)}</span> },
                   { header: "URL", cell: (s) => (s.external_url ? <a className="text-accent underline" href={s.external_url} target="_blank" rel="noreferrer">buka</a> : "—") },
+                  {
+                    header: "Rekonsiliasi",
+                    cell: (s) =>
+                      ["PENDING", "UNKNOWN"].includes(s.status) ? (
+                        <ConfirmAction
+                          label="Periksa status eksternal"
+                          icon={<SearchCheck className="h-4 w-4" aria-hidden />}
+                          isAdmin={isAdmin}
+                          confirmText="Hanya membaca status di remote/GitHub (tidak push, tidak membuat PR, tidak merge). Hasil dicatat; retry tetap menunggu sampai status jelas."
+                          onConfirm={async () => {
+                            await post(`/api/broker/side-effects/${s.id}/reconcile`, {});
+                            qc.invalidateQueries({ queryKey: key });
+                          }}
+                        />
+                      ) : (
+                        <span className="text-xs text-ink-3">—</span>
+                      ),
+                  },
                 ]}
               />
+              {r.side_effects.some((s) => ["PENDING", "UNKNOWN"].includes(s.status)) && (
+                <p className="mt-2 text-xs text-warn">
+                  Ada efek eksternal yang hasilnya belum diketahui: attempt baru menunggu (SIDE_EFFECT_UNRECONCILED) sampai direkonsiliasi.
+                </p>
+              )}
             </Card>
             <Card title="Panggilan model (dicatat broker)">
               <Table

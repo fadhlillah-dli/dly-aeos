@@ -288,6 +288,10 @@ def spawn(run_id: str, argv: list[str], *, cwd: Path, env: dict[str, str], stder
             job = None
         if suspended and not _win.resume(int(popen._handle)):  # type: ignore[attr-defined]
             popen.kill()
+            if job is not None:
+                _win.close(job)
+            if stderr_fh:
+                stderr_fh.close()
             raise OSError("could not resume suspended worker process")
     try:
         create_time = psutil.Process(popen.pid).create_time()

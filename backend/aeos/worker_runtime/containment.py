@@ -99,8 +99,6 @@ def _listener() -> tuple[socket.socket, int]:
 
 
 def _kill_tree_check(sandbox: processes.SandboxDirs, env: dict[str, str]) -> dict[str, Any]:
-    import psutil
-
     run_id = f"containment-{utcnow().strftime('%H%M%S%f')}"
     mp = processes.spawn(run_id, [sys.executable, "-c", TREE], cwd=sandbox.root, env=env)
     try:
@@ -109,7 +107,8 @@ def _kill_tree_check(sandbox: processes.SandboxDirs, env: dict[str, str]) -> dic
         gpid = int(line) if line.isdigit() else None
         res = processes.kill_run_processes(run_id)
         child_alive = processes.is_alive(mp.pid, mp.create_time)
-        grand_alive = bool(gpid and psutil.pid_exists(gpid) and psutil.Process(gpid).status() != psutil.STATUS_ZOMBIE)
+        # is_alive handles a process vanishing between the checks (no false FAIL from a race).
+        grand_alive = bool(gpid and processes.is_alive(gpid, None))
     except Exception as exc:
         processes.kill_run_processes(run_id)
         return _result("cancel_kills_tree", "FAIL", f"probe error {type(exc).__name__}")
