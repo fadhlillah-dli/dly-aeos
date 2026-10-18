@@ -218,9 +218,11 @@ def approved_plan(client: AuthedClient, monkeypatch: Any, project_id: str, *, co
 
 PUB_REPO = "octo/pub"
 PUB_FOLDER = "FolderRoot0001"
+# One provider vocabulary (aeos.portfolio.providers): publication targets are exactly {provider, root_id};
+# Google Docs are files in the Drive folder (google-drive operations), the GitHub Issues root id is owner/repo.
+PUBLISH_PROVIDERS = ("google-drive", "github-issues")
 PUBLISH_TARGETS = [{"provider": "google-drive", "root_id": PUB_FOLDER},
-                   {"provider": "google-docs", "root_id": PUB_FOLDER},
-                   {"provider": "github-issues", "repo": PUB_REPO}]
+                   {"provider": "github-issues", "root_id": PUB_REPO}]
 
 
 def publication_ready(client: AuthedClient, db: Session, vault: Any, monkeypatch: Any, *,
@@ -239,7 +241,7 @@ def publication_ready(client: AuthedClient, db: Session, vault: Any, monkeypatch
     r = client.put(f"/api/projects/{project['id']}/integrations",
                    json={"provider": "GOOGLE_DRIVE", "purpose": "docs", "root_id": PUB_FOLDER})
     assert r.status_code == 200, r.text
-    for provider in ("google-drive", "google-docs", "github-issues"):
+    for provider in PUBLISH_PROVIDERS:
         r = client.post("/api/decisions", json={"kind": "WRITE_ENABLEMENT", "provider": provider, "enabled": True,
                                                 "rationale": "owner enables writes for this pilot",
                                                 "auth_scope": {"provider": provider}})
@@ -282,10 +284,11 @@ def doctor_ready(db: Session, capability: Any) -> list[str]:
     """CONTROLLED PRECONDITION: record Doctor results for every check of *capability* as passing.
 
     Used only where a §50 row is about scheduler/runtime semantics, not about readiness itself. On this
-    host CAN_RUN_WORKER cannot become READY for real (no Docker containment; and the doctor's
-    containment.report check misreads the worker-runtime report format - see test_containment.py), so
-    the rows below prove admission/lease/cancel behaviour behind an explicitly fixture-made gate. The
-    rows are labelled ``observed_evidence.fixture = acceptance`` and expire after one hour."""
+    host CAN_RUN_WORKER cannot become READY for real (no Docker containment), so the rows below prove
+    admission/lease/cancel behaviour behind an explicitly fixture-made gate. The rows are labelled
+    ``observed_evidence.fixture = acceptance`` and expire after one hour. Like a real Doctor run, they
+    must be written AFTER the owner decisions/route changes they depend on: those changes mark dependent
+    results STALE (§08), and a STALE result never counts as passing."""
     from aeos.core.enums import Capability
     from aeos.doctor.capabilities import checks_for_capability
     from aeos.doctor.checks import REGISTRY, load_all
@@ -331,20 +334,26 @@ WORKER_ROUTE = "worker.acc-free"
 
 
 def worker_ready(client: AuthedClient, db: Session, monkeypatch: Any, *, tasks: list[dict[str, Any]] | None = None,
-                 project_name: str = "Worker App", platform: bool = False, responder: Any = None) -> dict[str, Any]:
+                 project_name: str = "Worker App", platform: bool = False, responder: Any = None,
+                 targets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Approved plan with compiled TaskSpecs and every admission prerequisite decided by the owner:
     an activated free worker route, the ADR-0051 process-sandbox exception, the implementer agent
     enabled through the API, and the plan executed (tasks QUEUED -> READY). ``platform`` plans on the
-    seeded DLY AEOS self-build project (§09) instead of a new project."""
+    seeded DLY AEOS self-build project (§09) instead of a new project. ``targets`` are the exact targets
+    the owner's plan approval binds (e.g. ``{"provider": "github-repo", "repo": owner/name}``: delivery of
+    an accepted task as a PR is authorised only by an APPROVAL whose operations include ``create_pr``)."""
     from aeos.core.enums import Capability
 
     seed_catalog(db)
     fake_opencode(monkeypatch)
-    doctor_ready(db, Capability.CAN_RUN_WORKER)
     register_free_route(db, WORKER_ROUTE)
     activate_route(client, WORKER_ROUTE)
     owner_exception(client, target_type="worker_sandbox", target_id="process",
                     details={"allow_process_sandbox": True})
+    # The controlled precondition is written AFTER the owner decisions it depends on: recording a
+    # ROUTE_ACTIVATION / EXCEPTION decision marks the dependent Doctor results STALE (§08 invalidation), so a
+    # result recorded before them would (correctly) no longer count - exactly as a real recheck must follow.
+    doctor_ready(db, Capability.CAN_RUN_WORKER)
     r = client.post("/api/workforce/agents/opencode-implementer/enable", json={"reason": "pilot"})
     assert r.status_code == 200, r.text
     if platform:
@@ -356,7 +365,7 @@ def worker_ready(client: AuthedClient, db: Session, monkeypatch: Any, *, tasks: 
     else:
         project = create_project(client, name=project_name)
     approved = approved_plan(client, monkeypatch, project["id"], content=plan_content(tasks=tasks),
-                             responder=responder)
+                             responder=responder, targets=targets)
     plan = approved["plan"]
     ex = client.post(f"/api/plans/{plan['id']}/execute")
     assert ex.status_code == 200, ex.text

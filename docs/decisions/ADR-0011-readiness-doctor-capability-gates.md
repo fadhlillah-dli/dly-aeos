@@ -108,7 +108,9 @@ both sides now use it; frozen facade signatures only gained keyword arguments wi
      one tiny `claude -p` call through the bridge. Never run / BLOCKED / STALE -> UNKNOWN -> DEGRADED (manual
      package fallback), FAILED or quota exhausted -> BLOCKED, MOCK/DEMO never counts.
    * `CAN_PUBLISH_PERSONAL` additionally needs `adapter.write_enablement` (new: flag + ACTIVE human
-     WRITE_ENABLEMENT decision for google-drive, google-docs and github-issues). `adapter.google_oauth` checks the
+     WRITE_ENABLEMENT decision for every PERSONAL publication provider of `aeos.portfolio.providers` -
+     google-drive and github-issues; Google Docs writes are google-drive operations, there is no separate
+     google-docs enablement since the wave-2 provider vocabulary). `adapter.google_oauth` checks the
      references the publisher really writes (`personal/google-oauth-client` + `personal/google-oauth-token`;
      the Doctor looked for a non-existent `personal/google-oauth`). OFFICE Bitbucket uses `office/bitbucket`.
    * OFFICE: the policy module has no `integrations_allowed` flag; it records a company authorisation with

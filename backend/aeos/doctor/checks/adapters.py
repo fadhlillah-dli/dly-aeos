@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from aeos.core.enums import Domain
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import secret_ref_status, set_secret_remedy
 from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
+from aeos.portfolio import providers as pv
 
 GITHUB_REF = "personal/github"
 # Same references the publisher's Google adapter writes (aeos.publisher.providers.google): the OAuth client
@@ -24,7 +26,11 @@ BITBUCKET_REF = "office/bitbucket"
 GITHUB_API = "https://api.github.com"
 # secrets facade contract: purpose "<namespace>:<use>" with the namespace of the reference (§26)
 GITHUB_PURPOSE = "personal:doctor.github-readonly-probe"
-PERSONAL_PUBLISH_PROVIDERS = ("google-drive", "google-docs", "github-issues")
+# The PERSONAL publication providers of the one provider vocabulary (aeos.portfolio.providers): Google Docs
+# are files in the project's Drive folder, so ``google-drive`` covers both; there is no separate Docs write.
+PERSONAL_PUBLISH_PROVIDERS: tuple[str, ...] = tuple(dict.fromkeys(
+    pv.PUBLICATION_PROVIDER[Domain.PERSONAL.value].values()))
+PERSONAL_PUBLISH_LABELS = ", ".join(pv.LABELS.get(p, p) for p in PERSONAL_PUBLISH_PROVIDERS)
 
 
 def github_token() -> str:
@@ -141,8 +147,8 @@ def _enablement_fp(ctx: CheckContext) -> dict[str, Any] | None:
        component_id="policy-decision-registry", needs_db=True, ttl_seconds=3600, ok={"CONFIGURED", "VERIFIED"},
        invalidators=("config:write_enablement", "config:policy"), fingerprint=_enablement_fp, severity_fail="HIGH",
        scope={"domain": "PERSONAL"},
-       description="Flag write_enabled.<provider> + keputusan WRITE_ENABLEMENT ACTIVE untuk Google Drive, Google Docs "
-                   "dan GitHub Issues (syarat interlock §26).")
+       description="Flag write_enabled.<provider> + keputusan WRITE_ENABLEMENT ACTIVE untuk setiap provider publikasi "
+                   f"PERSONAL ({PERSONAL_PUBLISH_LABELS}; Google Docs = file di folder Drive) (syarat interlock §26).")
 def adapter_write_enablement(ctx: CheckContext) -> Outcome:
     assert ctx.session is not None
     try:
@@ -165,8 +171,8 @@ def adapter_write_enablement(ctx: CheckContext) -> Outcome:
                            privilege="SUPER_ADMIN (keputusan manusia)", cost="tidak ada",
                            rollback="cabut keputusan (flag otomatis kembali false)",
                            evidence_to_collect="adapter.write_enablement CONFIGURED"))
-    return Outcome("CONFIGURED", "Write enablement efektif untuk Google Drive, Google Docs dan GitHub Issues; setiap "
-                   "write tetap butuh approval versi/hash yang tepat (interlock).", evidence=evidence)
+    return Outcome("CONFIGURED", f"Write enablement efektif untuk {PERSONAL_PUBLISH_LABELS}; setiap write tetap butuh "
+                   "approval versi/hash yang tepat (interlock).", evidence=evidence)
 
 
 def _office(component: str, label: str, ref: str) -> Any:

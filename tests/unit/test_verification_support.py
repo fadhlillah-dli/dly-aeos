@@ -339,7 +339,7 @@ def claude_result(structured: dict[str, Any] | None, *, ok: bool = True, quota: 
 def install_doctor(monkeypatch: pytest.MonkeyPatch, status: str = "READY", reasons: list[str] | None = None) -> None:
     from aeos.doctor.facade import CapabilityState
 
-    def capability_state(session, capability, *, domain=None, project_id=None):
+    def capability_state(session, capability, *, domain=None, project_id=None, **_kw):
         return CapabilityState(capability=capability, status=status, reasons=reasons or [])
 
     install_module(monkeypatch, "aeos.doctor.capabilities", capability_state=capability_state,

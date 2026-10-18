@@ -594,7 +594,8 @@ def test_publish_personal_needs_tokens_and_write_enablement(settings, db, secret
     secrets.put_secret("personal/google-oauth-client", '{"installed": {}}', actor="test")
     secrets.put_secret("personal/google-oauth-token", '{"token": "x"}', actor="test")
     secrets.put_secret("personal/github", "ghp_" + "y" * 36, actor="test")
-    for p in ("google-drive", "google-docs", "github-issues"):
+    # canonical PERSONAL publication providers (aeos.portfolio.providers): Google Docs writes are google-drive
+    for p in ("google-drive", "github-issues"):
         r = personal_client.post("/api/decisions", json={"kind": "WRITE_ENABLEMENT", "provider": p, "enabled": True,
                                                          "auth_scope": {"provider": p},
                                                          "rationale": f"owner enables {p} writes for publication"})
@@ -609,14 +610,14 @@ def test_publish_personal_needs_tokens_and_write_enablement(settings, db, secret
     # revoking one enablement makes the gate stale (config:write_enablement) and then BLOCKED
     from aeos.policy import decisions as registry
 
-    d = registry.find_active_decision(db, kind="WRITE_ENABLEMENT", target_type="provider_write", target_id="google-docs")
-    registry.revoke_decision(db, d.id, actor_user_id=_admin(db).id, reason="pause Google Docs writes")
+    d = registry.find_active_decision(db, kind="WRITE_ENABLEMENT", target_type="provider_write", target_id="google-drive")
+    registry.revoke_decision(db, d.id, actor_user_id=_admin(db).id, reason="pause Google Drive/Docs writes")
     db.commit()
     assert _stored(db, "adapter.write_enablement").status == "STALE"
     assert facade.capability_state(db, Capability.CAN_PUBLISH_PERSONAL, domain="PERSONAL").status != "READY"
     _run(settings, db, fake_host)
     st = facade.capability_state(db, Capability.CAN_PUBLISH_PERSONAL, domain="PERSONAL")
-    assert st.status == "BLOCKED" and any("google-docs" in r for r in st.reasons)
+    assert st.status == "BLOCKED" and any("google-drive" in r for r in st.reasons)
 
 
 # ---------------------------------------------------------------------------------- OFFICE + staging

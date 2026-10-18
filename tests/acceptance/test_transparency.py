@@ -95,10 +95,11 @@ def _enabled_opencode(client: AuthedClient, db, monkeypatch, host, settings) -> 
     host.install("opencode", "1.19.3\n")
     settings.opencode_binary = None
     fake_opencode(monkeypatch)  # the worker runtime's own view of the same binary
-    doctor_ready(db, Capability.CAN_RUN_WORKER)
     register_free_route(db, WORKER_ROUTE)
     activate_route(client, WORKER_ROUTE)
     owner_exception(client, target_type="worker_sandbox", target_id="process", details={"allow_process_sandbox": True})
+    # after the owner decisions: they mark dependent Doctor results STALE (§08), see world.doctor_ready
+    doctor_ready(db, Capability.CAN_RUN_WORKER)
     _ok(client.post("/api/workforce/agents/opencode-implementer/enable", json={"reason": "pilot"}))
 
 
@@ -184,6 +185,10 @@ def _pinned_opencode(client: AuthedClient, db, host, settings, tmp_path, *, pin:
     db.commit()
     host.install("opencode", f"{installed}\n")
     settings.opencode_binary = None
+    # CAN_RUN_WORKER reads the ADR-0051 sandbox requirement live (not from a stored CheckResult): without
+    # Docker only an ACTIVE owner exception for the WEAK process sandbox satisfies it. Recorded before the
+    # controlled precondition (world.doctor_ready), whose results it would otherwise mark STALE.
+    owner_exception(client, target_type="worker_sandbox", target_id="process", details={"allow_process_sandbox": True})
 
 
 def test_binary_drift_from_the_approved_pin_is_visible_and_invalidates_readiness(personal_client: AuthedClient, db,
@@ -194,7 +199,8 @@ def test_binary_drift_from_the_approved_pin_is_visible_and_invalidates_readiness
     assert (versions["approved_pin"], versions["observed_version"], versions["status"]) == ("1.18.0", "1.18.0",
                                                                                           "MATCH")
     doctor_ready(db, Capability.CAN_RUN_WORKER)
-    assert caps_by_name(personal_client)["CAN_RUN_WORKER"]["status"] == "READY"
+    cap = caps_by_name(personal_client)["CAN_RUN_WORKER"]
+    assert cap["status"] == "READY", cap.get("reasons")
     # the binary is upgraded in place, away from the approved pin
     host.install("opencode", "1.19.3\n")
     host.replace_binary("opencode", size=4242)

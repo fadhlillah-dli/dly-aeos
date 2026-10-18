@@ -237,12 +237,14 @@ def fake_doctor_host_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     real = doctor_caps.capability_state
 
     def capability_state(session: Any, capability: Capability, *, domain: str | None = None,
-                         project_id: str | None = None) -> CapabilityState:
+                         project_id: str | None = None, **kwargs: Any) -> CapabilityState:
+        # ``**kwargs``: any additive facade keyword (e.g. ``exclude_checks``) is forwarded to the real gate
+        # unchanged, so only the host tool probes of FAKED_CAPABILITIES are replaced.
         if capability in FAKED_CAPABILITIES:
             return CapabilityState(capability=capability, status="READY", reasons=[],
                                    checks=[{"check_id": "e2e.host-probes", "status": "FAKED",
                                             "note": "host tool probes replaced by the E2E harness"}])
-        return real(session, capability, domain=domain, project_id=project_id)
+        return real(session, capability, domain=domain, project_id=project_id, **kwargs)
 
     monkeypatch.setattr(doctor_caps, "capability_state", capability_state)
 

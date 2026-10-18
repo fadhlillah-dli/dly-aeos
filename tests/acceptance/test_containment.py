@@ -168,11 +168,7 @@ def test_container_sandbox_blocks_filesystem_and_egress():
                 "Docker is not available on this host and the container containment suite is NOT_PROVEN (ADR-0051)")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: doctor seam - checks/containment.py reads report['results'] items by 'name'/'passed', but "
-    "worker_runtime.containment_report returns 'check'/'status' (PASS|NOT_ENFORCED|FAIL|NOT_RUN); every item is "
-    "counted as failed (named '0','1',...), so containment.report is always FAILED and CAN_RUN_WORKER can never be "
-    "READY, even with the ADR-0051 owner exception or a passing container report"))
+# formerly strict xfail BUG_CONTAINMENT_REPORT (containment.report misread the runtime report); fixed by W3
 def test_doctor_containment_check_reflects_the_runtime_report(personal_client: AuthedClient, db, host, vault):
     from aeos.worker_runtime import facade as runtime
 

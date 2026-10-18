@@ -14,8 +14,9 @@
 
 Everything is real: planning, approval, admission, the worker runtime workspace, the independent
 verifier (child pytest of the trusted grader against the candidate snapshot, trusted ruff), the
-checkpoint review package and the acceptance engine. The review result arrives through the official
-manual-package fallback (§12) because the native path is blocked by BUG_REVIEW_CAPABILITY.
+checkpoint review package and the acceptance engine. In these rows the native bridge is not proven (no
+Doctor capability test ran), so the review result arrives through the official manual-package fallback
+(§12); ``test_passing_native_capability_test_makes_max_review_ready`` proves the native path's gate.
 """
 
 from __future__ import annotations
@@ -40,17 +41,6 @@ from tests.acceptance.world import caps_by_name, task
 from tests.conftest import AuthedClient
 
 pytestmark = pytest.mark.acceptance
-
-BUG_REVIEW_CAPABILITY = (
-    "BUG: doctor seam - checks/claude.py claude.capability_test reads result['ok'] and requires mode NATIVE/None, but "
-    "claude_bridge.capability_test() returns {'status': 'VERIFIED', 'mode': 'LIVE', 'error_code': None} without 'ok'; "
-    "a passing native capability test is recorded FAILED ('tidak diketahui'), so CAN_REVIEW_WITH_MAX/CAN_PLAN_* are "
-    "never READY and every checkpoint review falls back to the manual package")
-BUG_VERIFIER_STATUS = (
-    "BUG: execution seam - verification.verifier._side_effects writes verifier_status=PASS|FAIL|QUARANTINED|"
-    "NOT_PROVEN|BLOCKED through workforce.update_run, whose vocabulary is PASSED|FAILED|ERROR|NOT_PROVEN|BLOCKED|"
-    "NOT_RUN|RUNNING; the update is rejected (VALIDATION_FAILED) and the Workforce Console run row never shows "
-    "the verifier result")
 
 
 def _te(db, task_id: str) -> TaskExecution:
@@ -202,7 +192,7 @@ def test_worker_done_but_verifier_failed_is_a_visible_failure(personal_client: A
     assert gates["ready_for_human_merge"] is False
 
 
-@pytest.mark.xfail(strict=True, reason=BUG_VERIFIER_STATUS)
+# formerly strict xfail BUG_VERIFIER_STATUS (verifier/workforce status vocabulary), fixed by seam W2
 def test_workforce_console_shows_the_verifier_result(personal_client: AuthedClient, db, monkeypatch, tmp_path, host,
                                                      settings, vault):
     w = self_build(personal_client, db, monkeypatch, tmp_path, host, settings,
@@ -268,7 +258,7 @@ def test_post_deploy_failure_triggers_incident_and_rollback():
 
 
 # ---------------------------------------------------------------------------------------------- review seam
-@pytest.mark.xfail(strict=True, reason=BUG_REVIEW_CAPABILITY)
+# formerly strict xfail BUG_REVIEW_CAPABILITY (capability_test misread the bridge result); fixed by W3
 def test_passing_native_capability_test_makes_max_review_ready(personal_client: AuthedClient, db, monkeypatch,
                                                                host, settings, vault):
     from tests.acceptance.fakes import FakeClaude

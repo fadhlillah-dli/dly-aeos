@@ -291,7 +291,8 @@ def test_office_plan_blocked_by_policy_even_when_capability_ready(db, owner, mon
     from aeos.doctor import facade as doctor
 
     monkeypatch.setattr(doctor, "capability_state",
-                        lambda s, c, domain=None, project_id=None: doctor.CapabilityState(capability=c, status="READY"))
+                        lambda s, c, domain=None, project_id=None, **_kw: doctor.CapabilityState(
+                            capability=c, status="READY"))
     bridge = FakeBridge(monkeypatch, tmp_path)
     plan = _plan(db, owner, domain=Domain.OFFICE)
     with pytest.raises(Blocked) as exc:
@@ -305,7 +306,8 @@ def test_office_plan_runs_with_capability_and_company_authorisation(db, owner, m
     from aeos.policy import decisions as registry
 
     monkeypatch.setattr(doctor, "capability_state",
-                        lambda s, c, domain=None, project_id=None: doctor.CapabilityState(capability=c, status="READY"))
+                        lambda s, c, domain=None, project_id=None, **_kw: doctor.CapabilityState(
+                            capability=c, status="READY"))
     registry.record_decision(
         db, kind="POLICY", actor_user_id=owner.id, target_type="office_policy", target_id="OFFICE", domain="OFFICE",
         allowed_operations=[], auth_scope={"company": "ACME"}, rationale="company approval letter ref X",

@@ -13,8 +13,9 @@
 
 Google Drive/Docs, GitHub and Confluence are faked with ``respx`` (stateful fakes in ``fakes.py``);
 planning, policy (decision registry + external-write interlock), docs engine and the publisher run for
-real. The end-to-end runs are ``xfail(strict=True)`` because the integrated interlock currently denies
-every publication (see ``BUG_BINDING``); the adapter-level contracts are proven separately.
+real, end to end, in the one provider vocabulary (``aeos.portfolio.providers``: Google Docs are
+``google-drive`` operations, targets are ``{provider, root_id}``); the adapter-level contracts are also
+proven separately.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from aeos.policy import facade as policy
 from aeos.publisher.providers.base import OpContext, ProviderBlocked, ProviderConflict
 from tests.acceptance.fakes import FakeClaude, FakeGitHubApi, FakeGoogleApi, google_token_json
 from tests.acceptance.world import (
+    PUB_FOLDER,
     PUB_REPO,
     PlanningResponder,
     approve_current,
@@ -48,20 +50,15 @@ from tests.conftest import AuthedClient
 
 pytestmark = pytest.mark.acceptance
 
-BUG_BINDING = (
-    "BUG: publication seam - the publisher passes the PUBLICATION decision id to policy.check_external_write, "
-    "which accepts only an APPROVAL decision bound to the plan_version (DECISION_KIND, DECISION_TARGET_MISMATCH); "
-    "publisher op targets (root_parent_id/logical_id) never match the approved target scope keys (root_id/repo) "
-    "(TARGET_NOT_APPROVED); create_doc is sent as provider google-drive although the policy catalog lists it "
-    "under google-docs (OPERATION_UNKNOWN); and publisher.targets looks up integrations as 'google-drive' while "
-    "portfolio stores 'GOOGLE_DRIVE'. Every real publication is INTERLOCK_DENIED.")
+# The end-to-end rows below were strict xfails (BUG_BINDING: decision kind/target binding and provider
+# vocabulary mismatches made every real publication INTERLOCK_DENIED) until the W1 planning/publication seam.
 
 
 def _google_op(operation: str, logical_id: str, *, title: str = "Product Home", payload: dict | None = None,
                existing_id: str | None = None, existing_rev: str | None = None,
                attachments: dict | None = None) -> OpContext:
     return OpContext(operation_id="op-1", publication_id="pub-1", project_id="proj-1", project_key="pub-app",
-                     project_name="Pub App", domain="PERSONAL", provider="google-docs", operation=operation,
+                     project_name="Pub App", domain="PERSONAL", provider="google-drive", operation=operation,
                      logical_id=logical_id, idempotency_key="sha256:" + "a" * 64, title=title, target={},
                      payload=payload or {}, existing_external_id=existing_id, existing_revision=existing_rev,
                      attachments=attachments or {})
@@ -72,8 +69,8 @@ def test_publish_before_bootstrap_is_refused(client: AuthedClient, db, settings,
     assert client.get("/api/auth/bootstrap-status").json() == {"bootstrap_complete": False}
     for url in ("/api/plans/x/publications/preview", "/api/publications/x/execute", "/api/publications/x/retry"):
         assert client.client.post(url, json={}).status_code in (401, 403), url
-    intent = policy.WriteIntent(actor_user_id="nobody", project_id="p", domain="PERSONAL", provider="google-docs",
-                                operation="create_doc", target={"provider": "google-docs", "root_id": "F"},
+    intent = policy.WriteIntent(actor_user_id="nobody", project_id="p", domain="PERSONAL", provider="google-drive",
+                                operation="create_doc", target={"provider": "google-drive", "root_id": "F"},
                                 approved_plan_version_id="v", approved_hash="sha256:x", decision_id="d",
                                 capability_expires_at=utcnow() + timedelta(minutes=5))
     verdict = policy.check_external_write(db, intent)
@@ -154,7 +151,7 @@ def test_publication_binds_the_approved_version_never_latest(personal_client: Au
     assert db.scalar(select(func.count()).select_from(ExternalReference)) == 0  # nothing written anywhere
 
 
-@pytest.mark.xfail(strict=True, reason=BUG_BINDING)
+# formerly strict xfail BUG_BINDING, fixed by seam W1
 def test_new_revision_during_a_running_publication_keeps_the_approved_snapshot(personal_client: AuthedClient, db,
                                                                                vault, monkeypatch):
     world = publication_ready(personal_client, db, vault, monkeypatch)
@@ -206,7 +203,7 @@ def test_google_docs_human_revision_is_a_conflict_never_an_overwrite(settings, v
         client.close()
 
 
-@pytest.mark.xfail(strict=True, reason=BUG_BINDING)
+# formerly strict xfail BUG_BINDING, fixed by seam W1
 def test_human_edit_during_update_is_kept_and_handed_to_review(personal_client: AuthedClient, db, vault, monkeypatch):
     world = publication_ready(personal_client, db, vault, monkeypatch)
     plan = world["plan"]
@@ -223,7 +220,7 @@ def test_human_edit_during_update_is_kept_and_handed_to_review(personal_client: 
             "parent_version_id": approved["id"], "content": content, "rationale": "update ringkasan"})
         assert r.status_code == 201, r.text
         approve_current(personal_client, plan["id"], action="APPROVE_AND_PUBLISH",
-                        targets=[{"provider": "google-docs", "root_id": "FolderRoot0001"}])
+                        targets=[{"provider": "google-drive", "root_id": PUB_FOLDER}])
         second = preview_and_execute(personal_client, plan["id"], targets=["docs"])
         view = run_outbox(db, second["id"])
     overview = next(o for o in view["operations"] if o["logical_id"] == "01-product-overview")
@@ -281,7 +278,7 @@ def test_confluence_folder_support_on_a_real_tenant():
 
 
 # ---------------------------------------------------------------------------------------------- 1.20
-@pytest.mark.xfail(strict=True, reason=BUG_BINDING)
+# formerly strict xfail BUG_BINDING, fixed by seam W1
 def test_provider_timeout_after_create_is_reconciled_before_retry(personal_client: AuthedClient, db, vault,
                                                                   monkeypatch):
     world = publication_ready(personal_client, db, vault, monkeypatch)
@@ -305,7 +302,7 @@ def test_provider_timeout_after_create_is_reconciled_before_retry(personal_clien
 
 
 # ---------------------------------------------------------------------------------------------- 1.21 / 3.23
-@pytest.mark.xfail(strict=True, reason=BUG_BINDING)
+# formerly strict xfail BUG_BINDING, fixed by seam W1
 def test_one_failing_target_is_partial_and_successes_are_kept(personal_client: AuthedClient, db, vault, monkeypatch):
     world = publication_ready(personal_client, db, vault, monkeypatch)
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:

@@ -86,7 +86,7 @@ class FakeModules:
 
         doc = types.ModuleType("aeos.doctor.capabilities")
 
-        def capability_state(session: Session, capability, *, domain=None, project_id=None):
+        def capability_state(session: Session, capability, *, domain=None, project_id=None, **_kw):
             from aeos.doctor.facade import CapabilityState
 
             return CapabilityState(capability=capability, status=fake.capability,
