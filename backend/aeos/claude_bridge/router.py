@@ -11,16 +11,26 @@ from sqlalchemy import select
 from aeos.api.deps import DB, AdminPrincipal, CurrentPrincipal, SettingsDep
 from aeos.audit import service as audit
 from aeos.claude_bridge import bridge
+from aeos.identity.service import Principal
 from aeos.models.claude_bridge_ext import ClaudeCapabilityTest
 
 router = APIRouter(tags=["claude_bridge"])
 
 
+def mask_account(auth: dict[str, Any], principal: Principal) -> dict[str, Any]:
+    """The Max account e-mail is the owner's own: shown to SUPER_ADMIN, masked for other roles."""
+    if principal.is_admin or not auth.get("email"):
+        return auth
+    return {**auth, "email": "(disembunyikan untuk peran ini)"}
+
+
 @router.get("/api/claude/status")
-def claude_status(db: DB, settings: SettingsDep, _p: CurrentPrincipal, refresh: bool = False) -> dict[str, Any]:
+def claude_status(db: DB, settings: SettingsDep, principal: CurrentPrincipal, refresh: bool = False) -> dict[str, Any]:
     """Binary/version/auth summary, env hygiene, policy models, last capability test, quota (UNKNOWN)."""
-    out = bridge.status(db, settings, refresh=refresh)
+    # a forced re-probe spawns the official binary: SUPER_ADMIN only (otherwise the 60 s cache)
+    out = bridge.status(db, settings, refresh=refresh and principal.is_admin)
     db.commit()  # persists a STALE mark when the binary changed since the last test
+    out["auth"] = mask_account(out["auth"], principal)
     return out
 
 

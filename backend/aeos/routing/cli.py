@@ -9,13 +9,20 @@ app = typer.Typer(help="Model registry and routing (registry entries are never a
                   no_args_is_help=True)
 
 
-def _admin_user_id(session, username: str) -> str:
+def _admin_user_id(session, username: str, password: str) -> str:
+    """Human-only AUTH (§19/§20): the decision actor proves it is the SUPER_ADMIN by its password.
+
+    A username alone is not enough - any local process (an agent with a shell included) could name
+    the owner. The password is read without echo and never stored or logged."""
     from aeos.core.enums import Role
+    from aeos.identity.passwords import verify_password
     from aeos.models.identity import User
 
     user = session.scalars(select(User).where(User.username == username)).first()
     if user is None or not user.is_active or user.role != Role.SUPER_ADMIN.value:
         raise typer.BadParameter(f"{username!r} is not an active SUPER_ADMIN (decisions are human-only)")
+    if not password or not verify_password(user.password_hash, password):
+        raise typer.BadParameter("password check failed - no decision recorded")
     return user.id
 
 
@@ -85,9 +92,11 @@ def activate_cmd(
     from aeos.routing import service
 
     ensure_database()
+    password = typer.prompt(f"Password for {as_user} (confirms this human decision)", hide_input=True,
+                            default="", show_default=False)
     try:
         with session_scope() as s:
-            uid = _admin_user_id(s, as_user)
+            uid = _admin_user_id(s, as_user, password)
             route, decision = service.activate_route(
                 s, route_key, actor_user_id=uid, mode=mode.upper(), rationale=rationale,
                 expected_config_hash=expected_hash, allowed_data_classes=data_class or None,

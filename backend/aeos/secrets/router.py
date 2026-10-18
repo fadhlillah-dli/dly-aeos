@@ -20,6 +20,12 @@ from aeos.secrets.health import secrets_status, store_health
 router = APIRouter(tags=["secrets"])
 
 
+def _active(principal: Principal) -> str:
+    """Active domain for project-ref visibility; no selection -> only non-project refs are shown."""
+    d = principal.active_domain
+    return d.value if d is not None and principal.can_access_domain(d) else "NONE"
+
+
 def _office_visible(principal: Principal) -> bool:
     """OFFICE metadata (even existence of an office credential) only inside an OFFICE session."""
     return principal.active_domain == Domain.OFFICE and principal.can_access_domain(Domain.OFFICE)
@@ -27,7 +33,7 @@ def _office_visible(principal: Principal) -> bool:
 
 @router.get("/api/secrets/status")
 def get_secrets_status(settings: SettingsDep, principal: CurrentPrincipal) -> dict[str, Any]:
-    return secrets_status(settings, include_office=_office_visible(principal))
+    return secrets_status(settings, include_office=_office_visible(principal), domain=_active(principal))
 
 
 @router.get("/api/secrets/health")
@@ -50,7 +56,7 @@ def _cred_status(rows: list[dict[str, Any]]) -> str:
         return "CONFIGURED"  # a stored credential is configuration, not a functional proof
     if "EXPIRED" in states:
         return "EXPIRED"
-    if states <= {"UNKNOWN", "HIDDEN"}:
+    if states <= {"UNKNOWN", "HIDDEN", "NO_ACCESS"}:
         return "UNKNOWN"
     return "MISSING"
 
@@ -70,9 +76,10 @@ def _openrouter_quota(db: Session) -> dict[str, Any] | None:
 
 def integrations_overview(db: Session, settings: Settings, principal: Principal) -> dict[str, Any]:
     from aeos.claude_bridge import bridge
+    from aeos.claude_bridge.router import mask_account
 
     office = _office_visible(principal)
-    st = secrets_status(settings, include_office=office)
+    st = secrets_status(settings, include_office=office, domain=_active(principal))
     health = store_health(settings)
     claude = bridge.status(db, settings)
     test = claude.get("last_capability_test") or {}
@@ -84,7 +91,8 @@ def integrations_overview(db: Session, settings: Settings, principal: Principal)
             "status": claude_status,
             "capability": "Perencanaan/review terstruktur lewat binary resmi, login claude.ai (tanpa API)",
             "scope": "Workspace supervisor terpisah; alat baca saja (Read/Grep/Glob); OFFICE ditolak tanpa otorisasi",
-            "account": {k: claude["auth"].get(k) for k in ("authMethod", "subscriptionType", "apiProvider", "email")},
+            "account": {k: mask_account(claude["auth"], principal).get(k)
+                        for k in ("authMethod", "subscriptionType", "apiProvider", "email")},
             "credential_refs": [], "credential_note": "Kredensial native dikelola binary resmi; tidak disimpan di vault.",
             "expiry": None, "proof_time": test.get("checked_at"), "proof_source": "uji kemampuan bridge (E2)",
             "remedies": [{"command": "claude", "why": "Login resmi: jalankan lalu ketik /login (akun Max)"},

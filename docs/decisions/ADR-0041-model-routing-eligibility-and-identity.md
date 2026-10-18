@@ -72,3 +72,28 @@ context 262144, tools, `expiration_date` 2026-10-31; 16 `:free` models in total)
 * Seeded OpenCode context windows are UNKNOWN (not published in S07): tasks that set `min_context`
   stay blocked until the window is recorded from a verified source.
 * LiteLLM (§07 order 6) is not introduced; the broker remains the only worker-model egress.
+
+## Addendum 2026-10-18 - completeness review
+
+* **CLI decisions need the actor's password**. `aeos routes activate --as <admin>` prompts for that
+  SUPER_ADMIN's password (no echo) before it records the ROUTE_ACTIVATION/TRIAL decision. Without
+  it, any local process (an agent with a shell included) could name the owner and self-approve
+  (human-only AUTH, §19/§20). If the password is wrong or the user is not an active SUPER_ADMIN,
+  nothing is recorded.
+* **Approval display = authorisation**. Detail views mark a decision `effective` only when it is
+  ACTIVE, human, unexpired and bound to the hash of the route's current configuration (recomputed,
+  not the stored value). Expired or agent-recorded decisions are labelled "tidak berlaku" and never
+  shown as approved.
+* **Canonical data-class order**. Activation stores allowed data classes in enum order, so
+  re-confirming the reviewed classes keeps the reviewed config hash (and eval results). Narrowing or
+  widening them is a real configuration change.
+* **Registry mode**. `GET /api/routes` reports `mode=LIVE` only when every listed row is LIVE. A few
+  catalog-discovered rows never relabel the seeded DESIGN registry as live runtime data.
+* **Last used**. The domain scope is applied in SQL, so a burst of usage from the other domain can
+  neither leak through nor hide the visible usage.
+* **Not done (gap)**: recording the model actually served by a *worker* route. The supervisor
+  resolution is recorded from `modelUsage`. For worker routes, a first observation would change
+  `resolved_version`, which is part of the config hash, and so invalidate the approval the route
+  was activated under. That needs its own decision: either an "alias observed" field outside the
+  identity, or treating the first observation as non-breaking. It also needs a broker/worker-runtime
+  reporter. Until then the worker resolved version stays UNKNOWN, as §23 allows.

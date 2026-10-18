@@ -65,6 +65,7 @@ def test_opus_result_parsed_with_resolved_model_and_no_dollars():
 def test_fable_request_answered_by_other_model_is_policy_mismatch():
     p = _parse(FABLE_FALLBACK, model="fable")
     assert not p.ok and p.error_code == "MODEL_POLICY_MISMATCH"
+    assert p.structured is None  # §12: an off-policy answer is rejected, not handed to the caller
     assert p.model_resolved == "claude-opus-4-8"
     assert "claude-opus-4-8" in p.error
     assert p.usage["safety_stops"] == 2
@@ -83,6 +84,7 @@ def test_family_mismatch_and_unknown_identity():
     no_usage.pop("modelUsage")
     p = _parse(no_usage)
     assert not p.ok and p.model_resolved == "UNKNOWN" and p.error_code == "MODEL_POLICY_MISMATCH"
+    assert p.structured is None  # identity UNKNOWN is never accepted as a pass
 
 
 def test_auxiliary_haiku_tolerated_but_foreign_output_model_rejected():

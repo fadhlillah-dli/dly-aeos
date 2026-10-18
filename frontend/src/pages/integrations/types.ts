@@ -7,7 +7,7 @@ export interface Remedy {
 
 export interface CredentialRef {
   ref: string;
-  state: string; // PRESENT | MISSING | EXPIRED | UNKNOWN | HIDDEN
+  state: string; // PRESENT | MISSING | EXPIRED | UNKNOWN | HIDDEN | NO_ACCESS
   backend?: string;
   updated_at?: string | null;
   expires_at?: string | null;
@@ -54,7 +54,24 @@ export interface SecretStatusItem {
   purpose: string | null;
   used_by: string | null;
   integration: string | null;
-  remedy: string;
+  remedy: string | null; // null for NO_ACCESS: no command would succeed
+  remedy_note?: string | null;
+}
+
+export interface TokenView {
+  present: boolean;
+  ttl_seconds?: number;
+  renewable?: boolean;
+  expires_in_seconds?: number;
+  policies?: string[];
+}
+
+export interface FunctionalCheck {
+  status: string; // VERIFIED | FAILED | BLOCKED | NOT_TESTED
+  checked_at: string | null;
+  stale?: boolean;
+  steps?: { id: string; status: string; detail?: string }[];
+  note?: string;
 }
 
 export interface SecretStatusResponse {
@@ -79,9 +96,11 @@ export interface StoreHealth {
     version: string | null;
     login: string;
     approle_in_keyring: boolean | null;
+    token?: TokenView;
     binary_installed: boolean;
     server_pid_alive: boolean;
   };
+  functional_check?: FunctionalCheck;
   keyring: { available: boolean; backend: string; platform_store: string };
   interim: { active: boolean; decision: Record<string, unknown> | null; residual_risk: string | null };
   reasons: string[];

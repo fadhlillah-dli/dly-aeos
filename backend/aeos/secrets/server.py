@@ -109,7 +109,7 @@ def bao_version(binary: Path) -> str | None:
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         out = subprocess.run([str(binary), "version"], capture_output=True, text=True, timeout=20, check=False,
-                             stdin=subprocess.DEVNULL, **kwargs).stdout
+                             stdin=subprocess.DEVNULL, env=_server_env(), **kwargs).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     for tok in out.split():

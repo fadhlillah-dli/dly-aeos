@@ -21,7 +21,12 @@ export function SupervisorSection() {
   return (
     <Card
       title="Pengawas: Claude Code resmi (login Max native, tanpa Claude API)"
-      actions={<StatusBadge status={s.bridge_status === "BLOCKED" ? "BLOCKED" : t?.status ?? "NOT_TESTED"} />}
+      actions={
+        <span className="flex flex-wrap items-center gap-2">
+          <Freshness at={s.checked_at} label="Diperiksa" staleAfterSeconds={300} />
+          <StatusBadge status={s.bridge_status === "BLOCKED" ? "BLOCKED" : t?.status ?? "NOT_TESTED"} />
+        </span>
+      }
     >
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="space-y-3">

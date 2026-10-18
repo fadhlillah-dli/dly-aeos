@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from aeos.api.deps import DB, AdminPrincipal, CurrentPrincipal, SettingsDep
@@ -35,13 +35,18 @@ def _visible_domains(principal: Principal) -> list[str | None]:
 
 
 def _last_used(session: Session, route_key: str, principal: Principal) -> dict[str, Any] | None:
-    domains = _visible_domains(principal)
-    q = select(UsageLedgerEntry).where(UsageLedgerEntry.route_key == route_key).order_by(UsageLedgerEntry.at.desc())
-    for e in session.scalars(q.limit(20)):
-        if e.domain in domains:
-            return {"at": _iso(e.at), "run_id": e.run_id, "model": e.model, "source": e.source, "mode": e.mode,
-                    "status": "LAST_USED"}
-    return None
+    """Latest usage visible in this session's domain (filtered in SQL: a burst of usage from the other
+    domain can neither hide the visible one nor leak through)."""
+    named = [d for d in _visible_domains(principal) if d is not None]
+    scope = or_(UsageLedgerEntry.domain.is_(None), UsageLedgerEntry.domain.in_(named)) if named \
+        else UsageLedgerEntry.domain.is_(None)
+    q = (select(UsageLedgerEntry).where(UsageLedgerEntry.route_key == route_key, scope)
+         .order_by(UsageLedgerEntry.at.desc()).limit(1))
+    e = session.scalars(q).first()
+    if e is None:
+        return None
+    return {"at": _iso(e.at), "run_id": e.run_id, "model": e.model, "source": e.source, "mode": e.mode,
+            "status": "LAST_USED"}
 
 
 def _eval_summary(r: ModelRoute) -> dict[str, Any]:
@@ -113,7 +118,9 @@ def list_routes(db: DB, principal: CurrentPrincipal, pool: str | None = None, st
         "checked_at": _iso(last.created_at) if last else (_iso(max(checks)) if checks else None),
         "catalog_refresh": ({"at": _iso(last.created_at), "status": last.status, "results": last.results}
                             if last else None),
-        "mode": "LIVE" if any(r.mode == "LIVE" for r in rows) else "DESIGN",
+        # DESIGN as long as any seeded design row is listed: a few catalog-discovered LIVE rows never
+        # relabel the registry as live runtime data (§37, §50 'Katalog blueprint ... belum diprobe')
+        "mode": "LIVE" if rows and all(r.mode == "LIVE" for r in rows) else "DESIGN",
         "counts": {"total": len(items), "approved": sum(1 for r in rows if r.status in {"APPROVED", "TRIAL"})},
     }
 
@@ -163,10 +170,13 @@ def get_route(route_key: str, db: DB, principal: CurrentPrincipal) -> dict[str, 
     decisions = db.scalars(select(Decision).where(Decision.target_type == service.TARGET_TYPE,
                                                   Decision.target_id == r.route_key)
                            .order_by(Decision.created_at.desc()).limit(20))
+    current = service.compute_config_hash(r)
     view["decisions"] = [
         {"id": d.id, "kind": d.kind, "status": d.status, "target_hash": d.target_hash,
-         "matches_current_config": d.target_hash == r.config_hash, "created_at": _iso(d.created_at),
-         "expires_at": _iso(d.expires_at), "rationale": d.rationale}
+         "matches_current_config": d.target_hash == current,
+         # only an ACTIVE, human, unexpired decision bound to the CURRENT hash authorises the route
+         "effective": service.decision_effective(d, r), "actor_kind": d.actor_kind or "HUMAN",
+         "created_at": _iso(d.created_at), "expires_at": _iso(d.expires_at), "rationale": d.rationale}
         for d in decisions
     ]
     view["quota_states"] = [

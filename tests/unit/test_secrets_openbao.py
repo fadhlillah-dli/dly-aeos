@@ -50,10 +50,13 @@ def _healthy(sealed=False, initialized=True):
         200, json={"initialized": initialized, "sealed": sealed, "standby": False, "version": "2.7.1"}))
 
 
-def _login(lease=3600, renewable=True, token=TOKEN):
+CONTROLLER = ["aeos-personal", "aeos-platform", "aeos-projects", "aeos-workers", "default"]
+
+
+def _login(lease=3600, renewable=True, token=TOKEN, policies=None):
     return respx.post(f"{ADDR}/v1/auth/approle/login").mock(return_value=httpx.Response(
         200, json={"auth": {"client_token": token, "lease_duration": lease, "renewable": renewable,
-                            "policies": ["aeos-personal"]}}))
+                            "policies": CONTROLLER if policies is None else policies}}))
 
 
 @respx.mock
@@ -101,9 +104,32 @@ def test_put_status_list_and_delete_never_return_values(bao):
         "updated_time": "2026-10-18T03:00:00Z", "current_version": 2, "custom_metadata": {}}}))
     refs = [s.ref for s in bao.list_status()]
     assert refs == ["projects/p1/github", "workers/openrouter"]
+    assert bao.denied_namespaces == ["office"]  # not bound to the controller: never even listed
+    assert bao.token_view()["policies"] == sorted(CONTROLLER) and TOKEN not in repr(bao.token_view())
     delete = respx.delete(f"{ADDR}/v1/aeos/metadata/workers/openrouter").mock(return_value=httpx.Response(204))
     bao.delete("workers/openrouter", actor="cli")
     assert delete.called
+
+
+@respx.mock
+def test_list_status_survives_a_denied_namespace(bao):
+    """Real OpenBao answers 403 for LIST on a namespace the token is not bound to (observed on
+    2.7.1); the listing must skip it, not fail the whole status page (all refs UNKNOWN)."""
+    _healthy()
+    _login(policies=[])  # policies not reported -> the provider has to ask
+
+    def listing(request):
+        prefix = request.url.path.split("/metadata/", 1)[1]
+        if prefix == "office/":
+            return httpx.Response(403, json={"errors": ["permission denied"]})
+        keys = {"personal/": ["github"]}.get(prefix)
+        return httpx.Response(200, json={"data": {"keys": keys}}) if keys else httpx.Response(404)
+
+    respx.get(url__regex=re.escape(ADDR) + r"/v1/aeos/metadata/[a-z0-9/]+/(\?.*)?$").mock(side_effect=listing)
+    respx.get(f"{ADDR}/v1/aeos/metadata/personal/github").mock(return_value=httpx.Response(200, json={"data": {
+        "updated_time": "2026-10-18T03:00:00Z", "current_version": 1, "custom_metadata": {}}}))
+    assert [s.ref for s in bao.list_status()] == ["personal/github"]
+    assert bao.denied_namespaces == ["office"]
 
 
 @respx.mock
@@ -196,3 +222,84 @@ def test_non_loopback_addr_refused():
         OpenBaoClient("http://10.0.0.5:8200")
     with pytest.raises(OpenBaoUnavailable):
         OpenBaoClient("http://vault.example.com:8200")
+
+
+def _projects(db):
+    from aeos.models.portfolio import Project
+
+    personal = Project(project_key="sec-personal", name="Personal project", domain="PERSONAL")
+    office = Project(project_key="sec-office", name="Office project", domain="OFFICE")
+    db.add_all([personal, office])
+    db.commit()
+    return personal.id, office.id
+
+
+@respx.mock
+def test_project_secrets_only_for_registered_personal_projects(bao, db):
+    """§23/§26: the controller is bound to aeos-projects but not aeos-office, so an OFFICE project's
+    credential under projects/ would bypass OFFICE default deny; unknown projects fail closed too."""
+    _healthy()
+    _login()
+    personal, office = _projects(db)
+    respx.get(f"{ADDR}/v1/aeos/data/projects/{personal}/github").mock(return_value=httpx.Response(200, json={
+        "data": {"data": {"value": VALUE}, "metadata": {}}}))
+    calls = respx.route(url__regex=rf".*/projects/({office}|unknown-project)/.*").mock(
+        return_value=httpx.Response(200, json={"data": {"data": {"value": VALUE}, "metadata": {}}}))
+    assert bao.get(f"projects/{personal}/github", purpose=f"projects:{personal}:broker", actor="t") == VALUE
+    for pid in (office, "unknown-project"):
+        with pytest.raises(PolicyDenied):
+            bao.get(f"projects/{pid}/github", purpose=f"projects:{pid}:broker", actor="t")
+        with pytest.raises(PolicyDenied):
+            bao.put(f"projects/{pid}/github", VALUE, actor="cli")
+        with pytest.raises(PolicyDenied):
+            bao.delete(f"projects/{pid}/github", actor="cli")
+    assert not calls.called  # refused before any vault request
+
+
+@respx.mock
+def test_verify_roundtrip_reports_without_values(bao):
+    _healthy()
+    _login()
+    stored: dict = {}
+
+    def write(request):
+        stored["value"] = json.loads(request.content)["data"]["value"]
+        return httpx.Response(200, json={"data": {"version": 1}})
+
+    respx.post(f"{ADDR}/v1/aeos/data/platform/aeos-healthcheck").mock(side_effect=write)
+    respx.post(f"{ADDR}/v1/aeos/metadata/platform/aeos-healthcheck").mock(return_value=httpx.Response(204))
+    respx.get(f"{ADDR}/v1/aeos/metadata/platform/aeos-healthcheck").mock(return_value=httpx.Response(
+        200, json={"data": {"updated_time": "2026-10-18T03:00:00Z", "current_version": 1, "custom_metadata": {}}}))
+    respx.get(f"{ADDR}/v1/aeos/data/platform/aeos-healthcheck").mock(side_effect=lambda req: httpx.Response(
+        200, json={"data": {"data": {"value": stored["value"]}, "metadata": {}}}))
+    delete = respx.delete(f"{ADDR}/v1/aeos/metadata/platform/aeos-healthcheck").mock(return_value=httpx.Response(204))
+    res = bao.verify_roundtrip()
+    assert res["status"] == "VERIFIED" and [s["id"] for s in res["steps"]] == ["write", "read", "delete"]
+    assert delete.called and stored["value"] not in json.dumps(res)
+    assert res["token"]["present"] and "aeos-office" not in res["token"]["policies"]
+
+
+@respx.mock
+def test_status_projection_marks_unbound_office_namespace_no_access(bao, settings, monkeypatch):
+    """§26 status without values: office/* under the controller AppRole (office policy not bound) is
+    NO_ACCESS - not 'missing' with a `secrets set` remedy that OpenBao would refuse - and the
+    controller never even asks OpenBao for office paths."""
+    from aeos.secrets import provider as provider_mod
+    from aeos.secrets.health import secrets_status, store_health
+
+    _healthy()
+    _login()
+    office_calls = respx.route(url__regex=r".*/v1/aeos/(data|metadata)/office/.*").mock(
+        return_value=httpx.Response(403, json={"errors": ["permission denied"]}))
+    respx.get(url__regex=r".*/v1/aeos/metadata/[a-z]+/(\?.*)?$").mock(return_value=httpx.Response(404))
+    respx.get(url__regex=r".*/v1/aeos/metadata/(personal|workers)/[a-z-]+$").mock(return_value=httpx.Response(404))
+    monkeypatch.setattr(provider_mod, "openbao_provider", lambda _s: bao)
+    rows = {i["ref"]: i for i in secrets_status(settings, include_office=True)["items"]}
+    assert rows["office/atlassian"]["state"] == "NO_ACCESS" and rows["office/atlassian"]["remedy"] is None
+    assert rows["personal/github"]["state"] == "MISSING"
+    assert rows["personal/github"]["remedy"] == "aeos secrets set personal/github"
+    assert not office_calls.called
+    h = store_health(settings)
+    assert h["status"] == "CONNECTED" and h["functional_check"]["status"] == "NOT_TESTED"  # CONNECTED != VERIFIED
+    assert h["openbao"]["token"]["present"] and TOKEN not in json.dumps(h)
+    assert any(r["command"] == "aeos vault status --verify" for r in h["remedies"])

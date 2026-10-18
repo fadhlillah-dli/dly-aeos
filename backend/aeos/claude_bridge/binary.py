@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -101,13 +102,19 @@ def locate_binary(settings: Settings) -> BinaryInfo:
     return BinaryInfo(found=True, path=path, source=source)
 
 
+def neutral_cwd() -> str:
+    """Working directory for probes: never the controller's cwd (it may be a repository whose
+    project settings/hooks the client would read, S05). The OS temp dir holds no project config."""
+    return tempfile.gettempdir()
+
+
 def _run(argv: list[str], *, timeout: float = 30.0) -> tuple[int, str, str]:
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     proc = subprocess.run(
         argv, capture_output=True, text=True, encoding="utf-8", errors="replace", env=child_env(),
-        stdin=subprocess.DEVNULL, timeout=timeout, check=False, **kwargs,
+        stdin=subprocess.DEVNULL, timeout=timeout, check=False, cwd=neutral_cwd(), **kwargs,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -162,7 +169,7 @@ def parse_auth_status(rc: int, stdout: str, stderr: str = "") -> AuthInfo:
     if logged_in is not True:
         reasons.append("not logged in: run `claude` and complete the official claude.ai login (/login)")
     if method != REQUIRED_AUTH_METHOD:
-        reasons.append(f"authMethod is {method!r}; only the native claude.ai (Max) login is allowed — "
+        reasons.append(f"authMethod is {method!r}; only the native claude.ai (Max) login is allowed - "
                        "API keys/console/third-party auth are never used as a fallback")
     if provider != REQUIRED_API_PROVIDER:
         reasons.append(f"apiProvider is {provider!r}; Bedrock/Vertex/Foundry/other providers are not allowed")

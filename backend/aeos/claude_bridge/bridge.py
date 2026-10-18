@@ -77,6 +77,8 @@ CAPABILITY_TEST_PROMPT = (
     'Reply only with the structured result {"ok": true}.'
 )
 CAPABILITY_TEST_MAX_AGE = timedelta(days=7)
+# Purposes that may run without a domain: the doctor probe sends a fixed prompt and no project data.
+DOMAINLESS_PURPOSE_PREFIXES = ("doctor.",)
 
 # DESIGN default for display; the planning module's PlanVersion policy baseline is authoritative.
 SUPERVISOR_POLICY: dict[str, Any] = {
@@ -151,6 +153,11 @@ def validate_request(request: ClaudeRequest) -> tuple[str, str] | None:
         return "REQUEST_INVALID", "domain must be PERSONAL or OFFICE"
     if request.project_id and not request.domain:
         return "DOMAIN_REQUIRED", "project-scoped Claude requests need the explicit human-selected domain (U-05)"
+    if not request.domain and not str(request.purpose or "").startswith(DOMAINLESS_PURPOSE_PREFIXES):
+        # §50 'Submit prompt tanpa domain': refused before any model call. Only the doctor's
+        # capability probe (fixed prompt, no project data) runs without a domain.
+        return "DOMAIN_REQUIRED", (f"purpose {request.purpose!r} needs the explicit human-selected domain "
+                                   "(PERSONAL/OFFICE); only doctor.* probes run without one (U-05)")
     if not (1 <= int(request.timeout_seconds) <= 3600):
         return "REQUEST_INVALID", "timeout_seconds must be within 1..3600"
     try:
@@ -160,6 +167,40 @@ def validate_request(request: ClaudeRequest) -> tuple[str, str] | None:
     if high_confidence_secret_hits(request.prompt):
         return "SECRET_IN_PROMPT", "prompt contains a credential; it is never sent to a model (U-13)"
     return None
+
+
+def project_domain_problem(request: ClaudeRequest) -> tuple[str, str] | None:
+    """U-05 defence in depth: a project-scoped request must carry the project's own immutable domain.
+
+    A caller (or upstream bug) passing ``domain=PERSONAL`` for an OFFICE project would otherwise skip
+    the OFFICE policy check below; an unregistered project cannot prove its domain -> refused."""
+    if not request.project_id:
+        return None
+    try:
+        from aeos.models.portfolio import Project
+
+        with session_scope() as s:
+            project = s.get(Project, request.project_id)
+            domain = project.domain if project is not None else None
+    except Exception as exc:  # fail closed
+        return "DOMAIN_UNVERIFIED", f"project domain could not be read ({type(exc).__name__})"
+    if domain is None:
+        return "PROJECT_NOT_FOUND", "project is not registered; its domain cannot be verified"
+    if domain != request.domain:
+        return "DOMAIN_MISMATCH", "request domain differs from the project's immutable domain (U-05)"
+    return None
+
+
+def preflight(request: ClaudeRequest) -> tuple[str, str] | None:
+    """Everything that must hold before any prompt leaves the machine (bridge and manual package)."""
+    problem = validate_request(request)
+    if problem:
+        return problem
+    if request.domain == Domain.OFFICE.value:
+        allowed, why = office_claude_allowed()
+        if not allowed:
+            return "OFFICE_POLICY_DENIED", why
+    return project_domain_problem(request)
 
 
 def office_claude_allowed() -> tuple[bool, str]:
@@ -180,13 +221,9 @@ def office_claude_allowed() -> tuple[bool, str]:
 
 def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) -> ClaudeResult:
     settings = settings or get_settings()
-    problem = validate_request(request)
+    problem = preflight(request)
     if problem:
         return _fail(request, *problem)
-    if request.domain == Domain.OFFICE.value:
-        allowed, why = office_claude_allowed()
-        if not allowed:
-            return _fail(request, "OFFICE_POLICY_DENIED", why)
     schema_json = json.dumps(request.json_schema, separators=(",", ":"), ensure_ascii=False)
     if len(schema_json) > MAX_SCHEMA_ARG_CHARS:
         return _fail(request, "SCHEMA_TOO_LARGE", f"schema is {len(schema_json)} chars (> {MAX_SCHEMA_ARG_CHARS})")
@@ -201,7 +238,8 @@ def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) 
     request_id = new_id()
     try:
         ws = prepare_workspace(settings, request_id)
-        context_manifest = copy_context(ws, list(request.context_files))
+        context_manifest = copy_context(ws, list(request.context_files), layout=settings.layout,
+                                        domain=request.domain)
     except WorkspaceError as exc:
         return _fail(request, exc.code, str(exc), engine_version=pr.binary.version)
 
@@ -282,6 +320,8 @@ def _record_side_effects(request: ClaudeRequest, result: ClaudeResult, resets_at
             if result.quota_exhausted:
                 record_quota_exhausted(s, request.model, resets_at=resets_at, reset_text=reset_text,
                                        message=result.error)
+            elif result.ok:
+                clear_quota_exhausted(s, request.model)
             if result.ok and result.model_resolved and result.model_resolved != "UNKNOWN":
                 _observe_resolution(s, request.model, result.model_resolved)
     except Exception:  # pragma: no cover - logged; never break the caller's flow
@@ -333,6 +373,32 @@ def record_quota_exhausted(session: Session, model: str, *, resets_at: Any = Non
     except Exception:  # pragma: no cover
         log.exception("emit quota event failed")
     return row
+
+
+def clear_quota_exhausted(session: Session, model: str) -> bool:
+    """A later successful call proves the limit has lifted for that scope: EXHAUSTED -> UNKNOWN.
+
+    Without this an exhaustion observed without a reset time would block the queue forever. The
+    state goes back to UNKNOWN (remaining Max quota is not published), never to "OK"."""
+    scope = family_of(model) or "max"
+    row = session.scalars(select(QuotaState).where(QuotaState.provider == QUOTA_PROVIDER,
+                                                   QuotaState.scope == scope)).first()
+    if row is None or row.state != "EXHAUSTED":
+        return False
+    row.state = "UNKNOWN"
+    row.source = "observed-successful-call"
+    row.observed_at = utcnow()
+    row.resets_at = None
+    row.details = {"note": "a later call succeeded; remaining quota is not published (UNKNOWN, not OK)"}
+    session.flush()
+    try:
+        from aeos.events.service import emit
+
+        emit(session, source="claude_bridge", kind="claude.quota_available", entity_type="quota",
+             entity_id=f"{QUOTA_PROVIDER}:{scope}", payload={"scope": scope, "state": "UNKNOWN"})
+    except Exception:  # pragma: no cover
+        log.exception("emit quota event failed")
+    return True
 
 
 def _observe_resolution(session: Session, model: str, resolved: str) -> None:

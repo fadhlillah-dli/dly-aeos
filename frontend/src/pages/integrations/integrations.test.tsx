@@ -28,12 +28,29 @@ const HEALTH = {
   reasons: ["OpenBao unreachable"], remedies: [{ command: "aeos vault start", why: "Jalankan" }], checked_at: "2026-10-18T10:00:00Z", source: "health", mode: "LIVE",
   evidence_limit: "CONNECTED bukan VERIFIED",
 };
+// OpenBao up and logged in (CONNECTED), office namespace unbound, last functional proof is history (stale)
+const STATUS_BAO = {
+  ...STATUS, backend: "openbao", reasons: [],
+  items: [
+    { ...STATUS.items[0], state: "PRESENT", backend: "openbao", exists: true, updated_at: "2026-10-18T03:00:00Z" },
+    { ref: "office/atlassian", namespace: "office", exists: null, state: "NO_ACCESS", backend: "openbao", updated_at: null, expires_at: null, scope: {}, note: "", purpose: "Token Atlassian", used_by: "publisher", integration: "atlassian", remedy: null, remedy_note: "OFFICE: kebijakan office tidak terikat" },
+  ],
+};
+const HEALTH_BAO = {
+  ...HEALTH, status: "CONNECTED", backend: "openbao", reasons: [],
+  openbao: { ...HEALTH.openbao, reachable: true, initialized: true, sealed: false, version: "2.7.1", login: "OK", approle_in_keyring: true, binary_installed: true, token: { present: true, ttl_seconds: 3600, renewable: true, expires_in_seconds: 3000, policies: ["aeos-personal", "aeos-workers", "default"] } },
+  functional_check: { status: "VERIFIED", checked_at: "2026-10-01T00:00:00Z", stale: true },
+  remedies: [{ command: "aeos vault status --verify", why: "Buktikan" }],
+};
+let vault = "down";
 
 beforeEach(() => {
+  vault = "down";
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
-      const body = url.startsWith("/api/secrets/integrations") ? CARDS : url.startsWith("/api/secrets/status") ? STATUS : HEALTH;
+      const up = vault === "up";
+      const body = url.startsWith("/api/secrets/integrations") ? CARDS : url.startsWith("/api/secrets/status") ? (up ? STATUS_BAO : STATUS) : up ? HEALTH_BAO : HEALTH;
       return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
     }),
   );
@@ -65,5 +82,18 @@ describe("Integrations & Access page", () => {
     expect(screen.getByText(/external_worker_allowed=false/)).toBeInTheDocument();
     expect(screen.getByText(/Disembunyikan di sesi ini/)).toBeInTheDocument();
     expect(screen.getAllByText(/Belum ada bukti/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Belum diuji \(aeos vault status --verify\)/)).toBeInTheDocument();
+  });
+
+  it("shows token TTL/scope, a stale functional proof as stale and NO_ACCESS without a bogus command", async () => {
+    vault = "up";
+    renderPage();
+    expect(await screen.findByText(/TTL 60 menit, sisa 50 menit, dapat diperpanjang/)).toBeInTheDocument();
+    expect(screen.getByText("aeos-personal, aeos-workers, default")).toBeInTheDocument();
+    expect(screen.getByText(/Usang \(hasil terakhir VERIFIED\)/)).toBeInTheDocument();
+    expect(screen.queryByText("Terverifikasi")).toBeNull(); // a past roundtrip is never shown as a current pass
+    expect(await screen.findByText("Tanpa akses")).toBeInTheDocument();
+    expect(screen.getByText(/kebijakan office tidak terikat/)).toBeInTheDocument();
+    expect(screen.queryByText("aeos secrets set office/atlassian")).toBeNull();
   });
 });

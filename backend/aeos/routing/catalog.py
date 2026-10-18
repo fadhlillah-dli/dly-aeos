@@ -24,6 +24,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from aeos.claude_bridge.binary import neutral_cwd
 from aeos.claude_bridge.env import child_env
 from aeos.core.config import Settings, get_settings
 from aeos.core.errors import AeosError
@@ -264,8 +265,10 @@ def refresh_opencode_catalog(session: Session, settings: Settings) -> dict[str, 
     if sys.platform == "win32":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
+        # neutral cwd: never the controller's cwd, whose project config (plugins/providers) opencode would load
         proc = subprocess.run([binary, "models"], capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=60, env=child_env(), stdin=subprocess.DEVNULL, check=False, **kwargs)
+                              timeout=60, env=child_env(), stdin=subprocess.DEVNULL, check=False,
+                              cwd=neutral_cwd(), **kwargs)
     except (OSError, subprocess.SubprocessError) as exc:
         return {"status": "FAILED", "checked_at": now.isoformat(), "reason": f"opencode models failed: {type(exc).__name__}"}
     if proc.returncode != 0:

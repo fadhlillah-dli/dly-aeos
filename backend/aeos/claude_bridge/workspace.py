@@ -98,8 +98,36 @@ def high_confidence_secret_hits(text: str) -> int:
     return hits
 
 
-def copy_context(ws: Path, files: list[Path]) -> list[dict[str, Any]]:
-    """Copy context files read-only into ``<ws>/context``. Returns a manifest (name, size, hash)."""
+def scan_text(data: bytes) -> str:
+    """Text to scan for credentials in a context file of any encoding.
+
+    Decoded leniently as UTF-8; when the bytes contain NULs (UTF-16, e.g. PowerShell 5.1 ``>``
+    output) a NUL-stripped copy is scanned too, so a token cannot hide behind the encoding."""
+    text = data.decode("utf-8", errors="replace")
+    if b"\x00" in data:
+        text += "\n" + data.replace(b"\x00", b"").decode("utf-8", errors="replace")
+    return text
+
+
+def domain_boundary_problem(layout: DataLayout, src: Path, domain: str | None) -> str | None:
+    """§12/§23/U-05: a request may only carry context from its own domain's data partition.
+
+    The supervisor never gets both domains at once: a PERSONAL (or platform, ``domain=None``)
+    request must not read a file under the OFFICE partition and vice versa. Symlinks are resolved,
+    so a link pointing into the other partition is refused as well."""
+    for d in Domain:
+        if d.value != domain and _within(src, layout.domain_root(d)):
+            return (f"context file {src.name} belongs to the {d.value} data partition; a "
+                    f"{domain or 'platform'} request may not send it (domain-first)")
+    return None
+
+
+def copy_context(ws: Path, files: list[Path], *, layout: DataLayout | None = None,
+                 domain: str | None = None) -> list[dict[str, Any]]:
+    """Copy context files read-only into ``<ws>/context``. Returns a manifest (name, size, hash).
+
+    With *layout*, files from another domain's data partition are refused. On any refusal the
+    partial copy is removed, so nothing half-prepared is left behind."""
     if len(files) > MAX_CONTEXT_FILES:
         raise WorkspaceError(f"too many context files ({len(files)} > {MAX_CONTEXT_FILES})", code="CONTEXT_TOO_LARGE")
     target = ws / "context"
@@ -107,31 +135,35 @@ def copy_context(ws: Path, files: list[Path]) -> list[dict[str, Any]]:
     manifest: list[dict[str, Any]] = []
     total = 0
     used: set[str] = set()
-    for src in files:
-        src = Path(src)
-        if not src.is_file():
-            raise WorkspaceError(f"context file not found: {src.name}", code="CONTEXT_MISSING")
-        size = src.stat().st_size
-        total += size
-        if size > MAX_CONTEXT_FILE_BYTES or total > MAX_CONTEXT_TOTAL_BYTES:
-            raise WorkspaceError("context exceeds the size limit", code="CONTEXT_TOO_LARGE")
-        try:
-            text = src.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            text = ""
-        if high_confidence_secret_hits(text):
-            raise WorkspaceError(f"context file {src.name} contains a credential; refusing to send it",
-                                 code="SECRET_IN_PROMPT")
-        name = src.name if src.name not in used else f"{len(used)}-{src.name}"
-        try:
-            name = safe_segment(name)
-        except UnsafePathError:
-            name = f"context-{len(used)}{src.suffix if safe_suffix(src.suffix) else ''}"
-        used.add(name)
-        dest = target / name
-        shutil.copyfile(src, dest)
-        os.chmod(dest, stat.S_IREAD)
-        manifest.append({"name": name, "bytes": size, "sha256": file_sha256(dest)})
+    try:
+        for src in files:
+            src = Path(src)
+            if not src.is_file():
+                raise WorkspaceError(f"context file not found: {src.name}", code="CONTEXT_MISSING")
+            if layout is not None:
+                problem = domain_boundary_problem(layout, src, domain)
+                if problem:
+                    raise WorkspaceError(problem, code="CONTEXT_DOMAIN_DENIED")
+            size = src.stat().st_size
+            total += size
+            if size > MAX_CONTEXT_FILE_BYTES or total > MAX_CONTEXT_TOTAL_BYTES:
+                raise WorkspaceError("context exceeds the size limit", code="CONTEXT_TOO_LARGE")
+            if high_confidence_secret_hits(scan_text(src.read_bytes())):
+                raise WorkspaceError(f"context file {src.name} contains a credential; refusing to send it",
+                                     code="SECRET_IN_PROMPT")
+            name = src.name if src.name not in used else f"{len(used)}-{src.name}"
+            try:
+                name = safe_segment(name)
+            except UnsafePathError:
+                name = f"context-{len(used)}{src.suffix if safe_suffix(src.suffix) else ''}"
+            used.add(name)
+            dest = target / name
+            shutil.copyfile(src, dest)
+            os.chmod(dest, stat.S_IREAD)
+            manifest.append({"name": name, "bytes": size, "sha256": file_sha256(dest)})
+    except BaseException:
+        cleanup_context(ws)
+        raise
     return manifest
 
 
@@ -149,6 +181,13 @@ def cleanup_context(ws: Path) -> None:
             os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
         except OSError:
             pass
+    remove_tree(target)
+
+
+def remove_tree(target: Path) -> None:
+    """``rmtree`` that also removes read-only files (Windows refuses to delete them otherwise)."""
+    if not target.exists():
+        return
 
     def _retry(func: Any, path: str, _exc: Any) -> None:
         os.chmod(path, stat.S_IWRITE | stat.S_IREAD)

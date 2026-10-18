@@ -140,6 +140,14 @@ def _decision_valid(d: Decision | None, *, kind: str, config_hash: str | None) -
     return config_hash is None or d.target_hash == config_hash
 
 
+def decision_effective(d: Decision, route: ModelRoute) -> bool:
+    """Whether *d* currently authorises *route*: ACTIVE, human, unexpired and bound to the hash of the
+    route's CURRENT configuration (what the dashboard may show as approved — nothing else)."""
+    if d.kind not in {"ROUTE_ACTIVATION", "TRIAL"}:
+        return False
+    return _decision_valid(d, kind=d.kind, config_hash=compute_config_hash(route))
+
+
 def find_route_decision(session: Session, *, kind: str, route: ModelRoute) -> Decision | None:
     """ACTIVE human decision of *kind* bound to the route's CURRENT configuration, else None.
 
@@ -542,7 +550,9 @@ def activate_route(
         restricted = any(terms.get(k) is True for k in RESTRICTED_TERMS_KEYS) or route.identity_status == "UNVERIFIED"
         if restricted and set(allowed_data_classes) - {DataClassification.PUBLIC.value}:
             raise ValidationFailed("data terms/identity of this route allow PUBLIC data only")
-        route.allowed_data_classes = sorted(set(allowed_data_classes))
+        # canonical (enum) order: re-confirming the same classes must not change the reviewed identity
+        chosen = set(allowed_data_classes)
+        route.allowed_data_classes = [c.value for c in DataClassification if c.value in chosen]
     now = utcnow()
     if terms_reviewed:
         route.terms_checked_at = now
