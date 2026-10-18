@@ -45,3 +45,11 @@ def create_pull_request(
     from aeos.broker.git_broker import create_pull_request as impl
 
     return impl(session, run_id=run_id, repo_full_name=repo_full_name, head=head, base=base, title=title, body=body)
+
+
+def reconcile_side_effect(session: Session, *, side_effect_id: str, actor: str) -> dict[str, Any]:
+    """Read the external state of a PENDING/UNKNOWN push/PR and record it before any retry (§14).
+    Read-only towards the provider. Added by the completeness review; existing signatures unchanged."""
+    from aeos.broker.git_broker import reconcile_side_effect as impl
+
+    return impl(session, side_effect_id, actor=actor)
