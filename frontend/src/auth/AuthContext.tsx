@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useMemo, type ReactNode } from "react";
 import { ApiError, get, post, setCsrfToken } from "../api/client";
+import { restartEventStream } from "../lib/events";
 
 export type Domain = "PERSONAL" | "OFFICE";
 
@@ -76,8 +77,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (domain: Domain, projectId: string | null = null) => {
       const s = await post<SessionView>("/api/session/context", { domain, project_id: projectId });
       setSession(s);
-      // Domain switch: drop every cached view so no data from the other domain lingers (§35).
+      // Domain switch: drop every cached view so no data from the other domain lingers (§35), and
+      // reopen the event stream: the backend applies the domain/project scope when a stream opens.
       qc.removeQueries({ predicate: (query) => query.queryKey[0] !== "session" });
+      restartEventStream();
     },
     [qc, setSession],
   );

@@ -5,7 +5,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { MappedBadge, PROPOSAL_STATUS } from "../../components/proposals/MappedBadge";
-import { Button, Card, EmptyState, ErrorBox, inputClass, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
+import { Button, Card, EmptyState, ErrorBox, inputBase, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { relativeTime } from "../../lib/format";
 import { ProposalForm } from "./ProposalForm";
 import type { Kind, Meta, ProposalRow } from "./types";
@@ -20,7 +20,8 @@ export default function ProposalsPage() {
   const source = params.get("source");
   const kindParam = params.get("kind");
   const initialKind = KINDS.find((k) => k === kindParam) ?? null;
-  const [open, setOpen] = useState(Boolean(component || source));
+  // Deep links from Tools & Repos / component detail / System Map open the form directly (§39).
+  const [open, setOpen] = useState(Boolean(component || source || params.get("new")));
   const [status, setStatus] = useState("");
   const [kind, setKind] = useState("");
   const nav = useNavigate();
@@ -76,7 +77,7 @@ export default function ProposalsPage() {
         title="Daftar usulan"
         actions={
           <div className="flex flex-wrap gap-2">
-            <select aria-label="Filter status" className={inputClass + " w-56"} value={status} onChange={(e) => setStatus(e.target.value)}>
+            <select aria-label="Filter status" className={inputBase + " w-full sm:w-56"} value={status} onChange={(e) => setStatus(e.target.value)}>
               <option value="">Semua status</option>
               {STATUSES.map((s) => (
                 <option key={s} value={s}>
@@ -84,7 +85,7 @@ export default function ProposalsPage() {
                 </option>
               ))}
             </select>
-            <select aria-label="Filter jenis" className={inputClass + " w-36"} value={kind} onChange={(e) => setKind(e.target.value)}>
+            <select aria-label="Filter jenis" className={inputBase + " w-full sm:w-36"} value={kind} onChange={(e) => setKind(e.target.value)}>
               <option value="">Semua jenis</option>
               {KINDS.map((k) => (
                 <option key={k} value={k}>

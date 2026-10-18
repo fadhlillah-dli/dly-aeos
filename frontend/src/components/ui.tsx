@@ -1,6 +1,6 @@
 import { clsx } from "clsx";
 import { AlertTriangle, Database, Info, Loader2 } from "lucide-react";
-import { useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { useState, type ComponentPropsWithRef, type ReactNode } from "react";
 import { Link, useInRouterContext } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { absoluteTime, ageSeconds, relativeTime } from "../lib/format";
@@ -10,12 +10,12 @@ export function Card({ title, actions, children, className }: { title?: ReactNod
   return (
     <section className={clsx("rounded-lg border border-line bg-surface", className)}>
       {(title || actions) && (
-        <header className="flex items-center justify-between gap-2 border-b border-line px-4 py-2.5">
-          <h2 className="text-sm font-semibold">{title}</h2>
-          <div className="flex items-center gap-2">{actions}</div>
+        <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+          <h2 className="min-w-0 text-sm font-semibold">{title}</h2>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">{actions}</div>
         </header>
       )}
-      <div className="p-4">{children}</div>
+      <div className="min-w-0 p-4">{children}</div>
     </section>
   );
 }
@@ -107,29 +107,44 @@ export function PageHeader({
   );
 }
 
+export type ButtonVariant = "primary" | "secondary" | "danger" | "ghost";
+
+export function buttonClass(variant: ButtonVariant = "secondary", className?: string): string {
+  return clsx(
+    "inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
+    variant === "primary" && "bg-accent text-accent-ink hover:opacity-90",
+    variant === "secondary" && "border border-line bg-surface hover:bg-surface-3",
+    variant === "danger" && "bg-bad text-bad-ink hover:opacity-90",
+    variant === "ghost" && "hover:bg-surface-3",
+    className,
+  );
+}
+
 export function Button({
   variant = "secondary",
   busy,
   className,
   children,
   ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "danger" | "ghost"; busy?: boolean }) {
+}: ComponentPropsWithRef<"button"> & { variant?: ButtonVariant; busy?: boolean }) {
   return (
     <button
       {...rest}
       disabled={rest.disabled || busy}
-      className={clsx(
-        "inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
-        variant === "primary" && "bg-accent text-accent-ink hover:opacity-90",
-        variant === "secondary" && "border border-line bg-surface hover:bg-surface-3",
-        variant === "danger" && "bg-bad text-white hover:opacity-90",
-        variant === "ghost" && "hover:bg-surface-3",
-        className,
-      )}
+      className={buttonClass(variant, className)}
     >
       {busy && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
       {children}
     </button>
+  );
+}
+
+/** A router link that looks like a button (navigation, not an action: it never writes anything). */
+export function LinkButton({ to, variant = "secondary", className, children, ...rest }: { to: string; variant?: ButtonVariant; className?: string; children: ReactNode; title?: string }) {
+  return (
+    <Link to={to} className={buttonClass(variant, className)} {...rest}>
+      {children}
+    </Link>
   );
 }
 
@@ -187,11 +202,12 @@ export function Freshness({ at, staleAfterSeconds = 900, label = "Diperiksa" }: 
 
 export function KeyValue({ items }: { items: [ReactNode, ReactNode][] }) {
   return (
-    <dl className="grid grid-cols-[minmax(120px,max-content)_1fr] gap-x-4 gap-y-1.5 text-sm">
+    // Phones: label above value (a max-content label column would squeeze values to a sliver).
+    <dl className="grid grid-cols-1 gap-x-4 text-sm sm:grid-cols-[minmax(120px,max-content)_minmax(0,1fr)] sm:gap-y-1.5">
       {items.map(([k, v], i) => (
         <div key={i} className="contents">
           <dt className="text-ink-3">{k}</dt>
-          <dd className="min-w-0 break-words">{v ?? "—"}</dd>
+          <dd className="mb-1.5 min-w-0 wrap-anywhere sm:mb-0">{v ?? "—"}</dd>
         </div>
       ))}
     </dl>
@@ -274,13 +290,13 @@ export function Notice({ tone = "info", children }: { tone?: "info" | "warn" | "
       )}
     >
       <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-      <div>{children}</div>
+      <div className="min-w-0 wrap-break-word">{children}</div>
     </div>
   );
 }
 
 export function Mono({ children }: { children: ReactNode }) {
-  return <code className="mono rounded bg-surface-3 px-1 py-0.5">{children}</code>;
+  return <code className="mono rounded bg-surface-3 px-1 py-0.5 wrap-anywhere">{children}</code>;
 }
 
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
@@ -293,5 +309,9 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
   );
 }
 
-export const inputClass =
-  "w-full rounded-md border border-line bg-surface px-3 py-1.5 text-sm placeholder:text-ink-3 focus:border-accent focus:outline-none";
+/** Field styling without a width: combine with an explicit width (w-full sm:w-56 ...). */
+export const inputBase =
+  "rounded-md border border-line bg-surface px-3 py-1.5 text-sm placeholder:text-ink-3 focus:border-accent focus:outline-none";
+
+/** Full-width field. Do not append another w-* class to it (both are width utilities; use inputBase). */
+export const inputClass = `w-full ${inputBase}`;
