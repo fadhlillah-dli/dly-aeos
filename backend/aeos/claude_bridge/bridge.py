@@ -112,6 +112,15 @@ def cmdline_length(argv: list[str]) -> int:
     return len(subprocess.list2cmdline(argv))
 
 
+MAX_COMMAND_LINE_CHARS = MAX_CMDLINE_CHARS
+
+
+def command_line_chars(argv: list[str]) -> int:
+    """Length of the command line as Windows receives it (``subprocess.list2cmdline`` quoting).
+    Measured on every OS so the same request is accepted or refused everywhere."""
+    import subprocess
+
+    return len(subprocess.list2cmdline(argv))
 QUOTA_PROVIDER = "claude-native"
 CAPABILITY_TEST_SCHEMA: dict[str, Any] = {
     "type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False,
@@ -285,6 +294,12 @@ def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) 
                      "Claude native bridge is BLOCKED: " + "; ".join(pr.reasons or ["unknown"]) +
                      " - use the manual package (official Claude Code) instead; no API fallback exists",
                      engine_version=pr.binary.version)
+    cmdline = command_line_chars(build_argv(str(pr.binary.path), schema_json=schema_json, model=request.model,
+                                            tools=list(request.allowed_tools), effort=request.effort))
+    if cmdline > MAX_COMMAND_LINE_CHARS:
+        return _fail(request, "SCHEMA_TOO_LARGE",
+                     f"the command line would be {cmdline} chars after quoting (> {MAX_COMMAND_LINE_CHARS}; "
+                     "Windows limit 32767)", engine_version=pr.binary.version)
 
     request_id = new_id()
     try:
