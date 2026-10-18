@@ -353,7 +353,8 @@ class _Ctx:
                                                  "ke isi dokumen"),
             ("Last reviewed", "belum direview manusia (dicatat di AEOS)"),
             ("Links", "; ".join(f"{k}: {', '.join(map(str, vals))}" for k, vals in sorted(doc.links.items())
-                                if vals and isinstance(vals, list)) or "—"),
+                                if vals and isinstance(vals, list) and k != "task_ids") or "—"),
+            ("Issue / evidence", "dirujuk live di AEOS (Work items, Evidence) — tidak disalin ke dokumen"),
         ]
 
     # -- registration
@@ -586,7 +587,7 @@ def _prd(ctx: _Ctx, f: FeatureView, parent: str) -> None:
             timing=p1.Timing.FEATURE_APPROVAL, status=_ok_status(ctx), reason="",
             owner=ctx.owner("Product Owner") if not f.owner else f"{f.owner} (Feature Owner)", slice_=slice_,
             template_key="prd",
-            links={"requirement": [f.key], "tasks": [t.task_key for t in tasks],
+            links={"requirement": [f.key], "tasks": [t.task_key for t in tasks], "task_ids": [t.id for t in tasks],
                    "commit": sorted({t.base_commit for t in tasks if t.base_commit}),
                    "related": rfc_ids + tdd_ids + [f"06-testing/test-plan-{f.key}"]},
             build=build)
@@ -824,7 +825,7 @@ def _test_plan(ctx: _Ctx, f: FeatureView, parent: str) -> None:
     tasks = ctx.tasks_for(f.key)
     logical_id = f"{parent}/test-plan-{f.key}"
 
-    def pick(*keys: str) -> Any:
+    def lookup(*keys: str) -> Any:
         for src in (ft, t):
             for k in keys:
                 if src.get(k):
@@ -832,7 +833,7 @@ def _test_plan(ctx: _Ctx, f: FeatureView, parent: str) -> None:
         return None
 
     def txt(*keys: str) -> str:
-        val = pick(*keys)
+        val = lookup(*keys)
         return _bullets(val) if isinstance(val, list) else as_text(val)
 
     def build(doc: RenderedDocument) -> None:
@@ -849,7 +850,7 @@ def _test_plan(ctx: _Ctx, f: FeatureView, parent: str) -> None:
         b.put("test_data", txt("data", "test_data"))
         b.put("tools", txt("tools"))
         acs = list(f.acceptance) + [ac for x in tasks for ac in x.acceptance_criteria]
-        scenarios = pick("scenarios")
+        scenarios = lookup("scenarios")
         b.put("scenarios", _bullets(scenarios) if isinstance(scenarios, list) else
               (_join("Skenario minimum diturunkan dari acceptance criteria yang disetujui (bukan hasil uji):",
                      _numbered(acs)) if acs else ""))
@@ -875,7 +876,8 @@ def _test_plan(ctx: _Ctx, f: FeatureView, parent: str) -> None:
             parent=parent, timing=p1.Timing.FEATURE_APPROVAL, status=_ok_status(ctx), reason="",
             owner=ctx.owner("QA Lead"), slice_={**_feature_slice(f, tasks), "testing": t},
             template_key="test-plan",
-            links={"requirement": [f.key, f"02-requirements/prd-{f.key}"], "tasks": [x.task_key for x in tasks]},
+            links={"requirement": [f.key, f"02-requirements/prd-{f.key}"], "tasks": [x.task_key for x in tasks],
+                   "task_ids": [x.id for x in tasks]},
             build=build)
 
 

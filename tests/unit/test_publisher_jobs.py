@@ -445,6 +445,62 @@ def test_status_dimensions_are_separate(env):
     assert dims["VERIFIED"]["status"] in ("UNKNOWN", "NOT_PROVEN")
 
 
+def test_reconcile_records_human_edit_of_published_document_as_revision_input(env):
+    from aeos.models.publishing import DocumentRevision
+
+    db = env["db"]
+    pub = _preview(env)
+    _execute(env, pub)
+    jobs.process_publication(db, pub.id)
+    store = env["fakes"]["google"].store
+    store["01-product-overview"]["rev"] = "r-human"
+    store["01-product-overview"]["text"] = "Catatan PO di Google Docs"
+    result = jobs.reconcile_publication(db, pub.id, actor_user_id="owner-user")
+    db.commit()
+    assert result["human_edits"] == 1 and result["status"] == "PUBLISHED"
+    rec = db.scalar(select(DocumentRecord).where(DocumentRecord.logical_doc_id == "01-product-overview"))
+    rev = db.scalar(select(DocumentRevision).where(DocumentRevision.document_id == rec.id,
+                                                   DocumentRevision.kind == "HUMAN_EDIT_INPUT"))
+    assert rev.status == "OPEN" and rev.observed_revision == "r-human" and "Catatan PO" in rev.body_markdown
+    ref = db.scalar(select(ExternalReference).where(ExternalReference.logical_id == "01-product-overview"))
+    assert ref.sync_status == "STALE"
+    again = jobs.reconcile_publication(db, pub.id, actor_user_id="owner-user")
+    assert again["human_edits"] == 1  # still differs, but no duplicate revision input
+    assert len(list(db.scalars(select(DocumentRevision).where(DocumentRevision.kind == "HUMAN_EDIT_INPUT")))) == 1
+    # a later approved change to that document is planned as CONFLICT (open human edit is never overwritten)
+    plan = db.get(Plan, env["plan"].id)
+    content = copy.deepcopy(SAMPLE_CONTENT)
+    content["summary"] = "Ringkasan baru"
+    v2 = add_version(db, plan, content)
+    approve(db, plan, v2)
+    db.commit()
+    pub2 = _preview(env)
+    op = next(o for o in _ops(db, pub2) if o.logical_id == "01-product-overview")
+    assert op.status == "CONFLICT" and "human edit" in op.error
+
+
+def test_issue_links_are_added_to_feature_documents(env):
+    db = env["db"]
+    pub = _preview(env)
+    _execute(env, pub)
+    jobs.process_publication(db, pub.id)
+    prd = db.scalar(select(DocumentRecord).where(DocumentRecord.logical_doc_id == "02-requirements/prd-tasks"))
+    issues = prd.links["issues"]
+    assert [i["logical_id"] for i in issues] == ["issue:task:T1"] and issues[0]["url"].startswith("https://")
+
+
+def test_execute_with_nothing_to_write(env):
+    db = env["db"]
+    pub = _preview(env)
+    _execute(env, pub)
+    jobs.process_publication(db, pub.id)
+    same = _preview(env)  # everything unchanged → all SKIPPED
+    out = _execute(env, same)
+    db.refresh(same)
+    assert out.allowed and same.status == "PUBLISHED" and "tidak ada operasi" in same.status_reason
+    assert db.get(Plan, env["plan"].id).state == "PUBLISHED"
+
+
 def test_final_status_rules():
     def op(s):
         return PublicationOperation(status=s)

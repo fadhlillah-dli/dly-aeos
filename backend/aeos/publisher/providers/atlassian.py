@@ -32,6 +32,7 @@ from aeos.core.hashing import sha256_text
 from aeos.core.redaction import register_secret
 from aeos.publisher.providers.base import (
     DEFAULT_TIMEOUT,
+    Inspection,
     OpContext,
     OpResult,
     ProviderBlocked,
@@ -396,6 +397,18 @@ class ConfluenceProvider:
         out = resp.json()
         return OpResult(external_id=pid, external_url=_link(self.cfg, out),
                         external_revision=str((out.get("version") or {}).get("number", number + 1)), kind="page")
+
+    def inspect(self, external_id: str) -> Inspection:
+        resp = send(self.client, "GET", self._v2(f"/pages/{quote(external_id, safe='')}"), write=False,
+                    what="confluence inspect page", headers=self._h(), params={"body-format": "storage"})
+        if resp.status_code == 404:
+            return Inspection(exists=False)
+        if resp.status_code != 200:
+            raise classify_http_error(resp, write=False, what="confluence inspect page")
+        data = resp.json()
+        body = ((data.get("body") or {}).get("storage") or {}).get("value", "")
+        return Inspection(exists=True, revision=str((data.get("version") or {}).get("number", "")),
+                          text=re.sub(r"<[^>]+>", " ", body)[:100_000], url=_link(self.cfg, data))
 
     def _marker_matches(self, kind: str, content_id: str, ctx: OpContext) -> bool:
         resp = send(self.client, "GET", self._v2(f"/{kind}/{quote(content_id, safe='')}/properties"), write=False,

@@ -7,9 +7,10 @@ acknowledged by an admin (never overwritten automatically).
 
 from __future__ import annotations
 
+import difflib
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
@@ -20,6 +21,7 @@ from aeos.core.timeutil import utcnow
 from aeos.docs_engine import product1, visuals
 from aeos.docs_engine import service as docs_service
 from aeos.events import service as events
+from aeos.models.evidence import EvidenceArtifact
 from aeos.models.planning import PlanVersion
 from aeos.models.publishing import DocumentRecord, DocumentRevision, ExternalReference
 
@@ -40,9 +42,11 @@ def _iso(dt: Any) -> str | None:
     return dt.isoformat() if dt else None
 
 
-def document_view(rec: DocumentRecord, refs: list[ExternalReference], open_inputs: int) -> dict[str, Any]:
+def document_view(rec: DocumentRecord, refs: list[ExternalReference], open_inputs: int,
+                  evidence: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     stale = any(r.sync_status != "SYNCED" for r in refs)
     return {
+        "evidence": evidence or [],  # live references (DYNAMIC), never copied into the document
         "id": rec.id, "project_id": rec.project_id, "domain": rec.domain, "logical_doc_id": rec.logical_doc_id,
         "node": rec.node, "title": rec.title, "kind": rec.kind, "doc_type": rec.doc_type,
         "parent_logical_id": rec.parent_logical_id, "owner": rec.owner, "status": rec.status,
@@ -86,8 +90,21 @@ def list_documents(project_id: str, db: DB, principal: CurrentPrincipal, domain:
         DocumentRevision.project_id == project.id, DocumentRevision.kind == "HUMAN_EDIT_INPUT",
         DocumentRevision.status == "OPEN").group_by(DocumentRevision.document_id)).all())
     checked = max((r.rendered_at for r in recs if r.rendered_at), default=None)
+    task_ids = sorted({t for r in recs for t in ((r.links or {}).get("task_ids") or [])})
+    ev_by_task: dict[str, list[dict[str, Any]]] = {}
+    if task_ids:
+        for ev in db.scalars(select(EvidenceArtifact).where(EvidenceArtifact.task_id.in_(task_ids),
+                                                            EvidenceArtifact.project_id == project.id)):
+            ev_by_task.setdefault(ev.task_id or "", []).append(
+                {"id": ev.id, "kind": ev.kind, "trusted": ev.trusted, "evidence_level": ev.evidence_level,
+                 "origin": ev.origin, "created_at": _iso(ev.created_at), "mode": ev.mode})
+
+    def evidence_for(rec: DocumentRecord) -> list[dict[str, Any]]:
+        return [e for t in ((rec.links or {}).get("task_ids") or []) for e in ev_by_task.get(t, [])]
+
     return {
-        "items": [document_view(r, refs.get(r.logical_doc_id, []), int(open_inputs.get(r.id, 0))) for r in recs],
+        "items": [document_view(r, refs.get(r.logical_doc_id, []), int(open_inputs.get(r.id, 0)), evidence_for(r))
+                  for r in recs],
         "product_title": product1.product_title(project.name), "source": SOURCE, "checked_at": _iso(checked),
         "mode": "LIVE",
         "summary": {"documents": sum(1 for r in recs if r.kind == "DOC"),
@@ -153,6 +170,30 @@ def revisions(doc_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDo
                        "acknowledged_by": r.acknowledged_by, "acknowledged_at": _iso(r.acknowledged_at),
                        "excerpt": (r.body_markdown or "")[:2000]} for r in rows],
             "source": SOURCE, "checked_at": utcnow().isoformat(), "mode": "LIVE"}
+
+
+@router.get("/api/documents/{doc_id}/diff")
+def diff(doc_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain,
+         against: str | None = Query(default=None, max_length=64)) -> dict[str, Any]:
+    """Unified diff "sebelum → sesudah" (§41): current rendered snapshot vs the previous snapshot, or vs a
+    specific revision (e.g. an observed human edit) when ``against`` is given."""
+    rec = _load_doc(db, principal, domain, doc_id)
+    revs = list(db.scalars(select(DocumentRevision).where(DocumentRevision.document_id == rec.id)
+                           .order_by(DocumentRevision.created_at.desc())))
+    if against:
+        base = next((r for r in revs if r.id == against), None)
+        if base is None:
+            raise NotFound("revision not found")
+    else:
+        base = next((r for r in revs if r.kind == "RENDERED" and r.status == "SUPERSEDED"), None)
+    before = (base.body_markdown if base else "").splitlines()
+    after = (rec.body_markdown or "").splitlines()
+    lines = list(difflib.unified_diff(before, after, fromfile=f"{base.kind.lower()}:{base.id}" if base else "(kosong)",
+                                      tofile=f"current:{rec.content_hash or ''}", lineterm="", n=2))
+    truncated = len(lines) > 4000
+    return {"document_id": rec.id, "base_revision_id": base.id if base else None,
+            "base_kind": base.kind if base else None, "diff": "\n".join(lines[:4000]), "truncated": truncated,
+            "changed": bool(lines), "source": SOURCE, "checked_at": utcnow().isoformat()}
 
 
 @router.post("/api/documents/{doc_id}/revision-inputs/{rev_id}/acknowledge")

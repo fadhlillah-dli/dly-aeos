@@ -606,13 +606,18 @@ def execute_publication(session: Session, pub_id: str, *, actor_user_id: str, co
         session.flush()
         return ExecuteOutcome(False, reasons, pub)
     now = utcnow()
-    pub.status = RUNNING if ops else PUBLISHED
     pub.started_at = now
-    pub.status_reason = "" if ops else "tidak ada perubahan untuk dipublikasikan"
-    if not ops:
+    if ops:
+        pub.status, pub.status_reason = RUNNING, ""
+        to_state = PS.PUBLISHING
+    else:  # nothing to write: the outcome is decided by the planned SKIPPED/CONFLICT rows
+        pub.status = final_status(_ops_for(session, pub.id))
+        pub.status_reason = "tidak ada operasi yang perlu dijalankan" + (
+            "; konflik revisi menunggu keputusan manusia" if pub.status != PUBLISHED else "")
         pub.finished_at = now
-    applied, note = plan_state.set_plan_state(session, pub.plan_id, PS.PUBLISHING if ops else PS.PUBLISHED,
-                                              reason=f"publication {pub.id}")
+        to_state = PS.PUBLISHED if pub.status == PUBLISHED else PS.PUBLICATION_PARTIAL
+        plan_state.set_plan_state(session, pub.plan_id, PS.PUBLISHING, reason=f"publication {pub.id}")
+    applied, note = plan_state.set_plan_state(session, pub.plan_id, to_state, reason=f"publication {pub.id}")
     pub.summary = {**(pub.summary or {}), "plan_state": {"applied": applied, "note": note}}
     audit.record(session, actor_type="user", actor_id=actor_user_id, action="publication.execute",
                  target_type="publication", target_id=pub.id, project_id=pub.project_id, domain=pub.domain,
@@ -753,7 +758,9 @@ def _record_success(run: _Run, op: PublicationOperation, res: OpResult) -> None:
             rec.external_revision = res.external_revision
             rec.last_synced_at = now
             rec.links = {**(rec.links or {}), "external_url": res.external_url, "external_id": res.external_id,
-                         "external_provider": ref_provider}
+                         "external_provider": ref_provider,
+                         # §29: incremental updates carry no images; a new DOCX snapshot needs its own decision
+                         "visual_update_pending": bool((res.response or {}).get("images_not_updated"))}
     if op.operation == "create_issue":
         tgt = op.target or {}
         proj = s.scalar(select(OperationalWorkProjection).where(
@@ -771,6 +778,16 @@ def _record_success(run: _Run, op: PublicationOperation, res: OpResult) -> None:
         proj.external_status = str((res.response or {}).get("state") or "open")
         proj.last_synced_at = now
         proj.sync_status = "SYNCED"
+        feature = tgt.get("feature_key")
+        if feature:  # §27 per-document links to the issues of the feature (reference, not a status copy)
+            for lid in (f"02-requirements/prd-{feature}", f"06-testing/test-plan-{feature}"):
+                doc = s.scalar(select(DocumentRecord).where(DocumentRecord.project_id == pub.project_id,
+                                                            DocumentRecord.logical_doc_id == lid))
+                if doc is not None:
+                    issues = [i for i in (doc.links or {}).get("issues", []) if i.get("issue_id") != res.external_id]
+                    issues.append({"provider": op.provider, "issue_id": res.external_id, "url": res.external_url,
+                                   "logical_id": op.logical_id})
+                    doc.links = {**(doc.links or {}), "issues": issues}
 
 
 def _record_conflict(run: _Run, op: PublicationOperation, exc: ProviderConflict) -> None:
@@ -1155,9 +1172,13 @@ def reconcile_publication(session: Session, pub_id: str, *, actor_user_id: str,
     if project is None:
         raise NotFound("project not found")
     run = _Run(session=session, pub=pub, project=project, now=now or utcnow())
-    report: dict[str, list[str]] = {"found": [], "absent": [], "unknown": [], "conflict": [], "skipped": []}
+    report: dict[str, list[str]] = {"found": [], "absent": [], "unknown": [], "conflict": [], "skipped": [],
+                                    "human_edits": [], "missing": []}
     try:
         for op in _ops_for(session, pub.id):
+            if op.status == OP_SUCCEEDED and op.operation in ("create_doc", "update_doc"):
+                _inspect_published(run, op, report)
+                continue
             if op.status not in (OP_UNKNOWN, OP_IN_FLIGHT, OP_FAILED, OP_PENDING) or \
                     (op.status == OP_PENDING and op.attempts == 0):
                 report["skipped"].append(op.id)
@@ -1180,6 +1201,47 @@ def reconcile_publication(session: Session, pub_id: str, *, actor_user_id: str,
                 payload={k: len(v) for k, v in report.items()})
     session.flush()
     return {k: len(v) for k, v in report.items()} | {"status": pub.status}
+
+
+def _inspect_published(run: _Run, op: PublicationOperation, report: dict[str, list[str]]) -> None:
+    """Read-only check of a published document: a provider revision that AEOS did not write is a human
+    edit → recorded as revision input (§29 "Human edits dibaca sebagai input revisi"), never overwritten."""
+    s, pub = run.session, run.pub
+    ref = _ref(s, pub.project_id, REF_PROVIDER[op.provider], op.logical_id)
+    if ref is None:
+        return
+    try:
+        inspect = getattr(run.provider(op), "inspect", None)
+        if inspect is None:
+            report["skipped"].append(op.id)
+            return
+        ins = inspect(ref.external_id)
+    except ProviderError as exc:
+        op.response = {**(op.response or {}), "inspect_error": exc.message}
+        report["unknown"].append(op.id)
+        return
+    ref.last_synced_at = run.now
+    if not ins.exists:
+        ref.sync_status = "UNKNOWN"
+        report["missing"].append(op.id)
+        return
+    if not ins.revision or ins.revision == ref.external_revision:
+        return
+    rec = s.scalar(select(DocumentRecord).where(DocumentRecord.project_id == pub.project_id,
+                                                DocumentRecord.logical_doc_id == op.logical_id))
+    if rec is not None:
+        known = s.scalar(select(DocumentRevision).where(
+            DocumentRevision.document_id == rec.id, DocumentRevision.kind == "HUMAN_EDIT_INPUT",
+            DocumentRevision.observed_revision == ins.revision))
+        if known is None:
+            s.add(DocumentRevision(document_id=rec.id, project_id=rec.project_id, domain=rec.domain,
+                                   logical_doc_id=rec.logical_doc_id, kind="HUMAN_EDIT_INPUT", status="OPEN",
+                                   plan_version_id=pub.plan_version_id, body_markdown=redact_text(ins.text),
+                                   provider=op.provider, external_id=ref.external_id,
+                                   expected_revision=ref.external_revision, observed_revision=ins.revision,
+                                   publication_id=pub.id, details={"detected_by": "reconcile"}))
+    ref.sync_status = "STALE"
+    report["human_edits"].append(op.id)
 
 
 def recover_in_flight(session: Session) -> int:

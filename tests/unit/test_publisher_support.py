@@ -282,6 +282,14 @@ class FakeProvider:
             return None
         return OpResult(external_id=cur["id"], external_revision=cur["rev"], kind="doc", response={"reconciled": True})
 
+    def inspect(self, external_id: str):
+        from aeos.publisher.providers.base import Inspection
+
+        for cur in self.store.values():
+            if cur["id"] == external_id:
+                return Inspection(exists=True, revision=cur["rev"], text=cur.get("text", ""))
+        return Inspection(exists=False)
+
     def close(self) -> None:
         pass
 
