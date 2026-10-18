@@ -3,6 +3,8 @@ import { MemoryRouter } from "react-router-dom";
 import { opsBadgeSpec } from "../../components/control_center/OpsBadge";
 import { statusSpec } from "../../components/StatusBadge";
 import { mergeEvents, StreamState } from "./ActivityFeed";
+import { NoDomainNotice } from "./index";
+import { IntegrationsView } from "./IntegrationsCard";
 import { OverviewView } from "./OverviewView";
 import type { ActivityItem, Overview, Section } from "./types";
 
@@ -110,5 +112,65 @@ describe("Activity stream", () => {
     render(<StreamState status="reconnecting" lastSeenAt={null} />);
     expect(screen.getByText(/Menyambung ulang/)).toBeInTheDocument();
     expect(screen.getByText(/belum pernah/)).toBeInTheDocument();
+  });
+});
+
+describe("Integrations summary (§35 integration settings/health)", () => {
+  it("shows credential status and ref, never a value, and untested as not verified", () => {
+    render(
+      <MemoryRouter>
+        <IntegrationsView
+          data={{
+            items: [
+              {
+                id: "i1",
+                project_id: "p1",
+                project_name: "DLY AEOS",
+                provider: "github",
+                purpose: "code",
+                tenant_id: null,
+                root_id: "fadhlillah-dli/dly-aeos",
+                credential_ref: "personal/github",
+                credential: { status: "CONFIGURED", backend: "openbao" },
+                last_verified_at: null,
+                verification: "NOT_TESTED",
+                checks: [],
+              },
+            ],
+            checks: [],
+            source: "project_integrations",
+            checked_at: new Date().toISOString(),
+            evidence_limit: "status only",
+          }}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("personal/github")).toBeInTheDocument();
+    expect(screen.getByText("Belum diuji fungsi")).toBeInTheDocument();
+    expect(screen.getByText(/nilai tidak pernah ditampilkan/)).toBeInTheDocument();
+  });
+
+  it("explains how to add an integration when none exist", () => {
+    render(
+      <MemoryRouter>
+        <IntegrationsView data={{ items: [], checks: [], source: "x", checked_at: new Date().toISOString(), evidence_limit: "" }} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText(/Belum ada integrasi tercatat/)).toBeInTheDocument();
+    expect(screen.getByText(/aeos publish google-connect/)).toBeInTheDocument();
+  });
+});
+
+describe("Domain-first notice and header (§35, U-05)", () => {
+  it("asks for an explicit domain choice", () => {
+    render(<NoDomainNotice />);
+    expect(screen.getByText(/Pilih domain PERSONAL atau OFFICE/)).toBeInTheDocument();
+  });
+
+  it("shows environment and mode in the context header", () => {
+    renderView(overview({ environment: "local", dev_mode: true }));
+    expect(screen.getByText("local")).toBeInTheDocument();
+    expect(screen.getByText(/mode pengembangan/)).toBeInTheDocument();
+    expect(screen.getByText("Mode LIVE")).toBeInTheDocument();
   });
 });

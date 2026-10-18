@@ -38,6 +38,21 @@ def scoped_project_ids(session: Session, principal: Principal, domain: Domain) -
     return ids
 
 
+def scope_visible(scope: dict[str, Any] | None, domain: Domain, project_ids: list[str] | set[str]) -> bool:
+    """Inventory-style ``scope`` dicts (``domain``/``domains``/``project_id``): a row scoped to another
+    domain or to a project outside the user's scope is not visible (same rule as exports, §35/§41)."""
+    scope = scope or {}
+    domains: set[str] = set()
+    if isinstance(scope.get("domains"), list):
+        domains |= {str(d).upper() for d in scope["domains"]}
+    if isinstance(scope.get("domain"), str):
+        domains.add(scope["domain"].upper())
+    if domains and domain.value not in domains:
+        return False
+    pid = scope.get("project_id")
+    return not (pid and pid not in project_ids)
+
+
 # ----------------------------------------------------------------------------------------- activity
 
 
@@ -166,8 +181,7 @@ def search(session: Session, principal: Principal, domain: Domain, q: str, limit
     for c in session.scalars(select(ComponentReference).where(or_(
             like(ComponentReference.name), like(ComponentReference.friendly_name),
             like(ComponentReference.component_id))).limit(limit)):
-        domains = {str(d).upper() for d in ((c.scope or {}).get("domains") or [])}
-        if domains and domain.value not in domains:
+        if not scope_visible(c.scope, domain, pids):
             continue
         hits.append({"type": "component", "id": c.component_id, "title": c.friendly_name or c.name,
                      "subtitle": c.design_label, "link": f"/tools/{c.component_id}"})

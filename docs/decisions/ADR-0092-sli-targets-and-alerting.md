@@ -26,7 +26,10 @@ bukti ...". §35 requires alerts in the Control Center and domain-scoped project
 4. The emergency stop runs fixed steps (pause scheduling, revoke all capabilities, cancel active
    runs, preserve evidence, audit) through the owning modules' facades, commits and reports each step
    separately, and never reports COMPLETED when a step failed or its module is missing. The API
-   requires a single-use, account-bound, 3-minute confirmation token.
+   requires a single-use, account-bound, 3-minute confirmation token. The stop acts on every domain;
+   the browser report shows step statuses plus counts/run ids of the active domain only (statuses
+   only without a selected domain), one `INCIDENT_CONTAINMENT` evidence artifact is stored per domain
+   partition, and platform-level records (audit, alert, last-stop) hold statuses only.
 
 ## Consequences
 

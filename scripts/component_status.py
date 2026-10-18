@@ -84,22 +84,39 @@ def _claude() -> dict[str, Any]:
         warnings.append("ANTHROPIC_API_KEY is set in this shell: Claude Code would bill the API key instead of "
                         "your Max subscription. Unset it (DLY AEOS never uses the Claude API).")
     if item["status"] == "OK":
-        code, out = _run(["claude", "auth", "status", "--json"], timeout=20)
-        summary: dict[str, Any] = {"loggedIn": None}
-        if code in (0, 1) and out.startswith("{"):
-            try:
-                data = json.loads(out)
-                # Only non-identifying fields; email/org/ids are never printed.
-                summary = {k: data.get(k) for k in ("loggedIn", "authMethod", "apiProvider", "subscriptionType")}
-            except ValueError:
-                pass
-        item["auth"] = summary
-        if summary.get("loggedIn") is not True:
+        item["auth"] = claude_auth_summary()
+        logged_in = item["auth"].get("loggedIn")
+        if logged_in is None:
+            warnings.append("auth status UNKNOWN (could not read `claude auth status`); run it yourself and "
+                            "sign in with `claude` if needed")
+        elif logged_in is not True:
             warnings.append("not logged in: run `claude` once and sign in with your Claude account (Max plan)")
-        elif summary.get("authMethod") not in ("claude.ai", None):
-            warnings.append(f"auth method is {summary.get('authMethod')!r}; DLY AEOS expects the native claude.ai login")
+        elif item["auth"].get("authMethod") not in ("claude.ai", None):
+            warnings.append(f"auth method is {item['auth'].get('authMethod')!r}; DLY AEOS expects the native "
+                            "claude.ai login")
     item["warnings"] = warnings
     return item
+
+
+AUTH_FIELDS = ("loggedIn", "authMethod", "apiProvider", "subscriptionType")
+
+
+def claude_auth_summary() -> dict[str, Any]:
+    """Non-identifying fields of ``claude auth status`` (JSON). Email/org/account ids are never printed.
+
+    Tries ``--json`` first and the plain command second (older clients print JSON by default);
+    anything unreadable is ``loggedIn: None`` (UNKNOWN), never reported as logged in or out."""
+    for args in (["claude", "auth", "status", "--json"], ["claude", "auth", "status"]):
+        code, out = _run(args, timeout=20)
+        if code not in (0, 1) or not out.lstrip().startswith("{"):
+            continue
+        try:
+            data = json.loads(out)
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            return {k: data.get(k) for k in AUTH_FIELDS}
+    return {"loggedIn": None, "note": "auth status could not be read"}
 
 
 def _openbao() -> dict[str, Any]:

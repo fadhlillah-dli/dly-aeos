@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { get, post, put } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { OpsBadge } from "../../components/control_center/OpsBadge";
 import { Provenance } from "../../components/control_center/Provenance";
 import { StatusBadge } from "../../components/StatusBadge";
-import { Button, Card, ErrorBox, Loading, Mono, Table } from "../../components/ui";
+import { Button, Card, ErrorBox, inputClass, Loading, Mono, Table } from "../../components/ui";
 import { relativeTime } from "../../lib/format";
 import type { AlertRow, FlagRow, ListMeta, SliItem } from "./types";
 
@@ -14,6 +15,28 @@ function fmt(item: SliItem): string {
   if (item.unit === "usd") return `$${item.value.toFixed(4)}`;
   if (item.unit === "seconds") return item.value >= 3600 ? `${(item.value / 3600).toFixed(1)} jam` : `${Math.round(item.value)} dtk`;
   return String(item.value);
+}
+
+/** Integer flag editor; the backend validates type/range (e.g. interval >= 30 s) and audits the change. */
+export function IntFlagEditor({ flag, disabled, onSave, busy }: { flag: FlagRow; disabled: boolean; onSave: (value: number) => void; busy: boolean }) {
+  const [text, setText] = useState(String(flag.value ?? ""));
+  const value = Number(text);
+  const valid = text.trim() !== "" && Number.isInteger(value);
+  return (
+    <span className="inline-flex items-center gap-1">
+      <input
+        className={`${inputClass} w-24`}
+        inputMode="numeric"
+        value={text}
+        disabled={disabled}
+        aria-label={`Nilai ${flag.key}`}
+        onChange={(e) => setText(e.target.value)}
+      />
+      <Button className="text-xs" disabled={disabled || !valid || value === flag.value} busy={busy} onClick={() => onSave(value)}>
+        Simpan
+      </Button>
+    </span>
+  );
 }
 
 export function OpsTab() {
@@ -28,6 +51,10 @@ export function OpsTab() {
   });
   const toggle = useMutation({
     mutationFn: (f: FlagRow) => put(`/api/ops/flags/${f.key}`, { value: !f.value, reason: "dashboard" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ops-flags"] }),
+  });
+  const setInt = useMutation({
+    mutationFn: ({ key, value }: { key: string; value: number }) => put(`/api/ops/flags/${key}`, { value, reason: "dashboard" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["ops-flags"] }),
   });
 
@@ -112,8 +139,15 @@ export function OpsTab() {
                       <Button className="text-xs" disabled={!isAdmin} busy={toggle.isPending && toggle.variables?.key === r.key} onClick={() => toggle.mutate(r)}>
                         {r.value ? "Nonaktifkan" : "Aktifkan"}
                       </Button>
+                    ) : r.kind === "int" ? (
+                      <IntFlagEditor
+                        flag={r}
+                        disabled={!isAdmin}
+                        busy={setInt.isPending && setInt.variables?.key === r.key}
+                        onSave={(value) => setInt.mutate({ key: r.key, value })}
+                      />
                     ) : (
-                      <span className="text-xs text-ink-3">via API</span>
+                      <span className="text-xs text-ink-3">via API (PUT /api/ops/flags/{r.key})</span>
                     ),
                 },
               ]}
@@ -121,6 +155,7 @@ export function OpsTab() {
           </>
         )}
         {toggle.error ? <ErrorBox error={toggle.error} /> : null}
+        {setInt.error ? <ErrorBox error={setInt.error} /> : null}
       </Card>
     </div>
   );

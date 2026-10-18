@@ -41,8 +41,15 @@ function ContextHeader({ data }: { data: Overview }) {
         ) : (
           <span className="text-ink-2">{hint?.reason ?? "Belum memilih proyek."}</span>
         )}
-        <span className="ml-auto text-xs text-ink-3" title={absoluteTime(data.generated_at)}>
-          Diperiksa {relativeTime(data.generated_at)}
+        <span className="ml-auto inline-flex flex-wrap items-center gap-2 text-xs text-ink-3">
+          {data.environment ? (
+            <span>
+              Lingkungan: <Mono>{data.environment}</Mono>
+              {data.dev_mode ? " (mode pengembangan)" : ""}
+            </span>
+          ) : null}
+          <StatusBadge status={data.mode === "LIVE" ? "LIVE" : "MOCK"} label={`Mode ${data.mode}`} />
+          <span title={absoluteTime(data.generated_at)}>Diperiksa {relativeTime(data.generated_at)}</span>
         </span>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-ink-3">

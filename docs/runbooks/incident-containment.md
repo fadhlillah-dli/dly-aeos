@@ -25,8 +25,12 @@ menentukan owner dan blast radius, memperbaiki akar masalah, lalu menambah regre
    | pause_scheduling | no new run starts (verified by reading the state back) | stop the server (`Ctrl+C`) |
    | revoke_capabilities | every active broker grant revoked; remaining count reported | stop the server; rotate upstream credentials |
    | cancel_runs | RUNNING/LEASED runs cancelled (process tree killed) | kill processes manually (Task Manager / `kill`) |
-   | preserve_evidence | state snapshot stored as INCIDENT_CONTAINMENT evidence | export audit/evidence snapshots manually |
-   | audit | audit row + CRITICAL alert | note the time and actions by hand |
+   | preserve_evidence | one INCIDENT_CONTAINMENT evidence artifact per domain partition | export audit/evidence snapshots manually |
+   | audit | audit row + CRITICAL alert (statuses only) | note the time and actions by hand |
+
+   The stop acts on every domain, but the dashboard shows counts and run ids of the **active domain
+   only** (a step that failed in the other domain still shows FAILED/PARTIAL with a neutral reason).
+   Open the other domain's session, or run the CLI, for its details.
 3. **Determine owner and blast radius**: which projects/domains, which credentials, which external
    targets (branches, PRs, documents, issues). Use *Riwayat & Pemulihan* → *Audit* filtered by time,
    and export snapshots (*Ekspor*) for the incident record — exports are scoped and redacted.
@@ -45,5 +49,6 @@ menentukan owner dan blast radius, memperbaiki akar masalah, lalu menambah regre
 
 ## Evidence
 
-* `ops.emergency_stop` audit row with step results, `INCIDENT_CONTAINMENT` evidence artifact,
-  CRITICAL alert `emergency_stop`, and `ops.emergency.last` (shown on *Ringkasan*).
+* `ops.emergency_stop` audit row with step statuses, one `INCIDENT_CONTAINMENT` evidence artifact
+  per domain (that domain's counts and run ids), CRITICAL alert `emergency_stop`, and
+  `ops.emergency.last` (shown on *Ringkasan*).

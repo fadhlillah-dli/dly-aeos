@@ -74,6 +74,9 @@ def service_inventory(settings: Settings, *, probe: bool = True) -> dict[str, An
             state = loop.state()
             status = "RUNNING" if state["running"] else status
             detail += f"; last evaluation {state['last_run_at'] or 'never'}"
+            if state.get("last_error"):
+                status = "DEGRADED"
+                detail += f"; last error {state['last_error']}"
         items.append({"service": hook, "kind": "background", "status": status, "detail": detail})
     if probe:
         items.append({"service": "openbao", "kind": "external", **_openbao(settings)})

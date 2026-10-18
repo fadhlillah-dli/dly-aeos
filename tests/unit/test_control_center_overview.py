@@ -231,3 +231,93 @@ def test_history_endpoints_scoped(personal_client, db):
     pubs = personal_client.get("/api/control-center/history/publications").json()["items"]
     assert pubs[0]["status"] == "PARTIAL" and pubs[0]["operations"] == {"SUCCEEDED": 1, "FAILED": 1}
     assert len(db.scalars(select(Publication)).all()) == 1
+
+
+def test_ready_with_stale_or_failed_supporting_check_is_not_ready(personal_client, db, monkeypatch):
+    """§08/§50 "Config/model/provider berubah setelah doctor -> check terkait kedaluwarsa": a READY claim
+    whose supporting check is STALE/FAILED/UNKNOWN is shown as UNKNOWN with the check named."""
+    now = utcnow().isoformat()
+    fake_doctor(monkeypatch, {
+        "CAN_OPEN_DASHBOARD": ("READY", [{"check_id": "core.db", "status": "VERIFIED", "last_checked_at": now}]),
+        "CAN_PLAN_PERSONAL": ("READY", [{"check_id": "claude.auth", "status": "STALE", "last_checked_at": now}]),
+        "CAN_RUN_WORKER": ("READY", [{"check_id": "sandbox.kill", "status": "FAILED", "last_checked_at": now}]),
+    })
+    by = {c["capability"]: c for c in
+          personal_client.get("/api/control-center/overview").json()["sections"]["capabilities"]["data"]["items"]}
+    assert by["CAN_OPEN_DASHBOARD"]["status"] == "READY"
+    assert by["CAN_PLAN_PERSONAL"]["status"] == "UNKNOWN" and "claude.auth" in by["CAN_PLAN_PERSONAL"]["reasons"][-1]
+    assert by["CAN_RUN_WORKER"]["status"] == "UNKNOWN" and "sandbox.kill" in by["CAN_RUN_WORKER"]["reasons"][-1]
+
+
+def test_secret_refs_budgets_and_quotas_are_domain_scoped(personal_client, db, secrets_memory):
+    """§35/§50 "Viewer mengakses ... Office -> scope diterapkan termasuk counts": OFFICE secret refs,
+    Office project budgets and Office-scoped quotas never appear in (or count towards) a PERSONAL view."""
+    from aeos.models.cost import Budget, QuotaState
+    from aeos.models.workforce import WorkerRun
+
+    p = _project(db)
+    o = _project(db, "omega", "OFFICE")
+    for ref in ("personal/github", "office/atlassian", "workers/openrouter", f"projects/{p.id}/x",
+                f"projects/{o.id}/y", "projects/omega/z"):
+        secrets_memory.put(ref, "value-" + "Z" * 30, actor="test")
+    office_run = WorkerRun(project_id=o.id, domain="OFFICE", task_id="t", role_key="impl", execution_status="DONE")
+    db.add(office_run)
+    db.flush()
+    db.add_all([
+        Budget(scope_type="GLOBAL", scope_id="*", limit_usd=10),
+        Budget(scope_type="PROJECT", scope_id=p.id, limit_usd=5),
+        Budget(scope_type="PROJECT", scope_id=o.id, limit_usd=5),
+        Budget(scope_type="RUN", scope_id=office_run.id, limit_usd=1),
+        QuotaState(provider="openrouter", scope="*", state="OK"),
+        QuotaState(provider="jira", scope="office/acme", state="LOW"),
+        QuotaState(provider="x", scope="*", state="OK", details={"domain": "OFFICE"}),
+    ])
+    db.commit()
+    _select(personal_client, p.id)
+    s = personal_client.get("/api/control-center/overview").json()["sections"]
+    refs = {r["ref"] for r in s["secrets"]["data"]["items"]}
+    assert refs == {"personal/github", "workers/openrouter", f"projects/{p.id}/x"}
+    assert "Z" * 30 not in str(s["secrets"])
+    assert s["cost"]["data"]["budgets"] == 2  # GLOBAL + the Personal project budget
+    providers = {q["provider"] for q in s["cost"]["data"]["quotas"]}
+    assert "openrouter" in providers and "jira" not in providers and "x" not in providers
+    personal_client.select_domain(Domain.OFFICE, o.id)
+    s_office = personal_client.get("/api/control-center/overview").json()["sections"]
+    assert "office/atlassian" in {r["ref"] for r in s_office["secrets"]["data"]["items"]}
+    assert "personal/github" not in {r["ref"] for r in s_office["secrets"]["data"]["items"]}
+    assert s_office["cost"]["data"]["budgets"] == 3  # GLOBAL + Office project + Office run
+
+
+def test_search_hides_components_scoped_to_other_domain_or_project(personal_client, db):
+    from aeos.models.inventory import ComponentReference
+
+    p = _project(db)
+    o = _project(db, "omega", "OFFICE")
+    db.add_all([
+        ComponentReference(component_id="tool-shared", kind="tool", name="Toolbox shared", scope={}),
+        ComponentReference(component_id="tool-office", kind="tool", name="Toolbox office", scope={"domain": "OFFICE"}),
+        ComponentReference(component_id="tool-office-proj", kind="tool", name="Toolbox omega",
+                           scope={"project_id": o.id}),
+        ComponentReference(component_id="tool-alpha", kind="tool", name="Toolbox alpha", scope={"project_id": p.id}),
+    ])
+    db.commit()
+    hits = personal_client.get("/api/control-center/search?q=toolbox").json()["items"]
+    assert {h["id"] for h in hits if h["type"] == "component"} == {"tool-shared", "tool-alpha"}
+
+
+def test_overview_header_carries_environment(personal_client, db):
+    body = personal_client.get("/api/control-center/overview").json()
+    assert body["environment"] and "dev_mode" in body
+
+
+def test_pending_decisions_without_domain_field_are_scoped_by_project(personal_client, db, monkeypatch):
+    """A queue item that carries only a project_id is shown only when that project is in the active
+    domain (an admin is unrestricted by project, but never across domains)."""
+    p = _project(db)
+    o = _project(db, "omega", "OFFICE")
+    fake_queue(monkeypatch, [{"kind": "PLAN_APPROVAL", "title": "Personal item", "project_id": p.id},
+                             {"kind": "PLAN_APPROVAL", "title": "Office item", "project_id": o.id},
+                             {"kind": "PROMOTION", "title": "Platform item"}])
+    _select(personal_client, p.id)
+    top = personal_client.get("/api/control-center/overview").json()["sections"]["decisions"]["data"]["top"]
+    assert {t["title"] for t in top} == {"Personal item", "Platform item"}

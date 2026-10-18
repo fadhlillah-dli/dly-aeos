@@ -11,22 +11,46 @@ import type { EmergencyReport, StepResult } from "./types";
 export const CONFIRM_PHRASE = "HENTIKAN";
 
 interface LastInfo {
-  last: { incident_id: string; at: string; status: string; reason: string; by: string } | null;
+  last: { incident_id: string; at: string; status: string; reason: string; by: string; steps?: StepResult[] } | null;
   scheduling: { status: string; reason?: string };
   steps: { step: string; description: string }[];
 }
 
-export function StepList({ steps }: { steps: StepResult[] }) {
+const COUNT_LABELS: [string, string][] = [
+  ["active_before", "aktif sebelum"],
+  ["remaining_active", "masih aktif"],
+  ["active_runs", "run aktif"],
+  ["cancelled", "dibatalkan"],
+  ["failed", "gagal"],
+];
+
+function counts(s: StepResult): string {
+  return COUNT_LABELS.filter(([k]) => typeof s[k] === "number")
+    .map(([k, label]) => `${label}: ${String(s[k])}`)
+    .join(", ");
+}
+
+export function StepList({ steps, scope }: { steps: StepResult[]; scope?: string }) {
+  const otherNote = steps.map((s) => s.other_domains).find((n): n is string => typeof n === "string");
   return (
-    <ol className="space-y-1 text-sm">
-      {steps.map((s) => (
-        <li key={s.step} className="flex flex-wrap items-center gap-2">
-          <OpsBadge status={s.status} />
-          <Mono>{s.step}</Mono>
-          <span className="text-ink-3">{s.reason ?? s.detail ?? ""}</span>
-        </li>
-      ))}
-    </ol>
+    <div>
+      {scope && (
+        <p className="mb-1 text-xs text-ink-3">
+          {scope === "NO_DOMAIN_SELECTED" ? "Tanpa domain terpilih: hanya status per langkah yang ditampilkan." : `Rincian untuk domain ${scope}.`}
+        </p>
+      )}
+      <ol className="space-y-1 text-sm">
+        {steps.map((s) => (
+          <li key={s.step} className="flex flex-wrap items-center gap-2">
+            <OpsBadge status={s.status} />
+            <Mono>{s.step}</Mono>
+            <span className="text-ink-3">{s.reason ?? s.detail ?? ""}</span>
+            {counts(s) && <span className="text-xs text-ink-3">({counts(s)})</span>}
+          </li>
+        ))}
+      </ol>
+      {otherNote && <p className="mt-1 text-xs text-ink-3">{otherNote}</p>}
+    </div>
   );
 }
 
@@ -68,6 +92,11 @@ export function EmergencyTab() {
               ["Emergency stop terakhir", info.data.last ? `${info.data.last.status} · ${relativeTime(info.data.last.at)} · ${info.data.last.reason}` : "belum pernah"],
             ]}
           />
+          {info.data.last?.steps?.length ? (
+            <div className="mt-2">
+              <StepList steps={info.data.last.steps} />
+            </div>
+          ) : null}
         </Card>
       )}
       <Card title={<span className="inline-flex items-center gap-1"><ShieldAlert className="h-4 w-4" aria-hidden /> Jalankan emergency stop</span>}>
@@ -98,7 +127,7 @@ export function EmergencyTab() {
       </Card>
       {report && (
         <Card title={<span className="flex items-center gap-2">Hasil insiden <Mono>{report.incident_id.slice(0, 8)}</Mono> <OpsBadge status={report.status} /></span>}>
-          <StepList steps={report.steps} />
+          <StepList steps={report.steps} scope={report.scope} />
           <p className="mt-2 text-xs text-ink-3">{report.notice}</p>
         </Card>
       )}

@@ -44,6 +44,8 @@ export interface QuotaRow {
 export interface Overview {
   generated_at: string;
   domain: string;
+  environment?: string;
+  dev_mode?: boolean;
   project: { id: string; name: string; project_key: string; is_platform: boolean; mode: string; lifecycle: string } | null;
   mode: string;
   contains_mock: boolean;
@@ -93,6 +95,39 @@ export interface ActivityPage {
   next_before: number | null;
   latest_seq: number;
   checked_at: string;
+}
+
+export interface IntegrationCheck {
+  check_id: string;
+  group?: string;
+  status: string;
+  severity: string;
+  summary: string;
+  last_checked_at: string | null;
+}
+
+export interface IntegrationRow {
+  id: string;
+  project_id: string;
+  project_name: string | null;
+  provider: string;
+  purpose: string;
+  tenant_id: string | null;
+  root_id: string | null;
+  credential_ref: string | null;
+  // Status/ref/expiry only - the backend never returns a secret value (§26, §35).
+  credential: { status: string; backend?: string; updated_at?: string | null; expires_at?: string | null; reason?: string };
+  last_verified_at: string | null;
+  verification: string;
+  checks: IntegrationCheck[];
+}
+
+export interface IntegrationList {
+  items: IntegrationRow[];
+  checks: IntegrationCheck[];
+  source: string;
+  checked_at: string;
+  evidence_limit: string;
 }
 
 export interface SearchHit {

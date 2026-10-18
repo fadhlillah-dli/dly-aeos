@@ -66,7 +66,17 @@ export interface RestoreTest {
   warnings: string[];
   evidence_id: string | null;
   evidence_note: string;
-  stats: Record<string, unknown>;
+  stats: Record<string, unknown> & { files_verified_by_partition?: Record<string, number> };
+  // Domain-scoped view (§35): per-partition numbers only for the active domain + platform.
+  scope?: string;
+}
+
+export interface HashVerification {
+  ok: boolean;
+  checked_at?: string;
+  problems: string[];
+  files_checked_by_partition?: Record<string, number>;
+  scope?: string;
 }
 
 export interface BackupRow {
@@ -82,8 +92,9 @@ export interface BackupRow {
   readiness: string;
   ready: boolean;
   retention?: string;
-  last_verification?: { ok: boolean; checked_at: string; problems: string[] } | null;
+  last_verification?: HashVerification | null;
   last_restore_test?: RestoreTest | null;
+  restore_test_count?: number;
   note?: string;
 }
 
@@ -134,6 +145,38 @@ export interface EmergencyReport {
   status: string;
   steps: StepResult[];
   notice: string;
+  scope?: string;
+}
+
+export interface ServiceRow {
+  service: string;
+  kind: string;
+  status: string;
+  detail: string;
+  version?: string;
+}
+
+export interface RunbookRow {
+  id: string;
+  title: string;
+  trigger: string;
+  path: string;
+}
+
+export interface RetirementItem {
+  key: string;
+  title: string;
+  status: string;
+  detail: Record<string, unknown>;
+  owner_action: string;
+}
+
+export interface RetirementChecklist {
+  project: { id: string; name: string; domain: string; lifecycle: string };
+  items: RetirementItem[];
+  blocking: string[];
+  notice: string;
+  checked_at: string;
 }
 
 export interface SliItem {

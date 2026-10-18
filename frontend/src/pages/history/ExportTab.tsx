@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download } from "lucide-react";
 import { get } from "../../api/client";
 import { OpsBadge } from "../../components/control_center/OpsBadge";
@@ -25,6 +25,10 @@ interface SnapshotRow {
 }
 
 export function ExportTab() {
+  const qc = useQueryClient();
+  // The download is a plain link (browser handles the file); refresh the registry shortly after so the
+  // new snapshot (id/hash/time) is listed.
+  const refreshSoon = () => window.setTimeout(() => qc.invalidateQueries({ queryKey: ["ops-exports"] }), 1500);
   const q = useQuery({ queryKey: ["ops-exports"], queryFn: () => get<ListMeta & { items: SnapshotRow[] }>("/api/ops/exports") });
   return (
     <div className="space-y-3">
@@ -37,6 +41,7 @@ export function ExportTab() {
           <a
             key={k.kind}
             href={`/api/ops/export?kind=${k.kind}&download=true`}
+            onClick={refreshSoon}
             className="inline-flex items-center gap-1.5 rounded-md border border-line bg-surface px-3 py-1.5 text-sm hover:bg-surface-3"
           >
             <Download className="h-4 w-4" aria-hidden /> {k.label}

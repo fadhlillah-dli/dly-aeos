@@ -31,6 +31,11 @@ control plane is a single SQLite database (WAL) plus files under the OS data dir
    requires a RESTORE_TESTED backup, takes a pre-restore backup (raw copy if the live DB is damaged)
    and never deletes newer files.
 5. Retention is an owner policy that only labels backups; nothing deletes backups automatically.
+6. A backup is one platform-level unit, but every dashboard view of it is domain-scoped (§35, §50
+   "termasuk counts"): readiness stays global (a failed OFFICE archive makes the backup FAILED for
+   everyone), while per-partition counts, sizes and problem texts are shown only for the active
+   domain. Platform-level records (audit rows, `RESTORE_TEST` evidence) carry no per-domain counts.
+   The local CLI shows the full view.
 
 ## Consequences
 

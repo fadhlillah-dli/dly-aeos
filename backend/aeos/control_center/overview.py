@@ -33,6 +33,8 @@ MOCK_MODES = ("MOCK", "DEMO")
 COST_WINDOW = timedelta(days=30)
 CRITICAL_SEVERITIES = ("CRITICAL", "HIGH")
 FAILED_CHECK_STATUSES = ("FAILED", "EXPIRED")
+NOT_PASSING_CHECK_STATUSES = frozenset({"FAILED", "EXPIRED", "MISSING", "STALE", "UNKNOWN"})
+DOMAIN_SECRET_NAMESPACES = {"personal": Domain.PERSONAL.value, "office": Domain.OFFICE.value}
 
 
 # ----------------------------------------------------------------------------------------- sections
@@ -59,6 +61,15 @@ def _capabilities(session: Session, domain: Domain, project: Project | None) -> 
             # Never READY without the checks that prove it (§08 "dihitung dari code/probes").
             status = "UNKNOWN"
             reasons.append("READY dilaporkan tanpa hasil pemeriksaan pendukung; diperlakukan UNKNOWN")
+        elif status == "READY":
+            weak = sorted({str(c.get("check_id") or "?") for c in st.checks
+                           if str(c.get("status") or "UNKNOWN").upper() in NOT_PASSING_CHECK_STATUSES})
+            if weak:
+                # A failed/stale/unknown supporting check invalidates READY (§08 invalidation, §50
+                # "Config/model/provider berubah setelah doctor -> check terkait kedaluwarsa").
+                status = "UNKNOWN"
+                reasons.append("READY dilaporkan, tetapi pemeriksaan pendukung belum lulus/usang: "
+                               + ", ".join(weak[:10]))
         rows.append({"capability": cap.value, "status": status, "reasons": reasons, "checks": st.checks,
                      "remedies": st.remedies, "checked_at": min(checked) if checked else None})
         times.extend(str(t) for t in checked)
@@ -132,14 +143,17 @@ def _latest_checks(session: Session, domain: Domain, project: Project | None) ->
     return list(latest.values())
 
 
-def _blockers(session: Session, domain: Domain, project: Project | None) -> dict[str, Any]:
-    tq = select(TaskExecution).where(TaskExecution.domain == domain.value, TaskExecution.state == "BLOCKED")
+def _blockers(session: Session, principal: Principal, domain: Domain, project: Project | None) -> dict[str, Any]:
+    pids = _scoped_project_ids(session, principal, domain)
+    tq = select(TaskExecution).where(TaskExecution.domain == domain.value, TaskExecution.state == "BLOCKED",
+                                     TaskExecution.project_id.in_(pids))
     if project is not None:
         tq = tq.where(TaskExecution.project_id == project.id)
     tasks = list(session.scalars(tq.limit(50)))
     titles = {t.id: t.title for t in session.scalars(select(TaskSpec).where(TaskSpec.id.in_([x.task_id for x in tasks])))} \
         if tasks else {}
-    rq = select(WorkerRun).where(WorkerRun.domain == domain.value, WorkerRun.execution_status == "BLOCKED")
+    rq = select(WorkerRun).where(WorkerRun.domain == domain.value, WorkerRun.execution_status == "BLOCKED",
+                                 WorkerRun.project_id.in_(pids))
     if project is not None:
         rq = rq.where(WorkerRun.project_id == project.id)
     runs = list(session.scalars(rq.limit(50)))
@@ -176,7 +190,7 @@ def _blockers(session: Session, domain: Domain, project: Project | None) -> dict
                 evidence_limit="Tidak ada blocker tercatat ≠ siap; lihat status capability.", data={"items": []})
 
 
-def _health(session: Session, settings: Settings, domain: Domain) -> dict[str, Any]:
+def _health(session: Session, settings: Settings, domain: Domain, project: Project | None = None) -> dict[str, Any]:
     from aeos.operations import alerts as ops_alerts
     from aeos.operations import release
 
@@ -196,7 +210,9 @@ def _health(session: Session, settings: Settings, domain: Domain) -> dict[str, A
                      "detail": "status penjadwal dari modul workforce"})
     except ImportError as exc:
         subs.append({"key": "scheduler", "status": "UNKNOWN", "detail": f"modul belum tersedia: {exc.name or exc}"})
-    last_doctor = session.scalar(select(func.max(CheckResult.last_checked_at)))
+    # Only checks visible in this domain/project scope (an OFFICE check time is not shown to PERSONAL).
+    last_doctor = max((c.last_checked_at for c in _latest_checks(session, domain, project) if c.last_checked_at),
+                      default=None)
     subs.append({"key": "doctor", "status": "CONFIGURED" if last_doctor else "UNKNOWN",
                  "detail": f"pemeriksaan terakhir {last_doctor.isoformat() if last_doctor else 'belum pernah'}"})
     open_alerts = ops_alerts.list_alerts(session, domain=domain.value, status="OPEN", limit=100)
@@ -214,12 +230,43 @@ def _health(session: Session, settings: Settings, domain: Domain) -> dict[str, A
                 evidence_limit="Kesehatan proses lokal; bukan verifikasi fungsi end-to-end.", data={"items": subs})
 
 
-def _cost(session: Session, domain: Domain, project: Project | None) -> dict[str, Any]:
+def _scoped_project_ids(session: Session, principal: Principal, domain: Domain) -> set[str]:
+    ids = set(session.scalars(select(Project.id).where(Project.domain == domain.value)))
+    if principal.allowed_project_ids is not None:
+        ids &= set(principal.allowed_project_ids)
+    return ids
+
+
+def _quota_visible(qs: QuotaState, domain: Domain) -> bool:
+    """Provider quotas are platform-level unless their scope/details name a domain (§35 scope)."""
+    scope = (qs.scope or "").strip().lower()
+    named = DOMAIN_SECRET_NAMESPACES.get(scope.split("/", 1)[0].split(":", 1)[0])
+    detail_domain = str((qs.details or {}).get("domain") or "").upper() or None
+    return all(d is None or d == domain.value for d in (named, detail_domain))
+
+
+def _visible_budgets(session: Session, domain: Domain, pids: set[str]) -> int:
+    """Budgets the active domain may see: GLOBAL/ROUTE (platform), PROJECT/RUN of its own projects."""
+    n = 0
+    for b in session.scalars(select(Budget)):
+        kind = (b.scope_type or "").upper()
+        if kind in ("GLOBAL", "ROUTE"):
+            n += 1
+        elif kind == "PROJECT":
+            n += 1 if b.scope_id in pids else 0
+        elif kind == "RUN":
+            run = session.get(WorkerRun, b.scope_id)
+            n += 1 if run is not None and run.domain == domain.value and run.project_id in pids else 0
+    return n
+
+
+def _cost(session: Session, principal: Principal, domain: Domain, project: Project | None) -> dict[str, Any]:
     since = utcnow() - COST_WINDOW
+    pids = _scoped_project_ids(session, principal, domain)
     q = select(UsageLedgerEntry).where(UsageLedgerEntry.domain == domain.value, UsageLedgerEntry.at >= since)
     if project is not None:
         q = q.where(UsageLedgerEntry.project_id == project.id)
-    entries = list(session.scalars(q))
+    entries = [e for e in session.scalars(q) if e.project_id is None or e.project_id in pids]
     live = [e for e in entries if e.mode not in MOCK_MODES]
     actual = sum(float(e.cost_usd) for e in live if e.cost_usd is not None and not e.is_estimate)
     estimate = sum(float(e.cost_usd) for e in live if e.cost_usd is not None and e.is_estimate)
@@ -228,12 +275,12 @@ def _cost(session: Session, domain: Domain, project: Project | None) -> dict[str
     quotas = [{"provider": qs.provider, "scope": qs.scope, "state": qs.state, "source": qs.source,
                "observed_at": qs.observed_at.isoformat() if qs.observed_at else None,
                "resets_at": qs.resets_at.isoformat() if qs.resets_at else None}
-              for qs in session.scalars(select(QuotaState))]
+              for qs in session.scalars(select(QuotaState)) if _quota_visible(qs, domain)]
     if not any(qs["provider"] in ("claude-native", "claude") for qs in quotas):
         quotas.append({"provider": "claude-native", "scope": "Max subscription", "state": "UNKNOWN",
                        "source": "UNKNOWN", "observed_at": None, "resets_at": None,
                        "note": "Kuota Max tidak dikonversi dari token; tidak ada sumber resmi yang terbaca."})
-    budgets = int(session.scalar(select(func.count()).select_from(Budget)) or 0)
+    budgets = _visible_budgets(session, domain, pids)
     reasons: list[str] = []
     try:
         import importlib
@@ -266,6 +313,7 @@ def _decisions(session: Session, principal: Principal, domain: Domain, project: 
         raw = queue.queue_items(session, domain=domain.value, project_id=project.id if project else None)
     except TypeError:
         raw = queue.queue_items(session)
+    pids = _scoped_project_ids(session, principal, domain)
     items: list[dict[str, Any]] = []
     for r in raw or []:
         d = r if isinstance(r, dict) else {k: getattr(r, k) for k in dir(r) if not k.startswith("_")
@@ -274,7 +322,7 @@ def _decisions(session: Session, principal: Principal, domain: Domain, project: 
         if dom is not None and str(dom).upper() != domain.value:
             continue
         pid = d.get("project_id")
-        if pid and principal.allowed_project_ids is not None and pid not in principal.allowed_project_ids:
+        if pid and pid not in pids:  # another domain's project, or outside the user's project scope
             continue
         items.append({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in d.items()
                       if isinstance(v, (str, int, float, bool, type(None))) or hasattr(v, "isoformat")})
@@ -297,10 +345,29 @@ def _stream(session: Session, domain: Domain) -> dict[str, Any]:
                 data={"latest_seq": last.seq, "last_event_at": last.at.isoformat(), "last_kind": last.kind})
 
 
-def _secrets() -> dict[str, Any]:
+def _secret_visible(ref: str, scope: dict[str, Any] | None, domain: Domain, project_ids: set[str],
+                    project_keys: set[str]) -> bool:
+    """Secret *references* are metadata too: an ``office/*`` ref never appears in a PERSONAL view (and
+    vice versa); ``projects/<id|key>/*`` only for projects visible in this scope (§35, §50)."""
+    ns, _, rest = (ref or "").partition("/")
+    named = DOMAIN_SECRET_NAMESPACES.get(ns)
+    if named is not None and named != domain.value:
+        return False
+    if ns == "projects":
+        owner = rest.split("/", 1)[0]
+        if owner not in project_ids and owner not in project_keys:
+            return False
+    scope_domain = str((scope or {}).get("domain") or "").upper()
+    return not (scope_domain and scope_domain != domain.value)
+
+
+def _secrets(session: Session, principal: Principal, domain: Domain) -> dict[str, Any]:
     from aeos.secrets import facade as secrets
 
-    statuses = secrets.list_status()
+    pids = _scoped_project_ids(session, principal, domain)
+    keys = set(session.scalars(select(Project.project_key).where(Project.id.in_(pids)))) if pids else set()
+    statuses = [s for s in secrets.list_status()
+                if _secret_visible(s.ref, getattr(s, "scope", None), domain, pids, keys)]
     now = utcnow()
     soon = [s.ref for s in statuses if s.expires_at is not None and ensure_aware(s.expires_at) is not None
             and ensure_aware(s.expires_at) <= now + timedelta(days=7)]  # type: ignore[operator]
@@ -365,12 +432,12 @@ def build_overview(session: Session, settings: Settings, principal: Principal, d
         "capabilities": guarded("doctor", lambda: _capabilities(session, domain, project)),
         "active_plan": guarded("planning", lambda: _active_plan(session, project)),
         "policy": guarded("policy", lambda: _policy(session)),
-        "blockers": guarded("blockers", lambda: _blockers(session, domain, project)),
-        "health": guarded("health", lambda: _health(session, settings, domain)),
-        "cost": guarded("cost", lambda: _cost(session, domain, project)),
+        "blockers": guarded("blockers", lambda: _blockers(session, principal, domain, project)),
+        "health": guarded("health", lambda: _health(session, settings, domain, project)),
+        "cost": guarded("cost", lambda: _cost(session, principal, domain, project)),
         "decisions": guarded("policy.queue", lambda: _decisions(session, principal, domain, project)),
         "stream": guarded("events", lambda: _stream(session, domain)),
-        "secrets": guarded("secrets", _secrets),
+        "secrets": guarded("secrets", lambda: _secrets(session, principal, domain)),
         "recovery": guarded("operations.backup", lambda: _recovery(settings, domain)),
         "emergency": guarded("operations.emergency", lambda: _emergency(session)),
     }
@@ -383,7 +450,7 @@ def build_overview(session: Session, settings: Settings, principal: Principal, d
                         "domain": project.domain, "is_platform": project.is_platform, "mode": project.mode,
                         "lifecycle": project.lifecycle}
     else:
-        n = int(session.scalar(select(func.count()).select_from(Project).where(Project.domain == domain.value)) or 0)
+        n = len(_scoped_project_ids(session, principal, domain))
         sections["project_hint"] = item(
             "UNKNOWN", source="projects", checked_at=utcnow(),
             reason=("Pilih proyek di header." if n else
@@ -393,6 +460,8 @@ def build_overview(session: Session, settings: Settings, principal: Principal, d
     return {
         "generated_at": utcnow().isoformat(),
         "domain": domain.value,
+        "environment": settings.environment,  # §35 header: domain, project, environment, freshness, mode
+        "dev_mode": settings.dev_mode,
         "project": project_view,
         **_mode(session, domain, project),
         "sections": sections,

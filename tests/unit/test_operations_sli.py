@@ -184,3 +184,30 @@ def test_loop_run_once_respects_flag(settings, db):
     assert loop.state()["running"] is True
     loop.stop()
     assert loop.state()["running"] is False
+
+
+def test_loop_failure_in_one_domain_does_not_skip_the_other(settings, db, monkeypatch):
+    """Alerts keep their domain scope and one failing domain never silences the other (§33 monitoring);
+    the error is visible in the service inventory instead of being swallowed."""
+    from aeos.operations import loop, services
+
+    real = sli.evaluate
+
+    def flaky(session, *, domain, settings=None):
+        if domain == Domain.PERSONAL:
+            raise RuntimeError("personal data unreadable")
+        return real(session, domain=domain, settings=settings)
+
+    monkeypatch.setattr(sli, "evaluate", flaky)
+    try:
+        out = loop.run_once(settings)
+        assert out["PERSONAL"] == {"error": "RuntimeError"}
+        assert set(out["OFFICE"]) == {"domain", "platform"}  # OFFICE was still evaluated
+        assert "PERSONAL: RuntimeError" in loop.state()["last_error"]
+        inv = {i["service"]: i for i in services.service_inventory(settings, probe=False)["items"]}
+        assert inv["aeos.operations.loop"]["status"] == "DEGRADED"
+        monkeypatch.setattr(sli, "evaluate", real)
+        loop.run_once(settings)
+        assert loop.state()["last_error"] is None
+    finally:
+        loop._state["last_error"] = None  # module-level state: never leak into other tests
