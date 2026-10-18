@@ -1,0 +1,15 @@
+# Example non-secret configuration. Copy to the OS config dir as aeos.yaml, or point AEOS_CONFIG at
+# a file. Secrets (API keys, tokens, passwords) are REJECTED here — use `aeos secrets set ...`.
+#   Windows: %LOCALAPPDATA%\DLY-AEOS\aeos.yaml
+#   macOS:   ~/Library/Application Support/DLY-AEOS/aeos.yaml
+environment: local
+host: 127.0.0.1          # loopback only (master §06)
+port: 8787
+# data_dir: overrides the OS default data directory
+session_ttl_hours: 12
+session_idle_minutes: 120
+max_upload_bytes: 26214400
+openbao_addr: http://127.0.0.1:8200
+# claude_binary: /path/to/claude          # default: found on PATH
+# opencode_binary: /path/to/opencode      # default: found on PATH
+platform_repo_slug: fadhlillah-dli/dly-aeos
