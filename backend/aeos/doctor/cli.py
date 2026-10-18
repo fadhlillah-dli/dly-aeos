@@ -39,6 +39,20 @@ def _open_session(settings: Any) -> tuple[Any, str]:
         return None, "unreadable"
 
 
+def data_dir_label(settings: Any) -> str:
+    """Logical name of the data directory for printed/JSON output: no user name or absolute path (§37)."""
+    from aeos.core.paths import default_data_dir, repo_root
+    from aeos.inventory.probes import logical_location
+
+    try:
+        if settings.data_dir.resolve() == default_data_dir().resolve():
+            return {"win32": "%LOCALAPPDATA%\\DLY-AEOS", "darwin": "~/Library/Application Support/DLY-AEOS"}.get(
+                sys.platform, "$XDG_DATA_HOME/DLY-AEOS") + " (default OS)"
+    except OSError:
+        pass
+    return f"{logical_location(settings.data_dir, repo=repo_root())} (AEOS_DATA_DIR)"
+
+
 def dashboard_critical_failures(results: list[Any]) -> list[str]:
     from aeos.core.enums import Capability
     from aeos.doctor.capabilities import RULES
@@ -105,7 +119,7 @@ def doctor(
     failures = dashboard_critical_failures(report.results)
     exit_code = 1 if failures else 0
     if as_json:
-        payload = {"data_dir": str(settings.data_dir), "database": db_state, "persisted": persisted,
+        payload = {"data_dir": data_dir_label(settings), "database": db_state, "persisted": persisted,
                    "run_id": report.run_id, "functional": functional, "results": [r.as_dict() for r in report.results],
                    "skipped": report.skipped, "capabilities": matrix, "dashboard_critical_failures": failures,
                    "exit_code": exit_code}
@@ -119,7 +133,7 @@ def _print_report(settings: Any, db_state: str, persisted: bool, report: Any, ma
                   failures: list[str]) -> None:
     echo = typer.echo
     echo("DLY AEOS Readiness Doctor - bootstrap layer (no server, no LLM)")
-    echo(ascii_safe(f"platform: {sys.platform}   data dir: {settings.data_dir}   database: {db_state}"))
+    echo(ascii_safe(f"platform: {sys.platform}   data dir: {data_dir_label(settings)}   database: {db_state}"))
     rows = [[r.group, r.check_id, r.status, r.severity, r.summary] for r in report.results]
     echo(table(["GROUP", "CHECK", "STATUS", "SEV", "SUMMARY"], rows, max_width=90))
     if report.skipped:
@@ -132,6 +146,12 @@ def _print_report(settings: Any, db_state: str, persisted: bool, report: Any, ma
         reason = (c["reasons"][0] if c["reasons"] else "")
         cap_rows.append([c["capability"], c["status"], reason])
     echo(table(["CAPABILITY", "STATUS", "FIRST REASON"], cap_rows, max_width=100))
+    risks = [(c["capability"], r) for c in matrix for r in c.get("residual_risks") or []]
+    if risks:
+        echo("")
+        echo("Residual risks (true even when a gate is READY; never counted as a pass):")
+        for cap, r in risks:
+            echo(ascii_safe(f"  [{cap}] {r}"))
     grouped: dict[tuple[str, str], tuple[list[str], dict[str, Any]]] = {}
     for r in report.results:
         if r.remediation and r.status in ("MISSING", "FAILED", "EXPIRED", "UNKNOWN", "STALE"):
@@ -149,11 +169,13 @@ def _print_report(settings: Any, db_state: str, persisted: bool, report: Any, ma
                 if rem.get(key):
                     echo(ascii_safe(f"      {label}: {rem[key]}"))
     echo("")
+    from aeos.doctor.model import aeos_cmd
+
     if not persisted and db_state == "schema-outdated":
         echo("Results were NOT stored: the database schema is older than this version. Back up and migrate it "
-             "with: aeos db upgrade")
+             f"with: {aeos_cmd('db upgrade')}")
     elif not persisted:
-        echo("Results were NOT stored (database not initialised). Create it with: aeos db upgrade")
+        echo(f"Results were NOT stored (database not initialised). Create it with: {aeos_cmd('db upgrade')}")
     if failures:
         echo(ascii_safe("EXIT 1: critical check(s) for CAN_OPEN_DASHBOARD not OK: " + ", ".join(failures)))
     else:

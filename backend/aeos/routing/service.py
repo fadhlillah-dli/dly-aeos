@@ -106,12 +106,7 @@ def refresh_config_hash(session: Session, route: ModelRoute, *, reason: str) -> 
                              reason=f"route configuration changed: {reason}")
     except (ImportError, ModuleNotFoundError):
         pass  # hash binding already makes old approvals ineffective
-    try:
-        from aeos.doctor.facade import invalidate
-
-        invalidate(session, invalidator="config:routes", reason=f"{route.route_key}: {reason}")
-    except (ImportError, ModuleNotFoundError):
-        pass
+    notify_readiness(session, route.route_key, reason=reason)
     try:
         from aeos.events.service import emit
 
@@ -120,6 +115,21 @@ def refresh_config_hash(session: Session, route: ModelRoute, *, reason: str) -> 
     except Exception:  # pragma: no cover
         log.exception("emit route.config_changed failed")
     return True
+
+
+READINESS_INVALIDATORS = ("config:routes", "model:route")
+
+
+def notify_readiness(session: Session, route_key: str, *, reason: str) -> int:
+    """§08/§50 "Model alias/provider route berubah": a route status, pin (resolved model) or configuration
+    change (eligible_domains, data terms, ...) marks the dependent Doctor checks STALE in the same
+    transaction, so CAN_RUN_WORKER / review gates stop being READY until rechecked."""
+    try:
+        from aeos.doctor.facade import invalidate
+    except (ImportError, ModuleNotFoundError):
+        return 0
+    return sum(invalidate(session, invalidator=inv, reason=f"{route_key}: {reason}"[:200])
+               for inv in READINESS_INVALIDATORS)
 
 
 def get_route(session: Session, route_key: str) -> ModelRoute:
@@ -501,6 +511,7 @@ def observe_supervisor_resolution(session: Session, *, route_key: str, requested
     if route is None:
         return False
     previous = route.resolved_version
+    previous_identity = route.identity_status
     if route.config_hash is None:
         route.config_hash = compute_config_hash(route)
     route.resolved_version = resolved
@@ -511,6 +522,11 @@ def observe_supervisor_resolution(session: Session, *, route_key: str, requested
             f"{utcnow().date().isoformat()}: alias {requested} now resolves to {resolved} (was {previous})")
         return refresh_config_hash(session, route, reason=f"alias {requested} resolved {previous} -> {resolved}")
     route.config_hash = compute_config_hash(route)
+    if previous != resolved or previous_identity != "VERIFIED":
+        # first observation of the pinned/resolved model (UNKNOWN -> resolved): checks bound to the
+        # previous identity are rechecked; no approval is invalidated (no previously known identity).
+        notify_readiness(session, route_key, reason=f"alias {requested} resolved to {resolved} (was "
+                                                    f"{previous or 'UNKNOWN'})")
     return False
 
 
@@ -588,13 +604,16 @@ def activate_route(
     except (ImportError, ModuleNotFoundError) as exc:
         raise Blocked("decision registry (aeos.policy) unavailable - activation cannot be recorded",
                       code="DECISION_REGISTRY_UNAVAILABLE") from exc
+    previous_status = route.status
     route.status = mode
     session.flush()
+    notify_readiness(session, route.route_key, reason=f"status {previous_status} -> {mode}")
     return route, decision
 
 
 def disable_route(session: Session, route_key: str, *, reason: str) -> ModelRoute:
     route = get_route(session, route_key)
+    previous_status = route.status
     route.status = "DISABLED"
     try:
         from aeos.policy.facade import invalidate_decisions
@@ -604,4 +623,5 @@ def disable_route(session: Session, route_key: str, *, reason: str) -> ModelRout
     except (ImportError, ModuleNotFoundError):
         pass  # DISABLED status alone already excludes the route
     session.flush()
+    notify_readiness(session, route.route_key, reason=f"status {previous_status} -> DISABLED: {reason}")
     return route

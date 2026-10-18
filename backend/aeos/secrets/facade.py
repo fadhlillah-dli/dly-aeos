@@ -53,10 +53,15 @@ def get_secret(ref: str, *, purpose: str, actor: str) -> str:
     return get_provider().get(ref, purpose=purpose, actor=actor)
 
 
-def put_secret(ref: str, value: str, *, actor: str) -> SecretStatus:
+def put_secret(ref: str, value: str, *, actor: str, session: Any | None = None) -> SecretStatus:
+    """Store a value. Dependent Readiness Doctor checks (``secret:<ref>``) become STALE afterwards;
+    pass ``session`` (additive) when the caller holds an open write transaction on the local DB."""
     from aeos.secrets.provider import get_provider
+    from aeos.secrets.readiness import invalidate_secret_checks
 
-    return get_provider().put(ref, value, actor=actor)
+    status = get_provider().put(ref, value, actor=actor)
+    invalidate_secret_checks(ref, reason="credential stored/rotated", session=session)
+    return status
 
 
 def secret_status(ref: str) -> SecretStatus:

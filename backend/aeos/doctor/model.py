@@ -63,6 +63,18 @@ def venv_python() -> str:
     return ".\\.venv\\Scripts\\python.exe" if sys.platform == "win32" else ".venv/bin/python"
 
 
+def shell_chain(*commands: str) -> str:
+    """Join commands so the line runs in the default shell of the OS: Windows PowerShell 5.1 has no
+    ``&&`` (``;`` is used), zsh/bash stop at the first failure with ``&&``. Never a ``#`` comment:
+    zsh does not treat ``#`` as a comment in interactive shells."""
+    return "; ".join(commands) if sys.platform == "win32" else " && ".join(commands)
+
+
+def npm_cmd(args: str) -> str:
+    """npm invocation that also works when PowerShell blocks ``npm.ps1`` (execution policy)."""
+    return f"npm.cmd {args}" if sys.platform == "win32" else f"npm {args}"
+
+
 @dataclass(frozen=True)
 class Remedy:
     """A remediation PROPOSAL. AEOS never executes it (§08: no auto-install/IAM/hidden fix)."""

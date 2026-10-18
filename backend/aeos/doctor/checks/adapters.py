@@ -11,19 +11,32 @@ from typing import Any
 
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import secret_ref_status, set_secret_remedy
-from aeos.doctor.model import CheckContext, Outcome
+from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
 
 GITHUB_REF = "personal/github"
-GOOGLE_REF = "personal/google-oauth"
+# Same references the publisher's Google adapter writes (aeos.publisher.providers.google): the OAuth client
+# config and the consented token are stored separately; CAN_PUBLISH_PERSONAL needs both.
+GOOGLE_CLIENT_REF = "personal/google-oauth-client"
+GOOGLE_TOKEN_REF = "personal/google-oauth-token"
+GOOGLE_REF = GOOGLE_TOKEN_REF  # kept for callers of the earlier single-ref contract
 ATLASSIAN_REF = "office/atlassian"
+BITBUCKET_REF = "office/bitbucket"
 GITHUB_API = "https://api.github.com"
+# secrets facade contract: purpose "<namespace>:<use>" with the namespace of the reference (§26)
+GITHUB_PURPOSE = "personal:doctor.github-readonly-probe"
+PERSONAL_PUBLISH_PROVIDERS = ("google-drive", "google-docs", "github-issues")
+
+
+def github_token() -> str:
+    """Stored PERSONAL GitHub token for an in-process read-only probe (registered for redaction, never logged)."""
+    from aeos.secrets import facade as secrets
+
+    return secrets.get_secret(GITHUB_REF, purpose=GITHUB_PURPOSE, actor="doctor")
 
 
 def github_get(ctx: CheckContext, path: str) -> Any:
     """Read-only GitHub API GET with the stored token (never logged). Returns HttpResult or None."""
-    from aeos.secrets import facade as secrets
-
-    token = secrets.get_secret(GITHUB_REF, purpose="doctor.github_readonly_probe", actor="doctor")
+    token = github_token()
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "dly-aeos-doctor"}
     return ctx.runner.http_get(f"{GITHUB_API}{path}", timeout=10.0, headers=headers, allow_remote=True)
@@ -71,31 +84,97 @@ def adapter_github(ctx: CheckContext) -> Outcome:
                    error_code="GITHUB_PROBE_INCONCLUSIVE")
 
 
-@check("adapter.google_oauth", "PROJECT_ADAPTERS", "Google Drive/Docs PERSONAL: OAuth client", component_id="google-drive",
-       ttl_seconds=3600, invalidators=(f"secret:{GOOGLE_REF}",), ok={"CONFIGURED", "CONNECTED", "VERIFIED"},
-       severity_fail="HIGH", scope={"domain": "PERSONAL"}, observation="configuration")
+def google_connect_remedy() -> Remedy:
+    return Remedy(
+        operation="Hubungkan Google (consent pemilik di browser, redirect ke 127.0.0.1, scope drive.file saja); client "
+                  "OAuth jenis 'Desktop app' dibuat pemilik di Google Cloud Console",
+        command=aeos_cmd("publish google-connect --client-secret <path ke client_secret.json>"),
+        source="Google OAuth installed-app flow (S18: scope drive.file)",
+        target=f"{GOOGLE_CLIENT_REF} + {GOOGLE_TOKEN_REF}", privilege="pemilik akun Google", cost="tidak ada",
+        rollback=aeos_cmd(f"secrets delete {GOOGLE_TOKEN_REF}") + " dan cabut akses aplikasi di akun Google",
+        evidence_to_collect="adapter.google_oauth CONFIGURED; publikasi pertama adalah bukti fungsi")
+
+
+@check("adapter.google_oauth", "PROJECT_ADAPTERS", "Google Drive/Docs PERSONAL: OAuth client + token",
+       component_id="google-drive", ttl_seconds=3600,
+       invalidators=(f"secret:{GOOGLE_CLIENT_REF}", f"secret:{GOOGLE_TOKEN_REF}"),
+       ok={"CONFIGURED", "CONNECTED", "VERIFIED"}, severity_fail="HIGH", scope={"domain": "PERSONAL"},
+       observation="configuration")
 def adapter_google(ctx: CheckContext) -> Outcome:
-    state, evidence = secret_ref_status(GOOGLE_REF)
-    evidence["scope_policy"] = "drive.file (least privilege, S18)"
-    if state == "NOT_IMPLEMENTED":
+    client_state, client_ev = secret_ref_status(GOOGLE_CLIENT_REF)
+    token_state, token_ev = secret_ref_status(GOOGLE_TOKEN_REF)
+    evidence: dict[str, Any] = {"client": client_ev, "token": token_ev,
+                                "scope_policy": "drive.file (least privilege, S18)", "token_scopes_read": False}
+    states = {client_state, token_state}
+    if "NOT_IMPLEMENTED" in states:
         return Outcome("UNKNOWN", "Modul secrets belum tersedia.", evidence=evidence, error_code="SECRETS_NOT_IMPLEMENTED")
-    if state == "STORE_UNAVAILABLE":
-        return Outcome("MISSING", "Secret store tidak tersedia (fail closed).", evidence=evidence,
-                       error_code="SECRET_STORE_UNAVAILABLE")
-    if state == "ABSENT":
-        return Outcome("MISSING", f"OAuth client {GOOGLE_REF} belum disimpan; consent dilakukan pemilik lewat alur Google.",
-                       evidence=evidence, error_code="GOOGLE_OAUTH_MISSING",
-                       remedy=set_secret_remedy(GOOGLE_REF, "OAuth client Google (Desktop app)"))
-    return Outcome("CONFIGURED", f"OAuth client {GOOGLE_REF} tersimpan; token/consent dan root folder diverifikasi oleh "
-                   "adapter publisher.", evidence=evidence)
+    if "STORE_UNAVAILABLE" in states:
+        return Outcome("MISSING", "Secret store tidak tersedia; credential Google tidak dapat diperiksa (fail closed).",
+                       evidence=evidence, error_code="SECRET_STORE_UNAVAILABLE")
+    if token_state != "PRESENT":
+        what = "client OAuth dan token" if client_state != "PRESENT" else "token consent"
+        return Outcome("MISSING", f"Google belum terhubung: {what} belum disimpan ({GOOGLE_TOKEN_REF}).",
+                       evidence=evidence, error_code="GOOGLE_OAUTH_MISSING", remedy=google_connect_remedy())
+    if client_state != "PRESENT":
+        return Outcome("FAILED", f"Token Google ada tetapi client {GOOGLE_CLIENT_REF} hilang; refresh token tidak dapat "
+                       "dipakai.", evidence=evidence, error_code="GOOGLE_CLIENT_MISSING", remedy=google_connect_remedy())
+    return Outcome("CONFIGURED", "Client OAuth dan token Google tersimpan (nilai tidak dibaca); scope dan root folder "
+                   "dibuktikan oleh publikasi pertama, bukan oleh Doctor.", evidence=evidence)
 
 
-def _office(component: str, label: str) -> Any:
+def _enablement_fp(ctx: CheckContext) -> dict[str, Any] | None:
+    if ctx.session is None:
+        return None
+    from sqlalchemy import select
+
+    from aeos.models.decisions import Decision
+    from aeos.models.identity import SystemSetting
+
+    flags = ctx.session.execute(select(SystemSetting.key, SystemSetting.version).where(
+        SystemSetting.key.like("write_enabled.%"))).all()
+    decisions = ctx.session.execute(select(Decision.id, Decision.status).where(
+        Decision.kind == "WRITE_ENABLEMENT")).all()
+    return {"flags": sorted((k, int(v or 0)) for k, v in flags), "decisions": sorted((d[0], d[1]) for d in decisions)}
+
+
+@check("adapter.write_enablement", "PROJECT_ADAPTERS", "Write enablement provider PERSONAL (keputusan manusia)",
+       component_id="policy-decision-registry", needs_db=True, ttl_seconds=3600, ok={"CONFIGURED", "VERIFIED"},
+       invalidators=("config:write_enablement", "config:policy"), fingerprint=_enablement_fp, severity_fail="HIGH",
+       scope={"domain": "PERSONAL"},
+       description="Flag write_enabled.<provider> + keputusan WRITE_ENABLEMENT ACTIVE untuk Google Drive, Google Docs "
+                   "dan GitHub Issues (syarat interlock §26).")
+def adapter_write_enablement(ctx: CheckContext) -> Outcome:
+    assert ctx.session is not None
+    try:
+        from aeos.policy import enablement
+    except (ImportError, ModuleNotFoundError):
+        return Outcome("UNKNOWN", "Modul policy tidak tersedia; write eksternal ditolak (fail closed).",
+                       error_code="POLICY_NOT_AVAILABLE")
+    rows = {r["provider"]: r for r in enablement.status(ctx.session, "PERSONAL")}
+    effective = [p for p in PERSONAL_PUBLISH_PROVIDERS if (rows.get(p) or {}).get("effective")]
+    missing = [p for p in PERSONAL_PUBLISH_PROVIDERS if p not in effective]
+    evidence = {"providers": {p: {"flag": (rows.get(p) or {}).get("flag"),
+                                  "decision": bool((rows.get(p) or {}).get("decision_id")),
+                                  "effective": p in effective} for p in PERSONAL_PUBLISH_PROVIDERS}}
+    if missing:
+        return Outcome("MISSING", f"Write enablement belum efektif untuk: {', '.join(missing)} (butuh flag + keputusan "
+                       "WRITE_ENABLEMENT ACTIVE); interlock menolak publikasi ke provider tersebut.", evidence=evidence,
+                       error_code="WRITE_NOT_ENABLED", remedy=Remedy(
+                           operation="Pemilik mencatat keputusan WRITE_ENABLEMENT per provider di halaman Keputusan "
+                           "(Policy & Decisions); tidak ada perintah otomatis", target=", ".join(missing),
+                           privilege="SUPER_ADMIN (keputusan manusia)", cost="tidak ada",
+                           rollback="cabut keputusan (flag otomatis kembali false)",
+                           evidence_to_collect="adapter.write_enablement CONFIGURED"))
+    return Outcome("CONFIGURED", "Write enablement efektif untuk Google Drive, Google Docs dan GitHub Issues; setiap "
+                   "write tetap butuh approval versi/hash yang tepat (interlock).", evidence=evidence)
+
+
+def _office(component: str, label: str, ref: str) -> Any:
     def fn(ctx: CheckContext) -> Outcome:
-        state, evidence = secret_ref_status(ATLASSIAN_REF)
+        state, evidence = secret_ref_status(ref)
         evidence["policy"] = "OFFICE default deny (§23)"
         if state == "PRESENT":
-            return Outcome("CONFIGURED", f"Credential {ATLASSIAN_REF} ada; {label} tetap diblokir sampai otorisasi "
+            return Outcome("CONFIGURED", f"Credential {ref} ada; {label} tetap diblokir sampai otorisasi "
                            "perusahaan tercatat dan tenant/target diverifikasi.", evidence=evidence)
         return Outcome("NOT_APPLICABLE", f"Adapter {label} belum dikonfigurasi (OFFICE belum diotorisasi).",
                        evidence=evidence)
@@ -104,7 +183,9 @@ def _office(component: str, label: str) -> Any:
     return fn
 
 
-for _cid, _label in (("bitbucket", "Bitbucket"), ("jira", "Jira"), ("confluence", "Confluence")):
+# Same references as the publisher's Atlassian adapter (Bitbucket has its own app password reference).
+for _cid, _label, _ref in (("bitbucket", "Bitbucket", BITBUCKET_REF), ("jira", "Jira", ATLASSIAN_REF),
+                           ("confluence", "Confluence", ATLASSIAN_REF)):
     check(f"adapter.office_{_cid}", "PROJECT_ADAPTERS", f"{_label} OFFICE", component_id=_cid, ttl_seconds=3600,
-          invalidators=(f"secret:{ATLASSIAN_REF}", "config:office_policy"), ok={"CONFIGURED", "VERIFIED"},
-          scope={"domain": "OFFICE"})(_office(_cid, _label))
+          invalidators=(f"secret:{_ref}", "config:office_policy"), ok={"CONFIGURED", "VERIFIED"},
+          scope={"domain": "OFFICE"})(_office(_cid, _label, _ref))

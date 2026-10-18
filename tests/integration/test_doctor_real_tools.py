@@ -36,7 +36,10 @@ def test_real_claude_binary_and_native_auth_probe(settings, db):
     assert by_id["claude.binary"].status == "VERIFIED"
     assert by_id["claude.auth"].status in {"CONNECTED", "MISSING", "FAILED", "UNKNOWN"}
     assert "email" not in by_id["claude.auth"].observed_evidence
-    assert "claude.capability_test" not in by_id  # functional check never runs implicitly
+    # without --functional the check only reads the bridge's recorded proof: none on a fresh data dir, and
+    # no `claude -p` call is made implicitly (NOT-PROVEN -> manual fallback, never VERIFIED by narration)
+    assert by_id["claude.capability_test"].status == "UNKNOWN"
+    assert by_id["claude.capability_test"].error_code == "CAPABILITY_TEST_NOT_RUN"
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")

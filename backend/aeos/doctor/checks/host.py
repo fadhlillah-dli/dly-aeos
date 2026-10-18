@@ -138,9 +138,9 @@ def host_port(ctx: CheckContext) -> Outcome:
         return Outcome("FAILED", f"Port {port} di {host} dipakai proses lain; AEOS tidak akan pindah ke antarmuka "
                        "publik atau mematikan auth.", evidence=evidence, error_code="PORT_IN_USE",
                        target_identity=f"{host}:{port}",
-                       remedy=Remedy(operation="Hentikan proses yang memakai port atau pilih port lain",
-                                     command=f"{find_cmd}  # lalu: {aeos_cmd(f'serve --port {port + 1}')}",
-                                     target=f"{host}:{port}", privilege="pengguna lokal",
+                       remedy=Remedy(operation="Lihat proses yang memakai port (perintah di bawah), hentikan bila "
+                                     f"milik Anda, atau jalankan AEOS di port lain: {aeos_cmd(f'serve --port {port + 1}')}",
+                                     command=find_cmd, target=f"{host}:{port}", privilege="pengguna lokal",
                                      rollback="kembali ke port semula", evidence_to_collect="port bebas atau milik AEOS"))
     if can_bind(host, port):
         return Outcome("VERIFIED", f"Port {port} di {host} tersedia.", evidence=evidence, target_identity=f"{host}:{port}")
