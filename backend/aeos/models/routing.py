@@ -46,6 +46,19 @@ class ModelRoute(IdMixin, TimestampMixin, Base):
     source_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
     notes: Mapped[str] = mapped_column(Text, default="")
     mode: Mapped[str] = mapped_column(String(16), default="DESIGN")
+    # --- routing module extensions (§23, §37, §38, §43) -------------------------------------------
+    alias: Mapped[str | None] = mapped_column(String(64), nullable=True)  # e.g. "fable" / "opus"
+    priority: Mapped[int] = mapped_column(Integer, default=100)  # deterministic tie-break, lower first
+    # VERIFIED (resolved identity observed by AEOS) | PROVIDER_CLAIMED (catalog says) | UNVERIFIED
+    identity_status: Mapped[str] = mapped_column(String(24), default="PROVIDER_CLAIMED")
+    evidence_level: Mapped[str] = mapped_column(String(4), default="E0")  # E1 = catalog/doc reading
+    origin: Mapped[str] = mapped_column(String(24), default="SEED")  # SEED|CATALOG_DISCOVERED|OWNER
+    availability: Mapped[str] = mapped_column(String(16), default="UNKNOWN")  # AVAILABLE|MISSING|UNKNOWN
+    availability_checked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    free_until: Mapped[datetime | None] = mapped_column(nullable=True)  # after this, is_free is not trusted
+    config_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)  # AIConfiguration identity
+    config_changed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    resolved_observed_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class CapabilityGrant(IdMixin, CreatedMixin, Base):

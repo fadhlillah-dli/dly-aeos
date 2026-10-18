@@ -1,0 +1,244 @@
+"""`aeos vault ...` - local OpenBao lifecycle (§07 order 3, §26). ASCII output only.
+
+install  shows the plan (official release, asset, checksum, target, privilege, cost, rollback) and
+         needs --yes or an interactive confirmation; user level only, never system-wide.
+start    generated loopback-only config, detached server, pid recorded.
+stop     stops the recorded server process.
+status   health/sealed/initialised, AppRole presence, interim mode.
+init     init + unseal + KV v2 + policies + AppRole; prints unseal key(s) and root token ONCE.
+unseal   applies unseal keys (prompted, or from the OS keyring when the owner stored them there).
+"""
+
+from __future__ import annotations
+
+import getpass
+import time
+
+import httpx
+import typer
+
+app = typer.Typer(help="Local OpenBao vault (install/start/stop/status/init/unseal).", no_args_is_help=True)
+
+
+def _err(msg: str) -> None:
+    typer.secho(msg, fg="red", err=True)
+
+
+def _settings():
+    from aeos.core.config import get_settings
+
+    return get_settings()
+
+
+def _observe(status: str, version: str | None, detail: dict) -> None:
+    """Best-effort inventory observation (installation dimension)."""
+    try:
+        from aeos.cli import ensure_database
+        from aeos.core.db import session_scope
+        from aeos.inventory.facade import record_observation
+
+        ensure_database()
+        with session_scope() as s:
+            record_observation(s, component_id="openbao", dimension="installation", status=status,
+                               observer="aeos.secrets.vault_cli", observed_version=version, detail=detail,
+                               ttl_seconds=None)
+    except (ImportError, ModuleNotFoundError):
+        pass
+    except Exception as exc:  # pragma: no cover
+        typer.secho(f"warning: inventory observation not recorded ({type(exc).__name__})", fg="yellow", err=True)
+
+
+@app.command("install")
+def install_cmd(
+    version: str = typer.Option(None, help="Exact OpenBao version (default: latest release via GitHub API)"),
+    yes: bool = typer.Option(False, "--yes", help="Confirm the shown plan without prompting"),
+) -> None:
+    """Install the official OpenBao binary into <data dir>/bin after showing the plan."""
+    from aeos.secrets import installer
+
+    settings = _settings()
+    with httpx.Client(headers={"User-Agent": "dly-aeos-vault-install"}, follow_redirects=False) as client:
+        try:
+            release = installer.resolve_release(client, version)
+            plan = installer.install_plan(settings, release)
+        except (installer.InstallError, httpx.HTTPError) as exc:
+            _err(f"cannot plan the install: {exc}")
+            raise typer.Exit(1) from exc
+        typer.echo("Install plan (nothing has been changed yet):")
+        for k, v in plan.items():
+            typer.echo(f"  {k:<14} {v}")
+        if not yes and not typer.confirm("Proceed with this user-level install?", default=False):
+            typer.echo("Aborted - nothing installed.")
+            raise typer.Exit(1)
+        try:
+            result = installer.install(settings, client, plan)
+        except (installer.InstallError, httpx.HTTPError, OSError) as exc:
+            _err(f"install failed, nothing installed: {exc}")
+            _observe("INSTALL_FAILED", plan["version"], {"error": str(exc)[:200]})
+            raise typer.Exit(1) from exc
+    _observe("INSTALLED", result["version"], {k: result[k] for k in ("archive_sha256", "binary_sha256", "verification")})
+    typer.echo(f"Installed OpenBao {result['version']} -> {result['installed']}")
+    typer.echo("Signature (GPG/sigstore) NOT verified; SHA256 matched checksums.txt.")
+    typer.echo("Next: aeos vault start  then  aeos vault init")
+
+
+@app.command("start")
+def start_cmd(wait: float = typer.Option(10.0, help="Seconds to wait for the listener")) -> None:
+    """Start the local OpenBao server (loopback only) in the background."""
+    from aeos.secrets import server
+    from aeos.secrets.openbao import OpenBaoClient, OpenBaoUnavailable
+
+    settings = _settings()
+    binary = server.bin_path(settings)
+    if binary is None:
+        _err("OpenBao binary not found. Run: aeos vault install")
+        raise typer.Exit(1)
+    try:
+        info = server.start(settings, binary)
+    except (OpenBaoUnavailable, OSError) as exc:
+        _err(f"cannot start OpenBao: {exc}")
+        raise typer.Exit(1) from exc
+    if info.get("already_running"):
+        typer.echo(f"OpenBao already running (pid {info['pid']}).")
+        return
+    deadline = time.monotonic() + wait
+    health = None
+    while time.monotonic() < deadline:
+        try:
+            health = OpenBaoClient(settings.openbao_addr).health()
+            break
+        except OpenBaoUnavailable:
+            time.sleep(0.5)
+    typer.echo(f"OpenBao started (pid {info['pid']}), config {info['config']}, log {info['log']}")
+    if health is None:
+        typer.secho("listener not reachable yet - check the log", fg="yellow")
+    elif not health["initialized"]:
+        typer.echo("Not initialised yet. Next: aeos vault init")
+    elif health["sealed"]:
+        typer.echo("Sealed. Next: aeos vault unseal")
+
+
+@app.command("stop")
+def stop_cmd() -> None:
+    """Stop the OpenBao server started by `aeos vault start`."""
+    from aeos.secrets import server
+
+    typer.echo("Stopped." if server.stop(_settings()) else "No running OpenBao recorded.")
+
+
+@app.command("status")
+def status_cmd() -> None:
+    """Vault health, sealed/initialised, AppRole presence and interim-mode warning (no values)."""
+    from aeos.secrets.health import store_health
+
+    h = store_health(_settings())
+    b = h["openbao"]
+    typer.echo(f"store status     {h['status']} (backend {h['backend']})")
+    typer.echo(f"openbao          addr={b['addr']} reachable={b['reachable']} initialized={b['initialized']} "
+               f"sealed={b['sealed']} version={b['version'] or 'UNKNOWN'}")
+    typer.echo(f"binary           {'installed' if b['binary_installed'] else 'missing'}; server pid alive={b['server_pid_alive']}")
+    typer.echo(f"approle keyring  {b['approle_in_keyring']}; login={b['login']}")
+    typer.echo(f"os keyring       {h['keyring']['available']} ({h['keyring']['backend']})")
+    if h["interim"]["active"]:
+        typer.secho(f"WARNING interim  {h['interim']['residual_risk']}", fg="yellow")
+    for r in h["reasons"]:
+        typer.echo(f"reason           {r}")
+    for rem in h["remedies"]:
+        typer.echo(f"remedy           {rem['command']}  ({rem['why']})")
+    typer.echo(f"evidence limit   {h['evidence_limit']}")
+
+
+@app.command("init")
+def init_cmd(
+    shares: int = typer.Option(1, help="Number of unseal key shares"),
+    threshold: int = typer.Option(1, help="Keys required to unseal"),
+    store_unseal_in_keyring: bool = typer.Option(
+        False, "--store-unseal-in-keyring",
+        help="Also store the threshold unseal keys in the OS keyring (convenience; residual risk)"),
+    yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation"),
+) -> None:
+    """Initialise OpenBao for DLY AEOS (policies + AppRole) and revoke the root token afterwards."""
+    from aeos.core.redaction import register_secret
+    from aeos.secrets.openbao import OpenBaoError, OpenBaoUnavailable
+    from aeos.secrets.provider import bootstrap_store, reset_provider_cache
+    from aeos.secrets.setup import CONTROLLER_POLICIES, POLICY_NAMESPACES, run_init
+
+    settings = _settings()
+    typer.echo("This will initialise the local OpenBao at " + settings.openbao_addr)
+    typer.echo(f"  key shares/threshold : {shares}/{threshold}")
+    typer.echo(f"  policies             : {', '.join(POLICY_NAMESPACES)}")
+    typer.echo(f"  approle              : aeos-controller -> {', '.join(CONTROLLER_POLICIES)} (office NOT bound)")
+    typer.echo("  bootstrap credentials: OS keyring service " + bootstrap_store(settings).service)
+    if not yes and not typer.confirm("Continue?", default=False):
+        raise typer.Exit(1)
+    try:
+        res = run_init(settings.openbao_addr, shares=shares, threshold=threshold, bootstrap=bootstrap_store(settings),
+                       store_unseal_in_keyring=store_unseal_in_keyring)
+    except (OpenBaoError, ValueError) as exc:
+        _err(f"init refused: {exc}")
+        if isinstance(exc, OpenBaoUnavailable):
+            from aeos.secrets import server
+
+            _err("If `aeos vault status` now reports initialized=True, the keys were never received: the vault is "
+                 f"unusable. Stop it (aeos vault stop), delete {server.server_dir(settings) / 'raft'} (no secrets were "
+                 "stored yet) and run `aeos vault init` again.")
+        raise typer.Exit(1) from exc
+    for k in res.keys:
+        register_secret(k)
+    register_secret(res.root_token)
+    typer.echo("")
+    typer.echo("=" * 72)
+    typer.echo("SHOWN ONCE - store these OFFLINE (password manager / paper), never in the repo or config:")
+    for i, k in enumerate(res.keys, 1):
+        typer.echo(f"  Unseal key {i}: {k}")
+    typer.echo(f"  Root token  : {res.root_token}")
+    typer.echo(f"  ({threshold} of {shares} keys are needed after every restart: aeos vault unseal)")
+    typer.echo("=" * 72)
+    for step in res.steps:
+        typer.echo(f"  done: {step}")
+    reset_provider_cache()
+    if res.error:
+        _err(f"setup incomplete: {res.error}")
+        _err("The root token was NOT revoked so you can finish/retry; revoke it when done.")
+        raise typer.Exit(1)
+    typer.echo("Root token revoked; the controller now uses AppRole with a 1h token TTL.")
+    if res.unseal_stored:
+        typer.secho("Unseal keys are also in the OS keyring (your choice): anyone with your OS account can unseal.",
+                    fg="yellow")
+
+
+@app.command("unseal")
+def unseal_cmd(from_keyring: bool = typer.Option(False, "--from-keyring", help="Use unseal keys stored in the OS keyring")) -> None:
+    """Unseal OpenBao after a restart."""
+    from aeos.core.redaction import register_secret
+    from aeos.secrets.openbao import OpenBaoClient, OpenBaoError
+    from aeos.secrets.provider import bootstrap_store, reset_provider_cache
+
+    settings = _settings()
+    c = OpenBaoClient(settings.openbao_addr)
+    try:
+        st = c.seal_status()
+        if not st.get("initialized"):
+            _err("OpenBao is not initialised. Run: aeos vault init")
+            raise typer.Exit(1)
+        if not st.get("sealed"):
+            typer.echo("Already unsealed.")
+            return
+        keys = bootstrap_store(settings).unseal_keys() if from_keyring else []
+        if from_keyring and not keys:
+            _err("no unseal keys stored in the OS keyring")
+            raise typer.Exit(1)
+        need = int(st.get("t") or 1) - int(st.get("progress") or 0)
+        for i in range(need):
+            key = keys[i] if i < len(keys) else getpass.getpass(f"Unseal key {i + 1}/{need} (hidden): ")
+            register_secret(key)
+            st = c.unseal(key)
+            if not st.get("sealed"):
+                break
+    except OpenBaoError as exc:
+        _err(f"unseal failed: {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        c.close()
+    reset_provider_cache()
+    typer.echo("Unsealed." if not st.get("sealed") else "Still sealed - more keys needed.")
