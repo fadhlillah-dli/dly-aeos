@@ -124,7 +124,8 @@ def test_push_rejects_main_branch_no_grant_and_foreign_worktree(db, repo_env, tm
                                     repo_full_name="../../etc", remote_url=str(repo_env["bare"]))
 
 
-def test_remote_github_push_requires_interlock(db, repo_env, secrets_memory):
+def test_remote_github_push_requires_interlock(db, repo_env, secrets_memory, absent_modules):
+    absent_modules("aeos.policy.interlock")
     """Interlock missing (policy module absent) -> fail closed before any credential is fetched."""
     secrets_memory.put("personal/github", TOKEN, actor="test")
     _grant(db, repo_env["run"])

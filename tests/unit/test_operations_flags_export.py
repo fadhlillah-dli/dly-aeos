@@ -47,7 +47,8 @@ def test_flag_validation_and_unknown_keys(personal_client):
     assert personal_client.put("/api/ops/flags/ops.sli_loop_interval_seconds", json={"value": 5}).status_code == 422
 
 
-def test_flag_change_without_doctor_reports_unavailable(personal_client):
+def test_flag_change_without_doctor_reports_unavailable(personal_client, absent_modules):
+    absent_modules("aeos.doctor.capabilities")
     r = personal_client.put("/api/ops/flags/ui.advanced_view_default", json={"value": True})
     assert r.status_code == 200
     assert r.json()["readiness_invalidation"]["status"] == "UNAVAILABLE"

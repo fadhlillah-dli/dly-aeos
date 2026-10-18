@@ -31,6 +31,7 @@ dependencies = [
   "google-auth-oauthlib>=1.2",
   "jsonschema>=4.22",
   "filetype>=1.2",
+  "anyio>=4",
   "pypdf>=5",
 ]
 

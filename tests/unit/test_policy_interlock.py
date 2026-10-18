@@ -92,12 +92,25 @@ def test_target_naming_another_provider_is_denied(db, personal):
 def test_approval_not_made_by_a_human_is_denied(db, personal):
     """§19/§20: the approval behind a write must be a live human decision. A row whose actor kind is
     anything else (forged/tampered, ADR-recorded, agent) is refused even if every binding matches."""
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
     from aeos.models.decisions import Decision
 
+    # Tampering with an existing decision's actor kind is refused by the DB (immutable binding column).
     db.get(Decision, personal["decision_id"]).actor_kind = "AGENT"
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
+    # A forged row inserted with every binding copied but a non-human actor kind is refused by the interlock.
+    orig = db.get(Decision, personal["decision_id"])
+    cols = {c.name: getattr(orig, c.name) for c in Decision.__table__.columns if c.name != "id"}
+    orig.status = "SUPERSEDED"
+    forged = Decision(**{**cols, "actor_kind": "AGENT"})
+    db.add(forged)
     db.commit()
-    res = check_external_write(db, personal["intent"])
-    assert not res.allowed and _codes(res) == {"DECISION_ACTOR_NOT_HUMAN"}
+    res = check_external_write(db, replace(personal["intent"], decision_id=forged.id))
+    assert not res.allowed and "DECISION_ACTOR_NOT_HUMAN" in _codes(res)
 
 
 def test_bootstrap_incomplete_denied(db, personal):

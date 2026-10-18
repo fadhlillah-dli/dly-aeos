@@ -78,7 +78,8 @@ def test_activate_refuses_viewers_and_unknown_users(routes, monkeypatch):
     assert routes.query(Decision).count() == 0
 
 
-def test_activate_without_decision_registry_fails_closed(routes, monkeypatch):
+def test_activate_without_decision_registry_fails_closed(routes, monkeypatch, absent_modules):
+    absent_modules("aeos.policy.decisions")
     create_admin(routes)  # policy module not installed: nothing is recorded, route stays CANDIDATE
     r = _activate(password=ADMIN_PW)
     assert r.exit_code == 1 and "DECISION_REGISTRY_UNAVAILABLE" in r.output

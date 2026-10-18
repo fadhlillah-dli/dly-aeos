@@ -115,7 +115,7 @@ APPEND_ONLY_TABLES = (
 # Tables whose binding columns are immutable once written; lifecycle/status columns may change.
 IMMUTABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "decisions": (
-        "kind", "actor_user_id", "target_type", "target_id", "target_version", "target_hash",
+        "kind", "actor_user_id", "actor_kind", "target_type", "target_id", "target_version", "target_hash",
         "allowed_operations", "auth_scope", "project_id", "domain", "created_at",
     ),
     "projects": ("domain",),  # §04: domain never changes via model output or manifest edit

@@ -101,7 +101,8 @@ def test_claude_binary_missing_and_found(settings, db):
                                      "status": "INSTALLED", "observed_version": "2.1.302"}
 
 
-def test_claude_capability_test_is_unknown_without_bridge_and_verified_with_it(settings, db, monkeypatch):
+def test_claude_capability_test_is_unknown_without_bridge_and_verified_with_it(settings, db, monkeypatch, absent_modules):
+    absent_modules("aeos.claude_bridge.bridge")
     res = check("claude.capability_test", _ctx(settings, db, base_runner(), functional=True))
     assert res.status == "UNKNOWN" and res.error_code == "BRIDGE_NOT_IMPLEMENTED"
     import aeos.claude_bridge.facade as bridge
@@ -228,7 +229,8 @@ def test_branch_protection_residual_risk(settings, db, secrets_memory, status, b
     assert "residual_risk" in res.observed_evidence
 
 
-def test_worker_engine_status_through_facade(settings, db, monkeypatch):
+def test_worker_engine_status_through_facade(settings, db, monkeypatch, absent_modules):
+    absent_modules("aeos.worker_runtime.opencode")
     res = check("worker.opencode", _ctx(settings, db, base_runner()))
     assert res.status == "UNKNOWN" and res.error_code == "WORKER_RUNTIME_NOT_IMPLEMENTED"
     import aeos.worker_runtime.facade as worker

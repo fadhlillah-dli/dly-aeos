@@ -2,7 +2,6 @@ import { useQuery } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
-import { RelatedLinks } from "../../components/control_center/Provenance";
 import { Button, ErrorBox, Loading, Notice, PageHeader } from "../../components/ui";
 import { ActivityFeed } from "./ActivityFeed";
 import { IntegrationsCard } from "./IntegrationsCard";
@@ -62,7 +61,6 @@ export default function Page() {
           </div>
         </div>
       )}
-      <RelatedLinks />
     </div>
   );
 }

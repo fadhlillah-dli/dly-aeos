@@ -7,5 +7,5 @@ if (-not (Test-Path $exe)) {
     Write-Host "Virtual environment not found. Run: .\scripts\bootstrap.ps1" -ForegroundColor Yellow
     exit 1
 }
-& $exe @args
+if ($MyInvocation.ExpectingInput) { $input | & $exe @args } else { & $exe @args }
 exit $LASTEXITCODE

@@ -176,7 +176,8 @@ def test_manual_result_with_wrong_model_is_rejected(db, owner, monkeypatch, tmp_
     assert plan.state == "PLANNING_FAILED"
 
 
-def test_missing_bridge_and_manual_writer_fails_closed_without_api(db, owner):
+def test_missing_bridge_and_manual_writer_fails_closed_without_api(db, owner, absent_modules):
+    absent_modules("aeos.claude_bridge.bridge", "aeos.claude_bridge.manual")
     """Real absence of aeos.claude_bridge.bridge/manual modules: no crash, no API, NEEDS_DECISION."""
     plan = _plan(db, owner)
     service.run_pipeline(db, plan.id, actor=owner.id)
@@ -378,7 +379,8 @@ def test_attachment_from_other_project_is_not_found(db, owner):
         _plan(db, owner, attachment_ids=[att.id])
 
 
-def test_unreadable_attachment_is_recorded_unknown(db, owner):
+def test_unreadable_attachment_is_recorded_unknown(db, owner, absent_modules):
+    absent_modules("aeos.intake.service")
     """intake impl absent -> attachment marked UNKNOWN (never pretended read)."""
     project = make_project(db)
     att = Attachment(project_id=project.id, domain="PERSONAL", filename="a.md", stored_name="s", size_bytes=1,

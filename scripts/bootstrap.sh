@@ -92,6 +92,8 @@ fi
 echo "Step 3: local database"
 .venv/bin/aeos db upgrade
 .venv/bin/aeos seed
+# Observe what is actually installed so the first dashboard view is not DESIGN-only (read-only probes).
+.venv/bin/aeos inventory reconcile || true
 
 if [ "$NO_DOCTOR" = 0 ]; then
   echo "Step 4: Readiness Doctor"

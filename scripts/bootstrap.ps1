@@ -101,6 +101,8 @@ if (-not $SkipFrontend) {
 Write-Host "Step 3: local database"
 & .\.venv\Scripts\aeos.exe db upgrade
 & .\.venv\Scripts\aeos.exe seed
+# Observe what is actually installed so the first dashboard view is not DESIGN-only (read-only probes).
+& .\.venv\Scripts\aeos.exe inventory reconcile
 
 if (-not $NoDoctor) {
     Write-Host "Step 4: Readiness Doctor"

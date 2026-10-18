@@ -10,6 +10,7 @@ annotated-types==0.8.0
     # via pydantic
 anyio==4.15.1
     # via
+    #   dly-aeos (pyproject.toml)
     #   httpx
     #   starlette
 argon2-cffi==25.1.0
@@ -143,6 +144,8 @@ pygments==2.21.0
     # via
     #   pytest
     #   rich
+pypdf==6.21.1
+    # via dly-aeos (pyproject.toml)
 pytest==9.1.1
     # via
     #   dly-aeos (pyproject.toml)
