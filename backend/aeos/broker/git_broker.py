@@ -318,7 +318,7 @@ def push_task_branch(
             raise PolicyDenied("GitHub personal credentials are PERSONAL-only", code="DOMAIN_CREDENTIAL")
         from aeos.secrets import facade as secrets
 
-        token = secrets.get_secret("personal/github", purpose=f"push {branch}", actor="service:broker")
+        token = secrets.get_secret("personal/github", purpose=f"personal:broker.push {branch}", actor="service:broker")
     se = _side_effect(session, run, kind="PUSH_BRANCH", key=f"push:{repo_full_name}:{branch}:{expected_head or run.head_commit or ''}",
                       target=target)
     work_root = get_settings().layout.root / "broker" / "git"
@@ -383,7 +383,7 @@ def create_pull_request(
                 "side_effect_id": existing.id}
     from aeos.secrets import facade as secrets
 
-    token = secrets.get_secret("personal/github", purpose=f"create PR {head}", actor="service:broker")
+    token = secrets.get_secret("personal/github", purpose=f"personal:broker.create-pr {head}", actor="service:broker")
     se = _side_effect(session, run, kind="CREATE_PR", key=key, target=target)
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "dly-aeos-broker"}
@@ -484,7 +484,7 @@ def reconcile_side_effect(session: Session, side_effect_id: str, *, actor: str,
                 raise PolicyDenied("GitHub personal credentials are PERSONAL-only", code="DOMAIN_CREDENTIAL")
             from aeos.secrets import facade as secrets
 
-            token = secrets.get_secret("personal/github", purpose=f"reconcile push {branch}", actor="service:broker")
+            token = secrets.get_secret("personal/github", purpose=f"personal:broker.reconcile-push {branch}", actor="service:broker")
         try:
             sha = _ls_remote_head(url, branch, token)
         except subprocess.TimeoutExpired:
@@ -505,7 +505,7 @@ def reconcile_side_effect(session: Session, side_effect_id: str, *, actor: str,
         base = str(target.get("base", ""))
         from aeos.secrets import facade as secrets
 
-        token = secrets.get_secret("personal/github", purpose=f"reconcile PR {head}", actor="service:broker")
+        token = secrets.get_secret("personal/github", purpose=f"personal:broker.reconcile-pr {head}", actor="service:broker")
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                    "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "dly-aeos-broker"}
         with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False, trust_env=False) as client:

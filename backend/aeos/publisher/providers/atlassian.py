@@ -107,7 +107,7 @@ def readiness(cfg: AtlassianConfig, *, product: str) -> tuple[str, list[str], st
 
 
 def _basic_auth(ref: str) -> str:
-    raw = secrets.get_secret(ref, purpose="atlassian publication", actor=ACTOR)
+    raw = secrets.get_secret(ref, purpose="office:publisher.atlassian", actor=ACTOR)
     try:
         data = json.loads(raw)
         user = data.get("email") or data.get("username") or ""

@@ -23,7 +23,7 @@ def github_get(ctx: CheckContext, path: str) -> Any:
     """Read-only GitHub API GET with the stored token (never logged). Returns HttpResult or None."""
     from aeos.secrets import facade as secrets
 
-    token = secrets.get_secret(GITHUB_REF, purpose="doctor.github_readonly_probe", actor="doctor")
+    token = secrets.get_secret(GITHUB_REF, purpose="personal:doctor.github-readonly-probe", actor="doctor")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "dly-aeos-doctor"}
     return ctx.runner.http_get(f"{GITHUB_API}{path}", timeout=10.0, headers=headers, allow_remote=True)

@@ -65,7 +65,7 @@ def github_token(domain: str) -> tuple[str | None, str]:
     try:
         from aeos.secrets import facade as secrets
 
-        token = secrets.get_secret(SECRET_REF, purpose="delivery.provider.read", actor="delivery")
+        token = secrets.get_secret(SECRET_REF, purpose="personal:delivery.provider.read", actor="delivery")
     except ImportError:
         return None, "UNAVAILABLE: secrets module not available"
     except AeosError as exc:
