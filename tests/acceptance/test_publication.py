@@ -322,3 +322,17 @@ def test_one_failing_target_is_partial_and_successes_are_kept(personal_client: A
         retried = run_outbox(db, pub["id"])
         assert len(google.files) == created_docs, "the retry never re-creates what already succeeded"
         assert retried["status"] == "PUBLISHED"
+
+
+def test_publication_status_keeps_docs_published_separate_from_active_and_verified(
+        personal_client: AuthedClient, db, vault, monkeypatch):
+    world = publication_ready(personal_client, db, vault, monkeypatch)
+    pv = personal_client.post(f"/api/plans/{world['plan']['id']}/publications/preview", json={"render_visuals": False})
+    assert pv.status_code == 200, pv.text
+    view = personal_client.get(f"/api/publications/{pv.json()['id']}").json()
+    dims = view["status_dimensions"]
+    assert set(dims) == {"APPROVED", "IMPLEMENTED", "VERIFIED", "ACTIVE", "ARCHITECTURE_SOURCE_UPDATED",
+                         "DOCS_PUBLISHED"}, "separate fields, never one green badge"
+    assert dims["APPROVED"]["status"] == "APPROVED" and dims["DOCS_PUBLISHED"]["status"] == "NOT_PUBLISHED"
+    assert dims["ACTIVE"]["status"] == "UNKNOWN" and dims["VERIFIED"]["status"] != "VERIFIED"
+    assert {d["source"] for d in dims.values()} >= {"publisher", "operations", "verification"}
