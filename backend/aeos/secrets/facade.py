@@ -10,6 +10,13 @@ Rules every implementation must keep:
   ``aeos.core.redaction.register_secret``;
 * when the backing store is unavailable the call fails closed with ``Blocked``;
 * status calls never include values.
+
+``purpose`` contract (enforced by the OpenBao and interim providers): ``"<namespace>:<use>"`` where
+``<namespace>`` equals the reference namespace, e.g. ``get_secret("personal/github",
+purpose="personal:broker.github", ...)``, ``get_secret("workers/openrouter",
+purpose="workers:broker.model-proxy", ...)``; project secrets need ``"projects:<project-id>:<use>"``
+for the same project and are served only for PERSONAL projects. A mismatching purpose raises
+``PolicyDenied(SECRET_SCOPE_DENIED)`` — an OFFICE secret is never returned to a personal caller.
 """
 
 from __future__ import annotations
