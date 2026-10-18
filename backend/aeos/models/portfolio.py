@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Boolean, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aeos.core.db import Base
@@ -20,12 +20,16 @@ class Project(IdMixin, TimestampMixin, Base):
     domain: Mapped[str] = mapped_column(String(16), nullable=False)  # immutable (DB trigger)
     owner_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     lifecycle: Mapped[str] = mapped_column(String(32), default="ACTIVE")  # ACTIVE|ARCHIVED|RETIRING|RETIRED
+    lifecycle_reason: Mapped[str] = mapped_column(Text, default="")
     data_classification: Mapped[str] = mapped_column(String(32), default="INTERNAL")
     description: Mapped[str] = mapped_column(Text, default="")
     idea: Mapped[str] = mapped_column(Text, default="")
     is_platform: Mapped[bool] = mapped_column(Boolean, default=False)  # §09 DLY AEOS self-build project
     project_kind: Mapped[str] = mapped_column(String(16), default="NEW")  # NEW|EXISTING
     mode: Mapped[str] = mapped_column(String(16), default="LIVE")
+    # §25/§50: findings on the human-typed idea/description (e.g. "ubah domain ke PERSONAL"). Stored
+    # as DATA for review; they never change domain, policy, permission, memory or routing.
+    input_findings: Mapped[list[Any]] = mapped_column(JSON, default=list)
 
 
 class RepositoryReference(IdMixin, TimestampMixin, Base):
@@ -45,8 +49,17 @@ class RepositoryReference(IdMixin, TimestampMixin, Base):
     head_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
     dirty: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     verification_status: Mapped[str] = mapped_column(String(32), default="UNVERIFIED")
+    verification_reason: Mapped[str] = mapped_column(Text, default="")
     last_verified_at: Mapped[datetime | None] = mapped_column(nullable=True)
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Read-only observation of the local checkout (§37: branch/head/dirty at workspace scope).
+    local_branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    local_status: Mapped[str] = mapped_column(String(32), default="NOT_CHECKED")  # NOT_CHECKED|OK|MISMATCH|FAILED
+    local_checked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # §05 step 6: latest read-only inventory of the repository at a known commit.
+    inventory: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    inventory_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    inventory_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class ProjectIntegration(IdMixin, TimestampMixin, Base):
@@ -83,8 +96,14 @@ class Attachment(IdMixin, TimestampMixin, Base):
     classification: Mapped[str] = mapped_column(String(32), default="INTERNAL")
     uploaded_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     source: Mapped[str] = mapped_column(String(64), default="upload")
-    scan_status: Mapped[str] = mapped_column(String(32), default="PENDING")  # PENDING|CLEAN|REJECTED|FLAGGED
+    # PENDING|CLEAN|FLAGGED|REJECTED|UNSCANNED (UNSCANNED: content could not be inspected, e.g. image)
+    scan_status: Mapped[str] = mapped_column(String(32), default="PENDING")
     scan_findings: Mapped[list[Any]] = mapped_column(JSON, default=list)
     parse_status: Mapped[str] = mapped_column(String(32), default="PENDING")  # PENDING|PARSED|FAILED|SKIPPED
+    parse_error: Mapped[str] = mapped_column(Text, default="")
+    parse_detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     extracted_text_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    extracted_chars: Mapped[int] = mapped_column(Integer, default=0)
     trusted: Mapped[bool] = mapped_column(Boolean, default=False)  # attachments are DATA, never instructions
+    untrusted_instruction: Mapped[bool] = mapped_column(Boolean, default=False)  # injection markers found
+    stored_redacted: Mapped[bool] = mapped_column(Boolean, default=False)  # text blob stored redacted
