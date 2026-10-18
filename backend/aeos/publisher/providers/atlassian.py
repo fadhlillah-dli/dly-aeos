@@ -66,16 +66,23 @@ class AtlassianConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_integration(cls, tenant_id: str | None, root_id: str | None, config: dict[str, Any] | None
-                         ) -> AtlassianConfig:
+    def from_integration(cls, tenant_id: str | None, root_id: str | None, config: dict[str, Any] | None,
+                         *, product: str | None = None) -> AtlassianConfig:
+        """Map a ProjectIntegration (aeos.portfolio.providers vocabulary) onto the adapter config.
+
+        ``root_id`` is the exact target: CONFLUENCE_PROJECTS_PARENT_ID for Confluence and JIRA_PROJECT_KEY for
+        Jira. The tenant is stored as ``<site>.atlassian.net`` (no scheme) and is always called over https."""
         cfg = dict(config or {})
+        base = str(cfg.get("base_url") or tenant_id or "").strip().rstrip("/")
+        if base and "://" not in base:
+            base = f"https://{base}"
         return cls(
-            base_url=str(cfg.get("base_url") or tenant_id or "").rstrip("/"),
+            base_url=base,
             enabled=cfg.get("enabled") is True,
             deployment=str(cfg.get("deployment") or "UNKNOWN").upper(),
             space_id=str(cfg.get("space_id") or ""),
-            parent_id=str(cfg.get(CONFLUENCE_PARENT_KEY) or root_id or ""),
-            project_key=str(cfg.get("project_key") or ""),
+            parent_id=str(cfg.get(CONFLUENCE_PARENT_KEY) or (root_id if product != "jira" else "") or ""),
+            project_key=str(cfg.get("project_key") or (root_id if product == "jira" else "") or ""),
             issue_type=str(cfg.get("issue_type") or "Task"),
             extra=cfg,
         )

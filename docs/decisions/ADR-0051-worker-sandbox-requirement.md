@@ -56,3 +56,13 @@ machines are Windows and macOS; Docker is not installed on the build host.
   in the dashboard; NOT_ENFORCED is never rendered as pass.
 * `sandbox/Dockerfile` defines the hardened worker image; container launch stays NOT_PROVEN until
   the container containment suite is implemented and passes on a host with Docker.
+
+## Amendment 2026-10-18 (integration)
+
+* The process-sandbox exception is recordable through `POST /api/decisions` (`kind=EXCEPTION`,
+  `exception=worker_sandbox_process`, optional `allow_bash`), the Decision page preset and `aeos policy
+  decide ... --exception worker_sandbox_process [--allow-bash]`. They produce exactly
+  `worker_sandbox/process` with `details.allow_process_sandbox = true` and an explicit boolean
+  `allow_bash`, PERSONAL only, with an expiry; a renewal supersedes the previous decision, so dropping
+  `allow_bash` takes effect immediately. `sandbox_readiness` and `process_shell_allowed` read these
+  decisions unchanged (tested: record -> READY/process, revoke -> BLOCKED).

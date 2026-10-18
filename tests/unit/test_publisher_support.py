@@ -104,14 +104,28 @@ def add_version(db: Session, plan: Plan, content: dict[str, Any], *, tasks: list
     return v
 
 
-def approve(db: Session, plan: Plan, version: PlanVersion, actor: str = "owner-user") -> Decision:
+def approved_targets_for(db: Session, project_id: str) -> list[dict[str, str]]:
+    """What the human approves with Approve & Publish: the project's configured targets ({provider, root_id})."""
+    from aeos.publisher.targets import resolve_targets
+
+    project = db.get(Project, project_id)
+    return [{"provider": t.provider, "root_id": t.root_id or "unset"} for t in resolve_targets(db, project)]
+
+
+def approve(db: Session, plan: Plan, version: PlanVersion, actor: str = "owner-user",
+            targets: list[dict[str, str]] | None = None, action: str = "APPROVE_AND_PUBLISH") -> Decision:
+    from aeos.policy import catalog
+
     for d in db.scalars(select(Decision).where(Decision.kind == "APPROVAL", Decision.target_type == "plan_version",
                                                Decision.status == "ACTIVE")):
         if d.project_id == plan.project_id:
             d.status = "SUPERSEDED"
+    targets = approved_targets_for(db, plan.project_id) if targets is None else targets
+    ops = sorted({op for t in targets for op in catalog.PUBLISH_OPERATIONS.get(t["provider"], ())})
     d = Decision(kind="APPROVAL", actor_user_id=actor, target_type="plan_version", target_id=version.id,
                  target_version=str(version.version), target_hash=version.manifest_hash, project_id=plan.project_id,
-                 domain=plan.domain, allowed_operations=["publish"])
+                 domain=plan.domain, allowed_operations=ops,
+                 auth_scope={"plan_id": plan.id, "action": action, "targets": targets})
     db.add(d)
     plan.approved_version_id = version.id
     plan.state = "APPROVED"

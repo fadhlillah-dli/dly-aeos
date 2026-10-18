@@ -19,7 +19,10 @@ def test_personal_drive_docs_with_remedy(personal_client: AuthedClient, secrets_
     assert r.status_code == 200, r.text
     integ = r.json()["integration"]
     cap = integ["capability_status"]
-    assert cap["configuration"] == "MISSING" and cap["root"] == "MISSING"
+    # Google Drive root folder is optional (My Drive by default); the credential is still missing.
+    assert cap["configuration"] == "MISSING" and cap["root"] == "DEFAULT"
+    assert integ["provider"] == "google-drive"  # legacy GOOGLE_DRIVE input is stored in the one vocabulary
+    assert cap["target"] == {"provider": "google-drive", "root_id": "root"}
     assert cap["connectivity"] == "NOT_CHECKED" and cap["functional"] == "NOT_TESTED"  # never claims VERIFIED
     assert cap["write_enabled"] is False
     assert any(x["command"] == "aeos publish google-connect" for x in cap["remedies"])
@@ -33,7 +36,8 @@ def test_personal_drive_docs_with_remedy(personal_client: AuthedClient, secrets_
     assert listed["items"][0]["capability_status"]["configuration"] == "CONFIGURED"
     assert "refresh-value-not-shown" not in str(listed)
     assert listed["source"] and listed["checked_at"]
-    assert "GOOGLE_DRIVE" in listed["allowed_providers"] and "CONFLUENCE" not in listed["allowed_providers"]
+    assert "google-drive" in listed["allowed_providers"] and "confluence" not in listed["allowed_providers"]
+    assert listed["items"][0]["capability_status"]["target"] == {"provider": "google-drive", "root_id": DRIVE_FOLDER}
 
 
 def test_office_provider_rejected_in_personal(personal_client: AuthedClient):

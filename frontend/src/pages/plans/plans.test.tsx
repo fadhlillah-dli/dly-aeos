@@ -8,13 +8,13 @@ describe("approval targets", () => {
   it("parses exact identifiers and drops rows without them", () => {
     expect(
       parseTargets([
-        { provider: "google-docs", identifiers: "root_id=F1" },
-        { provider: "confluence", identifiers: "space=ENG; parent_id=12=3" },
+        { provider: "google-drive", identifiers: "root_id=F1" },
+        { provider: "confluence", identifiers: "root_id=12=3" },
         { provider: "github-repo", identifiers: "" },
       ]),
     ).toEqual([
-      { provider: "google-docs", root_id: "F1" },
-      { provider: "confluence", space: "ENG", parent_id: "12=3" },
+      { provider: "google-drive", root_id: "F1" },
+      { provider: "confluence", root_id: "12=3" },
     ]);
   });
 });

@@ -87,3 +87,13 @@ into a throw-away test data directory:
   `secret_store/interim-keyring` with `details.secret_store_interim_keyring == true` (domain
   PERSONAL).
 * OS-keyring write errors fail closed (`Blocked SECRET_STORE_UNAVAILABLE`) without echoing the value.
+
+## Amendment 2026-10-18 (integration)
+
+* The interim exception is recordable through `POST /api/decisions` (`kind=EXCEPTION`,
+  `exception=secret_store_interim_keyring`), the Decision page preset and `aeos policy decide --kind
+  EXCEPTION --exception secret_store_interim_keyring --domain PERSONAL --days N --as <admin>`. All three
+  produce exactly `secret_store/interim-keyring` with `details.secret_store_interim_keyring = true`,
+  domain PERSONAL and an expiry; OFFICE is refused (`EXCEPTION_DOMAIN_DENIED`). A free-form decision on
+  that target must carry the same boolean or is refused. Revoking it turns the store back to
+  OpenBao-or-BLOCKED immediately (tested).

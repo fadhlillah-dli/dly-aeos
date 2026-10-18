@@ -14,7 +14,9 @@ from aeos.doctor.checks._common import secret_ref_status, set_secret_remedy
 from aeos.doctor.model import CheckContext, Outcome
 
 GITHUB_REF = "personal/github"
-GOOGLE_REF = "personal/google-oauth"
+# The OAuth token written by `aeos publish google-connect` and read by the publisher (provider
+# vocabulary: aeos.portfolio.providers); the earlier "personal/google-oauth" was never written.
+GOOGLE_REF = "personal/google-oauth-token"
 ATLASSIAN_REF = "office/atlassian"
 GITHUB_API = "https://api.github.com"
 

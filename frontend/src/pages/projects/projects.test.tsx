@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -185,12 +185,12 @@ describe("IntegrationsPanel", () => {
           id: "i1",
           project_id: "p1",
           domain: "PERSONAL",
-          provider: "GOOGLE_DRIVE",
+          provider: "google-drive",
           purpose: "docs",
           tenant_id: null,
           root_id: null,
           root_id_name: "GOOGLE_DRIVE_FOLDER_ID",
-          credential_ref: "personal/google-oauth",
+          credential_ref: "personal/google-oauth-token",
           config: {},
           target_url: null,
           last_verified_at: null,
@@ -204,7 +204,7 @@ describe("IntegrationsPanel", () => {
           },
         },
       ],
-      allowed_providers: { GOOGLE_DRIVE: ["docs"] },
+      allowed_providers: { "google-drive": ["docs"] },
       checked_at: new Date().toISOString(),
       mode: "LIVE",
     }));
@@ -214,7 +214,66 @@ describe("IntegrationsPanel", () => {
     expect(screen.getByText("Fungsi belum diuji")).toBeInTheDocument();
     expect(screen.queryByText(/Terverifikasi/)).not.toBeInTheDocument();
     expect(screen.getAllByText("aeos publish google-connect").length).toBeGreaterThan(0);
-    expect(screen.queryByText("Atur integrasi")).not.toBeInTheDocument(); // VIEWER: no admin form
+    expect(screen.queryByText("Pengaturan integrasi publikasi")).not.toBeInTheDocument(); // VIEWER: no admin form
+    expect(screen.queryByText("Atur integrasi lain")).not.toBeInTheDocument();
+  });
+
+  it("PERSONAL settings save Google Drive (optional folder) and GitHub Issues with credential refs only", async () => {
+    auth.domain = "PERSONAL";
+    const { IntegrationsPanel } = await import("./IntegrationsPanel");
+    const fn = mockFetch((_url, init) =>
+      init?.method === "PUT"
+        ? { integration: JSON.parse(String(init.body)) }
+        : { items: [], allowed_providers: { "google-drive": ["docs"], "github-issues": ["issues"] }, checked_at: new Date().toISOString(), mode: "LIVE" },
+    );
+    const project = {
+      id: "p1",
+      domain: "PERSONAL",
+      repositories: [{ provider: "GITHUB", full_name: "owner/app" }],
+    } as unknown as import("./types").ProjectView;
+    wrap(<IntegrationsPanel project={project} isAdmin />);
+    const drive = await screen.findByRole("form", { name: /Google Drive/ });
+    await userEvent.click(within(drive).getByRole("button", { name: /Simpan/ }));
+    await waitFor(() => expect(fn.mock.calls.some(([, i]) => i?.method === "PUT")).toBe(true));
+    const driveBody = JSON.parse(String(fn.mock.calls.find(([, i]) => i?.method === "PUT")![1]!.body));
+    expect(driveBody).toEqual({ provider: "google-drive", purpose: "docs", root_id: null, credential_ref: "personal/google-oauth-token", config: {} });
+    const issues = screen.getByRole("form", { name: /GitHub Issues/ });
+    expect(within(issues).getByDisplayValue("owner/app")).toBeInTheDocument(); // defaults to the project's repository
+    await userEvent.click(within(issues).getByRole("button", { name: /Simpan/ }));
+    await waitFor(() => expect(fn.mock.calls.filter(([, i]) => i?.method === "PUT").length).toBe(2));
+    const issuesBody = JSON.parse(String(fn.mock.calls.filter(([, i]) => i?.method === "PUT")[1][1]!.body));
+    expect(issuesBody).toMatchObject({ provider: "github-issues", purpose: "issues", root_id: "owner/app", credential_ref: "personal/github" });
+    expect(JSON.stringify(issuesBody)).not.toMatch(/token\W*[:=]|secret\W*[:=]/i);
+  });
+
+  it("OFFICE settings require the Confluence parent and space and keep the adapter disabled by default", async () => {
+    auth.domain = "OFFICE";
+    const { IntegrationsPanel } = await import("./IntegrationsPanel");
+    const fn = mockFetch((_url, init) =>
+      init?.method === "PUT"
+        ? { integration: JSON.parse(String(init.body)) }
+        : { items: [], allowed_providers: { confluence: ["docs"], jira: ["issues", "roadmap"] }, checked_at: new Date().toISOString(), mode: "LIVE" },
+    );
+    const project = { id: "p2", domain: "OFFICE", repositories: [] } as unknown as import("./types").ProjectView;
+    wrap(<IntegrationsPanel project={project} isAdmin />);
+    const conf = await screen.findByRole("form", { name: /Confluence/ });
+    expect(within(conf).getByRole("button", { name: /Simpan/ })).toBeDisabled();
+    fireEvent.change(within(conf).getByPlaceholderText("perusahaan.atlassian.net"), { target: { value: "acme.atlassian.net" } });
+    fireEvent.change(within(conf).getByPlaceholderText("ENG"), { target: { value: "ENG" } });
+    fireEvent.change(within(conf).getByLabelText(/CONFLUENCE_PROJECTS_PARENT_ID/), { target: { value: "123456" } });
+    fireEvent.change(within(conf).getByLabelText(/Deployment/), { target: { value: "CLOUD" } });
+    await userEvent.click(within(conf).getByRole("button", { name: /Simpan/ }));
+    await waitFor(() => expect(fn.mock.calls.some(([, i]) => i?.method === "PUT")).toBe(true));
+    const body = JSON.parse(String(fn.mock.calls.find(([, i]) => i?.method === "PUT")![1]!.body));
+    expect(body).toEqual({
+      provider: "confluence",
+      purpose: "docs",
+      tenant_id: "acme.atlassian.net",
+      root_id: "123456",
+      credential_ref: "office/atlassian",
+      config: { space_id: "ENG", deployment: "CLOUD", enabled: false },
+    });
+    expect(screen.getAllByText(/OFFICE default deny/).length).toBeGreaterThan(0);
   });
 });
 

@@ -103,11 +103,19 @@ def test_resolved_model_mismatch_fails_review_stage(db, owner, monkeypatch, tmp_
     plan = _plan(db, owner)
     service.run_pipeline(db, plan.id, actor=owner.id)
     db.refresh(plan)
-    assert plan.state == "REVIEW_FAILED"
+    # Hard stop (ADR-0030 amendment): checkpoint + NEEDS_DECISION; no other model, nothing skipped.
+    assert plan.state == "NEEDS_DECISION" and plan.checkpoint["stage"] == "CHALLENGE_REVIEW"
+    assert plan.checkpoint["hard_stop"]["code"] == "MODEL_POLICY_MISMATCH"
     assert bridge.stage_calls() == ["PRIMARY_PLANNING", "CHALLENGE_REVIEW"]  # nothing accepted, nothing skipped
     run = _runs(db, plan)[-1]
-    assert run.status == "MODEL_MISMATCH" and run.error_code == "MODEL_MISMATCH"
+    assert run.status == "MODEL_MISMATCH" and run.error_code == "MODEL_POLICY_MISMATCH"
     assert db.scalar(select(PlanningArtifact).where(PlanningArtifact.planning_run_id == run.id)) is None
+    # Resume re-runs the SAME stage with the SAME policy model (fable), never skips to synthesis.
+    bridge.models.pop("CHALLENGE_REVIEW")
+    service.run_pipeline(db, plan.id, actor=owner.id)
+    db.refresh(plan)
+    assert bridge.stage_calls()[2] == "CHALLENGE_REVIEW" and bridge.calls[2].model == "fable"
+    assert plan.state == "READY_FOR_HUMAN_REVIEW"
 
 
 @pytest.mark.parametrize(("family", "resolved", "ok"), [
@@ -125,7 +133,8 @@ def test_primary_model_mismatch_fails_planning(db, owner, monkeypatch, tmp_path)
     plan = _plan(db, owner)
     service.run_pipeline(db, plan.id, actor=owner.id)
     db.refresh(plan)
-    assert plan.state == "PLANNING_FAILED" and plan.current_version_id is None
+    assert plan.state == "NEEDS_DECISION" and plan.current_version_id is None
+    assert plan.checkpoint["stage"] == "PRIMARY_PLANNING"
 
 
 def test_schema_invalid_output_fails_stage(db, owner, monkeypatch, tmp_path):
@@ -173,7 +182,7 @@ def test_manual_result_with_wrong_model_is_rejected(db, owner, monkeypatch, tmp_
     bridge.complete_manual(plan.checkpoint["package_id"])
     service.import_manual_result(db, plan.id, actor=owner.id)
     db.refresh(plan)
-    assert plan.state == "PLANNING_FAILED"
+    assert plan.state == "NEEDS_DECISION" and plan.checkpoint["hard_stop"]["code"] == "MODEL_POLICY_MISMATCH"
 
 
 def test_missing_bridge_and_manual_writer_fails_closed_without_api(db, owner, absent_modules):
