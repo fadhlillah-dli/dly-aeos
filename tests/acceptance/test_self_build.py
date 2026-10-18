@@ -23,7 +23,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from aeos.core.errors import AeosError
+from aeos.core.errors import PolicyDenied
 from aeos.models.audit import AuditEvent
 from aeos.models.evidence import AcceptanceRecord
 from aeos.models.workforce import TaskExecution, WorkerRun
@@ -90,6 +90,7 @@ def test_clean_candidate_is_accepted_only_after_verifier_and_review(personal_cli
 def test_candidate_changing_active_policy_or_verifier_is_quarantined_until_human_review(
         personal_client: AuthedClient, db, monkeypatch, tmp_path, host, settings, vault):
     from aeos.broker import facade as broker
+    from aeos.broker import git_broker
 
     changes = {**GOOD_CHANGE, "backend/aeos/verification/verifier.py": "PASS_EVERYTHING = True\n",
                "policy/office.yaml": "external_worker_allowed: true\n"}
@@ -100,24 +101,40 @@ def test_candidate_changing_active_policy_or_verifier_is_quarantined_until_human
     te = _te(db, w["task_id"])
     assert te.state == "BLOCKED" and "QUARANTINED" in te.reason
     blocked = personal_client.post(f"/api/runs/{w['run_id']}/review", json={"reviewer": "FEATURE"})
-    assert blocked.status_code in (409, 422, 423) or blocked.json()["error"]["code"] == "VERIFICATION_NOT_PASSED"
+    assert blocked.status_code >= 400 and blocked.json()["error"]["code"] == "VERIFICATION_NOT_PASSED", blocked.text
+    assert blocked.json()["error"]["details"]["verifier_status"] == "QUARANTINED"
     assert _acceptance(db, w["task_id"]) is None
     # the active controller is untouched: its grader and verifier are what ran
     assert (w["controller"] / "tests" / "acceptance" / "test_grader.py").read_text(encoding="utf-8").startswith("def ")
     run = db.get(WorkerRun, w["run_id"])
-    with pytest.raises(AeosError):
-        broker.push_task_branch(db, run_id=run.id, worktree=run.workspace_ref, branch=run.branch,
-                                repo_full_name="fadhlillah-dli/dly-aeos")
+    assert run.quarantined is True
+    # the patch stays a candidate: the broker refuses remote publication until a human special-review release
+    broker.issue_grant(db, run_id=run.id, project_id=run.project_id, domain=run.domain, kind="GIT_BRANCH",
+                       scope={"repo": "fadhlillah-dli/dly-aeos", "branch": run.branch}, ttl_seconds=600)
+    db.commit()
+    with pytest.raises(PolicyDenied) as exc:
+        git_broker.push_task_branch(db, run_id=run.id, worktree=run.workspace_ref, branch=run.branch,
+                                    repo_full_name="fadhlillah-dli/dly-aeos", remote_url=str(tmp_path / "remote.git"))
+    assert exc.value.code == "QUARANTINED", exc.value.code
     db.rollback()
 
 
 # ---------------------------------------------------------------------------------------------- 1.24 / 2.14
 def test_candidate_rewriting_grader_or_pipeline_cannot_fake_its_pass(personal_client: AuthedClient, db, monkeypatch,
                                                                      tmp_path, host, settings, vault):
+    from aeos.worker_runtime.scope import PLATFORM_PROTECTED_PATHS, ChangedPath, check_scope
+
     changes = {"backend/aeos/feature/calc.py": "def add(a, b):\n    return a - b\n",  # wrong
                "tests/acceptance/test_grader.py": "def test_add():\n    assert True\n",  # its own "grader"
                ".github/workflows/ci.yml": "on: [push]\njobs: {}\n"}
-    w = self_build(personal_client, db, monkeypatch, tmp_path, host, settings, changes=changes)
+    # first line: the runtime's own scope check fails and quarantines this attempt (SCOPE_VIOLATION)
+    first = check_scope([ChangedPath(path=p, status="A") for p in changes], allowed=["backend/aeos/feature/**"],
+                        forbidden=[], protected=PLATFORM_PROTECTED_PATHS)
+    assert first.quarantine and {v["path"] for v in first.violations} >= {"tests/acceptance/test_grader.py",
+                                                                         ".github/workflows/ci.yml"}
+    # second line, proven on its own: even with the runtime check bypassed the verifier is not fooled
+    w = self_build(personal_client, db, monkeypatch, tmp_path, host, settings, changes=changes,
+                   bypass_runtime_scope=True)
     out = verify(personal_client, w["run_id"])
     assert out["status"] == "FAIL"
     assert any("test_add" in t for t in out["failing_tests"]), "the controller's grader ran, not the candidate's"

@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session
 from aeos.core.timeutil import utcnow
 from tests.conftest import AuthedClient
 
+GIT_TIMEOUT = 60  # seconds; every child process in this suite is bounded (no hung test run)
+
 
 def seed_catalog(db: Session) -> None:
     """`aeos seed`: design catalog (manifest, roles, model registry, research, self project)."""
@@ -380,7 +382,7 @@ def git_repo(path: Any, files: dict[str, str], *, origin: str | None = None) -> 
 
     def g(*args: str) -> str:
         return subprocess.run(["git", "-c", "core.hooksPath=", "-c", "commit.gpgsign=false", *args], cwd=path,
-                              capture_output=True, text=True, check=True).stdout.strip()
+                              capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT).stdout.strip()
 
     g("init", "-q", "-b", "main")
     g("config", "user.email", "acceptance@example.invalid")

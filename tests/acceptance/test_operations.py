@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from aeos.core.paths import repo_root
-from tests.acceptance.world import owner_id
+from tests.acceptance.world import GIT_TIMEOUT, owner_id
 from tests.conftest import AuthedClient
 
 pytestmark = pytest.mark.acceptance
@@ -34,7 +34,7 @@ GIT_ID = ["-c", "user.name=AEOS Acceptance", "-c", "user.email=acc@example.inval
 
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *GIT_ID, *args], check=True, capture_output=True,
-                          text=True).stdout
+                          text=True, timeout=GIT_TIMEOUT).stdout
 
 
 def _platform_repo(tmp_path: Path) -> Path:
@@ -42,7 +42,8 @@ def _platform_repo(tmp_path: Path) -> Path:
     (repo / "backend").mkdir(parents=True)
     shutil.copytree(Path(repo_root()) / "backend" / "aeos", repo / "backend" / "aeos",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True, capture_output=True,
+                   timeout=GIT_TIMEOUT)
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "release base")
     return repo

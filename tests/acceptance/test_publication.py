@@ -109,6 +109,11 @@ def test_approving_an_old_plan_version_is_refused_and_latest_reported(personal_c
     plan = personal_client.get(f"/api/plans/{detail['id']}").json()
     assert plan["current_version"]["id"] == v2["id"] and plan["approved_version"] is None
     assert plan["decisions"] == []  # nothing was recorded for the stale attempts
+    db.expire_all()
+    denied = db.scalars(select(AuditEvent).where(AuditEvent.action == "plan.decision",
+                                                 AuditEvent.result == "DENIED")).all()
+    assert sorted(a.target_id for a in denied) == sorted([v1["id"], v2["id"]]), \
+        "each refused stale approval stays in the audit trail although the request failed"
     approve_current(personal_client, detail["id"])
     # a human edit creates v3: the approval of v2 no longer authorises anything
     content = personal_client.get(f"/api/plans/{detail['id']}/versions/{v2['id']}").json()["content"]

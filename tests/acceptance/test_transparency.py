@@ -273,8 +273,9 @@ def test_offline_inventory_shows_the_last_snapshot_and_stale_never_green(persona
 
 # ---------------------------------------------------------------------------------------------- 3.13
 def test_viewer_cannot_reach_office_inventory_detail_search_export_or_counts(personal_client: AuthedClient, db, app,
-                                                                             host):
+                                                                             host, vault):
     seed_catalog(db)
+    vault.put("office/atlassian", json.dumps({"email": "svc@corp.example", "api_token": "x" * 24}), actor="owner")
     create_viewer(db)
     with TestClient(app, base_url="http://testserver") as raw:
         viewer = AuthedClient(raw)
@@ -301,5 +302,32 @@ def test_viewer_cannot_reach_office_inventory_detail_search_export_or_counts(per
         assert not any(ch.isdigit() for ch in gap["message"]), "no count of the other domain's components"
         viewer_map = _ok(viewer.get("/api/inventory/map", params={"lens": "DESIGN"}))
         assert not {n["id"] for n in viewer_map["nodes"]} & set(OFFICE_ONLY)
+        assert not [g for g in viewer_map["groups"] if set(g["node_ids"]) & set(OFFICE_ONLY)], "no OFFICE counts"
+        # events are scoped too: an OFFICE inventory event never reaches the PERSONAL viewer
+        from aeos.events import service as events
+
+        events.emit(db, source="inventory", kind="acc.office.inventory", domain="OFFICE",
+                    payload={"component_id": "jira", "note": "office-only observation"})
+        db.commit()
+        listed = _ok(viewer.get("/api/events"))["events"]
+        assert all(e.get("domain") != "OFFICE" for e in listed) and "acc.office.inventory" not in json.dumps(listed)
+        # credentials: not even the existence of the stored OFFICE credential is visible
+        secrets = _ok(viewer.get("/api/secrets/status"))
+        assert secrets["office_hidden"] is True
+        assert not [i for i in secrets["items"] if str(i.get("ref", "")).startswith("office/")], secrets["items"]
+        assert "office/atlassian" not in json.dumps(secrets)
+        # a viewer whose scope is PERSONAL cannot switch into OFFICE to read it there
+        from aeos.models.identity import User
+
+        user = db.scalar(select(User).where(User.username == "viewer"))
+        user.domain_scope = ["PERSONAL"]
+        db.commit()
+        assert viewer.post("/api/session/context", json={"domain": "OFFICE"}).status_code == 403
+        assert viewer.get("/api/inventory/components/jira").status_code == 404
         # the viewer cannot widen the scope by writing either
         assert viewer.post("/api/inventory/refresh", json={}).status_code == 403
+    # control: the same records exist and are served inside an OFFICE session of an owner in scope
+    personal_client.select_domain(Domain.OFFICE)
+    assert "office/atlassian" in json.dumps(_ok(personal_client.get("/api/secrets/status")))
+    assert "acc.office.inventory" in json.dumps(_ok(personal_client.get("/api/events"))["events"])
+    assert _ok(personal_client.get("/api/inventory/components/jira"))["component_id"] == "jira"

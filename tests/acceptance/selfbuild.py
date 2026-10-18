@@ -91,14 +91,21 @@ def review_ready(client: AuthedClient, host: Any, settings: Any) -> None:
 
 def self_build(client: AuthedClient, db: Session, monkeypatch: Any, tmp_path: Path, host: Any, settings: Any, *,
                changes: dict[str, str] | None = None, allowed: list[str] | None = None, grader: str = GRADER_PASS,
-               review: dict[str, Any] | None = None, extra_tasks: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Platform-project task leased, worker change committed by the runtime, run in REVIEW."""
+               review: dict[str, Any] | None = None, extra_tasks: list[dict[str, Any]] | None = None,
+               bypass_runtime_scope: bool = False) -> dict[str, Any]:
+    """Platform-project task leased, worker change committed by the runtime, run in REVIEW.
+
+    The runtime's own bookkeeping after an exit 0 (``executor._finalize``) is reproduced with the
+    runtime's real scope check (``worker_runtime.scope.check_scope`` against the platform protected
+    paths): protected hits mark the run quarantined. ``bypass_runtime_scope`` skips that first line of
+    defence on purpose, for rows that prove the independent verifier catches the candidate on its own."""
     from sqlalchemy import select
 
     from aeos.core.enums import Domain
     from aeos.models.portfolio import Project
     from aeos.models.workforce import WorkerRun
     from aeos.worker_runtime import workspace as wsmod
+    from aeos.worker_runtime.scope import PLATFORM_PROTECTED_PATHS, check_scope
     from aeos.workforce import facade as workforce
     from aeos.workforce import scheduler
     from tests.acceptance.world import git_repo
@@ -121,12 +128,19 @@ def self_build(client: AuthedClient, db: Session, monkeypatch: Any, tmp_path: Pa
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8", newline="\n")
     collected = wsmod.collect_changes(ws)
+    scope = check_scope(collected["changes"], allowed=[*(allowed or ["backend/aeos/feature/**"])], forbidden=[],
+                        protected=PLATFORM_PROTECTED_PATHS)
+    if not bypass_runtime_scope:
+        assert not scope.violations, f"the runtime would fail this attempt (SCOPE_VIOLATION): {scope.violations}"
     head = wsmod.commit_candidate(ws, f"aeos: {run.task_key}")
     # what the runtime records after the worker exited 0 (executor._finalize)
     run.workspace_ref, run.git_dir_ref = str(ws.repo), str(ws.git_dir)
     run.base_commit, run.head_commit, run.branch = ws.base_commit, head, ws.branch
     run.exit_code = 0
     run.touched_paths = [c.path for c in collected["changes"]]
+    if not bypass_runtime_scope:
+        run.quarantined = bool(scope.violations or scope.protected_hits)
+        run.quarantine_reasons = [*scope.violations, *scope.protected_hits]
     db.commit()
     workforce.transition_task(db, run.task_id, "RUNNING", reason="worker bound", actor="service:worker_runtime")
     scheduler.set_run_status(db, db.get(WorkerRun, run.id), "RUNNING", reason="worker bound",

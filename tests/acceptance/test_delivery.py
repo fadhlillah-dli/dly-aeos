@@ -19,6 +19,7 @@ from aeos.core.errors import AeosError, PolicyDenied
 from aeos.models.workforce import WorkerRun
 from aeos.policy import facade as policy
 from tests.acceptance.selfbuild import manual_review, self_build, verify
+from tests.acceptance.world import GIT_TIMEOUT
 from tests.conftest import AuthedClient
 
 pytestmark = pytest.mark.acceptance
@@ -40,7 +41,7 @@ def _accepted(client, db, monkeypatch, tmp_path, host, settings) -> dict:
 
 def _git(cwd, *args: str) -> str:
     return subprocess.run(["git", "-c", "core.hooksPath=", *args], cwd=cwd, capture_output=True, text=True,
-                          check=True).stdout.strip()
+                          check=True, timeout=GIT_TIMEOUT).stdout.strip()
 
 
 # ---------------------------------------------------------------------------------------------- 1.33
