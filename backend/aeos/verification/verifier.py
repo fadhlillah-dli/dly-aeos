@@ -30,6 +30,7 @@ import json
 import logging
 import shutil
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -484,6 +485,10 @@ class _Verifier:
         finally:
             if workdir is not None:
                 shutil.rmtree(workdir, ignore_errors=True)
+                for name in ("b1", "b2"):
+                    short = _short_basetemp(workdir, name)
+                    if short is not None:
+                        shutil.rmtree(short, ignore_errors=True)
         self._persist(trusted_ran)
         self._side_effects()
         self._audit_and_emit()
@@ -751,7 +756,11 @@ class _Verifier:
 
     @staticmethod
     def _basetemp(workdir: Path, name: str) -> list[str]:
-        return ["--basetemp", str(workdir / name)]
+        # pytest's per-test temp dirs nest deeply (tmp_path -> data dir -> task-data -> git objects); on
+        # Windows that exceeds MAX_PATH under a deep data dir, so the suite gets a short, verifier-owned
+        # basetemp directly under the system temp dir (unique per run, removed with the workdir).
+        short = _short_basetemp(workdir, name)
+        return ["--basetemp", str(short if short is not None else workdir / name)]
 
     def _collect_expected(self, trusted_root: Path, trusted_copy: Path, ini: Path, workdir: Path,
                           limits: VerifierLimits) -> list[str]:
@@ -1062,3 +1071,12 @@ class _Verifier:
             attempt=run.attempt, mode=run.mode if run.mode in {m.value for m in DataMode} else "LIVE",
             payload={"status": out.status, "report_evidence_id": out.report_evidence_id, "task_id": run.task_id},
         )
+
+
+def _short_basetemp(workdir: Path, name: str) -> Path | None:
+    """Windows only: a short pytest basetemp (stable per workdir) under the system temp dir."""
+    if sys.platform != "win32":
+        return None
+    from aeos.core.hashing import sha256_text
+
+    return Path(tempfile.gettempdir()) / f"av{sha256_text(str(workdir))[:8]}{name}"

@@ -5,6 +5,7 @@ versi AEOS baru" → the candidate cannot fake its own pass). Needs git; slower,
 from __future__ import annotations
 
 import shutil
+import subprocess
 
 import pytest
 
@@ -24,9 +25,18 @@ pytestmark = [pytest.mark.integration, requires_git]
 def _candidate_from_controller(settings, world, name):
     cand = settings.layout.task_data(world.project.domain and __import__("aeos.core.enums", fromlist=["Domain"])
                                      .Domain(world.project.domain), world.project.project_key) / name
-    shutil.copytree(repo_root() / "backend", cand / "backend",
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"))
-    shutil.copy2(repo_root() / "pyproject.toml", cand / "pyproject.toml")
+    # A real self-build candidate is a full worktree of the platform repository (§09): copy every tracked
+    # file (the trusted suite reads install-manifest/, policy/, scripts/, docs/decisions/ ...).
+    root = repo_root()
+    tracked = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=True,
+                             timeout=60).stdout.decode("utf-8").split(chr(0))
+    for rel in filter(None, tracked):
+        src = root / rel
+        if not src.is_file():
+            continue  # deleted in the working tree
+        dst = cand / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
     git(cand, "init", "-q")
     git(cand, "add", "-A")
     git(cand, "commit", "-q", "-m", "base")
