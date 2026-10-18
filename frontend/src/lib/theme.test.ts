@@ -1,5 +1,6 @@
+import { act, renderHook } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
-import { applyTheme, readStoredTheme, resolveTheme, setTheme, THEME_STORAGE_KEY } from "./theme";
+import { applyTheme, readStoredTheme, resolveTheme, setTheme, THEME_STORAGE_KEY, useTheme } from "./theme";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -38,5 +39,19 @@ describe("theme preference", () => {
     expect(() => setTheme("dark")).not.toThrow();
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(() => applyTheme()).not.toThrow();
+  });
+});
+
+describe("theme across tabs", () => {
+  it("applies a choice made in another tab (storage event) to this document, not only to the toggle state", () => {
+    const { result } = renderHook(() => useTheme());
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+    act(() => {
+      window.localStorage.setItem(THEME_STORAGE_KEY, "dark"); // written by the other tab
+      window.dispatchEvent(new StorageEvent("storage", { key: THEME_STORAGE_KEY, newValue: "dark" }));
+    });
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(result.current.theme).toBe("dark");
+    expect(result.current.choice).toBe("dark");
   });
 });

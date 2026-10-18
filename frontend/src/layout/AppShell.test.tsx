@@ -69,7 +69,7 @@ describe("AppShell header (§35: domain, project, environment, freshness, LIVE/M
     api({ mode: "MIXED" });
     renderShell();
     const header = await screen.findByRole("banner");
-    await waitFor(() => expect(within(header).getByTestId("data-mode")).toHaveTextContent("LIVE + DEMO"));
+    await waitFor(() => expect(within(header).getByTestId("data-mode")).toHaveTextContent("LIVE + MOCK/DEMO"));
     expect(within(header).getByTestId("environment")).toHaveTextContent("local");
     // Without a live stream the header never claims fresh data.
     expect(within(header).getByTestId("freshness")).toHaveTextContent(/kesegaran tidak diketahui|terputus/);

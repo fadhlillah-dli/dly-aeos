@@ -85,9 +85,11 @@ function ProjectSwitch() {
   );
 }
 
+// MIXED = live records plus labelled fixture rows; the projection does not say whether those rows are
+// MOCK or DEMO, so the header does not pretend to know either.
 const MODE_LABEL: Record<string, string> = {
   LIVE: "LIVE",
-  MIXED: "LIVE + DEMO",
+  MIXED: "LIVE + MOCK/DEMO",
   MOCK: "MOCK",
   DEMO: "DEMO",
 };

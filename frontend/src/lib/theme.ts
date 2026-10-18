@@ -58,8 +58,14 @@ export function useTheme(): { theme: ResolvedTheme; choice: ThemeChoice | null; 
   const [state, setState] = useState(() => ({ choice: readStoredTheme(), theme: resolveTheme() }));
   useEffect(() => {
     const update = () => setState({ choice: readStoredTheme(), theme: resolveTheme() });
+    // Another tab changed the choice: apply it here too, so the toggle never disagrees with <html>.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== null && e.key !== THEME_STORAGE_KEY) return;
+      applyTheme();
+      update();
+    };
     window.addEventListener(CHANGE_EVENT, update);
-    window.addEventListener("storage", update);
+    window.addEventListener("storage", onStorage);
     let mq: MediaQueryList | null = null;
     try {
       mq = window.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
@@ -69,7 +75,7 @@ export function useTheme(): { theme: ResolvedTheme; choice: ThemeChoice | null; 
     }
     return () => {
       window.removeEventListener(CHANGE_EVENT, update);
-      window.removeEventListener("storage", update);
+      window.removeEventListener("storage", onStorage);
       mq?.removeEventListener?.("change", update);
     };
   }, []);

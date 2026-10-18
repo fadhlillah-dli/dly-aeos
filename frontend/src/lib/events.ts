@@ -36,13 +36,16 @@ const STATUS_THROTTLE_MS = 1_000;
  * browser's 6-per-origin limit and replayed the whole history on every mount, so each navigation
  * fired an invalidation storm. Semantics:
  *
- * - the first connection starts at cursor 0; its backlog (history before the "ready" frame) only
- *   advances the cursor - pages fetched fresh data on mount, so history is not re-dispatched;
- * - a reconnect sends the last cursor and DOES dispatch the backlog (those are missed live events);
+ * - a fresh start opens at the current head (`latest_seq` of GET /api/events): pages fetched fresh
+ *   data on mount, so history is neither downloaded nor re-dispatched. If the head lookup fails it
+ *   falls back to cursor 0 and the backlog before the "ready" frame only advances the cursor;
+ * - a reconnect sends the last cursor and DOES dispatch the backlog (those are missed live events;
+ *   the backend replays every event after the cursor);
  * - events are deduped by seq; status drops to "reconnecting" on error or a silent connection, so
  *   the UI shows STALE/UNKNOWN instead of staying green;
- * - `restartEventStream()` (domain/project switch, logout) closes the stream and starts over, because
- *   the backend applies the session's domain/project scope when the stream is opened.
+ * - `restartEventStream()` (domain/project switch) closes the stream and starts over, because the
+ *   backend applies the session's domain scope when the stream is opened (and ends a stream whose
+ *   session changed elsewhere); `stopEventStream()` (logout) closes it and forgets the cursor.
  */
 class SharedEventStream {
   private listeners = new Set<Listener>();
@@ -55,6 +58,9 @@ class SharedEventStream {
   private lastNotify = 0;
   private cursor = 0;
   private live = false; // false while the initial (history) backlog is being replayed
+  /** Bumped by restart/stop so a pending head lookup can never open a stream for an old scope. */
+  private generation = 0;
+  private starting = false;
   status: StreamStatus = "connecting";
   lastSeenAt: string | null = null;
 
@@ -65,7 +71,7 @@ class SharedEventStream {
       clearTimeout(this.idleTimer);
       this.idleTimer = undefined;
     }
-    if (!this.es && !this.retryTimer) this.open();
+    if (!this.es && !this.retryTimer && !this.starting) this.start();
     return () => {
       this.listeners.delete(listener);
       this.statusListeners.delete(onStatus);
@@ -78,13 +84,42 @@ class SharedEventStream {
     };
   }
 
-  /** Start over from cursor 0 (new scope). History is skipped again; subscribers stay attached. */
+  /** Start over at the head (new scope). History is skipped again; subscribers stay attached. */
   restart(): void {
+    this.reset();
+    if (this.listeners.size > 0) this.start();
+  }
+
+  /** Logout: close and forget the cursor. The next subscriber (after a new login) starts fresh. */
+  stop(): void {
+    this.reset();
+  }
+
+  private reset(): void {
     this.close();
+    this.generation += 1;
+    this.starting = false;
     this.cursor = 0;
     this.live = false;
+    this.lastSeenAt = null;
     this.setStatus("connecting", true);
-    if (this.listeners.size > 0) this.open();
+  }
+
+  private start(): void {
+    if (typeof EventSource === "undefined") return;
+    if (this.cursor > 0) {
+      this.open();
+      return;
+    }
+    const gen = this.generation;
+    this.starting = true;
+    void headSeq().then((head) => {
+      if (gen !== this.generation) return; // restarted/stopped meanwhile
+      this.starting = false;
+      if (this.es || this.listeners.size === 0) return;
+      if (head !== null) this.cursor = Math.max(this.cursor, head);
+      this.open();
+    });
   }
 
   private open(): void {
@@ -179,11 +214,28 @@ class SharedEventStream {
   }
 }
 
+/** Current head of the event log; null when unknown (then the stream starts at 0 and skips history). */
+async function headSeq(): Promise<number | null> {
+  try {
+    const r = await fetch("/api/events?limit=1", { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!r.ok) return null;
+    const body = (await r.json()) as { latest_seq?: unknown };
+    return typeof body.latest_seq === "number" && body.latest_seq >= 0 ? body.latest_seq : null;
+  } catch {
+    return null;
+  }
+}
+
 const shared = new SharedEventStream();
 
-/** Domain/project switch or logout: the backend scopes a stream when it is opened, so start over. */
+/** Domain/project switch: the backend scopes a stream when it is opened, so start over. */
 export function restartEventStream(): void {
   shared.restart();
+}
+
+/** Logout: close the stream now (not after the idle delay) and forget the previous user's cursor. */
+export function stopEventStream(): void {
+  shared.stop();
 }
 
 /**

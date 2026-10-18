@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useMemo, type ReactNode } from "react";
 import { ApiError, get, post, setCsrfToken } from "../api/client";
-import { restartEventStream } from "../lib/events";
+import { restartEventStream, stopEventStream } from "../lib/events";
 
 export type Domain = "PERSONAL" | "OFFICE";
 
@@ -68,6 +68,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await post("/api/auth/logout");
     } finally {
+      // Close the event stream now and forget its cursor: it was opened with this session's scope.
+      stopEventStream();
       setSession(null);
       qc.clear();
     }

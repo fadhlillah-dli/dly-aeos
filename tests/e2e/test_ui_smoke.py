@@ -286,6 +286,7 @@ class Watch:
     # Admin flows on seeded PERSONAL data must not hit 4xx: a 404/405/422 there is a broken API path
     # or a request-shape mismatch between a page and the backend. OFFICE/VIEWER flows expect 403/404.
     strict_4xx: bool = False
+    streams: int = 0  # /api/events/stream connections opened since the last visit() (one per tab expected)
 
     def attach(self, page: Any) -> None:
         page.on("pageerror", lambda exc: self.problems.append(f"{self.current}: uncaught page error: {exc}"))
@@ -309,6 +310,8 @@ class Watch:
         self.problems.append(f"{self.current}: console error: {text}")
 
     def _request(self, req: Any) -> None:
+        if "/api/events/stream" in req.url:
+            self.streams += 1
         if self._tracked(req.url):
             self.inflight[id(req)] = time.monotonic()
 
@@ -447,6 +450,7 @@ def visit(page: Any, srv: Server, watch: Watch, path: str, *, shots: Path | None
           check_overflow: bool = False) -> None:
     watch.current = f"{path} [{tag}]"
     watch.reset_inflight()
+    watch.streams = 0
     page.goto(srv.base_url + path, wait_until="domcontentloaded")
     h1 = page.locator("main h1").first
     try:
@@ -462,6 +466,9 @@ def visit(page: Any, srv: Server, watch: Watch, path: str, *, shots: Path | None
         watch.problems.append(f"{watch.current}: PageHeader provenance ('Sumber data') missing")
     if page.locator("main").get_by_text("Memuat…").count() > 0:
         watch.settle(page, timeout=5)
+    if watch.streams > 1:
+        # One shared SSE connection per tab: several would exhaust the browser's per-origin limit.
+        watch.problems.append(f"{watch.current}: {watch.streams} event-stream connections opened (expected one per tab)")
     for text in page.evaluate(ENGLISH_JS):
         if ENGLISH_UI.match(text):
             watch.problems.append(f"{watch.current}: untranslated UI copy: {text[:60]!r}")
@@ -577,6 +584,27 @@ def test_admin_personal_desktop(browser: Any, server: Server, shots: Path) -> No
             # DEMO fixtures exist in PERSONAL: the header must not claim plain LIVE (evidence honesty).
             assert "DEMO" in mode or "MOCK" in mode, mode
             assert header.get_by_test_id("freshness").count() == 1, "data freshness missing from header"
+
+        with step(watch, "live event stream (SSE) in the browser"):
+            # §35: a persisted event reaches an open page through the stream, without a reload.
+            page.goto(server.base_url + "/")
+            watch.settle(page)
+            page.get_by_role("banner").get_by_test_id("freshness").filter(has_text="Stream live").wait_for(timeout=10_000)
+            created = api_write(page, "POST", "/api/proposals", {
+                "kind": "COMPARE", "title": "UI smoke: event stream check (DESIGN)",
+                "sources": ["https://github.com/NousResearch/hermes-agent"], "problem": "Smoke test: event only.",
+                "expected_benefit": "UNKNOWN", "scope_type": "PLATFORM", "existing_component_ids": [],
+            })
+            assert created["status"] == 200, created
+            feed = page.locator('main ol[aria-label="Aktivitas"]')
+            feed.get_by_text(created["data"]["id"][:12]).first.wait_for(timeout=10_000)
+            watch.settle(page)
+
+        with step(watch, "DEMO run detail is labelled"):
+            assert seeded.run_ids, "no DEMO runs were seeded"
+            page.goto(server.base_url + f"/runs/{seeded.run_ids[0]}")
+            watch.settle(page)
+            page.locator("main").get_by_text(re.compile(r"fixture (DEMO|MOCK); bukan pekerjaan nyata")).wait_for(timeout=5000)
 
         with step(watch, "/work DEMO labels"):
             page.goto(server.base_url + "/work")
@@ -810,6 +838,18 @@ def test_viewer_is_read_only(browser: Any, server: Server, shots: Path) -> None:
                     if el.is_visible() and (role == "link" or el.is_enabled()):
                         watch.problems.append(f"{path} [viewer]: admin-only {role} '{label}' is usable")
 
+        with step(watch, "/system-map [viewer] node card"):
+            page.goto(server.base_url + "/system-map")
+            watch.settle(page)
+            page.get_by_role("button", name="Buka semua").click()
+            node = page.locator(".react-flow__node").filter(has_not_text="klik untuk buka").first
+            node.wait_for()
+            node.click()
+            page.locator("main").get_by_role("link", name="Buka detail komponen").first.wait_for()
+            watch.settle(page)
+            assert page.locator("main").get_by_role("link", name=re.compile("^Usulkan perubahan")).count() == 0, (
+                "VIEWER sees 'Usulkan perubahan' on the System Map node card")
+
         # Hiding a button is not enforcement: the backend rejects a VIEWER write (§50).
         for method, path, body in (
             ("POST", "/api/proposals", {"kind": "COMPARE", "title": "viewer write", "sources": [], "scope_type": "PLATFORM"}),
@@ -819,6 +859,9 @@ def test_viewer_is_read_only(browser: Any, server: Server, shots: Path) -> None:
             with step(watch, f"viewer direct write {path}"):
                 res = api_write(page, method, path, body)
                 assert res["status"] == 403, f"VIEWER {method} {path} -> {res}"
+                # The role check rejected it - not a CSRF failure of the helper (that would prove nothing).
+                code = ((res.get("data") or {}).get("error") or {}).get("code")
+                assert code in {"READ_ONLY_ROLE", "ADMIN_REQUIRED"}, f"VIEWER {method} {path} -> {res}"
     finally:
         ctx.close()
     assert not watch.problems, "browser problems:\n" + watch.report()
@@ -843,8 +886,9 @@ def _record_browser_version(browser: Any) -> None:
 
 def _git(*args: str) -> str:
     try:
-        return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True, check=False).stdout.strip()
-    except OSError:
+        return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True, check=False,
+                              timeout=30).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
         return "UNKNOWN"
 
 
@@ -888,6 +932,7 @@ AEOS_UI_EVIDENCE=1 python -m pytest tests/e2e/test_ui_smoke.py -m integration -q
 
 The test builds `frontend/dist` when it is missing or older than `frontend/src`, starts its own
 server on a free 127.0.0.1 port with a fresh data directory, and never calls Claude, OpenCode,
-OpenBao, GitHub, Google or Atlassian (their binaries/addresses point at absent paths).
+OpenBao, GitHub, Google or Atlassian: claude/opencode/bao/mmdc point at absent paths, OpenBao at a
+closed loopback port, and no GitHub/Google/Atlassian account or credential is configured.
 """
     (EVIDENCE_DIR / "README.md").write_text(text, encoding="utf-8", newline="\n")
