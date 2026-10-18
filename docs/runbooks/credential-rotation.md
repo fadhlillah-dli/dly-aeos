@@ -23,7 +23,9 @@ action in the provider's console; AEOS never rotates or revokes provider credent
    fine-grained GitHub token limited to the platform repository; an OpenRouter key with a spend
    limit).
 4. **Store it** without echoing it to the terminal history:
-   - GitHub: `gh auth token | aeos secrets set personal/github --stdin`
+   - GitHub: `gh auth token | ./aeos secrets set personal/github --stdin` (macOS/Linux);
+     on Windows pipe into the program directly:
+     `gh auth token | .\.venv\Scripts\aeos.exe secrets set personal/github --stdin`
    - OpenRouter worker key: `aeos secrets set workers/openrouter` (prompts without echo)
    - Google OAuth: re-run `aeos publish google-connect --client-secret <file>` and complete consent.
 5. **Revoke the old credential at the provider** once the new one is verified.

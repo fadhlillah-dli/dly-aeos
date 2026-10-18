@@ -269,3 +269,27 @@ def test_real_smoke_subprocess_promotes_good_and_rejects_broken_release(settings
     report = release.promote(settings, broken["release_id"], **kw)
     assert report["status"] == "FAILED", report
     assert release.read_pointer(settings)["active"]["release_id"] == good["release_id"]
+
+
+@pytest.mark.parametrize("ref", ["--output=/tmp/x", "-n", "HEAD main", ""])
+def test_build_rejects_option_like_refs(settings, git_repo, ref):
+    """A ref is passed to git as an argument: option-like or malformed refs are refused up front."""
+    from aeos.core.errors import ValidationFailed
+
+    with pytest.raises(ValidationFailed) as exc:
+        release.build_release(settings, repo=git_repo, ref=ref)
+    assert exc.value.code == "RELEASE_BAD_REF"
+
+
+def test_smoke_error_text_is_redacted(settings, tmp_path, monkeypatch):
+    """Child-process output is untrusted text: a credential-shaped string never reaches the report."""
+    secret = "ghp_" + "R" * 36
+
+    class Proc:
+        returncode = 4
+        stdout = '{"ok": false, "error": "boom ' + secret + '"}\n'
+        stderr = "trace " + secret
+
+    monkeypatch.setattr(release.subprocess, "run", lambda *a, **k: Proc())
+    out = release._run_release_python(tmp_path, "print(1)", [], {}, tmp_path, 5)
+    assert out["ok"] is False and secret not in str(out)

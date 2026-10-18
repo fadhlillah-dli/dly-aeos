@@ -142,6 +142,7 @@ def _file_contains_secret(path: Path) -> bool:
 
 
 PLATFORM_PARTITION = "PLATFORM"
+DATABASE_PART = "DATABASE"  # the database copy (platform-level, holds both domains' rows)
 
 
 def partition_root(settings: Settings, partition: str) -> Path:
@@ -258,6 +259,7 @@ def create_backup(
     layout = settings.layout
     if not layout.db_path.is_file():
         raise Blocked("no control-plane database exists yet; nothing to back up", code="NO_DATABASE")
+    label = redact_text((label or "manual").strip())[:40] or "manual"  # free text: never a secret in id/manifest
     stamp = utcnow().strftime("%Y%m%dT%H%M%SZ")
     backup_id = f"{stamp}-{slugify(label, 24)}-{new_id()[:8]}"
     safe_segment(backup_id)
@@ -335,7 +337,8 @@ def create_backup(
                      target_type="backup", target_id=backup_id,
                      details={"label": label, "manifest_sha256": manifest_sha,
                               "db_sha256": manifest["database"]["sha256"],
-                              "excluded_files": len(excluded)})
+                              # platform-level row: no per-domain counts (they are in the manifest)
+                              "credential_like_files_excluded": bool(excluded)})
         events.emit(session, source="operations", kind="ops.backup.created", entity_type="backup",
                     entity_id=backup_id, payload={"label": label, "readiness": summary["readiness"]})
     return summary
@@ -349,6 +352,7 @@ def verify_backup(settings: Settings, backup_id: str, *, record: bool = True) ->
     path = _backup_dir(settings, backup_id)
     problems: list[str] = []
     checked = 0
+    by_partition: dict[str, int] = {}
     results = _load_results(path)
     manifest_sha = _sha256_file(path / MANIFEST)
     if results.get("manifest_sha256") and results["manifest_sha256"] != manifest_sha:
@@ -364,6 +368,7 @@ def verify_backup(settings: Settings, backup_id: str, *, record: bool = True) ->
         problems.append("database copy hash mismatch")
     else:
         checked += 1
+        by_partition[DATABASE_PART] = 1
     for arch in manifest.get("archives") or []:
         apath = path / str(arch.get("file", ""))
         if not apath.is_file():
@@ -389,11 +394,13 @@ def verify_backup(settings: Settings, backup_id: str, *, record: bool = True) ->
                         problems.append(f"file hash mismatch in {arch.get('file')}")
                     else:
                         checked += 1
+                        part = str(arch.get("domain", "unknown"))
+                        by_partition[part] = by_partition.get(part, 0) + 1
         except zipfile.BadZipFile:
             problems.append(f"archive {arch.get('file')} is not a valid zip")
     result = {"backup_id": backup_id, "ok": not problems, "checked_at": utcnow().isoformat(),
-              "files_checked": checked, "problems": problems, "kind": "HASH_VERIFY",
-              "notice": "hash verification is not a restore test"}
+              "files_checked": checked, "files_checked_by_partition": by_partition, "problems": problems,
+              "kind": "HASH_VERIFY", "notice": "hash verification is not a restore test"}
     if record:
         _append_result(path, "verifications", result)
     return result
@@ -438,26 +445,35 @@ def _open_with_models(db_path: Path) -> dict[str, Any]:
 
 def _extract_and_verify(backup_path: Path, manifest: dict[str, Any], dest: Path) -> dict[str, Any]:
     verified = 0
+    by_partition: dict[str, int] = {}
     problems: list[str] = []
     for arch in manifest.get("archives") or []:
-        domain_dir = dest / str(arch.get("domain", "unknown")).lower()
+        part = str(arch.get("domain", "unknown"))
+        by_partition.setdefault(part, 0)
+        domain_dir = dest / part.lower()
         domain_dir.mkdir(parents=True, exist_ok=True)
         expected = {e["path"]: e for e in arch.get("files") or []}
-        with zipfile.ZipFile(backup_path / str(arch["file"])) as zf:
-            for info in zf.infolist():
-                name = _safe_member(info.filename)
-                target = ensure_within(domain_dir, domain_dir / name)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(info) as src, target.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                entry = expected.get(name)
-                if entry is None:
-                    problems.append("unexpected archive member")
-                elif _sha256_file(target) != entry["sha256"]:
-                    problems.append("extracted file hash mismatch")
-                else:
-                    verified += 1
-    return {"files_verified": verified, "problems": problems}
+        try:
+            with zipfile.ZipFile(backup_path / str(arch["file"])) as zf:
+                for info in zf.infolist():
+                    name = _safe_member(info.filename)
+                    target = ensure_within(domain_dir, domain_dir / name)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info) as src, target.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    entry = expected.get(name)
+                    if entry is None:
+                        problems.append(f"unexpected archive member in {arch['file']}")
+                    elif _sha256_file(target) != entry["sha256"]:
+                        problems.append(f"extracted file hash mismatch in {arch['file']}")
+                    else:
+                        verified += 1
+                        by_partition[part] += 1
+        except Exception as exc:
+            # Tagged with the archive name (never the member path) so a domain-scoped view can hide
+            # another partition's details while the restore test still FAILS (§35 scope).
+            problems.append(f"archive {arch.get('file')} could not be restored ({type(exc).__name__})")
+    return {"files_verified": verified, "files_verified_by_partition": by_partition, "problems": problems}
 
 
 def restore_test(
@@ -506,11 +522,12 @@ def restore_test(
                                 "next `aeos db upgrade`)")
             files = _extract_and_verify(path, manifest, data)
             stats["files_verified"] = files["files_verified"]
+            stats["files_verified_by_partition"] = files["files_verified_by_partition"]
             problems.extend(files["problems"])
             expected_files = sum(int(a.get("file_count", 0)) for a in manifest.get("archives") or [])
             if files["files_verified"] != expected_files:
                 problems.append("not every archived file could be restored and verified")
-        except (sqlite3.DatabaseError, OSError, zipfile.BadZipFile, ValidationFailed, UnsafePathError) as exc:
+        except Exception as exc:  # any failure is a FAILED restore test, recorded - never a pass, never a 500
             problems.append(f"restore failed: {type(exc).__name__}: {redact_text(str(exc))[:200]}")
         finally:
             rmtree_robust(tmp)
@@ -525,17 +542,24 @@ def restore_test(
             try:
                 from aeos.verification import facade as verification
 
+                # Platform-level evidence (no domain): it binds the manifest hash (which holds the
+                # per-partition details) but carries no per-domain counts, so a Personal export of
+                # platform evidence never reveals Office volumes (§50 scope "termasuk counts").
                 ev = verification.collect_evidence(
                     session,
                     kind="RESTORE_TEST",
                     origin="restore-test",
                     collector_identity="aeos.operations.backup.restore_test",
                     claim=(f"Backup {backup_id} restored into an isolated temp directory: integrity_check ok, "
-                           f"row counts match manifest, all model tables readable, "
-                           f"{stats.get('files_verified', 0)} archived file(s) hash-verified."),
+                           "row counts match the manifest, all model tables readable, every archived file "
+                           "hash-verified."),
                     content={"backup_id": backup_id, "manifest_sha256": _sha256_file(path / MANIFEST),
                              "db_sha256": (manifest.get("database") or {}).get("sha256"),
-                             "stats": stats, "warnings": warnings, "started_at": started.isoformat()},
+                             "checks": {"integrity_check": stats.get("integrity_check"),
+                                        "row_counts_match_manifest": True,
+                                        "model_tables_checked": stats.get("model_tables_checked"),
+                                        "all_archived_files_verified": True},
+                             "warnings": warnings, "started_at": started.isoformat()},
                     evidence_level="E2",
                     subject_type="backup",
                     subject_id=backup_id,
@@ -569,13 +593,60 @@ def restore_test(
         from aeos.audit import service as audit
         from aeos.events import service as events
 
+        public = scope_result(result, None, platform_only=True) or result
+        public_problems = [str(p) for p in public.get("problems") or []]
         audit.record(session, actor_type=actor_type, actor_id=actor, action="ops.backup.restore_test",
                      result="SUCCESS" if status == "PASSED" else "FAILED", target_type="backup",
-                     target_id=backup_id, reason="; ".join(problems)[:500] or evidence_note,
-                     details={"status": status, "evidence_id": evidence_id, "stats": stats})
+                     target_id=backup_id, reason="; ".join(public_problems)[:500] or evidence_note,
+                     details={"status": status, "evidence_id": evidence_id, "stats": public["stats"]})
         events.emit(session, source="operations", kind="ops.backup.restore_tested", entity_type="backup",
                     entity_id=backup_id, payload={"status": status, "evidence_id": evidence_id})
     return result
+
+
+# ----------------------------------------------------------------------------------------- scoped views
+
+
+HIDDEN_PROBLEM = "problem in another domain partition (details are shown only in that domain's session or the CLI)"
+_TOTAL_KEYS = ("files_checked",)
+_TOTAL_STAT_KEYS = ("files_verified", "rows_total")
+
+
+def scope_result(
+    result: dict[str, Any] | None, domain: Domain | None, *, platform_only: bool = False
+) -> dict[str, Any] | None:
+    """Domain-scoped view of a verification / restore-test result (§35, §50 "termasuk counts").
+
+    A backup is one platform-level unit holding both domain partitions. Its overall status stays
+    global (a FAILED Office archive still makes the backup FAILED — never hidden as a pass), but
+    per-partition numbers and problem texts of partitions outside *domain* are removed, as are
+    totals that would let a Personal session derive Office volumes. ``platform_only`` keeps only the
+    database/platform parts (used for platform-level audit rows). ``domain=None`` without
+    ``platform_only`` is the full local-operator view (CLI)."""
+    if result is None or (domain is None and not platform_only):
+        return result
+    visible = {PLATFORM_PARTITION, DATABASE_PART}
+    if domain is not None and not platform_only:
+        visible.add(domain.value)
+    hidden_files = {f"{p.lower()}.zip" for p in PARTITIONS if p not in visible}
+    out = {k: v for k, v in result.items() if k not in _TOTAL_KEYS}
+    problems: list[str] = []
+    for p in result.get("problems") or []:
+        text = HIDDEN_PROBLEM if any(name in str(p) for name in hidden_files) else str(p)
+        if not (text == HIDDEN_PROBLEM and HIDDEN_PROBLEM in problems):
+            problems.append(text)
+    out["problems"] = problems
+    by = result.get("files_checked_by_partition")
+    if isinstance(by, dict):
+        out["files_checked_by_partition"] = {k: v for k, v in by.items() if k in visible}
+    if isinstance(result.get("stats"), dict):
+        stats = {k: v for k, v in result["stats"].items() if k not in _TOTAL_STAT_KEYS}
+        if isinstance(stats.get("files_verified_by_partition"), dict):
+            stats["files_verified_by_partition"] = {k: v for k, v in stats["files_verified_by_partition"].items()
+                                                    if k in visible}
+        out["stats"] = stats
+    out["scope"] = "PLATFORM" if platform_only else domain.value if domain else "ALL"
+    return out
 
 
 # ----------------------------------------------------------------------------------------- listing
@@ -608,7 +679,12 @@ def summarize(settings: Settings, backup_id: str, *, domain: Domain | None = Non
         return domain is None or part in (domain.value, PLATFORM_PARTITION)
 
     visible = [a for a in archives if _visible(a.get("domain"))]
-    size = sum(p.stat().st_size for p in path.iterdir() if p.is_file())
+    hidden_files = {str(a.get("file")) for a in archives if not _visible(a.get("domain"))}
+    size = sum(p.stat().st_size for p in path.iterdir() if p.is_file() and p.name not in hidden_files)
+    last_verification = verifications[-1] if verifications else None
+    if domain is not None:
+        last_verification = scope_result(last_verification, domain)
+        last_test = scope_result(last_test, domain)
     return {
         "backup_id": backup_id,
         "label": manifest.get("label"),
@@ -626,7 +702,7 @@ def summarize(settings: Settings, backup_id: str, *, domain: Domain | None = Non
         "excluded_by_design": manifest.get("excluded_by_design") or [],
         "readiness": readiness,
         "ready": readiness == READINESS_TESTED,
-        "last_verification": verifications[-1] if verifications else None,
+        "last_verification": last_verification,
         "last_restore_test": last_test,
         "restore_test_count": len(results.get("restore_tests") or []),
     }
@@ -755,9 +831,32 @@ def restore_live(
     else:
         staged = live.with_name(f".restore-{new_id()[:8]}.sqlite3")
         shutil.copy2(path / DB_FILE, staged)
-        for suffix in ("-wal", "-shm"):
-            Path(str(live) + suffix).unlink(missing_ok=True)
-        os.replace(staged, live)
+        if live.is_file() and raw_copy is None:
+            # Fold the WAL into the main file first so removing a stale -wal never loses data and a
+            # stale -wal can never be replayed onto the restored file.
+            try:
+                conn = sqlite3.connect(live, timeout=5)
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                finally:
+                    conn.close()
+            except sqlite3.DatabaseError:
+                pass
+        try:
+            # Windows refuses to unlink/replace a file another process holds open (an undetected
+            # server, a SQLite viewer, an antivirus scan): report it instead of half-restoring.
+            for suffix in ("-wal", "-shm"):
+                Path(str(live) + suffix).unlink(missing_ok=True)
+            os.replace(staged, live)
+        except OSError as exc:
+            staged.unlink(missing_ok=True)
+            raise Blocked(
+                "the live database file is in use by another process and was NOT replaced; close every "
+                "program using it (server, SQLite viewer) and run the restore again",
+                code="LIVE_DB_IN_USE",
+                details={"error": type(exc).__name__, "pre_restore_backup_id": pre["backup_id"] if pre else None,
+                         "pre_restore_raw_copy": raw_copy},
+            ) from exc
     restored_files = 0
     for arch in manifest.get("archives") or []:
         root = partition_root(settings, str(arch["domain"]))

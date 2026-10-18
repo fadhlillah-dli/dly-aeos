@@ -142,10 +142,11 @@ def backup_verify(backup_id: str) -> None:
 
     try:
         result = backup.verify_backup(settings, backup_id)
+        platform_view = backup.scope_result(result, None, platform_only=True) or {}
         with session_scope() as s:
             audit.record(s, actor_type="cli", actor_id=_local_actor(), action="ops.backup.verify",
                          result="SUCCESS" if result["ok"] else "FAILED", target_type="backup", target_id=backup_id,
-                         details={"problems": result["problems"]})
+                         details={"problems": platform_view.get("problems", []), "ok": result["ok"]})
     except AeosError as exc:
         _fail(exc)
     _echo(f"{'OK' if result['ok'] else 'FAILED'}: {result['files_checked']} file(s) checked")

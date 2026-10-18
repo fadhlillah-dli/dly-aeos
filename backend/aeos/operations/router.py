@@ -64,29 +64,33 @@ def list_backups(principal: CurrentPrincipal, domain: ActiveDomain, db: DB, sett
 
 
 @router.post("/api/ops/backups")
-def create_backup(body: BackupIn, principal: AdminPrincipal, db: DB, settings: SettingsDep) -> dict[str, Any]:
+def create_backup(body: BackupIn, principal: AdminPrincipal, domain: ActiveDomain, db: DB,
+                  settings: SettingsDep) -> dict[str, Any]:
     result = backup.create_backup(settings, label=body.label, actor=principal.user.id, session=db, actor_type="user")
     db.commit()
-    return result
+    return backup.summarize(settings, result["backup_id"], domain=domain)
 
 
 @router.post("/api/ops/backups/{backup_id}/verify")
-def verify_backup(backup_id: str, principal: AdminPrincipal, db: DB, settings: SettingsDep) -> dict[str, Any]:
+def verify_backup(backup_id: str, principal: AdminPrincipal, domain: ActiveDomain, db: DB,
+                  settings: SettingsDep) -> dict[str, Any]:
     from aeos.audit import service as audit
 
     result = backup.verify_backup(settings, backup_id)
+    platform_view = backup.scope_result(result, None, platform_only=True) or {}
     audit.record(db, actor_type="user", actor_id=principal.user.id, action="ops.backup.verify",
                  result="SUCCESS" if result["ok"] else "FAILED", target_type="backup", target_id=backup_id,
-                 details={"problems": result["problems"], "files_checked": result["files_checked"]})
+                 details={"problems": platform_view.get("problems", []), "ok": result["ok"]})
     db.commit()
-    return result
+    return backup.scope_result(result, domain) or result
 
 
 @router.post("/api/ops/backups/{backup_id}/restore-test")
-def restore_test(backup_id: str, principal: AdminPrincipal, db: DB, settings: SettingsDep) -> dict[str, Any]:
+def restore_test(backup_id: str, principal: AdminPrincipal, domain: ActiveDomain, db: DB,
+                 settings: SettingsDep) -> dict[str, Any]:
     result = backup.restore_test(settings, backup_id, session=db, actor=principal.user.id, actor_type="user")
     db.commit()
-    return result
+    return backup.scope_result(result, domain) or result
 
 
 # ----------------------------------------------------------------------------------------- releases
@@ -139,7 +143,10 @@ def emergency_prepare(principal: AdminPrincipal, db: DB) -> dict[str, Any]:
 def emergency_stop(body: EmergencyIn, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
     emergency.consume_token(db, user_id=principal.user.id, token=body.token)
     db.commit()  # the token is spent even if a later step fails
-    domain = principal.active_domain.value if principal.active_domain else None
+    # The stop works without a selected domain (it is an emergency), but the browser only ever sees
+    # the active domain's counts/run ids — or statuses only when no domain is selected (§35, §50).
+    active = principal.active_domain
+    domain = active.value if active is not None and principal.can_access_domain(active) else emergency.STATUS_ONLY
     report = emergency.execute(db, actor_type="user", actor_id=principal.user.id, reason=body.reason,
                                incident_owner=body.incident_owner, blast_radius=body.blast_radius,
                                visible_domain=domain)

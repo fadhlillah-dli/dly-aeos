@@ -41,7 +41,11 @@ Secrets are never in these files: OpenBao + OS credential store only (§26).
 
 API (dashboard *Riwayat & Pemulihan → Backup*): `GET/POST /api/ops/backups`,
 `POST /api/ops/backups/{id}/verify`, `POST /api/ops/backups/{id}/restore-test` (SUPER_ADMIN). There is
-no HTTP route for live restore. OpenBao has its own recovery path
+no HTTP route for live restore. A backup is one platform-level unit holding both domain partitions;
+the dashboard shows its overall readiness (a failed OFFICE archive makes the backup FAILED for
+everyone) but per-partition file counts, sizes and problem details only for the active domain
+(§35 scope). Platform-level records (audit rows, `RESTORE_TEST` evidence) carry no per-domain
+counts. The CLI shows the full view. OpenBao has its own recovery path
 ([runbook](runbooks/openbao-unseal-recovery.md)).
 
 Suggested owner cadence (decide and record it): backup + restore test before every upgrade and at a
@@ -95,6 +99,14 @@ Dashboard *Riwayat & Pemulihan → Darurat* (single-use confirmation token, type
 `aeos ops emergency-stop --reason "..."`. Steps, each reported separately: pause scheduling, revoke
 all active capabilities, cancel RUNNING/LEASED runs, preserve evidence, audit + CRITICAL alert.
 [Runbook](runbooks/incident-containment.md).
+
+The stop itself is platform-wide (an OFFICE run is cancelled from a PERSONAL session too), but what
+is *shown* is scoped (§35, §50 "termasuk counts"): the dashboard report carries every step status
+(a failure in another domain still shows as FAILED/PARTIAL with a neutral reason) plus counts and run
+ids of the active domain only; with no domain selected it shows statuses only. The audit row, the
+CRITICAL alert and `ops.emergency.last` hold statuses only. One `INCIDENT_CONTAINMENT` evidence
+artifact is stored per domain partition with that domain's counts. The local CLI shows the full
+report.
 
 ## Feature flags
 

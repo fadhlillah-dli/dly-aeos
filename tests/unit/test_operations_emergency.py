@@ -8,6 +8,7 @@ seluruh proses dihentikan; status/evidence konsisten", "VIEWER memanggil write e
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 import pytest
@@ -54,14 +55,25 @@ def test_emergency_stop_all_steps_succeed(db, monkeypatch):
                                                      "preserve_evidence", "audit"]
     assert fw.paused is True
     assert broker_calls[0]["all_active"] is True and steps["revoke_capabilities"]["remaining_active"] == 0
-    assert set(fw.cancelled) == {runs[0].id, runs[1].id, runs[2].id}
+    assert set(fw.cancelled) == {runs[0].id, runs[1].id, runs[2].id}  # the stop itself is platform-wide
     assert steps["cancel_runs"]["remaining_active"] == 0
     assert {r["run_id"] for r in steps["cancel_runs"]["runs"]} == {runs[0].id, runs[1].id}
-    assert steps["cancel_runs"]["hidden_other_domain"] == 1  # Office run id not shown to Personal
-    assert evidence and evidence[0].kind == "INCIDENT_CONTAINMENT" and evidence[0].trusted
+    # Personal view: Office run ids AND Office counts are not shown (§50 scope "termasuk counts")
+    assert steps["cancel_runs"]["active_runs"] == 2 and steps["cancel_runs"]["cancelled"] == 2
+    assert steps["revoke_capabilities"]["active_before"] == 2
+    text = json.dumps(report)
+    assert runs[2].id not in text and "by_domain" not in text and "OFFICE" not in text
+    assert "hidden_other_domain" not in text and "remaining_total" not in text and "revoked_total" not in text
+    assert {e.domain for e in evidence} == {"PERSONAL", "OFFICE"}  # one INCIDENT_CONTAINMENT per partition
+    assert all(e.kind == "INCIDENT_CONTAINMENT" and e.trusted for e in evidence)
+    office_ev = next(e for e in evidence if e.domain == "OFFICE")
+    personal_ev = next(e for e in evidence if e.domain == "PERSONAL")
+    assert runs[2].id in json.dumps(office_ev.inline) and runs[2].id not in json.dumps(personal_ev.inline)
     assert db.get(WorkerRun, runs[3].id).execution_status == "DONE"  # finished runs untouched
     audit = db.scalar(select(AuditEvent).where(AuditEvent.action == "ops.emergency_stop"))
     assert audit is not None and audit.result == "SUCCESS"
+    assert audit.domain is None and runs[2].id not in json.dumps(audit.details)
+    assert all(set(s) <= {"step", "status", "reason"} for s in audit.details["steps"])  # statuses only
     assert db.scalar(select(OpsAlert).where(OpsAlert.kind == "emergency_stop")).severity == "CRITICAL"
     assert emergency.last_emergency(db)["incident_id"] == report["incident_id"]
 
@@ -92,9 +104,52 @@ def test_partial_cancel_reported(db, monkeypatch):
     runs = _active_state(db)
     fw.fail_runs.add(runs[1].id)
     report = emergency.execute(db, actor_type="cli", actor_id="op", reason="partial kill check")
-    cancel = next(s for s in report["steps"] if s["step"] == "cancel_runs")
-    assert cancel["status"] == "PARTIAL" and cancel["failed"] == 1 and cancel["remaining_active"] == 1
+    cancel = next(s for s in report["steps"] if s["step"] == "cancel_runs")  # full CLI view
+    assert cancel["status"] == "PARTIAL" and cancel["remaining_total"] == 1
+    assert cancel["by_domain"]["PERSONAL"]["failed"] == 1 and cancel["by_domain"]["OFFICE"]["failed"] == 0
     assert report["status"] == "PARTIAL"
+
+
+def test_failure_only_in_other_domain_is_not_hidden_but_not_detailed(db, monkeypatch):
+    """An Office run that cannot be cancelled keeps the stop PARTIAL in a Personal session, with a
+    neutral reason and without Office counts/ids; the Office view names the failure."""
+    fw = fake_workforce(monkeypatch)
+    fake_broker(monkeypatch)
+    fake_verification(monkeypatch)
+    runs = _active_state(db)
+    fw.fail_runs.add(runs[2].id)  # the OFFICE run
+    full = emergency.execute(db, actor_type="cli", actor_id="op", reason="office kill fails")
+    personal = emergency.scope_report(full, "PERSONAL")
+    office = emergency.scope_report(full, "OFFICE")
+    p_cancel = next(s for s in personal["steps"] if s["step"] == "cancel_runs")
+    o_cancel = next(s for s in office["steps"] if s["step"] == "cancel_runs")
+    assert personal["status"] == "PARTIAL" and p_cancel["status"] == "PARTIAL"
+    assert p_cancel["remaining_active"] == 0 and "domain lain" in p_cancel["reason"]
+    assert runs[2].id not in json.dumps(personal)
+    assert o_cancel["remaining_active"] == 1 and o_cancel["failed"] == 1
+    assert "masih aktif" in o_cancel["reason"] and o_cancel["runs"][0]["run_id"] == runs[2].id
+
+
+def test_status_only_view_without_domain(db, monkeypatch):
+    fake_workforce(monkeypatch)
+    fake_broker(monkeypatch)
+    fake_verification(monkeypatch)
+    runs = _active_state(db)
+    report = emergency.execute(db, actor_type="user", actor_id="u", reason="no domain chosen",
+                               visible_domain=emergency.STATUS_ONLY)
+    assert report["status"] == "COMPLETED" and report["scope"] == "NO_DOMAIN_SELECTED"
+    assert all(set(s) <= {"step", "status", "reason"} for s in report["steps"])
+    assert not any(r.id in json.dumps(report) for r in runs)
+
+
+def test_reason_is_redacted(db, monkeypatch):
+    for name in ("aeos.workforce.scheduler", "aeos.broker.grants", "aeos.verification.collector"):
+        block_module(monkeypatch, name)
+    secret = "ghp_" + "S" * 36
+    report = emergency.execute(db, actor_type="cli", actor_id="op", reason=f"leaked token {secret}")
+    db.commit()
+    assert secret not in json.dumps(report)
+    assert secret not in json.dumps(emergency.last_emergency(db))
 
 
 def test_reason_required(db):
@@ -138,3 +193,28 @@ def test_api_emergency_stop_flow(client, db, monkeypatch):
     assert r.status_code == 403
     last = client.get("/api/ops/emergency-stop/last").json()
     assert last["last"]["status"] == "COMPLETED" and last["scheduling"]["status"] == "PAUSED"
+
+
+def test_api_report_is_scoped_to_the_session_domain(client, db, monkeypatch):
+    """§35/§50: the stop cancels every active run (platform-wide), but a PERSONAL browser session never
+    receives Office run ids or Office counts; the last-stop record carries statuses only."""
+    fw = fake_workforce(monkeypatch)
+    fake_broker(monkeypatch)
+    fake_verification(monkeypatch)
+    from tests.conftest import ADMIN_PW
+
+    create_admin(db)
+    runs = _active_state(db)
+    client.login("owner", ADMIN_PW)
+    client.select_domain(Domain.PERSONAL)
+    token = client.post("/api/ops/emergency-stop/prepare").json()["token"]
+    body = client.post("/api/ops/emergency-stop", json={"token": token, "reason": "scoped drill"}).json()
+    assert body["status"] == "COMPLETED" and body["scope"] == "PERSONAL"
+    assert runs[2].id in fw.cancelled  # the Office run was cancelled too
+    text = json.dumps(body)
+    assert runs[2].id not in text and "OFFICE" not in text
+    cancel = next(s for s in body["steps"] if s["step"] == "cancel_runs")
+    assert cancel["cancelled"] == 2 and {r["run_id"] for r in cancel["runs"]} == {runs[0].id, runs[1].id}
+    last = client.get("/api/ops/emergency-stop/last").json()["last"]
+    assert runs[2].id not in json.dumps(last)
+    assert all(set(s) <= {"step", "status", "reason"} for s in last["steps"])

@@ -6,7 +6,7 @@ import { OpsBadge } from "../../components/control_center/OpsBadge";
 import { Provenance } from "../../components/control_center/Provenance";
 import { Button, EmptyState, ErrorBox, Loading, Mono, Notice, Table } from "../../components/ui";
 import { absoluteTime, relativeTime, shortHash } from "../../lib/format";
-import type { BackupList, BackupRow, RestoreTest } from "./types";
+import type { BackupList, BackupRow, HashVerification, RestoreTest } from "./types";
 
 function size(n?: number) {
   if (!n) return "0 B";
@@ -18,6 +18,37 @@ function size(n?: number) {
     i += 1;
   }
   return `${v.toFixed(i ? 1 : 0)} ${units[i]}`;
+}
+
+function partitionCounts(result: RestoreTest | HashVerification): string {
+  const counts = "stats" in result ? result.stats.files_verified_by_partition : result.files_checked_by_partition;
+  if (!counts) return "";
+  return Object.entries(counts)
+    .map(([part, n]) => `${part}: ${n}`)
+    .join(", ");
+}
+
+/** Last restore test per backup: status + time + evidence, so "lulus tanpa bukti" never looks ready (§33). */
+export function LastRestoreTest({ row }: { row: BackupRow }) {
+  const t = row.last_restore_test;
+  if (!t) return <span className="text-xs text-warn">Belum pernah diuji</span>;
+  return (
+    <span className="flex flex-col gap-0.5 text-xs">
+      <span className="inline-flex items-center gap-1">
+        <OpsBadge status={t.status} />
+        <span className="text-ink-3" title={absoluteTime(t.finished_at)}>
+          {relativeTime(t.finished_at)}
+        </span>
+      </span>
+      {t.evidence_id ? (
+        <span className="text-ink-3">
+          Bukti <Mono>{t.evidence_id.slice(0, 8)}</Mono>
+        </span>
+      ) : (
+        <span className="text-warn">{t.evidence_note || "Tidak ada bukti tercatat"}</span>
+      )}
+    </span>
+  );
 }
 
 export function RecoveryNotice({ data }: { data: BackupList }) {
@@ -37,19 +68,27 @@ export function RecoveryNotice({ data }: { data: BackupList }) {
   );
 }
 
-function ResultBox({ title, result }: { title: string; result: RestoreTest | { ok: boolean; problems: string[]; files_checked: number } }) {
-  const status = "status" in result ? result.status : result.ok ? "PASS" : "FAILED";
+function ResultBox({ title, result }: { title: string; result: RestoreTest | HashVerification }) {
+  const isRestore = "status" in result;
+  const status = isRestore ? result.status : result.ok ? "OK" : "MISMATCH";
   return (
     <div className="rounded-md border border-line bg-surface-2 p-3 text-sm" role="status">
       <div className="flex items-center gap-2 font-medium">
         {title} <OpsBadge status={status} />
       </div>
+      {!isRestore && <div className="mt-1 text-xs text-ink-3">Verifikasi hash bukan restore test; backup belum dianggap siap karenanya.</div>}
       {"evidence_id" in result && result.evidence_id && (
         <div className="mt-1">
           Bukti: <Mono>{result.evidence_id}</Mono>
         </div>
       )}
       {"evidence_note" in result && result.evidence_note && <div className="mt-1 text-warn">{result.evidence_note}</div>}
+      {partitionCounts(result) && <div className="mt-1 text-xs text-ink-3">Berkas terverifikasi: {partitionCounts(result)}</div>}
+      {result.scope && result.scope !== "ALL" && (
+        <div className="mt-1 text-xs text-ink-3">
+          Rincian per partisi hanya untuk domain aktif ({result.scope}); status keseluruhan tetap mencakup semua partisi.
+        </div>
+      )}
       {result.problems.length > 0 && (
         <ul className="mt-1 list-disc pl-5 text-bad">
           {result.problems.map((p) => (
@@ -65,11 +104,11 @@ export function BackupsTab() {
   const { isAdmin } = useAuth();
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["ops-backups"], queryFn: () => get<BackupList>("/api/ops/backups") });
-  const [result, setResult] = useState<{ title: string; data: RestoreTest | { ok: boolean; problems: string[]; files_checked: number } } | null>(null);
+  const [result, setResult] = useState<{ title: string; data: RestoreTest | HashVerification } | null>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: ["ops-backups"] });
   const create = useMutation({ mutationFn: () => post<BackupRow>("/api/ops/backups", { label: "dashboard" }), onSuccess: refresh });
   const verify = useMutation({
-    mutationFn: (id: string) => post<{ ok: boolean; problems: string[]; files_checked: number }>(`/api/ops/backups/${id}/verify`),
+    mutationFn: (id: string) => post<HashVerification>(`/api/ops/backups/${id}/verify`),
     onSuccess: (data) => {
       setResult({ title: "Verifikasi hash", data });
       refresh();
@@ -113,6 +152,7 @@ export function BackupsTab() {
             { header: "Backup", cell: (b) => <Mono>{b.backup_id}</Mono> },
             { header: "Dibuat", cell: (b) => (b.created_at ? <span title={absoluteTime(b.created_at)}>{relativeTime(b.created_at)}</span> : "—") },
             { header: "Kesiapan", cell: (b) => <OpsBadge status={b.readiness} /> },
+            { header: "Uji restore terakhir", cell: (b) => <LastRestoreTest row={b} /> },
             { header: "Ukuran", cell: (b) => size(b.size_bytes) },
             { header: "Hash DB", cell: (b) => <Mono>{shortHash(b.db_sha256)}</Mono> },
             { header: "Retensi", cell: (b) => <OpsBadge status={b.retention} /> },

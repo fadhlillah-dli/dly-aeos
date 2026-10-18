@@ -38,10 +38,18 @@ def run_once(settings: Settings) -> dict[str, Any]:
     with session_scope() as s:
         if not flags.get_flag(s, "ops.sli_loop_enabled"):
             return {"skipped": "ops.sli_loop_enabled is false"}
+    errors: list[str] = []
     for domain in Domain:
-        with session_scope() as s:
-            out = sli.evaluate(s, domain=domain, settings=settings)
-            results[domain.value] = out["alerts"]
+        # Each domain is evaluated (and committed) on its own: a failure in one never skips the other.
+        try:
+            with session_scope() as s:
+                out = sli.evaluate(s, domain=domain, settings=settings)
+                results[domain.value] = out["alerts"]
+        except Exception as exc:
+            results[domain.value] = {"error": type(exc).__name__}
+            errors.append(f"{domain.value}: {type(exc).__name__}")
+            log.exception("SLI evaluation failed for %s", domain.value)
+    _state["last_error"] = "; ".join(errors) or None
     _state["last_run_at"] = utcnow().isoformat()
     _state["runs"] = int(_state["runs"]) + 1
     return results
@@ -65,7 +73,6 @@ def _main(settings: Settings, first_delay: float) -> None:
     while not _stop.is_set():
         try:
             run_once(settings)
-            _state["last_error"] = None
         except Exception as exc:  # logged + visible in the service inventory; never kills the app
             _state["last_error"] = type(exc).__name__
             log.exception("SLI evaluation failed")

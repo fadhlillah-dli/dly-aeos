@@ -11,8 +11,9 @@ built here) can replace the active controller through a controlled, human-only p
 * ``promote`` (CLI only, human, audited, recorded as a PROMOTION ``Decision`` bound to the artifact
   hash): integrity check -> compatibility check (migration head vs current DB revision) ->
   pre-upgrade backup + restore test -> smoke test in a subprocess (import the app factory from the
-  extracted artifact, migrate a *copy* of the database, ``GET /api/health`` on a temporary loopback
-  port) -> live migration only when required and the server is stopped -> ``releases/ACTIVE.json``
+  extracted artifact, migrate a *copy* of the database, background services disabled so queued work
+  is never executed twice, ``GET /api/health`` on a temporary loopback port) -> live migration only
+  when required and the server is stopped -> ``releases/ACTIVE.json``
   updated keeping the previous release. Any failure keeps the old release active (§50 "Upgrade
   controller gagal").
 * ``rollback`` returns the pointer to the previous release after the same integrity/compatibility/
@@ -168,6 +169,8 @@ def build_release(
     session: Session | None = None,
 ) -> dict[str, Any]:
     repo = (repo or repo_root()).resolve()
+    if not ref or ref.startswith("-") or any(ch.isspace() for ch in ref):
+        raise ValidationFailed("invalid git ref (must be a commit/ref name, not an option)", code="RELEASE_BAD_REF")
     if not _git_ok(repo, "rev-parse", "--is-inside-work-tree"):
         raise Blocked(f"{repo} is not a git working tree", code="RELEASE_NOT_A_REPO")
     dirty = _git(repo, "status", "--porcelain", "--untracked-files=normal").splitlines()
@@ -388,7 +391,20 @@ try:
     init_engine(settings)
     out["migration"] = {k: str(v) for k, v in upgrade_database().items()}
     import httpx, uvicorn
+    # The smoke instance runs against a COPY of the live database: background services (scheduler
+    # loop, publication outbox worker, ...) must never start here, otherwise queued work could be
+    # executed twice against real external targets. Clear the hook list in place before the app
+    # lifespan reads it, and refuse to continue if that cannot be guaranteed (fail closed).
+    import aeos.api.routers as _routers
+    _hooks = getattr(_routers, "LIFECYCLE_HOOKS", [])
+    out["lifecycle_hooks_disabled"] = list(_hooks)
+    if isinstance(_hooks, list):
+        _hooks.clear()
+    import aeos.api.app as _appmod
     from aeos.api.app import create_app
+    if list(getattr(_appmod, "LIFECYCLE_HOOKS", [])) or list(getattr(_routers, "LIFECYCLE_HOOKS", [])):
+        out["error"] = "background services could not be disabled for the smoke test"
+        print(json.dumps(out, default=str)); sys.exit(5)
     server = uvicorn.Server(uvicorn.Config(create_app(settings), host="127.0.0.1", port=settings.port,
                                            log_level="warning", lifespan="on"))
     thread = threading.Thread(target=server.run, daemon=True)
@@ -449,6 +465,8 @@ def _run_release_python(release_dir: Path, script: str, args: list[str], env_ext
         data = {}
     if not data:
         data = {"ok": False, "error": "no result from release process"}
+    if data.get("error"):
+        data["error"] = redact_text(str(data["error"]))[:500]  # child output is untrusted text
     data["exit_code"] = proc.returncode
     if proc.returncode != 0 and proc.stderr:
         data["stderr_tail"] = redact_text(proc.stderr.strip()[-800:])
@@ -531,9 +549,11 @@ def _pre_change_backup(settings: Settings, session: Session, *, label: str, acto
     test = backup.restore_test(settings, created["backup_id"], session=session, actor=actor)
     session.commit()
     if test["status"] not in ("PASSED", "PASSED_UNRECORDED"):
-        raise Blocked("pre-upgrade backup failed its restore test; refusing to continue",
+        platform_view = backup.scope_result(test, None, platform_only=True) or {}
+        raise Blocked("pre-upgrade backup failed its restore test; refusing to continue (details: "
+                      f"aeos ops backup list / results.json of {created['backup_id']})",
                       code="PRE_UPGRADE_BACKUP_FAILED", details={"backup_id": created["backup_id"],
-                                                                  "problems": test["problems"]})
+                                                                  "problems": platform_view.get("problems", [])})
     return {"backup_id": created["backup_id"], "restore_test": test["status"], "evidence_id": test["evidence_id"]}
 
 
@@ -643,6 +663,10 @@ def _transition(
     except AeosError as exc:
         session.rollback()
         return fail("decision", f"decision refused: {exc.message}")
+    except Exception as exc:  # e.g. an incompatible policy implementation: never proceed without AUTH
+        session.rollback()
+        return fail("decision", f"a PROMOTION decision could not be recorded ({type(exc).__name__}); the "
+                                "operation is refused (fail closed)")
 
     # 2. compatibility (migration head vs current database revision)
     compat = compatibility(settings, target_prov)
@@ -676,7 +700,7 @@ def _transition(
     db_source = settings.layout.backups / pre["backup_id"] / "aeos.sqlite3" if pre else None
     smoke = smoke_runner(settings, release_dir, db_source=db_source, timeout=smoke_timeout)
     report["smoke"] = {k: smoke.get(k) for k in ("ok", "error", "health", "migration", "version", "exit_code",
-                                                 "stderr_tail")}
+                                                 "stderr_tail", "lifecycle_hooks_disabled")}
     if not smoke.get("ok"):
         return fail("smoke", f"smoke test failed: {smoke.get('error') or 'unknown error'}; previous release stays active")
     if smoke.get("version") and smoke.get("version") != target_prov.get("version"):

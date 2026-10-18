@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import sqlite3
 import zipfile
@@ -20,7 +21,7 @@ import pytest
 from sqlalchemy import select
 
 from aeos.core.enums import Domain
-from aeos.core.errors import Blocked, PolicyDenied
+from aeos.core.errors import Blocked, PolicyDenied, ValidationFailed
 from aeos.models.audit import AuditEvent
 from aeos.models.evidence import EvidenceArtifact
 from aeos.models.portfolio import Project
@@ -327,3 +328,134 @@ def test_api_backups_require_domain(admin_client):
 def test_no_http_route_for_live_restore(app):
     paths = {getattr(r, "path", "") for r in app.routes}
     assert not any(p.endswith("/restore") for p in paths)
+
+
+def test_domain_scoped_views_hide_office_counts_and_problems(personal_client, db, settings, monkeypatch):
+    """§35/§50 "Viewer/Personal mengakses ... Office -> scope diterapkan termasuk counts": a backup holds
+    both partitions, but a PERSONAL session never sees Office file counts, totals or Office problem
+    texts. The overall status stays global: a corrupt Office archive still makes the backup FAILED."""
+    calls = fake_verification(monkeypatch)
+    _project(db, "alpha", Domain.PERSONAL)
+    lay = settings.layout
+    for i in range(4):  # four Office files, one Personal file
+        f = lay.publications(Domain.OFFICE, "omega") / f"page{i}.html"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(f"<p>{i}</p>", encoding="utf-8")
+    pf = lay.evidence(Domain.PERSONAL, "alpha") / "r.json"
+    pf.parent.mkdir(parents=True, exist_ok=True)
+    pf.write_text("{}", encoding="utf-8")
+    created = personal_client.post("/api/ops/backups", json={"label": "scoped"})
+    assert created.status_code == 200, created.text
+    bid = created.json()["backup_id"]
+    assert {a["domain"] for a in created.json()["archives"]} == {"PERSONAL"}
+    rt = personal_client.post(f"/api/ops/backups/{bid}/restore-test").json()
+    assert rt["status"] == "PASSED" and rt["scope"] == "PERSONAL"
+    assert "files_verified" not in rt["stats"] and "rows_total" not in rt["stats"]
+    assert rt["stats"]["files_verified_by_partition"] == {"PERSONAL": 1}
+    ev = calls[-1]
+    inline = json.dumps(ev.inline)  # platform evidence: no per-domain counts or totals
+    assert '"files_verified"' not in inline and "files_verified_by_partition" not in inline
+    assert '"rows_total"' not in inline and "OFFICE" not in inline
+    assert "file(s)" not in ev.claim and not re.search(r"\b[45] archived", ev.claim)  # no Office volume
+    listing = personal_client.get("/api/ops/backups").json()["items"][0]
+    assert listing["last_restore_test"]["stats"]["files_verified_by_partition"] == {"PERSONAL": 1}
+    office_size = (lay.backups / bid / "office.zip").stat().st_size
+    full = backup.summarize(settings, bid)
+    assert listing["size_bytes"] == full["size_bytes"] - office_size
+    # corrupt the OFFICE archive: Personal sees FAILED with a neutral reason, Office sees the detail
+    office_zip = lay.backups / bid / "office.zip"
+    office_zip.write_bytes(office_zip.read_bytes() + b"x")
+    v = personal_client.post(f"/api/ops/backups/{bid}/verify").json()
+    assert v["ok"] is False and "files_checked" not in v
+    assert v["problems"] == [backup.HIDDEN_PROBLEM]
+    assert "office" not in json.dumps(v).lower()
+    audit_row = db.scalars(select(AuditEvent).where(AuditEvent.action == "ops.backup.verify")).all()[-1]
+    assert "office" not in json.dumps(audit_row.details).lower()  # platform audit row: no Office detail
+    personal_client.select_domain(Domain.OFFICE)
+    v_office = personal_client.post(f"/api/ops/backups/{bid}/verify").json()
+    assert any("office.zip" in p for p in v_office["problems"])
+    assert personal_client.get("/api/ops/backups").json()["items"][0]["readiness"] == backup.READINESS_FAILED
+
+
+def test_restore_live_reports_locked_database_without_replacing(settings, db, monkeypatch):
+    """Windows: a live DB held open by another process cannot be replaced -> Blocked, nothing changed."""
+    _project(db, "alpha", Domain.PERSONAL)
+    bid = _restore_tested(settings, db, monkeypatch)
+    _project(db, "beta", Domain.PERSONAL)
+    db.close()
+    real_replace = backup.os.replace
+
+    def locked(src, dst):
+        if str(dst) == str(settings.layout.db_path):
+            raise PermissionError(32, "The process cannot access the file because it is being used")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(backup.os, "replace", locked)
+    with pytest.raises(Blocked) as exc:
+        backup.restore_live(settings, bid, actor="tester", server_check=lambda s: {"running": False})
+    assert exc.value.code == "LIVE_DB_IN_USE" and exc.value.details["pre_restore_backup_id"]
+    assert not list(settings.layout.db_path.parent.glob(".restore-*.sqlite3"))  # staged copy removed
+    from aeos.core.db import init_engine, session_factory
+
+    init_engine(settings)
+    s = session_factory()()
+    try:
+        assert set(s.scalars(select(Project.project_key))) == {"alpha", "beta"}  # live data untouched
+    finally:
+        s.close()
+
+
+def test_unexpected_restore_failure_is_recorded_as_failed(settings, db, monkeypatch):
+    """Any unexpected error during the restore test is a FAILED test (recorded, no evidence), never a
+    500 and never a pass (§33 "restore benar-benar diuji")."""
+    calls = fake_verification(monkeypatch)
+    bid = backup.create_backup(settings, label="boom", actor="tester")["backup_id"]
+
+    def explode(_path):
+        raise RuntimeError("model registry exploded")
+
+    monkeypatch.setattr(backup, "_open_with_models", explode)
+    result = backup.restore_test(settings, bid, session=db, actor="tester")
+    assert result["status"] == "FAILED" and result["evidence_id"] is None and calls == []
+    assert any("RuntimeError" in p for p in result["problems"])
+    assert backup.list_backups(settings)[0]["readiness"] == backup.READINESS_FAILED
+    assert not list((settings.layout.root / "tmp").glob("restore-test-*"))
+
+
+def test_office_extraction_failure_detail_hidden_from_personal(settings, db, monkeypatch):
+    """A broken Office archive fails the restore test for everyone, but the Personal view gets a neutral
+    reason without Office member paths (§35, §50 scope)."""
+    fake_verification(monkeypatch)
+    f = settings.layout.publications(Domain.OFFICE, "omega") / "secret-plan.html"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("<p>office</p>", encoding="utf-8")
+    bid = backup.create_backup(settings, label="office-broken", actor="tester")["backup_id"]
+    real_safe_member = backup._safe_member
+
+    def refuse_office(name):
+        if "omega" in name:
+            raise ValidationFailed(f"unsafe archive member: {name!r}")
+        return real_safe_member(name)
+
+    monkeypatch.setattr(backup, "_safe_member", refuse_office)
+    result = backup.restore_test(settings, bid, session=db, actor="tester")
+    assert result["status"] == "FAILED"
+    personal = backup.scope_result(result, Domain.PERSONAL)
+    assert personal["status"] == "FAILED" and backup.HIDDEN_PROBLEM in personal["problems"]
+    assert "omega" not in json.dumps(personal) and "office.zip" not in json.dumps(personal)
+    office = backup.scope_result(result, Domain.OFFICE)
+    assert any("office.zip" in p for p in office["problems"])
+
+
+def test_backup_label_is_redacted_in_id_and_manifest(settings, db):
+    """§50 "Trace berisi secret": a credential pasted into the free-text label never reaches the backup
+    directory name, the manifest or the audit trail."""
+    token = "ghp_" + "L" * 36
+    summary = backup.create_backup(settings, label=f"x {token}", actor="tester", session=db)
+    db.commit()
+    bid = summary["backup_id"]
+    assert token not in bid and token[:20] not in bid
+    manifest = (settings.layout.backups / bid / "manifest.json").read_text(encoding="utf-8")
+    assert token not in manifest
+    row = db.scalar(select(AuditEvent).where(AuditEvent.action == "ops.backup.create"))
+    assert token not in json.dumps(row.details)

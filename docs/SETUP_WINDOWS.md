@@ -168,8 +168,12 @@ with its own budget configuration and outage/fallback tests (§07 step 6).
 ```powershell
 winget install --id GitHub.cli -e
 gh auth login
-gh auth token | .\aeos.ps1 secrets set personal/github --stdin
+gh auth token | .\.venv\Scripts\aeos.exe secrets set personal/github --stdin
 ```
+
+Pipe into `aeos.exe` directly: Windows PowerShell does not forward pipeline input through the
+`.\aeos.ps1` launcher to the program it starts, so `gh auth token | .\aeos.ps1 ...` would receive
+no token.
 
 Prefer a fine-grained token limited to the repositories AEOS may touch. Merge stays human-only.
 
