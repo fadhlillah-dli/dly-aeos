@@ -1,0 +1,8 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv",
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": ["tests"],
+  "files.eol": "\n",
+  "editor.formatOnSave": false,
+  "[python]": { "editor.defaultFormatter": "charliermarsh.ruff" }
+}

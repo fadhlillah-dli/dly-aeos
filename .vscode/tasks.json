@@ -1,0 +1,52 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AEOS: doctor",
+      "type": "shell",
+      "windows": { "command": ".\\aeos.ps1 doctor" },
+      "osx": { "command": "./aeos doctor" },
+      "linux": { "command": "./aeos doctor" },
+      "problemMatcher": []
+    },
+    {
+      "label": "AEOS: serve",
+      "type": "shell",
+      "windows": { "command": ".\\aeos.ps1 serve" },
+      "osx": { "command": "./aeos serve" },
+      "linux": { "command": "./aeos serve" },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "AEOS: dev (backend + vite)",
+      "dependsOn": ["AEOS: serve --dev", "AEOS: vite"],
+      "problemMatcher": []
+    },
+    {
+      "label": "AEOS: serve --dev",
+      "type": "shell",
+      "windows": { "command": ".\\aeos.ps1 serve --dev" },
+      "osx": { "command": "./aeos serve --dev" },
+      "linux": { "command": "./aeos serve --dev" },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "AEOS: vite",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": { "cwd": "${workspaceFolder}/frontend" },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "AEOS: tests",
+      "type": "shell",
+      "windows": { "command": ".\\.venv\\Scripts\\python -m pytest -q" },
+      "osx": { "command": ".venv/bin/python -m pytest -q" },
+      "linux": { "command": ".venv/bin/python -m pytest -q" },
+      "problemMatcher": []
+    }
+  ]
+}
