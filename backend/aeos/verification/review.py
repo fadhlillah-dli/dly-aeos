@@ -500,10 +500,25 @@ def _after_review(session: Session, rec: ReviewRecord, run: WorkerRun, *, actor:
 
     run_verdict = rec.verdict if rec.status == "COMPLETED" else (
         Verdict.BLOCKED.value if rec.status == "WAITING_QUOTA" else Verdict.NOT_PROVEN.value)
-    if rec.reviewer_kind != "SECURITY":  # WorkerRun.review_verdict mirrors the feature/architecture review
-        upd = call(workforce.update_run, session, run.id, actor="reviewer", review_verdict=run_verdict)
+    waiting = rec.status == "WAITING_QUOTA"
+    if rec.reviewer_kind != "SECURITY" or waiting:  # review_verdict mirrors the feature/architecture review
+        fields: dict[str, Any] = {"review_verdict": run_verdict} if rec.reviewer_kind != "SECURITY" else {}
+        if waiting:
+            fields["quota_status"] = "WAITING_QUOTA"
+        upd = call(workforce.update_run, session, run.id, actor="reviewer", **fields)
         if not upd.ok:
             notes.append(f"run review_verdict update {upd.label()}")
+    if waiting:
+        # §50 "Fable Max quota habis -> Review menunggu; gate tidak dilewati": the review stays BLOCKED
+        # (WAITING_QUOTA), the task stays in REVIEW (no repair, no new attempt, no gate), and the observed
+        # limit is recorded through the cost module — never converted into dollars or a % of Max.
+        from aeos.cost import facade as cost
+
+        q = call(cost.set_quota_state, session, provider="claude-native", state="EXHAUSTED",
+                 source="observed-limit", scope="*",
+                 details={"observed_by": "checkpoint review", "review_id": rec.id, "run_id": run.id})
+        if not q.ok:
+            notes.append(f"native quota state {q.label()}")
     if rec.status != "COMPLETED":
         return None  # waiting/manual/failed reviews never open a gate and never trigger repair
     if rec.verdict in PASS_VERDICTS:
@@ -518,7 +533,7 @@ def _after_review(session: Session, rec: ReviewRecord, run: WorkerRun, *, actor:
     if rec.verdict == Verdict.BLOCKED.value:
         t = call(workforce.transition_task, session, run.task_id, ExecutionState.BLOCKED.value,
                  reason=f"REVIEW_BLOCKED: {rec.status_reason}"[:1000], actor="reviewer",
-                 expected_from=ExecutionState.REVIEW.value)
+                 expected_from=ExecutionState.REVIEW.value, reason_code="REVIEW_BLOCKED")
         rec.repair_status = f"NO_REPAIR (task {t.label()})"
         return None
     findings = [dict(f, source="claude-checkpoint-review") for f in rec.findings] or [

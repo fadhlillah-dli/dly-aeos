@@ -47,6 +47,9 @@ BEAM_TERMS = {
     "regions": "unavailable in several countries/regions (S07)", "claim_level": "E1 provider statement",
 }
 ZEN_FREE_PRICING = {"input_per_mtok": 0, "output_per_mtok": 0, "currency": "USD", "basis": "free for a limited time (S07)"}
+# Non-OpenRouter OpenAI-compatible upstreams name their broker credential explicitly (§26: the key lives
+# in the secrets store under the worker-model namespace; the broker enforces the domain namespace rule).
+ZEN_CREDENTIAL_REF = "workers/opencode-zen"
 
 
 def _zen(model: str, display: str, *, pool: str, terms: dict[str, Any], classes: list[str], priority: int,
@@ -61,7 +64,7 @@ def _zen(model: str, display: str, *, pool: str, terms: dict[str, Any], classes:
         "identity_status": identity, "priority": priority, "fallback_chain": fallback or [],
         "expires_note": None if paid else "free for a limited time per S07 (no end date published)",
         "source_refs": ["S07", "S08"], "notes": notes, "pricing_checked_at": RESEARCH_DATE,
-        "terms_checked_at": RESEARCH_DATE,
+        "terms_checked_at": RESEARCH_DATE, "mode_params": {"credential_ref": ZEN_CREDENTIAL_REF},
     }
 
 
@@ -114,6 +117,7 @@ def seed_routes() -> list[dict[str, Any]]:
             "eligible_domains": ["PERSONAL"], "allowed_data_classes": [P], "supports_tools": "UNKNOWN",
             "priority": 10, "source_refs": ["S09"], "notes": "Comparator only; input limited by the free-tier data terms.",
             "pricing_checked_at": RESEARCH_DATE, "terms_checked_at": RESEARCH_DATE,
+            "mode_params": {"credential_ref": "workers/gemini"},
         },
         # ---- ARENA (feasibility of route and data) ----
         _zen("longcat-2.5-preview-free", "LongCat 2.5 Preview Free", pool="ARENA", terms=ZERO_RETENTION,
@@ -192,14 +196,20 @@ _NON_CONFIG_UPDATABLE = ("display_name", "notes", "source_refs", "expires_note")
 
 
 def run(session: Session) -> dict[str, Any]:
-    """Idempotent: creates missing routes; refreshes only descriptive fields of untouched seed rows."""
-    created = updated = existing = 0
+    """Idempotent: creates missing routes; refreshes only descriptive fields of untouched seed rows.
+
+    Integration amendment (ADR-0041): an untouched CANDIDATE seed row that predates the explicit
+    ``mode_params.credential_ref`` gets it backfilled. That is a configuration change, but a CANDIDATE
+    row carries no approval, so nothing is invalidated; the config hash is recomputed."""
+    created = updated = existing = backfilled = 0
     for spec in seed_routes():
+        spec = dict(spec)
+        mode_params = dict(spec.pop("mode_params", None) or {})
         row = session.scalars(select(ModelRoute).where(ModelRoute.route_key == spec["route_key"])).first()
         if row is None:
             row = ModelRoute(
                 status="CANDIDATE", mode="DESIGN", origin="SEED", evidence_level="E1", availability="UNKNOWN",
-                resolved_version=None, eval_results={}, mode_params={}, **spec,
+                resolved_version=None, eval_results={}, mode_params=mode_params, **spec,
             )
             row.config_hash = compute_config_hash(row)
             session.add(row)
@@ -213,6 +223,11 @@ def run(session: Session) -> dict[str, Any]:
                     setattr(row, f, spec[f])
                     changed = True
             updated += int(changed)
+            ref = mode_params.get("credential_ref")
+            if ref and not (row.mode_params or {}).get("credential_ref"):
+                row.mode_params = {**(row.mode_params or {}), "credential_ref": ref}
+                row.config_hash = compute_config_hash(row)
+                backfilled += 1
     session.flush()
-    return {"created": created, "existing": existing, "updated_descriptive": updated, "mode": "DESIGN",
-            "approved": 0}
+    return {"created": created, "existing": existing, "updated_descriptive": updated,
+            "credential_ref_backfilled": backfilled, "mode": "DESIGN", "approved": 0}

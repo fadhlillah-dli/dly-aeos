@@ -35,20 +35,26 @@ EXPECTED = {
     (S.QUEUED, S.CANCELLED), (S.BLOCKED, S.CANCELLED), (S.LEASED, S.CANCELLED), (S.REVIEW, S.CANCELLED),
     # lease expiry / stop condition while RUNNING (only with a stop reason code)
     (S.RUNNING, S.BLOCKED),
+    # acceptance STALE after DONE (§14 re-verification): only via reopen_for_reverification
+    (S.DONE, S.READY), (S.DONE, S.BLOCKED),
 }
 
 
 def test_transition_table_matches_master_diagram_exactly():
     actual = {(a, b) for a, targets in LEGAL_TRANSITIONS.items() for b in targets}
     assert actual == EXPECTED
-    for terminal in (S.DONE, S.FAILED, S.CANCELLED):
+    for terminal in (S.FAILED, S.CANCELLED):
         assert LEGAL_TRANSITIONS[terminal] == frozenset()
+    # DONE is left only with the ACCEPTANCE_STALE reopen code (never a free exit)
+    assert not is_legal("DONE", "READY") and is_legal("DONE", "READY", reason_code="ACCEPTANCE_STALE")
+    assert not is_legal("DONE", "CANCELLED", reason_code="ACCEPTANCE_STALE")
 
 
 @pytest.mark.parametrize("src,dst", [(a, b) for a in ALL for b in ALL])
 def test_every_pair_legal_or_conflict(db, src, dst):
     task = _task(db, src.value)
-    legal = (src, dst) in EXPECTED and dst is not S.DONE
+    # DONE is entered only via mark_accepted and left only via reopen_for_reverification
+    legal = (src, dst) in EXPECTED and dst is not S.DONE and src is not S.DONE
     code = "LEASE_LOST" if (src, dst) == (S.RUNNING, S.BLOCKED) else ""
     if legal:
         te = scheduler.transition_task(db, task.id, dst.value, reason="test", actor="test", reason_code=code)

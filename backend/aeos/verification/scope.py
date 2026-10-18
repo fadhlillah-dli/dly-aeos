@@ -72,6 +72,11 @@ SECRET_SCAN_ALLOW = frozenset({
     "scripts/secret_scan.py",
 })
 _HIGH_CONFIDENCE = [p for p in _REDACTION_PATTERNS if not p.groups]
+# Binary content has no word boundaries: a token glued to arbitrary bytes ("PKghp_...") must still be
+# found, so the binary scan uses the patterns without the text-oriented "not after an alphanumeric"
+# guard that the redactor added against prose false positives (integration fix, ADR-0060).
+_WORD_GUARD = "(?<![A-Za-z0-9])"
+_HIGH_CONFIDENCE_BINARY = [re.compile(p.pattern.replace(_WORD_GUARD, ""), p.flags) for p in _HIGH_CONFIDENCE]
 
 # Added lines in product code that reach into the test runner itself.
 _TAMPER_CODE = re.compile(
@@ -337,7 +342,7 @@ def scan_binary_secrets(path: str, data: bytes) -> list[dict[str, Any]]:
         return []
     text = data[:BINARY_SCAN_MAX_BYTES].decode("latin-1")
     findings: list[dict[str, Any]] = []
-    for pat in _HIGH_CONFIDENCE:
+    for pat in _HIGH_CONFIDENCE_BINARY:
         m = pat.search(text)
         if m:
             findings.append({"path": path, "line": None, "offset": m.start(), "pattern": pat.pattern[:32] + "...",

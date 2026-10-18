@@ -33,6 +33,8 @@ log = logging.getLogger("aeos.delivery.provider")
 GITHUB_API = "https://api.github.com"
 TIMEOUT = httpx.Timeout(15.0, connect=10.0)
 SECRET_REF = "personal/github"
+# Secrets contract: "<namespace>:<use>" with the reference namespace (aeos.secrets.facade).
+SECRET_PURPOSE = "personal:delivery.provider-read"
 REPO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
 NOT_ENFORCEABLE_MESSAGE = "Branch protection tidak dapat ditegakkan pada paket GitHub ini — merge tetap tindakan manusia"
 NOT_CONFIGURED_MESSAGE = ("Branch protection/ruleset tersedia tetapi belum dikonfigurasi untuk branch ini — "
@@ -65,7 +67,7 @@ def github_token(domain: str) -> tuple[str | None, str]:
     try:
         from aeos.secrets import facade as secrets
 
-        token = secrets.get_secret(SECRET_REF, purpose="delivery.provider.read", actor="delivery")
+        token = secrets.get_secret(SECRET_REF, purpose=SECRET_PURPOSE, actor="delivery")
     except ImportError:
         return None, "UNAVAILABLE: secrets module not available"
     except AeosError as exc:

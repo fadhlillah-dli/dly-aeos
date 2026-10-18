@@ -226,6 +226,32 @@ def quota_exhausted(session: Session, route: ModelRoute) -> QuotaState | None:
     return None
 
 
+def credential_rejections(route: ModelRoute, *, domain: str) -> list[str]:
+    """§26 credential paths (integration amendment, ADR-0041): a route the broker could not authenticate
+    for *domain* is never eligible. OpenRouter routes may use the default worker refs; any other remote
+    OpenAI-compatible upstream must name ``mode_params.credential_ref`` in a namespace the broker allows
+    for the domain (loopback test endpoints may run without a key)."""
+    if route.provider == "claude-native":
+        return []
+    ref = (route.mode_params or {}).get("credential_ref")
+    if not ref:
+        endpoint = route.endpoint or ""
+        loopback = endpoint.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]"))
+        if route.provider in ("openrouter", "local") or loopback:
+            return []
+        return ["no mode_params.credential_ref: the broker has no credential for this upstream"]
+    ref = str(ref)
+    try:
+        from aeos.broker.facade import credential_ref_problem
+
+        # a projects/<id>/ reference is bound to its project; the broker re-checks the exact run project
+        project_id = ref.split("/")[1] if ref.startswith("projects/") and ref.count("/") >= 2 else None
+        problem = credential_ref_problem(domain, ref, project_id=project_id)
+    except (ImportError, ModuleNotFoundError):
+        return ["broker unavailable: credential reference cannot be checked (fail closed)"]
+    return [f"credential_ref {ref}: {problem}"] if problem else []
+
+
 def _validate_inputs(domain: str, data_classification: str, pool: str) -> None:
     if domain not in {d.value for d in Domain}:
         raise ValidationFailed("domain must be PERSONAL or OFFICE (explicit human choice)", code="DOMAIN_REQUIRED")
@@ -289,6 +315,7 @@ def route_rejections(
             reasons.append(f"context window {route.context_window} < required {min_context}")
     if route.availability == "MISSING":
         reasons.append("route missing from the provider catalog at the last refresh")
+    reasons += credential_rejections(route, domain=domain)
     q = quota_exhausted(session, route)
     if q is not None:
         resets = q.resets_at.isoformat() if q.resets_at else "UNKNOWN"

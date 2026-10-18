@@ -45,6 +45,9 @@ from aeos.models.workforce import WorkerRun
 
 GITHUB_API = "https://api.github.com"
 GIT_TIMEOUT = 180
+GITHUB_SECRET_REF = "personal/github"
+# Secrets contract: purpose = "<namespace>:<use>" with the reference's namespace (aeos.secrets.facade).
+GITHUB_SECRET_PURPOSE = "personal:broker.github"
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$")
 _BRANCH_RE = re.compile(r"^aeos/[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$")
 PROTECTED_BRANCH_NAMES = frozenset({"main", "master", "trunk", "develop", "development", "release", "production",
@@ -72,8 +75,13 @@ def validate_branch(branch: str, *, default_branch: str = "main") -> str:
     return branch
 
 
+_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
 def validate_refspec(refspec: str, *, default_branch: str = "main") -> tuple[str, str]:
-    """Accept exactly ``refs/heads/aeos/X:refs/heads/aeos/X``; reject everything else."""
+    """Accept exactly ``refs/heads/aeos/X:refs/heads/aeos/X`` or the sha-pinned form
+    ``<full commit sha>:refs/heads/aeos/X``; reject everything else (force, deletion, tags, other
+    destinations, several refspecs, abbreviated or symbolic sources)."""
     if not isinstance(refspec, str) or not refspec or any(c.isspace() for c in refspec) or "," in refspec or ";" in refspec:
         raise PolicyDenied("exactly one refspec is allowed", code="REFSPEC_REJECTED")
     if refspec.startswith("+"):
@@ -85,8 +93,9 @@ def validate_refspec(refspec: str, *, default_branch: str = "main") -> tuple[str
         raise PolicyDenied("branch deletion is not allowed", code="REFSPEC_REJECTED")
     if src.startswith("refs/tags/") or dst.startswith("refs/tags/"):
         raise PolicyDenied("tags are not pushed by the broker", code="REFSPEC_REJECTED")
-    if not dst.startswith("refs/heads/aeos/") or src != dst:
-        raise PolicyDenied("only refs/heads/aeos/* may be pushed, to the same name", code="REFSPEC_REJECTED")
+    if not dst.startswith("refs/heads/aeos/") or (src != dst and not _SHA_RE.match(src)):
+        raise PolicyDenied("only refs/heads/aeos/* may be pushed, to the same name or from an exact commit sha",
+                           code="REFSPEC_REJECTED")
     validate_branch(dst[len("refs/heads/"):], default_branch=default_branch)
     return src, dst
 
@@ -142,12 +151,17 @@ def _interlock(session: Session, run: WorkerRun, *, provider: str, operation: st
     from aeos.policy import facade as policy
 
     task = session.get(TaskSpec, run.task_id) if run.task_id else None
-    intent = policy.WriteIntent(
-        actor_user_id=run.requested_by or "", project_id=run.project_id, domain=run.domain, provider=provider,
-        operation=operation, target=target, approved_plan_version_id=task.plan_version_id if task else None,
-        approved_hash=task.plan_version_hash if task else None, decision_id=None,
-        capability_expires_at=grant.expires_at, extra={"run_id": run.id, "broker": True})
     try:
+        # The write is bound to the ACTIVE human APPROVAL of the run's exact plan version + hash that allows
+        # this operation; without it the interlock refuses (DECISION_MISSING) — integration amendment ADR-0053.
+        approval = policy.find_active_decision(
+            session, kind="APPROVAL", target_type="plan_version", target_id=task.plan_version_id,
+            target_hash=task.plan_version_hash, operation=operation) if task is not None else None
+        intent = policy.WriteIntent(
+            actor_user_id=run.requested_by or "", project_id=run.project_id, domain=run.domain, provider=provider,
+            operation=operation, target=target, approved_plan_version_id=task.plan_version_id if task else None,
+            approved_hash=task.plan_version_hash if task else None, decision_id=approval.id if approval else None,
+            capability_expires_at=grant.expires_at, extra={"run_id": run.id, "broker": True})
         res = policy.check_external_write(session, intent)
     except ImportError as exc:
         raise Blocked("policy interlock unavailable; external write refused (fail closed)",
@@ -223,7 +237,10 @@ def _git(args: list[str], *, cwd: Path, env: dict[str, str], hooks: Path) -> sub
 
 def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: str | None, work_root: Path,
                      expected_head: str | None = None) -> dict[str, Any]:
-    """Fetch the task branch from the untrusted candidate into a private bare mirror and push it."""
+    """Fetch the task branch from the untrusted candidate into a private bare mirror and push it.
+
+    With ``expected_head`` the push is sha-pinned (``<sha>:refs/heads/<branch>``, never forced): exactly
+    the verified commit is published even if the branch tip moved between fetch and push."""
     src, dst = validate_refspec(f"refs/heads/{branch}:refs/heads/{branch}")
     validate_remote_url(remote_url)
     if token:
@@ -247,10 +264,13 @@ def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: 
             return {"ok": False, "stage": "fetch", "error": redact_text(fetch.stderr)[:400]}
         head = _git(["rev-parse", dst], cwd=mirror, env=base_env, hooks=hooks).stdout.strip()
         if expected_head and head != expected_head:
-            return {"ok": False, "stage": "verify", "error": "task branch head differs from the runtime-recorded head"}
+            return {"ok": False, "stage": "verify", "commit": head,
+                    "error": "task branch head differs from the runtime-recorded head"}
         stage = "push"
+        pinned_src, _ = validate_refspec(f"{head}:{dst}") if _SHA_RE.match(head or "") else (src, dst)
         env = git_auth_env(remote_url, token, empty_global=empty_global)
-        push = _git(["push", "--porcelain", "--no-verify", remote_url, f"{src}:{dst}"], cwd=mirror, env=env, hooks=hooks)
+        push = _git(["push", "--porcelain", "--no-verify", remote_url, f"{pinned_src}:{dst}"], cwd=mirror, env=env,
+                    hooks=hooks)
         out = redact_text((push.stdout or "") + (push.stderr or ""))[:800]
         return {"ok": push.returncode == 0, "stage": "push", "commit": head, "output": out,
                 "error": "" if push.returncode == 0 else out}
@@ -282,10 +302,17 @@ def _rmtree(path: Path) -> None:
 # ----------------------------------------------------------------------------- operations
 def push_task_branch(
     session: Session, *, run_id: str, worktree: str, branch: str, repo_full_name: str,
-    remote_url: str | None = None, expected_head: str | None = None,
+    remote_url: str | None = None, expected_head: str | None = None, expected_head_sha: str | None = None,
 ) -> dict[str, Any]:
+    """Push the run's runtime-recorded head as ``<sha>:refs/heads/<branch>`` (never forced).
+
+    Always returns ``head_sha`` (the commit that was — or, for FAILED/UNKNOWN, would have been —
+    published) next to ``status`` PUSHED | FAILED | UNKNOWN; FAILED/UNKNOWN are returned, not raised,
+    so the outbox row and audit record persist with the caller's commit. After a push the delivery
+    hook ``aeos.delivery.sync.on_branch_updated`` re-observes open PRs of the branch (§14, §50)."""
     from aeos.core.config import get_settings
 
+    expected_head = expected_head_sha or expected_head
     run = session.get(WorkerRun, run_id)
     if run is None:
         raise NotFound("run not found")
@@ -318,7 +345,7 @@ def push_task_branch(
             raise PolicyDenied("GitHub personal credentials are PERSONAL-only", code="DOMAIN_CREDENTIAL")
         from aeos.secrets import facade as secrets
 
-        token = secrets.get_secret("personal/github", purpose=f"push {branch}", actor="service:broker")
+        token = secrets.get_secret(GITHUB_SECRET_REF, purpose=GITHUB_SECRET_PURPOSE, actor="service:broker")
     se = _side_effect(session, run, kind="PUSH_BRANCH", key=f"push:{repo_full_name}:{branch}:{expected_head or run.head_commit or ''}",
                       target=target)
     work_root = get_settings().layout.root / "broker" / "git"
@@ -335,10 +362,24 @@ def push_task_branch(
     events.emit(session, source="broker", kind="run.side_effect", entity_type="run", entity_id=run.id, run_id=run.id,
                 project_id=run.project_id, domain=run.domain,
                 payload={"kind": "PUSH_BRANCH", "status": se.status, "branch": branch, "commit": res.get("commit")})
+    head_sha = res.get("commit") or expected_head
+    hook = _branch_updated(session, repo_full_name, branch, head_sha) if res["ok"] and head_sha else "NOT_CALLED"
     # Failures are returned (not raised) so the audit/outbox records persist with the caller's commit.
     return {"status": "PUSHED" if res["ok"] else se.status, "ok": bool(res["ok"]), "branch": branch,
-            "commit": res.get("commit"), "side_effect_id": se.id, "remote": target["remote"],
+            "commit": res.get("commit"), "head_sha": head_sha, "side_effect_id": se.id, "remote": target["remote"],
+            "pr_observation": hook,
             "error": "" if res["ok"] else f"{res['stage']}: {res.get('error', '')}"[:300]}
+
+
+def _branch_updated(session: Session, repo: str, branch: str, head_sha: str) -> str:
+    """Delivery hook: open PR records of this branch re-observe the new head (acceptance STALE when it
+    moved). Delivery missing -> reported, never assumed (fail closed: nothing is accepted by this)."""
+    try:
+        from aeos.delivery import sync
+    except ImportError:
+        return "DELIVERY_UNAVAILABLE"
+    changed = sync.on_branch_updated(session, repo=repo, branch=branch, head_sha=head_sha, actor="broker")
+    return f"OBSERVED ({changed} PR record(s) invalidated)"
 
 
 def _find_open_pr(client: httpx.Client, api: str, repo: str, head: str, base: str, headers: dict[str, str],
@@ -383,7 +424,7 @@ def create_pull_request(
                 "side_effect_id": existing.id}
     from aeos.secrets import facade as secrets
 
-    token = secrets.get_secret("personal/github", purpose=f"create PR {head}", actor="service:broker")
+    token = secrets.get_secret(GITHUB_SECRET_REF, purpose=GITHUB_SECRET_PURPOSE, actor="service:broker")
     se = _side_effect(session, run, kind="CREATE_PR", key=key, target=target)
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "dly-aeos-broker"}
@@ -425,8 +466,11 @@ def create_pull_request(
     events.emit(session, source="broker", kind="run.side_effect", entity_type="run", entity_id=run.id, run_id=run.id,
                 project_id=run.project_id, domain=run.domain,
                 payload={"kind": "CREATE_PR", "status": outcome, "number": se.external_id, "url": se.external_url})
+    head_obj = (pr or {}).get("head") if isinstance((pr or {}).get("head"), dict) else {}
+    base_obj = (pr or {}).get("base") if isinstance((pr or {}).get("base"), dict) else {}
     return {"status": "CREATED" if outcome == "SUCCEEDED" else outcome, "ok": outcome == "SUCCEEDED",
             "number": se.external_id, "url": se.external_url, "side_effect_id": se.id, "error": detail[:300],
+            "head_sha": head_obj.get("sha"), "base_sha": base_obj.get("sha"),
             "note": "draft PR; integration into the base branch is a human-only action"}
 
 
@@ -484,7 +528,7 @@ def reconcile_side_effect(session: Session, side_effect_id: str, *, actor: str,
                 raise PolicyDenied("GitHub personal credentials are PERSONAL-only", code="DOMAIN_CREDENTIAL")
             from aeos.secrets import facade as secrets
 
-            token = secrets.get_secret("personal/github", purpose=f"reconcile push {branch}", actor="service:broker")
+            token = secrets.get_secret(GITHUB_SECRET_REF, purpose=GITHUB_SECRET_PURPOSE, actor="service:broker")
         try:
             sha = _ls_remote_head(url, branch, token)
         except subprocess.TimeoutExpired:
@@ -505,7 +549,7 @@ def reconcile_side_effect(session: Session, side_effect_id: str, *, actor: str,
         base = str(target.get("base", ""))
         from aeos.secrets import facade as secrets
 
-        token = secrets.get_secret("personal/github", purpose=f"reconcile PR {head}", actor="service:broker")
+        token = secrets.get_secret(GITHUB_SECRET_REF, purpose=GITHUB_SECRET_PURPOSE, actor="service:broker")
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                    "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "dly-aeos-broker"}
         with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False, trust_env=False) as client:
