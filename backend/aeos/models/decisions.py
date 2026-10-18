@@ -21,12 +21,14 @@ class Decision(IdMixin, CreatedMixin, Base):
     __table_args__ = (Index("ix_decisions_target", "target_type", "target_id"),)
 
     # APPROVAL|REJECTION|REVISION_REQUEST|EXCEPTION|ADR|POLICY|TRIAL|PROMOTION|RISK_ACCEPTANCE|
-    # PUBLICATION|DOMAIN_SELECTION|ROUTE_ACTIVATION|BUDGET
+    # PUBLICATION|DOMAIN_SELECTION|ROUTE_ACTIVATION|BUDGET|WRITE_ENABLEMENT
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     domain: Mapped[str | None] = mapped_column(String(16), nullable=True)
     actor_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    actor_kind: Mapped[str] = mapped_column(String(16), default="HUMAN")  # decisions are human-only AUTH
+    # HUMAN (active SUPER_ADMIN user) | HUMAN_RECORDED (owner decision recorded from an accepted ADR,
+    # actor "owner:ADR-NNNN"). Agents/models never create decisions.
+    actor_kind: Mapped[str] = mapped_column(String(16), default="HUMAN")
     auth_scope: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     target_type: Mapped[str] = mapped_column(String(64), nullable=False)
     target_id: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -62,6 +64,8 @@ class ArchitectureDecisionRecord(IdMixin, TimestampMixin, Base):
     context: Mapped[str] = mapped_column(Text, default="")
     decision: Mapped[str] = mapped_column(Text, default="")
     consequences: Mapped[str] = mapped_column(Text, default="")
+    sections: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # every "## heading" -> body
+    meta: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # Date / Deciders / Source bullets
     source_path: Mapped[str | None] = mapped_column(String(256), nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     decision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
