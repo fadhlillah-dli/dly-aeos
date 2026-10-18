@@ -55,6 +55,8 @@ WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CO
                         "MODULE_UNAVAILABLE", "VERIFIER_UNAVAILABLE", "SIDE_EFFECT_UNRECONCILED",
                         "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED"})
 QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED"})
+# BLOCKED reason codes that only an owner action clears (retry_task / quarantine release), never a tick.
+HUMAN_BLOCK_CODES = frozenset({"QUARANTINED", "REVIEW_BLOCKED"})
 
 
 # ----------------------------------------------------------------------------- small helpers
@@ -214,7 +216,7 @@ def set_run_status(session: Session, run: WorkerRun, status: str, *, reason: str
 
 def transition_task(
     session: Session, task_id: str, to_state: str, *, reason: str, actor: str, expected_from: str | None = None,
-    reason_code: str = "", _allow_done: bool = False, **set_fields: Any,
+    reason_code: str = "", _allow_done: bool = False, _allow_reopen: bool = False, **set_fields: Any,
 ) -> TaskExecution:
     """Apply a legal §14 transition with optimistic concurrency; raise ``Conflict`` otherwise."""
     te = get_te(session, task_id)
@@ -226,6 +228,9 @@ def transition_task(
     if dst == S.DONE.value and not _allow_done:
         raise Conflict("DONE is reachable only through mark_accepted with a valid AcceptanceRecord",
                        code="DONE_REQUIRES_ACCEPTANCE")
+    if src == S.DONE.value and not _allow_reopen:
+        raise Conflict("a DONE task is reopened only through reopen_for_reverification when its acceptance "
+                       "became STALE", code="REOPEN_REQUIRES_STALE_ACCEPTANCE")
     if expected_from is not None and src != expected_from:
         raise Conflict(f"task is {src}, expected {expected_from}", code="STATE_CHANGED")
     if not is_legal(src, dst, reason_code=reason_code):
@@ -263,7 +268,10 @@ def _set_wait_reason(session: Session, te: TaskExecution, code: str, reason: str
 
 # ----------------------------------------------------------------------------- observed run fields
 _RUN_FIELD_VOCAB: dict[str, set[str] | None] = {
-    "verifier_status": {"NOT_RUN", "RUNNING", "PASSED", "FAILED", "ERROR", "NOT_PROVEN", "BLOCKED"},
+    # The verifier's own vocabulary (ADR-0060: PASS/FAIL/QUARANTINED/NOT_PROVEN/BLOCKED) is the
+    # contract; PASSED/FAILED/ERROR stay accepted for older callers (integration amendment, ADR-0050).
+    "verifier_status": {"NOT_RUN", "RUNNING", "PASS", "FAIL", "QUARANTINED", "PASSED", "FAILED", "ERROR",
+                        "NOT_PROVEN", "BLOCKED"},
     "review_verdict": {*(v.value for v in Verdict), "PENDING"},
     "acceptance_status": {"PENDING", "ACCEPTED", "REJECTED", "STALE", "INVALIDATED"},
     "merged_status": {"NOT_MERGED", "PR_OPEN", "MERGED", "RELEASED", "UNKNOWN"},
@@ -330,19 +338,33 @@ def ensure_executions(session: Session, plan_version_id: str, *, actor: str, req
     for t in tasks:
         te = session.scalar(select(TaskExecution).where(TaskExecution.task_id == t.id))
         if te is None:
+            # A MOCK/DEMO TaskSpec (fixture plan content) never becomes LIVE work: its execution keeps
+            # the fixture label, so the LIVE scheduler never admits it (§35/§50, ADR-0050 amendment).
+            te_mode = mode if mode != DataMode.LIVE.value else (task_data_mode(t, version) or mode)
             te = TaskExecution(task_id=t.id, project_id=t.project_id, domain=t.domain, state=S.QUEUED.value,
                                plan_id=version.plan_id, plan_version_id=plan_version_id, task_key=t.task_key,
-                               requested_by=requested_by, mode=mode, state_changed_at=utcnow(),
+                               requested_by=requested_by, mode=te_mode, state_changed_at=utcnow(),
                                assigned_agent_key=IMPLEMENTER_AGENT_KEY)
             session.add(te)
             session.flush()
             _audit(session, actor, "workforce.task.enqueue", target_type="task", target_id=t.id,
                    project_id=t.project_id, domain=t.domain, details={"plan_version_id": plan_version_id})
             events.emit(session, source="scheduler", kind="task.state_changed", entity_type="task", entity_id=t.id,
-                        entity_version="1", project_id=t.project_id, domain=t.domain, mode=mode,
+                        entity_version="1", project_id=t.project_id, domain=t.domain, mode=te.mode,
                         payload={"from": None, "to": S.QUEUED.value, "task_key": t.task_key})
         out.append(te)
     return out
+
+
+NON_LIVE_MODES = frozenset({DataMode.MOCK.value, DataMode.DEMO.value})
+
+
+def task_data_mode(task: TaskSpec, version: PlanVersion | None = None) -> str | None:
+    """MOCK/DEMO when the TaskSpec (or its PlanVersion) is fixture content, else None (LIVE)."""
+    for m in (getattr(task, "mode", None), getattr(version, "mode", None)):
+        if m in NON_LIVE_MODES:
+            return str(m)
+    return None
 
 
 def validate_dag(tasks: list[TaskSpec]) -> dict[str, str]:
@@ -443,6 +465,11 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
         wait = _quota_wait(session, te)
         if wait:
             reasons.append(("QUOTA_EXHAUSTED", wait))
+    if te.state == S.BLOCKED.value and te.reason_code in HUMAN_BLOCK_CODES:
+        # A quarantined patch waits for its special review, a BLOCKED review verdict for evidence or a
+        # decision (§14 "REVIEW --> BLOCKED: bukti atau keputusan kurang", §21). Starting a new attempt
+        # on the next tick would silently discard that; only an owner action (retry/release) clears it.
+        reasons.append((te.reason_code, te.reason or "waiting for an owner action (retry / special review)"))
     return reasons
 
 
@@ -570,6 +597,45 @@ def write_set_conflicts(session: Session, task: TaskSpec) -> list[dict[str, Any]
     return out
 
 
+def scope_contract_problems(session: Session, task: TaskSpec) -> list[tuple[str, str]]:
+    """Re-check the TaskSpec write scope at lease time (§21, §50 "File path traversal/symlink keluar
+    sandbox"): every allowed/forbidden glob must be a safe repository-relative path
+    (``aeos.planning.dag.unsafe_path``), and an allowed area that lies inside a forbidden one is a
+    contradictory contract. Forbidden matching is case-insensitive: Windows and macOS file systems are
+    case-insensitive, so ``Policy/**`` must never slip past ``policy/**``."""
+    from aeos.worker_runtime.scope import ScopePathError, matches, normalize_pattern, static_prefix
+
+    try:
+        from aeos.planning.dag import unsafe_path
+    except ImportError:  # planning module absent: the local normaliser below still fails closed
+        def unsafe_path(p: Any) -> str | None:
+            return None
+
+    problems: list[tuple[str, str]] = []
+    allowed = [str(p) for p in (task.allowed_paths or [])]
+    forbidden = [str(p) for p in (task.forbidden_paths or [])]
+    for label, paths in (("allowed", allowed), ("forbidden", forbidden)):
+        for p in paths:
+            why = unsafe_path(p)
+            if why is None:
+                try:
+                    normalize_pattern(p)
+                except ScopePathError as exc:
+                    why = str(exc)
+            if why:
+                problems.append(("UNSAFE_PATH", f"{label} path {p!r} is not a safe repository-relative path: {why}"))
+    if problems:
+        return problems
+    for a in allowed:
+        prefix = static_prefix(a)
+        probes = [prefix, f"{prefix}/__aeos_probe__"] if prefix else []
+        for f in forbidden:
+            if any(matches(probe, f, case_insensitive=True) for probe in probes):
+                problems.append(("FORBIDDEN_PATH_ALLOWED", f"allowed path {a!r} lies inside forbidden path {f!r} "
+                                 "(compared case-insensitively); the TaskSpec contract is contradictory"))
+    return problems
+
+
 def _cost_estimate(task: TaskSpec, route: ModelRoute) -> tuple[float | None, int]:
     limits = task.limits or {}
     tokens = int(limits.get("max_tokens", DEFAULT_MAX_TOKENS) or DEFAULT_MAX_TOKENS)
@@ -590,6 +656,14 @@ def admission_check(session: Session, task_id: str) -> Admission:
     if te.state != S.READY.value:
         adm.blocks.append(("NOT_READY", f"task is {te.state}"))
         return adm
+    fixture = task_data_mode(task, session.get(PlanVersion, task.plan_version_id))
+    if fixture or te.mode != DataMode.LIVE.value:
+        # §35/§50 "Fixture roster/run ... MOCK/DEMO jelas; tidak dihitung accepted outcome/cost live":
+        # fixture content is never executed by a real worker against a real repository and budget.
+        adm.blocks.append(("NON_LIVE_TASKSPEC", f"TaskSpec/plan version is {fixture or te.mode}; fixture content "
+                                                "is never admitted as live work"))
+    for code, why in scope_contract_problems(session, task):
+        adm.blocks.append((code, why))
     if scheduling_paused(session):
         adm.waits.append(("SCHEDULING_PAUSED", "scheduling is paused by the owner"))
     approved, why = ext.approved_version(session, te.plan_id)
@@ -757,8 +831,13 @@ def admit_ready_tasks(session: Session, *, actor: str = "system:scheduler", limi
         try:
             run = acquire_lease(session, te.task_id, actor=actor, admission=adm)
         except Blocked as exc:
-            _set_wait_reason(session, get_te(session, te.task_id), "BUDGET_EXCEEDED"
-                             if exc.code not in ("BUDGET_UNAVAILABLE",) else "MODULE_UNAVAILABLE", exc.message)
+            # The reservation was refused by the cost module (§22 "Sistem mencadangkan compute, biaya,
+            # dan slot sebelum memulai"): no lease, no run; the task waits with the cost module's reason.
+            code = {"BUDGET_UNAVAILABLE": "MODULE_UNAVAILABLE", "QUOTA_EXHAUSTED": "QUOTA_EXHAUSTED"}.get(
+                exc.code, "BUDGET_EXCEEDED")
+            reasons = "; ".join(str(r) for r in (exc.details or {}).get("reasons", [])[:5])
+            _set_wait_reason(session, get_te(session, te.task_id), code,
+                             f"{exc.code}: {exc.message}" + (f" ({reasons})" if reasons else ""))
             continue
         except Conflict:
             continue
@@ -994,6 +1073,47 @@ def mark_accepted(session: Session, task_id: str, run_id: str, *, acceptance_id:
     return te
 
 
+def reopen_for_reverification(session: Session, task_id: str, *, reason: str, actor: str) -> TaskExecution:
+    """A DONE task whose acceptance became STALE (§14 "Perubahan head/base yang relevan membatalkan
+    acceptance ... dan memicu verifikasi ulang", §50 "PR baru mengubah head atau base terkait").
+
+    ``DONE -> READY`` (a new bounded attempt whose head/base is verified and reviewed again) while
+    attempts remain and the plan version is still the approved one; otherwise ``DONE -> BLOCKED``
+    (owner decision / new approval needed). Both carry ``ACCEPTANCE_STALE``. The accepted run keeps
+    its history (acceptance_status STALE); nothing external is undone. Idempotent: a task that is not
+    DONE is returned unchanged. Never commits."""
+    te = get_te(session, task_id)
+    if te.state != S.DONE.value:
+        return te
+    task = session.get(TaskSpec, task_id)
+    if task is None:
+        raise NotFound("task spec missing")
+    note = redact_text(reason)[:1500] or "acceptance became STALE"
+    accepted = session.get(WorkerRun, te.accepted_run_id) if te.accepted_run_id else None
+    if accepted is not None and accepted.acceptance_status != "STALE":
+        accepted.acceptance_status = "STALE"
+        session.flush()
+    approved, why = ext.approved_version(session, te.plan_id)
+    cap = max_attempts(task, te)
+    findings = [{"source": "acceptance", "severity": "HIGH", "title": f"acceptance STALE: {note}"[:300],
+                 "required_action": "re-verify and review the new head/base state"}]
+    if approved is None or approved.id != task.plan_version_id:
+        target, extra = S.BLOCKED.value, f"; plan version no longer approved ({why or 'superseded'})"
+    elif te.attempts_used >= cap:
+        target, extra = S.BLOCKED.value, (f"; attempt cap reached ({te.attempts_used}/{cap}): an owner decision "
+                                           "(extra attempt) is required for the re-verification attempt")
+    else:
+        target, extra = S.READY.value, f"; re-verification attempt {te.attempts_used + 1}/{cap}"
+    te = transition_task(session, task_id, target, reason=f"reopened: {note}{extra}", actor=actor,
+                         reason_code="ACCEPTANCE_STALE", _allow_reopen=True, active_run_id=None,
+                         pending_findings=findings)
+    _audit(session, actor, "workforce.task.reopen", target_type="task", target_id=task_id,
+           project_id=te.project_id, domain=te.domain, reason=note,
+           details={"to": target, "accepted_run_id": te.accepted_run_id, "attempts_used": te.attempts_used,
+                    "max_attempts": cap})
+    return te
+
+
 def release_quarantine(session: Session, run_id: str, *, actor: str, actor_user_id: str, rationale: str) -> Decision:
     """Record the human owner's special-review release of a quarantined patch (§21). The decision is
     bound to this run and its exact runtime head commit; any other patch needs a new decision.
@@ -1050,6 +1170,12 @@ def retry_task(session: Session, task_id: str, *, actor: str, extra_attempts: in
                                 details={"extra_attempts": int(extra_attempts)})
         te.extra_attempts = (te.extra_attempts or 0) + int(min(extra_attempts, 3))
         te.extra_attempts_decision_id = d.id
+        session.flush()
+    if te.reason_code in HUMAN_BLOCK_CODES:
+        # The owner explicitly asks for a new attempt instead of the pending special review / decision.
+        _audit(session, actor, "workforce.task.retry_clears_block", target_type="task", target_id=task_id,
+               project_id=te.project_id, domain=te.domain, reason=rationale, details={"code": te.reason_code})
+        te.reason_code = ""
         session.flush()
     refresh_readiness(session, task.plan_version_id, actor=actor)
     te = get_te(session, task_id)
@@ -1238,10 +1364,12 @@ __all__ = [
     "record_action",
     "refresh_readiness",
     "release_quarantine",
+    "reopen_for_reverification",
     "request_repair",
     "retry_task",
     "route_quota_exhausted",
     "scheduling_paused",
+    "scope_contract_problems",
     "set_scheduling_paused",
     "transition_task",
     "update_run",

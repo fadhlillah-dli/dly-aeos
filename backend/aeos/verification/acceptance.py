@@ -144,6 +144,8 @@ def evaluate_acceptance(session: Session, run_id: str, *, actor: str = ENGINE_ID
         reasons.append(f"verification evidence is {report.mode}, not LIVE")
     if run.head_commit and view.get("head_commit") != run.head_commit:
         reasons.append("verification does not cover the run's current head commit")
+    if run.base_commit and view.get("base_commit") and view["base_commit"] != run.base_commit:
+        reasons.append("verification was made against another base commit than the run's recorded base")
     docs_only, static_ok = bool(view.get("docs_only")), static_allowed(task)
     reasons += _verdict_problems(review, "review", artifact_hash=view["artifact_hash"], docs_only=docs_only,
                                  static_allowed=static_ok)
@@ -171,9 +173,12 @@ def evaluate_acceptance(session: Session, run_id: str, *, actor: str = ENGINE_ID
 
     status = REJECTED if reasons else ACCEPTED
     refs = [report.id, *report_refs(report)]
+    # The record binds the identity the scheduler checks in mark_accepted: the WorkerRun's runtime-recorded
+    # head/base (integration amendment, ADR-0062); the verifier's view is used only when the run has none.
     rec = AcceptanceRecord(
         task_id=task.id, run_id=run.id, project_id=project.id, domain=project.domain,
-        artifact_hash=view["artifact_hash"], base_commit=view.get("base_commit"), head_commit=view.get("head_commit"),
+        artifact_hash=view["artifact_hash"], base_commit=run.base_commit or view.get("base_commit"),
+        head_commit=run.head_commit or view.get("head_commit"),
         config_hash=view.get("config_hash"), plan_version_hash=task.plan_version_hash, task_spec_hash=task.spec_hash,
         verification_evidence_id=report.id, verifier_evidence_refs=refs[:100], review_record_id=review.id,
         security_review_id=security.id if security else None, review_verdict=verdict, acceptance_status=status,
@@ -272,6 +277,7 @@ def invalidate(
 
     explicit = all(v is None for v in (head_commit, base_commit, config_hash, plan_version_hash))
     changed: list[AcceptanceRecord] = []
+    reopen_reason: str | None = None
     rows = session.scalars(select(AcceptanceRecord).where(
         AcceptanceRecord.task_id == task_id, AcceptanceRecord.acceptance_status.in_([ACCEPTED, "PENDING"])))
     for rec in rows:
@@ -286,6 +292,8 @@ def invalidate(
             diffs.append("plan version hash changed")
         if not diffs and not explicit:
             continue
+        if rec.acceptance_status == ACCEPTED:
+            reopen_reason = (reason + (": " + ", ".join(diffs) if diffs else ""))[:1500]
         rec.acceptance_status = to_status
         rec.invalidated_at = utcnow()
         rec.invalidated_reason = (reason + (": " + ", ".join(diffs) if diffs else ""))[:2000]
@@ -300,6 +308,15 @@ def invalidate(
                     payload={"status": to_status, "task_id": task_id, "reason": rec.invalidated_reason,
                              "required": "re-verification and review of the new state"})
     session.flush()
+    if reopen_reason is not None:
+        # §14 "... membatalkan acceptance/approval lama dan memicu verifikasi ulang": a DONE task that
+        # rested on this acceptance is reopened by the scheduler (READY for a new bounded attempt, or
+        # BLOCKED when none is left). Workforce missing -> recorded, never assumed (fail closed).
+        reopened = call(workforce.reopen_for_reverification, session, task_id,
+                        reason=f"acceptance {to_status}: {reopen_reason}", actor=ENGINE_IDENTITY)
+        if not reopened.ok:
+            log.warning("task %s not reopened after acceptance %s: %s", task_id, to_status, reopened.label())
+        session.flush()
     return changed
 
 

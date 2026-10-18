@@ -55,3 +55,37 @@ the questions admission must answer; §22 lists stop conditions (quota, lease lo
 * Two concurrent workers require an explicit owner decision; overlapping write sets are serialised.
 * The REVIEW-after-failure interpretation keeps the diagram's edge set; it is revisited if the
   owner prefers FAILED tasks to be re-openable (would need a new edge and a new ADR).
+
+## Amendment 2026-10-18 (integration)
+
+Seam group W2 (scheduler <-> cost <-> routing <-> broker <-> runtime <-> verification <-> delivery) was
+made to work end to end (`tests/e2e/test_e2e_execution_chain.py`). Reconciled contracts:
+
+1. **Reopen on STALE acceptance (§14, §50 "PR baru mengubah head atau base").** DONE is no longer
+   unconditionally terminal: `DONE -> READY` and `DONE -> BLOCKED` exist, legal ONLY with reason code
+   `ACCEPTANCE_STALE` (`states.REOPEN_CODES`) and only through
+   `workforce.facade.reopen_for_reverification(session, task_id, *, reason, actor)`; `transition_task`
+   refuses to leave DONE otherwise (`REOPEN_REQUIRES_STALE_ACCEPTANCE`). READY when an attempt is left
+   and the plan version is still the approved one (a new bounded attempt is verified + reviewed again),
+   otherwise BLOCKED (owner decision / new approval). The accepted run keeps its history
+   (`acceptance_status=STALE`). Callers: `verification.acceptance.invalidate` (used by delivery PR sync,
+   the broker's branch-update hook, prepare-pr head mismatch, `recheck` and the verifier loop's
+   periodic recheck of ACCEPTED records for config/plan drift). This closes the gap recorded in
+   ADR-0062 Consequences.
+2. **Fixtures are never live work.** `ensure_executions` keeps the MOCK/DEMO label of a TaskSpec (or its
+   PlanVersion) on the TaskExecution, and admission blocks `NON_LIVE_TASKSPEC`, so no real worker,
+   repository or budget is ever used for fixture content.
+3. **Scope re-check at lease time.** Admission blocks `UNSAFE_PATH` (every allowed/forbidden glob through
+   `aeos.planning.dag.unsafe_path` + the runtime normaliser) and `FORBIDDEN_PATH_ALLOWED` (an allowed area
+   inside a forbidden one, compared case-insensitively because Windows/macOS file systems are).
+4. **Owner-only blocks.** BLOCKED tasks with `QUARANTINED` (verifier, special review §21) or
+   `REVIEW_BLOCKED` (review verdict BLOCKED) are never turned into a new attempt by a tick
+   (`HUMAN_BLOCK_CODES`); only `retry_task` (owner) or the quarantine release clears them. The frozen
+   facade `transition_task` gained the additive keyword `reason_code` so callers can name the code.
+5. **Vocabulary.** `update_run(verifier_status=...)` accepts the verifier's own statuses
+   (PASS/FAIL/QUARANTINED/NOT_PROVEN/BLOCKED; PASSED/FAILED kept). A refused reservation keeps the cost
+   module's code (`QUOTA_EXHAUSTED` stays QUOTA_EXHAUSTED, `BUDGET_STATE_UNTRUSTED` is shown as
+   BUDGET_EXCEEDED with the original code in the reason).
+6. **Reservation lifecycle.** The run-level hold reserved at lease time receives partial commits from the
+   broker (ADR-0080 amendment) and is settled by `stop_run_resources` on finish/cancel/crash/policy stop;
+   a MOCK run's hold is released, never committed.

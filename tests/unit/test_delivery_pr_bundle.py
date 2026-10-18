@@ -59,13 +59,17 @@ class FakeBroker:
     def __init__(self, monkeypatch, *, head_sha: str | None):
         self.calls: list[tuple[str, dict]] = []
 
-        def push_task_branch(session, *, run_id, worktree, branch, repo_full_name):
-            self.calls.append(("push", {"run_id": run_id, "branch": branch, "repo": repo_full_name}))
-            return {"pushed": True, "head_sha": head_sha}
+        # Integration contract (ADR-0053/0063 amendments 2026-10-18): sha-pinned push with
+        # expected_head_sha, results always carry status + head_sha.
+        def push_task_branch(session, *, run_id, worktree, branch, repo_full_name, expected_head_sha=None):
+            self.calls.append(("push", {"run_id": run_id, "branch": branch, "repo": repo_full_name,
+                                        "expected_head_sha": expected_head_sha}))
+            return {"status": "PUSHED", "ok": True, "head_sha": head_sha}
 
         def create_pull_request(session, *, run_id, repo_full_name, head, base, title, body):
             self.calls.append(("pr", {"head": head, "base": base, "title": title, "body": body}))
-            return {"number": 12, "html_url": f"https://github.com/{repo_full_name}/pull/12", "head_sha": head_sha,
+            return {"status": "CREATED", "ok": True, "number": 12,
+                    "html_url": f"https://github.com/{repo_full_name}/pull/12", "head_sha": head_sha,
                     "base_sha": "b" * 40}
 
         install_module(monkeypatch, "aeos.broker.git_broker", push_task_branch=push_task_branch,
