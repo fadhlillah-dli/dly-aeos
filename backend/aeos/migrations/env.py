@@ -3,8 +3,9 @@ from __future__ import annotations
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-import aeos.models  # noqa: F401  (register mappers)
-from aeos.core.db import Base
+from aeos.core.db import Base, import_all_models
+
+import_all_models()
 
 config = context.config
 target_metadata = Base.metadata
