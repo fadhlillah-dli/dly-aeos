@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+.vite/
+
+# Runtime state never belongs in the platform repo (master architecture §06)
+app-data/
+task-data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+logs/
+*.log
+
+# Local config & secrets — examples only are tracked
+.env
+.env.*
+!.env.example
+config/local*.yaml
+config/*.local.yaml
+client_secret*.json
+credentials*.json
+oauth-token*.json
+*.pem
+*.key
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# Claude Code local state
+.claude/worktrees/
+.claude/settings.local.json
