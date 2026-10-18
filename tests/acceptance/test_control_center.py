@@ -22,7 +22,7 @@ import pytest
 from aeos.core.enums import Domain
 from aeos.core.hashing import file_sha256
 from aeos.core.paths import repo_root
-from tests.acceptance.world import create_project, seed_catalog
+from tests.acceptance.world import GIT_TIMEOUT, create_project, seed_catalog
 from tests.conftest import AuthedClient
 
 pytestmark = pytest.mark.acceptance
@@ -74,6 +74,19 @@ async def _sse_until_ready(app: Any, cookie: str, last_event_id: int | None) -> 
     with anyio.fail_after(30):
         await app(scope, receive, send)
     return status[0], frames
+
+
+def _state_counts(db: Any) -> tuple[int, ...]:
+    from sqlalchemy import func, select
+
+    from aeos.models.audit import Event
+    from aeos.models.cost import UsageLedgerEntry
+    from aeos.models.inventory import ComponentObservation
+    from aeos.models.workforce import WorkerRun
+
+    db.expire_all()
+    return tuple(db.scalar(select(func.count()).select_from(m)) for m in (Event, UsageLedgerEntry,
+                                                                          ComponentObservation, WorkerRun))
 
 
 def _stream(client: AuthedClient, app: Any, last_event_id: int | None) -> list[dict[str, Any]]:
@@ -140,7 +153,11 @@ def test_broken_stream_resumes_from_the_cursor_and_is_never_shown_live(personal_
     events.emit(db, source="acc", kind="acc.office", domain="OFFICE", project_id=office["id"])
     events.emit(db, source="acc", kind="acc.step3", domain="PERSONAL")
     db.commit()
+    before = _state_counts(db)
     resumed = _stream(personal_client, app, seqs[0])
+    again = _stream(personal_client, app, seqs[0])  # a second reconnect from the same cursor
+    assert _state_counts(db) == before, "reconnecting writes no usage, events or state"
+    assert [f.get("seq") for f in again] == [f.get("seq") for f in resumed], "replay is deterministic"
     kinds = [f["kind"] for f in resumed if f["type"] == "event"]
     assert [k for k in kinds if k.startswith("acc.")] == ["acc.step1", "acc.step2", "acc.step3"]
     assert "acc.office" not in kinds and "acc.step0" not in kinds, "no duplicates, no other-domain events"
@@ -169,13 +186,24 @@ def test_master_keeps_its_final_name_and_history_after_lawful_changes(personal_c
     from aeos.workforce.catalog import ROLE_PRACTICE_SOURCES
 
     assert MASTER_REL == MASTER and [Path(MASTER).name] == ROLE_PRACTICE_SOURCES
-    # history is kept by git and by ADR amendments, never by renamed copies
-    git = subprocess.run(["git", "-C", str(root), "log", "--format=%H", "--follow", "--", MASTER],
-                         capture_output=True, text=True, check=True).stdout.split()
-    assert git, "the master is versioned in git history"
-    names = subprocess.run(["git", "-C", str(root), "log", "--all", "--format=", "--name-only", "--", "docs/architecture"],
-                           capture_output=True, text=True, check=True).stdout.split()
-    assert set(names) <= {MASTER}, f"no renamed/revision master ever committed: {sorted(set(names))}"
+    # history is kept by git and by ADR amendments, never by renamed copies. The independent verifier runs
+    # this suite against an exported candidate snapshot (a plain tree without .git, see
+    # aeos.verification.verifier): there the controller's history is not readable and a candidate cannot
+    # rewrite it, so only the file-level checks apply. In a checkout (developer run, CI) git is mandatory.
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False,
+                              timeout=GIT_TIMEOUT)
+
+    top = git("rev-parse", "--show-toplevel")
+    exported_snapshot = not (root / ".git").exists() and (
+        top.returncode != 0 or Path(top.stdout.strip()).resolve() != root.resolve())
+    if not exported_snapshot:
+        assert top.returncode == 0 and Path(top.stdout.strip()).resolve() == root.resolve(), top.stderr
+        log = git("log", "--format=%H", "--follow", "--", MASTER)
+        assert log.returncode == 0 and log.stdout.split(), "the master is versioned in git history"
+        names = git("log", "--all", "--format=", "--name-only", "--", "docs").stdout.split()
+        masters_ever = {n for n in names if "master_architecture" in Path(n).name.lower()}
+        assert masters_ever == {MASTER}, f"no renamed/revision master ever committed: {sorted(masters_ever)}"
     adrs = list((root / "docs" / "decisions").glob("ADR-*.md"))
     assert adrs and all("_v" not in a.stem.lower() and "final" not in a.stem.lower() for a in adrs)
     # ADRs are listed through the API from those same files (history as decisions, not copies)
@@ -216,6 +244,8 @@ def test_mock_costs_runs_diagrams_and_tests_are_labelled_and_never_counted(perso
     assert r.status_code == 422 and "not trusted LIVE evidence" in r.text
     # diagrams: the DESIGN lens is labelled DESIGN/manifest, and nothing is drawn as observed
     design = _ok(personal_client.get("/api/inventory/map", params={"lens": "DESIGN"}))
-    assert all(n["basis"] == ["manifest"] for n in design["nodes"])
+    assert design["mode"] == "DESIGN" and design["source"] == design["lens_source"]
+    assert design["nodes"] and all(n["basis"] == ["manifest"] for n in design["nodes"])
+    assert {e["status"] for e in design["edges"]} <= {"DESIGN"}, "a design edge is never drawn as observed traffic"
     observed = _ok(personal_client.get("/api/inventory/map", params={"lens": "OBSERVED"}))
-    assert not [n for n in observed["nodes"] if n["present"]]
+    assert observed["nodes"] and not [n for n in observed["nodes"] if n["present"]]

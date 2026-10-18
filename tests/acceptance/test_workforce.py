@@ -68,7 +68,26 @@ def _start_tree(run: WorkerRun, tmp_path):
     mp = processes.spawn(run.id, [sys.executable, "-c", SLEEP_TREE], cwd=tmp_path,
                          env=processes.build_sandbox_env(dirs, run_id=run.id))
     grandchild = int(mp.stdout.readline().decode().strip())
-    return mp, grandchild
+    return mp, (grandchild, psutil.Process(grandchild).create_time())
+
+
+def _gone(proc: tuple[int, float], *, timeout: float = 10.0) -> bool:
+    """The process (pid + create time, so a reused pid is not mistaken for it) has exited or is a zombie.
+    It would otherwise sleep for 120 s, so a short wait only absorbs the OS's asynchronous kill delivery."""
+    pid, ctime = proc
+    try:
+        p = psutil.Process(pid)
+        if p.create_time() != ctime:
+            return True
+        p.wait(timeout=timeout)
+        return True
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.TimeoutExpired:
+        try:
+            return p.status() == psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return True
 
 
 def _to_running(db, run_id: str, *, pid: int | None = None, create_time: float | None = None) -> WorkerRun:
@@ -140,16 +159,17 @@ def test_manager_title_grants_no_privilege(personal_client: AuthedClient, db, mo
     assert te.state == "BLOCKED" and te.reason_code == "FAN_OUT_FORBIDDEN"
     assert admit(db) == []
     # a title/reporting line never mints authority: only a human account can record a decision
+    from aeos.core.errors import PolicyDenied
     from aeos.policy import facade as policy
 
     before = db.scalar(select(func.count()).select_from(Decision))
-    with pytest.raises(Exception) as exc:
-        policy.record_decision(db, kind="APPROVAL", actor_user_id="agent:engineering-manager", target_type="plan_version",
-                               target_id=w["plan"]["approved_version"]["id"], domain="PERSONAL",
-                               rationale="as CTO I approve")
-    assert getattr(exc.value, "code", "") in ("ACTOR_NOT_HUMAN", "FORBIDDEN", "NOT_FOUND", "ACTOR_UNKNOWN") or \
-        "actor" in str(exc.value).lower()
-    db.rollback()
+    for actor in ("agent:engineering-manager", "engineering-manager", f"worker:{w['plan']['id']}"):
+        with pytest.raises(PolicyDenied) as exc:
+            policy.record_decision(db, kind="APPROVAL", actor_user_id=actor, target_type="plan_version",
+                                   target_id=w["plan"]["approved_version"]["id"], domain="PERSONAL",
+                                   rationale="as CTO I approve")
+        assert exc.value.code == "DECISION_ACTOR_NOT_HUMAN", (actor, exc.value.code)
+        db.rollback()
     assert db.scalar(select(func.count()).select_from(Decision)) == before
     assert {d.actor_kind for d in db.scalars(select(Decision))} <= {"HUMAN", "HUMAN_RECORDED"}
 
@@ -267,10 +287,12 @@ def test_cancel_from_dashboard_kills_the_tree_revokes_and_releases(personal_clie
         r = personal_client.post(f"/api/runs/{run.id}/cancel", json={"reason": "owner stop"})
         assert r.status_code == 200, r.text
         assert "efek eksternal" in r.json()["note"]
-        assert not processes.is_alive(mp.pid, mp.create_time)
-        assert not (psutil.pid_exists(grandchild) and psutil.Process(grandchild).status() != psutil.STATUS_ZOMBIE)
+        assert not processes.is_alive(mp.pid, mp.create_time), "the worker process was stopped"
+        assert _gone(grandchild), "its child process was stopped too (whole tree)"
     finally:
         processes.kill_run_processes(run.id)
+        if mp.stdout is not None:
+            mp.stdout.close()
     run = _run(db, run.id)
     assert run.execution_status == "CANCELLED" and _te(db, w["tasks"]["T1"]).state == "CANCELLED"
     assert db.scalar(select(CapabilityGrant).where(CapabilityGrant.run_id == run.id)).active is False
@@ -351,7 +373,8 @@ def test_demo_roster_and_runs_are_labelled_and_never_counted(personal_client: Au
     summary = personal_client.get("/api/workforce/summary").json()
     assert summary["active_runs"] == 0 and summary["demo_runs"] >= 1 and summary["cost"]["entries"] == 0
     costs = personal_client.get("/api/costs/summary").json()
-    assert "DEMO" not in str(costs.get("by_mode", {})) or costs.get("live_total_usd") in (None, 0, "0", 0.0)
+    assert costs["totals"]["entries"] == 0 and costs["totals"]["actual_usd"] == 0, "DEMO is never actual usage"
+    assert costs["native_subscription"]["entries"] == 0
     overview = personal_client.get("/api/control-center/overview").json()
     assert overview["contains_mock"] is True and overview["mode"] in ("MIXED", "DEMO", "MOCK")
     assert db.scalar(select(func.count()).select_from(UsageLedgerEntry).where(UsageLedgerEntry.mode == "LIVE")) == 0

@@ -533,12 +533,15 @@ def decide(session: Session, plan_id: str, *, action: str, version_id: str, vers
         raise NotFound("plan version not found")
     latest = session.get(PlanVersion, plan.current_version_id) if plan.current_version_id else None
     if latest is None or version.id != latest.id or version.manifest_hash != version_hash:
+        details = _latest_details(latest, requested_version_id=version_id, requested_hash=version_hash)
         audit.record(session, actor_type="user", actor_id=actor_user_id, action="plan.decision", result="DENIED",
                      target_type="plan_version", target_id=version_id, project_id=plan.project_id, domain=plan.domain,
                      reason="stale version or hash", details={"action": action, "requested_hash": version_hash})
+        # Nothing else was written by this request; the denial stays in the audit trail although the request
+        # fails (the API rolls back the unit of work on error), like office_gate below.
+        session.commit()
         raise Conflict("the decision must reference the current plan version and its exact hash",
-                       code="STALE_PLAN_VERSION",
-                       details=_latest_details(latest, requested_version_id=version_id, requested_hash=version_hash))
+                       code="STALE_PLAN_VERSION", details=details)
     if content_hash(version.content) != version.manifest_hash:
         raise Conflict("plan version content does not match its manifest hash (integrity)", code="VERSION_INTEGRITY")
     state = S(plan.state)

@@ -26,6 +26,7 @@ from aeos.models.planning import TaskSpec
 from tests.acceptance.fakes import FakeClaude
 from tests.acceptance.support import fake_token
 from tests.acceptance.world import (
+    GIT_TIMEOUT,
     WORKER_ROUTE,
     PlanningResponder,
     admit,
@@ -69,12 +70,14 @@ def test_candidate_symlink_and_traversal_are_never_materialised_or_accepted(tmp_
     repo = tmp_path / "candidate"
     git_repo(repo, {"src/app.py": "print('ok')\n"})
     blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=b"../../../outside/secret",
-                          capture_output=True, check=True).stdout.decode().strip()
-    subprocess.run(["git", "update-index", "--add", "--cacheinfo", f"120000,{blob},src/escape"], cwd=repo, check=True)
+                          capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout.decode().strip()
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo", f"120000,{blob},src/escape"], cwd=repo, check=True,
+                   capture_output=True, timeout=GIT_TIMEOUT)
     subprocess.run(["git", "-c", "user.email=a@example.invalid", "-c", "user.name=a", "-c", "commit.gpgsign=false",
-                    "commit", "-q", "-m", "symlink"], cwd=repo, check=True)
+                    "-c", "core.hooksPath=", "commit", "-q", "-m", "symlink"], cwd=repo, check=True,
+                   capture_output=True, timeout=GIT_TIMEOUT)
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True,
-                          check=True).stdout.strip()
+                          check=True, timeout=GIT_TIMEOUT).stdout.strip()
     dest = tmp_path / "snapshot"
     dest.mkdir()
     info = GitReader(repo).export_tree(head, dest, max_bytes=10 * 1024 * 1024)
@@ -198,7 +201,7 @@ def test_pr_code_under_the_verifier_sees_no_production_secret(tmp_path: Path, mo
     import sys
 
     out = subprocess.run([sys.executable, "-I", "-c", probe], env=env, capture_output=True, text=True, check=True,
-                         cwd=tmp_path)
+                         cwd=tmp_path, timeout=120)
     assert out.stdout.strip() in ("[]", '["PYTHON_KEYRING_BACKEND"]')
 
 

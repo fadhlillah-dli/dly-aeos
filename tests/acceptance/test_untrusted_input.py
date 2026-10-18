@@ -32,6 +32,7 @@ from aeos.models.routing import CapabilityGrant
 from aeos.policy import facade as policy
 from tests.acceptance.fakes import FakeClaude
 from tests.acceptance.world import (
+    GIT_TIMEOUT,
     PlanningResponder,
     create_project,
     git_repo,
@@ -232,7 +233,8 @@ def test_office_origin_checkout_in_a_personal_project_is_never_read(personal_cli
     rid = r.json()["repository"]["id"]
     import subprocess
 
-    subprocess.run(["git", "remote", "set-url", "origin", "git@bitbucket.org:company/svc.git"], cwd=repo, check=True)
+    subprocess.run(["git", "remote", "set-url", "origin", "git@bitbucket.org:company/svc.git"], cwd=repo, check=True,
+                   capture_output=True, timeout=GIT_TIMEOUT)
     inv = personal_client.post(f"/api/repositories/{rid}/inventory", json={})
     assert inv.status_code == 403 and inv.json()["error"]["code"] == "CHECKOUT_OTHER_DOMAIN_ORIGIN"
     pack = personal_client.post(f"/api/projects/{project['id']}/context-packs", json={"query": ["office_secret_logic"]})
