@@ -163,7 +163,7 @@ def fake_planning(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def fake_queue(monkeypatch: pytest.MonkeyPatch, items: list[dict[str, Any]]) -> None:
-    def queue_items(session, *, domain=None, project_id=None):
+    def queue_items(session, domain, project_ids=None):
         return list(items)
 
     _install(monkeypatch, "aeos.policy.queue", queue_items=queue_items)

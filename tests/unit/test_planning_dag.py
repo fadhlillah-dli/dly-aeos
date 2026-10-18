@@ -243,6 +243,15 @@ def test_dag_view_runtime_conflicts_blockers_and_acceptance(db):
     assert blocker["task_key"] == "T1" and blocker["blocks"] == ["T2", "T4"]
     conflict = next(c for c in view["shared_write_conflicts"] if c["tasks"] == ["T1", "T3"])
     assert conflict["concurrent_risk"] is True and nodes["T1"]["conflicts_with"] == ["T3"]
-    # acceptance is never inferred from status; verification module absent -> UNKNOWN
-    assert nodes["T1"]["acceptance"]["status"] == "UNKNOWN"
+    # acceptance is never inferred from status: no AcceptanceRecord -> NONE, never accepted
+    assert nodes["T1"]["acceptance"]["status"] == "NONE" and nodes["T1"]["acceptance"]["valid"] is False
     assert nodes["T2"]["dependencies_ready"] is False
+
+
+def test_acceptance_unknown_when_verification_module_absent(db, absent_modules):
+    """Fail closed: without the verification module acceptance is UNKNOWN (never READY/accepted)."""
+    from aeos.planning.dag import _acceptance_for
+
+    absent_modules("aeos.verification.acceptance")
+    out = _acceptance_for(db, "no-such-task", "sha256:x")
+    assert out["status"] == "UNKNOWN" and out["valid"] is None

@@ -27,7 +27,8 @@ def test_process_containment_reports_honestly(settings, monkeypatch):
     assert "sk-or-v1" not in str(rep) and "ghp_" not in str(rep)
 
 
-def test_report_is_recorded(db):
+def test_report_is_recorded(db, absent_modules):
+    absent_modules("aeos.verification.collector")
     rep = {"kind": "process", "overall": "WEAK", "checked_at": "x", "results": [], "summary": {}}
     record_containment_report(db, rep, actor="cli:test")
     from aeos.models.identity import SystemSetting

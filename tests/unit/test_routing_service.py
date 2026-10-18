@@ -95,7 +95,8 @@ def test_approved_route_eligible_and_selected(routes):
     assert sel.route.route_key == DS and "priority" in sel.reason
 
 
-def test_office_always_denied_by_default(routes, monkeypatch):
+def test_office_always_denied_by_default(routes, monkeypatch, absent_modules):
+    absent_modules("aeos.policy.office")
     r = approve(routes, DS)
     # even if someone had added OFFICE to the route, policy decides — and it is missing here
     r.eligible_domains = ["PERSONAL", "OFFICE"]
@@ -300,7 +301,8 @@ def test_activation_guards(routes, monkeypatch):
                                expected_config_hash=r.config_hash)
 
 
-def test_activation_fails_closed_without_decision_registry(routes):
+def test_activation_fails_closed_without_decision_registry(routes, absent_modules):
+    absent_modules("aeos.policy.decisions")
     r = service.get_route(routes, DS)
     with pytest.raises(Blocked) as ei:
         service.activate_route(routes, DS, actor_user_id="o", mode="TRIAL", rationale="no policy module here",

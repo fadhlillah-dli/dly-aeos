@@ -328,8 +328,9 @@ def test_capability_test_blocked_without_binary(settings, monkeypatch):
     assert out["status"] == "BLOCKED" and out["steps"][-1]["status"] == "BLOCKED"
 
 
-def test_capability_test_without_verification_module_says_not_persisted(settings, fake_claude, monkeypatch):
+def test_capability_test_without_verification_module_says_not_persisted(settings, fake_claude, monkeypatch, absent_modules):
     install_fakes(monkeypatch, verification=False)
+    absent_modules("aeos.verification.collector")
     out = bridge.capability_test("opus", settings=settings)
     assert out["status"] == "VERIFIED" and out["evidence_id"] is None
 

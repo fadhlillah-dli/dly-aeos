@@ -5,7 +5,6 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { MappedBadge, PROPOSAL_STATUS } from "../../components/proposals/MappedBadge";
-import { RelatedLinks } from "../../components/proposals/PageLinks";
 import { Button, Card, EmptyState, ErrorBox, inputClass, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { relativeTime } from "../../lib/format";
 import { ProposalForm } from "./ProposalForm";
@@ -51,7 +50,6 @@ export default function ProposalsPage() {
                 <Lightbulb className="h-4 w-4" aria-hidden /> Usulkan perubahan
               </Button>
             )}
-            <RelatedLinks subject="DLY AEOS Usulan Upgrade (alur proposal)" />
           </>
         }
       />

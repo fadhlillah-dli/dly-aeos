@@ -4,7 +4,7 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { BUDGET_STATE, COST_KIND, MappedBadge, QUOTA_STATE } from "../../components/proposals/MappedBadge";
-import { decisionHref, RelatedLinks } from "../../components/proposals/PageLinks";
+import { decisionHref } from "../../components/proposals/PageLinks";
 import { Link } from "react-router-dom";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
@@ -322,7 +322,6 @@ export default function CostsPage() {
                 </option>
               ))}
             </select>
-            <RelatedLinks subject="DLY AEOS Biaya & Kuota (cost ledger, budget, quota)" />
           </>
         }
       />

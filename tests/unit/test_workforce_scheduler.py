@@ -100,7 +100,8 @@ def test_readiness_requires_active_approval(db, fakes):
     assert te.state == "BLOCKED" and te.reason_code == "PLAN_NOT_APPROVED"
 
 
-def test_readiness_fails_closed_without_planning_module(db):
+def test_readiness_fails_closed_without_planning_module(db, absent_modules):
+    absent_modules("aeos.planning.service")
     p = make_project(db)
     _plan, pv, specs = make_plan(db, p, [{"task_key": "a"}])
     scheduler.ensure_executions(db, pv.id, actor="t")

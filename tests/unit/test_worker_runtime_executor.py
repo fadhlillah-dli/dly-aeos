@@ -266,7 +266,7 @@ def test_start_blocked_without_sandbox_exception(settings, setup):
 
 def test_evidence_fallback_when_collector_missing(settings, setup, monkeypatch):
     make, fakes = setup
-    monkeypatch.delitem(sys.modules, "aeos.verification.collector")
+    monkeypatch.setitem(sys.modules, "aeos.verification.collector", None)
     run_id, task_id = make("ok")
     executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, _ = _load(run_id, task_id)

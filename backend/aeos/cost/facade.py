@@ -50,9 +50,10 @@ def record_usage(
     cost_usd: float | None = None, is_estimate: bool = False, reservation_id: str | None = None,
     mode: str = "LIVE",
 ) -> UsageLedgerEntry:
+    kwargs = dict(locals())  # captured before the lazy import adds 'impl'
     from aeos.cost.service import record_usage as impl
 
-    return impl(**locals())
+    return impl(**kwargs)
 
 
 # --- additive (module group H): non-token units and quota state ------------------------------

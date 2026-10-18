@@ -16,6 +16,8 @@ pytestmark = pytest.mark.acceptance
 
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 UNAUTHENTICATED_BY_DESIGN = {"/api/auth/login"}
+# Capability-token routes (§25/§26): never session-authenticated; a session cookie must be refused.
+CAPABILITY_TOKEN_PREFIX = "/broker/"
 COMMON_DEFAULTS = [("admin", "admin"), ("admin", "password"), ("root", "root"), ("aeos", "aeos"), ("owner", "owner")]
 
 
@@ -84,6 +86,10 @@ def test_viewer_is_denied_on_every_write_route(client: AuthedClient, db, app):
             checked += 1
             code = r.json().get("error", {}).get("code") if r.headers.get("content-type", "").startswith(
                 "application/json") else None
+            if path.startswith(CAPABILITY_TOKEN_PREFIX):
+                if r.status_code != 401 or code != "COOKIE_AUTH_REJECTED":
+                    failures.append(f"{method} {path} -> {r.status_code} {code} (cookie auth must be refused)")
+                continue
             if r.status_code != 403 or code != "READ_ONLY_ROLE":
                 failures.append(f"{method} {path} -> {r.status_code} {code}")
     assert checked > 0

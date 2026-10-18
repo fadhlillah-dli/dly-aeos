@@ -307,13 +307,11 @@ def _cost(session: Session, principal: Principal, domain: Domain, project: Proje
 
 
 def _decisions(session: Session, principal: Principal, domain: Domain, project: Project | None) -> dict[str, Any]:
-    from aeos.policy import queue  # type: ignore[attr-defined]
+    import importlib
 
-    try:
-        raw = queue.queue_items(session, domain=domain.value, project_id=project.id if project else None)
-    except TypeError:
-        raw = queue.queue_items(session)
+    queue = importlib.import_module("aeos.policy.queue")  # contract: queue_items(session, domain, project_ids=None)
     pids = _scoped_project_ids(session, principal, domain)
+    raw = queue.queue_items(session, domain.value, project_ids=[project.id] if project else sorted(pids))
     items: list[dict[str, Any]] = []
     for r in raw or []:
         d = r if isinstance(r, dict) else {k: getattr(r, k) for k in dir(r) if not k.startswith("_")

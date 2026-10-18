@@ -66,10 +66,11 @@ def _codes(adm) -> set[str]:
 
 
 # ----------------------------------------------------------------------------- admission (§19, §14, §22)
-def test_admission_waits_without_verifier(db, monkeypatch):
+def test_admission_waits_without_verifier(db, monkeypatch, absent_modules):
     """§19 'siapa verifier dan penerima hasilnya': no worker is started whose result could never be
     accepted (verification module absent -> fail closed, no run/cost)."""
     fk = FakeModules().install(monkeypatch, skip=("aeos.verification.acceptance",))
+    absent_modules("aeos.verification.acceptance")
     _p, specs = _ready(db, fk)
     adm = scheduler.admission_check(db, specs[0].id)
     assert not adm.admitted and "VERIFIER_UNAVAILABLE" in _codes(adm)
@@ -198,7 +199,7 @@ def test_release_quarantine_guards(db, fakes, monkeypatch):
         scheduler.release_quarantine(db, run.id, actor="user:o", actor_user_id="o", rationale="reviewed ok")
     run.quarantined = True
     db.flush()
-    monkeypatch.delitem(sys.modules, "aeos.policy.decisions")
+    monkeypatch.setitem(sys.modules, "aeos.policy.decisions", None)
     with pytest.raises(Blocked) as exc:  # policy module missing -> fail closed, no decision
         scheduler.release_quarantine(db, run.id, actor="user:o", actor_user_id="o", rationale="reviewed ok")
     assert exc.value.code == "POLICY_UNAVAILABLE"

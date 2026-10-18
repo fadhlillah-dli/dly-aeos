@@ -1,5 +1,4 @@
 import { useAuth } from "../../auth/AuthContext";
-import { RelatedLinks } from "../../components/control_center/Provenance";
 import { Notice, PageHeader, Tabs } from "../../components/ui";
 import { AuditTab } from "./AuditTab";
 import { BackupsTab } from "./BackupsTab";
@@ -45,7 +44,6 @@ export default function Page() {
           { id: "emergency", label: "Darurat", content: <EmergencyTab /> },
         ]}
       />
-      <RelatedLinks />
     </div>
   );
 }

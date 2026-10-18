@@ -142,7 +142,7 @@ def test_corrupt_backup_fails_and_produces_no_evidence(settings, db, monkeypatch
     bid = backup.create_backup(settings, label="bad", actor="tester")["backup_id"]
     dbfile = settings.layout.backups / bid / "aeos.sqlite3"
     data = bytearray(dbfile.read_bytes())
-    data[200:600] = b"\x00" * 400
+    data[200:600] = bytes(b ^ 0xFF for b in data[200:600])  # always changes the bytes
     dbfile.write_bytes(bytes(data))
     assert backup.verify_backup(settings, bid)["ok"] is False
     result = backup.restore_test(settings, bid, session=db, actor="tester")

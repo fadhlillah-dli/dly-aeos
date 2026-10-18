@@ -411,6 +411,12 @@ async def chat_completions(request: Request) -> Response:
         declared = 0
     if declared > MAX_BODY_BYTES:
         return _error(413, "BODY_TOO_LARGE", "request body too large")
+    # Authentication shape first (no DB): cookie sessions and missing bearer tokens are rejected
+    # before any body is interpreted.
+    try:
+        _check_auth_headers({k.lower(): v for k, v in request.headers.items()}, dict(request.cookies))
+    except ProxyError as exc:
+        return _error(exc.status, exc.code, exc.message)
     raw = await request.body()
     if len(raw) > MAX_BODY_BYTES:
         return _error(413, "BODY_TOO_LARGE", "request body too large")
