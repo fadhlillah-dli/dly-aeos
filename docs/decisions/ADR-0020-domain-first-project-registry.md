@@ -48,3 +48,29 @@ OFFICE menjadi PERSONAL" as acceptance rows.
   OFFICE project resolve the same credential. The accepted residual: a creator can observe that a
   slug is already taken (the new key gets a suffix) without learning which project or domain holds
   it; names, counts and ids of other-domain projects are never returned.
+
+## Amendment 2026-10-18 (integration)
+
+**One provider vocabulary** (`aeos.portfolio.providers`) for ProjectIntegration rows (seed + API), the
+publisher, the external-write interlock and write enablement, Doctor adapter checks and the UI:
+PERSONAL `google-drive` (docs), `github-issues` (issues), `github-repo` (code), `github-projects`,
+`github-actions`; OFFICE `confluence` (docs), `jira` (issues/roadmap), `bitbucket` (code),
+`bitbucket-pipelines`. Earlier spellings (`GOOGLE_DRIVE`, `GOOGLE_DOCS`, `GITHUB_ISSUES`, `GITHUB`,
+`google-docs`) are accepted as input and stored canonical; `aeos seed` migrates existing rows (target ids
+untouched; a legacy row whose canonical twin exists is reported, never merged) and moves the seeded
+Google credential reference to `personal/google-oauth-token` (the ref `aeos publish google-connect`
+writes; the Doctor adapter check, its remedy (`aeos publish google-connect`, never `aeos secrets set`) and
+the Integrations & Access card read the same refs - the card shows CONFIGURED only when both
+`personal/google-oauth-client` and `personal/google-oauth-token` exist). The Control Center integrations
+view lists a provider's Doctor checks from `providers.DOCTOR_CHECKS` (`github-issues` ->
+`adapter.github_token`), not from a substring of the provider id.
+
+* The exact target of an integration is `{provider, root_id}` (shown as `capability_status.target`); an
+  approval binds it and the publisher writes only inside it. The Google Drive root folder is optional
+  (`root_id` empty = project folder in My Drive, target `root`).
+* Config keys that would form a second target (`parent*`, `root*`, `folder*`, `repo*`, `project_key`) are
+  refused; `deployment` must be CLOUD / DATA_CENTER / UNKNOWN, `enabled`/`milestone_labels` booleans,
+  `space_id`/`base_url` validated and Atlassian-only.
+* The project page has an integration settings form (Google Drive folder, GitHub Issues repository;
+  OFFICE: Confluence tenant/space/CONFLUENCE_PROJECTS_PARENT_ID/deployment/enabled, Jira tenant/key/
+  deployment/enabled) that stores credential references only.

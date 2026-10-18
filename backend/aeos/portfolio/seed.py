@@ -4,8 +4,9 @@
   inference), ``is_platform``, kind EXISTING, classification INTERNAL;
 * platform repository GITHUB ``settings.platform_repo_slug`` (role platform), UNVERIFIED until a
   provider lookup succeeds; local checkout is the logical ``platform-repo`` resolved at use time;
-* docs integration GOOGLE_DRIVE (root folder pending owner OAuth) and issues integration
-  GITHUB_ISSUES. Nothing is published, verified or connected by seeding.
+* docs integration ``google-drive`` (root folder optional: My Drive until the owner sets one; OAuth
+  pending) and issues integration ``github-issues`` (the platform repository). Provider ids follow
+  ``aeos.portfolio.providers``; legacy rows are migrated. Nothing is published, verified or connected.
 
 Re-running never changes an existing domain (immutable) and never overwrites target IDs.
 """
@@ -23,8 +24,13 @@ from aeos.core.enums import DataClassification, Domain
 from aeos.core.errors import AeosError
 from aeos.events import service as events
 from aeos.models.portfolio import Project, RepositoryReference
+from aeos.portfolio import providers as pv
 from aeos.portfolio.facade import PLATFORM_PROJECT_KEY
-from aeos.portfolio.integrations import ensure_integration
+from aeos.portfolio.integrations import (
+    compute_capability_status,
+    ensure_integration,
+    migrate_provider_vocabulary,
+)
 from aeos.portfolio.repositories import PLATFORM_LOCAL_REF, validate_identity
 
 PLATFORM_NAME = "DLY AEOS"
@@ -105,14 +111,23 @@ def run(session: Session) -> dict[str, Any]:
                                             "left unchanged (identity is never rewritten by a seed)")
     result["repository_id"] = repo.id
 
-    _docs, docs_created = ensure_integration(
-        session, project, provider="GOOGLE_DRIVE", purpose="docs", root_id=None,
-        credential_ref="personal/google-oauth", config={"pending": "owner OAuth consent (aeos publish google-connect)"},
+    # One provider vocabulary (aeos.portfolio.providers): rows seeded by earlier builds as GOOGLE_DRIVE /
+    # GITHUB_ISSUES are renamed (target ids untouched) before the idempotent registration below.
+    result["provider_migration"] = migrate_provider_vocabulary(session)
+    docs, docs_created = ensure_integration(
+        session, project, provider=pv.GOOGLE_DRIVE, purpose="docs", root_id=None,
+        credential_ref=pv.DEFAULT_CREDENTIAL_REFS[pv.GOOGLE_DRIVE],
+        config={"pending": "owner OAuth consent (aeos publish google-connect)"},
     )
+    if not docs_created and docs.credential_ref == pv.LEGACY_GOOGLE_REF:
+        # the earlier seed pointed at a reference the publisher never writes; use the real token ref
+        docs.credential_ref = pv.DEFAULT_CREDENTIAL_REFS[pv.GOOGLE_DRIVE]
+        docs.capability_status = compute_capability_status(docs)
     _issues, issues_created = ensure_integration(
-        session, project, provider="GITHUB_ISSUES", purpose="issues", root_id=slug, credential_ref="personal/github",
+        session, project, provider=pv.GITHUB_ISSUES, purpose="issues", root_id=slug,
+        credential_ref=pv.DEFAULT_CREDENTIAL_REFS[pv.GITHUB_ISSUES],
     )
-    result["integrations"] = {"GOOGLE_DRIVE/docs": "created" if docs_created else "exists",
-                              "GITHUB_ISSUES/issues": "created" if issues_created else "exists"}
+    result["integrations"] = {f"{pv.GOOGLE_DRIVE}/docs": "created" if docs_created else "exists",
+                              f"{pv.GITHUB_ISSUES}/issues": "created" if issues_created else "exists"}
     result["verification_status"] = repo.verification_status
     return result

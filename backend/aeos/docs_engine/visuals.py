@@ -14,12 +14,16 @@ Optional binary override: environment variable ``AEOS_MMDC_BINARY`` (path to mmd
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 from aeos.core.hashing import sha256_text
 from aeos.core.redaction import redact_text
@@ -28,6 +32,42 @@ from aeos.docs_engine.plan_content import DiagramView
 
 DETECT_TIMEOUT_S = 20
 RENDER_TIMEOUT_S = 90
+
+
+def _kill_tree(pid: int) -> None:
+    try:
+        parent = psutil.Process(pid)
+    except psutil.Error:
+        return
+    procs: list[psutil.Process] = []
+    with contextlib.suppress(psutil.Error):
+        procs = parent.children(recursive=True)
+    procs.append(parent)
+    for proc in procs:
+        with contextlib.suppress(psutil.Error):
+            proc.kill()
+    with contextlib.suppress(psutil.Error):
+        psutil.wait_procs(procs, timeout=5)
+
+
+def run_bounded(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+    """Run *argv* (no shell) with a timeout that kills the whole process tree.
+
+    ``mmdc`` is an npm shim on Windows (``mmdc.cmd`` -> node -> headless Chromium): ``subprocess.run``'s
+    timeout would kill only the shim and leave node/Chromium running. Raises ``subprocess.TimeoutExpired``."""
+    kwargs: dict[str, Any] = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", **kwargs)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc.pid)
+        with contextlib.suppress(Exception):
+            proc.communicate(timeout=5)
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 # §29 table: which source a visual must come from and how it may be used.
 VISUAL_KINDS: dict[str, dict[str, str]] = {
@@ -101,8 +141,7 @@ def detect_mmdc(binary: str | None = None) -> MmdcInfo:
                                                 "Mermaid dan berstatus visual pending. Opsional: npm install -g "
                                                 "@mermaid-js/mermaid-cli")
     try:
-        proc = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=DETECT_TIMEOUT_S,
-                              check=False)
+        proc = run_bounded([path, "--version"], timeout=DETECT_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         return MmdcInfo(available=False, path=path, status="TIMEOUT", reason="mmdc --version timeout")
     except OSError as exc:
@@ -146,10 +185,8 @@ def render_diagram(diagram: DiagramView, out_dir: Path, *, mmdc: MmdcInfo | None
         return art
     for target in (png, svg):
         try:
-            proc = subprocess.run(
-                [mmdc.path, "-i", str(src), "-o", str(target), "-b", "white", "--quiet"],
-                capture_output=True, text=True, timeout=timeout, check=False,
-            )
+            proc = run_bounded([mmdc.path, "-i", str(src), "-o", str(target), "-b", "white", "--quiet"],
+                               timeout=timeout)
         except subprocess.TimeoutExpired:
             art.status, art.reason = STATUS_FAILED, f"mmdc timeout setelah {timeout}s; visual pending"
             return art

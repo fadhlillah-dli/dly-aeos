@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 from aeos.audit import service as audit
 from aeos.core.config import Settings, get_settings
 from aeos.core.enums import Domain
-from aeos.core.errors import AeosError, Blocked, NotFound, ValidationFailed
+from aeos.core.errors import AeosError, Blocked, Conflict, NotFound, ValidationFailed
 from aeos.core.hashing import sha256_bytes
 from aeos.core.paths import ensure_within
 from aeos.core.redaction import redact_text
@@ -270,6 +270,37 @@ def attachment_text(session: Session, attachment_id: str, *, max_chars: int = 20
         raise NotFound("attachment not found")
     text, _ = read_extracted_text(session, att, max_chars=max_chars)
     return text
+
+
+def link_attachment(session: Session, attachment_id: str, *, proposal_id: str) -> Attachment:
+    """Facade implementation (``aeos.intake.facade.link_attachment``): record that an uploaded attachment
+    (e.g. a ``.md`` brief, U-11) is input to a change proposal. Provenance only — the attachment stays
+    untrusted DATA and grants nothing (§25, §50).
+
+    Fails closed: the attachment must exist, not be REJECTED, live in the proposal's domain (and project
+    for a project-scoped proposal) and not already belong to another proposal. Idempotent. Does not commit."""
+    from aeos.models.research import ChangeProposal
+
+    att = session.get(Attachment, attachment_id)
+    proposal = session.get(ChangeProposal, proposal_id)
+    if att is None or proposal is None or att.domain != proposal.domain:
+        raise NotFound("attachment not found in this domain")  # no cross-domain metadata leaks (§35)
+    if proposal.project_id and att.project_id != proposal.project_id:
+        raise NotFound("attachment not found in this project")
+    if att.scan_status == "REJECTED":
+        raise Blocked("attachment was rejected by intake scanning", code="ATTACHMENT_REJECTED")
+    if att.proposal_id == proposal.id:
+        return att
+    if att.proposal_id:
+        raise Conflict("attachment already belongs to another proposal", code="ATTACHMENT_ALREADY_LINKED",
+                       details={"proposal_id": att.proposal_id})
+    att.proposal_id = proposal.id
+    session.flush()
+    audit.record(session, actor_type="system", actor_id="intake", action="intake.attachment.link",
+                 target_type="attachment", target_id=att.id, project_id=att.project_id, domain=att.domain,
+                 details={"proposal_id": proposal.id, "filename": att.filename, "scan_status": att.scan_status,
+                          "trusted": False})
+    return att
 
 
 def list_attachments(session: Session, project_id: str) -> list[Attachment]:

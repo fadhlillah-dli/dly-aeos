@@ -69,6 +69,113 @@ def decisions_cmd(
                           f"ops={','.join(d.allowed_operations or []) or '-'} expires={exp}")
 
 
+def _admin_user_id(session, username: str, password: str) -> str:
+    """Human-only AUTH (§19/§20): the actor proves it is the SUPER_ADMIN by its password (never stored/logged).
+
+    A username alone is not enough - any local process (an agent with a shell included) could name the owner."""
+    from aeos.core.enums import Role
+    from aeos.identity.passwords import verify_password
+    from aeos.models.identity import User
+
+    user = session.scalars(select(User).where(User.username == username)).first()
+    if user is None or not user.is_active or user.role != Role.SUPER_ADMIN.value:
+        raise typer.BadParameter(f"{username!r} is not an active SUPER_ADMIN (decisions are human-only)")
+    if not password or not verify_password(user.password_hash, password):
+        raise typer.BadParameter("password check failed - no decision recorded")
+    return user.id
+
+
+def _scope(pairs: list[str] | None) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for p in pairs or []:
+        k, sep, v = p.partition("=")
+        if not sep or not k.strip():
+            raise typer.BadParameter(f"--scope expects key=value, got {p!r}")
+        out[k.strip()] = v.strip()
+    return out
+
+
+@app.command("decide")
+def decide_cmd(
+    kind: str = typer.Option(..., help="EXCEPTION | RISK_ACCEPTANCE | WRITE_ENABLEMENT | POLICY | BUDGET"),
+    as_user: str = typer.Option(..., "--as", help="Your SUPER_ADMIN username (the human decision actor)"),
+    domain: str = typer.Option(..., help="PERSONAL or OFFICE (explicit, never inferred)"),
+    rationale: str = typer.Option(..., help="Why (min 10 characters)"),
+    scope: list[str] = typer.Option(None, "--scope", help="Explicit auth scope key=value (repeatable)"),
+    days: int = typer.Option(None, help="Expiry in days (required for EXCEPTION / RISK_ACCEPTANCE)"),
+    exception: str = typer.Option(None, help="EXCEPTION preset: secret_store_interim_keyring | worker_sandbox_process"),
+    allow_bash: bool = typer.Option(None, "--allow-bash/--no-allow-bash", help="worker_sandbox_process only"),
+    provider: str = typer.Option(None, help="WRITE_ENABLEMENT provider (google-drive, github-issues, ...)"),
+    enable: bool = typer.Option(None, "--enable/--disable", help="WRITE_ENABLEMENT on/off"),
+    office_authorization: bool = typer.Option(False, "--office-authorization", help="POLICY: company authorisation"),
+    company_reference: str = typer.Option(None, help="Company approval reference (office authorisation)"),
+    allowed_provider: list[str] = typer.Option(None, "--allowed-provider", help="OFFICE provider (repeatable)"),
+    target_type: str = typer.Option(None), target_id: str = typer.Option(None),
+    project: str = typer.Option(None, help="Project id (optional, must be in --domain)"),
+) -> None:
+    """Record one human decision with the exact target shape its consumer reads (password confirms AUTH)."""
+    from datetime import timedelta
+
+    from aeos.core.enums import Domain
+    from aeos.core.errors import AeosError
+    from aeos.core.timeutil import utcnow
+    from aeos.models.portfolio import Project
+    from aeos.policy import recording
+    from aeos.policy.decisions import decision_view
+
+    _ensure_db()
+    try:
+        dom = Domain(domain.upper())
+    except ValueError as exc:
+        raise typer.BadParameter("--domain must be PERSONAL or OFFICE") from exc
+    auth_scope = _scope(scope) or {"recorded_via": "aeos policy decide", "kind": kind.upper()}
+    password = typer.prompt(f"Password for {as_user} (confirms this human decision)", hide_input=True,
+                            default="", show_default=False)
+    try:
+        with session_scope() as s:
+            uid = _admin_user_id(s, as_user, password)
+            if project:
+                p = s.get(Project, project)
+                if p is None or p.domain != dom.value:  # another domain's project is "not found"
+                    raise typer.BadParameter("project not found in this domain")
+            d = recording.record_generic_decision(
+                s, actor_user_id=uid, domain=dom, kind=kind.upper(), rationale=rationale, auth_scope=auth_scope,
+                project_id=project, target_type=target_type, target_id=target_id,
+                expires_at=(utcnow() + timedelta(days=days)) if days else None, provider=provider, enabled=enable,
+                office_authorization=office_authorization, company_reference=company_reference,
+                allowed_providers=allowed_provider or [], exception=exception, allow_bash=allow_bash,
+            )
+            v = decision_view(s, d)
+            console.print(f"Recorded {v['kind']} {v['id']} -> {v['target_type']}:{v['target_id']} "
+                          f"status={v['status']} expires={v['expires_at'] or '-'}")
+    except AeosError as exc:
+        typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command("revoke")
+def revoke_cmd(
+    decision_id: str = typer.Argument(...),
+    as_user: str = typer.Option(..., "--as", help="Your SUPER_ADMIN username"),
+    reason: str = typer.Option(..., help="Why the decision is revoked"),
+) -> None:
+    """Revoke (invalidate) an ACTIVE decision; consumers fail closed immediately."""
+    from aeos.core.errors import AeosError
+    from aeos.policy.decisions import revoke_decision
+
+    _ensure_db()
+    password = typer.prompt(f"Password for {as_user} (confirms this human decision)", hide_input=True,
+                            default="", show_default=False)
+    try:
+        with session_scope() as s:
+            uid = _admin_user_id(s, as_user, password)
+            d = revoke_decision(s, decision_id, actor_user_id=uid, reason=reason)
+            console.print(f"Revoked {d.kind} {d.id} ({d.target_type}:{d.target_id})")
+    except AeosError as exc:
+        typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
+        raise typer.Exit(1) from exc
+
+
 @app.command("adrs")
 def adrs_cmd(load: bool = typer.Option(False, "--load", help="(Re)load docs/decisions/ADR-*.md first")) -> None:
     """List the ADR register."""

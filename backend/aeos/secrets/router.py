@@ -123,12 +123,18 @@ def integrations_overview(db: Session, settings: Settings, principal: Principal)
         [{"command": "gh auth token | aeos secrets set personal/github --stdin",
           "why": "Simpan token GitHub ke vault (tanpa ditampilkan)"}],
     ))
-    cards.append(card(
-        "google", "Google Drive / Docs (PERSONAL)", "PERSONAL", ["personal/google-oauth"],
+    # The refs `aeos publish google-connect` writes and the publisher reads (aeos.portfolio.providers); the
+    # publisher needs BOTH, so one present ref alone is not "configured".
+    google = card(
+        "google", "Google Drive / Docs (PERSONAL)", "PERSONAL",
+        ["personal/google-oauth-token", "personal/google-oauth-client"],
         "Publikasi dokumen Product 1 ke folder Drive yang disetujui (scope drive.file)",
         "Folder root yang dipilih pemilik; revisi dilindungi requiredRevisionId",
         [{"command": "aeos publish google-connect", "why": "Hubungkan akun Google melalui OAuth resmi"}],
-    ))
+    )
+    if google["status"] == "CONFIGURED" and not all(r.get("state") == "PRESENT" for r in google["credential_refs"]):
+        google["status"] = "MISSING"
+    cards.append(google)
     cards.append(card(
         "openrouter", "OpenRouter (rute pekerja)", None, ["workers/openrouter", "personal/openrouter"],
         "Akses model pekerja lewat broker; info kunci/kuota resmi dari /api/v1/key",

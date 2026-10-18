@@ -100,6 +100,9 @@ export interface Dimension {
 export interface TargetView {
   purpose: string;
   family: string;
+  /** One provider vocabulary + exact root id: the identity the plan approval binds (U-10). */
+  provider?: string;
+  root_id?: string;
   label: string;
   status: string;
   reasons: string[];
