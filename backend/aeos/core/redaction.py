@@ -15,17 +15,17 @@ from typing import Any
 REDACTED = "[REDACTED]"
 
 _PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"sk-or-v1-[A-Za-z0-9]{20,}"),  # OpenRouter
-    re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"),  # Anthropic
-    re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),  # OpenAI-style
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
-    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
-    re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
-    re.compile(r"ya29\.[0-9A-Za-z_\-]{20,}"),  # Google OAuth access token
-    re.compile(r"1//[0-9A-Za-z_\-]{20,}"),  # Google refresh token
+    re.compile(r"(?<![A-Za-z0-9])sk-or-v1-[A-Za-z0-9]{20,}"),  # OpenRouter
+    re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_\-]{20,}"),  # Anthropic
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{20,}"),  # OpenAI-style
+    re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
+    re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}"),  # AWS access key id
+    re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_\-]{35}"),  # Google API key
+    re.compile(r"(?<![A-Za-z0-9])ya29\.[0-9A-Za-z_\-]{20,}"),  # Google OAuth access token
+    re.compile(r"(?<![A-Za-z0-9])1//[0-9A-Za-z_\-]{20,}"),  # Google refresh token
     re.compile(r"(?:hvs|s|b)\.[A-Za-z0-9]{24,}"),  # Vault/OpenBao tokens
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-~+/]{16,}=*"),
     re.compile(r"(?i)((?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)[^\s,;\"']{6,}"),
