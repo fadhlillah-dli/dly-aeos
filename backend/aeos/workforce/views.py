@@ -50,7 +50,12 @@ def derive_ui_state(run: WorkerRun | None, te: TaskExecution | None) -> str:
             return "WAITING_QUOTA"
         return run.execution_status
     if run is not None and run.execution_status == S.REVIEW.value:
-        return "WAITING_REVIEW"
+        if te is not None and te.active_run_id == run.id and te.state == S.BLOCKED.value:
+            # quarantined / review-blocked candidate: it waits for the owner, not for a review (§35, §50
+            # "Worker selesai tetapi verifier gagal -> REVIEW/BLOCKED sesuai state")
+            return "BLOCKED"
+        # §50 "Fable Max quota habis -> Review menunggu": the checkpoint review waits for quota
+        return "WAITING_QUOTA" if run.quota_status == "WAITING_QUOTA" else "WAITING_REVIEW"
     if run is not None and (run.execution_status in (S.DONE.value, S.FAILED.value, S.CANCELLED.value)
                             or te is None or te.active_run_id != run.id):
         return run.execution_status

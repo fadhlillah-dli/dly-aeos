@@ -32,11 +32,20 @@ def revoke_grants(session: Session, *, run_id: str | None = None, all_active: bo
     return impl(session, run_id=run_id, all_active=all_active, reason=reason)
 
 
-def push_task_branch(session: Session, *, run_id: str, worktree: str, branch: str, repo_full_name: str) -> dict[str, Any]:
-    """Push only ``refs/heads/aeos/*`` without force/delete; never the default branch."""
+def push_task_branch(
+    session: Session, *, run_id: str, worktree: str, branch: str, repo_full_name: str,
+    expected_head_sha: str | None = None,
+) -> dict[str, Any]:
+    """Push only ``refs/heads/aeos/*`` without force/delete; never the default branch.
+
+    Sha-pinned: the broker pushes ``<runtime head sha>:refs/heads/<branch>``. ``expected_head_sha``
+    (additive, integration 2026-10-18) must equal that head or the push is refused (HEAD_MISMATCH).
+    The result always carries ``head_sha`` and ``status`` PUSHED | FAILED | UNKNOWN (FAILED/UNKNOWN are
+    returned, not raised: reconcile an UNKNOWN with ``reconcile_side_effect`` before any retry)."""
     from aeos.broker.git_broker import push_task_branch as impl
 
-    return impl(session, run_id=run_id, worktree=worktree, branch=branch, repo_full_name=repo_full_name)
+    return impl(session, run_id=run_id, worktree=worktree, branch=branch, repo_full_name=repo_full_name,
+                expected_head_sha=expected_head_sha)
 
 
 def create_pull_request(
@@ -45,6 +54,16 @@ def create_pull_request(
     from aeos.broker.git_broker import create_pull_request as impl
 
     return impl(session, run_id=run_id, repo_full_name=repo_full_name, head=head, base=base, title=title, body=body)
+
+
+def credential_ref_problem(domain: str, ref: str, *, project_id: str | None = None) -> str | None:
+    """Why a route's ``mode_params.credential_ref`` may not serve a worker model call of *domain*
+    (None = allowed): OFFICE -> ``office/`` only; PERSONAL -> ``personal/``, ``workers/`` or the run's own
+    ``projects/<id>/``; ``platform/`` never. Routing uses the same rule for eligibility (additive,
+    integration 2026-10-18)."""
+    from aeos.broker.model_proxy import credential_namespace_problem as impl
+
+    return impl(domain, ref, project_id=project_id)
 
 
 def reconcile_side_effect(session: Session, *, side_effect_id: str, actor: str) -> dict[str, Any]:

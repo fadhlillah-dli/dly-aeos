@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -500,10 +501,21 @@ def _after_review(session: Session, rec: ReviewRecord, run: WorkerRun, *, actor:
 
     run_verdict = rec.verdict if rec.status == "COMPLETED" else (
         Verdict.BLOCKED.value if rec.status == "WAITING_QUOTA" else Verdict.NOT_PROVEN.value)
-    if rec.reviewer_kind != "SECURITY":  # WorkerRun.review_verdict mirrors the feature/architecture review
-        upd = call(workforce.update_run, session, run.id, actor="reviewer", review_verdict=run_verdict)
+    waiting = rec.status == "WAITING_QUOTA"
+    # A review that got past the quota (completed, manual path, failed output) no longer waits for it:
+    # the run must not keep showing WAITING_QUOTA after the limit lifted.
+    stop_waiting = not waiting and run.quota_status == "WAITING_QUOTA"
+    if rec.reviewer_kind != "SECURITY" or waiting or stop_waiting:  # review_verdict mirrors the feature review
+        fields: dict[str, Any] = {"review_verdict": run_verdict} if rec.reviewer_kind != "SECURITY" else {}
+        if waiting:
+            fields["quota_status"] = "WAITING_QUOTA"
+        elif stop_waiting:
+            fields["quota_status"] = None
+        upd = call(workforce.update_run, session, run.id, actor="reviewer", **fields)
         if not upd.ok:
             notes.append(f"run review_verdict update {upd.label()}")
+    if rec.mode == "LIVE" and (waiting or rec.status == "COMPLETED"):
+        _observe_native_quota(session, rec, run, exhausted=waiting, notes=notes)
     if rec.status != "COMPLETED":
         return None  # waiting/manual/failed reviews never open a gate and never trigger repair
     if rec.verdict in PASS_VERDICTS:
@@ -518,7 +530,7 @@ def _after_review(session: Session, rec: ReviewRecord, run: WorkerRun, *, actor:
     if rec.verdict == Verdict.BLOCKED.value:
         t = call(workforce.transition_task, session, run.task_id, ExecutionState.BLOCKED.value,
                  reason=f"REVIEW_BLOCKED: {rec.status_reason}"[:1000], actor="reviewer",
-                 expected_from=ExecutionState.REVIEW.value)
+                 expected_from=ExecutionState.REVIEW.value, reason_code="REVIEW_BLOCKED")
         rec.repair_status = f"NO_REPAIR (task {t.label()})"
         return None
     findings = [dict(f, source="claude-checkpoint-review") for f in rec.findings] or [
@@ -528,6 +540,53 @@ def _after_review(session: Session, rec: ReviewRecord, run: WorkerRun, *, actor:
                actor="reviewer")
     rec.repair_status = rep.label()
     return None
+
+
+NATIVE_QUOTA_PROVIDER = "claude-native"
+_NATIVE_FAMILIES = ("opus", "fable", "sonnet", "haiku")
+_NATIVE_FAMILY_RE = re.compile(r"claude-(opus|fable|sonnet|haiku)\b")
+
+
+def native_quota_scope(model: str | None) -> str:
+    """QuotaState scope of a native observation: the model family (``fable``, ``opus`` ...) or ``max``.
+
+    The same scope the claude bridge records and clears for its own observations, so an exhaustion
+    seen by a review is lifted by the next successful call of that family instead of staying
+    EXHAUSTED forever (a ``*`` scope without reset time would never be cleared)."""
+    m = (model or "").strip().lower()
+    if m in _NATIVE_FAMILIES:
+        return m
+    hit = _NATIVE_FAMILY_RE.search(m)
+    return hit.group(1) if hit else "max"
+
+
+def _observe_native_quota(session: Session, rec: ReviewRecord, run: WorkerRun, *, exhausted: bool,
+                          notes: list[str]) -> None:
+    """§42/§50 "Fable Max quota habis -> Review menunggu": record the observed limit through the cost
+    module (never dollars or a % of Max) — or, after a review that completed, lift an exhaustion of that
+    family back to UNKNOWN (remaining Max quota is not published, so never "OK"). The review's own
+    session writes it: the bridge's separate side-effect transaction cannot while this one holds the
+    SQLite write lock."""
+    from aeos.cost import facade as cost
+    from aeos.models.cost import QuotaState
+
+    scope = native_quota_scope(rec.model_resolved or rec.model_requested)
+    if exhausted:
+        q = call(cost.set_quota_state, session, provider=NATIVE_QUOTA_PROVIDER, state="EXHAUSTED",
+                 source="observed-limit", scope=scope,
+                 details={"observed_by": "checkpoint review", "review_id": rec.id, "run_id": run.id,
+                          "note": "observed limit; remaining quota is not published"})
+    else:
+        row = session.scalar(select(QuotaState).where(QuotaState.provider == NATIVE_QUOTA_PROVIDER,
+                                                      QuotaState.scope == scope))
+        if row is None or row.state != "EXHAUSTED":
+            return
+        q = call(cost.set_quota_state, session, provider=NATIVE_QUOTA_PROVIDER, state="UNKNOWN",
+                 source="observed-successful-call", scope=scope,
+                 details={"observed_by": "checkpoint review", "review_id": rec.id,
+                          "note": "a later review call succeeded; remaining quota is not published (UNKNOWN)"})
+    if not q.ok:
+        notes.append(f"native quota state {q.label()}")
 
 
 def _audit_emit(session: Session, rec: ReviewRecord, run: WorkerRun, *, actor: str, actor_type: str) -> None:

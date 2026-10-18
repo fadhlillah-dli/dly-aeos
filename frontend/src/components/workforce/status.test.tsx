@@ -21,6 +21,12 @@ describe("workforce status helpers (§35)", () => {
     expect(statusSpec(workerSpec("EXITED_3").status).tone).toBe("bad");
   });
 
+  it("understands the verifier's own vocabulary (PASS/FAIL/QUARANTINED)", () => {
+    expect(verifierSpec("PASS").label).toBe("Verifier: lulus");
+    expect(statusSpec(verifierSpec("FAIL").status).tone).toBe("bad");
+    expect(statusSpec(verifierSpec("QUARANTINED").status).tone).not.toBe("ok");
+  });
+
   it("shows canonical state next to the derived UI state", () => {
     render(<ExecState state="RUNNING" uiState="STALE" />);
     expect(screen.getByText("Berjalan")).toBeInTheDocument();

@@ -238,6 +238,15 @@ export default function RunDetailPage() {
               </p>
             )}
           </Card>
+          {r.task_execution?.reason_code === "ACCEPTANCE_STALE" && (
+            <Notice tone="warn">
+              Acceptance usang (head/base/konfigurasi berubah): tugas dibuka ulang untuk verifikasi dan review ulang. Hasil lama tidak lagi dihitung
+              diterima.
+            </Notice>
+          )}
+          {r.ui_state === "WAITING_QUOTA" && r.execution_state === "REVIEW" && (
+            <Notice tone="warn">Kuota Claude Max habis: review checkpoint menunggu (BLOCKED); tidak ada gate yang dibuka dan tidak ada repair otomatis.</Notice>
+          )}
           {r.quarantined && <QuarantineNotice run={r} isAdmin={isAdmin} onDone={() => qc.invalidateQueries({ queryKey: key })} />}
           {r.mode !== "LIVE" && <Notice tone="mock">Run ini adalah fixture {r.mode}; bukan pekerjaan nyata dan tidak dihitung.</Notice>}
 

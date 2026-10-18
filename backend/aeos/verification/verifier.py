@@ -31,6 +31,7 @@ import logging
 import shutil
 import sys
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -174,10 +175,22 @@ def compute_config_hash(*, suite_hash: str, trusted_root: Path, task_spec_hash: 
     })
 
 
-def current_config_hash(task: TaskSpec) -> str | None:
-    """Config hash a verification of *task* would have now (None when the trusted suite is unreadable)."""
+def current_config_hash(task: TaskSpec, session: Session | None = None) -> str | None:
+    """Config hash a verification of *task* would have now (None when the trusted suite is unreadable).
+
+    The suite is the project's trusted suite: the owner-registered copy when the project has a
+    registration (integration amendment, ADR-0060), otherwise the controller checkout (as before — a
+    project without a registration can never be verified PASS, and a hash computed from another suite
+    never matches a registered one, so this fallback cannot validate anything). A registered copy that
+    is missing or tampered gives None (UNKNOWN, fail closed)."""
+    from sqlalchemy.orm import object_session
+
     try:
+        s = session or object_session(task)
+        project = s.get(Project, task.project_id) if s is not None else None
         root = suite.trusted_controller_root().resolve()
+        if project is not None and not project.is_platform and suite.has_registration(s, project.id):
+            root = suite.resolve_trusted_suite(s, project).root
         return compute_config_hash(suite_hash=suite.trusted_suite_hash(root), trusted_root=root,
                                    task_spec_hash=task.spec_hash, policy=dict(task.verifier_policy or {}))
     except (AeosError, OSError):
@@ -247,6 +260,7 @@ class VerificationOutcome:
     run_update: str = "NOT_ATTEMPTED"
     task_transition: str = "NOT_ATTEMPTED"
     repair: str = "NOT_ATTEMPTED"
+    compute_usage: str = "NOT_RECORDED"
     verifier: str = field(default_factory=verifier_identity)
 
     def to_dict(self) -> dict[str, Any]:
@@ -375,6 +389,7 @@ class _Verifier:
         self.changed_entries: list[tuple[str, str]] = []
         self.numstat: dict[str, dict[str, int | None]] = {}
         self.identity = verifier_identity()
+        self.started = time.monotonic()
         self.env_identity: dict[str, Any] = {"verifier": self.identity, "python": sys.version.split()[0],
                                              "platform": sys.platform, "verifier_version": VERIFIER_VERSION}
 
@@ -405,12 +420,18 @@ class _Verifier:
             candidate = self._candidate(run, project)
             if task is None:
                 raise _Blocked("NO_TASKSPEC", "run has no TaskSpec; scope cannot be verified")
-            if not project.is_platform:
-                raise _Blocked("NO_TRUSTED_SUITE",
-                               "no trusted acceptance suite is registered outside the candidate for this project")
+            try:
+                # platform: the trusted controller checkout; other projects: the owner-registered copy
+                # bound to a POLICY decision on its hash (integration amendment, ADR-0060)
+                trusted_suite = suite.resolve_trusted_suite(s, project)
+            except AeosError as exc:
+                raise _Blocked(exc.code, exc.message) from exc
             if importlib.util.find_spec("pytest") is None:
                 raise _Blocked("PYTEST_UNAVAILABLE", "pytest is not installed in the controller environment")
-            trusted_root = suite.trusted_controller_root().resolve()
+            trusted_root = trusted_suite.root
+            self.env_identity["suite_kind"] = trusted_suite.kind
+            if trusted_suite.decision_id:
+                self.env_identity["suite_decision_id"] = trusted_suite.decision_id
             self._check_separation(candidate, trusted_root)
             try:
                 suite_files = suite.trusted_suite_files(trusted_root)
@@ -430,8 +451,11 @@ class _Verifier:
             snapshot.mkdir()
             snap_ok = self._export(git, snapshot)
             self._static_scans(diff, snapshot if snap_ok else None)
+            # Trusted *code* for collecting the expected test ids: the controller checkout for the
+            # platform, the human-reviewed base commit of the project otherwise (never the candidate head).
+            code_root = trusted_root if trusted_suite.kind == "CONTROLLER" else self._export_base(git, workdir)
             if snap_ok:
-                snap_ok = self._check_shadowing(snapshot, trusted_root)
+                snap_ok = self._check_shadowing(snapshot, code_root)
             if snap_ok:
                 trusted_copy = workdir / "tr"
                 copied, copy_hash = suite.copy_trusted_suite(trusted_copy, trusted_root)
@@ -440,7 +464,7 @@ class _Verifier:
                 ini = workdir / "pytest.ini"
                 ini.write_text(PYTEST_INI, encoding="utf-8")
                 self._preflight(snapshot, workdir, limits)
-                expected = self._collect_expected(trusted_root, trusted_copy, ini, workdir, limits)
+                expected = self._collect_expected(code_root, trusted_copy, ini, workdir, limits)
                 trusted_ran = True
                 self._run_trusted_suite(snapshot, trusted_copy, ini, workdir, limits, expected)
                 self._check_suite_integrity(copied, trusted_root)
@@ -605,6 +629,17 @@ class _Verifier:
             except FileExistsError:
                 continue
         raise _Blocked("WORKDIR_UNAVAILABLE", "could not allocate a verifier work directory")
+
+    def _export_base(self, git: GitReader, workdir: Path) -> Path:
+        """Materialise the recorded base commit (human-reviewed state) for collecting the expected ids."""
+        base_dir = workdir / "bs"
+        base_dir.mkdir()
+        try:
+            git.export_tree(self.out.base_commit or "", base_dir, max_bytes=MAX_SNAPSHOT_BYTES)
+        except (SnapshotError, GitError) as exc:
+            raise _Blocked("BASE_UNREADABLE", f"base commit could not be materialised for trusted collection: {exc}") \
+                from exc
+        return base_dir
 
     def _export(self, git: GitReader, snapshot: Path) -> bool:
         try:
@@ -979,13 +1014,16 @@ class _Verifier:
         out, run = self.out, self.run_row
         out.run_update = call(workforce.update_run, self.session, run.id, actor=ORIGIN,
                               verifier_status=out.status).label()
+        self._record_compute()
         if not run.task_id:
             return
         if out.status == "QUARANTINED":
+            # BLOCKED with the QUARANTINED code waits for the special review (owner action); the
+            # scheduler never turns it into a new attempt on its own (integration amendment, ADR-0050).
             out.task_transition = call(
                 workforce.transition_task, self.session, run.task_id, ExecutionState.BLOCKED.value,
                 reason=f"QUARANTINED: {out.quarantine_reason}"[:1000], actor=ORIGIN,
-                expected_from=ExecutionState.REVIEW.value,
+                expected_from=ExecutionState.REVIEW.value, reason_code="QUARANTINED",
             ).label()
         elif out.status == "FAIL" and self.request_repair_on_fail:
             findings: list[dict[str, Any]] = [
@@ -996,6 +1034,18 @@ class _Verifier:
                          for t in out.failing_tests[:20]]
             out.repair = call(workforce.request_repair, self.session, run.task_id, findings=findings,
                               review_record_id=None, actor=ORIGIN).label()
+
+    def _record_compute(self) -> None:
+        """§42 units kept separate: the verifier's wall-clock compute seconds (cash cost UNKNOWN)."""
+        from aeos.cost import facade as cost
+
+        run = self.run_row
+        seconds = round(max(0.0, time.monotonic() - self.started), 3)
+        mode = run.mode if run.mode in {m.value for m in DataMode} else "LIVE"
+        rec = call(cost.record_unit_usage, self.session, provider="aeos-verifier", category="COMPUTE",
+                   source="verifier", quantity=seconds, unit="seconds", project_id=self.out.project_id,
+                   domain=self.out.domain, run_id=run.id, task_id=run.task_id, mode=mode)
+        self.out.compute_usage = f"{seconds}s {rec.label()}"
 
     def _audit_and_emit(self) -> None:
         out, run = self.out, self.run_row
