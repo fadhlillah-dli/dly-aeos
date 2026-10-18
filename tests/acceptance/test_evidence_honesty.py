@@ -56,20 +56,40 @@ def test_grader_policy_pipeline_changes_never_pass_scope():
         assert allowed.quarantine_reason
 
 
-def test_acceptance_validity_is_bound_to_identity(db):
+def test_acceptance_validity_is_bound_to_identity(db, tmp_path, monkeypatch):
+    """Also §50 "Config/model/provider berubah" + "Worker mengubah grader": a changed grader (trusted
+    suite) or a moved run head makes an ACCEPTED record invalid even before anyone re-checks it."""
     from aeos.models.evidence import AcceptanceRecord
+    from aeos.verification import suite
+    from aeos.verification.verifier import current_config_hash
 
+    grader = tmp_path / "controller" / "tests" / "acceptance" / "test_grader.py"
+    grader.parent.mkdir(parents=True)
+    grader.write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    monkeypatch.setattr(suite, "trusted_controller_root", lambda: tmp_path / "controller")
     rec = make_records(db)
+    cfg = current_config_hash(rec.task)
+    assert cfg
     db.add(AcceptanceRecord(task_id=rec.task.id, run_id=rec.run.id, project_id=rec.project.id,
                             artifact_hash="sha256:art", base_commit="b" * 40, head_commit="a" * 40,
-                            config_hash="sha256:cfg", plan_version_hash=rec.task.plan_version_hash,
+                            config_hash=cfg, plan_version_hash=rec.task.plan_version_hash,
                             acceptance_status="ACCEPTED", mode="LIVE"))
     db.commit()
-    assert verification.acceptance_is_valid(db, rec.task.id, base_commit="b" * 40, config_hash="sha256:cfg",
+    assert verification.acceptance_is_valid(db, rec.task.id, base_commit="b" * 40, config_hash=cfg,
                                             plan_version_hash=rec.task.plan_version_hash)
+    assert verification.acceptance_is_valid(db, rec.task.id)
     assert not verification.acceptance_is_valid(db, rec.task.id, base_commit="c" * 40)
     assert not verification.acceptance_is_valid(db, rec.task.id, config_hash="sha256:new-grader")
     assert not verification.acceptance_is_valid(db, rec.task.id, plan_version_hash="sha256:new-plan")
+    # the grader changes -> the accepted identity no longer holds (fail closed, no caller identity needed)
+    grader.write_text("def test_x():\n    assert 1 == 1\n", encoding="utf-8")
+    assert not verification.acceptance_is_valid(db, rec.task.id)
+    grader.write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    assert verification.acceptance_is_valid(db, rec.task.id)
+    # new commits on the run (head moved) -> not valid any more
+    rec.run.head_commit = "9" * 40
+    db.commit()
+    assert not verification.acceptance_is_valid(db, rec.task.id)
 
 
 def test_mock_acceptance_is_never_valid(db):

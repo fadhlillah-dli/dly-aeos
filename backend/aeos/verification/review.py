@@ -558,11 +558,17 @@ def collect_manual_review(session: Session, review_id: str, *, actor: str, actor
     if waiting.status != "NEEDS_DECISION":
         raise Conflict("only reviews waiting for a manual result can be completed", code="REVIEW_NOT_WAITING")
     run, _project, task = _load(session, waiting.run_id or "")
+    if run.execution_status != ExecutionState.REVIEW.value:
+        raise Conflict("the run is no longer in REVIEW; request a new review for the current attempt",
+                       code="RUN_NOT_IN_REVIEW", details={"execution_status": run.execution_status})
     report = latest_report(session, run.id)
     view = report_view(report) or {}
     if view.get("artifact_hash") != waiting.target_hash:
         raise Conflict("the candidate changed since the package was created; request a new review",
                        code="REVIEW_PACKAGE_STALE")
+    if view.get("status") != "PASS":
+        raise Blocked(f"latest verifier status is {view.get('status')}; a review result cannot be imported",
+                      code="VERIFICATION_NOT_PASSED", details={"verifier_status": view.get("status")})
     model_resolved: str | None = None
     engine_version: str | None = None
     role = SECURITY_ROLE if waiting.reviewer_kind == "SECURITY" else REVIEWER_ROLE

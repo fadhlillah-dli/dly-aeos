@@ -4,6 +4,8 @@ merge call anywhere (see test_delivery_no_merge)."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import respx
 
@@ -14,18 +16,22 @@ from aeos.models.evidence import EvidenceArtifact
 from aeos.policy.facade import InterlockResult
 from aeos.verification import acceptance
 from tests.unit.test_verification_support import (
-    HEAD,
     FakeWorkforce,
+    git,
     install_doctor,
     install_module,
     install_planning,
+    make_candidate,
     make_review,
     make_world,
     record_verification,
     remove_module,
+    requires_git,
 )
 
 REPO = "fadhlillah-dli/dly-aeos"
+BRANCH = "aeos/t1-attempt-1"
+pytestmark = requires_git
 
 
 @pytest.fixture
@@ -35,17 +41,22 @@ def wf(monkeypatch) -> FakeWorkforce:
 
 @pytest.fixture
 def accepted(db, wf, monkeypatch, settings):
-    w = make_world(db, repo=REPO, workspace=str(settings.layout.root / "cand"))
+    """An accepted task whose candidate is a real git repo: the task branch points at the accepted head."""
+    w = make_world(db, repo=REPO)
+    cand, base, head = make_candidate(settings, w, head_files={"backend/extra.py": "X = 1\n"})
+    git(cand, "branch", BRANCH, head)
+    w.run.workspace_ref = str(cand)
     install_planning(monkeypatch, w.version)
-    report = record_verification(db, w)
+    report = record_verification(db, w, head=head, base=base)
     make_review(db, w, report)
     acc = acceptance.evaluate_acceptance(db, w.run.id)
     db.commit()
+    assert acc.acceptance_status == "ACCEPTED"
     return w, acc
 
 
 class FakeBroker:
-    def __init__(self, monkeypatch, *, head_sha=HEAD):
+    def __init__(self, monkeypatch, *, head_sha: str | None):
         self.calls: list[tuple[str, dict]] = []
 
         def push_task_branch(session, *, run_id, worktree, branch, repo_full_name):
@@ -103,7 +114,7 @@ def test_prepare_pr_happy_path_uses_broker_only(db, accepted, monkeypatch):
     w, acc = accepted
     install_doctor(monkeypatch, "READY")
     intents = _allow(monkeypatch)
-    broker = FakeBroker(monkeypatch)
+    broker = FakeBroker(monkeypatch, head_sha=acc.head_commit)
     out = pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
     db.commit()
     assert [c[0] for c in broker.calls] == ["push", "pr"]
@@ -111,7 +122,7 @@ def test_prepare_pr_happy_path_uses_broker_only(db, accepted, monkeypatch):
     assert broker.calls[1][1]["base"] == "main" and "Merge authority: human only" in broker.calls[1][1]["body"]
     assert intents[0].operation == "create_pr" and intents[0].approved_hash == w.task.plan_version_hash
     pr = db.get(PullRequestRecord, out["pull_request"]["id"])
-    assert pr.state == "OPEN" and pr.number == 12 and pr.accepted_head_sha == HEAD
+    assert pr.state == "OPEN" and pr.number == 12 and pr.accepted_head_sha == acc.head_commit
     assert pr.initial_base_sha == "b" * 40 and out["merge_authority"] == "HUMAN_ONLY"
     bundle_ev = db.get(EvidenceArtifact, pr.bundle_evidence_id)
     assert bundle_ev.kind == "PR_BUNDLE"
@@ -121,10 +132,10 @@ def test_prepare_pr_happy_path_uses_broker_only(db, accepted, monkeypatch):
 
 @pytest.mark.parametrize("status", ["BLOCKED", "UNKNOWN", "DEGRADED"])
 def test_prepare_pr_requires_capability(db, accepted, monkeypatch, status):
-    w, _ = accepted
+    w, acc = accepted
     install_doctor(monkeypatch, status)
     _allow(monkeypatch)
-    broker = FakeBroker(monkeypatch)
+    broker = FakeBroker(monkeypatch, head_sha=acc.head_commit)
     with pytest.raises(Blocked) as e:
         pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
     assert e.value.code == "CAPABILITY_NOT_READY" and not broker.calls
@@ -148,10 +159,10 @@ def test_prepare_pr_fails_closed_when_modules_missing(db, accepted, monkeypatch)
 
 
 def test_prepare_pr_interlock_denial(db, accepted, monkeypatch):
-    w, _ = accepted
+    w, acc = accepted
     install_doctor(monkeypatch, "READY")
     _allow(monkeypatch, allowed=False, reasons=["bootstrap incomplete"])
-    broker = FakeBroker(monkeypatch)
+    broker = FakeBroker(monkeypatch, head_sha=acc.head_commit)
     with pytest.raises(PolicyDenied) as e:
         pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
     assert e.value.details["reasons"] == ["bootstrap incomplete"] and not broker.calls
@@ -178,12 +189,51 @@ def test_task_branch_required(db, accepted, monkeypatch):
     assert e.value.code == "BRANCH_NOT_TASK_BRANCH"
 
 
+def test_task_branch_moved_after_acceptance_is_refused_before_push(db, accepted, monkeypatch):
+    """§50 "PR baru mengubah head": the broker pushes the branch tip, so a tip that moved after acceptance
+    is refused before anything is pushed, and the acceptance becomes STALE."""
+    w, acc = accepted
+    install_doctor(monkeypatch, "READY")
+    _allow(monkeypatch)
+    broker = FakeBroker(monkeypatch, head_sha=acc.head_commit)
+    cand = w.run.workspace_ref
+    (Path(cand) / "backend" / "late.py").write_text("Y = 2\n", encoding="utf-8")
+    git(Path(cand), "add", "-A")
+    git(Path(cand), "commit", "-q", "-m", "late change")
+    git(Path(cand), "branch", "-f", BRANCH, "HEAD")
+    with pytest.raises(Conflict) as e:
+        pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
+    assert e.value.code == "HEAD_MISMATCH" and not broker.calls
+    assert acc.acceptance_status == "STALE"
+
+
+def test_unreadable_task_branch_is_blocked(db, accepted, monkeypatch):
+    w, acc = accepted
+    install_doctor(monkeypatch, "READY")
+    broker = FakeBroker(monkeypatch, head_sha=acc.head_commit)
+    w.run.branch = "aeos/does-not-exist"
+    db.commit()
+    with pytest.raises(Blocked) as e:
+        pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
+    assert e.value.code == "BRANCH_UNRESOLVED" and not broker.calls
+
+
+def test_broker_without_pushed_sha_is_reported_not_proven(db, accepted, monkeypatch):
+    w, acc = accepted
+    install_doctor(monkeypatch, "READY")
+    _allow(monkeypatch)
+    FakeBroker(monkeypatch, head_sha=None)
+    out = pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
+    assert any("NOT-PROVEN" in n for n in out["notes"])
+    assert out["pull_request"]["observed_head_sha"] is None
+
+
 def _pr(db, w, acc, **kw):
     pr = PullRequestRecord(project_id=w.project.id, domain="PERSONAL", task_id=w.task.id, run_id=w.run.id,
-                           acceptance_id=acc.id, repo_full_name=REPO, number=12, head_ref="aeos/t1-attempt-1",
-                           base_ref="main", accepted_head_sha=HEAD, initial_base_sha="b" * 40,
-                           observed_head_sha=HEAD, observed_base_sha="b" * 40, bundle_hash="sha256:x", state="OPEN",
-                           **kw)
+                           acceptance_id=acc.id, repo_full_name=REPO, number=12, head_ref=BRANCH,
+                           base_ref="main", accepted_head_sha=acc.head_commit, initial_base_sha="b" * 40,
+                           observed_head_sha=acc.head_commit, observed_base_sha="b" * 40, bundle_hash="sha256:x",
+                           state="OPEN", **kw)
     db.add(pr)
     db.commit()
     return pr
@@ -192,7 +242,7 @@ def _pr(db, w, acc, **kw):
 API = provider.GITHUB_API
 
 
-def _pull(head=HEAD, base="b" * 40, merged=False, merged_by=None):
+def _pull(head, base="b" * 40, merged=False, merged_by=None):
     return {"number": 12, "state": "closed" if merged else "open", "merged": merged, "merged_by": merged_by,
             "merged_at": "2026-10-18T10:00:00Z" if merged else None, "merge_commit_sha": "e" * 40 if merged else None,
             "head": {"sha": head, "ref": "aeos/t1-attempt-1"}, "base": {"sha": base, "ref": "main"},
@@ -219,8 +269,8 @@ def test_sync_base_moved_makes_acceptance_stale(respx_mock, db, accepted, secret
     w, acc = accepted
     secrets_memory.put("personal/github", "a-test-token-value", actor="t")
     pr = _pr(db, w, acc)
-    respx_mock.get(f"{API}/repos/{REPO}/pulls/12").respond(200, json=_pull(base="c" * 40))
-    respx_mock.get(f"{API}/repos/{REPO}/commits/{HEAD}/check-runs").respond(200, json={"check_runs": []})
+    respx_mock.get(f"{API}/repos/{REPO}/pulls/12").respond(200, json=_pull(acc.head_commit, base="c" * 40))
+    respx_mock.get(f"{API}/repos/{REPO}/commits/{acc.head_commit}/check-runs").respond(200, json={"check_runs": []})
     sync.sync_pull_request(db, pr.id, actor="owner")
     assert acc.acceptance_status == "STALE" and "base moved" in acc.invalidated_reason
 
@@ -231,9 +281,9 @@ def test_sync_human_merge_records_ci_on_merge_commit(respx_mock, db, accepted, s
     secrets_memory.put("personal/github", "a-test-token-value", actor="t")
     pr = _pr(db, w, acc)
     respx_mock.get(f"{API}/repos/{REPO}/pulls/12").respond(200, json=_pull(
-        merged=True, merged_by={"login": "fadhlillah-dli", "type": "User"}))
+        acc.head_commit, merged=True, merged_by={"login": "fadhlillah-dli", "type": "User"}))
     ok = {"check_runs": [{"name": "backend (ubuntu-latest)", "status": "completed", "conclusion": "success"}]}
-    respx_mock.get(f"{API}/repos/{REPO}/commits/{HEAD}/check-runs").respond(200, json=ok)
+    respx_mock.get(f"{API}/repos/{REPO}/commits/{acc.head_commit}/check-runs").respond(200, json=ok)
     respx_mock.get(f"{API}/repos/{REPO}/commits/{'e' * 40}/check-runs").respond(200, json=ok)
     out = sync.sync_pull_request(db, pr.id, actor="owner")
     db.commit()
@@ -255,5 +305,5 @@ def test_sync_without_credential_is_failed_not_assumed(db, accepted, secrets_mem
 def test_branch_update_hook_invalidates(db, accepted):
     w, acc = accepted
     _pr(db, w, acc)
-    assert sync.on_branch_updated(db, repo=REPO, branch="aeos/t1-attempt-1", head_sha="8" * 40) == 1
+    assert sync.on_branch_updated(db, repo=REPO, branch=BRANCH, head_sha="8" * 40) == 1
     assert acc.acceptance_status == "STALE"

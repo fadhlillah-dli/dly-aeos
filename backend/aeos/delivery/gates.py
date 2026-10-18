@@ -35,8 +35,13 @@ from aeos.models.workforce import TaskExecution, WorkerRun
 from aeos.verification import acceptance as acceptance_mod
 from aeos.verification import collector
 from aeos.verification.integration import call
-from aeos.verification.review import PASS_VERDICTS, latest_review, security_review_required
-from aeos.verification.verifier import latest_report, related_evidence, report_view
+from aeos.verification.review import (
+    NON_REGRESSION_SCOPE,
+    PASS_VERDICTS,
+    latest_review,
+    security_review_required,
+)
+from aeos.verification.verifier import current_config_hash, latest_report, related_evidence, report_view
 
 GATE_NAMES: tuple[tuple[str, str], ...] = (
     ("G0", "Input / policy"),
@@ -93,7 +98,10 @@ def ci_gate_status(ev: EvidenceArtifact | None, gate: str) -> tuple[str, list[st
                          gates=[str(g) for g in (r.get("gates") or [])])
             for r in data.get("runs") or [] if isinstance(r, dict)]
     selected = [r for r in runs if gate in r.gates]
-    return summarize_runs(selected), [r.name for r in selected]
+    status = summarize_runs(selected)
+    if data.get("truncated") and status in ("PASS", "NO_CHECKS"):
+        status = "NOT_PROVEN"  # the provider reported more check-runs than were read
+    return status, [r.name for r in selected]
 
 
 def latest_pr(session: Session, task_id: str) -> PullRequestRecord | None:
@@ -165,7 +173,7 @@ def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
 
     # G1 static — provider CI is the source; verifier static checks support (and can fail) it.
     ci1, names1 = ci_gate_status(ci_head, "G1")
-    v_static_fail = view is not None and (view.get("ruff_status") == "FAIL" or view.get("secret_scan_status") == "FAIL"
+    v_static_fail = view is not None and (view.get("ruff_status") == "FAIL" or view.get("leak_scan_status") == "FAIL"
                                           or view.get("scope_status") == "FAIL")
     refs1 = [ci_head.id if ci_head else None, view["evidence_id"] if view else None]
     if ci1 == "FAIL" or v_static_fail:
@@ -189,14 +197,20 @@ def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
         vs = view["status"]
         stale = bool(run and run.head_commit and view.get("head_commit") and run.head_commit != view["head_commit"])
         stale = stale or bool(head and view.get("head_commit") and head != view["head_commit"])
+        # §08/§50: a changed grader/lint/verifier/TaskSpec configuration makes the old result stale too
+        current_cfg = current_config_hash(task)
+        config_stale = vs == "PASS" and (current_cfg is None or view.get("config_hash") != current_cfg)
         mapping = {"PASS": "PASS", "FAIL": "FAIL", "QUARANTINED": "BLOCKED", "NOT_PROVEN": "NOT_PROVEN",
                    "BLOCKED": "BLOCKED"}
-        status = "STALE" if stale else mapping.get(vs, "UNKNOWN")
+        status = "STALE" if (stale or config_stale) else mapping.get(vs, "UNKNOWN")
         summary = (f"Suite terpercaya: {view.get('tests_passed')} lulus, {view.get('tests_failed')} gagal, "
                    f"{view.get('tests_skipped')} dilewati" if view.get("tests_passed") is not None
                    else str(view.get("summary") or vs))
         if stale:
             summary = "Verifikasi tidak lagi mencakup head terbaru — perlu verifikasi ulang"
+        elif config_stale:
+            summary = ("Konfigurasi verifier/grader berubah atau tidak diketahui sejak verifikasi — "
+                       "perlu verifikasi ulang")
         gates.append(_gate("G2", status, summary, "independent verifier (trusted suite)", [view["evidence_id"]],
                            reasons=[str(view.get("summary") or "")]))
 
@@ -239,7 +253,18 @@ def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
         sec_needed = security_review_required(task, view)
         sec_ok = (sec is not None and sec.status == "COMPLETED" and sec.mode != "MOCK" and sec.verdict in PASS_VERDICTS
                   and view is not None and sec.target_hash == view.get("artifact_hash"))
-        if g2 == "PASS" and bound and sec_needed and not sec_ok:
+        static_ok = bool(view and view.get("docs_only")) and acceptance_mod.static_allowed(task)
+        nr_gaps = [k for k, _q in NON_REGRESSION_SCOPE
+                   if (review.non_regression or {}).get(k, {}).get("status") not in ("COVERED", "NOT_APPLICABLE")]
+        high_impact = bool(view and view.get("impact") == "HIGH")
+        if review.verdict == "PASS-STATIC" and not static_ok:
+            gates.append(_gate("G4", "NOT_PROVEN", "PASS-STATIC hanya cukup untuk perubahan dokumen yang diizinkan "
+                                                   "TaskSpec", "review_records", [review.id]))
+        elif high_impact and nr_gaps:
+            gates.append(_gate("G4", "NOT_PROVEN", "Perubahan berdampak tinggi: non-regression belum seluruhnya "
+                                                   "dibuktikan (§31, §34)", "review_records", [review.id],
+                               reasons=[f"non-regression '{k}' belum COVERED/NOT_APPLICABLE" for k in nr_gaps]))
+        elif g2 == "PASS" and bound and sec_needed and not sec_ok:
             status = "BLOCKED" if sec is not None and sec.status != "COMPLETED" else (
                 "FAIL" if sec is not None and sec.verdict == "FAIL" else "PENDING")
             gates.append(_gate("G4", status, "Review keamanan terpisah diperlukan (§15) dan belum lulus",

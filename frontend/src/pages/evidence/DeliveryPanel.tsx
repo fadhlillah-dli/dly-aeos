@@ -146,7 +146,19 @@ export function DeliveryPanel() {
                   </span>
                 ),
               },
-              { header: "Sinkron", cell: (p) => <span className="text-xs"><Status status={p.sync_status === "SYNCED" ? "VERIFIED" : p.sync_status === "FAILED" ? "FAILED" : "NOT_CHECKED"} label={p.sync_status} /> {p.sync_error}</span> },
+              {
+                header: "Sinkron",
+                cell: (p) => (
+                  <span className="text-xs">
+                    {/* an observation of the provider, not a verification */}
+                    <Status
+                      status={p.sync_status === "SYNCED" ? "CONFIGURED" : p.sync_status === "FAILED" ? "FAILED" : "NOT_CHECKED"}
+                      label={p.sync_status === "SYNCED" ? "Teramati" : p.sync_status === "FAILED" ? "Gagal sinkron" : "Belum disinkronkan"}
+                    />{" "}
+                    {p.last_synced_at && <Freshness at={p.last_synced_at} label="Sinkron" />} {p.sync_error}
+                  </span>
+                ),
+              },
               {
                 header: "",
                 cell: (p) =>

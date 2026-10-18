@@ -341,13 +341,17 @@ class CIStatus:
     checked_at: str
     error: str | None = None
     source: str = "GitHub check-runs API (provider is the CI source of truth)"
+    truncated: bool = False  # the provider reported more check-runs than were read
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def gate_status(self, gate: str) -> tuple[str, list[str]]:
         runs = [r for r in self.runs if gate in r.gates]
-        return summarize_runs(runs, error=self.error), [r.name for r in runs]
+        status = summarize_runs(runs, error=self.error)
+        if self.truncated and status in ("PASS", "NO_CHECKS"):
+            status = "NOT_PROVEN"
+        return status, [r.name for r in runs]
 
 
 def classify_check(name: str) -> list[str]:
@@ -374,9 +378,11 @@ def summarize_runs(runs: list[CheckRunView], *, error: str | None = None) -> str
 def parse_check_runs(repo: str, sha: str, payloads: list[dict[str, Any]]) -> CIStatus:
     runs: list[CheckRunView] = []
     total = 0
+    read = 0
     for body in payloads:
         total = max(total, int(body.get("total_count") or 0))
         for cr in body.get("check_runs") or []:
+            read += 1
             if not isinstance(cr, dict):
                 continue
             if cr.get("head_sha") and cr.get("head_sha") != sha:
@@ -387,8 +393,12 @@ def parse_check_runs(repo: str, sha: str, payloads: list[dict[str, Any]]) -> CIS
                 app=(cr.get("app") or {}).get("slug"), url=cr.get("html_url"), started_at=cr.get("started_at"),
                 completed_at=cr.get("completed_at"), gates=classify_check(name),
             ))
-    return CIStatus(repo=repo, sha=sha, overall=summarize_runs(runs), total=len(runs), runs=runs,
-                    checked_at=utcnow().isoformat())
+    truncated = total > read
+    overall = summarize_runs(runs)
+    if truncated and overall in ("PASS", "NO_CHECKS"):
+        overall = "NOT_PROVEN"  # unseen check-runs could be failing: a partial read is never a pass
+    return CIStatus(repo=repo, sha=sha, overall=overall, total=len(runs), runs=runs,
+                    checked_at=utcnow().isoformat(), truncated=truncated)
 
 
 def fetch_check_runs(repo: str, sha: str, *, token: str | None, client: httpx.Client | None = None,

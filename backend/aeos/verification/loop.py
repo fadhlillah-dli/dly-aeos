@@ -39,7 +39,10 @@ def pending_runs(session: Any) -> list[WorkerRun]:
     out: list[WorkerRun] = []
     for run in rows:
         view = report_view(latest_report(session, run.id))
-        if view is None or view.get("head_commit") != run.head_commit:
+        # A report counts for this head when it resolved it (head_commit) or was requested for it
+        # (requested_head — also recorded when the run was BLOCKED before the head could be resolved),
+        # so a BLOCKED verification is never retried automatically for the same head.
+        if view is None or run.head_commit not in (view.get("head_commit"), view.get("requested_head")):
             out.append(run)
     return out
 

@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, load_project
+from aeos.audit import service as audit
 from aeos.core.enums import Domain
 from aeos.core.errors import AeosError, NotFound
 from aeos.core.timeutil import utcnow
@@ -43,6 +44,8 @@ def prepare_pr(task_id: str, body: PreparePRIn, principal: AdminPrincipal, domai
     try:
         result = pr_bundle.prepare_pr(db, task.id, actor_user_id=principal.user.id, base_branch=body.base_branch)
     except AeosError as exc:
+        if exc.code == "HEAD_MISMATCH":
+            db.commit()  # keep the acceptance invalidation (STALE) — audit_denied rolls back otherwise
         audit_denied(db, principal, "delivery.pr.prepare", exc, target_type="task", target_id=task.id,
                      project_id=task.project_id, domain=task.domain)
         raise
@@ -106,6 +109,10 @@ def record_capabilities(body: CapabilityRecordIn, principal: AdminPrincipal, dom
     caps = provider.check_capabilities(ref.full_name, body.branch or ref.default_branch, token=token,
                                        credential=credential)
     ev = provider.record_capability_evidence(db, project, caps)
+    audit.record(db, actor_type="user", actor_id=principal.user.id, action="delivery.provider.capabilities",
+                 result="SUCCESS", target_type="repository", target_id=ref.full_name, project_id=project.id,
+                 domain=project.domain, details={"evidence_id": ev.id, "merge_gate": caps.merge_gate,
+                                                 "branch": caps.branch, "access": caps.credential})
     db.commit()
     out = caps.to_dict()
     out["evidence_id"] = ev.id
@@ -144,7 +151,12 @@ class HandoffIn(BaseModel):
 def governance_handoff(task_id: str, body: HandoffIn, principal: AdminPrincipal, domain: ActiveDomain,
                        db: DB) -> dict[str, Any]:
     task = _load_task(db, principal, domain, task_id)
-    result = governance.handoff(db, task.id, actor=principal.user.id, artifact_hash=body.artifact_hash)
+    try:
+        result = governance.handoff(db, task.id, actor=principal.user.id, artifact_hash=body.artifact_hash)
+    except AeosError as exc:
+        audit_denied(db, principal, "delivery.governance.handoff", exc, target_type="task", target_id=task.id,
+                     project_id=task.project_id, domain=task.domain)
+        raise
     db.commit()
     return result
 

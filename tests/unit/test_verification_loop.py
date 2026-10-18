@@ -37,6 +37,25 @@ def test_run_once_verifies_each_head_once(db, settings, tmp_path: Path, monkeypa
     assert loop.run_once() == []
 
 
+def test_blocked_verification_is_not_retried_for_the_same_head(db, settings, tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch):
+    """A run whose head cannot be resolved is BLOCKED once; the loop does not hammer it every tick, but a
+    new head (the runtime recorded new commits) is picked up again."""
+    FakeWorkforce().install(monkeypatch)
+    root = make_controller(tmp_path / "controller")
+    monkeypatch.setattr(suite, "trusted_controller_root", lambda: root)
+    w = make_world(db, verifier_policy={"ruff": False, "candidate_tests": False})
+    cand, base, _head = make_candidate(settings, w, head_files={"backend/extra.py": "X = 1\n"})
+    bind_candidate(db, w, cand, base, "e" * 40)  # a head commit that does not exist in the candidate
+    results = loop.run_once()
+    assert [r["status"] for r in results] == ["BLOCKED"]
+    db.expire_all()
+    assert loop.pending_runs(db) == [], "BLOCKED for this exact head -> not retried automatically"
+    w.run.head_commit = _head
+    db.commit()
+    assert [r.id for r in loop.pending_runs(db)] == [w.run.id]
+
+
 def test_start_stop_is_idempotent(settings):
     loop.start(settings)
     loop.start(settings)

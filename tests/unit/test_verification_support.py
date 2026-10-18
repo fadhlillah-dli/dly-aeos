@@ -223,7 +223,7 @@ BASE = "b" * 40
 
 def record_verification(db, world: World, *, status: str = "PASS", head: str = HEAD, base: str = BASE,
                         artifact_hash: str = "sha256:" + "c" * 64, changed: list[str] | None = None,
-                        mode: str = "LIVE", config_hash: str | None = None, ruff: str = "PASS"):
+                        mode: str = "LIVE", config_hash: str | None = None, ruff: str = "PASS", leak: str = "PASS"):
     """Record evidence the way the verifier does (origin verifier) without running subprocesses."""
     from aeos.verification import collector
     from aeos.verification.scope import check_scope
@@ -250,7 +250,7 @@ def record_verification(db, world: World, *, status: str = "PASS", head: str = H
     report = collector.collect_evidence(
         db, kind="VERIFICATION_REPORT", claim=f"verification {status}", evidence_level="E2",
         content={"status": status, "summary": "test", "trusted_suite_status": status, "ruff_status": ruff,
-                 "scope_status": "PASS", "secret_scan_status": "PASS", "tests_passed": 3, "tests_failed": 0,
+                 "scope_status": "PASS", "leak_scan_status": leak, "tests_passed": 3, "tests_failed": 0,
                  "tests_skipped": 0, "docs_only": scope.docs_only, "impact": "HIGH" if scope.high_impact else "NORMAL",
                  "security_sensitive": bool(scope.security_sensitive), "evidence_refs": [sc.id, df.id, tr.id],
                  "not_proven": [], "residual_risks": ["same-user process"]}, **common)

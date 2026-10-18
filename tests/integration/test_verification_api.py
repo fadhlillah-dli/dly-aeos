@@ -199,3 +199,18 @@ def test_cli_gates_and_capabilities(settings, db, wf, monkeypatch):
     res.output.encode("ascii")
     res = runner.invoke(verify_cli, ["run", "does-not-exist"])
     assert res.exit_code == 2 and "NOT_FOUND" in res.output
+
+
+def test_refused_privileged_actions_are_audited(personal_client: AuthedClient, db, wf):
+    """Every privileged action leaves an audit row, including refusals (AGENTS.md)."""
+    w = make_world(db, run_state="RUNNING")
+    r = personal_client.post(f"/api/runs/{w.run.id}/verify", json={})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "RUN_NOT_IN_REVIEW"
+    r = personal_client.post(f"/api/runs/{w.run.id}/acceptance/evaluate", json={})
+    assert r.status_code == 409
+    r = personal_client.post(f"/api/delivery/governance/{w.task.id}/handoff", json={})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "ACCEPTANCE_REQUIRED"
+    db.expire_all()
+    for action in ("verification.run", "verification.acceptance.decide", "delivery.governance.handoff"):
+        rows = audit.list_events(db, action_prefix=action)
+        assert rows and rows[0].result in ("DENIED", "FAILED") and rows[0].target_id in (w.run.id, w.task.id), action
