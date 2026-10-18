@@ -1,11 +1,15 @@
-"""Research & Technology Registry, ChangeProposal, evaluation (§39, §40, §43, §44, §47)."""
+"""Research & Technology Registry, ChangeProposal, evaluation (§39, §40, §43, §44, §47).
+
+ResearchEntry / ChangeProposal / EvalSuite / EvalRun are owned by module group H (research,
+proposals, evaluation). ContextPack / MemoryRecord are owned by the knowledge module (§24).
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Integer, String, Text
+from sqlalchemy import JSON, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aeos.core.db import Base
@@ -13,8 +17,14 @@ from aeos.models.base import IdMixin, TimestampMixin
 
 
 class ResearchEntry(IdMixin, TimestampMixin, Base):
-    __tablename__ = "research_entries"
+    """§47 registry entry. Research lifecycle is NOT installation/connection/usage evidence; the
+    §38 inventory dimensions stay separate (component_id links to the inventory record)."""
 
+    __tablename__ = "research_entries"
+    __table_args__ = (Index("ix_research_identity", "identity"),)
+
+    # Stable seed/registry key (e.g. "tool:opencode", "ref:S28"); unique so seeding is idempotent.
+    entry_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     identity: Mapped[str | None] = mapped_column(String(256), nullable=True)
     category: Mapped[str] = mapped_column(String(64), default="")
@@ -37,12 +47,28 @@ class ResearchEntry(IdMixin, TimestampMixin, Base):
     superseded_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     # DISCOVERED|SOURCE_VERIFIED|CONTROLLED_EVAL|CANARY|RECOMMENDED_FOR_PROMOTION|REJECTED|DEFERRED|ENABLED|REFERENCE_ONLY
     lifecycle: Mapped[str] = mapped_column(String(32), default="DISCOVERED")
-    checked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(nullable=True)  # last live upstream check (None = NOT CHECKED)
     component_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    # GITHUB_REPO|OFFICIAL_DOCS|PAPER|BLOG|FORUM|PRODUCT|INTERNAL|PRACTICE|UNKNOWN
+    source_kind: Mapped[str] = mapped_column(String(32), default="UNKNOWN")
+    # STATED_BY_MASTER|CONFIGURED|INTERNAL|UNVERIFIED|CHECKED|CHANGED|NOT_FOUND (identity of the source, not trust)
+    identity_status: Mapped[str] = mapped_column(String(32), default="UNVERIFIED")
+    # NOT_CHECKED|OK|IDENTITY_CHANGED|ARCHIVED|NOT_FOUND|RATE_LIMITED|ERROR|NOT_SUPPORTED
+    upstream_status: Mapped[str] = mapped_column(String(32), default="NOT_CHECKED")
+    upstream: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # fetched metadata (dated)
+    history: Mapped[list[Any]] = mapped_column(JSON, default=list)  # identity changes/checks, append-only in code
+    section_refs: Mapped[list[str]] = mapped_column(JSON, default=list)  # master sections (§45, §47, §52)
+    submitted_domain: Mapped[str | None] = mapped_column(String(16), nullable=True)  # session domain of add-by-URL
+    added_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    mode: Mapped[str] = mapped_column(String(16), default="DESIGN")  # seeded rows are design catalog
 
 
 class ChangeProposal(IdMixin, TimestampMixin, Base):
+    """§39-§41 proposal inside the existing Decision/ADR flow. Status here never replaces task
+    execution state or capability readiness (§40)."""
+
     __tablename__ = "change_proposals"
+    __table_args__ = (Index("ix_proposals_domain_status", "domain", "status"),)
 
     kind: Mapped[str] = mapped_column(String(16), nullable=False)  # ADD|REPLACE|UPGRADE|REMOVE|COMPARE
     title: Mapped[str] = mapped_column(String(256), nullable=False)
@@ -60,8 +86,8 @@ class ChangeProposal(IdMixin, TimestampMixin, Base):
     baseline_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     candidate_pin: Mapped[str | None] = mapped_column(String(128), nullable=True)
     candidate_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    # SUBMITTED|UNDER_REVIEW|REVIEWED|TRIAL_APPROVED|IN_TRIAL|PROMOTION_PENDING|ACCEPTED|ROLLED_BACK|FAILED|PARTIAL|
-    # KEEP|REJECTED|DEFERRED|REQUEST_MORE_EVIDENCE|REFERENCE_ONLY
+    # SUBMITTED|UNDER_REVIEW|REVIEWED|TRIAL_APPROVED|IN_TRIAL|PROMOTION_PENDING|PROMOTION_APPROVED|ACCEPTED|
+    # ROLLED_BACK|FAILED|PARTIAL|KEEP|REJECTED|DEFERRED|REQUEST_MORE_EVIDENCE|REFERENCE_ONLY
     status: Mapped[str] = mapped_column(String(32), default="SUBMITTED")
     review_package: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # §39 items 1-10
     decision_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -69,9 +95,20 @@ class ChangeProposal(IdMixin, TimestampMixin, Base):
     evidence_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     outcome: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     attachment_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Canonical source identities (github:owner/repo, url:host/path, name:slug) used for duplicates.
+    canonical_identities: Mapped[list[str]] = mapped_column(JSON, default=list)
+    duplicate_of: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    parts: Mapped[list[Any]] = mapped_column(JSON, default=list)  # parent: explicit child parts + dependencies
+    unknown_fields: Mapped[list[str]] = mapped_column(JSON, default=list)  # technical fields stored as UNKNOWN
+    research_entry_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    review_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class EvalSuite(IdMixin, TimestampMixin, Base):
+    """§43/§44 protected, held-out suite definition. Seeded rows hold cases + acceptance only —
+    never results. Workers cannot modify graders (no write API)."""
+
     __tablename__ = "eval_suites"
 
     suite_key: Mapped[str] = mapped_column(String(96), unique=True, nullable=False)
@@ -83,22 +120,41 @@ class EvalSuite(IdMixin, TimestampMixin, Base):
     held_out: Mapped[bool] = mapped_column(default=True)
     cases: Mapped[list[Any]] = mapped_column(JSON, default=list)
     protected: Mapped[bool] = mapped_column(default=True)  # workers cannot modify graders
+    description: Mapped[str] = mapped_column(Text, default="")
+    acceptance: Mapped[list[Any]] = mapped_column(JSON, default=list)  # suite-level acceptance criteria
+    isolation: Mapped[str] = mapped_column(Text, default="")
+    verifier: Mapped[str] = mapped_column(String(128), default="independent-verifier")
+    mode: Mapped[str] = mapped_column(String(16), default="DESIGN")
 
 
 class EvalRun(IdMixin, TimestampMixin, Base):
+    """One planned/executed evaluation of a full AIConfiguration on a suite (§43). Failed, timeout
+    and quota-interrupted samples are kept in ``samples``/``failures`` — never dropped."""
+
     __tablename__ = "eval_runs"
+    __table_args__ = (Index("ix_eval_runs_suite_config", "suite_key", "configuration_hash"),)
 
     suite_key: Mapped[str] = mapped_column(String(96), nullable=False)
     configuration: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)  # full AIConfiguration
     configuration_hash: Mapped[str] = mapped_column(String(80), nullable=False)
     topology: Mapped[str | None] = mapped_column(String(32), nullable=True)  # A|B|C|D (§44)
+    # PLANNED|RUNNING|COMPLETED|FAILED|CANCELLED
     status: Mapped[str] = mapped_column(String(32), default="PLANNED")
     sample_size: Mapped[int] = mapped_column(Integer, default=0)
-    metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # §43 dimensions
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # §43 dimensions (computed by code)
     failures: Mapped[list[Any]] = mapped_column(JSON, default=list)  # never dropped
     gate_results: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    role_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    route_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    repetitions: Mapped[int] = mapped_column(Integer, default=1)
+    samples: Mapped[list[Any]] = mapped_column(JSON, default=list)  # per-sample observations from the verifier
+    limits: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # declared budget/attempt/time caps
+    planned_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_source: Mapped[str | None] = mapped_column(String(64), nullable=True)  # verifier|collector identity
+    notes: Mapped[str] = mapped_column(Text, default="")
+    mode: Mapped[str] = mapped_column(String(16), default="LIVE")
 
 
 class ContextPack(IdMixin, TimestampMixin, Base):

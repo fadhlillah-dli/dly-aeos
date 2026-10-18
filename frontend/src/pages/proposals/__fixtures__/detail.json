@@ -1,0 +1,603 @@
+{
+ "id": "3113189a-92ca-472e-a406-bc2dcb44fc0f",
+ "kind": "REPLACE",
+ "title": "https://github.com/anomalyco/opencode",
+ "status": "TRIAL_APPROVED",
+ "domain": "PERSONAL",
+ "scope_type": "PLATFORM",
+ "project_id": null,
+ "parent_id": null,
+ "duplicate_of": null,
+ "source_refs": [
+  "https://github.com/anomalyco/opencode"
+ ],
+ "canonical_identities": [
+  "github:anomalyco/opencode"
+ ],
+ "existing_component_ids": [
+  "opencode"
+ ],
+ "submitted_by": "f3c1ab05-0300-4f52-9303-2297ee34d374",
+ "baseline_hash": "sha256:52d54eab4acff34dd1f37473f33dfbe8378f3474e588469fa8001910e7920fdc",
+ "candidate_hash": "sha256:03fc4ec445aa501c7dbed7a74dd96be54baab74aa5250844aebaffdc68931034",
+ "candidate_pin": "1.4.0",
+ "reviewed_at": "2026-10-18T12:09:14.502095+00:00",
+ "created_at": "2026-10-18T12:09:14.454426+00:00",
+ "updated_at": "2026-10-18T12:09:14.533347+00:00",
+ "parts_count": 0,
+ "outcome_status": null,
+ "allowed_actions": [
+  "PROMOTE",
+  "KEEP",
+  "REJECT",
+  "DEFER",
+  "REQUEST_MORE_EVIDENCE",
+  "REFERENCE_ONLY"
+ ],
+ "problem": "stabilitas worker",
+ "expected_benefit": "",
+ "limits": {
+  "cost_usd": "UNKNOWN",
+  "max_minutes": "UNKNOWN",
+  "max_attempts": "UNKNOWN",
+  "data_class": "UNKNOWN",
+  "resource": "UNKNOWN"
+ },
+ "candidate_component_ids": [],
+ "attachment_ids": [],
+ "unknown_fields": [
+  "limits.cost_usd",
+  "limits.max_minutes",
+  "limits.max_attempts",
+  "limits.data_class",
+  "limits.resource",
+  "source.license",
+  "source.maintainer",
+  "source.distribution",
+  "source.terms"
+ ],
+ "parts": [],
+ "review_package": {
+  "summary": {
+   "kind": "REPLACE",
+   "decision_question": "Komponen mana yang diganti, siapa consumer-nya, dan kapan versi lama boleh dihentikan?",
+   "problem": "stabilitas worker",
+   "expected_benefit": "UNKNOWN",
+   "relevance": [
+    {
+     "name": "OpenCode",
+     "placement": "Worker engine pertama yang diuji",
+     "relevance": "",
+     "lifecycle": "SOURCE_VERIFIED"
+    }
+   ],
+   "plain_language": [
+    "Menambah/mengubah dependency; manfaat terhadap baseline belum terbukti sampai trial terkendali.",
+    "Persentase penghematan/keunggulan tidak ditampilkan tanpa metode pengukuran dan baseline."
+   ],
+   "attachments": []
+  },
+  "source_identity": [
+   {
+    "identity": "github:anomalyco/opencode",
+    "status": "STATED_BY_MASTER",
+    "research_entry_id": "0cd73c9a-d93b-46d8-aaf6-f8c2764abb7a",
+    "research_lifecycle": "SOURCE_VERIFIED",
+    "evidence_level": "E1",
+    "official_repo": "https://github.com/anomalyco/opencode",
+    "release_or_commit": "UNKNOWN",
+    "latest_release": "UNKNOWN",
+    "maintainer": "UNKNOWN",
+    "license": "UNKNOWN",
+    "distribution": "UNKNOWN",
+    "terms": "UNKNOWN",
+    "checked_at": null,
+    "research_date": "2026-10-17/18",
+    "flags": [
+     "NOT_CHECKED"
+    ],
+    "note": "Dinyatakan pada master (riset 17-18 Okt 2026), belum dicek live."
+   }
+  ],
+  "baseline": {
+   "components": [
+    {
+     "component_id": "opencode",
+     "status": "KNOWN",
+     "name": "OpenCode",
+     "friendly_name": "",
+     "kind": "worker-engine",
+     "function": "UNKNOWN",
+     "usage_role": "runtime",
+     "requirement": "CANDIDATE",
+     "design_label": "CANDIDATE",
+     "approved_pin": "1.3.0",
+     "manifest_hash": "UNKNOWN",
+     "admission_status": "DISCOVERED",
+     "enablement": "DISABLED",
+     "lifecycle_final": "ACTIVE",
+     "source_url": null,
+     "upstream_identity": null,
+     "identity_verified": "UNVERIFIED",
+     "owner": "owner",
+     "license": "UNKNOWN",
+     "access": {
+      "egress": [
+       "opencode.ai"
+      ],
+      "credential_ref": "workers/openrouter"
+     },
+     "cost": {},
+     "operations": {},
+     "decision_refs": [],
+     "mode": "DESIGN",
+     "consumers": [
+      {
+       "source_id": "workforce",
+       "target_id": "opencode",
+       "relation": "calls",
+       "lens": "DESIGN",
+       "provenance": "",
+       "data": "",
+       "boundary": null
+      }
+     ],
+     "dependencies": [],
+     "observations": {},
+     "evidence_note": "Belum ada observasi; status runtime UNKNOWN."
+    }
+   ],
+   "baseline_hash": "sha256:52d54eab4acff34dd1f37473f33dfbe8378f3474e588469fa8001910e7920fdc",
+   "architecture_snapshot": null,
+   "note": null
+  },
+  "alternatives": [
+   {
+    "option": "KEEP_EXISTING",
+    "applicable": true,
+    "summary": "Pertahankan konfigurasi saat ini; baseline tetap berlaku.",
+    "tradeoffs": "Tanpa biaya migrasi; masalah/tujuan usulan tetap terbuka.",
+    "unknowns": []
+   },
+   {
+    "option": "SMALL_CONFIG_FIX",
+    "applicable": true,
+    "summary": "Perbaikan konfigurasi kecil pada komponen yang ada.",
+    "tradeoffs": "Risiko rendah; mungkin tidak memenuhi capability baru.",
+    "unknowns": []
+   },
+   {
+    "option": "ADD",
+    "applicable": false,
+    "summary": "Tambahkan kandidat berdampingan dengan scope terbatas.",
+    "tradeoffs": "Menambah dependency, proses dan permukaan risiko; manfaat harus dibuktikan.",
+    "unknowns": [
+     "Manfaat terhadap baseline belum terbukti",
+     "Biaya operasi UNKNOWN"
+    ]
+   },
+   {
+    "option": "REPLACE",
+    "applicable": true,
+    "summary": "Ganti komponen lama setelah consumer dipindahkan.",
+    "tradeoffs": "Memerlukan migration/consumer tests dan rencana rollback/forward recovery.",
+    "unknowns": [
+     "Kompatibilitas consumer",
+     "Rollback data"
+    ]
+   },
+   {
+    "option": "TRIAL",
+    "applicable": true,
+    "summary": "Uji terisolasi terbatas (sandbox sekali pakai) sebelum keputusan promotion.",
+    "tradeoffs": "Butuh pin/hash kandidat, budget/attempt/time caps dan verifier independen.",
+    "unknowns": [
+     "Hasil eksperimen belum ada"
+    ]
+   },
+   {
+    "option": "REJECT",
+    "applicable": true,
+    "summary": "Tolak; baseline tetap berlaku dan alasan dicatat.",
+    "tradeoffs": "Tidak ada perubahan; kandidat tetap tercatat di registry.",
+    "unknowns": []
+   }
+  ],
+  "impact": {
+   "contracts": {
+    "status": "KNOWN",
+    "items": [
+     "workforce calls opencode (DESIGN)"
+    ],
+    "source": "inventory relations/access"
+   },
+   "state_data_migration": {
+    "status": "UNKNOWN",
+    "items": [],
+    "source": null,
+    "reason": "Relasi data/state belum terpetakan; migration UNKNOWN; backup + restore test diperlukan"
+   },
+   "own_auth_cap_enf": {
+    "status": "UNKNOWN",
+    "items": [],
+    "source": null,
+    "reason": "Policy/OWN-AUTH-CAP-ENF kandidat belum direview"
+   },
+   "secrets": {
+    "status": "KNOWN",
+    "items": [
+     "opencode: credential_ref (referensi, tanpa nilai)"
+    ],
+    "source": "inventory relations/access"
+   },
+   "egress": {
+    "status": "KNOWN",
+    "items": [
+     "opencode: egress ['opencode.ai']"
+    ],
+    "source": "inventory relations/access"
+   },
+   "ci": {
+    "status": "UNKNOWN",
+    "items": [],
+    "source": null,
+    "reason": "Dampak CI UNKNOWN"
+   },
+   "docs": {
+    "status": "KNOWN",
+    "items": [
+     "Inventory, ADR/decision dan dokumentasi terdampak diperbarui saat outcome"
+    ],
+    "source": "§41"
+   },
+   "operations": {
+    "status": "UNKNOWN",
+    "items": [],
+    "source": null,
+    "reason": "Runbook restart/uninstall/recovery kandidat UNKNOWN"
+   },
+   "rollback": {
+    "status": "KNOWN",
+    "items": [
+     "opencode: konfigurasi diterima sebelumnya pin=1.3.0",
+     "Rollback kode tidak menjamin rollback data; status data rollback harus dinyatakan"
+    ],
+    "source": "inventory relations/access"
+   },
+   "unmapped_components": []
+  },
+  "experiment_plan": {
+   "type": "CONTROLLED_TRIAL",
+   "install": "hanya di sandbox trial setelah TRIAL_APPROVE",
+   "pins": {
+    "baseline_hash": "sha256:52d54eab4acff34dd1f37473f33dfbe8378f3474e588469fa8001910e7920fdc",
+    "candidate_pin": "1.4.0",
+    "candidate_hash": "sha256:03fc4ec445aa501c7dbed7a74dd96be54baab74aa5250844aebaffdc68931034",
+    "note": null
+   },
+   "suites": [
+    {
+     "suite_key": "eval.small-bugfix",
+     "available": false
+    },
+    {
+     "suite_key": "eval.feature-fe-api",
+     "available": false
+    },
+    {
+     "suite_key": "eval.provider-quota-interruption",
+     "available": false
+    },
+    {
+     "suite_key": "eval.crash-recovery",
+     "available": false
+    }
+   ],
+   "comparison": "Baseline vs candidate pada tugas representatif dengan verifier/suite dan budget setara; negative/edge/scope-escape/recovery cases sesuai impact",
+   "isolation": "Sandbox sekali pakai dari baseline commit yang diterima; fixture dibuat ulang per sampel; tanpa akses ke vault/SSH/credential native; egress hanya rute yang diizinkan",
+   "limits": {
+    "cost_usd": "UNKNOWN",
+    "max_minutes": "UNKNOWN",
+    "max_attempts": "UNKNOWN",
+    "data_class": "UNKNOWN",
+    "resource": "UNKNOWN"
+   },
+   "acceptance": [
+    "Requirement yang ditetapkan sebelum eksekusi terpenuhi",
+    "Compatibility dengan consumer terbukti",
+    "Scope adherence dan privacy/secret behavior lulus",
+    "Correctness, recovery/cancel teruji",
+    "Overhead operasional terukur",
+    "Manfaat diukur terhadap accepted outcomes dan oversight, bukan output lebih pendek"
+   ],
+   "stop_conditions": [
+    "Budget/attempt/time cap tercapai",
+    "Pelanggaran scope/permission",
+    "Secret terdeteksi pada output",
+    "Gate security/authority/evidence gagal",
+    "Owner membatalkan"
+   ],
+   "collector_verifier": "Verifier independen (trusted collector); worker tidak menilai hasilnya sendiri",
+   "canary": "Hanya jika aman dan reversible; bila tidak, sandbox/staging dan cutover berizin (tanpa dual authority)"
+  },
+  "replacement_plan": {
+   "previous_accepted_configuration": [
+    {
+     "component_id": "opencode",
+     "approved_pin": "1.3.0",
+     "manifest_hash": "UNKNOWN"
+    }
+   ],
+   "version_schema_data_compatibility": "UNKNOWN",
+   "backup_and_restore_evidence": "Diperlukan sebelum cutover bila ada state/data; belum ada bukti restore",
+   "adapter_consumer_changes": [
+    "workforce"
+   ],
+   "credential_egress_changes": {
+    "credential_refs_to_revoke_after_cutover": [
+     "opencode"
+    ]
+   },
+   "cutover_order": "UNKNOWN",
+   "coexistence": "Hanya bila aman; tidak menjalankan dua scheduler/vault/credential authority aktif",
+   "success_stop_criteria": "Acceptance trial + stop conditions pada rencana eksperimen",
+   "operations_owner": [
+    "owner"
+   ],
+   "rollback_or_forward_recovery": "UNKNOWN",
+   "notes": [
+    "Rollback kode tidak menjamin rollback data; migration irreversible memerlukan keputusan owner",
+    "Credential komponen lama dicabut setelah consumer sah dipindahkan; revoke/uninstall bukan efek review",
+    "Jika berhasil, komponen lama ditandai deprecated/retired, tidak dihapus dari history"
+   ]
+  },
+  "cost": {
+   "cash": {
+    "value": null,
+    "basis": "UNKNOWN",
+    "note": "Belum ada pricing/ledger untuk kandidat"
+   },
+   "compute": {
+    "value": null,
+    "basis": "UNKNOWN",
+    "note": "Compute kandidat belum diukur"
+   },
+   "ci": {
+    "value": null,
+    "basis": "UNKNOWN",
+    "note": "Menit CI belum diukur"
+   },
+   "storage": {
+    "value": null,
+    "basis": "UNKNOWN",
+    "note": "Storage belum diukur"
+   },
+   "tokens": {
+    "value": null,
+    "basis": "UNKNOWN",
+    "note": "Token/context belum diukur"
+   },
+   "oversight": {
+    "value": null,
+    "basis": "UNKNOWN",
+    "note": "Konsumsi review Claude belum diukur (bukan dolar)"
+   },
+   "operations": {
+    "value": null,
+    "basis": "UNKNOWN",
+    "note": "Usaha operasi belum diperkirakan"
+   },
+   "migration": {
+    "value": null,
+    "basis": "UNKNOWN",
+    "note": "Usaha migrasi belum diperkirakan"
+   },
+   "baseline_cost_records": "UNKNOWN",
+   "rule": "Actual/estimate/UNKNOWN dibedakan; persentase penghematan hanya dengan metode dan baseline terukur."
+  },
+  "claude_review": {
+   "status": "NOT_REQUESTED",
+   "label": "Rekomendasi Claude adalah DATA review; findings bukan persetujuan pemilik"
+  },
+  "human_decision": {
+   "required": true,
+   "bind": {
+    "baseline_hash": "sha256:52d54eab4acff34dd1f37473f33dfbe8378f3474e588469fa8001910e7920fdc",
+    "candidate_hash": "sha256:03fc4ec445aa501c7dbed7a74dd96be54baab74aa5250844aebaffdc68931034"
+   },
+   "scope_fields": [
+    "target",
+    "environment",
+    "provider",
+    "data_class",
+    "budget_usd",
+    "max_minutes",
+    "max_attempts"
+   ],
+   "options": {
+    "TRIAL_APPROVE": "Izin uji terisolasi dalam scope; BUKAN promotion, tidak mengubah baseline aktif",
+    "PROMOTE": "Promotion kandidat; keputusan terpisah dari trial, memerlukan bukti trial terpercaya",
+    "KEEP": "Pertahankan baseline",
+    "REJECT": "Tolak kandidat",
+    "DEFER": "Tunda",
+    "REQUEST_MORE_EVIDENCE": "Minta bukti tambahan",
+    "REFERENCE_ONLY": "Simpan sebagai referensi/pola saja"
+   },
+   "allowed_now": [
+    "PROMOTE",
+    "KEEP",
+    "REJECT",
+    "DEFER",
+    "REQUEST_MORE_EVIDENCE",
+    "REFERENCE_ONLY"
+   ],
+   "rules": [
+    "Keputusan terikat baseline_hash + candidate_hash (+ provider/data class/budget/target)",
+    "Perubahan hash/target/scope membatalkan binding; keputusan harus diulang",
+    "Budget tidak naik dari keputusan ini; kenaikan budget memerlukan keputusan BUDGET terpisah",
+    "Pengusul/implementer/model tidak dapat memberi approval"
+   ],
+   "next_actions": [
+    "Pilih keputusan dan scope; sistem merekam Decision terikat hash"
+   ]
+  },
+  "outcome": {
+   "status": "PENDING",
+   "evidence": [],
+   "accepted_configuration": null,
+   "partial_failures": [],
+   "rollback": null,
+   "inventory_docs_update": "PENDING",
+   "note": "Diisi setelah implementasi: ACCEPTED / ROLLED_BACK / FAILED / PARTIAL; rollback bukan acceptance."
+  },
+  "parts": [],
+  "unknown_fields": [
+   "limits.cost_usd",
+   "limits.max_minutes",
+   "limits.max_attempts",
+   "limits.data_class",
+   "limits.resource",
+   "source.license",
+   "source.maintainer",
+   "source.distribution",
+   "source.terms"
+  ],
+  "generated_at": "2026-10-18T12:09:14.501361+00:00",
+  "generated_by": "deterministic review builder (kode, bukan LLM)",
+  "review_contributors": [
+   {
+    "role": "Research / Supply-chain Analyst",
+    "performed_by": "kode: registry riset + Check Upstream (metadata publik)"
+   },
+   {
+    "role": "Integration / Architecture specialist",
+    "performed_by": "kode: relasi & consumer dari inventaris"
+   },
+   {
+    "role": "Security / Privacy",
+    "performed_by": "BELUM DIJALANKAN — review keamanan/akses data manusia atau reviewer terpisah diperlukan"
+   },
+   {
+    "role": "FinOps",
+    "performed_by": "kode: ledger/pricing; UNKNOWN bila data tidak ada"
+   },
+   {
+    "role": "Model Evaluation",
+    "performed_by": "kode: saran suite; hasil hanya dari EvalRun tercatat"
+   },
+   {
+    "role": "Claude tertinggi (checkpoint)",
+    "performed_by": "opsional — status NOT_REQUESTED; findings bukan approval"
+   },
+   {
+    "role": "Owner",
+    "performed_by": "manusia: tujuan, biaya, residual risk dan target (keputusan terikat hash)"
+   }
+  ]
+ },
+ "review_hash": "sha256:a556a71df99748012bd4d8e225d7e2e39e543585b9814c7217f67bb4bdfe9103",
+ "decisions": [
+  {
+   "id": "e99fcc5d-f495-443d-9a3a-7706aacb1d24",
+   "kind": "TRIAL",
+   "action": "TRIAL_APPROVE",
+   "status": "ACTIVE",
+   "actor_user_id": "f3c1ab05-0300-4f52-9303-2297ee34d374",
+   "actor_kind": "HUMAN",
+   "target_hash": "sha256:34d9b20c0f0f3b90c3e3d0f0dfaee737805a1f2a70283214bbfdae903ffc7ed3",
+   "target_version": "sha256:a556a71df99748012bd4d8e225d7e2e39e543585b9814c7217f67bb4bdfe9103",
+   "baseline_hash": "sha256:52d54eab4acff34dd1f37473f33dfbe8378f3474e588469fa8001910e7920fdc",
+   "candidate_hash": "sha256:03fc4ec445aa501c7dbed7a74dd96be54baab74aa5250844aebaffdc68931034",
+   "scope": {
+    "budget_usd": 0.0,
+    "data_class": "INTERNAL",
+    "environment": "sandbox",
+    "provider": "opencode-zen",
+    "target": "platform"
+   },
+   "allowed_operations": [
+    "trial.sandbox"
+   ],
+   "rationale": "uji",
+   "created_at": "2026-10-18T12:09:14.531612+00:00",
+   "invalidated_at": null,
+   "invalidation_reason": null
+  }
+ ],
+ "evidence_ids": [],
+ "task_ids": [],
+ "outcome": {},
+ "duplicates": [],
+ "research_entries": [
+  {
+   "id": "0cd73c9a-d93b-46d8-aaf6-f8c2764abb7a",
+   "entry_key": "tool:opencode",
+   "name": "OpenCode",
+   "identity": "github:anomalyco/opencode",
+   "category": "worker-engine",
+   "urls": [
+    "https://github.com/anomalyco/opencode",
+    "https://opencode.ai/v2/docs/console/models/",
+    "https://opencode.ai/docs/cli/"
+   ],
+   "source_refs": [
+    "S07",
+    "S08",
+    "S28"
+   ],
+   "evidence_level": "E1",
+   "lifecycle": "SOURCE_VERIFIED",
+   "placement": "Worker engine pertama yang diuji",
+   "identity_status": "STATED_BY_MASTER",
+   "upstream_status": "NOT_CHECKED",
+   "checked_at": null,
+   "freshness": "NOT_CHECKED",
+   "research_date": "2026-10-17/18",
+   "release_date": null,
+   "component_id": null,
+   "source_kind": "GITHUB_REPO",
+   "mode": "DESIGN",
+   "section_refs": [
+    "§45"
+   ],
+   "is_reference": false,
+   "latest_tag": null,
+   "update_available": null,
+   "checkable": true,
+   "installed_or_active": "NOT_IMPLIED"
+  }
+ ],
+ "delivery_dimensions": {
+  "APPROVED": {
+   "status": "NO",
+   "note": "Keputusan PROMOTION terikat hash"
+  },
+  "IMPLEMENTED": {
+   "status": "UNKNOWN",
+   "note": "Outcome yang dicatat manusia dengan bukti"
+  },
+  "ACTIVE": {
+   "status": "UNKNOWN",
+   "note": "Dari konfigurasi/observasi inventaris, bukan dari approval"
+  },
+  "VERIFIED": {
+   "status": "NOT-PROVEN",
+   "note": "Bukti terpercaya dari verifier/collector"
+  },
+  "ARCHITECTURE_SOURCE_UPDATED": {
+   "status": "UNKNOWN",
+   "note": "ArchitectureSnapshot sesudah perubahan"
+  },
+  "DOCS_PUBLISHED": {
+   "status": "UNKNOWN",
+   "note": "Status publikasi dokumen berasal dari modul publisher"
+  }
+ },
+ "guarantees": {
+  "installs": false,
+  "activates": false,
+  "raises_budget": false,
+  "sends_project_data": false,
+  "note": "Usulan/review tidak memasang, mengaktifkan, menaikkan budget atau mengirim data proyek."
+ }
+}

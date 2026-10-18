@@ -1,0 +1,218 @@
+{
+ "items": [
+  {
+   "id": "14e29c62-cb46-4ae0-9bdf-b4a08c601c32",
+   "entry_key": "ref:S01",
+   "name": "S01",
+   "identity": "url:code.claude.com/docs/en/model-config",
+   "category": "source-reference",
+   "urls": [
+    "https://code.claude.com/docs/en/model-config"
+   ],
+   "source_refs": [
+    "S01"
+   ],
+   "evidence_level": "E1",
+   "lifecycle": "REFERENCE_ONLY",
+   "placement": "Pemilihan model, alias, pinning, fallback dan billing considerations",
+   "identity_status": "STATED_BY_MASTER",
+   "upstream_status": "NOT_CHECKED",
+   "checked_at": null,
+   "freshness": "NOT_CHECKED",
+   "research_date": "2026-10-17/18",
+   "release_date": null,
+   "component_id": null,
+   "source_kind": "OFFICIAL_DOCS",
+   "mode": "DESIGN",
+   "section_refs": [
+    "§52"
+   ],
+   "is_reference": true,
+   "latest_tag": null,
+   "update_available": null,
+   "checkable": false,
+   "installed_or_active": "NOT_IMPLIED"
+  },
+  {
+   "id": "21872ff6-72e5-45e4-a9ca-146c7a5180a9",
+   "entry_key": "ref:S02",
+   "name": "S02",
+   "identity": "url:support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan",
+   "category": "source-reference",
+   "urls": [
+    "https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan"
+   ],
+   "source_refs": [
+    "S02"
+   ],
+   "evidence_level": "E1",
+   "lifecycle": "REFERENCE_ONLY",
+   "placement": "Fable pada Max dan batas mingguan",
+   "identity_status": "STATED_BY_MASTER",
+   "upstream_status": "NOT_CHECKED",
+   "checked_at": null,
+   "freshness": "NOT_CHECKED",
+   "research_date": "2026-10-17/18",
+   "release_date": null,
+   "component_id": null,
+   "source_kind": "OFFICIAL_DOCS",
+   "mode": "DESIGN",
+   "section_refs": [
+    "§52"
+   ],
+   "is_reference": true,
+   "latest_tag": null,
+   "update_available": null,
+   "checkable": false,
+   "installed_or_active": "NOT_IMPLIED"
+  },
+  {
+   "id": "5d605d82-b1df-4800-9573-f19b4f7c2616",
+   "entry_key": "ref:S03",
+   "name": "S03",
+   "identity": "url:support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-or-max-plan",
+   "category": "source-reference",
+   "urls": [
+    "https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-or-max-plan"
+   ],
+   "source_refs": [
+    "S03"
+   ],
+   "evidence_level": "E1",
+   "lifecycle": "REFERENCE_ONLY",
+   "placement": "Max login, shared limits, API-key priority",
+   "identity_status": "STATED_BY_MASTER",
+   "upstream_status": "NOT_CHECKED",
+   "checked_at": null,
+   "freshness": "NOT_CHECKED",
+   "research_date": "2026-10-17/18",
+   "release_date": null,
+   "component_id": null,
+   "source_kind": "OFFICIAL_DOCS",
+   "mode": "DESIGN",
+   "section_refs": [
+    "§52"
+   ],
+   "is_reference": true,
+   "latest_tag": null,
+   "update_available": null,
+   "checkable": false,
+   "installed_or_active": "NOT_IMPLIED"
+  },
+  {
+   "id": "b04590c1-593e-4f8b-a1b4-4f89a618a730",
+   "entry_key": "ref:S04",
+   "name": "S04",
+   "identity": "url:code.claude.com/docs/en/legal-and-compliance",
+   "category": "source-reference",
+   "urls": [
+    "https://code.claude.com/docs/en/legal-and-compliance"
+   ],
+   "source_refs": [
+    "S04"
+   ],
+   "evidence_level": "E1",
+   "lifecycle": "REFERENCE_ONLY",
+   "placement": "Autentikasi, ordinary use, embedded official binary, batas credential",
+   "identity_status": "STATED_BY_MASTER",
+   "upstream_status": "NOT_CHECKED",
+   "checked_at": null,
+   "freshness": "NOT_CHECKED",
+   "research_date": "2026-10-17/18",
+   "release_date": null,
+   "component_id": null,
+   "source_kind": "OFFICIAL_DOCS",
+   "mode": "DESIGN",
+   "section_refs": [
+    "§52"
+   ],
+   "is_reference": true,
+   "latest_tag": null,
+   "update_available": null,
+   "checkable": false,
+   "installed_or_active": "NOT_IMPLIED"
+  },
+  {
+   "id": "4a384b34-32a0-41ab-b667-53554245f3ac",
+   "entry_key": "ref:S05",
+   "name": "S05",
+   "identity": "url:code.claude.com/docs/en/headless",
+   "category": "source-reference",
+   "urls": [
+    "https://code.claude.com/docs/en/headless"
+   ],
+   "source_refs": [
+    "S05"
+   ],
+   "evidence_level": "E1",
+   "lifecycle": "REFERENCE_ONLY",
+   "placement": "CLI programmatic mode, output, --bare dan trust behavior",
+   "identity_status": "STATED_BY_MASTER",
+   "upstream_status": "NOT_CHECKED",
+   "checked_at": null,
+   "freshness": "NOT_CHECKED",
+   "research_date": "2026-10-17/18",
+   "release_date": null,
+   "component_id": null,
+   "source_kind": "OFFICIAL_DOCS",
+   "mode": "DESIGN",
+   "section_refs": [
+    "§52"
+   ],
+   "is_reference": true,
+   "latest_tag": null,
+   "update_available": null,
+   "checkable": false,
+   "installed_or_active": "NOT_IMPLIED"
+  },
+  {
+   "id": "af822ded-63df-4cff-9b19-85e94ff570fa",
+   "entry_key": "ref:S06",
+   "name": "S06",
+   "identity": "url:code.claude.com/docs/en/mcp",
+   "category": "source-reference",
+   "urls": [
+    "https://code.claude.com/docs/en/mcp"
+   ],
+   "source_refs": [
+    "S06"
+   ],
+   "evidence_level": "E1",
+   "lifecycle": "REFERENCE_ONLY",
+   "placement": "Integrasi tool resmi",
+   "identity_status": "STATED_BY_MASTER",
+   "upstream_status": "NOT_CHECKED",
+   "checked_at": null,
+   "freshness": "NOT_CHECKED",
+   "research_date": "2026-10-17/18",
+   "release_date": null,
+   "component_id": null,
+   "source_kind": "OFFICIAL_DOCS",
+   "mode": "DESIGN",
+   "section_refs": [
+    "§52"
+   ],
+   "is_reference": true,
+   "latest_tag": null,
+   "update_available": null,
+   "checkable": false,
+   "installed_or_active": "NOT_IMPLIED"
+  }
+ ],
+ "source": "research_entries (katalog master §45/§47/§52 + entri manual)",
+ "checked_at": null,
+ "mode": "DESIGN",
+ "lifecycles": [
+  "DISCOVERED",
+  "SOURCE_VERIFIED",
+  "CONTROLLED_EVAL",
+  "CANARY",
+  "RECOMMENDED_FOR_PROMOTION",
+  "REJECTED",
+  "DEFERRED",
+  "ENABLED",
+  "REFERENCE_ONLY"
+ ],
+ "evidence_limit": "Tahap riset bukan bukti instalasi/koneksi/penggunaan; E1 = kemampuan terdokumentasi, E0 = klaim komunitas.",
+ "generated_at": "2026-10-18T12:09:15.094612+00:00"
+}
