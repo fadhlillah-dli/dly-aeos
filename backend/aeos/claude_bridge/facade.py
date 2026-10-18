@@ -16,6 +16,11 @@ from typing import Any
 
 @dataclass
 class ClaudeRequest:
+    """A supervisor request. ``domain`` is the explicit human-selected PERSONAL/OFFICE domain and is
+    required for every purpose except ``doctor.*`` probes; a ``project_id`` must name a registered
+    project whose immutable domain equals ``domain``. Context files must come from that domain's
+    data partition. The same preflight applies to the manual package (ADR-0040 addendum)."""
+
     purpose: str  # planning.primary|planning.challenge|planning.synthesis|planning.final|review.checkpoint|...
     role: str
     model: str  # alias or pinned id from policy (e.g. "opus", "fable")

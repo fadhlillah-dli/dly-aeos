@@ -25,6 +25,9 @@ BINARY_SUFFIXES = {".png", ".jpg", ".ico", ".docx", ".sqlite3", ".woff", ".woff2
 # Token-shaped patterns (no capture groups) are high confidence; the generic "key=value" runtime
 # redaction rule is too noisy for source code, so source uses a literal-string assignment check.
 HIGH_CONFIDENCE = [p for p in _PATTERNS if not p.groups]
+# Token-shaped literals inside tests/ are accepted only when they are visibly fake.
+FAKE_MARKERS = ("test", "unit", "fake", "example", "dummy", "shouldnot", "abcdefgh", "0123456789", "secretinurl",
+                "refreshed", "xxxx")
 LITERAL_ASSIGNMENT = re.compile(
     r"(?i)\b(api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token)\b\s*[:=]\s*"
     r"[\"']([^\"'\s]{16,})[\"']"
@@ -48,7 +51,9 @@ def main() -> int:
             continue
         for lineno, line in enumerate(text.splitlines(), 1):
             for pat in HIGH_CONFIDENCE:
-                if pat.search(line):
+                for m in pat.finditer(line):
+                    if rel.startswith("tests/") and any(k in m.group(0).lower() for k in FAKE_MARKERS):
+                        continue
                     findings.append(f"{rel}:{lineno}: matches {pat.pattern[:40]}...")
             m = LITERAL_ASSIGNMENT.search(line)
             if m and not any(w in m.group(2) for w in ("example", "placeholder", "changeme", "xxx", "<", "${")):

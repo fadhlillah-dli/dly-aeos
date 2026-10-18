@@ -38,3 +38,24 @@ def select_route(session: Session, *, task: TaskSpec) -> RouteDecision:
     from aeos.routing.service import select_route as impl
 
     return impl(session, task=task)
+
+
+# --- additive contracts (existing signatures above are unchanged) ------------------------------
+
+
+def fallback_route(session: Session, *, task: TaskSpec, failed_route_key: str) -> RouteDecision:
+    """Next route after a failure (e.g. 429): only along the failed route's fallback_chain, only to
+    routes that are themselves eligible, same pool and free. Raises ``Blocked`` -> back off/queue."""
+    from aeos.routing.service import fallback_route as impl
+
+    return impl(session, task=task, failed_route_key=failed_route_key)
+
+
+def note_rate_limited(
+    session: Session, *, provider: str, scope: str = "free-daily", retry_after_seconds: int | None = None,
+    source: str = "observed-429",
+) -> None:
+    """Record an observed rate/quota limit so routing excludes the route until it resets."""
+    from aeos.routing.service import note_rate_limited as impl
+
+    impl(session, provider=provider, scope=scope, retry_after_seconds=retry_after_seconds, source=source)

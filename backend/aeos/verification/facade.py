@@ -24,9 +24,10 @@ def collect_evidence(
 ) -> EvidenceArtifact:
     """Persist content (redacted) under the evidence dir and record a hashed EvidenceArtifact.
     ``trusted`` is derived from ``origin`` ∈ TRUSTED_COLLECTORS — callers cannot set it."""
+    kwargs = dict(locals())  # captured before the lazy import adds 'impl'
     from aeos.verification.collector import collect_evidence as impl
 
-    return impl(**locals())
+    return impl(**kwargs)
 
 
 def latest_acceptance(session: Session, task_id: str) -> AcceptanceRecord | None:

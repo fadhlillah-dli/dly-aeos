@@ -15,9 +15,9 @@ from typing import Any
 REDACTED = "[REDACTED]"
 
 _PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"sk-or-v1-[A-Za-z0-9]{20,}"),  # OpenRouter
-    re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"),  # Anthropic
-    re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),  # OpenAI-style
+    re.compile(r"(?<![A-Za-z0-9])sk-or-v1-[A-Za-z0-9]{20,}"),  # OpenRouter
+    re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_\-]{20,}"),  # Anthropic
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{20,}"),  # OpenAI-style
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
@@ -31,10 +31,40 @@ _PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?i)((?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)[^\s,;\"']{6,}"),
 ]
 
-_SENSITIVE_KEYS = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie|credential)")
+# Key-name rule: a mapping value is masked when its key names a credential as a whole word
+# (csrf_token, api_key, client_secret, Authorization) — but not counters/flags/hashes such as
+# input_tokens, max_output_tokens, token_hash or office_authorization=True.
+# Token shapes without the word-boundary guard, for scanning opaque/binary content where a credential
+# can sit directly after arbitrary bytes (verifier binary scan). Never used for prose redaction.
+UNBOUNDED_TOKEN_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(p.pattern.replace("(?<![A-Za-z0-9])", "")) for p in _PATTERNS if not p.groups
+]
+
+_SENSITIVE_WORDS = frozenset(
+    {"password", "passwd", "passphrase", "secret", "token", "authorization", "cookie", "credential", "credentials", "pat"}
+)
+_SENSITIVE_JOINED = ("apikey", "privatekey", "clientsecret", "secretid", "accesskey", "refreshtoken", "accesstoken")
+_NON_SECRET_WORDS = frozenset(
+    {"tokens", "count", "counts", "used", "usage", "limit", "limits", "max", "min", "budget", "ttl", "expiry",
+     "expires", "hash", "hashes", "ref", "refs", "status", "type", "kind", "name", "id", "present", "required"}
+)
+_CAMEL = re.compile(r"([a-z0-9])([A-Z])")
+_SPLIT = re.compile(r"[^a-z0-9]+")
 
 _lock = threading.Lock()
 _known_values: set[str] = set()
+
+
+def is_sensitive_key(key: str) -> bool:
+    words = [w for w in _SPLIT.split(_CAMEL.sub(r"\1_\2", key).lower()) if w]
+    if not words:
+        return False
+    joined = "".join(words)
+    if any(j in joined for j in _SENSITIVE_JOINED):
+        return True
+    if any(w in _NON_SECRET_WORDS for w in words):
+        return False
+    return any(w in _SENSITIVE_WORDS for w in words)
 
 
 def register_secret(value: str | None) -> None:
@@ -66,7 +96,7 @@ def redact(value: Any) -> Any:
     if isinstance(value, Mapping):
         out: dict[Any, Any] = {}
         for k, v in value.items():
-            if isinstance(k, str) and _SENSITIVE_KEYS.search(k) and v not in (None, "", False):
+            if isinstance(k, str) and isinstance(v, str) and v and is_sensitive_key(k):
                 out[k] = REDACTED
             else:
                 out[k] = redact(v)
@@ -78,3 +108,15 @@ def redact(value: Any) -> Any:
 
 def contains_secret(text: str) -> bool:
     return redact_text(text) != text
+
+
+def contains_high_confidence_secret(text: str) -> bool:
+    """Registered runtime secret values or token-shaped patterns only (no generic key=value rule),
+    so prose like "token: string" is not a false positive."""
+    if not text:
+        return False
+    with _lock:
+        values = list(_known_values)
+    if any(v in text for v in values):
+        return True
+    return any(p.search(text) for p in _PATTERNS if not p.groups)
