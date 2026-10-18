@@ -1,6 +1,7 @@
 """Task DAG compiler and projection (§13, §14, §21, §35 "Task DAG").
 
-* ``validate_graph`` rejects unknown nodes, self-dependencies and cycles (tasks and features).
+* ``validate_graph`` rejects unknown nodes, self-dependencies and cycles (tasks and features), and
+  task paths that could leave the workspace (``..``, drive letters, UNC, ``~``).
 * ``compile_version`` turns an approved PlanVersion into Milestone/Feature/TaskSpec/TaskDependency
   rows with a default for every §21 field. It is idempotent per version (TaskSpec is append-only).
   For the platform project (§09) the AGENTS.md protected paths are forbidden by default; a task that
@@ -32,12 +33,20 @@ FALLBACK_PROTECTED_PATHS: tuple[str, ...] = (
     "backend/aeos/identity/**", "tests/acceptance/**", ".github/workflows/**", "install-manifest/**",
     "backend/aeos/migrations/**",
 )
+# Trusted grader/pipeline paths that no worker of ANY managed project may change without quarantine
+# review (§21 "grader/held-out tests ... pipeline tepercaya"). The platform project adds the full
+# AGENTS.md protected list (§09).
+GENERIC_TRUSTED_PATHS: tuple[str, ...] = ("tests/acceptance/**", ".github/workflows/**", "bitbucket-pipelines.yml")
 DEFAULT_LIMITS = {"max_attempts": 2, "timeout_seconds": 3600, "max_output_tokens": 32000}
 MAX_ATTEMPTS_CAP = 2  # §21 pilot cap: at most two implementation attempts per TaskSpec
+# §21 resource caps of the pilot: one active worker per task, no automatic nested fan-out. Fixed by the
+# control plane (never taken from model output); raising them is a recorded human decision.
+RESOURCE_LIMITS = {"max_active_workers": 1, "nested_fan_out": False}
 DEFAULT_TOOLS = ["fs.read", "fs.write:allowed_paths", "tests.run"]
 DEFAULT_STOP_CONDITIONS = [
     "quota exhausted", "deadline/timeout reached", "lease lost", "policy changed", "scope violated (write outside "
     "allowed_paths)", "evidence invalid", "owner cancelled", "attempt limit reached",
+    "scope grows or the contract cannot be met -> stop and file a blocker/decision request (no self-split)",
 ]
 DEFAULT_EVIDENCE = [
     "independent verifier test report (trusted collector)", "diff against the recorded base commit",
@@ -64,11 +73,45 @@ def protected_paths() -> tuple[str, ...]:
     return tuple(dict.fromkeys(found)) or FALLBACK_PROTECTED_PATHS
 
 
+def protected_for(project: Project | None) -> tuple[str, ...]:
+    """Default forbidden paths for a project's TaskSpecs: the AGENTS.md list for the platform project,
+    the generic trusted grader/pipeline paths for every other project."""
+    if project is not None and project.is_platform:
+        return tuple(dict.fromkeys(protected_paths() + GENERIC_TRUSTED_PATHS))
+    return GENERIC_TRUSTED_PATHS
+
+
 def _norm(p: str) -> str:
     p = str(p).strip().replace("\\", "/")
     while p.startswith("./"):
         p = p[2:]
     return p.lstrip("/")
+
+
+_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+
+def unsafe_path(p: Any) -> str | None:
+    """Why a TaskSpec path glob may not be used (§50 "File path traversal/symlink keluar sandbox"), or None.
+
+    Paths are repository-relative globs. Parent traversal, drive letters, UNC shares, home (``~``)
+    expansion and control characters could address files outside the task workspace on Windows,
+    macOS or Linux, so they are rejected instead of being normalised away (fail closed)."""
+    if not isinstance(p, str) or not p.strip():
+        return "empty path"
+    raw = p.strip()
+    if any(ord(c) < 32 for c in raw):
+        return "control character in path"
+    slashed = raw.replace("\\", "/")
+    if slashed.startswith("//"):
+        return "UNC/network path"
+    if _DRIVE_RE.match(slashed):
+        return "absolute drive path"
+    if slashed.startswith("~"):
+        return "home-relative path"
+    if any(part == ".." for part in slashed.split("/")):
+        return "parent traversal (..)"
+    return None
 
 
 def _static_prefix(p: str) -> str:
@@ -81,8 +124,11 @@ def _static_prefix(p: str) -> str:
 
 
 def paths_overlap(a: str, b: str) -> bool:
-    """Conservative overlap test for two path globs (shared-write detection, §19, §22)."""
-    pa, pb = _static_prefix(a), _static_prefix(b)
+    """Conservative overlap test for two path globs (shared-write detection, §19, §22).
+
+    Case-insensitive on purpose: Windows and default macOS volumes are case-insensitive, so
+    ``Policy/x.yaml`` writes the protected ``policy/**`` tree there (conservative = more overlap)."""
+    pa, pb = _static_prefix(a).casefold(), _static_prefix(b).casefold()
     if not pa or not pb:
         return True  # a root-level glob overlaps everything
     return pa == pb or pa.startswith(pb + "/") or pb.startswith(pa + "/")
@@ -182,14 +228,20 @@ def validate_graph(content: dict[str, Any]) -> list[dict[str, Any]]:
         fk = t.get("feature_key")
         if fk and fk not in f_keys:
             errors.append({"code": "UNKNOWN_FEATURE", "kind": "task", "key": t.get("key"), "feature_key": fk})
+        # Write scopes only: a forbidden path can never grant access, so it is not a reason to fail.
+        for p in t.get("allowed_paths") or []:
+            why = unsafe_path(p)
+            if why:
+                errors.append({"code": "UNSAFE_PATH", "kind": "task", "key": t.get("key"), "field": "allowed_paths",
+                               "path": str(p)[:200], "reason": why})
     return errors
 
 
 def require_valid_graph(content: dict[str, Any]) -> None:
     errors = validate_graph(content)
     if errors:
-        raise ValidationFailed("plan DAG is invalid (unknown node, self-dependency or cycle)", code="DAG_INVALID",
-                               details={"errors": errors})
+        raise ValidationFailed("plan DAG is invalid (unknown node, self-dependency, cycle or unsafe path)",
+                               code="DAG_INVALID", details={"errors": errors})
 
 
 # ---------------------------------------------------------------- TaskSpec defaults (§21)
@@ -217,7 +269,9 @@ def _str_list(v: Any) -> list[str]:
 
 def task_spec_fields(task: dict[str, Any], *, project: Project, version: PlanVersion,
                      protected: tuple[str, ...]) -> dict[str, Any]:
-    allowed = [_norm(p) for p in _str_list(task.get("allowed_paths")) if _norm(p)]
+    # Second guard for the preview projection (compile itself requires a valid graph): an unsafe write
+    # path never becomes an allowed path.
+    allowed = [_norm(p) for p in _str_list(task.get("allowed_paths")) if _norm(p) and not unsafe_path(p)]
     forbidden = [_norm(p) for p in _str_list(task.get("forbidden_paths")) if _norm(p)]
     touches_protected = [p for p in protected if any(paths_overlap(p, a) for a in allowed)]
     for p in protected:
@@ -229,6 +283,7 @@ def task_spec_fields(task: dict[str, Any], *, project: Project, version: PlanVer
         "timeout_seconds": _clamp(limits_in.get("timeout_seconds"), 60, 14400, DEFAULT_LIMITS["timeout_seconds"]),
         "max_output_tokens": _clamp(limits_in.get("max_output_tokens"), 1000, 128000,
                                     DEFAULT_LIMITS["max_output_tokens"]),
+        **RESOURCE_LIMITS,
     }
     cap_in = task.get("capability_scope") or {}
     route_in = task.get("model_route_policy") or {}
@@ -290,6 +345,7 @@ def task_spec_fields(task: dict[str, Any], *, project: Project, version: PlanVer
         "evidence_requirements": list(dict.fromkeys(_str_list(task.get("evidence_requirements")) + DEFAULT_EVIDENCE)),
         "risk_class": risk,
         "artifact_schema_version": str(task.get("artifact_schema_version") or "1")[:16],
+        "mode": version.mode if version.mode in ("MOCK", "DEMO") else "LIVE",
     }
 
 
@@ -310,7 +366,7 @@ def compile_version(session: Session, version: PlanVersion, *, actor: str) -> di
     project = session.get(Project, version.project_id)
     if project is None:
         raise ValidationFailed("project of the plan version no longer exists")
-    protected = protected_paths() if project.is_platform else ()
+    protected = protected_for(project)
 
     for idx, m in enumerate(content.get("milestones") or []):
         session.add(Milestone(plan_version_id=version.id, milestone_key=str(m["key"]), title=str(m.get("title") or m["key"])[:256],
@@ -335,7 +391,7 @@ def compile_version(session: Session, version: PlanVersion, *, actor: str) -> di
                  action="plan.dag.compile", target_type="plan_version", target_id=version.id,
                  project_id=version.project_id, domain=version.domain,
                  details={"tasks": len(by_key), "manifest_hash": version.manifest_hash,
-                          "protected_paths_default": bool(protected)})
+                          "protected_paths_default": list(protected), "platform_project": bool(project.is_platform)})
     events.emit(session, source="planning", kind="plan.dag.compiled", entity_type="plan_version", entity_id=version.id,
                 entity_version=version.manifest_hash, project_id=version.project_id, domain=version.domain,
                 payload={"plan_id": version.plan_id, "tasks": len(by_key)})
@@ -345,7 +401,9 @@ def compile_version(session: Session, version: PlanVersion, *, actor: str) -> di
 # ---------------------------------------------------------------- projection
 
 
-def _acceptance_for(session: Session, task_id: str) -> dict[str, Any]:
+def _acceptance_for(session: Session, task_id: str, plan_version_hash: str) -> dict[str, Any]:
+    """Acceptance from AcceptanceRecord only. Validity is checked against the *TaskSpec's* plan version
+    hash (a record accepted for another plan identity is stale, §14); UNKNOWN validity stays None."""
     try:
         from aeos.verification import facade as verification
 
@@ -355,9 +413,7 @@ def _acceptance_for(session: Session, task_id: str) -> dict[str, Any]:
     if rec is None:
         return {"status": "NONE", "valid": False, "source": "acceptance_records"}
     try:
-        from aeos.verification import facade as verification
-
-        valid = verification.acceptance_is_valid(session, task_id, plan_version_hash=rec.plan_version_hash)
+        valid = verification.acceptance_is_valid(session, task_id, plan_version_hash=plan_version_hash)
     except (ImportError, ModuleNotFoundError):
         valid = None
     return {"status": rec.acceptance_status, "valid": valid, "record_id": rec.id, "source": "acceptance_records"}
@@ -373,11 +429,11 @@ def dag_view(session: Session, plan: Plan, version: PlanVersion) -> dict[str, An
             "forbidden_paths": s.forbidden_paths or [], "depends_on": s.depends_on or [], "spec_hash": s.spec_hash,
             "limits": s.limits or {}, "data_classification": s.data_classification,
             "quarantine": bool((s.reviewer_policy or {}).get("quarantine_special_review")),
-            "acceptance_criteria": s.acceptance_criteria or [],
+            "acceptance_criteria": s.acceptance_criteria or [], "mode": s.mode or "LIVE",
         } for s in specs]
     else:
         project = session.get(Project, version.project_id)
-        protected = protected_paths() if project is not None and project.is_platform else ()
+        protected = protected_for(project)
         tasks = []
         for t in (version.content or {}).get("tasks") or []:
             if not isinstance(t, dict) or not t.get("key"):
@@ -390,7 +446,7 @@ def dag_view(session: Session, plan: Plan, version: PlanVersion) -> dict[str, An
                 "depends_on": f.get("depends_on", []), "spec_hash": None, "limits": f.get("limits", {}),
                 "data_classification": f.get("data_classification"),
                 "quarantine": bool((f.get("reviewer_policy") or {}).get("quarantine_special_review")),
-                "acceptance_criteria": f.get("acceptance_criteria", []),
+                "acceptance_criteria": f.get("acceptance_criteria", []), "mode": f.get("mode", version.mode or "LIVE"),
             })
     keys = {t["key"] for t in tasks}
     by_key = {t["key"]: t for t in tasks}
@@ -409,15 +465,17 @@ def dag_view(session: Session, plan: Plan, version: PlanVersion) -> dict[str, An
             if lease is not None:
                 lease_info = {"owner": lease.owner, "run_id": lease.run_id, "expires_at": lease.expires_at.isoformat(),
                               "heartbeat_at": lease.heartbeat_at.isoformat() if lease.heartbeat_at else None}
-            acceptance = _acceptance_for(session, t["id"])
+            acceptance = _acceptance_for(session, t["id"], version.manifest_hash)
         t["runtime"] = runtime
         t["lease"] = lease_info
         t["acceptance"] = acceptance
         t["warnings"] = [] if t["allowed_paths"] else ["NO_ALLOWED_PATHS: the scheduler must block this task"]
 
     for t in tasks:
+        # Only an ACCEPTED record whose validity was positively confirmed counts (UNKNOWN never passes,
+        # an external "Done" never counts, §14/§50).
         accepted = [d for d in t["depends_on"] if d in by_key and by_key[d]["acceptance"].get("status") == "ACCEPTED"
-                    and by_key[d]["acceptance"].get("valid") is not False]
+                    and by_key[d]["acceptance"].get("valid") is True]
         t["accepted_prerequisites"] = accepted
         t["dependencies_ready"] = len(accepted) == len([d for d in t["depends_on"] if d in keys])
 
@@ -469,6 +527,8 @@ def dag_view(session: Session, plan: Plan, version: PlanVersion) -> dict[str, An
         "plan_id": plan.id, "plan_version_id": version.id, "version": version.version,
         "manifest_hash": version.manifest_hash, "approved": plan.approved_version_id == version.id,
         "compiled": persisted, "mode": "LIVE" if persisted else "PREVIEW",
+        # Provenance of the plan content itself: a MOCK/DEMO version stays labelled as such (§35, §49).
+        "data_mode": version.mode or "LIVE",
         "nodes": tasks, "edges": edges, "critical_blockers": blockers, "shared_write_conflicts": conflicts,
         "validation_errors": errors,
         "runtime_note": "Runtime state comes from TaskExecution/Lease/AcceptanceRecord; NOT_SCHEDULED means no "

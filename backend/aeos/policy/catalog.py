@@ -38,6 +38,16 @@ HUMAN_ONLY_OPERATIONS = frozenset({
     "deploy_production", "promote_production",
 })
 
+# ADRs that record an explicit owner instruction and may therefore back an ``owner:ADR-NNNN``
+# (HUMAN_RECORDED) decision. Design ADRs written while building the seed are ACCEPTED documentation,
+# not owner AUTH; an ADR file edit alone can never mint an owner actor. Extending this set is a code
+# change under the protected path ``backend/aeos/policy/**`` (quarantined review, §09).
+OWNER_RECORDED_ADRS = frozenset({"ADR-0003"})
+# The only decision kinds an owner-recorded actor may hold. ADR-0003 §3 explicitly does NOT delegate
+# plan approval, publication approval, risk acceptance, budgets, policy or OFFICE authorisation, so an
+# ``owner:ADR-NNNN`` actor can never record an APPROVAL/POLICY/RISK_ACCEPTANCE/... decision, nor revoke one.
+OWNER_RECORDED_KINDS = frozenset({"EXCEPTION"})
+
 DECISION_KINDS = frozenset({
     "APPROVAL", "REJECTION", "REVISION_REQUEST", "EXCEPTION", "ADR", "POLICY", "TRIAL", "PROMOTION",
     "RISK_ACCEPTANCE", "PUBLICATION", "DOMAIN_SELECTION", "ROUTE_ACTIVATION", "BUDGET", "WRITE_ENABLEMENT",

@@ -105,7 +105,7 @@ export interface ContextView {
   assumptions: Statement[];
   unknowns: Statement[];
   material_questions: MaterialQuestion[];
-  constraints: { kind: string; statement: string; flags?: string[]; attachment_id?: string }[];
+  constraints: { kind: string; statement: string; flags?: string[]; attachment_id?: string; source?: "prompt" | "attachment" }[];
   attachments: AttachmentInput[];
   repo_inventory: Record<string, unknown>;
   integration_capabilities: Record<string, unknown>;
@@ -192,6 +192,9 @@ export interface PlanDetail extends PlanSummary {
   resolutions: { finding_key: string; action: string; note: string }[];
   verdict: FinalReview | null;
   verdict_effective: string | null;
+  /** Version the final reviewer judged; a later human edit has not been reviewed by Fable. */
+  verdict_version_id?: string | null;
+  current_version_reviewed?: boolean;
   decisions: DecisionView[];
   manual: ManualInfo | null;
   allowed: { run: boolean; import_manual: boolean; approve: boolean; revise_or_reject: boolean; edit: boolean; compile: boolean };
@@ -229,6 +232,11 @@ export type PlanContent = Record<string, unknown> & {
   features?: { key: string; title: string; requirement: string; priority: string; acceptance: string[]; depends_on: string[]; milestone: string }[];
   milestones?: { key: string; title: string; exit_evidence: string; order: number }[];
   tasks?: Record<string, unknown>[];
+  /** Planner output (DATA): its own facts/assumptions/unknowns/material questions for this version. */
+  facts?: Statement[];
+  assumptions?: Statement[];
+  unknowns?: Statement[];
+  material_questions?: MaterialQuestion[];
 };
 
 export interface DagNode {
@@ -243,10 +251,12 @@ export interface DagNode {
   forbidden_paths: string[];
   depends_on: string[];
   spec_hash: string | null;
-  limits: Record<string, number>;
+  limits: Record<string, number | boolean>;
   data_classification: string;
   quarantine: boolean;
   acceptance_criteria: string[];
+  /** TaskSpec provenance (LIVE | MOCK | DEMO). */
+  mode?: string;
   runtime: { state: string; reason: string; attempts_used: number; active_run_id: string | null; updated_at?: string };
   lease: { owner: string; run_id: string; expires_at: string; heartbeat_at: string | null } | null;
   acceptance: { status: string; valid: boolean | null; source?: string };
@@ -264,6 +274,8 @@ export interface DagView {
   approved?: boolean;
   compiled: boolean;
   mode: string;
+  /** Provenance of the plan content (LIVE | MOCK | DEMO). */
+  data_mode?: string;
   nodes: DagNode[];
   edges: { id: string; source: string; target: string }[];
   critical_blockers: { task_key: string; state: string; reason: string; blocks: string[]; impact: number }[];

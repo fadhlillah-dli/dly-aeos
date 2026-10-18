@@ -156,6 +156,9 @@ class TaskSpec(Base):
     evidence_requirements: Mapped[list[Any]] = mapped_column(JSON, default=list)
     risk_class: Mapped[str] = mapped_column(String(4), default="R1")
     artifact_schema_version: Mapped[str] = mapped_column(String(16), default="1")
+    # Provenance copied from the PlanVersion (LIVE|MOCK|DEMO): a TaskSpec compiled from fixture plan
+    # content is itself a fixture and must never be admitted as real work (§35, §49).
+    mode: Mapped[str] = mapped_column(String(16), default="LIVE")
     spec_hash: Mapped[str] = mapped_column(String(80), nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
 

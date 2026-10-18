@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { get, post } from "../../api/client";
+import { useAuth } from "../../auth/AuthContext";
 import type { AdrDetail, AdrSummary } from "../../components/planning/types";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, KeyValue, Loading, Mono, Notice, Table } from "../../components/ui";
@@ -55,7 +56,9 @@ export function MciBanner() {
 
 export function SnapshotCard({ isAdmin }: { isAdmin: boolean }) {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["policy", "snapshot"], queryFn: () => get<SnapshotView>("/api/policy/snapshot") });
+  const { domain } = useAuth();
+  // The bound-decision list is scoped to the active domain by the backend, so the cache key is too.
+  const q = useQuery({ queryKey: ["policy", "snapshot", domain], queryFn: () => get<SnapshotView>("/api/policy/snapshot") });
   const refresh = useMutation({
     mutationFn: () => post("/api/policy/snapshot/refresh"),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["policy"] }),
@@ -85,7 +88,7 @@ export function SnapshotCard({ isAdmin }: { isAdmin: boolean }) {
             items={[
               ["Hash", <Mono key="h">{s.active.content_hash}</Mono>],
               ["Versi", `v${s.active.version} · ${relativeTime(s.active.created_at)} · ${s.active.source}`],
-              ["Keputusan terikat", String(s.active.decision_count)],
+              ["Keputusan terikat (domain aktif + global)", String(s.active.decision_count)],
               ["MCI", <StatusBadge key="m" status={s.mci_status} />],
               ["Drift", s.drift ? <StatusBadge key="d" status="DRIFTED" label="Berubah sejak snapshot" /> : <StatusBadge key="d" status="CONFIGURED" label="Sesuai" />],
             ]}
@@ -144,7 +147,8 @@ interface OfficePolicy {
 }
 
 export function OfficePolicyCard() {
-  const q = useQuery({ queryKey: ["policy", "office"], queryFn: () => get<OfficePolicy>("/api/policy/office") });
+  const { domain } = useAuth();
+  const q = useQuery({ queryKey: ["policy", "office", domain], queryFn: () => get<OfficePolicy>("/api/policy/office") });
   const p = q.data;
   return (
     <Card title="Kebijakan OFFICE (default deny)">

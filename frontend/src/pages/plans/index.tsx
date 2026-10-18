@@ -176,7 +176,11 @@ export default function PlansPage() {
                   <Link to={`/plans/${p.id}`} className="hover:underline">
                     {p.title}
                   </Link>
-                  {p.needs_decision && <div className="text-xs font-normal text-warn">Perlu keputusan Anda</div>}
+                  {p.needs_decision && (
+                    <div className="flex items-center gap-1 text-xs font-normal text-warn">
+                      <AlertTriangle className="h-3 w-3" aria-hidden /> Perlu keputusan Anda
+                    </div>
+                  )}
                   {p.running && <div className="text-xs font-normal text-info">Pipeline sedang berjalan</div>}
                 </div>
               ),

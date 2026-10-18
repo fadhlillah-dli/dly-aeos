@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
 import { MermaidDiagram } from "../../components/planning/MermaidDiagram";
-import type { PlanContent } from "../../components/planning/types";
-import { EmptyState, Mono, Table, Tabs } from "../../components/ui";
+import type { MaterialQuestion, PlanContent, Statement } from "../../components/planning/types";
+import { StatusBadge } from "../../components/StatusBadge";
+import { EmptyState, Mono, Notice, Table, Tabs } from "../../components/ui";
 
 // Indonesian labels for common plan-content keys; unknown keys are humanised (technical IDs stay English).
 const LABELS: Record<string, string> = {
@@ -127,6 +128,59 @@ function ListOf({ items, titleKey, empty }: { items: Record<string, unknown>[] |
   );
 }
 
+function StatementList({ title, items, empty }: { title: string; items: Statement[] | undefined; empty: string }) {
+  return (
+    <div>
+      <h3 className="mb-1 text-sm font-semibold">{title}</h3>
+      {items?.length ? (
+        <ul className="grid gap-1 text-sm">
+          {items.map((s, i) => (
+            <li key={i} className="rounded border border-line px-2 py-1">
+              {s.statement}
+              {(s.source || s.impact) && <div className="text-xs text-ink-3">{s.source ? `Sumber: ${s.source}` : `Dampak: ${s.impact}`}</div>}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="text-sm text-ink-3">{empty}</div>
+      )}
+    </div>
+  );
+}
+
+/** §05 step 7: the planner's own facts/assumptions/unknowns/material questions for this version (DATA). */
+export function PlanAssumptions({ content }: { content: PlanContent }) {
+  const questions: MaterialQuestion[] = content.material_questions ?? [];
+  return (
+    <div className="grid gap-4">
+      <Notice tone="info">
+        Bagian ini ditulis oleh perencana (model) untuk versi ini dan berstatus DATA/proposal — bukan fakta yang terverifikasi. Fakta dari control plane
+        ada di tab <strong>Konteks &amp; pertanyaan</strong>.
+      </Notice>
+      <div>
+        <h3 className="mb-1 text-sm font-semibold">Pertanyaan material</h3>
+        {questions.length ? (
+          <ul className="grid gap-1 text-sm">
+            {questions.map((q, i) => (
+              <li key={i} className="flex flex-wrap items-center gap-2 rounded border border-line px-2 py-1">
+                {q.blocking ? <StatusBadge status="BLOCKED" label="Memblokir" /> : <StatusBadge status="PENDING" label="Tidak memblokir" />}
+                <Mono>{q.category}</Mono> {q.question}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="text-sm text-ink-3">Perencana tidak mencatat pertanyaan material.</div>
+        )}
+      </div>
+      <div className="grid gap-4 md:grid-cols-3">
+        <StatementList title="Asumsi" items={content.assumptions} empty="Tidak ada asumsi tercatat" />
+        <StatementList title="Unknown" items={content.unknowns} empty="Tidak ada unknown tercatat" />
+        <StatementList title="Fakta (menurut perencana)" items={content.facts} empty="Tidak ada fakta tercatat" />
+      </div>
+    </div>
+  );
+}
+
 export function ContentViewer({ content }: { content: PlanContent }) {
   const arch = content.architecture;
   const tabs = [
@@ -155,14 +209,26 @@ export function ContentViewer({ content }: { content: PlanContent }) {
       id: "test",
       label: "06 Testing",
       content: (
-        <ListOf items={(content.testing as { test_plans?: Record<string, unknown>[] } | undefined)?.test_plans} titleKey="title" empty="Belum ada Test Plan" />
+        <div className="grid gap-3">
+          <Notice tone="info">
+            Perencanaan hanya menyusun Test Plan (termasuk Test Strategy dan AC). Eksekusi/hasil, defect, final assessment dan sign-off berstatus{" "}
+            <Mono>NOT STARTED</Mono> sampai ada bukti verifier independen/UAT — tidak pernah diisi oleh model.
+          </Notice>
+          <ListOf items={(content.testing as { test_plans?: Record<string, unknown>[] } | undefined)?.test_plans} titleKey="title" empty="Belum ada Test Plan" />
+        </div>
       ),
     },
     {
       id: "release",
       label: "07 Release",
       content: (
-        <ListOf items={(content.release as { release_plans?: Record<string, unknown>[] } | undefined)?.release_plans} titleKey="title" empty="Belum ada Release Plan" />
+        <div className="grid gap-3">
+          <Notice tone="info">
+            Release Plan memuat Release Notes sebagai section. Status testing/security/UAT, sign-off, validasi pasca-rilis dan evidence berstatus{" "}
+            <Mono>NOT STARTED</Mono> sampai release candidate dan bukti runtime tersedia.
+          </Notice>
+          <ListOf items={(content.release as { release_plans?: Record<string, unknown>[] } | undefined)?.release_plans} titleKey="title" empty="Belum ada Release Plan" />
+        </div>
       ),
     },
     { id: "ops", label: "08 Operations", content: <ObjectView value={content.operations as Record<string, unknown>} /> },
@@ -220,6 +286,7 @@ export function ContentViewer({ content }: { content: PlanContent }) {
         />
       ),
     },
+    { id: "assumptions", label: "Asumsi & pertanyaan", content: <PlanAssumptions content={content} /> },
   ];
   return <Tabs tabs={tabs} />;
 }

@@ -100,7 +100,8 @@ def load_adrs(session: Session, directory: Path | None = None) -> dict[str, Any]
         result["skipped"].append("decisions directory not found")
         return result
     for path in sorted(root.glob("ADR-*.md")):
-        parsed = parse_adr(path.read_text(encoding="utf-8"), filename=path.name)
+        # utf-8-sig: an ADR saved by a Windows editor with a BOM must still parse its "# ADR-NNNN" title.
+        parsed = parse_adr(path.read_text(encoding="utf-8-sig"), filename=path.name)
         if not parsed["key"]:
             result["skipped"].append(path.name)
             continue

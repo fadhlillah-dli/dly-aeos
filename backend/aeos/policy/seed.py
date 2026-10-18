@@ -3,8 +3,9 @@
 1. Load ``docs/decisions/ADR-*.md`` into the ``adrs`` table (upsert by key, content-hashed).
 2. Record the ADR-0003 owner exception (commit/push/open_pr/merge_pr on the platform repo while
    building the seed) as a Decision of kind EXCEPTION with actor ``owner:ADR-0003`` /
-   HUMAN_RECORDED, bound to the ADR's content hash. A revoked exception is never re-created for the
-   same ADR content; a changed ADR supersedes the old binding.
+   HUMAN_RECORDED, bound to the ADR's content hash. A changed ADR supersedes an ACTIVE binding; an
+   exception revoked by the owner is never re-created by the seed, not even after the ADR file changes
+   (the delegate can edit files, so a file edit must not undo a human revocation).
 3. Activate the initial PolicySnapshot.
 
 The exception records the owner's delegation to the trusted seed builder (official Claude Code in
@@ -47,6 +48,11 @@ def _record_seed_exception(session: Session) -> str:
         if adr.decision_id != current.id:
             adr.decision_id = current.id
         return "present" if current.status == "ACTIVE" else f"present ({current.status})"
+    revoked = [d for d in existing if d.status == "INVALIDATED" and (d.invalidation_reason or "").startswith("revoked:")]
+    if revoked:
+        # A human revocation is never undone by editing the ADR file (the delegate itself can edit files):
+        # re-delegation needs a fresh, explicit owner decision outside this seed (fail closed).
+        return "revoked by owner (not re-recorded from a changed ADR file)"
 
     platform = None
     try:

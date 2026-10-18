@@ -48,7 +48,7 @@ export function StageTimeline({
                 {mismatch && <AlertTriangle className="h-3.5 w-3.5 text-bad" aria-label="tidak sesuai policy" />}
               </dd>
               <dt className="text-ink-3">Mode</dt>
-              <dd>{r ? <StatusBadge status={r.mode === "NATIVE" ? "LIVE" : r.mode === "MOCK" ? "MOCK" : "PENDING"} label={r.mode} /> : "—"}</dd>
+              <dd>{r ? <StatusBadge status={r.mode === "NATIVE" ? "LIVE" : r.mode === "MOCK" || r.mode === "DEMO" ? r.mode : "PENDING"} label={r.mode} /> : "—"}</dd>
               <dt className="text-ink-3">Durasi</dt>
               <dd>{formatDuration(r?.duration_ms)}</dd>
               <dt className="text-ink-3">Engine</dt>

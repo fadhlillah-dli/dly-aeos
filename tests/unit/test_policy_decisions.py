@@ -63,6 +63,29 @@ def test_owner_recorded_decision_requires_accepted_adr(db, owner):
     adrs.load_adrs(db)
     d = _record(db, "owner:ADR-0003", allowed_operations=["commit", "merge_pr"])
     assert d.actor_kind == "HUMAN_RECORDED"
+    # an ACCEPTED design ADR (written while building the seed) is documentation, not owner AUTH
+    from aeos.models.decisions import ArchitectureDecisionRecord
+
+    design = db.query(ArchitectureDecisionRecord).filter_by(adr_key="ADR-0030").one()
+    assert design.status == "ACCEPTED"
+    with pytest.raises(PolicyDenied) as exc:
+        _record(db, "owner:ADR-0030")
+    assert exc.value.code == "DECISION_ACTOR_NOT_HUMAN"
+
+
+@pytest.mark.parametrize("kind", ["APPROVAL", "POLICY", "RISK_ACCEPTANCE", "BUDGET", "WRITE_ENABLEMENT", "PUBLICATION"])
+def test_owner_recorded_actor_cannot_record_undelegated_kinds(db, owner, kind):
+    """ADR-0003 §3: plan/publication approval, risk, budget, policy and write enablement are NOT delegated;
+    the ADR-backed actor may only hold the EXCEPTION it records (and can never revoke anything)."""
+    adrs.load_adrs(db)
+    with pytest.raises(PolicyDenied) as exc:
+        _record(db, "owner:ADR-0003", kind=kind, target_type="plan_version", target_id="v1", allowed_operations=[])
+    assert exc.value.code == "DECISION_ACTOR_NOT_AUTHORISED"
+    assert db.query(Decision).filter(Decision.actor_user_id == "owner:ADR-0003").count() == 0
+    human = _record(db, owner.id, expires_at=utcnow() + timedelta(days=1))
+    with pytest.raises(PolicyDenied):
+        registry.revoke_decision(db, human.id, actor_user_id="owner:ADR-0003", reason="revoke via ADR actor")
+    assert human.status == "ACTIVE"
 
 
 def test_human_only_operations_cannot_be_delegated_by_users(db, owner):
@@ -176,8 +199,16 @@ def test_office_policy_default_deny_and_authorised_overrides(db, owner, monkeypa
             details={"office_policy": {"external_worker_allowed": True, "approved_worker_routes": ["r1"]}})
     p = office.office_policy(db)
     assert p["external_worker_allowed"] is False and p["ignored_decisions"]
+    # not an authorisation: no company reference (approval artefact), or a POLICY about another target
+    _record(db, owner.id, kind="POLICY", target_type="office_policy", target_id="OFFICE", domain="OFFICE",
+            details={"office_authorization": True, "allowed_providers": ["jira"]})
+    _record(db, owner.id, kind="POLICY", target_type="route", target_id="r1", domain="OFFICE",
+            details={"office_authorization": True, "company_reference": "letter-9", "allowed_providers": ["jira"],
+                     "office_policy": {"external_worker_allowed": True}})
+    p = office.office_policy(db)
+    assert p["office_authorization"] is False and p["external_worker_allowed"] is False
     auth = _record(db, owner.id, kind="POLICY", target_type="office_policy", target_id="OFFICE", domain="OFFICE",
-                   details={"office_authorization": True, "allowed_providers": ["jira"]})
+                   details={"office_authorization": True, "company_reference": "letter-1", "allowed_providers": ["jira"]})
     p = office.office_policy(db)
     assert p["office_authorization"] and p["authorization_decision_id"] == auth.id
     assert p["external_worker_allowed"] is True and p["approved_worker_routes"] == ["r1"]

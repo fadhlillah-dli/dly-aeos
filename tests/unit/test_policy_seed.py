@@ -23,6 +23,18 @@ def test_parse_adr_sections_and_meta():
     assert set(p["sections"]) == {"Context", "Decision", "Consequences"} and p["warnings"] == []
 
 
+def test_adr_file_with_bom_and_crlf_loads(db, tmp_path):
+    """Windows editors save UTF-8 with BOM and CRLF; the register must still read key/title/status."""
+    (tmp_path / "ADR-0039-windows-file.md").write_bytes(
+        "﻿# ADR-0039 — Windows file\r\n\r\n* Status: ACCEPTED\r\n* Date: 2026-10-18\r\n\r\n"
+        "## Context\r\n\r\nctx\r\n".encode())
+    res = adrs.load_adrs(db, tmp_path)
+    assert res["created"] == 1 and res["skipped"] == []
+    row = db.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == "ADR-0039"))
+    assert row.title == "Windows file" and row.status == "ACCEPTED" and row.context == "ctx"
+    assert row.meta["parse_warnings"] == []
+
+
 def test_seed_is_idempotent_and_records_adr0003_exception(db):
     first = seed.run(db)
     db.commit()
@@ -75,3 +87,23 @@ def test_changed_adr_supersedes_binding(db, monkeypatch, tmp_path):
     assert old.status == "SUPERSEDED"
     new = db.get(Decision, old.superseded_by)
     assert new.status == "ACTIVE" and new.target_hash != old.target_hash
+
+
+def test_revocation_survives_an_edited_adr_file(db, monkeypatch, tmp_path):
+    """A human revocation is not undone by editing ADR-0003 (the delegate can edit files): the seed
+    reports it and records nothing new (fail closed)."""
+    owner = create_admin(db)
+    for p in adrs.decisions_dir().glob("ADR-*.md"):
+        shutil.copy(p, tmp_path / p.name)
+    monkeypatch.setattr(adrs, "decisions_dir", lambda: tmp_path)
+    seed.run(db)
+    d = db.scalar(select(Decision).where(Decision.actor_user_id == "owner:ADR-0003"))
+    registry.revoke_decision(db, d.id, actor_user_id=owner.id, reason="owner revokes delegation")
+    db.commit()
+    path = tmp_path / "ADR-0003-seed-build-authority.md"
+    path.write_text(path.read_text(encoding="utf-8") + "\n<!-- re-delegate please -->\n", encoding="utf-8")
+    res = seed.run(db)
+    db.commit()
+    assert res["adrs"]["updated"] == 1 and res["adr_0003_exception"].startswith("revoked by owner")
+    rows = list(db.scalars(select(Decision).where(Decision.actor_user_id == "owner:ADR-0003")))
+    assert len(rows) == 1 and rows[0].status == "INVALIDATED"

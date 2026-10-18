@@ -28,6 +28,15 @@ def _load_plan(db: DB, principal: Principal, domain: Domain, plan_id: str) -> Pl
     return plan
 
 
+def _reconcile_expiry(db: DB) -> None:
+    """Persist EXPIRED for approvals past ``expires_at`` before projecting plans, so an expired approval
+    never shows as APPROVED (the interlock/get_approved_version already fail closed on expiry)."""
+    from aeos.policy import decisions as registry
+
+    if registry.expire_due_decisions(db):
+        db.commit()
+
+
 def _load_version(db: DB, plan: Plan, version_id: str) -> PlanVersion:
     v = db.get(PlanVersion, version_id)
     if v is None or v.plan_id != plan.id:
@@ -54,6 +63,7 @@ def create_plan(project_id: str, body: PlanCreateIn, db: DB, principal: AdminPri
 @router.get("/api/plans")
 def list_plans(db: DB, principal: CurrentPrincipal, domain: ActiveDomain, project_id: str | None = None,
                state: str | None = None, limit: int = Query(200, ge=1, le=500)) -> dict[str, Any]:
+    _reconcile_expiry(db)
     q = select(Plan).where(Plan.domain == domain.value)
     if project_id:
         load_project(db, principal, project_id, domain=domain)
@@ -71,6 +81,7 @@ def list_plans(db: DB, principal: CurrentPrincipal, domain: ActiveDomain, projec
 @router.get("/api/plans/{plan_id}")
 def get_plan(plan_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
     plan = _load_plan(db, principal, domain, plan_id)
+    _reconcile_expiry(db)
     return {**service.plan_detail(db, plan), "checked_at": utcnow().isoformat()}
 
 

@@ -86,7 +86,19 @@ function DecisionHistory({ highlight }: { highlight: string | null }) {
             { header: "Operasi", cell: (d) => <div className="text-xs">{d.allowed_operations.join(", ") || "—"}</div> },
             { header: "Aktor", cell: (d) => <span className="text-xs">{d.actor} ({d.actor_kind})</span> },
             { header: "Berlaku s.d.", cell: (d) => (d.expires_at ? relativeTime(d.expires_at) : "—") },
-            { header: "Alasan", cell: (d) => <div className="max-w-xs text-xs">{d.invalidation_reason ?? d.rationale}</div> },
+            {
+              header: "Alasan / sebelum → sesudah",
+              cell: (d) => (
+                <div className="max-w-xs text-xs">
+                  {d.invalidation_reason ?? d.rationale}
+                  {d.superseded_by && (
+                    <div className="mt-1 text-ink-3">
+                      Digantikan oleh keputusan <Mono>{d.superseded_by.slice(0, 8)}</Mono>
+                    </div>
+                  )}
+                </div>
+              ),
+            },
             {
               header: "",
               cell: (d) =>

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -167,10 +168,19 @@ def ensure_active_snapshot(session: Session, *, source: str = "policy") -> Polic
     return snap
 
 
-def snapshot_view(snap: PolicySnapshot | None, *, include_content: bool = False) -> dict[str, Any] | None:
+def snapshot_view(
+    snap: PolicySnapshot | None, *, include_content: bool = False,
+    decision_filter: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any] | None:
+    """Snapshot projection. ``decision_filter`` restricts the bound-decision references to what the
+    viewer may see (§35/§50: OFFICE decision metadata — ids, targets, even counts — never reaches a
+    PERSONAL view). The hash still covers every decision; it reveals no content."""
     if snap is None:
         return None
     content = snap.content or {}
+    decisions = list(content.get("decisions") or [])
+    if decision_filter is not None:
+        decisions = decision_filter(decisions)
     view = {
         "id": snap.id,
         "version": snap.version,
@@ -180,10 +190,11 @@ def snapshot_view(snap: PolicySnapshot | None, *, include_content: bool = False)
         "active": snap.active,
         "files": {name: {"path": f.get("path"), "sha256": f.get("sha256"), "status": f.get("status")}
                   for name, f in (content.get("files") or {}).items()},
-        "decision_count": len(content.get("decisions") or []),
-        "decisions": content.get("decisions") or [],
+        "decision_count": len(decisions),
+        "decisions": decisions,
+        "decisions_scope": "all" if decision_filter is None else "active domain + global",
         "mci_status": (snap.mci_reference or {}).get("status", "UNVERIFIED"),
     }
-    if include_content:
+    if include_content and decision_filter is None:
         view["content"] = content
     return view

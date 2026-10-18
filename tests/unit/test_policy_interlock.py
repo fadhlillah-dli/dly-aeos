@@ -28,13 +28,13 @@ DOC_TARGET = {"provider": "google-docs", "root_id": "F1"}
 CONF_TARGET = {"provider": "confluence", "space": "ENG", "parent_id": "123"}
 
 
-def _approved_plan(db, owner, project, *, targets, action="APPROVE_AND_PUBLISH"):
+def _approved_plan(db, owner, project, *, targets, action="APPROVE_AND_PUBLISH", mode="LIVE"):
     content = sample_content()
     plan = Plan(project_id=project.id, domain=project.domain, title="p", state="READY_FOR_HUMAN_REVIEW")
     db.add(plan)
     db.flush()
     v = PlanVersion(plan_id=plan.id, project_id=project.id, domain=project.domain, version=1, content=content,
-                    manifest_hash=content_hash(content))
+                    manifest_hash=content_hash(content), mode=mode)
     db.add(v)
     db.flush()
     plan.current_version_id = v.id
@@ -81,6 +81,23 @@ def test_full_valid_personal_write_is_allowed(db, personal):
     assert res.decision is not None and res.decision.id == personal["decision_id"]
     audit = db.query(AuditEvent).filter(AuditEvent.action == "policy.interlock.check").all()
     assert audit and audit[-1].result == "SUCCESS"
+
+
+def test_target_naming_another_provider_is_denied(db, personal):
+    """A target dict that names a different provider than the write never passes the scope check."""
+    res = check_external_write(db, replace(personal["intent"], target={"provider": "github-repo", "root_id": "F1"}))
+    assert not res.allowed and _codes(res) == {"TARGET_PROVIDER_MISMATCH"}
+
+
+def test_approval_not_made_by_a_human_is_denied(db, personal):
+    """§19/§20: the approval behind a write must be a live human decision. A row whose actor kind is
+    anything else (forged/tampered, ADR-recorded, agent) is refused even if every binding matches."""
+    from aeos.models.decisions import Decision
+
+    db.get(Decision, personal["decision_id"]).actor_kind = "AGENT"
+    db.commit()
+    res = check_external_write(db, personal["intent"])
+    assert not res.allowed and _codes(res) == {"DECISION_ACTOR_NOT_HUMAN"}
 
 
 def test_bootstrap_incomplete_denied(db, personal):
@@ -169,6 +186,19 @@ def test_operation_not_in_approval_denied(db, owner):
                          approved_hash=v.manifest_hash, decision_id=did,
                          capability_expires_at=utcnow() + timedelta(minutes=5))
     assert {"OPERATION_NOT_APPROVED", "TARGET_NOT_APPROVED"} <= _codes(check_external_write(db, intent))
+
+
+def test_mock_plan_version_is_never_published(db, owner):
+    """§35/§49: fixture (MOCK) plan content is never written externally, even when approved."""
+    project = make_project(db)
+    _plan, v, did = _approved_plan(db, owner, project, targets=[DOC_TARGET], mode="MOCK")
+    _enable(db, owner, "google-docs", "PERSONAL")
+    intent = WriteIntent(actor_user_id=owner.id, project_id=project.id, domain="PERSONAL", provider="google-docs",
+                         operation="create_doc", target=DOC_TARGET, approved_plan_version_id=v.id,
+                         approved_hash=v.manifest_hash, decision_id=did,
+                         capability_expires_at=utcnow() + timedelta(minutes=5))
+    res = check_external_write(db, intent)
+    assert not res.allowed and _codes(res) == {"VERSION_NOT_LIVE"}
 
 
 def test_human_only_merge_is_always_denied(db, personal):
