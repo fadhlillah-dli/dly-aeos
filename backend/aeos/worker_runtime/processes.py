@@ -32,7 +32,11 @@ from aeos.core.redaction import contains_secret
 log = logging.getLogger("aeos.worker_runtime")
 
 RUN_MARKER = "AEOS_RUN_ID"
-CREATE_TIME_TOLERANCE = 1.0
+# psutil reports the same create_time for the same process on every call (Windows: 100 ns ticks, Linux:
+# boot time + clock ticks), and the value round-trips exactly through the DB. A loose tolerance would let
+# a *different* process that reused the PID within that window pass as the old worker (Windows recycles
+# PIDs quickly), so only float noise is tolerated.
+CREATE_TIME_TOLERANCE = 0.05
 
 _ENV_ALLOW = {
     "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "NUMBER_OF_PROCESSORS",
@@ -314,15 +318,41 @@ def is_alive(pid: int | None, create_time: float | None) -> bool:
             return False
         if p.status() == psutil.STATUS_ZOMBIE:
             return False
-        # Windows has no zombie state: an exited process stays visible while any handle to it is open
-        # (e.g. a Popen object), so ask for its exit status without blocking.
-        try:
-            p.wait(timeout=0)
-        except psutil.TimeoutExpired:
-            return True
-        return False
+        if sys.platform == "win32":
+            # Windows has no zombie state: an exited process stays visible while any handle to it is open
+            # (e.g. a Popen object), so ask the kernel for its exit status directly.
+            return _windows_still_active(pid)
+        return True
     except psutil.Error:
         return False
+
+
+_STILL_ACTIVE = 259
+
+
+def _windows_still_active(pid: int) -> bool:
+    """GetExitCodeProcess == STILL_ACTIVE. If the process cannot be opened for an unknown reason the answer
+    is "alive": that only delays a retry, whereas a false "dead" could start a duplicate worker (§14, §50)."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    process_query_limited_information = 0x1000
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        err = ctypes.get_last_error()
+        return err != 87  # ERROR_INVALID_PARAMETER: no such process
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == _STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _same(p: psutil.Process, create_time: float | None) -> bool:
