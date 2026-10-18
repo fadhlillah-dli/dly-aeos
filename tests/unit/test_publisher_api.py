@@ -229,6 +229,41 @@ def test_acknowledge_human_edit_revision_input(personal_client, world):
     assert again.status_code == 409
 
 
+def test_document_diff_and_live_evidence_references(personal_client, world):
+    import copy
+
+    from aeos.core.hashing import content_hash
+    from aeos.models.evidence import EvidenceArtifact
+    from aeos.models.planning import Plan, TaskSpec
+    from tests.unit.test_publisher_support import SAMPLE_CONTENT, add_version, approve
+
+    db = world["db"]
+    pid = world["project"].id
+    personal_client.post(f"/api/projects/{pid}/documents/render",
+                         json={"plan_version_id": world["version"].id, "render_visuals": False})
+    plan = db.get(Plan, world["plan"].id)
+    content = copy.deepcopy(SAMPLE_CONTENT)
+    content["features"][0]["acceptance"].append("User dapat mencari tugas")
+    v2 = add_version(db, plan, content)
+    approve(db, plan, v2)
+    db.commit()
+    personal_client.post(f"/api/projects/{pid}/documents/render", json={"plan_version_id": v2.id,
+                                                                        "render_visuals": False})
+    db.expire_all()
+    rec = db.scalar(select(DocumentRecord).where(DocumentRecord.project_id == pid,
+                                                 DocumentRecord.logical_doc_id == "02-requirements/prd-tasks"))
+    d = personal_client.get(f"/api/documents/{rec.id}/diff").json()
+    assert d["changed"] and "+" in d["diff"] and "User dapat mencari tugas" in d["diff"]
+    task = db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v2.id, TaskSpec.task_key == "T1"))
+    db.add(EvidenceArtifact(project_id=pid, domain="PERSONAL", task_id=task.id, kind="TEST_REPORT", origin="verifier",
+                            collector_identity="verifier", trusted=True, content_hash=content_hash("x"),
+                            evidence_level="E2"))
+    db.commit()
+    docs = personal_client.get(f"/api/projects/{pid}/documents").json()
+    item = next(i for i in docs["items"] if i["id"] == rec.id)
+    assert item["evidence"] and item["evidence"][0]["trusted"] is True and item["evidence"][0]["evidence_level"] == "E2"
+
+
 # ------------------------------------------------------------------------------------------- CLI
 
 
