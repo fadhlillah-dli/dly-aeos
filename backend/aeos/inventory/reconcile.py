@@ -48,6 +48,7 @@ from aeos.inventory.probes import (
     ProbeRefused,
     ProbeRunner,
     clean_output,
+    file_is_placeholder,
     get_runner,
     github_slug_from_remote,
     is_loopback_url,
@@ -227,14 +228,9 @@ def _probe_python_module(ctx: ReconcileContext, comp: ComponentReference, probe:
 
 
 def _module_is_placeholder(spec: Any) -> bool:
-    origin = getattr(spec, "origin", None)
-    if not origin or not str(origin).endswith(".py"):
-        return False
-    try:
-        head = Path(origin).read_text(encoding="utf-8", errors="replace")[:2048]
-    except OSError:
-        return False
-    return "PLACEHOLDER" in head
+    """Shared rule with the Doctor (``aeos.inventory.probes.file_is_placeholder``): only the explicit
+    docstring marker counts, never a mention of the word in a real module."""
+    return file_is_placeholder(getattr(spec, "origin", None))
 
 
 def _probe_platform_module(ctx: ReconcileContext, comp: ComponentReference, probe: dict[str, Any]) -> list[Spec]:

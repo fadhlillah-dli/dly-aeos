@@ -64,3 +64,14 @@ edges, and immutable ArchitectureSnapshots for render/diff/audit.
 * Many platform tools show "installed-but-disabled" (INFO) until enablement decisions exist; that is the
   truthful state of the seed.
 * Python packages have no lockfile yet; the coverage view reports `requirements.lock` as a gap.
+
+## Amendment 2026-10-18 (integration)
+
+* Platform-module implementation status (`implemented` FULL/PARTIAL/SKELETON) and the Doctor's
+  `module_present` share one rule, `aeos.inventory.probes.source_is_placeholder`: a module is a
+  placeholder only when the first line of its docstring carries the foundation marker
+  `PLACEHOLDER —` (or `–`, `-`, `:`). The earlier "word anywhere in the first 2 KiB" test would report a
+  real module as a skeleton as soon as its docstring mentioned placeholders.
+* Reconciliation keeps calling `aeos.doctor.facade.invalidate` for changed binaries/identities (item 8);
+  the Doctor now shows `secret:<ref>` invalidators as `secret-ref <ref>` in stored reasons, events and the
+  observations it expires (ADR-0011 amendment), so redaction never rewrites them.

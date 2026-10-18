@@ -96,7 +96,7 @@ def test_optional_tools_do_not_block_unrelated_capabilities():
     assert "containment.docker" not in checks_for_capability(Capability.CAN_PLAN_PERSONAL)
 
 
-def test_office_capabilities_blocked_by_default(db):
+def test_office_capabilities_blocked_by_default(db, monkeypatch):
     for cap in (Capability.CAN_PLAN_OFFICE, Capability.CAN_USE_OFFICE_INTEGRATIONS):
         st = ev(cap, all_ok(cap), session=db)
         assert st.status == "BLOCKED"
@@ -105,7 +105,15 @@ def test_office_capabilities_blocked_by_default(db):
     assert worker.status == "BLOCKED" and "external_worker_allowed" in worker.reasons[0]
     review = ev(Capability.CAN_REVIEW_WITH_MAX, all_ok(Capability.CAN_REVIEW_WITH_MAX), domain="OFFICE", session=db)
     assert review.status == "BLOCKED"
-    assert ev(Capability.CAN_RUN_WORKER, all_ok(Capability.CAN_RUN_WORKER), domain="PERSONAL").status == "READY"
+    # PERSONAL is not office-gated; READY additionally needs the live ADR-0051 sandbox requirement
+    import aeos.worker_runtime.facade as worker
+
+    monkeypatch.setattr(worker, "sandbox_readiness", lambda s, *, domain: {
+        "status": "READY" if domain == "PERSONAL" else "BLOCKED", "kind": "container", "reasons": [],
+        "remedies": [], "residual_risks": []})
+    assert ev(Capability.CAN_RUN_WORKER, all_ok(Capability.CAN_RUN_WORKER), domain="PERSONAL",
+              session=db).status == "READY"
+    assert ev(Capability.CAN_RUN_WORKER, all_ok(Capability.CAN_RUN_WORKER), domain="PERSONAL").status == "UNKNOWN"
     assert ev(Capability.CAN_PLAN_PERSONAL, all_ok(Capability.CAN_PLAN_PERSONAL), domain="OFFICE").status == \
         "NOT_APPLICABLE"
 
@@ -198,7 +206,13 @@ def test_wildcard_invalidators_match(settings, db, runner, secrets_memory):
     n = invalidate(db, invalidator="secret:workers/openrouter", reason="kunci dirotasi")
     db.commit()
     stale = {r.check_id for r in db.scalars(select(CheckResult).where(CheckResult.status == "STALE"))}
-    assert n >= 2 and {"route.worker_key", "secret.status"} <= stale
+    # a single reference write invalidates the checks about that reference, not the store's own status
+    assert n >= 1 and "route.worker_key" in stale and "secret.status" not in stale
+    # a wildcard invalidator (secret backend changed) matches every secret-dependent declaration
+    n = invalidate(db, invalidator="secret:*", reason="secret backend berubah")
+    db.commit()
+    stale = {r.check_id for r in db.scalars(select(CheckResult).where(CheckResult.status == "STALE"))}
+    assert n >= 1 and {"route.worker_key", "secret.status"} <= stale
 
 
 def test_every_capability_rule_references_registered_checks():

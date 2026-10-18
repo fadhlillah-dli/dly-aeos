@@ -7,13 +7,12 @@ required checks block merges. Human-only merge is kept by the broker having no m
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import file_fingerprint, secret_ref_status, set_secret_remedy
-from aeos.doctor.checks.adapters import GITHUB_REF, github_get
-from aeos.doctor.model import CheckContext, Outcome, Remedy
+from aeos.doctor.checks.adapters import GITHUB_REF, github_token
+from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
 from aeos.inventory import scope as scope_reader
 
 PROTECTED_DOCS = ("https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/"
@@ -42,47 +41,103 @@ def delivery_ci_workflow(ctx: CheckContext) -> Outcome:
                    evidence=evidence)
 
 
-@check("delivery.branch_protection", "DELIVERY", "Ketersediaan branch protection (read-only)", component_id="github",
-       ttl_seconds=86400, invalidators=(f"secret:{GITHUB_REF}", "target"), functional=True, network=True,
-       severity_fail="HIGH", scope={"domain": "PERSONAL"})
+def _capability_view(caps: dict[str, Any]) -> dict[str, Any]:
+    keep = ("repo", "branch", "checked_at", "credential", "visibility", "plan", "merge_gate", "enforcement_tested",
+            "required_status_checks", "residual_risks", "source", "mode")
+    return {k: caps.get(k) for k in keep if k in caps}
+
+
+def _merge_gate_outcome(caps: dict[str, Any], *, origin: str) -> Outcome:
+    """Map ``aeos.delivery.provider.ProviderCapabilities`` onto a CheckResult. A CONFIGURED provider rule is
+    still not proven enforcement (bypass tests NOT-PROVEN); NOT_ENFORCEABLE is a residual risk, never a pass."""
+    from aeos.delivery.provider import ENFORCEMENT_UNTESTED, NOT_CONFIGURED_MESSAGE, NOT_ENFORCEABLE_MESSAGE
+
+    view = _capability_view(caps)
+    gate = str(caps.get("merge_gate") or "UNKNOWN").upper()
+    risks = [str(r) for r in caps.get("residual_risks") or []]
+    if gate == "NOT_ENFORCEABLE" and NOT_ENFORCEABLE_MESSAGE not in risks:
+        risks.append(NOT_ENFORCEABLE_MESSAGE)
+    if gate == "NOT_CONFIGURED" and NOT_CONFIGURED_MESSAGE not in risks:
+        risks.append(NOT_CONFIGURED_MESSAGE)
+    if ENFORCEMENT_UNTESTED not in risks:
+        risks.append(ENFORCEMENT_UNTESTED)
+    if RESIDUAL_RISK not in risks and gate != "CONFIGURED":
+        risks.append(RESIDUAL_RISK)
+    evidence = {**view, "residual_risks": risks, "origin": origin, "enforceable": gate == "CONFIGURED"}
+    target = f"github:{caps.get('repo')}@{caps.get('branch')}"
+    if gate == "CONFIGURED":
+        return Outcome("CONFIGURED", f"Merge gate provider terkonfigurasi pada {caps.get('branch')} (required checks: "
+                       f"{len(caps.get('required_status_checks') or [])}); penegakan NOT-PROVEN sampai uji bypass.",
+                       evidence=evidence, target_identity=target)
+    if gate == "NOT_ENFORCEABLE":
+        return Outcome("MISSING", "Branch protection tidak dapat ditegakkan pada paket/repo ini (residual risk, bukan "
+                       "penegakan): merge tetap tindakan manusia.", evidence=evidence, target_identity=target,
+                       error_code="BRANCH_PROTECTION_NOT_ENFORCEABLE", severity="HIGH")
+    if gate == "NOT_CONFIGURED":
+        return Outcome("MISSING", f"Branch protection/ruleset tersedia tetapi belum dikonfigurasi untuk "
+                       f"{caps.get('branch')}.", evidence=evidence, target_identity=target, error_code="BRANCH_NOT_PROTECTED",
+                       remedy=Remedy(operation="Aktifkan branch protection / ruleset untuk branch default (oleh pemilik "
+                                     "repo, di GitHub)", source=f"S22: {PROTECTED_DOCS}", target=target,
+                                     privilege="admin repo (pemilik)", cost="sesuai paket GitHub",
+                                     rollback="nonaktifkan rule", evidence_to_collect="delivery.branch_protection CONFIGURED"))
+    return Outcome("UNKNOWN", f"Kemampuan merge gate provider UNKNOWN ({caps.get('credential') or 'tanpa detail'}); "
+                   "merge tetap tindakan manusia.", evidence=evidence, target_identity=target,
+                   error_code="PROVIDER_CAPABILITY_UNKNOWN")
+
+
+def _latest_capability_evidence(ctx: CheckContext, slug: str) -> Any:
+    from sqlalchemy import or_, select
+
+    from aeos.models.evidence import EvidenceArtifact
+
+    assert ctx.session is not None
+    return ctx.session.scalar(select(EvidenceArtifact).where(
+        EvidenceArtifact.kind == "PROVIDER_CAPABILITY", EvidenceArtifact.subject_id == slug,
+        EvidenceArtifact.trusted.is_(True), EvidenceArtifact.mode == "LIVE",
+        or_(EvidenceArtifact.domain.is_(None), EvidenceArtifact.domain != "OFFICE"))
+        .order_by(EvidenceArtifact.created_at.desc()).limit(1))
+
+
+@check("delivery.branch_protection", "DELIVERY", "Merge gate provider / branch protection (read-only)", component_id="github",
+       ttl_seconds=86400, invalidators=(f"secret:{GITHUB_REF}", "target", "repo:origin"), severity_fail="HIGH",
+       scope={"domain": "PERSONAL"}, ok={"CONFIGURED", "VERIFIED"}, network=True,
+       description="Tanpa --functional: bukti PROVIDER_CAPABILITY terakhir (aeos delivery capabilities --record). "
+                   "Dengan --functional: aeos.delivery.provider.check_capabilities (GET saja, jaringan).")
 def delivery_branch_protection(ctx: CheckContext) -> Outcome:
     slug = ctx.settings.platform_repo_slug
+    if not ctx.functional:
+        if ctx.session is None:
+            return Outcome("UNKNOWN", "Database belum ada; bukti kemampuan provider tidak dapat dibaca.",
+                           error_code="DB_NOT_INITIALISED", evidence={"residual_risks": [RESIDUAL_RISK]})
+        ev = _latest_capability_evidence(ctx, slug)
+        if ev is None:
+            return Outcome("UNKNOWN", f"Kemampuan merge gate github:{slug} belum pernah diprobe (NOT-PROVEN); merge tetap "
+                           "tindakan manusia.", evidence={"target": f"github:{slug}", "residual_risks": [RESIDUAL_RISK]},
+                           error_code="PROVIDER_CAPABILITY_NOT_CHECKED", remedy=Remedy(
+                               operation="Probe read-only kemampuan provider dan simpan sebagai bukti",
+                               command=aeos_cmd("delivery capabilities --record"), source=f"S22: {PROTECTED_DOCS}",
+                               target=f"github:{slug}", privilege="pengguna lokal (token read-only)",
+                               cost="tidak ada (GET saja)",
+                               evidence_to_collect="EvidenceArtifact PROVIDER_CAPABILITY"))
+        inline = ev.inline or {}
+        caps = inline.get("content") if isinstance(inline.get("content"), dict) else (inline.get("summary") or {})
+        out = _merge_gate_outcome(caps, origin=f"evidence {ev.id[:8]} ({ev.created_at.isoformat()})")
+        out.evidence["evidence_id"] = ev.id
+        return out
     state, evidence = secret_ref_status(GITHUB_REF)
     evidence.update({"target": f"github:{slug}", "source": f"S22: {PROTECTED_DOCS}"})
     if state != "PRESENT":
-        return Outcome("UNKNOWN", "Token GitHub tidak tersedia; ketersediaan branch protection tidak diketahui.",
-                       evidence={**evidence, "residual_risk": RESIDUAL_RISK}, error_code="GITHUB_TOKEN_UNAVAILABLE",
+        return Outcome("UNKNOWN", "Token GitHub tidak tersedia; kemampuan merge gate tidak diketahui (tidak ada panggilan).",
+                       evidence={**evidence, "residual_risks": [RESIDUAL_RISK]}, error_code="GITHUB_TOKEN_UNAVAILABLE",
                        remedy=set_secret_remedy(GITHUB_REF, "GitHub (read-only metadata)") if state == "ABSENT" else None)
     try:
-        repo = github_get(ctx, f"/repos/{slug}")
-        branch = (repo.body or {}).get("default_branch") if repo.status == 200 and isinstance(repo.body, dict) else "main"
-        hr = github_get(ctx, f"/repos/{slug}/branches/{branch}/protection")
-    except Exception as exc:
-        return Outcome("UNKNOWN", f"Probe branch protection gagal ({type(exc).__name__}).", evidence=evidence,
-                       error_code="BRANCH_PROTECTION_PROBE_ERROR")
-    message = str((hr.body or {}).get("message") or "") if isinstance(hr.body, dict) else ""
-    evidence.update({"branch": branch, "http_status": hr.status, "provider_message": message[:120]})
-    if hr.status == 200 and isinstance(hr.body, dict):
-        checks = ((hr.body.get("required_status_checks") or {}).get("contexts")) or []
-        reviews = bool(hr.body.get("required_pull_request_reviews"))
-        evidence.update({"required_status_checks": checks, "required_reviews": reviews,
-                         "enforce_admins": (hr.body.get("enforce_admins") or {}).get("enabled")})
-        return Outcome("VERIFIED", f"Branch protection aktif pada {branch} (required checks: {len(checks)}, review: "
-                       f"{'ya' if reviews else 'tidak'}).", evidence=evidence, target_identity=f"github:{slug}@{branch}")
-    if hr.status == 404 and re.search(r"not protected", message, re.I):
-        return Outcome("MISSING", f"Branch {branch} belum diproteksi; dapat diaktifkan bila paket akun mendukung.",
-                       evidence={**evidence, "residual_risk": RESIDUAL_RISK}, error_code="BRANCH_NOT_PROTECTED",
-                       remedy=Remedy(operation="Aktifkan branch protection / ruleset untuk main (oleh pemilik repo)",
-                                     source=f"S22: {PROTECTED_DOCS}", target=f"github:{slug}@{branch}",
-                                     privilege="admin repo (pemilik)", cost="sesuai paket GitHub",
-                                     rollback="nonaktifkan rule", evidence_to_collect="delivery.branch_protection VERIFIED"))
-    if hr.status in (403, 404):
-        return Outcome("MISSING", "Branch protection tidak dapat ditegakkan pada paket/repo ini (403/404 private Free); "
-                       "dicatat sebagai residual risk.", evidence={**evidence, "residual_risk": RESIDUAL_RISK,
-                                                                   "enforceable": False},
-                       error_code="BRANCH_PROTECTION_NOT_ENFORCEABLE", severity="HIGH")
-    return Outcome("UNKNOWN", f"Respons tidak konklusif ({hr.status or hr.error}).", evidence=evidence,
-                   error_code="BRANCH_PROTECTION_INCONCLUSIVE")
+        from aeos.delivery import provider
+
+        caps = provider.check_capabilities(slug, token=github_token(), credential="AVAILABLE").to_dict()
+    except Exception as exc:  # store/network/validation failure: never green
+        return Outcome("UNKNOWN", f"Probe kemampuan provider gagal ({type(exc).__name__}).",
+                       evidence={**evidence, "residual_risks": [RESIDUAL_RISK]}, error_code="PROVIDER_PROBE_ERROR")
+    return _merge_gate_outcome(caps, origin="aeos.delivery.provider.check_capabilities (live, GET only)")
 
 
 @check("delivery.staging_target", "DELIVERY", "Target staging terkonfigurasi", component_id="delivery-ci",
