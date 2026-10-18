@@ -30,7 +30,16 @@ Bitbucket. §05 step 6 requires an inventory of an existing repository without r
    get-url`); the origin must point at the declared provider/owner/name or the checkout is
    `MISMATCH`. Credentials embedded in remote URLs are stripped; views show a logical/redacted
    path. The platform repository uses the logical ref `platform-repo` resolved from
-   `aeos.core.paths.repo_root()` at use time.
+   `aeos.core.paths.repo_root()` at use time. Path comparisons are case-insensitive on Windows and
+   macOS, and the top-level check uses `samefile`.
+4a. Domain boundary of checkouts (AGENTS.md invariant 9, §50 "Source Office muncul dalam platform
+   personal working tree"): a checkout may not equal, contain or sit inside a checkout registered by
+   a project of the other domain (`PolicyDenied CHECKOUT_CROSS_DOMAIN`, audited; the error never
+   names the other project). An OFFICE checkout may not overlap the PERSONAL platform working tree
+   (`OFFICE_SOURCE_IN_PERSONAL_TREE`). Before repository *content* is read (inventory, context
+   packs) both checks run again at use time, plus the origin check: a PERSONAL checkout whose origin
+   is on Bitbucket, or an OFFICE checkout whose origin is on github.com, is refused
+   (`CHECKOUT_OTHER_DOMAIN_ORIGIN`, audited) and observed as `MISMATCH` with `domain_conflict`.
 5. All git calls go through `aeos.portfolio.gitread`: list args, timeouts, stdout streamed with a
    hard cap (the process is killed at the cap, so a huge blob or grep line is never buffered whole),
    inherited `GIT_*` variables removed, `core.fsmonitor=false`, no console window on Windows,
@@ -42,6 +51,9 @@ Bitbucket. §05 step 6 requires an inventory of an existing repository without r
    paths, head/branch/dirty, explicit coverage gaps; tests are never executed). The result records
    the inventoried `commit` and the checkout's `head_commit` separately (`commit_is_head`), and its
    hash covers commit content only (not branch or working-tree state).
+   `inventory_for_project(session, project_id, commit=None)` wraps it for a registered project
+   (primary repository, platform first; domain checks applied; result recorded on the repository
+   reference) so planning never has to resolve or guess a checkout path itself.
 7. The project key `dly-aeos` is reserved for the §09 seed; a human-created project named
    "DLY AEOS" gets a suffixed key. The CLI (`aeos project show|inventory`) requires `--domain` and
    reports a project of another domain as not found, like the API's 404.

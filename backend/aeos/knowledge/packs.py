@@ -8,6 +8,9 @@ A pack is the minimum, provenance-carrying context for one task/role:
 * project context = metadata search over this project's plans/tasks/decisions/docs (+ global ADRs);
 * policy context = the trusted controller's ``policy/`` files, read-only with hashes; missing policy
   is reported, never reconstructed;
+* runtime context = metadata + redacted inline summaries of EvidenceArtifacts written by trusted
+  collectors (verifier/doctor/collector, ``trusted=True``) for this project; worker-reported evidence
+  is never runtime context, and MOCK/DEMO evidence keeps its label;
 * research and attachments are labelled DATA / UNTRUSTED_DATA; memory is MEMORY_DATA (never policy);
 * every item has kind/ref/provenance/classification/hash and a token estimate (chars/4) checked
   against the budget; forbidden scope (defaults + request + TaskSpec) is always respected;
@@ -37,6 +40,7 @@ from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.events import service as events
 from aeos.identity.service import Principal
 from aeos.knowledge import memory as memory_mod
+from aeos.models.evidence import EvidenceArtifact
 from aeos.models.knowledge_ext import ContextPackMeta
 from aeos.models.planning import TaskSpec
 from aeos.models.portfolio import Attachment, Project, RepositoryReference
@@ -50,21 +54,26 @@ DEFAULT_TTL_HOURS, MAX_TTL_HOURS = 168, 720
 MAX_REPO_READ_BYTES = 512 * 1024
 MIN_BUDGET, MAX_BUDGET = 1024, 200_000
 ITEM_OVERHEAD_TOKENS = 16
-INCLUDE_KINDS = ("policy", "task", "symbol", "repo_file", "code_match", "metadata", "memory", "attachment", "research")
+INCLUDE_KINDS = ("policy", "task", "symbol", "repo_file", "code_match", "metadata", "runtime", "memory", "attachment",
+                 "research")
 MANDATORY = frozenset({"policy", "task"})
 ROLE_PROFILES: dict[str, tuple[str, ...]] = {
     "default": ("policy", "task", "symbol", "repo_file", "code_match", "metadata", "memory"),
     "planner": ("policy", "task", "metadata", "memory", "attachment", "research", "repo_file", "symbol"),
-    "feature-implementer": ("policy", "task", "symbol", "repo_file", "code_match", "memory"),
-    "reviewer": ("policy", "task", "symbol", "repo_file", "code_match", "metadata", "memory"),
-    "security-reviewer": ("policy", "task", "symbol", "repo_file", "code_match", "metadata"),
+    "feature-implementer": ("policy", "task", "symbol", "repo_file", "code_match", "runtime", "memory"),
+    "reviewer": ("policy", "task", "symbol", "repo_file", "code_match", "metadata", "runtime", "memory"),
+    "security-reviewer": ("policy", "task", "symbol", "repo_file", "code_match", "metadata", "runtime"),
     "docs-writer": ("policy", "task", "metadata", "memory", "repo_file", "attachment"),
     "researcher": ("policy", "task", "research", "metadata", "memory"),
 }
-DEFAULT_FORBIDDEN = (".env", ".env.*", "*/.env", "*/.env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*id_rsa*",
-                     "*id_ed25519*", "*secrets.*", "*credentials*", ".git/*", "*.sqlite3", "*.sqlite", "*.db",
-                     "*.kdbx", "*.keystore", "*.jks")
-CAPS = {"symbol": 20, "repo_file": 20, "code_match": 30, "metadata": 20, "memory": 20, "attachment": 10, "research": 10}
+DEFAULT_FORBIDDEN = (".env", ".env.*", "*/.env", "*/.env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.ppk", "*id_rsa*",
+                     "*id_dsa*", "*id_ecdsa*", "*id_ed25519*", "*secrets.*", "secrets/*", "*/secrets/*", "*credentials*",
+                     ".git/*", "*.sqlite3", "*.sqlite", "*.db", "*.kdbx", "*.keystore", "*.jks", "*.tfstate",
+                     "*.tfstate.*", ".npmrc", "*/.npmrc", ".pypirc", "*/.pypirc", ".netrc", "*/.netrc", ".ssh/*",
+                     "*/.ssh/*", ".aws/*", "*/.aws/*")
+CAPS = {"symbol": 20, "repo_file": 20, "code_match": 30, "metadata": 20, "runtime": 10, "memory": 20, "attachment": 10,
+        "research": 10}
+TRUSTED_EVIDENCE_ORIGINS = frozenset({"verifier", "doctor", "collector"})
 _TERM_RE = re.compile(r"^[^\x00-\x1f\x7f]{2,100}$")
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{1,63}$")
 _SYMBOL_KEYWORDS = "def|class|function|interface|type|enum|struct|trait|fn|func|const|let|var|module"
@@ -408,6 +417,31 @@ def _collect_attachments(col: _Collector, session: Session, project: Project, te
             n += 1
 
 
+def _collect_runtime(col: _Collector, session: Session, project: Project, task: TaskSpec | None) -> None:
+    """§24 runtime context: evidence collected by trusted tools, already reduced/redacted (inline summary)."""
+    import json
+
+    q = select(EvidenceArtifact).where(
+        EvidenceArtifact.project_id == project.id, EvidenceArtifact.domain == project.domain,
+        EvidenceArtifact.trusted.is_(True), EvidenceArtifact.origin.in_(sorted(TRUSTED_EVIDENCE_ORIGINS)))
+    if task is not None:
+        q = q.where(EvidenceArtifact.task_id == task.id)
+    for ev in session.scalars(q.order_by(EvidenceArtifact.created_at.desc()).limit(CAPS["runtime"])):
+        mode = (ev.mode or "LIVE").upper()
+        label = "" if mode == "LIVE" else f"[{mode}] "
+        lines = [f"{label}{ev.kind} ({ev.origin}, {ev.collector_identity}) evidence {ev.evidence_level}",
+                 f"Claim: {ev.claim}" if ev.claim else "",
+                 f"Environment: {json.dumps(ev.environment, sort_keys=True, default=str)}" if ev.environment else "",
+                 f"Summary: {json.dumps(ev.inline, sort_keys=True, default=str)}" if ev.inline else ""]
+        body = "\n".join(x for x in lines if x)
+        col.add(kind="runtime", ref=f"evidence:{ev.id}", content=body, trust="RUNTIME_EVIDENCE",
+                classification=ev.classification, title=f"{label}{ev.kind} · {ev.evidence_level}", truncatable=True,
+                provenance={"source": "aeos-db evidence_artifacts (trusted collector)", "evidence_id": ev.id,
+                            "origin": ev.origin, "collector_identity": ev.collector_identity,
+                            "content_hash": ev.content_hash, "evidence_level": ev.evidence_level, "mode": mode,
+                            "run_id": ev.run_id, "task_id": ev.task_id, "collected_at": ev.created_at.isoformat()})
+
+
 def _collect_research(col: _Collector, session: Session, terms: list[str]) -> None:
     if not terms:
         return
@@ -440,6 +474,9 @@ def build_pack(
     query: Any = None, paths: Any = None, forbidden_paths: Any = None, token_budget: int | None = None,
     include: Any = None, ttl_hours: int | None = None,
 ) -> tuple[ContextPack, ContextPackMeta]:
+    from aeos.portfolio.service import require_writable
+
+    require_writable(project)
     budget = int(token_budget or DEFAULT_BUDGET)
     if not MIN_BUDGET <= budget <= MAX_BUDGET:
         raise ValidationFailed(f"token_budget must be {MIN_BUDGET}..{MAX_BUDGET}", code="INVALID_BUDGET")
@@ -488,12 +525,18 @@ def build_pack(
         elif path is None:
             warnings.append(f"repository context unavailable: no local checkout for {repo.full_name}")
         else:
+            # Office source never enters a Personal pack (and vice versa): checked before any content read.
+            repos.require_checkout_in_domain(session, principal, project, repo, path,
+                                             action="knowledge.context_pack.build")
             resolved_commit = gitread.resolve_commit(path, base_ref)
             reader = _RepoReader(path, resolved_commit, forbidden, allowed)
             if reader.truncated:
                 warnings.append("repository tree listing truncated; context may be incomplete")
             if repo.verification_status != "VERIFIED":
                 warnings.append(f"repository {repo.full_name} identity is {repo.verification_status}")
+            if repo.local_status != "OK":
+                warnings.append(f"local checkout status is {repo.local_status}: it is not confirmed to be "
+                                f"{repo.full_name} (run Verifikasi identitas to re-check the origin remote)")
 
     policy_snapshot = policy_hashes() if "policy" in kinds else {}
     col = _Collector(project, budget)
@@ -510,6 +553,8 @@ def build_pack(
             _collect_matches(col, reader, terms, repo.full_name)
         elif kind == "metadata":
             _collect_metadata(col, session, principal, project, terms)
+        elif kind == "runtime":
+            _collect_runtime(col, session, project, task)
         elif kind == "memory":
             _collect_memory(col, session, principal, project, terms)
         elif kind == "attachment":
@@ -714,6 +759,6 @@ def pack_view(pack: ContextPack, meta: ContextPackMeta | None, *, freshness: str
         "kinds": sorted({i.get("kind") for i in pack.items or []}),
         "items": items,
         "created_at": pack.created_at.isoformat(),
-        "trust_note": "Repository/attachment/research items are DATA; only POLICY_READ_ONLY items carry policy, "
-                      "and none of them grant permissions.",
+        "trust_note": "Repository/attachment/research items are DATA; RUNTIME_EVIDENCE comes from trusted collectors "
+                      "only; only POLICY_READ_ONLY items carry policy, and none of them grant permissions.",
     }

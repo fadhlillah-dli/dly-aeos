@@ -13,7 +13,7 @@ import { IntegrationsPanel } from "./IntegrationsPanel";
 import { MemoryPanel } from "./MemoryPanel";
 import { RepositoriesPanel } from "./RepositoriesPanel";
 import { SearchPanel } from "./SearchPanel";
-import type { ProjectView } from "./types";
+import { READ_ONLY_LIFECYCLES, type ProjectView } from "./types";
 
 const TRANSITIONS: Record<string, string[]> = {
   ACTIVE: ["ARCHIVED", "RETIRING"],
@@ -23,7 +23,7 @@ const TRANSITIONS: Record<string, string[]> = {
 };
 const LIFECYCLE_LABEL: Record<string, string> = { ACTIVE: "Aktifkan", ARCHIVED: "Arsipkan", RETIRING: "Mulai pensiun", RETIRED: "Pensiunkan" };
 
-function Overview({ project, isAdmin }: { project: ProjectView; isAdmin: boolean }) {
+function Overview({ project, isAdmin, readOnly }: { project: ProjectView; isAdmin: boolean; readOnly: boolean }) {
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(project.name);
@@ -78,7 +78,7 @@ function Overview({ project, isAdmin }: { project: ProjectView; isAdmin: boolean
         title="Ide dan deskripsi"
         className="lg:col-span-2"
         actions={
-          isAdmin && !editing ? (
+          isAdmin && !readOnly && !editing ? (
             <Button
               variant="ghost"
               onClick={() => {
@@ -188,6 +188,8 @@ export default function ProjectDetailPage() {
   const hash = location.hash.replace("#", "");
   const initial = TAB_IDS.includes(hash) ? hash : "ringkasan";
   const isActive = activeProject === project.id;
+  const readOnly = READ_ONLY_LIFECYCLES.includes(project.lifecycle);
+  const canWrite = isAdmin && !readOnly;
   return (
     <div className="space-y-5">
       <PageHeader
@@ -236,16 +238,27 @@ export default function ProjectDetailPage() {
         </span>
       </div>
       {ctxError ? <ErrorBox error={ctxError} /> : null}
+      {readOnly && (
+        <Notice tone="warn">
+          Proyek ini {project.lifecycle === "ARCHIVED" ? "diarsipkan" : "sudah dipensiunkan"} dan hanya-baca: repository, integrasi, lampiran,
+          ContextPack dan memori tidak dapat ditambah atau diubah (riwayat tetap tersimpan).{" "}
+          {project.lifecycle === "ARCHIVED"
+            ? isAdmin
+              ? "Klik “Aktifkan” di Ringkasan untuk mengubahnya lagi."
+              : "SUPER_ADMIN dapat mengaktifkannya kembali."
+            : "Status pensiun bersifat final."}
+        </Notice>
+      )}
       <Tabs
         key={initial}
         initial={initial}
         tabs={[
-          { id: "ringkasan", label: "Ringkasan", content: <Overview project={project} isAdmin={isAdmin} /> },
-          { id: "repositories", label: `Repository (${project.repositories.length})`, content: <RepositoriesPanel project={project} isAdmin={isAdmin} /> },
-          { id: "integrations", label: "Integrasi", content: <IntegrationsPanel project={project} isAdmin={isAdmin} /> },
-          { id: "attachments", label: `Lampiran (${project.attachments?.total ?? 0})`, content: <AttachmentsPanel projectId={project.id} isAdmin={isAdmin} /> },
-          { id: "context", label: "Konteks", content: <ContextPanel project={project} isAdmin={isAdmin} /> },
-          { id: "memory", label: "Memori", content: <MemoryPanel project={project} isAdmin={isAdmin} /> },
+          { id: "ringkasan", label: "Ringkasan", content: <Overview project={project} isAdmin={isAdmin} readOnly={readOnly} /> },
+          { id: "repositories", label: `Repository (${project.repositories.length})`, content: <RepositoriesPanel project={project} isAdmin={canWrite} /> },
+          { id: "integrations", label: "Integrasi", content: <IntegrationsPanel project={project} isAdmin={canWrite} /> },
+          { id: "attachments", label: `Lampiran (${project.attachments?.total ?? 0})`, content: <AttachmentsPanel projectId={project.id} isAdmin={canWrite} /> },
+          { id: "context", label: "Konteks", content: <ContextPanel project={project} isAdmin={canWrite} /> },
+          { id: "memory", label: "Memori", content: <MemoryPanel project={project} isAdmin={canWrite} /> },
         ]}
       />
     </div>

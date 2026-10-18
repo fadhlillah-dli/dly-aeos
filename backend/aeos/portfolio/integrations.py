@@ -23,7 +23,7 @@ from aeos.core.timeutil import utcnow
 from aeos.events import service as events
 from aeos.identity.service import Principal
 from aeos.models.portfolio import Project, ProjectIntegration
-from aeos.portfolio.service import deny
+from aeos.portfolio.service import deny, require_writable
 
 PURPOSES = ("docs", "issues", "code", "ci", "roadmap")
 # domain -> provider -> allowed purposes (U-02..U-04, §04 table)
@@ -202,6 +202,7 @@ def compute_capability_status(integration: ProjectIntegration) -> dict[str, Any]
 def upsert_integration(session: Session, principal: Principal, project: Project, body: dict[str, Any]) -> ProjectIntegration:
     if not isinstance(body, dict):
         raise ValidationFailed("request body must be an object", code="INVALID_BODY")
+    require_writable(project)
     if any("domain" in str(k).lower() for k in body):
         deny(session, principal, action="portfolio.integration.update", code="DOMAIN_IMMUTABLE", project=project,
              reason="integration domain follows the project domain and cannot be set")
@@ -328,8 +329,19 @@ def integration_view(integ: ProjectIntegration) -> dict[str, Any]:
     }
 
 
-def integration_state(integrations: list[ProjectIntegration]) -> dict[str, str]:
-    """Per-purpose summary for list views: NOT_CONFIGURED | MISSING | CONFIGURED | VERIFIED."""
+def live_integration_view(integ: ProjectIntegration) -> dict[str, Any]:
+    """View with the configuration state re-evaluated now (credential/root), never persisted."""
+    view = integration_view(integ)
+    view["capability_status"] = compute_capability_status(integ)
+    return view
+
+
+def integration_state(integrations: list[ProjectIntegration],
+                      statuses: dict[str, dict[str, Any]] | None = None) -> dict[str, str]:
+    """Per-purpose summary for list views: NOT_CONFIGURED | MISSING | CONFIGURED | VERIFIED.
+
+    *statuses* (integration id -> capability status computed on read) takes precedence over the
+    value stored at the last PUT, so a credential stored later is reflected without another PUT."""
     out: dict[str, str] = {}
     for purpose in ("docs", "issues"):
         rows = [i for i in integrations if i.purpose == purpose]
@@ -337,7 +349,8 @@ def integration_state(integrations: list[ProjectIntegration]) -> dict[str, str]:
             out[purpose] = "NOT_CONFIGURED"
         elif any(i.last_verified_at for i in rows):
             out[purpose] = "VERIFIED"
-        elif any((i.capability_status or {}).get("configuration") == "CONFIGURED" for i in rows):
+        elif any(((statuses or {}).get(i.id) or i.capability_status or {}).get("configuration") == "CONFIGURED"
+                 for i in rows):
             out[purpose] = "CONFIGURED"
         else:
             out[purpose] = "MISSING"

@@ -242,3 +242,5 @@ export interface SearchResponse {
 
 export const CLASSIFICATIONS = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"] as const;
 export const CODE_PROVIDER: Record<Domain, "GITHUB" | "BITBUCKET"> = { PERSONAL: "GITHUB", OFFICE: "BITBUCKET" };
+// Backend: ARCHIVED/RETIRED projects are read-only (PROJECT_READ_ONLY); only a lifecycle change is accepted.
+export const READ_ONLY_LIFECYCLES: readonly string[] = ["ARCHIVED", "RETIRED"];

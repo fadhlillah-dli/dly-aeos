@@ -69,7 +69,12 @@ def list_projects(domain: str = typer.Option(None, help=DOMAIN_HELP)) -> None:
         rows = list(s.scalars(select(Project).where(Project.domain == chosen)
                               .order_by(Project.is_platform.desc(), Project.name)))
         if not rows:
-            _say(f"No {chosen} projects. Run `aeos seed` (or `aeos project seed-self`) for the DLY AEOS self project.")
+            if chosen == "PERSONAL":
+                _say("No PERSONAL projects. Run `aeos seed` (or `aeos project seed-self`) for the DLY AEOS self "
+                     "project, or create one in the Control Center (Proyek > Proyek baru).")
+            else:  # the self project is PERSONAL (section 09); OFFICE projects are always created by a human
+                _say(f"No {chosen} projects. Choose {chosen} in the Control Center and create one (Proyek > "
+                     "Proyek baru).")
             return
         for p in rows:
             flag = " (platform)" if p.is_platform else ""

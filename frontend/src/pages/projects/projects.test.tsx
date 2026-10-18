@@ -217,3 +217,71 @@ describe("IntegrationsPanel", () => {
     expect(screen.queryByText("Atur integrasi")).not.toBeInTheDocument(); // VIEWER: no admin form
   });
 });
+
+describe("ProjectDetailPage read-only lifecycle", () => {
+  it("states that an ARCHIVED project is read-only and only offers lifecycle actions", async () => {
+    auth.domain = "PERSONAL";
+    auth.isAdmin = true;
+    const { default: ProjectDetailPage } = await import("./ProjectDetailPage");
+    mockFetch((url) => {
+      if (url.startsWith("/api/projects/"))
+        return {
+          project: {
+            id: "p1",
+            name: "Arsip",
+            project_key: "arsip",
+            domain: "PERSONAL",
+            lifecycle: "ARCHIVED",
+            lifecycle_reason: "jeda",
+            data_classification: "INTERNAL",
+            project_kind: "NEW",
+            is_platform: false,
+            mode: "LIVE",
+            owner_user_id: "u1",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            repositories: [],
+            integrations: [],
+            integration_state: { docs: "NOT_CONFIGURED", issues: "NOT_CONFIGURED" },
+            links: { plans: "/plans?project=p1", publications: "/publications?project=p1", dag: "/dag?project=p1", detail: "/projects/p1" },
+            description: "",
+            idea: "ide",
+            input_findings: [],
+            attachments: { total: 0 },
+          },
+          checked_at: new Date().toISOString(),
+          source: "aeos-portfolio",
+          mode: "LIVE",
+        };
+      return { items: [] };
+    });
+    wrap(<ProjectDetailPage />);
+    expect(await screen.findByText(/diarsipkan dan hanya-baca/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Ubah" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Aktifkan" })).toBeInTheDocument();
+  });
+});
+
+describe("SearchPanel status honesty", () => {
+  it("renders module statuses through the honest mapping (a CLEAN scan is not a pass)", async () => {
+    auth.domain = "PERSONAL";
+    const { SearchPanel } = await import("./SearchPanel");
+    mockFetch(() => ({
+      items: [
+        { kind: "attachment", id: "a1", title: "brief.md", subtitle: "text/plain", snippet: "", project_id: "p1", status: "CLEAN", url: "/projects/p1#attachments", updated_at: null },
+        { kind: "repository", id: "r1", title: "octo/app", subtitle: "GITHUB", snippet: "", project_id: "p1", status: "UNVERIFIED", url: "/projects/p1#repositories", updated_at: null },
+      ],
+      total: 2,
+      counts: { attachment: 1, repository: 1 },
+      has_more: false,
+      limit: 20,
+      offset: 0,
+      checked_at: new Date().toISOString(),
+      source: "t",
+    }));
+    wrap(<SearchPanel />);
+    await userEvent.type(screen.getByPlaceholderText(/Cari proyek/), "brief");
+    expect(await screen.findByText("Tidak ada temuan (tetap DATA)")).toBeInTheDocument();
+    expect(screen.getByText("Belum diverifikasi")).toBeInTheDocument();
+  });
+});
