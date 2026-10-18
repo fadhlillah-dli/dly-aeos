@@ -11,8 +11,10 @@ Selection (``get_provider``), fail closed:
 
 Values are returned only to trusted in-process callers whose *purpose* prefix matches the
 reference namespace (``personal:...`` may read ``personal/*`` only; OFFICE secrets are never
-returned to a personal-scoped caller). Every fetched value is registered for redaction. Status
-calls never include values. Access is logged (ref/purpose/actor/result) — never the value.
+returned to a personal-scoped caller). ``projects/<id>/...`` is served only for a registered
+PERSONAL project (the controller is not bound to the office policy). Every fetched value is
+registered for redaction. Status calls never include values. Access is logged
+(ref/purpose/actor/result) — never the value.
 """
 
 from __future__ import annotations
@@ -87,6 +89,41 @@ def check_purpose(ref: str, purpose: str) -> None:
         if len(parts) < 2 or parts[1] != project:
             raise PolicyDenied("project secrets need purpose 'projects:<project-id>:<use>' for the same project",
                                code="SECRET_SCOPE_DENIED")
+
+
+def project_domain(project_id: str) -> str | None:
+    """Immutable domain of a registered project (None when unknown or the DB is unavailable)."""
+    try:
+        from aeos.core.db import session_factory
+        from aeos.models.portfolio import Project
+
+        s = session_factory()()
+        try:
+            p = s.get(Project, project_id)
+            return p.domain if p is not None else None
+        finally:
+            s.close()
+    except Exception:  # DB not initialised -> unknown -> callers deny
+        return None
+
+
+def check_project_scope(ref: str) -> None:
+    """``projects/<id>/...`` is served only for a registered PERSONAL project.
+
+    The controller AppRole is bound to the ``aeos-projects`` policy but NOT to ``aeos-office``
+    (OFFICE default deny, §23/§26). Without this check an OFFICE project's credential stored under
+    ``projects/`` would bypass that boundary, so OFFICE (and unknown) projects fail closed."""
+    ns, name = strict_ref(ref)
+    if ns != "projects":
+        return
+    project_id = name.split("/", 1)[0]
+    domain = project_domain(project_id)
+    if domain is None:
+        raise PolicyDenied("project secret for an unknown project (domain cannot be verified)",
+                           code="SECRET_SCOPE_DENIED")
+    if domain != "PERSONAL":
+        raise PolicyDenied("OFFICE project credentials are not served: the office policy is not bound to the "
+                           "AEOS controller until a company authorisation is recorded", code="SECRET_SCOPE_DENIED")
 
 
 def _log_access(provider: str, ref: str, purpose: str, actor: str, result: str) -> None:
@@ -197,7 +234,10 @@ class KeyringBootstrapStore:
         import keyring
 
         register_secret(value)
-        keyring.set_password(self.service, name, value)
+        try:
+            keyring.set_password(self.service, name, value)
+        except Exception as exc:  # keyring backend errors: fail closed, never echo the value
+            raise Blocked(f"OS keyring write failed: {type(exc).__name__}", code="SECRET_STORE_UNAVAILABLE") from exc
 
     def _delete(self, name: str) -> None:
         import keyring
@@ -256,7 +296,9 @@ class OpenBaoProvider:
         self._token_deadline = 0.0
         self._token_ttl = 0
         self._renewable = False
+        self._token_policies: list[str] = []
         self._health: tuple[float, dict[str, Any]] | None = None
+        self.denied_namespaces: list[str] = []  # namespaces the controller token may not list (office)
 
     def _client(self, token: str | None = None) -> OpenBaoClient:
         return OpenBaoClient(self.addr, token=token, http=self._http)
@@ -298,8 +340,19 @@ class OpenBaoProvider:
         self._token = str(token)
         self._token_ttl = int(auth.get("lease_duration") or 0)
         self._renewable = bool(auth.get("renewable"))
+        policies = auth.get("token_policies") or auth.get("policies") or []
+        self._token_policies = sorted(str(p) for p in policies) if isinstance(policies, list) else []
         self._token_deadline = time.monotonic() + max(self._token_ttl, 1)
         return self._token
+
+    def token_view(self) -> dict[str, Any]:
+        """Scope and TTL of the controller token (§26 'scope dan TTL'); never the token itself."""
+        with self._lock:
+            if not self._token:
+                return {"present": False}
+            return {"present": True, "ttl_seconds": self._token_ttl, "renewable": self._renewable,
+                    "expires_in_seconds": max(0, int(self._token_deadline - time.monotonic())),
+                    "policies": list(self._token_policies)}
 
     def _get_token(self) -> str:
         with self._lock:
@@ -352,6 +405,7 @@ class OpenBaoProvider:
 
     def get(self, ref: str, *, purpose: str, actor: str) -> str:
         check_purpose(ref, purpose)
+        check_project_scope(ref)
         data = self._call(lambda c: c.kv_read(KV_MOUNT, ref))
         if data is None or not isinstance((data.get("data") or {}).get("value"), str):
             _log_access(self.name, ref, purpose, actor, "MISSING")
@@ -370,6 +424,7 @@ class OpenBaoProvider:
     def put(self, ref: str, value: str, *, actor: str, expires_at: datetime | None = None,
             scope: dict[str, Any] | None = None) -> SecretStatus:
         strict_ref(ref)
+        check_project_scope(ref)
         if not value:
             raise ValidationFailed("secret value must not be empty")
         register_secret(value)
@@ -400,24 +455,74 @@ class OpenBaoProvider:
         )
 
     def list_status(self) -> list[SecretStatus]:
+        """Metadata of every listable ref. Namespaces the controller policy does not cover (office,
+        by design) are skipped and recorded in ``denied_namespaces`` instead of failing the whole
+        listing (observed against OpenBao 2.7.1: LIST on office/ -> 403)."""
         refs: list[str] = []
+        denied: list[str] = []
 
         def walk(prefix: str, depth: int) -> None:
-            for key in self._call(lambda c: c.kv_list(KV_MOUNT, prefix)):
+            try:
+                keys = self._call(lambda c: c.kv_list(KV_MOUNT, prefix))
+            except PolicyDenied:
+                denied.append(prefix)
+                return
+            for key in keys:
                 if key.endswith("/"):
                     if depth < 2:
                         walk(f"{prefix}/{key.rstrip('/')}", depth + 1)
                 else:
                     refs.append(f"{prefix}/{key}")
 
+        self.ensure_usable()
+        self._get_token()
+        bound = set(self._token_policies)
         for ns in NAMESPACES:
+            if bound and f"aeos-{ns}" not in bound and "root" not in bound:
+                denied.append(ns)  # not bound to the controller: do not even ask (no re-login churn)
+                continue
             walk(ns, 0)
-        return [self.status(r) for r in sorted(refs)]
+        self.denied_namespaces = denied
+        out: list[SecretStatus] = []
+        for r in sorted(refs):
+            try:
+                out.append(self.status(r))
+            except PolicyDenied:
+                continue
+        return out
 
     def delete(self, ref: str, *, actor: str) -> None:
         strict_ref(ref)
+        check_project_scope(ref)
         self._call(lambda c: c.kv_delete_all(KV_MOUNT, ref))
         _log_access(self.name, ref, "delete", actor, "DELETED")
+
+    HEALTHCHECK_REF = "platform/aeos-healthcheck"
+
+    def verify_roundtrip(self) -> dict[str, Any]:
+        """Functional proof (beyond CONNECTED): write, read back and delete a random value in the
+        platform namespace with the controller's AppRole token. Returns a summary without values."""
+        import secrets as _secrets
+
+        probe = "aeos-verify-" + _secrets.token_hex(16)
+        register_secret(probe)
+        steps: list[dict[str, str]] = []
+        status = "VERIFIED"
+        try:
+            self.put(self.HEALTHCHECK_REF, probe, actor="aeos.vault.verify")
+            steps.append({"id": "write", "status": "VERIFIED"})
+            back = self.get(self.HEALTHCHECK_REF, purpose="platform:vault.verify", actor="aeos.vault.verify")
+            same = back == probe
+            steps.append({"id": "read", "status": "VERIFIED" if same else "FAILED"})
+            if not same:
+                status = "FAILED"
+            self.delete(self.HEALTHCHECK_REF, actor="aeos.vault.verify")
+            steps.append({"id": "delete", "status": "VERIFIED"})
+        except (Blocked, PolicyDenied, ValidationFailed) as exc:
+            status = "FAILED"
+            steps.append({"id": "error", "status": "FAILED", "detail": f"{exc.code}: {exc.message}"})
+        return {"status": status, "steps": steps, "checked_at": utcnow().isoformat(),
+                "token": self.token_view(), "ref": self.HEALTHCHECK_REF}
 
 
 # ------------------------------------------------------------------------------ interim keyring
@@ -427,6 +532,8 @@ class InterimKeyringProvider:
     """Owner-approved interim runtime store in the OS keyring (residual risk surfaced in status)."""
 
     name = "os-keyring-interim"
+    # office/* is never served in interim mode: status shows NO_ACCESS, not "missing" (no remedy to run)
+    denied_namespaces = ["office"]
 
     def __init__(self, settings: Settings, *, decision_id: str | None = None):
         self.service = f"{settings.keyring_service}-interim"
@@ -438,6 +545,7 @@ class InterimKeyringProvider:
         ns, _ = strict_ref(ref)
         if ns not in INTERIM_NAMESPACES:
             raise PolicyDenied("OFFICE secrets are never stored in the interim OS keyring", code="SECRET_SCOPE_DENIED")
+        check_project_scope(ref)  # projects/<id>/... only for PERSONAL projects
         return ns
 
     def _index(self) -> dict[str, Any]:
@@ -481,7 +589,10 @@ class InterimKeyringProvider:
         import keyring
 
         register_secret(value)
-        keyring.set_password(self.service, ref, value)
+        try:
+            keyring.set_password(self.service, ref, value)
+        except Exception as exc:  # keyring backend errors: fail closed, never echo the value
+            raise Blocked(f"OS keyring write failed: {type(exc).__name__}", code="SECRET_STORE_UNAVAILABLE") from exc
         with self._lock:
             idx = self._index()
             idx[ref] = {"updated_at": utcnow().isoformat(), "updated_by": actor[:64],
@@ -515,26 +626,39 @@ class InterimKeyringProvider:
             self._write_index(idx)
 
 
+INTERIM_TARGET = ("secret_store", "interim-keyring")
+
+
 def interim_exception(settings: Settings) -> dict[str, Any] | None:
-    """ACTIVE human EXCEPTION decision (domain PERSONAL) allowing the interim keyring store."""
+    """ACTIVE human EXCEPTION decision (domain PERSONAL) allowing the interim keyring store.
+
+    Bound to the exact target ``secret_store/interim-keyring`` (the one ``aeos secrets
+    interim-keyring`` tells the owner to record) and made by an active SUPER_ADMIN account —
+    an EXCEPTION recorded for anything else never switches the secret store."""
     try:
         from sqlalchemy import select
 
         from aeos.core.db import session_factory
+        from aeos.core.enums import Role
         from aeos.models.decisions import Decision
+        from aeos.models.identity import User
 
         s = session_factory()()
         try:
             rows = list(s.scalars(select(Decision).where(Decision.kind == "EXCEPTION", Decision.status == "ACTIVE",
-                                                         Decision.domain == "PERSONAL")
+                                                         Decision.domain == "PERSONAL",
+                                                         Decision.target_type == INTERIM_TARGET[0],
+                                                         Decision.target_id == INTERIM_TARGET[1])
                                   .order_by(Decision.created_at.desc())))
+            admins = {u.id for u in s.scalars(select(User).where(User.role == Role.SUPER_ADMIN.value,
+                                                                 User.is_active.is_(True)))}
         finally:
             s.close()
     except Exception:  # DB not initialised yet -> no exception can exist
         return None
     now = utcnow()
     for d in rows:
-        if (d.actor_kind or "HUMAN") != "HUMAN":
+        if (d.actor_kind or "HUMAN") != "HUMAN" or d.actor_user_id not in admins:
             continue
         if not isinstance(d.details, dict) or d.details.get("secret_store_interim_keyring") is not True:
             continue
@@ -595,6 +719,7 @@ def select_backend(settings: Settings | None = None) -> Selection:
         bao.ensure_usable()
         bao._get_token()
         bao_view["login"] = "OK"
+        bao_view["token"] = bao.token_view()
         return Selection(bao, "openbao", [], bao_view)
     except Blocked as exc:
         reasons.append(exc.message)
@@ -637,12 +762,34 @@ def provider_put(ref: str, value: str, *, actor: str, expires_at: datetime | Non
     return p.put(ref, value, actor=actor)
 
 
+def verification_file(settings: Settings) -> Any:
+    return settings.data_dir / "secrets" / "last-verify.json"
+
+
+def record_verification(settings: Settings, result: dict[str, Any]) -> None:
+    """Keep the last functional roundtrip (status/steps/time, never values) for the health view."""
+    path = verification_file(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keep = {k: result.get(k) for k in ("status", "steps", "checked_at", "ref")}
+    keep["backend"] = result.get("backend", "openbao")
+    path.write_text(json.dumps(keep, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def last_verification(settings: Settings) -> dict[str, Any] | None:
+    try:
+        data = json.loads(verification_file(settings).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def platform_label() -> str:
     return {"win32": "Windows Credential Manager", "darwin": "macOS Keychain"}.get(sys.platform, "Secret Service")
 
 
 __all__ = [
     "INTERIM_RESIDUAL_RISK", "InterimKeyringProvider", "KeyringBootstrapStore", "MemorySecretProvider",
-    "OpenBaoProvider", "SecretProvider", "Selection", "check_purpose", "get_provider", "interim_exception",
-    "openbao_provider", "select_backend", "set_provider_override", "strict_ref",
+    "OpenBaoProvider", "SecretProvider", "Selection", "check_project_scope", "check_purpose", "get_provider",
+    "interim_exception", "last_verification", "openbao_provider", "project_domain", "record_verification",
+    "select_backend", "set_provider_override", "strict_ref",
 ]

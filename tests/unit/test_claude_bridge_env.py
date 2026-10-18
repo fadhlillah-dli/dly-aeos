@@ -134,8 +134,50 @@ def test_context_copied_read_only_and_secrets_refused(settings, tmp_path: Path):
     leaked.write_text(f"key {fake_key}", encoding="utf-8")
     ws2 = prepare_workspace(settings, "req-ctx2")
     with pytest.raises(WorkspaceError) as ei:
-        copy_context(ws2, [leaked])
+        copy_context(ws2, [src, leaked])
     assert ei.value.code == "SECRET_IN_PROMPT"
+    assert not (ws2 / "context").exists()  # the partial copy (plan.md) is removed on refusal
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "latin-1"])
+def test_credentials_in_non_utf8_context_are_found(settings, tmp_path: Path, encoding):
+    """U-13: a token cannot slip into a model prompt by saving the file as UTF-16/latin-1."""
+    leaked = tmp_path / "notes.txt"
+    leaked.write_text("deploy with ghp_" + "e" * 36 + " please", encoding=encoding)
+    ws = prepare_workspace(settings, f"req-enc-{encoding}")
+    with pytest.raises(WorkspaceError) as ei:
+        copy_context(ws, [leaked])
+    assert ei.value.code == "SECRET_IN_PROMPT"
+
+
+def test_context_domain_partition_boundary(settings, tmp_path: Path):
+    """§12/U-05: each request only gets context from its own domain partition (symlinks resolved)."""
+    layout = settings.layout
+    office = layout.domain_root(Domain.OFFICE) / "projects" / "acme" / "evidence" / "a.md"
+    personal = layout.domain_root(Domain.PERSONAL) / "projects" / "mine" / "evidence" / "b.md"
+    for f in (office, personal):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("isi", encoding="utf-8")
+    outside = tmp_path / "c.md"
+    outside.write_text("isi", encoding="utf-8")
+    cases = [("PERSONAL", office, False), ("PERSONAL", personal, True), ("OFFICE", personal, False),
+             ("OFFICE", office, True), (None, office, False), (None, personal, False), ("PERSONAL", outside, True)]
+    for i, (domain, f, allowed) in enumerate(cases):
+        ws = prepare_workspace(settings, f"req-dom-{i}")
+        if allowed:
+            assert copy_context(ws, [f], layout=layout, domain=domain)
+        else:
+            with pytest.raises(WorkspaceError) as ei:
+                copy_context(ws, [f], layout=layout, domain=domain)
+            assert ei.value.code == "CONTEXT_DOMAIN_DENIED", (domain, f)
+    link = tmp_path / "innocent.md"
+    try:
+        link.symlink_to(office)
+    except (OSError, NotImplementedError):  # Windows without developer mode: symlinks unavailable
+        return
+    ws = prepare_workspace(settings, "req-dom-link")
+    with pytest.raises(WorkspaceError):
+        copy_context(ws, [link], layout=layout, domain="PERSONAL")
 
 
 def test_secret_detector_registered_values_and_shapes():
@@ -144,6 +186,36 @@ def test_secret_detector_registered_values_and_shapes():
     assert high_confidence_secret_hits(f"use {value} now") >= 1
     assert high_confidence_secret_hits("ghp_" + "b" * 36) >= 1
     assert high_confidence_secret_hits("the field token: string is documented") == 0
+
+
+def test_binary_probes_run_from_a_neutral_directory_with_scrubbed_env(monkeypatch):
+    """`claude --version` / `claude auth status` never run in the controller cwd (a repository whose
+    project settings the client would read, S05) and never see provider/credential variables."""
+    import subprocess
+    import tempfile
+
+    from aeos.claude_bridge import binary as binmod
+
+    seen: list[dict] = []
+
+    def fake_run(argv, **kw):
+        seen.append({"argv": argv, **kw})
+        out = ('{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "subscriptionType": "max"}'
+               if "auth" in argv else "2.1.302 (Claude Code)")
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+    for k, v in FORBIDDEN_SAMPLE.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(binmod.subprocess, "run", fake_run)
+    monkeypatch.setattr(binmod, "fingerprint", lambda p: "sha256:" + "f" * 64)
+    info = binmod.probe_version(binmod.BinaryInfo(found=True, path=Path("claude.exe"), source="PATH"))
+    auth = binmod.probe_auth(info)
+    assert info.version == "2.1.302" and auth.status == "VERIFIED"
+    assert len(seen) == 2
+    for call in seen:
+        assert Path(call["cwd"]).resolve() == Path(tempfile.gettempdir()).resolve()
+        assert call["stdin"] == subprocess.DEVNULL and call["timeout"] and "shell" not in call
+        assert not any(is_forbidden(k) for k in call["env"])
 
 
 def test_trace_argv_never_contains_schema_body():

@@ -18,6 +18,15 @@ function freeLabel(r: RouteItem) {
 
 export { freeLabel };
 
+/** §37: an identity field that is not recorded shows UNKNOWN, never a guess. */
+function cfgText(config: Record<string, unknown> | undefined, key: string): string {
+  const v = config?.[key];
+  if (v === null || v === undefined || v === "") return "UNKNOWN";
+  if (Array.isArray(v)) return v.length ? v.join(", ") : "UNKNOWN";
+  if (typeof v === "object") return Object.keys(v as object).length ? JSON.stringify(v) : "UNKNOWN";
+  return String(v);
+}
+
 export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: () => void }) {
   const { isAdmin } = useAuth();
   const q = useRouteDetail(routeKey);
@@ -69,6 +78,12 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
                 ["Domain", r.eligible_domains.join(", ") || "—"],
                 ["Kelas data", r.allowed_data_classes.join(", ") || "—"],
                 ["Konteks / alat", `${r.context_window ?? "UNKNOWN"} token · tools ${r.supports_tools}`],
+                ["Harness", `${cfgText(r.config, "harness")} · versi ${cfgText(r.config, "harness_version")}`],
+                ["Revisi prompt / policy", `${cfgText(r.config, "prompt_revision")} · ${cfgText(r.config, "policy_version")}`],
+                ["Strategi konteks", cfgText(r.config, "context_strategy")],
+                ["Parameter mode", cfgText(r.config, "mode_params")],
+                ["Set alat", cfgText(r.config, "tool_set")],
+                ["Region / residensi", cfgText(r.config, "region")],
                 ["Harga", <Freshness key="pc" at={r.pricing_checked_at} label="Harga diperiksa" staleAfterSeconds={30 * 86400} />],
                 ["Data terms", <Freshness key="tc" at={r.terms_checked_at} label="Terms diperiksa" staleAfterSeconds={30 * 86400} />],
                 ["Gratis sampai", r.expires_note ?? (r.free_until ? absoluteTime(r.free_until) : "—")],
@@ -96,9 +111,13 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
                 <ul className="space-y-1 text-sm">
                   {r.decisions.map((d) => (
                     <li key={d.id} className="flex flex-wrap items-center gap-2">
-                      <StatusBadge status={d.status === "ACTIVE" && d.matches_current_config ? "APPROVED" : "STALE"} label={`${d.kind} ${d.status}`} />
+                      <StatusBadge status={d.effective ? "APPROVED" : d.status === "ACTIVE" ? "STALE" : "DISABLED"} label={`${d.kind} ${d.status}${d.effective ? "" : " (tidak berlaku)"}`} />
                       {!d.matches_current_config && <span className="text-xs text-warn">hash lama</span>}
+                      {d.matches_current_config && !d.effective && d.status === "ACTIVE" && (
+                        <span className="text-xs text-warn">{d.actor_kind !== "HUMAN" ? "bukan keputusan manusia" : "kedaluwarsa"}</span>
+                      )}
                       <span className="text-xs text-ink-3">{absoluteTime(d.created_at)}</span>
+                      {d.expires_at && <span className="text-xs text-ink-3">s.d. {absoluteTime(d.expires_at)}</span>}
                     </li>
                   ))}
                 </ul>

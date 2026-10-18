@@ -68,6 +68,14 @@ const STATUS = {
   mode: "LIVE",
 };
 
+const DS_CONFIG = { harness: "opencode", harness_version: null, prompt_revision: null, policy_version: null, context_strategy: null, mode_params: {}, tool_set: ["opencode-default"], region: null };
+const decision = (over: Record<string, unknown>) => ({
+  id: "d-1", kind: "TRIAL", status: "ACTIVE", target_hash: "sha256:" + "c".repeat(64), matches_current_config: true,
+  effective: false, actor_kind: "HUMAN", created_at: "2026-10-01T00:00:00Z", expires_at: "2026-10-10T00:00:00Z", rationale: "pilot", ...over,
+});
+// an expired ACTIVE decision bound to the current hash, and one recorded by an agent: neither authorises the route
+const DS_DECISIONS = [decision({}), decision({ id: "d-2", actor_kind: "AGENT", expires_at: null })];
+
 const ROUTES = { items: [route({}), PAID], source: "model_routes", checked_at: null, catalog_refresh: null, mode: "DESIGN", counts: { total: 2, approved: 0 } };
 
 let calls: { url: string; method: string; body?: string }[] = [];
@@ -84,7 +92,7 @@ beforeEach(() => {
       else if (url === "/api/routes") body = ROUTES;
       else if (url.startsWith("/api/claude/capability-test")) body = { status: "VERIFIED", model_resolved: "claude-opus-5-5", steps: [] };
       else if (url.startsWith("/api/routes/opencode-zen/qwen3.8-flash")) body = { ...PAID, config: {}, decisions: [], quota_states: [] };
-      else if (url.startsWith("/api/routes/")) body = { ...route({}), config: {}, decisions: [], quota_states: [] };
+      else if (url.startsWith("/api/routes/")) body = { ...route({}), config: DS_CONFIG, decisions: DS_DECISIONS, quota_states: [] };
       return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
     }),
   );
@@ -132,6 +140,18 @@ describe("Models & Routes page", () => {
     await screen.findByText("claude.exe (PATH)");
     expect(screen.queryByRole("button", { name: /Uji kemampuan/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Perbarui katalog/ })).toBeNull();
+  });
+
+  it("never shows an expired or non-human decision as approving, and unknown identity fields as UNKNOWN", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByText("DeepSeek V4.1 Flash Free"));
+    const drawer = await screen.findByRole("dialog", { name: /Detail rute/ });
+    expect(await within(drawer).findByText(/kedaluwarsa$/)).toBeInTheDocument();
+    expect(within(drawer).getByText("bukan keputusan manusia")).toBeInTheDocument();
+    expect(within(drawer).getAllByText(/\(tidak berlaku\)/).length).toBe(2);
+    expect(within(drawer).queryByText("Disetujui")).toBeNull();
+    expect(within(drawer).getByText("opencode · versi UNKNOWN")).toBeInTheDocument();
+    expect(within(drawer).getByText("UNKNOWN · UNKNOWN")).toBeInTheDocument(); // prompt revision / policy version
   });
 
   it("activation dialog states the decision and requires a budget decision for paid routes", async () => {

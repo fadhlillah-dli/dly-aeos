@@ -64,6 +64,12 @@ def test_last_used_is_domain_scoped(personal_client: AuthedClient, db):
     db.commit()
     item = personal_client.get(f"/api/routes/{DS}").json()
     assert item["last_used"]["run_id"] == "personal-run" and item["last_used"]["status"] == "LAST_USED"
+    for i in range(25):  # a later burst of Office usage neither leaks nor hides the Personal one
+        db.add(UsageLedgerEntry(route_key=DS, provider="opencode-zen", category="WORKER_API", source="broker",
+                                domain="OFFICE", run_id=f"office-burst-{i}", at=utcnow()))
+    db.commit()
+    body = personal_client.get(f"/api/routes/{DS}").text
+    assert '"run_id":"personal-run"' in body.replace(" ", "") and "office-burst" not in body
 
 
 def test_eligibility_requires_explicit_domain(personal_client: AuthedClient, db):
@@ -149,3 +155,54 @@ def test_office_session_sees_no_personal_bias(admin_client: AuthedClient, db):
     admin_client.select_domain(Domain.OFFICE)
     r = admin_client.get("/api/routes/eligibility", params={"domain": "OFFICE", "classification": "INTERNAL"})
     assert r.status_code == 200 and r.json()["eligible"] == []
+
+
+def test_decision_view_effective_only_while_human_active_unexpired_and_current(
+        personal_client: AuthedClient, db, monkeypatch):
+    """The drawer may show a decision as approving only when it really authorises the route now."""
+    install_fakes(monkeypatch)
+    _seed(db)
+    h = service.get_route(db, DS).config_hash
+    r = personal_client.post(f"/api/routes/{DS}/activate", json={"mode": "TRIAL", "rationale": "pilot for slice 1",
+                                                                  "expected_config_hash": h})
+    assert r.status_code == 200, r.text
+    detail = personal_client.get(f"/api/routes/{DS}").json()
+    assert [d["effective"] for d in detail["decisions"]] == [True]
+    db.expire_all()
+    d = db.get(service.Decision, r.json()["decision_id"])
+    d.expires_at = utcnow().replace(year=2020)  # still ACTIVE, but expired
+    db.commit()
+    detail = personal_client.get(f"/api/routes/{DS}").json()
+    assert detail["decisions"][0]["status"] == "ACTIVE" and detail["decisions"][0]["effective"] is False
+    assert detail["active_decision"] is None
+    human_decision(db, kind="TRIAL", target_type="model_route", target_id=DS, target_hash=h, actor_kind="AGENT")
+    db.commit()
+    agent = next(x for x in personal_client.get(f"/api/routes/{DS}").json()["decisions"] if x["actor_kind"] == "AGENT")
+    assert agent["matches_current_config"] is True and agent["effective"] is False  # model output is never AUTH
+
+
+def test_activation_with_same_classes_keeps_the_reviewed_hash(personal_client: AuthedClient, db, monkeypatch):
+    """Re-confirming the seeded classes (in any order) must not mint a new identity: eval results and the
+    reviewed hash stay valid. Narrowing the classes is a real change and gets a new hash."""
+    install_fakes(monkeypatch)
+    _seed(db)
+    h = service.get_route(db, DS).config_hash
+    r = personal_client.post(f"/api/routes/{DS}/activate", json={
+        "mode": "TRIAL", "rationale": "pilot for slice 1", "expected_config_hash": h,
+        "allowed_data_classes": ["INTERNAL", "PUBLIC"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["route"]["config_hash"] == h and r.json()["route"]["allowed_data_classes"] == ["PUBLIC", "INTERNAL"]
+    r = personal_client.post(f"/api/routes/{DS}/activate", json={
+        "mode": "TRIAL", "rationale": "public data only now", "expected_config_hash": h,
+        "allowed_data_classes": ["PUBLIC"]})
+    assert r.status_code == 200 and r.json()["route"]["config_hash"] != h
+
+
+def test_list_mode_stays_design_while_seeded_rows_exist(personal_client: AuthedClient, db):
+    """A few catalog-discovered LIVE rows never relabel the seeded DESIGN registry as live runtime."""
+    _seed(db)
+    db.add(service.ModelRoute(route_key="openrouter/x/y:free", pool="ARENA", provider="openrouter", model_id="x/y:free",
+                              mode="LIVE", origin="CATALOG_DISCOVERED", status="CANDIDATE"))
+    db.commit()
+    assert personal_client.get("/api/routes").json()["mode"] == "DESIGN"
+    assert personal_client.get("/api/routes", params={"pool": "ARENA", "status": "CANDIDATE"}).json()["mode"] == "DESIGN"

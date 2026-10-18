@@ -119,8 +119,9 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, *, policy: bool = True, cost:
 
 def human_decision(db, *, kind: str, target_type: str, target_id: str, target_hash: str | None = None,
                    domain: str | None = "PERSONAL", details: dict | None = None, auth_scope: dict | None = None,
-                   expires_at: datetime | None = None, actor_kind: str = "HUMAN") -> Decision:
-    d = Decision(kind=kind, actor_user_id="owner-id", actor_kind=actor_kind, target_type=target_type,
+                   expires_at: datetime | None = None, actor_kind: str = "HUMAN",
+                   actor_user_id: str = "owner-id") -> Decision:
+    d = Decision(kind=kind, actor_user_id=actor_user_id, actor_kind=actor_kind, target_type=target_type,
                  target_id=target_id, target_hash=target_hash, domain=domain, details=details or {},
                  auth_scope=auth_scope or {}, expires_at=expires_at, rationale="test decision")
     db.add(d)

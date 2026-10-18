@@ -17,17 +17,14 @@ mode MANUAL_FALLBACK. A bare object carries no model provenance, so its identity
 from __future__ import annotations
 
 import json
-import os
-import shutil
-import stat
 from pathlib import Path
 from typing import Any
 
 from aeos.claude_bridge.facade import ClaudeRequest, ClaudeResult
-from aeos.claude_bridge.parsing import parse_output, redact_strings, schema_errors, validate_schema
-from aeos.claude_bridge.workspace import high_confidence_secret_hits
+from aeos.claude_bridge.parsing import parse_output, redact_strings, schema_errors
+from aeos.claude_bridge.workspace import WorkspaceError, copy_context, remove_tree
 from aeos.core.config import get_settings
-from aeos.core.errors import Conflict, NotFound, ValidationFailed
+from aeos.core.errors import AeosError, Conflict, NotFound, PolicyDenied, ValidationFailed
 from aeos.core.hashing import content_hash, sha256_text
 from aeos.core.paths import UnsafePathError, safe_segment
 from aeos.core.timeutil import utcnow
@@ -107,40 +104,35 @@ paket `{pkg.name}`. Jangan mengubah `PROMPT.md` atau `schema.json` (hash diperik
 """
 
 
+_POLICY_CODES = {"OFFICE_POLICY_DENIED", "DOMAIN_MISMATCH", "CONTEXT_DOMAIN_DENIED"}
+
+
+def _refuse(code: str, message: str) -> AeosError:
+    if code in _POLICY_CODES:
+        return PolicyDenied(message, code=code)
+    if code == "PROJECT_NOT_FOUND":
+        return NotFound(message, code=code)
+    return ValidationFailed(message, code=code)
+
+
 def write_manual_package(request: ClaudeRequest, *, package_id: str) -> Path:
-    if high_confidence_secret_hits(request.prompt):
-        raise ValidationFailed("prompt contains a credential; manual packages never include secrets",
-                               code="SECRET_IN_PROMPT")
-    try:
-        validate_schema(request.json_schema)
-    except Exception as exc:
-        raise ValidationFailed(f"json_schema is invalid: {getattr(exc, 'message', exc)}", code="SCHEMA_INVALID") from exc
+    """Write a package for official Claude Code. The same preflight as the bridge applies (§23:
+    the Office policy holds from the first planning/review call — a manual package would make the
+    owner paste Office data into Claude Max just the same)."""
+    from aeos.claude_bridge.bridge import preflight
+
+    problem = preflight(request)
+    if problem:
+        raise _refuse(*problem)
     pkg = package_dir(package_id)
     if pkg.exists():
         raise Conflict(f"manual package {package_id} already exists")
     pkg.mkdir(parents=True)
-    schema_json = json.dumps(request.json_schema, separators=(",", ":"), ensure_ascii=False)
-    (pkg / "PROMPT.md").write_text(request.prompt, encoding="utf-8")
-    (pkg / "schema.json").write_text(schema_json, encoding="utf-8")
-    ctx = pkg / "context"
-    ctx.mkdir()
-    manifest: list[dict[str, Any]] = []
-    for src in request.context_files:
-        src = Path(src)
-        if not src.is_file():
-            raise ValidationFailed(f"context file not found: {src.name}")
-        text = ""
-        try:
-            text = src.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            pass
-        if high_confidence_secret_hits(text):
-            raise ValidationFailed(f"context file {src.name} contains a credential", code="SECRET_IN_PROMPT")
-        dest = ctx / safe_segment(src.name)
-        shutil.copyfile(src, dest)
-        os.chmod(dest, stat.S_IREAD)
-        manifest.append({"name": dest.name, "bytes": dest.stat().st_size})
-    (pkg / "INSTRUCTIONS.md").write_text(_instructions(request, pkg), encoding="utf-8")
+    try:
+        manifest = _fill_package(pkg, request)
+    except BaseException:
+        remove_tree(pkg)  # never leave a half-written package (or its context copies) behind
+        raise
     meta = {
         "package_id": package_id, "purpose": request.purpose, "role": request.role, "model_requested": request.model,
         "project_id": request.project_id, "domain": request.domain, "created_at": utcnow().isoformat(),
@@ -150,6 +142,19 @@ def write_manual_package(request: ClaudeRequest, *, package_id: str) -> Path:
     }
     (pkg / "package.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
     return pkg
+
+
+def _fill_package(pkg: Path, request: ClaudeRequest) -> list[dict[str, Any]]:
+    schema_json = json.dumps(request.json_schema, separators=(",", ":"), ensure_ascii=False)
+    (pkg / "PROMPT.md").write_text(request.prompt, encoding="utf-8")
+    (pkg / "schema.json").write_text(schema_json, encoding="utf-8")
+    try:
+        manifest = copy_context(pkg, list(request.context_files), layout=get_settings().layout,
+                                domain=request.domain)
+    except WorkspaceError as exc:
+        raise _refuse(exc.code, str(exc)) from exc
+    (pkg / "INSTRUCTIONS.md").write_text(_instructions(request, pkg), encoding="utf-8")
+    return manifest
 
 
 def _load_meta(pkg: Path) -> dict[str, Any]:

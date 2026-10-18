@@ -250,3 +250,53 @@ def test_generated_server_config_is_loopback_only(settings):
     bad = settings.model_copy(update={"openbao_addr": "http://0.0.0.0:8200"})
     with pytest.raises(Exception):
         server.config_text(bad)
+
+
+def test_vault_status_verify_blocked_without_store(settings, memory_keyring, monkeypatch):  # noqa: F811
+    """`--verify` never claims VERIFIED without a reachable OpenBao (CONNECTED != VERIFIED)."""
+    monkeypatch.setattr(server, "bin_path", lambda s: None)
+    with respx.mock(assert_all_called=False) as m:
+        m.route(url__startswith=ADDR).mock(side_effect=httpx.ConnectError("down"))
+        r = runner.invoke(app, ["vault", "status", "--verify"])
+    assert r.exit_code == 1 and "not the active store" in r.output
+    from aeos.secrets.provider import last_verification
+
+    assert last_verification(settings)["status"] == "BLOCKED"
+
+
+def test_vault_status_verify_roundtrip(settings, memory_keyring):  # noqa: F811
+    bootstrap_store(settings).set_approle("role-" + "i" * 20, "sid-" + "j" * 20)
+    stored: dict = {}
+
+    def write(req):
+        stored["v"] = json.loads(req.content)["data"]["value"]
+        return httpx.Response(200, json={"data": {"version": 1}})
+
+    with respx.mock(assert_all_called=False) as m:
+        m.get(f"{ADDR}/v1/sys/health").mock(return_value=httpx.Response(
+            200, json={"initialized": True, "sealed": False, "standby": False, "version": "2.7.1"}))
+        m.post(f"{ADDR}/v1/auth/approle/login").mock(return_value=httpx.Response(200, json={
+            "auth": {"client_token": "s." + "C" * 26, "lease_duration": 3600, "renewable": True,
+                     "token_policies": ["aeos-personal", "aeos-platform", "aeos-projects", "aeos-workers"]}}))
+        m.post(f"{ADDR}/v1/aeos/data/platform/aeos-healthcheck").mock(side_effect=write)
+        m.post(f"{ADDR}/v1/aeos/metadata/platform/aeos-healthcheck").mock(return_value=httpx.Response(204))
+        m.get(f"{ADDR}/v1/aeos/metadata/platform/aeos-healthcheck").mock(return_value=httpx.Response(
+            200, json={"data": {"updated_time": "2026-10-18T03:00:00Z", "current_version": 1, "custom_metadata": {}}}))
+        m.get(f"{ADDR}/v1/aeos/data/platform/aeos-healthcheck").mock(side_effect=lambda req: httpx.Response(
+            200, json={"data": {"data": {"value": stored["v"]}, "metadata": {}}}))
+        m.delete(f"{ADDR}/v1/aeos/metadata/platform/aeos-healthcheck").mock(return_value=httpx.Response(204))
+        m.get(url__regex=r".*/v1/aeos/metadata/[a-z]+/\?list=true$").mock(return_value=httpx.Response(404))
+        r = runner.invoke(app, ["vault", "status", "--verify"])
+    assert r.exit_code == 0, r.output
+    assert "functional check VERIFIED" in r.output and stored["v"] not in r.output
+    assert "policies=aeos-personal,aeos-platform,aeos-projects,aeos-workers" in r.output
+    from aeos.secrets.health import store_health
+    from aeos.secrets.provider import last_verification
+
+    assert last_verification(settings)["status"] == "VERIFIED"
+    with respx.mock(assert_all_called=False) as m:
+        m.route(url__startswith=ADDR).mock(side_effect=httpx.ConnectError("down"))
+        reset_provider_cache()
+        h = store_health(settings)
+    assert h["functional_check"]["status"] == "VERIFIED" and h["status"] == "BLOCKED"  # history, not live state
+    assert h["functional_check"]["stale"] is True  # never shown as a current proof

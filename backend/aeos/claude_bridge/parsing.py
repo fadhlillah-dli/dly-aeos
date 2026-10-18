@@ -289,6 +289,8 @@ def parse_output(
         return ParsedOutput(ok=False, structured=None, error_code="SCHEMA_INVALID",
                             error="; ".join(errors), **base)
     if not resolution.policy_ok:
-        return ParsedOutput(ok=False, structured=redact_strings(structured), error_code="MODEL_POLICY_MISMATCH",
+        # §12 "tolak penerimaan hasil": the answer of an off-policy model is never handed to callers
+        # (the redacted raw output stays in the trace for diagnosis).
+        return ParsedOutput(ok=False, structured=None, error_code="MODEL_POLICY_MISMATCH",
                             error=resolution.reason, **base)
     return ParsedOutput(ok=True, structured=redact_strings(structured), **base)

@@ -30,8 +30,8 @@ def _settings():
     return get_settings()
 
 
-def _observe(status: str, version: str | None, detail: dict) -> None:
-    """Best-effort inventory observation (installation dimension)."""
+def _observe(status: str, version: str | None, detail: dict, *, dimension: str = "installation") -> None:
+    """Best-effort inventory observation (installation / functional dimension)."""
     try:
         from aeos.cli import ensure_database
         from aeos.core.db import session_scope
@@ -39,9 +39,9 @@ def _observe(status: str, version: str | None, detail: dict) -> None:
 
         ensure_database()
         with session_scope() as s:
-            record_observation(s, component_id="openbao", dimension="installation", status=status,
+            record_observation(s, component_id="openbao", dimension=dimension, status=status,
                                observer="aeos.secrets.vault_cli", observed_version=version, detail=detail,
-                               ttl_seconds=None)
+                               ttl_seconds=None if dimension == "installation" else 7 * 86400)
     except (ImportError, ModuleNotFoundError):
         pass
     except Exception as exc:  # pragma: no cover
@@ -126,12 +126,41 @@ def stop_cmd() -> None:
     typer.echo("Stopped." if server.stop(_settings()) else "No running OpenBao recorded.")
 
 
+def _verify(settings) -> int:
+    """Functional roundtrip with the controller AppRole token (write/read/delete, no values shown)."""
+    from aeos.secrets.provider import OpenBaoProvider, record_verification, select_backend
+
+    sel = select_backend(settings)
+    if not isinstance(sel.provider, OpenBaoProvider):
+        _err(f"verify: OpenBao is not the active store (backend {sel.backend}); " + "; ".join(sel.reasons))
+        from aeos.core.timeutil import utcnow
+
+        record_verification(settings, {"status": "BLOCKED", "steps": [], "checked_at": utcnow().isoformat(),
+                                       "backend": sel.backend, "ref": None})
+        return 1
+    res = sel.provider.verify_roundtrip()
+    record_verification(settings, res)
+    tok = res.get("token") or {}
+    typer.echo(f"functional check {res['status']} (write/read/delete {res['ref']})")
+    for st in res["steps"]:
+        typer.echo(f"  {st['id']:<8} {st['status']} {st.get('detail', '')}".rstrip())
+    if tok.get("present"):
+        typer.echo(f"  token    ttl={tok.get('ttl_seconds')}s renewable={tok.get('renewable')} "
+                   f"policies={','.join(tok.get('policies') or []) or 'UNKNOWN'}")
+    _observe("VERIFIED" if res["status"] == "VERIFIED" else "FAILED", None,
+             {"dimension_note": "functional roundtrip", "status": res["status"]}, dimension="functional")
+    return 0 if res["status"] == "VERIFIED" else 1
+
+
 @app.command("status")
-def status_cmd() -> None:
+def status_cmd(verify: bool = typer.Option(False, "--verify", help="Also prove write/read/delete with the "
+                                           "controller token (functional check)")) -> None:
     """Vault health, sealed/initialised, AppRole presence and interim-mode warning (no values)."""
     from aeos.secrets.health import store_health
 
-    h = store_health(_settings())
+    settings = _settings()
+    code = _verify(settings) if verify else 0
+    h = store_health(settings)
     b = h["openbao"]
     typer.echo(f"store status     {h['status']} (backend {h['backend']})")
     typer.echo(f"openbao          addr={b['addr']} reachable={b['reachable']} initialized={b['initialized']} "
@@ -143,9 +172,16 @@ def status_cmd() -> None:
         typer.secho(f"WARNING interim  {h['interim']['residual_risk']}", fg="yellow")
     for r in h["reasons"]:
         typer.echo(f"reason           {r}")
+    tok = b.get("token") or {}
+    if tok.get("present"):
+        typer.echo(f"token            ttl={tok.get('ttl_seconds')}s policies={','.join(tok.get('policies') or [])}")
+    fc = h["functional_check"]
+    typer.echo(f"functional check {fc.get('status')} at {fc.get('checked_at') or '-'}")
     for rem in h["remedies"]:
         typer.echo(f"remedy           {rem['command']}  ({rem['why']})")
     typer.echo(f"evidence limit   {h['evidence_limit']}")
+    if code:
+        raise typer.Exit(code)
 
 
 @app.command("init")

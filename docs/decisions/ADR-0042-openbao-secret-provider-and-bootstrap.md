@@ -65,3 +65,25 @@ into a throw-away test data directory:
 * Until the owner runs `aeos vault install/start/init` (or records the interim exception) every
   secret-dependent capability is BLOCKED and statuses are UNKNOWN, never "missing".
 * OpenBao Agent, SOPS+age backup and an office AppRole are not implemented (future, decision-bound).
+
+## Addendum 2026-10-18 - completeness review
+
+* **Functional proof beyond CONNECTED** (§07 order 3 "vault health, policy scope, token TTL").
+  `aeos vault status --verify` writes, reads back and deletes a random value at
+  `platform/aeos-healthcheck` with the controller AppRole token and stores the result (status,
+  steps and time, never values) in `<data>/secrets/last-verify.json`. The health view shows it
+  under `functional_check`. It is **stale** when OpenBao is not the active store now or the proof
+  is older than 7 days, so a past roundtrip is never shown as a current pass. The controller
+  token's TTL, renewability and bound policies (never the token) are shown as `openbao.token`.
+* **Unbound namespaces are NO_ACCESS**. The controller is not bound to `aeos-office`, and the
+  interim keyring never serves `office/*`, so office refs show `NO_ACCESS` (neither present nor
+  missing) with no `aeos secrets set` remedy, which would only be refused. The controller does not
+  even ask OpenBao for namespaces outside its token policies (observed 403 on 2.7.1).
+* **Project secrets**. `projects/<id>/...` is served only for a registered PERSONAL project, and is
+  listed only in a session whose active domain equals the project's domain. An OFFICE project's
+  credential cannot bypass the unbound office policy through the `projects/` namespace.
+* **Interim exception binding**. The interim keyring is enabled only by an ACTIVE, unexpired, human
+  EXCEPTION decision recorded by an active SUPER_ADMIN, for the exact target
+  `secret_store/interim-keyring` with `details.secret_store_interim_keyring == true` (domain
+  PERSONAL).
+* OS-keyring write errors fail closed (`Blocked SECRET_STORE_UNAVAILABLE`) without echoing the value.

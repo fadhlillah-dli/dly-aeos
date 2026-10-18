@@ -41,7 +41,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def test_live_openbao_init_put_get(settings, memory_keyring):  # noqa: F811
+def test_live_openbao_init_put_get(settings, memory_keyring, monkeypatch):  # noqa: F811
     explicit = os.environ.get("DLY_AEOS_TEST_BAO")  # path to a bao binary (AEOS_* vars are reset by fixtures)
     binary = Path(explicit) if explicit and Path(explicit).is_file() else server.bin_path(settings)
     if binary is None:
@@ -59,6 +59,23 @@ def test_live_openbao_init_put_get(settings, memory_keyring):  # noqa: F811
         assert p.status("personal/github").exists
         with pytest.raises(PolicyDenied):
             p.put("office/atlassian", "nope-nope-nope", actor="pytest")  # office policy not bound to the AppRole
+        listed = {st.ref: st for st in p.list_status()}  # office/ is not readable: listed as no-access, not a crash
+        assert listed["personal/github"].exists is True
+        assert not any(r.startswith("office/") for r in listed) and "office" in p.denied_namespaces
+        tok = p.token_view()
+        assert tok["present"] and 0 < tok["ttl_seconds"] <= 3600 and "aeos-office" not in tok["policies"]
+        assert "aeos-personal" in tok["policies"]
+        check = p.verify_roundtrip()  # functional proof beyond CONNECTED
+        assert check["status"] == "VERIFIED", check
+        assert not p.status(OpenBaoProvider.HEALTHCHECK_REF).exists
+        from aeos.secrets import provider as provider_mod
+        from aeos.secrets.health import secrets_status
+
+        monkeypatch.setattr(provider_mod, "openbao_provider", lambda _s: p)
+        rows = {i["ref"]: i for i in secrets_status(s, include_office=True)["items"]}
+        assert rows["personal/github"]["state"] == "PRESENT"
+        assert rows["office/atlassian"]["state"] == "NO_ACCESS"  # neither present nor missing
+        assert rows["office/atlassian"]["remedy"] is None  # `secrets set office/...` would be refused
         # restart/recovery: after a restart the vault is sealed (fail closed) until unsealed, data survives
         server.stop(s)
         server.start(s, binary)

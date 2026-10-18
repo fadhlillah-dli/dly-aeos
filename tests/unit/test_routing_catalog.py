@@ -155,9 +155,23 @@ def test_opencode_catalog_unknown_without_binary(routes, settings, monkeypatch):
 def test_opencode_catalog_parsed(routes, settings, monkeypatch):
     listing = "opencode/deepseek-v4.1-flash-free\nopencode/glm-5.3-flash-free\nopenrouter/x/y\n"
     monkeypatch.setattr(catalog, "_opencode_binary", lambda s: "opencode")
-    monkeypatch.setattr(catalog.subprocess, "run",
-                        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, stdout=listing, stderr=""))
+    monkeypatch.setenv("OPENCODE_API_KEY", "oc-" + "k" * 30)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-" + "k" * 40)
+    seen: dict = {}
+
+    def fake_run(argv, **kw):
+        seen.update(kw, argv=argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=listing, stderr="")
+
+    monkeypatch.setattr(catalog.subprocess, "run", fake_run)
     out = catalog.refresh_opencode_catalog(routes, settings)
+    # list args + timeout, scrubbed env (no provider keys), neutral cwd (never the controller's repo)
+    import tempfile
+    from pathlib import Path
+
+    assert seen["argv"] == ["opencode", "models"] and seen["timeout"] and "shell" not in seen
+    assert "OPENCODE_API_KEY" not in seen["env"] and "OPENROUTER_API_KEY" not in seen["env"]
+    assert Path(seen["cwd"]).resolve() == Path(tempfile.gettempdir()).resolve()
     assert out["status"] == "OK" and "opencode-zen/deepseek-v4.1-flash-free" in out["available"]
     assert "opencode-zen/beam-free" in out["missing"]
     assert catalog.parse_opencode_models(listing) == {"opencode/deepseek-v4.1-flash-free", "opencode/glm-5.3-flash-free",

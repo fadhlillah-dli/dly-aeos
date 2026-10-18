@@ -10,6 +10,7 @@ const REF_STATE: Record<string, { status: string; label: string }> = {
   EXPIRED: { status: "EXPIRED", label: "Kedaluwarsa" },
   UNKNOWN: { status: "UNKNOWN", label: "Tidak diketahui (vault tidak tersedia)" },
   HIDDEN: { status: "NOT_APPLICABLE", label: "Disembunyikan di sesi ini" },
+  NO_ACCESS: { status: "BLOCKED", label: "Tanpa akses (policy office tidak terikat)" },
 };
 
 function RefRow({ r }: { r: CredentialRef }) {

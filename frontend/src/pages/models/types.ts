@@ -102,7 +102,19 @@ export interface RouteItem {
 
 export interface RouteDetail extends RouteItem {
   config: Record<string, unknown>;
-  decisions: { id: string; kind: string; status: string; target_hash: string | null; matches_current_config: boolean; created_at: string | null; expires_at: string | null; rationale: string }[];
+  decisions: {
+    id: string;
+    kind: string;
+    status: string;
+    target_hash: string | null;
+    matches_current_config: boolean;
+    /** ACTIVE + human + unexpired + bound to the current config hash: the only state shown as approving */
+    effective: boolean;
+    actor_kind: string;
+    created_at: string | null;
+    expires_at: string | null;
+    rationale: string;
+  }[];
   quota_states: { scope: string; state: string; source: string; observed_at: string | null; resets_at: string | null }[];
 }
 

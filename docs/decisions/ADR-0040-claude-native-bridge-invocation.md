@@ -85,3 +85,33 @@ Observed on the owner's Windows 11 machine on 2026-10-18 (Claude Code 2.1.302, w
   documented in `--help` and is NOT-PROVEN.
 * A Claude Code update changes the binary fingerprint/version: the last capability test turns STALE
   and `doctor.invalidate("binary:claude")` is requested.
+
+## Addendum 2026-10-18 - completeness review
+
+Decisions added after the review of the first implementation (same status, same deciders):
+
+* **One preflight for the bridge and the manual package** (`bridge.preflight`). Before any prompt
+  leaves the machine, whether it goes through `run_structured` or into a manual package: model
+  alias/pinned id, read-only tools, effort, schema, no credential in the prompt, an explicit domain,
+  the OFFICE policy (`claude_max_allowed_for_office_data`, policy missing means deny), and for a
+  project-scoped request the project must be registered with that same immutable domain
+  (`PROJECT_NOT_FOUND`, `DOMAIN_MISMATCH`). §23 says the Office policy holds from the first
+  planning/review call, and a manual package would have the owner paste the same data into Claude Max.
+* **Explicit domain for every purpose except `doctor.*`** (§50 "Submit prompt tanpa domain"). The
+  doctor capability probe sends a fixed prompt and no project data, so it is the only request that
+  may run without a domain.
+* **Context stays inside its domain partition**. Context files under another domain's data
+  partition (`<data>/office` or `<data>/personal`, symlinks resolved) are refused with
+  `CONTEXT_DOMAIN_DENIED`; a domain-less request may read neither. The supervisor never gets both
+  domains at once (§12). The credential scan also covers UTF-16/latin-1 files, and a refused copy
+  is removed.
+* **The off-policy answer is never handed out**. `MODEL_POLICY_MISMATCH` results carry
+  `structured=None`; the redacted raw output stays in the trace only.
+* **Quota recovery**. A later successful call of the same family turns an EXHAUSTED observation
+  back into UNKNOWN (`observed-successful-call`, event `claude.quota_available`). It never becomes
+  "OK", and an exhaustion without a reset time no longer blocks the queue forever.
+* **Probes run from a neutral directory**. `claude --version`/`claude auth status` (and `opencode
+  models`) run from the OS temp directory, never from the controller's cwd, whose project settings
+  the client could read (S05).
+* **Account e-mail**. The Max account e-mail is shown to SUPER_ADMIN only and masked for other
+  roles. A forced re-probe (`?refresh=true`) is admin-only.
