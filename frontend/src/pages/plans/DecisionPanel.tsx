@@ -61,6 +61,8 @@ export function DecisionPanel({ plan, version, catalog }: { plan: PlanDetail; ve
     onSuccess: () => qc.invalidateQueries({ queryKey: ["plan", plan.id] }),
   });
   const stale = decide.error instanceof ApiError && decide.error.code === "STALE_PLAN_VERSION" ? decide.error.details : null;
+  const reviewedOther = plan.current_version_reviewed === false;
+  const nonLive = version.mode && version.mode !== "LIVE" ? version.mode : null;
   const canApprove = plan.allowed.approve;
   const canRevise = plan.allowed.revise_or_reject;
   const opsPublish = operationsFor("APPROVE_AND_PUBLISH", targets, catalog);
@@ -80,6 +82,19 @@ export function DecisionPanel({ plan, version, catalog }: { plan: PlanDetail; ve
             ["Domain", plan.domain],
           ]}
         />
+        {reviewedOther && (
+          <Notice tone="warn">
+            Versi v{version.version} belum melalui review akhir (Fable).{" "}
+            {plan.verdict_version_id ? "Verdict yang tampil berlaku untuk versi lain." : "Belum ada verdict untuk versi ini."} Anda tetap berwenang memutuskan;
+            keputusan mencatat versi mana yang terakhir direview.
+          </Notice>
+        )}
+        {nonLive && (
+          <Notice tone="mock">
+            Versi ini berlabel {nonLive}. Persetujuan boleh untuk menguji alur, tetapi interlock menolak publikasi eksternal isi {nonLive}
+            (<Mono>VERSION_NOT_LIVE</Mono>).
+          </Notice>
+        )}
         <div>
           <div className="mb-1 text-sm font-medium">Target eksternal (scope persis)</div>
           <div className="grid gap-2">
@@ -116,6 +131,20 @@ export function DecisionPanel({ plan, version, catalog }: { plan: PlanDetail; ve
             </div>
           </div>
         </div>
+        <div className="rounded-md border border-line p-2 text-sm">
+          <div className="font-medium">Target yang akan diikat (persis seperti dikirim):</div>
+          {targets.length ? (
+            <ul className="mt-1 grid gap-1">
+              {targets.map((t, i) => (
+                <li key={i}>
+                  <Mono>{JSON.stringify(t)}</Mono>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="mt-1 text-xs text-ink-3">Belum ada target dengan identifier persis (mis. root_id=…).</div>
+          )}
+        </div>
         <div className="grid gap-2 text-sm sm:grid-cols-2">
           <div className="rounded-md border border-line p-2">
             <div className="font-medium">Approve &amp; Publish akan mengikat operasi:</div>
@@ -137,8 +166,11 @@ export function DecisionPanel({ plan, version, catalog }: { plan: PlanDetail; ve
         </label>
         {stale && (
           <div className="rounded-md border border-warn/40 bg-warn-bg p-3 text-sm text-warn" role="alert">
-            Versi yang Anda tinjau sudah usang. Versi terbaru: v{String(stale.latest_version)} <Mono>{String(stale.latest_hash)}</Mono>. Muat ulang dan tinjau
-            revisi terbaru sebelum memutuskan.
+            Versi yang Anda tinjau sudah usang. Versi terbaru: v{String(stale.latest_version)} <Mono>{String(stale.latest_hash)}</Mono>. Tinjau revisi
+            terbaru sebelum memutuskan.
+            <div className="mt-2">
+              <Button onClick={() => qc.invalidateQueries({ queryKey: ["plan", plan.id] })}>Tampilkan revisi terbaru</Button>
+            </div>
           </div>
         )}
         {!stale && <ErrorBox error={decide.error} />}

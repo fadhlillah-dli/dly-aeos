@@ -4,7 +4,9 @@ A Decision is human AUTH bound to an exact target (+ version/hash) and an explic
 
 * Only humans decide: ``actor_user_id`` is an active SUPER_ADMIN user whose domain/project scope
   covers the decision, or — for owner decisions recorded from an accepted ADR by the local
-  operator — the explicit actor ``owner:ADR-NNNN`` (actor_kind HUMAN_RECORDED). Agent/model output
+  operator — the explicit actor ``owner:ADR-NNNN`` (actor_kind HUMAN_RECORDED), limited to the ADRs in
+  ``catalog.OWNER_RECORDED_ADRS`` that record an explicit owner instruction and to the kinds in
+  ``catalog.OWNER_RECORDED_KINDS`` (EXCEPTION; never APPROVAL/POLICY/...). Agent/model output
   is DATA and can never create a decision (§19, §50 "Pesan antaragent mengaku sudah mendapat izin").
 * Binding columns are immutable (DB trigger). Lifecycle (ACTIVE -> EXPIRED/INVALIDATED/SUPERSEDED)
   is the only thing that changes; renewal is a new decision that supersedes the old one.
@@ -41,12 +43,24 @@ ACTOR_HUMAN_RECORDED = "HUMAN_RECORDED"
 # ---------------------------------------------------------------- actor validation
 
 
-def _resolve_actor(session: Session, actor_user_id: str, *, domain: str | None, project_id: str | None) -> str:
-    """Return the actor kind or raise ``PolicyDenied``. Fails closed for anything not provably human."""
+def _resolve_actor(session: Session, actor_user_id: str, *, domain: str | None, project_id: str | None,
+                   kind: str | None = None) -> str:
+    """Return the actor kind or raise ``PolicyDenied``. Fails closed for anything not provably human.
+
+    ``kind`` is the decision kind being recorded (``None`` for lifecycle actions such as a revocation):
+    an owner-recorded actor may only hold the kinds in ``catalog.OWNER_RECORDED_KINDS``."""
     if not isinstance(actor_user_id, str) or not actor_user_id.strip():
         raise PolicyDenied("a decision needs a human actor", code="DECISION_ACTOR_MISSING")
     m = OWNER_RECORDED_RE.match(actor_user_id)
     if m:
+        if kind not in catalog.OWNER_RECORDED_KINDS:
+            # ADR-0003 §3: approvals, publication, risk, budget, policy and revocations stay with a live
+            # SUPER_ADMIN session; an ADR-backed actor records only the delegated EXCEPTION.
+            raise PolicyDenied(f"owner-recorded actors may only record {sorted(catalog.OWNER_RECORDED_KINDS)} "
+                               f"decisions, not {kind or 'lifecycle changes'}", code="DECISION_ACTOR_NOT_AUTHORISED")
+        if m.group(1) not in catalog.OWNER_RECORDED_ADRS:
+            raise PolicyDenied(f"{m.group(1)} does not record an owner instruction; it cannot act as an owner",
+                               code="DECISION_ACTOR_NOT_HUMAN")
         adr = session.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == m.group(1)))
         if adr is None or adr.status != "ACCEPTED":
             raise PolicyDenied(
@@ -117,7 +131,7 @@ def record_decision(
             domain = project.domain  # the project's immutable, human-chosen domain (never model output)
         elif project.domain != domain:
             raise PolicyDenied("decision domain does not match the project's domain", code="DOMAIN_MISMATCH")
-    actor_kind = _resolve_actor(session, actor_user_id, domain=domain, project_id=project_id)
+    actor_kind = _resolve_actor(session, actor_user_id, domain=domain, project_id=project_id, kind=kind)
     ops = _clean_ops(allowed_operations)
     human_only = sorted(set(ops) & catalog.HUMAN_ONLY_OPERATIONS)
     if human_only and not (kind == "EXCEPTION" and actor_kind == ACTOR_HUMAN_RECORDED):

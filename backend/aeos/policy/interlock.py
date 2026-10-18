@@ -11,9 +11,10 @@ only when the list of reasons is empty. Conditions:
 5. OFFICE: an ACTIVE company-authorisation decision listing the provider, and a verified Atlassian
    deployment kind (Cloud vs Data Center is not assumed, §04);
 6. write enablement: ``write_enabled.<provider>`` flag AND an ACTIVE human WRITE_ENABLEMENT decision;
-7. an approved, immutable PlanVersion whose manifest hash equals ``intent.approved_hash``, bound by
-   the ACTIVE APPROVAL decision ``intent.decision_id`` that covers the operation and the target scope,
-   and that is still the plan's approved version;
+7. an approved, immutable, LIVE (never MOCK/DEMO) PlanVersion whose stored content still hashes to
+   its manifest hash and whose manifest hash equals ``intent.approved_hash``, bound by the ACTIVE
+   APPROVAL decision ``intent.decision_id`` that covers the operation and the target scope, and that
+   is still the plan's approved version;
 8. an unexpired capability (``capability_expires_at`` present and in the future).
 
 Reason strings start with a stable code (``CODE: explanation``) so callers/tests can match them.
@@ -27,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
 from aeos.core.enums import Domain, Role
+from aeos.core.hashing import content_hash
 from aeos.core.timeutil import ensure_aware, is_expired, utcnow
 from aeos.models.decisions import Decision
 from aeos.models.identity import User
@@ -84,6 +86,11 @@ def _approval_reasons(session: Session, intent: WriteIntent, reasons: list[str])
         reasons.append("APPROVED_VERSION_SCOPE: plan version belongs to another project/domain")
     if version.manifest_hash != intent.approved_hash:
         reasons.append("APPROVED_HASH_MISMATCH: approved_hash does not match the immutable version manifest hash")
+    if content_hash(version.content) != version.manifest_hash:
+        reasons.append("VERSION_INTEGRITY: stored plan content no longer matches its manifest hash")
+    if (version.mode or "LIVE") != "LIVE":
+        # §35/§49: MOCK/DEMO plan content is never written to an external system as if it were real.
+        reasons.append(f"VERSION_NOT_LIVE: plan version is {version.mode}; fixtures are never published externally")
     plan = session.get(Plan, version.plan_id)
     if plan is None or plan.approved_version_id != version.id:
         reasons.append("VERSION_NOT_APPROVED: the plan's approved version is not this version (stale or revoked)")
@@ -99,6 +106,9 @@ def _approval_reasons(session: Session, intent: WriteIntent, reasons: list[str])
     status = effective_status(d)
     if d.kind != "APPROVAL":
         reasons.append("DECISION_KIND: referenced decision is not an APPROVAL")
+    if d.actor_kind != "HUMAN":
+        # §19/§20: a publication approval comes from a live SUPER_ADMIN decision, never an ADR-recorded actor.
+        reasons.append(f"DECISION_ACTOR_NOT_HUMAN: approval actor kind is {d.actor_kind}, not a human SUPER_ADMIN")
     if status != "ACTIVE":
         reasons.append(f"DECISION_NOT_ACTIVE: approval decision is {status}")
     if d.target_type != catalog.TARGET_PLAN_VERSION or d.target_id != version.id:
@@ -145,6 +155,9 @@ def check_external_write(session: Session, intent: WriteIntent) -> InterlockResu
         reasons.append(f"OPERATION_UNKNOWN: {intent.operation!r} is not a known operation for {intent.provider!r}")
     if not isinstance(intent.target, dict) or not intent.target:
         reasons.append("TARGET_MISSING: write target is empty")
+    elif intent.target.get("provider") not in (None, intent.provider):
+        reasons.append(f"TARGET_PROVIDER_MISMATCH: target names provider {intent.target.get('provider')!r}, "
+                       f"the write uses {intent.provider!r}")
 
     if domain == Domain.OFFICE.value:
         from aeos.policy.office import office_policy

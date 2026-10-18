@@ -54,11 +54,19 @@ def load_defaults() -> tuple[dict[str, Any], str]:
     return merged, "policy/office-defaults.yaml"
 
 
-def _authorisation_decisions(session: Session) -> list[Any]:
+def _office_policy_decisions(session: Session) -> list[Any]:
+    """ACTIVE human POLICY decisions recorded for the OFFICE policy target (the only target the OFFICE
+    authorisation/override endpoint writes). POLICY decisions about other targets never relax OFFICE."""
     from aeos.policy.decisions import active_decisions
 
     return [d for d in active_decisions(session, kinds=["POLICY"], domain=Domain.OFFICE.value)
-            if (d.details or {}).get("office_authorization") is True]
+            if d.target_type == catalog.TARGET_OFFICE_POLICY and d.target_id == Domain.OFFICE.value
+            and d.actor_kind == "HUMAN"]
+
+
+def _authorisation_decisions(session: Session) -> list[Any]:
+    return [d for d in _office_policy_decisions(session)
+            if (d.details or {}).get("office_authorization") is True and (d.details or {}).get("company_reference")]
 
 
 def company_authorisation(session: Session) -> Any | None:
@@ -68,14 +76,12 @@ def company_authorisation(session: Session) -> Any | None:
 
 
 def office_policy(session: Session) -> dict[str, Any]:
-    from aeos.policy.decisions import active_decisions
-
     policy, source = load_defaults()
     defaults_hash = content_hash(policy)
     auth = company_authorisation(session)
     applied: list[str] = []
     ignored: list[dict[str, str]] = []
-    for d in active_decisions(session, kinds=["POLICY"], domain=Domain.OFFICE.value):
+    for d in _office_policy_decisions(session):
         overrides = (d.details or {}).get("office_policy") or {}
         if not isinstance(overrides, dict) or not overrides:
             continue

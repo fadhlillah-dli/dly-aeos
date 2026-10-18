@@ -32,6 +32,35 @@ def test_can_transition_matches_table(src, dst):
     assert states.can_transition(src, dst) is (dst in states.TRANSITIONS[src])
 
 
+ILLEGAL = [(a, b) for a, b in itertools.product(ALL, ALL) if b not in states.TRANSITIONS[a]]
+LEGAL = [(a, b) for a, b in itertools.product(ALL, ALL) if b in states.TRANSITIONS[a]]
+
+
+@pytest.mark.parametrize(("src", "dst"), ILLEGAL)
+def test_every_illegal_transition_is_refused_without_side_effects(src, dst):
+    """Every pair outside the table raises Conflict before touching the session (state unchanged)."""
+    plan = Plan(project_id="p", domain="PERSONAL", title="x", state=src.value)
+    with pytest.raises(Conflict) as exc:
+        states.transition(None, plan, dst, reason="probe")  # type: ignore[arg-type]
+    assert exc.value.code == "ILLEGAL_PLANNING_TRANSITION" and plan.state == src.value
+    assert exc.value.details["from"] == src.value and exc.value.details["to"] == dst.value
+
+
+def test_every_legal_transition_applies_and_emits(db):
+    from aeos.models.audit import Event
+
+    project = make_project(db)
+    for src, dst in LEGAL:
+        plan = Plan(project_id=project.id, domain=project.domain, title=f"{src}->{dst}", state=src.value)
+        db.add(plan)
+        db.flush()
+        states.transition(db, plan, dst, reason="legal", actor="tester")
+        assert plan.state == dst.value
+        ev = db.query(Event).filter(Event.entity_id == plan.id, Event.kind == "plan.state_changed").one()
+        assert ev.payload["from"] == src.value and ev.payload["to"] == dst.value
+    db.rollback()
+
+
 def test_pipeline_order_and_no_stage_skipping():
     s = PlanningState
     assert states.can_transition(s.CONTEXT_READY, s.PRIMARY_PLANNING)

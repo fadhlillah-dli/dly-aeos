@@ -38,6 +38,26 @@ def _visible(principal: Principal, domain: Domain, d: Decision) -> bool:
     return True
 
 
+def _scoped_refs(principal: Principal) -> Any:
+    """Filter for decision references embedded in projections (policy snapshot): only global ones and
+    those of the principal's active, accessible domain and project scope (§35, §50 incl. counts)."""
+    active = principal.active_domain
+
+    def _filter(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for r in refs:
+            dom = r.get("domain")
+            if dom is not None and (active is None or dom != active.value or not principal.can_access_domain(dom)):
+                continue
+            pid = r.get("project_id")
+            if pid is not None and principal.allowed_project_ids is not None and pid not in principal.allowed_project_ids:
+                continue
+            out.append(r)
+        return out
+
+    return _filter
+
+
 def _load_visible_decision(db: DB, principal: Principal, domain: Domain, decision_id: str) -> Decision:
     d = db.get(Decision, decision_id)
     if d is None or not _visible(principal, domain, d):
@@ -116,6 +136,28 @@ class DecisionIn(BaseModel):
     request_id: str | None = None
 
 
+def _request_visible(principal: Principal, domain: Domain, req: DecisionRequest | None) -> bool:
+    """Same scope as the queue: the active domain, domain-less (platform) requests only in PERSONAL,
+    and the principal's project scope. Anything else is a 404 (no cross-domain metadata)."""
+    if req is None:
+        return False
+    if req.domain is None:
+        if domain != Domain.PERSONAL:
+            return False
+    elif req.domain != domain.value:
+        return False
+    if req.project_id is not None and principal.allowed_project_ids is not None:
+        return req.project_id in principal.allowed_project_ids
+    return True
+
+
+# Detail keys that carry policy meaning and are set only from the dedicated, validated fields above.
+# Smuggling them through free-form ``details`` (e.g. ``office_authorization: true`` without a company
+# reference) is refused instead of silently granting or relaxing anything (fail closed).
+_RESERVED_DETAIL_KEYS = frozenset({"office_authorization", "company_reference", "allowed_providers", "office_policy",
+                                   "enabled", "provider", "handled_by"})
+
+
 def _require_target(body: DecisionIn) -> tuple[str, str]:
     if not body.target_type or not body.target_id:
         raise ValidationFailed(f"{body.kind} needs an explicit target_type and target_id")
@@ -126,6 +168,10 @@ def _require_target(body: DecisionIn) -> tuple[str, str]:
 def create_decision(body: DecisionIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
     if not body.auth_scope:
         raise ValidationFailed("auth_scope must state the explicit scope of this decision")
+    reserved = sorted(set(body.details) & _RESERVED_DETAIL_KEYS)
+    if reserved:
+        raise ValidationFailed(f"details may not set {reserved}; use the dedicated fields of this endpoint",
+                               code="RESERVED_DETAIL_KEYS", details={"reserved": reserved})
     project_id = None
     if body.project_id:
         project_id = load_project(db, principal, body.project_id, domain=domain).id
@@ -190,7 +236,7 @@ def create_decision(body: DecisionIn, db: DB, principal: AdminPrincipal, domain:
         enablement.set_flag(db, target_id, bool(body.enabled))
     if body.request_id:
         req = db.get(DecisionRequest, body.request_id)
-        if req is None or (req.domain not in (None, domain.value)):
+        if not _request_visible(principal, domain, req):
             raise NotFound("decision request not found")
         decision_requests.resolve_request(db, req.id, decision_id=decision.id, actor_user_id=principal.user.id)
     db.commit()
@@ -230,11 +276,8 @@ def list_requests(db: DB, principal: CurrentPrincipal, domain: ActiveDomain,
     q = select(DecisionRequest).where(or_(DecisionRequest.domain == domain.value, DecisionRequest.domain.is_(None)))
     if status:
         q = q.where(DecisionRequest.status == status)
-    rows = list(db.scalars(q.order_by(DecisionRequest.created_at.desc()).limit(500)))
-    if domain != Domain.PERSONAL:
-        rows = [r for r in rows if r.domain == domain.value]
-    if principal.allowed_project_ids is not None:
-        rows = [r for r in rows if r.project_id is None or r.project_id in principal.allowed_project_ids]
+    rows = [r for r in db.scalars(q.order_by(DecisionRequest.created_at.desc()).limit(500))
+            if _request_visible(principal, domain, r)]
     return {"items": [decision_requests.request_view(r) for r in rows], "source": "decision_requests",
             "checked_at": _now(), "mode": "LIVE"}
 
@@ -260,7 +303,7 @@ class DeclineIn(BaseModel):
 def decline_request(request_id: str, body: DeclineIn, db: DB, principal: AdminPrincipal,
                     domain: ActiveDomain) -> dict[str, Any]:
     req = db.get(DecisionRequest, request_id)
-    if req is None or req.domain not in (None, domain.value) or (req.domain is None and domain != Domain.PERSONAL):
+    if not _request_visible(principal, domain, req):
         raise NotFound("decision request not found")
     req = decision_requests.decline_request(db, request_id, actor_user_id=principal.user.id, note=body.note)
     db.commit()
@@ -271,11 +314,11 @@ def decline_request(request_id: str, body: DeclineIn, db: DB, principal: AdminPr
 
 
 @router.get("/api/policy/snapshot")
-def get_snapshot(db: DB, _principal: CurrentPrincipal) -> dict[str, Any]:
+def get_snapshot(db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
     snap = snapshot.active_snapshot(db)
     current_hash = content_hash(snapshot.compute_content(db))
     return {
-        "active": snapshot.snapshot_view(snap),
+        "active": snapshot.snapshot_view(snap, decision_filter=_scoped_refs(principal)),
         "status": "ACTIVE" if snap else "NOT_RECORDED",
         "current_content_hash": current_hash,
         # Drift: policy files/decisions changed since the active snapshot was recorded.
@@ -290,7 +333,8 @@ def get_snapshot(db: DB, _principal: CurrentPrincipal) -> dict[str, Any]:
 def refresh_snapshot(db: DB, principal: AdminPrincipal) -> dict[str, Any]:
     snap = snapshot.ensure_active_snapshot(db, source=f"refresh by {principal.user.username}")
     db.commit()
-    return {"active": snapshot.snapshot_view(snap), "status": "ACTIVE", "checked_at": _now()}
+    return {"active": snapshot.snapshot_view(snap, decision_filter=_scoped_refs(principal)), "status": "ACTIVE",
+            "checked_at": _now()}
 
 
 @router.get("/api/policy/mci")
@@ -299,8 +343,14 @@ def get_mci(_principal: CurrentPrincipal) -> dict[str, Any]:
 
 
 @router.get("/api/policy/office")
-def get_office_policy(db: DB, _principal: CurrentPrincipal) -> dict[str, Any]:
-    return {**office.office_policy(db), "checked_at": _now()}
+def get_office_policy(db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
+    view = {**office.office_policy(db), "checked_at": _now()}
+    if principal.active_domain != Domain.OFFICE or not principal.can_access_domain(Domain.OFFICE):
+        # The effective (default-deny) policy is visible everywhere; the OFFICE decision references
+        # behind it are OFFICE metadata and stay in OFFICE sessions (§35, §50).
+        view.update(authorization_decision_id=None, applied_decision_ids=[], ignored_decisions=[],
+                    decision_refs_hidden=True)
+    return view
 
 
 @router.get("/api/policy/write-enablement")
@@ -321,11 +371,15 @@ def list_adrs(db: DB, _principal: CurrentPrincipal) -> dict[str, Any]:
 
 
 @router.get("/api/adrs/{adr_key}")
-def get_adr(adr_key: str, db: DB, _principal: CurrentPrincipal) -> dict[str, Any]:
+def get_adr(adr_key: str, db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
     row = db.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == adr_key))
     if row is None:
         raise NotFound("ADR not found")
     view = adr_loader.adr_view(row, full=True)
     linked = list(db.scalars(select(Decision).where(Decision.actor_user_id == f"owner:{adr_key}")))
-    view["linked_decisions"] = [{"id": d.id, "kind": d.kind, "status": registry.effective_status(d)} for d in linked]
+    active = principal.active_domain
+    # ADRs are platform documents (no domain); decisions linked to them stay in their own domain scope.
+    visible = [d for d in linked if d.domain is None
+               or (active is not None and principal.can_access_domain(active) and _visible(principal, active, d))]
+    view["linked_decisions"] = [{"id": d.id, "kind": d.kind, "status": registry.effective_status(d)} for d in visible]
     return view

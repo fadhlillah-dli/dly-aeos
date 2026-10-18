@@ -131,6 +131,80 @@ def test_human_edit_creates_new_version_and_invalidates_approval(db, owner, read
                                          target_hash=v.manifest_hash) is None
 
 
+def test_verdict_is_tied_to_the_reviewed_version(db, owner, ready_plan):
+    """The Fable verdict judged the synthesis version only; a later human edit is shown as not reviewed
+    (a reviewer verdict is never silently reused for different content)."""
+    detail = service.plan_detail(db, ready_plan)
+    v = _current(db, ready_plan)
+    assert detail["verdict_version_id"] == v.id and detail["current_version_reviewed"] is True
+    edited = copy.deepcopy(v.content)
+    edited["overview"]["vision"] = "Visi revisi pemilik"
+    service.create_human_version(db, ready_plan.id, content=edited, parent_version_id=v.id, rationale="revisi visi",
+                                 actor_user_id=owner.id)
+    db.commit()
+    detail = service.plan_detail(db, ready_plan)
+    assert detail["verdict_version_id"] == v.id and detail["current_version_reviewed"] is False
+    res = _approve(db, owner, ready_plan)  # the human may still decide; the decision records provenance
+    assert res["decision"]["details"]["reviewed_version_id"] == v.id
+    assert res["decision"]["details"]["version_source"] == "HUMAN_EDIT"
+    # the fake bridge output is MOCK; a human edit of MOCK content stays MOCK (never becomes LIVE)
+    assert res["decision"]["details"]["version_mode"] == "MOCK" and _current(db, ready_plan).mode == "MOCK"
+
+
+def test_no_edit_or_redecision_while_publishing(db, owner, ready_plan):
+    """§50 'Revisi baru muncul selama publish': while PUBLISHING no new version or decision can replace the
+    approved one; the publisher keeps the exact approved version."""
+    _approve(db, owner, ready_plan)
+    v = _current(db, ready_plan)
+    planning_facade.transition_plan(db, ready_plan.id, "PUBLISHING", reason="publisher started", actor="publisher")
+    db.commit()
+    edited = copy.deepcopy(v.content)
+    edited["overview"]["vision"] = "Diubah saat publish"
+    with pytest.raises(Conflict) as exc:
+        service.create_human_version(db, ready_plan.id, content=edited, parent_version_id=v.id, rationale="ubah",
+                                     actor_user_id=owner.id)
+    assert exc.value.code == "PLAN_NOT_EDITABLE"
+    with pytest.raises(Conflict):
+        service.decide(db, ready_plan.id, action="REQUEST_REVISION", version_id=v.id, version_hash=v.manifest_hash,
+                       targets=[], rationale="revisi saat publish", actor_user_id=owner.id)
+    assert planning_facade.get_approved_version(db, ready_plan.id).id == v.id
+    with pytest.raises(Conflict):  # illegal transition for the publisher too
+        planning_facade.transition_plan(db, ready_plan.id, "APPROVED", reason="x", actor="publisher")
+
+
+@pytest.mark.parametrize("target", ["APPROVED", "REJECTED", "REVISION_REQUESTED", "READY_FOR_HUMAN_REVIEW",
+                                    "PRIMARY_PLANNING", "NEEDS_DECISION"])
+def test_other_modules_cannot_set_human_decision_states(db, owner, ready_plan, target):
+    """Human-only AUTH (§19, §20): the cross-module facade only moves publication states. APPROVED,
+    REJECTED, ... require ``decide`` with a Decision bound to version + hash; NEEDS_DECISION only from a
+    publication state."""
+    with pytest.raises(Conflict) as exc:
+        planning_facade.transition_plan(db, ready_plan.id, target, reason="publisher says so", actor="publisher")
+    assert exc.value.code == "TRANSITION_NOT_DELEGATED" and ready_plan.state == "READY_FOR_HUMAN_REVIEW"
+    assert planning_facade.get_approved_version(db, ready_plan.id) is None
+
+
+def test_publisher_lifecycle_through_the_facade(db, owner, ready_plan):
+    _approve(db, owner, ready_plan)
+    for state in ("PUBLISHING", "PUBLICATION_PARTIAL", "NEEDS_DECISION", "PUBLISHING", "PUBLISHED"):
+        planning_facade.transition_plan(db, ready_plan.id, state, reason="publisher", actor="publisher")
+        assert ready_plan.state == state
+    db.commit()
+
+
+def test_publishing_requires_an_active_approval(db, owner, ready_plan):
+    """The publisher cannot start/resume a publication when the approval stopped being ACTIVE, even if the
+    plan state still says APPROVED (fail closed)."""
+    res = _approve(db, owner, ready_plan)
+    registry.invalidate_decisions(db, target_type="plan_version", target_id=ready_plan.approved_version_id,
+                                  reason="revoked elsewhere", plan_hook=False)
+    db.commit()
+    assert ready_plan.state == "APPROVED" and db.get(Decision, res["decision"]["id"]).status == "INVALIDATED"
+    with pytest.raises(Conflict) as exc:
+        planning_facade.transition_plan(db, ready_plan.id, "PUBLISHING", reason="start", actor="publisher")
+    assert exc.value.code == "NOT_APPROVED" and ready_plan.state == "APPROVED"
+
+
 def test_human_edit_guards(db, owner, ready_plan):
     v = _current(db, ready_plan)
     with pytest.raises(Conflict) as exc:

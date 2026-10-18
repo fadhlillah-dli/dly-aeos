@@ -24,7 +24,7 @@ function TaskTable({ view, highlight }: { view: DagView; highlight: string | nul
           header: "Task",
           cell: (n) => (
             <div className={highlight === n.key ? "font-semibold text-accent" : undefined}>
-              <Mono>{n.key}</Mono> {n.title}
+              <Mono>{n.key}</Mono> {n.title} {n.mode && n.mode !== "LIVE" && <StatusBadge status={n.mode} />}
               <div className="text-xs text-ink-3">{n.role_key} · risiko {n.risk_class} · {n.data_classification}</div>
               {n.warnings.map((w) => (
                 <div key={w} className="text-xs text-warn">
@@ -57,7 +57,16 @@ function TaskTable({ view, highlight }: { view: DagView; highlight: string | nul
         },
         {
           header: "Prasyarat diterima",
-          cell: (n) => (n.depends_on.length ? `${n.accepted_prerequisites.length}/${n.depends_on.length}${n.dependencies_ready ? " — siap" : ""}` : "tidak ada"),
+          cell: (n) =>
+            n.depends_on.length ? (
+              <div className="text-xs">
+                {n.accepted_prerequisites.length}/{n.depends_on.length}
+                {n.dependencies_ready ? " — siap" : " — menunggu AcceptanceRecord"}
+                {n.accepted_prerequisites.length > 0 && <div className="text-ink-3">Diterima: {n.accepted_prerequisites.join(", ")}</div>}
+              </div>
+            ) : (
+              "tidak ada"
+            ),
         },
         { header: "Path tulis", cell: (n) => <div className="text-xs">{n.allowed_paths.join(", ") || "—"}</div> },
         { header: "Konflik tulis", cell: (n) => (n.conflicts_with.length ? <span className="text-warn">{n.conflicts_with.join(", ")}</span> : "—") },
@@ -133,7 +142,7 @@ export default function DagPage() {
         source="task_specs, task_dependencies, task_executions, leases, acceptance_records"
         checkedAt={view?.checked_at ?? null}
         evidenceLimit="State runtime dari scheduler; penerimaan hanya dari AcceptanceRecord. Status issue eksternal tidak membuka dependensi."
-        mode={view?.mode && view.mode !== "LIVE" ? view.mode : undefined}
+        mode={view?.data_mode && view.data_mode !== "LIVE" ? view.data_mode : view?.mode && view.mode !== "LIVE" ? view.mode : undefined}
       />
       <div className="mb-4 max-w-xl">
         <select
@@ -154,7 +163,9 @@ export default function DagPage() {
       <ErrorBox error={plans.error ?? dag.error} />
       {plans.data && !withVersion.length && (
         <EmptyState title="Belum ada DAG">
-          Buat dan jalankan rencana di halaman <Link to="/plans" className="underline">Rencana</Link>; DAG dikompilasi saat versi disetujui.
+          Buat dan jalankan rencana di halaman <Link to="/plans" className="underline">Rencana</Link>; DAG dikompilasi saat versi disetujui. Via CLI:{" "}
+          <Mono>aeos plan create --project &lt;key&gt; --domain {domain ?? "PERSONAL"} --title "..." --prompt "..." --actor &lt;username&gt;</Mono> lalu{" "}
+          <Mono>aeos plan run &lt;plan_id&gt; --actor &lt;username&gt;</Mono>.
         </EmptyState>
       )}
       {dag.isLoading && <Loading />}
@@ -172,6 +183,11 @@ export default function DagPage() {
               Buka rencana
             </Link>
           </div>
+          {view.data_mode && view.data_mode !== "LIVE" && (
+            <Notice tone="mock">
+              Isi rencana ini berlabel {view.data_mode} (bukan output model nyata). TaskSpec-nya tidak dihitung sebagai pekerjaan nyata dan tidak dipublikasikan.
+            </Notice>
+          )}
           {view.runtime_note && <Notice tone="info">{view.runtime_note}</Notice>}
           {view.validation_errors.length > 0 && (
             <Notice tone="warn">DAG tidak valid: {view.validation_errors.map((e) => String(e.code)).join(", ")}. Persetujuan dan kompilasi akan ditolak.</Notice>

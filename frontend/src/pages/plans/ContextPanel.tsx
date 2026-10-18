@@ -28,6 +28,8 @@ function Statements({ title, items, empty }: { title: string; items: { statement
 export function ContextPanel({ context }: { context: ContextView | null }) {
   if (!context) return <EmptyState title="Konteks perencanaan tidak tersedia" />;
   const untrusted = context.constraints.filter((c) => c.kind === "UNTRUSTED_INPUT");
+  const fromPrompt = untrusted.filter((c) => c.source === "prompt");
+  const fromAttachments = untrusted.filter((c) => c.source !== "prompt");
   return (
     <div className="grid gap-4">
       <div>
@@ -37,12 +39,21 @@ export function ContextPanel({ context }: { context: ContextView | null }) {
           Hash konteks <Mono>{shortHash(context.context_hash, 16)}</Mono> · policy snapshot <Mono>{shortHash(context.policy_ref, 16)}</Mono>
         </div>
       </div>
-      {untrusted.length > 0 && (
-        <div className="flex items-start gap-2 rounded-md border border-warn/40 bg-warn-bg p-3 text-sm text-warn">
+      {fromPrompt.length > 0 && (
+        <div className="flex items-start gap-2 rounded-md border border-warn/40 bg-warn-bg p-3 text-sm text-warn" role="status">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
           <div>
-            Lampiran berisi teks mirip instruksi ({untrusted.flatMap((u) => u.flags ?? []).join(", ")}). Isinya DATA tak tepercaya dan tidak mengubah domain,
-            tujuan, izin, memori atau routing.
+            Teks permintaan berisi kalimat mirip instruksi ({fromPrompt.flatMap((u) => u.flags ?? []).join(", ")}). Dicatat sebagai input tak tepercaya: domain
+            tetap pilihan manusia dan teks tidak dapat mengubah kebijakan, izin, persetujuan, atau routing.
+          </div>
+        </div>
+      )}
+      {fromAttachments.length > 0 && (
+        <div className="flex items-start gap-2 rounded-md border border-warn/40 bg-warn-bg p-3 text-sm text-warn" role="status">
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <div>
+            Lampiran berisi teks mirip instruksi ({fromAttachments.flatMap((u) => u.flags ?? []).join(", ")}). Isinya DATA tak tepercaya dan tidak mengubah
+            domain, tujuan, izin, memori atau routing.
           </div>
         </div>
       )}

@@ -52,6 +52,16 @@ def test_viewer_cannot_create_or_decide(client, db):
     r = client.post(f"/api/projects/{project.id}/plans", json={"title": "x", "prompt": "y"})
     assert r.status_code == 403 and r.json()["error"]["code"] == "READ_ONLY_ROLE"
     assert client.post("/api/decisions", json={"kind": "EXCEPTION"}).status_code == 403
+    # every other write of the module is refused for VIEWER by the backend (not just hidden in the UI)
+    for path, body in (("/api/decisions/x/revoke", {"reason": "weg damit"}),
+                       ("/api/decision-requests", {"kind": "BUDGET", "title": "naik"}),
+                       ("/api/decision-requests/x/decline", {"note": "tidak perlu"}),
+                       ("/api/policy/snapshot/refresh", {}), ("/api/plans/x/run", {}),
+                       ("/api/plans/x/manual-result", {}), ("/api/plans/x/compile", {}),
+                       ("/api/plans/x/versions", {"parent_version_id": "v", "content": {}, "rationale": "edit"}),
+                       ("/api/plans/x/decision", {"action": "APPROVE", "version_id": "v", "version_hash": "h"})):
+        r = client.post(path, json=body)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "READ_ONLY_ROLE", path
     assert client.get("/api/plans").status_code == 200  # read stays available
 
 
@@ -205,6 +215,53 @@ def test_generic_decision_endpoint_rules(personal_client, db):
     assert all(i["domain"] in (None, "PERSONAL") for i in listing["items"])
 
 
+@pytest.mark.parametrize("details", [{"office_authorization": True}, {"office_policy": {"external_worker_allowed": True}},
+                                     {"enabled": True}, {"allowed_providers": ["jira"]}])
+def test_policy_meaning_cannot_be_smuggled_through_details(personal_client, db, details):
+    """A company authorisation needs the dedicated fields (company reference + explicit providers); free-form
+    details can never mint one or relax OFFICE defaults (fail closed)."""
+    personal_client.select_domain(Domain.OFFICE)
+    r = personal_client.post("/api/decisions", json={
+        "kind": "POLICY", "target_type": "route", "target_id": "r1", "auth_scope": {"route": "r1"},
+        "rationale": "kebijakan route kantor", "details": details})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "RESERVED_DETAIL_KEYS"
+    office = personal_client.get("/api/policy/office").json()
+    assert office["office_authorization"] is False and office["external_worker_allowed"] is False
+
+
+def test_office_decision_metadata_never_reaches_personal_views(personal_client, db):
+    """§35/§50 "Viewer mengakses ... Office": OFFICE decision ids/targets/counts stay in OFFICE sessions —
+    the policy snapshot, the OFFICE policy projection and decision requests are scoped."""
+    base = {"auth_scope": {"company": "ACME"}, "rationale": "otorisasi perusahaan tercatat"}
+    personal_client.select_domain(Domain.OFFICE)
+    r = personal_client.post("/api/decisions", json={**base, "kind": "POLICY", "office_authorization": True,
+                                                     "company_reference": "surat persetujuan 7",
+                                                     "allowed_providers": ["confluence"]})
+    assert r.status_code == 201
+    office_decision = r.json()["id"]
+    req = personal_client.post("/api/decision-requests", json={"kind": "RISK_ACCEPTANCE", "title": "Risiko kantor"})
+    assert req.status_code == 201
+    office_snap = personal_client.get("/api/policy/snapshot").json()["active"]
+    assert office_decision in {d["id"] for d in office_snap["decisions"]} and office_snap["decision_count"] == 1
+    assert personal_client.get("/api/policy/office").json()["authorization_decision_id"] == office_decision
+
+    personal_client.select_domain(Domain.PERSONAL)
+    snap = personal_client.get("/api/policy/snapshot").json()["active"]
+    assert snap["decisions"] == [] and snap["decision_count"] == 0  # no ids, no counts
+    assert snap["content_hash"] == office_snap["content_hash"]  # same snapshot; the hash reveals no content
+    office = personal_client.get("/api/policy/office").json()
+    assert office["authorization_decision_id"] is None and office["applied_decision_ids"] == []
+    assert office["decision_refs_hidden"] is True and office["external_worker_allowed"] is False
+    assert personal_client.get(f"/api/decisions/{office_decision}").status_code == 404
+    rid = req.json()["id"]
+    assert personal_client.post(f"/api/decision-requests/{rid}/decline", json={"note": "bukan urusan"}).status_code == 404
+    assert rid not in {i["id"] for i in personal_client.get("/api/decision-requests").json()["items"]}
+    r = personal_client.post("/api/decisions", json={
+        "kind": "RISK_ACCEPTANCE", "target_type": "risk", "target_id": "R-1", "auth_scope": {"risk": "R-1"},
+        "rationale": "menerima risiko residual", "expires_at": "2099-01-01T00:00:00Z", "request_id": rid})
+    assert r.status_code == 404  # an OFFICE request cannot be resolved from a PERSONAL session
+
+
 def test_policy_read_endpoints(personal_client, db):
     from aeos.policy import seed
 
@@ -220,6 +277,9 @@ def test_policy_read_endpoints(personal_client, db):
     assert any(a["key"] == "ADR-0003" for a in adrs)
     adr = personal_client.get("/api/adrs/ADR-0003").json()
     assert "Decision" in adr["sections"] and adr["linked_decisions"][0]["kind"] == "EXCEPTION"
+    personal_client.select_domain(Domain.OFFICE)  # the PERSONAL-scoped ADR-0003 decision stays in PERSONAL
+    assert personal_client.get("/api/adrs/ADR-0003").json()["linked_decisions"] == []
+    personal_client.select_domain(Domain.PERSONAL)
     assert personal_client.get("/api/adrs/ADR-9999").status_code == 404
     req = personal_client.post("/api/decision-requests", json={"kind": "BUDGET", "title": "Naikkan budget",
                                                                "reason": "kuota habis"})
@@ -267,3 +327,35 @@ def test_cli_policy_and_plan_commands_are_ascii(settings):
         assert res.output.isascii(), args
     res = cli.invoke(app, ["policy", "decisions", "--kind", "EXCEPTION"])
     assert "EXCEPTION" in res.output or "No decisions" in res.output
+
+
+def test_cli_plan_create_status_and_domain_guard(settings, db, tmp_path):
+    """CLI: explicit --domain (never inferred, U-05), BOM-safe prompt files (Windows editors), ASCII output,
+    and bracketed DATA in titles is printed verbatim (no markup interpretation)."""
+    from typer.testing import CliRunner
+
+    from aeos.cli import app
+    from tests.conftest import create_admin
+
+    create_admin(db)
+    project = make_project(db, key="cli-proj")
+    prompt_file = tmp_path / "ide.md"
+    prompt_file.write_bytes("﻿Aplikasi catatan pribadi dengan ekspor Markdown dan pencarian".encode())
+    cli = CliRunner()
+    res = cli.invoke(app, ["plan", "create", "--project", "cli-proj", "--domain", "OFFICE", "--title", "x",
+                           "--prompt", "y", "--actor", "owner"])
+    assert res.exit_code == 1 and "DOMAIN_MISMATCH" in res.output
+    res = cli.invoke(app, ["plan", "create", "--project", "cli-proj", "--domain", "PERSONAL", "--title",
+                           "Rencana [/bold] CLI", "--prompt-file", str(prompt_file), "--actor", "owner"])
+    assert res.exit_code == 0, res.output
+    assert res.output.isascii() and "CONTEXT_READY" in res.output
+    from aeos.models.planning import Plan, PlanningContext
+
+    db.expire_all()
+    plan = db.query(Plan).filter(Plan.project_id == project.id).one()
+    assert db.get(PlanningContext, plan.context_id).prompt.startswith("Aplikasi")  # BOM stripped
+    res = cli.invoke(app, ["plan", "status", plan.id])
+    assert res.exit_code == 0 and res.output.isascii() and "Rencana [/bold] CLI" in res.output
+    res = cli.invoke(app, ["plan", "create", "--project", "cli-proj", "--domain", "PERSONAL", "--title", "x",
+                           "--prompt", "y", "--actor", "nobody"])
+    assert res.exit_code != 0  # the actor must be an active SUPER_ADMIN

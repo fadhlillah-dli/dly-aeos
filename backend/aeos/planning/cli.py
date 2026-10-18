@@ -18,7 +18,7 @@ from aeos.core.errors import AeosError
 
 app = typer.Typer(help="Planning: create plans, run the 4-stage Opus/Fable pipeline, import manual results.",
                   no_args_is_help=True)
-console = Console(highlight=False)
+console = Console(highlight=False, markup=False)  # plan titles/errors are DATA, never markup
 
 
 def _ascii(text: object) -> str:
@@ -65,7 +65,7 @@ def create(
 
     if not prompt and not prompt_file:
         raise typer.BadParameter("give --prompt or --prompt-file")
-    text = prompt_file.read_text(encoding="utf-8") if prompt_file else prompt
+    text = prompt_file.read_text(encoding="utf-8-sig") if prompt_file else prompt  # BOM-safe (Windows editors)
     _ensure_db()
     try:
         with session_scope() as s:

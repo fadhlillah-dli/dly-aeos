@@ -9,7 +9,7 @@ from sqlalchemy import select
 from aeos.core.db import session_scope
 
 app = typer.Typer(help="Policy & Decision Registry: snapshot, decisions, ADRs.", no_args_is_help=True)
-console = Console(highlight=False)
+console = Console(highlight=False, markup=False)  # ADR titles/decision targets are DATA, never markup
 
 
 def _ensure_db() -> None:

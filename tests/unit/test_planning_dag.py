@@ -17,12 +17,12 @@ from aeos.planning import dag
 from tests.unit.test_planning_support import make_project, sample_content, task
 
 
-def _version(db, project, content):
+def _version(db, project, content, *, mode="LIVE"):
     plan = Plan(project_id=project.id, domain=project.domain, title="t", state="APPROVED")
     db.add(plan)
     db.flush()
     v = PlanVersion(plan_id=plan.id, project_id=project.id, domain=project.domain, version=1, content=content,
-                    manifest_hash=content_hash(content))
+                    manifest_hash=content_hash(content), mode=mode)
     db.add(v)
     db.flush()
     plan.current_version_id = plan.approved_version_id = v.id
@@ -51,6 +51,35 @@ def test_rejects_unknown_self_and_cycle():
     assert _codes(sample_content()) == set()
 
 
+@pytest.mark.parametrize("path", [
+    "../outside/**", "src/../../etc/passwd", "..\\..\\Windows\\System32", "C:/Users/me/.ssh/**", "c:\\secrets",
+    "\\\\server\\share\\x", "//server/share", "~/.config/claude/**", "src/\x00x",
+])
+def test_unsafe_write_paths_are_rejected(path):
+    """§50 "File path traversal/symlink keluar sandbox": a TaskSpec write scope that could leave the task
+    workspace on Windows/macOS/Linux is a DAG error (fail closed), never silently normalised."""
+    errors = dag.validate_graph(sample_content(tasks=[task("T1", paths=[path])]))
+    assert [e["code"] for e in errors] == ["UNSAFE_PATH"] and errors[0]["key"] == "T1"
+    with pytest.raises(ValidationFailed) as exc:
+        dag.require_valid_graph(sample_content(tasks=[task("T1", paths=[path])]))
+    assert exc.value.code == "DAG_INVALID"
+
+
+@pytest.mark.parametrize("path", ["src/app/**", "./src/x.py", "/backend/aeos/x.py", "docs/a..b.md", "src\\win\\file.py"])
+def test_safe_relative_write_paths_pass(path):
+    assert dag.validate_graph(sample_content(tasks=[task("T1", paths=[path])])) == []
+
+
+def test_protected_paths_match_case_insensitively(db):
+    """Windows/macOS file systems are case-insensitive: ``Backend/AEOS/Policy`` is the protected tree."""
+    assert dag.paths_overlap("Backend/AEOS/Policy/interlock.py", "backend/aeos/policy/**")
+    project = make_project(db, is_platform=True, key="dly-aeos-ci")
+    _, v = _version(db, project, sample_content(tasks=[task("T1", paths=["Backend/AEOS/Policy/interlock.py"])]))
+    dag.compile_version(db, v, actor="tester")
+    spec = db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v.id))
+    assert spec.reviewer_policy["quarantine_special_review"] is True and spec.risk_class == "R3"
+
+
 def test_compile_rejects_invalid_graph(db):
     project = make_project(db)
     _, v = _version(db, project, sample_content(tasks=[task("T1", deps=["T2"]), task("T2", deps=["T1"])]))
@@ -71,7 +100,12 @@ def test_compile_fills_every_section21_field_and_is_idempotent(db):
     spec = db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v.id, TaskSpec.task_key == "T1"))
     assert spec.project_id == project.id and spec.domain == "PERSONAL"
     assert spec.plan_version_hash == v.manifest_hash and spec.feature_key == "F1"
-    assert spec.limits == {"max_attempts": 2, "timeout_seconds": 3600, "max_output_tokens": 128000}
+    # §21 time/token/attempt limits (clamped) + resource caps fixed by the control plane
+    assert spec.limits == {"max_attempts": 2, "timeout_seconds": 3600, "max_output_tokens": 128000,
+                           "max_active_workers": 1, "nested_fan_out": False}
+    assert any("decision request" in s for s in spec.stop_conditions)  # §21 scope growth -> blocker
+    # §21 grader/trusted pipeline paths are forbidden for every managed project
+    assert set(dag.GENERIC_TRUSTED_PATHS) <= set(spec.forbidden_paths)
     assert spec.egress_allowed == []  # default deny
     assert spec.tools_allowed == dag.DEFAULT_TOOLS
     assert spec.data_classification == "CONFIDENTIAL"  # never below the project's classification
@@ -116,6 +150,62 @@ def test_non_platform_project_has_no_platform_protected_defaults(db):
     dag.compile_version(db, v, actor="tester")
     spec = db.scalars(select(TaskSpec).where(TaskSpec.plan_version_id == v.id)).first()
     assert "policy/**" not in spec.forbidden_paths
+    assert ".github/workflows/**" in spec.forbidden_paths and "tests/acceptance/**" in spec.forbidden_paths
+
+
+def test_task_touching_trusted_pipeline_is_quarantined_in_any_project(db):
+    """§21: a TaskSpec that really changes the trusted pipeline/grader stays a quarantined patch."""
+    project = make_project(db)
+    _, v = _version(db, project, sample_content(tasks=[task("T1", paths=[".github/workflows/ci.yml"])]))
+    dag.compile_version(db, v, actor="tester")
+    spec = db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v.id))
+    assert spec.reviewer_policy["quarantine_special_review"] is True and spec.risk_class == "R3"
+    assert ".github/workflows/**" not in spec.forbidden_paths
+
+
+def test_unknown_acceptance_validity_never_opens_a_dependency(db, monkeypatch):
+    """§14/§50: only an ACCEPTED record with confirmed validity for this plan identity counts; an
+    unknown validity or a record for another plan version hash never opens the dependency."""
+    from types import SimpleNamespace
+
+    from aeos.verification import facade as verification
+
+    project = make_project(db)
+    plan, v = _version(db, project, sample_content())
+    dag.compile_version(db, v, actor="tester")
+    db.commit()
+    seen: list[str | None] = []
+    monkeypatch.setattr(verification, "latest_acceptance", lambda s, tid: SimpleNamespace(
+        id="acc-1", acceptance_status="ACCEPTED", plan_version_hash="sha256:other"))
+
+    def unknown_validity(s, tid, **kw):
+        seen.append(kw.get("plan_version_hash"))
+        raise ModuleNotFoundError("aeos.verification.acceptance")
+
+    monkeypatch.setattr(verification, "acceptance_is_valid", unknown_validity)
+    nodes = {n["key"]: n for n in dag.dag_view(db, plan, v)["nodes"]}
+    assert nodes["T1"]["acceptance"] == {"status": "ACCEPTED", "valid": None, "record_id": "acc-1",
+                                         "source": "acceptance_records"}
+    assert nodes["T2"]["accepted_prerequisites"] == [] and nodes["T2"]["dependencies_ready"] is False
+    # validity is asked for the TaskSpec's plan version hash, not the record's own hash
+    assert set(seen) == {v.manifest_hash}
+    monkeypatch.setattr(verification, "acceptance_is_valid", lambda s, tid, **kw: True)
+    nodes = {n["key"]: n for n in dag.dag_view(db, plan, v)["nodes"]}
+    assert nodes["T2"]["accepted_prerequisites"] == ["T1"] and nodes["T2"]["dependencies_ready"] is True
+
+
+def test_dag_view_keeps_mock_provenance(db):
+    project = make_project(db)
+    plan, v = _version(db, project, sample_content(), mode="MOCK")
+    assert dag.dag_view(db, plan, v)["data_mode"] == "MOCK"
+    assert {n["mode"] for n in dag.dag_view(db, plan, v)["nodes"]} == {"MOCK"}  # preview
+    dag.compile_version(db, v, actor="tester")
+    db.commit()
+    specs = list(db.scalars(select(TaskSpec).where(TaskSpec.plan_version_id == v.id)))
+    assert specs and {s.mode for s in specs} == {"MOCK"}  # a fixture TaskSpec stays a fixture
+    assert {n["mode"] for n in dag.dag_view(db, plan, v)["nodes"]} == {"MOCK"}
+    _plan2, live = _version(db, project, sample_content())
+    assert dag.dag_view(db, _plan2, live)["data_mode"] == "LIVE"
 
 
 @pytest.mark.parametrize(("a", "b", "overlap"), [

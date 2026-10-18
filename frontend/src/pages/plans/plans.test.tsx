@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { statusSpec } from "../../components/StatusBadge";
 import { acceptanceBadge, runtimeBadge } from "../dag/dagStatus";
-import { ObjectView } from "./ContentViewer";
+import { ObjectView, PlanAssumptions } from "./ContentViewer";
 import { parseTargets } from "./DecisionPanel";
 
 describe("approval targets", () => {
@@ -42,5 +42,25 @@ describe("content viewer", () => {
     expect(screen.getByText("Visi X")).toBeInTheDocument();
     expect(screen.getByText("B")).toBeInTheDocument();
     expect(screen.getByText("Acceptance criteria")).toBeInTheDocument();
+  });
+
+  it("shows the planner's assumptions, unknowns and material questions as DATA (§05 step 7)", () => {
+    render(
+      <PlanAssumptions
+        content={{
+          assumptions: [{ statement: "Pengguna tunggal", source: "prompt" }],
+          unknowns: [{ statement: "Target hosting belum dipilih", impact: "Rilis tertunda" }],
+          material_questions: [{ question: "Data apa yang sensitif?", category: "security", blocking: true }],
+          facts: [],
+        }}
+      />,
+    );
+    expect(screen.getByText(/berstatus DATA\/proposal/)).toBeInTheDocument();
+    expect(screen.getByText("Pengguna tunggal")).toBeInTheDocument();
+    expect(screen.getByText("Target hosting belum dipilih")).toBeInTheDocument();
+    expect(screen.getByText("Dampak: Rilis tertunda")).toBeInTheDocument();
+    expect(screen.getByText("Data apa yang sensitif?")).toBeInTheDocument();
+    expect(screen.getByText("Memblokir")).toBeInTheDocument();
+    expect(screen.getByText("Tidak ada fakta tercatat")).toBeInTheDocument();
   });
 });
