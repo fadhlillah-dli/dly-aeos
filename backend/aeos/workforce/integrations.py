@@ -62,11 +62,16 @@ def acceptance_valid_for_run(session: Session, task: TaskSpec, base_commit: str 
     return bool(ok), "" if ok else "acceptance record is not ACCEPTED/valid for this base/plan identity"
 
 
-def capability_ready(session: Session, capability: Capability, *, domain: str, project_id: str | None) -> tuple[bool, list[str]]:
+def capability_ready(session: Session, capability: Capability, *, domain: str, project_id: str | None,
+                     exclude_checks: tuple[str, ...] = ()) -> tuple[bool, list[str]]:
     from aeos.doctor import facade as doctor
 
     try:
-        doctor.require_capability(session, capability, domain=domain, project_id=project_id)
+        if exclude_checks:
+            doctor.require_capability(session, capability, domain=domain, project_id=project_id,
+                                      exclude_checks=exclude_checks)
+        else:
+            doctor.require_capability(session, capability, domain=domain, project_id=project_id)
     except ImportError as exc:
         return False, [_unavailable("doctor", exc)]
     except Blocked as exc:

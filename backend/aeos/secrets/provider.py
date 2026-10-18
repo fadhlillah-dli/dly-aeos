@@ -746,20 +746,28 @@ def get_provider() -> SecretProvider:
                   code="SECRET_STORE_UNAVAILABLE", details={"reasons": sel.reasons})
 
 
-def provider_delete(ref: str, *, actor: str) -> None:
+def provider_delete(ref: str, *, actor: str, session: Any | None = None) -> None:
+    from aeos.secrets.readiness import invalidate_secret_checks
+
     p = get_provider()
     deleter = getattr(p, "delete", None)
     if deleter is None:  # pragma: no cover
         raise Blocked(f"provider {p.name} cannot delete")
     deleter(ref, actor=actor)
+    invalidate_secret_checks(ref, reason="credential deleted", session=session)
 
 
 def provider_put(ref: str, value: str, *, actor: str, expires_at: datetime | None = None,
-                 scope: dict[str, Any] | None = None) -> SecretStatus:
+                 scope: dict[str, Any] | None = None, session: Any | None = None) -> SecretStatus:
+    from aeos.secrets.readiness import invalidate_secret_checks
+
     p = get_provider()
     if isinstance(p, (OpenBaoProvider, InterimKeyringProvider)):
-        return p.put(ref, value, actor=actor, expires_at=expires_at, scope=scope)
-    return p.put(ref, value, actor=actor)
+        status = p.put(ref, value, actor=actor, expires_at=expires_at, scope=scope)
+    else:
+        status = p.put(ref, value, actor=actor)
+    invalidate_secret_checks(ref, reason="credential stored/rotated", session=session)
+    return status
 
 
 def verification_file(settings: Settings) -> Any:

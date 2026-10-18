@@ -8,13 +8,14 @@ from typing import Any
 
 from sqlalchemy import select
 
-from aeos.core.redaction import contains_secret, register_secret
+from aeos.core.redaction import contains_secret, redact_text, register_secret
 from aeos.doctor.checks import check
-from aeos.doctor.checks._common import binary_fingerprint, binary_outcome
-from aeos.doctor.model import CheckContext, Outcome, Remedy
+from aeos.doctor.checks._common import binary_fingerprint, binary_outcome, resolve_openbao
+from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
 from aeos.inventory.probes import ProbeRefused, is_loopback_url
 
 OPENBAO_DOCS = "https://openbao.org/docs/auth/approle/"
+OPENBAO_RELEASES = "https://github.com/openbao/openbao/releases"
 KEYRING_PROBE_SERVICE = "dly-aeos-doctor-probe"
 DOMAIN_PRIVATE_NAMESPACES = frozenset({"office", "projects"})
 
@@ -57,20 +58,40 @@ def secret_keyring(ctx: CheckContext) -> Outcome:
                                   "status": "VERIFIED"}])
 
 
+_bao_binary_fp = binary_fingerprint("bao", "openbao_binary", resolver=resolve_openbao)
+
+
+def vault_remedy(step: str) -> Remedy:
+    """Remedy through the reviewed ``aeos vault`` commands (official release, checksum-verified, user-level,
+    loopback only; master §07 step 3). The owner runs them; the Doctor never does."""
+    steps = {
+        "install": ("Pasang biner OpenBao resmi ke <data>/bin (rencana ditampilkan dan dikonfirmasi dulu; SHA256 "
+                    "dicocokkan dengan checksums.txt, tanda tangan GPG belum diverifikasi)", "vault install",
+                    "hapus <data>/bin/bao", "secret.openbao_binary VERIFIED"),
+        "start": ("Jalankan server OpenBao lokal (hanya 127.0.0.1)", "vault start", aeos_cmd("vault stop"),
+                  "secret.openbao_health CONNECTED"),
+        "init": ("Inisialisasi OpenBao, policy per namespace dan AppRole controller (tindakan pemilik; recovery "
+                 "material disimpan terpisah)", "vault init", "tidak dapat dibatalkan; rencanakan sebelum menjalankan",
+                 "secret.openbao_health CONNECTED, secret.status CONFIGURED"),
+        "unseal": ("Buka segel OpenBao oleh pemilik", "vault unseal", "tidak diperlukan", "sealed=false"),
+    }
+    op, cmd, rollback, evidence = steps[step]
+    return Remedy(operation=op, command=aeos_cmd(cmd), source=f"S24: {OPENBAO_RELEASES} / {OPENBAO_DOCS}",
+                  target="<data>/bin, 127.0.0.1:8200", privilege="pemilik (pengguna lokal, tanpa elevasi)",
+                  cost="tidak ada", rollback=rollback, evidence_to_collect=evidence)
+
+
 @check("secret.openbao_binary", "SECRET", "Binary OpenBao", component_id="openbao", ttl_seconds=86400,
-       invalidators=("binary:bao",), fingerprint=binary_fingerprint("bao", "openbao_binary"), severity_fail="MEDIUM",
+       invalidators=("binary:bao",), fingerprint=_bao_binary_fp, severity_fail="MEDIUM",
        observation="installation")
 def secret_openbao_binary(ctx: CheckContext) -> Outcome:
     return binary_outcome(ctx, name="bao", override_attr="openbao_binary", args=["version"],
-                          regex=r"v?(\d+\.\d+\.\d+)", label="OpenBao", missing_remedy=Remedy(
-                              operation="Pasang OpenBao dari distribusi resmi; inisialisasi/unseal oleh pemilik",
-                              source=f"S24: {OPENBAO_DOCS}", target="PATH atau setelan openbao_binary",
-                              privilege="pengguna lokal", rollback="uninstall OpenBao",
-                              evidence_to_collect="bao version"))
+                          regex=r"v?(\d+\.\d+\.\d+)", label="OpenBao", resolver=resolve_openbao,
+                          missing_remedy=vault_remedy("install"))
 
 
 def _bao_fp(ctx: CheckContext) -> dict[str, Any]:
-    return {"addr": ctx.settings.openbao_addr, **binary_fingerprint("bao", "openbao_binary")(ctx)}
+    return {"addr": ctx.settings.openbao_addr, **_bao_binary_fp(ctx)}
 
 
 @check("secret.openbao_health", "SECRET", "Health OpenBao (initialized/sealed)", component_id="openbao",
@@ -87,15 +108,13 @@ def secret_openbao_health(ctx: CheckContext) -> Outcome:
         hr = ctx.runner.http_get(url, timeout=5.0)
     except ProbeRefused:
         return Outcome("FAILED", "Probe ditolak (non-loopback).", evidence=evidence, error_code="OPENBAO_NOT_LOOPBACK")
-    start_remedy = Remedy(operation="Jalankan server OpenBao lokal, lalu init/unseal oleh pemilik (recovery material "
-                          "disimpan terpisah)", command="bao server -config=<file konfigurasi anda>",
-                          source=f"S24: {OPENBAO_DOCS}", target=addr, privilege="pemilik",
-                          rollback="hentikan server", evidence_to_collect="secret.openbao_health CONNECTED")
     if hr.status is None:
-        has_binary = bool(ctx.runner.which("bao") or ctx.settings.openbao_binary)
+        has_binary = resolve_openbao(ctx)[0] is not None
         status = "FAILED" if has_binary else "MISSING"
-        return Outcome(status, f"OpenBao tidak terjangkau di {addr} ({hr.error}); operasi yang butuh secret ditolak.",
-                       evidence={**evidence, "error": hr.error}, error_code="OPENBAO_UNREACHABLE", remedy=start_remedy)
+        hint = "server belum berjalan" if has_binary else "biner OpenBao belum terpasang"
+        return Outcome(status, f"OpenBao tidak terjangkau di {addr} ({hr.error}; {hint}); operasi yang butuh secret "
+                       "ditolak.", evidence={**evidence, "error": hr.error, "binary_installed": has_binary},
+                       error_code="OPENBAO_UNREACHABLE", remedy=vault_remedy("start" if has_binary else "install"))
     body = hr.body if isinstance(hr.body, dict) else {}
     evidence.update({"http_status": hr.status, "initialized": body.get("initialized"), "sealed": body.get("sealed"),
                      "standby": body.get("standby"), "server_version": body.get("version")})
@@ -104,25 +123,22 @@ def secret_openbao_health(ctx: CheckContext) -> Outcome:
                        error_code="OPENBAO_IDENTITY_UNCONFIRMED")
     if not body.get("initialized"):
         return Outcome("FAILED", "OpenBao belum diinisialisasi.", evidence=evidence, error_code="OPENBAO_NOT_INITIALIZED",
-                       remedy=Remedy(operation="Inisialisasi OpenBao (tindakan pemilik; simpan recovery material "
-                                     "terpisah)", command="bao operator init", source=f"S24: {OPENBAO_DOCS}",
-                                     target=addr, privilege="pemilik",
-                                     rollback="tidak dapat dibatalkan; rencanakan sebelum menjalankan",
-                                     evidence_to_collect="initialized=true"),
-                       requires_destructive=True)
+                       remedy=vault_remedy("init"), requires_destructive=True)
     if body.get("sealed"):
         return Outcome("FAILED", "OpenBao sealed; secret tidak tersedia (fail closed).", evidence=evidence,
-                       error_code="OPENBAO_SEALED", remedy=Remedy(
-                           operation="Unseal OpenBao oleh pemilik", command="bao operator unseal",
-                           source=f"S24: {OPENBAO_DOCS}", target=addr, privilege="pemilik",
-                           evidence_to_collect="sealed=false"))
+                       error_code="OPENBAO_SEALED", remedy=vault_remedy("unseal"))
     return Outcome("CONNECTED", "OpenBao terjangkau, initialized dan unsealed; auth/policy/TTL belum diverifikasi oleh "
                    "pemeriksaan ini.", evidence=evidence, component_version=body.get("version"),
                    target_identity="openbao@loopback")
 
 
+# Depends on the store itself (backend selection, OpenBao address/binary), not on individual references: a
+# credential write or a Google token refresh does not change whether the store is reachable, so it must not
+# make CAN_RUN_WORKER / CAN_PUBLISH_PERSONAL STALE. A secret_store decision (interim keyring exception)
+# emits ``secret:*``, which still matches ``secret:store``.
 @check("secret.status", "SECRET", "Status secret store (tanpa nilai)", component_id="secret-provider",
-       ttl_seconds=900, ok={"CONFIGURED", "VERIFIED"}, severity_fail="HIGH", invalidators=("secret:*",))
+       ttl_seconds=900, ok={"CONFIGURED", "VERIFIED"}, severity_fail="HIGH",
+       invalidators=("secret:store", "config:openbao_addr", "binary:bao"))
 def secret_status(ctx: CheckContext) -> Outcome:
     from aeos.core.errors import Blocked
 
@@ -131,11 +147,16 @@ def secret_status(ctx: CheckContext) -> Outcome:
 
         items = secrets.list_status()
     except Blocked as exc:
-        return Outcome("MISSING", "Secret store tidak tersedia; operasi yang butuh credential ditolak (fail closed).",
-                       evidence={"error_code": exc.code}, error_code="SECRET_STORE_UNAVAILABLE", remedy=Remedy(
-                           operation="Siapkan OpenBao (atau credential store OS) untuk SecretProvider",
-                           source=f"S24: {OPENBAO_DOCS}", privilege="pemilik",
-                           evidence_to_collect="secret.status CONFIGURED"))
+        reasons = [redact_text(str(r))[:200] for r in (exc.details or {}).get("reasons") or []][:5]
+        has_binary = resolve_openbao(ctx)[0] is not None
+        remedy = vault_remedy("start" if has_binary else "install")
+        remedy = Remedy(**{**remedy.as_dict(), "operation": remedy.operation + "; lalu " + aeos_cmd("vault init")
+                           + ". Alternatif sementara (PERSONAL saja, residual risk): keputusan EXCEPTION pemilik untuk "
+                           "OS keyring - lihat " + aeos_cmd("secrets interim-keyring")})
+        return Outcome("MISSING", "Secret store tidak tersedia (OpenBao belum siap dan tidak ada pengecualian interim "
+                       "OS keyring); operasi yang butuh credential ditolak (fail closed).",
+                       evidence={"error_code": exc.code, "reasons": reasons, "binary_installed": has_binary},
+                       error_code="SECRET_STORE_UNAVAILABLE", remedy=remedy)
     except (ImportError, ModuleNotFoundError):
         return Outcome("UNKNOWN", "Modul secrets belum tersedia.", error_code="SECRETS_NOT_IMPLEMENTED")
     except Exception as exc:
@@ -150,11 +171,17 @@ def secret_status(ctx: CheckContext) -> Outcome:
         ns = st.ref.partition("/")[0]
         by_ns[ns] = by_ns.get(ns, 0) + (1 if st.exists else 0)
     backends = sorted({st.backend for st in items})
-    return Outcome("CONFIGURED", f"Secret store terjangkau; {sum(by_ns.values())} ref platform/personal/worker "
-                   "tersimpan (nilai tidak dibaca).",
-                   evidence={"refs_by_namespace": by_ns, "backends": backends,
-                             "refs": [st.ref for st in shown if st.exists],
-                             "not_listed": "namespace office/projects dilaporkan oleh pemeriksaan ber-scope domain"})
+    evidence: dict[str, Any] = {"refs_by_namespace": by_ns, "backends": backends,
+                                "refs": [st.ref for st in shown if st.exists],
+                                "not_listed": "namespace office/projects dilaporkan oleh pemeriksaan ber-scope domain"}
+    interim = "os-keyring-interim" in backends
+    if interim:
+        from aeos.secrets.provider import INTERIM_RESIDUAL_RISK
+
+        evidence["residual_risks"] = [INTERIM_RESIDUAL_RISK]
+    store = "OS keyring sementara (pengecualian pemilik, residual risk)" if interim else "terjangkau"
+    return Outcome("CONFIGURED", f"Secret store {store}; {sum(by_ns.values())} ref platform/personal/worker "
+                   "tersimpan (nilai tidak dibaca).", evidence=evidence, severity="MEDIUM" if interim else None)
 
 
 @check("secret.no_raw_exposure", "SECRET", "Tidak ada secret mentah di audit/event/observasi", needs_db=True,

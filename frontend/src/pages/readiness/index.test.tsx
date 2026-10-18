@@ -102,11 +102,16 @@ const caps = {
   mode: "LIVE",
 };
 
+let checksBody: unknown = checks;
+let capsBody: unknown = caps;
+
 beforeEach(() => {
+  checksBody = checks;
+  capsBody = caps;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
-      const body = url.includes("capabilities") ? caps : checks;
+      const body = url.includes("capabilities") ? capsBody : checksBody;
       return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
     }),
   );
@@ -114,7 +119,76 @@ beforeEach(() => {
 
 afterEach(() => vi.unstubAllGlobals());
 
+function renderPage() {
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <MemoryRouter>
+        <ReadinessPage />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
 describe("Readiness page", () => {
+  it("shows the startup run, the live sandbox gate and residual risks without turning them green", async () => {
+    checksBody = {
+      ...checks,
+      last_run: {
+        id: "r1", started_at: "2026-10-18T01:00:00+00:00", finished_at: "2026-10-18T01:00:05+00:00",
+        trigger: "startup", functional: false, groups: [], capability: null, counts: { VERIFIED: 27, MISSING: 18 },
+      },
+    };
+    capsBody = {
+      ...caps,
+      items: [
+        {
+          capability: "CAN_RUN_WORKER",
+          label: "Menjalankan worker dalam sandbox",
+          description: "",
+          domain: null,
+          status: "READY",
+          reasons: ["catatan: worker_runtime.sandbox_readiness: process sandbox WEAK diizinkan keputusan pengecualian"],
+          checks: [
+            // a WEAK process sandbox allowed by an owner exception satisfies the gate but is CONFIGURED, never VERIFIED
+            { check_id: "worker_runtime.sandbox_readiness", title: "Syarat sandbox worker (live, ADR-0051)", tier: "critical",
+              status: "READY", effective_status: "CONFIGURED", ok: true, last_checked_at: null, component_id: "worker-runtime",
+              live: true },
+          ],
+          remedies: [],
+          residual_risks: ["Tidak ada penegakan egress jaringan: proses worker dapat menghubungi host selain broker.",
+                           "Penulisan di luar worktree tidak dicegah OS."],
+        },
+      ],
+    };
+    renderPage();
+    expect(await screen.findByText("Menjalankan worker dalam sandbox")).toBeInTheDocument();
+    expect(screen.getByTestId("last-run")).toHaveTextContent("otomatis saat server mulai");
+    const live = screen.getByText(/Syarat sandbox worker \(live, ADR-0051\)/);
+    expect(live).toHaveTextContent("Terkonfigurasi");
+    expect(live).not.toHaveTextContent("Terverifikasi");
+    const risks = screen.getByTestId("residual-risks");
+    expect(risks).toHaveTextContent("Risiko residual (2)");
+    expect(risks).toHaveTextContent("bukan tanda lulus");
+    expect(risks).toHaveTextContent(/egress/);
+    expect(screen.queryByTestId("last-failure")).not.toBeInTheDocument();
+  });
+
+  it("says when the latest (startup) Doctor pass failed instead of presenting the older run as current", async () => {
+    checksBody = {
+      ...checks,
+      last_run: {
+        id: "r0", started_at: "2026-10-17T01:00:00+00:00", finished_at: "2026-10-17T01:00:05+00:00",
+        trigger: "cli", functional: false, groups: [], capability: null, counts: { VERIFIED: 27 },
+      },
+      last_failure: { at: "2026-10-18T01:00:03+00:00", trigger: "startup", error: "OperationalError" },
+    };
+    renderPage();
+    const notice = await screen.findByTestId("last-failure");
+    expect(notice).toHaveTextContent("otomatis saat server mulai gagal");
+    expect(notice).toHaveTextContent("OperationalError");
+    expect(notice).toHaveTextContent("bukan status terkini");
+  });
+
   it("shows the capability matrix first, unknown is not green, viewer cannot run checks", async () => {
     render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
