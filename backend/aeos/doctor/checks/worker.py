@@ -64,12 +64,26 @@ def worker_opencode(ctx: CheckContext) -> Outcome:
                        evidence=evidence, error_code="OPENCODE_FAILED", remedy=remedy,
                        target_identity=evidence.get("location"))
     if st == "INSTALLED" and version:
-        drift = bool(status.get("drift"))
-        summary = f"OpenCode {version} terpasang (skenario: perintah versi; fungsi worker NOT-PROVEN)"
-        if drift:
-            summary += f"; berbeda dari versi yang dipin {pinned} (drift, perlu review)"
-        return Outcome("VERIFIED", summary + ".", evidence=evidence, component_version=str(version),
-                       target_identity=evidence.get("location"), severity="MEDIUM" if drift else None)
+        if status.get("drift") or (pinned and str(version) != str(pinned)):
+            # §38 "Binary/version/route berubah dari pin": admission stops until reconciled (§50); the engine
+            # is installed, so the inventory still records INSTALLED with the observed version.
+            return Outcome("FAILED", f"OpenCode {version} terpasang tetapi berbeda dari versi yang dipin {pinned} "
+                           "(drift): admission worker dihentikan sampai direkonsiliasi.", evidence=evidence,
+                           component_version=str(version), target_identity=evidence.get("location"),
+                           error_code="OPENCODE_PIN_DRIFT", severity="HIGH", remedy=Remedy(
+                               operation="Pasang versi yang dipin, ATAU ubah pin lewat PR yang direview (install-"
+                               "manifest + worker runtime) setelah uji kontrak worker pada versi baru",
+                               command=npm_cmd(f"install -g opencode-ai@{pinned}"),
+                               source=f"S28: {OPENCODE_URL} (install-manifest/ otoritatif)",
+                               target="PATH atau setelan opencode_binary (AEOS_OPENCODE_BINARY)",
+                               privilege="pengguna lokal (pin baru: reviewer manusia)", cost="tidak ada",
+                               rollback=npm_cmd(f"install -g opencode-ai@{version}"),
+                               evidence_to_collect="worker.opencode VERIFIED tanpa drift"),
+                           observations=[{"component_id": "opencode", "dimension": "installation",
+                                          "status": "INSTALLED", "observed_version": str(version)}])
+        return Outcome("VERIFIED", f"OpenCode {version} terpasang sesuai pin (skenario: perintah versi; fungsi worker "
+                       "NOT-PROVEN).", evidence=evidence, component_version=str(version),
+                       target_identity=evidence.get("location"))
     return Outcome("UNKNOWN", f"Status OpenCode tidak konklusif ({st or 'tanpa status'}).", evidence=evidence,
                    error_code="OPENCODE_STATUS_UNRECOGNISED")
 

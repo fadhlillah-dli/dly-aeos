@@ -203,16 +203,41 @@ def readiness_invalidators(decision: Decision) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _route_pool_invalidator(session: Session, decision: Decision) -> str:
+    """``model:route:<POOL>`` of the route a decision is about (the Claude bridge proof depends on SUPERVISOR
+    routes only); unknown route -> ``model:route:*`` (conservative)."""
+    if decision.target_type == "model_route" and decision.target_id:
+        try:
+            from aeos.models.routing import ModelRoute
+
+            pool = session.scalar(select(ModelRoute.pool).where(ModelRoute.route_key == decision.target_id))
+        except Exception:  # pragma: no cover - routing tables always exist with the policy module
+            pool = None
+        if pool:
+            return f"model:route:{str(pool).upper()}"
+    return "model:route:*"
+
+
 def _notify_readiness(session: Session, decisions: list[Decision], *, reason: str) -> None:
     """Mark dependent Readiness Doctor checks STALE so capabilities stop being READY until a recheck.
     Same transaction as the decision change; a missing doctor module means nothing was fresh."""
-    invalidators = list(dict.fromkeys(i for d in decisions for i in readiness_invalidators(d)))
+    invalidators: list[str] = []
+    for d in decisions:
+        invs = readiness_invalidators(d)
+        if "model:route" in invs:
+            invs.append(_route_pool_invalidator(session, d))
+        invalidators += invs
+    invalidators = list(dict.fromkeys(invalidators))
     if not invalidators:
         return
     try:
         from aeos.doctor import facade as doctor
     except (ImportError, ModuleNotFoundError):
         return
+    if any(d.domain == "OFFICE" for d in decisions):
+        # Stored stale reasons and doctor.check.stale events of platform-level checks are visible to every
+        # domain: an OFFICE decision id/kind is OFFICE metadata and is not quoted there (ADR-0011 #8).
+        reason = "keputusan ber-scope domain berubah; detail di halaman Keputusan domain terkait"
     for inv in invalidators:
         doctor.invalidate(session, invalidator=inv, reason=redact_text(reason)[:200])
 

@@ -220,9 +220,16 @@ def _live_sandbox(session: Session | None, domain: str | None) -> tuple[str, lis
     sb = sandbox_readiness_view(session, eval_domain)
     status = str(sb.get("status") or "BLOCKED")
     risks = [str(r) for r in sb.get("residual_risks") or []] if status == "READY" else []
-    entry.update(status=status, effective_status="VERIFIED" if status == "READY" else "MISSING", ok=status == "READY",
-                 kind=sb.get("kind"), evaluated_domain=eval_domain)
+    # Honest label: only a container whose containment report passed is VERIFIED. The WEAK process sandbox
+    # allowed by an owner exception satisfies the policy (ok) but is CONFIGURED, never VERIFIED (§08, §25).
     if status == "READY":
+        label = "VERIFIED" if sb.get("kind") == "container" else "CONFIGURED"
+    else:
+        label = "MISSING"
+    entry.update(status=status, effective_status=label, ok=status == "READY", kind=sb.get("kind"),
+                 evaluated_domain=eval_domain)
+    if status == "READY":
+        entry["residual_risks"] = risks
         notes = [] if domain else [f"catatan: {LIVE_SANDBOX_ID}: dievaluasi untuk PERSONAL (OFFICE selalu BLOCKED "
                                    "tanpa isolasi terverifikasi)"]
         if sb.get("kind") == "process":
@@ -234,6 +241,7 @@ def _live_sandbox(session: Session | None, domain: str | None) -> tuple[str, lis
                 for r in sb.get("remedies") or []]
     # Not accepted yet: these are the risks an owner exception for the WEAK process sandbox would accept.
     pending = [f"bila process sandbox diizinkan: {r}" for r in sb.get("residual_risks") or []]
+    entry["residual_risks"] = pending
     return "blocked", [f"{LIVE_SANDBOX_ID}: BLOCKED ({eval_domain}) - {why}"], remedies, pending, entry
 
 
@@ -268,11 +276,13 @@ def evaluate(capability: Capability, rows: dict[str, dict[str, Any]], *, now: da
                 spec.ok_statuses if spec else frozenset({"VERIFIED"}))
             ok = eff in ok_set
             title = spec.title if spec else cid
+            # a stale/expired result no longer describes the system; risks stay attached to their check so a
+            # view can drop those of checks scoped to another domain (views.capabilities_view, §50)
+            row_risks = _risks_of(row) if eff not in ("STALE", "EXPIRED") else []
             checks.append({"check_id": cid, "title": title, "tier": tier, "status": row["status"] if row else None,
                            "effective_status": eff, "ok": ok, "last_checked_at": row.get("last_checked_at") if row else None,
-                           "component_id": spec.component_id if spec else None})
-            if eff not in ("STALE", "EXPIRED"):
-                risks += _risks_of(row)  # a stale/expired result no longer describes the system
+                           "component_id": spec.component_id if spec else None, "residual_risks": row_risks})
+            risks += row_risks
             if ok:
                 continue
             summary = (row or {}).get("summary") or why or ""
@@ -380,6 +390,24 @@ def invalidator_label(invalidator: str) -> str:
     return invalidator
 
 
+# Secret namespaces whose reference names are domain metadata (same rule as the platform-level
+# ``secret.status`` row): a result that is not scoped to that domain never quotes them (§35, §50).
+PRIVATE_SECRET_NAMESPACES: dict[str, str | None] = {"office": "OFFICE", "projects": None}
+PRIVATE_LABEL = "secret-ref <ber-scope domain>"
+PRIVATE_REASON = "credential ber-scope domain berubah; detail hanya terlihat di domain pemiliknya"
+
+
+def _private_owner(invalidator: str) -> tuple[bool, str | None]:
+    """(domain-private?, owning domain or None) of an invalidator target. Only ``secret:office/...`` and
+    ``secret:projects/...`` references are private; ``projects`` refs may belong to either domain."""
+    kind, sep, target = invalidator.partition(":")
+    if sep and kind.lower() == "secret":
+        ns = target.partition("/")[0]
+        if ns in PRIVATE_SECRET_NAMESPACES:
+            return True, PRIVATE_SECRET_NAMESPACES[ns]
+    return False, None
+
+
 def _depends(invalidator: str, row: Any) -> bool:
     """A result depends on *invalidator* when it declares it (exact or wildcard), or - for
     ``component:<id>`` (the observed identity/version of that component changed) - when the check is
@@ -401,24 +429,32 @@ def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
     from aeos.inventory.observations import expire_component_observations
 
     n = 0
-    components: set[str] = set()
+    components: dict[str, bool] = {}  # component -> may quote the invalidator target
     label = invalidator_label(invalidator)
     why = reason or f"invalidated by {label}"
     kind, _, target = invalidator.partition(":")
+    private, owner = _private_owner(invalidator)
     for cid, row in latest_results(session).items():
         if row.status == "STALE" or not _depends(invalidator, row):
             continue
+        # A platform-level row (or another domain's row) is visible to every/that session, and so is its
+        # domain-less event: it never names an OFFICE/per-project credential reference (§50 "counts are
+        # metadata too"). Matching above still used the raw invalidator.
+        row_domain = (row.scope or {}).get("domain")
+        quote = not private or (owner is not None and row_domain == owner)
+        row_label, row_why = (label, why) if quote else (PRIVATE_LABEL, PRIVATE_REASON)
         row.observed_evidence = {**(row.observed_evidence or {}), "status_before_stale": row.status,
-                                 "stale_reason": f"{why} [{label}]"[:300]}
+                                 "stale_reason": f"{row_why} [{row_label}]"[:300]}
         row.status = "STALE"
         n += 1
         if row.component_id:
-            components.add(row.component_id)
+            components[row.component_id] = components.get(row.component_id, True) and quote
         events.emit(session, source="doctor", kind="doctor.check.stale", entity_type="check", entity_id=cid,
-                    domain=(row.scope or {}).get("domain"),
-                    payload={"check_id": cid, "invalidator": label, "invalidator_kind": kind,
-                             "invalidator_target": target, "reason": why[:200]})
-    for comp in components:
-        expire_component_observations(session, comp, reason=f"{label}: {why}")
+                    domain=row_domain,
+                    payload={"check_id": cid, "invalidator": row_label, "invalidator_kind": kind,
+                             "invalidator_target": target if quote else None, "reason": row_why[:200]})
+    for comp, quote in components.items():
+        expire_component_observations(session, comp, reason=f"{label}: {why}" if quote
+                                      else f"{PRIVATE_LABEL}: {PRIVATE_REASON}")
     session.flush()
     return n

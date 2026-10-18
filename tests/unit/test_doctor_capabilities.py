@@ -206,7 +206,13 @@ def test_wildcard_invalidators_match(settings, db, runner, secrets_memory):
     n = invalidate(db, invalidator="secret:workers/openrouter", reason="kunci dirotasi")
     db.commit()
     stale = {r.check_id for r in db.scalars(select(CheckResult).where(CheckResult.status == "STALE"))}
-    assert n >= 2 and {"route.worker_key", "secret.status"} <= stale
+    # a single reference write invalidates the checks about that reference, not the store's own status
+    assert n >= 1 and "route.worker_key" in stale and "secret.status" not in stale
+    # a wildcard invalidator (secret backend changed) matches every secret-dependent declaration
+    n = invalidate(db, invalidator="secret:*", reason="secret backend berubah")
+    db.commit()
+    stale = {r.check_id for r in db.scalars(select(CheckResult).where(CheckResult.status == "STALE"))}
+    assert n >= 1 and {"route.worker_key", "secret.status"} <= stale
 
 
 def test_every_capability_rule_references_registered_checks():

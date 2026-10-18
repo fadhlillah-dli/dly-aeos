@@ -20,6 +20,9 @@ type Capability = Omit<CapabilityItem, "checks"> & {
   checks: (CapabilityItem["checks"][number] & { live?: boolean })[];
 };
 
+/** Additive field of /api/doctor/checks: a failed Doctor pass (e.g. at server start) newer than the last run. */
+type ChecksData = ChecksResponse & { last_failure?: { at: string; trigger: string | null; error: string | null } | null };
+
 /** How a Doctor run was started (``DoctorRun.trigger``). */
 const TRIGGER_LABELS: Record<string, string> = {
   startup: "otomatis saat server mulai",
@@ -221,7 +224,7 @@ function RunControls({ groups }: { groups: { id: string; label: string }[] }) {
 export default function ReadinessPage() {
   const { isAdmin, domain } = useAuth();
   const qc = useQueryClient();
-  const checks = useQuery({ queryKey: ["doctor", "checks", domain], queryFn: () => get<ChecksResponse>("/api/doctor/checks") });
+  const checks = useQuery({ queryKey: ["doctor", "checks", domain], queryFn: () => get<ChecksData>("/api/doctor/checks") });
   const caps = useQuery({ queryKey: ["doctor", "capabilities", domain], queryFn: () => get<CapabilitiesResponse>("/api/doctor/capabilities") });
   const [selected, setSelected] = useState<string | null>(null);
   const [onlyProblems, setOnlyProblems] = useState(false);
@@ -241,6 +244,7 @@ export default function ReadinessPage() {
   if (checks.isLoading || caps.isLoading) return <Loading />;
   if (checks.error) return <ErrorBox error={checks.error} />;
   const lastRun = checks.data?.last_run;
+  const lastFailure = checks.data?.last_failure;
 
   return (
     <div>
@@ -256,6 +260,15 @@ export default function ReadinessPage() {
         <Notice tone="warn">
           Doctor belum pernah dijalankan pada database ini; semua status UNKNOWN. Jalankan <Mono>aeos doctor</Mono> di terminal
           {isAdmin ? " atau tombol “Jalankan pemeriksaan”." : " (butuh SUPER_ADMIN)."}
+        </Notice>
+      )}
+      {lastFailure && (
+        <Notice tone="warn">
+          <span data-testid="last-failure">
+            Pemeriksaan {triggerLabel(lastFailure.trigger)} gagal pada {absoluteTime(lastFailure.at)}
+            {lastFailure.error ? ` (${lastFailure.error})` : ""}; hasil di bawah berasal dari run sebelumnya dan bukan status
+            terkini. Jalankan ulang pemeriksaan.
+          </span>
         </Notice>
       )}
       {lastRun && (

@@ -2,6 +2,12 @@ DLY AEOS Readiness Doctor - sample output (Windows)
 =====================================================
 commit : eac9f80 (all sections except --functional); --functional: e145907
 date   : 2026-10-18 (integration day; local clock 2026-10-19 00:57 +07:00, --functional 00:54 +07:00)
+review : sections 00-05 (no LLM) re-run on the review commit "fix(W3-doctor-readiness): review" (parent
+         fdfd664) on 2026-10-19 local time in another fresh temporary data dir: all 64 check statuses, all 9
+         capability statuses and all exit codes are identical to the outputs below. The dashboard API and the
+         --functional sections were NOT re-run (no second Max call); the review changes (domain filtering of
+         residual risks, CONFIGURED label for an allowed process sandbox, pin-drift blocking, pool-specific
+         route invalidation, secret.status invalidators) do not change this machine's results.
 OS     : Windows 11 Pro 10.0.26200 (win32, AMD64), Windows PowerShell 5.1
 tools  : (environment, not Doctor output) git, Python 3.13, Node 24, gh, Claude Code 2.1.302 (Max login);
          absent: OpenBao, OpenCode, Docker

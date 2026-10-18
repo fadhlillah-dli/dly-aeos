@@ -106,7 +106,7 @@ def refresh_config_hash(session: Session, route: ModelRoute, *, reason: str) -> 
                              reason=f"route configuration changed: {reason}")
     except (ImportError, ModuleNotFoundError):
         pass  # hash binding already makes old approvals ineffective
-    notify_readiness(session, route.route_key, reason=reason)
+    notify_readiness(session, route.route_key, reason=reason, pool=route.pool)
     try:
         from aeos.events.service import emit
 
@@ -120,7 +120,13 @@ def refresh_config_hash(session: Session, route: ModelRoute, *, reason: str) -> 
 READINESS_INVALIDATORS = ("config:routes", "model:route")
 
 
-def notify_readiness(session: Session, route_key: str, *, reason: str) -> int:
+def readiness_invalidators(pool: str | None) -> tuple[str, ...]:
+    """``config:routes`` + ``model:route`` for every route change, plus ``model:route:<POOL>`` so a check can depend
+    on one pool only (the Claude bridge proof on SUPERVISOR routes). Unknown pool -> wildcard (conservative)."""
+    return (*READINESS_INVALIDATORS, f"model:route:{pool.upper()}" if pool else "model:route:*")
+
+
+def notify_readiness(session: Session, route_key: str, *, reason: str, pool: str | None = None) -> int:
     """§08/§50 "Model alias/provider route berubah": a route status, pin (resolved model) or configuration
     change (eligible_domains, data terms, ...) marks the dependent Doctor checks STALE in the same
     transaction, so CAN_RUN_WORKER / review gates stop being READY until rechecked."""
@@ -128,8 +134,10 @@ def notify_readiness(session: Session, route_key: str, *, reason: str) -> int:
         from aeos.doctor.facade import invalidate
     except (ImportError, ModuleNotFoundError):
         return 0
+    if pool is None:
+        pool = session.scalar(select(ModelRoute.pool).where(ModelRoute.route_key == route_key))
     return sum(invalidate(session, invalidator=inv, reason=f"{route_key}: {reason}"[:200])
-               for inv in READINESS_INVALIDATORS)
+               for inv in readiness_invalidators(pool))
 
 
 def get_route(session: Session, route_key: str) -> ModelRoute:
@@ -511,7 +519,6 @@ def observe_supervisor_resolution(session: Session, *, route_key: str, requested
     if route is None:
         return False
     previous = route.resolved_version
-    previous_identity = route.identity_status
     if route.config_hash is None:
         route.config_hash = compute_config_hash(route)
     route.resolved_version = resolved
@@ -521,12 +528,11 @@ def observe_supervisor_resolution(session: Session, *, route_key: str, requested
         route.notes = (route.notes + "\n" if route.notes else "") + (
             f"{utcnow().date().isoformat()}: alias {requested} now resolves to {resolved} (was {previous})")
         return refresh_config_hash(session, route, reason=f"alias {requested} resolved {previous} -> {resolved}")
+    # The first observation (no previously known identity) is not a pin change: nothing was bound to an earlier
+    # identity, and the bridge proof that observed it records the model itself. Invalidating here would mark
+    # claude.capability_test STALE on the first call of every other supervisor alias (e.g. fable after an opus
+    # test) and push reviews to the manual fallback. A real re-resolution goes through refresh_config_hash above.
     route.config_hash = compute_config_hash(route)
-    if previous != resolved or previous_identity != "VERIFIED":
-        # first observation of the pinned/resolved model (UNKNOWN -> resolved): checks bound to the
-        # previous identity are rechecked; no approval is invalidated (no previously known identity).
-        notify_readiness(session, route_key, reason=f"alias {requested} resolved to {resolved} (was "
-                                                    f"{previous or 'UNKNOWN'})")
     return False
 
 
@@ -607,7 +613,7 @@ def activate_route(
     previous_status = route.status
     route.status = mode
     session.flush()
-    notify_readiness(session, route.route_key, reason=f"status {previous_status} -> {mode}")
+    notify_readiness(session, route.route_key, reason=f"status {previous_status} -> {mode}", pool=route.pool)
     return route, decision
 
 
@@ -623,5 +629,6 @@ def disable_route(session: Session, route_key: str, *, reason: str) -> ModelRout
     except (ImportError, ModuleNotFoundError):
         pass  # DISABLED status alone already excludes the route
     session.flush()
-    notify_readiness(session, route.route_key, reason=f"status {previous_status} -> DISABLED: {reason}")
+    notify_readiness(session, route.route_key, reason=f"status {previous_status} -> DISABLED: {reason}",
+                     pool=route.pool)
     return route

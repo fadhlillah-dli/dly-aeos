@@ -121,8 +121,8 @@ both sides now use it; frozen facade signatures only gained keyword arguments wi
    `config:office_policy` (office policy target or OFFICE POLICY), `config:write_enablement`,
    `config:budget`, `config:routes` + `model:route` (route decisions), `config:sandbox` (worker_sandbox),
    `secret:*` (secret_store); routing status changes (activate/disable), configuration identity changes
-   (e.g. `eligible_domains`) and the first observed supervisor resolution (pin) -> `config:routes` +
-   `model:route`. DB-state fingerprints (routes/decisions, agent definition, sandbox exceptions, budgets,
+   (e.g. `eligible_domains`, a re-resolved supervisor alias = pin change) -> `config:routes` +
+   `model:route` (+ `model:route:<POOL>`, see 6). DB-state fingerprints (routes/decisions, agent definition, sandbox exceptions, budgets,
    write enablement) make a stored result STALE immediately even when a producer is missed.
    Stored reasons/events show `secret:<ref>` as `secret-ref <ref>`: the raw form reads like a `secret: value`
    assignment to the redaction scanner (it was redacted and failed `secret.no_raw_exposure`).
@@ -139,3 +139,30 @@ both sides now use it; frozen facade signatures only gained keyword arguments wi
 5. **Startup doctor**: the `aeos.doctor.worker` lifecycle hook runs the non-functional checks in a background
    thread under the app lifespan (startup is not delayed), emits `doctor.check*`/`doctor.run.completed`
    (`doctor.run.failed` on error) and the Readiness page labels the run "otomatis saat server mulai".
+6. **Review corrections (same day, adversarial review of the seam):**
+   * `secret.status` depends on the store (`secret:store`, `config:openbao_addr`, `binary:bao`), not on `secret:*`.
+     With `secret:*` every credential write - including the publisher's hourly Google token refresh - made a
+     CAN_RUN_WORKER critical check STALE and stopped scheduler admission until a manual Doctor run. A
+     `secret_store` decision still emits `secret:*`, which matches `secret:store`.
+   * Domain metadata in invalidation: a result that is not scoped to the reference's domain (platform-level rows
+     and their domain-less `doctor.check.stale` events, component observations) never names an `office/*` or
+     `projects/*` secret reference (generic label `secret-ref <ber-scope domain>`); the secrets hook no longer puts
+     the reference into the free-text reason. Platform-level stale reasons for OFFICE decisions carry no decision
+     id/kind; `policy.snapshot` no longer counts OFFICE decisions (§50: counts are metadata). Residual risks are
+     attached to their check and `capabilities_view` drops those of checks hidden from the session.
+   * Pool-specific route invalidation: route hooks emit `config:routes`, `model:route` and `model:route:<POOL>`;
+     `claude.capability_test` declares `model:route:SUPERVISOR`. A WORKER route activation/disable/config change no
+     longer marks the bridge proof STALE (verification.review sends every review to the manual fallback while
+     CAN_REVIEW_WITH_MAX is not READY). The "first observed resolution" hook was removed: with no previously known
+     identity nothing was bound to it, and it degraded the Max gates on the first call of a second alias (fable
+     after an opus test). A real re-resolution still goes through `refresh_config_hash` (identity hash changes).
+   * Pin drift (§38 "Binary/version/route berubah dari pin ... hentikan admission", §50): `worker.opencode` reports
+     an installed OpenCode whose version differs from the pin as FAILED (`OPENCODE_PIN_DRIFT`, CAN_RUN_WORKER BLOCKED);
+     the inventory still records INSTALLED with the observed version (a check that reports its own dimension is not
+     overwritten by the generic status mapping).
+   * Honest labels: the live sandbox entry is VERIFIED only for a container whose containment report passed; the
+     WEAK process sandbox with an owner exception is CONFIGURED (ok for the gate, never VERIFIED). A capability-test
+     result without `mode` is not proof (fail closed; the bridge always records LIVE).
+   * Startup failures: `doctor.run.failed` carries the exception type and a message with data/repo/home paths
+     replaced by logical names; `/api/doctor/checks` returns `last_failure` while no newer run exists and the
+     Readiness page says the shown results come from an older run.
