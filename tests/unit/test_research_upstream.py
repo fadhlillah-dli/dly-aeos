@@ -201,3 +201,5 @@ def test_real_github_check_when_network_allowed(db):
     if out["check_status"] in ("RATE_LIMITED", "ERROR"):
         pytest.skip(f"GitHub unavailable: {out['check_status']}")
     assert out["check_status"] in ("OK", "IDENTITY_CHANGED", "ARCHIVED", "FORK", "NOT_FOUND")
+    if out["check_status"] == "OK":  # published advisories are read live (or recorded as not readable)
+        assert out["upstream"]["advisories"]["status"] in ("OK", "ERROR", "RATE_LIMITED")

@@ -24,6 +24,8 @@ const SCOPE_LABELS: Record<string, string> = {
   budget_usd: "Budget (USD, tidak menaikkan budget)",
   max_minutes: "Waktu maks (menit)",
   max_attempts: "Attempt maks",
+  stop_conditions: "Stop conditions (pisahkan dengan ;)",
+  rollback_scope: "Rollback scope",
 };
 
 /** §39 item 9 + §40: the human decision, bound to the EXACT baseline/candidate hashes shown here. */
@@ -32,7 +34,7 @@ export function DecisionPanel({ proposalId, pkg, allowed, isAdmin }: { proposalI
   const [picked, setAction] = useState(allowed[0] ?? "");
   const action = allowed.includes(picked) ? picked : (allowed[0] ?? "");
   const [rationale, setRationale] = useState("");
-  const [scope, setScope] = useState<Record<string, string>>({ environment: "sandbox", budget_usd: "0" });
+  const [scope, setScope] = useState<Record<string, string>>({ environment: "sandbox", budget_usd: "0", max_minutes: "60", max_attempts: "2" });
   const bind = pkg.human_decision.bind;
   const gate = pkg.human_decision.source_identity_gate;
   const needsScope = action === "TRIAL_APPROVE" || action === "PROMOTE";

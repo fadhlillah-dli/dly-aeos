@@ -21,7 +21,7 @@ class Decision(IdMixin, CreatedMixin, Base):
     __table_args__ = (Index("ix_decisions_target", "target_type", "target_id"),)
 
     # APPROVAL|REJECTION|REVISION_REQUEST|EXCEPTION|ADR|POLICY|TRIAL|PROMOTION|RISK_ACCEPTANCE|
-    # PUBLICATION|DOMAIN_SELECTION|ROUTE_ACTIVATION|BUDGET|WRITE_ENABLEMENT
+    # PUBLICATION|DOMAIN_SELECTION|ROUTE_ACTIVATION|BUDGET|WRITE_ENABLEMENT|ROLLBACK
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     domain: Mapped[str | None] = mapped_column(String(16), nullable=True)

@@ -63,3 +63,100 @@ ACCEPTED / ROLLED_BACK / FAILED / PARTIAL where a rollback is never shown as acc
 * Any inventory change to a baseline component invalidates pending trial/promotion bindings; the
   owner re-reviews and decides again. This is the intended §50 behaviour.
 * Without the policy module the proposal flow fails closed at the decision step.
+
+## Amendment 2026-10-19 (audit gap closure, master §39–§41, §47, §49 M3)
+
+1. **Domain-scoped baselines.** The ADD/COMPARE baseline uses the latest ArchitectureSnapshot taken in
+   the proposal's own domain; outcome before/after snapshots must belong to that domain and the "after"
+   snapshot must postdate the PROMOTION decision. Another domain's snapshot never changes a baseline hash
+   or appears in a package.
+2. **Owner plan bound to the candidate.** `ChangeProposal.owner_plan` holds the owner's measurable
+   acceptance (metric + threshold + baseline), the operations owner, the REPLACE/UPGRADE plan (cutover
+   order, retirement point, rollback/forward recovery, compatibility, restore-tested backup, coexistence)
+   and an optional canary plan. These keys are part of `candidate_hash` (editing them re-reviews and
+   re-binds); REMOVE closure progress and canary evidence are recorded outside the hash.
+3. **Trial admission.** TRIAL_APPROVE binds `target/environment/provider/data_class/budget_usd` plus
+   `max_minutes`, `max_attempts`, `stop_conditions` and `rollback_scope`; the environment is
+   sandbox/staging (canary only with a declared canary plan, never for unsafe coexistence); RESTRICTED
+   data is refused; the provider must have a WORKER/LOCAL route allowed for the domain and data class
+   (ELIGIBLE or NOT_ACTIVATED; UNKNOWN_PROVIDER/INELIGIBLE refuse); the Security/Privacy assessment by
+   code must not be BLOCKED; problem, benefit and a measurable criterion are required
+   (`BENEFIT_NOT_TESTABLE`). The decision enumerates its operations (`trial.sandbox`, `trial.task.run`,
+   `trial.eval.run`, `trial.verifier.collect`, `trial.stop`; promotion: `promote.candidate`,
+   `inventory.config.apply`, `release.promote.candidate`). Linked duplicates of one canonical identity
+   never hold ACTIVE decisions at the same time (`DUPLICATE_DECISION_CONFLICT`).
+4. **Trial execution.** `POST /api/proposals/{id}/trial/launch` (owner) re-verifies the TRIAL binding
+   and creates, in the proposal's project (platform project for PLATFORM scope), a Plan + immutable
+   PlanVersion (`source=CHANGE_PROPOSAL`) whose single TaskSpec carries `change_proposal:<id>`, the
+   decision id, candidate pin/hash, caps, stop conditions and operations; the same owner action records
+   the plan APPROVAL bound to that exact version hash with the TRIAL decision as authority (§40 "one
+   authorization covers the series of trial operations"), and the workforce scheduler enqueues it (or the
+   trial waits with the readiness reasons). The scheduler re-verifies the binding before every attempt
+   and while running (stale hashes, stopped trial, other provider, operation outside the decision, caps)
+   and stops the attempt otherwise. `trial/stop` cancels the trial tasks (capabilities revoked, process
+   tree killed, evidence kept).
+5. **Scope vs what ran.** Every binding check compares the decision scope with the trial records: task
+   domain/data class, run provider, attempts and ledger spend; any drift invalidates the decision.
+6. **Evidence about the candidate.** Gate evidence must be trusted LIVE evidence produced for a TaskSpec/
+   run linked to the proposal, an eval run linked to it, or verifier evidence naming the proposal and its
+   candidate hash, and created after the TRIAL decision (`EVIDENCE_NOT_FOR_CANDIDATE`).
+   `attach_evidence` and the ACCEPTED outcome re-verify the bindings (`STALE_BINDING`, proposal back to
+   UNDER_REVIEW). After PROMOTE only the promoted change may move the baseline (pin/manifest/observed
+   version of the upgraded component; retirement fields of a replaced/removed one).
+7. **Claude checkpoint before PROMOTE.** `POST /api/proposals/{id}/checkpoint` records a review of the
+   bound evidence package (hash over candidate hash + acceptance + evidence) through the native bridge, a
+   manual Claude Code result, or — only after the bridge could not run for that package, or for OFFICE —
+   an explicit owner NOT-PROVEN record. PROMOTE needs a current record that is not FAIL/BLOCKED/waiting,
+   a linked TaskSpec, the named operations owner, and for REPLACE/UPGRADE the cutover and rollback plan
+   (plus a restore-tested backup when the component holds state/data); the PROMOTE decision records the
+   authorised cutover.
+8. **Outcomes do what they claim.** ACCEPTED requires the lawful configuration change (manifest pin =
+   accepted pin AND enabled by decision or observed installed/configured at that version after the
+   promotion), an observation after activation, the pre-declared acceptance met per criterion with bound
+   evidence (or an ACTIVE RISK_ACCEPTANCE waiver), an ADR link for ADD/REPLACE/REMOVE, every REMOVE
+   closure item CLOSED/WAIVED and canary evidence when a canary was run. ROLLED_BACK must reference the
+   successful rollback/restore operation that ran after the promotion (`ops.release.rollback`,
+   `ops.backup.restore` or `inventory.manifest.load` restoring the previous pin; restore-test evidence for
+   `data_rollback=DONE`) and records a `ROLLBACK` Decision bound to the proposal and candidate. ACCEPTED/
+   ROLLED_BACK/PARTIAL trigger a scoped inventory reconciliation and compute the inventory/ADR/docs/
+   ownership finalization from records (`inventory_docs_update` names what is still missing).
+9. **Links and dimensions.** `POST /api/proposals/{id}/links` links TaskSpecs, eval runs, publications,
+   controller releases, ADRs and observations after validating each record in the proposal's domain;
+   `aeos ops release promote --proposal <id>` promotes a controller release only while that proposal's
+   PROMOTION binding holds and records the release. DOCS_PUBLISHED follows the linked publications
+   (PARTIAL/CONFLICT stay visible); ACTIVE is ENABLED_IN_CONFIG/OBSERVED_IN_CONFIG from inventory only.
+10. **Review package additions.** UPGRADE delta (version/publisher/license/terms/schema), REMOVE closure
+    plan, ADD overlap with existing components, recorded shortcomings (registry limitations, open drift),
+    impact dimensions for schema/API/tools, hooks/prompts/memory, identity and resource/hardware, CI/docs
+    derived from related inventory records, rollback UNKNOWN unless a tested rollback/restore reference
+    exists (old pins are targets, not proof), candidate-specific plain language with unmeasured
+    percentages masked, ACTUAL (30-day ledger, domain-scoped) and ESTIMATE (route pricing) costs, and the
+    Security/Privacy assessment. Same-domain possible duplicates by goal/component are suggested, never
+    merged. Worker/Hermes/reviewer suggestions enter as untrusted SUBMITTED proposals
+    (`POST /api/proposals/suggestions`, `proposals.facade.file_suggestion`).
+
+## Amendment 2026-10-19 (adversarial review of the gap closure)
+
+11. **Duplicates and finished changes.** The "no contradictory ACTIVE decisions" rule applies to OPEN
+    duplicates. A duplicate whose outcome is recorded (ACCEPTED/ROLLED_BACK/FAILED/PARTIAL) is a finished
+    change: its decisions (and its ROLLBACK record) are history, so the next proposal for the same source
+    identity - e.g. the next UPGRADE - can be decided.
+12. **The promoted pin is the accepted configuration.** Without an explicit `approved_pin` the ACCEPTED
+    check uses the promoted candidate pin; an already-enabled component at its old pin is never the
+    accepted upgrade.
+13. **REMOVE never enables.** An accepted removal moves an ENABLED registry entry to REFERENCE_ONLY (event
+    RETIRED); a failed/rolled-back removal restores it. A removal trial does not move entries through the
+    adoption stages (CONTROLLED_EVAL/CANARY/RECOMMENDED_FOR_PROMOTION).
+14. **REPLACE names the retirement point** (`retire_old_version_after`) before PROMOTE.
+15. **Evidence stays about this candidate.** A TaskSpec created for another proposal's trial cannot be
+    linked (`TASK_OF_OTHER_PROPOSAL`); canary evidence must be bound to the candidate and postdate the
+    TRIAL decision, and the canary requirement follows the TRIAL decision's environment (not only a
+    launched trial).
+16. **Rollback needs something that ran.** ROLLED_BACK without any trial/promotion is refused; without a
+    promotion the referenced rollback must postdate the TRIAL decision.
+17. **Platform records.** `aeos ops release promote --proposal` only accepts PERSONAL (platform)
+    proposals; a shared registry row is superseded only by another shared row; goal-duplicate suggestions
+    stay within the proposal's project scope.
+18. **Visible and fail-closed.** UNDER_REVIEW (a stale binding) is listed in the decision queue; a
+    binding check that cannot complete blocks only that trial task (`TRIAL_BINDING_UNVERIFIED`) and a
+    running proposal-bound attempt stops when the check is unavailable.

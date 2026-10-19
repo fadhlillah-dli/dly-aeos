@@ -3,15 +3,17 @@ admin-only human actions; decisions are recorded in the Decision registry bound 
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, load_project
+from aeos.core.errors import ValidationFailed
 from aeos.core.timeutil import utcnow
+from aeos.proposals import checkpoint, links, plan, service, trial
 from aeos.proposals import review as R
-from aeos.proposals import service
 
 router = APIRouter(tags=["proposals"])
 
@@ -67,6 +69,52 @@ class OutcomeIn(BaseModel):
     notes: str = Field(default="", max_length=4000)
     before_snapshot_id: str | None = None
     after_snapshot_id: str | None = None
+    acceptance_results: dict[str, Any] = Field(default_factory=dict)
+    waiver_decision_id: str | None = Field(default=None, max_length=36)
+    adr_keys: list[str] = Field(default_factory=list, max_length=20)
+
+
+class PlanIn(BaseModel):
+    acceptance: list[dict[str, Any]] | None = Field(default=None, max_length=20)
+    replacement: dict[str, Any] | None = None
+    canary: dict[str, Any] | None = None
+    operations_owner: str | None = Field(default=None, max_length=128)
+    removal: dict[str, Any] | None = None
+    canary_evidence_ids: list[str] | None = Field(default=None, max_length=50)
+
+
+class LinksIn(BaseModel):
+    task_ids: list[str] = Field(default_factory=list, max_length=50)
+    eval_run_ids: list[str] = Field(default_factory=list, max_length=50)
+    publication_ids: list[str] = Field(default_factory=list, max_length=50)
+    release_ids: list[str] = Field(default_factory=list, max_length=20)
+    adr_keys: list[str] = Field(default_factory=list, max_length=20)
+    observation_ids: list[str] = Field(default_factory=list, max_length=50)
+
+
+class TrialLaunchIn(BaseModel):
+    allowed_paths: list[str] = Field(default_factory=list, max_length=20)
+
+
+class TrialStopIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class CheckpointIn(BaseModel):
+    with_claude: bool = False
+    manual_result: dict[str, Any] | None = None
+    acknowledge_not_proven: bool = False
+    rationale: str = Field(default="", max_length=2000)
+
+
+class SuggestionIn(BaseModel):
+    source_kind: str = Field(pattern="^(worker|hermes|reviewer)$")
+    source_id: str = Field(min_length=1, max_length=64)
+    kind: str = Field(default="COMPARE", pattern="^(ADD|REPLACE|UPGRADE|REMOVE|COMPARE)$")
+    title: str | None = Field(default=None, max_length=256)
+    sources: list[str] = Field(default_factory=list, max_length=20)
+    rationale: str = Field(default="", max_length=4000)
+    existing_component_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
 @router.get("/api/proposals/meta")
@@ -83,7 +131,9 @@ def proposals_meta(db: DB, principal: CurrentPrincipal, domain: ActiveDomain) ->
     return {
         "kinds": [{"kind": k, "question": q} for k, q in R.KIND_QUESTIONS.items()],
         "actions": list(service.ACTIONS), "outcomes": list(service.OUTCOMES),
-        "scope_required": list(service.SCOPE_REQUIRED), "platform_project": platform,
+        "scope_required": list(service.TRIAL_SCOPE_REQUIRED), "promote_scope_required": list(service.PROMOTE_SCOPE_REQUIRED),
+        "trial_environments": list(service.TRIAL_ENVIRONMENTS), "plan_keys": [*plan.BOUND_KEYS, *plan.PROGRESS_KEYS],
+        "platform_project": platform,
         "attachments": "Lampiran .md/berkas lain diunggah lewat intake (parser isolation); lampiran adalah DATA.",
         "guarantees": "Usulan/review tidak memasang, mengaktifkan, mengubah route/policy, menaikkan budget atau "
                       "memberi credential baru.",
@@ -117,8 +167,37 @@ def create_proposal(body: ProposalIn, db: DB, principal: AdminPrincipal, domain:
     return service.proposal_view(db, p, detail=True)
 
 
+@router.post("/api/proposals/suggestions")
+def file_suggestion(body: SuggestionIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    """The owner files a worker/Hermes/reviewer suggestion (from a run report) as an untrusted proposal."""
+    project_id = None
+    if body.source_kind == "worker":
+        from aeos.models.workforce import WorkerRun
+
+        run = db.get(WorkerRun, body.source_id)
+        if run is None or run.domain != domain.value or not principal.can_access_project(run.project_id, run.domain):
+            raise ValidationFailed("worker run not found in this domain")
+        project_id = run.project_id
+    p = service.file_suggestion(db, source_kind=body.source_kind, source_id=body.source_id, domain=domain.value,
+                                project_id=project_id, kind=body.kind, title=body.title, sources=body.sources,
+                                rationale=body.rationale, existing_component_ids=body.existing_component_ids)
+    db.commit()
+    return service.proposal_view(db, p, detail=True)
+
+
 def _load(db: Any, principal: Any, domain: Any, proposal_id: str) -> Any:
     return service.get_proposal(db, proposal_id, domain=domain.value, allowed_project_ids=principal.allowed_project_ids)
+
+
+def _committing(db: Any, fn: Callable[[], Any]) -> Any:
+    """Run a write; a StaleBinding persists the invalidation of stale decisions before refusing."""
+    try:
+        out = fn()
+    except service.StaleBinding:
+        db.commit()
+        raise
+    db.commit()
+    return out
 
 
 @router.get("/api/proposals/{proposal_id}")
@@ -130,36 +209,72 @@ def get_proposal(proposal_id: str, db: DB, principal: CurrentPrincipal, domain: 
 def review_proposal(proposal_id: str, body: ReviewIn, db: DB, principal: AdminPrincipal,
                     domain: ActiveDomain) -> dict[str, Any]:
     p = _load(db, principal, domain, proposal_id)
-    try:
-        service.review(db, p, actor_user_id=principal.user.id, with_claude=body.with_claude,
-                       candidate_pin=body.candidate_pin, domain=domain.value)
-    except service.StaleBinding:
-        db.commit()
-        raise
-    db.commit()
+    _committing(db, lambda: service.review(db, p, actor_user_id=principal.user.id, with_claude=body.with_claude,
+                                           candidate_pin=body.candidate_pin, domain=domain.value))
     return service.proposal_view(db, p, detail=True)
+
+
+@router.patch("/api/proposals/{proposal_id}/plan")
+def update_plan(proposal_id: str, body: PlanIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    p = _load(db, principal, domain, proposal_id)
+    patch = body.model_dump(exclude_unset=True)
+    out = _committing(db, lambda: plan.update(db, p, patch, actor_user_id=principal.user.id))
+    return {"rebinds_candidate": out["rebinds_candidate"], "proposal": service.proposal_view(db, p, detail=True)}
+
+
+@router.post("/api/proposals/{proposal_id}/links")
+def add_links(proposal_id: str, body: LinksIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    p = _load(db, principal, domain, proposal_id)
+    added = _committing(db, lambda: links.add_links(db, p, actor_user_id=principal.user.id,
+                                                    allowed_project_ids=principal.allowed_project_ids,
+                                                    **body.model_dump()))
+    return {"added": added, "proposal": service.proposal_view(db, p, detail=True)}
 
 
 @router.post("/api/proposals/{proposal_id}/decision")
 def decide(proposal_id: str, body: DecisionIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
     p = _load(db, principal, domain, proposal_id)
-    try:
-        decision = service.decide(db, p, actor_user_id=principal.user.id, action=body.action,
-                                  baseline_hash=body.baseline_hash, candidate_hash=body.candidate_hash,
-                                  scope=body.scope, rationale=body.rationale)
-    except service.StaleBinding:
-        db.commit()  # persist the invalidation of stale decisions before refusing
-        raise
-    db.commit()
+    decision = _committing(db, lambda: service.decide(db, p, actor_user_id=principal.user.id, action=body.action,
+                                                      baseline_hash=body.baseline_hash,
+                                                      candidate_hash=body.candidate_hash, scope=body.scope,
+                                                      rationale=body.rationale))
     return {"decision_id": decision.id, "proposal": service.proposal_view(db, p, detail=True)}
+
+
+@router.post("/api/proposals/{proposal_id}/trial/launch")
+def launch_trial(proposal_id: str, body: TrialLaunchIn, db: DB, principal: AdminPrincipal,
+                 domain: ActiveDomain) -> dict[str, Any]:
+    p = _load(db, principal, domain, proposal_id)
+    out = _committing(db, lambda: trial.launch_trial(db, p, actor_user_id=principal.user.id,
+                                                     allowed_paths=body.allowed_paths or None))
+    return {"trial": out, "proposal": service.proposal_view(db, p, detail=True)}
+
+
+@router.post("/api/proposals/{proposal_id}/trial/stop")
+def stop_trial(proposal_id: str, body: TrialStopIn, db: DB, principal: AdminPrincipal,
+               domain: ActiveDomain) -> dict[str, Any]:
+    p = _load(db, principal, domain, proposal_id)
+    out = _committing(db, lambda: trial.stop_trial(db, p, actor_user_id=principal.user.id, reason=body.reason))
+    return {"trial": out, "proposal": service.proposal_view(db, p, detail=True)}
+
+
+@router.post("/api/proposals/{proposal_id}/checkpoint")
+def record_checkpoint(proposal_id: str, body: CheckpointIn, db: DB, principal: AdminPrincipal,
+                      domain: ActiveDomain) -> dict[str, Any]:
+    p = _load(db, principal, domain, proposal_id)
+    rec = _committing(db, lambda: checkpoint.record(db, p, actor_user_id=principal.user.id,
+                                                    with_claude=body.with_claude, manual_result=body.manual_result,
+                                                    acknowledge_not_proven=body.acknowledge_not_proven,
+                                                    rationale=body.rationale))
+    return {"checkpoint": {k: v for k, v in rec.items() if k != "schema"}, "proposal": service.proposal_view(db, p, detail=True)}
 
 
 @router.post("/api/proposals/{proposal_id}/evidence")
 def attach_evidence(proposal_id: str, body: EvidenceIn, db: DB, principal: AdminPrincipal,
                     domain: ActiveDomain) -> dict[str, Any]:
     p = _load(db, principal, domain, proposal_id)
-    service.attach_evidence(db, p, evidence_ids=body.evidence_ids, actor_user_id=principal.user.id)
-    db.commit()
+    _committing(db, lambda: service.attach_evidence(db, p, evidence_ids=body.evidence_ids,
+                                                    actor_user_id=principal.user.id))
     return service.proposal_view(db, p, detail=True)
 
 
@@ -167,11 +282,12 @@ def attach_evidence(proposal_id: str, body: EvidenceIn, db: DB, principal: Admin
 def record_outcome(proposal_id: str, body: OutcomeIn, db: DB, principal: AdminPrincipal,
                    domain: ActiveDomain) -> dict[str, Any]:
     p = _load(db, principal, domain, proposal_id)
-    service.record_outcome(db, p, actor_user_id=principal.user.id, status=body.status, evidence_ids=body.evidence_ids,
-                           accepted_configuration=body.accepted_configuration, partial_failures=body.partial_failures,
-                           rollback=body.rollback, notes=body.notes, before_snapshot_id=body.before_snapshot_id,
-                           after_snapshot_id=body.after_snapshot_id)
-    db.commit()
+    _committing(db, lambda: service.record_outcome(
+        db, p, actor_user_id=principal.user.id, status=body.status, evidence_ids=body.evidence_ids,
+        accepted_configuration=body.accepted_configuration, partial_failures=body.partial_failures,
+        rollback=body.rollback, notes=body.notes, before_snapshot_id=body.before_snapshot_id,
+        after_snapshot_id=body.after_snapshot_id, acceptance_results=body.acceptance_results,
+        waiver_decision_id=body.waiver_decision_id, adr_keys=body.adr_keys))
     return service.proposal_view(db, p, detail=True)
 
 
