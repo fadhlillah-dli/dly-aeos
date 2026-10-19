@@ -45,12 +45,15 @@ def test_doctor_reports_data_dir_in_repo(settings, db):
     from aeos.core.timeutil import utcnow
     from aeos.doctor.checks.host import host_data_dir
     from aeos.doctor.model import CheckContext
+    from tests.unit.test_inventory_fakes import base_runner
 
+    # a real check context always carries a host runner (the Windows ACL probe of the data dir uses it; the fake
+    # host has no PowerShell, so the ACL stays UNKNOWN rather than being invented)
     inside = Settings.model_construct(**{**settings.model_dump(), "data_dir": repo_root() / "app-data"})
-    out = host_data_dir(CheckContext(settings=inside, session=db, runner=None, repo=repo_root(),  # type: ignore[arg-type]
+    out = host_data_dir(CheckContext(settings=inside, session=db, runner=base_runner(), repo=repo_root(),
                                      now=utcnow()))
     assert out.status == "FAILED" and out.error_code == "DATA_DIR_IN_REPO"
-    ok = host_data_dir(CheckContext(settings=settings, session=db, runner=None, repo=repo_root(),  # type: ignore[arg-type]
+    ok = host_data_dir(CheckContext(settings=settings, session=db, runner=base_runner(), repo=repo_root(),
                                     now=utcnow()))
     assert ok.error_code != "DATA_DIR_IN_REPO" and ok.evidence["separate_from_repo"] is True
 

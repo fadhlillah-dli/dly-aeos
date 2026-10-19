@@ -47,10 +47,19 @@ def _service() -> Any:
     return service
 
 
+def artifact_label(a: Any) -> str:
+    """The label of a TaskSpec input artifact: the plan's string, or the ``label`` the task compiler keeps on the
+    hash-bound artifact dict (planning.dag.resolve_input_artifacts)."""
+    if isinstance(a, dict):
+        return str(a.get("label") or "")
+    return a if isinstance(a, str) else ""
+
+
 def proposal_id_for_task(task: TaskSpec | None) -> str | None:
     for a in (task.input_artifacts if task is not None else None) or []:
-        if isinstance(a, str) and a.startswith(ARTIFACT_PREFIX):
-            return a[len(ARTIFACT_PREFIX):]
+        label = artifact_label(a)
+        if label.startswith(ARTIFACT_PREFIX):
+            return label[len(ARTIFACT_PREFIX):]
     return None
 
 

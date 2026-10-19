@@ -571,7 +571,7 @@ def _planning_schema_view(content: dict[str, Any]) -> tuple[dict[str, Any], dict
             if isinstance(g.get("security_assessment"), dict):
                 s["security_assessment"] = g["security_assessment"]
         tm = g.get("threat_model")
-        if _has_content(tm):
+        if isinstance(tm, dict) and _has_content(tm):
             s["threat_model"] = threat_model_lists(tm)
     raw = dict(content)
     feature_keys = {as_text(f.get("key") or f.get("feature_key") or f.get("id"))

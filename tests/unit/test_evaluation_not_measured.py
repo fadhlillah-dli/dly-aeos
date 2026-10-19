@@ -36,7 +36,8 @@ def test_metrics_never_contain_agent_message_or_loc_counts():
 def test_ranking_ignores_volume_even_when_samples_report_it():
     def entry(h: str, samples: list[dict[str, Any]]) -> dict[str, Any]:
         m = service.compute_metrics(samples)
-        return {"configuration_hash": h, "sample_size": m["sample_size"],
+        # a leaderboard entry is keyed by configuration + route binding + topology (C5 leaderboard entries)
+        return {"entry_key": service._entry_key(h, None, None), "configuration_hash": h, "sample_size": m["sample_size"],
                 "final_acceptance_rate": m["outcome"]["final_acceptance_rate"],
                 "acceptance_ci95": m["outcome"]["acceptance_ci95"]}
 

@@ -282,7 +282,6 @@ export interface ProposalDetail extends ProposalRow {
   problem: string;
   expected_benefit: string;
   limits: Record<string, unknown>;
-  candidate_component_ids?: string[];
   attachment_ids: string[];
   unknown_fields: string[];
   parts: { child_id: string; title: string; kind: string; depends_on: string[] }[];

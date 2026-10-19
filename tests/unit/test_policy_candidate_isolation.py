@@ -42,6 +42,8 @@ def test_serve_reload_watches_only_the_controller_backend(monkeypatch, settings)
     from aeos import cli
 
     seen: dict = {}
+    # a development server runs only on a separate dev profile (never the real keyring service, §09)
+    monkeypatch.setenv("AEOS_KEYRING_SERVICE", "dly-aeos-dev")
     monkeypatch.setattr(uvicorn, "run", lambda *a, **k: seen.update(k))
     monkeypatch.setattr(cli, "ensure_database", lambda: None)
     res = CliRunner().invoke(cli.app, ["serve", "--reload", "--port", "18999"])
