@@ -56,6 +56,14 @@ def require_capability(
     return state
 
 
+def resource_budget(session: Session) -> dict[str, Any] | None:
+    """Additive (2026-10-19): the owner's hardware/OS resource budget (cpu_cores, ram_gib, disk_gib,
+    max_parallel_workers) set with ``aeos doctor budget``; None while not set (UNKNOWN, never guessed)."""
+    from aeos.doctor.checks.host import resource_budget as impl
+
+    return impl(session)
+
+
 def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
     """Mark checks depending on *invalidator* (e.g. ``binary:claude``, ``config:routes``) as STALE."""
     from aeos.doctor.capabilities import invalidate as impl

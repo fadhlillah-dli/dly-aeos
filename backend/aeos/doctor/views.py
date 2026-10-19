@@ -80,8 +80,33 @@ def last_failure(session: Session, run: DoctorRun | None) -> dict[str, Any] | No
     return {"at": ensure_aware(ev.at).isoformat(), "trigger": payload.get("trigger"), "error": payload.get("error")}
 
 
-def checks_view(session: Session, *, domain: str | None, group: str | None = None) -> dict[str, Any]:
-    specs = [s for s in ordered_specs() if _visible(dict(s.scope), domain)]
+def project_items(session: Session, *, domain: str | None, allowed_project_ids: list[str] | None = None,
+                  group: str | None = None) -> list[dict[str, Any]]:
+    """Latest result per (project-scoped check, project) visible in *domain* (never another domain's projects)."""
+    from aeos.doctor.runner import latest_project_results
+
+    specs = {s.check_id: s for s in ordered_specs() if s.targets is not None and (not group or s.group == group.upper())}
+    out = []
+    now = utcnow()
+    for (cid, pid), r in sorted(latest_project_results(session, list(specs)).items()):
+        if not pid:
+            continue
+        v = row_view(r)
+        if not _visible(v.get("scope"), domain) or (v.get("scope") or {}).get("domain") is None:
+            continue
+        if allowed_project_ids is not None and pid not in allowed_project_ids:
+            continue
+        eff, why = effective_status(v, now, None)
+        out.append({**v, "title": specs[cid].title, "group_label": GROUP_LABELS[specs[cid].group],
+                    "project_id": pid, "effective_status": eff, "stale_reason": why,
+                    "component_link": f"/tools/{specs[cid].component_id}" if specs[cid].component_id else None})
+    return out
+
+
+def checks_view(session: Session, *, domain: str | None, group: str | None = None,
+                allowed_project_ids: list[str] | None = None) -> dict[str, Any]:
+    # project-scoped checks are listed per project (project_items), never as one platform row
+    specs = [s for s in ordered_specs() if _visible(dict(s.scope), domain) and s.targets is None]
     if group:
         specs = [s for s in specs if s.group == group.upper()]
     ids = [s.check_id for s in specs]
@@ -109,8 +134,13 @@ def checks_view(session: Session, *, domain: str | None, group: str | None = Non
                       "component_link": f"/tools/{s.component_id}" if s.component_id else None})
     last = latest_run(session)
     counts = visible_counts([i["status"] for i in items if last is not None and i.get("run_id") == last.id])
+    from aeos.doctor.review import last_review
+
     return {
         "items": items,
+        "project_items": project_items(session, domain=domain, allowed_project_ids=allowed_project_ids, group=group),
+        # §07 optional Claude explanation of platform-level results: E0 advisory, never a status
+        "claude_review": last_review(session),
         "groups": [{"id": g, "label": label, "order": i} for i, (g, label) in enumerate(GROUPS)],
         "last_run": run_meta(last, counts),
         "last_failure": last_failure(session, last),
@@ -128,10 +158,10 @@ def checks_view(session: Session, *, domain: str | None, group: str | None = Non
     }
 
 
-def capabilities_view(session: Session, *, domain: str | None) -> dict[str, Any]:
+def capabilities_view(session: Session, *, domain: str | None, project_id: str | None = None) -> dict[str, Any]:
     from aeos.doctor.capabilities import HUMAN_ONLY
 
-    items = capability_matrix(session, domain=domain)
+    items = capability_matrix(session, domain=domain, project_id=project_id)
     hidden = hidden_check_ids(domain)
     for it in items:
         before = len(it["checks"])

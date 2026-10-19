@@ -18,8 +18,64 @@ from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
 from aeos.inventory.probes import ProbeRefused
 
 SUPPORTED_PLATFORMS = {"win32": "Windows", "darwin": "macOS", "linux": "Linux"}
-DISK_FLOOR_BYTES = 1 << 30  # provisional operational floor (1 GiB); resource budget not yet set (§51 P2)
+DISK_FLOOR_BYTES = 1 << 30  # provisional operational floor (1 GiB) while the owner has not set a budget (§51 P2)
 CLOCK_SKEW_SECONDS = 300
+BUDGET_KEY = "doctor.resource_budget"
+BUDGET_FIELDS = ("cpu_cores", "ram_gib", "disk_gib", "max_parallel_workers")
+
+
+def resource_budget(session: Any) -> dict[str, Any] | None:
+    """The owner's hardware/OS resource budget (§51 P2), set with ``aeos doctor budget``; None = not set."""
+    if session is None:
+        return None
+    from aeos.models.identity import SystemSetting
+
+    try:
+        row = session.get(SystemSetting, BUDGET_KEY)
+    except Exception:  # table missing (bootstrap): treated as not set
+        return None
+    return dict(row.value) if row is not None and isinstance(row.value, dict) else None
+
+
+def set_resource_budget(session: Any, *, actor: str, reason: str, cpu_cores: int | None = None,
+                        ram_gib: float | None = None, disk_gib: float | None = None,
+                        max_parallel_workers: int | None = None) -> dict[str, Any]:
+    """Record the owner's resource budget (audited, emits ``doctor.resource_budget.changed``, marks the host
+    checks STALE). Values are the owner's choice for this machine; nothing is measured or guessed here."""
+    from aeos.audit import service as audit
+    from aeos.core.errors import ValidationFailed
+    from aeos.core.timeutil import utcnow
+    from aeos.events import service as events
+    from aeos.models.identity import SystemSetting
+
+    values = {"cpu_cores": cpu_cores, "ram_gib": ram_gib, "disk_gib": disk_gib,
+              "max_parallel_workers": max_parallel_workers}
+    for k, v in values.items():
+        if v is not None and (not isinstance(v, (int, float)) or v <= 0):
+            raise ValidationFailed(f"{k} must be a positive number")
+    if all(v is None for v in values.values()):
+        raise ValidationFailed("set at least one budget value")
+    if not (reason or "").strip():
+        raise ValidationFailed("reason is required")
+    row = session.get(SystemSetting, BUDGET_KEY)
+    before = dict(row.value) if row is not None and isinstance(row.value, dict) else None
+    value = {**(before or {}), **{k: v for k, v in values.items() if v is not None},
+             "set_by": actor, "set_at": utcnow().isoformat(), "reason": reason.strip()[:500]}
+    if row is None:
+        session.add(SystemSetting(key=BUDGET_KEY, value=value))
+    else:
+        row.value = value
+        row.version = (row.version or 1) + 1
+    session.flush()
+    audit.record(session, actor_type="user" if actor not in ("cli", "local-operator") else "cli", actor_id=actor,
+                 action="doctor.resource_budget.set", target_type="system_setting", target_id=BUDGET_KEY,
+                 reason=reason[:500], details={"before": before, "after": {k: value.get(k) for k in BUDGET_FIELDS}})
+    events.emit(session, source="doctor", kind="doctor.resource_budget.changed", entity_type="system_setting",
+                entity_id=BUDGET_KEY, payload={k: value.get(k) for k in BUDGET_FIELDS})
+    from aeos.doctor.capabilities import invalidate
+
+    invalidate(session, invalidator="config:resource_budget", reason="resource budget pemilik berubah")
+    return value
 
 
 def tcp_in_use(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -41,8 +97,15 @@ def can_bind(host: str, port: int) -> bool:
             return False
 
 
-@check("host.platform", "HOST", "OS, arsitektur dan resource", ttl_seconds=86400)
-def host_platform(ctx: CheckContext) -> Outcome:
+def budget_remedy() -> Remedy:
+    return Remedy(operation="Tetapkan budget resource mesin ini (keputusan pemilik dari mesin nyata, §51 P2)",
+                  command=aeos_cmd("doctor budget --cpu <n> --ram <GiB> --disk <GiB> --max-workers <n> --reason <teks>"),
+                  target="system setting doctor.resource_budget", privilege="pemilik (operator lokal)",
+                  rollback="jalankan ulang dengan nilai sebelumnya",
+                  evidence_to_collect="host.resource_budget VERIFIED")
+
+
+def _machine_facts() -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "os": SUPPORTED_PLATFORMS.get(sys.platform, sys.platform), "release": platform.release(),
         "arch": platform.machine(), "cpu_count": os.cpu_count(), "python_bits": 64 if sys.maxsize > 2**32 else 32,
@@ -55,12 +118,57 @@ def host_platform(ctx: CheckContext) -> Outcome:
         evidence["ram_available_gib"] = round(vm.available / (1 << 30), 1)
     except Exception:  # psutil missing/limited: resource facts become UNKNOWN, not guessed
         evidence["ram_total_gib"] = None
-    evidence["resource_budget"] = "UNKNOWN: batas resource belum ditetapkan dari mesin nyata (§51 P2)"
+    return evidence
+
+
+@check("host.platform", "HOST", "OS dan arsitektur (fakta resource)", ttl_seconds=86400,
+       invalidators=("config:resource_budget",),
+       description="OS/arsitektur didukung (Windows/macOS/Linux) plus fakta CPU/RAM. Perbandingan dengan budget "
+                   "resource pemilik ada di host.resource_budget (UNKNOWN sampai pemilik menetapkannya).")
+def host_platform(ctx: CheckContext) -> Outcome:
+    evidence = _machine_facts()
+    budget = resource_budget(ctx.session)
+    evidence["resource_budget"] = (
+        "UNKNOWN: batas resource belum ditetapkan pemilik dari mesin nyata (§51 P2); lihat host.resource_budget"
+        if budget is None else "dibandingkan oleh host.resource_budget")
     if sys.platform not in SUPPORTED_PLATFORMS:
         return Outcome("FAILED", f"Platform {sys.platform} tidak didukung (Windows/macOS/Linux).", evidence=evidence,
                        error_code="UNSUPPORTED_PLATFORM", severity="HIGH")
     return Outcome("VERIFIED", f"{evidence['os']} {evidence['arch']}, {evidence['cpu_count']} CPU, RAM "
-                   f"{evidence.get('ram_total_gib')} GiB (skenario: platform didukung).", evidence=evidence,
+                   f"{evidence.get('ram_total_gib')} GiB (skenario: platform didukung; budget resource dinilai oleh "
+                   "host.resource_budget).", evidence=evidence, target_identity=f"{evidence['os']}/{evidence['arch']}")
+
+
+@check("host.resource_budget", "HOST", "Budget resource pemilik (CPU/RAM/worker)", ttl_seconds=86400,
+       invalidators=("config:resource_budget",), ok={"VERIFIED"}, severity_fail="HIGH",
+       description="Membandingkan CPU/RAM mesin ini dengan budget yang ditetapkan pemilik (aeos doctor budget / PUT "
+                   "/api/doctor/resource-budget, teraudit). UNKNOWN sampai pemilik menetapkan budget dari mesin nyata "
+                   "(§51 P2); tidak pernah ditebak. Lantai disk dinilai host.disk.")
+def host_resource_budget(ctx: CheckContext) -> Outcome:
+    evidence = _machine_facts()
+    budget = resource_budget(ctx.session)
+    if budget is None:
+        evidence["resource_budget"] = None
+        return Outcome("UNKNOWN", "Budget resource belum ditetapkan pemilik dari mesin nyata (§51 P2); CPU/RAM tidak "
+                       "dibandingkan dan host.disk memakai lantai sementara 1 GiB.", evidence=evidence,
+                       error_code="RESOURCE_BUDGET_NOT_SET", remedy=budget_remedy())
+    evidence["resource_budget"] = {k: budget.get(k) for k in BUDGET_FIELDS}
+    evidence["set_by"], evidence["set_at"] = budget.get("set_by"), budget.get("set_at")
+    short: list[str] = []
+    if budget.get("cpu_cores") and (evidence["cpu_count"] or 0) < budget["cpu_cores"]:
+        short.append(f"CPU {evidence['cpu_count']} < budget {budget['cpu_cores']}")
+    if budget.get("ram_gib"):
+        if evidence.get("ram_total_gib") is None:
+            short.append("RAM tidak terbaca (UNKNOWN)")
+        elif evidence["ram_total_gib"] < budget["ram_gib"]:
+            short.append(f"RAM {evidence['ram_total_gib']} GiB < budget {budget['ram_gib']} GiB")
+    if short:
+        return Outcome("FAILED", "Mesin di bawah budget resource pemilik: " + "; ".join(short) + ".",
+                       evidence=evidence, error_code="RESOURCE_BELOW_BUDGET", severity="HIGH",
+                       target_identity=f"{evidence['os']}/{evidence['arch']}", remedy=budget_remedy())
+    return Outcome("VERIFIED", f"{evidence['os']} {evidence['arch']}, {evidence['cpu_count']} CPU, RAM "
+                   f"{evidence.get('ram_total_gib')} GiB memenuhi budget pemilik (max_parallel_workers "
+                   f"{budget.get('max_parallel_workers') or 'UNKNOWN'}; belum dipakai scheduler).", evidence=evidence,
                    target_identity=f"{evidence['os']}/{evidence['arch']}")
 
 
@@ -71,7 +179,8 @@ def _existing_parent(path: Path) -> Path:
     return p
 
 
-@check("host.disk", "HOST", "Ruang disk data dir", ttl_seconds=3600, severity_fail="HIGH")
+@check("host.disk", "HOST", "Ruang disk data dir", ttl_seconds=3600, severity_fail="HIGH",
+       invalidators=("config:resource_budget",))
 def host_disk(ctx: CheckContext) -> Outcome:
     base = _existing_parent(ctx.data_dir)
     try:
@@ -79,20 +188,75 @@ def host_disk(ctx: CheckContext) -> Outcome:
     except OSError as exc:
         return Outcome("UNKNOWN", f"Ruang disk tidak dapat dibaca ({type(exc).__name__}).", error_code="DISK_UNREADABLE")
     free_gib = round(usage.free / (1 << 30), 2)
+    budget = resource_budget(ctx.session)
+    floor_gib = float(budget["disk_gib"]) if budget and budget.get("disk_gib") else 1.0
     evidence = {"free_gib": free_gib, "total_gib": round(usage.total / (1 << 30), 1), "measured_at": logical(ctx, base),
-                "floor_gib": 1, "floor_note": "ambang sementara; budget resource belum ditetapkan (§51)"}
-    if usage.free < DISK_FLOOR_BYTES:
-        return Outcome("FAILED", f"Ruang kosong {free_gib} GiB di bawah ambang 1 GiB.", evidence=evidence,
+                "floor_gib": floor_gib,
+                "floor_note": "budget disk pemilik" if budget and budget.get("disk_gib")
+                else "ambang sementara 1 GiB; budget resource belum ditetapkan pemilik (§51 P2)"}
+    if usage.free < floor_gib * (1 << 30):
+        return Outcome("FAILED", f"Ruang kosong {free_gib} GiB di bawah ambang {floor_gib} GiB.", evidence=evidence,
                        error_code="DISK_LOW", remedy=Remedy(
                            operation="Kosongkan ruang disk atau pindahkan data dir (AEOS_DATA_DIR)",
                            target=logical(ctx, base), privilege="pengguna lokal",
-                           rollback="tidak berlaku", evidence_to_collect="ruang kosong >= 1 GiB"))
+                           rollback="tidak berlaku", evidence_to_collect=f"ruang kosong >= {floor_gib} GiB"))
     return Outcome("VERIFIED", f"Ruang kosong {free_gib} GiB pada lokasi data.", evidence=evidence)
+
+
+def os_time_sync(ctx: CheckContext) -> dict[str, Any]:
+    """OS time-synchronisation status without AEOS contacting a time server itself (--functional only).
+
+    Windows: ``w32tm /query /status`` (source / last successful sync); Linux: ``timedatectl show -p
+    NTPSynchronized``; macOS has no unprivileged status command -> UNKNOWN (never guessed)."""
+    if sys.platform == "win32":
+        exe = ctx.runner.which("w32tm")
+        if not exe:
+            return {"status": "UNKNOWN", "reason": "w32tm tidak ditemukan", "operation_ref": "w32tm /query /status"}
+        rr = ctx.runner.run([exe, "/query", "/status"], timeout=10.0, env=dict(ctx.env), cwd=ctx.probe_cwd)
+        text = rr.stdout or ""
+        if not rr.ok or not text.strip():
+            return {"status": "UNKNOWN", "reason": f"w32tm gagal ({rr.error or rr.returncode})",
+                    "operation_ref": "w32tm /query /status"}
+        fields = {k.strip().lower(): v.strip() for k, _, v in (ln.partition(":") for ln in text.splitlines()) if v}
+        source = fields.get("source")
+        last = fields.get("last successful sync time")
+        if source is None:
+            return {"status": "UNKNOWN", "reason": "output w32tm tidak dikenali (bahasa OS?)",
+                    "operation_ref": "w32tm /query /status"}
+        free = any(x in source.lower() for x in ("local cmos clock", "free-running"))
+        return {"status": "NOT_SYNCED" if free or not last or "unspecified" in (last or "").lower() else "SYNCED",
+                "source": source[:80], "last_sync": (last or "")[:60], "operation_ref": "w32tm /query /status"}
+    if sys.platform.startswith("linux"):
+        exe = ctx.runner.which("timedatectl")
+        if not exe:
+            return {"status": "UNKNOWN", "reason": "timedatectl tidak ditemukan",
+                    "operation_ref": "timedatectl show -p NTPSynchronized"}
+        rr = ctx.runner.run([exe, "show", "-p", "NTPSynchronized", "--value"], timeout=10.0, env=dict(ctx.env),
+                            cwd=ctx.probe_cwd)
+        value = (rr.stdout or "").strip().lower()
+        if not rr.ok or value not in ("yes", "no"):
+            return {"status": "UNKNOWN", "reason": "status timedatectl tidak terbaca",
+                    "operation_ref": "timedatectl show -p NTPSynchronized"}
+        return {"status": "SYNCED" if value == "yes" else "NOT_SYNCED",
+                "operation_ref": "timedatectl show -p NTPSynchronized"}
+    return {"status": "UNKNOWN", "reason": "macOS tidak menyediakan status sinkronisasi waktu tanpa hak admin",
+            "operation_ref": None}
 
 
 @check("host.clock", "HOST", "Kewajaran jam sistem", ttl_seconds=3600)
 def host_clock(ctx: CheckContext) -> Outcome:
     evidence: dict[str, Any] = {"utc_now": ctx.now.isoformat(), "ntp_compared": False}
+    if ctx.functional:
+        sync = os_time_sync(ctx)
+        evidence["os_time_sync"] = sync
+        evidence["ntp_compared"] = sync["status"] in ("SYNCED", "NOT_SYNCED")
+        if sync["status"] == "NOT_SYNCED":
+            return Outcome("FAILED", "Jam OS tidak tersinkron dengan sumber waktu (TTL/expiry tidak dapat dipercaya).",
+                           evidence=evidence, error_code="CLOCK_NOT_SYNCED", severity="HIGH", remedy=Remedy(
+                               operation="Aktifkan/ulangi sinkronisasi waktu OS",
+                               command="w32tm /resync" if sys.platform == "win32" else "timedatectl set-ntp true",
+                               privilege="admin OS", rollback="tidak berlaku",
+                               evidence_to_collect="host.clock --functional VERIFIED"))
     if ctx.session is None:
         return Outcome("UNKNOWN", "Tidak ada database untuk membandingkan waktu tercatat; NTP tidak diperiksa.",
                        evidence=evidence)
@@ -110,12 +274,39 @@ def host_clock(ctx: CheckContext) -> Outcome:
                        "dipercaya.", evidence=evidence, error_code="CLOCK_BEHIND", severity="HIGH",
                        remedy=Remedy(operation="Sinkronkan jam sistem dengan sumber waktu OS",
                                      privilege="admin OS", evidence_to_collect="jam >= record terakhir"))
-    return Outcome("VERIFIED", "Tidak ada tanda jam mundur terhadap record terakhir (NTP tidak dibandingkan).",
-                   evidence=evidence)
+    synced = (evidence.get("os_time_sync") or {}).get("status") == "SYNCED"
+    return Outcome("VERIFIED", "Tidak ada tanda jam mundur terhadap record terakhir" + (
+        "; jam OS tersinkron (status OS)." if synced else " (sinkronisasi OS tidak dibandingkan; gunakan --functional)."),
+        evidence=evidence)
 
 
 def _port_fp(ctx: CheckContext) -> dict[str, Any]:
     return {"host": ctx.settings.host, "port": ctx.settings.port}
+
+
+def port_owner(port: int) -> dict[str, Any]:
+    """Which local process listens on *port* (psutil; read-only). Access may be denied without admin rights."""
+    try:
+        import psutil
+
+        for c in psutil.net_connections(kind="tcp"):
+            if c.laddr and c.laddr.port == port and c.status == psutil.CONN_LISTEN:
+                if not c.pid:
+                    return {"status": "UNKNOWN", "reason": "pid tidak terlihat (butuh hak admin)"}
+                try:
+                    name = psutil.Process(c.pid).name()
+                except psutil.Error:
+                    name = None
+                return {"status": "IDENTIFIED", "pid": c.pid, "name": name}
+        return {"status": "UNKNOWN", "reason": "pendengar tidak ditemukan di tabel koneksi"}
+    except Exception as exc:  # AccessDenied on macOS without root, psutil missing
+        return {"status": "UNKNOWN", "reason": f"tabel koneksi tidak terbaca ({type(exc).__name__})"}
+
+
+def _owner_text(owner: dict[str, Any]) -> str:
+    if owner.get("status") == "IDENTIFIED":
+        return f"pid {owner.get('pid')} {owner.get('name') or ''}".strip()
+    return "pemilik UNKNOWN: " + str(owner.get("reason") or "")
 
 
 @check("host.port", "HOST", "Port lokal control plane", ttl_seconds=900, invalidators=("config:port",),
@@ -135,8 +326,10 @@ def host_port(ctx: CheckContext) -> Outcome:
             evidence["running_version"] = body.get("version")
             return Outcome("CONNECTED", f"DLY AEOS {body.get('version')} sudah berjalan di {host}:{port}.",
                            evidence=evidence, target_identity=f"{host}:{port}")
-        return Outcome("FAILED", f"Port {port} di {host} dipakai proses lain; AEOS tidak akan pindah ke antarmuka "
-                       "publik atau mematikan auth.", evidence=evidence, error_code="PORT_IN_USE",
+        evidence["owner"] = port_owner(port)
+        return Outcome("FAILED", f"Port {port} di {host} dipakai proses lain ({_owner_text(evidence['owner'])}); AEOS "
+                       "tidak akan pindah ke antarmuka publik atau mematikan auth.", evidence=evidence,
+                       error_code="PORT_IN_USE",
                        target_identity=f"{host}:{port}",
                        remedy=Remedy(operation="Lihat proses yang memakai port (perintah di bawah), hentikan bila "
                                      f"milik Anda, atau jalankan AEOS di port lain: {aeos_cmd(f'serve --port {port + 1}')}",
@@ -148,6 +341,10 @@ def host_port(ctx: CheckContext) -> Outcome:
                    error_code="PORT_BIND_DENIED", target_identity=f"{host}:{port}",
                    remedy=Remedy(operation="Pilih port lain yang diizinkan", command=aeos_cmd(f"serve --port {port + 1}"),
                                  target=f"{host}:{port}", evidence_to_collect="port dapat di-bind"))
+
+
+def _posix() -> bool:
+    return os.name == "posix"
 
 
 def _data_fp(ctx: CheckContext) -> dict[str, Any]:
@@ -181,7 +378,7 @@ def host_data_dir(ctx: CheckContext) -> Outcome:
                        error_code="DATA_DIR_NOT_WRITABLE", remedy=Remedy(
                            operation="Perbaiki izin data dir untuk pengguna saat ini", target="<data>",
                            privilege="pengguna lokal/admin OS", evidence_to_collect="tes tulis berhasil"))
-    if os.name == "posix":
+    if _posix():
         mode = d.stat().st_mode
         evidence["world_writable"] = bool(mode & 0o002)
         if mode & 0o002:
@@ -191,5 +388,54 @@ def host_data_dir(ctx: CheckContext) -> Outcome:
                                privilege="pengguna lokal", rollback="chmod ke mode sebelumnya",
                                evidence_to_collect="mode tanpa bit world-writable"))
     else:
-        evidence["acl_checked"] = False
-    return Outcome("VERIFIED", "Data directory ada dan tes tulis berhasil.", evidence=evidence, target_identity="<data>")
+        from aeos.doctor.checks.evidence import windows_acl
+
+        broad, err = windows_acl(ctx, d)
+        evidence["acl_checked"] = err is None
+        if err:
+            evidence["acl_error"] = err
+        if broad:
+            evidence["broad_write_aces"] = broad
+            return Outcome("FAILED", "Data directory dapat ditulis grup luas (" + ", ".join(
+                sorted({b["principal"] for b in broad})) + ").", evidence=evidence,
+                error_code="DATA_DIR_ACL_TOO_OPEN", remedy=Remedy(
+                    operation="Hapus hak tulis Everyone/Users/Authenticated Users dari data dir",
+                    command="icacls <data dir> /remove:g *S-1-1-0 *S-1-5-32-545 *S-1-5-11 /T",
+                    privilege="pengguna lokal/admin OS", rollback="icacls <data dir> /reset /T",
+                    evidence_to_collect="host.data_dir VERIFIED"))
+    return Outcome("VERIFIED", "Data directory ada dan tes tulis berhasil" + (
+        "; ACL Windows tanpa hak tulis grup luas." if not _posix() and evidence.get("acl_checked")
+        else ("; ACL Windows tidak terbaca (UNKNOWN)." if not _posix() else ".")),
+        evidence=evidence, target_identity="<data>")
+
+
+VSCODE_CHANNELS = (("code", "stable"), ("code-insiders", "insiders"))
+
+
+@check("host.vscode", "HOST", "VS Code (permukaan kerja): identitas distribusi", component_id="vscode",
+       ttl_seconds=86400, invalidators=("binary:code",), severity_fail="LOW", observation="installation",
+       description="Advisory, tidak memblokir: versi, commit dan arsitektur dari `code --version`, lokasi logis dan "
+                   "kanal (stable/insiders). Keaslian distribusi tidak diverifikasi.")
+def host_vscode(ctx: CheckContext) -> Outcome:
+    from aeos.doctor.checks._common import run_version
+
+    for name, channel in VSCODE_CHANNELS:
+        path = ctx.runner.which(name)
+        if not path:
+            continue
+        version, rr = run_version(ctx, path, ["--version"], regex=r"(\d+\.\d+\.\d+)", timeout=20.0)
+        lines = [ln.strip() for ln in (rr.stdout or "").splitlines() if ln.strip()]
+        evidence = {"channel": channel, "location": logical(ctx, path), "operation_ref": f"{name} --version",
+                    "commit": lines[1][:40] if len(lines) > 1 else None, "arch": lines[2][:16] if len(lines) > 2 else None,
+                    "distribution_verified": False}
+        if version is None:
+            return Outcome("UNKNOWN", f"VS Code ({channel}) ditemukan tetapi versi tidak terbaca.", evidence=evidence,
+                           error_code="VERSION_PROBE_FAILED", target_identity=evidence["location"])
+        return Outcome("VERIFIED", f"VS Code {version} ({channel}) ditemukan; identitas distribusi tercatat (keaslian "
+                       "tidak diverifikasi).", evidence=evidence, component_version=version,
+                       target_identity=evidence["location"])
+    return Outcome("MISSING", "VS Code tidak ditemukan di PATH (opsional bagi server; permukaan kerja U-01).",
+                   severity="LOW", error_code="VSCODE_MISSING", remedy=Remedy(
+                       operation="Pasang VS Code dari distribusi resmi dan aktifkan perintah 'code' di PATH",
+                       source="code.visualstudio.com (distribusi resmi)", privilege="pengguna lokal",
+                       rollback="uninstall VS Code", evidence_to_collect="code --version"))

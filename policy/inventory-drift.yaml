@@ -1,0 +1,28 @@
+# Inventory drift severity policy (master §36: "Perbedaan bukan langsung insiden security; severity dan
+# admission mengikuti policy serta bukti"). Protected path (§09): a human reviews every edit.
+#
+# Read by aeos.inventory.drift.drift_policy(); unknown classes/keys and invalid levels are ignored and
+# the built-in defaults (identical to the values below) apply. Drift is never escalated to a security
+# incident by this file; it only ranks findings for review.
+version: 1
+# REQUIRED components with a bootstrap order <= this value are "bootstrap core" (master §07 steps 0-3).
+bootstrap_core_max_order: 3
+severity:
+  planned-but-missing:
+    required_bootstrap_core: HIGH
+    required: MEDIUM
+    optional: LOW
+  installed-but-disabled:
+    default: INFO
+  enabled-but-unverified:
+    explicit: MEDIUM   # enabled by a decision / route / integration / agent definition
+    implicit: LOW      # only part of the running released controller
+  resolved-version-mismatch:
+    version: HIGH      # observed version differs from the approved pin
+    digest: HIGH       # executable bytes differ from the approved digest (same --version possible)
+    tool_schema: HIGH  # tool/MCP schema differs from the one recorded at admission
+    configuration: MEDIUM
+  observed-but-unregistered:
+    default: LOW
+  obsolete-reference:
+    default: LOW

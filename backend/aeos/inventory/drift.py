@@ -11,18 +11,24 @@ Drift classes (§36):
 * ``obsolete-reference``       — a live record still references a tombstoned/unknown component.
 
 Only fresh (non-expired) observations create drift; stale or missing evidence is a coverage gap,
-not a finding. Drift is not automatically a security incident: severity follows policy/evidence.
+not a finding. Drift is not automatically a security incident: severity follows the reviewed policy
+reference ``policy/inventory-drift.yaml`` (protected path) and the evidence; the constants below are
+only the fail-safe defaults when that file is absent or invalid.
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+import yaml
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from aeos.core.paths import repo_root
 from aeos.core.timeutil import utcnow
 from aeos.inventory.configlens import config_basis, is_explicit
 from aeos.inventory.observations import UNREGISTERED_PREFIX, is_stale, latest_observations
@@ -48,6 +54,68 @@ DRIFT_LABELS = {
 }
 COMPONENT_CLASSES = frozenset(DRIFT_CLASSES[:4])
 MISSING_STATES = frozenset({"NOT_INSTALLED", "REMOVED", "INSTALL_FAILED"})
+SEVERITIES = ("INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL")
+POLICY_REL = "policy/inventory-drift.yaml"
+DEFAULT_POLICY: dict[str, Any] = {
+    "bootstrap_core_max_order": 3,
+    "severity": {
+        "planned-but-missing": {"required_bootstrap_core": "HIGH", "required": "MEDIUM", "optional": "LOW"},
+        "installed-but-disabled": {"default": "INFO"},
+        "enabled-but-unverified": {"explicit": "MEDIUM", "implicit": "LOW"},
+        "resolved-version-mismatch": {"version": "HIGH", "digest": "HIGH", "tool_schema": "HIGH",
+                                      "configuration": "MEDIUM"},
+        "observed-but-unregistered": {"default": "LOW"},
+        "obsolete-reference": {"default": "LOW"},
+    },
+}
+_policy_cache: dict[str, Any] = {}
+
+
+def policy_path(root: Path | None = None) -> Path:
+    return (root or repo_root()) / POLICY_REL
+
+
+def drift_policy(root: Path | None = None) -> dict[str, Any]:
+    """The reviewed severity policy merged over the defaults (unknown keys/invalid values ignored).
+    Cached per file identity, so an edited policy applies on the next reconciliation."""
+    path = policy_path(root)
+    try:
+        st = path.stat()
+        stamp: tuple[Any, ...] = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = (str(path), 0, 0)
+    if _policy_cache.get("stamp") == stamp:
+        return copy.deepcopy(_policy_cache["policy"])
+    merged = copy.deepcopy(DEFAULT_POLICY)
+    merged["source"] = "default (policy file missing)"
+    merged["warnings"] = []
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) if stamp[1] else None
+    except (OSError, yaml.YAMLError) as exc:
+        raw = None
+        merged["warnings"].append(f"{POLICY_REL} unreadable ({type(exc).__name__}); defaults used")
+    if isinstance(raw, dict):
+        merged["source"] = POLICY_REL
+        order = raw.get("bootstrap_core_max_order")
+        if isinstance(order, int) and 0 <= order <= 11:
+            merged["bootstrap_core_max_order"] = order
+        for cls, levels in (raw.get("severity") or {}).items():
+            if cls not in merged["severity"] or not isinstance(levels, dict):
+                merged["warnings"].append(f"unknown drift class {cls!r} ignored")
+                continue
+            for key, value in levels.items():
+                if key in merged["severity"][cls] and value in SEVERITIES:
+                    merged["severity"][cls][key] = value
+                else:
+                    merged["warnings"].append(f"{cls}.{key}={value!r} ignored")
+    _policy_cache.update(stamp=stamp, policy=merged)
+    return copy.deepcopy(merged)
+
+
+def severity(policy: dict[str, Any], drift_class: str, key: str) -> str:
+    levels = policy["severity"].get(drift_class) or {}
+    return levels.get(key) or levels.get("default") or DEFAULT_POLICY["severity"][drift_class].get(
+        key, next(iter(DEFAULT_POLICY["severity"][drift_class].values())))
 
 
 @dataclass
@@ -84,7 +152,9 @@ def versions_match(pin: str, observed: str) -> bool:
 
 
 def _component_items(comp: ComponentReference, latest: dict[tuple[str, str], ComponentObservation],
-                     now: datetime, basis: list[str] | None = None) -> list[DriftItem]:
+                     now: datetime, basis: list[str] | None = None, policy: dict[str, Any] | None = None
+                     ) -> list[DriftItem]:
+    policy = policy or drift_policy()
     cid = comp.component_id
     scope = domain_scope(comp)
     inst = _fresh(latest.get((cid, "installation")), now)
@@ -93,9 +163,10 @@ def _component_items(comp: ComponentReference, latest: dict[tuple[str, str], Com
     in_config = bool(basis)
     items: list[DriftItem] = []
     if comp.requirement in ("REQUIRED", "OPTIONAL") and inst is not None and inst.status in MISSING_STATES:
-        sev = "MEDIUM" if comp.requirement == "REQUIRED" else "LOW"
-        if comp.requirement == "REQUIRED" and comp.bootstrap_order is not None and comp.bootstrap_order <= 3:
-            sev = "HIGH"
+        sev = severity(policy, "planned-but-missing", "required" if comp.requirement == "REQUIRED" else "optional")
+        if comp.requirement == "REQUIRED" and comp.bootstrap_order is not None and \
+                comp.bootstrap_order <= policy["bootstrap_core_max_order"]:
+            sev = severity(policy, "planned-but-missing", "required_bootstrap_core")
         items.append(DriftItem(
             cid, "planned-but-missing", sev,
             f"{comp.requirement}: dirancang tetapi tidak ditemukan saat probe {inst.observed_at.isoformat()}",
@@ -105,14 +176,15 @@ def _component_items(comp: ComponentReference, latest: dict[tuple[str, str], Com
         ))
     if inst is not None and inst.status == "INSTALLED" and not in_config:
         items.append(DriftItem(
-            cid, "installed-but-disabled", "INFO",
+            cid, "installed-but-disabled", severity(policy, "installed-but-disabled", "default"),
             "Terpasang tetapi tidak aktif: belum di-enable melalui keputusan/konfigurasi yang sah",
             detail={"observation_id": inst.id, "enablement": comp.enablement}, lens_from="CONFIG",
             domain_scope=scope,
         ))
     if in_config and comp.capability_tests and (func is None or func.status != "VERIFIED"):
         items.append(DriftItem(
-            cid, "enabled-but-unverified", "MEDIUM" if is_explicit(basis) else "LOW",
+            cid, "enabled-but-unverified",
+            severity(policy, "enabled-but-unverified", "explicit" if is_explicit(basis) else "implicit"),
             "Berlaku dalam konfigurasi tetapi belum ada bukti fungsi VERIFIED yang masih berlaku",
             detail={"functional": func.status if func else "NOT_TESTED",
                     "observation_id": func.id if func else None, "config_basis": basis,
@@ -123,16 +195,39 @@ def _component_items(comp: ComponentReference, latest: dict[tuple[str, str], Com
         observed = inst.observed_version
         if observed and not versions_match(comp.approved_pin, observed):
             items.append(DriftItem(
-                cid, "resolved-version-mismatch", "HIGH",
+                cid, "resolved-version-mismatch", severity(policy, "resolved-version-mismatch", "version"),
                 f"Versi teramati {observed} berbeda dari pin {comp.approved_pin}",
                 key="version", detail={"approved_pin": comp.approved_pin, "observed_version": observed,
                                        "observation_id": inst.id},
                 domain_scope=scope,
             ))
+    approved_digest = (comp.details or {}).get("approved_digest")
+    if approved_digest and inst is not None and inst.status == "INSTALLED" and inst.observed_identity \
+            and str(inst.observed_identity).startswith("sha256:") and inst.observed_identity != approved_digest:
+        # same --version but different bytes: the executable is not the reviewed artifact (§37)
+        items.append(DriftItem(
+            cid, "resolved-version-mismatch", severity(policy, "resolved-version-mismatch", "digest"),
+            f"Digest executable teramati {str(inst.observed_identity)[:23]}... berbeda dari digest yang disetujui",
+            key="digest", detail={"approved_digest": approved_digest, "observed_digest": inst.observed_identity,
+                                  "observation_id": inst.id},
+            domain_scope=scope,
+        ))
+    approved_schema = (comp.details or {}).get("tool_schema_hash")
+    schema_obs = next((o for o in (conf, _fresh(latest.get((cid, "functional")), now))
+                       if o is not None and (o.detail or {}).get("tool_schema_hash")), None)
+    if approved_schema and schema_obs is not None and schema_obs.detail["tool_schema_hash"] != approved_schema:
+        items.append(DriftItem(
+            cid, "resolved-version-mismatch", severity(policy, "resolved-version-mismatch", "tool_schema"),
+            "Schema tool/MCP yang teramati berbeda dari yang disetujui saat admission; perubahan sistem perlu proposal",
+            key="tool_schema", detail={"approved_tool_schema_hash": approved_schema,
+                                       "observed_tool_schema_hash": schema_obs.detail["tool_schema_hash"],
+                                       "observation_id": schema_obs.id},
+            domain_scope=scope,
+        ))
     if conf is not None and conf.status == "DRIFTED":
         aspect = (conf.detail or {}).get("aspect") or "configuration"
         items.append(DriftItem(
-            cid, "resolved-version-mismatch", "MEDIUM",
+            cid, "resolved-version-mismatch", severity(policy, "resolved-version-mismatch", "configuration"),
             f"{aspect}: teramati berbeda dari yang disetujui ({(conf.detail or {}).get('reason') or 'DRIFTED'})",
             key=str(aspect), detail={**(conf.detail or {}), "observation_id": conf.id},
             lens_from="DESIGN", domain_scope=scope,
@@ -143,6 +238,7 @@ def _component_items(comp: ComponentReference, latest: dict[tuple[str, str], Com
 def compute_drift(session: Session, *, evaluated: set[str] | None = None,
                   now: datetime | None = None) -> list[DriftItem]:
     now = now or utcnow()
+    policy = drift_policy()
     comps = {c.component_id: c for c in session.scalars(select(ComponentReference))}
     latest = latest_observations(session)
     basis = config_basis(session, comps, latest, now)
@@ -150,7 +246,7 @@ def compute_drift(session: Session, *, evaluated: set[str] | None = None,
     for cid, comp in comps.items():
         if comp.tombstoned_at is not None or (evaluated is not None and cid not in evaluated):
             continue
-        items.extend(_component_items(comp, latest, now, basis.get(cid)))
+        items.extend(_component_items(comp, latest, now, basis.get(cid), policy))
     if evaluated is not None:
         return items
     for (cid, dim), obs in latest.items():
@@ -158,7 +254,7 @@ def compute_drift(session: Session, *, evaluated: set[str] | None = None,
             continue
         d = obs.detail or {}
         items.append(DriftItem(
-            cid, "observed-but-unregistered", "LOW",
+            cid, "observed-but-unregistered", severity(policy, "observed-but-unregistered", "default"),
             f"{d.get('kind', 'komponen')} '{d.get('name', cid)}' ditemukan di {d.get('source', 'managed scope')} "
             "tanpa registrasi; perlu review (tidak diadopsi, tidak diberi akses)",
             detail={"observation_id": obs.id, **d}, lens_from="OBSERVED", lens_to="DESIGN",
@@ -169,7 +265,7 @@ def compute_drift(session: Session, *, evaluated: set[str] | None = None,
             comp = comps.get(end)
             if comp is None or comp.tombstoned_at is not None:
                 items.append(DriftItem(
-                    rel.source_id, "obsolete-reference", "LOW",
+                    rel.source_id, "obsolete-reference", severity(policy, "obsolete-reference", "default"),
                     f"Relasi {rel.relation} ({rel.lens}) masih merujuk komponen '{end}' yang sudah tidak terdaftar",
                     key=f"relation:{rel.id}:{end}",
                     detail={"relation_id": rel.id, "relation": rel.relation, "lens": rel.lens, "missing": end},
@@ -181,7 +277,7 @@ def compute_drift(session: Session, *, evaluated: set[str] | None = None,
             continue
         if obs.observed_at >= comp.tombstoned_at:
             items.append(DriftItem(
-                cid, "obsolete-reference", "LOW",
+                cid, "obsolete-reference", severity(policy, "obsolete-reference", "default"),
                 "Komponen sudah dihapus dari manifest (tombstone) tetapi masih teramati",
                 key=f"observation:{obs.dimension}", detail={"observation_id": obs.id, "tombstoned_at":
                                                             comp.tombstoned_at.isoformat()},

@@ -14,12 +14,14 @@ Tests inject a fake runner with :func:`set_runner_override` (same pattern as the
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -170,7 +172,9 @@ class SystemProbeRunner:
             st = Path(path).stat()
         except OSError:
             return None
-        return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+        # inode/ctime make an in-place replacement visible even when size and mtime were preserved
+        return {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "ino": getattr(st, "st_ino", 0),
+                "ctime_ns": getattr(st, "st_ctime_ns", 0)}
 
 
 def _decode(data: bytes | None) -> str:
@@ -280,12 +284,66 @@ def file_is_placeholder(path: str | os.PathLike[str] | None) -> bool:
     return source_is_placeholder(head)
 
 
+DIGEST_MAX_BYTES = 512 * 1024 * 1024  # larger files are reported as TOO_LARGE, never guessed
+DIGEST_MAX_AGE_SECONDS = 1800.0  # a cached digest is re-verified at least this often
+_digest_cache: dict[str, tuple[tuple[Any, ...], float, str | None]] = {}
+_digest_lock = threading.Lock()
+
+
+def file_digest(path: str | os.PathLike[str] | None, *, max_bytes: int = DIGEST_MAX_BYTES,
+                use_cache: bool = True) -> str | None:
+    """``sha256:<hex>`` of a local file's content (§08/§37 "binary/version/digest"), or None when the file
+    is not readable here (e.g. a fake path in tests) and ``TOO_LARGE`` above *max_bytes*.
+
+    The digest is cached by (path, size, mtime, ctime, inode) and re-verified after
+    ``DIGEST_MAX_AGE_SECONDS``: a binary replaced in place with the same size and mtime is therefore
+    detected on POSIX at once (ctime/inode change) and everywhere within the re-verification window."""
+    if not path:
+        return None
+    p = Path(path)
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    if not p.is_file():
+        return None
+    if st.st_size > max_bytes:
+        return "TOO_LARGE"
+    key = (st.st_size, st.st_mtime_ns, getattr(st, "st_ctime_ns", 0), getattr(st, "st_ino", 0))
+    now = time.monotonic()
+    if use_cache:
+        with _digest_lock:
+            hit = _digest_cache.get(str(p))
+        if hit is not None and hit[0] == key and now - hit[1] < DIGEST_MAX_AGE_SECONDS:
+            return hit[2]
+    h = hashlib.sha256()
+    try:
+        with p.open("rb") as fh:
+            while block := fh.read(1 << 20):
+                h.update(block)
+    except OSError:
+        return None
+    digest = "sha256:" + h.hexdigest()
+    with _digest_lock:
+        _digest_cache[str(p)] = (key, now, digest)
+    return digest
+
+
+def clear_digest_cache() -> None:
+    with _digest_lock:
+        _digest_cache.clear()
+
+
 def path_fingerprint(runner: ProbeRunner, path: str | None) -> dict[str, Any]:
-    """Cheap identity of a binary/file (hash of path + size + mtime); no process is spawned."""
+    """Identity of a binary/file: hash of the path, size/mtime(/inode/ctime) and the content digest (cached,
+    re-verified periodically); no process is spawned."""
     if not path:
         return {"present": False}
     st = runner.stat(path)
-    return {"present": st is not None, "path_sha": sha256_text(str(path))[:16], **(st or {})}
+    out = {"present": st is not None, "path_sha": sha256_text(str(path))[:16], **(st or {})}
+    if st is not None:
+        out["digest"] = file_digest(path)
+    return out
 
 
 def clean_output(text: str, limit: int = 400) -> str:
