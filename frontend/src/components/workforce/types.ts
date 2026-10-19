@@ -193,6 +193,8 @@ export interface RoleCard {
   mode: string;
   active_runs: number;
   demo_runs: number;
+  /** §17 assignment: non-terminal tasks naming this role (projection). */
+  assigned_tasks?: number;
   availability: string;
 }
 

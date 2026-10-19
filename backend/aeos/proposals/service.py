@@ -677,16 +677,27 @@ def delivery_dimensions(session: Session, p: ChangeProposal) -> dict[str, dict[s
 
     enabled = [c for c in (inventory.get_component(session, cid) for cid in p.candidate_component_ids or [])
                if c is not None and c.enablement == "ENABLED"]
+    # §41 "kapan aktif": when the inventory first observed a candidate as ENABLED (never the approval time)
+    activated_at = None
+    if enabled:
+        from sqlalchemy import func as _f
 
-    def dim(status: str, note: str) -> dict[str, str]:
-        return {"status": status, "note": note}
+        from aeos.models.inventory import ComponentObservation
+
+        first = session.scalar(select(_f.min(ComponentObservation.observed_at)).where(
+            ComponentObservation.component_id.in_([c.component_id for c in enabled]),
+            ComponentObservation.dimension == "enablement", ComponentObservation.status == "ENABLED"))
+        activated_at = first.isoformat() if first else None
+
+    def dim(status: str, note: str, **extra: Any) -> dict[str, Any]:
+        return {"status": status, "note": note, **extra}
 
     return {
         "APPROVED": dim("YES" if promotion and promotion.status == "ACTIVE" else
                         (promotion.status if promotion else "NO"), "Keputusan PROMOTION terikat hash"),
         "IMPLEMENTED": dim(cur.get("status") or "UNKNOWN", "Outcome yang dicatat manusia dengan bukti"),
         "ACTIVE": dim("ENABLED_IN_CONFIG" if enabled else "UNKNOWN",
-                      "Dari konfigurasi/observasi inventaris, bukan dari approval"),
+                      "Dari konfigurasi/observasi inventaris, bukan dari approval", at=activated_at),
         "VERIFIED": dim("EVIDENCE_ATTACHED" if trusted else "NOT-PROVEN", "Bukti terpercaya dari verifier/collector"),
         "ARCHITECTURE_SOURCE_UPDATED": dim("YES" if cur.get("after_snapshot") else "UNKNOWN",
                                            "ArchitectureSnapshot sesudah perubahan"),

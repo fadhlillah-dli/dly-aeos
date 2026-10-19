@@ -72,6 +72,11 @@ recorded at promotion.
 Any failure keeps the previous release active, raises a HIGH alert and is audited
 (§50 "Upgrade controller gagal"). Details: [runbook](runbooks/controller-upgrade-rollback.md).
 
+**GitHub Releases** (master §06 "GitHub activity ... releases"): AEOS builds and promotes local release
+artifacts only; it never creates a GitHub tag or Release. After a successful promotion the owner may
+publish one by hand (`gh release create v<version> --target <commit> --notes-file <provenance summary>`),
+so release activity on GitHub is an owner action, not something the controller claims.
+
 ## SLIs and alerts
 
 `aeos ops sli --domain PERSONAL|OFFICE [--raise-alerts] [--json]` · `GET /api/ops/sli` ·

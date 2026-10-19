@@ -104,6 +104,52 @@ function CapabilityRow({ cap }: { cap: Capability }) {
   );
 }
 
+interface Explanation {
+  status: "NARRATION" | "UNAVAILABLE";
+  explanation?: string;
+  next_steps?: string[];
+  error?: string | null;
+  error_code?: string | null;
+  label: string;
+}
+
+/** §08: Claude can explain a Doctor result - narration only, never a status change (owner's native login). */
+function ExplainCheck({ checkId }: { checkId: string }) {
+  const { isAdmin } = useAuth();
+  const explain = useMutation({ mutationFn: () => post<Explanation>("/api/claude/explain-check", { check_id: checkId }) });
+  if (!isAdmin) return null;
+  const data = explain.data;
+  return (
+    <div className="space-y-2" data-testid="explain-check">
+      <Button busy={explain.isPending} onClick={() => explain.mutate()}>
+        Jelaskan dengan Claude
+      </Button>
+      <ErrorBox error={explain.error} />
+      {data && (
+        <div className="rounded-md border border-line bg-surface-2 p-3 text-sm">
+          <div className="mb-1 text-xs font-semibold text-ink-3">{data.label}</div>
+          {data.status === "NARRATION" ? (
+            <>
+              <p>{data.explanation}</p>
+              {data.next_steps && data.next_steps.length > 0 && (
+                <ul className="mt-1 list-disc pl-4 text-xs">
+                  {data.next_steps.map((s) => (
+                    <li key={s}>{s}</li>
+                  ))}
+                </ul>
+              )}
+            </>
+          ) : (
+            <p className="text-ink-2">
+              {data.error_code}: {data.error}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CheckDetail({ check, onClose }: { check: CheckItem; onClose: () => void }) {
   const [showHistory, setShowHistory] = useState(false);
   const history = useQuery({
@@ -163,6 +209,7 @@ function CheckDetail({ check, onClose }: { check: CheckItem; onClose: () => void
           <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-3">Usulan perbaikan</div>
           <RemedyPanel remedy={check.remediation} requiresDestructive={check.requires_destructive} requiresPaidWrite={check.requires_paid_write} />
         </div>
+        <ExplainCheck checkId={check.check_id} />
         <div>
           <button className="inline-flex items-center gap-1 text-xs text-accent hover:underline" onClick={() => setShowHistory(!showHistory)}>
             {showHistory ? <ChevronDown className="h-3.5 w-3.5" aria-hidden /> : <ChevronRight className="h-3.5 w-3.5" aria-hidden />}

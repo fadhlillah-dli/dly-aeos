@@ -261,9 +261,19 @@ def _active_counts(session: Session, column: Any, *, domain: str, mode: str,
     return {k: int(n) for k, n in session.execute(q.group_by(column)) if k}
 
 
+def _assigned_task_counts(session: Session, *, domain: str, project_ids: list[str] | None) -> dict[str, int]:
+    q = (select(TaskSpec.role_key, func.count()).join(TaskExecution, TaskExecution.task_id == TaskSpec.id)
+         .where(TaskExecution.domain == domain, TaskExecution.state.not_in(["DONE", "FAILED", "CANCELLED"]))
+         .group_by(TaskSpec.role_key))
+    if project_ids is not None:
+        q = q.where(TaskExecution.project_id.in_(project_ids))
+    return {str(k): int(v) for k, v in session.execute(q).all()}
+
+
 def roles_view(session: Session, *, domain: str, project_ids: list[str] | None = None) -> dict[str, Any]:
     live = _active_counts(session, WorkerRun.role_key, domain=domain, mode=DataMode.LIVE.value, project_ids=project_ids)
     demo = _active_counts(session, WorkerRun.role_key, domain=domain, mode=DataMode.DEMO.value, project_ids=project_ids)
+    assigned = _assigned_task_counts(session, domain=domain, project_ids=project_ids)
     groups: dict[str, list[dict[str, Any]]] = {g: [] for g, _ in GROUPS}
     for r in session.scalars(select(RoleSkillPack).order_by(RoleSkillPack.name)):
         n = live.get(r.role_key, 0)
@@ -275,6 +285,8 @@ def roles_view(session: Session, *, domain: str, project_ids: list[str] | None =
             "source_section": r.source_section, "version": r.version, "revision_hash": r.revision_hash,
             "eval_status": r.eval_status, "mode": r.mode,
             "active_runs": n, "demo_runs": demo.get(r.role_key, 0),
+            # §17 assignment: non-terminal tasks of approved plans that name this role (projection, read-only)
+            "assigned_tasks": assigned.get(r.role_key, 0),
             "availability": "ACTIVE" if n else ("SERVICE" if r.deterministic_service else
                                                 "HUMAN" if r.kind == "HUMAN" else "AVAILABLE_INACTIVE"),
         })

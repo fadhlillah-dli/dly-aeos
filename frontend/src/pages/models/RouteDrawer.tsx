@@ -96,7 +96,22 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
             <ExplainButtons
               content={{
                 what: <p>{r.notes || "Rute model pekerja yang tercatat di registry."}</p>,
-                why: <p>Kandidat dari master §23 / katalog ({r.evidence_level}); pemilihan produksi hanya setelah evaluasi dan keputusan manusia.</p>,
+                why: <p>Kandidat dari master §23 / katalog ({r.evidence_level}); pemilihan produksi hanya setelah evaluasi dan keputusan manusia.{r.decisions[0]?.rationale ? ` Alasan keputusan terakhir: ${r.decisions[0].rationale}` : ""}</p>,
+                usedBy: (
+                  <p>
+                    {r.last_used?.at
+                      ? `Terakhir dipakai ${absoluteTime(r.last_used.at)} oleh run ${r.last_used.run_id ?? "UNKNOWN"} (${r.last_used.status}).`
+                      : "Belum pernah dipakai oleh run mana pun (tercatat di usage ledger)."}
+                  </p>
+                ),
+                propose: (
+                  <p>
+                    <a className="text-accent underline" href={`/proposals?kind=REPLACE&source=${encodeURIComponent(r.route_key)}`}>
+                      Usulkan perubahan untuk rute ini
+                    </a>{" "}
+                    (usulan tidak mengaktifkan apa pun).
+                  </p>
+                ),
                 evidence: (
                   <pre className="mono whitespace-pre-wrap text-xs">{JSON.stringify({ pricing: r.pricing, data_terms: r.data_terms }, null, 2)}</pre>
                 ),

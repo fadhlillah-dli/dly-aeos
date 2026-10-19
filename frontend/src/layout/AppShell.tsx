@@ -11,6 +11,7 @@ import { useEventStream, type StreamStatus } from "../lib/events";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useTheme } from "../lib/theme";
 import type { Overview } from "../pages/overview/types";
+import { Breadcrumb } from "./Breadcrumb";
 import { GlobalSearch } from "./GlobalSearch";
 import { NAV } from "./nav";
 
@@ -300,6 +301,7 @@ export function AppShell() {
           </div>
         </header>
         <main className="min-w-0 flex-1 p-4 md:p-5">
+          <Breadcrumb />
           <Outlet />
         </main>
       </div>

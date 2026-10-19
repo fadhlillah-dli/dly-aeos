@@ -130,6 +130,25 @@ def test_component_detail_has_every_section_37_field_group(seeded):
     assert "install" not in unverified["operations"]
 
 
+def test_component_identity_group_has_kind_category_upstream_and_logical_instances(seeded, settings):
+    """§37 Identity: stable ID, kind, friendly name, function, category, upstream identity, instances."""
+    before = views.component_detail(seeded, "nodejs-runtime", domain="PERSONAL")["identity"]
+    assert before["instances"] is None and before["instances_note"]
+    runner = base_runner()
+    runner.add_binary("node", "v24.15.0")
+    reconcile(seeded, settings, runner=runner)
+    seeded.commit()
+    ident = views.component_detail(seeded, "nodejs-runtime", domain="PERSONAL")["identity"]
+    assert ident["component_id"] == "nodejs-runtime"
+    assert ident["kind"] and ident["category"] and ident["friendly_name"] and ident["function"]
+    assert ident["category_label"]
+    assert ident["instances"], "an observed installation becomes a component instance"
+    blob = json.dumps(ident["instances"], default=str)
+    assert str(Path.home()) not in blob and not re.search(r"[A-Za-z]:\\\\", blob), "instances are logical"
+    unverified = views.component_detail(seeded, "ddorchestrator", domain="PERSONAL")["identity"]
+    assert unverified["upstream_identity_status"] == "UNVERIFIED"
+
+
 def test_detail_and_lists_never_leak_local_paths(seeded, settings):
     runner = base_runner()
     runner.add_binary("node", "v24.15.0")
