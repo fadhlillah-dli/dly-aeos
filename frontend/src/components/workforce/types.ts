@@ -198,6 +198,12 @@ export interface RoleCard {
   active_runs: number;
   demo_runs: number;
   availability: string;
+  /** §17/§46 competence definition: inputs, example outputs, failure modes, evaluation case references. */
+  inputs?: string[];
+  example_outputs?: string[];
+  failure_modes?: string[];
+  evaluation_cases?: { suite_key: string; task_class?: string; case_ids: string[] }[];
+  practice_sources?: string[];
 }
 
 export interface RoleGroup {

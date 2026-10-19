@@ -445,3 +445,41 @@ def test_office_and_personal_plans_use_the_same_contract(db, owner):
     versions = list(db.scalars(select(PlanVersion).where(PlanVersion.plan_id.in_([personal.id, office.id]))))
     assert {v.schema_version for v in versions} == {contracts.SCHEMA_VERSION}
     assert len({v.manifest_hash for v in versions}) == 1  # same content -> same manifest in both domains
+
+
+# ---------------------------------------------------------------- review (C7)
+
+
+def test_manual_import_rechecks_readiness_before_the_next_native_stage(db, owner, monkeypatch, tmp_path):
+    """§05 step 2: after a manual result is imported the next stage's prompt is executed only after the
+    CAN_PLAN_PERSONAL check — a bridge that became BLOCKED makes no model call; DEGRADED stays manual."""
+    bridge = FakeBridge(monkeypatch, tmp_path)
+    _cap(monkeypatch, "DEGRADED", ["claude.capability_test: UNKNOWN"])
+    plan = _plan(db, owner)
+    service.run_pipeline(db, plan.id, actor=owner.id)
+    db.refresh(plan)
+    assert plan.state == "AWAITING_MANUAL_CLAUDE" and bridge.calls == []
+    bridge.complete_manual(plan.checkpoint["package_id"])
+    service.import_manual_result(db, plan.id, actor=owner.id)
+    db.refresh(plan)
+    assert bridge.calls == [] and plan.state == "AWAITING_MANUAL_CLAUDE"  # DEGRADED: challenge stage manual too
+    assert plan.checkpoint["stage"] == "CHALLENGE_REVIEW"
+    bridge.complete_manual(plan.checkpoint["package_id"])
+    _cap(monkeypatch, "BLOCKED", ["claude.env: FAILED - ANTHROPIC_API_KEY set"])
+    service.import_manual_result(db, plan.id, actor=owner.id)
+    db.refresh(plan)
+    assert bridge.calls == [] and plan.state == "NEEDS_DECISION"
+    assert "CAN_PLAN_PERSONAL" in plan.state_reason and plan.checkpoint["bridge_proof"]["label"] == "BLOCKED"
+
+
+def test_integration_engineer_task_requires_provider_contract_test_evidence(db):
+    """§16 Integration Engineer: provider contract tests, target/tenant and idempotency are mandatory evidence."""
+    content = sample_content(tasks=[task("T1", role_key="integration-engineer", paths=["backend/adapters/**"],
+                                         expected_outputs=["adapter"], acceptance_criteria=["idempotent"]),
+                                    task("T2")])
+    v = _approved_version(db, content)
+    dag.compile_version(db, v, actor="tester")
+    specs = {s.task_key: s for s in db.scalars(select(TaskSpec).where(TaskSpec.plan_version_id == v.id))}
+    reqs = " | ".join(specs["T1"].evidence_requirements)
+    assert "provider contract test" in reqs and "idempotency key" in reqs and "tenant" in reqs
+    assert not [r for r in specs["T2"].evidence_requirements if "contract test" in r]

@@ -250,3 +250,29 @@ def test_manual_result_refused_when_verification_no_longer_passes(db, world, wf,
     with pytest.raises(Blocked) as e:
         review.collect_manual_review(db, waiting.id, actor="owner", structured=review_payload())
     assert e.value.code == "VERIFICATION_NOT_PASSED"
+
+
+
+def test_checkpoint_package_carries_the_role_contract(db, world, wf, monkeypatch):
+    """§16/§17: the reviewer judges the result against the RoleSkillPack the task ran under (boundaries,
+    verification, failure modes), e.g. Product Analyst 'does not invent stakeholders'."""
+    from aeos.models.planning import TaskSpec
+    from aeos.workforce import catalog
+
+    install_doctor(monkeypatch)
+    bridge = FakeBridge(result=claude_result(review_payload("PASS-CONTROLLED"))).install(monkeypatch)
+    record_verification(db, world)
+    review.review_run(db, world.run.id, actor="t")
+    prompt = bridge.requests[0].prompt
+    implementer = next(r for r in catalog.EXECUTOR_ROLES if r["role_key"] == "feature-implementer")
+    assert '"role_contract"' in prompt and "role_contract, check the result" in prompt
+    assert implementer["failure_modes"][0] in prompt and implementer["boundaries"][0] in prompt
+    analyst = review.role_section(db, TaskSpec(task_key="x", title="t", goal="g", role_key="product-analyst"))
+    assert "Tidak mengarang stakeholder atau keputusan bisnis" in analyst["boundaries"]
+    assert "Mengarang stakeholder/keputusan bisnis" in analyst["failure_modes"]
+    ux = review.role_section(db, TaskSpec(task_key="u", title="t", goal="g", role_key="ux-research-assistant"))
+    assert {"Mengaku riset pengguna dilakukan", "Asumsi tidak ditandai"} <= set(ux["failure_modes"])
+    integ = review.role_section(db, TaskSpec(task_key="i", title="t", goal="g", role_key="integration-engineer"))
+    assert {"Akses global", "Target/tenant tidak terikat", "Tanpa idempotensi"} <= set(integ["failure_modes"])
+    assert "unmarked persona assumptions" in ux["review_rule"] and "idempotency key" in integ["review_rule"]
+    assert review.role_section(db, TaskSpec(task_key="y", title="t", goal="g", role_key="chief-executive-officer")) is None

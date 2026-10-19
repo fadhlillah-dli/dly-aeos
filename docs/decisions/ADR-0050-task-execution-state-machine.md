@@ -110,8 +110,9 @@ made to work end to end (`tests/e2e/test_e2e_execution_chain.py`). Reconciled co
    (`ROLE_UNKNOWN`), with a context estimate (prompt chars/4 + output cap, or `min_context_tokens`) above the
    route's context window (`CONTEXT_TOO_LARGE`), or with an agent outside its `allowed_scope`
    (`AGENT_OUT_OF_SCOPE`). It waits on `RESOURCE_INSUFFICIENT` (per-run memory — `limits.memory_mb` or
-   `workforce.run_memory_mb`, default 512 MB — against free memory minus runs already LEASED, and one CPU per
-   worker when the cap is 2) and on `ROLE_NOT_EVALUATED` (from the risk class in
+   `workforce.run_memory_mb`, default 512 MB — against a fixed worker share (50 %) of the host's physical memory
+   minus what LEASED/RUNNING runs reserved; momentary free memory is recorded as an observation/warning only, so
+   admission does not depend on other processes' load — and one CPU per worker when the cap is 2) and on `ROLE_NOT_EVALUATED` (from the risk class in
    `workforce.role_eval_required_from`, default R4: a PASS evaluation of the role's current revision or an
    owner EXCEPTION on `role_evaluation/<role_key>`). The answers (compute reservation, context estimate,
    verifier suite status, reviewer path, role eligibility) are recorded on `WorkerRun.caps`. The compute
@@ -127,3 +128,8 @@ made to work end to end (`tests/e2e/test_e2e_execution_chain.py`). Reconciled co
    applies per TaskSpec. `AgentDefinition.limits.max_active` is an upper bound on the cap.
 5. **Base commit (§21).** The first attempt pins `TaskExecution.base_commit`; every later attempt of the same
    TaskSpec starts from it. `reopen_for_reverification` (stale acceptance) releases the pin explicitly.
+6. **OFFICE route binding (§23, review).** An OFFICE task is admitted on a route only while the owner's
+   `office_route/<route_key>` POLICY decision (recorded only by `POST /api/policy/office/routes`, bound to the
+   route identity and the ACTIVE company authorisation) holds; otherwise it waits `OFFICE_ROUTE_NOT_AUTHORISED`.
+   The generic decision endpoint refuses `office_route/*` and `workforce/*` targets
+   (`DEDICATED_ENDPOINT_REQUIRED`), so neither the company-approval nor the evaluation evidence can be skipped.

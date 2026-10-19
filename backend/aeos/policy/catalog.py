@@ -70,6 +70,14 @@ TARGET_ID_CONCURRENCY = "concurrency"
 # §44 DecisionRecord fields for adopting a routing/role/mode result. A mode/route adoption decision that
 # lacks one of them is refused (the owner sees options, goal, evidence, trade-off and when it stops applying).
 DECISION_RECORD_FIELDS: tuple[str, ...] = ("options", "goal", "evidence_ids", "cost_quality_tradeoff", "invalidate_if")
+# Targets whose decision is written only by a dedicated endpoint that checks its own evidence first (company
+# authorisation + company-approved route; passing evaluation run + DecisionRecord). The generic decision endpoint
+# refuses them, so a decision on these targets can never skip those checks. (RETIREMENT is not a generic kind.)
+TARGET_OFFICE_ROUTE = "office_route"
+DEDICATED_TARGETS: dict[str, str] = {
+    TARGET_OFFICE_ROUTE: "POST /api/policy/office/routes",
+    TARGET_WORKFORCE: "POST /api/workforce/concurrency",
+}
 # Kinds a human may record through the generic decision endpoint. APPROVAL/REJECTION/REVISION are
 # recorded only through the plan decision endpoint, bound to an exact PlanVersion + hash.
 GENERIC_DECISION_KINDS: tuple[str, ...] = ("EXCEPTION", "RISK_ACCEPTANCE", "WRITE_ENABLEMENT", "POLICY", "BUDGET")

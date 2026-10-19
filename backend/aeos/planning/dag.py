@@ -52,6 +52,18 @@ DEFAULT_EVIDENCE = [
     "independent verifier test report (trusted collector)", "diff against the recorded base commit",
     "acceptance criteria -> evidence mapping",
 ]
+# §16 role-specific evidence the reviewer asks for (added to the TaskSpec, never removable by the planner):
+# Integration Engineer "contract test provider; target/tenant dan idempotency wajib", UX/UI Designer "desain
+# diverifikasi terhadap AC dan pengguna yang dituju" (states + accessibility).
+ROLE_EVIDENCE: dict[str, list[str]] = {
+    "integration-engineer": [
+        "provider contract test of the adapter in the trusted suite",
+        "test asserting the explicit target/tenant binding and the idempotency key (no global credential)",
+    ],
+    "ux-ui-designer": [
+        "loading/error/empty state coverage and an accessibility check mapped to the acceptance criteria",
+    ],
+}
 CLASS_ORDER = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"]
 RISK_ORDER = ["R0", "R1", "R2", "R3", "R4"]
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
@@ -613,7 +625,8 @@ def task_spec_fields(task: dict[str, Any], *, project: Project, version: PlanVer
         },
         "limits": limits,
         "stop_conditions": list(dict.fromkeys(_str_list(task.get("stop_conditions")) + DEFAULT_STOP_CONDITIONS)),
-        "evidence_requirements": list(dict.fromkeys(_str_list(task.get("evidence_requirements")) + DEFAULT_EVIDENCE)),
+        "evidence_requirements": list(dict.fromkeys(_str_list(task.get("evidence_requirements")) + DEFAULT_EVIDENCE
+                                                    + ROLE_EVIDENCE.get(str(task.get("role_key") or DEFAULT_ROLE), []))),
         "risk_class": risk,
         "artifact_schema_version": str(task.get("artifact_schema_version") or "1")[:16],
         "mode": version.mode if version.mode in ("MOCK", "DEMO") else "LIVE",
