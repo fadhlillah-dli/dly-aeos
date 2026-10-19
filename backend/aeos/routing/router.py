@@ -88,7 +88,9 @@ def _active_decision_view(session: Session, r: ModelRoute) -> dict[str, Any] | N
 def _runtime_view(r: ModelRoute, runtime: dict[str, Any]) -> dict[str, Any]:
     fields = service.binding_fields(r)
     drift = service.binding_drift(r, runtime) if r.status in {"APPROVED", "TRIAL"} else []
-    return {"bound": {f: getattr(r, f) for f in (*fields, "harness_version")}, "current": {f: runtime.get(f) for f in fields},
+    current_fields = (*fields, "harness_version") if service.runs_on_worker_runtime(r) else fields
+    return {"bound": {f: getattr(r, f) for f in (*fields, "harness_version")},
+            "current": {f: runtime.get(f) for f in current_fields},
             "status": "DRIFT" if drift else ("BOUND" if r.status in {"APPROVED", "TRIAL"} else "NOT_ACTIVATED"),
             "drift": drift}
 
@@ -131,6 +133,8 @@ def route_view(session: Session, r: ModelRoute, principal: Principal,
         "region": r.region, "region_restricted": service.region_restricted(r),
         "terms_restriction": (None if r.pool == "SUPERVISOR"
                               else service.terms_restriction(r.data_terms or {}, r.identity_status)),
+        # training/trial flags still UNKNOWN: the owner records their own reading at activation (terms_record)
+        "terms_unknown": [] if r.pool == "SUPERVISOR" else service.unknown_terms_keys(r.data_terms or {}),
         "reviewed_tool_set": service.reviewed_tool_set(r), "runtime_binding": _runtime_view(r, runtime),
         "execution_path": _execution_path(r),
     }

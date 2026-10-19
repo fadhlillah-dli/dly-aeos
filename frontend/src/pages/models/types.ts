@@ -117,6 +117,8 @@ export interface RouteItem {
   region?: string | null;
   region_restricted?: boolean;
   terms_restriction?: string | null;
+  /** training/trial flags still UNKNOWN: the owner records their own reading at activation */
+  terms_unknown?: string[];
   reviewed_tool_set?: string[] | null;
   runtime_binding?: RuntimeBinding;
   execution_path?: { status: string; note: string };
@@ -159,6 +161,8 @@ export interface ActivatePayload {
   terms_reviewed?: boolean;
   terms_note?: string;
   region?: string | null;
+  /** the owner's own reading of UNKNOWN training/trial terms (needs terms_reviewed) */
+  terms_record?: { may_use_inputs_for_training: boolean; trial_only_no_confidential: boolean; note: string } | null;
   /** APPROVED only: COMPLETED, gate-passing EvalRuns of exactly this configuration (§23 "telah diuji") */
   eval_run_ids?: string[] | null;
 }

@@ -8,7 +8,8 @@ How an EvalRun is executed in this build, without a second scheduler (U-12):
 2. Each slot is executed as an ordinary TaskSpec of an approved plan through the workforce — admission,
    cost reservation, sandbox, broker, independent verifier and checkpoint review. The owner binds the
    executed task to its slot (``bind_task``); the collector refuses a task that ran on another route or
-   another harness version.
+   another harness version, or whose attempt began before the run started, and refuses to record a run whose
+   route configuration changed after the start (the samples would describe two configurations).
 3. ``collect`` (identity ``collector``, a TRUSTED_COLLECTOR) derives each sample from the canonical records
    of that task — TaskExecution, WorkerRun, AcceptanceRecord, ReviewRecord, BrokerRequest, the usage
    ledger — never from worker narration. When every slot has a terminal sample the run is recorded through
@@ -106,6 +107,23 @@ def start_run(session: Session, run_id: str, *, actor_user_id: str, viewer_domai
     return run
 
 
+def route_changed_since_start(session: Session, run: EvalRun) -> str | None:
+    """Why the registered route no longer has the configuration the run started on (None = unchanged). A change
+    reverted to the same hash during the run still counts (``config_changed_at`` after the start)."""
+    from aeos.models.routing import ModelRoute
+    from aeos.routing.service import compute_config_hash
+
+    route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == run.route_key)) if run.route_key else None
+    if route is None:
+        return f"route {run.route_key} is not registered"
+    if compute_config_hash(route) != run.route_config_hash:
+        return "the route configuration changed since the run started"
+    changed_at, began = ensure_aware(route.config_changed_at), ensure_aware(run.started_at)
+    if changed_at is not None and began is not None and changed_at > began:  # type: ignore[operator]
+        return "the route configuration changed during the run"
+    return None
+
+
 def _task_bound_elsewhere(session: Session, task_id: str, run_id: str) -> str | None:
     for other in session.scalars(select(EvalRun).where(EvalRun.status.in_(("RUNNING", "COMPLETED", "FAILED",
                                                                            "CANCELLED")))):
@@ -182,6 +200,12 @@ def derive_sample(session: Session, run: EvalRun, binding: dict[str, Any]) -> tu
     used = {r.model_route_key for r in impl if r.model_route_key}
     if run.route_key and used - {run.route_key}:
         return "INVALID", None, f"task ran on other routes {sorted(used - {run.route_key})}: not this configuration"
+    began = ensure_aware(run.started_at)
+    early = [r for r in impl if began is not None and r.created_at is not None
+             and ensure_aware(r.created_at) < began]  # type: ignore[operator]
+    if early:
+        # start_run proved the route configuration; an attempt made before it may have run on another one
+        return "INVALID", None, "task attempt began before this evaluation started: configuration not proven"
     harness = (run.configuration or {}).get("harness_version")
     engines = {r.engine_version for r in impl if r.engine_version}
     if harness not in (None, "UNKNOWN") and engines - {harness}:
@@ -266,6 +290,10 @@ def collect(session: Session, run_id: str, *, viewer_domain: str | None = None, 
     run = get_run(session, run_id, viewer_domain=viewer_domain, scoped=scoped)
     if run.status != "RUNNING":
         raise Conflict(f"eval run is {run.status}; only a RUNNING run is collected")
+    changed = route_changed_since_start(session, run)
+    if changed:
+        raise Conflict(f"{changed}: the samples would mix configurations; stop it (aeos eval finish) and plan a new "
+                       "run on the current configuration", code="ROUTE_CONFIG_CHANGED")
     all_slots = slots(session, run)
     by_slot = {b["slot_id"]: b for b in run.bindings or []}
     collected: list[dict[str, Any]] = []

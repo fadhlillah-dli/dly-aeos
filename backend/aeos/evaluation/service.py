@@ -221,8 +221,15 @@ def environment_fingerprint() -> dict[str, Any]:
         controller = getattr(aeos, "__version__", "UNKNOWN")
     except Exception:  # pragma: no cover
         controller = "UNKNOWN"
+    try:
+        from aeos.routing.service import observed_harness_version
+
+        harness = observed_harness_version() or "UNKNOWN"
+    except Exception:  # pragma: no cover - observation only, never a pass
+        harness = "UNKNOWN"
     return {"os": platform.system() or "UNKNOWN", "python": f"{sys.version_info.major}.{sys.version_info.minor}",
-            "controller": controller, "sandbox": "process (WEAK) - the only launchable kind in this build"}
+            "controller": controller, "harness": f"opencode {harness}",
+            "sandbox": "process (WEAK) - the only launchable kind in this build"}
 
 
 def conditions_of(suite: EvalSuite, limits: dict[str, Any], environment: dict[str, Any]) -> str:
@@ -540,21 +547,29 @@ def _delta(entry: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
             "conclusion": conclusion}
 
 
+def _entry_key(h: str, route_config_hash: str | None, topology: str | None) -> str:
+    return f"{h}|{(route_config_hash or '-')[7:23] or '-'}|{topology or '-'}"
+
+
 def _entry(session: Session, suite_key: str, h: str, topology: str | None, rs: list[EvalRun]) -> dict[str, Any]:
     samples = [x for r in rs for x in (r.samples or [])]
     m = compute_metrics(samples)
     gate_views = [eligibility(r.gate_results or {}, compute_metrics(r.samples or [])) for r in rs]
     elig = next((g for g in gate_views if not g["eligible"]), gate_views[0])
     binding = route_binding(session, rs[-1])
+    # every run of an entry must still describe the route's current configuration (a run of an earlier route
+    # configuration is never pooled into - or inherited by - the current one)
+    stale = any(route_binding(session, r).get("route_config_current") is False for r in rs)
     if elig["eligible"] and binding["status"] == "NOT_ELIGIBLE":
         elig = {**elig, "eligible": False, "status": "EXCLUDED_ROUTE_TERMS", "route_reasons": binding["reasons"]}
-    elif elig["eligible"] and binding.get("route_config_current") is False:
+    elif elig["eligible"] and stale:
         elig = {**elig, "eligible": False, "status": "EXCLUDED_STALE_CONFIGURATION",
                 "route_reasons": ["the registered route changed since this evaluation: results are not inherited"]}
     environments = {content_hash(r.environment or {}) for r in rs}
     conditions = {r.conditions_hash for r in rs}
     return {
-        "entry_key": f"{h}|{topology or '-'}", "configuration_hash": h, "label": _config_label(rs[0].configuration),
+        "entry_key": _entry_key(h, rs[0].route_config_hash, topology), "configuration_hash": h,
+        "route_config_hash": rs[0].route_config_hash, "label": _config_label(rs[0].configuration),
         "configuration": rs[0].configuration, "topology": topology, "topologies": [topology or "-"],
         "runs": len(rs), "run_ids": [r.id for r in rs], "sample_size": m["sample_size"],
         "final_acceptance_rate": m["outcome"]["final_acceptance_rate"],
@@ -583,13 +598,15 @@ def leaderboard(session: Session, *, role: str | None = None, domain: str | None
 
     per_suite: list[dict[str, Any]] = []
     tested: set[str] = set()
-    # §44: topology results are never pooled across topologies - (configuration, topology) is one entry.
-    grouped: dict[tuple[str, str, str | None], list[EvalRun]] = defaultdict(list)
+    # §44: topology results are never pooled across topologies - (configuration, topology) is one entry; nor are
+    # runs of different configurations of the registered route (§23/§43: a changed route never inherits results).
+    grouped: dict[tuple[str, str, str | None, str | None], list[EvalRun]] = defaultdict(list)
     for r in completed:
-        grouped[(r.suite_key, r.configuration_hash, r.topology)].append(r)
+        grouped[(r.suite_key, r.configuration_hash, r.route_config_hash, r.topology)].append(r)
         tested.add(r.configuration_hash)
     for s in role_suites:
-        entries = [_entry(session, sk, h, topo, rs) for (sk, h, topo), rs in grouped.items() if sk == s.suite_key]
+        entries = [_entry(session, sk, h, topo, rs) for (sk, h, _rh, topo), rs in grouped.items()
+                   if sk == s.suite_key]
         eligible_all = [e for e in entries if e["eligibility"]["eligible"]]
         excluded = [e for e in entries if not e["eligibility"]["eligible"]]
         baseline = next((e for e in eligible_all if e["is_baseline"]), None)
@@ -726,10 +743,10 @@ def topology_comparison(session: Session, *, suite_key: str, configuration_hash:
     runs = [r for r in session.scalars(q) if r.samples]
     same = [r for r in runs if r.configuration_hash == configuration_hash and r.topology]
     others = sorted({r.configuration_hash for r in runs if r.topology and r.configuration_hash != configuration_hash})
-    by_topo: dict[str, list[EvalRun]] = defaultdict(list)
+    by_topo: dict[tuple[str, str], list[EvalRun]] = defaultdict(list)
     for r in same:
-        by_topo[r.topology or "-"].append(r)
-    rows = [_entry(session, suite_key, configuration_hash, t, rs) for t, rs in sorted(by_topo.items())]
+        by_topo[(r.topology or "-", r.route_config_hash or "")].append(r)
+    rows = [_entry(session, suite_key, configuration_hash, t, rs) for (t, _rh), rs in sorted(by_topo.items())]
     eligible = [e for e in rows if e["eligibility"]["eligible"]]
     conds = {e["conditions_hash"] for e in eligible}
     comparable = len(conds) <= 1 and not any(e["conditions_mixed"] for e in eligible)
@@ -756,7 +773,9 @@ def plan_comparison(session: Session, *, proposal_id: str, suite_keys: list[str]
     p = session.get(ChangeProposal, proposal_id)
     if p is None:
         raise NotFound("proposal not found")
-    if domain is not None and p.domain not in (None, domain):
+    if p.domain is not None and p.domain != domain:
+        # domain-first: a domain proposal is only prepared from that explicitly chosen domain (never from a
+        # session without an active domain, never from the other one)
         raise NotFound("proposal not found")
     if p.status not in ("TRIAL_APPROVED", "IN_TRIAL", "REVIEWED", "UNDER_REVIEW"):
         raise Conflict(f"proposal is {p.status}: a comparison is prepared for a reviewed/trial proposal",
@@ -851,11 +870,17 @@ def activation_evidence(session: Session, *, route_key: str, route_config_hash: 
         suite = session.scalar(select(EvalSuite).where(EvalSuite.suite_key == r.suite_key))
         if not suite_integrity_ok(suite) or (suite is not None and (not suite.protected or suite.mode == "CANDIDATE")):
             own.append("suite missing, not protected or its content hash does not match")
+        if r.submitted_domain not in (None, "PERSONAL"):
+            # route activation is PERSONAL-only; an Office evaluation never flows into the shared route record
+            own.append(f"planned in {r.submitted_domain}: never evidence for a PERSONAL route activation")
         elig = eligibility(r.gate_results or {}, r.metrics or None)
         if not elig["eligible"]:
             own.append(elig["status"])
         if not r.sample_size:
             own.append("no samples")
+        elif not ((r.metrics or {}).get("outcome") or {}).get("accepted"):
+            # U-07 "lolos evaluasi": a configuration that produced no accepted outcome did not pass the evaluation
+            own.append("NO_ACCEPTED_OUTCOME (0 accepted samples: the evaluation was not passed)")
         if own:
             problems.append(f"{rid}: " + "; ".join(own))
         else:
@@ -889,12 +914,20 @@ def scorecard_snapshot(session: Session, *, role: str, domain: str | None = None
 # --------------------------------------------------------------------------- failures -> candidate cases (§28)
 
 
-def _source_summary(session: Session, source_type: str, source_id: str) -> dict[str, Any]:
+def _visible(domain: str | None, viewer_domain: str | None) -> bool:
+    """A domain-bound record is visible only from that explicitly chosen domain (domain-first, §35)."""
+    return domain is None or domain == viewer_domain
+
+
+def _source_summary(session: Session, source_type: str, source_id: str,
+                    viewer_domain: str | None = None) -> dict[str, Any]:
+    """Summary of a failure source. The domain is checked before anything else, so a record of the other
+    domain is indistinguishable from a missing one (no existence/state oracle)."""
     if source_type == "evidence":
         from aeos.models.evidence import EvidenceArtifact
 
         ev = session.get(EvidenceArtifact, source_id)
-        if ev is None:
+        if ev is None or not _visible(ev.domain, viewer_domain):
             raise NotFound("evidence not found")
         if not ev.trusted:
             raise PolicyDenied("only trusted (verifier/collector) evidence of a failure can seed a case",
@@ -905,7 +938,7 @@ def _source_summary(session: Session, source_type: str, source_id: str) -> dict[
         from aeos.models.workforce import WorkerRun
 
         run = session.get(WorkerRun, source_id)
-        if run is None:
+        if run is None or not _visible(run.domain, viewer_domain):
             raise NotFound("worker run not found")
         failed = run.execution_status in ("FAILED", "CANCELLED") or run.quarantined or run.verifier_status == "FAIL" \
             or run.acceptance_status == "REJECTED"
@@ -918,7 +951,7 @@ def _source_summary(session: Session, source_type: str, source_id: str) -> dict[
         from aeos.models.operations_ext import OpsAlert
 
         alert = session.get(OpsAlert, source_id)
-        if alert is None:
+        if alert is None or not _visible(alert.domain, viewer_domain):
             raise NotFound("alert not found")
         return {"domain": alert.domain, "project_id": alert.project_id, "task_id": None, "kind": alert.kind,
                 "claim": alert.title, "content_hash": content_hash({"alert": alert.id, "kind": alert.kind})}
@@ -934,9 +967,8 @@ def propose_case_from_failure(session: Session, *, source_type: str, source_id: 
         raise ValidationFailed(f"kind must be one of {D.PROTOCOL['case_kinds']}")
     if len((title or "").strip()) < 5 or len((expected or "").strip()) < 10:
         raise ValidationFailed("title (min 5) and expected behaviour (min 10 characters) are required")
-    src = _source_summary(session, source_type, source_id)
-    if src.get("domain") and viewer_domain is not None and src["domain"] != viewer_domain:
-        raise NotFound("source not found")  # never reveal a failure of the other domain
+    # never reveal a failure of the other domain - nor of any domain to a session without an active domain
+    src = _source_summary(session, source_type, source_id, viewer_domain)
     related = None
     if related_suite_key:
         related = session.scalar(select(EvalSuite).where(EvalSuite.suite_key == related_suite_key))
@@ -994,7 +1026,7 @@ def adopt_case(session: Session, candidate_id: str, *, actor_user_id: str, expec
     regression suite (existing protected suites are never edited). OFFICE failures are never promoted into the
     platform's suites (Office data never flows into shared definitions)."""
     c = session.get(EvalCaseCandidate, candidate_id)
-    if c is None or (c.domain and viewer_domain is not None and c.domain != viewer_domain):
+    if c is None or not _visible(c.domain, viewer_domain):
         raise NotFound("case candidate not found")
     if c.status != "CANDIDATE":
         raise Conflict(f"candidate is {c.status}")
@@ -1034,7 +1066,7 @@ def adopt_case(session: Session, candidate_id: str, *, actor_user_id: str, expec
 def reject_case(session: Session, candidate_id: str, *, actor_user_id: str, reason: str,
                 viewer_domain: str | None = None) -> EvalCaseCandidate:
     c = session.get(EvalCaseCandidate, candidate_id)
-    if c is None or (c.domain and viewer_domain is not None and c.domain != viewer_domain):
+    if c is None or not _visible(c.domain, viewer_domain):
         raise NotFound("case candidate not found")
     if c.status != "CANDIDATE":
         raise Conflict(f"candidate is {c.status}")

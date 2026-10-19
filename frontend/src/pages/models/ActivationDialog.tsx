@@ -16,13 +16,21 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
   const [termsNote, setTermsNote] = useState("");
   const [region, setRegion] = useState(route.region ?? "");
   const [evalRuns, setEvalRuns] = useState("");
+  const [recTraining, setRecTraining] = useState<"" | "yes" | "no">("");
+  const [recTrial, setRecTrial] = useState<"" | "yes" | "no">("");
   const activate = useActivateRoute(route.route_key);
   const paid = !route.effectively_free;
-  const restricted =
-    Boolean(route.terms_restriction) ||
+  // §23 "klaim provider bukan bukti": UNKNOWN training/trial terms limit the route to PUBLIC until the owner records
+  // their own reading of the provider terms (terms_record, stored on the decision).
+  const termsUnknown = (route.terms_unknown ?? []).length > 0;
+  const flagRestricted =
     route.identity_status === "UNVERIFIED" ||
     route.data_terms?.may_use_inputs_for_training === true ||
     route.data_terms?.trial_only_no_confidential === true;
+  const recordStarted = termsUnknown && (recTraining !== "" || recTrial !== "");
+  const recordComplete = termsUnknown && termsReviewed && recTraining !== "" && recTrial !== "" && termsNote.trim().length >= 10;
+  const recordClears = recordComplete && recTraining === "no" && recTrial === "no" && !flagRestricted;
+  const restricted = (Boolean(route.terms_restriction) && !recordClears) || flagRestricted;
   const decisionKind = mode === "APPROVED" ? "ROUTE_ACTIVATION" : "TRIAL";
   const evalRunIds = evalRuns.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
   const canSubmit =
@@ -30,7 +38,9 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
     classes.length > 0 &&
     (!paid || budgetId.trim().length > 0) &&
     (mode !== "APPROVED" || evalRunIds.length > 0) &&
-    (!route.region_restricted || region.trim().length >= 2);
+    (!route.region_restricted || region.trim().length >= 2) &&
+    (!recordStarted || recordComplete) &&
+    (!restricted || classes.every((c) => c === "PUBLIC"));
 
   const toggle = (c: string) => setClasses((cur) => (cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c]));
 
@@ -46,6 +56,9 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
         terms_reviewed: termsReviewed,
         terms_note: termsReviewed ? termsNote.trim() : "",
         region: region.trim() ? region.trim().toUpperCase() : null,
+        terms_record: recordComplete
+          ? { may_use_inputs_for_training: recTraining === "yes", trial_only_no_confidential: recTrial === "yes", note: termsNote.trim() }
+          : null,
         eval_run_ids: mode === "APPROVED" ? evalRunIds : null,
       },
       { onSuccess: onClose },
@@ -100,7 +113,7 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
             <div className="flex flex-wrap gap-3 text-sm">
               {DATA_CLASSES.map((c) => (
                 <label key={c} className="inline-flex items-center gap-1">
-                  <input type="checkbox" checked={classes.includes(c)} disabled={restricted && c !== "PUBLIC"} onChange={() => toggle(c)} />
+                  <input type="checkbox" checked={classes.includes(c)} disabled={restricted && c !== "PUBLIC" && !classes.includes(c)} onChange={() => toggle(c)} />
                   {c}
                 </label>
               ))}
@@ -133,6 +146,32 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
             <Field label="Catatan pemeriksaan terms" hint="Apa yang dibaca (retensi, pelatihan, trial); tersimpan pada keputusan.">
               <input className={inputClass} value={termsNote} onChange={(e) => setTermsNote(e.target.value)} />
             </Field>
+          )}
+          {termsUnknown && (
+            <fieldset className="rounded border border-line p-3">
+              <legend className="px-1 text-sm font-medium">Terms belum diketahui: catat bacaan Anda</legend>
+              <p className="mb-2 text-xs text-ink-3">
+                Katalog tidak menyatakan {(route.terms_unknown ?? []).join(", ")}. Klaim provider bukan bukti; tanpa catatan Anda rute ini
+                hanya untuk PUBLIC. Wajib: centang pemeriksaan terms di atas dan catatan minimal 10 karakter.
+              </p>
+              <Field label="Input dipakai untuk pelatihan model?">
+                <select aria-label="Input dipakai untuk pelatihan model" className={inputClass} value={recTraining} onChange={(e) => setRecTraining(e.target.value as "" | "yes" | "no")}>
+                  <option value="">Belum dicatat (UNKNOWN)</option>
+                  <option value="yes">Ya - hanya PUBLIC</option>
+                  <option value="no">Tidak</option>
+                </select>
+              </Field>
+              <Field label="Hanya trial / tanpa data rahasia?">
+                <select aria-label="Hanya trial tanpa data rahasia" className={inputClass} value={recTrial} onChange={(e) => setRecTrial(e.target.value as "" | "yes" | "no")}>
+                  <option value="">Belum dicatat (UNKNOWN)</option>
+                  <option value="yes">Ya - hanya PUBLIC</option>
+                  <option value="no">Tidak</option>
+                </select>
+              </Field>
+              {recordStarted && !recordComplete && (
+                <p className="mt-1 text-xs text-warn">Lengkapi kedua jawaban, centang pemeriksaan terms dan isi catatan (min 10 karakter).</p>
+              )}
+            </fieldset>
           )}
         </div>
         {activate.error && (

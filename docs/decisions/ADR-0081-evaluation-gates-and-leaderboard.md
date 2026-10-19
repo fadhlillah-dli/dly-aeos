@@ -81,3 +81,17 @@ from an evaluation result.
 * **Not available in this build (honest):** executable fixtures/graders for the held-out case definitions (each
   case needs an owner-authored fixture project + trusted suite, ADR-0060), an automatic case -> TaskSpec compiler,
   and therefore any real recorded experiment; run views say `fixtures: NOT_AVAILABLE_IN_BUILD`.
+
+### Review addendum 2026-10-19 (C5 review)
+
+* **Samples describe exactly one route configuration.** The collector refuses a task whose attempt began before
+  the run started, and refuses to record a run whose registered route changed after the start (also when it was
+  changed back: `config_changed_at` after the start) - `ROUTE_CONFIG_CHANGED`; such a run can only be finished
+  (CANCELLED, never evidence).
+* **No pooling across route configurations.** Leaderboard and topology entries are grouped by (suite,
+  configuration, route config hash, topology); runs of an earlier route configuration are listed
+  `EXCLUDED_STALE_CONFIGURATION` instead of being pooled into the current one. The environment fingerprint also
+  records the observed OpenCode version.
+* **Domain-first for cases and comparisons.** A failure (evidence/run/alert), case candidate or proposal bound
+  to a domain is visible only from that explicitly chosen domain - never from a session without an active domain
+  (NotFound, checked before any state is revealed).

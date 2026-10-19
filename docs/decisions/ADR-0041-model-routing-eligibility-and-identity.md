@@ -155,3 +155,18 @@ context 262144, tools, `expiration_date` 2026-10-31; 16 `:free` models in total)
   planning continues on it because the trusted acceptance test 1.31 requires that behaviour — blocking it is an
   owner decision. ARENA/COMPARATOR routes can be activated, but the broker serves WORKER routes only (protected
   path), so arena feasibility runs are reported `NOT_WIRED`. No live provider endpoint/terms were exercised.
+
+### Review addendum 2026-10-19 (C5 review)
+
+* **"Lolos evaluasi" (U-07).** APPROVED evidence additionally needs at least one accepted outcome per referenced run
+  (`NO_ACCEPTED_OUTCOME`); gate-passing runs with 0 accepted samples did not pass the evaluation. A run planned in
+  OFFICE is never evidence for the (PERSONAL-only) activation, so Office results never reach `eval_results`.
+* **Harness binding fails closed before a catalog refresh.** The hard filter compares the bound `harness_version`
+  with the OpenCode version observable now: a route activated while OpenCode was absent (nothing bound) or bound
+  to another version is ineligible until re-activated (the executor's `HARNESS_VERSION_DRIFT` remains the last
+  check; an engine that is not observable at all stays the executor's `ENGINE_MISSING`).
+* **Availability remedy is honest per provider.** For providers no catalog source observes in this build (e.g.
+  Gemini, local) the rejection says so instead of suggesting `aeos routes refresh`.
+* **Owner terms record from UI and CLI.** The route view lists `terms_unknown`; the activation dialog and
+  `aeos routes activate --inputs-used-for-training/--no-... --trial-only/--no-... --terms-note` record the
+  owner's reading (`terms_record`), so UNKNOWN terms can be lifted above PUBLIC only by that recorded review.

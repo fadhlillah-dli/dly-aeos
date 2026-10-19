@@ -194,6 +194,58 @@ describe("Models & Routes page", () => {
     expect(sent).toMatchObject({ mode: "APPROVED", eval_run_ids: ["run-1", "run-2"] });
   });
 
+  it("UNKNOWN data terms allow PUBLIC only until the owner records their own reading (§23)", async () => {
+    const unknownTerms = route({
+      route_key: "openrouter/poolside/laguna-s-2.1:free",
+      display_name: "Laguna S 2.1 Free",
+      pool: "ARENA",
+      data_terms: { training: "UNKNOWN", may_use_inputs_for_training: null },
+      allowed_data_classes: ["PUBLIC"],
+      terms_restriction: "data terms UNKNOWN (may_use_inputs_for_training): record the reviewed terms (terms_record) first",
+      terms_unknown: ["may_use_inputs_for_training"],
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? "GET", body: init?.body as string | undefined });
+        let body: unknown = {};
+        if (url.startsWith("/api/claude/status")) body = STATUS;
+        else if (url === "/api/routes") body = { ...ROUTES, items: [unknownTerms] };
+        else if (url.startsWith("/api/routes/")) body = { ...unknownTerms, config: DS_CONFIG, decisions: [], quota_states: [] };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByText("Laguna S 2.1 Free"));
+    const drawer = await screen.findByRole("dialog", { name: /Detail rute/ });
+    fireEvent.click(await within(drawer).findByRole("button", { name: /Aktifkan rute/ }));
+    const dialog = await screen.findByRole("dialog", { name: "Aktivasi rute" });
+    const internal = within(dialog).getByRole("checkbox", { name: "INTERNAL" });
+    expect(internal).toBeDisabled(); // UNKNOWN terms: PUBLIC only
+    expect(within(dialog).getByText(/Terms belum diketahui/)).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Alasan/ }), { target: { value: "arena trial setelah membaca terms" } });
+    fireEvent.change(within(dialog).getByRole("combobox", { name: "Input dipakai untuk pelatihan model" }), { target: { value: "no" } });
+    const submit = within(dialog).getByRole("button", { name: /Catat keputusan TRIAL/ });
+    expect(submit).toBeDisabled(); // a started record must be complete (both answers, terms review, note)
+    fireEvent.change(within(dialog).getByRole("combobox", { name: "Hanya trial tanpa data rahasia" }), { target: { value: "no" } });
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /membaca ulang harga dan data terms/ }));
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Catatan pemeriksaan terms/ }), {
+      target: { value: "Halaman provider: prompt tidak dipakai untuk pelatihan" },
+    });
+    expect(internal).not.toBeDisabled();
+    fireEvent.click(internal);
+    expect(submit).not.toBeDisabled();
+    fireEvent.click(submit);
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/activate") && c.method === "POST")).toBe(true));
+    const sent = JSON.parse(calls.find((c) => c.url.endsWith("/activate"))!.body!);
+    expect(sent).toMatchObject({
+      mode: "TRIAL",
+      terms_reviewed: true,
+      allowed_data_classes: ["PUBLIC", "INTERNAL"],
+      terms_record: { may_use_inputs_for_training: false, trial_only_no_confidential: false },
+    });
+  });
+
   it("shows a changed configuration as needing evaluation and an unwired arena route honestly", async () => {
     const changed = route({
       eval_summary: { state: "NEEDS_EVALUATION", roles: {}, stale_roles: ["feature-implementer"], note: "Konfigurasi berubah; hasil lama tidak diwariskan" },
