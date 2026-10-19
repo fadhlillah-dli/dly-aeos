@@ -56,10 +56,18 @@ Office archives on company-approved storage only.
 
 | Command | What it does |
 |---|---|
-| `aeos ops release build [--ref HEAD]` | `git archive` of a clean commit reachable from `main` → zip + provenance (commit, tree hash, artifact SHA-256, schema head, built_at, builder) |
+| `aeos ops release build [--ref HEAD]` | `git archive` of a clean commit reachable from `main` **that is accepted** (trusted provider-CI PASS for that exact commit, or an owner EXCEPTION decision) → zip + provenance (commit, tree hash, artifact SHA-256, schema head, acceptance basis, built_at, builder) + pinned UI bundle (`frontend/dist` zipped with its own SHA-256; its correspondence to the commit is labelled UNVERIFIED) |
+| `aeos ops release accept --commit <sha> --operator <admin> --reason "..."` | human-only EXCEPTION decision bound to one exact commit, used when trusted CI PASS is not available |
 | `aeos ops release list` | releases with integrity and ACTIVE/PREVIOUS role |
-| `aeos ops release promote <id> --operator <admin>` | decision → compatibility (migration head vs DB) → pre-promote backup + restore test → smoke test in a subprocess on a temp loopback port against a DB copy → live migration only if required (server stopped) → `ACTIVE.json` (previous kept) |
+| `aeos ops release promote <id> --operator <admin>` | decision (bound to artifact hash, UI hash, runtime-config hash) → compatibility (migration head vs DB) → pre-promote backup + restore test → smoke test in a subprocess on a temp loopback port against a DB copy (health, then functional: temporary admin in the copy, login, explicit PERSONAL, doctor RUNTIME run, capabilities, projects) → live migration only if required (server stopped) → `ACTIVE.json` (previous kept, config hash recorded) |
 | `aeos ops release rollback --operator <admin>` | pointer back to the previous release after the same checks; refused when the DB is ahead (restore the pre-promote backup first) |
+| `aeos serve [--release auto\|active\|checkout]` | `auto` (default) runs the ACTIVE release when one was promoted: artifact + UI hash verified, extracted tree compared byte-for-byte (planted files refused), `PYTHONPATH` = the release only, byte-code cache outside the release; refuses to start on any integrity failure. `checkout` runs the editable source tree and warns when a release is active. `--dev`/`--reload` always run the checkout and need a separate dev profile (`AEOS_DATA_DIR` + `AEOS_KEYRING_SERVICE`, set by `scripts/dev.*`) unless `--dev-with-real-credentials` |
+
+`GET /api/health` reports `controller.mode` (`release`/`checkout`), `release_id`, `commit`,
+`matches_active`; the doctor check `recovery.config_rollback` FAILS with
+`CONTROLLER_NOT_ACTIVE_RELEASE` when the running controller is not the ACTIVE release, and with
+`CONFIG_CHANGED_SINCE_PROMOTION` when the runtime config / policy snapshot hash differs from the one
+recorded at promotion.
 
 Any failure keeps the previous release active, raises a HIGH alert and is audited
 (§50 "Upgrade controller gagal"). Details: [runbook](runbooks/controller-upgrade-rollback.md).
@@ -169,6 +177,8 @@ Hash pinning (`--generate-hashes`) is a possible hardening step recorded in ADR-
   private repositories) are not proven on the real account.
 * Worker containment, egress control, secret broker, verifier independence, cancel and bypass tests
   must pass on this machine before workers are trusted.
-* The released controller artifact is a source archive; serving the UI from the artifact and
-  running the controller directly from the extracted release are NOT-PROVEN.
+* The released controller artifact is a source archive run with the checkout's virtual environment
+  (third-party packages are pinned by `requirements.lock`, not bundled). The UI bundle is pinned by
+  hash at build time, but that it was built from the released commit is UNVERIFIED. Releases built
+  before acceptance gating show acceptance UNKNOWN at promotion.
 * Backups are not encrypted by AEOS; encryption at rest/off-machine copies are owner decisions.
