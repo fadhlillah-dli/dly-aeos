@@ -619,7 +619,10 @@ def _fact_relation(e: rt.EdgeFact, comps: dict[str, ComponentReference], now: da
     }
 
 
-def component_relations(session: Session, component_id: str, *, domain: str | None) -> dict[str, Any]:
+def component_relations(session: Session, component_id: str, *, domain: str | None, page: int = 1,
+                        page_size: int = 200) -> dict[str, Any]:
+    """Relations of one component (§36/§38 API): backend-paginated over the combined list (outgoing first, in a
+    stable lens/relation order); ``outgoing``/``incoming`` are the split of the returned page."""
     comps = _visible_components(session, domain, include_tombstoned=True)
     if component_id not in comps:
         raise NotFound("component not found")
@@ -639,8 +642,16 @@ def component_relations(session: Session, component_id: str, *, domain: str | No
         if component_id not in (e.source_id, e.target_id) or e.source_id not in comps or e.target_id not in comps:
             continue
         (outgoing if e.source_id == component_id else incoming).append(_fact_relation(e, comps, now, checks))
-    return {"component_id": component_id, "outgoing": outgoing, "incoming": incoming,
-            "items": outgoing + incoming, "source": "ComponentRelation (DESIGN/CONFIG/OBSERVED) + run/ledger records",
+    page = max(1, page)
+    page_size = max(1, min(page_size, 500))
+    combined = [("out", v) for v in outgoing] + [("in", v) for v in incoming]
+    window = combined[(page - 1) * page_size:page * page_size]
+    out_page = [v for d, v in window if d == "out"]
+    in_page = [v for d, v in window if d == "in"]
+    return {"component_id": component_id, "outgoing": out_page, "incoming": in_page,
+            "items": out_page + in_page, "total": len(combined), "total_outgoing": len(outgoing),
+            "total_incoming": len(incoming), "page": page, "page_size": page_size,
+            "source": "ComponentRelation (DESIGN/CONFIG/OBSERVED) + run/ledger records",
             "checked_at": _iso(now), "mode": "DESIGN"}
 
 
@@ -956,7 +967,7 @@ def component_detail(session: Session, component_id: str, *, domain: str | None)
     usage, _edges, _runs = rt.collect(session, domain=domain, now=now)
     dims = dimension_values(comp, latest, now, state=state, basis=basis, usage_fact=usage.get(component_id),
                             write_enabled=component_id in write_enabled_components(session, domain))
-    rels = component_relations(session, component_id, domain=domain)
+    rels = component_relations(session, component_id, domain=domain, page_size=500)
     checks = latest_checks_for(session, component_id, domain)
     evals = rt.eval_runs(session, component_id, domain=domain)
     obs_hist = [o for o in history(session, component_id, limit=40) if _obs_visible(o, domain)]
