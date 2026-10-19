@@ -195,10 +195,14 @@ def test_connectivity_observations_never_claim_more_than_was_seen(settings, db, 
     ("recovery.publication_idempotency", "PUBLICATION_IDEMPOTENCY_TEST"),
     ("worker.contract", "WORKER_CONTRACT_TEST"),
 ])
-def test_mock_untrusted_or_office_evidence_never_proves_platform_readiness(settings, db, cid, kind):
+def test_mock_untrusted_or_office_evidence_never_proves_platform_readiness(settings, db, cid, kind, monkeypatch):
     """§50 'Mock ... tests ditampilkan' / 'Restore backup belum pernah diuji': only LIVE, trusted,
     non-OFFICE evidence turns these platform checks VERIFIED."""
     from aeos.models.evidence import EvidenceArtifact
+    from aeos.worker_runtime import opencode
+
+    monkeypatch.setattr(opencode, "opencode_status", lambda configured=None, refresh=False: {
+        "status": "INSTALLED", "version": "1.19.3", "binary": "opencode"})
 
     def add(**kw):
         db.add(EvidenceArtifact(kind=kind, origin="verifier", collector_identity="test", content_hash="sha256:x",
@@ -210,8 +214,29 @@ def test_mock_untrusted_or_office_evidence_never_proves_platform_readiness(setti
     add(trusted=True, mode="LIVE", domain="OFFICE")
     assert _check(cid, settings, db, base_runner()).status in ("MISSING", "UNKNOWN")
     # the recorded verdict counts, not the mere presence of a row (worker.contract reads inline.content.overall)
-    add(trusted=True, mode="LIVE", domain=None, inline={"content": {"overall": "PASS"}})
+    add(trusted=True, mode="LIVE", domain=None, inline={"content": {"overall": "PASS", "engine_version": "1.19.3"}})
     assert _check(cid, settings, db, base_runner()).status == "VERIFIED"
+
+
+def test_worker_contract_proves_only_the_engine_version_it_ran_against(settings, db, monkeypatch):
+    """§08 'engine/version': a PASS recorded for another OpenCode binary (or with the engine now missing) is
+    stale evidence, never VERIFIED."""
+    from aeos.models.evidence import EvidenceArtifact
+    from aeos.worker_runtime import opencode
+
+    installed = {"status": "INSTALLED", "version": "1.20.0", "binary": "opencode"}
+    monkeypatch.setattr(opencode, "opencode_status", lambda configured=None, refresh=False: dict(installed))
+    db.add(EvidenceArtifact(kind="WORKER_CONTRACT_TEST", origin="collector", collector_identity="test",
+                            content_hash="sha256:x", claim="contract", trusted=True, mode="LIVE", domain=None,
+                            inline={"content": {"overall": "PASS", "engine_version": "1.19.3"}}))
+    db.commit()
+    res = _check("worker.contract", settings, db, base_runner())
+    assert res.status == "UNKNOWN" and res.error_code == "WORKER_CONTRACT_STALE"
+    installed.update(status="MISSING", version=None)
+    res = _check("worker.contract", settings, db, base_runner())
+    assert res.status == "UNKNOWN" and res.error_code == "WORKER_CONTRACT_STALE"
+    installed.update(status="INSTALLED", version="1.19.3")
+    assert _check("worker.contract", settings, db, base_runner()).status == "VERIFIED"
 
 
 def test_worker_contract_evidence_that_failed_is_never_verified(settings, db):

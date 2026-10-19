@@ -178,5 +178,20 @@ def worker_contract(ctx: CheckContext) -> Outcome:
     if overall != "PASS":
         return Outcome("UNKNOWN", f"Uji kontrak worker {ev.id[:8]} tidak konklusif ({overall}); NOT-PROVEN.",
                        evidence=evidence, error_code="WORKER_CONTRACT_NOT_PROVEN", remedy=remedy)
+    # §08 "engine/version": a contract test proves the engine version it ran against, not a later binary.
+    recorded = str((content or {}).get("engine_version") or "")
+    try:
+        from aeos.worker_runtime import facade as worker
+
+        current = worker.opencode_status()
+    except Exception:  # worker runtime absent / probe error: the binding cannot be checked (never a pass)
+        current = {}
+    installed = str(current.get("version") or "") if str(current.get("status") or "").upper() == "INSTALLED" else ""
+    evidence.update(recorded_engine_version=recorded or None, installed_engine_version=installed or None)
+    if not recorded or not installed or recorded != installed:
+        return Outcome("UNKNOWN", f"Uji kontrak worker {ev.id[:8]} tercatat untuk OpenCode {recorded or 'UNKNOWN'}, "
+                       f"terpasang sekarang {installed or str(current.get('status') or 'UNKNOWN')}: bukti tidak berlaku "
+                       "untuk engine ini; NOT-PROVEN sampai uji kontrak dijalankan ulang.", evidence=evidence,
+                       error_code="WORKER_CONTRACT_STALE", remedy=remedy)
     return Outcome("VERIFIED", f"Uji kontrak engine worker {ev.id[:8]} lulus ({ev.created_at.isoformat()}); perilaku "
                    "model route nyata tetap NOT-PROVEN.", evidence=evidence)

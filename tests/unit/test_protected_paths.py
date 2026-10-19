@@ -69,6 +69,7 @@ def test_trust_relevant_controller_code_is_quarantined_for_self_build(path):
     "services/api/.env", ".env.production", "config/secrets/db.yaml", "charts/helm/values.yaml",
     "opencode.json", "opencode.jsonc", ".opencode/agent/x.md", "AGENTS.md", "CLAUDE.md", ".claude/settings.json",
     "azure-pipelines.yml", ".circleci/config.yml", ".gitlab-ci.yml", "bitbucket-pipelines.yml",
+    "policy/access.rego",  # §16 'policy ... restricted area' (the verifier quarantined it before the lists merged)
 ])
 def test_restricted_areas_of_any_managed_project_are_quarantined(path):
     """§16 Platform/DevSecOps: IaC/IAM/secret/deploy targets and §25 agent config are restricted areas."""

@@ -157,6 +157,21 @@ def test_evaluate_probe_never_passes_an_unreported_section():
     assert by["keyring_unreachable"] == "NOT_RUN" and by["docker_socket_absent"] == "NOT_RUN"
 
 
+def test_host_path_checks_rest_on_the_mount_table_not_only_on_probed_names():
+    """On a Windows host the probed host paths (C:\\Users\\...) never exist inside the Linux container, so 'not
+    visible by name' alone is no evidence: an extra host mount fails read_data_db / real_ssh_dir too, and an
+    unreadable mount table leaves them NOT_RUN (review 2026-10-19)."""
+    prof = container.profile_for("PERSONAL")
+    extra = {**compliant_probe(), "mounts": [*compliant_probe()["mounts"], {"point": "/host/appdata"}]}
+    by = {r["check"]: r["status"] for r in container.evaluate_probe(extra, profile=prof)}
+    assert by["read_data_db"] == "FAIL" and by["real_ssh_dir"] == "FAIL" and by["mounts_allowlisted"] == "FAIL"
+    blind = {**compliant_probe(), "mounts": []}
+    by = {r["check"]: r["status"] for r in container.evaluate_probe(blind, profile=prof)}
+    assert by["read_data_db"] == "NOT_RUN" and by["real_ssh_dir"] == "NOT_RUN"
+    by = {r["check"]: r["status"] for r in container.evaluate_probe(compliant_probe(), profile=prof)}
+    assert by["read_data_db"] == "PASS" and by["real_ssh_dir"] == "PASS"
+
+
 def test_office_profile_report_is_recorded_separately(docker, db):
     rep = containment_report("container", domain="OFFICE")
     assert rep["domain"] == "OFFICE" and rep["network"] == "aeos-worker-office"

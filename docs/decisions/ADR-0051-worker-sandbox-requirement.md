@@ -100,9 +100,12 @@ The master's minimum controls are hard rules, not risk the exception can buy awa
 6. **OFFICE profile** (§11): separate network, gateway, container user and per-domain data partition, and
    its own containment report. OFFICE stays BLOCKED until that report passes on the host - and the
    scheduler still requires the company authorisation (`OFFICE_DENIED`).
-7. **Controller integrity** (§09 Zone 1): every run fingerprints the trust-relevant files of the running
-   controller checkout (the protected-path list) before the worker starts and compares them afterwards; a
-   change fails + quarantines the run and raises a HIGH alert. Writes to the data-dir DB are not detectable
+7. **Controller integrity** (§09 Zone 1, "a worker cannot load its changes into the active controller"):
+   every run fingerprints the running controller checkout - the protected-path list plus everything the
+   controller loads (`backend/**`, the served `frontend/dist/**`, `scripts/**`, the `aeos`/`aeos.ps1`
+   launchers, `config/**`, `contracts/**`) - before the worker starts and compares it afterwards (both
+   outside any DB transaction); a change fails + quarantines the run and raises a HIGH alert (an owner edit
+   of the checkout during a run trips it too: fail closed). Writes to the data-dir DB are not detectable
    this way; they stay a stated residual risk of the process sandbox (the container never mounts the data
    dir). Combined with (1), OpenCode's own tools are the only file access a process-sandbox worker has.
 8. **Repository agent config** (§25): the executor refuses a worktree whose base commit carries
@@ -115,3 +118,10 @@ The master's minimum controls are hard rules, not risk the exception can buy awa
 Residual risk accepted by the owner under the process exception after this amendment: same OS user for
 OpenCode's own tools (bounded by `external_directory: deny`), no OS egress filter for the engine process
 itself (it talks only to the broker), and undetected direct writes to the data-dir DB.
+
+Review 2026-10-19 (same day): the worker's own report `.aeos/report.json` is exempt from the immediate
+out-of-scope stop (it is taken out of the candidate before the diff), so the blocker channel works when the
+engine writes it with its write tool; the managed-project `policy/**` quarantine of the verifier is kept in
+the shared list (§16 restricted area); the worker prompt revision also covers the baseline tool permissions
+and the report schema (§25 tool change = system change); `worker.contract` is VERIFIED only for the OpenCode
+version the contract test ran against (`WORKER_CONTRACT_STALE` otherwise).

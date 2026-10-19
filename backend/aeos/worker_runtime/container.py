@@ -430,9 +430,15 @@ def evaluate_probe(data: dict[str, Any], *, profile: Profile) -> list[dict[str, 
     out.append(_r("read_outside_worktree", None if outside is None or mounts_ok is None else outside and mounts_ok,
                   f"host probe file readable={hpd.get('outside_file')}, controller checkout visible="
                   f"{hpd.get('controller')}"))
-    out.append(_r("read_data_db", _denied(hp, ("db", "data_dir")),
-                  f"AEOS DB readable={hpd.get('db')}, data dir visible={hpd.get('data_dir')} (content never read)"))
-    out.append(_r("real_ssh_dir", _denied(hp, ("real_ssh",)), f"host ~/.ssh visible={hpd.get('real_ssh')}"))
+    # A host path probed by name proves little on a Windows host (a Windows path never exists inside the Linux
+    # container), so these checks also need the mount table to show no host mount besides worktree/config.
+    db_denied = _denied(hp, ("db", "data_dir"))
+    out.append(_r("read_data_db", None if db_denied is None or mounts_ok is None else db_denied and mounts_ok,
+                  f"AEOS DB readable={hpd.get('db')}, data dir visible={hpd.get('data_dir')} (content never read); "
+                  f"mounts allow-listed={mounts_ok}"))
+    ssh_denied = _denied(hp, ("real_ssh",))
+    out.append(_r("real_ssh_dir", None if ssh_denied is None or mounts_ok is None else ssh_denied and mounts_ok,
+                  f"host ~/.ssh visible={hpd.get('real_ssh')}; mounts allow-listed={mounts_ok}"))
     home = data.get("home") if isinstance(data.get("home"), dict) else None
     hd = home or {}
     out.append(_r("home_ssh_redirected", None if home is None or "home_ssh" not in data
