@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from aeos.verification import scope
 from tests.unit.test_verification_support import fake_secret
 
@@ -135,3 +137,48 @@ def test_binary_secret_scan_never_returns_the_value():
     assert token not in str(findings)
     assert scope.scan_binary_secrets("assets/y.bin", b"\x00\x01\x02 plain bytes") == []
     assert scope.scan_binary_secrets("tests/unit/test_core.py", token.encode()) == []  # same allow-list
+
+
+@pytest.mark.parametrize("path", [
+    "docs/architecture/DLY_AEOS_Master_Architecture_Final.md",  # U-23: the master is not a docs-only change
+    "AGENTS.md", "CLAUDE.md",
+    "backend/aeos/audit/service.py", "backend/aeos/events/service.py",  # §50 T2 #2.14
+    "backend/aeos/control_center/views.py", "backend/aeos/workforce/scheduler.py",
+    "backend/aeos/doctor/checks/delivery.py", "backend/aeos/worker_runtime/sandbox.py",  # §09 capability code
+    "backend/aeos/routing/service.py", "backend/aeos/cost/service.py",
+])
+def test_capability_audit_dashboard_and_master_paths_are_protected(path):
+    """A candidate that rewrites the master/agent instructions, the audit trail, the dashboard projections or
+    the code deciding its own capabilities is never accepted silently: FAIL outside its contract, QUARANTINED
+    (special review + human promotion) inside it — never an ordinary (docs-only) PASS."""
+    from aeos.worker_runtime import scope as runtime_scope
+
+    outside = scope.check_scope([path], allowed=["backend/aeos/feature/**"], forbidden=[], protected=PROTECTED)
+    assert outside.status == "FAIL", path
+    inside = scope.check_scope([path], allowed=["**"], forbidden=[], protected=PROTECTED)
+    assert inside.status == "QUARANTINED" and inside.quarantine_reason, path
+    # the runtime's first line of defence uses the same list
+    assert set(scope.PLATFORM_PROTECTED_PATHS) == set(runtime_scope.PLATFORM_PROTECTED_PATHS)
+
+
+@pytest.mark.parametrize("path,category", [
+    ("services/api/migrations/0003_add_col.py", "migration"), ("db/alembic/versions/x.py", "migration"),
+    ("sql/seed.sql", "migration"), ("api/openapi.yaml", "contract"), ("proto/user.proto", "contract"),
+    ("infra/main.tf", "infrastructure"), ("deploy/k8s/app.yaml", "infrastructure"),
+    ("deploy/helm/values.yaml", "infrastructure"), ("Dockerfile", "infrastructure"),
+    (".gitlab-ci.yml", "ci"), ("bitbucket-pipelines.yml", "ci"), ("config/feature_flags.json", "config_flags"),
+    ("requirements.lock", "dependency"), ("web/package-lock.json", "dependency"), ("svc/poetry.lock", "dependency"),
+    ("svc/uv.lock", "dependency"), ("app/.env.example", "config_flags"), ("svc/auth/login.py", "auth"),
+])
+def test_generic_product_layouts_are_high_impact_even_for_small_diffs(path, category):
+    """§31: routing/IAM/secrets/CI/migration/schema/flags/IaC/dependencies are high-impact in any repository,
+    not only in the AEOS layout."""
+    r = scope.check_scope([path], allowed=["**"], forbidden=[], protected=[])
+    assert r.to_dict()["impact"] == "HIGH", path
+    assert path in r.impact_categories.get(category, []), (path, r.impact_categories)
+
+
+def test_ordinary_code_is_not_high_impact():
+    r = scope.check_scope(["src/feature/calc.py", "tests/unit/test_calc.py"], allowed=["**"], forbidden=[],
+                          protected=[])
+    assert r.to_dict()["impact"] == "NORMAL" and r.impact_categories == {}

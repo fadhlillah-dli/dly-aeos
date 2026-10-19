@@ -265,6 +265,8 @@ def test_branch_protection_residual_risk(settings, db, secrets_memory, status, b
             return_value=Response(status, json=body))
         gh.get(f"https://api.github.com/repos/{slug}/rulesets").mock(return_value=Response(status, json=body))
         gh.get(f"https://api.github.com/repos/{slug}/rules/branches/main").mock(return_value=Response(200, json=[]))
+        gh.get(f"https://api.github.com/repos/{slug}/environments").mock(
+            return_value=Response(200, json={"total_count": 0, "environments": []}))
         res = check("delivery.branch_protection", _ctx(settings, db, r, functional=True))
         assert all(c.request.method == "GET" for c in gh.calls)
     assert res.status == "MISSING" and res.error_code == code

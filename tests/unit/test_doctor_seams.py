@@ -456,6 +456,8 @@ def test_prepare_pr_consumes_provider_capability_evidence(settings, db, secrets_
         gh.get(f"{GITHUB}/repos/{slug}/branches/main/protection").mock(return_value=Response(403, json=upgrade))
         gh.get(f"{GITHUB}/repos/{slug}/rulesets").mock(return_value=Response(403, json=upgrade))
         gh.get(f"{GITHUB}/repos/{slug}/rules/branches/main").mock(return_value=Response(200, json=[]))
+        gh.get(f"{GITHUB}/repos/{slug}/environments").mock(
+            return_value=Response(200, json={"total_count": 0, "environments": []}))
         caps = provider.check_capabilities(slug, token="t" * 40)
     provider.record_capability_evidence(db, portfolio.platform_project(db), caps)
     db.commit()

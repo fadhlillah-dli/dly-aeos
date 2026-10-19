@@ -164,18 +164,41 @@ def _fetch_key(secrets: Any, ref: str, purpose: str) -> str:
         raise ProxyError(403, "CREDENTIAL_DOMAIN", f"secret scope refused for {purpose}: {exc.code}") from exc
 
 
+def route_authorisation_problem(session: Any, route: ModelRoute) -> str | None:
+    """§23 "per request: only routes still allowed (hash-bound, unexpired decision, still free or budgeted)".
+
+    Re-checked on every proxied request, not only at admission: a grant can live for hours while the route's
+    configuration changes (e.g. the catalog shows a price), its TRIAL expires, its free period ends or the
+    owner revokes the approval. The decision lookup recomputes the route's *current* configuration hash."""
+    try:
+        from aeos.routing import facade as routing
+
+        return routing.route_use_problem(session, route)
+    except (ImportError, AttributeError):  # routing unavailable: the approval cannot be checked -> fail closed
+        return "routing module unavailable: route approval cannot be checked"
+
+
 def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: str | None = None) -> Upstream:
+    from aeos.broker.facade import SERVED_POOLS
     from aeos.secrets import facade as secrets
 
     route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
     if route is None:
         raise ProxyError(403, "ROUTE_UNKNOWN", "route in grant scope no longer exists")
-    if route.provider == "claude-native" or route.pool != "WORKER":
+    if route.provider == "claude-native" or route.pool == "SUPERVISOR":
         raise ProxyError(403, "ROUTE_NOT_WORKER", "route is not a worker route")
+    if route.pool not in SERVED_POOLS:
+        # ARENA/COMPARATOR/LOCAL/WATCHLIST have no controlled execution path through the broker yet
+        # (ADR-0106); routing refuses such tasks at admission, this is the boundary's second line.
+        raise ProxyError(403, "ROUTE_NOT_WORKER",
+                         f"route pool {route.pool} has no broker serving path (only {', '.join(SERVED_POOLS)})")
     if route.status not in {"APPROVED", "TRIAL"}:
         raise ProxyError(403, "ROUTE_NOT_APPROVED", f"route status {route.status}")
     if domain not in (route.eligible_domains or []):
         raise ProxyError(403, "ROUTE_DOMAIN", "route not eligible for this domain")
+    problem = route_authorisation_problem(session, route)
+    if problem:
+        raise ProxyError(403, "ROUTE_APPROVAL_INVALID", problem)
     cred_ref = (route.mode_params or {}).get("credential_ref")
     purpose = f"model proxy route {route_key}"
     if route.provider == "openrouter":

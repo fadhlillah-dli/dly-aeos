@@ -17,6 +17,7 @@ from tests.unit.test_verification_support import (
     FakeBridge,
     FakeWorkforce,
     bind_candidate,
+    claude_envelope,
     claude_result,
     fake_secret,
     install_doctor,
@@ -174,7 +175,8 @@ def test_prs_list_and_review_manual_result(personal_client: AuthedClient, db, wf
     assert r.status_code == 200
     rev = r.json()["review"]
     assert rev["status"] == "NEEDS_DECISION" and rev["verdict"] == "NOT-PROVEN"
-    r = personal_client.post(f"/api/reviews/{rev['id']}/manual-result", json={"structured": review_payload()})
+    r = personal_client.post(f"/api/reviews/{rev['id']}/manual-result",
+                             json={"structured": claude_envelope(review_payload())})
     assert r.status_code == 200, r.text
     assert r.json()["review"]["mode"] == "MANUAL_FALLBACK"
     assert r.json()["acceptance"]["acceptance_status"] == "ACCEPTED"

@@ -180,3 +180,22 @@ def test_collection_emits_dashboard_event(db):
     db.commit()
     views = [v for v in events.replay(db) if v.kind == "evidence.collected" and v.entity_id == ev.id]
     assert views and views[0].payload["trusted"] is False and views[0].source == "untrusted-input"
+
+
+def test_retention_policy_comes_from_the_catalog(db):
+    """§13 EvidenceArtifact retention policy: chosen from a catalog (default/legal-hold/short), stored on the
+    append-only row; an unknown policy is refused, never silently mapped."""
+    held = facade.collect_evidence(db, kind="NOTE", origin="collector", collector_identity="c", claim="hold",
+                                   content={"x": 1}, retention_policy="legal-hold")
+    plain = facade.collect_evidence(db, kind="NOTE", origin="collector", collector_identity="c", claim="plain")
+    db.commit()
+    assert held.retention_policy == "legal-hold" and plain.retention_policy == "default"
+    assert set(collector.RETENTION_POLICIES) == {"default", "legal-hold", "short"}
+    with pytest.raises(ValidationFailed) as e:
+        facade.collect_evidence(db, kind="NOTE", origin="collector", collector_identity="c", claim="x",
+                                retention_policy="delete-after-7d")
+    assert e.value.code == "EVIDENCE_RETENTION_INVALID"
+    with pytest.raises((IntegrityError, OperationalError)):  # still append-only: no retention job can rewrite it
+        db.execute(text("UPDATE evidence_artifacts SET retention_policy='short' WHERE id=:i"), {"i": held.id})
+        db.commit()
+    db.rollback()

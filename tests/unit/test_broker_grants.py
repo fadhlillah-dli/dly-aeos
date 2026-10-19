@@ -112,6 +112,44 @@ def test_request_cap_atomic_under_concurrency(settings):
         assert s.get(CapabilityGrant, gid).used_requests == 3
 
 
+def test_readiness_invalidation_keeps_running_grants_and_blocks_new_admissions(db, monkeypatch):
+    """§08 "an authorisation already valid for one run stays valid within its scope": when the Doctor marks
+    the route configuration STALE (``invalidate('config:routes')``), the running attempt keeps its grant
+    (the broker never consults readiness), while a NEW admission waits with CAPABILITY_NOT_READY."""
+    from aeos.workforce import scheduler
+    from tests.unit.test_workforce_support import (
+        FakeModules,
+        make_plan,
+        make_project,
+        make_route,
+        process_sandbox_exception,
+        seed_and_enable_implementer,
+    )
+
+    fakes = FakeModules().install(monkeypatch)
+    project = make_project(db)
+    plan, pv, specs = make_plan(db, project, [{"task_key": "a", "allowed_paths": ["src/**"]},
+                                              {"task_key": "b", "allowed_paths": ["docs/**"]}])
+    fakes.approved[plan.id] = pv.id
+    make_route(db)
+    fakes.route_key = "worker.test-free"
+    seed_and_enable_implementer(db)
+    process_sandbox_exception(db)
+    scheduler.ensure_executions(db, pv.id, actor="test", requested_by="owner")
+    scheduler.refresh_readiness(db, pv.id)
+    run = scheduler.acquire_lease(db, specs[0].id, actor="test")
+    raw, _g = broker.issue_grant(db, run_id=run.id, project_id=run.project_id, domain=run.domain, kind="MODEL_PROXY",
+                                 scope={"models": {"m": "worker.test-free"}}, ttl_seconds=600)
+    db.commit()
+    fakes.capability = "STALE"  # what CAN_RUN_WORKER reports after the doctor invalidated config:routes
+    scheduler.refresh_readiness(db, pv.id)
+    db.commit()
+    g = grants.authenticate(db, raw, kind="MODEL_PROXY")
+    assert g.active and g.run_id == run.id, "the running attempt's grant is untouched"
+    adm = scheduler.admission_check(db, specs[1].id)
+    assert not adm.admitted and "CAPABILITY_NOT_READY" in {c for c, _ in adm.waits}
+
+
 def test_usage_counters(db):
     _raw, g = _issue(db, max_tokens=1000, max_cost_usd=0.5)
     grants.add_usage(db, g.id, tokens=300, cost_usd=0.1)

@@ -146,6 +146,29 @@ def sync_pr(pr_id: str, principal: AdminPrincipal, domain: ActiveDomain, db: DB)
     return result
 
 
+class ObserveDeploymentIn(BaseModel):
+    project_id: str = Field(max_length=36)
+    environment: str = Field(pattern="^(staging|production)$")
+    sha: str = Field(min_length=7, max_length=64)
+
+
+@router.post("/api/delivery/targets/observe")
+def observe_target(body: ObserveDeploymentIn, principal: AdminPrincipal, domain: ActiveDomain,
+                   db: DB) -> dict[str, Any]:
+    """Read-only observation of an owner-registered deployment target (G6/G8). AEOS never deploys."""
+    from aeos.delivery import deployment
+
+    project = load_project(db, principal, body.project_id, domain=domain)
+    try:
+        result = deployment.observe(db, project.id, body.environment, body.sha, actor=principal.user.id)
+    except AeosError as exc:
+        audit_denied(db, principal, "delivery.target.observe", exc, target_type="project", target_id=project.id,
+                     project_id=project.id, domain=project.domain)
+        raise
+    db.commit()
+    return result
+
+
 class HandoffIn(BaseModel):
     artifact_hash: str | None = Field(default=None, max_length=80)
 

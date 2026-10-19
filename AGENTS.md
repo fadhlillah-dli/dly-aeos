@@ -52,7 +52,12 @@ Runtime state never lives in the repo: data dir is `%LOCALAPPDATA%\DLY-AEOS` (Wi
 Workers building DLY AEOS may propose changes but the patch is quarantined for special review if
 it touches: `policy/**`, `backend/aeos/policy/**`, `backend/aeos/verification/**`,
 `backend/aeos/broker/**`, `backend/aeos/identity/**`, `tests/acceptance/**`, `.github/workflows/**`,
-`install-manifest/**`, `backend/aeos/migrations/**`.
+`install-manifest/**`, `backend/aeos/migrations/**`, the master and agent instructions
+(`docs/architecture/**`, `AGENTS.md`, `CLAUDE.md` — U-23), the audit/event trail and dashboard
+projections (`backend/aeos/audit/**`, `backend/aeos/events/**`, `backend/aeos/control_center/**`), and the
+code that decides what a worker may do (`backend/aeos/workforce/**`, `backend/aeos/doctor/**`,
+`backend/aeos/worker_runtime/**`, `backend/aeos/routing/**`, `backend/aeos/cost/**`). The list lives in
+`aeos.verification.scope.PLATFORM_PROTECTED_PATHS` and `aeos.worker_runtime.scope.PLATFORM_PROTECTED_PATHS`.
 
 ## Engineering conventions
 

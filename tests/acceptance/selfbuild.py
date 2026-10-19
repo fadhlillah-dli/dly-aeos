@@ -164,12 +164,23 @@ def review(client: AuthedClient, run_id: str) -> dict[str, Any]:
     return r.json()
 
 
+def claude_code_envelope(structured: dict[str, Any], model: str = "claude-fable-5-1") -> dict[str, Any]:
+    """What `claude -p --output-format json` prints for the manual package: the result envelope whose
+    ``modelUsage`` proves which Claude model answered (§15 — a bare JSON object proves nothing)."""
+    import json
+
+    return {"type": "result", "subtype": "success", "is_error": False, "result": json.dumps(structured),
+            "structured_output": structured, "session_id": "manual-package-session", "duration_ms": 1200,
+            "modelUsage": {model: {"inputTokens": 1500, "outputTokens": 900}}}
+
+
 def manual_review(client: AuthedClient, run_id: str, structured: dict[str, Any] | None = None) -> dict[str, Any]:
     """§12 fallback (the path while the native bridge is not proven - the self-build world runs no Doctor
     capability test): the checkpoint package is run by the owner in official Claude Code and its JSON
-    result is submitted back."""
+    result envelope is submitted back."""
     waiting = review(client, run_id)["review"]
     assert waiting["status"] == "NEEDS_DECISION", waiting
-    r = client.post(f"/api/reviews/{waiting['id']}/manual-result", json={"structured": structured or review_output()})
+    r = client.post(f"/api/reviews/{waiting['id']}/manual-result",
+                    json={"structured": claude_code_envelope(structured or review_output())})
     assert r.status_code == 200, r.text
     return r.json()

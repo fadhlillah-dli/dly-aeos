@@ -12,7 +12,9 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 
-# AGENTS.md "Protected paths (self-build, §09)" — patches touching these are quarantined.
+# AGENTS.md "Protected paths (self-build, §09)" — patches touching these are quarantined. Kept in sync
+# with aeos.verification.scope.PLATFORM_PROTECTED_PATHS (the master and agent instructions, audit/events,
+# dashboard projections, scheduler, readiness, runtime, routing and cost code are protected too).
 PLATFORM_PROTECTED_PATHS: tuple[str, ...] = (
     "policy/**",
     "backend/aeos/policy/**",
@@ -23,6 +25,17 @@ PLATFORM_PROTECTED_PATHS: tuple[str, ...] = (
     ".github/workflows/**",
     "install-manifest/**",
     "backend/aeos/migrations/**",
+    "docs/architecture/**",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "backend/aeos/audit/**",
+    "backend/aeos/events/**",
+    "backend/aeos/control_center/**",
+    "backend/aeos/workforce/**",
+    "backend/aeos/doctor/**",
+    "backend/aeos/worker_runtime/**",
+    "backend/aeos/routing/**",
+    "backend/aeos/cost/**",
 )
 # §21/§31: trusted pipeline definitions of any project.
 GENERIC_PROTECTED_PATHS: tuple[str, ...] = (
