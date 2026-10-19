@@ -33,7 +33,13 @@ from aeos.models.planning import PlanVersion, TaskSpec
 from aeos.models.portfolio import Project
 from aeos.models.workforce import WorkerRun
 from aeos.verification.integration import call
-from aeos.verification.review import NON_REGRESSION_SCOPE, latest_review, security_review_required
+from aeos.verification.review import (
+    DEFAULT_REVIEW_MODEL,
+    NON_REGRESSION_SCOPE,
+    _model_policy_problem,
+    latest_review,
+    required_reviews,
+)
 from aeos.verification.verifier import current_config_hash, latest_report, report_refs, report_view
 
 log = logging.getLogger("aeos.verification.acceptance")
@@ -82,12 +88,17 @@ def static_allowed(task: TaskSpec) -> bool:
 
 
 def _verdict_problems(rec: ReviewRecord, label: str, *, artifact_hash: str, docs_only: bool,
-                      static_allowed: bool) -> list[str]:
+                      static_allowed: bool, policy: dict[str, Any] | None = None) -> list[str]:
     out: list[str] = []
     if rec.target_hash != artifact_hash:
         out.append(f"{label} is bound to a different artifact than the verified one")
     if rec.mode == "MOCK":
         out.append(f"a MOCK {label} can never produce acceptance")
+    # §15: only a review whose Claude model identity is proven (and allowed) counts — defence in depth for
+    # records written before the reviewer-identity rule or by another path.
+    identity = _model_policy_problem(policy or {}, rec.model_resolved, rec.model_requested or DEFAULT_REVIEW_MODEL)
+    if identity:
+        out.append(f"{label}: review model identity not proven ({identity})")
     if rec.verdict in ACCEPTABLE_VERDICTS:
         return out
     if rec.verdict == "PASS-STATIC":
@@ -96,6 +107,52 @@ def _verdict_problems(rec: ReviewRecord, label: str, *, artifact_hash: str, docs
                        "evidence")
         return out
     out.append(f"{label} verdict {rec.verdict} is not a pass")
+    return out
+
+
+def evidence_requirements_status(session: Session, task: TaskSpec, report: Any,
+                                 review: ReviewRecord | None) -> list[dict[str, str]]:
+    """§21 TaskSpec "evidence requirements": which requirement is met by which evidence.
+
+    Machine-checkable requirements (the compiled defaults) are MET/UNMET; acceptance refuses any UNMET one.
+    Free-text requirements the engine cannot interpret are REVIEWER_ATTESTED: they are part of the review
+    package and the reviewer's VERIFY section, and are listed as such (never shown as verified by code)."""
+    from aeos.verification.verifier import related_evidence
+
+    claims = list(((review.verify or {}) if review else {}).get("claims") or [])
+    statuses = [str(c.get("status") or "UNKNOWN") for c in claims if isinstance(c, dict)]
+    out: list[dict[str, str]] = []
+    for req in task.evidence_requirements or []:
+        text = req if isinstance(req, str) else str(req)
+        low = text.lower()
+        if text.strip().upper() in STATIC_EVIDENCE_MARKERS:
+            continue  # decided by static_allowed()
+        if "verifier" in low and ("report" in low or "test" in low):
+            ok = bool(report is not None and report.trusted and report.origin == "verifier")
+            out.append({"requirement": text, "status": "MET" if ok else "UNMET",
+                        "evidence": report.id if report is not None else "",
+                        "detail": "trusted verifier report" if ok else "no trusted verifier report"})
+        elif "diff" in low:
+            diff = related_evidence(session, report, "DIFF") if report is not None else None
+            out.append({"requirement": text, "status": "MET" if diff is not None else "UNMET",
+                        "evidence": diff.id if diff is not None else "",
+                        "detail": "verifier diff against the recorded base" if diff is not None
+                        else "no verifier DIFF evidence referenced by the report"})
+        elif "acceptance criteria" in low or "criteria" in low:
+            bad = [s for s in statuses if s in ("CONTRADICTED", "UNSUPPORTED")]
+            supported = statuses.count("SUPPORTED")
+            if bad:
+                status, detail = "UNMET", f"reviewer marked {len(bad)} claim(s) {'/'.join(sorted(set(bad)))}"
+            elif task.acceptance_criteria and supported == 0:
+                status, detail = "UNMET", "no acceptance criterion is mapped to SUPPORTED evidence in VERIFY"
+            else:
+                status, detail = "MET", f"{supported} SUPPORTED claim(s) for {len(task.acceptance_criteria or [])} " \
+                                        "criterion/criteria"
+            out.append({"requirement": text, "status": status, "evidence": review.id if review else "",
+                        "detail": detail})
+        else:
+            out.append({"requirement": text, "status": "REVIEWER_ATTESTED", "evidence": review.id if review else "",
+                        "detail": "free-text requirement: checked by the reviewer, not by code"})
     return out
 
 
@@ -130,10 +187,12 @@ def evaluate_acceptance(session: Session, run_id: str, *, actor: str = ENGINE_ID
         raise Blocked("verification did not establish the artifact identity", code="VERIFICATION_INCOMPLETE")
     review = _require_completed(latest_review(session, run.id), missing_code="REVIEW_REQUIRED",
                                 label="checkpoint review")
-    security = None
-    if security_review_required(task, view):
-        security = _require_completed(latest_review(session, run.id, reviewer="SECURITY"),
-                                      missing_code="SECURITY_REVIEW_REQUIRED", label="security review")
+    # §15/§16/§17: every specialist review the output or risk requires (security, a11y, privacy, SRE)
+    specialists: dict[str, ReviewRecord] = {}
+    for kind in required_reviews(session, task, view, report):
+        specialists[kind] = _require_completed(latest_review(session, run.id, reviewer=kind),
+                                               missing_code=f"{kind}_REVIEW_REQUIRED", label=f"{kind.lower()} review")
+    security = specialists.get("SECURITY")
 
     reasons: list[str] = []
     if view["status"] != "PASS":
@@ -147,12 +206,16 @@ def evaluate_acceptance(session: Session, run_id: str, *, actor: str = ENGINE_ID
     if run.base_commit and view.get("base_commit") and view["base_commit"] != run.base_commit:
         reasons.append("verification was made against another base commit than the run's recorded base")
     docs_only, static_ok = bool(view.get("docs_only")), static_allowed(task)
+    policy = dict(task.reviewer_policy or {})
     reasons += _verdict_problems(review, "review", artifact_hash=view["artifact_hash"], docs_only=docs_only,
-                                 static_allowed=static_ok)
-    if security is not None:
-        reasons += _verdict_problems(security, "security review", artifact_hash=view["artifact_hash"],
-                                     docs_only=docs_only, static_allowed=static_ok)
+                                 static_allowed=static_ok, policy=policy)
+    for kind, spec_rec in specialists.items():
+        reasons += _verdict_problems(spec_rec, f"{kind.lower()} review", artifact_hash=view["artifact_hash"],
+                                     docs_only=docs_only, static_allowed=static_ok, policy=policy)
     verdict = review.verdict
+    for req in evidence_requirements_status(session, task, report, review):
+        if req["status"] == "UNMET":
+            reasons.append(f"evidence requirement not met: {req['requirement']} ({req['detail']})")
     if view.get("impact") == "HIGH":
         # §31: high-impact changes need every non-regression dimension argued from evidence.
         for key, _question in NON_REGRESSION_SCOPE:
@@ -183,8 +246,8 @@ def evaluate_acceptance(session: Session, run_id: str, *, actor: str = ENGINE_ID
         verification_evidence_id=report.id, verifier_evidence_refs=refs[:100], review_record_id=review.id,
         security_review_id=security.id if security else None, review_verdict=verdict, acceptance_status=status,
         reasons=reasons, decided_by=actor[:64],
-        mode="LIVE" if report.mode == "LIVE" and review.mode != "MOCK" and (security is None or security.mode != "MOCK")
-        else "MOCK",
+        mode="LIVE" if report.mode == "LIVE" and review.mode != "MOCK" and all(
+            s.mode != "MOCK" for s in specialists.values()) else "MOCK",
     )
     if status == ACCEPTED:
         for prev in session.scalars(select(AcceptanceRecord).where(AcceptanceRecord.task_id == task.id,
@@ -206,7 +269,8 @@ def evaluate_acceptance(session: Session, run_id: str, *, actor: str = ENGINE_ID
                  result="SUCCESS", target_type="task", target_id=task.id, project_id=project.id, domain=project.domain,
                  reason="; ".join(reasons)[:500],
                  details={"acceptance_id": rec.id, "status": status, "run_id": run.id, "verdict": verdict,
-                          "artifact_hash": rec.artifact_hash, "head": rec.head_commit, "notes": notes})
+                          "artifact_hash": rec.artifact_hash, "head": rec.head_commit, "notes": notes,
+                          "specialist_reviews": {k: s.id for k, s in specialists.items()}})
     events.emit(session, source="verifier", kind="acceptance.decided", entity_type="acceptance", entity_id=rec.id,
                 entity_version=rec.artifact_hash, project_id=project.id, domain=project.domain, run_id=run.id,
                 attempt=run.attempt, mode=rec.mode, payload={"status": status, "task_id": task.id, "notes": notes})
@@ -244,8 +308,15 @@ def staleness(session: Session, rec: AcceptanceRecord) -> list[str]:
 
 
 def acceptance_view(session: Session, rec: AcceptanceRecord) -> dict[str, Any]:
+    from aeos.models.evidence import EvidenceArtifact
+
     stale = staleness(session, rec) if rec.acceptance_status == ACCEPTED else []
+    task = session.get(TaskSpec, rec.task_id)
+    report = session.get(EvidenceArtifact, rec.verification_evidence_id) if rec.verification_evidence_id else None
+    review = session.get(ReviewRecord, rec.review_record_id) if rec.review_record_id else None
+    requirements = evidence_requirements_status(session, task, report, review) if task is not None else []
     return {
+        "evidence_requirements": requirements,
         "id": rec.id, "task_id": rec.task_id, "run_id": rec.run_id, "project_id": rec.project_id,
         "domain": rec.domain, "acceptance_status": rec.acceptance_status, "artifact_hash": rec.artifact_hash,
         "base_commit": rec.base_commit, "head_commit": rec.head_commit, "config_hash": rec.config_hash,

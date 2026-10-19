@@ -59,6 +59,15 @@ def terms_eligibility(route: ModelRoute, *, data_classification: str) -> list[st
     return impl(route, data_classification=data_classification)
 
 
+def route_use_problem(session: Session, route: ModelRoute) -> str | None:
+    """Why *route* may not serve a request right now (None = allowed): its APPROVED/TRIAL status must
+    rest on an ACTIVE human decision bound to the CURRENT configuration hash, and a route that is not
+    free (any more) needs a valid budget decision. The broker re-checks this per request (§23)."""
+    from aeos.routing.service import route_use_problem as impl
+
+    return impl(session, route)
+
+
 def note_rate_limited(
     session: Session, *, provider: str, scope: str = "free-daily", retry_after_seconds: int | None = None,
     source: str = "observed-429",

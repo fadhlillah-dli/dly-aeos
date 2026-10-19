@@ -148,6 +148,41 @@ python -m pip install -r requirements.lock && python -m pip install --no-deps -e
 Review the diff (new packages are supply-chain changes) and commit it with the dependency change.
 Hash pinning (`--generate-hashes`) is a possible hardening step recorded in ADR-0093.
 
+A candidate that changes a manifest or lockfile is **high impact**: the verifier records a
+`DEPENDENCY_DIFF` evidence item (added / removed / upgraded packages; licences `UNKNOWN` = NOT-PROVEN)
+and — because the trusted suite runs with the controller's installed packages (recorded as
+`dependency_set_hash` on every verification) — a changed Python dependency set is NOT-PROVEN in
+isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106).
+
+## Delivery targets, gates and verifier honesty (ADR-0106)
+
+* **Release approvers (G7):** record the GitHub logins allowed to merge/release a project as a human
+  POLICY decision: `POST /api/decisions` with `kind=POLICY`, `target_type=release_approvers`,
+  `target_id=<project id>`, `auth_scope={"github_logins": ["<login>"]}`. Without it a human merge
+  is shown NOT_PROVEN; a merge by any other account is FAIL.
+* **Staging / production targets (G6/G8):** register a PERSONAL integration with
+  `provider=deployment-target`, `purpose=staging|production`, `root_id=https://<base url>` (optional
+  `config.health_path`, default `/health`). AEOS never deploys; `aeos delivery observe-target
+  <project> --environment staging --sha <commit>` performs one GET and records a RUNTIME_OBSERVATION
+  that is PASS only when the target reports the exact commit and healthy.
+* **Pipeline reference (§31):** set `config.gate_G1 ... gate_G5` on the project's `ci` integration
+  to exact CI job names (template: `blueprints/pipeline-reference.yaml`); otherwise CI jobs are
+  classified by name heuristics and the evidence says `NAME_HEURISTIC`.
+* **Database migrations of managed projects:** the verifier does not run upgrade/downgrade/restore
+  round-trips (`migration_rollback` NOT-PROVEN). Run them in the project's own pipeline with a
+  dedicated migration credential that is separate from the runtime credential, and keep the result
+  as CI evidence.
+* **Verifier isolation:** every VERIFICATION_REPORT states `verifier_isolation: WEAK` (same OS user,
+  no container/egress enforcement) until a sandboxed runner exists; the Gate panel shows it next to
+  the verifier status.
+* **Specialist reviews:** a UI change (or a frontend/UX role) needs the A11Y reviewer, data/AI roles or
+  CONFIDENTIAL/RESTRICTED data the PRIVACY reviewer, CI/IaC or operations roles the SRE reviewer. Request
+  them with "Review wajib (spesialis)" on the run list, `POST /api/runs/<run>/reviews/batch`, or
+  `aeos verify review <run> --kind A11Y|PRIVACY|SRE|SECURITY`. A run has a review budget
+  (`reviewer_policy.max_reviews_per_run`, default 12; quota waits do not count).
+* **OFFICE delivery:** NOT_APPLICABLE — no Bitbucket push/PR/Pipelines adapter and no company
+  authorisation; `prepare-pr` refuses with `OFFICE_DELIVERY_NOT_AVAILABLE`.
+
 ## Worker runtime (sandbox, engine contract, attribution)
 
 | Command / setting | What it does |

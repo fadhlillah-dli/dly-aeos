@@ -45,7 +45,14 @@ PLATFORM_PROTECTED_PATHS: tuple[str, ...] = (
     "backend/aeos/core/**",
     "backend/aeos/secrets/**",
     "backend/aeos/claude_bridge/**",
-    # §25 prompt/instruction/tool changes are system changes
+    # the audit/event trail and the dashboard projections (§50 T2 #2.14: a candidate must not be able to
+    # change what the active audit/dashboard/controller reports about it)
+    "backend/aeos/audit/**",
+    "backend/aeos/events/**",
+    "backend/aeos/control_center/**",
+    # the authoritative design (U-23: the master changes only with traceable approval) and §25
+    # prompt/instruction/tool changes are system changes
+    "docs/architecture/**",
     "backend/aeos/planning/prompts.py",
     "AGENTS.md",
     "CLAUDE.md",

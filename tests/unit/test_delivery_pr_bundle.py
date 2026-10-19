@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import respx
+from sqlalchemy import select
 
 from aeos.core.errors import Blocked, Conflict, PolicyDenied
 from aeos.delivery import gates, pr_bundle, provider, sync
@@ -25,6 +26,7 @@ from tests.unit.test_verification_support import (
     make_candidate,
     make_review,
     make_world,
+    record_release_approvers,
     record_verification,
     remove_module,
     requires_git,
@@ -135,8 +137,74 @@ def test_prepare_pr_happy_path_uses_broker_only(db, accepted, monkeypatch):
     assert pr.initial_base_sha == "b" * 40 and out["merge_authority"] == "HUMAN_ONLY"
     bundle_ev = db.get(EvidenceArtifact, pr.bundle_evidence_id)
     assert bundle_ev.kind == "PR_BUNDLE"
+    # §01/§03/§32: the governance handoff ran after acceptance and before the PR, bound to the artifact
+    handoff = db.scalar(select(EvidenceArtifact).where(EvidenceArtifact.kind == "GOVERNANCE_HANDOFF",
+                                                       EvidenceArtifact.task_id == w.task.id))
+    assert handoff is not None and handoff.environment["artifact_hash"] == acc.artifact_hash
+    assert handoff.created_at <= bundle_ev.created_at
+    body = broker.calls[1][1]["body"]
+    assert "### Governance handoff" in body and "NOT_CONFIGURED" in body
+    assert any("governance handoff NOT_CONFIGURED" in n for n in out["notes"])
     with pytest.raises(Conflict):
         pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
+
+
+def test_prepare_pr_refused_when_governance_blocks(db, accepted, monkeypatch):
+    from aeos.delivery import governance
+
+    w, acc = accepted
+    install_doctor(monkeypatch, "READY")
+    _allow(monkeypatch)
+    broker = FakeBroker(monkeypatch, head_sha=acc.head_commit)
+
+    class Blocking:
+        name, version, contract_version = "office-harness", "1", governance.CONTRACT_VERSION
+
+        def handoff(self, payload):
+            return governance.GovernanceHandoffOutput(contract_version=governance.CONTRACT_VERSION, adapter=self.name,
+                                                      adapter_version="1", result="BLOCKED",
+                                                      input_hash=payload.digest(), reasons=("downstream review",))
+
+    monkeypatch.setattr(governance, "_adapter", Blocking())
+    with pytest.raises(Blocked) as e:
+        pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
+    assert e.value.code == "GOVERNANCE_REJECTED" and e.value.code in pr_bundle.PERSISTED_FAILURE_CODES
+    assert broker.calls == [], "nothing is pushed or opened after a blocking governance result"
+
+
+def test_delivery_grants_respect_the_taskspec_capability_scope():
+    """§21 "capability scope/expiry": the branch prefix and the declared operations bound the delivery grants."""
+    from aeos.models.planning import TaskSpec
+    from aeos.models.workforce import WorkerRun
+
+    def spec(scope):
+        return TaskSpec(task_key="t", title="t", goal="g", project_id="p", plan_version_id="pv", spec_hash="s",
+                        capability_scope=scope)
+
+    run = WorkerRun(project_id="p", domain="PERSONAL", branch="aeos/t1-attempt-1")
+    assert pr_bundle.capability_scope_problems(spec({"branch_prefix": "aeos/", "operations": []}), run) == []
+    assert pr_bundle.capability_scope_problems(
+        spec({"branch_prefix": "aeos/", "operations": ["push_branch", "create_pr", "tests.run"]}), run) == []
+    probs = pr_bundle.capability_scope_problems(spec({"branch_prefix": "aeos/feature-x/", "operations": ["edit"]}), run)
+    assert any("branch prefix" in p for p in probs) and any("push_branch, create_pr" in p for p in probs)
+
+
+def test_prepare_pr_refused_outside_the_capability_scope(db, accepted, monkeypatch):
+    w, acc = accepted
+    install_doctor(monkeypatch, "READY")
+    _allow(monkeypatch)
+    broker = FakeBroker(monkeypatch, head_sha=acc.head_commit)
+    monkeypatch.setattr(pr_bundle, "capability_scope_problems", lambda task, run: ["outside branch prefix"])
+    with pytest.raises(PolicyDenied) as e:
+        pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
+    assert e.value.code == "CAPABILITY_SCOPE_DENIED" and broker.calls == []
+
+
+def test_prepare_pr_for_office_is_refused_honestly(db, wf, monkeypatch):
+    w = make_world(db, domain="OFFICE", is_platform=False, project_key="office-app")
+    with pytest.raises(Blocked) as e:
+        pr_bundle.prepare_pr(db, w.task.id, actor_user_id="owner-id")
+    assert e.value.code == "OFFICE_DELIVERY_NOT_AVAILABLE" and "Bitbucket" in e.value.message
 
 
 @pytest.mark.parametrize("state,accepted_run", [("BLOCKED", "same"), ("READY", "same"), ("DONE", "other")])
@@ -313,13 +381,20 @@ def test_sync_human_merge_records_ci_on_merge_commit(respx_mock, db, accepted, s
     ok = {"check_runs": [{"name": "backend (ubuntu-latest)", "status": "completed", "conclusion": "success"}]}
     respx_mock.get(f"{API}/repos/{REPO}/commits/{acc.head_commit}/check-runs").respond(200, json=ok)
     respx_mock.get(f"{API}/repos/{REPO}/commits/{'e' * 40}/check-runs").respond(200, json=ok)
+    # the merge commit's own file list (vs its first parent): what the merge brought into main
+    respx_mock.get(f"{API}/repos/{REPO}/commits/{'e' * 40}").respond(200, json={
+        "sha": "e" * 40, "parents": [{"sha": "b" * 40}, {"sha": acc.head_commit}],
+        "files": [{"filename": "backend/extra.py", "status": "added"}]})
+    record_release_approvers(db, w.project, ["fadhlillah-dli"])
     out = sync.sync_pull_request(db, pr.id, actor="owner")
     db.commit()
     assert pr.state == "MERGED" and pr.merged_by_type == "User"
     assert len(out["ci_evidence_ids"]) == 2
     assert acc.acceptance_status == "ACCEPTED"
+    assert pr.details["merge_delta"]["files"] == ["backend/extra.py"]
     g = {x["gate"]: x for x in gates.compute_gates(db, w.task.id)["gates"]}
     assert g["G5"]["status"] == "PASS" and g["G7"]["status"] == "PASS"
+    assert all(c.request.method == "GET" for c in respx_mock.calls)
 
 
 def test_sync_without_credential_is_failed_not_assumed(db, accepted, secrets_memory):

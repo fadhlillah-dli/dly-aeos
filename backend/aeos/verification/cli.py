@@ -93,14 +93,15 @@ def pending_cmd(limit: int = typer.Option(1, min=1, max=20, help="Maximum runs t
 def review_cmd(
     run_id: str = typer.Argument(..., help="Verified WorkerRun id"),
     security: bool = typer.Option(False, "--security", help="Request the separate Security Reviewer session"),
+    kind: str = typer.Option(None, "--kind", help="Specialist review kind: SECURITY | A11Y | PRIVACY | SRE"),
 ) -> None:
     """Request the Claude checkpoint review (official claude binary; manual package fallback)."""
     from aeos.verification import review
 
+    reviewer = (kind or ("SECURITY" if security else "FEATURE")).upper()
     try:
         with _session() as s:
-            outcome = review.review_run(s, run_id, actor=ACTOR, actor_type="cli",
-                                        reviewer="SECURITY" if security else "FEATURE")
+            outcome = review.review_run(s, run_id, actor=ACTOR, actor_type="cli", reviewer=reviewer)
             view = review.review_view(outcome.review)
             acc = outcome.acceptance
             notes = outcome.notes

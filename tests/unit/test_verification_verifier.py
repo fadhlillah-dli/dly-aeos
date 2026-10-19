@@ -18,6 +18,7 @@ from aeos.core.errors import Conflict
 from aeos.models.evidence import EvidenceArtifact
 from aeos.verification import collector, suite, verifier
 from tests.unit.test_verification_support import (
+    BASE_FILES,
     BUGGY_CALC,
     GIT,
     FakeWorkforce,
@@ -71,8 +72,124 @@ def test_clean_change_passes_with_trusted_e2_report(db, settings, controller, wf
     test_reports = db.scalars(select(EvidenceArtifact).where(EvidenceArtifact.kind == "TEST_REPORT")).all()
     trusted = [e for e in test_reports if collector.evidence_summary(e).get("suite") == "trusted-acceptance"
                or "Trusted" in e.claim]
-    assert trusted and all(e.evidence_level == "E2" and e.trusted for e in trusted)
+    # §34 E4: the fully passing trusted suite references the current protected suite by hash + test ids
+    assert trusted and all(e.evidence_level == "E4" and e.trusted for e in trusted)
+    ref = trusted[0].environment["protected_suite"]
+    assert ref["suite_hash"] == out.suite_hash and "tests.acceptance.test_calc::test_add" in ref["test_ids"]
     assert ("update_run", {"run_id": world.run.id, "actor": "verifier", "verifier_status": "PASS"}) in wf.calls
+    # §20: the runner is not an isolated sandbox; every report says so (never presented as isolated)
+    view = verifier.report_view(report)
+    assert view["verifier_isolation"] == "WEAK"
+    assert any("NOT-PROVEN" in r and "isolation WEAK" in r for r in collector.read_json(report)["residual_risks"])
+    assert view["dependency_set_hash"] == verifier.dependency_set()["hash"]
+
+
+def test_e4_reference_to_a_changed_protected_suite_is_capped_at_e2(db, settings, controller, wf):
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    trusted = next(e for e in db.scalars(select(EvidenceArtifact).where(EvidenceArtifact.kind == "TEST_REPORT"))
+                   if "Trusted" in e.claim)
+    assert trusted.evidence_level == "E4"
+    # the grader changes afterwards: the same reference is no longer the current protected suite
+    (controller / "tests" / "acceptance" / "test_new.py").write_text("def test_new():\n    assert True\n",
+                                                                       encoding="utf-8")
+    again = collector.collect_evidence(db, kind="TEST_REPORT", origin="verifier", collector_identity="v",
+                                       claim="stale reference", content={"status": "PASS"}, evidence_level="E4",
+                                       project_id=world.project.id, environment=dict(trusted.environment))
+    assert again.evidence_level == "E2" and out.status == "PASS"
+
+
+def test_negative_tests_required_for_api_changes(db, settings, controller, wf):
+    """§16/§22/§31 G2: an API change under verifier_policy.negative_tests_required needs an added test that
+    asserts a refusal/error path; otherwise the verification is NOT_PROVEN (never PASS)."""
+    policy = {**FAST, "negative_tests_required": True}
+    world = make_world(db, verifier_policy=policy)
+    router = "def get_item(i):\n    if i < 0:\n        raise ValueError('bad')\n    return i\n"
+    cand, base, head = make_candidate(settings, world, head_files={"backend/api/router.py": router})
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.status == "NOT_PROVEN" and out.checks["negative_tests"].status == "NOT_PROVEN"
+    assert any("negative tests required" in n for n in out.not_proven)
+    world2 = make_world(db, project_key="neg-ok", verifier_policy=policy)
+    cand2, base2, head2 = make_candidate(settings, world2, name="run-2", head_files={
+        "backend/api/router.py": router,
+        "tests/unit/test_router.py": ("import pytest\n\nfrom api.router import get_item\n\n\n"
+                                      "def test_negative_id_is_refused():\n    with pytest.raises(ValueError):\n"
+                                      "        get_item(-1)\n")})
+    bind_candidate(db, world2, cand2, base2, head2)
+    out2 = _verify(db, world2)
+    assert out2.checks["negative_tests"].status == "PASS", out2.checks["negative_tests"]
+    assert out2.status == "PASS", (out2.reasons, out2.not_proven)
+
+
+def test_dependency_change_records_a_diff_and_is_not_proven_in_isolation(db, settings, controller, wf):
+    """§16 supply chain + §09 Zone 2: a changed Python dependency set yields DEPENDENCY_DIFF evidence with
+    licences UNKNOWN, and the run is NOT_PROVEN because the suite ran on the controller's dependencies."""
+    world = make_world(db, verifier_policy=FAST, allowed_paths=["backend/**", "tests/unit/**", "requirements.lock"])
+    base_files = {**BASE_FILES, "requirements.lock": "fastapi==0.115.0\nhttpx==0.27.0\n"}
+    cand, base, head = make_candidate(settings, world, base_files=base_files, head_files={
+        "requirements.lock": "fastapi==0.116.1\nhttpx==0.27.0\nleftpad==1.0.0\n"})
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.status == "NOT_PROVEN" and any("Zone 2" in n for n in out.not_proven)
+    ev = db.scalar(select(EvidenceArtifact).where(EvidenceArtifact.kind == "DEPENDENCY_DIFF"))
+    data = collector.read_json(ev)
+    assert data["licenses"] == "UNKNOWN" and data["auto_upgrade"] is False
+    assert data["packages"]["added"] == ["leftpad==1.0.0"]
+    assert data["packages"]["upgraded"] == ["fastapi==0.115.0 -> fastapi==0.116.1"]
+
+
+def test_frontend_and_migration_changes_are_stated_not_proven(db, settings, controller, wf):
+    world = make_world(db, verifier_policy=FAST,
+                       allowed_paths=["backend/**", "tests/unit/**", "frontend/**"])
+    cand, base, head = make_candidate(settings, world, head_files={
+        "frontend/src/App.tsx": "export const App = () => null;\n",
+        "backend/migrations/versions/0009_x.py": "revision = '0009'\n"})
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.checks["frontend_tests"].status == "NOT_PROVEN"
+    assert out.checks["migration_rollback"].status == "NOT_PROVEN"
+    assert out.status == "PASS"  # visible NOT-PROVEN items, but nothing the trusted suite failed
+    report = db.get(EvidenceArtifact, out.report_evidence_id)
+    nps = collector.read_json(report)["not_proven"]
+    assert any("frontend" in n for n in nps) and any("migration" in n for n in nps)
+
+
+def test_baseline_on_the_base_commit_classifies_regressions_and_is_cached(db, settings, controller, wf):
+    """§34 "baseline set before the change": with verifier_policy.baseline the trusted suite is measured on the
+    recorded base commit (once per base + suite hash); a head failure that passed on the base is a regression."""
+    world = make_world(db, verifier_policy={**FAST, "baseline": True})
+    cand, base, head = make_candidate(settings, world, head_files={"backend/calc.py": BUGGY_CALC})
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.status == "FAIL" and out.checks["baseline"].status == "FAIL"
+    assert set(out.checks["baseline"].details["regressions"]) == {"tests.acceptance.test_calc::test_add",
+                                                                  "tests.acceptance.test_calc::test_add_negative"}
+    assert any("critical regression" in r for r in out.reasons)
+    base_reports = [e for e in db.scalars(select(EvidenceArtifact).where(EvidenceArtifact.kind == "TEST_REPORT"))
+                    if (e.environment or {}).get("baseline_commit") == base]
+    assert len(base_reports) == 1 and collector.read_json(base_reports[0])["status"] == "PASS"
+    # a second attempt on the same base reuses the measured baseline (no second baseline run)
+    world2 = make_world(db, project_key=world.project.project_key + "-2", verifier_policy={**FAST, "baseline": True})
+    world2.project = world.project
+    world2.run.project_id = world.project.id
+    world2.run.workspace_ref, world2.run.base_commit, world2.run.head_commit = str(cand), base, head
+    db.commit()
+    out2 = _verify(db, world2)
+    assert out2.checks["baseline"].details["cached_evidence_id"] == base_reports[0].id
+
+
+def test_taskspec_suites_select_candidate_test_dirs(db, settings, controller, wf):
+    world = make_world(db, verifier_policy={**FAST, "suites": ["acceptance"]})
+    cand, base, head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.checks["candidate_tests"].status == "NOT_RUN"
+    assert "suites: acceptance" in out.checks["candidate_tests"].summary
+    assert out.checks["trusted_suite"].status == "PASS"  # the trusted suite always runs
+    assert not any("integration-marked" in n for n in out.not_proven)
 
 
 def test_trusted_suite_used_even_when_candidate_rewrites_its_own_copy(db, settings, controller, wf):
