@@ -178,6 +178,13 @@ def test_generic_product_layouts_are_high_impact_even_for_small_diffs(path, cate
     assert path in r.impact_categories.get(category, []), (path, r.impact_categories)
 
 
+@pytest.mark.parametrize("path", ["web/src/components/Button.tsx", "app/views/Login.vue", "ui/Card.svelte",
+                                  "static/css/site.css", "client/src/App.jsx"])
+def test_ui_output_in_any_layout_is_the_frontend_category(path):
+    """§17: UI output activates the a11y/UX specialist in product repositories too, not only under frontend/."""
+    assert path in scope.impact_categories([path]).get("frontend", [])
+
+
 def test_ordinary_code_is_not_high_impact():
     r = scope.check_scope(["src/feature/calc.py", "tests/unit/test_calc.py"], allowed=["**"], forbidden=[],
                           protected=[])

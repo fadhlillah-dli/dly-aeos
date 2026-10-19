@@ -59,3 +59,20 @@ a real staging target, a sandboxed runner).
   a real staging/production target and its health endpoint; a container/VM runner and a separate broker
   identity; migration round-trips for managed projects' own toolchains; licence/SBOM data.
 * Verifier v2 changes the config hash: accepted tasks are re-verified once after the upgrade (§14).
+
+## Review addendum (C6 review)
+
+* Review budget counts only sessions that produced (or failed to produce) a reviewer answer
+  (COMPLETED/FAILED rows, native or manual import). A WAITING_QUOTA refusal or a pending manual
+  package never consumes it, so re-requesting while the Max quota is exhausted cannot strand a run.
+  `review_all` keeps sessions that already ran when a later kind is refused or the run leaves REVIEW
+  (the reason is in the notes); an exhausted budget names the owner's remedy (new attempt, or a higher
+  `max_reviews_per_run` in a new PlanVersion).
+* G7 release approvers come only from a HUMAN POLICY decision recorded in the project's own domain.
+* The a11y/UX specialist also activates for UI files in any layout (`*.tsx`, `*.jsx`, `*.vue`,
+  `*.svelte`, `*.css`, `*.scss`), not only under `frontend/`.
+* The Control Center shows what the backend states: verifier isolation WEAK, the required specialist
+  reviews and why, the governance handoff status, and OFFICE delivery NOT_APPLICABLE with its reason; the
+  run list offers one action that requests every required review (`POST /api/runs/{id}/reviews/batch`).
+* §09 "a worker cannot raise its own capability" stays a residual risk under the process sandbox (a
+  worker can still write the controller DB directly); it needs the container sandbox (ADR-0051).

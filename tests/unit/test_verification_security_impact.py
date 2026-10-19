@@ -182,3 +182,39 @@ def test_review_all_requests_each_open_kind_within_the_review_budget(db, wf, mon
     with pytest.raises(Blocked) as e:
         review.review_run(db, w.run.id, actor="owner", reviewer="A11Y")
     assert e.value.code == "REVIEW_BUDGET_EXHAUSTED"
+
+
+def test_quota_waits_do_not_consume_the_review_budget(db, wf, monkeypatch):
+    """§19 review budget counts review sessions that ran: a WAITING_QUOTA refusal (no review happened) can be
+    re-requested without stranding the run in REVIEW with REVIEW_BUDGET_EXHAUSTED."""
+    install_doctor(monkeypatch)
+    w = make_world(db)
+    _task_with(db, w, "quota-budget", reviewer_policy={"max_reviews_per_run": 1})
+    record_verification(db, w, changed=["backend/extra.py"])
+    FakeBridge(result=claude_result(None, ok=False, quota=True)).install(monkeypatch)
+    for _ in range(3):
+        assert review.review_run(db, w.run.id, actor="owner").review.status == "WAITING_QUOTA"
+    db.commit()
+    assert review.review_required_kinds(db, w.run.id)["budget"]["used"] == 0
+    FakeBridge(result=claude_result(review_payload())).install(monkeypatch)
+    out = review.review_run(db, w.run.id, actor="owner")
+    assert out.review.status == "COMPLETED"
+    with pytest.raises(Blocked) as e:
+        review.review_run(db, w.run.id, actor="owner")
+    assert e.value.code == "REVIEW_BUDGET_EXHAUSTED"
+
+
+def test_review_batch_keeps_completed_sessions_when_a_later_kind_is_refused(db, wf, monkeypatch):
+    """A batch never throws away a review session that already ran (the router commits what it returns):
+    a later refusal stops the batch and is reported in the notes."""
+    install_doctor(monkeypatch)
+    FakeBridge(result=claude_result(review_payload())).install(monkeypatch)
+    w = make_world(db)
+    _task_with(db, w, "batch-stop", role_key="frontend-engineer", reviewer_policy={"max_reviews_per_run": 1})
+    record_verification(db, w, changed=["frontend/src/pages/x.tsx"])
+    outs = review.review_all(db, w.run.id, actor="owner", kinds=["FEATURE", "A11Y", "FEATURE"])
+    assert [o.review.reviewer_kind for o in outs] == ["CLAUDE"]
+    assert outs[0].review.status == "COMPLETED"
+    assert any("REVIEW_BUDGET_EXHAUSTED" in n and "A11Y" in n for n in outs[0].notes)
+    with pytest.raises(Blocked):  # nothing ran yet -> the refusal itself is the answer
+        review.review_all(db, w.run.id, actor="owner", kinds=["A11Y"])

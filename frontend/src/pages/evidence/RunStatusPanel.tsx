@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ShieldAlert, ShieldCheck, Sparkles } from "lucide-react";
+import { ShieldAlert, ShieldCheck, Sparkles, Users } from "lucide-react";
 import { useAuth } from "../../auth/AuthContext";
 import { Button, EmptyState, ErrorBox, Loading, Mono, Notice, Table } from "../../components/ui";
 import { shortHash } from "../../lib/format";
@@ -18,6 +18,8 @@ export function RunStatusPanel({ onSelectTask }: { onSelectTask: (taskId: string
   const verify = useMutation({ mutationFn: (runId: string) => evidenceApi.verify(runId), onSettled: refresh });
   const review = useMutation({ mutationFn: (runId: string) => evidenceApi.review(runId), onSettled: refresh });
   const security = useMutation({ mutationFn: (runId: string) => evidenceApi.review(runId, "SECURITY"), onSettled: refresh });
+  // §17/§19: feature review + every specialist the change requires (a11y/UX, privacy/data, SRE, security)
+  const batch = useMutation({ mutationFn: (runId: string) => evidenceApi.reviewBatch(runId), onSettled: refresh });
 
   if (q.isLoading) return <Loading />;
   if (q.error) return <ErrorBox error={q.error} />;
@@ -28,7 +30,17 @@ export function RunStatusPanel({ onSelectTask }: { onSelectTask: (taskId: string
         Status dipisah per sumber: laporan worker hanyalah klaim; hanya verifier independen yang menjalankan suite tepercaya;
         verdict reviewer bukan penerimaan; merge tetap tindakan manusia.
       </Notice>
-      <ErrorBox error={verify.error ?? review.error ?? security.error} />
+      <ErrorBox error={verify.error ?? review.error ?? security.error ?? batch.error} />
+      {batch.data && (
+        <Notice tone={batch.data.notes.length ? "warn" : "info"}>
+          {batch.data.reviews.length} sesi review diminta (berurutan, dalam anggaran review run).
+          {batch.data.notes.map((n) => (
+            <span key={n} className="block">
+              {n}
+            </span>
+          ))}
+        </Notice>
+      )}
       {rows.length === 0 ? (
         <EmptyState title="Belum ada run worker di domain ini">
           Run muncul setelah scheduler menjalankan task dari rencana yang disetujui (<Mono>aeos work …</Mono>).
@@ -102,6 +114,15 @@ export function RunStatusPanel({ onSelectTask }: { onSelectTask: (taskId: string
                         onClick={() => security.mutate(r.run_id)}
                       >
                         <ShieldAlert className="h-3.5 w-3.5" aria-hidden /> Review keamanan
+                      </Button>
+                      <Button
+                        className="text-xs"
+                        disabled={r.verifier.status !== "PASS"}
+                        title="Semua review yang diwajibkan perubahan ini: feature + spesialis (aksesibilitas/UX, privasi/data, SRE, keamanan) — sesi terpisah, dalam anggaran review run (§17, §19)"
+                        busy={batch.isPending && batch.variables === r.run_id}
+                        onClick={() => batch.mutate(r.run_id)}
+                      >
+                        <Users className="h-3.5 w-3.5" aria-hidden /> Review wajib (spesialis)
                       </Button>
                     </>
                   )}

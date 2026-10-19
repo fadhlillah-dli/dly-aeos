@@ -106,7 +106,8 @@ IMPACT_CATEGORIES: dict[str, tuple[str, ...]] = {
                        "**/Dockerfile*", "**/docker-compose*.y*ml"),
     "ci": (".github/**", ".gitlab-ci.yml", "bitbucket-pipelines.yml", "azure-pipelines.yml", ".circleci/**",
            "Jenkinsfile"),
-    "frontend": ("frontend/**",),
+    # UI output in any layout (§17: the a11y/UX specialist activates by output, not by the AEOS folder name)
+    "frontend": ("frontend/**", "**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte", "**/*.css", "**/*.scss"),
     "config_flags": ("config/**", "**/*flags*", "**/feature-flags/**", "**/.env*", "**/settings*.py"),
     "instructions": ("AGENTS.md", "CLAUDE.md", "**/AGENTS.md", "**/CLAUDE.md", "**/.claude/**", "**/hooks/**",
                      "docs/architecture/**"),

@@ -132,6 +132,31 @@ def test_g7_merge_by_an_unauthorised_human_fails(db, wf, monkeypatch):
     assert g["G7"]["status"] == "FAIL" and "tidak berwenang" in g["G7"]["summary"]
 
 
+@pytest.mark.parametrize("actor_kind,domain", [("HUMAN_RECORDED", "PERSONAL"), ("AGENT", "PERSONAL"),
+                                               ("HUMAN", "OFFICE")])
+def test_release_approvers_need_a_human_decision_of_the_projects_domain(db, wf, monkeypatch, actor_kind, domain):
+    """G7 approver list = human-only AUTH: an owner-recorded/agent row, or a decision filed under the other
+    domain for this project id, never authorises a release approver (fail closed -> NOT_PROVEN)."""
+    from aeos.models.decisions import Decision
+
+    w = make_world(db, repo="o/r")
+    install_planning(monkeypatch, w.version)
+    report = record_verification(db, w)
+    make_review(db, w, report)
+    acc = acceptance.evaluate_acceptance(db, w.run.id)
+    db.add(Decision(kind="POLICY", actor_user_id="owner", actor_kind=actor_kind, target_type="release_approvers",
+                    target_id=w.project.id, domain=domain, auth_scope={"github_logins": ["fadhlillah-dli"]},
+                    rationale="not a valid approver record"))
+    db.add(PullRequestRecord(project_id=w.project.id, domain="PERSONAL", task_id=w.task.id, run_id=w.run.id,
+                             acceptance_id=acc.id, repo_full_name="o/r", number=9, head_ref="aeos/t1", base_ref="main",
+                             accepted_head_sha=HEAD, observed_head_sha=HEAD, bundle_hash="sha256:b", state="MERGED",
+                             merged=True, merged_by_login="fadhlillah-dli", merged_by_type="User",
+                             merge_commit_sha="m" * 40))
+    db.commit()
+    assert gates.release_approvers(db, w.project) == ([], None)
+    assert _by(gates.compute_gates(db, w.task.id))["G7"]["status"] == "NOT_PROVEN"
+
+
 def test_g5_fails_when_the_merge_brings_protected_paths_beyond_the_verified_change(db, wf, monkeypatch):
     w = make_world(db, repo="o/r")
     install_planning(monkeypatch, w.version)
