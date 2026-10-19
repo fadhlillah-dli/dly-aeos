@@ -267,9 +267,12 @@ def test_rollback_refused_when_database_is_ahead(settings, git_repo, db, operato
 
 def test_no_http_route_for_promote_or_rollback(app, admin_client):
     # app.routes nests included routers (_IncludedRouter has no .path): read the real route table.
-    paths = " ".join(app.openapi()["paths"])
+    all_paths = list(app.openapi()["paths"])
+    paths = " ".join(all_paths)
     assert "/api/ops/releases" in paths  # the table is really populated
-    assert "promote" not in paths and "rollback" not in paths and "/accept" not in paths
+    assert "promote" not in paths and "rollback" not in paths
+    # release acceptance is CLI-only too (other modules' /accept routes, e.g. memory items, are unrelated)
+    assert [p for p in all_paths if p.startswith("/api/ops") and "accept" in p] == []
     assert admin_client.post("/api/ops/releases/x/promote").status_code in (404, 405)
     assert admin_client.get("/api/ops/releases").json()["notice"].startswith("Promote/rollback hanya lewat CLI")
 
