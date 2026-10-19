@@ -27,6 +27,9 @@ from aeos.models.planning import Plan, PlanVersion, TaskSpec
 from aeos.models.portfolio import Project, RepositoryReference
 from aeos.publisher.providers.base import OpContext, OpResult, ProviderError, ProviderTimeout
 
+# LEGACY layout (pre-schema keys such as ``product``/``security``/``needs_rfc``). The planning service rejects it
+# (schema_errors), so no approved version can carry it; the renderer still tolerates it. Tests about the real
+# §27/§28 seam use ``schema_sample_content()`` below, which passes the plan-content schema.
 SAMPLE_CONTENT: dict[str, Any] = {
     "product": {"name": "Contoh App", "vision": "Tugas tercatat rapi", "objectives": ["Catat tugas", "Lacak selesai"]},
     "summary": "Aplikasi contoh untuk mencatat tugas harian.",
@@ -54,6 +57,119 @@ SAMPLE_CONTENT: dict[str, Any] = {
     "security": {"authn": "Password Argon2id", "threats": ["Credential stuffing"]},
     "testing": {"strategy": "Unit + integration oleh verifier independen", "levels": ["unit", "integration"]},
 }
+
+
+def schema_task(key: str, feature: str, *, risk_class: str = "R1", deps: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "key": key, "feature_key": feature, "title": f"Task {key}", "goal": f"Implement {key}",
+        "role_key": "feature-implementer", "input_artifacts": [], "expected_outputs": ["code", "tests"],
+        "acceptance_criteria": [f"{key} works"], "depends_on": deps or [], "allowed_paths": [f"src/{key.lower()}/**"],
+        "forbidden_paths": [], "tools_allowed": [], "egress_allowed": [],
+        "capability_scope": {"operations": [], "paths": [], "notes": ""}, "capability_ttl_seconds": 0,
+        "data_classification": "INTERNAL",
+        "model_route_policy": {"pool": "WORKER", "requires_tools": True, "min_context_tokens": 0, "notes": ""},
+        "reviewer_policy": {"required": True, "reviewer_role": "", "checkpoint": ""},
+        "verifier_policy": {"required": True, "suites": [], "negative_tests_required": True},
+        "limits": {"max_attempts": 2, "timeout_seconds": 1800, "max_output_tokens": 16000},
+        "stop_conditions": [], "evidence_requirements": [], "risk_class": risk_class, "artifact_schema_version": "1",
+    }
+
+
+def schema_sample_content(name: str = "Contoh App") -> dict[str, Any]:
+    """A realistic plan that PASSES ``planning.service.schema_errors('plan_content', ...)`` (schema v1)."""
+    from aeos.planning import contracts
+
+    c = contracts.empty_plan_content(name)
+    c["product_home"].update({
+        "summary": "Aplikasi untuk mencatat tugas harian.", "product_owner": "Fadhlillah", "engineering_lead": "UNKNOWN",
+        "tech_lead": "Fadhlillah", "repository": "owner/contoh", "issue_tracker": "GitHub Issues owner/contoh",
+        "service": "contoh-api", "criticality": "LOW", "stack": ["Python", "FastAPI", "React"],
+        "quick_links": ["https://example.invalid/runbook"], "current_development": "MVP pencatatan tugas",
+        "active_features": ["F1"], "open_risks": ["R1"], "sdlc_lifecycle": "Discovery → MVP",
+        "governance_links": ["Decision registry AEOS"]})
+    c["overview"].update({
+        "overview": "Contoh App mencatat dan melacak tugas harian.", "vision": "Tugas tercatat rapi",
+        "objectives": ["Catat tugas", "Lacak selesai"], "scope_in": ["Pencatatan tugas"], "scope_out": ["Aplikasi mobile"],
+        "team_ownership": "Satu pemilik produk dan satu engineer.", "stakeholders": ["Pemilik (pengguna tunggal)"],
+        "roadmap": ["M1: MVP pencatatan"], "system_inventory": ["contoh-api", "contoh-spa"],
+        "data_overview": "Data tugas milik satu pengguna."})
+    c["milestones"] = [{"key": "M1", "title": "MVP", "exit_evidence": "Semua AC terbukti oleh verifier", "order": 1}]
+    c["features"] = [
+        {"key": "F1", "title": "Kelola tugas", "requirement": "CRUD tugas", "priority": "P1",
+         "acceptance": ["User dapat membuat tugas", "User dapat menandai selesai"], "depends_on": [], "milestone": "M1"},
+        {"key": "F2", "title": "Login", "requirement": "Login lokal", "priority": "P1",
+         "acceptance": ["User login dengan password"], "depends_on": ["F1"], "milestone": "M1"},
+    ]
+    c["requirements"] = [{
+        "feature_key": "F1", "title": "PRD Kelola tugas", "overview": "Pengguna mengelola daftar tugasnya.",
+        "problem": "Tugas tercecer di banyak tempat.", "background": "Pengguna memakai catatan kertas.",
+        "goals": ["Semua tugas di satu tempat"], "non_goals": ["Kolaborasi tim"],
+        "business_requirements": ["Tidak ada biaya langganan"], "functional_requirements": ["Buat/ubah/hapus tugas"],
+        "non_functional_requirements": ["Respons < 300 ms"], "user_stories": ["Sebagai pengguna saya mencatat tugas"],
+        "acceptance_criteria": ["Tugas tersimpan setelah reload"], "user_impact": "Pengguna tidak kehilangan tugas.",
+        "dependencies": ["SQLite lokal"], "assumptions": ["Satu pengguna"], "risks": ["Kehilangan data lokal"],
+        "success_metrics": ["Tugas dibuat per minggu"], "rollout_considerations": "Rilis lokal bertahap.",
+        "related_work": ["RFC: Penyimpanan tugas lokal"]}]
+    c["architecture"]["overview"].update({
+        "context": "Satu API dan satu SPA.", "high_level_architecture": "SPA memanggil REST API lokal.",
+        "component_architecture": ["API — REST", "SPA — UI"], "data_architecture": "SQLite satu file.",
+        "data_flow": "SPA → API → SQLite.", "external_integrations": ["GitHub"], "api_landscape": ["/api/tasks"],
+        "infrastructure": "Laptop pengguna.", "security_architecture": "Auth lokal Argon2id.",
+        "principles": ["Local-first"], "decisions": ["Gunakan SQLite"]})
+    c["architecture"]["diagrams"] = [{"key": "context", "title": "Context", "kind": "context",
+                                      "mermaid": "flowchart TD\n  U[User] --> A[API]",
+                                      "verification_source": "contract API"}]
+    sp = c["security_privacy"]
+    sp["overview"].update({"ownership": "Fadhlillah", "authn_authz": "Password Argon2id; satu peran",
+                           "encryption": "TLS lokal", "secrets": "OS keychain", "logging_monitoring": "Audit log lokal",
+                           "controls": ["CSRF", "Rate limit login"]})
+    sp["initial_risks"] = [{"key": "R1", "title": "Kebocoran data", "description": "File DB tersalin",
+                            "likelihood": "LOW", "impact": "HIGH", "mitigation": "Enkripsi disk",
+                            "residual_risk": "Rendah setelah enkripsi", "owner": "Fadhlillah"}]
+    sp["threat_model"].update({"assets": ["Data tugas"], "actors": ["Pencuri laptop"], "trust_boundaries": ["Browser"],
+                               "entry_points": ["/api/login"],
+                               "threats": [{"key": "T-1", "threat": "Credential stuffing",
+                                            "scenario": "Tebak password berulang", "mitigation": "Rate limit"}]})
+    sp["data_inventory"] = [{"data_type": "Tugas", "classification": "INTERNAL", "owner": "Fadhlillah",
+                             "storage": "SQLite", "access": "Pemilik", "retention": "Sampai dihapus",
+                             "disposal": "Hapus file DB"}]
+    sp["open_questions"] = ["Perlu backup terenkripsi?"]
+    c["development_baseline"].update({
+        "guidelines": ["Ruff bersih"], "coding_standards": ["PEP 8"], "secure_coding": ["Tanpa eval"],
+        "branching": "trunk + aeos/*", "pr_review": "Satu reviewer", "dependency_management": "pip-tools",
+        "dev_environment": "Python 3.12", "secrets_handling": "Tidak di repo", "ci_cd_requirements": ["pytest"]})
+    c["testing"]["test_plans"] = [{
+        "key": "TP1", "title": "Kelola tugas", "feature_keys": ["F1"], "overview": "Uji CRUD tugas.",
+        "objectives": ["AC F1 terbukti"], "scope": "API + SPA",
+        "test_strategy": {"approach": "Risk-based", "levels": ["unit", "integration"], "types": ["functional"],
+                          "environments": ["lokal"], "data": "Data sintetis", "tools": ["pytest"]},
+        "scenarios": [{"key": "S1", "title": "Buat tugas", "type": "functional", "steps": ["POST /api/tasks"],
+                       "expected_result": "201 Created", "acceptance_criteria_refs": ["AC1"]},
+                      {"key": "S2", "title": "Uji penerimaan", "type": "uat", "steps": ["Pemilik membuat tugas"],
+                       "expected_result": "Tugas tampil", "acceptance_criteria_refs": []}],
+        "acceptance_criteria": ["Tugas tersimpan setelah reload"], "exit_criteria": ["Semua skenario lulus di verifier"],
+        "defect_management": "Defect sebagai GitHub issue", "evidence_requirements": ["Laporan verifier"]}]
+    c["release"]["release_plans"] = [{
+        "key": "REL1", "version": "1.0.0", "title": "MVP", "overview": "Rilis pertama.", "scope": "F1 dan F2",
+        "features": ["F1", "F2"], "enhancements": [], "fixes": [], "breaking_changes": [],
+        "related_requirements": ["PRD F1"], "known_issues": ["Belum ada sinkronisasi"], "risks": ["Data lokal saja"],
+        "release_notes": {"summary": "MVP pencatatan tugas", "highlights": ["CRUD tugas"], "upgrade_notes": "Tidak ada",
+                          "known_limitations": ["Satu pengguna"]},
+        "deployment": "Install lokal", "migration": "Tidak ada", "rollback": "Install versi sebelumnya",
+        "production_readiness": ["Backup diuji"], "post_release_validation": ["Smoke test lokal"]}]
+    c["operations"].update({
+        "overview": "Aplikasi lokal satu pengguna.", "ownership": "Fadhlillah", "dependencies": ["SQLite"],
+        "criticality": "LOW", "sli_slo_proposals": [{"indicator": "Availability lokal", "objective": "99%",
+                                                    "rationale": "Pemakaian pribadi"}],
+        "runbooks": [{"key": "restart", "title": "Restart", "purpose": "Pulihkan server lokal yang macet"}],
+        "monitoring": ["Jumlah error 5xx"], "logging": "Log aplikasi lokal 14 hari", "alerting": ["5xx > 5/menit"],
+        "backup": {"scope": "File SQLite", "frequency": "Harian", "retention": "7 hari",
+                   "restore_procedure": "Salin file backup"},
+        "maintenance": ["Vacuum SQLite bulanan"]})
+    c["tasks"] = [schema_task("T1", "F1"), schema_task("T2", "F2", risk_class="R3", deps=["T1"])]
+    c["assumptions"] = [{"statement": "Satu pengguna", "source": "brief"}]
+    c["unknowns"] = [{"statement": "Kebutuhan sinkronisasi", "impact": "arsitektur"}]
+    return c
 
 
 def make_project(db: Session, *, domain: str = "PERSONAL", name: str = "Contoh App", key: str | None = None,

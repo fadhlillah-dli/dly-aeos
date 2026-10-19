@@ -34,6 +34,7 @@ from aeos.core.errors import Blocked, ValidationFailed
 from aeos.core.hashing import sha256_text
 from aeos.core.redaction import register_secret
 from aeos.core.timeutil import UTC, utcnow
+from aeos.publisher import human_sections
 from aeos.publisher.providers.base import (
     DEFAULT_TIMEOUT,
     Inspection,
@@ -435,7 +436,16 @@ class GoogleDriveDocsProvider:
                 if ctx.existing_revision else "revision baseline unknown — cannot prove no human edit",
                 expected_revision=ctx.existing_revision, observed_revision=observed,
                 current_text=docs_plain_text(current)[:100_000])
-        _text, reqs = markdown_to_docs_requests(ctx.payload.get("markdown", ""))
+        # HUMAN_GOVERNED content written in the doc (sign-off, approval ...) is carried into the new body; if it
+        # cannot be located the update is refused — never a blind whole-body replacement (§28, §29).
+        current_text = docs_plain_text(current)
+        try:
+            markdown, kept = human_sections.preserve(ctx.payload.get("markdown", ""), current_text,
+                                                     ctx.payload.get("human_guard"))
+        except human_sections.HumanContentUnlocatable as exc:
+            raise ProviderConflict(str(exc), expected_revision=ctx.existing_revision, observed_revision=observed,
+                                   current_text=current_text[:100_000]) from exc
+        _text, reqs = markdown_to_docs_requests(markdown)
         end = _body_end(current)
         requests: list[dict[str, Any]] = []
         if end - 1 > 1:
@@ -454,7 +464,8 @@ class GoogleDriveDocsProvider:
         return OpResult(external_id=doc_id, external_url=f"https://docs.google.com/document/d/{doc_id}/edit",
                         external_revision=new_rev, kind="doc",
                         response={"replies": len(data.get("replies") or []), "mode": "docs-batchUpdate",
-                                  "images_not_updated": "![" in ctx.payload.get("markdown", "")})
+                                  "images_not_updated": "![" in ctx.payload.get("markdown", ""),
+                                  "human_sections_kept": {t: len(v) for t, v in kept.items()}})
 
     # -- reconciliation (find by marker, never by title)
     def find_by_marker(self, project_id: str, logical_id: str) -> list[dict[str, Any]]:
@@ -487,7 +498,12 @@ class GoogleDriveDocsProvider:
         observed = current.get("revisionId")
         if observed == ctx.existing_revision:
             return None  # our update did not apply → safe to retry
-        expected_text, _ = markdown_to_docs_requests(ctx.payload.get("markdown", ""))
+        try:  # the update we may have written carried the human sections it found: compare against the same
+            markdown, _kept = human_sections.preserve(ctx.payload.get("markdown", ""), docs_plain_text(current),
+                                                      ctx.payload.get("human_guard"))
+        except human_sections.HumanContentUnlocatable:
+            markdown = ctx.payload.get("markdown", "")
+        expected_text, _ = markdown_to_docs_requests(markdown)
         if docs_plain_text(current).strip() == expected_text.strip():
             return OpResult(external_id=ctx.existing_external_id or "", external_revision=observed, kind="doc",
                             response={"reconciled": True})

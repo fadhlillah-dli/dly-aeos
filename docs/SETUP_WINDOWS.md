@@ -165,17 +165,23 @@ with its own budget configuration and outage/fallback tests (§07 step 6).
 
 **GitHub** (repository, issues, PRs):
 
+Primary path — a **fine-grained personal access token** (least privilege, §07 step 7): github.com →
+Settings → Developer settings → Fine-grained tokens → *Only select repositories*: the platform
+repository; permissions Issues: read/write, Pull requests: read/write, Contents: read/write (the git broker
+pushes `aeos/*` task branches with this token; protect `main` with a branch rule so merge stays human),
+Metadata: read; no Workflows or Administration permission.
+Store it (paste at the hidden prompt twice, nothing is echoed):
+
 ```powershell
-winget install --id GitHub.cli -e
-gh auth login
-gh auth token | .\.venv\Scripts\aeos.exe secrets set personal/github --stdin
+.\.venv\Scripts\aeos.exe secrets set personal/github
 ```
 
-Pipe into `aeos.exe` directly: Windows PowerShell does not forward pipeline input through the
-`.\aeos.ps1` launcher to the program it starts, so `gh auth token | .\aeos.ps1 ...` would receive
-no token.
-
-Prefer a fine-grained token limited to the repositories AEOS may touch. Merge stays human-only.
+Alternative (broader): `gh auth login` then
+`gh auth token | .\.venv\Scripts\aeos.exe secrets set personal/github --stdin`. That classic OAuth token
+normally carries `repo`/`workflow` over all your repositories; `aeos doctor --functional` shows it as a
+residual risk on `adapter.github_token`. Pipe into `aeos.exe` directly: Windows PowerShell does not
+forward pipeline input through the `.\aeos.ps1` launcher to the program it starts, so
+`gh auth token | .\aeos.ps1 ...` would receive no token. Merge stays human-only.
 
 **Google Drive + Docs** (official project documents, folder per project name):
 

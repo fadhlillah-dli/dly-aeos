@@ -34,6 +34,12 @@ class RenderIn(BaseModel):
     render_visuals: bool = True
 
 
+class ReleaseCandidateIn(BaseModel):
+    plan_version_id: str = Field(min_length=1, max_length=64)
+    release: str = Field(min_length=1, max_length=64, description="Release plan version/key, e.g. 1.0.0")
+    commit: str = Field(min_length=40, max_length=64, description="Full git SHA of the release candidate")
+
+
 class AcknowledgeIn(BaseModel):
     note: str = Field(default="", max_length=2000)
 
@@ -87,7 +93,21 @@ def product1_structure(_principal: CurrentPrincipal) -> dict[str, Any]:
 def visuals_status(_principal: CurrentPrincipal) -> dict[str, Any]:
     info = visuals.detect_mmdc()
     return {"mmdc": info.__dict__, "kinds": visuals.VISUAL_KINDS, "screenshot": "NOT_PROVEN",
+            "screenshot_note": "AEOS has no approved browser-automation collector in this build; documents reference "
+                               "trusted SCREENSHOT EvidenceArtifacts (commit recorded) only when a collector stored them",
+            "diagram_verification": "UNVERIFIED unless checked: ERD vs platform schema, trust boundaries vs threat model",
             "evidence_role": visuals.EVIDENCE_ROLE}
+
+
+@router.get("/api/projects/{project_id}/documents/screenshots")
+def screenshot_manifest(project_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    """§29 screenshot manifest for a project: NOT_PROVEN unless trusted SCREENSHOT evidence exists."""
+    project = load_project(db, principal, project_id, domain=domain)
+    refs = docs_service.evidence_refs(db, project)
+    items = [{"id": e.id, "kind": e.kind, "trusted": True, "origin": e.origin, "claim": e.claim,
+              "environment": {"commit": e.commit, "name": e.environment}} for e in refs if e.kind == "SCREENSHOT"]
+    return visuals.screenshot_manifest(project_id=project.id, commit=None, environment=None, evidence=items) | {
+        "source": "EvidenceArtifact (trusted collectors only)", "checked_at": utcnow().isoformat()}
 
 
 @router.get("/api/projects/{project_id}/documents")
@@ -150,6 +170,21 @@ def render_documents(project_id: str, body: RenderIn, db: DB, settings: Settings
     db.commit()
     return {"delta": delta.to_dict() if delta else {}, "visuals": [v.to_dict() for v in result.visuals],
             "checked_at": utcnow().isoformat()}
+
+
+@router.post("/api/projects/{project_id}/documents/release-candidate")
+def release_candidate(project_id: str, body: ReleaseCandidateIn, db: DB, settings: SettingsDep,
+                      principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    """§28 release candidate: record the consistent documentation snapshot (commit + approved version + content
+    hashes) for one Release Plan. Documentation state only — no readiness/sign-off claim, nothing published."""
+    project = load_project(db, principal, project_id, domain=domain)
+    version = db.get(PlanVersion, body.plan_version_id)
+    if version is None or version.project_id != project.id:
+        raise NotFound("plan version not found")
+    out = docs_service.record_release_candidate(db, settings, version, release_key=body.release, commit=body.commit,
+                                                actor_user_id=principal.user.id)
+    db.commit()
+    return {**out, "checked_at": utcnow().isoformat(), "source": SOURCE}
 
 
 def _load_doc(db: DB, principal: CurrentPrincipal, domain: ActiveDomain, doc_id: str) -> DocumentRecord:

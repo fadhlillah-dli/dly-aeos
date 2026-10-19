@@ -141,8 +141,32 @@ def resolve_target(session: Session, project: Project, purpose: str) -> Target:
                 t.reasons.append(why)
                 t.remedies.append(f"aeos secrets set {atl.ATLASSIAN_REF} --stdin (JSON email + api_token)")
             else:
-                t.reasons.append("capability (Cloud REST v2, folder support) diperiksa saat eksekusi")
+                gate_ok, gate_reasons = office_gate(session, project)
+                if not gate_ok:
+                    # §23 OFFICE default deny: enabled=true on the integration is not a company authorisation.
+                    # No OFFICE read or write (capability probe, issue sync, publication) runs past this gate.
+                    t.status = "BLOCKED"
+                    t.reasons += gate_reasons
+                    t.remedies.append("Catat otorisasi perusahaan (Decision) dan jalankan Readiness Doctor sampai "
+                                      "CAN_USE_OFFICE_INTEGRATIONS READY.")
+                else:
+                    t.reasons.append("capability (Cloud REST v2, folder support) diperiksa saat eksekusi")
     return t
+
+
+def office_gate(session: Session, project: Project) -> tuple[bool, list[str]]:
+    """(ready, reasons) of the Doctor gate CAN_USE_OFFICE_INTEGRATIONS; unavailable → not ready (fail closed)."""
+    try:
+        from aeos.core.enums import Capability
+        from aeos.doctor import facade as doctor
+
+        state = doctor.capability_state(session, Capability.CAN_USE_OFFICE_INTEGRATIONS, domain="OFFICE",
+                                        project_id=project.id)
+    except Exception as exc:  # doctor unavailable or failing: never a reason to call an OFFICE system
+        return False, [f"CAN_USE_OFFICE_INTEGRATIONS tidak dapat dievaluasi ({exc.__class__.__name__}) — fail closed"]
+    if state.status == "READY":
+        return True, []
+    return False, [f"CAN_USE_OFFICE_INTEGRATIONS {state.status}: " + "; ".join(state.reasons[:3])]
 
 
 def resolve_targets(session: Session, project: Project, purposes: list[str] | None = None) -> list[Target]:
