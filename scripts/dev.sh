@@ -35,6 +35,18 @@ if [ "$PORT" != "8787" ]; then
   echo "Note: the Vite proxy in frontend/vite.config.ts targets 127.0.0.1:8787; with port $PORT use the backend URL directly or adjust the proxy."
 fi
 export AEOS_DEV_FRONTEND_PORT="$VITE_PORT"
+# Section 09: a hot-reloading dev server never holds the owner's real credentials or data. Use a
+# separate data directory and keyring service unless the caller chose others explicitly.
+if [ -z "${AEOS_DATA_DIR:-}" ]; then
+  if [ "$(uname -s)" = "Darwin" ]; then
+    AEOS_DATA_DIR="$HOME/Library/Application Support/DLY-AEOS-dev"
+  else
+    AEOS_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/DLY-AEOS-dev"
+  fi
+fi
+export AEOS_DATA_DIR
+export AEOS_KEYRING_SERVICE="${AEOS_KEYRING_SERVICE:-dly-aeos-dev}"
+echo "Dev profile: data $AEOS_DATA_DIR, keyring service $AEOS_KEYRING_SERVICE (create a dev admin with: ./aeos admin create, same environment)"
 echo "Starting control plane (dev) on http://127.0.0.1:$PORT ..."
 "$AEOS" serve --dev --port "$PORT" &
 BACKEND_PID=$!

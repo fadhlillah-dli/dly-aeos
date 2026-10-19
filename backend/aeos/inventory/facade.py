@@ -81,3 +81,9 @@ def effective_enablement(session: Session, component_id: str, *, domain: str | N
     from aeos.inventory.views import enablement_for
 
     return enablement_for(session, component_id, domain=domain)
+def blast_radius(session: Session, component_id: str, *, domain: str | None,
+                 direction: str = "dependents") -> dict[str, Any]:
+    """Who is affected if *component_id* changes/fails (``dependents``) or what it relies on (read-only)."""
+    from aeos.inventory.views import blast_radius as impl
+
+    return impl(session, component_id, domain=domain, direction=direction)

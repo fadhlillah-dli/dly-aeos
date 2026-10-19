@@ -56,13 +56,26 @@ Office archives on company-approved storage only.
 
 | Command | What it does |
 |---|---|
-| `aeos ops release build [--ref HEAD]` | `git archive` of a clean commit reachable from `main` → zip + provenance (commit, tree hash, artifact SHA-256, schema head, built_at, builder) |
+| `aeos ops release build [--ref HEAD]` | `git archive` of a clean commit reachable from `main` **that is accepted** (trusted provider-CI PASS for that exact commit, or an owner EXCEPTION decision) → zip + provenance (commit, tree hash, artifact SHA-256, schema head, acceptance basis, built_at, builder) + pinned UI bundle (`frontend/dist` zipped with its own SHA-256; its correspondence to the commit is labelled UNVERIFIED) |
+| `aeos ops release accept --commit <sha> --operator <admin> --reason "..."` | human-only EXCEPTION decision bound to one exact commit, used when trusted CI PASS is not available |
 | `aeos ops release list` | releases with integrity and ACTIVE/PREVIOUS role |
-| `aeos ops release promote <id> --operator <admin>` | decision → compatibility (migration head vs DB) → pre-promote backup + restore test → smoke test in a subprocess on a temp loopback port against a DB copy → live migration only if required (server stopped) → `ACTIVE.json` (previous kept) |
+| `aeos ops release promote <id> --operator <admin>` | decision (bound to artifact hash, UI hash, runtime-config hash) → compatibility (migration head vs DB) → pre-promote backup + restore test → smoke test in a subprocess on a temp loopback port against a DB copy (health, then functional: temporary admin in the copy, login, explicit PERSONAL, doctor RUNTIME run, capabilities, projects) → live migration only if required (server stopped) → `ACTIVE.json` (previous kept, config hash recorded) |
 | `aeos ops release rollback --operator <admin>` | pointer back to the previous release after the same checks; refused when the DB is ahead (restore the pre-promote backup first) |
+| `aeos serve [--release auto\|active\|checkout]` | `auto` (default) runs the ACTIVE release when one was promoted: artifact + UI hash verified, extracted tree compared byte-for-byte (planted files refused), `PYTHONPATH` = the release only, byte-code cache outside the release; refuses to start on any integrity failure. `checkout` runs the editable source tree and warns when a release is active. `--dev`/`--reload` always run the checkout and need a separate dev profile (`AEOS_DATA_DIR` + `AEOS_KEYRING_SERVICE`, set by `scripts/dev.*`) unless `--dev-with-real-credentials` |
+
+`GET /api/health` reports `controller.mode` (`release`/`checkout`), `release_id`, `commit`,
+`matches_active`; the doctor check `recovery.config_rollback` FAILS with
+`CONTROLLER_NOT_ACTIVE_RELEASE` when the running controller is not the ACTIVE release, and with
+`CONFIG_CHANGED_SINCE_PROMOTION` when the runtime config / policy snapshot hash differs from the one
+recorded at promotion.
 
 Any failure keeps the previous release active, raises a HIGH alert and is audited
 (§50 "Upgrade controller gagal"). Details: [runbook](runbooks/controller-upgrade-rollback.md).
+
+**GitHub Releases** (master §06 "GitHub activity ... releases"): AEOS builds and promotes local release
+artifacts only; it never creates a GitHub tag or Release. After a successful promotion the owner may
+publish one by hand (`gh release create v<version> --target <commit> --notes-file <provenance summary>`),
+so release activity on GitHub is an owner action, not something the controller claims.
 
 ## SLIs and alerts
 
@@ -85,6 +98,17 @@ Any failure keeps the previous release active, raises a HIGH alert and is audite
 **Targets**: none by default — every SLI shows `NO_TARGET` until you record one, based on the
 criticality you decide: `aeos ops sli target queue_age_seconds --max 1800 --rationale "..."`
 (audited). A target with no data shows UNKNOWN, never "within target".
+
+**Per criticality** (§33): `aeos ops sli criticality <project> HIGH|MEDIUM|LOW` records the owner's
+criticality of a project, and `aeos ops sli target <key> --criticality HIGH --max ...` sets a target that
+applies only to projects of that level (per-project SLIs only); `by_criticality` in the result shows each.
+
+**Error budget** (§46): `aeos ops sli budget-policy --window-days 28 --objective 0.99 --action alert|pause_scheduling`
+(owner decision). Every evaluation stores its samples (`ops_sli_samples`); the budget is the share of
+measured evaluations allowed to breach over the window (UNKNOWN/NO_TARGET never count as good). When a
+budget is exhausted a HIGH `error_budget_exhausted` alert is raised; with `pause_scheduling` new work is
+paused. The scheduler pause is global, so it is lifted only when the budget of every domain that caused it
+has recovered, and never when the current pause was set by someone else (emergency stop, a human).
 
 **Alerts** are deduplicated (`ops_alerts`) and emitted once as `alert.raised` events (resolved:
 `alert.resolved`), carrying the domain so Office alerts never reach a Personal session. Objective
@@ -226,6 +250,8 @@ invalidates route approvals bound to the old configuration hash (`PROMPT_REVISIO
   private repositories) are not proven on the real account.
 * Worker containment, egress control, secret broker, verifier independence, cancel and bypass tests
   must pass on this machine before workers are trusted.
-* The released controller artifact is a source archive; serving the UI from the artifact and
-  running the controller directly from the extracted release are NOT-PROVEN.
+* The released controller artifact is a source archive run with the checkout's virtual environment
+  (third-party packages are pinned by `requirements.lock`, not bundled). The UI bundle is pinned by
+  hash at build time, but that it was built from the released commit is UNVERIFIED. Releases built
+  before acceptance gating show acceptance UNKNOWN at promotion.
 * Backups are not encrypted by AEOS; encryption at rest/off-machine copies are owner decisions.

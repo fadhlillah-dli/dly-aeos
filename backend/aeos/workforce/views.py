@@ -309,11 +309,21 @@ def _supervision_counts(session: Session, *, domain: str, project_ids: list[str]
     return out
 
 
+def _assigned_task_counts(session: Session, *, domain: str, project_ids: list[str] | None) -> dict[str, int]:
+    q = (select(TaskSpec.role_key, func.count()).join(TaskExecution, TaskExecution.task_id == TaskSpec.id)
+         .where(TaskExecution.domain == domain, TaskExecution.state.not_in(["DONE", "FAILED", "CANCELLED"]))
+         .group_by(TaskSpec.role_key))
+    if project_ids is not None:
+        q = q.where(TaskExecution.project_id.in_(project_ids))
+    return {str(k): int(v) for k, v in session.execute(q).all()}
+
+
 def roles_view(session: Session, *, domain: str, project_ids: list[str] | None = None) -> dict[str, Any]:
     live = _active_counts(session, WorkerRun.role_key, domain=domain, mode=DataMode.LIVE.value, project_ids=project_ids)
     for role, n in _supervision_counts(session, domain=domain, project_ids=project_ids).items():
         live[role] = live.get(role, 0) + n
     demo = _active_counts(session, WorkerRun.role_key, domain=domain, mode=DataMode.DEMO.value, project_ids=project_ids)
+    assigned = _assigned_task_counts(session, domain=domain, project_ids=project_ids)
     groups: dict[str, list[dict[str, Any]]] = {g: [] for g, _ in GROUPS}
     for r in session.scalars(select(RoleSkillPack).order_by(RoleSkillPack.name)):
         n = live.get(r.role_key, 0)
@@ -328,6 +338,8 @@ def roles_view(session: Session, *, domain: str, project_ids: list[str] | None =
             "allowed_scope": r.allowed_scope or {}, "evaluation_cases": r.evaluation_cases or [],
             "practice_sources": r.practice_sources or [],
             "active_runs": n, "demo_runs": demo.get(r.role_key, 0),
+            # §17 assignment: non-terminal tasks of approved plans that name this role (projection, read-only)
+            "assigned_tasks": assigned.get(r.role_key, 0),
             # an imported pack (§45) is a CANDIDATE: never runnable before review + evaluation, never "available"
             "availability": "ACTIVE" if n else ("CANDIDATE" if r.mode == "CANDIDATE" else
                                                 "SERVICE" if r.deterministic_service else

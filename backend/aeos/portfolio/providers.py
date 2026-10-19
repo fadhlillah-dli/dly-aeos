@@ -37,6 +37,10 @@ INTEGRATION_PROVIDERS: dict[str, dict[str, frozenset[str]]] = {
         GITHUB_ACTIONS: frozenset({"ci"}),
         GOOGLE_DRIVE: frozenset({"docs"}),
         DEPLOYMENT_TARGET: frozenset({"staging", "production"}),
+        # §01/§04 per-project environment: the owner's chosen PERSONAL staging/deploy target, named by an
+        # exact identity (container:/host:/vm:<name>). Registering it configures; deploying to it still
+        # needs a human WRITE_ENABLEMENT decision for that exact target (§04 "with owner authorisation").
+        "local-target": frozenset({"staging", "deploy"}),
     },
     Domain.OFFICE.value: {
         BITBUCKET: frozenset({"code"}),
@@ -63,6 +67,7 @@ PUBLICATION_PROVIDER: dict[str, dict[str, str]] = {
 
 # Name of the exact target identifier stored in ``ProjectIntegration.root_id``.
 ROOT_ID_NAMES: dict[str, str] = {
+    "local-target": "ENVIRONMENT_TARGET_ID",
     GOOGLE_DRIVE: "GOOGLE_DRIVE_FOLDER_ID",
     GITHUB_ISSUES: "GITHUB_REPOSITORY",
     GITHUB_REPO: "GITHUB_REPOSITORY",
@@ -76,6 +81,7 @@ ROOT_ID_NAMES: dict[str, str] = {
 MY_DRIVE_ROOT = "root"
 
 LABELS: dict[str, str] = {
+    "local-target": "Target lingkungan PERSONAL (staging/deploy)",
     GOOGLE_DRIVE: "Google Drive / Google Docs",
     GITHUB_REPO: "GitHub repository",
     GITHUB_ISSUES: "GitHub Issues",

@@ -36,6 +36,8 @@ HIGH_IMPACT_PATTERNS: tuple[str, ...] = (
     "backend/aeos/routing/**", "backend/aeos/claude_bridge/**", "backend/aeos/identity/**", "backend/aeos/api/**",
     "backend/aeos/secrets/**", "backend/aeos/broker/**", "backend/aeos/policy/**", "backend/aeos/core/**",
     "backend/aeos/models/**", "backend/aeos/migrations/**", "backend/aeos/workforce/**", "**/facade.py",
+    # §21 "workers may not change final audit/evidence": the audit trail and event stream code
+    "backend/aeos/audit/**", "backend/aeos/events/**",
     ".github/**", "policy/**", "install-manifest/**", "contracts/**", "scripts/**", "pyproject.toml",
     "frontend/package.json", "frontend/package-lock.json", "AGENTS.md", "CLAUDE.md", "**/.claude/**",
     "**/hooks/**", "config/**",
@@ -91,7 +93,7 @@ SECURITY_SENSITIVE_PATTERNS: tuple[str, ...] = (
     "backend/aeos/identity/**", "backend/aeos/secrets/**", "backend/aeos/policy/**", "backend/aeos/broker/**",
     "backend/aeos/api/deps.py", "backend/aeos/api/security.py", "backend/aeos/core/redaction.py",
     "backend/aeos/core/paths.py", "backend/aeos/worker_runtime/**", "backend/aeos/claude_bridge/**",
-    ".github/workflows/**", "policy/**",
+    ".github/workflows/**", "policy/**", "backend/aeos/audit/**", "backend/aeos/events/**",
 )
 
 # Same allow-list as scripts/secret_scan.py: files that intentionally contain credential-shaped

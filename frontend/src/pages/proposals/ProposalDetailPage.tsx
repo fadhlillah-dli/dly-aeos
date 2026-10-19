@@ -310,6 +310,7 @@ export default function ProposalDetailPage() {
         source="change_proposals + inventory + research registry + decisions"
         checkedAt={p.reviewed_at}
         evidenceLimit={p.guarantees.note}
+        relatedDecisionsHref={`/decisions?target_type=change_proposal&target_id=${encodeURIComponent(p.id)}`}
         actions={
           <>
             <Link to="/proposals" className="self-center">
@@ -328,6 +329,8 @@ export default function ProposalDetailPage() {
             ["Sumber", p.source_refs.length ? p.source_refs.join(", ") : "—"],
             ["Identitas kanonik", p.canonical_identities.map((i) => <div key={i}><Mono>{i}</Mono></div>)],
             ["Komponen lama", p.existing_component_ids.length ? p.existing_component_ids.map((c) => <Link key={c} to={`/tools/${c}`} className="mr-2">{c}</Link>) : "—"],
+            ["Komponen kandidat (ditambah/pengganti)", (p.candidate_component_ids ?? []).length ? (p.candidate_component_ids ?? []).map((c) => <Link key={c} to={`/tools/${c}`} className="mr-2">{c}</Link>) : "—"],
+            ["Kapan aktif", p.delivery_dimensions?.ACTIVE?.at ? absoluteTime(p.delivery_dimensions.ACTIVE.at) : "belum aktif (tidak ada observasi ENABLED dari inventaris)"],
             ["Duplikat dari", p.duplicate_of ? <Link to={`/proposals/${p.duplicate_of}`}>{p.duplicate_of.slice(0, 8)}</Link> : "—"],
             ["Usulan duplikat yang tertaut", p.duplicates.length ? p.duplicates.map((d) => <Link key={d.id} to={`/proposals/${d.id}`} className="mr-2">{d.title}</Link>) : "—"],
             ["Field UNKNOWN", p.unknown_fields.length ? p.unknown_fields.join(", ") : "—"],

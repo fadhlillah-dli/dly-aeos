@@ -1,0 +1,29 @@
+# Retention reference (master §35 "Audit/evidence retention follows policy", §33 retirement
+# "data retention/disposal", §34 append-only ledger).
+#
+# Retention durations are OWNER decisions (company policy for OFFICE). None is set here: every
+# `retain_days: null` means "no disposal rule decided" -> the data is RETAINED and nothing is ever
+# reported as expired. AEOS never deletes records by itself; disposal of expired data is a manual,
+# owner-run action, and an active legal hold always blocks it.
+#
+# To decide a rule, the owner replaces `null` with a number of days for a data class x domain and
+# commits the change through review (this file is a protected path).
+status: OWNER_DECISION_REQUIRED
+version: 1
+legal_hold_blocks_disposal: true
+data_classes:
+  audit_events:
+    PERSONAL: {retain_days: null}
+    OFFICE: {retain_days: null}
+  evidence:
+    PERSONAL: {retain_days: null}
+    OFFICE: {retain_days: null}
+  attachments:
+    PERSONAL: {retain_days: null}
+    OFFICE: {retain_days: null}
+  external_references:
+    PERSONAL: {retain_days: null}
+    OFFICE: {retain_days: null}
+  backups:
+    PERSONAL: {retain_days: null}
+    OFFICE: {retain_days: null}

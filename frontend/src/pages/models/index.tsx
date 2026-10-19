@@ -111,6 +111,7 @@ export default function ModelsPage() {
         checkedAt={routes.data?.checked_at ?? null}
         evidenceLimit="Katalog = E1 (bacaan dokumen); CANDIDATE/BELUM DIUJI bukan teruji; kuota Max UNKNOWN"
         mode={routes.data?.mode}
+        relatedDecisionsHref="/decisions?target_type=model_route"
         actions={
           isAdmin ? (
             <Button busy={refresh.isPending} onClick={() => refresh.mutate()}>

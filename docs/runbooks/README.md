@@ -17,6 +17,7 @@ know it worked) and **Evidence** (what is recorded). The Control Center lists th
 | [incident-containment](incident-containment.md) | Anything risky is happening and must stop now (emergency stop) |
 | [openbao-unseal-recovery](openbao-unseal-recovery.md) | OpenBao is sealed, lost its token, or must be recovered |
 | [controller-upgrade-rollback](controller-upgrade-rollback.md) | Promoting a new controller release or rolling it back |
+| [domain-migration](domain-migration.md) | A project must move between PERSONAL and OFFICE (migration with an owner decision; the domain is never edited) |
 
 Rules that apply to every runbook:
 

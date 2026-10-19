@@ -127,6 +127,16 @@ describe("Models & Routes page", () => {
     expect(screen.getByText(/Tidak ada rute yang disetujui oleh seed/)).toBeInTheDocument();
   });
 
+  it("offers no platform-made Claude login form - only the official `claude` + /login flow (§12)", async () => {
+    const { container } = renderPage();
+    await screen.findByText("claude.exe (PATH)");
+    expect(container.querySelector('input[type="password"]')).toBeNull();
+    const fields = Array.from(container.querySelectorAll("input, textarea")).map(
+      (el) => `${el.getAttribute("name") ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("placeholder") ?? ""}`.toLowerCase(),
+    );
+    expect(fields.filter((f) => /token|password|kata sandi|api.?key|kode login|oauth code/.test(f))).toEqual([]);
+  });
+
   it("runs the capability test for admins only", async () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: /Uji kemampuan/ }));

@@ -1374,9 +1374,20 @@ def delivery_dimensions(session: Session, p: ChangeProposal) -> dict[str, dict[s
         arch_ok = bool(snap and R.snapshot_in_domain(snap, p.domain) and ensure_aware(snap.created_at)
                        and ensure_aware(promotion.created_at)
                        and ensure_aware(snap.created_at) >= ensure_aware(promotion.created_at))  # type: ignore[operator]
+    # §41 "kapan aktif": when the inventory first observed a candidate as ENABLED (never the approval time)
+    activated_at = None
+    if enabled:
+        from sqlalchemy import func as _f
 
-    def dim(status: str, note: str) -> dict[str, str]:
-        return {"status": status, "note": note}
+        from aeos.models.inventory import ComponentObservation
+
+        first = session.scalar(select(_f.min(ComponentObservation.observed_at)).where(
+            ComponentObservation.component_id.in_([c.component_id for c in enabled]),
+            ComponentObservation.dimension == "enablement", ComponentObservation.status == "ENABLED"))
+        activated_at = first.isoformat() if first else None
+
+    def dim(status: str, note: str, **extra: Any) -> dict[str, Any]:
+        return {"status": status, "note": note, **extra}
 
     implemented = cur.get("status") or "UNKNOWN"
     docs = L.docs_published(session, p)
@@ -1386,7 +1397,7 @@ def delivery_dimensions(session: Session, p: ChangeProposal) -> dict[str, dict[s
         "IMPLEMENTED": dim(implemented, "Outcome yang dicatat manusia dengan bukti"
                            + ("; sebagian target gagal" if implemented == "PARTIAL" else "")),
         "ACTIVE": dim("ENABLED_IN_CONFIG" if enabled else "OBSERVED_IN_CONFIG" if observed else "UNKNOWN",
-                      "Dari konfigurasi/observasi inventaris, bukan dari approval"),
+                      "Dari konfigurasi/observasi inventaris, bukan dari approval", at=activated_at),
         "VERIFIED": dim("EVIDENCE_ATTACHED" if trusted else "NOT-PROVEN", "Bukti terpercaya tentang kandidat ini"),
         "ARCHITECTURE_SOURCE_UPDATED": dim("YES" if arch_ok else "UNKNOWN",
                                            "ArchitectureSnapshot domain ini, diambil sesudah keputusan PROMOTION"),

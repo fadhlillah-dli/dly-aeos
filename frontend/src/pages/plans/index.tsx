@@ -10,6 +10,8 @@ import type { PlanDetail, PlanSummary } from "../../components/planning/types";
 import { Button, Card, EmptyState, ErrorBox, Field, inputClass, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { useEventStream } from "../../lib/events";
 import { relativeTime, shortHash } from "../../lib/format";
+import type { IntakePolicy } from "../projects/types";
+import { DropZone, QueueList, useUploadQueue } from "../projects/UploadZone";
 
 interface PlanList {
   items: PlanSummary[];
@@ -34,13 +36,19 @@ function NewPlanForm({ onDone }: { onDone: () => void }) {
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState("");
+  const policy = useQuery({ queryKey: ["intake-policy"], queryFn: () => get<IntakePolicy>("/api/intake/policy"), retry: false });
+  const queue = useUploadQueue(policy.data);
   const create = useMutation({
-    mutationFn: () =>
-      post<PlanDetail>(`/api/projects/${project}/plans`, {
+    mutationFn: async () => {
+      // §01 U-11: files (incl. .md) are uploaded to the selected project's intake first; the plan then
+      // references the accepted attachment ids. Attachments stay UNTRUSTED_DATA.
+      const uploaded = project && queue.pending ? await queue.uploadAllIds(project, "plan-intake") : [];
+      return post<PlanDetail>(`/api/projects/${project}/plans`, {
         title,
         prompt,
-        attachment_ids: attachments.split(/[\s,]+/).filter(Boolean),
-      }),
+        attachment_ids: [...attachments.split(/[\s,]+/).filter(Boolean), ...uploaded],
+      });
+    },
     onSuccess: (plan) => {
       qc.invalidateQueries({ queryKey: ["plans"] });
       onDone();
@@ -81,7 +89,11 @@ function NewPlanForm({ onDone }: { onDone: () => void }) {
         <Field label="Ide / prompt" hint="Konteks minimum; sistem hanya menanyakan ambiguitas yang material (§05).">
           <textarea className={clsx(inputClass, "min-h-32")} value={prompt} onChange={(e) => setPrompt(e.target.value)} required />
         </Field>
-        <Field label="ID lampiran (opsional)" hint="Unggah berkas di halaman proyek terlebih dahulu; pisahkan dengan koma.">
+        <Field label="Lampiran (opsional)" hint="Seret berkas (.md, .pdf, .docx, gambar, …) atau pilih; diunggah ke proyek terpilih saat rencana dibuat.">
+          <DropZone onFiles={queue.add} disabled={!project} policy={policy.data} />
+          <QueueList items={queue.items} onRemove={queue.remove} />
+        </Field>
+        <Field label="ID lampiran yang sudah ada (opsional)" hint="Lampiran yang sudah diunggah di halaman proyek; pisahkan dengan koma.">
           <input className={inputClass} value={attachments} onChange={(e) => setAttachments(e.target.value)} />
         </Field>
         <ErrorBox error={create.error} />

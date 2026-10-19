@@ -39,9 +39,40 @@ def tracked_files() -> list[str]:
     return [line for line in out.splitlines() if line]
 
 
+# §06 table: blueprints/ and contracts/ (and the docs) are generic schemas/templates with no sensitive
+# data. Personal identifiers (aeos.core.pii) and tenant/company hosts there fail G1 unless allow-listed.
+PII_SCOPES = ("blueprints/", "contracts/", "docs/")
+TENANT_HOST = re.compile(r"(?i)\b[a-z0-9-]+\.(?:atlassian\.net|jira\.com|bitbucket\.org/[a-z0-9-]+|sharepoint\.com)\b")
+PII_ALLOW_VALUES = ("example.com", "example.org", "example.net", "example.invalid", "@users.noreply.github.com",
+                    "noreply@anthropic.com", "your-tenant.atlassian.net", "<tenant>.atlassian.net",
+                    "company.atlassian.net", "example.atlassian.net")
+
+
+def pii_findings(rel: str, text: str) -> list[str]:
+    from aeos.core.pii import redact_pii
+
+    out: list[str] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        scrubbed = line
+        for allowed in PII_ALLOW_VALUES:
+            scrubbed = re.sub(r"[\w.+-]*" + re.escape(allowed), "", scrubbed, flags=re.I)
+        redacted = redact_pii(scrubbed)
+        if redacted != scrubbed:
+            kinds = sorted(set(re.findall(r"\[PII:([A-Z]+)\]", redacted)))
+            out.append(f"{rel}:{lineno}: personal identifier ({', '.join(kinds)})")
+        if TENANT_HOST.search(scrubbed):
+            out.append(f"{rel}:{lineno}: tenant/company host")
+    return out
+
+
 def main() -> int:
     findings: list[str] = []
     for rel in tracked_files():
+        if rel.startswith(PII_SCOPES) and Path(rel).suffix not in BINARY_SUFFIXES:
+            try:
+                findings += pii_findings(rel, (ROOT / rel).read_text(encoding="utf-8"))
+            except (UnicodeDecodeError, FileNotFoundError):
+                pass
         if rel in ALLOW or Path(rel).suffix in BINARY_SUFFIXES or rel.endswith("package-lock.json"):
             continue
         path = ROOT / rel

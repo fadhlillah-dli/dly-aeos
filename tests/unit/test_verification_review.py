@@ -63,7 +63,8 @@ def test_pass_review_records_review_verify_verdict_and_accepts(db, world, wf, mo
     assert rec.model_resolved == "claude-fable-5-1"
     # the checkpoint package is structured (no transcript) and stored as evidence
     req = bridge.requests[0]
-    assert req.purpose == "review.checkpoint" and req.allowed_tools == ["Read", "Grep", "Glob"]
+    # §12: package inline -> no file tools, so the supervisor cannot read outside the package
+    assert req.purpose == "review.checkpoint" and req.allowed_tools == []
     pkg = db.get(EvidenceArtifact, rec.package_evidence_id)
     assert pkg.kind == "REVIEW_PACKAGE"
     from aeos.verification import collector

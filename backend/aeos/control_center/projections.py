@@ -208,6 +208,37 @@ def search(session: Session, principal: Principal, domain: Domain, q: str, limit
 # ----------------------------------------------------------------------------------------- history
 
 
+def attempt_timeline(session: Session, principal: Principal, domain: Domain, *, outcome: str | None = None,
+                     page: int = 1, page_size: int = 50) -> dict[str, Any]:
+    """§35 History: accepted / failed / cancelled attempts across runs (domain + project scoped). Each row
+    keeps worker-reported, verifier, acceptance and merge status separate; finished_at orders the timeline."""
+    pids = scoped_project_ids(session, principal, domain)
+    page = max(1, page)
+    page_size = max(1, min(page_size, 200))
+    q = select(WorkerRun).where(WorkerRun.domain == domain.value, WorkerRun.project_id.in_(pids))
+    if outcome == "ACCEPTED":
+        q = q.where(WorkerRun.acceptance_status == "ACCEPTED")
+    elif outcome == "FAILED":
+        q = q.where(WorkerRun.execution_status.in_(["FAILED", "TIMED_OUT"]))
+    elif outcome == "CANCELLED":
+        q = q.where(WorkerRun.execution_status == "CANCELLED")
+    total = int(session.scalar(select(func.count()).select_from(q.subquery())) or 0)
+    rows = list(session.scalars(q.order_by(WorkerRun.finished_at.desc().nulls_last(), WorkerRun.created_at.desc())
+                                .offset((page - 1) * page_size).limit(page_size)))
+    return {
+        "items": [{"run_id": r.id, "task_id": r.task_id, "project_id": r.project_id, "attempt": r.attempt,
+                   "run_type": r.run_type, "execution_status": r.execution_status,
+                   "worker_reported_status": r.worker_reported_status, "verifier_status": r.verifier_status,
+                   "acceptance_status": r.acceptance_status, "merged_status": r.merged_status,
+                   "started_at": r.started_at.isoformat() if r.started_at else None,
+                   "finished_at": r.finished_at.isoformat() if r.finished_at else None, "mode": r.mode,
+                   "link": f"/runs/{r.id}"} for r in rows],
+        "page": page, "page_size": page_size, "total": total,
+        "source": "worker_runs (separate worker/verifier/acceptance/merge statuses)",
+        "checked_at": utcnow().isoformat(), "mode": "LIVE",
+    }
+
+
 def audit_timeline(session: Session, principal: Principal, domain: Domain, *, action: str | None,
                    target_type: str | None, target_id: str | None, result: str | None, before: int | None,
                    limit: int) -> dict[str, Any]:

@@ -222,6 +222,7 @@ def update_project(session: Session, principal: Principal, project: Project, bod
         require_writable(project)  # an ARCHIVED/RETIRED project only accepts a lifecycle change
     changes: dict[str, Any] = {}
     findings: list[dict[str, Any]] = []
+    retirement_decision_id: str | None = None
     if "name" in body:
         v = clean_text(body["name"], field="name", max_len=MAX_NAME, required=True)
         findings += scan_text(v, source="name").findings
@@ -243,11 +244,11 @@ def update_project(session: Session, principal: Principal, project: Project, bod
                 _deny(session, principal, action="portfolio.project.update", code="PLATFORM_RETIREMENT_DENIED",
                       project=project, reason="retiring the DLY AEOS platform project needs a migration decision")
             if target == "RETIRED":
-                # §33: RETIRED only after the legitimate owner's final verification (a RETIREMENT decision bound to
-                # the current checklist hash, nothing BLOCKING). Fail closed otherwise.
-                from aeos.policy import retirement as owner_verification
+                # §10/§33: RETIRED needs the owner's retirement decision bound to the current checklist hash.
+                from aeos.core.config import get_settings
+                from aeos.operations import facade as operations
 
-                owner_verification.require_retirement_verified(session, project)
+                retirement_decision_id = operations.require_retirement_decision(session, get_settings(), project).id
             changes["lifecycle"] = target
     if "lifecycle_reason" in body:
         changes["lifecycle_reason"] = redact_text(clean_text(body["lifecycle_reason"], field="lifecycle_reason",
@@ -261,7 +262,8 @@ def update_project(session: Session, principal: Principal, project: Project, bod
     audit.record(session, actor_type="user", actor_id=_actor(principal), action="portfolio.project.update",
                  target_type="project", target_id=project.id, project_id=project.id, domain=project.domain,
                  details={"changed": sorted(changes), "lifecycle_before": before.get("lifecycle"),
-                          "lifecycle_after": changes.get("lifecycle")})
+                          "lifecycle_after": changes.get("lifecycle"),
+                          **({"retirement_decision_id": retirement_decision_id} if retirement_decision_id else {})})
     events.emit(session, source="portfolio", kind="portfolio.project.updated", entity_type="project",
                 entity_id=project.id, project_id=project.id, domain=project.domain,
                 payload={"changed": sorted(changes), "lifecycle": project.lifecycle})
