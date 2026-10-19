@@ -64,6 +64,11 @@ def _emit_failure(exc: Exception, settings: Settings) -> None:
 
 def start(settings: Settings) -> None:
     global _thread
+    from aeos.doctor.capabilities import enable_auto_recheck
+
+    # while the server runs, an invalidation (binary/config/route/decision change) triggers a targeted recheck of
+    # the affected non-functional checks after its transaction commits (§08)
+    enable_auto_recheck(settings)
     if _thread is not None and _thread.is_alive():
         return
     _stop.clear()
@@ -73,6 +78,9 @@ def start(settings: Settings) -> None:
 
 def stop() -> None:
     global _thread
+    from aeos.doctor.capabilities import disable_auto_recheck
+
+    disable_auto_recheck()
     _stop.set()
     if _thread is not None:
         _thread.join(timeout=30)

@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from aeos.core.enums import (
@@ -24,7 +24,7 @@ from aeos.core.enums import (
 from aeos.core.errors import ValidationFailed
 from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
-from aeos.models.inventory import ComponentObservation, ComponentReference
+from aeos.models.inventory import ComponentObservation, ComponentReference, ComponentRelation
 
 DIMENSION_STATUSES: dict[str, frozenset[str]] = {
     "installation": frozenset(s.value for s in InstallationStatus),
@@ -39,6 +39,16 @@ DIMENSION_STATUSES: dict[str, frozenset[str]] = {
 }
 OBSERVED_DIMENSIONS = ("installation", "configuration", "connectivity", "functional", "usage")
 UNREGISTERED_PREFIX = "unregistered:"
+
+
+def component_known(session: Session, component_id: str) -> bool:
+    """True for a registered component, an ``unregistered:`` finding, or while no manifest is loaded yet
+    (bootstrap: the Doctor runs before ``aeos seed``; those observations attach once the catalog loads)."""
+    if component_id.startswith(UNREGISTERED_PREFIX):
+        return True
+    if session.get(ComponentReference, component_id) is not None:
+        return True
+    return session.scalar(select(ComponentReference.component_id).limit(1)) is None
 
 
 def component_domain(session: Session, component_id: str, scope: dict[str, Any] | None = None) -> str | None:
@@ -75,6 +85,12 @@ def record_observation(
         raise ValidationFailed(f"status {status!r} is not valid for dimension {dimension}", code="OBSERVATION_INVALID")
     if not component_id or len(component_id) > 96:
         raise ValidationFailed("component_id is required (max 96 chars)", code="OBSERVATION_INVALID")
+    if not component_known(session, component_id):
+        # Doctor and inventory share one set of component references (§08): an observation about an id the
+        # loaded manifest does not register would be evidence about nothing. Unregistered findings use the
+        # explicit ``unregistered:`` prefix (§38 UNREGISTERED observation).
+        raise ValidationFailed(f"component {component_id!r} is not registered in the InstallManifest",
+                               code="OBSERVATION_INVALID")
     data = dict(detail or {})
     location = data.pop("location", None)
     operation_ref = data.pop("operation_ref", None)
@@ -109,15 +125,83 @@ def record_observation(
     return obs
 
 
+def record_usage_observation(
+    session: Session, *, component_id: str, status: str, observer: str, run_id: str | None = None,
+    operation_ref: str | None = None, ttl_seconds: int | None = 900, domain: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> ComponentObservation:
+    """Usage/liveness observation (§38). IN_USE without a run/operation reference or a time window is
+    refused: "digunakan saat ini" needs a relevant observation reference."""
+    if status == "IN_USE" and (not (run_id or operation_ref) or not ttl_seconds):
+        raise ValidationFailed("IN_USE needs a run/operation reference and a time window (ttl)",
+                               code="OBSERVATION_INVALID")
+    scope: dict[str, Any] = {}
+    if run_id:
+        scope["run_id"] = run_id
+    if domain in ("PERSONAL", "OFFICE"):
+        scope["domain"] = domain
+    data = {**(detail or {}), **({"operation_ref": operation_ref} if operation_ref else {})}
+    return record_observation(session, component_id=component_id, dimension="usage", status=status,
+                              observer=observer, detail=data, ttl_seconds=ttl_seconds, scope=scope)
+
+
+def record_relation_observation(
+    session: Session, *, source_id: str, target_id: str, relation: str, observer: str, operation: str = "CALL",
+    run_id: str | None = None, domain: str | None = None, data_description: str = "",
+) -> ComponentRelation:
+    """Upsert one OBSERVED edge with ``last_observed_at`` now: traffic/event actually seen, distinct from the
+    manifest (DESIGN) and configuration (CONFIG) edges (§36). The edge keeps provenance and scope."""
+    from aeos.events import service as events
+    from aeos.inventory.manifest import RELATION_TYPES
+
+    if relation not in RELATION_TYPES:
+        raise ValidationFailed(f"unknown relation {relation!r}", code="OBSERVATION_INVALID")
+    for cid in (source_id, target_id):
+        if not cid or not component_known(session, cid):
+            raise ValidationFailed(f"component {cid!r} is not registered", code="OBSERVATION_INVALID")
+    now = utcnow()
+    row = session.scalar(select(ComponentRelation).where(
+        ComponentRelation.source_id == source_id, ComponentRelation.target_id == target_id,
+        ComponentRelation.relation == relation, ComponentRelation.lens == "OBSERVED"))
+    provenance = redact_text(f"{observer}:{run_id or 'operation'}")[:256]
+    scope = {"domain": domain} if domain in ("PERSONAL", "OFFICE") else {"domains": ["PLATFORM"]}
+    if row is None:
+        row = ComponentRelation(source_id=source_id, target_id=target_id, relation=relation, lens="OBSERVED",
+                                provenance=provenance, data_description=redact_text(data_description)[:2000],
+                                operation=operation[:16], scope={**scope, "source": observer[:64]},
+                                last_observed_at=now)
+        session.add(row)
+    else:
+        row.last_observed_at, row.provenance, row.tombstoned_at = now, provenance, None
+        row.scope = {**scope, "source": observer[:64]}
+    session.flush()
+    events.emit(session, source=observer[:64], kind="inventory.relation.observed", entity_type="component",
+                entity_id=source_id, domain=domain if domain in ("PERSONAL", "OFFICE") else None,
+                payload={"relation_id": row.id, "target": target_id, "relation": relation})
+    return row
+
+
 def is_stale(obs: ComponentObservation, now: datetime | None = None) -> bool:
     exp = ensure_aware(obs.expires_at)
     return exp is not None and exp <= (now or utcnow())
 
 
+ALL_DOMAINS: Any = object()  # sentinel: no domain filter (platform-internal callers: drift, reconcile, doctor)
+
+
+def visible_condition(domain: str | None) -> Any:
+    """SQL condition: observation scope has no domain tag, or the viewer's domain (§23/§35: an OFFICE-tagged
+    observation of a shared component never reaches a PERSONAL view, and vice versa)."""
+    tag = func.json_extract(ComponentObservation.scope, "$.domain")
+    return tag.is_(None) if domain is None else or_(tag.is_(None), tag == domain)
+
+
 def latest_observations(
     session: Session, component_ids: list[str] | None = None, dimensions: tuple[str, ...] | None = None,
+    *, visible_to: Any = ALL_DOMAINS,
 ) -> dict[tuple[str, str], ComponentObservation]:
-    """Latest observation per (component_id, dimension)."""
+    """Latest observation per (component_id, dimension). With ``visible_to=<domain>`` only observations that
+    domain may see count (the latest *visible* one, not the latest overall)."""
     co = ComponentObservation
     sub = select(co.component_id, co.dimension, func.max(co.observed_at).label("m")).group_by(
         co.component_id, co.dimension
@@ -126,9 +210,13 @@ def latest_observations(
         sub = sub.where(co.component_id.in_(component_ids))
     if dimensions is not None:
         sub = sub.where(co.dimension.in_(dimensions))
+    if visible_to is not ALL_DOMAINS:
+        sub = sub.where(visible_condition(visible_to))
     s = sub.subquery()
     q = select(co).join(s, and_(co.component_id == s.c.component_id, co.dimension == s.c.dimension,
                                 co.observed_at == s.c.m))
+    if visible_to is not ALL_DOMAINS:
+        q = q.where(visible_condition(visible_to))
     out: dict[tuple[str, str], ComponentObservation] = {}
     for obs in session.scalars(q):
         key = (obs.component_id, obs.dimension)

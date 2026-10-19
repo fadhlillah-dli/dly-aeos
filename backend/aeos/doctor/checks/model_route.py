@@ -106,13 +106,18 @@ def route_registry(ctx: CheckContext) -> Outcome:
         return Outcome("CONFIGURED", f"{len(eligible)} route pekerja eligible untuk {ROUTE_DOMAIN}/{ROUTE_CLASSIFICATION}: "
                        f"{', '.join(eligible[:5])} (keputusan manusia terikat hash; belum bukti kualitas).",
                        evidence=evidence)
+    # §08: the remedy (activating a worker route) may be a paid write when any candidate is not free.
+    paid = sorted(k for (k,) in ctx.session.execute(select(ModelRoute.route_key).where(
+        ModelRoute.pool == "WORKER", ModelRoute.status != "DISABLED", ModelRoute.is_free != "YES")))
+    evidence["paid_or_unknown_price_candidates"] = paid[:10]
     if decided == 0:
         return Outcome("MISSING", "Belum ada route pekerja APPROVED/TRIAL; kandidat tidak otomatis aktif (§23).",
-                       evidence=evidence, error_code="NO_APPROVED_WORKER_ROUTE", remedy=activate)
+                       evidence=evidence, error_code="NO_APPROVED_WORKER_ROUTE", remedy=activate,
+                       requires_paid_write=bool(paid))
     first = next(iter(evidence["rejected_decided"].items()), None)
     why = f" (mis. {first[0]}: {first[1][0]})" if first and first[1] else ""
     return Outcome("MISSING", f"{decided} route APPROVED/TRIAL tetapi tidak ada yang eligible{why}.", evidence=evidence,
-                   error_code="NO_ELIGIBLE_WORKER_ROUTE", remedy=activate)
+                   error_code="NO_ELIGIBLE_WORKER_ROUTE", remedy=activate, requires_paid_write=bool(paid))
 
 
 def _required_key_refs(ctx: CheckContext) -> tuple[list[str], list[tuple[str, tuple[str, ...]]]]:
@@ -270,7 +275,10 @@ def route_budget_admission(ctx: CheckContext) -> Outcome:
                        "menolak admission (fail closed).", evidence=evidence, error_code="BUDGET_STATE_UNTRUSTED",
                        remedy=Remedy(operation="Tinjau budget di halaman Biaya; perubahan budget hanya lewat keputusan "
                                      "BUDGET pemilik (tidak ada auto-topup)", target="Biaya & Kuota",
-                                     privilege="pemilik", evidence_to_collect="route.budget_admission CONFIGURED"))
+                                     privilege="pemilik", cost="keputusan BUDGET dapat mengizinkan pemakaian berbayar",
+                                     evidence_to_collect="route.budget_admission CONFIGURED"),
+                       # the remedy is a budget decision, i.e. it may authorise paid usage (§08, §42)
+                       requires_paid_write=True)
     note = ("budget GLOBAL bulanan aktif" if global_month else
             "belum ada budget GLOBAL; reservasi pertama memakai default $0 hard-stop (route gratis tetap bisa)")
     return Outcome("CONFIGURED", f"{len(budgets)} budget aktif dapat dipercaya; {note}. Tidak ada paid fallback.",

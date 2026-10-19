@@ -90,8 +90,18 @@ def github_get(ctx: CheckContext, path: str) -> Any:
     return ctx.runner.http_get(f"{GITHUB_API}{path}", timeout=10.0, headers=headers, allow_remote=True)
 
 
+def _scopes(headers: dict[str, str] | None) -> list[str] | str:
+    """Token scopes GitHub reports for classic tokens (``X-OAuth-Scopes``); fine-grained tokens expose none."""
+    raw = (headers or {}).get("x-oauth-scopes")
+    if raw is None:
+        return "NOT_EXPOSED (fine-grained token: izin per repo dibaca dari 'permissions')"
+    return sorted(s.strip() for s in raw.split(",") if s.strip())
+
+
+# "integration:*": a project integration target change (aeos.portfolio emits ``integration:<id>``) or an observed
+# permission/scope change makes these results STALE (§08).
 @check("adapter.github_token", "PROJECT_ADAPTERS", "GitHub PERSONAL: token dan akses repo (read-only)",
-       component_id="github", ttl_seconds=3600, invalidators=(f"secret:{GITHUB_REF}", "target"),
+       component_id="github", ttl_seconds=3600, invalidators=(f"secret:{GITHUB_REF}", "integration:*"),
        ok={"CONFIGURED", "CONNECTED", "VERIFIED"}, severity_fail="HIGH", scope={"domain": "PERSONAL"},
        observation="connectivity")
 def adapter_github(ctx: CheckContext) -> Outcome:
@@ -119,7 +129,8 @@ def adapter_github(ctx: CheckContext) -> Outcome:
         perms = hr.body.get("permissions") or {}
         evidence.update({"private": hr.body.get("private"), "default_branch": hr.body.get("default_branch"),
                          "permissions": {k: perms.get(k) for k in ("admin", "maintain", "push", "pull") if k in perms},
-                         "repo_id": hr.body.get("id")})
+                         "repo_id": hr.body.get("id"),
+                         "token_scopes": _scopes(getattr(hr, "headers", None))})
         privilege = github_token_privilege(_token_kind(), (getattr(hr, "headers", None) or {}).get("x-oauth-scopes"))
         evidence["token_privilege"] = privilege
         summary = f"Repo github:{slug} terbaca dengan token (read-only); izin tulis/enforcement belum diverifikasi."
@@ -151,9 +162,50 @@ def google_connect_remedy() -> Remedy:
         evidence_to_collect="adapter.google_oauth CONFIGURED; publikasi pertama adalah bukti fungsi")
 
 
-@check("adapter.google_oauth", "PROJECT_ADAPTERS", "Google Drive/Docs PERSONAL: OAuth client + token",
+DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+GOOGLE_SCOPE_PURPOSE = "personal:doctor.google-scope-read"
+
+
+def stored_google_token() -> dict[str, Any] | None:
+    """The consented Google token as stored by ``publish google-connect`` (registered for redaction; only its
+    non-secret fields are ever evidence)."""
+    import json
+
+    from aeos.core.redaction import register_secret
+    from aeos.secrets import facade as secrets
+
+    raw = secrets.get_secret(GOOGLE_TOKEN_REF, purpose=GOOGLE_SCOPE_PURPOSE, actor="doctor")
+    try:
+        tok = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(tok, dict):
+        return None
+    for k in ("token", "refresh_token", "client_secret"):
+        register_secret(tok.get(k))
+    return tok
+
+
+def google_scope_state() -> tuple[str, list[str]]:
+    """('LEAST_PRIVILEGE'|'EXCESSIVE'|'MISSING_DRIVE_FILE'|'UNREADABLE', granted scopes) from the stored token.
+    Scopes are what Google returned at consent/refresh time (``scopes`` in the token JSON)."""
+    try:
+        tok = stored_google_token()
+    except Exception:
+        return "UNREADABLE", []
+    if tok is None:
+        return "UNREADABLE", []
+    granted = sorted(str(s) for s in tok.get("scopes") or [])
+    if not granted:
+        return "UNREADABLE", []
+    if DRIVE_FILE_SCOPE not in granted:
+        return "MISSING_DRIVE_FILE", granted
+    return ("LEAST_PRIVILEGE" if granted == [DRIVE_FILE_SCOPE] else "EXCESSIVE"), granted
+
+
+@check("adapter.google_oauth", "PROJECT_ADAPTERS", "Google Drive/Docs PERSONAL: OAuth client + token + scope",
        component_id="google-drive", ttl_seconds=3600,
-       invalidators=(f"secret:{GOOGLE_CLIENT_REF}", f"secret:{GOOGLE_TOKEN_REF}"),
+       invalidators=(f"secret:{GOOGLE_CLIENT_REF}", f"secret:{GOOGLE_TOKEN_REF}", "integration:*"),
        ok={"CONFIGURED", "CONNECTED", "VERIFIED"}, severity_fail="HIGH", scope={"domain": "PERSONAL"},
        observation="configuration")
 def adapter_google(ctx: CheckContext) -> Outcome:
@@ -174,8 +226,17 @@ def adapter_google(ctx: CheckContext) -> Outcome:
     if client_state != "PRESENT":
         return Outcome("FAILED", f"Token Google ada tetapi client {GOOGLE_CLIENT_REF} hilang; refresh token tidak dapat "
                        "dipakai.", evidence=evidence, error_code="GOOGLE_CLIENT_MISSING", remedy=google_connect_remedy())
-    return Outcome("CONFIGURED", "Client OAuth dan token Google tersimpan (nilai tidak dibaca); scope dan root folder "
-                   "dibuktikan oleh publikasi pertama, bukan oleh Doctor.", evidence=evidence)
+    scope_state, granted = google_scope_state()
+    evidence.update({"token_scopes_read": scope_state != "UNREADABLE", "granted_scopes": granted,
+                     "scope_state": scope_state, "scope_source": "respons token Google saat consent/refresh"})
+    if scope_state in ("EXCESSIVE", "MISSING_DRIVE_FILE"):
+        return Outcome("FAILED", f"Scope token Google tidak sesuai least privilege drive.file ({scope_state}); "
+                       "hubungkan ulang dengan scope drive.file saja.", evidence=evidence,
+                       error_code="GOOGLE_SCOPE_NOT_LEAST_PRIVILEGE", remedy=google_connect_remedy())
+    note = ("scope drive.file terbaca dari token tersimpan" if scope_state == "LEAST_PRIVILEGE"
+            else "scope token tidak dapat dibaca (UNKNOWN)")
+    return Outcome("CONFIGURED", f"Client OAuth dan token Google tersimpan; {note}. Akses root folder tiap proyek "
+                   "diperiksa oleh adapter.project_drive_root.", evidence=evidence)
 
 
 def _enablement_fp(ctx: CheckContext) -> dict[str, Any] | None:
@@ -245,3 +306,268 @@ for _cid, _label, _ref in (("bitbucket", "Bitbucket", BITBUCKET_REF), ("jira", "
     check(f"adapter.office_{_cid}", "PROJECT_ADAPTERS", f"{_label} OFFICE", component_id=_cid, ttl_seconds=3600,
           invalidators=(f"secret:{_ref}", "config:office_policy"), ok={"CONFIGURED", "VERIFIED"},
           scope={"domain": "OFFICE"})(_office(_cid, _label, _ref))
+
+
+# ---------------------------------------------------------------- project-scoped targets (§08 project scope)
+#
+# One CheckResult per (check, project): readiness of one project's repository / Drive root is never inferred
+# from the platform repo or another project's target (§08 "Readiness dievaluasi menurut capability dan target").
+
+DRIVE_API = "https://www.googleapis.com/drive/v3/files"
+FOLDER_MIME = "application/vnd.google-apps.folder"
+OFFICE_TARGET_PROVIDERS = (pv.BITBUCKET, pv.JIRA, pv.CONFLUENCE)
+
+
+def _projects(ctx: CheckContext) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from aeos.models.portfolio import Project
+
+    assert ctx.session is not None
+    return {p.id: p for p in ctx.session.scalars(select(Project).where(Project.lifecycle != "RETIRED"))}
+
+
+def project_repo_targets(ctx: CheckContext) -> list[dict[str, Any]]:
+    from sqlalchemy import select
+
+    from aeos.models.portfolio import RepositoryReference
+
+    projects = _projects(ctx)
+    by_project: dict[str, list[Any]] = {}
+    assert ctx.session is not None
+    for r in ctx.session.scalars(select(RepositoryReference).order_by(RepositoryReference.full_name)):
+        if r.project_id in projects and (r.provider or "").upper() == "GITHUB":
+            by_project.setdefault(r.project_id, []).append(r)
+    return [{"project_id": pid, "domain": projects[pid].domain, "project_key": projects[pid].project_key,
+             "repos": [{"id": r.id, "full_name": r.full_name, "provider_repo_id": r.provider_repo_id} for r in repos],
+             "invalidators": [f"repository:{r.id}" for r in repos]}
+            for pid, repos in by_project.items()]
+
+
+@check("adapter.project_repo", "PROJECT_ADAPTERS", "Repo GitHub proyek: ID repo persis dan izin (per proyek)",
+       component_id="github", ttl_seconds=3600, needs_db=True, invalidators=(f"secret:{GITHUB_REF}", "integration:*"),
+       ok={"CONFIGURED", "CONNECTED", "VERIFIED"}, severity_fail="HIGH", targets=project_repo_targets,
+       description="Per proyek: repo terdaftar (provider repo ID persis), token tersimpan; dengan --functional GET "
+                   "read-only /repos/<owner>/<name> mencocokkan ID repo (repo bernama sama bukan target yang sama, "
+                   "§37) dan membaca izin/scope token.")
+def adapter_project_repo(ctx: CheckContext) -> Outcome:
+    target = ctx.project or {}
+    repos = target.get("repos") or []
+    evidence: dict[str, Any] = {"project_key": target.get("project_key"),
+                                "repos": [r["full_name"] for r in repos]}
+    if target.get("domain") != Domain.PERSONAL.value:
+        return Outcome("UNKNOWN", "Repo GitHub pada proyek non-PERSONAL tidak diprobe (OFFICE default deny, §23).",
+                       evidence=evidence, error_code="OFFICE_DEFAULT_DENY")
+    state, token_ev = secret_ref_status(GITHUB_REF)
+    evidence["token"] = {k: token_ev.get(k) for k in ("ref", "backend", "updated_at")}
+    if state in ("NOT_IMPLEMENTED", "STORE_UNAVAILABLE"):
+        return Outcome("MISSING" if state == "STORE_UNAVAILABLE" else "UNKNOWN",
+                       "Secret store tidak tersedia; token GitHub tidak dapat dibaca (fail closed).", evidence=evidence,
+                       error_code="SECRET_STORE_UNAVAILABLE")
+    if state == "ABSENT":
+        return Outcome("MISSING", f"Token {GITHUB_REF} belum disimpan.", evidence=evidence,
+                       error_code="GITHUB_TOKEN_MISSING", remedy=set_secret_remedy(GITHUB_REF, "GitHub"))
+    unpinned = [r["full_name"] for r in repos if not r.get("provider_repo_id")]
+    if not ctx.functional:
+        return Outcome("CONFIGURED", f"{len(repos)} repo terdaftar, token tersimpan; akses dan ID repo belum diprobe "
+                       "(gunakan --functional)." + (f" ID repo belum tercatat: {', '.join(unpinned)}." if unpinned
+                                                   else ""), evidence=evidence,
+                       target_identity=", ".join(f"github:{r['full_name']}" for r in repos)[:250])
+    results: list[dict[str, Any]] = []
+    permissions: dict[str, Any] = {}
+    scopes: Any = None
+    for r in repos:
+        try:
+            hr = github_get(ctx, f"/repos/{r['full_name']}")
+        except Exception as exc:  # never green
+            results.append({"repo": r["full_name"], "status": "UNKNOWN", "error": type(exc).__name__})
+            continue
+        item: dict[str, Any] = {"repo": r["full_name"], "http_status": hr.status}
+        if hr.status == 200 and isinstance(hr.body, dict):
+            observed_id = str(hr.body.get("id") or "")
+            expected_id = str(r.get("provider_repo_id") or "")
+            perms = hr.body.get("permissions") or {}
+            permissions[r["full_name"]] = {k: perms.get(k) for k in ("admin", "maintain", "push", "pull") if k in perms}
+            scopes = _scopes(hr.headers)
+            if expected_id and observed_id != expected_id:
+                item.update(status="FAILED", error="REPO_ID_MISMATCH", observed_id=observed_id, expected_id=expected_id)
+            else:
+                item.update(status="CONNECTED", repo_id=observed_id, id_pinned=bool(expected_id))
+        elif hr.status == 401:
+            item.update(status="EXPIRED", error="GITHUB_TOKEN_REJECTED")
+        elif hr.status in (403, 404):
+            item.update(status="FAILED", error="GITHUB_REPO_NOT_VISIBLE")
+        else:
+            item.update(status="UNKNOWN", error=str(hr.error or hr.status))
+        results.append(item)
+    evidence.update({"results": results, "permissions": permissions, "token_scopes": scopes})
+    statuses = {x["status"] for x in results}
+    for bad, code in (("EXPIRED", "GITHUB_TOKEN_REJECTED"), ("FAILED", "PROJECT_REPO_NOT_VERIFIED"),
+                      ("UNKNOWN", "GITHUB_PROBE_INCONCLUSIVE")):
+        if bad in statuses:
+            return Outcome(bad, f"Repo proyek: {', '.join(x['repo'] + ' ' + x['status'] for x in results)}.",
+                           evidence=evidence, error_code=code,
+                           remedy=set_secret_remedy(GITHUB_REF, "GitHub") if bad == "EXPIRED" else None)
+    return Outcome("CONNECTED", f"{len(results)} repo proyek terbaca dengan token (read-only), ID repo cocok"
+                   + ("" if not unpinned else f" (ID belum dipin: {', '.join(unpinned)})")
+                   + "; izin tulis/enforcement belum diverifikasi.", evidence=evidence,
+                   target_identity=", ".join(f"github:{x['repo']}" for x in results)[:250])
+
+
+def project_drive_targets(ctx: CheckContext) -> list[dict[str, Any]]:
+    from sqlalchemy import select
+
+    from aeos.models.portfolio import ProjectIntegration
+
+    projects = _projects(ctx)
+    out: dict[str, dict[str, Any]] = {}
+    assert ctx.session is not None
+    for integ in ctx.session.scalars(select(ProjectIntegration).where(ProjectIntegration.provider == pv.GOOGLE_DRIVE)):
+        p = projects.get(integ.project_id)
+        if p is None:
+            continue
+        t = out.setdefault(p.id, {"project_id": p.id, "domain": p.domain, "project_key": p.project_key,
+                                  "roots": [], "invalidators": []})
+        t["roots"].append({"integration_id": integ.id, "root_id": integ.root_id, "purpose": integ.purpose})
+        t["invalidators"].append(f"integration:{integ.id}")
+    return list(out.values())
+
+
+def drive_get(ctx: CheckContext, root_id: str, token: dict[str, Any]) -> Any:
+    """Read-only Drive metadata GET of one folder with the stored token (refreshed through the publisher's
+    GoogleAuth when expired). Never logged; the token is registered for redaction."""
+    import json
+
+    import httpx
+
+    from aeos.publisher.providers.google import GoogleAuth
+
+    with httpx.Client(timeout=10.0) as client:
+        header = GoogleAuth(client, token_json=json.dumps(token)).header()
+    url = (f"{DRIVE_API}/{root_id}?fields=id,name,mimeType,trashed,capabilities(canAddChildren)"
+           "&supportsAllDrives=true")
+    return ctx.runner.http_get(url, timeout=10.0, headers=header, allow_remote=True)
+
+
+@check("adapter.project_drive_root", "PROJECT_ADAPTERS", "Root Google Drive proyek dan scope token (per proyek)",
+       component_id="google-drive", ttl_seconds=3600, needs_db=True,
+       invalidators=(f"secret:{GOOGLE_TOKEN_REF}", f"secret:{GOOGLE_CLIENT_REF}", "integration:*"),
+       ok={"CONFIGURED", "CONNECTED", "VERIFIED"}, severity_fail="HIGH", targets=project_drive_targets,
+       description="Per proyek: root folder Drive terkonfigurasi dan token dengan scope drive.file; dengan --functional "
+                   "GET metadata folder root (read-only): ada, folder, tidak di trash, dapat menambah file.")
+def adapter_project_drive_root(ctx: CheckContext) -> Outcome:
+    target = ctx.project or {}
+    roots = target.get("roots") or []
+    evidence: dict[str, Any] = {"project_key": target.get("project_key"),
+                                "roots": [{"root_id": r.get("root_id"), "purpose": r.get("purpose")} for r in roots]}
+    if target.get("domain") != Domain.PERSONAL.value:
+        return Outcome("UNKNOWN", "Root Drive pada proyek non-PERSONAL tidak diprobe (OFFICE default deny, §23).",
+                       evidence=evidence, error_code="OFFICE_DEFAULT_DENY")
+    if any(not r.get("root_id") for r in roots):
+        return Outcome("MISSING", "Integrasi Google Drive proyek belum punya root folder (root_id).", evidence=evidence,
+                       error_code="DRIVE_ROOT_MISSING", remedy=Remedy(
+                           operation="Atur root folder Drive proyek (folder yang dibuat/dibuka aplikasi, drive.file)",
+                           command="PUT /api/projects/<id>/integrations (root_id = folder id)",
+                           target=str(target.get("project_key")), privilege="SUPER_ADMIN",
+                           evidence_to_collect="adapter.project_drive_root CONFIGURED"))
+    token_state, _ev = secret_ref_status(GOOGLE_TOKEN_REF)
+    if token_state != "PRESENT":
+        return Outcome("MISSING", "Token Google belum tersimpan; root Drive proyek tidak dapat diakses.",
+                       evidence=evidence, error_code="GOOGLE_OAUTH_MISSING", remedy=google_connect_remedy())
+    scope_state, granted = google_scope_state()
+    evidence.update({"granted_scopes": granted, "scope_state": scope_state})
+    if scope_state in ("EXCESSIVE", "MISSING_DRIVE_FILE"):
+        return Outcome("FAILED", f"Scope token Google {scope_state}; hanya drive.file yang diizinkan (S18).",
+                       evidence=evidence, error_code="GOOGLE_SCOPE_NOT_LEAST_PRIVILEGE", remedy=google_connect_remedy())
+    if not ctx.functional:
+        return Outcome("CONFIGURED", f"{len(roots)} root Drive terkonfigurasi; akses root belum diprobe (gunakan "
+                       "--functional).", evidence=evidence,
+                       target_identity=", ".join(f"google-drive:{r['root_id']}" for r in roots)[:250])
+    try:
+        token = stored_google_token()
+    except Exception as exc:
+        return Outcome("UNKNOWN", f"Token Google tidak dapat dibaca ({type(exc).__name__}).", evidence=evidence,
+                       error_code="GOOGLE_TOKEN_UNREADABLE")
+    results: list[dict[str, Any]] = []
+    for r in roots:
+        try:
+            hr = drive_get(ctx, str(r["root_id"]), token or {})
+        except Exception as exc:  # refresh/network failure: never green
+            results.append({"root_id": r["root_id"], "status": "UNKNOWN", "error": type(exc).__name__})
+            continue
+        item: dict[str, Any] = {"root_id": r["root_id"], "http_status": hr.status}
+        body = hr.body if isinstance(hr.body, dict) else {}
+        if hr.status == 200:
+            ok_folder = body.get("mimeType") == FOLDER_MIME and not body.get("trashed")
+            can_add = ((body.get("capabilities") or {}).get("canAddChildren")) is True
+            item.update(status="CONNECTED" if ok_folder and can_add else "FAILED",
+                        is_folder=body.get("mimeType") == FOLDER_MIME, trashed=bool(body.get("trashed")),
+                        can_add_children=can_add, error=None if ok_folder and can_add else "DRIVE_ROOT_NOT_WRITABLE_FOLDER")
+        elif hr.status == 401:
+            item.update(status="EXPIRED", error="GOOGLE_TOKEN_REJECTED")
+        elif hr.status in (403, 404):
+            # drive.file only sees files the app created or the user opened with it (S18)
+            item.update(status="FAILED", error="DRIVE_ROOT_NOT_VISIBLE")
+        else:
+            item.update(status="UNKNOWN", error=str(hr.error or hr.status))
+        results.append(item)
+    evidence["results"] = results
+    statuses = {x["status"] for x in results}
+    for bad, code in (("EXPIRED", "GOOGLE_TOKEN_REJECTED"), ("FAILED", "DRIVE_ROOT_NOT_VERIFIED"),
+                      ("UNKNOWN", "DRIVE_PROBE_INCONCLUSIVE")):
+        if bad in statuses:
+            return Outcome(bad, "Root Drive proyek: " + ", ".join(f"{x['root_id']} {x['status']}" for x in results)
+                           + " (drive.file hanya melihat folder yang dibuat/dibuka aplikasi).", evidence=evidence,
+                           error_code=code, remedy=google_connect_remedy() if bad == "EXPIRED" else None)
+    return Outcome("CONNECTED", f"{len(results)} root Drive proyek terbaca (folder, dapat menambah file; probe "
+                   "read-only, bukan uji tulis).", evidence=evidence,
+                   target_identity=", ".join(f"google-drive:{x['root_id']}" for x in results)[:250])
+
+
+def project_office_targets(ctx: CheckContext) -> list[dict[str, Any]]:
+    from sqlalchemy import select
+
+    from aeos.models.portfolio import ProjectIntegration
+
+    projects = _projects(ctx)
+    out: dict[str, dict[str, Any]] = {}
+    assert ctx.session is not None
+    for integ in ctx.session.scalars(select(ProjectIntegration).where(
+            ProjectIntegration.provider.in_(OFFICE_TARGET_PROVIDERS))):
+        p = projects.get(integ.project_id)
+        if p is None or p.domain != Domain.OFFICE.value:
+            continue
+        t = out.setdefault(p.id, {"project_id": p.id, "domain": p.domain, "project_key": p.project_key,
+                                  "targets": [], "invalidators": []})
+        t["targets"].append({"provider": integ.provider, "purpose": integ.purpose, "root_id": integ.root_id,
+                             "tenant_id": integ.tenant_id})
+        t["invalidators"].append(f"integration:{integ.id}")
+    return list(out.values())
+
+
+@check("adapter.project_office_targets", "PROJECT_ADAPTERS",
+       "Target OFFICE proyek: repo Bitbucket / project Jira / parent Confluence (per proyek)",
+       component_id="integration-registry", ttl_seconds=3600, needs_db=True,
+       invalidators=("config:office_policy", "integration:*", f"secret:{ATLASSIAN_REF}", f"secret:{BITBUCKET_REF}"),
+       ok={"CONFIGURED", "CONNECTED", "VERIFIED"}, targets=project_office_targets,
+       description="Per proyek OFFICE: identitas target (repo/project key/parent id + tenant). Tetap diblokir sampai "
+                   "otorisasi perusahaan tercatat (§23); probe identitas Atlassian belum diimplementasikan (NOT-PROVEN).")
+def adapter_project_office_targets(ctx: CheckContext) -> Outcome:
+    from aeos.doctor.office import office_gate
+
+    target = ctx.project or {}
+    items = target.get("targets") or []
+    evidence: dict[str, Any] = {"project_key": target.get("project_key"),
+                                "targets": [{k: t.get(k) for k in ("provider", "purpose", "root_id", "tenant_id")}
+                                            for t in items], "policy": "OFFICE default deny (§23)"}
+    allowed, reason = office_gate("CAN_USE_OFFICE_INTEGRATIONS", ctx.session)
+    evidence["office_gate"] = reason
+    if not allowed:
+        return Outcome("UNKNOWN", f"Target OFFICE tidak diprobe: {reason}.", evidence=evidence,
+                       error_code="OFFICE_DEFAULT_DENY")
+    missing = [t["provider"] for t in items if not t.get("root_id")]
+    if missing:
+        return Outcome("MISSING", f"Target OFFICE belum lengkap (root_id): {', '.join(missing)}.", evidence=evidence,
+                       error_code="OFFICE_TARGET_MISSING")
+    return Outcome("CONFIGURED", "Target OFFICE terkonfigurasi; identitas project/parent/repo belum diprobe oleh Doctor "
+                   "(NOT-PROVEN, probe Atlassian belum diimplementasikan).", evidence=evidence)

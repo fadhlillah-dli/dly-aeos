@@ -16,6 +16,8 @@ export interface GNode {
   isGroup: boolean;
   count?: number;
   presentCount?: number;
+  runs?: number; // §36 zoom-in: authorized active runs on this component
+  diff?: "added" | "removed" | "changed";
 }
 
 export interface GEdge {
@@ -26,6 +28,52 @@ export interface GEdge {
   status: string;
   count: number;
   relationIds: string[];
+  diff?: "added" | "removed" | "changed";
+}
+
+export interface DiffInput {
+  nodes: { added: { id: string }[]; removed: { id: string }[]; changed: { key: string }[] };
+  edges: {
+    added: { source: string; target: string; relation: string }[];
+    removed: { source: string; target: string; relation: string }[];
+    changed: { key: string[] }[];
+  };
+}
+
+/** §41 "menyorot added/changed/removed edges dari dua approved snapshots": colour the edges and nodes of the current
+ *  graph by the snapshot diff; removed relations whose ends are still drawn come back as ghost edges. */
+export function applyDiff(graph: { nodes: GNode[]; edges: GEdge[] }, diff: DiffInput | null): { nodes: GNode[]; edges: GEdge[] } {
+  if (!diff) return graph;
+  const key = (s: string, t: string, r: string) => `${s}|${t}|${r}`;
+  const added = new Set(diff.edges.added.map((e) => key(e.source, e.target, e.relation)));
+  const changed = new Set(diff.edges.changed.map((c) => key(c.key[0], c.key[1], c.key[2])));
+  const nodeDiff = new Map<string, GNode["diff"]>();
+  diff.nodes.added.forEach((n) => nodeDiff.set(n.id, "added"));
+  diff.nodes.changed.forEach((n) => nodeDiff.set(n.key, "changed"));
+  diff.nodes.removed.forEach((n) => nodeDiff.set(n.id, "removed"));
+  const nodes = graph.nodes.map((n) => (nodeDiff.has(n.id) ? { ...n, diff: nodeDiff.get(n.id) } : n));
+  const edges = graph.edges.map((e) => {
+    const k = key(e.source, e.target, e.relation);
+    if (added.has(k)) return { ...e, diff: "added" as const };
+    if (changed.has(k)) return { ...e, diff: "changed" as const };
+    return e;
+  });
+  const ids = new Set(nodes.map((n) => n.id));
+  const present = new Set(edges.map((e) => key(e.source, e.target, e.relation)));
+  diff.edges.removed.forEach((e, i) => {
+    const k = key(e.source, e.target, e.relation);
+    if (ids.has(e.source) && ids.has(e.target) && !present.has(k)) {
+      edges.push({ id: `removed:${i}:${k}`, source: e.source, target: e.target, relation: e.relation, status: "UNKNOWN", count: 1, relationIds: [], diff: "removed" });
+    }
+  });
+  return { nodes, edges };
+}
+
+export function diffVisual(diff: GEdge["diff"]): { stroke: string; dash?: string; label: string } | null {
+  if (diff === "added") return { stroke: "var(--color-ok)", label: "ditambah (snapshot)" };
+  if (diff === "removed") return { stroke: "var(--color-bad)", dash: "3 3", label: "dihapus (snapshot)" };
+  if (diff === "changed") return { stroke: "var(--color-warn)", label: "berubah (snapshot)" };
+  return null;
 }
 
 export const groupId = (category: string) => `group:${category}`;
@@ -65,6 +113,7 @@ export function foldGraph(nodes: MapNode[], edges: RelationView[], groups: MapGr
       drift: n.drift.length,
       requirement: n.requirement,
       isGroup: false,
+      runs: n.runs?.length ?? 0,
     });
   }
   const agg = new Map<string, GEdge>();
