@@ -149,3 +149,30 @@ remained.
   caps one argument at 128 KiB).
 * Nothing else changes: no file/stdin schema path, no new flags, the manual package remains the
   fallback for a request that does not fit.
+
+## Addendum 2026-10-19 — supervisor boundaries (audit wave 3)
+
+* **Domain boundary without file tools.** Checkpoint and security reviews embed the review package
+  inline in the prompt and now run with `allowed_tools=[]` (planning already did): the supervisor has
+  no Read/Grep/Glob, so it cannot read the other domain's partition by absolute path whatever
+  `--restricted` means. Requests that still need read tools (context files copied into the supervisor
+  workspace) keep the documented flags; whether `--restricted` confines absolute-path reads remains
+  **NOT-PROVEN** until the opt-in probe
+  `tests/integration/test_claude_bridge_live.py::test_live_supervisor_cannot_read_the_other_domain_partition`
+  is run on the owner's machine (`DLY_AEOS_LIVE_CLAUDE=1`) and its result is recorded here.
+* **Max is the supervisor (U-06).** A login whose `subscriptionType` is not `max` (DEGRADED) is no
+  longer used silently: `run_structured` refuses with `SUBSCRIPTION_NOT_MAX` (manual package stays
+  available) unless an ACTIVE owner EXCEPTION decision targets `claude_subscription/non-max`. The
+  5x/20x Max tier is not observable from `claude auth status` and stays UNVERIFIED.
+* **One subscription is not a shared backend (§12 future multi-user).** The native Max login on this
+  machine belongs to the bootstrap owner (first active SUPER_ADMIN). The capability test refuses other
+  accounts (`BRIDGE_OWNER_ONLY`); any additional local account must use its own permitted credential.
+  Planning/review call sites still run under the controller's identity for plans/reviews the owner
+  starts; extending the owner-only rule to them is tracked with those modules.
+* **Official binary.** AEOS never wraps or modifies the binary and refuses `.cmd/.bat/.ps1` shims; the
+  publisher signature (Authenticode / `codesign`) is not verified and `install-manifest` has no
+  approved pin for `claude-code`, so version drift is visible only through the fingerprint/version in
+  capability tests (NOT-PROVEN: official-build authenticity).
+* **Subscription quota behaviour** (weekly limit hit, extra paid usage) has only been observed against
+  fakes; the first real limit message is to be kept as E3 evidence (`cost.set_quota_state` source
+  `observed-limit-message`) and documented in `docs/evidence`.

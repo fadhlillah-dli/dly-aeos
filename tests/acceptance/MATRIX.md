@@ -8,12 +8,12 @@ that prove it, the status and the evidence level. Test ids are `file::test` rela
 
 | Status | Rows | Count |
 |---|---|---|
-| **PASS** (every part of the expected result proven) | all rows not listed below | 77 |
+| **PASS** (every part of the expected result proven) | all rows not listed below | 76 |
 | **PASS + XFAIL-BUG** (proven parts PASS; a named product bug is a strict xfail) | — | 0 |
-| **PASS + BLOCKED** (local part PASS; the rest needs an external capability) | 1.13, 1.19, 1.33, 1.34, 1.35 | 5 |
+| **PASS + BLOCKED** (local part PASS; the rest needs an external capability) | 1.12, 1.13, 1.19, 1.33, 1.34, 1.35 | 6 |
 | **Total** | | **82** |
 
-No strict xfails remain (BUG_PII and BUG_PIN_REDECLARED were fixed during integration); BLOCKED tests (5) are listed under "Seam bugs" and
+No strict xfails remain (BUG_PII and BUG_PIN_REDECLARED were fixed during integration); BLOCKED tests are listed under
 "Blocked" at the end. A strict xfail turns into a hard failure the moment the bug is fixed, so the
 row must then be re-marked PASS. Eight former strict xfails (5 bugs) were fixed by the wave-2 seams and
 are now PASS (see "Fixed by the wave-2 seams").
@@ -58,7 +58,7 @@ are now PASS (see "Fixed by the wave-2 seams").
 | 1.9 | Submit prompt tanpa domain | `test_untrusted_input.py::test_prompt_without_domain_is_refused_before_any_model_call`; `test_domain_scope.py::test_domain_scoped_reads_require_explicit_domain` | PASS | E2 |
 | 1.10 | Prompt memerintahkan OFFICE menjadi PERSONAL | `test_untrusted_input.py::test_prompt_ordering_office_to_personal_changes_nothing`; `test_domain_scope.py::test_project_domain_is_immutable` | PASS | E2 |
 | 1.11 | Lampiran berisi instruksi mengirim source ke GitHub personal | `test_untrusted_input.py::test_attachment_instructions_grant_no_authorisation_or_tool_permission` | PASS | E2 |
-| 1.12 | File path traversal/symlink keluar sandbox | `test_containment.py::test_task_write_scope_that_leaves_the_workspace_never_becomes_a_task`, `::test_candidate_symlink_and_traversal_are_never_materialised_or_accepted`, `::test_upload_archive_with_traversal_or_symlink_is_rejected`; `test_runtime_binding.py::test_path_traversal_segments_rejected`, `::test_managed_paths_cannot_escape` | PASS | E2 |
+| 1.12 | File path traversal/symlink keluar sandbox | `test_containment.py::test_task_write_scope_that_leaves_the_workspace_never_becomes_a_task`, `::test_candidate_symlink_and_traversal_are_never_materialised_or_accepted`, `::test_upload_archive_with_traversal_or_symlink_is_rejected`; `test_runtime_binding.py::test_path_traversal_segments_rejected`, `::test_managed_paths_cannot_escape`; BLOCKED: `test_containment.py::test_container_sandbox_blocks_filesystem_and_egress` (a worker process reading through an absolute path or a symlink outside its worktree is not prevented by the OS in the process sandbox) | PASS + BLOCKED-docker-containment | E2 (scope/materialisation/upload paths); worker-runtime read containment not proven |
 | 1.13 | Worker membaca vault/SSH/native Claude credential | PASS: `test_containment.py::test_worker_environment_and_tools_never_carry_vault_ssh_or_claude_credentials`, `::test_process_sandbox_containment_is_reported_honestly`, `::test_doctor_containment_check_reflects_the_runtime_report` (was XFAIL BUG_CONTAINMENT_REPORT, fixed by W3); BLOCKED: `::test_container_sandbox_blocks_filesystem_and_egress` | PASS + BLOCKED-docker-containment | E2 (env/tool/egress allow-lists); FS containment not proven |
 | 1.14 | VIEWER memanggil write endpoint langsung | `test_auth_boundary.py::test_viewer_is_denied_on_every_write_route` | PASS | E2 |
 | 1.15 | Bootstrap belum selesai tetapi publish diminta | `test_publication.py::test_publish_before_bootstrap_is_refused` | PASS | E2 |
@@ -140,7 +140,7 @@ are now PASS (see "Fixed by the wave-2 seams").
 | 3.27 | Mock diagram, roster, costs atau tests ditampilkan | `test_control_center.py::test_mock_costs_runs_diagrams_and_tests_are_labelled_and_never_counted`; `test_workforce.py::test_demo_roster_and_runs_are_labelled_and_never_counted`; `test_evidence_honesty.py::test_mock_acceptance_is_never_valid` | PASS | E2 |
 | 3.28 | Change proposal ditolak atau rollback dilakukan | `test_governance.py::test_rejected_proposal_keeps_reason_and_history_and_is_never_success`, `::test_rolled_back_change_keeps_its_history_and_evidence_and_is_never_success` | PASS | E2 |
 
-## Seam bugs (strict xfail; reasons are in the test modules)
+## Seam bugs (formerly strict xfail, all FIXED; kept for history)
 
 | Id | Seam | Rows | Tests |
 |---|---|---|---|
@@ -161,7 +161,7 @@ are now PASS (see "Fixed by the wave-2 seams").
 
 | Reason | Rows | Test |
 |---|---|---|
-| BLOCKED-docker-containment | 1.13 | `test_containment.py::test_container_sandbox_blocks_filesystem_and_egress` |
+| BLOCKED-docker-containment | 1.12, 1.13 | `test_containment.py::test_container_sandbox_blocks_filesystem_and_egress` |
 | BLOCKED-real-github | 1.34 | `test_containment.py::test_github_hosted_pr_run_has_no_secret_access` |
 | BLOCKED-real-github-enforcement | 1.33 | `test_delivery.py::test_provider_enforces_human_only_merge_on_the_real_repository` |
 | BLOCKED-real-atlassian-tenant | 1.19 | `test_publication.py::test_confluence_folder_support_on_a_real_tenant` |
@@ -222,9 +222,9 @@ The fixtures were reconciled with the contracts the other seams changed; no asse
 * **Delivery binding (W2)**: a PR is authorised by the plan APPROVAL whose operations include
   `create_pr` and whose targets name the repository; the 1.25 PR test approves with
   `{"provider": "github-repo", "repo": owner/name}`.
-* Eight strict xfails XPASSed and were re-marked PASS (table above). The two remaining strict xfails
-  were re-run with `--runxfail` and fail at their bug assertion (3.6's earlier failure point was the
-  missing live sandbox decision, now fixed in the fixture).
+* Eight strict xfails XPASSed and were re-marked PASS (table above). The two strict xfails that
+  remained at that point (BUG_PII 1.37, BUG_PIN_REDECLARED 3.6) were fixed later in the integration and
+  are PASS too; no strict xfail remains.
 
 ## How to run
 

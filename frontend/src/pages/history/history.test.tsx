@@ -23,6 +23,36 @@ describe("Audit tab (§34)", () => {
   });
 });
 
+describe("Attempts tab (§35 History: accepted/failed/cancelled attempts)", () => {
+  it("lists attempts with separate worker / verifier / acceptance / merge statuses", async () => {
+    const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query");
+    const { MemoryRouter } = await import("react-router-dom");
+    const { AttemptsTab } = await import("./AttemptsTab");
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (u: string) => {
+      urls.push(String(u));
+      return new Response(JSON.stringify({
+        items: [{ run_id: "run-aaaa-1111", task_id: "t", project_id: "p", attempt: 2, run_type: "IMPLEMENTATION",
+          execution_status: "FAILED", worker_reported_status: "EXITED_0", verifier_status: "FAILED",
+          acceptance_status: null, merged_status: null, started_at: null, finished_at: new Date().toISOString(),
+          mode: "LIVE", link: "/runs/run-aaaa-1111" }],
+        page: 1, page_size: 50, total: 1, source: "worker_runs", checked_at: new Date().toISOString(),
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter><AttemptsTab /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(/IMPLEMENTATION · attempt 2/)).toBeInTheDocument();
+    expect(screen.getByText("EXITED_0 (klaim)")).toBeInTheDocument(); // worker claim is not proof
+    fireEvent.change(screen.getByLabelText("Filter hasil percobaan"), { target: { value: "CANCELLED" } });
+    await screen.findByText(/IMPLEMENTATION · attempt 2/);
+    expect(urls.some((u) => u.includes("outcome=CANCELLED"))).toBe(true);
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("Backups recovery notice (§33, §50)", () => {
   it("warns that restore is untested when no backup is ready", () => {
     render(<RecoveryNotice data={{ items: [], recovery_ready: false, latest_restore_tested: null }} />);
