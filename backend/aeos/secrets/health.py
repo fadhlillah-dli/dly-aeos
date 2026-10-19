@@ -27,7 +27,13 @@ VERIFY_MAX_AGE = timedelta(days=7)
 def _remedies(bao: dict[str, Any], binary_installed: bool, approle: bool | None) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     if not binary_installed:
-        out.append({"command": "aeos vault install", "why": "Pasang biner OpenBao resmi (level pengguna, checksum diverifikasi)"})
+        from aeos.secrets.installer import install_command
+
+        cmd = install_command()
+        out.append({"command": f"aeos {cmd}",
+                    "why": "Pasang biner OpenBao resmi (level pengguna, checksum diverifikasi)"
+                           + ("" if cmd == "vault install" else "; belum ada approved_pin di install-manifest, "
+                              "tentukan versi persis yang sudah ditinjau")})
     if not bao.get("reachable"):
         out.append({"command": "aeos vault start", "why": "Jalankan server OpenBao lokal (127.0.0.1)"})
     elif not bao.get("initialized"):

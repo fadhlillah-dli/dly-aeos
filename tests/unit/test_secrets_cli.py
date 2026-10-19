@@ -328,3 +328,20 @@ def test_manifest_pin_reads_the_reviewed_manifest(tmp_path):
         "components:\n  - component_id: openbao\n    approved_pin: null\n", encoding="utf-8")
     assert installer.manifest_pin(tmp_path) is None
     assert installer.manifest_pin() is None  # the repository manifest has no approved pin yet (owner decision)
+
+
+def test_install_remedies_never_suggest_a_command_the_cli_refuses(settings, monkeypatch):
+    """Review finding: with no approved pin `aeos vault install` is refused, so the Doctor/health remedies must
+    name the exact-version form; with a pin the plain command is offered."""
+    from aeos.doctor.checks.secret import vault_remedy
+    from aeos.secrets.health import _remedies
+
+    monkeypatch.setattr(installer, "manifest_pin", lambda root=None: None)
+    assert vault_remedy("install").command.endswith("vault install --version <X.Y.Z>")
+    assert "approved_pin" in vault_remedy("install").operation
+    assert _remedies({}, False, None)[0]["command"] == "aeos vault install --version <X.Y.Z>"
+    r = runner.invoke(app, ["vault", "install", "--yes"])
+    assert r.exit_code == 1  # the plain form really is refused without a pin
+    monkeypatch.setattr(installer, "manifest_pin", lambda root=None: "2.7.1")
+    assert vault_remedy("install").command.endswith("vault install")
+    assert _remedies({}, False, None)[0]["command"] == "aeos vault install"

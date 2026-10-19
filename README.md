@@ -138,7 +138,9 @@ These cannot (and must not) be automated. The dashboard and `aeos doctor` show w
    `authMethod: claude.ai`. Make sure `ANTHROPIC_API_KEY` is **not** set in your environment.
 3. **OpenRouter key into the secret store** — create a key with a spend limit at openrouter.ai,
    then `aeos secrets set workers/openrouter` (input is not echoed). Never put it in a file.
-4. **OpenBao** — `aeos vault install`, `aeos vault start`, `aeos vault init` (store the unseal keys
+4. **OpenBao** — `aeos vault install` (installs the install-manifest `approved_pin`; while none is
+   recorded pass `--version X.Y.Z` for a version you reviewed - `latest` is never implied),
+   `aeos vault start`, `aeos vault init` (store the unseal keys
    and root token **offline**, never in the repo or chat), `aeos vault unseal` after each restart.
 5. **Google OAuth client + consent** (PERSONAL docs) — in Google Cloud Console create a project,
    enable the Google Drive API and Google Docs API, configure the OAuth consent screen, create an

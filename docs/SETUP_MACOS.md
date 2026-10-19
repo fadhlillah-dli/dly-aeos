@@ -67,7 +67,9 @@ Open http://127.0.0.1:8787, sign in, choose **PERSONAL**.
 ## 2. Claude Code (official) with native Max login
 
 ```bash
-curl -fsSL https://claude.ai/install.sh | bash      # official installer (docs: https://code.claude.com/docs/en/setup)
+brew install --cask claude-code                     # package manager (docs: https://code.claude.com/docs/en/setup)
+# or the official installer, downloaded and REVIEWED before it runs (never piped into a shell, §07):
+#   curl -fsSL https://claude.ai/install.sh -o install-claude.sh && less install-claude.sh && bash install-claude.sh
 claude                                              # sign in with your Claude account (Max plan), then /exit
 claude --version
 claude auth status                                  # loggedIn true, authMethod "claude.ai", subscriptionType "max"
@@ -89,7 +91,8 @@ model becomes a route only through a recorded ROUTE_ACTIVATION decision. Then ru
 ## 3. OpenBao and the macOS Keychain
 
 ```bash
-./aeos vault install     # reviewed OpenBao release (see install-manifest/); alternative: brew install openbao
+./aeos vault install     # the install-manifest approved_pin; while it is null: --version X.Y.Z (a version you reviewed)
+                         # alternative: brew install openbao
 ./aeos vault start
 ./aeos vault init        # prints unseal keys + root token ONCE - store them offline
 ./aeos vault unseal      # after every restart of OpenBao

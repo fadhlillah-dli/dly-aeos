@@ -374,7 +374,7 @@ def open_incident(body: IncidentIn, principal: AdminPrincipal, domain: ActiveDom
                                  domain=domain.value, project_id=project_id, declared_blast_radius=body.blast_radius,
                                  note=body.note)
     db.commit()
-    return incident.scoped(inc, domain.value)
+    return incident.scoped(inc, domain.value, db)
 
 
 def _incident_write(db: DB, principal: Any, incident_id: str) -> str | None:
@@ -392,7 +392,7 @@ def incident_note(incident_id: str, body: IncidentNoteIn, principal: AdminPrinci
     domain = _incident_write(db, principal, incident_id)
     inc = incident.add_timeline(db, incident_id, actor=principal.user.id, note=body.note, evidence_ids=body.evidence_ids)
     db.commit()
-    return incident.scoped(inc, domain)
+    return incident.scoped(inc, domain, db)
 
 
 @router.post("/api/ops/incidents/{incident_id}/analysis")
@@ -405,7 +405,7 @@ def incident_analysis(incident_id: str, body: IncidentAnalysisIn, principal: Adm
                                    root_cause_evidence_refs=body.root_cause_evidence_refs,
                                    root_cause_ref=body.root_cause_ref)
     db.commit()
-    return incident.scoped(inc, domain)
+    return incident.scoped(inc, domain, db)
 
 
 @router.post("/api/ops/incidents/{incident_id}/corrective-actions")
@@ -417,7 +417,7 @@ def incident_corrective(incident_id: str, body: CorrectiveActionIn, principal: A
     inc = incident.add_corrective_action(db, incident_id, actor=principal.user.id, description=body.description,
                                          ref=body.ref)
     db.commit()
-    return incident.scoped(inc, domain)
+    return incident.scoped(inc, domain, db)
 
 
 @router.post("/api/ops/incidents/{incident_id}/regression")
@@ -428,7 +428,7 @@ def incident_regression(incident_id: str, body: RegressionIn, principal: AdminPr
     inc = incident.link_regression(db, incident_id, actor=principal.user.id, test_ids=body.test_ids,
                                    eval_case_refs=body.eval_case_refs)
     db.commit()
-    return incident.scoped(inc, domain)
+    return incident.scoped(inc, domain, db)
 
 
 @router.post("/api/ops/incidents/{incident_id}/follow-up")
@@ -450,7 +450,7 @@ def incident_resolve(incident_id: str, principal: AdminPrincipal, db: DB) -> dic
     domain = _incident_write(db, principal, incident_id)
     inc = incident.resolve(db, incident_id, actor=principal.user.id)
     db.commit()
-    return incident.scoped(inc, domain)
+    return incident.scoped(inc, domain, db)
 
 
 def _now() -> str:

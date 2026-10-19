@@ -72,3 +72,10 @@ def scheduling_paused(session: Session) -> bool:
     from aeos.workforce.scheduler import scheduling_paused as impl
 
     return impl(session)
+
+
+def pause_info(session: Session) -> dict[str, Any]:
+    """The scheduler pause record ({paused, reason, by, at}); ``by`` tells who set the current pause."""
+    from aeos.workforce.scheduler import pause_info as impl
+
+    return impl(session)

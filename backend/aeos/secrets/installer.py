@@ -99,6 +99,13 @@ def manifest_pin(root: Path | None = None) -> str | None:
     return None
 
 
+def install_command(root: Path | None = None) -> str:
+    """The ``aeos`` sub-command that installs OpenBao as the CLI accepts it right now: plain ``vault install``
+    only when the manifest carries an approved pin; otherwise the owner must name a reviewed exact version
+    (remedies must never suggest a command that is refused)."""
+    return "vault install" if manifest_pin(root) else "vault install --version <X.Y.Z>"
+
+
 def resolve_release(client: httpx.Client, version: str | None = None) -> Release:
     if version is not None and not _VERSION.match(version.lstrip("v")):
         raise InstallError(f"invalid version {version!r}")

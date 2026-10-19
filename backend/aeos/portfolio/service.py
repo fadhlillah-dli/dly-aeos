@@ -246,9 +246,9 @@ def update_project(session: Session, principal: Principal, project: Project, bod
             if target == "RETIRED":
                 # §10/§33: RETIRED needs the owner's retirement decision bound to the current checklist hash.
                 from aeos.core.config import get_settings
-                from aeos.operations import retirement
+                from aeos.operations import facade as operations
 
-                retirement_decision_id = retirement.require_retirement_decision(session, get_settings(), project).id
+                retirement_decision_id = operations.require_retirement_decision(session, get_settings(), project).id
             changes["lifecycle"] = target
     if "lifecycle_reason" in body:
         changes["lifecycle_reason"] = redact_text(clean_text(body["lifecycle_reason"], field="lifecycle_reason",

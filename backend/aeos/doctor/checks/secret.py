@@ -64,9 +64,14 @@ _bao_binary_fp = binary_fingerprint("bao", "openbao_binary", resolver=resolve_op
 def vault_remedy(step: str) -> Remedy:
     """Remedy through the reviewed ``aeos vault`` commands (official release, checksum-verified, user-level,
     loopback only; master §07 step 3). The owner runs them; the Doctor never does."""
+    from aeos.secrets.facade import install_command
+
+    install = install_command()
+    pin_note = "" if install == "vault install" else (
+        "; install-manifest belum punya approved_pin OpenBao: pilih dan tinjau versi persis (--version X.Y.Z)")
     steps = {
         "install": ("Pasang biner OpenBao resmi ke <data>/bin (rencana ditampilkan dan dikonfirmasi dulu; SHA256 "
-                    "dicocokkan dengan checksums.txt, tanda tangan GPG belum diverifikasi)", "vault install",
+                    "dicocokkan dengan checksums.txt, tanda tangan GPG belum diverifikasi)" + pin_note, install,
                     "hapus <data>/bin/bao", "secret.openbao_binary VERIFIED"),
         "start": ("Jalankan server OpenBao lokal (hanya 127.0.0.1)", "vault start", aeos_cmd("vault stop"),
                   "secret.openbao_health CONNECTED"),

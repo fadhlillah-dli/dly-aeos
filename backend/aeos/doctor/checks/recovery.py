@@ -117,7 +117,7 @@ def recovery_config_rollback(ctx: CheckContext) -> Outcome:
                        error_code="NO_RELEASE_ARTIFACT", severity="LOW")
     # §09 zones: the trusted controller is the pinned ACTIVE release, not whatever the checkout contains.
     try:
-        from aeos.operations.release import controller_report
+        from aeos.operations.facade import controller_report
 
         ctl: dict[str, Any] | None = controller_report(ctx.settings, ctx.session)
     except Exception:  # operations module absent/broken: no claim either way
