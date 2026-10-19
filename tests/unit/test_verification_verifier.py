@@ -84,6 +84,81 @@ def test_clean_change_passes_with_trusted_e2_report(db, settings, controller, wf
     assert view["dependency_set_hash"] == verifier.dependency_set()["hash"]
 
 
+CANDIDATE_PROBE_TEST = '''
+import os, subprocess
+from pathlib import Path
+
+REAL_DB = {db!r}
+OWNER = {owner!r}
+
+
+def _gh_dirs():
+    out = [os.environ.get("GH_CONFIG_DIR"), os.path.join(os.path.expanduser("~"), ".config", "gh")]
+    if os.environ.get("XDG_CONFIG_HOME"):
+        out.append(os.path.join(os.environ["XDG_CONFIG_HOME"], "gh"))
+    if os.environ.get("APPDATA"):
+        out.append(os.path.join(os.environ["APPDATA"], "GitHub CLI"))
+    return [d for d in out if d]
+
+
+def test_no_gh_hosts_through_the_environment():
+    assert not [d for d in _gh_dirs() if os.path.isfile(os.path.join(d, "hosts.yml"))]
+    assert not any(d.startswith(OWNER) for d in _gh_dirs())
+
+
+def test_no_git_credentials_through_the_environment():
+    assert not os.path.isfile(os.path.join(os.path.expanduser("~"), ".git-credentials"))
+    cp = subprocess.run(["git", "config", "--show-scope", "--get-all", "credential.helper"], capture_output=True,
+                        text=True, stdin=subprocess.DEVNULL)
+    helpers = [ln.split("\\t", 1) for ln in cp.stdout.splitlines() if ln.strip()]
+    assert helpers and all(scope == "command" and value == "" for scope, value in helpers)
+
+
+def test_keyring_answers_nothing():
+    import keyring
+
+    assert type(keyring.get_keyring()).__module__ == "keyring.backends.null"
+    assert keyring.get_password("dly-aeos", "aeos-probe") is None
+
+
+def test_data_db_not_reachable_through_the_environment():
+    import platformdirs
+
+    candidates = [os.environ.get("AEOS_DATA_DIR"),
+                  platformdirs.user_data_dir("DLY-AEOS", appauthor=False, roaming=False)]
+    assert not any(os.path.isfile(os.path.join(c, "aeos.sqlite3")) for c in candidates if c)
+    assert all(os.path.normcase(os.path.join(c, "aeos.sqlite3")) != os.path.normcase(REAL_DB)
+               for c in candidates if c)
+    assert not os.environ.get("SSH_AUTH_SOCK")
+'''
+
+
+@pytest.mark.skipif(GIT is None, reason="git not available")
+def test_candidate_tests_find_no_owner_credentials_through_the_environment(db, settings, controller, wf, tmp_path,
+                                                                            monkeypatch):
+    """§20/§25 negative test through the real verifier: worker-written candidate tests that look for the keyring,
+    the gh hosts.yml, git credentials and the AEOS data DB through the environment find nothing, even with fake
+    owner credentials planted in the controller's own environment. The run states isolation WEAK honestly."""
+    from tests.unit.test_verification_procs import _plant_owner_state
+
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, head = make_candidate(settings, world, head_files={
+        "tests/unit/test_env_probe.py": CANDIDATE_PROBE_TEST.format(db=str(settings.layout.db_path),
+                                                                    owner=str(tmp_path / "owner"))})
+    bind_candidate(db, world, cand, base, head)
+    planted = _plant_owner_state(tmp_path, monkeypatch)
+    monkeypatch.setenv("AEOS_DATA_DIR", str(settings.data_dir))  # the controller keeps its own data dir
+    out = _verify(db, world)
+    assert out.checks["candidate_tests"].status == "PASS", out.checks["candidate_tests"]
+    assert out.checks["candidate_tests"].details.get("passed") == 5  # the 4 probes + the base's own test
+    assert out.status == "PASS", (out.reasons, out.not_proven)
+    view = verifier.report_view(db.get(EvidenceArtifact, out.report_evidence_id))
+    assert view["verifier_isolation"] == "WEAK" and view["verifier_runner"] == "process"
+    for ev in db.scalars(select(EvidenceArtifact)).all():
+        data, _ = collector.read_content(ev)
+        assert not data or str(planted["token"]).encode() not in data
+
+
 def test_e4_reference_to_a_changed_protected_suite_is_capped_at_e2(db, settings, controller, wf):
     world = make_world(db, verifier_policy=FAST)
     cand, base, head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
@@ -170,6 +245,71 @@ def test_frontend_and_migration_changes_are_stated_not_proven(db, settings, cont
     report = db.get(EvidenceArtifact, out.report_evidence_id)
     nps = collector.read_json(report)["not_proven"]
     assert any("frontend" in n for n in nps) and any("migration" in n for n in nps)
+
+
+_MIG_ENV = (
+    "from alembic import context\n"
+    "from sqlalchemy import engine_from_config, pool\n"
+    "config = context.config\n\n"
+    "def run_online():\n"
+    "    cn = engine_from_config(config.get_section(config.config_ini_section) or "
+    "{'sqlalchemy.url': config.get_main_option('sqlalchemy.url')}, prefix='sqlalchemy.', poolclass=pool.NullPool)\n"
+    "    with cn.connect() as c:\n"
+    "        context.configure(connection=c, render_as_batch=True)\n"
+    "        with context.begin_transaction():\n"
+    "            context.run_migrations()\n\n"
+    "if context.is_offline_mode():\n"
+    "    context.configure(url=config.get_main_option('sqlalchemy.url'), literal_binds=True)\n"
+    "    with context.begin_transaction():\n"
+    "        context.run_migrations()\n"
+    "else:\n"
+    "    run_online()\n"
+)
+_MIG_REV = (
+    "from alembic import op\nimport sqlalchemy as sa\n"
+    "revision = {rev!r}\ndown_revision = {down!r}\nbranch_labels = None\ndepends_on = None\n\n"
+    "def upgrade():\n    op.create_table({tbl!r}, sa.Column('id', sa.Integer, primary_key=True))\n\n"
+    "def downgrade():\n    op.drop_table({tbl!r})\n"
+)
+
+
+def _alembic_candidate(db, settings, *, good: bool):
+    world = make_world(db, verifier_policy=FAST,
+                       allowed_paths=["backend/**", "tests/unit/**", "docs/**"])
+    # a non-protected migrations location (still the "migration" impact category: **/migrations/**), so the
+    # round-trip result decides the verdict instead of the platform protected-path quarantine
+    mig = "backend/svc/migrations"
+    base_files = {
+        **BASE_FILES,
+        f"{mig}/env.py": _MIG_ENV,
+        f"{mig}/versions/0001_init.py": _MIG_REV.format(rev="0001", down=None, tbl="widgets"),
+    }
+    head_rev = _MIG_REV.format(rev="0002", down="0001", tbl="gadgets")
+    if not good:
+        head_rev = head_rev.replace("    op.drop_table('gadgets')\n", "    raise RuntimeError('downgrade broken')\n")
+    cand, base, head = make_candidate(settings, world, base_files=base_files, head_files={
+        f"{mig}/versions/0002_more.py": head_rev})
+    bind_candidate(db, world, cand, base, head)
+    return world
+
+
+def test_migration_change_runs_a_real_round_trip_that_passes(db, settings, controller, wf):
+    """§16/§31: a schema-migration change is verified by a real upgrade->downgrade(base)->upgrade round-trip and
+    reopen (restore), run as candidate code through the verifier runner (not merely stated NOT-PROVEN)."""
+    world = _alembic_candidate(db, settings, good=True)
+    out = _verify(db, world)
+    assert out.checks["migration_rollback"].status == "PASS", out.checks["migration_rollback"].summary
+    assert out.status == "PASS", (out.reasons, out.not_proven)
+    mig_reports = [e for e in db.scalars(select(EvidenceArtifact).where(EvidenceArtifact.kind == "TEST_REPORT"))
+                   if "round-trip" in e.claim]
+    assert mig_reports and collector.read_json(mig_reports[0])["status"] == "PASS"
+
+
+def test_migration_with_a_broken_downgrade_fails(db, settings, controller, wf):
+    world = _alembic_candidate(db, settings, good=False)
+    out = _verify(db, world)
+    assert out.checks["migration_rollback"].status == "FAIL"
+    assert out.status == "FAIL" and any("round-trip FAILED" in r for r in out.reasons)
 
 
 def test_baseline_on_the_base_commit_classifies_regressions_and_is_cached(db, settings, controller, wf):

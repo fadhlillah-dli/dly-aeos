@@ -186,12 +186,41 @@ def verifier_independence_self_test(repo: Path) -> dict[str, Any]:
     return out
 
 
+def _verifier_runner_view(ctx: CheckContext) -> dict[str, Any]:
+    """Which runner the verifier executes candidate code in (§20 isolated runner). CONTAINER only on a host with
+    a proven container boundary + the verifier image; otherwise WEAK, whose residual risk is reported, never
+    hidden. Fail closed: any error is reported as WEAK with the reason."""
+    domain = Domain.PERSONAL.value  # OFFICE is always BLOCKED by the worker runtime; verifier re-checks per domain
+    try:
+        from aeos.verification.runner import runner_status
+
+        st = runner_status(ctx.session, domain=domain)
+    except Exception as exc:
+        return {"isolation": "WEAK", "runner": "process", "reasons": [f"verifier runner unreadable ({type(exc).__name__})"],
+                "residual_risks": ["verifier isolation NOT-PROVEN: runner state could not be read (fail closed)"]}
+    isolation = str(st.get("isolation") or "WEAK")
+    view: dict[str, Any] = {"isolation": isolation, "runner": st.get("runner"), "domain": domain,
+                            "reasons": st.get("reasons") or [], "remedies": st.get("remedies") or [],
+                            "image": st.get("image"), "containment": st.get("containment") or {}}
+    if isolation != "CONTAINER":
+        view["residual_risks"] = [
+            "Verifier isolation WEAK: candidate code the verifier executes (trusted suite, candidate tests, "
+            "migration round-trip) runs as the controller's OS user with a scrubbed, redirected environment; no "
+            "container boundary proven on this host, so filesystem/egress are not OS-enforced (ADR-0051). Writes "
+            "to the controller checkout/interpreter and the DB trust tables during a verification are detected and "
+            "QUARANTINED; reads by absolute path or the OS credential API are not prevented.",
+            *([f"verifier container runner not available: {r}" for r in (st.get('reasons') or [])[:3]]),
+        ]
+    return view
+
+
 @check("evidence.verifier", "EVIDENCE_REVIEW", "Verifier/collector independen tersedia",
        component_id="verification-review", ttl_seconds=3600, ok={"CONFIGURED", "VERIFIED"}, severity_fail="HIGH",
        level="E1", functional_level="E2",
-       description="Tanpa --functional: modul collector/acceptance ada. Dengan --functional: uji mandiri pemisahan "
-                   "zona kepercayaan (shadow module kandidat terdeteksi, kandidat di dalam controller ditolak, suite "
-                   "tepercaya dibaca dari luar kandidat).")
+       description="Tanpa --functional: modul collector/acceptance ada dan runner isolasi dilaporkan (CONTAINER "
+                   "bila boundary terbukti, selainnya WEAK + residual risk). Dengan --functional: uji mandiri "
+                   "pemisahan zona kepercayaan (shadow module kandidat terdeteksi, kandidat di dalam controller "
+                   "ditolak, suite tepercaya dibaca dari luar kandidat).")
 def evidence_verifier(ctx: CheckContext) -> Outcome:
     present, placeholder = module_present("aeos.verification.collector")
     acc, acc_ph = module_present("aeos.verification.acceptance")
@@ -199,9 +228,18 @@ def evidence_verifier(ctx: CheckContext) -> Outcome:
     if not evidence["collector"] or not evidence["acceptance"]:
         return Outcome("MISSING", "Verifier/collector independen belum diimplementasikan; hasil worker tetap "
                        "REVIEW/NOT-PROVEN.", evidence=evidence, error_code="VERIFIER_NOT_IMPLEMENTED")
+    runner_view = _verifier_runner_view(ctx)
+    evidence["verifier_runner"] = runner_view
+    risks = list(runner_view.get("residual_risks") or [])
+    if risks:
+        evidence["residual_risks"] = risks
+    iso = runner_view["isolation"]
+    iso_note = (f" Runner candidate code: isolasi {iso}"
+                + ("" if iso == "CONTAINER" else " (WEAK, residual risk diterima pemilik; buktikan containment "
+                   "container + build image verifier untuk CONTAINER)") + ".")
     if not ctx.functional:
         return Outcome("CONFIGURED", "Collector dan acceptance tersedia; independensi diuji dengan --functional "
-                       "(uji mandiri pemisahan zona kepercayaan).", evidence=evidence)
+                       "(uji mandiri pemisahan zona kepercayaan)." + iso_note, evidence=evidence)
     try:
         test = verifier_independence_self_test(ctx.repo)
     except Exception as exc:  # never green on an error
@@ -214,8 +252,8 @@ def evidence_verifier(ctx: CheckContext) -> Outcome:
             + ("" if test.get("trusted_suite_hash") else " (suite tepercaya tidak terbaca)") + ".",
             evidence=evidence, error_code="VERIFIER_NOT_INDEPENDENT")
     return Outcome("VERIFIED", "Independensi verifier: shadow module kandidat terdeteksi, kandidat di dalam controller "
-                   "ditolak, suite tepercaya di-hash dari checkout controller (skenario: uji mandiri, bukan run worker).",
-                   evidence=evidence)
+                   "ditolak, suite tepercaya di-hash dari checkout controller (skenario: uji mandiri, bukan run worker)."
+                   + iso_note, evidence=evidence)
 
 
 @check("evidence.trace_redaction", "EVIDENCE_REVIEW", "Redaksi trace/log berfungsi", ttl_seconds=86400,
