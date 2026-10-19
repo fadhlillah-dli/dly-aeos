@@ -492,6 +492,20 @@ def test_snapshots_list_is_paginated_via_api(personal_client, db):
     assert body["total"] == 3 and len(body["items"]) == 2 and body["page"] == 1
 
 
+def test_relations_list_is_paginated_via_api(personal_client, db):
+    seed_run(db)
+    db.commit()
+    full = personal_client.get("/api/inventory/components/opencode/relations").json()
+    assert full["total"] >= 2 and full["total"] == full["total_outgoing"] + full["total_incoming"]
+    assert len(full["items"]) == full["total"]
+    pages = [personal_client.get("/api/inventory/components/opencode/relations",
+                                 params={"page": n, "page_size": 1}).json() for n in range(1, full["total"] + 1)]
+    assert all(len(p["items"]) == 1 and p["total"] == full["total"] for p in pages)
+    assert [p["items"][0]["id"] for p in pages] == [r["id"] for r in full["items"]]
+    assert personal_client.get("/api/inventory/components/opencode/relations",
+                               params={"page_size": 501}).status_code == 422
+
+
 # ------------------------------------------------------------------ §38 configuration with hash/revision and target
 
 

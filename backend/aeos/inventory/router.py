@@ -82,8 +82,10 @@ def component_detail(component_id: str, db: DB, principal: CurrentPrincipal, dom
 
 
 @router.get("/api/inventory/components/{component_id}/relations")
-def component_relations(component_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
-    return views.component_relations(db, component_id, domain=domain.value)
+def component_relations(component_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain,
+                        page: int = Query(default=1, ge=1),
+                        page_size: int = Query(default=200, ge=1, le=500)) -> dict[str, Any]:
+    return views.component_relations(db, component_id, domain=domain.value, page=page, page_size=page_size)
 
 
 @router.get("/api/inventory/components/{component_id}/dependencies")
