@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { DecisionStatusBadge } from "../../components/planning/DecisionStatusBadge";
@@ -23,15 +23,24 @@ interface QueueView {
 const KINDS = ["", "APPROVAL", "REVISION_REQUEST", "REJECTION", "EXCEPTION", "RISK_ACCEPTANCE", "WRITE_ENABLEMENT", "POLICY", "BUDGET", "TRIAL", "PROMOTION", "ROUTE_ACTIVATION"];
 const STATUSES = ["", "ACTIVE", "EXPIRED", "INVALIDATED", "SUPERSEDED"];
 
-function DecisionHistory({ highlight }: { highlight: string | null }) {
+export function DecisionHistory({ highlight }: { highlight: string | null }) {
   const { isAdmin } = useAuth();
   const qc = useQueryClient();
   const [kind, setKind] = useState("");
   const [status, setStatus] = useState("");
+  // §41 "Keputusan terkait": pages link here with ?target_type=&target_id= to show only their decisions.
+  const [search] = useSearchParams();
+  const targetType = search.get("target_type") ?? "";
+  const targetId = search.get("target_id") ?? "";
   const params = new URLSearchParams();
   if (kind) params.set("kind", kind);
   if (status) params.set("status", status);
-  const q = useQuery({ queryKey: ["decisions", kind, status], queryFn: () => get<{ items: DecisionView[]; checked_at: string }>(`/api/decisions?${params}`) });
+  if (targetType) params.set("target_type", targetType);
+  if (targetId) params.set("target_id", targetId);
+  const q = useQuery({
+    queryKey: ["decisions", kind, status, targetType, targetId],
+    queryFn: () => get<{ items: DecisionView[]; checked_at: string }>(`/api/decisions?${params}`),
+  });
   const revoke = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) => post(`/api/decisions/${id}/revoke`, { reason }),
     onSuccess: () => {
@@ -42,6 +51,20 @@ function DecisionHistory({ highlight }: { highlight: string | null }) {
   });
   return (
     <Card title="Riwayat keputusan (timeline)">
+      {targetType && (
+        <p className="mb-2 text-xs text-ink-2" data-testid="decision-target-filter">
+          Hanya keputusan untuk target <Mono>{targetType}</Mono>
+          {targetId && (
+            <>
+              :<Mono>{targetId}</Mono>
+            </>
+          )}
+          .{" "}
+          <Link to="/decisions" className="text-accent underline">
+            Tampilkan semua
+          </Link>
+        </p>
+      )}
       <div className="mb-3 flex flex-wrap gap-2">
         <select aria-label="Filter jenis" className={`${inputClass} w-auto`} value={kind} onChange={(e) => setKind(e.target.value)}>
           {KINDS.map((k) => (

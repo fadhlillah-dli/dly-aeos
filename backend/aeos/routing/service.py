@@ -2,15 +2,21 @@
 
 Stage 1 (hard filters, each rejection carries a reason):
   status APPROVED with an ACTIVE human ROUTE_ACTIVATION decision bound to the current config hash,
-  or TRIAL with an ACTIVE TRIAL decision bound to it; domain eligible (OFFICE additionally needs
-  the office policy: external_worker_allowed + route listed in approved_worker_routes; policy
-  unavailable -> deny); data classification allowed; identity UNVERIFIED -> PUBLIC data only;
-  tool support proven when tools are needed; context window known and large enough; catalog
-  availability not MISSING; quota not EXHAUSTED; pricing/terms freshness; paid (or free status
-  unknown/expired) -> also an ACTIVE BUDGET decision referenced by the activation.
+  or TRIAL with an ACTIVE TRIAL decision bound to it; the runtime the activation was bound to
+  (policy version, worker prompt revision, context strategy) is still the one in force; domain
+  eligible (OFFICE additionally needs the office policy: external_worker_allowed + route listed in
+  approved_worker_routes; policy unavailable -> deny); data classification allowed; identity
+  UNVERIFIED -> PUBLIC data only; tool support proven when tools are needed and every TaskSpec tool
+  inside the route's reviewed tool set; context window known and large enough; catalog availability
+  observed (UNKNOWN and MISSING are rejected); region/residency reviewed where the provider restricts
+  regions; quota not EXHAUSTED; pricing/terms freshness; paid (or free status unknown/expired) -> also
+  an ACTIVE BUDGET decision referenced by the activation.
 Stage 2 (selection): recorded eval results for the task role whose config hash matches the
   current configuration (a changed configuration never inherits an old baseline), otherwise the
-  deterministic priority. The model never selects itself; TaskSpec route policy can only narrow.
+  deterministic priority. Eval results are written onto the route only by the owner's APPROVED
+  activation, which must reference completed, gate-passing EvalRuns of exactly this configuration
+  (§23 "route produksi hanya menggunakan konfigurasi yang diizinkan dan telah diuji"). The model
+  never selects itself; TaskSpec route policy can only narrow.
 Fallback: only along the failed route's ``fallback_chain``, only to routes that are themselves
   eligible, same pool, free — never a paid fallback and never a supervisor downgrade.
 """
@@ -18,6 +24,7 @@ Fallback: only along the failed route's ``fallback_chain``, only to routes that 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -29,6 +36,7 @@ from sqlalchemy.orm import Session
 from aeos.core.enums import DataClassification, Domain
 from aeos.core.errors import Blocked, Conflict, NotFound, ValidationFailed
 from aeos.core.hashing import content_hash
+from aeos.core.redaction import redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.cost import QuotaState
 from aeos.models.decisions import Decision
@@ -46,6 +54,23 @@ TRIAL_DEFAULT_DAYS = 14
 TRIAL_MAX_DAYS = 90
 APPROVAL_MAX_DAYS = 365
 RESTRICTED_TERMS_KEYS = ("may_use_inputs_for_training", "trial_only_no_confidential")
+# Pools the worker runtime executes through the broker (the broker serves WORKER routes only) and whose
+# activation is therefore bound to the worker runtime fingerprint (prompt revision, context strategy).
+WORKER_EXECUTED_POOLS = ("WORKER",)
+# TaskSpec tool vocabulary a route may be reviewed for (planning DEFAULT_TOOLS + the OpenCode adapter's
+# explicit grants). The default reviewed set is the planning default; bash/webfetch need an explicit review.
+REVIEWED_WORKER_TOOLS = ("fs.read", "fs.write:allowed_paths", "tests.run")
+TOOL_VOCABULARY = frozenset({*REVIEWED_WORKER_TOOLS, "bash", "webfetch"})
+PLACEHOLDER_TOOL_SETS = frozenset({"opencode-default"})
+# Providers whose availability a catalog refresh observes (routing.catalog: OpenRouter models, `opencode models`).
+CATALOG_OBSERVED_PROVIDERS = frozenset({"openrouter", "opencode-zen"})
+_REGION = re.compile(r"^[A-Z0-9][A-Z0-9-]{1,31}$")
+# TaskSpec model_route_policy keys: consumed by routing, or constraints routing always enforces (a TaskSpec
+# asking to relax one of them is refused rather than silently ignored).
+POLICY_KEYS_CONSUMED = frozenset({"pool", "requires_tools", "needs_tools", "min_context_tokens", "min_context",
+                                  "routes", "primary"})
+POLICY_KEYS_ENFORCED = {"eligible_routes_only": True, "paid_fallback": False, "supervisor_downgrade": False}
+POLICY_KEYS_INFORMATIONAL = frozenset({"notes", "office_external_allowed"})
 
 # Fields that make up the AIConfiguration identity (§43). Status/timestamps/eval are excluded so
 # that refreshing a catalog without any change keeps the identity (and approvals) stable.
@@ -108,11 +133,20 @@ def refresh_config_hash(session: Session, route: ModelRoute, *, reason: str) -> 
     except (ImportError, ModuleNotFoundError):
         pass  # hash binding already makes old approvals ineffective
     notify_readiness(session, route.route_key, reason=reason, pool=route.pool)
+    # §47/§43 "re-evaluated when the model changes": roles that had a passing evaluation of the previous
+    # configuration now need a new one; the result is never inherited (eval_score checks the hash).
+    tested_roles = sorted(role for role, e in (route.eval_results or {}).items()
+                          if isinstance(e, dict) and e.get("config_hash") == old)
     try:
         from aeos.events.service import emit
 
         emit(session, source="routing", kind="route.config_changed", entity_type=TARGET_TYPE,
              entity_id=route.route_key, entity_version=new, payload={"reason": reason, "previous_hash": old})
+        if tested_roles:
+            emit(session, source="routing", kind="route.needs_evaluation", entity_type=TARGET_TYPE,
+                 entity_id=route.route_key, entity_version=new,
+                 payload={"roles": tested_roles, "previous_hash": old, "reason": reason,
+                          "remedy": "plan an EvalRun of the new configuration before an APPROVED re-activation"})
     except Exception:  # pragma: no cover
         log.exception("emit route.config_changed failed")
     return True
@@ -208,6 +242,23 @@ def budget_decision_valid(session: Session, decision_id: str | None, route: Mode
 # ------------------------------------------------------------------------------ helpers
 
 
+def route_use_problem(session: Session, route: ModelRoute) -> str | None:
+    """Per-request authorisation of an admitted route (broker, §23); see ``facade.route_use_problem``."""
+    if route.status not in {"APPROVED", "TRIAL"}:
+        return f"route status {route.status}"
+    kind = "ROUTE_ACTIVATION" if route.status == "APPROVED" else "TRIAL"
+    decision = find_route_decision(session, kind=kind, route=route)
+    if decision is None:
+        return (f"route {route.status} has no ACTIVE human {kind} decision bound to its current configuration "
+                "(configuration changed, approval expired or revoked)")
+    if not is_effectively_free(route):
+        ok, why = budget_decision_valid(session, (decision.details or {}).get("budget_decision_id"), route)
+        if not ok:
+            label = "free period ended" if route.is_free == "YES" else f"is_free={route.is_free}"
+            return f"route is no longer free ({label}) and has no valid budget decision: {why}"
+    return None
+
+
 def is_effectively_free(route: ModelRoute, now: datetime | None = None) -> bool:
     if route.is_free != "YES":
         return False
@@ -275,6 +326,190 @@ def credential_rejections(route: ModelRoute, *, domain: str) -> list[str]:
     return [f"credential_ref {ref}: {problem}"] if problem else []
 
 
+# ------------------------------------------------------------------------------ runtime binding (§23)
+
+
+def current_policy_version() -> str | None:
+    """Version of the canonical policy in force (hash of ``policy/*.yaml``). Decisions are deliberately not
+    part of it: an owner EXCEPTION/BUDGET elsewhere is not a policy change of the route. None = unknown."""
+    try:
+        from aeos.policy.snapshot import load_policy_files
+    except (ImportError, ModuleNotFoundError):
+        return None
+    try:
+        files = load_policy_files()
+    except Exception:  # pragma: no cover - fail closed (an unreadable policy is not a known version)
+        log.exception("policy files could not be read")
+        return None
+    return "pol-" + content_hash({name: entry.get("sha256") for name, entry in sorted(files.items())})[7:23]
+
+
+def current_worker_runtime() -> dict[str, str | None]:
+    """Fingerprints of the worker runtime in this build (§23 "prompt revision", "context strategy").
+
+    * ``prompt_revision``: the worker runtime's own revision (``executor.worker_prompt_revision``: the prompt
+      template, ``build_prompt`` rendered for a fixed probe TaskSpec, the OpenCode permission template, the
+      report schema). It is the same value the executor writes into every prompt and run and compares before a
+      run starts, so activation, eligibility and execution agree on one identity; any change is a new revision.
+    * ``context_strategy``: how worker context is assembled (TaskSpec file + worktree; attachment budgets and
+      the default model context/output limits the adapter writes)."""
+    try:
+        from aeos.worker_runtime import executor, opencode
+    except (ImportError, ModuleNotFoundError):
+        return {"prompt_revision": None, "context_strategy": None}
+    try:
+        revision = executor.worker_prompt_revision()
+        strategy = {"assembly": "taskspec-file+worktree", "max_attachment_chars": executor.MAX_ATTACHMENT_CHARS,
+                    "max_attach_total": executor.MAX_PROMPT_ATTACH_TOTAL,
+                    "default_context": opencode.DEFAULT_CONTEXT_LIMIT, "default_output": opencode.DEFAULT_OUTPUT_LIMIT}
+    except Exception:  # pragma: no cover - fail closed
+        log.exception("worker runtime fingerprint failed")
+        return {"prompt_revision": None, "context_strategy": None}
+    return {"prompt_revision": revision,
+            "context_strategy": "taskspec-file+worktree:" + content_hash(strategy)[7:19]}
+
+
+def observed_harness_version() -> str | None:
+    """The OpenCode version installed now (cached probe), or None when it is not installed/observable."""
+    try:
+        from aeos.worker_runtime import opencode
+
+        status = opencode.opencode_status()
+    except Exception:
+        return None
+    return status.get("version") if status.get("status") == "INSTALLED" and status.get("version") else None
+
+
+def runtime_context() -> dict[str, str | None]:
+    """The runtime values approvals are bound to, computed once per eligibility pass. ``harness_version`` is the
+    OpenCode version observable now (None = not installed/observable: the executor refuses ENGINE_MISSING)."""
+    return {"policy_version": current_policy_version(), **current_worker_runtime(),
+            "harness_version": observed_harness_version()}
+
+
+def runs_on_worker_runtime(route: ModelRoute) -> bool:
+    return route.pool in WORKER_EXECUTED_POOLS or route.harness == "opencode"
+
+
+def binding_fields(route: ModelRoute) -> tuple[str, ...]:
+    return ("policy_version", "prompt_revision", "context_strategy") if runs_on_worker_runtime(route) \
+        else ("policy_version",)
+
+
+def binding_drift(route: ModelRoute, runtime: dict[str, str | None]) -> list[str]:
+    """Why an activated route no longer matches the runtime it was approved for (empty = still bound)."""
+    reasons: list[str] = []
+    for f in binding_fields(route):
+        bound, current = getattr(route, f), runtime.get(f)
+        if current is None:
+            reasons.append(f"{f}: the value in force cannot be determined - fail closed")
+        elif bound is None:
+            reasons.append(f"{f} was not bound at activation: re-activate after review")
+        elif bound != current:
+            reasons.append(f"{f} changed since activation ({bound} -> {current}): re-review and re-activate")
+    observed = runtime.get("harness_version")
+    if runs_on_worker_runtime(route) and observed is not None:
+        # §23 "harness version": an engine installed or upgraded after the activation is not the reviewed one
+        # (a catalog refresh records it as a configuration change; until then the hard filter fails closed)
+        if route.harness_version is None:
+            reasons.append(f"harness_version was not bound at activation (OpenCode {observed} observed now): "
+                           "refresh the catalog and re-activate after review")
+        elif route.harness_version != observed:
+            reasons.append(f"harness_version changed since activation ({route.harness_version} -> {observed}): "
+                           "re-review and re-activate")
+    return reasons
+
+
+def _tool_covered(tool: str, reviewed: set[str]) -> bool:
+    return tool in reviewed or (tool.startswith("bash:") and "bash" in reviewed)
+
+
+def reviewed_tool_set(route: ModelRoute) -> list[str] | None:
+    """The tool set the owner reviewed for this route, or None when it was never reviewed."""
+    tools = [str(t) for t in (route.tool_set or [])]
+    return tools if tools and not set(tools) <= PLACEHOLDER_TOOL_SETS else None
+
+
+def tool_set_rejections(route: ModelRoute, tools: list[str] | None) -> list[str]:
+    if not tools:
+        return []
+    reviewed = reviewed_tool_set(route)
+    if reviewed is None:
+        return ["tool set not reviewed for this route (the activation records the reviewed tool set)"]
+    missing = [t for t in tools if not _tool_covered(t, set(reviewed))]
+    return [f"TaskSpec tools {missing} outside the route's reviewed tool set {sorted(reviewed)}"] if missing else []
+
+
+def _unavailable_regions(terms: dict[str, Any]) -> list[str]:
+    return [str(x).strip().upper() for x in terms.get("unavailable_regions") or [] if str(x).strip()]
+
+
+def region_restricted(route: ModelRoute) -> bool:
+    terms = route.data_terms or {}
+    return bool(terms.get("regions")) or bool(_unavailable_regions(terms))
+
+
+def region_rejections(route: ModelRoute, *, domain: str, office: dict[str, Any] | None) -> list[str]:
+    """§23 "Terms/kuota/promo/region tetap dinilai per route": a provider that restricts regions needs the
+    owner-reviewed region/residency on the route; an OFFICE policy may name allowed regions."""
+    reasons: list[str] = []
+    region = (route.region or "").upper()
+    if region_restricted(route) and not region:
+        reasons.append("provider restricts regions/residency: region not reviewed (record it at activation)")
+    if region and region in _unavailable_regions(route.data_terms or {}):
+        reasons.append(f"route unavailable in region {region} per its data terms")
+    if domain == Domain.OFFICE.value and office is not None and office.get("allowed_regions"):
+        allowed = [str(x).upper() for x in office.get("allowed_regions") or []]
+        if region not in allowed:
+            reasons.append(f"OFFICE policy: region/residency {region or 'UNKNOWN'} not in allowed_regions")
+    return reasons
+
+
+def unknown_terms_keys(terms: dict[str, Any]) -> list[str]:
+    """Training/trial flags whose value is UNKNOWN: a missing/None training flag, or an explicit None trial flag."""
+    return [k for k in RESTRICTED_TERMS_KEYS
+            if (k == "may_use_inputs_for_training" and terms.get(k) is None) or (k in terms and terms.get(k) is None)]
+
+
+def terms_restriction(terms: dict[str, Any], identity_status: str | None) -> str | None:
+    """Why only PUBLIC data may be sent on these terms, or None. Training/trial flags that are True
+    restrict; a training flag that is missing or None is UNKNOWN and restricts too (§23 "klaim provider
+    bukan bukti"), as does an explicit None trial flag."""
+    if identity_status == "UNVERIFIED":
+        return "model identity UNVERIFIED"
+    hit = [k for k in RESTRICTED_TERMS_KEYS if terms.get(k) is True]
+    if hit:
+        return f"data terms restrict to PUBLIC ({', '.join(hit)})"
+    unknown = unknown_terms_keys(terms)
+    if unknown:
+        return f"data terms UNKNOWN ({', '.join(unknown)}): record the reviewed terms (terms_record) first"
+    return None
+
+
+def terms_eligibility(route: ModelRoute, *, data_classification: str, now: datetime | None = None) -> list[str]:
+    """Terms/data/provider eligibility of *route* for a workload of *data_classification* — the §40/§43
+    evaluation gate ("terms/provider eligibility sebagai gate"); a subset of the routing hard filter."""
+    now = now or utcnow()
+    reasons: list[str] = []
+    if route.mode in {"MOCK", "DEMO"}:
+        reasons.append(f"mode {route.mode}: fixtures are never eligible")
+    if route.status == "DISABLED":
+        reasons.append("route DISABLED")
+    if data_classification not in (route.allowed_data_classes or []):
+        reasons.append(f"data classification {data_classification} not allowed (allowed: {route.allowed_data_classes or []})")
+    restriction = terms_restriction(route.data_terms or {}, route.identity_status)
+    if restriction and data_classification != DataClassification.PUBLIC.value:
+        reasons.append(restriction)
+    if region_restricted(route) and not route.region:
+        reasons.append("provider restricts regions/residency: region not reviewed")
+    checked = [ensure_aware(t) for t in (route.pricing_checked_at, route.terms_checked_at)]
+    if any(t is None for t in checked):
+        reasons.append("pricing/terms never checked")
+    elif any(now - t > TERMS_MAX_AGE for t in checked if t is not None):
+        reasons.append("pricing/terms older than 30 days")
+    return reasons
+
+
 def _validate_inputs(domain: str, data_classification: str, pool: str) -> None:
     if domain not in {d.value for d in Domain}:
         raise ValidationFailed("domain must be PERSONAL or OFFICE (explicit human choice)", code="DOMAIN_REQUIRED")
@@ -290,6 +525,7 @@ def _validate_inputs(domain: str, data_classification: str, pool: str) -> None:
 def route_rejections(
     session: Session, route: ModelRoute, *, domain: str, data_classification: str, needs_tools: bool,
     min_context: int | None, office: dict[str, Any] | None = None, office_reason: str = "",
+    tools: list[str] | None = None, runtime: dict[str, str | None] | None = None,
 ) -> list[str]:
     """All hard-filter reasons that make *route* ineligible (empty list = eligible)."""
     reasons: list[str] = []
@@ -312,6 +548,8 @@ def route_rejections(
         reasons.append("route DISABLED")
     else:
         reasons.append(f"status {status}: not approved (registry entries are never routable by default)")
+    if status in {"APPROVED", "TRIAL"}:
+        reasons += binding_drift(route, runtime if runtime is not None else runtime_context())
 
     if domain not in (route.eligible_domains or []):
         reasons.append(f"domain {domain} not in eligible_domains {route.eligible_domains or []}")
@@ -329,8 +567,13 @@ def route_rejections(
                        f"(allowed: {route.allowed_data_classes or []})")
     if route.identity_status == "UNVERIFIED" and data_classification != DataClassification.PUBLIC.value:
         reasons.append("model identity UNVERIFIED: only PUBLIC data may be sent")
+    elif data_classification != DataClassification.PUBLIC.value:
+        restriction = terms_restriction(route.data_terms or {}, route.identity_status)
+        if restriction:
+            reasons.append(f"{restriction}: only PUBLIC data may be sent")
     if needs_tools and route.supports_tools != "YES":
         reasons.append(f"tool support {route.supports_tools}: tool use not proven for this route")
+    reasons += tool_set_rejections(route, tools)
     if min_context:
         if not route.context_window:
             reasons.append("context window UNKNOWN")
@@ -338,6 +581,13 @@ def route_rejections(
             reasons.append(f"context window {route.context_window} < required {min_context}")
     if route.availability == "MISSING":
         reasons.append("route missing from the provider catalog at the last refresh")
+    elif route.availability != "AVAILABLE":
+        # UNKNOWN is never OK (AGENTS.md #7): a route no catalog refresh has observed is not routable.
+        remedy = ("run `aeos routes refresh`" if route.provider in CATALOG_OBSERVED_PROVIDERS
+                  else f"no catalog source observes provider {route.provider} in this build")
+        reasons.append(f"availability {route.availability or 'UNKNOWN'}: never observed in a provider catalog "
+                       f"({remedy})")
+    reasons += region_rejections(route, domain=domain, office=office)
     reasons += credential_rejections(route, domain=domain)
     q = quota_exhausted(session, route)
     if q is not None:
@@ -366,16 +616,17 @@ def _candidates(session: Session, pool: str) -> list[ModelRoute]:
 
 def eligible_routes(
     session: Session, *, domain: str, data_classification: str, needs_tools: bool = True,
-    min_context: int | None = None, pool: str = "WORKER",
+    min_context: int | None = None, pool: str = "WORKER", tools: list[str] | None = None,
 ) -> RouteDecision:
     _validate_inputs(domain, data_classification, pool)
     office, office_reason = (_office_policy(session) if domain == Domain.OFFICE.value else (None, ""))
     eligible: list[str] = []
     rejected: dict[str, list[str]] = {}
+    runtime = runtime_context()
     for r in _candidates(session, pool):
         reasons = route_rejections(session, r, domain=domain, data_classification=data_classification,
                                    needs_tools=needs_tools, min_context=min_context, office=office,
-                                   office_reason=office_reason)
+                                   office_reason=office_reason, tools=tools, runtime=runtime)
         if reasons:
             rejected[r.route_key] = reasons
         else:
@@ -420,15 +671,29 @@ def rank(session: Session, route_keys: list[str], role: str | None) -> list[Rank
     return ranked
 
 
+def _positive_int(v: Any) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+
+
 def _task_policy(task: TaskSpec) -> dict[str, Any]:
+    """The TaskSpec route policy as routing consumes it. The planning compiler (planning.dag) writes
+    ``requires_tools`` / ``min_context_tokens``; ``needs_tools`` / ``min_context`` are accepted too. A policy
+    asking routing to relax a constraint it always enforces is refused, never silently ignored."""
     pol = task.model_route_policy if isinstance(task.model_route_policy, dict) else {}
     pool = str(pol.get("pool") or "WORKER")
     if pool == "SUPERVISOR":
         raise Blocked("worker tasks are never routed to the supervisor pool", code="SUPERVISOR_NOT_ROUTABLE")
+    relaxed = [k for k, enforced in POLICY_KEYS_ENFORCED.items() if k in pol and pol[k] is not None
+               and bool(pol[k]) != enforced]
+    if relaxed:
+        raise Blocked(f"TaskSpec route policy asks to relax {relaxed}: eligible routes only, no paid fallback, "
+                      "no supervisor downgrade", code="ROUTE_POLICY_UNSUPPORTED", details={"keys": relaxed})
+    needs = pol["requires_tools"] if "requires_tools" in pol else pol.get("needs_tools", True)
+    min_context = _positive_int(pol.get("min_context_tokens")) or _positive_int(pol.get("min_context"))
     return {
         "pool": pool,
-        "needs_tools": bool(pol.get("needs_tools", True)),
-        "min_context": pol.get("min_context") if isinstance(pol.get("min_context"), int) else None,
+        "needs_tools": needs is not False,
+        "min_context": min_context,
         "routes": [str(x) for x in pol.get("routes") or []],
         "primary": str(pol["primary"]) if pol.get("primary") else None,
     }
@@ -436,8 +701,18 @@ def _task_policy(task: TaskSpec) -> dict[str, Any]:
 
 def select_route(session: Session, *, task: TaskSpec) -> RouteDecision:
     pol = _task_policy(task)
+    try:
+        from aeos.broker.facade import SERVED_POOLS as served
+    except ImportError:  # pragma: no cover - broker is part of the platform
+        served = ("WORKER",)
+    if pol["pool"] not in served:
+        # §23: refuse at admission instead of failing at the worker's first model call (ADR-0106).
+        raise Blocked(f"pool {pol['pool']} has no controlled execution path through the broker yet; "
+                      f"only {', '.join(served)} routes are served", code="POOL_NOT_SERVED",
+                      details={"pool": pol["pool"], "served_pools": list(served)})
     decision = eligible_routes(session, domain=task.domain, data_classification=task.data_classification,
-                               needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=pol["pool"])
+                               needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=pol["pool"],
+                               tools=[str(t) for t in task.tools_allowed or []])
     eligible = list(decision.eligible)
     rejected = dict(decision.rejected)
     if pol["routes"]:
@@ -497,7 +772,8 @@ def fallback_route(session: Session, *, task: TaskSpec, failed_route_key: str) -
     failed = get_route(session, failed_route_key)
     pol = _task_policy(task)
     decision = eligible_routes(session, domain=task.domain, data_classification=task.data_classification,
-                               needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=failed.pool)
+                               needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=failed.pool,
+                               tools=[str(t) for t in task.tools_allowed or []])
     eligible = [k for k in decision.eligible if not pol["routes"] or k in pol["routes"]]
     rejected = dict(decision.rejected)
     target = _walk_fallback(session, failed, eligible, rejected)
@@ -571,13 +847,124 @@ def observe_supervisor_resolution(session: Session, *, route_key: str, requested
 # ------------------------------------------------------------------------------ activation
 
 
+def _validated_classes(allowed_data_classes: list[str] | None, route: ModelRoute) -> list[str]:
+    if allowed_data_classes is None:
+        return list(route.allowed_data_classes or [])
+    valid = {c.value for c in DataClassification}
+    if not allowed_data_classes or any(c not in valid for c in allowed_data_classes):
+        raise ValidationFailed(f"allowed_data_classes must be a non-empty subset of {sorted(valid)}")
+    # canonical (enum) order: re-confirming the same classes must not change the reviewed identity
+    chosen = set(allowed_data_classes)
+    return [c.value for c in DataClassification if c.value in chosen]
+
+
+def _validated_terms_record(terms_record: dict[str, Any] | None, *, terms_reviewed: bool) -> dict[str, Any]:
+    """The owner's own reading of the training/trial terms (§23: a provider claim is not proof)."""
+    if not terms_record:
+        return {}
+    if not terms_reviewed:
+        raise ValidationFailed("a terms record is the result of a terms review: set terms_reviewed=true",
+                               code="TERMS_REVIEW_REQUIRED")
+    unknown_keys = sorted(set(terms_record) - {*RESTRICTED_TERMS_KEYS, "note"})
+    if unknown_keys:
+        raise ValidationFailed(f"terms_record accepts {sorted(RESTRICTED_TERMS_KEYS)} and note only",
+                               details={"unknown": unknown_keys})
+    out: dict[str, Any] = {}
+    for k in RESTRICTED_TERMS_KEYS:
+        if k not in terms_record:
+            raise ValidationFailed(f"terms_record must state {k} (true/false) as read in the provider terms",
+                                   code="TERMS_RECORD_INCOMPLETE")
+        if not isinstance(terms_record[k], bool):
+            raise ValidationFailed(f"terms_record.{k} must be true or false")
+        out[k] = terms_record[k]
+    note = str(terms_record.get("note") or "").strip()
+    if len(note) < 10:
+        raise ValidationFailed("terms_record.note must say what was read (min 10 characters)")
+    out["owner_terms_note"] = redact_text(note)[:500]
+    out["owner_terms_record"] = True
+    return out
+
+
+def _validated_region(region: str | None, route: ModelRoute, terms: dict[str, Any]) -> str | None:
+    if region is None or not str(region).strip():
+        if (bool(terms.get("regions")) or bool(_unavailable_regions(terms))) and not route.region:
+            raise ValidationFailed("the provider restricts regions/residency: state the region you reviewed "
+                                   "(e.g. ID) before activation", code="REGION_REVIEW_REQUIRED")
+        return route.region
+    code = str(region).strip().upper()
+    if not _REGION.match(code):
+        raise ValidationFailed("region must be a region/residency code such as ID, EU or GLOBAL")
+    if code in _unavailable_regions(terms):
+        raise ValidationFailed(f"the route's data terms list it as unavailable in {code}", code="REGION_UNAVAILABLE")
+    return code
+
+
+def _validated_tool_set(tool_set: list[str] | None, route: ModelRoute) -> list[str]:
+    if tool_set is None:
+        return reviewed_tool_set(route) or list(REVIEWED_WORKER_TOOLS)
+    tools = list(dict.fromkeys(str(t).strip() for t in tool_set if str(t).strip()))
+    bad = [t for t in tools if t not in TOOL_VOCABULARY and not (t.startswith("bash:") and len(t) > 5)]
+    if not tools or bad:
+        raise ValidationFailed(f"tool_set must be a non-empty subset of {sorted(TOOL_VOCABULARY)} (or bash:<pattern>)",
+                               details={"invalid": bad})
+    return sorted(tools)
+
+
+def rollback_target(session: Session, route: ModelRoute, *, new_hash: str) -> dict[str, Any]:
+    """§41/§43 "memiliki rollback": the configuration to return to if this activation goes wrong — the most
+    recent earlier ROUTE_ACTIVATION of this route for another configuration (with its config snapshot), or
+    disabling the route when no other configuration was ever approved."""
+    rows = session.scalars(select(Decision).where(
+        Decision.kind == "ROUTE_ACTIVATION", Decision.target_type == TARGET_TYPE, Decision.target_id == route.route_key,
+    ).order_by(Decision.created_at.desc()))
+    for d in rows:
+        if d.target_hash and d.target_hash != new_hash:
+            return {"action": "RESTORE_PREVIOUS_CONFIGURATION", "decision_id": d.id, "config_hash": d.target_hash,
+                    "config_snapshot_in_decision": bool((d.details or {}).get("config_snapshot")),
+                    "runbook": "docs/runbooks/model-rollback.md"}
+    return {"action": "DISABLE_ROUTE", "decision_id": None, "config_hash": None,
+            "note": "no earlier approved configuration of this route: rollback = disable it",
+            "runbook": "docs/runbooks/model-rollback.md"}
+
+
+def _activation_evidence(session: Session, route: ModelRoute, eval_run_ids: list[str] | None) -> dict[str, Any]:
+    try:
+        from aeos.evaluation.facade import activation_evidence
+    except (ImportError, ModuleNotFoundError):
+        return {"ok": False, "problems": ["evaluation module unavailable - test evidence cannot be checked"],
+                "roles": {}}
+    assert route.config_hash is not None
+    return activation_evidence(session, route_key=route.route_key, route_config_hash=route.config_hash,
+                               run_ids=list(eval_run_ids or []))
+
+
+_ACTIVATION_FIELDS = ("allowed_data_classes", "data_terms", "terms_checked_at", "pricing_checked_at", "region",
+                      "tool_set", "policy_version", "prompt_revision", "context_strategy", "harness_version",
+                      "config_hash")
+
+
 def activate_route(
     session: Session, route_key: str, *, actor_user_id: str, mode: str, rationale: str,
     expected_config_hash: str, allowed_data_classes: list[str] | None = None, budget_decision_id: str | None = None,
-    expires_in_days: int | None = None, terms_reviewed: bool = False,
+    expires_in_days: int | None = None, terms_reviewed: bool = False, terms_note: str = "",
+    terms_record: dict[str, Any] | None = None, region: str | None = None, tool_set: list[str] | None = None,
+    eval_run_ids: list[str] | None = None,
 ) -> tuple[ModelRoute, Decision]:
     """Human activation: records a ROUTE_ACTIVATION (APPROVED) or TRIAL decision bound to the exact
-    route config hash. Paid routes also need an explicit BUDGET decision. Never touches OFFICE."""
+    route config hash. Never touches OFFICE.
+
+    * Pricing/terms are re-read by the owner (``terms_reviewed``) whenever the last check is missing or
+      older than 30 days (§51 P2, §45) — a seeded research date is not a terms review.
+    * Data classes beyond PUBLIC need known, unrestricted training/trial terms (``terms_record`` states the
+      owner's reading when the catalog left them UNKNOWN) and a verified identity.
+    * The decision binds the runtime in force (policy version, worker prompt revision, context strategy,
+      observed harness version), the reviewed tool set and, where the provider restricts regions, the
+      reviewed region; a change of any of them makes the route ineligible until re-activated.
+    * Paid routes also need an explicit BUDGET decision.
+    * APPROVED (production) additionally needs ``eval_run_ids``: COMPLETED, gate-passing EvalRuns made on
+      exactly this configuration (§23 "telah diuji", §43). Their per-role result is written to
+      ``eval_results`` by this decision — the only writer — and a rollback target is recorded. TRIAL needs no
+      evaluation (it is time-limited)."""
     if mode not in {"APPROVED", "TRIAL"}:
         raise ValidationFailed("mode must be APPROVED or TRIAL")
     if len((rationale or "").strip()) < 10:
@@ -595,27 +982,32 @@ def activate_route(
         raise Conflict("route configuration changed since it was reviewed; reload and review again",
                        code="CONFIG_HASH_MISMATCH", details={"current": route.config_hash})
     if Domain.OFFICE.value in (route.eligible_domains or []):
-        raise ValidationFailed("OFFICE eligibility needs a recorded company authorisation (policy module)")
-    terms = route.data_terms or {}
-    if allowed_data_classes is not None:
-        valid = {c.value for c in DataClassification}
-        if not allowed_data_classes or any(c not in valid for c in allowed_data_classes):
-            raise ValidationFailed(f"allowed_data_classes must be a non-empty subset of {sorted(valid)}")
-        restricted = any(terms.get(k) is True for k in RESTRICTED_TERMS_KEYS) or route.identity_status == "UNVERIFIED"
-        if restricted and set(allowed_data_classes) - {DataClassification.PUBLIC.value}:
-            raise ValidationFailed("data terms/identity of this route allow PUBLIC data only")
-        # canonical (enum) order: re-confirming the same classes must not change the reviewed identity
-        chosen = set(allowed_data_classes)
-        route.allowed_data_classes = [c.value for c in DataClassification if c.value in chosen]
+        # §23: OFFICE eligibility exists only through the policy module's controlled path (company authorisation
+        # + company-approved route + owner decision bound to the route identity); anything else is refused.
+        try:
+            from aeos.policy.office_routes import office_route_authorised
+
+            authorised = office_route_authorised(session, route) is not None
+        except ImportError:  # policy module absent: fail closed
+            authorised = False
+        if not authorised:
+            raise ValidationFailed("OFFICE eligibility needs a recorded company authorisation (policy module)")
     now = utcnow()
-    if terms_reviewed:
-        route.terms_checked_at = now
-        route.pricing_checked_at = route.pricing_checked_at or now
-        route.data_terms = {**terms, "checked_by": "owner"}
-    if not is_effectively_free(route):
-        ok, why = budget_decision_valid(session, budget_decision_id, route)
-        if not ok:
-            raise ValidationFailed(f"paid route: {why}", code="BUDGET_DECISION_REQUIRED")
+    # ---- validate everything first; nothing on the route changes until all checks passed
+    terms = dict(route.data_terms or {})
+    terms.update(_validated_terms_record(terms_record, terms_reviewed=terms_reviewed))
+    stale = [ensure_aware(t) for t in (route.terms_checked_at, route.pricing_checked_at)]
+    if not terms_reviewed and any(t is None or now - t > TERMS_MAX_AGE for t in stale):
+        raise ValidationFailed("pricing/data terms were never reviewed or are older than 30 days: re-read the "
+                               "official pricing and data terms and confirm (terms_reviewed)",
+                               code="TERMS_REVIEW_REQUIRED")
+    classes = _validated_classes(allowed_data_classes, route)
+    restriction = terms_restriction(terms, route.identity_status)
+    if restriction and set(classes) - {DataClassification.PUBLIC.value}:
+        raise ValidationFailed(f"{restriction}: this route may receive PUBLIC data only",
+                               code="DATA_TERMS_RESTRICTED", details={"requested": classes})
+    reviewed_region = _validated_region(region, route, terms)
+    tools = _validated_tool_set(tool_set, route) if runs_on_worker_runtime(route) else list(route.tool_set or [])
     if mode == "TRIAL":
         days = expires_in_days or TRIAL_DEFAULT_DAYS
         if not 1 <= days <= TRIAL_MAX_DAYS:
@@ -624,7 +1016,46 @@ def activate_route(
         days = expires_in_days
         if days is not None and not 1 <= days <= APPROVAL_MAX_DAYS:
             raise ValidationFailed(f"approval expiry must be 1..{APPROVAL_MAX_DAYS} days")
+    if not is_effectively_free(route):
+        ok, why = budget_decision_valid(session, budget_decision_id, route)
+        if not ok:
+            raise ValidationFailed(f"paid route: {why}", code="BUDGET_DECISION_REQUIRED")
+    runtime = runtime_context()
+    unknown_runtime = [f for f in binding_fields(route) if runtime.get(f) is None]
+    if unknown_runtime:
+        raise Blocked(f"runtime binding cannot be determined ({unknown_runtime}) - activation refused (fail closed)",
+                      code="RUNTIME_BINDING_UNKNOWN")
+    # ---- apply (reverted when the test-evidence check below refuses)
+    saved = {f: getattr(route, f) for f in _ACTIVATION_FIELDS}
+    route.allowed_data_classes = classes
+    if terms_reviewed:
+        route.terms_checked_at = now
+        route.pricing_checked_at = now  # the owner re-read pricing and terms now
+        terms["checked_by"] = "owner"
+    route.data_terms = terms
+    route.region = reviewed_region
+    route.tool_set = tools
+    for f in binding_fields(route):
+        setattr(route, f, runtime[f])
+    if runs_on_worker_runtime(route):
+        route.harness_version = runtime.get("harness_version") or route.harness_version
     route.config_hash = compute_config_hash(route)
+    evidence: dict[str, Any] = {"ok": True, "problems": [], "roles": {}}
+    if mode == "APPROVED":
+        evidence = _activation_evidence(session, route, eval_run_ids)
+        if not evidence["ok"]:
+            to_evaluate = route.config_hash
+            for f, v in saved.items():
+                setattr(route, f, v)
+            raise ValidationFailed(
+                "APPROVED (production) needs completed, gate-passing EvalRuns of exactly this configuration: "
+                "activate it as TRIAL (binds the runtime), evaluate that configuration, then approve",
+                code="TEST_EVIDENCE_REQUIRED",
+                details={"problems": evidence["problems"], "config_hash_to_evaluate": to_evaluate})
+    rollback = rollback_target(session, route, new_hash=route.config_hash)
+    terms_review = ({"checked_by": actor_user_id, "checked_at": now.isoformat(), "data_classes": classes,
+                     "note": redact_text(terms_note or "")[:500], "terms_record": bool(terms_record)}
+                    if terms_reviewed else None)
     try:
         from aeos.policy.facade import record_decision
 
@@ -637,13 +1068,25 @@ def activate_route(
             domain=Domain.PERSONAL.value, rationale=rationale.strip(),
             expires_at=(now + timedelta(days=days)) if days else None,
             details={"mode": mode, "budget_decision_id": budget_decision_id, "terms_reviewed": terms_reviewed,
-                     "previous_status": route.status, "is_free": route.is_free},
+                     "terms_review": terms_review, "previous_status": route.status, "is_free": route.is_free,
+                     "previous_config_hash": saved["config_hash"], "rollback_target": rollback,
+                     "runtime_binding": {f: getattr(route, f) for f in (*binding_fields(route), "harness_version")},
+                     "tool_set": route.tool_set, "region": route.region,
+                     "eval_run_ids": sorted({rid for r in evidence["roles"].values() for rid in r["run_ids"]}),
+                     "eval_results": evidence["roles"], "config_snapshot": route_config(route)},
         )
     except (ImportError, ModuleNotFoundError) as exc:
+        for f, v in saved.items():
+            setattr(route, f, v)
         raise Blocked("decision registry (aeos.policy) unavailable - activation cannot be recorded",
                       code="DECISION_REGISTRY_UNAVAILABLE") from exc
     previous_status = route.status
     route.status = mode
+    if mode == "APPROVED":
+        results = dict(route.eval_results or {})
+        for role, r in evidence["roles"].items():
+            results[role] = {**r, "config_hash": route.config_hash, "decision_id": decision.id, "at": now.isoformat()}
+        route.eval_results = results
     session.flush()
     notify_readiness(session, route.route_key, reason=f"status {previous_status} -> {mode}", pool=route.pool)
     return route, decision

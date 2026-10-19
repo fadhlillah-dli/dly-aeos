@@ -14,29 +14,13 @@ from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Any
 
+# AGENTS.md "Protected paths (self-build, §09)" (the platform's own list) and the grader / pipeline /
+# policy / agent-config / restricted-area paths protected for every managed project (§16, §21, §25):
+# one shared definition with the compiler and the worker runtime (aeos.core.protected_paths).
+from aeos.core.protected_paths import GENERIC_PROTECTED_PATHS, PLATFORM_PROTECTED_PATHS  # noqa: F401
 from aeos.core.redaction import _PATTERNS as _REDACTION_PATTERNS
 from aeos.core.redaction import UNBOUNDED_TOKEN_PATTERNS
 
-# AGENTS.md "Protected paths (self-build, §09)" — the platform's own self-build list.
-PLATFORM_PROTECTED_PATHS: tuple[str, ...] = (
-    "policy/**",
-    "backend/aeos/policy/**",
-    "backend/aeos/verification/**",
-    "backend/aeos/broker/**",
-    "backend/aeos/identity/**",
-    "tests/acceptance/**",
-    ".github/workflows/**",
-    "install-manifest/**",
-    "backend/aeos/migrations/**",
-)
-# Grader / pipeline / policy locations that are protected for every managed project (§21).
-GENERIC_PROTECTED_PATHS: tuple[str, ...] = (
-    "tests/acceptance/**",
-    ".github/workflows/**",
-    "policy/**",
-    "bitbucket-pipelines.yml",
-    ".gitlab-ci.yml",
-)
 # Files that could alter how the verifier's test process behaves rather than what it tests.
 HARNESS_TAMPER_PATHS: tuple[str, ...] = (
     "**/sitecustomize.py",
@@ -52,16 +36,64 @@ HIGH_IMPACT_PATTERNS: tuple[str, ...] = (
     "backend/aeos/routing/**", "backend/aeos/claude_bridge/**", "backend/aeos/identity/**", "backend/aeos/api/**",
     "backend/aeos/secrets/**", "backend/aeos/broker/**", "backend/aeos/policy/**", "backend/aeos/core/**",
     "backend/aeos/models/**", "backend/aeos/migrations/**", "backend/aeos/workforce/**", "**/facade.py",
+    # §21 "workers may not change final audit/evidence": the audit trail and event stream code
+    "backend/aeos/audit/**", "backend/aeos/events/**",
     ".github/**", "policy/**", "install-manifest/**", "contracts/**", "scripts/**", "pyproject.toml",
     "frontend/package.json", "frontend/package-lock.json", "AGENTS.md", "CLAUDE.md", "**/.claude/**",
     "**/hooks/**", "config/**",
+    # generic product-repository layouts (§31: managed projects do not share the AEOS layout)
+    "**/migrations/**", "**/alembic/**", "**/*.sql", "**/schema/**", "**/schemas/**", "**/*.proto",
+    "**/*.graphql", "**/openapi*.yaml", "**/openapi*.yml", "**/openapi*.json", "**/asyncapi*.y*ml",
+    "**/*.tf", "**/*.tfvars", "**/k8s/**", "**/kubernetes/**", "**/helm/**", "**/charts/**", "**/Dockerfile*",
+    "**/docker-compose*.y*ml", "**/*flags*", "**/feature-flags/**", ".gitlab-ci.yml", "bitbucket-pipelines.yml",
+    "azure-pipelines.yml", ".circleci/**", "Jenkinsfile", "**/.env*", "**/settings*.py", "**/iam/**",
+    "**/auth/**", "**/permissions/**", "**/rbac/**", "**/AGENTS.md", "**/CLAUDE.md",
+    # dependency manifests and lockfiles (ADR-0093: requirements.lock is the reviewed install set)
+    "requirements.lock", "**/requirements*.txt", "**/package.json", "**/package-lock.json", "**/poetry.lock",
+    "**/uv.lock", "**/Pipfile.lock", "**/yarn.lock", "**/pnpm-lock.yaml", "**/go.mod", "**/go.sum",
+    "**/Cargo.lock", "**/Gemfile.lock", "**/pom.xml", "**/build.gradle*", "**/pyproject.toml",
 )
+# §31 "test scope follows impact": named categories of high-impact paths. The verifier maps each category
+# to what it must additionally prove (negative/permission tests, migration round-trip, dependency diff).
+IMPACT_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "migration": ("**/migrations/**", "**/alembic/**", "**/*.sql", "backend/aeos/models/**"),
+    "contract": ("**/facade.py", "contracts/**", "**/schema/**", "**/schemas/**", "**/*.proto", "**/*.graphql",
+                 "**/openapi*.yaml", "**/openapi*.yml", "**/openapi*.json", "**/asyncapi*.y*ml"),
+    "api": ("backend/aeos/api/**", "**/router.py", "**/routers/**", "**/routes/**", "**/views.py",
+            "**/controllers/**"),
+    "auth": ("backend/aeos/identity/**", "backend/aeos/policy/**", "backend/aeos/secrets/**", "**/auth/**",
+             "**/iam/**", "**/permissions/**", "**/rbac/**", "backend/aeos/api/deps.py",
+             "backend/aeos/api/security.py"),
+    "dependency": ("requirements.lock", "**/requirements*.txt", "**/package.json", "**/package-lock.json",
+                   "**/poetry.lock", "**/uv.lock", "**/Pipfile.lock", "**/yarn.lock", "**/pnpm-lock.yaml",
+                   "**/go.mod", "**/go.sum", "**/Cargo.lock", "**/Gemfile.lock", "**/pom.xml", "**/build.gradle*",
+                   "**/pyproject.toml"),
+    "infrastructure": ("**/*.tf", "**/*.tfvars", "**/k8s/**", "**/kubernetes/**", "**/helm/**", "**/charts/**",
+                       "**/Dockerfile*", "**/docker-compose*.y*ml"),
+    "ci": (".github/**", ".gitlab-ci.yml", "bitbucket-pipelines.yml", "azure-pipelines.yml", ".circleci/**",
+           "Jenkinsfile"),
+    # UI output in any layout (§17: the a11y/UX specialist activates by output, not by the AEOS folder name)
+    "frontend": ("frontend/**", "**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte", "**/*.css", "**/*.scss"),
+    "config_flags": ("config/**", "**/*flags*", "**/feature-flags/**", "**/.env*", "**/settings*.py"),
+    "instructions": ("AGENTS.md", "CLAUDE.md", "**/AGENTS.md", "**/CLAUDE.md", "**/.claude/**", "**/hooks/**",
+                     "docs/architecture/**"),
+}
+
+
+def impact_categories(paths: list[str]) -> dict[str, list[str]]:
+    """Changed paths grouped by impact category (only categories that were hit)."""
+    out: dict[str, list[str]] = {}
+    for cat, patterns in IMPACT_CATEGORIES.items():
+        hit = sorted({p for p in paths if first_match(p, patterns, case_insensitive=True)})
+        if hit:
+            out[cat] = hit
+    return out
 # §15 Security Reviewer: controls whose change needs a separate security review session.
 SECURITY_SENSITIVE_PATTERNS: tuple[str, ...] = (
     "backend/aeos/identity/**", "backend/aeos/secrets/**", "backend/aeos/policy/**", "backend/aeos/broker/**",
     "backend/aeos/api/deps.py", "backend/aeos/api/security.py", "backend/aeos/core/redaction.py",
     "backend/aeos/core/paths.py", "backend/aeos/worker_runtime/**", "backend/aeos/claude_bridge/**",
-    ".github/workflows/**", "policy/**",
+    ".github/workflows/**", "policy/**", "backend/aeos/audit/**", "backend/aeos/events/**",
 )
 
 # Same allow-list as scripts/secret_scan.py: files that intentionally contain credential-shaped
@@ -207,9 +239,14 @@ class ScopeResult:
     def security_sensitive(self) -> list[str]:
         return [p for p in self.changed if first_match(p, SECURITY_SENSITIVE_PATTERNS, case_insensitive=True)]
 
+    @property
+    def impact_categories(self) -> dict[str, list[str]]:
+        return impact_categories(self.changed)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "impact": "HIGH" if self.high_impact else "NORMAL",
+            "impact_categories": self.impact_categories,
             "high_impact_paths": self.high_impact,
             "security_sensitive_paths": self.security_sensitive,
             "status": self.status,
@@ -310,6 +347,107 @@ def added_lines(diff_text: str) -> list[AddedLine]:
             if path is None:
                 path = _UNKNOWN_PATH  # hunk without a parsable header: scan it, never skip it
     return out
+
+
+def changed_lines(diff_text: str) -> list[tuple[str, str, str]]:
+    """``(path, sign, text)`` for every added (``+``) and removed (``-``) line of a unified diff.
+
+    Same hunk-count discipline as ``added_lines``; removed lines of a deleted file keep its old path."""
+    out: list[tuple[str, str, str]] = []
+    path: str | None = None
+    old_path: str | None = None
+    old_left = new_left = 0
+    for raw in diff_text.split("\n"):
+        if raw.endswith("\r"):
+            raw = raw[:-1]
+        if old_left > 0 or new_left > 0:
+            if raw.startswith("\\"):
+                continue
+            tag, body = raw[:1], raw[1:]
+            if tag == "+":
+                out.append((path or old_path or _UNKNOWN_PATH, "+", body))
+                new_left -= 1
+            elif tag == "-":
+                out.append((path or old_path or _UNKNOWN_PATH, "-", body))
+                old_left -= 1
+            else:
+                old_left -= 1
+                new_left -= 1
+            continue
+        if raw.startswith("diff --git "):
+            path = old_path = None
+            continue
+        if raw.startswith("--- "):
+            src = raw[4:].strip()
+            old_path = None if src == "/dev/null" else (src[2:] if src.startswith("a/") else src)
+            continue
+        if raw.startswith("+++ "):
+            target = raw[4:].strip()
+            path = None if target == "/dev/null" else (target[2:] if target.startswith("b/") else target)
+            continue
+        m = _HUNK.match(raw)
+        if m:
+            old_left = int(m.group(1)) if m.group(1) is not None else 1
+            new_left = int(m.group(3)) if m.group(3) is not None else 1
+    return out
+
+
+# "name==1.2.3", "name>=1.2", "name[extra]~=1.0" (requirements/lock files, pyproject dependency strings)
+_PY_PIN = re.compile(r"^\s*[\"']?([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*(===|==|~=|>=|<=|!=|>|<)\s*"
+                     r"([^\s;#\\,\"']+)")
+# '"name": "^1.2.3"' (package.json dependency maps) and '"node_modules/name": {' + '"version": "1.2.3"' (locks)
+_JS_PIN = re.compile(r'^\s*"((?:@[^"/]+/)?[^"@/][^"]*)"\s*:\s*"([~^<>=]*\d[^"]*)"')
+
+
+def dependency_changes(diff_text: str, paths: list[str]) -> dict[str, dict[str, list[str]]]:
+    """Added/removed lines and parsed pins of the given dependency files (§16 supply-chain evidence)."""
+    wanted = set(paths)
+    out: dict[str, dict[str, list[str]]] = {
+        p: {"added": [], "removed": [], "pins_added": [], "pins_removed": []} for p in sorted(wanted)}
+    for path, sign, text in changed_lines(diff_text):
+        if path not in wanted:
+            continue
+        entry = out[path]
+        line = text.strip()
+        if not line:
+            continue
+        bucket = "added" if sign == "+" else "removed"
+        if len(entry[bucket]) < 200:
+            entry[bucket].append(line[:200])
+        m = _PY_PIN.match(line)
+        pin = f"{m.group(1).lower()}{m.group(2)}{m.group(3)}" if m else None
+        if pin is None:
+            j = _JS_PIN.match(line)
+            if j and j.group(1) not in ("version", "name", "lockfileVersion", "node", "npm"):
+                pin = f"{j.group(1)}@{j.group(2)}"
+        if pin and len(entry["pins_" + bucket]) < 500:
+            entry["pins_" + bucket].append(pin)
+    return out
+
+
+def _pin_name(pin: str) -> str:
+    if "@" in pin[1:]:
+        return pin[: pin.rindex("@")]
+    return re.split(r"(===|==|~=|>=|<=|!=|>|<)", pin, maxsplit=1)[0]
+
+
+def summarize_dependency_changes(changes: dict[str, dict[str, list[str]]]) -> dict[str, list[str]]:
+    """Package-level view: added / removed / upgraded (same name, other version) across the files."""
+    added: dict[str, str] = {}
+    removed: dict[str, str] = {}
+    for c in changes.values():
+        for pin in c["pins_added"]:
+            added.setdefault(_pin_name(pin), pin)
+        for pin in c["pins_removed"]:
+            removed.setdefault(_pin_name(pin), pin)
+    upgraded = sorted(f"{removed[n]} -> {added[n]}" for n in set(added) & set(removed) if removed[n] != added[n])
+    same = {n for n in set(added) & set(removed) if removed[n] == added[n]}
+    return {
+        "added": sorted(p for n, p in added.items() if n not in removed),
+        "removed": sorted(p for n, p in removed.items() if n not in added),
+        "upgraded": upgraded,
+        "unchanged_reformatted": sorted(added[n] for n in same),
+    }
 
 
 def scan_added_secrets(lines: list[AddedLine]) -> list[dict[str, Any]]:

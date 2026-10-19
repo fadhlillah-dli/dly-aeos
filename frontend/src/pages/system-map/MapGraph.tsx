@@ -1,11 +1,11 @@
 import { Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { clsx } from "clsx";
-import { AlertTriangle, Layers } from "lucide-react";
+import { AlertTriangle, Layers, Play } from "lucide-react";
 import { memo, useMemo } from "react";
 import { Badge, RELATION_LABELS } from "../../components/inventory/labels";
 import { useTheme } from "../../lib/theme";
-import { absentLabel, edgeVisual, layoutGraph, NODE_H, NODE_W, type GEdge, type GNode } from "./layout";
+import { absentLabel, diffVisual, edgeVisual, layoutGraph, NODE_H, NODE_W, type GEdge, type GNode } from "./layout";
 
 type CompData = {
   node: GNode;
@@ -24,6 +24,9 @@ const ComponentNode = memo(function ComponentNode({ data }: NodeProps<CompNode>)
         "rounded-md border bg-surface px-2 py-1.5 text-left shadow-sm transition",
         n.isGroup ? "border-accent border-2" : "border-line",
         !n.present && !n.isGroup && "border-dashed opacity-60",
+        n.diff === "added" && "ring-2 ring-ok",
+        n.diff === "changed" && "ring-2 ring-warn",
+        n.diff === "removed" && "ring-2 ring-bad",
         data.highlighted && "ring-2 ring-accent",
         data.selected && "ring-2 ring-ink",
         data.dimmed && "opacity-25",
@@ -52,6 +55,12 @@ const ComponentNode = memo(function ComponentNode({ data }: NodeProps<CompNode>)
           <>
             <Badge status={n.status} className="!px-1.5 !py-0 !text-[10px]" />
             {!n.present && <span className="truncate text-[10px] text-ink-3">{absentLabel(data.lens)}</span>}
+            {(n.runs ?? 0) > 0 && (
+              <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-ok-bg px-1 text-[10px] text-ok" title="Run aktif yang memakai komponen ini">
+                <Play className="h-3 w-3" aria-hidden /> {n.runs} run
+              </span>
+            )}
+            {n.diff && <span className="text-[10px] text-ink-3">{n.diff === "added" ? "baru" : n.diff === "removed" ? "dihapus" : "berubah"}</span>}
           </>
         )}
       </div>
@@ -98,7 +107,9 @@ export function MapGraph({
   const rfEdges: Edge[] = useMemo(
     () =>
       edges.map((e) => {
-        const v = edgeVisual(e.status);
+        const base = edgeVisual(e.status);
+        const dv = diffVisual(e.diff);
+        const v = dv ? { ...base, stroke: dv.stroke, dash: dv.dash ?? base.dash, label: `${base.label}, ${dv.label}` } : base;
         const hl = highlightEdges.has(`${e.source}->${e.target}`);
         const dim = highlightEdges.size > 0 && !hl;
         return {
@@ -106,8 +117,8 @@ export function MapGraph({
           source: e.source,
           target: e.target,
           animated: v.animated,
-          label: e.count > 1 ? `${e.count} relasi` : hl ? RELATION_LABELS[e.relation] ?? e.relation : undefined,
-          style: { stroke: hl ? "var(--color-accent)" : v.stroke, strokeDasharray: v.dash, strokeWidth: hl ? 2.5 : 1.2, opacity: dim ? 0.2 : 1 },
+          label: e.count > 1 ? `${e.count} relasi` : hl ? RELATION_LABELS[e.relation] ?? e.relation : dv ? dv.label : undefined,
+          style: { stroke: hl ? "var(--color-accent)" : v.stroke, strokeDasharray: v.dash, strokeWidth: hl || dv ? 2.5 : 1.2, opacity: dim ? 0.2 : 1 },
           markerEnd: { type: MarkerType.ArrowClosed, color: hl ? "var(--color-accent)" : v.stroke, width: 14, height: 14 },
           data: { gedge: e },
           ariaLabel: `${e.source} ${RELATION_LABELS[e.relation] ?? e.relation} ${e.target} (${v.label})`,

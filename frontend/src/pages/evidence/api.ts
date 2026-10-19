@@ -114,13 +114,30 @@ export interface GateItem {
   reasons: string[];
 }
 
+export type ReviewKind = "FEATURE" | "SECURITY" | "A11Y" | "PRIVACY" | "SRE";
+
+export interface SpecialistReview {
+  required: boolean;
+  reason: string | null;
+  verdict: string | null;
+  status: string | null;
+  review_id: string | null;
+}
+
 export interface SeparateStatus {
   worker_reported: { status: string | null; exit_code?: number | null; trust: string };
-  verifier: { status: string | null; evidence_id?: string | null; checked_at?: string | null };
+  verifier: { status: string | null; evidence_id?: string | null; checked_at?: string | null; isolation?: string | null };
   reviewer: { verdict: string | null; status: string | null; review_id?: string | null };
   accepted: { status: string | null; valid: boolean; acceptance_id?: string | null };
   merged: { status: string | null; merged_by?: string | null; merged_by_type?: string | null };
   security_reviewer?: { required: boolean; verdict: string | null; status: string | null; review_id: string | null };
+  // §15/§17: specialist reviewers activated by output/risk (SECURITY, A11Y, PRIVACY, SRE)
+  specialist_reviews?: Record<string, SpecialistReview>;
+  // §32: latest governance handoff for the accepted artifact
+  governance?: { adapter: string; adapter_configured: boolean; status: string; allows_promotion: boolean; note?: string; evidence_id: string | null };
+  // which code/CI provider the project's domain uses — OFFICE is NOT_APPLICABLE until authorised
+  delivery_provider?: { provider: string; ci: string; status: string; reason: string; remedy: string };
+  release_approvers?: { logins: string[]; decision_id: string | null };
 }
 
 export interface PRItem {
@@ -222,8 +239,14 @@ export const evidenceApi = {
   prs: () => get<ListEnvelope<PRItem> & { merge_authority: string }>("/api/delivery/prs"),
   capabilities: () => get<ProviderCaps>("/api/delivery/provider-capabilities"),
   verify: (runId: string) => post<{ status: string }>(`/api/runs/${encodeURIComponent(runId)}/verify`, {}),
-  review: (runId: string, reviewer: "FEATURE" | "SECURITY" = "FEATURE") =>
+  review: (runId: string, reviewer: ReviewKind = "FEATURE") =>
     post<{ review: ReviewItem }>(`/api/runs/${encodeURIComponent(runId)}/review`, { reviewer }),
+  // §19: every open review kind this change requires (feature + specialists), sequential sessions within the budget
+  reviewBatch: (runId: string, kinds?: ReviewKind[]) =>
+    post<{ reviews: ReviewItem[]; acceptance: AcceptanceItem | null; notes: string[] }>(
+      `/api/runs/${encodeURIComponent(runId)}/reviews/batch`,
+      kinds ? { kinds } : {},
+    ),
   recheck: (id: string) => post<AcceptanceItem>(`/api/acceptance/${encodeURIComponent(id)}/recheck`),
   preparePr: (taskId: string) =>
     post<{ pull_request: PRItem; notes?: string[] }>(`/api/tasks/${encodeURIComponent(taskId)}/prepare-pr`, {}),

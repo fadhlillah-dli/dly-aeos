@@ -75,8 +75,9 @@ def test_renderer_never_invents_results_or_approvals():
     secs = {s.key: s for s in tp.sections}
     assert secs["execution_results"].status == r.SEC_LIVE and secs["uat"].status == r.SEC_LIVE
     assert secs["sign_off"].status == r.SEC_HUMAN and secs["final_assessment"].status == r.SEC_HUMAN
-    assert "NOT STARTED" in tp.body_markdown and "tidak ada PASS" in tp.body_markdown
-    assert "| TC-1 | User dapat membuat tugas | NOT STARTED |" in tp.body_markdown
+    # §28: DYNAMIC sections reference the live source; no copied "NOT STARTED"/PASS snapshot that goes stale
+    assert "NOT STARTED" not in tp.body_markdown and "tidak menyatakan hasil uji" in tp.body_markdown
+    assert "| TC-1 | User dapat membuat tugas |" in tp.body_markdown and "| Hasil |" not in tp.body_markdown
     ra = res.by_id()["04-security-assessments/initial-risk-assessment"]
     assert {s.key: s.status for s in ra.sections}["acceptance"] == r.SEC_HUMAN
 

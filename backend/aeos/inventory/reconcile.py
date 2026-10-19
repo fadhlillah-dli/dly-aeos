@@ -22,7 +22,9 @@ import platform
 import sqlite3
 import sys
 import tempfile
-from collections.abc import Iterable
+import threading
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +41,7 @@ from aeos.core.ids import slugify
 from aeos.core.paths import repo_root
 from aeos.core.redaction import redact_text
 from aeos.core.timeutil import utcnow
+from aeos.inventory import dependencies as dep_reader
 from aeos.inventory import scope as scope_reader
 from aeos.inventory.drift import compute_drift, persist_drift
 from aeos.inventory.manifest import MANIFEST_REL, apply_manifest, current_manifest
@@ -48,6 +51,7 @@ from aeos.inventory.probes import (
     ProbeRefused,
     ProbeRunner,
     clean_output,
+    file_digest,
     file_is_placeholder,
     get_runner,
     github_slug_from_remote,
@@ -142,6 +146,9 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
             "exit_code": rr.returncode, "error": rr.error,
             "output": clean_output(rr.stdout or rr.stderr, 160) if version is None else None,
             "operation_ref": " ".join([name, *b.get("version_args", [])]),
+            # §37: the installed executable is its own identity (distinct from source repo / release asset):
+            # a replaced binary that prints the same --version is visible as a changed digest.
+            "digest": file_digest(path),
         })
     specs: list[Spec] = []
     if missing:
@@ -150,10 +157,14 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
     elif found:
         versions = [f"{f['name']} {f['version']}" if len(found) > 1 else f["version"] for f in found]
         version = "; ".join(v for v in versions if v) or None
+        digests = [f["digest"] for f in found if f.get("digest") and f["digest"] != "TOO_LARGE"]
+        identity = (digests[0] if len(found) == 1 else "; ".join(f"{f['name']} {f['digest']}" for f in found)) \
+            if len(digests) == len(found) else None
         specs.append(_obs(
-            "installation", "INSTALLED", version=version, ttl=ttl,
+            "installation", "INSTALLED", version=version, identity=identity, ttl=ttl,
             location=found[0]["location"], operation_ref=found[0]["operation_ref"], binaries=found,
             version_status="RESOLVED" if all(f["version"] for f in found) else "UNKNOWN",
+            digest_status="OBSERVED" if identity else "UNKNOWN",
             distribution_verified=False,
         ))
     health = probe.get("health")
@@ -450,9 +461,15 @@ def _read_sources(ctx: ReconcileContext, comps: dict[str, ComponentReference],
     def owned(kind: str) -> bool:
         return want is None or SOURCE_OWNERS[kind] in want
 
+    def build(owner: str, lockfile: str) -> dict[str, Any]:
+        c = comps.get(owner)
+        return {"component_id": owner, "lockfile": lockfile,
+                "label": f"digunakan oleh build {(c.friendly_name or c.name) if c else owner}"}
+
     if owned("python"):
         read, deps = scope_reader.read_pyproject(ctx.repo)
         lock = scope_reader.read_python_lock(ctx.repo)
+        _src, _pkgs, py_sha = dep_reader.python_lock(ctx.repo)
         sources += [read.as_dict(), lock.as_dict()]
         if deps:
             idx = _match_index(comps.values(), "python")
@@ -465,27 +482,34 @@ def _read_sources(ctx: ReconcileContext, comps: dict[str, ComponentReference],
                 if target and target in comps:
                     out.append((target, _obs("declaration", "DECLARED", version=installed, ttl=DECLARATION_TTL,
                                              source="pyproject.toml", package=d["name"], spec=d["spec"],
-                                             group=d["group"])))
+                                             group=d["group"],
+                                             used_by_build=build(SOURCE_OWNERS["python"], "requirements.lock"))))
             out.append((SOURCE_OWNERS["python"], _obs(
                 "declaration", "DECLARED", ttl=DECLARATION_TTL, source="pyproject.toml", packages=packages,
                 lockfile="requirements.lock" if lock.status == "READ" else None,
-                lockfile_status=lock.status, environment=ctx.logical(sys.prefix),
+                lockfile_status=lock.status, lockfile_sha256=py_sha, locked_packages=lock.entries or None,
+                environment=ctx.logical(sys.prefix),
             )))
     if owned("npm"):
         read, direct, transitive = scope_reader.read_package_lock(ctx.repo)
         sources.append(read.as_dict())
         if read.status == "READ":
+            _src, _pkgs, npm_sha = dep_reader.npm_lock(ctx.repo)
             idx = _match_index(comps.values(), "npm")
             for d in direct:
                 target = idx.get(d["name"].lower())
                 if target and target in comps:
                     out.append((target, _obs("declaration", "DECLARED", version=d.get("resolved"),
                                              ttl=DECLARATION_TTL, source="frontend/package-lock.json",
-                                             package=d["name"], spec=d["spec"], group=d["group"])))
+                                             package=d["name"], spec=d["spec"], group=d["group"],
+                                             used_by_build=build(SOURCE_OWNERS["npm"], "frontend/package-lock.json"))))
             out.append((SOURCE_OWNERS["npm"], _obs(
                 "declaration", "DECLARED", ttl=DECLARATION_TTL, source="frontend/package-lock.json",
-                packages=direct, transitive_packages=transitive,
+                packages=direct, transitive_packages=transitive, lockfile_sha256=npm_sha,
             )))
+    if want is None:
+        sbom_reads, _sbom_components = dep_reader.read_sbom_files(ctx.repo)
+        sources += [r.as_dict() for r in sbom_reads]
     if owned("actions"):
         read, actions = scope_reader.read_workflows(ctx.repo)
         sources.append(read.as_dict())
@@ -523,10 +547,69 @@ def _config_specs(ctx: ReconcileContext, comps: dict[str, ComponentReference]) -
     out: list[tuple[str, Spec]] = []
     if "dly-aeos-control-plane" in comps:
         ok = s.host in LOOPBACK_HOSTS
+        material = {"host": s.host, "port": s.port, "dev_mode": s.dev_mode, "environment": s.environment,
+                    "origins": sorted(s.allowed_origins)}
         out.append(("dly-aeos-control-plane", _obs(
-            "configuration", "CONFIGURED" if ok else "INVALID", ttl=DEFAULT_TTL, host=s.host, port=s.port,
-            dev_mode=s.dev_mode, environment=s.environment, source="settings (non-secret)",
+            "configuration", "CONFIGURED" if ok else "INVALID", version=content_hash(material)[:19],
+            ttl=DEFAULT_TTL, host=s.host, port=s.port, dev_mode=s.dev_mode, environment=s.environment,
+            source="settings (non-secret)", config_hash=content_hash(material), target="settings",
         )))
+    out += _record_config_specs(ctx, comps)
+    return out
+
+
+def _record_config_specs(ctx: ReconcileContext, comps: dict[str, ComponentReference]) -> list[tuple[str, Spec]]:
+    """§38 Configuration with hash/revision and target for components whose configuration lives in other records:
+    the OpenCode per-run config template, the ModelRoute registry and project integrations (non-secret fields).
+    Integration hashes are recorded on domain-only provider components, so OFFICE configuration never appears in
+    a PERSONAL view (§23, §35)."""
+    from aeos.inventory.configlens import INTEGRATION_COMPONENTS
+    from aeos.models.portfolio import ProjectIntegration
+    from aeos.models.routing import ModelRoute
+
+    out: list[tuple[str, Spec]] = []
+    if "opencode" in comps:
+        try:
+            from aeos.worker_runtime.opencode import build_config
+
+            template = build_config(broker_base_url="http://127.0.0.1:0", token="<capability-token>",
+                                    model="template", tools_allowed=[], egress_allowed=[])
+            h = content_hash(template)
+            out.append(("opencode", _obs("configuration", "CONFIGURED", version=h[:19], ttl=DEFAULT_TTL,
+                                         aspect="opencode config template", config_hash=h,
+                                         target="per-run opencode.json (sandbox)",
+                                         source="aeos.worker_runtime.opencode.build_config")))
+        except Exception as exc:  # template unreadable: UNKNOWN, never green
+            out.append(("opencode", _obs("configuration", "UNKNOWN", ttl=DEFAULT_TTL, error=type(exc).__name__,
+                                         aspect="opencode config template")))
+    if "model-routing" in comps:
+        routes = sorted((r.route_key, r.status, r.config_hash or "") for r in ctx.session.scalars(
+            select(ModelRoute).where(ModelRoute.status.in_(("APPROVED", "TRIAL")))))
+        h = content_hash(routes)
+        out.append(("model-routing", _obs("configuration", "CONFIGURED" if routes else "MISSING", version=h[:19],
+                                          ttl=DEFAULT_TTL, aspect="route registry", config_hash=h,
+                                          target="ModelRoute APPROVED/TRIAL", routes=len(routes),
+                                          reason=None if routes else "belum ada route APPROVED/TRIAL")))
+    by_component: dict[str, list[Any]] = {}
+    for pi in ctx.session.scalars(select(ProjectIntegration)):
+        cid = INTEGRATION_COMPONENTS.get(pi.provider)
+        c = comps.get(cid or "")
+        if c is None:
+            continue
+        domains = set((c.scope or {}).get("domains") or ["PLATFORM"])
+        if "PLATFORM" in domains or pi.domain not in domains:
+            continue  # only domain-only components carry integration configuration (no cross-domain metadata)
+        by_component.setdefault(c.component_id, []).append(pi)
+    for cid, rows in sorted(by_component.items()):
+        material = sorted((r.project_id, r.provider, r.purpose, r.tenant_id or "", r.root_id or "",
+                           r.credential_ref or "") for r in rows)
+        h = content_hash(material)
+        missing = [r.provider for r in rows if not r.root_id and r.provider not in ("github", "github-repo")]
+        domain = rows[0].domain
+        out.append((cid, _obs("configuration", "MISSING" if missing else "CONFIGURED", version=h[:19],
+                              ttl=DEFAULT_TTL, aspect="project integrations", config_hash=h, integrations=len(rows),
+                              target="ProjectIntegration (tenant/root)", domain_scope=domain,
+                              reason=f"root_id belum diatur: {', '.join(sorted(set(missing)))}" if missing else None)))
     return out
 
 
@@ -621,11 +704,41 @@ def _ensure_desired(session: Session, actor: str) -> str:
     return rec.content_hash
 
 
+_GUARD_LOCK = threading.Lock()
+_SCOPE_LOCKS: dict[str, threading.Lock] = {}
+
+
+@contextmanager
+def reconcile_guard(component_id: str | None) -> Iterator[None]:
+    """One reconciliation per scope at a time in this controller process (API refresh, poll loop): a second
+    concurrent request for the same scope is refused instead of probing twice (§38 API concurrency)."""
+    key = component_id or "core"
+    with _GUARD_LOCK:
+        lock = _SCOPE_LOCKS.setdefault(key, threading.Lock())
+    if not lock.acquire(blocking=False):
+        raise Conflict(f"a reconciliation of scope {key} is already running", code="RECONCILE_IN_PROGRESS",
+                       details={"scope": key})
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 def reconcile(
     session: Session, settings: Settings, *, component_id: str | None = None, runner: ProbeRunner | None = None,
     actor: str = "system", trigger: str = "cli", repo: Path | None = None,
 ) -> ReconciliationRun:
-    """Run one auditable reconciliation pass. The caller commits."""
+    """Run one auditable reconciliation pass. The caller commits. Refused (RECONCILE_IN_PROGRESS) while the
+    same scope is already being reconciled in this process."""
+    with reconcile_guard(component_id):
+        return _reconcile(session, settings, component_id=component_id, runner=runner, actor=actor, trigger=trigger,
+                          repo=repo)
+
+
+def _reconcile(
+    session: Session, settings: Settings, *, component_id: str | None, runner: ProbeRunner | None,
+    actor: str, trigger: str, repo: Path | None,
+) -> ReconciliationRun:
     from aeos.events import service as events
 
     manifest_hash = _ensure_desired(session, actor)

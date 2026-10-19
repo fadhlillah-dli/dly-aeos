@@ -325,6 +325,60 @@ def build_context(session: Session, *, project: Project, domain: str, prompt: st
     return ctx
 
 
+STAGE_MODEL_TARGET = ("planning_baseline", "stage_models")
+
+
+def _is_pinned(model: str) -> bool:
+    try:
+        from aeos.claude_bridge.parsing import is_pinned_id
+    except ImportError:  # bridge absent: only aliases are used
+        return False
+    return is_pinned_id(model)
+
+
+def configured_stage_models(session: Session) -> tuple[dict[str, str], dict[str, Any]]:
+    """§15 "Opus family, versi terkonfigurasi": the owner may pin a stage to an exact model id of its policy family
+    through a human POLICY decision on planning_baseline/stage_models that references a COMPLETED evaluation run
+    with every gate PASS. Anything else (other family, alias, no evaluation) is ignored and reported."""
+    from aeos.policy import decisions as registry
+
+    d = registry.find_active_decision(session, kind="POLICY", target_type=STAGE_MODEL_TARGET[0],
+                                      target_id=STAGE_MODEL_TARGET[1])
+    if d is None:
+        return {}, {}
+    details = d.details or {}
+    note: dict[str, Any] = {"decision_id": d.id}
+    try:
+        from aeos.models.research import EvalRun
+
+        run = session.get(EvalRun, str(details.get("eval_run_id") or "")) if details.get("eval_run_id") else None
+    except ImportError:
+        run = None
+    gates = {str(v).upper() for v in ((run.gate_results or {}) if run else {}).values()}
+    if d.actor_kind != "HUMAN" or run is None or run.status != "COMPLETED" or gates != {"PASS"}:
+        return {}, {**note, "ignored": "a stage model change needs a COMPLETED evaluation run with every gate PASS"}
+    out: dict[str, str] = {}
+    rejected: dict[str, str] = {}
+    families = {s.state.value: s.family for s in STAGES}
+    for stage, model in (details.get("models") or {}).items():
+        fam = families.get(str(stage))
+        if fam and isinstance(model, str) and _is_pinned(model) and model_matches(fam, model):
+            out[str(stage)] = model.strip()
+        else:
+            rejected[str(stage)] = str(model)[:64]
+    return out, {**note, "eval_run_id": run.id, **({"rejected": rejected} if rejected else {})}
+
+
+def stage_model(plan: Plan, spec: StageSpec) -> str:
+    """The model a stage requests: the plan's recorded baseline (alias or pinned id of the stage family)."""
+    for s in (plan.policy_baseline or {}).get("stages") or []:
+        if s.get("stage") == spec.state.value:
+            model = str(s.get("model") or "")
+            if model and (model.lower() == spec.family or model_matches(spec.family, model)):
+                return model
+    return spec.model
+
+
 def create_plan(session: Session, *, project: Project, domain: Domain | str, title: str, prompt: str,
                 attachment_ids: list[str] | None, actor_user_id: str) -> Plan:
     domain = Domain(domain).value
@@ -339,9 +393,14 @@ def create_plan(session: Session, *, project: Project, domain: Domain | str, tit
         raise ValidationFailed(f"prompt is required (max {MAX_PROMPT_CHARS} characters)")
     ctx = build_context(session, project=project, domain=domain, prompt=prompt, attachment_ids=attachment_ids or [],
                         actor_user_id=actor_user_id)
+    pinned, pin_note = configured_stage_models(session)
+    baseline = {**PLANNING_BASELINE, "policy_snapshot": ctx.policy_ref,
+                "stages": [{**s, "model": pinned.get(s["stage"], s["model"]),
+                            "configured": s["stage"] in pinned} for s in PLANNING_BASELINE["stages"]]}
+    if pin_note:
+        baseline["stage_model_decision"] = pin_note
     plan = Plan(project_id=project.id, domain=domain, context_id=ctx.id, title=redact_text(title), state=S.DRAFT.value,
-                policy_baseline={**PLANNING_BASELINE, "policy_snapshot": ctx.policy_ref}, checkpoint={},
-                created_by=actor_user_id)
+                policy_baseline=baseline, checkpoint={}, created_by=actor_user_id)
     session.add(plan)
     session.flush()
     audit.record(session, actor_type="user", actor_id=actor_user_id, action="plan.create", target_type="plan",
@@ -378,14 +437,28 @@ def _invalidate_plan_approvals(session: Session, plan: Plan, *, keep_version_id:
     return count
 
 
+def decision_refs_for(session: Session, plan: Plan, *, revision_decision_id: str | None = None) -> list[str]:
+    """§13 PlanVersion "decision references": the human decisions a new version is based on — the revision
+    request that triggered it and the ACTIVE POLICY decisions of the plan's domain (policy snapshot inputs)."""
+    from aeos.policy import decisions as registry
+
+    refs: list[str] = [revision_decision_id] if revision_decision_id else []
+    refs += [d.id for d in registry.active_decisions(session, kinds=["POLICY"])
+             if d.domain in (None, plan.domain)]
+    return list(dict.fromkeys(refs))
+
+
 def create_version(session: Session, plan: Plan, content: dict[str, Any], *, source: str, parent_version_id: str | None,
-                   run_ids: list[str], created_by: str, mode: str = "LIVE") -> PlanVersion:
+                   run_ids: list[str], created_by: str, mode: str = "LIVE",
+                   decision_refs: list[str] | None = None) -> PlanVersion:
     content = canonicalize(content)
     next_no = int(session.scalar(select(func.max(PlanVersion.version)).where(PlanVersion.plan_id == plan.id)) or 0) + 1
     version = PlanVersion(
         plan_id=plan.id, project_id=plan.project_id, domain=plan.domain, version=next_no,
         parent_version_id=parent_version_id, schema_version=contracts.SCHEMA_VERSION, content=content,
-        manifest_hash=content_hash(content), decision_refs=[], source=source, source_run_ids=list(run_ids),
+        manifest_hash=content_hash(content),
+        decision_refs=list(decision_refs) if decision_refs is not None else decision_refs_for(session, plan),
+        source=source, source_run_ids=list(run_ids),
         created_by=created_by[:64], mode="MOCK" if mode == "MOCK" else ("DEMO" if mode == "DEMO" else "LIVE"),
     )
     session.add(version)
@@ -420,12 +493,14 @@ def create_human_version(session: Session, plan_id: str, *, content: dict[str, A
     if parent_version_id != latest.id:
         raise Conflict("edit is based on an outdated version", code="STALE_PLAN_VERSION",
                        details=_latest_details(latest, requested_version_id=parent_version_id))
+    content = contracts.upgrade_content(content)  # older content gains the additive sections (empty lists)
     errors = schema_errors("plan_content", content)
     if errors:
         raise ValidationFailed("edited content does not match the plan content schema", code="PLAN_SCHEMA_INVALID",
                                details={"errors": errors})
     dag.require_valid_graph(content)
-    if content_hash(canonicalize(content)) == latest.manifest_hash:
+    if content_hash(canonicalize(content)) in (latest.manifest_hash,
+                                               content_hash(canonicalize(contracts.upgrade_content(latest.content)))):
         raise ValidationFailed("edited content is identical to the current version", code="NO_CHANGES")
     if not rationale or len(rationale.strip()) < 5:
         raise ValidationFailed("a human edit needs a short rationale")
@@ -561,8 +636,20 @@ def operations_for(action: str, targets: list[dict[str, Any]]) -> list[str]:
     return list(dict.fromkeys(ops))
 
 
+def review_coverage(plan: Plan, version: PlanVersion) -> dict[str, Any]:
+    """Which planning stages judged *version* (§15: a human edit must not silently cut the four-stage review)."""
+    cp = plan.checkpoint or {}
+    reviewed_id = cp.get("synthesis_version_id") if cp.get("verdict_artifact_id") else None
+    if reviewed_id == version.id:
+        return {"reviewed": True, "reviewed_version_id": reviewed_id, "stages_skipped": []}
+    return {"reviewed": False, "reviewed_version_id": reviewed_id,
+            "stages_skipped": ["CHALLENGE_REVIEW", "SYNTHESIS", "FINAL_REVIEW"],
+            "note": "versi ini belum dinilai Planning Challenger/Synthesizer/Final Reviewer"}
+
+
 def decide(session: Session, plan_id: str, *, action: str, version_id: str, version_hash: str,
-           targets: list[Any] | None, rationale: str, actor_user_id: str, expires_at: Any = None) -> dict[str, Any]:
+           targets: list[Any] | None, rationale: str, actor_user_id: str, expires_at: Any = None,
+           acknowledge_unreviewed: bool = False) -> dict[str, Any]:
     from aeos.policy import decisions as registry
 
     plan = _get_plan(session, plan_id)
@@ -591,6 +678,11 @@ def decide(session: Session, plan_id: str, *, action: str, version_id: str, vers
     if action in ("APPROVE", "APPROVE_AND_PUBLISH"):
         if state not in (S.READY_FOR_HUMAN_REVIEW, S.APPROVED):
             raise Conflict(f"plan in state {plan.state} cannot be approved", code="PLAN_NOT_APPROVABLE")
+        # §15/§17: skipping the planning review is never silent. The decision records exactly which stages did
+        # not judge this version and whether the owner acknowledged that (the UI requires the acknowledgement).
+        # The API does not refuse an unacknowledged approval: the trusted acceptance suite (1.18) pins that the
+        # owner may approve a human edit directly; enforcing it there is an owner decision.
+        coverage = review_coverage(plan, version)
         clean = _validate_targets(plan, action, targets or [])
         dag.require_valid_graph(version.content)
         ops = operations_for(action, clean)
@@ -615,7 +707,13 @@ def decide(session: Session, plan_id: str, *, action: str, version_id: str, vers
             expires_at=ensure_aware(expires_at) if expires_at else None,
             details={"action": action, "plan_id": plan.id, "plan_title": plan.title, "version": version.version,
                      "version_mode": version.mode or "LIVE", "version_source": version.source,
-                     "reviewed_version_id": (plan.checkpoint or {}).get("synthesis_version_id")},
+                     "reviewed_version_id": (plan.checkpoint or {}).get("synthesis_version_id"),
+                     "planning_review": {"reviewed": coverage["reviewed"],
+                                         "stages_skipped": coverage["stages_skipped"],
+                                         "unreviewed_acknowledged": bool(not coverage["reviewed"]
+                                                                         and acknowledge_unreviewed)},
+                     "verdict_effective": (plan.checkpoint or {}).get("verdict_effective") if coverage["reviewed"]
+                     else None},
         )
         for old in previous:
             registry.supersede_decision(session, old, new_decision_id=decision.id, reason="new approval recorded",
@@ -738,6 +836,51 @@ def office_gate(session: Session, plan: Plan, *, actor: str) -> None:
                   details={"reasons": reasons})
 
 
+def personal_gate(session: Session, plan: Plan, *, actor: str) -> dict[str, Any]:
+    """§02 "Integrasi Claude lokal harus diuji sebelum dinyatakan otomatis", §05 step 2, §08 CAN_PLAN_PERSONAL.
+
+    * BLOCKED (a proven failure: e.g. ANTHROPIC_* in the environment, capability test FAILED) -> no model call;
+      the plan waits in NEEDS_DECISION with the doctor's reasons.
+    * DEGRADED (checks ran, the native bridge is not proven) -> every stage goes through the manual package for
+      official Claude Code (explicit, never the Claude API).
+    * UNKNOWN (readiness never checked) -> the official bridge is used, labelled NOT-PROVEN on the plan and every
+      run (``bridge_proof``); it is never shown as a proven automatic integration.
+    * READY -> native bridge, labelled PROVEN.
+    Returns the recorded ``bridge_proof``. OFFICE plans are gated by ``office_gate``."""
+    if plan.domain != Domain.PERSONAL.value:
+        return {}
+    remedies: list[Any] = []
+    try:
+        from aeos.doctor import facade as doctor
+
+        state = doctor.capability_state(session, Capability.CAN_PLAN_PERSONAL, domain=plan.domain,
+                                        project_id=plan.project_id)
+        status, reasons = str(state.status), [str(r) for r in state.reasons]
+        remedies = list(state.remedies or [])
+    except (ImportError, ModuleNotFoundError):
+        status, reasons = "UNKNOWN", ["readiness doctor not available in this build"]
+    proof = {"capability": Capability.CAN_PLAN_PERSONAL.value, "status": status,
+             "label": {"READY": "PROVEN", "DEGRADED": "MANUAL_PACKAGE", "BLOCKED": "BLOCKED"}.get(status, "NOT-PROVEN"),
+             "reasons": [redact_text(r)[:300] for r in reasons[:10]], "checked_at": utcnow().isoformat()}
+    _set_cp(plan, bridge_proof=proof)
+    if status != "BLOCKED":
+        return proof
+    why = [f"CAN_PLAN_PERSONAL: BLOCKED ({'; '.join(proof['reasons'][:5])})" if proof["reasons"]
+           else "CAN_PLAN_PERSONAL: BLOCKED"]
+    cp = dict(plan.checkpoint or {})
+    cp.setdefault("stage", S.PRIMARY_PLANNING.value)
+    cp["blocked_reasons"] = why
+    plan.checkpoint = cp
+    if plan.state != S.NEEDS_DECISION.value:
+        transition(session, plan, S.NEEDS_DECISION, actor=actor,
+                   reason="Perencanaan PERSONAL diblokir sebelum panggilan model: " + "; ".join(why))
+    audit.record(session, actor_type="user", actor_id=actor, action="plan.run", result="DENIED", target_type="plan",
+                 target_id=plan.id, project_id=plan.project_id, domain=plan.domain, reason="; ".join(why))
+    session.commit()
+    raise Blocked("PERSONAL planning is blocked before any model call (CAN_PLAN_PERSONAL BLOCKED)",
+                  code="PERSONAL_PLANNING_BLOCKED", details={"reasons": why, "remedies": remedies})
+
+
 def _runs(session: Session, plan_id: str) -> list[PlanningRun]:
     return list(session.scalars(select(PlanningRun).where(PlanningRun.plan_id == plan_id)
                                 .order_by(PlanningRun.created_at)))
@@ -753,13 +896,54 @@ def stage_in_progress(session: Session, plan: Plan) -> PlanningRun | None:
     return None
 
 
-def _latest_revision_notes(session: Session, plan: Plan) -> str:
+def _latest_revision_request(session: Session, plan: Plan) -> Decision | None:
     ids = [v.id for v in _versions(session, plan.id)]
     if not ids:
-        return ""
-    d = session.scalar(select(Decision).where(Decision.kind == "REVISION_REQUEST", Decision.target_id.in_(ids))
-                       .order_by(Decision.created_at.desc()))
+        return None
+    return session.scalar(select(Decision).where(Decision.kind == "REVISION_REQUEST", Decision.target_id.in_(ids))
+                          .order_by(Decision.created_at.desc()))
+
+
+def _latest_revision_notes(session: Session, plan: Plan) -> str:
+    d = _latest_revision_request(session, plan)
     return d.rationale if d else ""
+
+
+MAX_HUMAN_EDIT_CHARS = 20_000
+MAX_HUMAN_EDITS_TOTAL = 60_000
+
+
+def human_edit_inputs(session: Session, plan: Plan) -> list[dict[str, Any]]:
+    """§29 "Edit manusia dibaca sebagai input revisi": OPEN/ACKNOWLEDGED HUMAN_EDIT_INPUT revisions of the
+    documents published from this plan's versions. They become untrusted DATA of the next revision run
+    (never instructions, never approval); the text is redacted and bounded."""
+    from aeos.models.publishing import DocumentRevision
+
+    vids = [v.id for v in _versions(session, plan.id)]
+    if not vids:
+        return []
+    rows = session.scalars(select(DocumentRevision).where(
+        DocumentRevision.kind == "HUMAN_EDIT_INPUT", DocumentRevision.status.in_(["OPEN", "ACKNOWLEDGED"]),
+        DocumentRevision.plan_version_id.in_(vids), DocumentRevision.project_id == plan.project_id,
+        DocumentRevision.domain == plan.domain).order_by(DocumentRevision.created_at))
+    out: list[dict[str, Any]] = []
+    budget = MAX_HUMAN_EDITS_TOTAL
+    for r in rows:
+        text = redact_text(r.body_markdown or "")[:min(MAX_HUMAN_EDIT_CHARS, max(budget, 0))]
+        budget -= len(text)
+        out.append({"id": r.id, "logical_doc_id": r.logical_doc_id, "status": r.status, "provider": r.provider,
+                    "plan_version_id": r.plan_version_id, "content_hash": r.content_hash, "text": text,
+                    "truncated": len(text) < len(r.body_markdown or ""), "flags": injection_flags(text)})
+    return out
+
+
+def _mark_human_edits_carried(session: Session, ids: list[str], version_id: str) -> None:
+    from aeos.models.publishing import DocumentRevision
+
+    for rid in ids:
+        r = session.get(DocumentRevision, rid)
+        if r is not None:
+            r.details = {**(r.details or {}), "carried_into_plan_version_id": version_id}
 
 
 def prepare_run(session: Session, plan: Plan, *, actor: str) -> StageSpec:
@@ -771,8 +955,11 @@ def prepare_run(session: Session, plan: Plan, *, actor: str) -> StageSpec:
     if state == S.CONTEXT_READY:
         cp = {"cycle": int(cp.get("cycle") or 0) + 1, "stage": S.PRIMARY_PLANNING.value}
     elif state == S.REVISION_REQUESTED:
+        request = _latest_revision_request(session, plan)
         cp = {"cycle": int(cp.get("cycle") or 0) + 1, "stage": S.PRIMARY_PLANNING.value,
-              "revision_of": plan.current_version_id, "revision_notes": _latest_revision_notes(session, plan)}
+              "revision_of": plan.current_version_id, "revision_notes": request.rationale if request else "",
+              "revision_decision_id": request.id if request else None,
+              "human_edit_input_ids": [e["id"] for e in human_edit_inputs(session, plan)]}
     elif state in (S.PLANNING_FAILED, S.REVIEW_FAILED, S.NEEDS_DECISION):
         if cp.get("stage") not in [s.value for s in PIPELINE_STAGES]:
             raise Conflict("nothing to resume: this plan waits for a human decision", code="PLAN_NOT_RUNNABLE")
@@ -822,9 +1009,11 @@ def run_pipeline(session: Session, plan_id: str, *, actor: str) -> Plan:
     plan = _get_plan(session, plan_id)
     spec = prepare_run(session, plan, actor=actor)
     office_gate(session, plan, actor=actor)
+    proof = personal_gate(session, plan, actor=actor)
     audit.record(session, actor_type="user", actor_id=actor, action="plan.run", target_type="plan", target_id=plan.id,
                  project_id=plan.project_id, domain=plan.domain, details={"from_stage": spec.state.value,
-                                                                          "cycle": plan.checkpoint.get("cycle")})
+                                                                          "cycle": plan.checkpoint.get("cycle"),
+                                                                          "bridge_proof": proof.get("label")})
     session.commit()
     _continue(session, plan, start=spec, actor=actor)
     return plan
@@ -854,7 +1043,10 @@ def _build_request(session: Session, plan: Plan, spec: StageSpec) -> tuple[Any, 
         revision = None
         if cp.get("revision_of"):
             base = session.get(PlanVersion, cp["revision_of"])
-            revision = {"notes": cp.get("revision_notes") or "", "content": base.content if base else {}}
+            wanted = set(cp.get("human_edit_input_ids") or [])
+            edits = [e for e in human_edit_inputs(session, plan) if e["id"] in wanted]
+            revision = {"notes": cp.get("revision_notes") or "", "content": base.content if base else {},
+                        "human_edits": edits}
             input_version_id = cp["revision_of"]
         prompt = prompts.primary_prompt(plan=plan, project=project, context=context, revision=revision)
     else:
@@ -865,8 +1057,12 @@ def _build_request(session: Session, plan: Plan, spec: StageSpec) -> tuple[Any, 
         input_version_id = version.id
         package = prompts.review_package(plan=plan, project=project, context=context, version=version)
         validation = dag.validate_graph(version.content)
+        # Non-blocking control-plane findings the reviewers must see: unknown roles, FE/BE split without a
+        # contract, cross-feature shared writes without a dependency (§17 principal review), missing NFRs (§46).
+        review_findings = [{**w, "blocking": False} for w in dag.plan_warnings(version.content)] + [
+            {**g, "severity": "HIGH", "blocking": True} for g in dag.quality_gaps(version.content)]
         if spec.state == S.CHALLENGE_REVIEW:
-            prompt = prompts.challenge_prompt(package=package, validation_findings=validation)
+            prompt = prompts.challenge_prompt(package=package, validation_findings=validation + review_findings)
         else:
             findings_art = _artifact(session, cp.get("findings_artifact_id"))
             if findings_art is None:
@@ -878,9 +1074,9 @@ def _build_request(session: Session, plan: Plan, spec: StageSpec) -> tuple[Any, 
                 synth_art = _artifact(session, cp.get("synthesis_artifact_id"))
                 resolutions = (synth_art.content or {}).get("resolutions", []) if synth_art else []
                 prompt = prompts.final_review_prompt(package=package, findings=findings_art.content,
-                                                     resolutions=resolutions)
+                                                     resolutions=resolutions, control_findings=review_findings)
     request = bridge.ClaudeRequest(
-        purpose=spec.purpose, role=spec.role, model=spec.model, prompt=prompt,
+        purpose=spec.purpose, role=spec.role, model=stage_model(plan, spec), prompt=prompt,
         json_schema=contracts.schema(spec.schema), project_id=plan.project_id, domain=plan.domain,
         context_files=[], timeout_seconds=STAGE_TIMEOUT_SECONDS, effort=None, allowed_tools=[],
     )
@@ -907,7 +1103,7 @@ def _run_stage(session: Session, plan: Plan, spec: StageSpec, *, actor: str) -> 
     cp = plan.checkpoint or {}
     run = PlanningRun(
         plan_id=plan.id, project_id=plan.project_id, stage=spec.state.value, role=spec.role,
-        model_requested=spec.model, engine="claude-code", mode="NATIVE", status="RUNNING", started_at=utcnow(),
+        model_requested=request.model, engine="claude-code", mode="NATIVE", status="RUNNING", started_at=utcnow(),
         cycle=int(cp.get("cycle") or 1), input_version_id=input_version_id,
         input_hash=content_hash({"prompt": request.prompt, "schema": request.json_schema, "model": request.model,
                                  "role": request.role}),
@@ -915,13 +1111,20 @@ def _run_stage(session: Session, plan: Plan, spec: StageSpec, *, actor: str) -> 
                          "model_family": spec.family, "schema": spec.schema,
                          "schema_hash": content_hash(request.json_schema), "prompt_revision": prompts.PROMPT_REVISION,
                          "allowed_tools": [], "timeout_seconds": request.timeout_seconds,
-                         "policy_snapshot": (plan.policy_baseline or {}).get("policy_snapshot")},
+                         "policy_snapshot": (plan.policy_baseline or {}).get("policy_snapshot"),
+                         "bridge_proof": ((cp.get("bridge_proof") or {}).get("label") or
+                                          ("OFFICE_GATE" if plan.domain == Domain.OFFICE.value else "NOT-PROVEN"))},
     )
     session.add(run)
     session.flush()
     _set_cp(plan, stage=spec.state.value, run_id=run.id)
     _emit_run(session, plan, run)
     session.commit()
+    proof = (plan.checkpoint or {}).get("bridge_proof") or {}
+    if proof.get("status") == "DEGRADED":
+        # CAN_PLAN_PERSONAL DEGRADED: the native bridge is not proven -> explicit manual package (§08, §12)
+        return _manual_fallback(session, plan, run, spec, request, code="BRIDGE_NOT_PROVEN", actor=actor,
+                                reason="CAN_PLAN_PERSONAL DEGRADED: " + "; ".join(proof.get("reasons") or [])[:1500])
     bridge = _bridge()
     try:
         result = bridge.run_structured(request)
@@ -1056,9 +1259,21 @@ def _complete_stage(session: Session, plan: Plan, run: PlanningRun, spec: StageS
         return _hard_stop(session, plan, run, spec, code="MODEL_POLICY_MISMATCH", status="MODEL_MISMATCH", actor=actor,
                           error=f"resolved model {run.model_resolved or 'UNKNOWN'} is not in the policy family "
                                 f"{spec.family!r}; result rejected (§12)")
+    requested = (run.model_requested or "").strip().lower().split("[", 1)[0]
+    if _is_pinned(requested) and (run.model_resolved or "").strip().lower().split("[", 1)[0] != requested:
+        # §15 configured version: a pinned stage model must resolve to exactly that id (no silent alias drift)
+        return _hard_stop(session, plan, run, spec, code="MODEL_POLICY_MISMATCH", status="MODEL_MISMATCH", actor=actor,
+                          error=f"resolved model {run.model_resolved or 'UNKNOWN'} differs from the configured stage "
+                                f"model {run.model_requested}; result rejected (§12, §15)")
     if structured is None:
         return _fail_stage(session, plan, run, spec, code="OUTPUT_MISSING", status="OUTPUT_INVALID", actor=actor,
                            error="no structured output returned")
+    # A result produced from an older (revision 1) package lacks the additive sections; they mean "nothing
+    # requested", so they are added as empty lists before validation (nothing else is touched).
+    if spec.schema == "plan_content":
+        structured = contracts.upgrade_content(structured)
+    elif spec.schema == "synthesis" and isinstance(structured.get("content"), dict):
+        structured = {**structured, "content": contracts.upgrade_content(structured["content"])}
     errors = schema_errors(spec.schema, structured)
     if errors:
         return _fail_stage(session, plan, run, spec, code="OUTPUT_SCHEMA_INVALID", status="OUTPUT_INVALID",
@@ -1090,10 +1305,14 @@ def _complete_stage(session: Session, plan: Plan, run: PlanningRun, spec: StageS
     session.flush()
     run.status = "SUCCEEDED"
 
+    refs = decision_refs_for(session, plan, revision_decision_id=cp.get("revision_decision_id"))
     if spec.state == S.PRIMARY_PLANNING:
         version = create_version(session, plan, structured, source="PLANNING_RUN", parent_version_id=cp.get("revision_of"),
-                                 run_ids=[run.id], created_by=f"planning:{run.id}", mode=content_mode)
+                                 run_ids=[run.id], created_by=f"planning:{run.id}", mode=content_mode,
+                                 decision_refs=refs)
         run.output_version_id = version.id
+        if cp.get("human_edit_input_ids"):
+            _mark_human_edits_carried(session, list(cp["human_edit_input_ids"]), version.id)
         cp.update(proposal_version_id=version.id, proposal_artifact_id=artifact.id,
                   proposal_validation=dag.validate_graph(version.content), primary_session_id=run.session_id)
         next_stage = S.CHALLENGE_REVIEW
@@ -1107,7 +1326,7 @@ def _complete_stage(session: Session, plan: Plan, run: PlanningRun, spec: StageS
         version = create_version(session, plan, structured["content"], source="PLANNING_RUN",
                                  parent_version_id=cp.get("proposal_version_id"),
                                  run_ids=[r for r in (cp.get("challenge_run_id"), run.id) if r],
-                                 created_by=f"planning:{run.id}", mode=content_mode)
+                                 created_by=f"planning:{run.id}", mode=content_mode, decision_refs=refs)
         run.output_version_id = version.id
         cp.update(synthesis_version_id=version.id, synthesis_artifact_id=artifact.id, synthesis_run_id=run.id,
                   synthesis_session_id=run.session_id)
@@ -1115,8 +1334,12 @@ def _complete_stage(session: Session, plan: Plan, run: PlanningRun, spec: StageS
     else:
         verdict = structured["verdict"]
         blocking = [f for f in structured.get("findings", []) if f.get("blocking")]
-        effective = "NOT-PROVEN" if verdict == "PASS-STATIC" and blocking else verdict  # never upgraded by code
-        cp.update(verdict_artifact_id=artifact.id, verdict=verdict, verdict_effective=effective, final_run_id=run.id)
+        reviewed = session.get(PlanVersion, cp.get("synthesis_version_id")) if cp.get("synthesis_version_id") else None
+        # §46 quality targets: a feature without testable NFRs is a blocking review question, never a silent pass
+        gaps = dag.quality_gaps(reviewed.content if reviewed else {})
+        effective = "NOT-PROVEN" if verdict == "PASS-STATIC" and (blocking or gaps) else verdict  # never upgraded
+        cp.update(verdict_artifact_id=artifact.id, verdict=verdict, verdict_effective=effective, final_run_id=run.id,
+                  quality_gaps=gaps)
     cp["stage"] = next_stage.value if next_stage else None
     cp["run_id"] = run.id
     plan.checkpoint = cp
@@ -1165,6 +1388,13 @@ def import_manual_result(session: Session, plan_id: str, *, actor: str, continue
     if ok and continue_pipeline:
         nxt = plan.checkpoint.get("stage")
         if nxt:
+            # §05 step 2 / §08: readiness is checked again before the next stage's prompt is executed (a bridge
+            # that became BLOCKED stops here; DEGRADED keeps using the manual package).
+            try:
+                personal_gate(session, plan, actor=actor)
+            except Blocked:
+                return plan
+            session.commit()
             _continue(session, plan, start=STAGE_BY_STATE[S(nxt)], actor=actor)
     return plan
 

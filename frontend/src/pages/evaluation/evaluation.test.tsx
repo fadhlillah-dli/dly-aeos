@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockApi, renderPage } from "../../components/proposals/testUtils";
 import EvaluationPage from "./index";
@@ -79,5 +79,109 @@ describe("Evaluation page (§43)", () => {
     expect(screen.getByText("fast-but-unsafe")).toBeInTheDocument();
     expect(screen.getByText("Dikecualikan: gate gagal")).toBeInTheDocument();
     expect(screen.getByText("security: FAIL")).toBeInTheDocument();
+  });
+
+  it("keeps topologies apart, shows the baseline delta, regression/terms exclusions and declared-weight ranking", async () => {
+    const base = {
+      label: "m@r",
+      configuration: {},
+      runs: 1,
+      sample_size: 50,
+      final_acceptance_rate: 0.5,
+      first_pass_acceptance_rate: 0.4,
+      acceptance_ci95: [0.36, 0.64],
+      acceptance_variance: 0.25,
+      failures_reported: 0,
+      metrics: { performance: { latency_p50_s: 60, latency_p95_s: 90 }, economics: { worker_cost_per_accepted_usd: 0.1, worker_cost_status: "COMPUTED" } },
+      eligibility: { eligible: true, status: "ELIGIBLE", gates_failed: [], gates_unproven: [] },
+      small_sample: false,
+      tie: false,
+    };
+    mockApi({
+      "/api/eval/suites": { items: [], checked_at: null, source: "eval_suites" },
+      "/api/eval/experiments": { items: [], common_gates: {}, measures: [], not_measured: [], dimensions: [], note: "" },
+      "/api/eval/runs": { items: [{ id: "run-1", suite_key: "eval.small-bugfix", role_key: null, topology: null, status: "RUNNING", configuration: { model_id: "m", provider_route: "r" }, configuration_hash: "sha256:x", sample_size: 0, failures: [], created_at: null, is_baseline: true, execution: { status: "COLLECTING", note: "kolektor", fixtures: "NOT_AVAILABLE_IN_BUILD" } }] },
+      "/api/eval/leaderboard": {
+        ...emptyBoard,
+        status: "HAS_RESULTS",
+        message: null,
+        candidates_not_tested: [],
+        combined: { weights: { "eval.small-bugfix": 3 }, source: "decision:d1", rule: "rata-rata berbobot", incomplete: [], ranking: [{ entry_key: "h1|C", label: "m@r", score: 0.9, interval: [0.8, 0.96], sample_size: 50, rank: 1, tie: false }] },
+        suites: [
+          {
+            suite_key: "eval.small-bugfix",
+            title: "Small bugfix",
+            role_key: "feature-implementer",
+            status: "RANKED",
+            baseline: "h1|A",
+            ranking: [
+              { ...base, entry_key: "h1|C", configuration_hash: "sha256:h1", topology: "C", final_acceptance_rate: 0.9, rank: 1, delta_vs_baseline: { acceptance_rate: 0.4, interval: [0.2, 0.55], conclusion: "BETTER" } },
+              { ...base, entry_key: "h1|A", configuration_hash: "sha256:h1", topology: "A", rank: 2, is_baseline: true, delta_vs_baseline: null },
+            ],
+            excluded: [
+              { ...base, entry_key: "h2|-", configuration_hash: "sha256:h2", label: "regressed", topology: null, eligibility: { eligible: false, status: "EXCLUDED_REGRESSION", gates_failed: [], gates_unproven: [] } },
+              { ...base, entry_key: "h3|-", configuration_hash: "sha256:h3", label: "gemini", topology: null, eligibility: { eligible: false, status: "EXCLUDED_ROUTE_TERMS", gates_failed: [], gates_unproven: [], route_reasons: ["data classification INTERNAL not allowed"] } },
+            ],
+            not_comparable: [{ ...base, entry_key: "h4|-", configuration_hash: "sha256:h4", label: "more-budget", topology: null }],
+          },
+        ],
+      },
+    });
+    renderPage(<EvaluationPage />);
+    expect(await screen.findByText("+40 pp (lebih baik)")).toBeInTheDocument();
+    expect(screen.getAllByText("Baseline").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("C").length).toBeGreaterThan(0); // topology C and A are separate entries
+    expect(screen.getAllByText("A").length).toBeGreaterThan(0);
+    expect(screen.getByText("Dikecualikan: regresi kritis")).toBeInTheDocument();
+    expect(screen.getByText("Dikecualikan: rute tidak eligible (terms/data)")).toBeInTheDocument();
+    expect(screen.getByText(/data classification INTERNAL not allowed/)).toBeInTheDocument();
+    expect(screen.getByText("more-budget")).toBeInTheDocument();
+    expect(screen.getByText(/Ranking gabungan \(bobot workload/)).toBeInTheDocument();
+  });
+
+  it("shows the controlled baseline-vs-candidate comparison of a proposal (§40), never as a route change", async () => {
+    const side = (rate: number, cost: number) => ({
+      status: "RECORDED",
+      run_ids: ["r"],
+      result: {
+        configuration_hash: "sha256:x",
+        label: "m@r",
+        configuration: {},
+        topologies: ["-"],
+        runs: 1,
+        sample_size: 10,
+        final_acceptance_rate: rate,
+        first_pass_acceptance_rate: rate,
+        acceptance_ci95: [0.2, 0.9],
+        acceptance_variance: 0.2,
+        failures_reported: 0,
+        metrics: { performance: { latency_p50_s: null, latency_p95_s: null }, economics: { worker_cost_per_accepted_usd: cost, worker_cost_status: "COMPUTED" } },
+        eligibility: { eligible: true, status: "ELIGIBLE", gates_failed: [], gates_unproven: [] },
+        small_sample: false,
+      },
+    });
+    const run = (id: string, isBase: boolean) => ({
+      id, suite_key: "eval.small-bugfix", role_key: null, topology: null, status: "COMPLETED", configuration: { model_id: "m", provider_route: "r" },
+      configuration_hash: "sha256:" + id, sample_size: 10, failures: [], created_at: null, is_baseline: isBase, proposal_id: "prop-1",
+    });
+    mockApi({
+      "/api/eval/suites": { items: [], checked_at: null, source: "eval_suites" },
+      "/api/eval/experiments": { items: [], common_gates: {}, measures: [], not_measured: [], dimensions: [], note: "" },
+      "/api/eval/runs": { items: [run("b", true), run("c", false)] },
+      "/api/eval/leaderboard": emptyBoard,
+      "/api/eval/comparisons/prop-1": {
+        proposal_id: "prop-1", status: "RECORDED", route_change: "NONE",
+        rule: "Baseline vs kandidat pada suite, limit dan environment yang sama.",
+        suites: [{ suite_key: "eval.small-bugfix", baseline: side(0.8, 0.125), candidate: side(0.5, 0.16), equal_conditions: true,
+                   delta: { acceptance_rate: -0.3, interval: [-0.7, 0.1], conclusion: "NOT_DISTINGUISHABLE" }, verdict: "NOT_DISTINGUISHABLE" }],
+      },
+    });
+    renderPage(<EvaluationPage />);
+    fireEvent.click(await screen.findByRole("tab", { name: "Run" }));
+    expect(await screen.findByText(/Perbandingan terkendali per proposal/)).toBeInTheDocument();
+    expect(await screen.findByText("Tidak dapat dibedakan (interval tumpang tindih)")).toBeInTheDocument();
+    expect(screen.getByText(/accepted 80% · n=10 · biaya\/accepted \$0.125/)).toBeInTheDocument();
+    expect(screen.getByText(/accepted 50% · n=10 · biaya\/accepted \$0.16/)).toBeInTheDocument();
+    expect(screen.getByText(/Rute tidak berubah otomatis \(NONE\)/)).toBeInTheDocument();
   });
 });

@@ -156,12 +156,43 @@ def worker_contract(ctx: CheckContext) -> Outcome:
                                                            EvidenceArtifact.trusted.is_(True),
                                                            EvidenceArtifact.mode == "LIVE", _NOT_OFFICE)
                             .order_by(EvidenceArtifact.created_at.desc()).limit(1))
+    remedy = Remedy(operation="Jalankan uji kontrak worker (OpenCode asli terhadap endpoint loopback terskrip; tanpa "
+                    "jaringan/kredensial)", command=aeos_cmd("worker contract-test"), privilege="pengguna lokal",
+                    cost="tidak ada", evidence_to_collect="worker.contract VERIFIED")
     if ev is None:
         return Outcome("UNKNOWN", "Belum ada bukti tepercaya uji kontrak worker (tool/schema/patch, caps); NOT-PROVEN. "
                        "Hasil worker tetap REVIEW sampai verifier independen membuktikannya.",
-                       error_code="WORKER_CONTRACT_NOT_PROVEN",
+                       error_code="WORKER_CONTRACT_NOT_PROVEN", remedy=remedy,
                        evidence={"looked_for": "EvidenceArtifact WORKER_CONTRACT_TEST (trusted, LIVE)",
                                  "residual_risks": ["Kontrak tool/schema/patch worker NOT-PROVEN pada host ini; output "
                                                     "worker hanya REVIEW sampai verifier independen lulus"]})
-    return Outcome("VERIFIED", f"Bukti uji kontrak worker {ev.id[:8]} ({ev.created_at.isoformat()}).",
-                   evidence={"evidence_id": ev.id, "level": ev.evidence_level, "claim": ev.claim[:200]})
+    inline = ev.inline or {}
+    content = inline.get("content") if isinstance(inline.get("content"), dict) else inline.get("summary") or {}
+    overall = str((content or {}).get("overall") or "UNKNOWN").upper()
+    evidence: dict[str, Any] = {
+        "evidence_id": ev.id, "level": ev.evidence_level, "claim": ev.claim[:200], "overall": overall,
+        "residual_risks": ["Perilaku tool/schema model pada route nyata NOT-PROVEN (uji memakai model loopback "
+                           "terskrip); dibuktikan per run oleh verifier independen"]}
+    if overall == "FAIL":
+        return Outcome("FAILED", f"Uji kontrak worker {ev.id[:8]} GAGAL ({ev.created_at.isoformat()}).",
+                       evidence=evidence, error_code="WORKER_CONTRACT_FAILED", remedy=remedy)
+    if overall != "PASS":
+        return Outcome("UNKNOWN", f"Uji kontrak worker {ev.id[:8]} tidak konklusif ({overall}); NOT-PROVEN.",
+                       evidence=evidence, error_code="WORKER_CONTRACT_NOT_PROVEN", remedy=remedy)
+    # §08 "engine/version": a contract test proves the engine version it ran against, not a later binary.
+    recorded = str((content or {}).get("engine_version") or "")
+    try:
+        from aeos.worker_runtime import facade as worker
+
+        current = worker.opencode_status()
+    except Exception:  # worker runtime absent / probe error: the binding cannot be checked (never a pass)
+        current = {}
+    installed = str(current.get("version") or "") if str(current.get("status") or "").upper() == "INSTALLED" else ""
+    evidence.update(recorded_engine_version=recorded or None, installed_engine_version=installed or None)
+    if not recorded or not installed or recorded != installed:
+        return Outcome("UNKNOWN", f"Uji kontrak worker {ev.id[:8]} tercatat untuk OpenCode {recorded or 'UNKNOWN'}, "
+                       f"terpasang sekarang {installed or str(current.get('status') or 'UNKNOWN')}: bukti tidak berlaku "
+                       "untuk engine ini; NOT-PROVEN sampai uji kontrak dijalankan ulang.", evidence=evidence,
+                       error_code="WORKER_CONTRACT_STALE", remedy=remedy)
+    return Outcome("VERIFIED", f"Uji kontrak engine worker {ev.id[:8]} lulus ({ev.created_at.isoformat()}); perilaku "
+                   "model route nyata tetap NOT-PROVEN.", evidence=evidence)

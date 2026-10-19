@@ -7,11 +7,12 @@ import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { DomainRequired } from "../../components/inventory/DomainRequired";
 import { Badge, LENS_LABELS, RELATION_LABELS } from "../../components/inventory/labels";
-import type { BlastRadius, MapNode, PathResult, RelationView, SystemMap } from "../../components/inventory/types";
+import type { BlastRadius, MapNode, PathResult, RelationView, SnapshotDiff, SystemMap } from "../../components/inventory/types";
 import { Button, Card, EmptyState, ErrorBox, inputBase, Loading, Notice, PageHeader, Table } from "../../components/ui";
 import { useEventStream } from "../../lib/events";
-import { foldGraph, groupId, hideNodes, type GEdge, type GNode } from "./layout";
+import { applyDiff, foldGraph, groupId, hideNodes, type GEdge, type GNode } from "./layout";
 import { MapGraph } from "./MapGraph";
+import { DataFlowView } from "./DataFlow";
 import { EdgeCard, NodeCard, SnapshotPanel } from "./Panels";
 
 const LENSES = ["DESIGN", "CONFIG", "OBSERVED"] as const;
@@ -30,7 +31,12 @@ export default function SystemMapPage() {
   const [params, setParams] = useSearchParams();
   const lens = (params.get("lens") ?? "DESIGN").toUpperCase();
   const blastRoot = params.get("blast") ?? "";
-  const [view, setView] = useState<"graph" | "table">("graph");
+  // §36 "Pengguna memilih domain, proyek, environment dan snapshot"
+  const projectId = params.get("project") ?? "";
+  const environment = params.get("env") ?? "";
+  const snapshotId = params.get("snapshot") ?? "";
+  const [snapshotDiff, setSnapshotDiff] = useState<SnapshotDiff | null>(null);
+  const [view, setView] = useState<"graph" | "table" | "flow">("graph");
   const [advanced, setAdvanced] = useState(false);
   const [hideAbsent, setHideAbsent] = useState(false);
   const [folded, setFolded] = useState<Set<string>>(new Set());
@@ -41,10 +47,20 @@ export default function SystemMapPage() {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GEdge | null>(null);
 
+  const mapQs = new URLSearchParams({ lens });
+  if (projectId) mapQs.set("project_id", projectId);
+  if (environment) mapQs.set("environment", environment);
+  if (snapshotId) mapQs.set("snapshot", snapshotId);
   const map = useQuery({
-    queryKey: ["inventory", "map", domain, lens],
-    queryFn: () => get<SystemMap>(`/api/inventory/map?lens=${lens}`),
+    queryKey: ["inventory", "map", domain, mapQs.toString()],
+    queryFn: () => get<SystemMap>(`/api/inventory/map?${mapQs.toString()}`),
     enabled: !!domain,
+  });
+  const projects = useQuery({
+    queryKey: ["projects", "system-map", domain],
+    queryFn: () => get<{ items: { id: string; name: string }[] }>("/api/projects"),
+    enabled: !!domain,
+    retry: false,
   });
   const path = useQuery({
     queryKey: ["inventory", "path", domain, lens, pathFrom, pathTo],
@@ -86,8 +102,8 @@ export default function SystemMapPage() {
     if (!data) return { nodes: [] as GNode[], edges: [] as GEdge[] };
     const ids = new Set(visibleNodes.map((n) => n.id));
     const folded_ = foldGraph(visibleNodes, data.edges.filter((e) => ids.has(e.source) && ids.has(e.target)), data.groups, folded);
-    return hideNodes(folded_, () => true);
-  }, [data, visibleNodes, folded]);
+    return applyDiff(hideNodes(folded_, () => true), snapshotDiff);
+  }, [data, visibleNodes, folded, snapshotDiff]);
 
   const ownerOf = useMemo(() => {
     const m = new Map<string, string>();
@@ -147,12 +163,36 @@ export default function SystemMapPage() {
             </Button>
           ))}
         </div>
+        <select aria-label="Proyek" className="rounded-md border border-line bg-surface px-2 py-1 text-sm" value={projectId} onChange={(e) => setParam("project", e.target.value)}>
+          <option value="">Semua proyek (platform)</option>
+          {(projects.data?.items ?? []).map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        <select aria-label="Environment" className="rounded-md border border-line bg-surface px-2 py-1 text-sm" value={environment} onChange={(e) => setParam("env", e.target.value)}>
+          <option value="">Semua environment</option>
+          {(data?.filters?.environments ?? ["local"]).map((env) => (
+            <option key={env} value={env}>
+              {env}
+            </option>
+          ))}
+        </select>
+        {snapshotId && (
+          <Button variant="secondary" onClick={() => setParam("snapshot", "")} title="Kembali ke lensa live">
+            Snapshot {data?.snapshot?.label ?? ""} — tutup
+          </Button>
+        )}
         <div className="ml-auto flex gap-1">
           <Button variant={view === "graph" ? "primary" : "secondary"} onClick={() => setView("graph")}>
             <Network className="h-4 w-4" aria-hidden /> Peta
           </Button>
           <Button variant={view === "table" ? "primary" : "secondary"} onClick={() => setView("table")}>
             <TableIcon className="h-4 w-4" aria-hidden /> Tabel
+          </Button>
+          <Button variant={view === "flow" ? "primary" : "secondary"} onClick={() => setView("flow")}>
+            <Layers className="h-4 w-4" aria-hidden /> Aliran data
           </Button>
         </div>
       </div>
@@ -212,7 +252,9 @@ export default function SystemMapPage() {
 
           <div className={clsx("grid gap-4", (selected || selectedRels.length > 0) && "xl:grid-cols-[minmax(0,1fr)_380px]")}>
             <div className="min-w-0">
-              {view === "graph" ? (
+              {view === "flow" ? (
+                <DataFlowView edges={data.edges.filter((e) => visibleNodes.some((n) => n.id === e.source) && visibleNodes.some((n) => n.id === e.target))} />
+              ) : view === "graph" ? (
                 <MapGraph
                   nodes={graph.nodes}
                   edges={graph.edges}
@@ -362,7 +404,7 @@ export default function SystemMapPage() {
           </Card>
         </>
       )}
-      {domain && <SnapshotPanel />}
+      {domain && <SnapshotPanel onDiff={setSnapshotDiff} onShow={(id) => setParam("snapshot", id)} />}
     </div>
   );
 }

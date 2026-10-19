@@ -208,7 +208,7 @@ def schema_errors(schema: dict[str, Any], instance: Any) -> list[str]:
 
 
 def summarise_usage(data: dict[str, Any]) -> dict[str, Any]:
-    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    usage: dict[str, Any] = data["usage"] if isinstance(data.get("usage"), dict) else {}
     models: dict[str, Any] = {}
     mu = data.get("modelUsage")
     if isinstance(mu, dict):
@@ -250,7 +250,7 @@ def parse_output(
             error=msg or f"no JSON result (exit {returncode})", quota_exhausted=quota,
             quota_resets_at=resets, quota_reset_text=reset_text,
         )
-    text = data.get("result") if isinstance(data.get("result"), str) else ""
+    text: str = data["result"] if isinstance(data.get("result"), str) else ""
     usage = summarise_usage(data)
     session_id = data.get("session_id") if isinstance(data.get("session_id"), str) else None
     duration = data.get("duration_ms") if isinstance(data.get("duration_ms"), int) else None
@@ -259,7 +259,7 @@ def parse_output(
         "output_models": resolution.output_models, "auxiliary_models": resolution.auxiliary_models,
         "all_models": resolution.all_models, "policy_ok": resolution.policy_ok, "reason": resolution.reason,
     }
-    base = {
+    base: dict[str, Any] = {
         "text": redact_text(text), "model_resolved": resolution.resolved, "session_id": session_id,
         "usage": usage, "duration_ms": duration, "raw": data,
     }

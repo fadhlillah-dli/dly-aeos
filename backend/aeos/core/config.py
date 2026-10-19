@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     office_external_worker_allowed: bool = False
 
     platform_repo_slug: str = "fadhlillah-dli/dly-aeos"
+    # §06 commit attribution of worker candidates: the owner's own identity (e.g. the GitHub noreply address
+    # ``<id>+<user>@users.noreply.github.com``). Unset -> the runtime identity, reported as not linked.
+    commit_author_name: str | None = None
+    commit_author_email: str | None = None
 
     @field_validator("host")
     @classmethod
@@ -83,6 +87,37 @@ class Settings(BaseSettings):
         # §06/§50: never auto-bind 0.0.0.0 or a public interface to make startup succeed.
         if v not in LOOPBACK_HOSTS:
             raise ValueError("AEOS V1 binds loopback only (127.0.0.1/::1/localhost)")
+        return v
+
+    @field_validator("data_dir")
+    @classmethod
+    def _data_dir_outside_repo(cls, v: Path) -> Path:
+        # §06: runtime state never lives in the source tree, and its location comes from OS/profile
+        # configuration - never from the process cwd (normally the repo) via a relative path.
+        v = Path(v).expanduser()
+        if not v.is_absolute():
+            raise ValueError(f"data_dir must be an absolute path (got relative {str(v)!r}); a relative path "
+                             "would resolve against the current directory, normally the repository")
+        from aeos.core.paths import repo_root
+
+        repo = repo_root().resolve()
+        resolved = v.resolve()
+        if (repo / ".git").exists() and (resolved == repo or repo in resolved.parents):
+            raise ValueError(f"data_dir {resolved} is inside the source tree {repo}; runtime state must live "
+                             "outside the repository (unset AEOS_DATA_DIR to use the OS default)")
+        return v
+
+    @field_validator("extra_allowed_origins")
+    @classmethod
+    def _loopback_origins_only(cls, v: list[str]) -> list[str]:
+        # §06/§26: an explicit extra origin may only name a loopback http origin with a port.
+        import re
+
+        pattern = re.compile(r"^http://(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})$")
+        bad = [o for o in v if not pattern.match(o) or not 0 < int(pattern.match(o).group(2)) < 65536]  # type: ignore[union-attr]
+        if bad:
+            raise ValueError(f"extra_allowed_origins accepts only loopback http origins with a port "
+                             f"(http://127.0.0.1:<port>, http://localhost:<port>, http://[::1]:<port>): {bad}")
         return v
 
     @classmethod
@@ -106,11 +141,12 @@ class Settings(BaseSettings):
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        host = f"[{self.host}]" if ":" in self.host else self.host  # IPv6 literal (RFC 3986)
+        return f"http://{host}:{self.port}"
 
     @property
     def allowed_origins(self) -> list[str]:
-        hosts = ["127.0.0.1", "localhost"]
+        hosts = ["127.0.0.1", "localhost", "[::1]"]
         origins = [f"http://{h}:{self.port}" for h in hosts]
         if self.dev_mode:
             origins += [f"http://{h}:{self.dev_frontend_port}" for h in hosts]

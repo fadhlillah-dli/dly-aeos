@@ -34,6 +34,8 @@ from aeos.identity.passwords import (
 from aeos.models.identity import AuthSession, LoginAttempt, SystemSetting, User
 
 BOOTSTRAP_KEY = "bootstrap.admin_created"
+# §26 recovery: a temporary credential is valid for one successful login within this window.
+TEMP_PASSWORD_TTL = timedelta(minutes=30)
 
 
 def hash_token(token: str) -> str:
@@ -133,7 +135,8 @@ def bootstrap_admin(session: Session, *, username: str, password: str, display_n
 
 def recover_user(session: Session, *, username: str) -> str:
     """Local, authorised recovery: one-time temporary password + revoke all sessions (§26)."""
-    user = session.scalar(select(User).where(User.username == username.strip().lower()))
+    user = session.scalar(select(User).where(User.username == username.strip().lower())
+                          .execution_options(populate_existing=True))
     if user is None:
         raise ValidationFailed("unknown user")
     temp = secrets.token_urlsafe(18)
@@ -141,9 +144,12 @@ def recover_user(session: Session, *, username: str) -> str:
     user.must_change_password = True
     user.is_active = True
     user.password_changed_at = utcnow()
+    user.temp_password_expires_at = utcnow() + TEMP_PASSWORD_TTL
+    user.temp_password_used_at = None
     revoke_all_sessions(session, user.id, reason="recovery")
     audit.record(session, actor_type="cli", actor_id="local-operator", action="identity.user.recover",
-                 target_type="user", target_id=user.id)
+                 target_type="user", target_id=user.id,
+                 details={"temp_password_expires_at": user.temp_password_expires_at.isoformat(), "single_use": True})
     return temp
 
 
@@ -152,6 +158,7 @@ def change_password(session: Session, principal: Principal, *, current: str, new
     if not verify_password(user.password_hash, current):
         audit.record(session, actor_type="user", actor_id=user.id, action="identity.password.change",
                      result="DENIED", reason="current password mismatch")
+        session.commit()  # persist the denied attempt even though we raise (the request rolls back)
         raise Forbidden("current password is incorrect")
     if current == new:
         raise ValidationFailed("new password must differ from the current one")
@@ -159,6 +166,8 @@ def change_password(session: Session, principal: Principal, *, current: str, new
     user.password_hash = hash_password(new)
     user.must_change_password = False
     user.password_changed_at = utcnow()
+    user.temp_password_expires_at = None  # the recovery credential is gone once a real one exists
+    user.temp_password_used_at = None
     # Revoke other sessions; keep the current one.
     session.execute(
         update(AuthSession)
@@ -224,6 +233,21 @@ def login(
                      reason="invalid credentials", details={"client_ip": client_ip})
         session.commit()  # persist the failed attempt even though we raise
         raise Unauthenticated("invalid username or password", code="INVALID_CREDENTIALS")
+    if user.temp_password_expires_at is not None:
+        # §26 recovery: the temporary credential works once and only until it expires.
+        denied = None
+        if user.temp_password_used_at is not None:
+            denied = ("temporary password already used", "TEMP_PASSWORD_USED")
+        elif ensure_aware(user.temp_password_expires_at) <= utcnow():
+            denied = ("temporary password expired", "TEMP_PASSWORD_EXPIRED")
+        if denied is not None:
+            session.add(LoginAttempt(username=username, client_ip=client_ip, success=False))
+            audit.record(session, actor_type="user", actor_id=user.id, action="identity.login", result="DENIED",
+                         reason=denied[0], details={"client_ip": client_ip})
+            session.commit()
+            raise Unauthenticated(f"{denied[0]}; ask the local operator for a new recovery (aeos admin recover)",
+                                  code=denied[1])
+        user.temp_password_used_at = utcnow()
 
     if needs_rehash(user.password_hash):
         user.password_hash = hash_password(password)

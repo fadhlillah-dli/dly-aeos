@@ -30,6 +30,7 @@ import httpx
 
 from aeos.core.hashing import sha256_text
 from aeos.core.redaction import register_secret
+from aeos.publisher import human_sections
 from aeos.publisher.providers.base import (
     DEFAULT_TIMEOUT,
     Inspection,
@@ -406,8 +407,15 @@ class ConfluenceProvider:
             raise ProviderConflict("Confluence page version changed outside AEOS (human edit) — not overwritten",
                                    expected_revision=ctx.existing_revision, observed_revision=str(number),
                                    current_text=re.sub(r"<[^>]+>", " ", body)[:100_000])
-        storage = markdown_to_storage(ctx.payload.get("markdown", ""),
-                                      rendered_images=set(ctx.payload.get("rendered_visuals", [])))
+        # HUMAN_GOVERNED content entered on the page is carried into the new body, or the update is refused (§29).
+        current_text = human_sections.storage_to_text(((data.get("body") or {}).get("storage") or {}).get("value", ""))
+        try:
+            markdown, kept = human_sections.preserve(ctx.payload.get("markdown", ""), current_text,
+                                                     ctx.payload.get("human_guard"))
+        except human_sections.HumanContentUnlocatable as exc:
+            raise ProviderConflict(str(exc), expected_revision=ctx.existing_revision, observed_revision=str(number),
+                                   current_text=current_text[:100_000]) from exc
+        storage = markdown_to_storage(markdown, rendered_images=set(ctx.payload.get("rendered_visuals", [])))
         resp = send(self.client, "PUT", self._v2(f"/pages/{quote(pid, safe='')}"), write=True,
                     what="confluence update page", headers=self._h({"Content-Type": "application/json"}),
                     json={"id": pid, "status": "current", "title": self.title_for(ctx),
@@ -420,7 +428,8 @@ class ConfluenceProvider:
             raise classify_http_error(resp, write=True, what="confluence update page")
         out = resp.json()
         return OpResult(external_id=pid, external_url=_link(self.cfg, out),
-                        external_revision=str((out.get("version") or {}).get("number", number + 1)), kind="page")
+                        external_revision=str((out.get("version") or {}).get("number", number + 1)), kind="page",
+                        response={"human_sections_kept": {t: len(v) for t, v in kept.items()}})
 
     def inspect(self, external_id: str) -> Inspection:
         resp = send(self.client, "GET", self._v2(f"/pages/{quote(external_id, safe='')}"), write=False,

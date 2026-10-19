@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ContextView, OperationCatalog, PlanDetail, VersionSummary } from "../../components/planning/types";
+import { BridgeProofNotice } from "./BridgeProof";
 import { ContextPanel } from "./ContextPanel";
 import { DecisionPanel } from "./DecisionPanel";
 
@@ -51,6 +52,14 @@ describe("decision panel honesty (§14, §35, §49)", () => {
     expect(screen.getByText(/belum melalui review akhir/)).toBeInTheDocument();
     expect(screen.getByText(/Verdict yang tampil berlaku untuk versi lain/)).toBeInTheDocument();
     expect(screen.getByText("sha256:feedbeef")).toBeInTheDocument();
+  });
+
+  it("keeps Approve disabled for an unreviewed version until the skipped review is acknowledged", () => {
+    renderPanel(plan(false), version("LIVE"));
+    const approve = screen.getByRole("button", { name: /^Approve$/ });
+    expect(approve).toBeDisabled();
+    fireEvent.click(screen.getByLabelText(/tidak menilai versi ini/));
+    expect(approve).not.toBeDisabled();
   });
 
   it("labels MOCK content and states that its external publication is refused", () => {
@@ -121,5 +130,23 @@ describe("untrusted input notices (§50 prompt/attachment injection)", () => {
   it("shows no warning without flags", () => {
     render(<ContextPanel context={base} />);
     expect(screen.queryByText(/mirip instruksi/)).not.toBeInTheDocument();
+  });
+});
+
+describe("local Claude integration proof (§02, §08 CAN_PLAN_PERSONAL)", () => {
+  it("never shows an unchecked bridge as proven", () => {
+    render(<BridgeProofNotice proof={{ label: "NOT-PROVEN", status: "UNKNOWN", reasons: ["claude.capability_test: UNKNOWN"] }} />);
+    expect(screen.getByText("Integrasi Claude lokal belum diuji")).toBeInTheDocument();
+    expect(screen.getByText(/tidak dinyatakan otomatis\/terbukti/)).toBeInTheDocument();
+    expect(screen.queryByText("Bridge Claude lokal terbukti")).not.toBeInTheDocument();
+  });
+
+  it("labels the manual package and an unknown label honestly", () => {
+    const { rerender } = render(<BridgeProofNotice proof={{ label: "MANUAL_PACKAGE", status: "DEGRADED" }} />);
+    expect(screen.getByText(/Paket manual/)).toBeInTheDocument();
+    rerender(<BridgeProofNotice proof={{ label: "SOMETHING" }} />);
+    expect(screen.getByText(/tidak dihitung sebagai terbukti/)).toBeInTheDocument();
+    rerender(<BridgeProofNotice proof={null} />);
+    expect(screen.queryByLabelText("Bukti integrasi Claude lokal")).not.toBeInTheDocument();
   });
 });

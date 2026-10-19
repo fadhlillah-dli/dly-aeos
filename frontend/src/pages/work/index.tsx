@@ -278,7 +278,7 @@ export default function WorkPage() {
                 cell: (r) => (
                   <div className="max-w-56 text-xs" title={r.current_action_source}>
                     {r.current_action || "—"}
-                    <div className="text-ink-3">sumber: event alat (runtime)</div>
+                    <div className="text-ink-3">sumber: {r.current_action_source || "UNKNOWN"}</div>
                   </div>
                 ),
               },
@@ -304,6 +304,11 @@ export default function WorkPage() {
                     {r.touched_paths.slice(0, 3).map((p) => (
                       <div key={p} className="truncate text-ink-3" title={p}>
                         {p}
+                      </div>
+                    ))}
+                    {(r.resources ?? []).slice(0, 3).map((x) => (
+                      <div key={`${x.kind}:${x.target}`} className="truncate text-ink-3" title={`${x.kind} ${x.target ?? ""} (${x.status})`}>
+                        {x.kind}: {x.target ?? "—"} ({x.status})
                       </div>
                     ))}
                     {r.quarantined && <StatusBadge status="BLOCKED" label="Dikarantina" />}
@@ -342,9 +347,18 @@ export default function WorkPage() {
               {
                 header: "Bukti",
                 cell: (r) => (
-                  <Link to={r.links.run} className="text-xs text-accent underline">
-                    {r.evidence_refs.length} referensi
-                  </Link>
+                  <div className="min-w-28 space-y-0.5 text-xs">
+                    {r.evidence_refs.slice(0, 3).map((ref) => (
+                      <div key={ref}>
+                        <Link to={`/evidence?id=${encodeURIComponent(ref)}`} className="text-accent underline" title={ref}>
+                          <Mono>{shortId(ref)}</Mono>
+                        </Link>
+                      </div>
+                    ))}
+                    <Link to={r.links.run} className="text-ink-3 underline">
+                      {r.evidence_refs.length} referensi
+                    </Link>
+                  </div>
                 ),
               },
               {

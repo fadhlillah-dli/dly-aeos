@@ -26,9 +26,18 @@
     {
       "label": "AEOS: serve --dev",
       "type": "shell",
-      "windows": { "command": ".\\aeos.ps1 serve --dev" },
-      "osx": { "command": "./aeos serve --dev" },
-      "linux": { "command": "./aeos serve --dev" },
+      "windows": {
+        "command": ".\\aeos.ps1 serve --dev",
+        "options": { "env": { "AEOS_DATA_DIR": "${env:LOCALAPPDATA}\\DLY-AEOS-dev", "AEOS_KEYRING_SERVICE": "dly-aeos-dev" } }
+      },
+      "osx": {
+        "command": "./aeos serve --dev",
+        "options": { "env": { "AEOS_DATA_DIR": "${env:HOME}/Library/Application Support/DLY-AEOS-dev", "AEOS_KEYRING_SERVICE": "dly-aeos-dev" } }
+      },
+      "linux": {
+        "command": "./aeos serve --dev",
+        "options": { "env": { "AEOS_DATA_DIR": "${env:HOME}/.local/share/DLY-AEOS-dev", "AEOS_KEYRING_SERVICE": "dly-aeos-dev" } }
+      },
       "isBackground": true,
       "problemMatcher": []
     },

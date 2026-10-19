@@ -18,6 +18,16 @@ ADMIN_PW = "correct-horse-battery-staple"
 VIEWER_PW = "read-only-observer-pass-77"
 
 
+@pytest.fixture(autouse=True)
+def _controller_not_elevated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI runners (GitHub-hosted Windows) run elevated; the product refuses the process sandbox for an elevated
+    controller (§25 non-root). That refusal is tested explicitly (test_worker_runtime_sandbox); every other test
+    runs as a normal user would."""
+    from aeos.worker_runtime import sandbox
+
+    monkeypatch.setattr(sandbox, "_elevation_probe", lambda: False)
+
+
 @pytest.fixture
 def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[config_mod.Settings]:
     monkeypatch.setenv("AEOS_DATA_DIR", str(tmp_path / "data"))
@@ -25,6 +35,12 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[config
     for k in list(os.environ):
         if k.startswith("AEOS_") and k not in {"AEOS_DATA_DIR", "AEOS_CONFIG"}:
             monkeypatch.delenv(k, raising=False)
+    # `aeos serve` (invoked in-process by CLI tests) writes these into os.environ; record them so that
+    # teardown removes whatever such a command set and nothing leaks into later tests.
+    for k in ("AEOS_PORT", "AEOS_DEV_MODE", "AEOS_HOST"):
+        if k not in os.environ:
+            monkeypatch.setenv(k, "")
+            monkeypatch.delenv(k)
     config_mod.reset_settings_cache()
     _reset_process_caches()
     s = config_mod.get_settings()

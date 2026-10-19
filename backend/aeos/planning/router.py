@@ -93,6 +93,9 @@ def run_plan(plan_id: str, db: DB, principal: AdminPrincipal, domain: ActiveDoma
     service.check_runnable(db, plan)
     # OFFICE: capability + company policy gate before any model call (records NEEDS_DECISION, raises Blocked).
     service.office_gate(db, plan, actor=principal.user.id)
+    # PERSONAL: CAN_PLAN_PERSONAL BLOCKED stops here too (the run re-evaluates and labels the bridge proof).
+    service.personal_gate(db, plan, actor=principal.user.id)
+    db.rollback()  # the gate's checkpoint label is re-recorded by the run itself
     started = runner.start(plan.id, actor=principal.user.id, action="run")
     return {"status": "STARTED" if started else "ALREADY_RUNNING", "plan": service.plan_summary(db, plan)}
 
@@ -159,6 +162,8 @@ class DecisionIn(BaseModel):
     rationale: str = Field(default="", max_length=5000)
     rerun: bool = False
     expires_at: datetime | None = None
+    # §15: approving a version the four-stage review never judged needs this explicit acknowledgement
+    acknowledge_unreviewed: bool = False
 
 
 @router.post("/api/plans/{plan_id}/decision")
@@ -166,7 +171,8 @@ def decide(plan_id: str, body: DecisionIn, db: DB, principal: AdminPrincipal, do
     plan = _load_plan(db, principal, domain, plan_id)
     result = service.decide(db, plan.id, action=body.action, version_id=body.version_id,
                             version_hash=body.version_hash, targets=body.targets, rationale=body.rationale,
-                            actor_user_id=principal.user.id, expires_at=body.expires_at)
+                            actor_user_id=principal.user.id, expires_at=body.expires_at,
+                            acknowledge_unreviewed=body.acknowledge_unreviewed)
     db.commit()
     if body.action == "REQUEST_REVISION" and body.rerun:
         try:

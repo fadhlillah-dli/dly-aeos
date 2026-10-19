@@ -38,6 +38,13 @@ RELEASED_KINDS = frozenset({"service", "platform_module", "datastore", "runtime"
 EXPLICIT_PREFIXES = ("enablement", "model route", "integrasi", "agent definition")
 
 
+def route_eligible(route: Any, domain: str | None) -> bool:
+    """Same rule as routing admission (``aeos.routing.service``): a route serves a domain only when that domain
+    is listed in ``eligible_domains``; an empty list serves no domain (fail closed, §23 OFFICE default deny).
+    ``domain=None`` is the platform-wide view (every route)."""
+    return domain is None or domain in (route.eligible_domains or [])
+
+
 def config_basis(
     session: Session, comps: dict[str, ComponentReference], latest: dict[tuple[str, str], ComponentObservation],
     now: datetime, *, domain: str | None = None,
@@ -61,7 +68,7 @@ def config_basis(
             if inst is not None and inst.status == "INSTALLED" and not is_stale(inst, now):
                 add(cid, "bagian dari released controller yang berjalan (terpasang, teramati)")
     for r in session.scalars(select(ModelRoute).where(ModelRoute.status.in_(("APPROVED", "TRIAL")))):
-        if domain is None or not r.eligible_domains or domain in (r.eligible_domains or []):
+        if route_eligible(r, domain):
             add(PROVIDER_COMPONENTS.get(r.provider), f"model route {r.route_key} ({r.status})")
     q = select(ProjectIntegration)
     if domain is not None:

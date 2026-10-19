@@ -6,6 +6,11 @@ The schemas are built here (single source) and published to ``contracts/planning
 ``additionalProperties: false`` and lists its properties as required; no ``$ref``, no recursion,
 no numeric/string-length constraints (structured-output limits). Bounds that matter (attempt caps,
 DAG validity, classification floors) are enforced by code at compile time, not by the schema.
+
+Schema 1, revision 2 (additive): top-level ``feature_governance`` (owner, RFC/TDD/DPIA/security-assessment
+needs, threat model per feature), ``milestone_governance``, ``rfcs``, ``tdds`` and ``interface_contracts``
+(contract-first, §19/§22). The schema title stays ``plan-content/1`` because nothing was removed or renamed;
+content stored before revision 2 is read through ``upgrade_content`` (empty lists = nothing requested).
 """
 
 from __future__ import annotations
@@ -285,6 +290,50 @@ STATEMENT = _o({"statement": _s(), "source": _s()})
 UNKNOWN = _o({"statement": _s(), "impact": _s()})
 QUESTION = _o({"question": _s(), "category": _e(QUESTION_CATEGORIES), "blocking": _b()})
 
+# ---- feature approval artefacts (§27 "03. RFCs/TDDs", "04. Privacy assessments", §28 feature approval) -------
+# Additive top-level sections (schema 1, revision 2): older stored content without them is upgraded with
+# empty lists by ``upgrade_content`` — an empty list keeps its meaning (nothing requested / UNKNOWN).
+PERSONAL_DATA = ["UNKNOWN", "YES", "NO"]
+CONTRACT_KINDS = ["api", "schema", "design_tokens", "shared_interface", "event"]
+RFC = _o({
+    "key": _s(), "feature_key": _s("Feature key, or empty for a plan-level RFC"), "title": _s(),
+    "context_problem": _s(), "proposal": _s(), "goals_non_goals": _sa(), "alternatives": _sa(),
+    "architecture_impact": _s(), "security_impact": _s(), "privacy_impact": _s(), "operations_impact": _s(),
+    "performance_impact": _s(), "risks_dependencies": _sa(), "migration_rollback": _s(),
+}, "RFC proposal (decision/approval stays human)")
+TDD = _o({
+    "key": _s(), "feature_key": _s("Feature key, or empty"), "title": _s(), "components": _sa(),
+    "data_model": _s(), "data_flow": _s(), "api_integration": _s(), "authn_authz": _s(), "controls": _sa(),
+    "errors": _s(), "logs_monitoring": _s(), "performance": _s(), "deployment": _s(), "migration_rollback": _s(),
+    "dependencies": _sa(), "technical_risks": _sa(), "testing": _s(),
+}, "Technical design document")
+FEATURE_GOVERNANCE = _o({
+    "feature_key": _s(),
+    "owner": _s("Feature owner only if named in the input; otherwise UNKNOWN"),
+    "needs_rfc": _b("true when an RFC entry with this feature_key is given"),
+    "needs_tdd": _b("true when a TDD entry with this feature_key is given"),
+    "personal_data": _e(PERSONAL_DATA, "Does the feature process personal data? UNKNOWN when not known"),
+    "privacy": _o({"processing_description": _s(), "data_types": _sa(), "necessity_proportionality": _s(),
+                   "risks_to_data_subjects": _sa(), "mitigations": _sa()}, "DPIA input when personal_data=YES"),
+    "needs_security_assessment": _b(),
+    "security_assessment": _o({"scope": _s(), "requirements": _sa(), "risks": _sa(), "mitigations": _sa()}),
+    "threat_model": _o({"assets": _sa(), "actors": _sa(), "trust_boundaries": _sa(), "entry_points": _sa(),
+                        "threats": _a(THREAT)}, "Feature threat model; empty when none"),
+}, "Per-feature approval artefacts; no findings, approvals or residual-risk acceptance")
+MILESTONE_GOVERNANCE = _o({
+    "milestone_key": _s(), "priority": _e(PRIORITIES), "acceptance": _sa(), "depends_on": _sa("Milestone keys"),
+    "owner": _s("UNKNOWN unless provided"),
+})
+INTERFACE_CONTRACT = _o({
+    "key": _s(), "title": _s(), "kind": _e(CONTRACT_KINDS), "feature_keys": _sa(),
+    "provider_task_key": _s("Task that defines and stabilises the contract"),
+    "consumer_task_keys": _sa("Tasks built against it; each must depend on the provider task"),
+    "definition": _s("Endpoints/schemas/tokens in short form"), "compatibility": _s(),
+    "contract_paths": _sa("Repository paths of the contract files, e.g. contracts/api.json"),
+}, "Contract-first: agreed before parallel work that depends on it (§19, §22)")
+ADDITIVE_SECTIONS: tuple[str, ...] = ("rfcs", "tdds", "feature_governance", "milestone_governance",
+                                      "interface_contracts")
+
 PLAN_CONTENT_PROPERTIES: dict[str, Any] = {
     "schema_version": _e([SCHEMA_VERSION]),
     "product_home": PRODUCT_HOME,
@@ -299,6 +348,11 @@ PLAN_CONTENT_PROPERTIES: dict[str, Any] = {
     "milestones": _a(MILESTONE),
     "features": _a(FEATURE),
     "tasks": _a(TASK),
+    "feature_governance": _a(FEATURE_GOVERNANCE, "One entry per feature (owner, RFC/TDD/DPIA/assessment needs)"),
+    "milestone_governance": _a(MILESTONE_GOVERNANCE),
+    "rfcs": _a(RFC),
+    "tdds": _a(TDD),
+    "interface_contracts": _a(INTERFACE_CONTRACT),
     "assumptions": _a(STATEMENT),
     "unknowns": _a(UNKNOWN),
     "material_questions": _a(QUESTION, "Only ambiguities material to architecture/scope/cost/security/legal/target"),
@@ -389,6 +443,18 @@ def write_contract_files(directory: Path | None = None) -> list[Path]:
         path.write_text(render(name), encoding="utf-8", newline="\n")
         out.append(path)
     return out
+
+
+def upgrade_content(content: Any) -> Any:
+    """Content stored before the additive sections existed gets them as empty lists (meaning preserved:
+    no RFC/TDD/contract requested, feature owner/personal-data status UNKNOWN). Present sections are kept
+    as they are; nothing else is changed. Non-dict input is returned unchanged (schema validation reports it)."""
+    if not isinstance(content, dict):
+        return content
+    missing = [k for k in ADDITIVE_SECTIONS if k not in content]
+    if not missing:
+        return content
+    return {**content, **{k: [] for k in missing}}
 
 
 def empty_plan_content(name: str = "", *, data_classification: str = "INTERNAL") -> dict[str, Any]:

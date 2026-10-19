@@ -88,6 +88,25 @@ def sync_pr_cmd(pr_id: str = typer.Argument(..., help="Delivery PR record id")) 
         _echo(f"  note: {n}")
 
 
+@app.command("observe-target")
+def observe_target_cmd(
+    project_id: str = typer.Argument(..., help="Project id with a registered deployment-target integration"),
+    environment: str = typer.Option("staging", help="staging | production"),
+    sha: str = typer.Option(..., help="Commit the target is expected to serve"),
+) -> None:
+    """Read-only GET of a registered deployment target's health endpoint (G6/G8 evidence). Never deploys."""
+    from aeos.delivery import deployment
+
+    try:
+        with _session() as s:
+            result = deployment.observe(s, project_id, environment, sha, actor=ACTOR)
+    except AeosError as exc:
+        _echo(f"{exc.code}: {exc.message}")
+        raise typer.Exit(2) from exc
+    _echo(f"{result['environment']} {result['target']}: {result['status']} - {result['reason']}")
+    _echo(f"evidence {result['evidence_id']}")
+
+
 @app.command("gates")
 def gates_cmd(task_id: str = typer.Argument(..., help="TaskSpec id")) -> None:
     """Show delivery gates G0-G8 for a task."""

@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { DeliveryPanel, ProviderRiskBanner } from "./DeliveryPanel";
 import { EvidenceLedger } from "./EvidenceLedger";
 import { GatesPanel } from "./GatesPanel";
@@ -20,9 +21,13 @@ function respond(routes: Record<string, unknown>) {
   }) as typeof fetch;
 }
 
-function wrap(ui: ReactNode) {
+function wrap(ui: ReactNode, path = "/evidence") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[path]}>{ui}</MemoryRouter>
+    </QueryClientProvider>,
+  );
 }
 
 const summaryRow = {
@@ -94,6 +99,31 @@ describe("Evidence & Decisions page", () => {
     expect(within(dialog).getByText(/tidak pernah dihitung sebagai kelulusan/)).toBeInTheDocument();
   });
 
+  it("opens the evidence record named by the deep link ?id= (Live Work 'Bukti' links)", async () => {
+    const item = {
+      id: "ev-42", project_id: "p", domain: "PERSONAL", subject_type: "run", subject_id: "run-1", run_id: "run-1",
+      task_id: "task-1", claim: "scope check PASS", kind: "SCOPE_CHECK", origin: "verifier", collector_identity: "aeos-verifier/1",
+      trusted: true, content_hash: "sha256:" + "3".repeat(64), content_type: "application/json", classification: "INTERNAL",
+      has_content: true, size_bytes: 2, evidence_level: "E2", level_explanation: "Uji terkendali", level_requested: "E2",
+      level_reason: "controlled test", environment: {}, created_at: new Date().toISOString(), mode: "LIVE",
+    };
+    respond({
+      "/api/evidence/ev-42": { ...item, inline: {}, integrity: "VERIFIED", content: "{}", content_note: null },
+      "/api/evidence": { items: [item], source: "s", checked_at: new Date().toISOString(), mode: "LIVE", level_explanations: {}, trusted_collectors: [] },
+    });
+    wrap(<EvidenceLedger />, "/evidence?id=ev-42");
+    const dialog = await screen.findByRole("dialog", { name: "Detail bukti" });
+    expect(await within(dialog).findByText("Isi cocok dengan hash")).toBeInTheDocument();
+  });
+
+  it("never claims the local ledger is WORM / tamper-proof (§34)", async () => {
+    respond({});
+    const { default: EvidencePage } = await import("./index");
+    wrap(<EvidencePage />);
+    expect(await screen.findByText(/append-only \(bukan WORM\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/tamper-proof|anti-rusak|WORM terjamin/i)).not.toBeInTheDocument();
+  });
+
   it("warns when stored evidence no longer matches its hash and renders nested environment values", async () => {
     const item = {
       id: "ev-7", project_id: "p", domain: "PERSONAL", subject_type: "run", subject_id: "run-1", run_id: "run-1",
@@ -151,5 +181,52 @@ describe("Evidence & Decisions page", () => {
     expect(screen.getAllByText("Lulus")).toHaveLength(2);
     expect(screen.getByText(/DLY AEOS tidak memiliki operasi merge atau deploy/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Siapkan PR/ })).toBeDisabled();
+  });
+
+  it("requests the feature + required specialist reviews in one batch and shows why a batch stopped (§17, §19)", async () => {
+    const passed = { ...summaryRow, verifier: { status: "PASS", evidence_id: "ev-1" } };
+    respond({
+      "/api/verification/summary": { items: [passed], source: "s", checked_at: null, mode: "LIVE" },
+      "/api/runs/run-1/reviews/batch": {
+        reviews: [{ id: "rv-1" }], acceptance: null,
+        notes: ["review batch stopped at A11Y: REVIEW_BUDGET_EXHAUSTED: review budget exhausted"],
+      },
+    });
+    wrap(<RunStatusPanel onSelectTask={() => {}} />);
+    const row = (await screen.findByText("Fitur kalkulator")).closest("tr")!;
+    await userEvent.click(within(row).getByRole("button", { name: /Review wajib \(spesialis\)/ }));
+    expect(await screen.findByText(/REVIEW_BUDGET_EXHAUSTED/)).toBeInTheDocument();
+    const calls = (globalThis.fetch as unknown as { mock: { calls: [RequestInfo | URL, RequestInit?][] } }).mock.calls;
+    const batchCall = calls.find(([u]) => String(u).endsWith("/api/runs/run-1/reviews/batch"));
+    expect(batchCall?.[1]?.method).toBe("POST");
+  });
+
+  it("separate status shows weak verifier isolation, required specialists, governance and OFFICE delivery honestly", async () => {
+    const gate = (g: string, status: string) => ({ gate: g, name: g, status, summary: `${g} summary`, source: "x", evidence_refs: [], reasons: [] });
+    respond({
+      "/api/delivery/gates": {
+        task_id: "task-1", task_key: "t1", title: "Fitur", run_id: "run-1", head_commit: "a".repeat(40),
+        gates: [gate("G0", "PASS")],
+        separate_status: {
+          ...summaryRow,
+          verifier: { status: "PASS", evidence_id: "ev-1", isolation: "WEAK" },
+          specialist_reviews: {
+            SECURITY: { required: false, reason: null, verdict: null, status: null, review_id: null },
+            A11Y: { required: true, reason: "UI output: frontend/src/x.tsx", verdict: null, status: null, review_id: null },
+          },
+          governance: { adapter: "null-governance-harness", adapter_configured: false, status: "NOT_CONFIGURED", allows_promotion: true, note: "Belum ada governance harness downstream", evidence_id: null },
+          delivery_provider: { provider: "bitbucket", ci: "bitbucket-pipelines", status: "NOT_APPLICABLE", reason: "adapter Bitbucket belum ada", remedy: "owner" },
+        },
+        acceptance: null, pull_request: null, ready_for_human_merge: false,
+        merge_authority: "HUMAN_ONLY", checked_at: new Date().toISOString(), mode: "LIVE",
+      },
+    });
+    wrap(<GatesPanel taskId="task-1" />);
+    expect(await screen.findByText("Isolasi verifier lemah (proses, bukan sandbox)")).toBeInTheDocument();
+    expect(screen.getByText("Aksesibilitas/UX")).toBeInTheDocument();
+    expect(screen.getByText("UI output: frontend/src/x.tsx")).toBeInTheDocument();
+    expect(screen.getByText("Belum dikonfigurasi")).toBeInTheDocument();
+    expect(screen.getByText("bitbucket / bitbucket-pipelines")).toBeInTheDocument();
+    expect(screen.getByText("adapter Bitbucket belum ada")).toBeInTheDocument();
   });
 });

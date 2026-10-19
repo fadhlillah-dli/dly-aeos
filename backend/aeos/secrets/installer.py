@@ -79,6 +79,33 @@ def _check_host(url: str) -> None:
         raise InstallError(f"refusing download from non-official host {host!r}")
 
 
+def manifest_pin(root: Path | None = None) -> str | None:
+    """The owner-approved OpenBao version pin from the reviewed install manifest (§07), or None."""
+    import yaml
+
+    from aeos.core.paths import repo_root
+
+    path = (root or repo_root()) / "install-manifest" / "manifest.yaml"
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    for comp in data.get("components") or []:
+        if isinstance(comp, dict) and comp.get("component_id") == "openbao":
+            pin = comp.get("approved_pin")
+            if isinstance(pin, dict):
+                pin = pin.get("version")
+            return str(pin).lstrip("v") if pin and _VERSION.match(str(pin).lstrip("v")) else None
+    return None
+
+
+def install_command(root: Path | None = None) -> str:
+    """The ``aeos`` sub-command that installs OpenBao as the CLI accepts it right now: plain ``vault install``
+    only when the manifest carries an approved pin; otherwise the owner must name a reviewed exact version
+    (remedies must never suggest a command that is refused)."""
+    return "vault install" if manifest_pin(root) else "vault install --version <X.Y.Z>"
+
+
 def resolve_release(client: httpx.Client, version: str | None = None) -> Release:
     if version is not None and not _VERSION.match(version.lstrip("v")):
         raise InstallError(f"invalid version {version!r}")

@@ -6,7 +6,7 @@ import json
 import secrets as pysecrets
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from aeos.core.redaction import contains_secret, redact_text, register_secret
 from aeos.doctor.checks import check
@@ -64,9 +64,14 @@ _bao_binary_fp = binary_fingerprint("bao", "openbao_binary", resolver=resolve_op
 def vault_remedy(step: str) -> Remedy:
     """Remedy through the reviewed ``aeos vault`` commands (official release, checksum-verified, user-level,
     loopback only; master §07 step 3). The owner runs them; the Doctor never does."""
+    from aeos.secrets.facade import install_command
+
+    install = install_command()
+    pin_note = "" if install == "vault install" else (
+        "; install-manifest belum punya approved_pin OpenBao: pilih dan tinjau versi persis (--version X.Y.Z)")
     steps = {
         "install": ("Pasang biner OpenBao resmi ke <data>/bin (rencana ditampilkan dan dikonfirmasi dulu; SHA256 "
-                    "dicocokkan dengan checksums.txt, tanda tangan GPG belum diverifikasi)", "vault install",
+                    "dicocokkan dengan checksums.txt, tanda tangan GPG belum diverifikasi)" + pin_note, install,
                     "hapus <data>/bin/bao", "secret.openbao_binary VERIFIED"),
         "start": ("Jalankan server OpenBao lokal (hanya 127.0.0.1)", "vault start", aeos_cmd("vault stop"),
                   "secret.openbao_health CONNECTED"),
@@ -184,29 +189,238 @@ def secret_status(ctx: CheckContext) -> Outcome:
                    "tersimpan (nilai tidak dibaca).", evidence=evidence, severity="MEDIUM" if interim else None)
 
 
-@check("secret.no_raw_exposure", "SECRET", "Tidak ada secret mentah di audit/event/observasi", needs_db=True,
-       ttl_seconds=3600, severity_fail="CRITICAL")
-def secret_no_raw_exposure(ctx: CheckContext) -> Outcome:
+def _bao_auth_fp(ctx: CheckContext) -> dict[str, Any]:
+    return {"addr": ctx.settings.openbao_addr, "service": ctx.settings.keyring_service, **_bao_binary_fp(ctx)}
+
+
+def _duration_seconds(text: str) -> int | None:
+    import re
+
+    m = re.fullmatch(r"(\d+)([smhd])", str(text or "").strip())
+    if not m:
+        return None
+    return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+
+
+@check("secret.openbao_auth", "SECRET", "OpenBao AppRole: login, policy namespace, TTL token", component_id="openbao",
+       ttl_seconds=900, invalidators=("config:openbao_addr", "binary:bao", "secret:store"),
+       ok={"CONNECTED", "VERIFIED", "NOT_APPLICABLE"}, fingerprint=_bao_auth_fp, severity_fail="HIGH",
+       description="Login AppRole controller, policy token = aeos-personal/aeos-workers/aeos-platform/aeos-projects "
+                   "(aeos-office TIDAK terikat, §23), TTL <= token_ttl yang dikonfigurasi, plus roundtrip "
+                   "`aeos vault status --verify` terakhir (<= 7 hari) sebagai bukti fungsi.")
+def secret_openbao_auth(ctx: CheckContext) -> Outcome:
+    try:
+        from aeos.secrets.health import store_health
+        from aeos.secrets.provider import select_backend
+        from aeos.secrets.setup import CONTROLLER_POLICIES, TOKEN_TTL
+    except (ImportError, ModuleNotFoundError):
+        return Outcome("UNKNOWN", "Modul secrets belum tersedia.", error_code="SECRETS_NOT_IMPLEMENTED")
+    try:
+        sel = select_backend(ctx.settings)
+    except Exception as exc:  # fail closed, never green
+        return Outcome("UNKNOWN", f"Status OpenBao tidak dapat dibaca ({type(exc).__name__}).",
+                       error_code="OPENBAO_STATUS_ERROR")
+    backend = sel.backend
+    if backend == "os-keyring-interim":
+        return Outcome("NOT_APPLICABLE", "OpenBao tidak dipakai: pengecualian interim OS keyring aktif (residual "
+                       "risk dilaporkan oleh secret.status).", evidence={"backend": backend})
+    if backend != "openbao":
+        if sel.provider is not None:
+            return Outcome("NOT_APPLICABLE", f"Secret provider {backend} (bukan OpenBao) dipakai; auth/policy OpenBao "
+                           "tidak berlaku.", evidence={"backend": backend})
+        has_binary = resolve_openbao(ctx)[0] is not None
+        return Outcome("MISSING", "Login AppRole OpenBao tidak berhasil; operasi yang butuh credential ditolak "
+                       "(fail closed).", evidence={"backend": backend, "login": (sel.openbao or {}).get("login"),
+                                                   "reasons": [redact_text(str(r))[:200] for r in sel.reasons][:5]},
+                       error_code="OPENBAO_LOGIN_FAILED",
+                       remedy=vault_remedy("start" if has_binary else "install"))
+    try:
+        h = store_health(ctx.settings)
+    except Exception as exc:
+        return Outcome("UNKNOWN", f"Status OpenBao tidak dapat dibaca ({type(exc).__name__}).",
+                       error_code="OPENBAO_STATUS_ERROR")
+    bao = h.get("openbao") or {}
+    token = bao.get("token") or {}
+    evidence: dict[str, Any] = {"backend": backend, "login": bao.get("login"), "approle_in_keyring":
+                                bao.get("approle_in_keyring"), "token": {k: token.get(k) for k in (
+                                    "present", "ttl_seconds", "renewable", "policies")},
+                                "functional_check": {k: (h.get("functional_check") or {}).get(k)
+                                                     for k in ("status", "checked_at", "stale")}}
+    policies = sorted(set(token.get("policies") or []) - {"default"})
+    expected = sorted(CONTROLLER_POLICIES)
+    ttl = token.get("ttl_seconds")
+    max_ttl = _duration_seconds(TOKEN_TTL)
+    problems: list[str] = []
+    if not token.get("present"):
+        problems.append("token controller tidak ada setelah login")
+    if "root" in policies:
+        problems.append("token controller memakai policy root")
+    if "aeos-office" in policies:
+        problems.append("policy aeos-office terikat ke controller (OFFICE default deny, §23)")
+    if policies != expected:
+        problems.append(f"policy token {policies} != yang diharapkan {expected}")
+    if not isinstance(ttl, int) or ttl <= 0 or (max_ttl is not None and ttl > max_ttl):
+        problems.append(f"TTL token {ttl}s di luar batas token_ttl {TOKEN_TTL}")
+    evidence.update({"expected_policies": expected, "max_ttl_seconds": max_ttl})
+    if problems:
+        return Outcome("FAILED", "AppRole OpenBao tidak sesuai kontrak: " + "; ".join(problems) + ".",
+                       evidence=evidence, error_code="OPENBAO_AUTH_SCOPE_INVALID", remedy=vault_remedy("init"))
+    verify = h.get("functional_check") or {}
+    if verify.get("status") == "VERIFIED" and not verify.get("stale"):
+        return Outcome("VERIFIED", f"Login AppRole OK, policy {', '.join(policies)}, TTL {ttl}s; roundtrip tulis/baca/"
+                       f"hapus terakhir {verify.get('checked_at')} (skenario: platform/aeos-healthcheck).",
+                       evidence=evidence, target_identity="openbao@loopback")
+    return Outcome("CONNECTED", f"Login AppRole OK, policy {', '.join(policies)}, TTL {ttl}s; roundtrip fungsi belum "
+                   "dibuktikan dalam 7 hari (jalankan " + aeos_cmd("vault status --verify") + ").", evidence=evidence,
+                   target_identity="openbao@loopback")
+
+
+# ---------------------------------------------------------------- persisted raw-secret scan (incremental, all rows)
+
+SCAN_STATE_KEY = "doctor.secret_exposure_scan"
+SCAN_BATCH = 50_000  # rows per table per run beyond the newest window; the sweep covers every row over runs
+RECENT_WINDOW = 500
+EXPOSURE_TARGET = "secret_exposure"
+
+
+def _scan_sources() -> dict[str, tuple[Any, Any, Any, Any]]:
+    """table -> (model, order column, unique tie-break column, text). Timestamps are not unique (every result
+    of one Doctor run shares ``last_checked_at``), so the watermark is the pair (order column, primary key)."""
     from aeos.models.audit import AuditEvent, Event
     from aeos.models.inventory import CheckResult, ComponentObservation
 
+    return {
+        "audit_events": (AuditEvent, AuditEvent.seq, AuditEvent.seq,
+                         lambda r: json.dumps(r.details, default=str) + (r.reason or "")),
+        "events": (Event, Event.seq, Event.seq, lambda r: json.dumps(r.payload, default=str)),
+        "observations": (ComponentObservation, ComponentObservation.observed_at, ComponentObservation.id,
+                         lambda r: json.dumps(r.detail, default=str)),
+        "check_results": (CheckResult, CheckResult.last_checked_at, CheckResult.id,
+                          lambda r: json.dumps(r.observed_evidence, default=str) + (r.summary or "")),
+    }
+
+
+def _after(order_col: Any, tie_col: Any, mark: Any) -> Any:
+    """SQL condition: rows strictly after the stored watermark (legacy scalar marks are read as (value, None))."""
+    from datetime import datetime
+
+    from sqlalchemy import and_, or_
+
+    if isinstance(mark, dict):
+        value, tie = mark.get("v"), mark.get("id")
+    else:
+        value, tie = mark, None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if tie is None or order_col is tie_col:
+        return order_col > value
+    return or_(order_col > value, and_(order_col == value, tie_col > tie))
+
+
+def _row_id(r: Any) -> str:
+    return str(getattr(r, "event_id", None) or getattr(r, "id", None) or getattr(r, "seq", ""))
+
+
+def _mark(value: Any) -> Any:
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+def accepted_exposures(session: Any, findings: dict[str, dict[str, Any]] | None = None) -> set[str]:
+    """Finding ids an ACTIVE human RISK_ACCEPTANCE decision covers (credential rotated / accepted). With *findings*
+    the decision must be bound to that finding's exact hash (§19: risk acceptance bound to target + hash)."""
+    from aeos.core.hashing import content_hash
+    from aeos.models.decisions import Decision
+
+    out: set[str] = set()
+    for d in session.scalars(select(Decision).where(
+            Decision.kind == "RISK_ACCEPTANCE", Decision.target_type == EXPOSURE_TARGET, Decision.status == "ACTIVE")):
+        if d.actor_kind not in ("HUMAN", "HUMAN_RECORDED"):
+            continue
+        if findings is not None:
+            f = findings.get(d.target_id)
+            if f is None or d.target_hash != content_hash(f):
+                continue
+        out.add(d.target_id)
+    return out
+
+
+@check("secret.no_raw_exposure", "SECRET", "Tidak ada secret mentah di audit/event/observasi", needs_db=True,
+       ttl_seconds=3600, severity_fail="CRITICAL",
+       description="Pemindaian bertahap SELURUH record audit/event/observasi/hasil Doctor (watermark per tabel) "
+                   "plus 500 record terbaru tiap run; temuan diingat sampai pemilik merotasi credential dan "
+                   "mencatat keputusan RISK_ACCEPTANCE untuk temuan itu. Nilai tidak pernah ditampilkan.")
+def secret_no_raw_exposure(ctx: CheckContext) -> Outcome:
+    from aeos.models.identity import SystemSetting
+
     assert ctx.session is not None
     s = ctx.session
-    sources = {
-        "audit_events": [json.dumps(r.details, default=str) + (r.reason or "")
-                         for r in s.scalars(select(AuditEvent).order_by(AuditEvent.seq.desc()).limit(500))],
-        "events": [json.dumps(r.payload, default=str) for r in s.scalars(select(Event).order_by(Event.seq.desc()).limit(500))],
-        "observations": [json.dumps(r.detail, default=str) for r in
-                         s.scalars(select(ComponentObservation).order_by(ComponentObservation.observed_at.desc()).limit(500))],
-        "check_results": [json.dumps(r.observed_evidence, default=str) + r.summary for r in
-                          s.scalars(select(CheckResult).order_by(CheckResult.last_checked_at.desc()).limit(500))],
-    }
-    hits = {k: sum(1 for text in v if contains_secret(text)) for k, v in sources.items()}
-    evidence = {"scanned": {k: len(v) for k, v in sources.items()}, "findings": hits, "values_shown": False}
-    if any(hits.values()):
-        return Outcome("FAILED", "Pola credential ditemukan di record tersimpan (nilai tidak ditampilkan).",
-                       evidence=evidence, error_code="RAW_SECRET_PERSISTED", remedy=Remedy(
-                           operation="Rotasi credential terdampak dan perbaiki jalur yang tidak meredaksi",
-                           privilege="pemilik", evidence_to_collect="secret.no_raw_exposure VERIFIED"))
-    return Outcome("VERIFIED", f"{sum(len(v) for v in sources.values())} record terbaru dipindai; tidak ada pola credential.",
-                   evidence=evidence)
+    row = s.get(SystemSetting, SCAN_STATE_KEY)
+    state: dict[str, Any] = dict(row.value or {}) if row is not None and isinstance(row.value, dict) else {}
+    marks: dict[str, Any] = dict(state.get("marks") or {})
+    findings: dict[str, dict[str, Any]] = {f["id"]: f for f in state.get("findings") or [] if isinstance(f, dict)}
+    scanned: dict[str, int] = dict(state.get("scanned") or {})
+    totals: dict[str, int] = {}
+    remaining: dict[str, int] = {}
+    recent_hits: dict[str, int] = {}
+
+    def note(table: str, r: Any) -> None:
+        fid = f"{table}:{_row_id(r)}"
+        findings.setdefault(fid, {"id": fid, "table": table, "row": _row_id(r), "found_at": ctx.now.isoformat()})
+
+    for table, (model, order_col, tie_col, text_of) in _scan_sources().items():
+        totals[table] = int(s.scalar(select(func.count()).select_from(model)) or 0)
+        hits = 0
+        for r in s.scalars(select(model).order_by(order_col.desc()).limit(RECENT_WINDOW)):
+            if contains_secret(text_of(r)):
+                hits += 1
+                note(table, r)
+        recent_hits[table] = hits
+        q = select(model).order_by(order_col.asc(), tie_col.asc())
+        mark = marks.get(table)
+        if mark is not None:
+            q = q.where(_after(order_col, tie_col, mark))
+        last = None
+        n = 0
+        for r in s.scalars(q.limit(SCAN_BATCH)):
+            n += 1
+            last = {"v": _mark(getattr(r, order_col.key)), "id": getattr(r, tie_col.key)}
+            if contains_secret(text_of(r)):
+                note(table, r)
+        if last is not None:
+            marks[table] = last
+        scanned[table] = int(scanned.get(table, 0)) + n
+        rest_q = select(func.count()).select_from(model)
+        if marks.get(table) is not None:
+            rest_q = rest_q.where(_after(order_col, tie_col, marks[table]))
+        remaining[table] = int(s.scalar(rest_q) or 0)
+    accepted = accepted_exposures(s, findings)
+    open_findings = sorted(fid for fid in findings if fid not in accepted)
+    # every OPEN finding is kept (forgetting one would turn the check green); only accepted ones are capped
+    kept = [f for fid, f in findings.items() if fid not in accepted]
+    kept += [f for fid, f in findings.items() if fid in accepted][-500:]
+    state = {"marks": marks, "findings": kept, "scanned": scanned, "updated_at": ctx.now.isoformat()}
+    if row is None:
+        s.add(SystemSetting(key=SCAN_STATE_KEY, value=state))
+    else:
+        row.value = state
+    complete = not any(remaining.values())
+    per_table = {t: sum(1 for fid in open_findings if fid.startswith(f"{t}:")) for t in totals}
+    evidence = {"findings": per_table, "scanned": scanned, "recent_window": RECENT_WINDOW,
+                "recent_findings": recent_hits, "rows_total": totals,
+                "rows_remaining_unscanned": remaining, "sweep_complete": complete,
+                "open_findings": len(open_findings), "finding_ids": open_findings[:20],
+                "accepted_findings": len(set(findings) & accepted), "values_shown": False}
+    if open_findings:
+        return Outcome("FAILED", f"{len(open_findings)} record tersimpan berisi pola credential (nilai tidak "
+                       "ditampilkan).", evidence=evidence, error_code="RAW_SECRET_PERSISTED", remedy=Remedy(
+                           operation="Rotasi credential terdampak, perbaiki jalur yang tidak meredaksi, lalu catat "
+                           "keputusan RISK_ACCEPTANCE per temuan (target secret_exposure/<id>) di halaman Keputusan",
+                           target=", ".join(open_findings[:5]), privilege="pemilik (SUPER_ADMIN)",
+                           rollback="tidak berlaku (record append-only)",
+                           evidence_to_collect="secret.no_raw_exposure VERIFIED"))
+    if not complete:
+        return Outcome("UNKNOWN", f"Pemindaian bertahap belum selesai: {sum(remaining.values())} record lama belum "
+                       f"dipindai (record terbaru bersih); jalankan ulang Doctor.", evidence=evidence,
+                       error_code="SECRET_SCAN_INCOMPLETE", severity="MEDIUM")
+    return Outcome("VERIFIED", f"Seluruh {sum(totals.values())} record dipindai (bertahap, watermark per tabel); tidak "
+                   "ada pola credential yang terbuka.", evidence=evidence)

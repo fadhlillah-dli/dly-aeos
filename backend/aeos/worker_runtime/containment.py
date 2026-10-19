@@ -6,6 +6,7 @@ answer on Windows/macOS/Linux without an OS boundary, and it is reported, never 
 
 The probe never reads secret content: it only checks reachability (open/stat/connect/API call
 returning "not found"), and the "outside" files it touches are created by this test itself.
+The ``container`` kind runs its own suite INSIDE the worker image (``aeos.worker_runtime.container``).
 """
 
 from __future__ import annotations
@@ -117,11 +118,16 @@ def _kill_tree_check(sandbox: processes.SandboxDirs, env: dict[str, str]) -> dic
                    f"child alive={child_alive}, grandchild alive={grand_alive}; methods={res.get('methods')}")
 
 
-def containment_report(sandbox_kind: str = "process") -> dict[str, Any]:
+def containment_report(sandbox_kind: str = "process", *, domain: str = "PERSONAL") -> dict[str, Any]:
     from aeos.core.config import get_settings
 
     settings = get_settings()
     checked = utcnow().isoformat()
+    if sandbox_kind == "container":
+        # The container suite runs the probes INSIDE the worker image (aeos.worker_runtime.container).
+        from aeos.worker_runtime import container
+
+        return container.containment_report(domain=domain)
     if sandbox_kind != "process":
         from aeos.worker_runtime.sandbox import sandbox_capabilities
 
@@ -130,8 +136,7 @@ def containment_report(sandbox_kind: str = "process") -> dict[str, Any]:
         checks = ["read_outside_worktree", "read_data_db", "real_ssh_dir", "home_ssh_redirected", "env_secrets",
                   "home_redirected", "write_outside_worktree", "egress_non_broker", "keyring_unreachable",
                   "cancel_kills_tree"]
-        status_note = "container containment suite is NOT implemented/proven in this build" if caps.get("available") \
-            else f"{sandbox_kind} not available: {reason}"
+        status_note = f"{sandbox_kind} sandbox not implemented in V1: {reason}"
         return {"kind": sandbox_kind, "checked_at": checked, "platform": sys.platform, "overall": "NOT_PROVEN",
                 "evidence_level": "E0", "results": [_result(c, "NOT_RUN", status_note) for c in checks],
                 "summary": {"NOT_RUN": len(checks)}}
@@ -188,6 +193,12 @@ def containment_report(sandbox_kind: str = "process") -> dict[str, Any]:
         kr = data["keyring"]
         results.append(_result("keyring_unreachable", "NOT_ENFORCED" if kr["reachable"] else "PASS",
                                f"OS keyring API reachable={kr['reachable']} (no secret read)"))
+    from aeos.worker_runtime.sandbox import host_is_elevated
+
+    elevated = host_is_elevated()
+    results.append(_result("non_root", "FAIL" if elevated else "PASS",
+                           "controller (and so the worker) runs elevated (root / elevated Administrator); the process "
+                           "sandbox is refused" if elevated else "worker runs as a normal (non-elevated) OS user"))
     results.append(_kill_tree_check(sandbox, env))
     summary: dict[str, int] = {}
     for r in results:
@@ -205,9 +216,9 @@ def record_containment_report(session: Any, report: dict[str, Any], *, actor: st
     """Persist the latest report (SystemSetting) + an evidence artifact when the collector exists."""
     from aeos.audit import service as audit
     from aeos.models.identity import SystemSetting
-    from aeos.worker_runtime.sandbox import CONTAINMENT_SETTING_PREFIX
+    from aeos.worker_runtime.sandbox import containment_setting_key
 
-    key = CONTAINMENT_SETTING_PREFIX + str(report.get("kind"))
+    key = containment_setting_key(str(report.get("kind")), report.get("domain"))
     row = session.get(SystemSetting, key)
     if row is None:
         session.add(SystemSetting(key=key, value=report))

@@ -92,6 +92,50 @@ def recovery_leases(ctx: CheckContext) -> Outcome:
     return Outcome("VERIFIED", f"Tidak ada lease kedaluwarsa ({active} aktif).", evidence=evidence)
 
 
+@check("recovery.queue", "RECOVERY", "Antrian dipulihkan setelah restart (run/publikasi tanpa pemilik)",
+       component_id="workforce-scheduler", needs_db=True, ttl_seconds=900, severity_fail="HIGH")
+def recovery_queue(ctx: CheckContext) -> Outcome:
+    """§08 "Lease/queue restart": after a crash/restart no queue item may keep running without an owner.
+
+    * a LIVE worker run that is LEASED/RUNNING while its lease is missing or no longer ACTIVE (the scheduler lost
+      it; a duplicate could be started), and
+    * a publication operation still IN_FLIGHT longer than the publisher's stale window (startup recovery did not
+      turn it into UNKNOWN for reconcile-before-retry).
+    Counts only (no ids/titles of either domain are quoted, §35)."""
+    from aeos.models.publishing import PublicationOperation
+    from aeos.models.workforce import Lease, WorkerRun
+    from aeos.publisher.jobs import IN_FLIGHT_STALE_AFTER
+
+    assert ctx.session is not None
+    s = ctx.session
+    active = {lid for (lid,) in s.execute(select(Lease.id).where(Lease.state == "ACTIVE"))}
+    runs = list(s.execute(select(WorkerRun.lease_id).where(WorkerRun.execution_status.in_(("LEASED", "RUNNING")),
+                                                           WorkerRun.mode == "LIVE")))
+    orphaned = sum(1 for (lid,) in runs if not lid or lid not in active)
+    cutoff = ctx.now - IN_FLIGHT_STALE_AFTER
+    stale_ops = s.scalar(select(func.count()).select_from(PublicationOperation).where(
+        PublicationOperation.status == "IN_FLIGHT",
+        or_(PublicationOperation.last_attempt_at.is_(None), PublicationOperation.last_attempt_at < cutoff))) or 0
+    evidence = {"running_worker_runs": len(runs), "runs_without_active_lease": int(orphaned),
+                "stale_in_flight_publication_ops": int(stale_ops),
+                "in_flight_stale_after_seconds": int(IN_FLIGHT_STALE_AFTER.total_seconds())}
+    problems = []
+    if orphaned:
+        problems.append(f"{orphaned} worker run LEASED/RUNNING tanpa lease ACTIVE")
+    if stale_ops:
+        problems.append(f"{stale_ops} operasi publikasi masih IN_FLIGHT melewati jendela stale")
+    if problems:
+        return Outcome("FAILED", "; ".join(problems) + " - rekonsiliasi dulu, jangan mulai duplikat.",
+                       evidence=evidence, error_code="QUEUE_NOT_RECOVERED", remedy=Remedy(
+                           operation="Rekonsiliasi antrian: restart server (startup recovery) lalu reconcile publikasi "
+                                     "yang terdampak; run tanpa lease dibatalkan/diulang oleh pemilik",
+                           command=aeos_cmd("publish list"), target="workforce queue + publication outbox",
+                           privilege="pemilik", rollback="tidak ada perubahan otomatis",
+                           evidence_to_collect="recovery.queue VERIFIED (0 run tanpa lease, 0 IN_FLIGHT stale)"))
+    return Outcome("VERIFIED", f"Antrian bersih: {len(runs)} run berjalan semuanya ber-lease ACTIVE; tidak ada operasi "
+                   "publikasi IN_FLIGHT yang stale.", evidence=evidence)
+
+
 @check("recovery.publication_idempotency", "RECOVERY", "Pencegahan publikasi ganda terbukti", component_id="publisher",
        needs_db=True, ttl_seconds=86400, severity_fail="MEDIUM")
 def recovery_publication_idempotency(ctx: CheckContext) -> Outcome:
@@ -103,8 +147,15 @@ def recovery_publication_idempotency(ctx: CheckContext) -> Outcome:
                             .order_by(EvidenceArtifact.created_at.desc()).limit(1))
     if ev is None:
         return Outcome("UNKNOWN", "Pencegahan publikasi ganda (timeout/partial/replay) belum dibuktikan.",
-                       error_code="IDEMPOTENCY_NOT_PROVEN")
-    return Outcome("VERIFIED", f"Bukti uji idempotensi publikasi {ev.id[:8]}.", evidence={"evidence_id": ev.id})
+                       error_code="IDEMPOTENCY_NOT_PROVEN", remedy=Remedy(
+                           operation="Jalankan uji idempotensi publikasi (fake loopback; tanpa tenant/credential nyata)",
+                           command=aeos_cmd("publish idempotency-test"), target="recovery.publication_idempotency",
+                           evidence_to_collect="EvidenceArtifact PUBLICATION_IDEMPOTENCY_TEST (trusted) pada commit ini"))
+    commit = str((ev.environment or {}).get("commit") or "") if isinstance(ev.environment, dict) else ""
+    return Outcome("VERIFIED", f"Bukti uji idempotensi publikasi {ev.id[:8]}"
+                   + (f" pada commit {commit[:12]} (mekanisme pada commit itu; uji ulang setelah perubahan publisher)."
+                      if commit else "."),
+                   evidence={"evidence_id": ev.id, "commit": commit or None})
 
 
 @check("recovery.config_rollback", "RECOVERY", "Rilis controller sebelumnya untuk rollback",
@@ -115,5 +166,31 @@ def recovery_config_rollback(ctx: CheckContext) -> Outcome:
     if not releases:
         return Outcome("MISSING", "Belum ada released controller artifact; rollback controller/konfigurasi belum tersedia.",
                        error_code="NO_RELEASE_ARTIFACT", severity="LOW")
-    return Outcome("CONFIGURED", f"{len(releases)} rilis controller tersimpan untuk rollback.",
-                   evidence={"releases": releases[-5:]})
+    # §09 zones: the trusted controller is the pinned ACTIVE release, not whatever the checkout contains.
+    try:
+        from aeos.operations.facade import controller_report
+
+        ctl: dict[str, Any] | None = controller_report(ctx.settings, ctx.session)
+    except Exception:  # operations module absent/broken: no claim either way
+        ctl = None
+    evidence: dict[str, Any] = {"releases": releases[-5:]}
+    if ctl is not None:
+        evidence["controller"] = {k: ctl.get(k) for k in ("source", "mode", "release_id", "commit", "dirty",
+                                                          "active_release_id", "matches_active", "config_drift")}
+        if ctl.get("active_release_id") and ctl.get("matches_active") is False:
+            return Outcome("FAILED", f"Controller yang berjalan ({ctl.get('mode')}, commit "
+                                     f"{str(ctl.get('commit') or 'UNKNOWN')[:12]}) bukan rilis aktif "
+                                     f"{ctl.get('active_release_id')}; perubahan checkout/git pull mengubah controller "
+                                     "tanpa promosi.", evidence=evidence, error_code="CONTROLLER_NOT_ACTIVE_RELEASE",
+                           severity="MEDIUM",
+                           remedy=Remedy(operation="Jalankan controller dari rilis aktif yang terverifikasi",
+                                         command=aeos_cmd("serve --release active"), source="aeos.operations.release",
+                                         evidence_to_collect="/api/health controller.mode = release"))
+        if ctl.get("config_drift"):
+            return Outcome("FAILED", "Konfigurasi runtime/policy snapshot berubah sejak promosi rilis aktif; perubahan "
+                                     "ini tidak terikat pada keputusan PROMOTION.", evidence=evidence,
+                           error_code="CONFIG_CHANGED_SINCE_PROMOTION", severity="LOW",
+                           remedy=Remedy(operation="Tinjau perubahan konfigurasi; promosikan ulang bila disengaja",
+                                         command=aeos_cmd("ops release list"),
+                                         evidence_to_collect="config_hash sama dengan ACTIVE.json"))
+    return Outcome("CONFIGURED", f"{len(releases)} rilis controller tersimpan untuk rollback.", evidence=evidence)

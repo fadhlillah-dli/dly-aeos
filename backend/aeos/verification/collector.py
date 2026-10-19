@@ -36,7 +36,7 @@ from aeos.core.errors import PolicyDenied, ValidationFailed
 from aeos.core.hashing import content_hash, sha256_bytes
 from aeos.core.ids import new_id
 from aeos.core.paths import ensure_within
-from aeos.core.redaction import contains_secret, redact, redact_text
+from aeos.core.redaction import REDACTED, contains_secret, is_sensitive_key, redact, redact_text
 from aeos.core.timeutil import utcnow
 from aeos.events import service as events
 from aeos.models.evidence import EvidenceArtifact
@@ -46,6 +46,14 @@ from aeos.verification.facade import TRUSTED_COLLECTORS
 log = logging.getLogger("aeos.verification.collector")
 
 LEVELS: tuple[str, ...] = tuple(level.value for level in EvidenceLevel)
+# §13 EvidenceArtifact "retention policy" catalog. Evidence rows are append-only (DB trigger) and no job
+# deletes evidence: every policy currently means "kept". ``legal-hold`` additionally marks rows that a future
+# retention job must never touch; ``short`` marks rows eligible for manual review-and-archive (never automatic).
+RETENTION_POLICIES: dict[str, str] = {
+    "default": "kept (append-only; no automatic deletion)",
+    "legal-hold": "kept; never eligible for any retention action",
+    "short": "kept until a human archives it (no automatic deletion)",
+}
 INLINE_MAX_CHARS = 4000
 MAX_EVIDENCE_BYTES = 50 * 1024 * 1024
 _KIND_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,47}$")
@@ -62,12 +70,41 @@ LEVEL_EXPLANATIONS: dict[str, str] = {
 STATIC_KINDS = frozenset({
     "DIFF", "CHANGED_FILES", "SCOPE_CHECK", "LINT_REPORT", "STATIC_ANALYSIS", "SECRET_SCAN",
     "CONFIG_SNAPSHOT", "PROVIDER_CAPABILITY", "DOC_REFERENCE", "MANIFEST", "PR_BUNDLE",
-    "GOVERNANCE_HANDOFF", "REVIEW_PACKAGE", "ATTACHMENT", "NOTE",
+    "GOVERNANCE_HANDOFF", "REVIEW_PACKAGE", "ATTACHMENT", "NOTE", "DEPENDENCY_DIFF",
 })
-CONTROLLED_TEST_KINDS = frozenset({"TEST_REPORT", "VERIFICATION_REPORT", "CONTAINMENT_TEST", "JUNIT_XML"})
+CONTROLLED_TEST_KINDS = frozenset({"TEST_REPORT", "VERIFICATION_REPORT", "CONTAINMENT_TEST", "JUNIT_XML",
+                                   "WORKER_CONTRACT_TEST"})
 RUNTIME_KINDS = frozenset({
     "PROBE", "RUNTIME_OBSERVATION", "CI_STATUS", "RESTORE_TEST", "SMOKE_TEST", "SCREENSHOT", "LOG", "HEALTH",
 })
+
+
+# Identity values (git commit/tree SHAs, sha256 digests, optionally ``sha256:``-prefixed) are never
+# personal data. They are exempt from PII minimisation so evidence identities (commit, base_commit,
+# artifact_hash, config_hash, suite_hash ...) are stored bit-exact; acceptance compares them literally
+# (§13, §14). They still pass the credential redactor (a registered secret value is still scrubbed).
+_IDENTITY_VALUE = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{40,64}$")
+
+
+def is_identity_value(value: Any) -> bool:
+    return isinstance(value, str) and bool(_IDENTITY_VALUE.match(value))
+
+
+def redact_evidence(value: Any) -> Any:
+    """``redact(value, pii=True)`` for stored evidence, except identity values (see ``_IDENTITY_VALUE``)."""
+    if is_identity_value(value):
+        return redact_text(value)
+    if isinstance(value, dict):
+        out: dict[Any, Any] = {}
+        for k, v in value.items():
+            if isinstance(k, str) and isinstance(v, str) and v and is_sensitive_key(k):
+                out[k] = REDACTED  # same key rule as aeos.core.redaction.redact (never weakened)
+            else:
+                out[k] = redact_evidence(v)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [redact_evidence(v) for v in value]
+    return redact(value, pii=True)
 
 
 def level_index(level: str | None) -> int:
@@ -124,7 +161,7 @@ def _serialize(content: bytes | str | dict[str, Any] | None) -> _Serialized:
     if content is None:
         return _Serialized(None, "", "", {"no_content": True})
     if isinstance(content, dict):
-        red = redact(content, pii=True)
+        red = redact_evidence(content)
         text = json.dumps(red, indent=2, sort_keys=True, ensure_ascii=False, default=str)
         compact = json.dumps(red, sort_keys=True, ensure_ascii=False, default=str)
         if len(compact) <= INLINE_MAX_CHARS:
@@ -182,10 +219,13 @@ def collect_evidence(
     content: bytes | str | dict[str, Any] | None = None, evidence_level: str = "E0",
     subject_type: str = "", subject_id: str = "", project_id: str | None = None, domain: str | None = None,
     run_id: str | None = None, task_id: str | None = None, environment: dict[str, Any] | None = None,
-    classification: str = "INTERNAL", mode: str = "LIVE", impl: Any = None,
+    classification: str = "INTERNAL", mode: str = "LIVE", impl: Any = None, retention_policy: str = "default",
 ) -> EvidenceArtifact:
     # ``impl`` is ignored: the frozen facade forwards ``**locals()``, which includes its own ``impl`` name.
     del impl
+    if retention_policy not in RETENTION_POLICIES:
+        raise ValidationFailed(f"unknown retention policy {retention_policy!r}", code="EVIDENCE_RETENTION_INVALID",
+                               details={"allowed": sorted(RETENTION_POLICIES)})
     kind_n = (kind or "").strip().upper()
     if not _KIND_RE.match(kind_n):
         raise ValidationFailed(f"invalid evidence kind: {kind!r}", code="EVIDENCE_KIND_INVALID")
@@ -207,7 +247,7 @@ def collect_evidence(
         raise ValidationFailed("environment must be a mapping")
 
     trusted = origin_n in TRUSTED_COLLECTORS
-    env = redact(dict(environment or {}), pii=True)
+    env = redact_evidence(dict(environment or {}))
     ceiling, ceiling_reason = level_ceiling(trusted=trusted, origin=origin_n, kind=kind_n, environment=env)
     assigned = _min_level(evidence_level, ceiling)
     if not trusted and evidence_level != "E0":
@@ -262,6 +302,7 @@ def collect_evidence(
         environment=env,
         created_at=now,
         mode=mode,
+        retention_policy=retention_policy,
     )
     session.add(ev)
     try:

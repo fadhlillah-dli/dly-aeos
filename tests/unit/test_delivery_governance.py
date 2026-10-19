@@ -133,3 +133,32 @@ def test_handoff_input_carries_owner_risk_decisions_by_reference(db, accepted):
     db.commit()
     payload, _ = governance.build_input(db, w.task.id)
     assert payload.risk_decisions == tuple(sorted([f"RISK_ACCEPTANCE:{keep.id}", f"APPROVAL:{plan_level.id}"]))
+
+
+def test_change_scope_dependency_contract_deltas_and_rollback_metadata(db, monkeypatch):
+    """§32 inputs: change scope, dependency/contract deltas (AEOS and generic product layouts) and rollback
+    metadata ("code revert does not revert data" when migrations changed)."""
+    FakeWorkforce().install(monkeypatch)
+    changed = ["backend/aeos/delivery/facade.py", "api/openapi.yaml", "proto/user.proto", "services/web/package.json",
+               "requirements.lock", "db/alembic/versions/0002_x.py", "sql/0003_seed.sql", "src/feature.py"]
+    w = make_world(db, allowed_paths=["**"])
+    report = record_verification(db, w, changed=changed)
+    make_review(db, w, report)
+    acceptance.evaluate_acceptance(db, w.run.id)
+    db.commit()
+    payload, _ = governance.build_input(db, w.task.id)
+    assert set(payload.change_scope) == set(changed)
+    assert set(payload.dependency_deltas) == {"services/web/package.json", "requirements.lock"}
+    assert {"backend/aeos/delivery/facade.py", "api/openapi.yaml", "proto/user.proto"} <= set(payload.contract_deltas)
+    assert "src/feature.py" not in payload.contract_deltas
+    rollback = governance._thaw(payload.rollback)
+    assert set(rollback["migrations_changed"]) == {"db/alembic/versions/0002_x.py", "sql/0003_seed.sql"}
+    assert rollback["note"] == "code revert does not revert data"
+    w2 = make_world(db, project_key="no-migrations", allowed_paths=["**"])
+    report2 = record_verification(db, w2, changed=["src/feature.py"])
+    make_review(db, w2, report2)
+    acceptance.evaluate_acceptance(db, w2.run.id)
+    db.commit()
+    payload2, _ = governance.build_input(db, w2.task.id)
+    assert governance._thaw(payload2.rollback) == {"migrations_changed": [], "note": "revert the merge commit"}
+    assert payload2.dependency_deltas == () and payload2.contract_deltas == ()

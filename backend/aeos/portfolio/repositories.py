@@ -509,21 +509,66 @@ def _verify_github(repo: RepositoryReference, actor: str) -> tuple[str, str, dic
     return "VERIFIED", f"identity verified via GitHub API ({auth_mode}); scope: repository identity only", attempt
 
 
+BITBUCKET_CLIENT_FACTORY: Any = None  # tests inject an httpx.Client (respx); production uses the provider default
+
+
+def _verify_bitbucket(session: Session, project: Project, repo: RepositoryReference) -> tuple[str, str, dict[str, Any]]:
+    """OFFICE (§04 "the selected Bitbucket repository"): exact identity check behind the company authorisation
+    for Bitbucket AND an enabled bitbucket integration (ADR-0073 disabled by default). Never guesses."""
+    from aeos.models.portfolio import ProjectIntegration
+    from aeos.policy import facade as policy
+
+    attempt: dict[str, Any] = {"at": utcnow().isoformat(), "auth_mode": "none"}
+    pol = policy.office_policy(session)
+    if not (pol.get("office_authorization") is True and "bitbucket" in (pol.get("authorized_providers") or [])):
+        return ("UNVERIFIED", "Bitbucket verification needs a recorded company authorisation that allows Bitbucket "
+                              "(OFFICE default deny, §23); no provider call was made", attempt)
+    integ = session.scalar(select(ProjectIntegration).where(ProjectIntegration.project_id == project.id,
+                                                            ProjectIntegration.provider == "bitbucket"))
+    if integ is None or (integ.config or {}).get("enabled") is not True:
+        return ("UNVERIFIED", "Bitbucket adapter is disabled for this project (integration bitbucket/code with "
+                              "config.enabled=true required, ADR-0073); no provider call was made", attempt)
+    from aeos.publisher.facade import ProviderError, bitbucket_repository_reference
+
+    attempt["auth_mode"] = "office/bitbucket"
+    client = BITBUCKET_CLIENT_FACTORY() if BITBUCKET_CLIENT_FACTORY else None
+    try:
+        ref = bitbucket_repository_reference(repo.full_name, client=client)
+    except ProviderError as exc:
+        attempt["error"] = getattr(exc, "code", type(exc).__name__)
+        return ("UNVERIFIED", f"Bitbucket did not confirm {repo.full_name}: {redact_text(str(exc))[:200]} - the "
+                              "repository is never guessed", attempt)
+    observed = str(ref.get("full_name") or "")
+    attempt["observed"] = {"id": ref.get("uuid"), "full_name": observed}
+    attempt["bitbucket"] = {"url": ref.get("url"), "main_branch": ref.get("main_branch"),
+                            "is_private": ref.get("is_private")}
+    if observed.lower() != repo.full_name.lower():
+        return ("UNVERIFIED", f"Bitbucket returned {observed or '(none)'} for {repo.full_name} (renamed/moved?); "
+                              "register the exact repository", attempt)
+    if repo.provider_repo_id and ref.get("uuid") != repo.provider_repo_id:
+        return ("UNVERIFIED", "the Bitbucket repository uuid changed since it was verified; re-register it "
+                              "explicitly", attempt)
+    return "VERIFIED", "identity verified via Bitbucket API (office/bitbucket); scope: repository identity only", attempt
+
+
 def verify_repository(session: Session, principal: Principal, project: Project, repo: RepositoryReference) -> dict[str, Any]:
     """Read-only identity verification + local observation. Never infers a different repository."""
     require_writable(project)
     if repo.provider == "GITHUB":
         status, reason, attempt = _verify_github(repo, principal.user.id)
     else:
-        status, reason, attempt = (
-            "UNVERIFIED",
-            "Bitbucket verification adapter is not available in this build (OFFICE, M5); it needs a company-"
-            "authorised office/bitbucket credential and CAN_USE_OFFICE_INTEGRATIONS",
-            {"at": utcnow().isoformat(), "auth_mode": "none"},
-        )
+        status, reason, attempt = _verify_bitbucket(session, project, repo)
     details = dict(repo.details or {})
     details["last_attempt"] = attempt
-    if status == "VERIFIED":
+    if status == "VERIFIED" and repo.provider == "BITBUCKET":
+        bb = attempt.get("bitbucket", {})
+        repo.provider_repo_id = attempt["observed"]["id"]
+        repo.default_branch = bb.get("main_branch") or repo.default_branch
+        repo.url = bb.get("url") or repo.url
+        repo.last_verified_at = utcnow()
+        details["url_source"] = "provider"
+        details["bitbucket"] = bb
+    elif status == "VERIFIED":
         gh = attempt.get("github", {})
         repo.provider_repo_id = attempt["observed"]["id"]
         repo.default_branch = gh.get("default_branch") or repo.default_branch
@@ -582,6 +627,46 @@ def repository_view(repo: RepositoryReference, *, summary: bool = False) -> dict
         "inventory_commit": repo.inventory_commit,
         "inventory_at": repo.inventory_at.isoformat() if repo.inventory_at else None,
         "created_at": repo.created_at.isoformat(),
+    })
+    return view
+
+
+def repository_detail(session: Session, repo: RepositoryReference) -> dict[str, Any]:
+    """§37 user repository view: identity + base branch, PR/CI links, policy/capability and docs targets in one
+    place (joined from delivery PR records, project integrations and WRITE_ENABLEMENT decisions)."""
+    from aeos.models.decisions import Decision
+    from aeos.models.portfolio import ProjectIntegration
+
+    view = repository_view(repo)
+    prs: list[dict[str, Any]] = []
+    try:
+        from aeos.models.delivery_ext import PullRequestRecord
+
+        rows = session.scalars(select(PullRequestRecord).where(PullRequestRecord.project_id == repo.project_id,
+                                                               PullRequestRecord.repo_full_name == repo.full_name)
+                               .order_by(PullRequestRecord.created_at.desc()).limit(20))
+        prs = [{"number": p.number, "url": p.url, "state": p.state, "head_ref": p.head_ref, "base_ref": p.base_ref,
+                "merged": p.merged, "merged_by_type": p.merged_by_type, "sync_status": p.sync_status,
+                "last_synced_at": p.last_synced_at.isoformat() if p.last_synced_at else None} for p in rows]
+    except ImportError:  # delivery module absent: say so instead of an empty "no PRs"
+        prs = []
+    integrations = list(session.scalars(select(ProjectIntegration).where(ProjectIntegration.project_id == repo.project_id)))
+    enabled = {d.target_id: d.id for d in session.scalars(select(Decision).where(
+        Decision.kind == "WRITE_ENABLEMENT", Decision.status == "ACTIVE",
+        Decision.target_id.in_([i.id for i in integrations] or ["-"])))}
+    view.update({
+        "base_branch": repo.default_branch,
+        "pull_requests": prs,
+        "ci": [{"provider": i.provider, "integration_id": i.id, "configuration":
+                (i.capability_status or {}).get("configuration", "UNKNOWN")} for i in integrations if i.purpose == "ci"],
+        "docs_targets": [{"provider": i.provider, "root_id": i.root_id, "integration_id": i.id}
+                         for i in integrations if i.purpose == "docs"],
+        "capability": {
+            "write_enablement": [{"integration_id": i.id, "provider": i.provider, "purpose": i.purpose,
+                                  "decision_id": enabled.get(i.id), "status": "ENABLED" if i.id in enabled else "NOT_ENABLED"}
+                                 for i in integrations],
+            "merge": "HUMAN_ONLY (AEOS never merges)",
+        },
     })
     return view
 

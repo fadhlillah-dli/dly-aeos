@@ -63,7 +63,8 @@ def test_pass_review_records_review_verify_verdict_and_accepts(db, world, wf, mo
     assert rec.model_resolved == "claude-fable-5-1"
     # the checkpoint package is structured (no transcript) and stored as evidence
     req = bridge.requests[0]
-    assert req.purpose == "review.checkpoint" and req.allowed_tools == ["Read", "Grep", "Glob"]
+    # §12: package inline -> no file tools, so the supervisor cannot read outside the package
+    assert req.purpose == "review.checkpoint" and req.allowed_tools == []
     pkg = db.get(EvidenceArtifact, rec.package_evidence_id)
     assert pkg.kind == "REVIEW_PACKAGE"
     from aeos.verification import collector
@@ -138,13 +139,72 @@ def test_fail_verdict_requests_repair_as_new_attempt(db, world, wf, monkeypatch)
 
 
 def test_invalid_reviewer_output_is_not_proven(db, world, wf, monkeypatch):
+    """§20: a broken reviewer answer is a reviewer-side failure (re-requestable), never a repair attempt
+    that burns one of the implementer's bounded attempts."""
     install_doctor(monkeypatch)
     FakeBridge(result=claude_result({"verdict": "PASS-CONTROLLED"})).install(monkeypatch)
     record_verification(db, world)
     out = review.review_run(db, world.run.id, actor="t")
-    assert out.review.status == "COMPLETED" and out.review.verdict == "NOT-PROVEN"
+    assert out.review.status == "FAILED" and out.review.verdict == "NOT-PROVEN"
     assert "schema" in out.review.status_reason
     assert out.acceptance is None
+    assert not wf.of("request_repair") and not wf.of("transition_task")
+    assert out.review.repair_status.startswith("NO_REPAIR")
+    # the review can simply be requested again for the same run (still in REVIEW)
+    FakeBridge(result=claude_result(review_payload())).install(monkeypatch)
+    again = review.review_run(db, world.run.id, actor="t")
+    assert again.review.status == "COMPLETED" and again.review.supersedes_id == out.review.id
+
+
+def test_reviewer_can_request_verification_instead_of_repair(db, world, wf, monkeypatch):
+    install_doctor(monkeypatch)
+    payload = review_payload("NOT-PROVEN")
+    payload["requested_verification"] = ["run the API negative tests for /api/x", "attach a staging probe"]
+    FakeBridge(result=claude_result(payload)).install(monkeypatch)
+    record_verification(db, world)
+    out = review.review_run(db, world.run.id, actor="t")
+    assert out.review.status == "COMPLETED" and out.review.verdict == "NOT-PROVEN"
+    assert out.review.repair_status.startswith("VERIFICATION_REQUESTED")
+    assert any("API negative tests" in u for u in out.review.unknowns)
+    assert not wf.of("request_repair"), "a verification request never consumes an implementer attempt"
+    from sqlalchemy import select
+
+    from aeos.models.audit import Event
+
+    ev = db.scalar(select(Event).where(Event.kind == "review.verification_requested"))
+    assert ev is not None and "attach a staging probe" in ev.payload["requested_verification"]
+
+
+def test_not_proven_without_requested_checks_still_requests_repair(db, world, wf, monkeypatch):
+    install_doctor(monkeypatch)
+    FakeBridge(result=claude_result(review_payload("NOT-PROVEN"))).install(monkeypatch)
+    record_verification(db, world)
+    review.review_run(db, world.run.id, actor="t")
+    assert wf.of("request_repair")
+
+
+@pytest.mark.parametrize("model", [None, "UNKNOWN", "claude-sonnet-4-5", "gpt-5"])
+def test_unproven_or_off_family_reviewer_identity_never_counts(db, world, wf, monkeypatch, model):
+    """§15: without a proven Claude identity of the requested family the review does not count —
+    even when the TaskSpec has no allowed_models list — and it is not the implementer's fault."""
+    install_doctor(monkeypatch)
+    FakeBridge(result=claude_result(review_payload(), model=model)).install(monkeypatch)
+    record_verification(db, world)
+    out = review.review_run(db, world.run.id, actor="t")
+    assert out.review.status == "FAILED" and out.review.verdict == "NOT-PROVEN"
+    assert "identity" in out.review.status_reason or "family" in out.review.status_reason
+    assert out.acceptance is None and not wf.of("mark_accepted") and not wf.of("request_repair")
+
+
+def test_acceptance_refuses_a_completed_review_without_model_identity(db, world, wf):
+    from aeos.verification import acceptance
+    from tests.unit.test_verification_support import make_review
+
+    report = record_verification(db, world)
+    make_review(db, world, report, model_resolved=None)
+    rec = acceptance.evaluate_acceptance(db, world.run.id)
+    assert rec.acceptance_status == "REJECTED"
+    assert any("model identity not proven" in r for r in rec.reasons)
 
 
 def test_verdict_clamping():
@@ -199,7 +259,14 @@ def test_mock_review_never_accepts(db, world, wf, monkeypatch):
     assert not wf.of("mark_accepted")
 
 
-def test_manual_result_import(db, world, wf, monkeypatch):
+def _envelope(payload, model="claude-fable-5-1"):
+    from tests.unit.test_verification_support import claude_envelope
+
+    return claude_envelope(payload, model=model)
+
+
+def test_manual_bare_json_never_satisfies_the_review_half(db, world, wf, monkeypatch):
+    """§15 audit: an admin-typed PASS JSON (no client provenance, model UNKNOWN) is not a Claude review."""
     install_doctor(monkeypatch, status="UNKNOWN")
     FakeBridge().install(monkeypatch, manual=False)
     record_verification(db, world)
@@ -208,10 +275,38 @@ def test_manual_result_import(db, world, wf, monkeypatch):
     out = review.collect_manual_review(db, waiting.id, actor="owner", structured=review_payload())
     db.commit()
     assert out.review.mode == "MANUAL_FALLBACK" and out.review.supersedes_id == waiting.id
-    assert out.review.verdict == "PASS-CONTROLLED"
+    assert out.review.status == "FAILED" and out.review.verdict == "NOT-PROVEN"
+    assert "identity" in out.review.status_reason and "envelope" in out.review.status_reason
+    assert out.acceptance is None and not wf.of("mark_accepted") and not wf.of("request_repair")
+
+
+def test_manual_result_import(db, world, wf, monkeypatch):
+    install_doctor(monkeypatch, status="UNKNOWN")
+    FakeBridge().install(monkeypatch, manual=False)
+    record_verification(db, world)
+    waiting = review.review_run(db, world.run.id, actor="t").review
+    db.commit()
+    out = review.collect_manual_review(db, waiting.id, actor="owner", structured=_envelope(review_payload()))
+    db.commit()
+    assert out.review.mode == "MANUAL_FALLBACK" and out.review.supersedes_id == waiting.id
+    assert out.review.verdict == "PASS-CONTROLLED" and out.review.model_resolved == "claude-fable-5-1"
     assert out.acceptance and out.acceptance["acceptance_status"] == "ACCEPTED"
     with pytest.raises(Conflict):
         review.collect_manual_review(db, out.review.id, actor="owner", structured=review_payload())
+
+
+def test_manual_envelope_from_another_family_is_refused(db, world, wf, monkeypatch):
+    from aeos.core.errors import ValidationFailed
+
+    install_doctor(monkeypatch, status="UNKNOWN")
+    FakeBridge().install(monkeypatch, manual=False)
+    record_verification(db, world)
+    waiting = review.review_run(db, world.run.id, actor="t").review
+    db.commit()
+    with pytest.raises(ValidationFailed) as e:
+        review.collect_manual_review(db, waiting.id, actor="owner",
+                                     structured=_envelope(review_payload(), model="claude-sonnet-4-5"))
+    assert e.value.code == "MANUAL_RESULT_INVALID" and "MODEL_POLICY_MISMATCH" in e.value.message
 
 
 def test_manual_result_refused_when_candidate_changed(db, world, wf, monkeypatch):
@@ -250,3 +345,29 @@ def test_manual_result_refused_when_verification_no_longer_passes(db, world, wf,
     with pytest.raises(Blocked) as e:
         review.collect_manual_review(db, waiting.id, actor="owner", structured=review_payload())
     assert e.value.code == "VERIFICATION_NOT_PASSED"
+
+
+
+def test_checkpoint_package_carries_the_role_contract(db, world, wf, monkeypatch):
+    """§16/§17: the reviewer judges the result against the RoleSkillPack the task ran under (boundaries,
+    verification, failure modes), e.g. Product Analyst 'does not invent stakeholders'."""
+    from aeos.models.planning import TaskSpec
+    from aeos.workforce import catalog
+
+    install_doctor(monkeypatch)
+    bridge = FakeBridge(result=claude_result(review_payload("PASS-CONTROLLED"))).install(monkeypatch)
+    record_verification(db, world)
+    review.review_run(db, world.run.id, actor="t")
+    prompt = bridge.requests[0].prompt
+    implementer = next(r for r in catalog.EXECUTOR_ROLES if r["role_key"] == "feature-implementer")
+    assert '"role_contract"' in prompt and "role_contract, check the result" in prompt
+    assert implementer["failure_modes"][0] in prompt and implementer["boundaries"][0] in prompt
+    analyst = review.role_section(db, TaskSpec(task_key="x", title="t", goal="g", role_key="product-analyst"))
+    assert "Tidak mengarang stakeholder atau keputusan bisnis" in analyst["boundaries"]
+    assert "Mengarang stakeholder/keputusan bisnis" in analyst["failure_modes"]
+    ux = review.role_section(db, TaskSpec(task_key="u", title="t", goal="g", role_key="ux-research-assistant"))
+    assert {"Mengaku riset pengguna dilakukan", "Asumsi tidak ditandai"} <= set(ux["failure_modes"])
+    integ = review.role_section(db, TaskSpec(task_key="i", title="t", goal="g", role_key="integration-engineer"))
+    assert {"Akses global", "Target/tenant tidak terikat", "Tanpa idempotensi"} <= set(integ["failure_modes"])
+    assert "unmarked persona assumptions" in ux["review_rule"] and "idempotency key" in integ["review_rule"]
+    assert review.role_section(db, TaskSpec(task_key="y", title="t", goal="g", role_key="chief-executive-officer")) is None

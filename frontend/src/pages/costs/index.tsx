@@ -93,6 +93,12 @@ interface Summary {
     per_task: { task_id: string; cost_usd: number | null; known_usd: number; unknown_entries: number; entries: number }[];
   };
   excluded_non_live: { entries: number; modes: string[]; note: string };
+  /** §42: latency and repair count monitored separately from money and tokens (absent on older servers). */
+  operations?: {
+    latency: { p50_s: number | null; p95_s: number | null; samples: number; runs: number; basis: string; status: string };
+    repairs: { repair_attempts: number; tasks: number; tasks_repaired: number; basis: string };
+    note: string;
+  };
 }
 
 interface LedgerRow {
@@ -346,6 +352,25 @@ export default function CostsPage() {
             <Notice tone="mock">
               {s.excluded_non_live.entries} entri {s.excluded_non_live.modes.join("/")} dikecualikan. {s.excluded_non_live.note}
             </Notice>
+          )}
+          {s.operations && (
+            <Card title="Latency dan repair pekerja">
+              <KeyValue
+                items={[
+                  [
+                    "Latency run (p50 / p95)",
+                    s.operations.latency.samples === 0 ? (
+                      <StatusBadge key="l" status="UNKNOWN" label="Belum ada run selesai" />
+                    ) : (
+                      `${s.operations.latency.p50_s ?? "—"} s / ${s.operations.latency.p95_s ?? "—"} s (n=${s.operations.latency.samples} dari ${s.operations.latency.runs} run)`
+                    ),
+                  ],
+                  ["Attempt repair", `${s.operations.repairs.repair_attempts} (${s.operations.repairs.tasks_repaired} dari ${s.operations.repairs.tasks} task)`],
+                  ["Dasar", `${s.operations.latency.basis}; ${s.operations.repairs.basis}`],
+                ]}
+              />
+              <p className="mt-2 text-xs text-ink-3">{s.operations.note}</p>
+            </Card>
           )}
 
           <Card title="Claude native (langganan Max)">

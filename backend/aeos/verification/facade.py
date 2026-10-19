@@ -20,14 +20,22 @@ def collect_evidence(
     content: bytes | str | dict[str, Any] | None = None, evidence_level: str = "E0",
     subject_type: str = "", subject_id: str = "", project_id: str | None = None, domain: str | None = None,
     run_id: str | None = None, task_id: str | None = None, environment: dict[str, Any] | None = None,
-    classification: str = "INTERNAL", mode: str = "LIVE",
+    classification: str = "INTERNAL", mode: str = "LIVE", retention_policy: str = "default",
 ) -> EvidenceArtifact:
     """Persist content (redacted) under the evidence dir and record a hashed EvidenceArtifact.
-    ``trusted`` is derived from ``origin`` ∈ TRUSTED_COLLECTORS — callers cannot set it."""
+    ``trusted`` is derived from ``origin`` ∈ TRUSTED_COLLECTORS — callers cannot set it.
+    ``retention_policy`` (additive): one of ``collector.RETENTION_POLICIES`` (default/legal-hold/short)."""
     kwargs = dict(locals())  # captured before the lazy import adds 'impl'
     from aeos.verification.collector import collect_evidence as impl
 
     return impl(**kwargs)
+
+
+def read_json(ev: EvidenceArtifact | None) -> dict[str, Any] | None:
+    """Full JSON content of an artifact, only when its stored bytes still match its ``content_hash``."""
+    from aeos.verification.collector import read_json as impl
+
+    return impl(ev)
 
 
 def latest_acceptance(session: Session, task_id: str) -> AcceptanceRecord | None:

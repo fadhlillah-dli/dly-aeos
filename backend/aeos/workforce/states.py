@@ -40,8 +40,10 @@ LEGAL_TRANSITIONS: dict[ExecutionState, frozenset[ExecutionState]] = {
 }
 
 # Reason codes that justify RUNNING -> BLOCKED (controller-enforced stop conditions, §22).
+# WORKER_BLOCKER: §21 "worker berhenti dan mengirim blocker/decision request" (a schema-valid worker report;
+# the task then waits for the owner, never for a tick).
 RUNNING_STOP_CODES = frozenset({"LEASE_LOST", "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED", "REASSIGNED",
-                                "CONTROLLER_SHUTDOWN", "POLICY_CHANGED"})
+                                "CONTROLLER_SHUTDOWN", "POLICY_CHANGED", "WORKER_BLOCKER"})
 # Reason codes that justify leaving DONE (acceptance invalidated by a head/base/config/plan change).
 REOPEN_CODES = frozenset({"ACCEPTANCE_STALE"})
 

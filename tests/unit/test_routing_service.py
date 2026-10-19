@@ -32,7 +32,18 @@ def routes(db):
 
 
 def _fresh(r: ModelRoute) -> None:
+    """What an owner terms review + a catalog refresh record (none of it is part of the identity)."""
     r.pricing_checked_at = r.terms_checked_at = utcnow()
+    r.availability, r.availability_checked_at = "AVAILABLE", utcnow()
+
+
+def bind_runtime(r: ModelRoute) -> None:
+    """What an activation binds: the runtime in force (policy version, worker prompt, context strategy)."""
+    runtime = service.runtime_context()
+    for f in service.binding_fields(r):
+        setattr(r, f, runtime[f])
+    if service.runs_on_worker_runtime(r):
+        r.harness_version = runtime.get("harness_version") or r.harness_version
 
 
 def approve(db, key: str, *, kind: str = "ROUTE_ACTIVATION", details: dict | None = None, expires_at=None,
@@ -41,6 +52,7 @@ def approve(db, key: str, *, kind: str = "ROUTE_ACTIVATION", details: dict | Non
 
     r = service.get_route(db, key)
     _fresh(r)
+    bind_runtime(r)
     r.status = "APPROVED" if kind == "ROUTE_ACTIVATION" else "TRIAL"
     r.config_hash = service.compute_config_hash(r)
     for old in db.query(Decision).filter_by(target_type="model_route", target_id=key, kind=kind, status="ACTIVE"):
@@ -51,8 +63,9 @@ def approve(db, key: str, *, kind: str = "ROUTE_ACTIVATION", details: dict | Non
     return r
 
 
-def task(domain="PERSONAL", classification="INTERNAL", role="feature-implementer", **policy) -> TaskSpec:
-    return TaskSpec(domain=domain, data_classification=classification, role_key=role, tools_allowed=["edit"],
+def task(domain="PERSONAL", classification="INTERNAL", role="feature-implementer", tools=None, **policy) -> TaskSpec:
+    return TaskSpec(domain=domain, data_classification=classification, role_key=role,
+                    tools_allowed=list(tools) if tools is not None else ["fs.read", "fs.write:allowed_paths"],
                     model_route_policy=policy, task_key="t1", title="t", goal="g", project_id="p",
                     plan_version_id="pv", plan_version_hash="h", spec_hash="s")
 
@@ -77,6 +90,59 @@ def test_seed_is_design_candidate_personal_only(routes):
     assert by[QWEN].pool == "WATCHLIST" and by[QWEN].is_free == "NO"
     assert by["local/qwen3.8-flash-next"].endpoint is None
     assert seed.run(routes)["created"] == 0  # idempotent
+
+
+SEEDED = {
+    "SUPERVISOR": {"claude-native/fable", "claude-native/opus"},
+    "WORKER": {DS, GLM},
+    "COMPARATOR": {GEMINI},
+    "ARENA": {"opencode-zen/longcat-2.5-preview-free", "opencode-zen/mimo-v2.6-flash-free", "opencode-zen/beam-free",
+              "opencode-zen/nemotron-3-ultra-free", "opencode-zen/nemotron-3.5-lightning-free",
+              "opencode-zen/nemotron-3.5-super-vl-free", LAGUNA, "opencode-zen/space-bunny-free",
+              "opencode-zen/ll-alpha-free", "opencode-zen/exo-free", PICKLE},
+    "WATCHLIST": {QWEN, *(f"opencode-zen/{m}" for m in ("kimi-k2.7-code", "minimax-m3", "mistral-large-4",
+                                                       "gpt-5.3-codex", "grok-build-0.1", "muse-spark-1.3"))},
+    "LOCAL": {"local/qwen3.8-flash-next"},
+}
+
+
+def test_seed_registers_every_section_23_candidate_with_its_terms(routes):
+    """§23 'Registry berisi semua kandidat yang relevan': the exact candidate set per pool, and the per-route
+    data terms the hard filter relies on (a widened MiMo or a Nemotron without its trial flag fails here)."""
+    by = {r.route_key: r for r in routes.query(ModelRoute).all()}
+    assert {k: {key for key, r in by.items() if r.pool == k} for k in SEEDED} == SEEDED
+    assert len(by) == sum(len(v) for v in SEEDED.values()) == 24
+    for key in SEEDED["ARENA"] | SEEDED["WORKER"] | SEEDED["WATCHLIST"] | SEEDED["COMPARATOR"]:
+        r = by[key]
+        # a research reading of a provider claim is not an owner terms review (§23, §51 P2)
+        assert r.terms_checked_at is None and "not an owner terms review" in (r.data_terms or {}).get(
+            "read_for_research", "not an owner terms review"), key
+    assert by["claude-native/fable"].terms_checked_at is not None  # supervisor: owner's own account terms
+    assert by["opencode-zen/longcat-2.5-preview-free"].allowed_data_classes == ["PUBLIC", "INTERNAL"]
+    assert by["opencode-zen/longcat-2.5-preview-free"].data_terms["may_use_inputs_for_training"] is False
+    mimo = by["opencode-zen/mimo-v2.6-flash-free"]
+    assert mimo.allowed_data_classes == ["PUBLIC"] and mimo.data_terms["may_use_inputs_for_training"] is True
+    beam = by["opencode-zen/beam-free"]
+    assert beam.allowed_data_classes == ["PUBLIC"] and "regions" in beam.data_terms and service.region_restricted(beam)
+    for key in ("opencode-zen/nemotron-3-ultra-free", "opencode-zen/nemotron-3.5-lightning-free",
+                "opencode-zen/nemotron-3.5-super-vl-free"):
+        assert by[key].data_terms["trial_only_no_confidential"] is True and by[key].allowed_data_classes == ["PUBLIC"]
+        assert service.terms_restriction(by[key].data_terms, by[key].identity_status)
+    assert all(by[k].is_free == "NO" and by[k].allowed_data_classes == ["PUBLIC"] for k in SEEDED["WATCHLIST"])
+    assert by[DS].tool_set == list(service.REVIEWED_WORKER_TOOLS)  # a reviewable candidate tool set, no placeholder
+    assert by["local/qwen3.8-flash-next"].mode_params == {"quantization": "UNKNOWN", "inference_backend": "UNKNOWN",
+                                                          "hardware": "UNKNOWN"}
+
+
+def test_seed_resets_a_seeded_research_date_on_untouched_rows(routes):
+    r = service.get_route(routes, DS)
+    r.terms_checked_at = seed.RESEARCH_DATE
+    r.tool_set = ["opencode-default"]
+    r.config_hash = service.compute_config_hash(r)
+    routes.flush()
+    out = seed.run(routes)
+    assert out["seeded_terms_check_reset"] >= 1 and r.terms_checked_at is None
+    assert r.tool_set == list(service.REVIEWED_WORKER_TOOLS) and r.config_hash == service.compute_config_hash(r)
 
 
 def test_nothing_is_eligible_by_default(routes):
@@ -287,12 +353,14 @@ def test_activation_guards(routes, monkeypatch):
     q = service.get_route(routes, QWEN)
     with pytest.raises(ValidationFailed) as ei:
         service.activate_route(routes, QWEN, actor_user_id="o", mode="APPROVED", rationale="paid model trial please",
-                               expected_config_hash=q.config_hash)
+                               expected_config_hash=q.config_hash, terms_reviewed=True)
     assert ei.value.code == "BUDGET_DECISION_REQUIRED"
     g = service.get_route(routes, GEMINI)
-    with pytest.raises(ValidationFailed):
+    with pytest.raises(ValidationFailed) as ei:
         service.activate_route(routes, GEMINI, actor_user_id="o", mode="APPROVED", rationale="compare internal docs",
-                               expected_config_hash=g.config_hash, allowed_data_classes=["PUBLIC", "INTERNAL"])
+                               expected_config_hash=g.config_hash, allowed_data_classes=["PUBLIC", "INTERNAL"],
+                               terms_reviewed=True)
+    assert ei.value.code == "DATA_TERMS_RESTRICTED"
     with pytest.raises(ValidationFailed):
         service.activate_route(routes, "claude-native/opus", actor_user_id="o", mode="APPROVED",
                                rationale="supervisor activation", expected_config_hash="x" * 20)
@@ -308,8 +376,9 @@ def test_activation_fails_closed_without_decision_registry(routes, absent_module
     r = service.get_route(routes, DS)
     with pytest.raises(Blocked) as ei:
         service.activate_route(routes, DS, actor_user_id="o", mode="TRIAL", rationale="no policy module here",
-                               expected_config_hash=r.config_hash)
+                               expected_config_hash=r.config_hash, terms_reviewed=True)
     assert ei.value.code == "DECISION_REGISTRY_UNAVAILABLE"
+    assert r.status == "CANDIDATE" and r.terms_checked_at is None  # nothing applied when the decision cannot be recorded
 
 
 def test_alias_resolution_change_is_a_new_configuration(routes, monkeypatch):
@@ -331,3 +400,17 @@ def test_disable_route_excludes_and_invalidates(routes, monkeypatch):
     service.disable_route(routes, DS, reason="terms changed")
     d = eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL")
     assert any("DISABLED" in x for x in d.rejected[DS]) and reg.invalidated_decisions
+
+
+def test_compiled_min_context_tokens_filters_routes(routes):
+    """§19/§21: the task compiler writes model_route_policy.min_context_tokens; route selection honours it
+    (the older spelling min_context keeps working)."""
+    r = service.get_route(routes, DS)
+    r.context_window = 65_536
+    service.refresh_config_hash(routes, r, reason="test")
+    approve(routes, DS)
+    assert select_route(routes, task=task(min_context_tokens=32_000)).route.route_key == DS
+    with pytest.raises(Blocked):
+        select_route(routes, task=task(min_context_tokens=128_000))
+    with pytest.raises(Blocked):
+        select_route(routes, task=task(min_context=128_000))

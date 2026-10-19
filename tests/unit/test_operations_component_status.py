@@ -87,3 +87,30 @@ def test_missing_tool_reports_official_hint_and_never_installs(cs, monkeypatch):
     item = cs._tool("OpenCode", "opencode", ["--version"], 5, False, "worker")
     assert item["status"] == "MISSING" and f"opencode-ai@{cs.OPENCODE_PIN}" in item["install_hint"]
     assert all(c[0] == "opencode" for c in calls)  # only the probe ran - no installer was invoked
+
+
+def test_no_hint_pipes_a_remote_script_into_a_shell(cs):
+    """Section 07: never run unverified install scripts (the bootstrap status list follows the Doctor rule)."""
+    for tool, per_os in cs.HINTS.items():
+        for os_key, hint in per_os.items():
+            low = hint.lower().replace(" ", "")
+            assert "|iex" not in low and "|bash" not in low and "|sh" not in low, (tool, os_key, hint)
+            assert "iwr" not in low.split("(")[0] and "invoke-expression" not in low, (tool, os_key, hint)
+    assert cs.HINTS["claude"]["win"] == "winget install --id Anthropic.ClaudeCode -e"
+    assert cs.HINTS["claude"]["mac"].startswith("brew install --cask claude-code")
+
+
+def test_setup_guides_never_pipe_a_remote_script_into_a_shell():
+    """Section 07 applies to the documentation too: the setup guides name package managers or a downloaded,
+    reviewed installer - never `curl ... | bash` / `irm ... | iex` (review finding)."""
+    import re
+
+    from aeos.core.paths import repo_root
+
+    piped = re.compile(r"(curl|wget|irm|iwr|invoke-webrequest|invoke-restmethod)[^\n|]*\|\s*(bash|sh|zsh|iex|invoke-expression)",
+                       re.I)
+    for name in ("SETUP_WINDOWS.md", "SETUP_MACOS.md", "OPERATIONS.md"):
+        text = (repo_root() / "docs" / name).read_text(encoding="utf-8")
+        assert not piped.search(text), (name, piped.search(text))
+    readme = (repo_root() / "README.md").read_text(encoding="utf-8")
+    assert not piped.search(readme)

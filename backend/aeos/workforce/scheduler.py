@@ -19,7 +19,8 @@ from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
 from aeos.core.enums import TERMINAL_EXECUTION_STATES, Capability, DataMode, ExecutionState, Verdict
-from aeos.core.errors import Blocked, Conflict, NotFound, ValidationFailed
+from aeos.core.errors import AeosError, Blocked, Conflict, NotFound, ValidationFailed
+from aeos.core.hashing import content_hash
 from aeos.core.ids import new_id
 from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
@@ -56,7 +57,7 @@ WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CO
                         "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED"})
 QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED"})
 # BLOCKED reason codes that only an owner action clears (retry_task / quarantine release), never a tick.
-HUMAN_BLOCK_CODES = frozenset({"QUARANTINED", "REVIEW_BLOCKED"})
+HUMAN_BLOCK_CODES = frozenset({"QUARANTINED", "REVIEW_BLOCKED", "WORKER_BLOCKER"})
 
 
 # ----------------------------------------------------------------------------- small helpers
@@ -151,28 +152,111 @@ def set_scheduler_enabled(session: Session, enabled: bool, *, actor: str) -> Non
                 entity_id="scheduler", payload={"enabled": bool(enabled)})
 
 
-def concurrency_cap(session: Session) -> tuple[int, str | None]:
-    """1 active implementation worker; 2 only with an ACTIVE human decision (§19, §21)."""
+CONCURRENCY_TARGET = ("workforce", "concurrency")  # policy.catalog.TARGET_WORKFORCE / TARGET_ID_CONCURRENCY
+
+
+def _concurrency_decision(session: Session) -> Decision | None:
     v = _setting(session, KEY_CONCURRENCY)
     if not isinstance(v, dict):
-        return 1, None
+        return None
     try:
         wanted = min(int(v.get("max_active", 1)), HARD_MAX_ACTIVE)
     except (TypeError, ValueError):
-        return 1, None
+        return None
     if wanted <= 1:
-        return 1, None
+        return None
     d = session.get(Decision, str(v.get("decision_id") or ""))
-    if d is None or d.status != "ACTIVE" or d.actor_kind != "HUMAN":
-        return 1, None
+    # §19: only a human POLICY decision on exactly workforce/concurrency counts (never another decision that
+    # happens to carry max_active_workers in its details).
+    if (d is None or d.status != "ACTIVE" or d.actor_kind != "HUMAN" or d.kind != "POLICY"
+            or (d.target_type, d.target_id) != CONCURRENCY_TARGET):
+        return None
     exp = ensure_aware(d.expires_at)
     if exp is not None and exp <= utcnow():
+        return None
+    return d
+
+
+def _scope_matches(scope: dict[str, Any], task: TaskSpec | None) -> bool:
+    """§44 a mode is adopted per task class, not for every project/role at once."""
+    if task is None:
+        return True
+    for key, value in (("project_ids", task.project_id), ("role_keys", task.role_key),
+                       ("risk_classes", task.risk_class), ("domains", task.domain)):
+        allowed = scope.get(key)
+        if isinstance(allowed, list) and allowed and value not in allowed:
+            return False
+    return True
+
+
+def concurrency_cap(session: Session, task: TaskSpec | None = None) -> tuple[int, str | None]:
+    """1 active implementation worker; 2 only with an ACTIVE human POLICY decision on workforce/concurrency
+    whose task-class scope covers *task* (§19, §21, §44)."""
+    v = _setting(session, KEY_CONCURRENCY)
+    d = _concurrency_decision(session)
+    if d is None or not isinstance(v, dict):
+        return 1, None
+    details = d.details or {}
+    if not _scope_matches(details.get("scope") or {}, task):
         return 1, None
     try:
-        allowed = int((d.details or {}).get("max_active_workers", 1))
+        allowed = int(details.get("max_active_workers", 1))
     except (TypeError, ValueError):
         allowed = 1
+    wanted = min(int(v.get("max_active", 1)), HARD_MAX_ACTIVE)
     return (min(wanted, allowed), d.id) if allowed >= 2 else (1, None)
+
+
+def set_concurrency(session: Session, *, max_active: int, actor: str, actor_user_id: str, rationale: str,
+                    eval_run_id: str | None = None, scope: dict[str, Any] | None = None,
+                    decision_record: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Owner action (§19 "Dua worker aktif adalah langkah eksperimen berikutnya"): 2 workers need a human POLICY
+    decision on workforce/concurrency that references a COMPLETED evaluation run with all gates PASS
+    (integration evidence), states the task-class scope and the rollback (previous mode), and carries the §44
+    DecisionRecord fields. ``max_active=1`` returns to the pilot mode (no decision needed)."""
+    if max_active not in (1, 2):
+        raise ValidationFailed("max_active must be 1 or 2 (pilot cap)")
+    previous, _ = concurrency_cap(session)
+    if max_active == 1:
+        _set_setting(session, KEY_CONCURRENCY, {"max_active": 1, "decision_id": None, "by": actor,
+                                                "at": utcnow().isoformat()})
+        _audit(session, actor, "workforce.concurrency.set", target_type="workforce", target_id="concurrency",
+               project_id=None, domain=None, reason=rationale, details={"max_active": 1, "previous": previous})
+        return {"max_active": 1, "decision_id": None, "previous": previous}
+    if not (rationale or "").strip() or len(rationale.strip()) < 10:
+        raise ValidationFailed("a rationale (min 10 characters) is required")
+    from aeos.models.research import EvalRun
+    from aeos.policy import catalog as policy_catalog
+
+    run = session.get(EvalRun, eval_run_id) if eval_run_id else None
+    gates = {k: str(v).upper() for k, v in ((run.gate_results or {}) if run else {}).items()}
+    if run is None or run.status != "COMPLETED" or not gates or any(v != "PASS" for v in gates.values()):
+        raise Blocked("two workers need integration evidence: a COMPLETED evaluation run with every gate PASS",
+                      code="CONCURRENCY_EVIDENCE_MISSING",
+                      details={"eval_run_id": eval_run_id, "status": run.status if run else None, "gates": gates})
+    record = dict(decision_record or {})
+    record.setdefault("evidence_ids", [run.id])
+    missing = [k for k in policy_catalog.DECISION_RECORD_FIELDS if not record.get(k)]
+    if missing:
+        raise ValidationFailed(f"decision record incomplete: {missing}", code="DECISION_RECORD_INCOMPLETE",
+                               details={"required": list(policy_catalog.DECISION_RECORD_FIELDS)})
+    clean_scope = {k: [str(x) for x in v] for k, v in (scope or {}).items()
+                   if k in ("project_ids", "role_keys", "risk_classes", "domains") and isinstance(v, list)}
+    d = ext.record_decision(
+        session, kind="POLICY", actor_user_id=actor_user_id, target_type=policy_catalog.TARGET_WORKFORCE,
+        target_id=policy_catalog.TARGET_ID_CONCURRENCY, target_hash=content_hash({"max_active": 2, "scope": clean_scope}),
+        allowed_operations=["run_two_workers"], auth_scope={"scope": clean_scope or "all task classes"},
+        rationale=rationale,
+        details={"max_active_workers": 2, "eval_run_id": run.id, "suite_key": run.suite_key, "scope": clean_scope,
+                 "rollback": {"previous_max_active": previous, "how": "set concurrency 1 (no decision needed)"},
+                 "decision_record": record})
+    _set_setting(session, KEY_CONCURRENCY, {"max_active": 2, "decision_id": d.id, "by": actor,
+                                            "at": utcnow().isoformat()})
+    _audit(session, actor, "workforce.concurrency.set", target_type="workforce", target_id="concurrency",
+           project_id=None, domain=None, reason=rationale, details={"max_active": 2, "decision_id": d.id})
+    events.emit(session, source="controller", kind="scheduler.concurrency_changed", entity_type="scheduler",
+                entity_id="scheduler", payload={"max_active": 2, "decision_id": d.id, "scope": clean_scope})
+    return {"max_active": 2, "decision_id": d.id, "previous": previous, "scope": clean_scope}
 
 
 # ----------------------------------------------------------------------------- transitions
@@ -452,6 +536,11 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
     fan = _fan_out_problem(task)
     if fan:
         reasons.append(("FAN_OUT_FORBIDDEN", fan))
+    from aeos.workforce import roles
+
+    if task.role_key not in roles.executor_role_keys():
+        reasons.append(("ROLE_UNKNOWN", f"role_key {task.role_key!r} is not an executor RoleSkillPack (a title grants "
+                                        "nothing; the task needs a new plan version with a catalog role)"))
     if te.attempts_used >= max_attempts(task, te):
         reasons.append(("NEEDS_DECISION", f"attempt cap reached ({te.attempts_used}/{max_attempts(task, te)})"))
     alive = _previous_worker_alive(session, task.id)
@@ -570,6 +659,9 @@ class Admission:
     est_usd: float = 0.0
     est_tokens: int = 0
     cap: int = 1
+    # §19 admission answers recorded by code: context size, compute reservation, verifier/reviewer path,
+    # role eligibility (never a narrative from a model)
+    answers: dict[str, Any] = field(default_factory=dict)
 
     @property
     def reasons(self) -> list[str]:
@@ -578,7 +670,7 @@ class Admission:
     def as_dict(self) -> dict[str, Any]:
         return {"task_id": self.task_id, "admitted": self.admitted, "blocks": self.blocks, "waits": self.waits,
                 "route": self.route.route_key if self.route else None,
-                "agent": self.agent.agent_key if self.agent else None, "cap": self.cap}
+                "agent": self.agent.agent_key if self.agent else None, "cap": self.cap, "answers": self.answers}
 
 
 def active_executions(session: Session, *, exclude_task: str | None = None) -> list[TaskExecution]:
@@ -588,17 +680,47 @@ def active_executions(session: Session, *, exclude_task: str | None = None) -> l
     return [r for r in rows if r.task_id != exclude_task]
 
 
+# §19 "Auth/IAM/shared schema/migration/control-plane policy -> serialise decisions and shared mutations":
+# two active tasks touching the same class conflict even when their files differ (two migration files can
+# create two Alembic heads; two auth/policy edits interact). Matched on the static path prefix, case-insensitive.
+SERIALISATION_CLASSES: dict[str, tuple[str, ...]] = {
+    "migrations": ("migrations/", "alembic/", "db/migrations/"),
+    "schema-models": ("backend/aeos/models/", "models/", "schema/", "prisma/"),
+    "auth-iam": ("backend/aeos/identity/", "backend/aeos/api/deps.py", "auth/", "iam/"),
+    "control-plane-policy": ("policy/", "backend/aeos/policy/"),
+    "contracts": ("contracts/",),
+    "pipeline": (".github/workflows/", "bitbucket-pipelines.yml"),
+}
+
+
+def serialisation_classes(paths: list[str]) -> set[str]:
+    from aeos.worker_runtime.scope import static_prefix
+
+    out: set[str] = set()
+    for p in paths:
+        prefix = (static_prefix(str(p)) or "").replace("\\", "/").casefold()
+        probe = prefix + ("" if prefix.endswith((".py", ".yml", ".yaml")) else "/")
+        for cls, roots in SERIALISATION_CLASSES.items():
+            for root in roots:
+                r = root.casefold()
+                if probe.startswith(r) or (r.endswith("/") and f"/{r}" in f"/{probe}") or (prefix and r.startswith(probe)):
+                    out.add(cls)
+    return out
+
+
 def write_set_conflicts(session: Session, task: TaskSpec) -> list[dict[str, Any]]:
     from aeos.worker_runtime.scope import write_sets_overlap
 
     out = []
+    mine = serialisation_classes(list(task.allowed_paths or []))
     for other in active_executions(session, exclude_task=task.id):
         ot = session.get(TaskSpec, other.task_id)
         if ot is None or ot.project_id != task.project_id:
             continue
         pairs = write_sets_overlap(list(task.allowed_paths or []), list(ot.allowed_paths or []))
-        if pairs:
-            out.append({"task_id": ot.id, "task_key": ot.task_key, "pairs": pairs[:5]})
+        shared = sorted(mine & serialisation_classes(list(ot.allowed_paths or [])))
+        if pairs or shared:
+            out.append({"task_id": ot.id, "task_key": ot.task_key, "pairs": pairs[:5], "classes": shared})
     return out
 
 
@@ -619,6 +741,11 @@ def scope_contract_problems(session: Session, task: TaskSpec) -> list[tuple[str,
     problems: list[tuple[str, str]] = []
     allowed = [str(p) for p in (task.allowed_paths or [])]
     forbidden = [str(p) for p in (task.forbidden_paths or [])]
+    if not allowed:
+        # ADR-0033 / §21 "allowed paths": an empty write scope would tell the worker the whole repository is
+        # writable; it is refused before any budget or attempt is spent.
+        problems.append(("NO_ALLOWED_PATHS", "TaskSpec has no allowed_paths; a worker is never started without an "
+                                             "explicit write scope (ADR-0033)"))
     for label, paths in (("allowed", allowed), ("forbidden", forbidden)):
         for p in paths:
             why = unsafe_path(p)
@@ -651,6 +778,145 @@ def _cost_estimate(task: TaskSpec, route: ModelRoute) -> tuple[float | None, int
     return None, tokens
 
 
+# ----------------------------------------------------------------------------- §19 admission answers (C7)
+KEY_ROLE_EVAL_FROM = "workforce.role_eval_required_from"  # risk class from which a PASS role evaluation is needed
+DEFAULT_ROLE_EVAL_FROM = "R4"
+RISK_ORDER = ("R0", "R1", "R2", "R3", "R4")
+KEY_RUN_MEMORY_MB = "workforce.run_memory_mb"
+DEFAULT_RUN_MEMORY_MB = 512
+CHARS_PER_TOKEN = 4
+ROLE_EVAL_TARGET_TYPE = "role_evaluation"
+
+
+def role_eligibility(session: Session, task: TaskSpec) -> dict[str, Any]:
+    """§46 "agent menjadi eligible untuk role dari hasil evaluasi, bukan dari judul di prompt". From the risk
+    class in ``workforce.role_eval_required_from`` (default R4) a PASS evaluation of the role's current revision,
+    or an ACTIVE owner EXCEPTION on role_evaluation/<role_key> bound to that revision, is required."""
+    from aeos.workforce import roles
+
+    threshold = str(_setting(session, KEY_ROLE_EVAL_FROM, DEFAULT_ROLE_EVAL_FROM) or DEFAULT_ROLE_EVAL_FROM)
+    risk = task.risk_class if task.risk_class in RISK_ORDER else "R1"
+    required = RISK_ORDER.index(risk) >= RISK_ORDER.index(threshold if threshold in RISK_ORDER else "R4")
+    revision = roles.role_revision(session, task.role_key)
+    evaluation = roles.role_evaluation(session, task.role_key, revision) if revision else {
+        "status": "NOT_EVALUATED", "basis": "role is not a catalog executor"}
+    out = {"required": required, "threshold": threshold, "risk_class": risk, "role_key": task.role_key,
+           "role_revision_hash": revision, "status": evaluation["status"], "basis": evaluation.get("basis", "")}
+    if required and evaluation["status"] != "PASS" and revision:
+        exc = ext.active_exception_decision(session, target_type=ROLE_EVAL_TARGET_TYPE, target_id=task.role_key,
+                                            target_hash=revision)
+        out["exception_decision_id"] = exc.id if exc else None
+    return out
+
+
+def context_estimate(session: Session, task: TaskSpec, te: TaskExecution, route: ModelRoute | None) -> dict[str, Any]:
+    """§19 "berapa konteks yang harus disalin": the worker prompt is built from the TaskSpec (+ repair findings)
+    and estimated at ~4 characters per token, plus the output cap, against the route's context window."""
+    try:
+        from aeos.worker_runtime.executor import build_prompt
+        from aeos.workforce import roles
+
+        chars = len(build_prompt(task, findings=list(te.pending_findings or []), protected=(), branch="aeos/estimate",
+                                 role_contract=roles.role_contract(session, task.role_key)))
+    except Exception:
+        return {"status": "UNKNOWN", "reason": "prompt estimate unavailable"}
+    prompt_tokens = chars // CHARS_PER_TOKEN + 1
+    output_cap = int((task.limits or {}).get("max_output_tokens", 8192) or 8192)
+    minimum = int((task.model_route_policy or {}).get("min_context_tokens") or 0)
+    window = route.context_window if route is not None else None
+    needed = max(prompt_tokens + output_cap, minimum)
+    if not window:
+        return {"status": "UNKNOWN", "prompt_tokens": prompt_tokens, "output_cap": output_cap, "needed": needed,
+                "context_window": None, "reason": "route context window UNKNOWN"}
+    return {"status": "FITS" if needed <= window else "TOO_LARGE", "prompt_tokens": prompt_tokens,
+            "output_cap": output_cap, "min_context_tokens": minimum, "needed": needed, "context_window": window}
+
+
+WORKER_MEMORY_SHARE = 0.5  # share of the host's physical memory the scheduler may reserve for worker runs
+
+
+def _reserved_compute_mb(session: Session, *, exclude_task: str | None) -> int:
+    """Memory reserved by runs that hold a slot (LEASED or RUNNING)."""
+    rows = session.scalars(select(WorkerRun).where(WorkerRun.execution_status.in_([S.LEASED.value, S.RUNNING.value]),
+                                                   WorkerRun.mode == DataMode.LIVE.value))
+    return sum(int(((r.caps or {}).get("compute") or {}).get("memory_mb") or 0) for r in rows
+               if r.task_id != exclude_task)
+
+
+def compute_check(session: Session, task: TaskSpec, *, active: int, cap: int) -> dict[str, Any]:
+    """§19 "batas resource/biaya" + §22 "mencadangkan compute": per-run memory (TaskSpec.limits.memory_mb or the
+    ``workforce.run_memory_mb`` setting) is reserved against a fixed worker share of the host's physical memory
+    (``WORKER_MEMORY_SHARE``) minus what LEASED/RUNNING runs already reserved — a deterministic capacity, not the
+    momentary free memory of other processes (that is recorded as an observation and a warning). A second worker
+    also needs a second CPU. The process sandbox cannot enforce the limit (WEAK)."""
+    import psutil
+
+    try:
+        need_mb = int((task.limits or {}).get("memory_mb") or _setting(session, KEY_RUN_MEMORY_MB, DEFAULT_RUN_MEMORY_MB))
+    except (TypeError, ValueError):
+        need_mb = DEFAULT_RUN_MEMORY_MB
+    try:
+        vm = psutil.virtual_memory()
+        total_mb = int(vm.total // (1024 * 1024))
+        available_mb = int(getattr(vm, "available", 0) // (1024 * 1024))
+        cpus = int(psutil.cpu_count(logical=True) or 1)
+    except Exception:
+        return {"status": "UNKNOWN", "memory_mb": need_mb, "reason": "host resource probe failed"}
+    budget = int(total_mb * WORKER_MEMORY_SHARE)
+    reserved = _reserved_compute_mb(session, exclude_task=task.id)
+    out: dict[str, Any] = {
+        "memory_mb": need_mb, "worker_budget_mb": budget, "reserved_mb": reserved, "available_mb_observed": available_mb,
+        "cpus": cpus, "enforced": False, "note": "process sandbox: limit reserved by admission, not enforced by the OS"}
+    if available_mb < need_mb:
+        out["warning"] = f"host free memory {available_mb} MB is below this run's reservation ({need_mb} MB) right now"
+    if budget - reserved < need_mb:
+        return {**out, "status": "INSUFFICIENT", "reason": f"{budget - reserved} MB of the worker memory budget left "
+                                                           f"after reservations, {need_mb} MB needed"}
+    if cap >= 2 and active + 1 > cpus:
+        return {**out, "status": "INSUFFICIENT", "reason": f"{active + 1} workers need {active + 1} CPUs, host has {cpus}"}
+    return {**out, "status": "OK"}
+
+
+def verifier_path(session: Session, task: TaskSpec) -> dict[str, Any]:
+    """§19 "siapa verifier dan penerima hasilnya": the trusted suite that will judge the result and the reviewer
+    path (native Claude Max review when CAN_REVIEW_WITH_MAX is READY, otherwise the manual review package)."""
+    from aeos.models.portfolio import Project
+
+    out: dict[str, Any] = {"verifier": "independent-verifier (trusted suite outside the candidate)"}
+    project = session.get(Project, task.project_id)
+    try:
+        from aeos.verification import suite
+
+        st = suite.suite_status(session, project) if project is not None else {"status": "BLOCKED",
+                                                                                 "code": "PROJECT_NOT_FOUND"}
+    except ImportError as exc:
+        st = {"status": "BLOCKED", "code": "MODULE_UNAVAILABLE", "reason": _str(exc)}
+    out["suite"] = st
+    ok, _reasons = ext.capability_ready(session, Capability.CAN_REVIEW_WITH_MAX, domain=task.domain,
+                                        project_id=task.project_id)
+    out["reviewer_path"] = "native (CAN_REVIEW_WITH_MAX READY)" if ok else "manual review package (official Claude Code)"
+    out["result_receiver"] = "verification -> checkpoint review -> AcceptanceRecord (owner merges)"
+    return out
+
+
+def _str(v: Any) -> str:
+    return redact_text(str(v))[:300]
+
+
+def _agent_scope_problem(agent: AgentDefinition | None, task: TaskSpec) -> str | None:
+    """§35 "project-scoped role/agent definitions": an agent outside its allowed domains/projects never runs."""
+    if agent is None:
+        return None
+    scope = agent.allowed_scope or {}
+    domains = scope.get("domains")
+    if isinstance(domains, list) and domains and task.domain not in domains:
+        return f"agent {agent.agent_key} is not allowed in domain {task.domain}"
+    projects = scope.get("project_ids")
+    if isinstance(projects, list) and task.project_id not in projects:
+        return f"agent {agent.agent_key} is not allowed for this project"
+    return None
+
+
 def admission_check(session: Session, task_id: str) -> Admission:
     te = get_te(session, task_id)
     task = session.get(TaskSpec, task_id)
@@ -669,6 +935,22 @@ def admission_check(session: Session, task_id: str) -> Admission:
                                                 "is never admitted as live work"))
     for code, why in scope_contract_problems(session, task):
         adm.blocks.append((code, why))
+    if not [o for o in (task.expected_outputs or []) if str(o).strip()]:
+        # §19 "output tambahan apa yang dihasilkan agent": a run without a declared output is never started
+        adm.blocks.append(("NO_EXPECTED_OUTPUT", "TaskSpec declares no expected_outputs"))
+    from aeos.workforce import roles
+
+    if task.role_key not in roles.executor_role_keys():
+        # §19 diagram "katalog role/skill -> task compiler", §17 "RoleSkillPack yang relevan": a title that is
+        # not a catalog executor role grants nothing and is never run
+        adm.blocks.append(("ROLE_UNKNOWN", f"role_key {task.role_key!r} is not an executor RoleSkillPack"))
+    else:
+        elig = role_eligibility(session, task)
+        adm.answers["role_eligibility"] = elig
+        if elig["required"] and elig["status"] != "PASS" and not elig.get("exception_decision_id"):
+            adm.waits.append(("ROLE_NOT_EVALUATED", f"risk {elig['risk_class']} >= {elig['threshold']}: role "
+                              f"{task.role_key} needs a PASS evaluation of revision {str(elig['role_revision_hash'])[:19]} "
+                              f"({elig['status']}: {elig['basis']}) or an owner EXCEPTION"))
     if scheduling_paused(session):
         adm.waits.append(("SCHEDULING_PAUSED", "scheduling is paused by the owner"))
     approved, why = ext.approved_version(session, te.plan_id)
@@ -692,6 +974,9 @@ def admission_check(session: Session, task_id: str) -> Admission:
         adm.waits.append(("AGENT_DISABLED", f"agent {agent_key} is not an implementation agent"))
     elif not agent.enabled:
         adm.waits.append(("AGENT_DISABLED", f"agent {agent_key} is disabled: {agent.enabled_reason}"))
+    out_of_scope = _agent_scope_problem(agent, task)
+    if out_of_scope:
+        adm.blocks.append(("AGENT_OUT_OF_SCOPE", out_of_scope))
     adm.agent = agent
     if task.domain == "OFFICE":
         ok, why = ext.office_external_allowed(session)
@@ -700,21 +985,29 @@ def admission_check(session: Session, task_id: str) -> Admission:
     ok, reasons = ext.capability_ready(session, Capability.CAN_RUN_WORKER, domain=task.domain, project_id=task.project_id)
     if not ok:
         adm.waits.append(("CAPABILITY_NOT_READY", "; ".join(reasons)))
-    from aeos.worker_runtime.sandbox import process_shell_allowed, sandbox_readiness, task_wants_shell
+    from aeos.worker_runtime.sandbox import task_sandbox_readiness
 
-    sb = sandbox_readiness(session, domain=task.domain)
+    # §25: the boundary THIS TaskSpec needs (domain, risk tier R3/R4, shell and egress grants); a shell is
+    # never given under the WEAK process sandbox (ADR-0051 amendment 2026-10-19).
+    sb = task_sandbox_readiness(session, domain=task.domain, risk_class=task.risk_class,
+                                tools_allowed=list(task.tools_allowed or []),
+                                egress_allowed=list(task.egress_allowed or []))
     if sb["status"] != "READY":
         adm.waits.append(("SANDBOX_NOT_READY", "; ".join(sb["reasons"])))
-    elif (sb.get("kind") == "process" and task_wants_shell(task.tools_allowed)
-          and not process_shell_allowed(session, sb.get("decision_id"))):
-        adm.waits.append(("SANDBOX_NOT_READY", "TaskSpec grants bash but the process-sandbox exception does not "
-                          "(details.allow_bash=true): with a shell the worker acts as the same OS user, incl. OS "
-                          "credential helpers (ADR-0051)"))
-    cap, _decision = concurrency_cap(session)
+    cap, _decision = concurrency_cap(session, task)
+    if agent is not None:
+        try:  # AgentDefinition.limits are an upper bound on the scheduler's own cap (§17)
+            cap = max(1, min(cap, int((agent.limits or {}).get("max_active", cap))))
+        except (TypeError, ValueError):
+            cap = 1
     adm.cap = cap
     active = active_executions(session, exclude_task=task.id)
     if len(active) >= cap:
         adm.waits.append(("CONCURRENCY_CAP", f"{len(active)} active implementation worker(s); cap {cap}"))
+    compute = compute_check(session, task, active=len(active), cap=cap)
+    adm.answers["compute"] = compute
+    if compute["status"] == "INSUFFICIENT":
+        adm.waits.append(("RESOURCE_INSUFFICIENT", compute["reason"]))
     conflicts = write_set_conflicts(session, task)
     if conflicts:
         adm.waits.append(("SHARED_WRITE_CONFLICT", "shared-write conflict with " +
@@ -732,11 +1025,28 @@ def admission_check(session: Session, task_id: str) -> Admission:
     ok, why = ext.verifier_available()
     if not ok:
         adm.waits.append(("VERIFIER_UNAVAILABLE", f"no independent verifier/acceptance path: {why}"))
+    else:
+        vp = verifier_path(session, task)
+        adm.answers["verifier"] = vp
+        if vp["suite"].get("code") in ("TRUSTED_SUITE_TAMPERED", "TRUSTED_SUITE_MISSING"):
+            # a registered suite that no longer verifies would end every attempt BLOCKED after spending budget
+            adm.waits.append(("VERIFIER_UNAVAILABLE", f"trusted suite {vp['suite']['code']}: {vp['suite'].get('reason')}"))
     route, rreasons = ext.select_route(session, task)
     if route is None:
         adm.waits.append(("ROUTE_INELIGIBLE", "; ".join(rreasons)))
     else:
         adm.route = route
+        if task.domain == "OFFICE":
+            # §23 controlled path: the route's owner decision (company authorisation + company-approved route,
+            # bound to the route identity) must still hold at admission — a revoked decision ends it here.
+            ok, why = ext.office_route_authorised(session, route)
+            if not ok:
+                adm.waits.append(("OFFICE_ROUTE_NOT_AUTHORISED", why))
+        ctx = context_estimate(session, task, te, route)
+        adm.answers["context"] = ctx
+        if ctx["status"] == "TOO_LARGE":
+            adm.blocks.append(("CONTEXT_TOO_LARGE", f"~{ctx['needed']} tokens (prompt + output cap) exceed the "
+                                                    f"route context window {ctx['context_window']}"))
         quota = route_quota_exhausted(session, route.route_key)
         if quota:
             adm.waits.append(("QUOTA_EXHAUSTED", quota + "; waiting (no fallback to another route)"))
@@ -746,8 +1056,30 @@ def admission_check(session: Session, task_id: str) -> Admission:
                                               "limits.max_cost_usd; no paid run without a cost decision"))
         else:
             adm.est_usd, adm.est_tokens = est_usd, est_tokens
+    # §40 trial admission: a TaskSpec launched for a change-proposal trial runs only while its TRIAL decision is
+    # still bound to the live baseline/candidate/scope (provider, operations, caps) - re-checked every attempt.
+    try:
+        from aeos.proposals import facade as proposals
+
+        for code, why in proposals.trial_admission_problems(session, task, route=adm.route):
+            adm.blocks.append((code, why))
+    except (ImportError, ModuleNotFoundError):  # pragma: no cover - proposals ships with the foundation
+        if _is_trial_task(task):
+            adm.blocks.append(("MODULE_UNAVAILABLE", "proposal trial binding cannot be verified (fail closed)"))
+    except AeosError as exc:  # a binding check that cannot complete blocks this trial task only (fail closed)
+        adm.blocks.append(("TRIAL_BINDING_UNVERIFIED", f"{exc.code}: {exc.message}"[:300]))
     adm.admitted = not adm.waits and not adm.blocks
     return adm
+
+
+def _is_trial_task(task: TaskSpec | None) -> bool:
+    """A change-proposal trial task (fail-closed fallback when aeos.proposals cannot be imported). Input artifacts
+    are the plan's strings or the compiler's hash-bound dicts that keep the original ``label``."""
+    for a in (task.input_artifacts if task is not None else None) or []:
+        label = str(a.get("label") or "") if isinstance(a, dict) else str(a)
+        if label.startswith("change_proposal:"):
+            return True
+    return False
 
 
 def _role_revision(session: Session, role_key: str | None) -> str | None:
@@ -806,7 +1138,13 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
               "max_tokens": int(limits.get("max_tokens", DEFAULT_MAX_TOKENS)),
               "max_cost_usd": adm.est_usd, "timeout_seconds": int(limits.get("timeout_seconds", 1800)),
               "max_attempts": max_attempts(task, te), "capability_ttl_seconds": task.capability_ttl_seconds,
-              "concurrency_cap": adm.cap},
+              "concurrency_cap": adm.cap,
+              # §22 compute reserved with the slot and the cost (released when the run is no longer LEASED)
+              "compute": {k: v for k, v in (adm.answers.get("compute") or {}).items()
+                          if k in ("memory_mb", "status", "enforced")},
+              "context_estimate": adm.answers.get("context"),
+              "verifier_path": adm.answers.get("verifier"),
+              "role_eligibility": adm.answers.get("role_eligibility")},
     )
     session.add(run)
     session.add(Lease(id=lease_id, task_id=task.id, run_id=run_id, owner=owner, acquired_at=now,
@@ -817,12 +1155,47 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
     return run
 
 
+FAIRNESS_MAX_WAIT = timedelta(minutes=30)
+
+
+def fair_order(session: Session, ready: list[TaskExecution]) -> list[TaskExecution]:
+    """ADR-0050 amendment (fairness, §10 "Workforce & Scheduler: fairness"):
+
+    1. anti-starvation: a task READY for longer than ``FAIRNESS_MAX_WAIT`` goes first (oldest first);
+    2. otherwise round-robin by project: projects whose last lease is oldest (or that never had one) come first,
+       one task per project per round, each project's tasks oldest-READY first.
+    Deterministic (ties by task id); no LLM, no priority inferred from model output."""
+    now = utcnow()
+    floor = now - timedelta(days=36500)
+
+    def since(te: TaskExecution) -> Any:
+        return ensure_aware(te.state_changed_at) or ensure_aware(te.created_at) or floor
+
+    aged = sorted([te for te in ready if since(te) <= now - FAIRNESS_MAX_WAIT], key=lambda t: (since(t), t.task_id))
+    rest = [te for te in ready if te not in aged]
+    groups: dict[str, list[TaskExecution]] = {}
+    for te in sorted(rest, key=lambda t: (since(t), t.task_id)):
+        groups.setdefault(te.project_id, []).append(te)
+    last: dict[str, Any] = {}
+    if groups:
+        rows = session.execute(select(WorkerRun.project_id, func.max(WorkerRun.created_at))
+                               .where(WorkerRun.project_id.in_(list(groups)), WorkerRun.run_type == "IMPLEMENTATION")
+                               .group_by(WorkerRun.project_id))
+        last = {pid: ensure_aware(at) for pid, at in rows}
+    order = sorted(groups, key=lambda pid: (last.get(pid) or floor, since(groups[pid][0]), pid))
+    interleaved: list[TaskExecution] = []
+    while any(groups[p] for p in order):
+        for pid in order:
+            if groups[pid]:
+                interleaved.append(groups[pid].pop(0))
+    return aged + interleaved
+
+
 def admit_ready_tasks(session: Session, *, actor: str = "system:scheduler", limit: int | None = None) -> list[str]:
-    """Admit READY LIVE tasks up to the concurrency cap. Returns leased run ids."""
+    """Admit READY LIVE tasks up to the concurrency cap in fair order (``fair_order``). Returns leased run ids."""
     leased: list[str] = []
-    ready = list(session.scalars(select(TaskExecution).where(TaskExecution.state == S.READY.value,
-                                                             TaskExecution.mode == DataMode.LIVE.value)
-                                 .order_by(TaskExecution.state_changed_at.asc())))
+    ready = fair_order(session, list(session.scalars(select(TaskExecution).where(
+        TaskExecution.state == S.READY.value, TaskExecution.mode == DataMode.LIVE.value))))
     for te in ready:
         if limit is not None and len(leased) >= limit:
             break
@@ -901,7 +1274,12 @@ def record_action(session: Session, run_id: str, *, lease_id: str | None, action
         return False
     clean = redact(action)
     if not action.get("is_narration") and action.get("kind") not in ("narration", "step"):
-        run.current_action = str(clean.get("label", ""))[:500]
+        # observed runner tool action: the source label follows this writer (models.workforce listener)
+        run._runner_action_write = True  # type: ignore[attr-defined]
+        try:
+            run.current_action = str(clean.get("label", ""))[:500]
+        finally:
+            run._runner_action_write = False  # type: ignore[attr-defined]
     path = clean.get("path")
     if action.get("kind") == "edit_file" and path and clean.get("status") == "completed":
         run.touched_paths = list(dict.fromkeys([*(run.touched_paths or []), str(path)[:400]]))[:2000]
@@ -1122,12 +1500,15 @@ def reopen_for_reverification(session: Session, task_id: str, *, reason: str, ac
                                            "(extra attempt) is required for the re-verification attempt")
     else:
         target, extra = S.READY.value, f"; re-verification attempt {te.attempts_used + 1}/{cap}"
+    # the re-verification attempt starts from the changed head/base: the pinned base is released explicitly
+    # (and audited below) instead of silently moving an in-flight task to a newer commit
     te = transition_task(session, task_id, target, reason=f"reopened: {note}{extra}", actor=actor,
                          reason_code="ACCEPTANCE_STALE", _allow_reopen=True, active_run_id=None,
-                         pending_findings=findings)
+                         pending_findings=findings, base_commit=None)
     _audit(session, actor, "workforce.task.reopen", target_type="task", target_id=task_id,
            project_id=te.project_id, domain=te.domain, reason=note,
            details={"to": target, "accepted_run_id": te.accepted_run_id, "attempts_used": te.attempts_used,
+                    "base_commit": "released for re-pin at the next lease",
                     "max_attempts": cap})
     return te
 
@@ -1296,6 +1677,15 @@ def _authorisation_lost(session: Session, run: WorkerRun, te: TaskExecution) -> 
         ok, owhy = ext.office_external_allowed(session)
         if not ok:
             return owhy
+    try:
+        from aeos.proposals import facade as proposals
+
+        lost = proposals.trial_authorisation_lost(session, run.task_id)
+    except (ImportError, ModuleNotFoundError):  # pragma: no cover - proposals ships with the foundation
+        task = session.get(TaskSpec, run.task_id) if run.task_id else None
+        lost = "proposal trial binding cannot be verified (fail closed)" if _is_trial_task(task) else None
+    if lost:
+        return f"proposal trial authority lost: {lost}"[:500]
     return None
 
 

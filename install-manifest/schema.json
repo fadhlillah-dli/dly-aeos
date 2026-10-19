@@ -48,6 +48,58 @@
     "source_ref": {"type": "string", "pattern": "^S[0-9]{2}$"},
     "component_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
     "nullable_text": {"type": ["string", "null"]},
+    "sha256_digest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "distribution": {
+      "$comment": "§37: the distribution artifact is its own identity (not the source repo, not the binary on PATH).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["release_asset", "package_manager", "installer", "os_component", "saas", "source_checkout",
+                          "pypi", "npm", "none", "unknown"]},
+        "url": {"type": ["string", "null"], "pattern": "^https://"},
+        "digest": {"$ref": "#/$defs/sha256_digest"},
+        "channel": {"$ref": "#/$defs/nullable_text"},
+        "note": {"$ref": "#/$defs/nullable_text"}
+      }
+    },
+    "signature": {
+      "$comment": "§25 tool admission: signature/provenance 'bila tersedia'; UNAVAILABLE/UNKNOWN recorded explicitly.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "result"],
+      "properties": {
+        "method": {"enum": ["gpg", "sigstore", "authenticode", "notarization", "checksum_only", "none", "unknown"]},
+        "available": {"type": ["boolean", "null"]},
+        "verified": {"type": "boolean"},
+        "verified_at": {"$ref": "#/$defs/nullable_text"},
+        "result": {"enum": ["VERIFIED", "NOT_VERIFIED", "UNAVAILABLE", "UNKNOWN"]},
+        "note": {"$ref": "#/$defs/nullable_text"}
+      }
+    },
+    "port": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port", "host"],
+      "properties": {
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "host": {"enum": ["127.0.0.1", "::1", "localhost"]},
+        "setting": {"type": ["string", "null"], "pattern": "^[a-z_]{1,64}$"},
+        "purpose": {"type": "string"}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "os": {"type": "array", "items": {"enum": ["windows", "macos", "linux"]}, "uniqueItems": true},
+        "arch": {"type": "array", "items": {"type": "string"}},
+        "min_version": {"$ref": "#/$defs/nullable_text"},
+        "max_version": {"$ref": "#/$defs/nullable_text"},
+        "source": {"$ref": "#/$defs/nullable_text"},
+        "note": {"$ref": "#/$defs/nullable_text"}
+      }
+    },
     "binary_probe": {
       "type": "object",
       "additionalProperties": false,
@@ -173,6 +225,14 @@
         },
         "bootstrap_order": {"type": ["integer", "null"], "minimum": 0, "maximum": 11},
         "approved_pin": {"type": ["string", "null"], "minLength": 1, "not": {"type": "string", "pattern": "[Ll][Aa][Tt][Ee][Ss][Tt]"}},
+        "approved_digest": {"$ref": "#/$defs/sha256_digest"},
+        "distribution": {"$ref": "#/$defs/distribution"},
+        "signature": {"$ref": "#/$defs/signature"},
+        "ports": {"type": "array", "items": {"$ref": "#/$defs/port"}},
+        "config_refs": {"type": "array", "items": {"type": "string",
+                                                   "pattern": "^(settings:[a-z_]{1,64}|file:[A-Za-z0-9_./-]{1,200})$"}},
+        "compatibility": {"$ref": "#/$defs/compatibility"},
+        "tool_schema_hash": {"$ref": "#/$defs/sha256_digest"},
         "probe": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/probe"}]},
         "capability_tests": {"type": "array", "items": {"$ref": "#/$defs/capability_test"}},
         "access": {
@@ -195,7 +255,8 @@
             "model": {"enum": ["NONE", "SUBSCRIPTION", "FREE_TIER", "METERED_API", "COMPUTE", "UNKNOWN"]},
             "amount": {"type": ["number", "null"]},
             "note": {"$ref": "#/$defs/nullable_text"},
-            "source": {"$ref": "#/$defs/nullable_text"}
+            "source": {"$ref": "#/$defs/nullable_text"},
+            "free_until": {"type": ["string", "null"], "pattern": "^([0-9]{4}-[0-9]{2}-[0-9]{2}|UNKNOWN)$"}
           }
         },
         "operations": {

@@ -62,6 +62,7 @@ export default function ProposalsPage() {
             initialComponent={component}
             initialSource={source}
             initialKind={initialKind}
+            initialPin={params.get("pin")}
             onCancel={() => {
               setOpen(false);
               setParams({});

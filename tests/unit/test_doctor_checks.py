@@ -226,6 +226,27 @@ def test_github_adapter_states_and_token_never_exposed(settings, db, secrets_mem
     assert check("adapter.github_token", _ctx(settings, db, r, functional=True)).status == "EXPIRED"
 
 
+def test_github_token_privilege_is_reported_from_scopes(settings, db, secrets_memory):
+    """§07 step 7 least privilege: a classic/OAuth token with repo/workflow over all repositories is a residual
+    risk the Doctor shows (from X-OAuth-Scopes); a fine-grained PAT is least privilege by construction."""
+    url = f"https://api.github.com/repos/{settings.platform_repo_slug}"
+    body = {"private": True, "default_branch": "main", "permissions": {"push": True}, "id": 1}
+    secrets_memory.put("personal/github", "gho_" + "x" * 36, actor="test")
+    r = base_runner()
+    r.http[url] = HttpResult(200, body, headers={"x-oauth-scopes": "repo, workflow, read:org"})
+    res = check("adapter.github_token", _ctx(settings, db, r, functional=True))
+    priv = res.observed_evidence["token_privilege"]
+    assert res.status == "CONNECTED" and priv["least_privilege"] is False and priv["broad_scopes"] == ["repo",
+                                                                                                         "workflow"]
+    assert "fine-grained" in res.observed_evidence["residual_risks"][0]
+    assert "gho_" not in json.dumps(res.as_dict())  # only the documented prefix kind, never the value
+    secrets_memory.put("personal/github", "github_pat_" + "y" * 40, actor="test")
+    r.http[url] = HttpResult(200, body)  # fine-grained tokens carry no X-OAuth-Scopes
+    res = check("adapter.github_token", _ctx(settings, db, r, functional=True))
+    assert res.observed_evidence["token_privilege"]["least_privilege"] is True
+    assert "residual_risks" not in res.observed_evidence
+
+
 def test_google_adapter_reads_the_token_google_connect_writes(settings, db, secrets_memory):
     """W1 seam: the check reads personal/google-oauth-token (written by `aeos publish google-connect`, read by
     the publisher) and its remedy is that consent flow - never `aeos secrets set` of a typed-in token."""
@@ -265,6 +286,8 @@ def test_branch_protection_residual_risk(settings, db, secrets_memory, status, b
             return_value=Response(status, json=body))
         gh.get(f"https://api.github.com/repos/{slug}/rulesets").mock(return_value=Response(status, json=body))
         gh.get(f"https://api.github.com/repos/{slug}/rules/branches/main").mock(return_value=Response(200, json=[]))
+        gh.get(f"https://api.github.com/repos/{slug}/environments").mock(
+            return_value=Response(200, json={"total_count": 0, "environments": []}))
         res = check("delivery.branch_protection", _ctx(settings, db, r, functional=True))
         assert all(c.request.method == "GET" for c in gh.calls)
     assert res.status == "MISSING" and res.error_code == code

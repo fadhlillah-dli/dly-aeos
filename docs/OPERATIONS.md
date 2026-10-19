@@ -56,13 +56,26 @@ Office archives on company-approved storage only.
 
 | Command | What it does |
 |---|---|
-| `aeos ops release build [--ref HEAD]` | `git archive` of a clean commit reachable from `main` → zip + provenance (commit, tree hash, artifact SHA-256, schema head, built_at, builder) |
+| `aeos ops release build [--ref HEAD]` | `git archive` of a clean commit reachable from `main` **that is accepted** (trusted provider-CI PASS for that exact commit, or an owner EXCEPTION decision) → zip + provenance (commit, tree hash, artifact SHA-256, schema head, acceptance basis, built_at, builder) + pinned UI bundle (`frontend/dist` zipped with its own SHA-256; its correspondence to the commit is labelled UNVERIFIED) |
+| `aeos ops release accept --commit <sha> --operator <admin> --reason "..."` | human-only EXCEPTION decision bound to one exact commit, used when trusted CI PASS is not available |
 | `aeos ops release list` | releases with integrity and ACTIVE/PREVIOUS role |
-| `aeos ops release promote <id> --operator <admin>` | decision → compatibility (migration head vs DB) → pre-promote backup + restore test → smoke test in a subprocess on a temp loopback port against a DB copy → live migration only if required (server stopped) → `ACTIVE.json` (previous kept) |
+| `aeos ops release promote <id> --operator <admin>` | decision (bound to artifact hash, UI hash, runtime-config hash) → compatibility (migration head vs DB) → pre-promote backup + restore test → smoke test in a subprocess on a temp loopback port against a DB copy (health, then functional: temporary admin in the copy, login, explicit PERSONAL, doctor RUNTIME run, capabilities, projects) → live migration only if required (server stopped) → `ACTIVE.json` (previous kept, config hash recorded) |
 | `aeos ops release rollback --operator <admin>` | pointer back to the previous release after the same checks; refused when the DB is ahead (restore the pre-promote backup first) |
+| `aeos serve [--release auto\|active\|checkout]` | `auto` (default) runs the ACTIVE release when one was promoted: artifact + UI hash verified, extracted tree compared byte-for-byte (planted files refused), `PYTHONPATH` = the release only, byte-code cache outside the release; refuses to start on any integrity failure. `checkout` runs the editable source tree and warns when a release is active. `--dev`/`--reload` always run the checkout and need a separate dev profile (`AEOS_DATA_DIR` + `AEOS_KEYRING_SERVICE`, set by `scripts/dev.*`) unless `--dev-with-real-credentials` |
+
+`GET /api/health` reports `controller.mode` (`release`/`checkout`), `release_id`, `commit`,
+`matches_active`; the doctor check `recovery.config_rollback` FAILS with
+`CONTROLLER_NOT_ACTIVE_RELEASE` when the running controller is not the ACTIVE release, and with
+`CONFIG_CHANGED_SINCE_PROMOTION` when the runtime config / policy snapshot hash differs from the one
+recorded at promotion.
 
 Any failure keeps the previous release active, raises a HIGH alert and is audited
 (§50 "Upgrade controller gagal"). Details: [runbook](runbooks/controller-upgrade-rollback.md).
+
+**GitHub Releases** (master §06 "GitHub activity ... releases"): AEOS builds and promotes local release
+artifacts only; it never creates a GitHub tag or Release. After a successful promotion the owner may
+publish one by hand (`gh release create v<version> --target <commit> --notes-file <provenance summary>`),
+so release activity on GitHub is an owner action, not something the controller claims.
 
 ## SLIs and alerts
 
@@ -85,6 +98,17 @@ Any failure keeps the previous release active, raises a HIGH alert and is audite
 **Targets**: none by default — every SLI shows `NO_TARGET` until you record one, based on the
 criticality you decide: `aeos ops sli target queue_age_seconds --max 1800 --rationale "..."`
 (audited). A target with no data shows UNKNOWN, never "within target".
+
+**Per criticality** (§33): `aeos ops sli criticality <project> HIGH|MEDIUM|LOW` records the owner's
+criticality of a project, and `aeos ops sli target <key> --criticality HIGH --max ...` sets a target that
+applies only to projects of that level (per-project SLIs only); `by_criticality` in the result shows each.
+
+**Error budget** (§46): `aeos ops sli budget-policy --window-days 28 --objective 0.99 --action alert|pause_scheduling`
+(owner decision). Every evaluation stores its samples (`ops_sli_samples`); the budget is the share of
+measured evaluations allowed to breach over the window (UNKNOWN/NO_TARGET never count as good). When a
+budget is exhausted a HIGH `error_budget_exhausted` alert is raised; with `pause_scheduling` new work is
+paused. The scheduler pause is global, so it is lifted only when the budget of every domain that caused it
+has recovered, and never when the current pause was set by someone else (emergency stop, a human).
 
 **Alerts** are deduplicated (`ops_alerts`) and emitted once as `alert.raised` events (resolved:
 `alert.resolved`), carrying the domain so Office alerts never reach a Personal session. Objective
@@ -130,6 +154,12 @@ snapshot is never a live status.
 * `GET /api/ops/retirement/{project_id}` — read-only retirement checklist (consumers, jobs,
   credentials, data retention, legal hold, backups, communication, final owner decision). Nothing is
   deleted or revoked by it (§33).
+* `PUT /api/ops/retirement/{project_id}/legal-hold` and `.../steps/{key}` record the tracked workflow
+  (`ops_retirements`; a step record does not change the checklist hash, a legal-hold change does).
+  `POST /api/ops/retirement/{project_id}/decision` records the owner's final verification: a `RETIREMENT`
+  decision bound to the shown `checklist_hash` (409 `RETIREMENT_BLOCKING_ITEMS` /
+  `RETIREMENT_CHECKLIST_STALE` / `RETIREMENT_REQUIRES_RETIRING`); lifecycle `RETIRED` is refused
+  (`RETIREMENT_NOT_VERIFIED`) unless that decision still matches the current checklist.
 
 ## Dependency lockfile
 
@@ -148,12 +178,69 @@ python -m pip install -r requirements.lock && python -m pip install --no-deps -e
 Review the diff (new packages are supply-chain changes) and commit it with the dependency change.
 Hash pinning (`--generate-hashes`) is a possible hardening step recorded in ADR-0093.
 
+A candidate that changes a manifest or lockfile is **high impact**: the verifier records a
+`DEPENDENCY_DIFF` evidence item (added / removed / upgraded packages; licences `UNKNOWN` = NOT-PROVEN)
+and — because the trusted suite runs with the controller's installed packages (recorded as
+`dependency_set_hash` on every verification) — a changed Python dependency set is NOT-PROVEN in
+isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106).
+
+## Delivery targets, gates and verifier honesty (ADR-0106)
+
+* **Release approvers (G7):** record the GitHub logins allowed to merge/release a project as a human
+  POLICY decision: `POST /api/decisions` with `kind=POLICY`, `target_type=release_approvers`,
+  `target_id=<project id>`, `auth_scope={"github_logins": ["<login>"]}`. Without it a human merge
+  is shown NOT_PROVEN; a merge by any other account is FAIL.
+* **Staging / production targets (G6/G8):** register a PERSONAL integration with
+  `provider=deployment-target`, `purpose=staging|production`, `root_id=https://<base url>` (optional
+  `config.health_path`, default `/health`). AEOS never deploys; `aeos delivery observe-target
+  <project> --environment staging --sha <commit>` performs one GET and records a RUNTIME_OBSERVATION
+  that is PASS only when the target reports the exact commit and healthy.
+* **Pipeline reference (§31):** set `config.gate_G1 ... gate_G5` on the project's `ci` integration
+  to exact CI job names (template: `blueprints/pipeline-reference.yaml`); otherwise CI jobs are
+  classified by name heuristics and the evidence says `NAME_HEURISTIC`.
+* **Database migrations of managed projects:** the verifier does not run upgrade/downgrade/restore
+  round-trips (`migration_rollback` NOT-PROVEN). Run them in the project's own pipeline with a
+  dedicated migration credential that is separate from the runtime credential, and keep the result
+  as CI evidence.
+* **Verifier isolation:** every VERIFICATION_REPORT states `verifier_isolation: WEAK` (same OS user,
+  no container/egress enforcement) until a sandboxed runner exists; the Gate panel shows it next to
+  the verifier status.
+* **Specialist reviews:** a UI change (or a frontend/UX role) needs the A11Y reviewer, data/AI roles or
+  CONFIDENTIAL/RESTRICTED data the PRIVACY reviewer, CI/IaC or operations roles the SRE reviewer. Request
+  them with "Review wajib (spesialis)" on the run list, `POST /api/runs/<run>/reviews/batch`, or
+  `aeos verify review <run> --kind A11Y|PRIVACY|SRE|SECURITY`. A run has a review budget
+  (`reviewer_policy.max_reviews_per_run`, default 12; quota waits do not count).
+* **OFFICE delivery:** NOT_APPLICABLE — no Bitbucket push/PR/Pipelines adapter and no company
+  authorisation; `prepare-pr` refuses with `OFFICE_DELIVERY_NOT_AVAILABLE`.
+
+## Worker runtime (sandbox, engine contract, attribution)
+
+| Command / setting | What it does |
+|---|---|
+| `aeos worker status [--domain OFFICE]` | sandbox levels, the policy requirement for the domain, residual risks, OpenCode status |
+| `aeos worker containment --kind process` | negative containment tests in a real child process (WEAK: NOT_ENFORCED items are residual risks) |
+| `aeos worker containment --kind container [--domain OFFICE]` | the 20-check suite INSIDE the worker image (build it first: see `sandbox/README.md`); a fresh PASS for the current image is what lets admission select the container sandbox |
+| `aeos worker contract-test` | real OpenCode against a scripted loopback model with a hostile repository `opencode.json`: request contract, output cap, tool list, project config ignored, outside-file denied, patch-only, watchdog, kill. Records `WORKER_CONTRACT_TEST` evidence (Doctor `worker.contract`); a real route's model behaviour stays NOT_PROVEN |
+| `aeos worker reap` | remove worker containers whose run is no longer active (after a controller crash) |
+| `commit_author_name` / `commit_author_email` (`aeos.yaml` in the OS config dir, see `config/aeos.example.yaml`, or `AEOS_COMMIT_AUTHOR_NAME` / `AEOS_COMMIT_AUTHOR_EMAIL`) | §06 attribution of candidate commits: set the owner's GitHub noreply address (`<id>+<user>@users.noreply.github.com`). Unset, commits use `AEOS Runtime <aeos-runtime@localhost>` and the run records `commit_identity.source = runtime-default (not linked to an account)` (the run record keeps the address minimised; it is in the commit only). Every candidate commit carries `AEOS-Run-Id`, `AEOS-Task`, `AEOS-Agent`, `AEOS-Route`, `AEOS-Engine` and `AEOS-Prompt-Revision` trailers |
+
+Worker rules enforced by the runtime (ADR-0051 amendment 2026-10-19): no shell and no egress TaskSpec under
+the process sandbox; R3 under the process sandbox only when the owner's exception lists
+`run_worker_process_sandbox_r3`; R4 always BLOCKED (no VM sandbox); no process sandbox while AEOS runs
+elevated; a repository carrying `opencode.json` / `.opencode/` is refused (`WORKTREE_AGENT_CONFIG`); an
+out-of-scope edit stops the run immediately; memory/process caps (`limits.max_memory_mb`,
+`limits.max_processes`) stop it with `RESOURCE_LIMIT`; a change to the running controller checkout fails and
+quarantines the run (HIGH alert); a worker blocker (`.aeos/report.json`, schema
+`contracts/worker/aeos-report.schema.json`) becomes an AGENT decision request and the task waits BLOCKED
+(`WORKER_BLOCKER`) for the owner. A worker prompt template change changes `ModelRoute.prompt_revision`, which
+invalidates route approvals bound to the old configuration hash (`PROMPT_REVISION_CHANGED`).
+
 ## Scenarios tested as normal operations (§33)
 
 | Scenario | Where it is handled |
 |---|---|
 | Worker crash / controller restart | [restart-recovery](runbooks/restart-recovery.md); lease reconciliation (workforce) |
-| Broker outage / expired credential | fail closed (capabilities BLOCKED); [credential-rotation](runbooks/credential-rotation.md) |
+| Broker outage / expired credential | fail closed (capabilities BLOCKED); executor: no grant -> `BROKER_UNAVAILABLE` before start, broker unreachable mid-run -> attempt FAILED (never DONE, no fallback); [credential-rotation](runbooks/credential-rotation.md) |
 | Quota exhaustion | queue/backoff, no paid fallback; [queue-drain](runbooks/queue-drain.md) |
 | Partial publication / provider outage | [publication-reconciliation](runbooks/publication-reconciliation.md) |
 | Runaway run | [cancel-runaway-run](runbooks/cancel-runaway-run.md), emergency stop |
@@ -169,6 +256,8 @@ Hash pinning (`--generate-hashes`) is a possible hardening step recorded in ADR-
   private repositories) are not proven on the real account.
 * Worker containment, egress control, secret broker, verifier independence, cancel and bypass tests
   must pass on this machine before workers are trusted.
-* The released controller artifact is a source archive; serving the UI from the artifact and
-  running the controller directly from the extracted release are NOT-PROVEN.
+* The released controller artifact is a source archive run with the checkout's virtual environment
+  (third-party packages are pinned by `requirements.lock`, not bundled). The UI bundle is pinned by
+  hash at build time, but that it was built from the released commit is UNVERIFIED. Releases built
+  before acceptance gating show acceptance UNKNOWN at promotion.
 * Backups are not encrypted by AEOS; encryption at rest/off-machine copies are owner decisions.

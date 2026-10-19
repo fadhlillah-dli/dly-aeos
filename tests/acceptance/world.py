@@ -46,9 +46,12 @@ def register_free_route(db: Session, key: str, *, model_id: str = "vendor/acc-mo
     from aeos.routing.service import compute_config_hash
 
     now = utcnow()
+    # terms as the owner recorded them when registering the route (known, not restricted): data classes above
+    # PUBLIC are only ever allowed on known training/trial terms (§23)
     r = ModelRoute(route_key=key, pool="WORKER", provider=provider, model_id=model_id, endpoint=endpoint,
                    status="CANDIDATE", eligible_domains=["PERSONAL"], allowed_data_classes=["PUBLIC", "INTERNAL"],
                    supports_tools="YES", is_free=is_free, pricing=pricing or {}, context_window=131072,
+                   data_terms={"may_use_inputs_for_training": False, "trial_only_no_confidential": False},
                    pricing_checked_at=now, terms_checked_at=now, availability="AVAILABLE", mode="LIVE",
                    origin="CATALOG_DISCOVERED", fallback_chain=fallback_chain or [], priority=10)
     db.add(r)
@@ -58,9 +61,11 @@ def register_free_route(db: Session, key: str, *, model_id: str = "vendor/acc-mo
     return r
 
 
-def activate_route(client: AuthedClient, key: str, *, mode: str = "APPROVED", budget_decision_id: str | None = None
+def activate_route(client: AuthedClient, key: str, *, mode: str = "TRIAL", budget_decision_id: str | None = None
                    ) -> dict[str, Any]:
-    """Owner reviews the route (exact config hash) and activates it: ROUTE_ACTIVATION decision."""
+    """Owner reviews the route (exact config hash) and activates it: a TRIAL decision. A production
+    (APPROVED / ROUTE_ACTIVATION) activation additionally needs recorded EvalRuns of exactly this
+    configuration (§23 "diizinkan dan telah diuji"), which the pilot does not have."""
     route = client.get(f"/api/routes/{key}").json()
     cfg = route.get("config_hash") or route.get("route", {}).get("config_hash")
     body: dict[str, Any] = {"mode": mode, "rationale": "reviewed terms and eval for acceptance",
@@ -321,11 +326,15 @@ def fake_opencode(monkeypatch: Any, version: str = "1.19.3") -> None:
 
 
 def owner_exception(client: AuthedClient, *, target_type: str, target_id: str, details: dict[str, Any],
-                    days: int = 7, rationale: str = "owner exception for the acceptance pilot") -> dict[str, Any]:
-    r = client.post("/api/decisions", json={
+                    days: int = 7, rationale: str = "owner exception for the acceptance pilot",
+                    allowed_operations: list[str] | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {
         "kind": "EXCEPTION", "target_type": target_type, "target_id": target_id, "rationale": rationale,
         "expires_at": (utcnow() + timedelta(days=days)).isoformat(), "auth_scope": {"domain": "PERSONAL"},
-        "details": details})
+        "details": details}
+    if allowed_operations:
+        body["allowed_operations"] = allowed_operations
+    r = client.post("/api/decisions", json=body)
     assert r.status_code == 201, r.text
     return r.json()
 
@@ -335,7 +344,7 @@ WORKER_ROUTE = "worker.acc-free"
 
 def worker_ready(client: AuthedClient, db: Session, monkeypatch: Any, *, tasks: list[dict[str, Any]] | None = None,
                  project_name: str = "Worker App", platform: bool = False, responder: Any = None,
-                 targets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                 targets: list[dict[str, Any]] | None = None, cover_r3: bool = False) -> dict[str, Any]:
     """Approved plan with compiled TaskSpecs and every admission prerequisite decided by the owner:
     an activated free worker route, the ADR-0051 process-sandbox exception, the implementer agent
     enabled through the API, and the plan executed (tasks QUEUED -> READY). ``platform`` plans on the
@@ -348,8 +357,12 @@ def worker_ready(client: AuthedClient, db: Session, monkeypatch: Any, *, tasks: 
     fake_opencode(monkeypatch)
     register_free_route(db, WORKER_ROUTE)
     activate_route(client, WORKER_ROUTE)
+    # ``cover_r3``: the owner's exception explicitly covers R3 (protected-path) work under the process sandbox
+    # (ADR-0051 amendment 2026-10-19); without it R3 waits for the container sandbox.
     owner_exception(client, target_type="worker_sandbox", target_id="process",
-                    details={"allow_process_sandbox": True})
+                    details={"allow_process_sandbox": True},
+                    allowed_operations=["run_worker_process_sandbox", "run_worker_process_sandbox_r3"] if cover_r3
+                    else None)
     # The controlled precondition is written AFTER the owner decisions it depends on: recording a
     # ROUTE_ACTIVATION / EXCEPTION decision marks the dependent Doctor results STALE (§08 invalidation), so a
     # result recorded before them would (correctly) no longer count - exactly as a real recheck must follow.

@@ -99,7 +99,7 @@ def _latest_capability_evidence(ctx: CheckContext, slug: str) -> Any:
 
 
 @check("delivery.branch_protection", "DELIVERY", "Merge gate provider / branch protection (read-only)", component_id="github",
-       ttl_seconds=86400, invalidators=(f"secret:{GITHUB_REF}", "target", "repo:origin"), severity_fail="HIGH",
+       ttl_seconds=86400, invalidators=(f"secret:{GITHUB_REF}", "integration:*", "repo:origin"), severity_fail="HIGH",
        scope={"domain": "PERSONAL"}, ok={"CONFIGURED", "VERIFIED"}, network=True,
        description="Tanpa --functional: bukti PROVIDER_CAPABILITY terakhir (aeos delivery capabilities --record). "
                    "Dengan --functional: aeos.delivery.provider.check_capabilities (GET saja, jaringan).")

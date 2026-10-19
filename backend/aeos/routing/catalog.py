@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from aeos.claude_bridge.binary import neutral_cwd
@@ -33,7 +33,8 @@ from aeos.core.timeutil import utcnow
 from aeos.models.cost import QuotaState
 from aeos.models.routing import ModelRoute
 from aeos.models.routing_ext import CatalogRefresh
-from aeos.routing.service import compute_config_hash, refresh_config_hash
+from aeos.routing.seed import _worker_prompt_revision
+from aeos.routing.service import WORKER_EXECUTED_POOLS, compute_config_hash, refresh_config_hash
 
 log = logging.getLogger("aeos.routing.catalog")
 
@@ -102,6 +103,21 @@ def _apply_openrouter(route: ModelRoute, m: dict[str, Any], now: datetime) -> No
     route.availability_checked_at = now
 
 
+# §23 "Trial/data restrictions diperiksa": a model family whose provider publishes trial-only terms keeps them
+# whichever gateway lists it (a Nemotron discovered on OpenRouter is still "trial use only - no confidential
+# data"). Training flags of the serving provider stay UNKNOWN until the owner records the terms.
+FAMILY_TERMS: dict[str, dict[str, Any]] = {
+    "nvidia": {"trial_only_no_confidential": True,
+               "statement": "NVIDIA family: trial use only - do not submit personal or confidential data (S07)",
+               "claim_level": "E1 family terms (S07) applied on catalog discovery"},
+}
+
+
+def discovered_terms(author: str) -> dict[str, Any]:
+    base: dict[str, Any] = {"retention": "UNKNOWN", "training": "UNKNOWN", "may_use_inputs_for_training": None}
+    return {**base, **FAMILY_TERMS.get(author.lower(), {})}
+
+
 def refresh_openrouter_catalog(session: Session, client: httpx.Client) -> dict[str, Any]:
     now = utcnow()
     models = {m["id"]: m for m in fetch_openrouter_models(client)}
@@ -132,12 +148,12 @@ def refresh_openrouter_catalog(session: Session, client: httpx.Client) -> dict[s
             route_key=f"openrouter/{model_id}", pool="ARENA", provider="openrouter",
             endpoint="https://openrouter.ai/api/v1", model_id=model_id,
             display_name=str(m.get("name") or model_id)[:200], harness="opencode", eligible_domains=["PERSONAL"],
-            allowed_data_classes=["PUBLIC"], data_terms={"retention": "UNKNOWN", "training": "UNKNOWN",
-                                                         "may_use_inputs_for_training": None},
+            allowed_data_classes=["PUBLIC"], data_terms=discovered_terms(author),
             status="CANDIDATE", mode="LIVE", origin="CATALOG_DISCOVERED", evidence_level="E1",
             identity_status="UNVERIFIED" if author in {"openrouter", "stealth"} else "PROVIDER_CLAIMED",
             priority=800, source_refs=["S11", "S12"], eval_results={}, mode_params={}, tool_set=[], fallback_chain=[],
             notes=f"Discovered in the OpenRouter catalog on {now.date().isoformat()}; never activated automatically.",
+            prompt_revision=_worker_prompt_revision(),
         )
         _apply_openrouter(route, m, now)
         route.config_hash = compute_config_hash(route)
@@ -261,6 +277,7 @@ def refresh_opencode_catalog(session: Session, settings: Settings) -> dict[str, 
         return {"status": "UNKNOWN", "checked_at": now.isoformat(),
                 "reason": "opencode binary not found - availability stays UNKNOWN",
                 "remedy": "install OpenCode from the reviewed InstallManifest (bootstrap order 5)"}
+    harness = observe_harness_version(session, binary)
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -282,7 +299,36 @@ def refresh_opencode_catalog(session: Session, settings: Settings) -> dict[str, 
         (present if route.model_id in listed else missing).append(route.route_key)
     session.flush()
     return {"status": "OK", "checked_at": now.isoformat(), "listed": len(listed), "available": present,
-            "missing": missing}
+            "missing": missing, **harness}
+
+
+def observe_harness_version(session: Session, binary: str | None) -> dict[str, Any]:
+    """§23 "harness version": record the installed OpenCode version on every route the worker runtime runs
+    with it. A different version is a configuration change (approvals bound to the old hash stop matching,
+    eval baselines are not inherited); the executor also refuses a run whose engine differs (drift)."""
+    try:
+        from aeos.worker_runtime import opencode
+
+        status = opencode.opencode_status(binary)
+    except Exception as exc:  # pragma: no cover - observation is best effort, never a pass
+        return {"harness_version": None, "harness_reason": f"version probe failed: {type(exc).__name__}"}
+    version = status.get("version") if status.get("status") == "INSTALLED" else None
+    if not version:
+        return {"harness_version": None, "harness_reason": f"opencode {status.get('status')}: version not observed"}
+    changed: list[str] = []
+    for route in session.scalars(select(ModelRoute).where(or_(ModelRoute.harness == "opencode",
+                                                                ModelRoute.pool.in_(WORKER_EXECUTED_POOLS)))):
+        # candidates bind the version at activation; activated or already-bound routes follow the installation
+        if route.harness_version == version or (route.harness_version is None
+                                                and route.status not in ("APPROVED", "TRIAL")):
+            continue
+        previous = route.harness_version
+        if route.config_hash is None:
+            route.config_hash = compute_config_hash(route)
+        route.harness_version = version
+        if refresh_config_hash(session, route, reason=f"harness opencode {previous or 'UNKNOWN'} -> {version}"):
+            changed.append(route.route_key)
+    return {"harness_version": version, "harness_changed": changed}
 
 
 def refresh_all(session: Session, *, actor: str, settings: Settings | None = None,

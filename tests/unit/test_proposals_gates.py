@@ -19,10 +19,8 @@ from aeos.core.errors import Blocked
 from aeos.models.research import ResearchEntry
 from aeos.proposals import service
 from aeos.research import service as research
+from tests.unit.proposal_fixtures import SCOPE, owner_plan, route
 from tests.unit.test_cost_fakes import install_fake_policy
-
-SCOPE = {"target": "platform:dly-aeos", "environment": "sandbox", "provider": "opencode-zen",
-         "data_class": "INTERNAL", "budget_usd": 0}
 
 
 @pytest.fixture
@@ -31,9 +29,12 @@ def policy(monkeypatch):
 
 
 def _proposal(db, sources, *, domain="PERSONAL", pin="1.0.0"):
+    route(db)
     p = service.create_proposal(db, actor_user_id="owner", domain=domain, kind="ADD", title=None, sources=sources,
-                                problem="internal codename ZEPHYR", candidate_pin=pin)
+                                problem="internal codename ZEPHYR", expected_benefit="retrieval lebih tepat",
+                                candidate_pin=pin)
     db.commit()
+    owner_plan(db, p)
     service.review(db, p, actor_user_id="owner")
     db.commit()
     return p

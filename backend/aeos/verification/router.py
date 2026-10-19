@@ -239,7 +239,36 @@ def verify(run_id: str, body: VerifyIn, principal: AdminPrincipal, domain: Activ
 
 
 class ReviewIn(BaseModel):
-    reviewer: Literal["FEATURE", "SECURITY"] = "FEATURE"
+    reviewer: Literal["FEATURE", "SECURITY", "A11Y", "PRIVACY", "SRE"] = "FEATURE"
+
+
+class ReviewBatchIn(BaseModel):
+    kinds: list[Literal["FEATURE", "SECURITY", "A11Y", "PRIVACY", "SRE"]] | None = Field(default=None, max_length=5)
+
+
+@router.get("/api/runs/{run_id}/reviews/required")
+def required_review_kinds(run_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
+    run = _load_run(db, principal, domain, run_id)
+    out = review.review_required_kinds(db, run.id)
+    out.update(checked_at=utcnow().isoformat(), source="task_specs, review_records, evidence_artifacts", mode="LIVE")
+    return out
+
+
+@router.post("/api/runs/{run_id}/reviews/batch")
+def request_reviews(run_id: str, principal: AdminPrincipal, domain: ActiveDomain, db: DB,
+                    body: ReviewBatchIn | None = None) -> dict[str, Any]:
+    """§19: every open independent read-only review kind (or the given ones) for the same verified package."""
+    run = _load_run(db, principal, domain, run_id)
+    try:
+        outcomes = review.review_all(db, run.id, actor=principal.user.id, kinds=list((body or ReviewBatchIn()).kinds
+                                                                                     or []) or None)
+    except AeosError as exc:
+        audit_denied(db, principal, "verification.review", exc, **_run_target(run))
+        raise
+    db.commit()
+    return {"reviews": [review.review_view(o.review) for o in outcomes],
+            "acceptance": next((o.acceptance for o in reversed(outcomes) if o.acceptance), None),
+            "notes": [n for o in outcomes for n in o.notes]}
 
 
 @router.post("/api/runs/{run_id}/review")
