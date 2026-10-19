@@ -356,7 +356,16 @@ class CIStatus:
         return status, [r.name for r in runs]
 
 
+_EXPLICIT_GATES = re.compile(r"\[(G[0-8](?:\s*,\s*G[0-8])*|NO-GATE)\]", re.I)
+
+
 def classify_check(name: str) -> list[str]:
+    """Gates a provider check-run counts toward. An explicit tag in the job name - ``[G1,G2]`` or
+    ``[NO-GATE]`` for report-only jobs - wins over the name heuristics (§31 explicit gate mapping)."""
+    m = _EXPLICIT_GATES.search(name or "")
+    if m:
+        tag = m.group(1).upper()
+        return [] if tag == "NO-GATE" else sorted({g.strip() for g in tag.split(",")})
     low = name.lower()
     return [g for g, needles in GATE_HINTS.items() if any(n in low for n in needles)]
 

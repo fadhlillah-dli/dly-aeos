@@ -38,10 +38,29 @@ class CapabilityTestBody(BaseModel):
     model: Literal["opus", "fable"] = "opus"
 
 
+def require_subscription_owner(db: DB, principal: Principal) -> None:
+    """§12 future multi-user: the native Max login on this machine belongs to the bootstrap owner; another
+    local account must use its own permitted credential, never the owner's subscription as a shared backend."""
+    from aeos.core.enums import Role
+    from aeos.core.errors import Forbidden
+    from aeos.models.identity import User
+
+    owner = db.scalar(select(User).where(User.role == Role.SUPER_ADMIN.value, User.is_active.is_(True))
+                      .order_by(User.created_at.asc()).limit(1))
+    if owner is None or owner.id != principal.user.id:
+        audit.record(db, actor_type="user", actor_id=principal.user.id, action="claude.bridge.use", result="DENIED",
+                     reason="the native Claude Max login belongs to the bootstrap owner account")
+        db.commit()
+        raise Forbidden("the native Claude Max login on this machine belongs to the bootstrap owner; other accounts "
+                        "use their own permitted credential (no shared subscription backend, §12)",
+                        code="BRIDGE_OWNER_ONLY")
+
+
 @router.post("/api/claude/capability-test")
 def claude_capability_test(body: CapabilityTestBody, db: DB, settings: SettingsDep,
                            principal: AdminPrincipal) -> dict[str, Any]:
     """Run the real capability test (one tiny structured call on the owner's Max login)."""
+    require_subscription_owner(db, principal)
     audit.record(db, actor_type="user", actor_id=principal.user.id, action="claude.capability_test.requested",
                  target_type="component", target_id="claude-code", details={"model": body.model})
     db.commit()
@@ -59,10 +78,13 @@ def claude_capability_test(body: CapabilityTestBody, db: DB, settings: SettingsD
 
 @router.get("/api/claude/capability-tests")
 def claude_capability_tests(db: DB, _p: CurrentPrincipal, limit: int = 20) -> dict[str, Any]:
+    from aeos.core.timeutil import utcnow
+
     rows = list(db.scalars(select(ClaudeCapabilityTest).order_by(ClaudeCapabilityTest.created_at.desc())
                            .limit(max(1, min(limit, 100)))))
     return {
         "items": [bridge.capability_test_view(r, fingerprint=None, version=None) for r in rows],
-        "source": "claude_capability_tests", "checked_at": rows[0].created_at.isoformat() if rows else None,
+        "source": "claude_capability_tests", "checked_at": utcnow().isoformat(),
+        "last_test_at": rows[0].created_at.isoformat() if rows else None,
         "mode": "LIVE",
     }

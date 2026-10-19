@@ -364,7 +364,7 @@ def execute(
             from aeos.operations import incident as incidents
 
             preserve_step = next((s for s in steps if s["step"] == "preserve_evidence"), {})
-            evidence_ids = [v.get("evidence_id") for v in (preserve_step.get("by_domain") or {}).values()
+            evidence_ids = [str(v["evidence_id"]) for v in (preserve_step.get("by_domain") or {}).values()
                             if isinstance(v, dict) and v.get("evidence_id")]
             with session.begin_nested():  # a failure here never loses the audit row above
                 inc = incidents.open_incident(

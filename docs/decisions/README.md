@@ -13,7 +13,7 @@ never rewritten. Number ranges per module group: 0001-0009 platform, 0010 doctor
 | [ADR-0001](ADR-0001-master-architecture-baseline.md) | Master architecture is the platform baseline; MCI alignment UNVERIFIED | ACCEPTED |
 | [ADR-0002](ADR-0002-stack-and-cross-platform-runtime.md) | Stack and cross-platform local runtime (Windows + macOS) | ACCEPTED |
 | [ADR-0003](ADR-0003-seed-build-authority.md) | Seed build by native Claude; owner-authorised commit/push/merge for the platform repo | ACCEPTED |
-| [ADR-0004](ADR-0004-first-admin-bootstrap-hardening.md) | First-admin bootstrap hardening and local single-use recovery | ACCEPTED |
+| [ADR-0004](ADR-0004-first-admin-bootstrap-hardening.md) | First-admin bootstrap hardening and local single-use recovery | PROPOSED |
 | [ADR-0010](ADR-0010-install-manifest-component-catalog.md) | InstallManifest as the reviewed component catalog (DESIGN lens) | ACCEPTED |
 | [ADR-0011](ADR-0011-readiness-doctor-capability-gates.md) | Readiness Doctor checks, fingerprints and capability gates | ACCEPTED |
 | [ADR-0012](ADR-0012-inventory-reconciliation-system-map.md) | Inventory reconciliation, drift and the three System Map lenses | ACCEPTED |
@@ -29,6 +29,7 @@ never rewritten. Number ranges per module group: 0001-0009 platform, 0010 doctor
 | [ADR-0040](ADR-0040-claude-native-bridge-invocation.md) | ClaudeNativeBridge invocation, output contract and model-policy check | ACCEPTED |
 | [ADR-0041](ADR-0041-model-routing-eligibility-and-identity.md) | Model registry, hard-filter routing and AIConfiguration identity | ACCEPTED |
 | [ADR-0042](ADR-0042-openbao-secret-provider-and-bootstrap.md) | OpenBao secret provider, OS-keyring bootstrap and the interim exception | ACCEPTED |
+| [ADR-0043](ADR-0043-openbao-direct-approle-instead-of-agent.md) | Direct AppRole login in the controller instead of OpenBao Agent (local single host) | PROPOSED |
 | [ADR-0050](ADR-0050-task-execution-state-machine.md) | TaskExecution state machine, admission and leases (§14, §19, §21, §22) | ACCEPTED |
 | [ADR-0051](ADR-0051-worker-sandbox-requirement.md) | Worker sandbox requirement and the process-sandbox exception (§11, §25, §50, §51) | ACCEPTED |
 | [ADR-0052](ADR-0052-self-build-candidate-workspace.md) | Self-build zones: candidate workspace, runtime commits and quarantine (§09, §21, §50) | ACCEPTED |
@@ -51,3 +52,4 @@ never rewritten. Number ranges per module group: 0001-0009 platform, 0010 doctor
 | [ADR-0091](ADR-0091-controller-release-promotion.md) | Released controller artifacts, human-only promotion and rollback | ACCEPTED |
 | [ADR-0092](ADR-0092-sli-targets-and-alerting.md) | SLIs from records, SLO targets as owner decisions, deduplicated alerts, emergency stop | ACCEPTED |
 | [ADR-0093](ADR-0093-universal-dependency-lockfile.md) | Universal Python dependency lockfile (requirements.lock) | ACCEPTED |
+| [ADR-0094](ADR-0094-ci-gates-supply-chain-and-security-tooling.md) | CI gates, explicit gate mapping, supply-chain reports and security tooling | PROPOSED |
