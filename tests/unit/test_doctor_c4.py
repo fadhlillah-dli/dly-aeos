@@ -240,6 +240,29 @@ def test_project_drive_root_is_probed_read_only_with_the_stored_token(settings, 
     assert run_check(REGISTRY["adapter.project_drive_root"], ctx).status == "CONFIGURED"
 
 
+def test_office_project_targets_stay_unknown_behind_the_office_gate(settings, db):
+    from aeos.models.portfolio import Project, ProjectIntegration
+
+    office = Project(project_key="corp", name="Corp", domain="OFFICE")
+    personal = Project(project_key="mine", name="Mine", domain="PERSONAL")
+    db.add_all([office, personal])
+    db.flush()
+    db.add_all([ProjectIntegration(project_id=office.id, domain="OFFICE", provider="jira", purpose="issues",
+                                   root_id="CORP"),
+                ProjectIntegration(project_id=personal.id, domain="PERSONAL", provider="jira", purpose="issues",
+                                   root_id="MINE")])
+    db.commit()
+    targets = adapters_mod.project_office_targets(_ctx(settings, db, base_runner()))
+    assert [t["project_id"] for t in targets] == [office.id], "only OFFICE projects are OFFICE targets"
+    run_doctor(settings, db, checks=["adapter.project_office_targets"], functional=True, runner=base_runner())
+    db.commit()
+    rows = latest_project_results(db, ["adapter.project_office_targets"])
+    (row,) = rows.values()
+    assert row.status == "UNKNOWN" and row.error_code == "OFFICE_DEFAULT_DENY"
+    assert row.scope["project_id"] == office.id and row.scope["domain"] == "OFFICE"
+    assert row.observed_evidence["targets"][0]["root_id"] == "CORP"
+
+
 def test_google_token_scopes_are_read_and_excess_scope_fails(settings, db, secrets_memory):
     secrets_memory.put("personal/google-oauth-client", '{"installed": {"client_id": "c"}}', actor="test")
     secrets_memory.put("personal/google-oauth-token", json.dumps({"token": "t", "scopes": [DRIVE_FILE]}), actor="test")
