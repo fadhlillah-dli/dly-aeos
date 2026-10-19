@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from aeos.doctor.checks import check
@@ -172,9 +171,6 @@ def containment_docker(ctx: CheckContext) -> Outcome:
                    component_version=client, severity="LOW")
 
 
-_PROTECTED_RE = re.compile(r"`([^`]+\*\*?)`")
-
-
 def enforced_protected_lists() -> dict[str, tuple[str, ...]]:
     """The protected-path lists the code actually enforces (worker scope, verifier quarantine, DAG fallback)."""
     from aeos.planning.dag import FALLBACK_PROTECTED_PATHS
@@ -212,9 +208,11 @@ def containment_protected_paths(ctx: CheckContext) -> Outcome:
     if not agents.is_file():
         return Outcome("MISSING", "AGENTS.md tidak ada; protected paths tidak terdefinisi.", error_code="AGENTS_MISSING")
     text = agents.read_text(encoding="utf-8", errors="replace")
-    start = text.find("## Protected paths")
-    section = text[start:text.find("\n## ", start + 5)] if start >= 0 else ""
-    paths = _PROTECTED_RE.findall(section)
+    # The canonical reading of the section (aeos.core.protected_paths: every backticked pattern of its first
+    # paragraph - globs and exact files such as AGENTS.md or pyproject.toml; later paragraphs only explain it).
+    from aeos.core.protected_paths import parse_agents_md
+
+    paths = list(parse_agents_md(text))
     if not paths:
         return Outcome("MISSING", "Bagian 'Protected paths' tidak ditemukan di AGENTS.md.", error_code="NO_PROTECTED_PATHS")
     evidence: dict[str, Any] = {"paths": paths, "source": "AGENTS.md"}

@@ -206,7 +206,7 @@ def serve(
 
     ensure_database()
     console.print(f"DLY AEOS listening on [bold]{settings.base_url}[/bold] (login required)")
-    extra: dict[str, object] = {}
+    extra: dict[str, Any] = {}
     if reload:
         from aeos.core.paths import repo_root
 

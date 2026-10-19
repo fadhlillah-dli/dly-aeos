@@ -154,6 +154,12 @@ snapshot is never a live status.
 * `GET /api/ops/retirement/{project_id}` — read-only retirement checklist (consumers, jobs,
   credentials, data retention, legal hold, backups, communication, final owner decision). Nothing is
   deleted or revoked by it (§33).
+* `PUT /api/ops/retirement/{project_id}/legal-hold` and `.../steps/{key}` record the tracked workflow
+  (`ops_retirements`; a step record does not change the checklist hash, a legal-hold change does).
+  `POST /api/ops/retirement/{project_id}/decision` records the owner's final verification: a `RETIREMENT`
+  decision bound to the shown `checklist_hash` (409 `RETIREMENT_BLOCKING_ITEMS` /
+  `RETIREMENT_CHECKLIST_STALE` / `RETIREMENT_REQUIRES_RETIRING`); lifecycle `RETIRED` is refused
+  (`RETIREMENT_NOT_VERIFIED`) unless that decision still matches the current checklist.
 
 ## Dependency lockfile
 

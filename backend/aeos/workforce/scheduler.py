@@ -1064,12 +1064,22 @@ def admission_check(session: Session, task_id: str) -> Admission:
         for code, why in proposals.trial_admission_problems(session, task, route=adm.route):
             adm.blocks.append((code, why))
     except (ImportError, ModuleNotFoundError):  # pragma: no cover - proposals ships with the foundation
-        if any(str(a).startswith("change_proposal:") for a in task.input_artifacts or []):
+        if _is_trial_task(task):
             adm.blocks.append(("MODULE_UNAVAILABLE", "proposal trial binding cannot be verified (fail closed)"))
     except AeosError as exc:  # a binding check that cannot complete blocks this trial task only (fail closed)
         adm.blocks.append(("TRIAL_BINDING_UNVERIFIED", f"{exc.code}: {exc.message}"[:300]))
     adm.admitted = not adm.waits and not adm.blocks
     return adm
+
+
+def _is_trial_task(task: TaskSpec | None) -> bool:
+    """A change-proposal trial task (fail-closed fallback when aeos.proposals cannot be imported). Input artifacts
+    are the plan's strings or the compiler's hash-bound dicts that keep the original ``label``."""
+    for a in (task.input_artifacts if task is not None else None) or []:
+        label = str(a.get("label") or "") if isinstance(a, dict) else str(a)
+        if label.startswith("change_proposal:"):
+            return True
+    return False
 
 
 def _role_revision(session: Session, role_key: str | None) -> str | None:
@@ -1673,8 +1683,7 @@ def _authorisation_lost(session: Session, run: WorkerRun, te: TaskExecution) -> 
         lost = proposals.trial_authorisation_lost(session, run.task_id)
     except (ImportError, ModuleNotFoundError):  # pragma: no cover - proposals ships with the foundation
         task = session.get(TaskSpec, run.task_id) if run.task_id else None
-        bound = any(str(a).startswith("change_proposal:") for a in (task.input_artifacts if task else None) or [])
-        lost = "proposal trial binding cannot be verified (fail closed)" if bound else None
+        lost = "proposal trial binding cannot be verified (fail closed)" if _is_trial_task(task) else None
     if lost:
         return f"proposal trial authority lost: {lost}"[:500]
     return None

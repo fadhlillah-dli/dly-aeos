@@ -124,21 +124,36 @@ def test_negative_tests_required_for_api_changes(db, settings, controller, wf):
     assert out2.status == "PASS", (out2.reasons, out2.not_proven)
 
 
-def test_dependency_change_records_a_diff_and_is_not_proven_in_isolation(db, settings, controller, wf):
-    """§16 supply chain + §09 Zone 2: a changed Python dependency set yields DEPENDENCY_DIFF evidence with
-    licences UNKNOWN, and the run is NOT_PROVEN because the suite ran on the controller's dependencies."""
-    world = make_world(db, verifier_policy=FAST, allowed_paths=["backend/**", "tests/unit/**", "requirements.lock"])
-    base_files = {**BASE_FILES, "requirements.lock": "fastapi==0.115.0\nhttpx==0.27.0\n"}
+def _dependency_candidate(db, settings, manifest: str):
+    world = make_world(db, verifier_policy=FAST, allowed_paths=["backend/**", "tests/unit/**", manifest])
+    base_files = {**BASE_FILES, manifest: "fastapi==0.115.0\nhttpx==0.27.0\n"}
     cand, base, head = make_candidate(settings, world, base_files=base_files, head_files={
-        "requirements.lock": "fastapi==0.116.1\nhttpx==0.27.0\nleftpad==1.0.0\n"})
+        manifest: "fastapi==0.116.1\nhttpx==0.27.0\nleftpad==1.0.0\n"})
     bind_candidate(db, world, cand, base, head)
     out = _verify(db, world)
-    assert out.status == "NOT_PROVEN" and any("Zone 2" in n for n in out.not_proven)
     ev = db.scalar(select(EvidenceArtifact).where(EvidenceArtifact.kind == "DEPENDENCY_DIFF"))
     data = collector.read_json(ev)
     assert data["licenses"] == "UNKNOWN" and data["auto_upgrade"] is False
     assert data["packages"]["added"] == ["leftpad==1.0.0"]
     assert data["packages"]["upgraded"] == ["fastapi==0.115.0 -> fastapi==0.116.1"]
+    return out
+
+
+def test_dependency_change_records_a_diff_and_is_not_proven_in_isolation(db, settings, controller, wf):
+    """§16 supply chain + §09 Zone 2: a changed Python dependency set yields DEPENDENCY_DIFF evidence with
+    licences UNKNOWN, and the run is NOT_PROVEN because the suite ran on the controller's dependencies.
+    (A requirements file that is not part of the protected bootstrap/dependency set.)"""
+    out = _dependency_candidate(db, settings, "requirements-dev.txt")
+    assert out.status == "NOT_PROVEN" and any("Zone 2" in n for n in out.not_proven)
+
+
+def test_change_of_the_protected_lockfile_is_quarantined_with_the_same_dependency_evidence(db, settings, controller,
+                                                                                          wf):
+    """requirements.lock is the reviewed install set of the controller (AGENTS.md protected paths, ADR-0093): a
+    platform candidate changing it is quarantined for special review, and the dependency diff and the Zone 2
+    statement are still recorded for that review."""
+    out = _dependency_candidate(db, settings, "requirements.lock")
+    assert out.status == "QUARANTINED" and any("Zone 2" in n for n in out.not_proven)
 
 
 def test_frontend_and_migration_changes_are_stated_not_proven(db, settings, controller, wf):

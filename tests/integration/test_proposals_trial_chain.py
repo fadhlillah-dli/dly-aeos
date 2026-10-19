@@ -72,7 +72,11 @@ def test_launch_trial_creates_the_bound_taskspec_and_the_scheduler_rechecks_the_
     approval = db.get(Decision, trial["plan_approval_decision_id"])
     assert approval.kind == "APPROVAL" and approval.target_hash == version.manifest_hash and approval.actor_kind == "HUMAN"
     t = db.get(TaskSpec, trial["task_ids"][0])
-    assert f"change_proposal:{pid}" in t.input_artifacts and t.data_classification == "INTERNAL"
+    # the task compiler keeps each input artifact hash-bound ({ref, kind, label, resolved}); the label is the binding
+    from aeos.proposals.trial import artifact_label, proposal_id_for_task
+
+    assert f"change_proposal:{pid}" in [artifact_label(a) for a in t.input_artifacts]
+    assert proposal_id_for_task(t) == pid and t.data_classification == "INTERNAL"
     assert set(t.capability_scope["operations"]) <= set(db.get(Decision, s["trial_decision_id"]).allowed_operations)
     assert t.limits["timeout_seconds"] == 60 * 60 and t.limits["max_attempts"] == 2
     assert t.allowed_paths == [f"sandbox/trials/{pid[:8]}/**"]

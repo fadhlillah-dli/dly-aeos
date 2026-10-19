@@ -47,7 +47,8 @@ describe("Upgrade Proposals (§39)", () => {
     await waitFor(() => expect(document.querySelectorAll("#inventory-component-ids option").length).toBe(2)); // picker
     fireEvent.change(screen.getByPlaceholderText("https://github.com/owner/repo"), { target: { value: "https://github.com/acme/aider" } });
     fireEvent.change(screen.getByLabelText("Komponen kandidat"), { target: { value: "aider" } });
-    fireEvent.change(screen.getByLabelText("Masalah / tujuan"), { target: { value: "Engine sering gagal" } });
+    // the label carries its hint ("Wajib sebelum TRIAL ...") inside the <label>: match the field name prefix
+    fireEvent.change(screen.getByLabelText(/^Masalah \/ tujuan/), { target: { value: "Engine sering gagal" } });
     fireEvent.change(screen.getByLabelText(/Manfaat yang diharapkan/), { target: { value: "Lebih sedikit repair" } });
     const numbers = document.querySelectorAll<HTMLInputElement>('input[type="number"]');
     if (numbers.length > 0) fireEvent.change(numbers[0], { target: { value: "1" } });
