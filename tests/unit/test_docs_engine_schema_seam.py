@@ -31,7 +31,12 @@ TASK_LEAVES_RENDERED = ("tasks.key", "tasks.title", "tasks.acceptance_criteria")
 # Leaves that are references to other leaves (feature/risk keys); their target is checked instead.
 REFERENCE_LEAVES = ("requirements.feature_key", "testing.test_plans.feature_keys", "release.release_plans.features",
                     "product_home.active_features", "product_home.open_risks", "features.depends_on",
-                    "features.milestone", "tasks.feature_key", "tasks.depends_on")
+                    "features.milestone", "tasks.feature_key", "tasks.depends_on",
+                    # planning schema rev 2 (cluster C7): governance/contract entries refer to features/milestones/tasks
+                    "feature_governance.feature_key", "milestone_governance.milestone_key",
+                    "milestone_governance.depends_on", "rfcs.feature_key", "tdds.feature_key",
+                    "interface_contracts.feature_keys", "interface_contracts.provider_task_key",
+                    "interface_contracts.consumer_task_keys")
 
 
 def _tasks(content: dict[str, Any]) -> list[r.TaskInfo]:
@@ -93,6 +98,13 @@ def _filled_plan() -> tuple[dict[str, Any], dict[str, str]]:
     c["product_home"].update({"active_features": [fkey], "open_risks": [rkey], "data_classification": "INTERNAL"})
     c["architecture"]["diagrams"][0]["kind"] = "context"
     c["architecture"]["diagrams"][0]["mermaid"] = f"flowchart TD\n  A[{c['architecture']['diagrams'][0]['mermaid']}]"
+    # rev 2 governance sections bound to the filled feature/milestone/task (personal data YES: the DPIA input renders)
+    c["feature_governance"][0].update({"feature_key": fkey, "personal_data": "YES"})
+    c["milestone_governance"][0].update({"milestone_key": mkey, "depends_on": []})
+    c["rfcs"][0]["feature_key"] = fkey
+    c["tdds"][0]["feature_key"] = fkey
+    tkey = c["tasks"][0]["key"]
+    c["interface_contracts"][0].update({"feature_keys": [fkey], "provider_task_key": tkey, "consumer_task_keys": []})
     return c, tokens
 
 

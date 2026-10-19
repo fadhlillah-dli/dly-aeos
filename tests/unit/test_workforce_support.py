@@ -231,7 +231,10 @@ def make_plan(db: Session, project: Project, tasks: list[dict[str, Any]]) -> tup
         ts = TaskSpec(plan_version_id=pv.id, plan_version_hash=pv.manifest_hash, project_id=project.id,
                       domain=project.domain, task_key=t["task_key"], title=t.get("title", t["task_key"]),
                       goal=t.get("goal", "do the thing"), depends_on=t.get("depends_on", []),
-                      allowed_paths=t.get("allowed_paths", []), forbidden_paths=t.get("forbidden_paths", []),
+                      # ADR-0033: a TaskSpec always names its write scope (an empty scope is never admitted)
+                      allowed_paths=t.get("allowed_paths", [f"src/{t['task_key']}/**"]),
+                      forbidden_paths=t.get("forbidden_paths", []),
+                      expected_outputs=t.get("expected_outputs", ["code"]),
                       tools_allowed=t.get("tools_allowed", []), egress_allowed=t.get("egress_allowed", []),
                       limits=t.get("limits", {}), capability_scope=t.get("capability_scope", {}),
                       acceptance_criteria=t.get("acceptance_criteria", ["AC1"]),

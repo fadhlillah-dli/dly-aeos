@@ -406,6 +406,27 @@ def _feature_flags(key: str, raw: dict[str, Any], plan_tasks: list[dict[str, Any
     return out
 
 
+def _keyed(t: dict[str, Any], field_: str) -> str:
+    val, key = as_text(t.get(field_)), as_text(t.get("key"))
+    return f"**{key}** — {val}" if key and val else val
+
+
+def threat_model_lists(tm: dict[str, Any]) -> dict[str, Any]:
+    """A schema threat model (``threats[]`` of ``{key, threat, scenario, mitigation}``) as the renderer's lists:
+    threats, attack scenarios and mitigations, each keyed by the threat key. Used for the plan-level threat model
+    and for the per-feature one of ``feature_governance`` (planning schema rev 2)."""
+    threats = [t for t in as_list(tm.get("threats")) if isinstance(t, dict)]
+    plain = [t for t in as_list(tm.get("threats")) if not isinstance(t, dict) and as_text(t)]
+    return _non_empty({
+        "assets": tm.get("assets"), "actors": tm.get("actors"), "trust_boundaries": tm.get("trust_boundaries"),
+        "entry_points": tm.get("entry_points"),
+        "threats": plain + [x for x in (_keyed(t, "threat") for t in threats) if x],
+        "attack_scenarios": as_list(tm.get("attack_scenarios")) + [x for x in (_keyed(t, "scenario") for t in threats)
+                                                                  if x],
+        "mitigations": as_list(tm.get("mitigations")) + [x for x in (_keyed(t, "mitigation") for t in threats) if x],
+    })
+
+
 def normalise_schema_v1(content: dict[str, Any]) -> dict[str, Any]:
     """Map a schema-v1 ``PlanVersion.content`` onto the renderer's internal layout. Pure; nothing invented:
     every value comes from the approved plan, ``UNKNOWN`` stays absent."""
@@ -445,19 +466,7 @@ def normalise_schema_v1(content: dict[str, Any]) -> dict[str, Any]:
         raw.update(_feature_flags(k, raw, plan_tasks, controls))
         features.append(raw)
 
-    threats = [t for t in as_list(tm.get("threats")) if isinstance(t, dict)]
-
-    def keyed(t: dict[str, Any], field_: str) -> str:
-        val, key = as_text(t.get(field_)), as_text(t.get("key"))
-        return f"**{key}** — {val}" if key and val else val
-
-    threat_model = _non_empty({
-        "assets": tm.get("assets"), "actors": tm.get("actors"), "trust_boundaries": tm.get("trust_boundaries"),
-        "entry_points": tm.get("entry_points"),
-        "threats": [x for x in (keyed(t, "threat") for t in threats) if x],
-        "attack_scenarios": [x for x in (keyed(t, "scenario") for t in threats) if x],
-        "mitigations": [x for x in (keyed(t, "mitigation") for t in threats) if x],
-    })
+    threat_model = threat_model_lists(tm)
     team = _non_empty({"product_owner": known(ph.get("product_owner")),
                        "engineering_lead": known(ph.get("engineering_lead")), "tech_lead": known(ph.get("tech_lead")),
                        "security_lead": known(spo.get("ownership")), "operations_owner": known(ops.get("ownership"))})
@@ -522,16 +531,124 @@ def normalise_schema_v1(content: dict[str, Any]) -> dict[str, Any]:
         "unknowns": as_list(c.get("unknowns")),
     }
     return out
+_PRD_KEYS = ("overview", "problem", "background", "goals", "non_goals", "business_requirements",
+             "functional_requirements", "non_functional_requirements", "user_stories", "acceptance_criteria",
+             "user_impact", "dependencies", "assumptions", "risks", "success_metrics", "rollout_considerations")
+_PERSONAL_DATA = {"YES": True, "NO": False}
+
+
+def _has_content(d: Any) -> bool:
+    return isinstance(d, dict) and any(as_list(v) if isinstance(v, list) else as_text(v) for v in d.values())
+
+
+def _planning_schema_view(content: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Fold the planning schema's per-feature sections (``requirements[]`` PRDs, ``feature_governance[]``,
+    feature-bound ``rfcs[]``/``tdds[]`` and ``interface_contracts[]``) into the feature dicts the renderer reads.
+    Returns (plan raw with feature-bound RFC/TDD entries removed from the plan-level lists, extra per feature)."""
+    extra: dict[str, dict[str, Any]] = {}
+
+    def slot(key: Any) -> dict[str, Any]:
+        return extra.setdefault(as_text(key), {})
+
+    for prd in as_list(content.get("requirements")):
+        if isinstance(prd, dict) and as_text(prd.get("feature_key")):
+            slot(prd["feature_key"]).update({"_prd": prd})
+    for g in as_list(content.get("feature_governance")):
+        if not isinstance(g, dict) or not as_text(g.get("feature_key")):
+            continue
+        s = slot(g["feature_key"])
+        owner = as_text(g.get("owner"))
+        if owner and owner.upper() != "UNKNOWN":
+            s["owner"] = owner
+        s["needs_rfc"] = bool(g.get("needs_rfc"))
+        s["needs_tdd"] = bool(g.get("needs_tdd"))
+        pd = _PERSONAL_DATA.get(as_text(g.get("personal_data")).upper())  # UNKNOWN -> None (never a pass)
+        s["personal_data"] = pd
+        if pd and isinstance(g.get("privacy"), dict):
+            s["privacy"] = g["privacy"]
+        if g.get("needs_security_assessment"):
+            s["needs_security_assessment"] = True
+            if isinstance(g.get("security_assessment"), dict):
+                s["security_assessment"] = g["security_assessment"]
+        tm = g.get("threat_model")
+        if _has_content(tm):
+            s["threat_model"] = threat_model_lists(tm)
+    raw = dict(content)
+    feature_keys = {as_text(f.get("key") or f.get("feature_key") or f.get("id"))
+                    for f in as_list(content.get("features")) if isinstance(f, dict)}
+    for kind in ("rfc", "tdd"):
+        unbound = []
+        for d in as_list(content.get(kind + "s")):
+            fk = as_text(d.get("feature_key")) if isinstance(d, dict) else ""
+            if fk and fk in feature_keys and kind not in slot(fk):
+                extra[fk][kind] = d
+            else:
+                unbound.append(d)
+        if kind + "s" in content:
+            raw[kind + "s"] = unbound
+    for c in as_list(content.get("interface_contracts")):
+        if isinstance(c, dict):
+            for fk in as_list(c.get("feature_keys")):
+                slot(fk).setdefault("interface_contracts", []).append(c)
+    return raw, extra
+
+
+_GOVERNANCE_FLAGS = ("needs_rfc", "needs_tdd", "needs_security_assessment")
+
+
+def _merge_governance(raw: dict[str, Any], more: dict[str, Any], *, join_prd: bool) -> dict[str, Any]:
+    """Fold one feature's planning-schema extras (``_planning_schema_view``) into its feature dict.
+
+    The feature's own fields win. On the schema-v1 path ``normalise_schema_v1`` already joined the PRD
+    (``join_prd=False``) and may have derived needs from plan data (risky tasks, RFC/TDD references): a needed
+    artefact is never dropped (flags are OR-ed) and the plan's explicit security assessment fills/overrides the
+    derived one field by field."""
+    prd = (more.get("_prd") or {}) if join_prd else {}
+    merged = {**{k: prd[k] for k in _PRD_KEYS if k in prd and k not in raw}, **raw}
+    for k, v in more.items():
+        if k == "_prd":
+            continue
+        if k in _GOVERNANCE_FLAGS:
+            merged[k] = bool(merged.get(k)) or bool(v)
+        elif k == "security_assessment" and isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k] = {**merged[k], **{kk: vv for kk, vv in v.items() if vv not in (None, "", [], {})}}
+        elif k not in merged:
+            merged[k] = v
+    return merged
 
 
 def build_view(content: dict[str, Any] | None) -> PlanView:
     content = content if isinstance(content, dict) else {}
-    if is_schema_v1(content):
-        content = normalise_schema_v1(content)
+    # planning schema rev 2 sections (feature governance, feature-bound RFC/TDD, interface contracts) are read
+    # from the stored content itself; the schema-v1 seam then maps the rest onto the internal layout
+    raw_plan, extra = _planning_schema_view(content)
+    v1 = is_schema_v1(content)
+    if v1:
+        normalised = normalise_schema_v1(content)
+        for kind in ("rfcs", "tdds"):  # plan-level RFC/TDD entries that are not bound to a feature
+            if kind in raw_plan:
+                normalised[kind] = raw_plan[kind]
+        raw_plan = normalised
+    governance = {as_text(m.get("milestone_key")): m for m in as_list(content.get("milestone_governance"))
+                  if isinstance(m, dict) and as_text(m.get("milestone_key"))}
+    if governance:  # milestone priority/acceptance/dependencies/owner (planning schema rev 2) on the milestone itself
+        milestones = []
+        for m in as_list(raw_plan.get("milestones")):
+            g = governance.get(as_text(m.get("key") or m.get("milestone_key"))) if isinstance(m, dict) else None
+            if g:
+                m = {**{k: g[k] for k in ("priority", "acceptance", "depends_on", "owner") if k in g}, **m}
+            milestones.append(m)
+        raw_plan = {**raw_plan, "milestones": milestones}
+    content = raw_plan
+    extra_by_slug = {feature_slug(k): v for k, v in extra.items() if feature_slug(k)}
     view = PlanView(raw=content)
     seen: set[str] = set()
     for i, f in enumerate(as_list(content.get("features"))):
         raw = f if isinstance(f, dict) else {"title": as_text(f)}
+        fk = as_text(raw.get("key") or raw.get("feature_key") or raw.get("id"))
+        more = extra.get(fk) or extra_by_slug.get(feature_slug(fk))
+        if more:
+            raw = _merge_governance(raw, more, join_prd=not v1)
         key = _feature_key(raw, i)
         base, n = key, 2
         while key in seen:  # duplicate keys never collapse two features into one document

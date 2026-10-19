@@ -176,7 +176,9 @@ Checkpoint package (JSON):
 FOCUS = {
     "FEATURE": ("Focus: outcome vs acceptance criteria, architecture impact up/downstream, contracts, evidence, "
                 "regression and integration. When the package marks impact HIGH, every non_regression entry must be "
-                "argued from evidence (COVERED/NOT_APPLICABLE) or reported as NOT_COVERED/UNKNOWN."),
+                "argued from evidence (COVERED/NOT_APPLICABLE) or reported as NOT_COVERED/UNKNOWN. When the package "
+                "carries a role_contract, check the result against its boundaries, verification and failure modes; "
+                "each violation is a finding."),
     "SECURITY": ("Focus (Security Reviewer): controls — authentication/authorization, domain scoping, secrets "
                  "handling and redaction, capability/egress boundaries, supply chain, injection, fail-closed paths. "
                  "You do not accept residual risk on behalf of the owner and do not self-repair."),
@@ -292,6 +294,30 @@ def non_regression_scope(changed: list[str]) -> list[dict[str, Any]]:
     return [{"key": k, "question": q, "hints": hints[k]} for k, q in NON_REGRESSION_SCOPE]
 
 
+ROLE_REVIEW_RULE = ("Judge the result against this role contract: a crossed boundary, a forbidden action or a listed "
+                    "failure mode (e.g. invented stakeholders/business decisions, unmarked persona assumptions or "
+                    "claimed user research, an adapter without provider contract test, tenant/target binding or "
+                    "idempotency key) is a finding.")
+
+
+def role_section(session: Session, task: TaskSpec) -> dict[str, Any] | None:
+    """§17 "RoleSkillPack yang relevan" / §16 role boundaries: the exact executor pack revision the task ran
+    under, so the reviewer checks the output against the role's boundaries and failure modes. None when the
+    workforce catalog is unavailable or the role is not a catalog executor (such a task is never admitted)."""
+    try:
+        from aeos.workforce import facade as workforce
+    except ImportError:
+        return None
+    contract = workforce.role_contract(session, task.role_key)
+    if not contract:
+        return None
+    return {"role_key": task.role_key, "name": contract.get("name"), "revision_hash": contract.get("revision_hash"),
+            "task_role_revision_hash": getattr(task, "role_revision_hash", None),
+            **{k: list(contract.get(k) or []) for k in ("outputs", "boundaries", "forbidden_actions", "verification",
+                                                          "failure_modes")},
+            "review_rule": ROLE_REVIEW_RULE}
+
+
 def build_checkpoint_package(session: Session, run: WorkerRun, task: TaskSpec, report: EvidenceArtifact) -> dict[str, Any]:
     view = report_view(report) or {}
     full_report = _read_json(report) or collector.evidence_summary(report)
@@ -348,6 +374,9 @@ def build_checkpoint_package(session: Session, run: WorkerRun, task: TaskSpec, r
         "worker_claims_untrusted": full_report.get("worker_claims_ignored") or [],
         "non_regression_scope": non_regression_scope(changed),
     }
+    role = role_section(session, task)
+    if role is not None:
+        package["role_contract"] = role
     return redact(package)
 
 

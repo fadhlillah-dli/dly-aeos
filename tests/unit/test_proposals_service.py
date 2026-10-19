@@ -394,6 +394,34 @@ def test_partial_outcome_requires_failed_parts(db, policy):
     assert service.delivery_dimensions(db, p)["IMPLEMENTED"]["status"] == "PARTIAL"
 
 
+def test_partial_to_accepted_needs_every_failed_part_reconciled(db, policy):
+    """§40: 'selesai' never opens the gate - each failed part needs a resolution with trusted evidence."""
+    p, t, _ev = promoted(db)
+    service.record_outcome(db, p, actor_user_id="owner", status="PARTIAL",
+                           partial_failures=["docs publish CONFLICT", {"target": "jira"}])
+    db.commit()
+    # every other ACCEPTED precondition holds (config applied, post-activation evidence, acceptance results), so
+    # the reconciliation of the failed parts is what decides
+    apply_config(db)
+    ev = evidence(db, task_spec=t, claim="post-activation probe")
+    accept = {"evidence_ids": [ev.id], "accepted_configuration": {"component_id": "opencode", "approved_pin": "1.4.0"},
+              "acceptance_results": {"AC1": {"status": "PASS", "evidence_id": ev.id}}}
+    with pytest.raises(ValidationFailed) as exc:  # nothing reconciled
+        service.record_outcome(db, p, actor_user_id="owner", status="ACCEPTED", **accept)
+    assert exc.value.code == "PARTIAL_NOT_RECONCILED"
+    db.rollback()
+    with pytest.raises(Blocked):  # a resolution without trusted evidence is NOT-PROVEN
+        service.record_outcome(db, p, actor_user_id="owner", status="ACCEPTED", **accept, reconciled_failures=[
+            {"part": "docs publish CONFLICT", "resolution": "republished", "evidence_ids": [ev.id]},
+            {"part": "jira", "resolution": "issue dibuat ulang", "evidence_ids": []}])
+    db.rollback()
+    _accept(db, p, ev, reconciled_failures=[
+        {"part": "docs publish CONFLICT", "resolution": "republished", "evidence_ids": [ev.id]},
+        {"part": "jira", "resolution": "issue dibuat ulang", "evidence_ids": [ev.id]}])
+    assert p.status == "ACCEPTED"
+    assert [r["part"] for r in p.outcome["current"]["reconciled_failures"]] == ["docs publish CONFLICT", "jira"]
+
+
 def test_failed_proposal_keeps_baseline_and_reason(db, policy):
     p, _t, _ev = promoted(db)
     service.record_outcome(db, p, actor_user_id="owner", status="FAILED", notes="consumer tests failed")

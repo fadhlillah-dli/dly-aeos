@@ -308,6 +308,27 @@ def get_office_policy(db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
     return view
 
 
+class OfficeRouteIn(BaseModel):
+    route_key: str = Field(min_length=1, max_length=128)
+    credential_ref: str = Field(min_length=8, max_length=200)
+    rationale: str = Field(min_length=10, max_length=2000)
+
+
+@router.post("/api/policy/office/routes", status_code=201)
+def authorise_office_route(body: OfficeRouteIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    """§23 controlled path: make a company-approved worker route OFFICE-eligible (OFFICE session, SUPER_ADMIN,
+    ACTIVE company authorisation). Activation of the route remains a separate, hash-bound owner decision."""
+    from aeos.core.errors import PolicyDenied
+    from aeos.policy import office_routes
+
+    if domain != Domain.OFFICE:
+        raise PolicyDenied("OFFICE route eligibility is decided in an OFFICE session", code="DOMAIN_MISMATCH")
+    d = office_routes.authorise_office_route(db, route_key=body.route_key, credential_ref=body.credential_ref,
+                                             actor_user_id=principal.user.id, rationale=body.rationale)
+    db.commit()
+    return {"decision": registry.decision_view(db, d), "checked_at": _now()}
+
+
 @router.get("/api/policy/write-enablement")
 def get_write_enablement(db: DB, _principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
     return {"items": enablement.status(db, domain.value), "domain": domain.value, "source": "system_settings + decisions",

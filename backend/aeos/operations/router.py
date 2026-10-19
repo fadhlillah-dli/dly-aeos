@@ -234,6 +234,27 @@ def retirement_checklist(project_id: str, principal: CurrentPrincipal, domain: A
     return {**retirement.checklist(db, settings, project), "checked_at": _now(), "mode": "LIVE"}
 
 
+class RetirementDecisionIn(BaseModel):
+    rationale: str = Field(min_length=10, max_length=2000)
+    checklist_hash: str | None = Field(default=None, max_length=80)
+
+
+@router.post("/api/ops/retirement/{project_id}/decision", status_code=201)
+def retirement_decision(project_id: str, body: RetirementDecisionIn, principal: AdminPrincipal, domain: ActiveDomain,
+                        db: DB, settings: SettingsDep) -> dict[str, Any]:
+    """§33 final verification by the legitimate owner: a RETIREMENT Decision bound to this project and the hash
+    of the checklist shown (refused while an item is BLOCKING). Nothing is deleted or revoked here."""
+    from aeos.policy import decisions as registry
+    from aeos.policy import retirement as owner_verification
+
+    project = load_project(db, principal, project_id, domain=domain)
+    d = owner_verification.record_retirement(db, project=project, actor_user_id=principal.user.id,
+                                             rationale=body.rationale, expected_hash=body.checklist_hash,
+                                             settings=settings)
+    db.commit()
+    return {"decision": registry.decision_view(db, d), "checklist": retirement.checklist(db, settings, project)}
+
+
 def _now() -> str:
     from aeos.core.timeutil import utcnow
 
