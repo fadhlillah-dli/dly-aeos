@@ -2,8 +2,14 @@
 
 * list arguments only (no shell), explicit timeouts, whole process tree killed on timeout (psutil);
 * a scrubbed child environment built from an allow-list — no credentials, no provider keys, no
-  ``AEOS_*`` overrides, ``HOME``/temp redirected into the verifier's work dir, keyring disabled and
-  outbound HTTP pointed at a dead proxy as an egress deterrent (not an enforcement claim);
+  ``AEOS_*`` overrides; every per-user location a tool discovers through the environment is redirected
+  into the verifier's run dir (``HOME``/``USERPROFILE``/``APPDATA``/``LOCALAPPDATA``/``XDG_*``,
+  ``GH_CONFIG_DIR``, docker/npm/claude config dirs), the Python keyring is the null backend, git reads no
+  system/global config and has no credential helper or askpass and only the local ``file`` transport, no
+  SSH agent socket, no D-Bus session bus, and outbound HTTP points at a dead proxy (an egress deterrent,
+  not an enforcement claim). This stops credential discovery *through the environment*; code running as
+  the same OS user that opens an absolute path or calls the OS credential API directly is not stopped
+  (stated as residual risk; the container runner in ``aeos.verification.runner`` is the isolation);
 * git plumbing that never runs hooks, fsmonitor, textconv, external diff or checkout filters.
 """
 
@@ -96,42 +102,96 @@ def run_process(args: list[str], *, cwd: Path, env: dict[str, str], timeout: flo
     )
 
 
-def scrubbed_env(*, pythonpath: list[Path], home: Path, tmp: Path, data_dir: Path,
-                 disable_plugin_autoload: bool) -> dict[str, str]:
-    """Allow-list environment for running candidate code under the verifier."""
-    env: dict[str, str] = {}
-    for key in _PASSTHROUGH_ENV:
-        val = os.environ.get(key)
-        if val and not contains_secret(val):
-            env[key] = val
-    for d in (home, tmp, data_dir, home / "AppData" / "Roaming", home / "AppData" / "Local", home / ".config"):
-        d.mkdir(parents=True, exist_ok=True)
-    env.update({
-        "HOME": str(home),
-        "USERPROFILE": str(home),
-        "APPDATA": str(home / "AppData" / "Roaming"),
-        "LOCALAPPDATA": str(home / "AppData" / "Local"),
-        "XDG_CONFIG_HOME": str(home / ".config"),
-        "XDG_DATA_HOME": str(home / ".local" / "share"),
-        "TMPDIR": str(tmp),
-        "TEMP": str(tmp),
-        "TMP": str(tmp),
-        "PYTHONPATH": os.pathsep.join(str(p) for p in pythonpath),
+# The keyring backend candidate code gets: answers "no password" for everything and stores nothing (the
+# ``fail`` backend raised, which invited a fallback to ``keyring.set_keyring(<real backend>)`` in code).
+NULL_KEYRING = "keyring.backends.null.Keyring"
+EMPTY_GIT_CONFIG = ".gitconfig-empty"
+
+
+def child_env_values(*, home: str, tmp: str, data_dir: str, pythonpath: str, empty_git_config: str,
+                     sep: str = os.sep) -> dict[str, str]:
+    """The explicit (non-passthrough) variables of a verifier child, for a host *or* a container layout.
+
+    Every location a credential-bearing tool finds through the environment points into the run's own home
+    (empty): gh (``GH_CONFIG_DIR``), git (no system/global config, ``credential.helper`` reset to empty, no
+    askpass, only the local ``file`` transport), docker (``DOCKER_CONFIG``), npm, the Claude CLI, the Python
+    keyring (null backend; its config dir is under the redirected XDG/LOCALAPPDATA), the D-Bus session bus
+    (Secret Service) and the SSH agent (``SSH_AUTH_SOCK`` is never set)."""
+    def j(*parts: str) -> str:
+        return sep.join((home, *parts))
+
+    return {
+        "HOME": home,
+        "USERPROFILE": home,
+        "APPDATA": j("AppData", "Roaming"),
+        "LOCALAPPDATA": j("AppData", "Local"),
+        "XDG_CONFIG_HOME": j(".config"),
+        "XDG_DATA_HOME": j(".local", "share"),
+        "XDG_CACHE_HOME": j(".cache"),
+        "XDG_STATE_HOME": j(".local", "state"),
+        "XDG_RUNTIME_DIR": j(".run"),
+        "GH_CONFIG_DIR": j(".config", "gh"),
+        "GH_PROMPT_DISABLED": "1",
+        "GH_NO_UPDATE_NOTIFIER": "1",
+        "DOCKER_CONFIG": j(".docker"),
+        "NPM_CONFIG_USERCONFIG": j(".npmrc"),
+        "CLAUDE_CONFIG_DIR": j(".claude"),
+        "DBUS_SESSION_BUS_ADDRESS": "disabled:",
+        "TMPDIR": tmp,
+        "TEMP": tmp,
+        "TMP": tmp,
+        "PYTHONPATH": pythonpath,
         "PYTHONNOUSERSITE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUTF8": "1",
         "PYTHONIOENCODING": "utf-8",
         "PYTHONHASHSEED": "0",
-        "AEOS_DATA_DIR": str(data_dir),
-        "AEOS_CONFIG": str(home / "no-config.yaml"),
-        "PYTHON_KEYRING_BACKEND": "keyring.backends.fail.Keyring",
+        "AEOS_DATA_DIR": data_dir,
+        "AEOS_CONFIG": j("no-config.yaml"),
+        "PYTHON_KEYRING_BACKEND": NULL_KEYRING,
         "HTTP_PROXY": DEAD_PROXY,
         "HTTPS_PROXY": DEAD_PROXY,
         "ALL_PROXY": DEAD_PROXY,
         "NO_PROXY": "127.0.0.1,localhost,testserver,::1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": empty_git_config,
+        "GIT_CONFIG_COUNT": "3",
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "",
+        "GIT_CONFIG_KEY_1": "core.askPass",
+        "GIT_CONFIG_VALUE_1": "",
+        "GIT_CONFIG_KEY_2": "credential.interactive",
+        "GIT_CONFIG_VALUE_2": "never",
+        "GIT_ASKPASS": "",
+        "SSH_ASKPASS": "",
+        "GCM_INTERACTIVE": "never",
+        "GIT_ALLOW_PROTOCOL": "file",
         "GIT_TERMINAL_PROMPT": "0",
         "AEOS_VERIFIER_CHILD": "1",
-    })
+    }
+
+
+def scrubbed_env(*, pythonpath: list[Path], home: Path, tmp: Path, data_dir: Path,
+                 disable_plugin_autoload: bool) -> dict[str, str]:
+    """Allow-list environment for running candidate code under the verifier (process runner)."""
+    env: dict[str, str] = {}
+    for key in _PASSTHROUGH_ENV:
+        val = os.environ.get(key)
+        if val and not contains_secret(val):
+            env[key] = val
+    for d in (home, tmp, data_dir, home / "AppData" / "Roaming", home / "AppData" / "Local", home / ".config",
+              home / ".config" / "gh", home / ".local" / "share", home / ".local" / "state", home / ".cache",
+              home / ".run", home / ".docker", home / ".claude"):
+        d.mkdir(parents=True, exist_ok=True)
+    empty = home / EMPTY_GIT_CONFIG
+    if not empty.is_file():
+        empty.write_text("", encoding="utf-8")
+    env.update(child_env_values(home=str(home), tmp=str(tmp), data_dir=str(data_dir),
+                                pythonpath=os.pathsep.join(str(p) for p in pythonpath), empty_git_config=str(empty)))
+    if sys.platform == "win32":
+        drive, rest = os.path.splitdrive(str(home))
+        env["HOMEDRIVE"] = drive or "C:"
+        env["HOMEPATH"] = rest or "\\"
     if disable_plugin_autoload:
         env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     return env
