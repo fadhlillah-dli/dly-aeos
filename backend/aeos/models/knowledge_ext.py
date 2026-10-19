@@ -41,3 +41,7 @@ class ContextPackMeta(TimestampMixin, Base):
     # pack for the same project/task/role/repository supersedes (and stales) the older one.
     expires_at: Mapped[datetime | None] = mapped_column(nullable=True)
     superseded_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # §13 ContextPack "AUTH, status": who/what authorised the scope (principal + TaskSpec/decision id) and
+    # the lifecycle status ACTIVE|STALE|EXPIRED|SUPERSEDED (consumers refuse anything but ACTIVE).
+    auth_ref: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(16), default="ACTIVE")

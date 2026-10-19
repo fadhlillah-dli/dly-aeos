@@ -29,6 +29,10 @@ class User(IdMixin, TimestampMixin, Base):
     domain_scope: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(nullable=True)
     password_changed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # §26 recovery: the temporary credential is single-use and time-limited. Set by `aeos admin recover`,
+    # cleared by a successful password change.
+    temp_password_expires_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    temp_password_used_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class AuthSession(IdMixin, Base):

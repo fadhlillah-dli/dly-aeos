@@ -137,11 +137,13 @@ def scope_report(report: dict[str, Any], domain: str | None) -> dict[str, Any]:
     another domain keeps its FAILED/PARTIAL status with a neutral reason instead of its details."""
     if domain is None:
         return copy.deepcopy(report)
-    out = {k: copy.deepcopy(v) for k, v in report.items() if k != "steps"}
+    out = {k: copy.deepcopy(v) for k, v in report.items() if k not in ("steps", "derived_blast_radius")}
     if domain == STATUS_ONLY:
         out["steps"] = _statuses_only(report.get("steps") or [])
         out["scope"] = "NO_DOMAIN_SELECTED"
         return out
+    if isinstance(report.get("derived_blast_radius"), dict):
+        out["derived_blast_radius"] = copy.deepcopy(report["derived_blast_radius"].get(domain) or {})
     steps: list[dict[str, Any]] = []
     for step in report.get("steps") or []:
         by_domain = step.get("by_domain")
@@ -200,13 +202,26 @@ def execute(
     if len((reason or "").strip()) < 5:
         raise ValidationFailed("a reason (at least 5 characters) is required for an emergency stop")
     reason = redact_text(reason.strip())[:1000]
-    incident_owner = redact_text(incident_owner or "")[:200]
+    actor = f"{actor_type}:{actor_id}"
+    # §33 "menentukan owner": never empty - the declared owner, else the human who ran the stop.
+    incident_owner = redact_text((incident_owner or "").strip())[:200] or actor[:200]
     blast_radius = redact_text(blast_radius or "")[:1000]
     incident_id = new_id()
     started = utcnow()
-    actor = f"{actor_type}:{actor_id}"
     stop_reason = f"emergency stop {incident_id}: {reason}"[:500]
     steps: list[dict[str, Any]] = []
+    # Snapshot what is affected BEFORE containment changes it (derived blast radius, §33).
+    pre_runs = [{"id": r.id, "project_id": r.project_id, "domain": r.domain, "engine": r.engine,
+                 "model_route_key": r.model_route_key} for r in _active_runs(session)]
+    pre_grants = [{"kind": g.kind, "project_id": g.project_id, "domain": g.domain}
+                  for g in session.scalars(select(CapabilityGrant).where(CapabilityGrant.active.is_(True),
+                                                                         CapabilityGrant.revoked_at.is_(None)))]
+    try:
+        from aeos.operations import incident as incidents
+
+        derived = incidents.derive_blast_radius(session, pre_runs, pre_grants)
+    except Exception as exc:  # derivation is best effort; containment never waits for it
+        derived = {d: {"error": f"blast radius not derived: {type(exc).__name__}"} for d in DOMAINS}
 
     def run_step(name: str, fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         try:
@@ -297,7 +312,8 @@ def execute(
         for d in DOMAINS:
             scoped = scope_report(partial, d)
             content = {"incident_id": incident_id, "started_at": started.isoformat(), "reason": reason,
-                       "incident_owner": incident_owner, "blast_radius": blast_radius, "domain": d,
+                       "incident_owner": incident_owner, "blast_radius": blast_radius,
+                       "derived_blast_radius": derived.get(d) or {}, "domain": d,
                        "steps": scoped["steps"], "active_runs_after": len(_active_runs(session, d)),
                        "active_grants_after": _active_grants(session, d)}
             ev = verification.collect_evidence(
@@ -343,13 +359,33 @@ def execute(
             session.add(SystemSetting(key=LAST_KEY, value=last))
         else:
             row.value = last
-        return {"detail": "audited and alert raised"}
+        detail = "audited and alert raised"
+        try:  # §28/§33 incident record: timeline, evidence, analysis and corrective action continue there
+            from aeos.operations import incident as incidents
 
+            preserve_step = next((s for s in steps if s["step"] == "preserve_evidence"), {})
+            evidence_ids = [v.get("evidence_id") for v in (preserve_step.get("by_domain") or {}).values()
+                            if isinstance(v, dict) and v.get("evidence_id")]
+            with session.begin_nested():  # a failure here never loses the audit row above
+                inc = incidents.open_incident(
+                    session, title=f"Emergency stop: {reason}"[:256], actor=actor, owner=incident_owner,
+                    source="emergency_stop", source_ref=incident_id,
+                    status="CONTAINED" if status_before_audit == "COMPLETED" else "OPEN",
+                    declared_blast_radius=blast_radius, derived_blast_radius=derived, evidence_ids=evidence_ids,
+                    note=f"containment {status_before_audit}: "
+                         + ", ".join(f"{s['step']}={s['status']}" for s in steps))
+            record_ids["incident_record_id"] = inc.id
+        except Exception as exc:
+            detail += f"; incident record not created ({type(exc).__name__})"
+        return {"detail": detail}
+
+    record_ids: dict[str, str] = {}
     run_step("audit", record)
     report = {
         "incident_id": incident_id, "status": overall(), "started_at": started.isoformat(),
         "finished_at": finished.isoformat(), "reason": reason, "incident_owner": incident_owner,
-        "blast_radius": blast_radius, "steps": steps,
+        "blast_radius": blast_radius, "derived_blast_radius": derived, "steps": steps,
+        "incident_record_id": record_ids.get("incident_record_id"),
         "notice": "Cancel stops processes and revokes access; it does not undo external side effects that already "
                   "happened (reconcile publications/branches separately). Resume scheduling explicitly when safe.",
     }

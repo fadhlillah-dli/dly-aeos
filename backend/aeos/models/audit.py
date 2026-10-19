@@ -35,6 +35,8 @@ class AuditEvent(Base):
     reason: Mapped[str] = mapped_column(Text, default="")
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # always redacted
     request_id: Mapped[str] = mapped_column(String(64), default="")
+    # §13 AuditEvent "actor/run/target": the worker/verification run an action belongs to, when any.
+    run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class Event(Base):

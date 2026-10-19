@@ -415,6 +415,7 @@ def sli_target(
     minimum: float = typer.Option(None, "--min", help="Lower bound (higher is better)"),
     clear: bool = typer.Option(False, help="Remove the target"),
     rationale: str = typer.Option("", help="Why this target (criticality)"),
+    criticality: str = typer.Option(None, help="Apply only to projects of this criticality (HIGH|MEDIUM|LOW)"),
 ) -> None:
     """Record an owner decision for an SLI target (audited)."""
     _settings()
@@ -424,10 +425,54 @@ def sli_target(
     try:
         with session_scope() as s:
             result = sli.set_target(s, key, maximum=None if clear else maximum, minimum=None if clear else minimum,
-                                    actor_type="cli", actor_id=_local_actor(), rationale=rationale)
+                                    actor_type="cli", actor_id=_local_actor(), rationale=rationale,
+                                    criticality=criticality.upper() if criticality else None)
     except AeosError as exc:
         _fail(exc)
-    _echo(f"Target for {key}: {result['target']}")
+    _echo(f"Target for {result['key']}: {result['target']}")
+
+
+@sli_app.command("criticality")
+def sli_criticality(
+    project: str = typer.Argument(..., help="Project id or project key"),
+    level: str = typer.Argument(..., help="HIGH, MEDIUM, LOW or NONE (clear)"),
+    rationale: str = typer.Option("", help="Why (recorded)"),
+) -> None:
+    """Record the owner's criticality for a project; it selects that project's SLI targets (section 33)."""
+    _settings()
+    from aeos.core.db import session_scope
+    from aeos.operations import sli
+
+    try:
+        with session_scope() as s:
+            p = _project(s, project)
+            result = sli.set_criticality(s, p.id, None if level.upper() == "NONE" else level.upper(),
+                                         actor_type="cli", actor_id=_local_actor(), rationale=rationale)
+    except AeosError as exc:
+        _fail(exc)
+    _echo(f"Criticality of {project}: {result['criticality'] or 'none'}")
+
+
+@sli_app.command("budget-policy")
+def sli_budget_policy(
+    window_days: int = typer.Option(..., help="SLO window in days (e.g. 28)"),
+    objective: float = typer.Option(..., help="Share of evaluations that must be within target (e.g. 0.99)"),
+    action: str = typer.Option("alert", help="alert | pause_scheduling (pause new work while exhausted)"),
+    rationale: str = typer.Option("", help="Why (recorded)"),
+) -> None:
+    """Record the owner's error-budget policy (section 46): window, objective and exhaustion action."""
+    _settings()
+    from aeos.core.db import session_scope
+    from aeos.operations import sli
+
+    try:
+        with session_scope() as s:
+            policy = sli.set_error_budget_policy(s, window_days=window_days, objective=objective, action=action,
+                                                 actor_type="cli", actor_id=_local_actor(), rationale=rationale)
+    except AeosError as exc:
+        _fail(exc)
+    _echo(f"Error budget policy: window {policy['window_days']} d, objective {policy['objective']}, "
+          f"action {policy['action']}")
 
 
 # ----------------------------------------------------------------------------------------- emergency stop
@@ -462,7 +507,66 @@ def emergency_stop(
         session.close()
     for step in report["steps"]:
         _echo(f"  {step['step']:<20} {step['status']}  {step.get('reason') or step.get('detail') or ''}")
-    _echo(f"Emergency stop {report['status']} (incident {report['incident_id']})")
+    _echo(f"Emergency stop {report['status']} (incident {report['incident_id']}, owner {report['incident_owner']})")
+    if report.get("incident_record_id"):
+        _echo(f"Incident record {report['incident_record_id']}: continue timeline, root cause, corrective action "
+              "and regression test in History > Darurat (GET /api/ops/incidents).")
     _echo(report["notice"])
     if report["status"] != "COMPLETED":
         raise typer.Exit(1)
+
+
+# ----------------------------------------------------------------------------------------- retirement
+
+retirement_app = typer.Typer(help="Project retirement: checklist, legal hold (nothing is ever deleted).",
+                             no_args_is_help=True)
+app.add_typer(retirement_app, name="retirement")
+
+
+def _project(session: Any, ref: str) -> Any:
+    from aeos.models.portfolio import Project
+
+    project = session.get(Project, ref) or session.scalar(select(Project).where(Project.project_key == ref))
+    if project is None:
+        raise typer.BadParameter(f"unknown project {ref!r} (id or project key)")
+    return project
+
+
+@retirement_app.command("legal-hold")
+def retirement_legal_hold(
+    project: str = typer.Argument(..., help="Project id or project key"),
+    on: bool = typer.Option(None, "--on/--off", help="Place (--on) or clear (--off) the legal hold"),
+    reason: str = typer.Option(..., help="Why (recorded and audited)"),
+) -> None:
+    """Record or clear a legal hold; while active, data/backup disposal is BLOCKING (section 33)."""
+    if on is None:
+        raise typer.BadParameter("choose --on or --off")
+    _settings()
+    from aeos.core.db import session_scope
+    from aeos.operations import retirement
+
+    try:
+        with session_scope() as s:
+            p = _project(s, project)
+            hold = retirement.set_legal_hold(s, p, active=on, reason=reason, actor=f"cli:{_local_actor()}")
+    except AeosError as exc:
+        _fail(exc)
+    _echo(f"Legal hold {'ACTIVE' if hold['active'] else 'cleared'} for {project} ({hold['at']})")
+
+
+@retirement_app.command("show")
+def retirement_show(project: str = typer.Argument(..., help="Project id or project key"),
+                    as_json: bool = typer.Option(False, "--json")) -> None:
+    """Show the read-only retirement checklist."""
+    settings = _settings()
+    from aeos.core.db import session_scope
+    from aeos.operations import retirement
+
+    with session_scope() as s:
+        data = retirement.checklist(s, settings, _project(s, project))
+    if as_json:
+        _json(data)
+        return
+    for item in data["items"]:
+        _echo(f"  {item['key']:<20} {item['status']:<24} {item['owner_action']}")
+    _echo(f"checklist_hash {data['checklist_hash']}  blocking: {', '.join(data['blocking']) or 'none'}")

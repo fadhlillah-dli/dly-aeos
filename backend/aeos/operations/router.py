@@ -109,7 +109,8 @@ def list_releases(principal: CurrentPrincipal, settings: SettingsDep) -> dict[st
 
 @router.get("/api/ops/sli")
 def get_sli(principal: CurrentPrincipal, domain: ActiveDomain, db: DB, settings: SettingsDep) -> dict[str, Any]:
-    return {**sli.public(sli.compute(db, domain=domain, settings=settings)), "mode": "LIVE"}
+    return {**sli.public(sli.compute(db, domain=domain, settings=settings)), "mode": "LIVE",
+            "error_budget": sli.error_budget(db, domain=domain)}
 
 
 @router.post("/api/ops/sli/evaluate")
@@ -231,7 +232,225 @@ def list_runbooks(principal: CurrentPrincipal) -> dict[str, Any]:
 def retirement_checklist(project_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB,
                          settings: SettingsDep) -> dict[str, Any]:
     project = load_project(db, principal, project_id, domain=domain)
-    return {**retirement.checklist(db, settings, project), "checked_at": _now(), "mode": "LIVE"}
+    return {**retirement.checklist(db, settings, project), "checked_at": _now(), "mode": "LIVE",
+            "source": "project records + ops_retirements (read-only projection)"}
+
+
+class LegalHoldIn(BaseModel):
+    active: bool
+    reason: str = Field(min_length=5, max_length=1000)
+
+
+class RetirementStepIn(BaseModel):
+    status: str = Field(pattern="^(IN_PROGRESS|DONE|NOT_APPLICABLE)$")
+    owner: str = Field(default="", max_length=200)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=50)
+    note: str = Field(default="", max_length=1000)
+
+
+class RetirementDecisionIn(BaseModel):
+    checklist_hash: str = Field(min_length=10, max_length=80)
+    rationale: str = Field(min_length=10, max_length=2000)
+
+
+@router.put("/api/ops/retirement/{project_id}/legal-hold")
+def retirement_legal_hold(project_id: str, body: LegalHoldIn, principal: AdminPrincipal, domain: ActiveDomain,
+                          db: DB) -> dict[str, Any]:
+    project = load_project(db, principal, project_id, domain=domain)
+    hold = retirement.set_legal_hold(db, project, active=body.active, reason=body.reason, actor=principal.user.id)
+    db.commit()
+    return {"project_id": project.id, "legal_hold": hold}
+
+
+@router.put("/api/ops/retirement/{project_id}/steps/{key}")
+def retirement_step(project_id: str, key: str, body: RetirementStepIn, principal: AdminPrincipal,
+                    domain: ActiveDomain, db: DB) -> dict[str, Any]:
+    project = load_project(db, principal, project_id, domain=domain)
+    entry = retirement.record_step(db, project, key, status=body.status, actor=principal.user.id, owner=body.owner,
+                                   evidence_ids=body.evidence_ids, note=body.note)
+    db.commit()
+    return {"project_id": project.id, "step": key, "recorded": entry}
+
+
+@router.post("/api/ops/retirement/{project_id}/decision")
+def retirement_decision(project_id: str, body: RetirementDecisionIn, principal: AdminPrincipal,
+                        domain: ActiveDomain, db: DB, settings: SettingsDep) -> dict[str, Any]:
+    project = load_project(db, principal, project_id, domain=domain)
+    result = retirement.record_decision(db, settings, project, actor_user_id=principal.user.id,
+                                        checklist_hash_seen=body.checklist_hash, rationale=body.rationale)
+    db.commit()
+    return result
+
+
+@router.get("/api/ops/retention")
+def retention_policy(principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    from aeos.operations import retention
+
+    policy = retention.load_policy()
+    return {"items": [retention.resolve(policy, c, domain.value) for c in retention.DATA_CLASSES],
+            "status": policy.get("status"), "legal_hold_blocks_disposal": policy.get("legal_hold_blocks_disposal"),
+            "source": "policy/retention.yaml (owner decisions; protected path)", "checked_at": _now(),
+            "mode": "LIVE", "notice": "AEOS tidak pernah menghapus data; kedaluwarsa = disposal manual saja."}
+
+
+# ----------------------------------------------------------------------------------------- incidents
+
+
+class IncidentIn(BaseModel):
+    title: str = Field(min_length=3, max_length=256)
+    owner: str = Field(default="", max_length=200)
+    note: str = Field(default="", max_length=2000)
+    blast_radius: str = Field(default="", max_length=1000)
+    project_id: str | None = None
+
+
+class IncidentNoteIn(BaseModel):
+    note: str = Field(min_length=3, max_length=2000)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=50)
+
+
+class IncidentAnalysisIn(BaseModel):
+    impact: str = Field(default="", max_length=4000)
+    hypotheses: list[str] = Field(default_factory=list, max_length=20)
+    root_cause: str = Field(default="", max_length=4000)
+    root_cause_evidence_refs: list[str] = Field(default_factory=list, max_length=20)
+    root_cause_ref: str | None = Field(default=None, max_length=64)
+
+
+class CorrectiveActionIn(BaseModel):
+    description: str = Field(min_length=5, max_length=2000)
+    ref: str | None = Field(default=None, max_length=64)
+
+
+class RegressionIn(BaseModel):
+    test_ids: list[str] = Field(default_factory=list, max_length=20)
+    eval_case_refs: list[str] = Field(default_factory=list, max_length=20)
+
+
+class FollowUpIn(BaseModel):
+    component_ids: list[str] = Field(min_length=1, max_length=20)
+    title: str = Field(default="", max_length=200)
+
+
+def _incident_domain(principal: Any) -> str | None:
+    active = principal.active_domain
+    return active.value if active is not None and principal.can_access_domain(active) else None
+
+
+@router.get("/api/ops/incidents")
+def list_incidents(principal: CurrentPrincipal, db: DB,
+                   status: str | None = Query(None, pattern="^(OPEN|CONTAINED|RESOLVED)$")) -> dict[str, Any]:
+    from aeos.operations import incident
+
+    return {"items": incident.list_incidents(db, domain=_incident_domain(principal), status=status),
+            "source": "ops_incidents", "checked_at": _now(), "mode": "LIVE"}
+
+
+@router.get("/api/ops/incidents/{incident_id}")
+def get_incident(incident_id: str, principal: CurrentPrincipal, db: DB) -> dict[str, Any]:
+    from aeos.operations import incident
+
+    return incident.get_incident(db, incident_id, domain=_incident_domain(principal))
+
+
+@router.get("/api/ops/incidents/{incident_id}/report")
+def incident_report(incident_id: str, principal: CurrentPrincipal, db: DB,
+                    kind: str = Query("INCIDENT_REPORT", pattern="^(INCIDENT_REPORT|POST_MORTEM)$")) -> dict[str, Any]:
+    from aeos.operations import incident
+
+    view = incident.get_incident(db, incident_id, domain=_incident_domain(principal))
+    return {"incident_id": incident_id, "kind": kind, "markdown": incident.render_report(view, kind=kind),
+            "generated_at": _now(), "mode": "SNAPSHOT"}
+
+
+@router.post("/api/ops/incidents")
+def open_incident(body: IncidentIn, principal: AdminPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
+    from aeos.operations import incident
+
+    project_id = None
+    if body.project_id:
+        project_id = load_project(db, principal, body.project_id, domain=domain).id
+    inc = incident.open_incident(db, title=body.title, actor=principal.user.id, owner=body.owner, source="manual",
+                                 domain=domain.value, project_id=project_id, declared_blast_radius=body.blast_radius,
+                                 note=body.note)
+    db.commit()
+    return incident.scoped(inc, domain.value)
+
+
+def _incident_write(db: DB, principal: Any, incident_id: str) -> str | None:
+    from aeos.operations import incident
+
+    domain = _incident_domain(principal)
+    incident.get_incident(db, incident_id, domain=domain)  # 404 for another domain's incident
+    return domain
+
+
+@router.post("/api/ops/incidents/{incident_id}/timeline")
+def incident_note(incident_id: str, body: IncidentNoteIn, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
+    from aeos.operations import incident
+
+    domain = _incident_write(db, principal, incident_id)
+    inc = incident.add_timeline(db, incident_id, actor=principal.user.id, note=body.note, evidence_ids=body.evidence_ids)
+    db.commit()
+    return incident.scoped(inc, domain)
+
+
+@router.post("/api/ops/incidents/{incident_id}/analysis")
+def incident_analysis(incident_id: str, body: IncidentAnalysisIn, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
+    from aeos.operations import incident
+
+    domain = _incident_write(db, principal, incident_id)
+    inc = incident.record_analysis(db, incident_id, actor=principal.user.id, impact=body.impact,
+                                   hypotheses=body.hypotheses, root_cause=body.root_cause,
+                                   root_cause_evidence_refs=body.root_cause_evidence_refs,
+                                   root_cause_ref=body.root_cause_ref)
+    db.commit()
+    return incident.scoped(inc, domain)
+
+
+@router.post("/api/ops/incidents/{incident_id}/corrective-actions")
+def incident_corrective(incident_id: str, body: CorrectiveActionIn, principal: AdminPrincipal,
+                        db: DB) -> dict[str, Any]:
+    from aeos.operations import incident
+
+    domain = _incident_write(db, principal, incident_id)
+    inc = incident.add_corrective_action(db, incident_id, actor=principal.user.id, description=body.description,
+                                         ref=body.ref)
+    db.commit()
+    return incident.scoped(inc, domain)
+
+
+@router.post("/api/ops/incidents/{incident_id}/regression")
+def incident_regression(incident_id: str, body: RegressionIn, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
+    from aeos.operations import incident
+
+    domain = _incident_write(db, principal, incident_id)
+    inc = incident.link_regression(db, incident_id, actor=principal.user.id, test_ids=body.test_ids,
+                                   eval_case_refs=body.eval_case_refs)
+    db.commit()
+    return incident.scoped(inc, domain)
+
+
+@router.post("/api/ops/incidents/{incident_id}/follow-up")
+def incident_follow_up(incident_id: str, body: FollowUpIn, principal: AdminPrincipal, domain: ActiveDomain,
+                       db: DB) -> dict[str, Any]:
+    from aeos.operations import incident
+
+    _incident_write(db, principal, incident_id)
+    result = incident.open_follow_up(db, incident_id, actor_user_id=principal.user.id, domain=domain.value,
+                                     component_ids=body.component_ids, title=body.title)
+    db.commit()
+    return result
+
+
+@router.post("/api/ops/incidents/{incident_id}/resolve")
+def incident_resolve(incident_id: str, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
+    from aeos.operations import incident
+
+    domain = _incident_write(db, principal, incident_id)
+    inc = incident.resolve(db, incident_id, actor=principal.user.id)
+    db.commit()
+    return incident.scoped(inc, domain)
 
 
 def _now() -> str:

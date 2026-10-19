@@ -26,9 +26,19 @@ def empty_db(tmp_path, monkeypatch):
     config_mod.reset_settings_cache()
 
 
+def _head() -> str:
+    from alembic.script import ScriptDirectory
+
+    from aeos.core.migrate import alembic_config
+
+    heads = ScriptDirectory.from_config(alembic_config()).get_heads()
+    assert len(heads) == 1, f"the migration history must have exactly one head, got {heads}"
+    return heads[0]
+
+
 def test_fresh_upgrade_matches_models_and_installs_triggers(empty_db):
     result = upgrade_database()
-    assert result["action"] == "upgraded" and result["head"] == "0001_initial"
+    assert result["action"] == "upgraded" and result["head"] == _head()
     import_all_models()
     with get_engine().connect() as conn:
         diff = compare_metadata(MigrationContext.configure(conn), Base.metadata)
@@ -36,14 +46,14 @@ def test_fresh_upgrade_matches_models_and_installs_triggers(empty_db):
     assert diff == [], diff
     assert set(Base.metadata.tables) <= set(inspect(get_engine()).get_table_names())
     assert {"trg_audit_events_no_update", "trg_plan_versions_no_delete", "trg_decisions_immutable_cols"} <= triggers
-    assert migration_status()["current"] == "0001_initial"
+    assert migration_status()["current"] == _head()
     assert upgrade_database()["action"] == "none"
 
 
 def test_database_created_by_create_all_is_stamped_not_recreated(empty_db):
     create_all(empty_db)
     result = upgrade_database()
-    assert result["action"] == "stamped" and migration_status()["current"] == "0001_initial"
+    assert result["action"] == "stamped" and migration_status()["current"] == _head()
 
 
 def test_behind_head_database_is_backed_up_before_upgrade(empty_db, monkeypatch):
@@ -52,13 +62,14 @@ def test_behind_head_database_is_backed_up_before_upgrade(empty_db, monkeypatch)
 
     import aeos.core.migrate as migrate
 
-    upgrade_database()  # now at 0001_initial
+    upgrade_database()  # now at the head
+    head = _head()
     calls: list[str] = []
     monkeypatch.setattr(migrate, "_head", lambda cfg: "0002_future")
     monkeypatch.setattr(migrate.command, "upgrade", lambda cfg, rev: calls.append(rev))
     result = upgrade_database()
-    assert result["action"] == "upgraded" and result["from"] == "0001_initial" and calls == ["head"]
+    assert result["action"] == "upgraded" and result["from"] == head and calls == ["head"]
     backup = Path(result["backup"])
     assert backup.is_file() and backup.parent == config_mod.get_settings().layout.backups
     with sqlite3.connect(backup) as raw:  # the copy is a readable database at the old revision
-        assert raw.execute("select version_num from alembic_version").fetchone()[0] == "0001_initial"
+        assert raw.execute("select version_num from alembic_version").fetchone()[0] == head
