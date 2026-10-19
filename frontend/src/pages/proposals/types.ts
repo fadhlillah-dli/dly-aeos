@@ -165,6 +165,7 @@ export interface ProposalDetail extends ProposalRow {
   problem: string;
   expected_benefit: string;
   limits: Record<string, unknown>;
+  candidate_component_ids?: string[];
   attachment_ids: string[];
   unknown_fields: string[];
   parts: { child_id: string; title: string; kind: string; depends_on: string[] }[];
@@ -175,7 +176,7 @@ export interface ProposalDetail extends ProposalRow {
   outcome: { current?: OutcomeEntry; history?: OutcomeEntry[] };
   duplicates: { id: string; title: string; status: string }[];
   research_entries: { id: string; name: string; lifecycle: string; identity_status: string; checked_at: string | null }[];
-  delivery_dimensions: Record<string, { status: string; note: string }>;
+  delivery_dimensions: Record<string, { status: string; note: string; at?: string | null }>;
   guarantees: { installs: boolean; activates: boolean; raises_budget: boolean; sends_project_data: boolean; note: string };
 }
 

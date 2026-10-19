@@ -271,5 +271,8 @@ describe("Organization page", () => {
     expect(screen.getByText("Layanan kode, bukan LLM")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("Nonaktif")).toBeInTheDocument());
     expect(screen.getAllByText("Belum dievaluasi")).toHaveLength(2);
+    // §17: ownership (accountable human) and assignment are projected, never a permission
+    expect(screen.getByText(/Pemilik \(manusia yang bertanggung jawab\): owner/)).toBeInTheDocument();
+    expect(screen.getByTestId("assigned-frontend-engineer")).toHaveTextContent("0 task aktif");
   });
 });

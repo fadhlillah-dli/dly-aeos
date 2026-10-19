@@ -33,6 +33,28 @@ def test_problem_benefit_and_limits_are_stored_redacted_and_shown_in_the_review(
     assert cash["cap_usd"] == 1 and cash["value"] is None and cash["basis"] == "UNKNOWN"  # a cap, not an estimate
 
 
+def test_detail_shows_when_a_candidate_became_active_from_inventory_not_approval(db):
+    """§41 detail 'kapan aktif': the first ENABLED inventory observation of a candidate, never the approval."""
+    from datetime import timedelta
+
+    from aeos.core.timeutil import utcnow
+    from aeos.models.inventory import ComponentObservation, ComponentReference
+
+    p = service.create_proposal(db, actor_user_id="owner", domain="PERSONAL", kind="ADD", title=None,
+                                sources=["https://github.com/octo/tool"], candidate_component_ids=["toolx"])
+    db.commit()
+    assert service.delivery_dimensions(db, p)["ACTIVE"]["at"] is None
+    db.add(ComponentReference(component_id="toolx", kind="tool", name="ToolX", enablement="ENABLED"))
+    first = utcnow() - timedelta(days=2)
+    db.add_all([ComponentObservation(component_id="toolx", dimension="enablement", status="ENABLED", observer="owner",
+                                     observed_at=first),
+                ComponentObservation(component_id="toolx", dimension="enablement", status="ENABLED", observer="owner",
+                                     observed_at=utcnow())])
+    db.commit()
+    active = service.delivery_dimensions(db, p)["ACTIVE"]
+    assert active["status"] == "ENABLED_IN_CONFIG" and active["at"].startswith(first.isoformat()[:16])
+
+
 @pytest.mark.parametrize("action,status,kind", [
     ("KEEP", "KEEP", "REJECTION"),
     ("DEFER", "DEFERRED", "REVISION_REQUEST"),

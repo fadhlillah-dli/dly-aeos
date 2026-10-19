@@ -1,7 +1,7 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Paperclip, Plus, Trash2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
-import { post } from "../../api/client";
+import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { Button, ErrorBox, Field, inputClass, Notice } from "../../components/ui";
 import { uploadAttachment } from "./intake";
@@ -51,6 +51,15 @@ export function ProposalForm({
   const [benefit, setBenefit] = useState("");
   const [scopeType, setScopeType] = useState<"PLATFORM" | "PROJECT">("PLATFORM");
   const [components, setComponents] = useState(initialComponent ?? "");
+  const [candidates, setCandidates] = useState("");
+  // §39: pick inventory components by friendly name instead of memorising internal ids (suggestions only;
+  // the backend still validates every id and marks unknown ones UNKNOWN).
+  const inventory = useQuery({
+    queryKey: ["inventory-components", "proposal-picker"],
+    queryFn: () => get<{ items: { component_id: string; friendly_name: string | null; name: string }[] }>(
+      "/api/inventory/components?page_size=200"),
+    retry: false,
+  });
   const [pin, setPin] = useState("");
   const [costUsd, setCostUsd] = useState("");
   const [maxMinutes, setMaxMinutes] = useState("");
@@ -76,6 +85,7 @@ export function ProposalForm({
         scope_type: scopeType,
         project_id: scopeType === "PROJECT" ? projectId : null,
         existing_component_ids: lines(components),
+        candidate_component_ids: lines(candidates),
         candidate_pin: pin || null,
         attachment_ids: attachments.map((a) => a.id),
         limits: Object.fromEntries(
@@ -139,8 +149,20 @@ export function ProposalForm({
         <Field label="Repo / docs / model / tool (URL atau nama)" hint="Satu per baris; bentuk URL GitHub apa pun dinormalisasi ke identitas kanonik">
           <textarea className={inputClass} rows={3} value={sources} onChange={(e) => setSources(e.target.value)} placeholder="https://github.com/owner/repo" />
         </Field>
-        <Field label="Komponen lama (ID inventaris)" hint="Wajib untuk REPLACE/UPGRADE/REMOVE; pisahkan dengan koma">
-          <input className={inputClass} value={components} onChange={(e) => setComponents(e.target.value)} placeholder="opencode" />
+        <datalist id="inventory-component-ids">
+          {(inventory.data?.items ?? []).map((c) => (
+            <option key={c.component_id} value={c.component_id}>
+              {c.friendly_name || c.name}
+            </option>
+          ))}
+        </datalist>
+        <Field label="Komponen lama (ID inventaris)" hint="Wajib untuk REPLACE/UPGRADE/REMOVE; ketik untuk memilih dari inventaris; pisahkan dengan koma">
+          <input className={inputClass} value={components} onChange={(e) => setComponents(e.target.value)} placeholder="opencode"
+            list="inventory-component-ids" aria-label="Komponen lama (ID inventaris)" />
+        </Field>
+        <Field label="Komponen kandidat (opsional)" hint="Komponen inventaris yang diusulkan ditambah/menggantikan; pisahkan dengan koma">
+          <input className={inputClass} value={candidates} onChange={(e) => setCandidates(e.target.value)}
+            list="inventory-component-ids" aria-label="Komponen kandidat" />
         </Field>
         <Field label="Masalah / tujuan">
           <textarea className={inputClass} rows={3} value={problem} onChange={(e) => setProblem(e.target.value)} />
