@@ -226,6 +226,14 @@ def test_planning_to_publication_end_to_end(world):
     records = list(db.scalars(select(DocumentRecord).where(DocumentRecord.project_id == pid)))
     published = [r for r in records if r.status == "PUBLISHED"]
     assert published and all(r.links.get("external_id") for r in published)
+    # §27/§28 seam: the schema-valid pipeline plan fills the Product 1 sections (not "documentation pending")
+    by_lid = {r.logical_doc_id: r for r in records}
+    sec = {lid: {s["key"]: s["status"] for s in by_lid[lid].sections}
+           for lid in ("01-product-overview", "03-architecture-overview", "02-requirements/prd-f1")}
+    assert sec["01-product-overview"]["overview"] == "FILLED"
+    assert sec["03-architecture-overview"]["context"] == "FILLED"  # the plan's context diagram
+    assert sec["02-requirements/prd-f1"]["acceptance_criteria"] == "FILLED"
+    assert "T1 works" in by_lid["02-requirements/prd-f1"].body_markdown  # TaskSpec F1 → document key f1
     refs = {(r.provider, r.logical_id): r for r in db.scalars(select(ExternalReference).where(
         ExternalReference.project_id == pid))}
     assert ("google-drive", "root") in refs and any(p == "github-issues" and lid.startswith("issue:")

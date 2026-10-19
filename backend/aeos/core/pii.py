@@ -68,15 +68,33 @@ def _card(m: re.Match[str]) -> str:
     return PII_CARD if 13 <= len(d) <= 19 and _luhn(d) else m.group(0)
 
 
-def redact_pii(text: str) -> str:
-    if not text:
-        return text
+# Identifiers that must never be "minimised": UUIDs (record ids, e.g. a publication operation id in an audit
+# row) and long hex digests. Their digit runs can look like a Luhn-valid card or a local phone number by chance.
+# (Never next to "@": a hex-looking e-mail local part or domain is still an e-mail address.)
+_PROTECTED = re.compile(r"(?<![0-9A-Fa-f@])(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+                        r"[0-9A-Fa-f]{12}|[0-9A-Fa-f]{32,})(?![0-9A-Fa-f@])")
+
+
+def _redact_plain(text: str) -> str:
     text = _EMAIL.sub(PII_EMAIL, text)
     text = _CARD.sub(_card, text)
     text = _NIK.sub(_nik, text)
     text = _PHONE_INTL.sub(_phone, text)
     text = _PHONE_LOCAL.sub(_phone, text)
     return text
+
+
+def redact_pii(text: str) -> str:
+    if not text:
+        return text
+    out: list[str] = []
+    pos = 0
+    for m in _PROTECTED.finditer(text):
+        out.append(_redact_plain(text[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(_redact_plain(text[pos:]))
+    return "".join(out)
 
 
 def contains_pii(text: str) -> bool:

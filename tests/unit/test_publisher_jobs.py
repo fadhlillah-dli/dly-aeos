@@ -419,6 +419,12 @@ def test_documents_marked_published_with_external_links(env):
     assert rec.last_synced_at is not None
     future = db.scalar(select(DocumentRecord).where(DocumentRecord.logical_doc_id == "08-monitoring"))
     assert future.status == "NOT_STARTED"  # skeleton published, status stays honest
+    # §29 "published with provenance": every external reference names the approved version and the run
+    db.refresh(pub)
+    refs = list(db.scalars(select(ExternalReference).where(ExternalReference.project_id == pub.project_id)))
+    assert refs and all(r.source_plan_version_id == pub.plan_version_id for r in refs)
+    assert all(r.last_publication_id == pub.id for r in refs)
+    assert pub.decision_id and pub.publication_decision_id  # plan approval + the run's PUBLICATION decision
 
 
 def test_crash_recovery_marks_in_flight_unknown(env):

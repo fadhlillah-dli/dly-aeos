@@ -40,6 +40,47 @@ def github_token() -> str:
     return secrets.get_secret(GITHUB_REF, purpose=GITHUB_PURPOSE, actor="doctor")
 
 
+# Classic OAuth/PAT scopes that reach far beyond publishing issues on one repository (§07 step 7 least privilege).
+BROAD_GITHUB_SCOPES = frozenset({"repo", "public_repo", "workflow", "delete_repo", "write:packages", "delete:packages",
+                                 "admin:org", "admin:repo_hook", "admin:org_hook", "admin:public_key",
+                                 "admin:gpg_key", "admin:ssh_signing_key", "admin:enterprise", "site_admin", "user",
+                                 "codespace", "project"})
+
+
+def _token_kind() -> str:
+    """Kind of the stored token from its documented prefix only (the value itself is never read further)."""
+    try:
+        token = github_token()
+    except Exception:
+        return "unknown"
+    if token.startswith("github_pat_"):
+        return "fine-grained"
+    if token.startswith(("ghp_", "gho_", "ghu_")):
+        return "classic"
+    return "unknown"
+
+
+def github_token_privilege(kind: str, scopes_header: str | None) -> dict[str, Any]:
+    """Least-privilege verdict from the token kind and GitHub's ``X-OAuth-Scopes`` header (classic tokens only).
+
+    Fine-grained PATs are limited to selected repositories/permissions by construction; a classic/OAuth token
+    (e.g. ``gh auth token``) with ``repo`` reaches every repository of the account — a residual risk the owner sees."""
+    scopes = sorted({s.strip() for s in (scopes_header or "").split(",") if s.strip()})
+    if kind == "fine-grained":
+        return {"kind": kind, "scopes": [], "least_privilege": True,
+                "note": "fine-grained PAT (repo terpilih, izin per resource)"}
+    if scopes_header is None:
+        return {"kind": kind, "scopes": [], "least_privilege": None,
+                "note": "jenis/scope token tidak terbaca — least privilege belum terbukti"}
+    broad = sorted(s for s in scopes if s in BROAD_GITHUB_SCOPES or s.startswith("admin:"))
+    if broad:
+        return {"kind": kind, "scopes": scopes, "least_privilege": False, "broad_scopes": broad,
+                "risk": "Token GitHub classic/OAuth dengan scope luas (" + ", ".join(broad) + ") menjangkau semua repo "
+                        "akun; gunakan fine-grained PAT khusus repo platform (Issues RW, Pull requests RW, Contents R, "
+                        "Metadata R)."}
+    return {"kind": kind, "scopes": scopes, "least_privilege": True, "note": "scope classic terbatas"}
+
+
 def github_get(ctx: CheckContext, path: str) -> Any:
     """Read-only GitHub API GET with the stored token (never logged). Returns HttpResult or None."""
     token = github_token()
@@ -78,8 +119,16 @@ def adapter_github(ctx: CheckContext) -> Outcome:
         evidence.update({"private": hr.body.get("private"), "default_branch": hr.body.get("default_branch"),
                          "permissions": {k: perms.get(k) for k in ("admin", "maintain", "push", "pull") if k in perms},
                          "repo_id": hr.body.get("id")})
-        return Outcome("CONNECTED", f"Repo github:{slug} terbaca dengan token (read-only); izin tulis/enforcement belum "
-                       "diverifikasi.", evidence=evidence, target_identity=f"github:{slug}")
+        privilege = github_token_privilege(_token_kind(), (getattr(hr, "headers", None) or {}).get("x-oauth-scopes"))
+        evidence["token_privilege"] = privilege
+        summary = f"Repo github:{slug} terbaca dengan token (read-only); izin tulis/enforcement belum diverifikasi."
+        if privilege["least_privilege"] is False:
+            evidence["residual_risks"] = [privilege["risk"]]
+            summary += " " + privilege["risk"]
+        return Outcome("CONNECTED", summary, evidence=evidence, target_identity=f"github:{slug}",
+                       remedy=None if privilege["least_privilege"] is not False else set_secret_remedy(
+                           GITHUB_REF, "GitHub fine-grained PAT, hanya repo platform: Issues RW, Pull requests RW, "
+                                       "Contents R, Metadata R"))
     if hr.status == 401:
         return Outcome("EXPIRED", "Token GitHub ditolak (kedaluwarsa/dicabut).", evidence=evidence,
                        error_code="GITHUB_TOKEN_REJECTED", remedy=set_secret_remedy(GITHUB_REF, "GitHub"))

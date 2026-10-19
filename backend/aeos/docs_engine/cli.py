@@ -120,6 +120,44 @@ def render(
         session.close()
 
 
+@app.command("release-candidate")
+def release_candidate(
+    plan_version_id: str = typer.Argument(..., help="APPROVED PlanVersion id"),
+    release: str = typer.Option(..., "--release", help="Release plan version/key, e.g. 1.0.0"),
+    commit: str = typer.Option(..., "--commit", help="Full git SHA of the release candidate"),
+) -> None:
+    """Record the release-candidate documentation snapshot (commit + approved version + document hashes).
+
+    Records documentation state only: no readiness, deployment or sign-off claim, nothing is published.
+    """
+    from aeos.core.config import get_settings
+    from aeos.core.errors import AeosError
+    from aeos.docs_engine import service
+    from aeos.models.planning import PlanVersion
+
+    session = _session()
+    try:
+        version = session.get(PlanVersion, plan_version_id)
+        if version is None:
+            _echo(f"plan version {plan_version_id} not found")
+            raise typer.Exit(2)
+        try:
+            out = service.record_release_candidate(session, get_settings(), version, release_key=release,
+                                                   commit=commit, actor_user_id="local-operator", actor_type="cli")
+            session.commit()
+        except AeosError as exc:
+            session.rollback()
+            _echo(f"release candidate refused: {exc.code}: {exc.message}")
+            for item in (exc.details or {}).get("pending", []):
+                _echo(f"  pending: {item['logical_doc_id']}: {', '.join(item['sections'])}")
+            raise typer.Exit(1) from exc
+        _echo(f"Release plan: {out['release_plan']}")
+        _echo(f"Snapshot: {out['snapshot_hash']} ({out['documents']} documents) at commit {out['commit']}"
+              + ("" if out["created"] else " (already recorded)"))
+    finally:
+        session.close()
+
+
 @app.command("visuals-status")
 def visuals_status() -> None:
     """Report whether the optional mermaid-cli (mmdc) renderer is available."""
