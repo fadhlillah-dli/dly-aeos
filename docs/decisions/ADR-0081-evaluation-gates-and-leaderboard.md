@@ -48,3 +48,36 @@ from an evaluation result.
 
 * The leaderboard is empty until the workforce executes evaluation runs and a verifier records them.
 * Small samples are flagged informationally (n < 10); no universal acceptance threshold is set.
+
+## Amendment 2026-10-19 (C5: execution, comparison, honest gaps)
+
+* **Execution without a second scheduler.** `aeos.evaluation.executor`: an owner starts a PLANNED run (suite intact,
+  route still on the planned configuration), every case x repetition becomes a slot, the owner binds a TaskSpec
+  executed through the workforce to each slot, and the trusted collector (`collector`) derives every sample from
+  canonical records (TaskExecution, WorkerRun, AcceptanceRecord, ReviewRecord, BrokerRequest, usage ledger) —
+  status, first pass, repairs, latency/queue wait, worker cost/tokens, permission attempts, scope/security
+  violations, critical regressions, Claude reviews, human interventions — and derives the gates from them. A task
+  that ran on another route/harness is refused; unexecuted slots are recorded CANCELLED, never dropped. API
+  `/api/eval/runs/{id}/start|bind|collect|finish`, CLI `aeos eval start|bind|collect|finish`.
+* **Leaderboard.** Grouped by (suite, configuration, topology) — topologies are never pooled, and
+  `/api/eval/topology` compares A-D for one fixed configuration. Critical regression excludes
+  (`EXCLUDED_REGRESSION`; adjacent regressions are reported only). A registered route failing the terms/data gate
+  for the workload's class (INTERNAL) is excluded (`EXCLUDED_ROUTE_TERMS`), a route changed since the run is
+  `EXCLUDED_STALE_CONFIGURATION`; an unregistered route is flagged `NOT_REGISTERED`. Only runs under the reference
+  conditions (limits + suite hash + environment) are ranked; a designated baseline gives deltas with conservative
+  intervals; mixed environments are flagged. A combined ranking exists only with owner-declared per-suite workload
+  weights (POLICY decision `eval_workload_weights/<role>`), with propagated intervals and ties.
+* **§44 measures** (context/coordination/worker tokens, merge conflicts, critical vs adjacent regression, security
+  violations) are computed under `metrics.usage`/outcome/contract/reliability.
+* **Local builds** must state quantization/inference backend/hardware (part of the configuration hash).
+* **Failures -> cases (§28).** `POST /api/eval/cases` turns trusted failure evidence, a failed run or an alert into a
+  CANDIDATE case; only a human PROMOTION decision bound to the case hash adopts it, as a new protected suite (OFFICE
+  failures are never promoted into platform suites).
+* **Blind qualitative review**: anonymised executed samples; scores feed `product_quality`.
+* **Controlled comparison (§39/§40)**: `POST /api/eval/comparisons` plans baseline + candidate runs on the same suites
+  and limits for a reviewed/trial proposal; `GET /api/eval/comparisons/{proposal}` gives the side-by-side verdict
+  (cost per accepted outcome, never "shorter output").
+* **Protected path.** `backend/aeos/evaluation/**` is a self-build protected path (AGENTS.md + the three tuples).
+* **Not available in this build (honest):** executable fixtures/graders for the held-out case definitions (each
+  case needs an owner-authored fixture project + trusted suite, ADR-0060), an automatic case -> TaskSpec compiler,
+  and therefore any real recorded experiment; run views say `fixtures: NOT_AVAILABLE_IN_BUILD`.

@@ -51,8 +51,10 @@ Runtime state never lives in the repo: data dir is `%LOCALAPPDATA%\DLY-AEOS` (Wi
 
 Workers building DLY AEOS may propose changes but the patch is quarantined for special review if
 it touches: `policy/**`, `backend/aeos/policy/**`, `backend/aeos/verification/**`,
-`backend/aeos/broker/**`, `backend/aeos/identity/**`, `tests/acceptance/**`, `.github/workflows/**`,
-`install-manifest/**`, `backend/aeos/migrations/**`.
+`backend/aeos/evaluation/**`, `backend/aeos/broker/**`, `backend/aeos/identity/**`, `tests/acceptance/**`,
+`.github/workflows/**`, `install-manifest/**`, `backend/aeos/migrations/**`.
+(`backend/aeos/evaluation/**` holds the held-out evaluation suites and gates: §16/§21 "workers never change
+graders or held-out tests".)
 
 ## Engineering conventions
 

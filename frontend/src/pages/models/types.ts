@@ -52,10 +52,18 @@ export interface ClaudeStatus {
 }
 
 export interface EvalSummary {
-  state: "DIUJI" | "BELUM_DIUJI";
-  roles: Record<string, { score?: number; runs?: number; accepted?: number; suite?: string; at?: string }>;
+  /** NEEDS_EVALUATION: the configuration changed and its previous results are not inherited (§02, §43) */
+  state: "DIUJI" | "BELUM_DIUJI" | "NEEDS_EVALUATION";
+  roles: Record<string, { score?: number; score_basis?: string; runs?: number; accepted?: number; suite?: string; at?: string; sample_size?: number; run_ids?: string[] }>;
   stale_roles: string[];
   note: string;
+}
+
+export interface RuntimeBinding {
+  bound: Record<string, string | null>;
+  current: Record<string, string | null>;
+  status: "BOUND" | "DRIFT" | "NOT_ACTIVATED";
+  drift: string[];
 }
 
 export interface RouteItem {
@@ -94,10 +102,24 @@ export interface RouteItem {
   config_changed_at: string | null;
   eval_summary: EvalSummary;
   last_used: { at: string | null; run_id: string | null; model: string | null; status: string } | null;
-  active_decision: { id: string; kind: string; expires_at: string | null; budget_decision_id?: string | null } | null;
+  active_decision: {
+    id: string;
+    kind: string;
+    expires_at: string | null;
+    budget_decision_id?: string | null;
+    eval_run_ids?: string[];
+    rollback_target?: { action: string; decision_id: string | null; config_hash: string | null; note?: string } | null;
+  } | null;
   quota: { state: string; scope?: string; resets_at?: string | null; source?: string; note?: string };
   source_refs: string[];
   notes: string;
+  // §23 per-route assessment (absent on older servers)
+  region?: string | null;
+  region_restricted?: boolean;
+  terms_restriction?: string | null;
+  reviewed_tool_set?: string[] | null;
+  runtime_binding?: RuntimeBinding;
+  execution_path?: { status: string; note: string };
 }
 
 export interface RouteDetail extends RouteItem {
@@ -135,6 +157,10 @@ export interface ActivatePayload {
   budget_decision_id?: string | null;
   expires_in_days?: number | null;
   terms_reviewed?: boolean;
+  terms_note?: string;
+  region?: string | null;
+  /** APPROVED only: COMPLETED, gate-passing EvalRuns of exactly this configuration (§23 "telah diuji") */
+  eval_run_ids?: string[] | null;
 }
 
 export const DATA_CLASSES = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"] as const;

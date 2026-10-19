@@ -17,6 +17,7 @@ PLATFORM_PROTECTED_PATHS: tuple[str, ...] = (
     "policy/**",
     "backend/aeos/policy/**",
     "backend/aeos/verification/**",
+    "backend/aeos/evaluation/**",
     "backend/aeos/broker/**",
     "backend/aeos/identity/**",
     "tests/acceptance/**",
