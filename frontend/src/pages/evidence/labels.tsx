@@ -21,6 +21,8 @@ const MAPPED: Record<string, { status: string; label: string }> = {
   HANDED_OFF: { status: "CONFIGURED", label: "Diserahkan" },
   AVAILABLE: { status: "CONFIGURED", label: "Tersedia" },
   UNTRUSTED_CLAIM: { status: "UNVERIFIED", label: "Klaim (tidak dihitung)" },
+  // §20 verifier isolation: process-level only (same OS user, no container/egress enforcement)
+  WEAK: { status: "DEGRADED", label: "Isolasi verifier lemah (proses, bukan sandbox)" },
 };
 
 export function Status({ status, label }: { status: string | null | undefined; label?: string }) {
@@ -67,7 +69,7 @@ export const GATE_HELP: Record<string, string> = {
   G3: "Job produk (frontend/UI) dari CI provider.",
   G4: "Review checkpoint Claude + bukti independen yang terikat artefak yang sama.",
   G5: "Retest pada merged state setelah merge oleh manusia.",
-  G6: "Staging berizin — belum ada target staging terdaftar.",
-  G7: "Merge dilakukan oleh manusia (diamati dari GitHub merged_by).",
-  G8: "Observasi pasca-rilis — belum ada target deployment.",
+  G6: "Staging berizin — target staging terdaftar pemilik (deployment-target) + observasi runtime commit ini.",
+  G7: "Merge oleh manusia yang tercatat sebagai approver rilis (keputusan POLICY release_approvers; diamati dari GitHub merged_by).",
+  G8: "Observasi pasca-rilis pada target produksi terdaftar; AEOS tidak pernah deploy.",
 };

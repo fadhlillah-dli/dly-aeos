@@ -6,12 +6,41 @@ import { shortHash } from "../../lib/format";
 import { evidenceApi, type GateItem, type SeparateStatus } from "./api";
 import { GATE_HELP, Status } from "./labels";
 
+const SPECIALIST_LABELS: Record<string, string> = {
+  A11Y: "Aksesibilitas/UX",
+  PRIVACY: "Privasi/data",
+  SRE: "SRE/operasi",
+};
+
+function SpecialistReviews({ s }: { s: SeparateStatus }) {
+  const rows = Object.entries(s.specialist_reviews ?? {}).filter(([k, v]) => k !== "SECURITY" && (v.required || v.verdict));
+  if (rows.length === 0) return <span className="text-xs text-ink-3">Tidak diwajibkan untuk task ini</span>;
+  return (
+    <span className="flex flex-col gap-1">
+      {rows.map(([k, v]) => (
+        <span key={k} className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-medium">{SPECIALIST_LABELS[k] ?? k}</span>
+          <Status status={v.verdict} label={v.verdict ? undefined : "Wajib — belum direview"} />
+          {v.required && v.reason && <span className="text-xs text-ink-3">{v.reason}</span>}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 export function SeparateFields({ s }: { s: SeparateStatus }) {
   return (
     <KeyValue
       items={[
         ["Laporan worker", <span key="w" className="flex flex-wrap items-center gap-2">{s.worker_reported.status ?? "—"} <Status status="UNTRUSTED_CLAIM" /></span>],
-        ["Verifier", <Status key="v" status={s.verifier.status} label={s.verifier.status ? undefined : "Belum diverifikasi"} />],
+        [
+          "Verifier",
+          <span key="v" className="flex flex-wrap items-center gap-2">
+            <Status status={s.verifier.status} label={s.verifier.status ? undefined : "Belum diverifikasi"} />
+            {/* §20: the runner is process-level only; never presented as an isolated sandbox */}
+            {s.verifier.isolation && <Status status={s.verifier.isolation} />}
+          </span>,
+        ],
         ["Reviewer", <span key="r" className="flex flex-wrap gap-2"><Status status={s.reviewer.verdict} label={s.reviewer.verdict ? undefined : "Belum direview"} />{s.reviewer.status && <Status status={s.reviewer.status} />}</span>],
         [
           "Review keamanan",
@@ -22,6 +51,34 @@ export function SeparateFields({ s }: { s: SeparateStatus }) {
             </span>
           ) : (
             <span key="s" className="text-xs text-ink-3">Tidak diwajibkan untuk task ini</span>
+          ),
+        ],
+        ["Review spesialis lain", <SpecialistReviews key="sp" s={s} />],
+        [
+          "Governance (§32)",
+          s.governance ? (
+            <span key="g" className="flex flex-wrap items-center gap-2">
+              <Status status={s.governance.status} />
+              <span className="mono text-xs">{s.governance.adapter}</span>
+              {!s.governance.allows_promotion && <span className="text-xs text-warn">menahan promosi</span>}
+              {s.governance.note && <span className="text-xs text-ink-3">{s.governance.note}</span>}
+            </span>
+          ) : (
+            <span key="g" className="text-xs text-ink-3">—</span>
+          ),
+        ],
+        [
+          "Provider delivery",
+          s.delivery_provider ? (
+            <span key="dp" className="flex flex-wrap items-center gap-2">
+              <Status status={s.delivery_provider.status} />
+              <span className="mono text-xs">
+                {s.delivery_provider.provider} / {s.delivery_provider.ci}
+              </span>
+              {s.delivery_provider.reason && <span className="text-xs text-ink-3">{s.delivery_provider.reason}</span>}
+            </span>
+          ) : (
+            <span key="dp" className="text-xs text-ink-3">—</span>
           ),
         ],
         [

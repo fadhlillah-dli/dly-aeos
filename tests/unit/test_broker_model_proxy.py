@@ -3,6 +3,7 @@ membaca production secret')."""
 
 from __future__ import annotations
 
+import importlib
 import json
 
 import httpx
@@ -11,6 +12,7 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from aeos.api.routers import MODULE_ROUTERS
 from aeos.broker import facade as broker
 from aeos.core.timeutil import utcnow
 from aeos.models.broker_ext import BrokerRequest
@@ -19,6 +21,11 @@ from aeos.models.routing import CapabilityGrant
 from aeos.models.workforce import WorkerRun
 from tests.conftest import ADMIN_PW, create_admin, make_app
 from tests.unit.test_workforce_support import FakeModules, make_project, make_route
+
+# The real routers (and the services they import at module level) load before FakeModules replaces
+# implementation modules in sys.modules, so this file also runs on its own (not only after other tests).
+for _mod in MODULE_ROUTERS:
+    importlib.import_module(_mod)
 
 UPSTREAM = "https://openrouter.ai/api/v1/chat/completions"
 KEY = "sk-or-v1-" + "k" * 48
@@ -230,3 +237,97 @@ def test_models_endpoint_lists_scope_only(env):
     assert r.status_code == 200
     assert [m["id"] for m in r.json()["data"]] == ["model-a"]
     assert env["client"].get("/broker/v1/models").status_code == 401
+
+
+# ------------------------------------------------------------------ §23 per-request route authorisation
+
+
+@pytest.fixture
+def real_routing(settings, db, secrets_memory, monkeypatch):
+    """Like ``env`` but with the REAL routing module, so the per-request approval rule itself is tested."""
+    fk = FakeModules().install(monkeypatch, skip=("aeos.routing.service",))
+    secrets_memory.put("workers/openrouter", KEY, actor="test")
+    p = make_project(db)
+    route = make_route(db, key="worker.free-a", model_id="vendor/model-a:free")
+    run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="RUNNING", model_route_key="worker.free-a")
+    db.add(run)
+    db.flush()
+    raw, grant = broker.issue_grant(db, run_id=run.id, project_id=p.id, domain="PERSONAL", kind="MODEL_PROXY",
+                                    scope={"models": {"model-a": "worker.free-a"}}, ttl_seconds=3600, max_requests=20)
+    db.commit()
+    app = make_app(settings)
+    with TestClient(app, base_url="http://testserver") as c:
+        yield {"client": c, "token": raw, "grant": grant, "run": run, "db": db, "fakes": fk, "route": route}
+
+
+def test_inflight_grant_stops_when_the_route_approval_no_longer_holds(real_routing, db):
+    """§23: an admitted run's grant (TTL up to hours) is checked against the route's CURRENT approval on
+    every request: a configuration change (here: the catalog now shows a price), an expired TRIAL or a
+    revoked approval refuses the next request — the upstream is never called."""
+    from aeos.models.decisions import Decision
+    from aeos.models.routing import ModelRoute
+
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(UPSTREAM).mock(return_value=httpx.Response(200, json=_ok_json()))
+        assert _post(real_routing).status_code == 200
+        route = db.scalar(select(ModelRoute).where(ModelRoute.route_key == "worker.free-a"))
+        route.is_free, route.pricing = "NO", {"prompt": "0.000002", "completion": "0.000008"}
+        db.commit()
+        r = _post(real_routing)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "ROUTE_APPROVAL_INVALID", r.text
+        assert len(mock.calls) == 1, "nothing was forwarded after the approval stopped matching"
+    # back to the approved configuration, but the human decision is revoked
+    route.is_free, route.pricing = "YES", {}
+    d = db.scalar(select(Decision).where(Decision.target_id == "worker.free-a", Decision.kind == "ROUTE_ACTIVATION"))
+    d.status = "INVALIDATED"
+    db.commit()
+    with respx.mock(assert_all_mocked=True) as mock:
+        r = _post(real_routing)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "ROUTE_APPROVAL_INVALID"
+        assert len(mock.calls) == 0
+
+
+def test_expired_trial_decision_refuses_the_next_request(real_routing, db):
+    from datetime import timedelta
+
+    from aeos.models.decisions import Decision
+    from aeos.models.routing import ModelRoute
+
+    route = db.scalar(select(ModelRoute).where(ModelRoute.route_key == "worker.free-a"))
+    route.status = "TRIAL"
+    db.add(Decision(kind="TRIAL", actor_user_id="owner", actor_kind="HUMAN", target_type="model_route",
+                    target_id="worker.free-a", target_hash=route.config_hash, domain="PERSONAL", rationale="trial",
+                    expires_at=utcnow() + timedelta(seconds=1)))
+    db.commit()
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(UPSTREAM).mock(return_value=httpx.Response(200, json=_ok_json()))
+        assert _post(real_routing).status_code == 200
+        d = db.scalar(select(Decision).where(Decision.kind == "TRIAL"))
+        d.expires_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+        r = _post(real_routing)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "ROUTE_APPROVAL_INVALID"
+        assert len(mock.calls) == 1
+
+
+def test_non_worker_pools_are_refused_at_the_boundary_and_at_admission(real_routing, db):
+    """§23 ARENA/COMPARATOR/LOCAL: no controlled execution path through the broker yet (ADR-0106) —
+    refused at routing admission (POOL_NOT_SERVED), and by the proxy if a grant ever names one."""
+    from aeos.core.errors import Blocked
+    from aeos.models.planning import TaskSpec
+    from aeos.models.routing import ModelRoute
+    from aeos.routing import facade as routing
+
+    route = db.scalar(select(ModelRoute).where(ModelRoute.route_key == "worker.free-a"))
+    route.pool = "LOCAL"
+    db.commit()
+    with respx.mock(assert_all_mocked=True) as mock:
+        r = _post(real_routing)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "ROUTE_NOT_WORKER"
+        assert "no broker serving path" in r.json()["error"]["message"] and len(mock.calls) == 0
+    task = TaskSpec(domain="PERSONAL", data_classification="INTERNAL", role_key="feature-implementer",
+                    model_route_policy={"pool": "LOCAL"}, task_key="t1", title="t", goal="g", project_id="p",
+                    plan_version_id="pv", plan_version_hash="h", spec_hash="s")
+    with pytest.raises(Blocked) as e:
+        routing.select_route(db, task=task)
+    assert e.value.code == "POOL_NOT_SERVED" and broker.SERVED_POOLS == ("WORKER",)

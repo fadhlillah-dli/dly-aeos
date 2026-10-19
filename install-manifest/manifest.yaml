@@ -952,6 +952,36 @@ components:
     discovery: {}
     invalidators: ["secret:workers/openrouter", "secret:personal/github"]
 
+  - component_id: aeos-mcp-interface
+    kind: mcp_server
+    name: Curated AEOS MCP interface
+    friendly_name: "Antarmuka MCP AEOS terkurasi — PLANNED (belum ada)"
+    function: "Antarmuka MCP per role untuk worker (claim_task, read_context, submit_result, request_decision, read_evidence) di atas CapabilityGrant broker. Belum diimplementasikan: hanya kontrak desain."
+    why_selected: "§11, §25: kontrak operasi MCP terkurasi; ditampilkan sebagai celah desain PLANNED, bukan kemampuan aktif (ADR-0106)."
+    category: tools/context
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: PLANNED
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "PLANNED: belum ada implementasi; tidak diprobe dan tidak pernah tampil terpasang.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku (PLANNED).", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Di belakang capability broker: setiap operasi MCP per role diotorisasi oleh CapabilityGrant (READ_CONTEXT dll.) dan allow-list operasi per role (§25)."
+    relations:
+      - {target: capability-broker, relation: depends_on, data_description: "Setiap operasi MCP akan diotorisasi grant broker per run/role.", operation: NONE, boundary: "CapabilityGrant", identity_ref: null}
+    discovery: {}
+    invalidators: []
+
   - component_id: verification-review
     kind: platform_module
     name: Verification & Review

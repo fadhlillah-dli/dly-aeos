@@ -23,9 +23,11 @@ def _repo(private=True, owner_type="User"):
             "owner": {"login": "fadhlillah-dli", "type": owner_type}, "permissions": {"admin": True, "push": True}}
 
 
-def _base_routes(mock, *, private=True, plan="free"):
+def _base_routes(mock, *, private=True, plan="free", environments=None):
     mock.get(f"{API}/repos/{REPO}").respond(200, json=_repo(private))
     mock.get(f"{API}/user").respond(200, json={"login": "fadhlillah-dli", "plan": {"name": plan}})
+    mock.get(f"{API}/repos/{REPO}/environments").respond(
+        200, json={"total_count": len(environments or []), "environments": environments or []})
 
 
 @respx.mock(assert_all_called=False)
@@ -88,6 +90,65 @@ def test_configured_protection_reports_required_checks_but_not_proven(respx_mock
     assert caps.enforcement_tested == "NOT-PROVEN"
     assert any("enforce_admins=false" in r for r in caps.residual_risks)
     assert provider.ENFORCEMENT_UNTESTED in caps.residual_risks
+    # §08 status-check identity: "backend" (legacy context) and "secret-scan" may be reported by any app
+    checks = {c.key: c for c in caps.checks}
+    assert caps.status_check_identity == "NOT_CONFIGURED"
+    assert checks["status_check_identity"].detail["unbound"] == ["backend (ubuntu-latest)", "secret-scan"]
+    assert checks["status_check_identity"].detail["apps"]["frontend"] == 1
+    assert any("tidak terikat ke GitHub App" in r for r in caps.residual_risks)
+    # §08 deploy restrictions: no deployment environment exists (and AEOS has no deploy operation)
+    assert caps.deploy_restrictions == "NOT_CONFIGURED"
+    assert any("tidak memiliki operasi deploy" in r for r in caps.residual_risks)
+
+
+def test_pipeline_reference_maps_jobs_to_gates_explicitly(db):
+    """§31 pipeline reference per project: with the project's reference, gates come from exact job names
+    (no name heuristics); the CI evidence records which mapping it used."""
+    from aeos.models.portfolio import ProjectIntegration
+
+    payload = [{"total_count": 3, "check_runs": [
+        {"name": "lint", "status": "completed", "conclusion": "success", "head_sha": "a" * 40},
+        {"name": "frontend", "status": "completed", "conclusion": "success", "head_sha": "a" * 40},
+        {"name": "backend (ubuntu-latest)", "status": "completed", "conclusion": "success", "head_sha": "a" * 40}]}]
+    heuristic = provider.parse_check_runs(REPO, "a" * 40, payload)
+    assert heuristic.gate_mapping == "NAME_HEURISTIC"
+    assert "G1" in {g for r in heuristic.runs if r.name == "frontend" for g in r.gates}  # heuristic: frontend ~ G1
+    p = Project(project_key="pipe", name="pipe", domain="PERSONAL")
+    db.add(p)
+    db.flush()
+    db.add(ProjectIntegration(project_id=p.id, domain="PERSONAL", provider="github-actions", purpose="ci",
+                              config={"gate_G1": "lint", "gate_G2": "backend (ubuntu-latest)", "gate_G3": "frontend"}))
+    db.commit()
+    gate_map = provider.pipeline_reference(db, p)
+    assert gate_map == {"G1": ["lint"], "G2": ["backend (ubuntu-latest)"], "G3": ["frontend"]}
+    explicit = provider.parse_check_runs(REPO, "a" * 40, payload, gate_map)
+    by_name = {r.name: r.gates for r in explicit.runs}
+    assert explicit.gate_mapping == "PIPELINE_REFERENCE"
+    assert by_name == {"lint": ["G1"], "frontend": ["G3"], "backend (ubuntu-latest)": ["G2"]}
+    assert provider.pipeline_reference(db, Project(project_key="none", name="n", domain="PERSONAL", id="x")) is None
+
+
+@respx.mock(assert_all_called=False)
+def test_status_check_identity_and_protected_environments_are_read(respx_mock):
+    envs = [{"name": "production", "protection_rules": [{"type": "required_reviewers", "reviewers": []},
+                                                        {"type": "wait_timer"}],
+             "deployment_branch_policy": {"protected_branches": True}}]
+    _base_routes(respx_mock, plan="pro", environments=envs)
+    respx_mock.get(f"{API}/repos/{REPO}/branches/main/protection").respond(200, json={
+        "required_status_checks": {"strict": True, "checks": [{"context": "backend", "app_id": 15368}]},
+        "required_pull_request_reviews": {"required_approving_review_count": 1}, "enforce_admins": {"enabled": True}})
+    respx_mock.get(f"{API}/repos/{REPO}/rulesets").respond(200, json=[])
+    respx_mock.get(f"{API}/repos/{REPO}/rules/branches/main").respond(200, json=[
+        {"type": "required_status_checks",
+         "parameters": {"required_status_checks": [{"context": "frontend", "integration_id": 15368}]}}])
+    caps = provider.check_capabilities(REPO, token=TOKEN)
+    checks = {c.key: c for c in caps.checks}
+    assert caps.status_check_identity == "CONFIGURED", checks["status_check_identity"]
+    assert checks["status_check_identity"].detail["apps"] == {"backend": 15368, "frontend": 15368}
+    assert caps.deploy_restrictions == "CONFIGURED"
+    assert checks["deploy_environments"].detail["environments"][0]["protection_rules"] == [
+        "required_reviewers", "wait_timer"]
+    assert all(call.request.method == "GET" for call in respx_mock.calls)  # read-only
 
 
 def test_no_token_means_no_network_and_unknown():

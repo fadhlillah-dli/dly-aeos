@@ -57,7 +57,9 @@ tool permissions/sandbox, capability gates, budgets, evaluator, admission, auth/
 secrets, supervisor bridge): `backend/aeos/routing/**`, `backend/aeos/worker_runtime/**`,
 `backend/aeos/doctor/**`, `backend/aeos/cost/**`, `backend/aeos/evaluation/**`,
 `backend/aeos/workforce/**`, `backend/aeos/api/**`, `backend/aeos/core/**`,
-`backend/aeos/secrets/**`, `backend/aeos/claude_bridge/**`, prompts and instructions (§25):
+`backend/aeos/secrets/**`, `backend/aeos/claude_bridge/**`, the audit/event trail and dashboard
+projections (`backend/aeos/audit/**`, `backend/aeos/events/**`, `backend/aeos/control_center/**`), the
+master and agent instructions (U-23) and prompts (§25): `docs/architecture/**`,
 `backend/aeos/planning/prompts.py`, `AGENTS.md`, `CLAUDE.md`, and the bootstrap/dependency set:
 `scripts/bootstrap.*`, `pyproject.toml`, `requirements.lock`.
 
