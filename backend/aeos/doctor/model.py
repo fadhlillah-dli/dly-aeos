@@ -121,6 +121,7 @@ class CheckContext:
     now: datetime
     functional: bool = False
     env: Mapping[str, str] = field(default_factory=dict)
+    project: dict[str, Any] | None = None  # target of a project-scoped check (see CheckSpec.targets)
 
     @property
     def data_dir(self) -> Path:
@@ -160,6 +161,17 @@ class CheckSpec:
     observation: str | None = None  # inventory dimension this check informs
     scope: Mapping[str, Any] = field(default_factory=dict)  # e.g. {"domain": "OFFICE"}
     description: str = ""
+    # §34 evidence ladder of what the check observes: E1 static (files/config/records), E2 controlled
+    # self-test (synthetic input), E3 runtime probe of the real component; ``functional_level`` applies
+    # when the run used --functional (e.g. a remote read-only API probe).
+    evidence_level: str = "E1"
+    functional_level: str | None = None
+    # Project-scoped check (§08 "project/domain/capability scope"): returns one target per project
+    # integration; the runner records one CheckResult per (check_id, project_id).
+    targets: Callable[[CheckContext], list[dict[str, Any]]] | None = None
+
+    def level(self, functional: bool) -> str:
+        return (self.functional_level or self.evidence_level) if functional else self.evidence_level
 
 
 @dataclass

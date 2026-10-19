@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Lightbulb, RefreshCw, Search } from "lucide-react";
+import { Download, Lightbulb, RefreshCw, Search } from "lucide-react";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { get, post } from "../../api/client";
@@ -7,18 +7,21 @@ import { useAuth } from "../../auth/AuthContext";
 import { CoverageBanner } from "../../components/inventory/CoverageBanner";
 import { DomainRequired } from "../../components/inventory/DomainRequired";
 import { Badge, DIMENSION_LABELS, REQUIREMENT_LABELS } from "../../components/inventory/labels";
-import type { ComponentList, ComponentRow, DimensionValue } from "../../components/inventory/types";
+import type { ComponentList, ComponentRow, DimensionValue, ProjectRepository, ProjectService, RoleRecord, RouteRecord } from "../../components/inventory/types";
 import { proposeComponentHref } from "../../components/proposals/PageLinks";
-import { Button, ErrorBox, inputClass, LinkButton, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
+import { Button, Card, ErrorBox, inputClass, LinkButton, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { useEventStream } from "../../lib/events";
 import { relativeTime, shortHash } from "../../lib/format";
 
 const DIMS = ["installation", "configuration", "connectivity", "functional", "enablement", "usage"] as const;
 
-function Dim({ d }: { d: DimensionValue }) {
+export function Dim({ d }: { d: DimensionValue }) {
+  // §38: "Sedang digunakan oleh task ..." needs the run/operation reference; shown with the badge, never inferred
+  const usedBy = d.refs && ["IN_USE", "LAST_USED", "STALE"].includes(d.effective) ? d.reason : null;
   return (
     <div title={[d.source, d.reason, d.at ? `pada ${d.at}` : null].filter(Boolean).join(" · ")}>
       <Badge status={d.effective} />
+      {usedBy && <div className="mt-0.5 max-w-48 text-[11px] text-ink-2">{usedBy}</div>}
       {d.at && <div className="mt-0.5 text-[11px] text-ink-3">{relativeTime(d.at)}</div>}
     </div>
   );
@@ -83,7 +86,26 @@ export default function ToolsPage() {
           <Link to={`/tools/${r.component_id}`} className="font-medium text-accent hover:underline" onClick={(e) => e.stopPropagation()}>
             {r.friendly_name || r.name}
           </Link>
-          <div className="mono text-xs text-ink-3">{r.component_id}</div>
+          {/* §35: friendly name, reason used and next action come before the technical ID */}
+          {r.why_selected && (
+            <div className="line-clamp-2 max-w-80 text-xs text-ink-2" data-testid="why-selected">
+              {r.why_selected}
+            </div>
+          )}
+          {r.next_action && (
+            <div className="mt-0.5 text-xs" data-testid="next-action" title={r.next_action.command ?? undefined}>
+              <span className="text-ink-3">Berikutnya: </span>
+              {r.next_action.link ? (
+                <Link to={r.next_action.link} className="text-accent hover:underline" onClick={(e) => e.stopPropagation()}>
+                  {r.next_action.label}
+                </Link>
+              ) : (
+                <span>{r.next_action.label}</span>
+              )}
+              {r.next_action.command && <Mono>{` ${r.next_action.command}`}</Mono>}
+            </div>
+          )}
+          <div className="mono text-xs text-ink-3" data-testid="component-id">{r.component_id}</div>
           <div className="text-xs text-ink-3">
             {r.kind} · {r.category_label}
             {r.domains.includes("PLATFORM") ? "" : ` · ${r.domains.join("/")}`}
@@ -161,14 +183,22 @@ export default function ToolsPage() {
       evidenceLimit="Katalog desain bukan bukti instalasi; tiap dimensi berasal dari observasi bertanggal"
       mode={data?.mode}
       actions={
-        isAdmin && domain ? (
+        domain ? (
           <>
-            <Button busy={refresh.isPending} onClick={() => refresh.mutate()} title="Probe read-only; tidak memasang apa pun">
-              <RefreshCw className="h-4 w-4" aria-hidden /> Segarkan (rekonsiliasi)
-            </Button>
-            <LinkButton to="/proposals?new=1&kind=ADD" title="Usulkan komponen baru; mengajukan URL tidak memasang apa pun">
-              <Lightbulb className="h-4 w-4" aria-hidden /> Usulkan komponen baru
-            </LinkButton>
+            {/* §37: SBOM (CycloneDX) of the platform lockfiles: declarations of what builds link, not running processes */}
+            <a className="inline-flex items-center gap-1 rounded-md border border-line px-3 py-1.5 text-sm hover:bg-surface-3" href="/api/inventory/sbom" download="dly-aeos.cdx.json">
+              <Download className="h-4 w-4" aria-hidden /> Unduh SBOM
+            </a>
+            {isAdmin && (
+              <>
+                <Button busy={refresh.isPending} onClick={() => refresh.mutate()} title="Probe read-only; tidak memasang apa pun">
+                  <RefreshCw className="h-4 w-4" aria-hidden /> Segarkan (rekonsiliasi)
+                </Button>
+                <LinkButton to="/proposals?new=1&kind=ADD" title="Usulkan komponen baru; mengajukan URL tidak memasang apa pun">
+                  <Lightbulb className="h-4 w-4" aria-hidden /> Usulkan komponen baru
+                </LinkButton>
+              </>
+            )}
           </>
         ) : undefined
       }
@@ -274,8 +304,88 @@ export default function ToolsPage() {
               </Button>
             </div>
           </div>
+          <ProjectRecords repos={data?.project_repositories ?? []} services={data?.project_services ?? []} routes={data?.routes ?? []} roles={data?.roles ?? []} />
         </>
       )}
+    </div>
+  );
+}
+
+/** §37 kinds that live in other registries: project repositories (exact provider repo id) and the services a
+ *  project declares (approved PlanVersion / repository markers). Shown with their source, never as installed. */
+export function ProjectRecords({
+  repos,
+  services,
+  routes = [],
+  roles = [],
+}: {
+  repos: ProjectRepository[];
+  services: ProjectService[];
+  routes?: RouteRecord[];
+  roles?: RoleRecord[];
+}) {
+  return (
+    <div className="mt-6 grid gap-4 lg:grid-cols-2">
+      <Card title="Route model & role (registry lain)">
+        {routes.length === 0 && roles.length === 0 ? (
+          <p className="text-sm text-ink-3">Belum ada route APPROVED/TRIAL atau agent aktif untuk domain ini.</p>
+        ) : (
+          <ul className="space-y-1 text-sm" data-testid="registry-records">
+            {routes.map((r) => (
+              <li key={r.id} className="flex flex-wrap items-center gap-2">
+                <Link to="/models" className="font-medium text-accent hover:underline">route {r.route_key}</Link>
+                <Badge status={r.status} />
+                <span className="text-xs text-ink-3">{r.pool} · provider {r.provider_component ?? r.provider}</span>
+              </li>
+            ))}
+            {roles.map((r) => (
+              <li key={r.id} className="flex flex-wrap items-center gap-2">
+                <Link to="/organization" className="font-medium text-accent hover:underline">role {r.name}</Link>
+                <span className="text-xs text-ink-3">agent aktif: {r.agents.map((a) => a.agent_key).join(", ")} · harness {r.harness_components.join(", ") || "—"}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+      <Card title="Repository proyek (domain ini)">
+        {repos.length === 0 ? (
+          <p className="text-sm text-ink-3">Belum ada repository proyek terdaftar di domain ini.</p>
+        ) : (
+          <ul className="space-y-1 text-sm">
+            {repos.map((r) => (
+              <li key={r.id} className="flex flex-wrap items-center gap-2">
+                <Link to={r.link} className="font-medium text-accent hover:underline">{r.full_name}</Link>
+                <span className="text-xs text-ink-3">{r.project_name}</span>
+                <Badge status={r.identity_status} />
+                <Mono>{r.identity ?? "ID repo UNKNOWN"}</Mono>
+                <span className="text-xs text-ink-3">
+                  {r.default_branch}
+                  {r.head_commit ? ` @ ${shortHash(r.head_commit, 8)}` : ""}
+                  {r.dirty ? " · dirty" : ""} · diverifikasi {r.last_verified_at ? relativeTime(r.last_verified_at) : "belum"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+      <Card title="Layanan hasil build proyek (deklarasi)">
+        {services.length === 0 ? (
+          <p className="text-sm text-ink-3">Belum ada layanan yang dideklarasikan PlanVersion yang disetujui atau penanda repository.</p>
+        ) : (
+          <ul className="space-y-1 text-sm">
+            {services.map((s) => (
+              <li key={s.id} className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">{s.name}</span>
+                <span className="text-xs text-ink-3">{s.project_name}</span>
+                <Badge status={s.status} />
+                <span className="text-xs text-ink-3" title={s.observed_reason}>
+                  teramati: {s.observed} · {s.provenance}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
     </div>
   );
 }

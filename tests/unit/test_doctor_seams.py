@@ -197,7 +197,9 @@ def test_checks_use_real_modules_not_not_implemented_paths(settings, db, secrets
     by_id = _run(settings, db, fake_host)
     not_impl = {cid: r.error_code for cid, r in by_id.items() if (r.error_code or "").endswith("NOT_IMPLEMENTED")}
     assert not_impl == {}
-    assert by_id["auth.interlock"].status == "CONFIGURED"
+    # the interlock is exercised by a self-test (unbound write intent refused), not inferred from module presence
+    assert by_id["auth.interlock"].status == "VERIFIED"
+    assert by_id["auth.interlock"].observed_evidence["self_test"]["allowed"] is False
     assert by_id["evidence.verifier"].status == "CONFIGURED"
     assert by_id["secret.status"].status == "CONFIGURED"  # memory provider = a reachable store
     assert by_id["worker.opencode"].status == "VERIFIED"

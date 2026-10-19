@@ -21,13 +21,28 @@ type Capability = Omit<CapabilityItem, "checks"> & {
 };
 
 /** Additive field of /api/doctor/checks: a failed Doctor pass (e.g. at server start) newer than the last run. */
-type ChecksData = ChecksResponse & { last_failure?: { at: string; trigger: string | null; error: string | null } | null };
+type ProjectCheckItem = { check_id: string; title: string; project_id: string; effective_status: string; summary: string; last_checked_at: string | null };
+type ClaudeReviewData = {
+  at: string | null;
+  ok: boolean;
+  summary: string | null;
+  findings: { check_id: string; observation: string; suggestion: string }[];
+  note: string;
+  error_code: string | null;
+  model_resolved: string | null;
+};
+type ChecksData = ChecksResponse & {
+  last_failure?: { at: string; trigger: string | null; error: string | null } | null;
+  project_items?: ProjectCheckItem[];
+  claude_review?: ClaudeReviewData | null;
+};
 
 /** How a Doctor run was started (``DoctorRun.trigger``). */
 const TRIGGER_LABELS: Record<string, string> = {
   startup: "otomatis saat server mulai",
   api: "dashboard",
   cli: "CLI (aeos doctor)",
+  recheck: "otomatis: cek ulang setelah perubahan",
 };
 
 function triggerLabel(trigger: string | null | undefined): string {
@@ -391,11 +406,58 @@ export default function ReadinessPage() {
           </div>
         )}
       </div>
+      <ProjectResults items={checks.data?.project_items ?? []} />
+      <ClaudeReview review={checks.data?.claude_review ?? null} />
       {checks.data?.status_legend && (
         <Card title="Arti status" className="mt-5">
           <KeyValue items={Object.entries(checks.data.status_legend).map(([k, v]) => [<Badge key={k} status={k} />, v])} />
         </Card>
       )}
     </div>
+  );
+}
+
+/** §08 per-target readiness: one result per project integration target (repository, Drive root). */
+export function ProjectResults({ items }: { items: ProjectCheckItem[] }) {
+  if (!items.length) return null;
+  return (
+    <Card title={`Target per proyek (${items.length})`} className="mt-5">
+      <ul className="space-y-1 text-sm" data-testid="project-results">
+        {items.map((c) => (
+          <li key={`${c.check_id}-${c.project_id}`} className="flex flex-wrap items-center gap-2">
+            <Badge status={c.effective_status} />
+            <span className="font-medium">{c.title}</span>
+            <Mono>{c.project_id.slice(0, 8)}</Mono>
+            <span className="text-xs text-ink-3">{c.summary}</span>
+            <Freshness at={c.last_checked_at} staleAfterSeconds={3600} />
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+/** §07 optional Claude explanation (E0 advisory): never a status, never AUTH, never a remedy run. */
+export function ClaudeReview({ review }: { review: ClaudeReviewData | null }) {
+  if (!review) return null;
+  return (
+    <Card title="Penjelasan Claude (advisory, E0)" className="mt-5">
+      <Notice tone="info">{review.note}</Notice>
+      {review.ok ? (
+        <>
+          <p className="mt-2 text-sm">{review.summary}</p>
+          <ul className="mt-2 list-disc pl-5 text-sm" data-testid="claude-review-findings">
+            {review.findings.map((f, i) => (
+              <li key={i}>
+                <Mono>{f.check_id}</Mono> {f.observation} — <span className="text-ink-3">{f.suggestion}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <p className="mt-2 text-sm text-ink-3">Review tidak tersedia ({review.error_code ?? "bridge"}); gunakan paket manual.</p>
+      )}
+      <p className="mt-1 text-xs text-ink-3">{review.at ? relativeTime(review.at) : ""} · model {review.model_resolved ?? "UNKNOWN"}</p>
+    </Card>
   );
 }

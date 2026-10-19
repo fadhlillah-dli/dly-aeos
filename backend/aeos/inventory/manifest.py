@@ -103,6 +103,40 @@ def _schema_errors(data: Any, schema: dict[str, Any]) -> list[str]:
     return errors
 
 
+def settings_keys() -> set[str]:
+    from aeos.core.config import Settings
+
+    return set(Settings.model_fields)
+
+
+def _identity_field_errors(cid: Any, c: dict[str, Any], master_urls: set[str] | None) -> list[str]:
+    """§07/§25/§37 structured identity fields: digest, distribution, signature, ports, configuration references,
+    compatibility. Settings references must name a real setting; ports are loopback only; a distribution URL is
+    never guessed (it must appear in the master like ``source_url``); a VERIFIED signature needs its time."""
+    errors: list[str] = []
+    keys = settings_keys()
+    for ref in c.get("config_refs") or []:
+        kind, _, value = str(ref).partition(":")
+        if kind == "settings" and value not in keys:
+            errors.append(f"{cid}: config_ref {ref!r} is not a Settings field")
+        if kind == "file" and (".." in value or value.startswith("/")):
+            errors.append(f"{cid}: config_ref {ref!r} must be a repo-relative path")
+    for p in c.get("ports") or []:
+        if p.get("setting") and p["setting"] not in keys:
+            errors.append(f"{cid}: port setting {p['setting']!r} is not a Settings field")
+    dist = c.get("distribution") or {}
+    if dist.get("url") and master_urls is not None and dist["url"] not in master_urls:
+        errors.append(f"{cid}: distribution.url {dist['url']!r} does not appear in the master (never guessed)")
+    sig = c.get("signature") or {}
+    if sig.get("result") == "VERIFIED" and not (sig.get("verified") and sig.get("verified_at")):
+        errors.append(f"{cid}: signature VERIFIED needs verified=true and verified_at")
+    if sig.get("verified") and sig.get("result") != "VERIFIED":
+        errors.append(f"{cid}: signature.verified=true contradicts result {sig.get('result')}")
+    if c.get("approved_digest") and not c.get("approved_pin"):
+        errors.append(f"{cid}: approved_digest needs the approved_pin it belongs to")
+    return errors
+
+
 def _semantic_errors(data: dict[str, Any], master_text: str | None) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -142,6 +176,7 @@ def _semantic_errors(data: dict[str, Any], master_text: str | None) -> tuple[lis
             errors.append(f"{cid}: health probe settings_url must be a known loopback setting")
         if c.get("identity_verified") == "UNVERIFIED" and (c.get("operations") or {}).get("install"):
             errors.append(f"{cid}: UNVERIFIED component must not carry an install operation")
+        errors += _identity_field_errors(cid, c, urls if master_text is not None else None)
     cats = data.get("categories") or []
     if list(cats) != list(CATEGORIES):
         errors.append("categories must list the seven §36 fold domains in order")
@@ -264,6 +299,14 @@ def _component_values(c: dict[str, Any], manifest_hash: str, sources_checked: st
         "notes": c.get("notes") or "",
         "source_checked_on": sources_checked,
         "maintainer": None,
+        # §07/§25/§37 structured identity of the reviewed artifact (DESIGN side; observations are compared to it)
+        "approved_digest": c.get("approved_digest"),
+        "distribution": dict(c["distribution"]) if c.get("distribution") else None,
+        "signature": dict(c["signature"]) if c.get("signature") else None,
+        "ports": list(c.get("ports") or []),
+        "config_refs": list(c.get("config_refs") or []),
+        "compatibility": dict(c["compatibility"]) if c.get("compatibility") else None,
+        "tool_schema_hash": c.get("tool_schema_hash"),
     }
     values["manifest_hash"] = manifest_hash
     values["mode"] = "DESIGN"

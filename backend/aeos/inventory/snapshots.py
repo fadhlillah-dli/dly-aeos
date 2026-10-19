@@ -39,14 +39,29 @@ def _file_refs(root: Path, paths: list[Path]) -> list[dict[str, str]]:
 
 
 def build_refs(session: Session, *, domain: str | None, root: Path | None = None) -> dict[str, Any]:
+    from aeos.inventory.configlens import config_basis
+    from aeos.inventory.decisions import decision_states
+    from aeos.inventory.observations import latest_observations
+    from aeos.inventory.views import enablement_dim, write_enabled_components
+
     root = root or repo_root()
     comps = _visible_components(session, domain)
     rec = current_manifest(session)
+    # decision-side dimensions come from the Decision registry / approved configuration, as the views show them;
+    # the observation-based "released controller" basis is left out so the snapshot hash does not churn with TTLs
+    states = decision_states(session, comps, domain=domain)
+    basis = config_basis(session, comps, latest_observations(session, list(comps)), utcnow(), domain=domain)
+    writable = write_enabled_components(session, domain)
     nodes = []
     for cid, c in sorted(comps.items()):
         node = {"id": cid}
         for f in NODE_FIELDS:
             node[f] = getattr(c, f)
+        st = states.get(cid)
+        if st is not None:
+            node["admission_status"], node["lifecycle_final"] = st.admission, st.lifecycle
+        decided = [r for r in basis.get(cid, []) if not r.startswith("bagian dari released controller")]
+        node["enablement"] = enablement_dim(c, decided, write_enabled=cid in writable)["value"]
         nodes.append(node)
     edges = []
     for r in session.scalars(select(ComponentRelation).where(ComponentRelation.tombstoned_at.is_(None),
@@ -105,19 +120,64 @@ def _in_scope(snap: ArchitectureSnapshot, domain: str | None) -> bool:
     return ((snap.refs or {}).get("scope") or {}).get("domain") == domain
 
 
-def snapshot_meta(snap: ArchitectureSnapshot) -> dict[str, Any]:
+SNAPSHOT_TARGET = "architecture_snapshot"
+
+
+def approval_of(session: Session, snap: ArchitectureSnapshot) -> dict[str, Any] | None:
+    """The ACTIVE human APPROVAL bound to this snapshot's exact hash (§41 "dua approved snapshots")."""
+    d = session.scalar(select(Decision).where(Decision.kind == "APPROVAL", Decision.target_type == SNAPSHOT_TARGET,
+                                              Decision.target_id == snap.id, Decision.status == "ACTIVE",
+                                              Decision.target_hash == snap.snapshot_hash)
+                       .order_by(Decision.created_at.desc()).limit(1))
+    if d is None or d.actor_kind not in ("HUMAN", "HUMAN_RECORDED"):
+        return None
+    return {"decision_id": d.id, "approved_at": d.created_at.isoformat() if d.created_at else None,
+            "actor_user_id": d.actor_user_id}
+
+
+def snapshot_meta(snap: ArchitectureSnapshot, session: Session | None = None) -> dict[str, Any]:
     refs = snap.refs or {}
+    approval = approval_of(session, snap) if session is not None else None
     return {"id": snap.id, "label": snap.label, "snapshot_hash": snap.snapshot_hash,
             "created_at": snap.created_at.isoformat(), "created_by": snap.created_by,
             "scope": refs.get("scope"), "taken_at": refs.get("taken_at"),
             "counts": {"nodes": len(refs.get("nodes") or []), "edges": len(refs.get("edges") or []),
                        "decisions": len(refs.get("decisions") or [])},
-            "manifest_hash": (refs.get("manifest") or {}).get("content_hash")}
+            "manifest_hash": (refs.get("manifest") or {}).get("content_hash"),
+            "approved": approval is not None, "approval": approval}
 
 
-def list_snapshots(session: Session, *, domain: str | None) -> list[dict[str, Any]]:
-    rows = session.scalars(select(ArchitectureSnapshot).order_by(ArchitectureSnapshot.created_at.desc()).limit(200))
-    return [snapshot_meta(s) for s in rows if _in_scope(s, domain)]
+def list_snapshots(session: Session, *, domain: str | None, approved_only: bool = False) -> list[dict[str, Any]]:
+    rows = [s for s in session.scalars(select(ArchitectureSnapshot).order_by(ArchitectureSnapshot.created_at.desc()))
+            if _in_scope(s, domain)]
+    metas = [snapshot_meta(s, session) for s in rows]
+    return [m for m in metas if m["approved"]] if approved_only else metas
+
+
+def list_snapshots_page(session: Session, *, domain: str | None, page: int = 1, page_size: int = 50,
+                        approved_only: bool = False) -> dict[str, Any]:
+    metas = list_snapshots(session, domain=domain, approved_only=approved_only)
+    page, page_size = max(1, page), max(1, min(page_size, 200))
+    return {"items": metas[(page - 1) * page_size:page * page_size], "total": len(metas), "page": page,
+            "page_size": page_size}
+
+
+def approve_snapshot(session: Session, snapshot_id: str, *, domain: str | None, actor_user_id: str,
+                     rationale: str) -> dict[str, Any]:
+    """Record a human APPROVAL bound to the snapshot's exact hash (the snapshot itself stays immutable)."""
+    from aeos.policy import facade as policy
+
+    if not (rationale or "").strip():
+        raise ValidationFailed("rationale is required")
+    snap = get_snapshot(session, snapshot_id, domain=domain)
+    if approval_of(session, snap) is not None:
+        return snapshot_meta(snap, session)
+    policy.record_decision(session, kind="APPROVAL", actor_user_id=actor_user_id, target_type=SNAPSHOT_TARGET,
+                           target_id=snap.id, target_hash=snap.snapshot_hash,
+                           allowed_operations=["architecture.snapshot.approve"], domain=domain, rationale=rationale,
+                           details={"label": snap.label,
+                                    "manifest_hash": ((snap.refs or {}).get("manifest") or {}).get("content_hash")})
+    return snapshot_meta(snap, session)
 
 
 def get_snapshot(session: Session, snapshot_id: str, *, domain: str | None) -> ArchitectureSnapshot:
@@ -152,6 +212,10 @@ def diff_snapshots(session: Session, a_id: str, b_id: str, *, domain: str | None
     for key in ("manifest", "master", "adrs", "contracts", "decisions"):
         if ra.get(key) != rb.get(key):
             refs_changed[key] = {"a": ra.get(key), "b": rb.get(key)}
-    return {"a": snapshot_meta(a), "b": snapshot_meta(b), "same_hash": a.snapshot_hash == b.snapshot_hash,
+    ma, mb = snapshot_meta(a, session), snapshot_meta(b, session)
+    return {"a": ma, "b": mb, "same_hash": a.snapshot_hash == b.snapshot_hash,
+            "both_approved": ma["approved"] and mb["approved"],
+            "approval_note": None if ma["approved"] and mb["approved"] else
+            "Satu atau kedua snapshot belum disetujui manusia; diff ini bukan perbandingan dua approved snapshot (§41).",
             "nodes": nodes, "edges": edges, "refs_changed": refs_changed,
             "note": "Diff antara dua artefak snapshot; bukan perbandingan dengan live inventory."}

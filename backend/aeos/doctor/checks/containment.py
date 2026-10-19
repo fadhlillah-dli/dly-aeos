@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from aeos.doctor.checks import check
-from aeos.doctor.checks._common import binary_fingerprint, resolve_binary, run_version
+from aeos.doctor.checks._common import binary_fingerprint, file_fingerprint, resolve_binary, run_version
 from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd, os_install_command
 
 SANDBOX_DOMAIN = "PERSONAL"  # OFFICE is always BLOCKED by the worker runtime (ADR-0051); the gate re-asks per domain
@@ -175,8 +175,38 @@ def containment_docker(ctx: CheckContext) -> Outcome:
 _PROTECTED_RE = re.compile(r"`([^`]+\*\*?)`")
 
 
-@check("containment.protected_paths", "CONTAINMENT", "Protected paths self-build terdefinisi",
-       component_id="trusted-self-build-seed", ttl_seconds=86400, ok={"CONFIGURED", "VERIFIED"})
+def enforced_protected_lists() -> dict[str, tuple[str, ...]]:
+    """The protected-path lists the code actually enforces (worker scope, verifier quarantine, DAG fallback)."""
+    from aeos.planning.dag import FALLBACK_PROTECTED_PATHS
+    from aeos.verification.scope import PLATFORM_PROTECTED_PATHS as VERIFIER
+    from aeos.worker_runtime.scope import PLATFORM_PROTECTED_PATHS as WORKER
+
+    return {"worker_runtime.scope": tuple(WORKER), "verification.scope": tuple(VERIFIER),
+            "planning.dag.FALLBACK": tuple(FALLBACK_PROTECTED_PATHS)}
+
+
+def protected_self_test(paths: list[str]) -> dict[str, Any]:
+    """A synthetic diff touching one file under every protected path must be quarantined by the verifier's scope
+    check (PROTECTED_PATH violation), and an ordinary docs file must not be."""
+    from aeos.verification.scope import PLATFORM_PROTECTED_PATHS, check_scope
+
+    probes = {p: (p.replace("**", "aeos-doctor-probe.txt").replace("*", "aeos-doctor-probe") if "*" in p
+                  else p) for p in paths}
+    res = check_scope([*probes.values(), "docs/aeos-doctor-probe.md"], allowed=["docs/**"], forbidden=[],
+                      protected=list(PLATFORM_PROTECTED_PATHS))
+    quarantined = {v.path for v in res.violations if v.rule in ("PROTECTED_PATH", "PROTECTED_PATH_ALLOWED")}
+    missed = sorted(p for p, f in probes.items() if f not in quarantined)
+    docs_flagged = "docs/aeos-doctor-probe.md" in quarantined
+    return {"probes": len(probes), "quarantined": len(quarantined & set(probes.values())), "missed": missed,
+            "docs_flagged": docs_flagged, "ok": not missed and not docs_flagged}
+
+
+@check("containment.protected_paths", "CONTAINMENT", "Protected paths self-build terdefinisi dan ditegakkan",
+       component_id="trusted-self-build-seed", ttl_seconds=86400, ok={"CONFIGURED", "VERIFIED"},
+       fingerprint=file_fingerprint("AGENTS.md"),
+       description="Daftar AGENTS.md harus sama dengan daftar yang ditegakkan kode (worker_runtime.scope, "
+                   "verification.scope, planning.dag fallback); uji mandiri: diff sintetis pada setiap protected path "
+                   "dikarantina oleh scope check verifier. Isolasi FS/egress sandbox dibuktikan containment.report.")
 def containment_protected_paths(ctx: CheckContext) -> Outcome:
     agents = ctx.repo / "AGENTS.md"
     if not agents.is_file():
@@ -187,5 +217,30 @@ def containment_protected_paths(ctx: CheckContext) -> Outcome:
     paths = _PROTECTED_RE.findall(section)
     if not paths:
         return Outcome("MISSING", "Bagian 'Protected paths' tidak ditemukan di AGENTS.md.", error_code="NO_PROTECTED_PATHS")
-    return Outcome("CONFIGURED", f"{len(paths)} protected path terdefinisi; penegakan oleh broker/verifier dibuktikan "
-                   "terpisah (NOT-PROVEN di sini).", evidence={"paths": paths, "source": "AGENTS.md"})
+    evidence: dict[str, Any] = {"paths": paths, "source": "AGENTS.md"}
+    try:
+        lists = enforced_protected_lists()
+    except (ImportError, ModuleNotFoundError) as exc:
+        return Outcome("UNKNOWN", f"Daftar yang ditegakkan tidak dapat dibaca ({type(exc).__name__}).",
+                       evidence=evidence, error_code="PROTECTED_LISTS_UNREADABLE")
+    documented = set(paths)
+    diffs = {name: {"missing_in_code": sorted(documented - set(lst)), "extra_in_code": sorted(set(lst) - documented)}
+             for name, lst in lists.items() if set(lst) != documented}
+    evidence["enforced_lists"] = {k: list(v) for k, v in lists.items()}
+    if diffs:
+        evidence["differences"] = diffs
+        return Outcome("FAILED", "Daftar protected path AGENTS.md berbeda dengan yang ditegakkan kode: "
+                       + ", ".join(sorted(diffs)) + ".", evidence=evidence, error_code="PROTECTED_PATHS_DIVERGED",
+                       severity="HIGH", remedy=Remedy(
+                           operation="Samakan AGENTS.md dan daftar di kode lewat PR yang direview (protected path)",
+                           target="AGENTS.md, worker_runtime/scope.py, verification/scope.py, planning/dag.py",
+                           privilege="reviewer manusia", evidence_to_collect="containment.protected_paths VERIFIED"))
+    test = protected_self_test(paths)
+    evidence["self_test"] = test
+    if not test["ok"]:
+        return Outcome("FAILED", "Uji mandiri: verifier tidak mengkarantina diff pada " + (", ".join(test["missed"])
+                       or "path biasa (docs) yang salah ditandai") + ".", evidence=evidence,
+                       error_code="PROTECTED_PATH_NOT_QUARANTINED", severity="HIGH")
+    return Outcome("VERIFIED", f"{len(paths)} protected path identik di AGENTS.md dan kode; diff sintetis pada setiap "
+                   "path dikarantina verifier (skenario: scope check). Isolasi sandbox dibuktikan terpisah.",
+                   evidence=evidence)

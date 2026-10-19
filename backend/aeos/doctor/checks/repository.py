@@ -59,6 +59,61 @@ def repo_origin(ctx: CheckContext) -> Outcome:
                    error_code="ORIGIN_MISMATCH", target_identity=f"github:{slug}" if slug else None)
 
 
+OFFICE_HOST_MARKERS = ("bitbucket.org", "atlassian.net", "bitbucket.")
+
+
+def _remote_host(remote: str) -> str | None:
+    from urllib.parse import urlparse
+
+    text = remote.strip()
+    if "://" not in text and "@" in text and ":" in text:  # scp-like git@host:owner/repo
+        return text.split("@", 1)[1].split(":", 1)[0].lower()
+    try:
+        return (urlparse(text).hostname or "").lower() or None
+    except ValueError:
+        return None
+
+
+@check("repo.domain", "REPOSITORY", "Domain repo platform (PERSONAL, bukan host OFFICE)",
+       component_id="dly-aeos-platform-repo", ttl_seconds=3600, invalidators=("repo:origin", "integration:*"),
+       ok={"VERIFIED", "CONFIGURED"}, severity_fail="HIGH",
+       description="Repo platform adalah proyek PERSONAL (U-02, §09): remote origin bukan host OFFICE (Bitbucket/"
+                   "Atlassian) dan, bila terdaftar, RepositoryReference repo platform milik proyek PERSONAL.")
+def repo_domain(ctx: CheckContext) -> Outcome:
+    if not ctx.runner.which("git"):
+        return Outcome("UNKNOWN", "git tidak ditemukan; remote tidak dapat dibaca.", error_code="GIT_MISSING")
+    remote = _git(ctx, "remote", "get-url", "origin")
+    host = _remote_host(remote) if remote else None
+    evidence: dict[str, Any] = {"origin_host": host, "expected_domain": "PERSONAL"}
+    if host and any(m in host for m in OFFICE_HOST_MARKERS):
+        return Outcome("FAILED", f"Remote origin repo platform berada di host OFFICE ({host}); platform adalah proyek "
+                       "PERSONAL (§09) dan data OFFICE tidak boleh bercampur (§23).", evidence=evidence,
+                       error_code="PLATFORM_REPO_OFFICE_HOST")
+    if ctx.session is None:
+        return Outcome("CONFIGURED", f"Remote origin di {host or 'UNKNOWN'} (bukan host OFFICE); pendaftaran proyek belum "
+                       "dapat dibaca tanpa database.", evidence=evidence)
+    from sqlalchemy import select
+
+    from aeos.models.portfolio import Project, RepositoryReference
+
+    slug = ctx.settings.platform_repo_slug.lower()
+    refs = [r for r in ctx.session.scalars(select(RepositoryReference)) if r.full_name.lower() == slug]
+    projects = {p.id: p for p in ctx.session.scalars(select(Project).where(
+        Project.id.in_([r.project_id for r in refs])))} if refs else {}
+    platform = ctx.session.scalar(select(Project).where(Project.is_platform.is_(True)).limit(1))
+    evidence.update({"registered_refs": len(refs), "project_domains": sorted({p.domain for p in projects.values()}),
+                     "platform_project_domain": platform.domain if platform else None})
+    wrong = [p for p in projects.values() if p.domain != "PERSONAL"]
+    if wrong or (platform is not None and platform.domain != "PERSONAL"):
+        return Outcome("FAILED", "Repo platform terdaftar di proyek non-PERSONAL; domain platform harus PERSONAL.",
+                       evidence=evidence, error_code="PLATFORM_REPO_DOMAIN_MISMATCH")
+    if not refs and platform is None:
+        return Outcome("CONFIGURED", f"Remote origin di {host or 'UNKNOWN'} (bukan host OFFICE); repo platform belum "
+                       "terdaftar sebagai proyek (domain PERSONAL ditetapkan saat pendaftaran).", evidence=evidence)
+    return Outcome("VERIFIED", "Repo platform milik proyek PERSONAL dan remote origin bukan host OFFICE.",
+                   evidence=evidence, target_identity=f"github:{ctx.settings.platform_repo_slug}")
+
+
 @check("repo.state", "REPOSITORY", "Branch, base commit dan status dirty", component_id="dly-aeos-platform-repo",
        ttl_seconds=900, invalidators=("repo:head",))
 def repo_state(ctx: CheckContext) -> Outcome:

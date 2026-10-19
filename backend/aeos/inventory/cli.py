@@ -132,3 +132,50 @@ def show_cmd(
     typer.echo(table(["DIMENSION", "VALUE", "AT", "SOURCE", "REASON"], rows, max_width=48))
     for d in data["evidence"]["drift"]:
         typer.echo(ascii_safe(f"  drift: {d['drift_class']} [{d['severity']}] {d['summary']}"))
+    nxt = data.get("next_action") or {}
+    if nxt:
+        typer.echo(ascii_safe(f"  next action: {nxt.get('label')}" + (f" ({nxt['command']})" if nxt.get("command")
+                                                                      else "")))
+
+
+@app.command("sbom")
+def sbom_cmd(out: str = typer.Option(None, "--out", help="Write the CycloneDX JSON here (default: print)")) -> None:
+    """CycloneDX 1.5 SBOM of requirements.lock + frontend/package-lock.json (declarations, not running processes)."""
+    from pathlib import Path
+
+    from aeos import __version__
+    from aeos.core.paths import repo_root
+    from aeos.inventory.dependencies import cyclonedx
+
+    body = cyclonedx(repo_root(), version=__version__)
+    text = json.dumps(body, indent=2, ensure_ascii=True, sort_keys=False)
+    if out:
+        path = Path(out)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text + "\n", encoding="utf-8")
+        typer.echo(ascii_safe(f"SBOM written: {path.name} ({len(body['components'])} components)"))
+        return
+    typer.echo(text)
+
+
+@app.command("poll")
+def poll_cmd(
+    enable: bool = typer.Option(None, "--enable/--disable", help="Turn the optional TTL-driven polling on or off"),
+    reason: str = typer.Option("", "--reason", help="Why (audited)"),
+) -> None:
+    """Show or set optional inventory polling (off by default; read-only refresh of expired components only)."""
+    from aeos.cli import ensure_database
+    from aeos.core.db import session_scope
+    from aeos.inventory.loop import MAX_PER_TICK, TICK_SECONDS, due_components, poll_enabled, set_poll_enabled
+
+    ensure_database()
+    with session_scope() as s:
+        if enable is None:
+            typer.echo(ascii_safe(f"inventory polling: {'ENABLED' if poll_enabled(s) else 'DISABLED'} (every "
+                                  f"{int(TICK_SECONDS)}s, max {MAX_PER_TICK} components per tick); due now: "
+                                  f"{', '.join(due_components(s)) or '-'}"))
+            return
+        if not reason.strip():
+            raise typer.BadParameter("--reason is required when changing polling")
+        set_poll_enabled(s, enable, actor="local-operator", reason=reason)
+    typer.echo("inventory polling " + ("enabled" if enable else "disabled") + " (audited); takes effect on the next tick")

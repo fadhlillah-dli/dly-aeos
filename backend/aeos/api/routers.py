@@ -41,6 +41,7 @@ MODULE_ROUTERS: list[str] = [
 # silently disables auth or policy.
 LIFECYCLE_HOOKS: list[str] = [
     "aeos.doctor.worker",
+    "aeos.inventory.loop",  # optional polling; idle unless the owner enabled inventory.poll_enabled
     "aeos.workforce.loop",
     "aeos.verification.loop",
     "aeos.publisher.worker",

@@ -1,19 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Lightbulb, RefreshCw } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { ExplainButtons } from "../../components/ExplainButtons";
 import { DomainRequired } from "../../components/inventory/DomainRequired";
 import { Badge, DIMENSION_LABELS, RELATION_LABELS, REQUIREMENT_LABELS, SeverityBadge } from "../../components/inventory/labels";
-import type { BlastRadius, ComponentDetail, RelationView } from "../../components/inventory/types";
+import type { BlastRadius, ComponentDetail, DependencyPage, RelationView } from "../../components/inventory/types";
 import { proposeComponentHref } from "../../components/proposals/PageLinks";
-import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, LinkButton, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
+import { Button, Card, EmptyState, ErrorBox, Freshness, inputClass, KeyValue, LinkButton, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { absoluteTime, relativeTime, shortHash } from "../../lib/format";
 
-function Unknown({ v }: { v: { value?: string | null; status: string; reason?: string | null } }) {
-  if (v.value) return <>{v.value}</>;
+function Unknown({ v }: { v: { value?: unknown; status: string; reason?: string | null } }) {
+  if (v.value !== null && v.value !== undefined && v.value !== "") return <>{asText(v.value)}</>;
   return (
     <span className="inline-flex flex-wrap items-center gap-1">
       <Badge status={v.status} />
@@ -53,8 +53,101 @@ function RelationsTable({ rows, dir }: { rows: RelationView[]; dir: "out" | "in"
         { header: "Operasi", cell: (r) => <span className="text-xs">{r.operation}</span> },
         { header: "Boundary / identitas", cell: (r) => <div className="text-xs">{r.boundary ?? "—"}<div className="text-ink-3">{r.identity_ref ?? ""}</div></div> },
         { header: "Provenance", cell: (r) => <span className="text-xs text-ink-3">{r.evidence}</span> },
+        {
+          header: "Hasil uji",
+          cell: (r) =>
+            r.tests && r.tests.length ? (
+              <ul className="text-xs">
+                {r.tests.map((t) => (
+                  <li key={`${t.about}-${t.check_id}`}>
+                    <Badge status={t.status} /> <Mono>{t.check_id}</Mono>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <span className="text-xs text-ink-3">belum ada pemeriksaan</span>
+            ),
+        },
       ]}
     />
+  );
+}
+
+/** §37 "paket transitif dapat dieksplorasi": the paginated lockfile view of a component that owns a lockfile. */
+export function DependencyExplorer({ componentId }: { componentId: string }) {
+  const [page, setPage] = useState(1);
+  const [relation, setRelation] = useState<"" | "direct" | "transitive">("");
+  const [q, setQ] = useState("");
+  const qs = new URLSearchParams({ page: String(page), page_size: "50" });
+  if (relation) qs.set("relation", relation);
+  if (q.trim()) qs.set("q", q.trim());
+  const deps = useQuery({
+    queryKey: ["inventory", "dependencies", componentId, qs.toString()],
+    queryFn: () => get<DependencyPage>(`/api/inventory/components/${encodeURIComponent(componentId)}/dependencies?${qs.toString()}`),
+  });
+  const data = deps.data;
+  const pages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
+  return (
+    <div className="mt-3" data-testid="dependency-explorer">
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
+        <input className={`${inputClass} max-w-56`} placeholder="Cari paket…" value={q} onChange={(e) => { setQ(e.target.value); setPage(1); }} aria-label="Cari paket" />
+        <select aria-label="Relasi dependensi" className="rounded-md border border-line bg-surface px-2 py-1" value={relation} onChange={(e) => { setRelation(e.target.value as "" | "direct" | "transitive"); setPage(1); }}>
+          <option value="">Semua</option>
+          <option value="direct">Langsung</option>
+          <option value="transitive">Transitif</option>
+        </select>
+        {data?.counts && (
+          <span className="text-xs text-ink-3">
+            {data.counts.direct} langsung · {data.counts.transitive} transitif · lockfile {data.lockfile?.path}
+            {data.lockfile?.matches_last_reconcile === false ? " (berubah sejak rekonsiliasi)" : ""}
+          </span>
+        )}
+      </div>
+      {deps.isLoading ? (
+        <Loading />
+      ) : deps.error ? (
+        <ErrorBox error={deps.error} />
+      ) : !data || data.items.length === 0 ? (
+        <p className="text-xs text-ink-3">{data?.reason ?? "Tidak ada paket untuk filter ini."}</p>
+      ) : (
+        <>
+          <Table
+            rows={data.items}
+            rowKey={(p) => `${p.ecosystem}:${p.name}:${p.version}:${p.parent_path.join("/")}`}
+            columns={[
+              { header: "Paket", cell: (p) => <div><Mono>{p.name}</Mono> <span className="text-xs">{p.version ?? "?"}</span>{p.dev ? <span className="text-xs text-ink-3"> (dev)</span> : null}</div> },
+              { header: "Relasi", cell: (p) => <span className="text-xs">{p.relation === "direct" ? "langsung" : `transitif via ${p.parent_path.join(" > ") || p.required_by.slice(0, 3).join(", ") || "?"}`}</span> },
+              { header: "Dipakai oleh", cell: (p) => <span className="text-xs">{p.used_by_build?.label ?? "—"}</span> },
+            ]}
+          />
+          <div className="mt-2 flex items-center gap-2 text-xs text-ink-3">
+            <Button disabled={page <= 1} onClick={() => setPage(page - 1)}>Sebelumnya</Button>
+            <span>Hal {page}/{pages} · {data.total} paket</span>
+            <Button disabled={page >= pages} onClick={() => setPage(page + 1)}>Berikutnya</Button>
+          </div>
+          <p className="mt-1 text-xs text-ink-3">{data.coverage.images}</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ConsumingTasks({ c }: { c: ComponentDetail["usage_role"]["consuming_tasks"] }) {
+  return (
+    <>
+      {(c.routes ?? []).map((r) => (
+        <li key={r.route_key}>route {r.route_key} ({r.status}, {r.pool})</li>
+      ))}
+      {(c.agents ?? []).map((a) => (
+        <li key={a.agent_key}>agent {a.agent_key} ({a.role_key}){a.enabled ? "" : " — nonaktif"}</li>
+      ))}
+      {c.items.map((r) => (
+        <li key={r.run_id}>
+          run <Mono>{r.run_id.slice(0, 8)}</Mono> task {r.task_key ?? "—"} <Badge status={r.status} />
+        </li>
+      ))}
+      {c.reason && <li className="text-ink-3">{c.reason}</li>}
+    </>
   );
 }
 
@@ -130,6 +223,14 @@ export default function ComponentDetailPage() {
       {d.source.unresolved_identity && (
         <Notice tone="warn">Identitas sumber belum terverifikasi; tidak ada tautan tebakan dan tidak ada tombol instalasi.</Notice>
       )}
+      {d.next_action && (
+        <Notice tone="info">
+          <span data-testid="detail-next-action">
+            Tindakan berikutnya: {d.next_action.link ? <Link className="underline" to={d.next_action.link}>{d.next_action.label}</Link> : d.next_action.label}
+            {d.next_action.command && <> — <Mono>{d.next_action.command}</Mono></>}
+          </span>
+        </Notice>
+      )}
 
       <div className="my-4">
         <ExplainButtons
@@ -148,10 +249,15 @@ export default function ComponentDetailPage() {
                     <Link className="text-accent hover:underline" to={`/tools/${u.component_id}`}>{u.name}</Link> ({RELATION_LABELS[u.relation] ?? u.relation}, {u.lens})
                   </li>
                 ))}
-                <li className="text-ink-3">Task/run: {use.consuming_tasks.reason}</li>
+                <ConsumingTasks c={use.consuming_tasks} />
               </ul>
             ) : (
-              <p>Belum ada komponen yang tercatat memakainya. {use.consuming_tasks.reason}</p>
+              <div>
+                <p>Belum ada komponen yang tercatat memakainya.</p>
+                <ul className="list-disc pl-5">
+                  <ConsumingTasks c={use.consuming_tasks} />
+                </ul>
+              </div>
             ),
             evidence: (
               <ul className="space-y-1">
@@ -216,7 +322,21 @@ export default function ComponentDetailPage() {
               ["Environment", d.scope.environment],
               ["Owner", d.scope.owner],
               ["Maintainer operasional", <Unknown key="m" v={d.scope.maintainer} />],
-              ["Scope otorisasi", d.scope.authorization_scope.value ?? "—"],
+              [
+                "Scope otorisasi",
+                <span key="a">
+                  <Badge status={d.scope.authorization_scope.status} /> {d.scope.authorization_scope.value ?? "—"}
+                  {(d.scope.authorization_scope.integrations ?? []).map((i) => (
+                    <div key={`${i.project_id}-${i.provider}-${i.purpose}`} className="text-xs text-ink-3">
+                      integrasi {i.provider}/{i.purpose}: {i.root_id ?? "root UNKNOWN"}
+                      {i.tenant_id ? ` @ ${i.tenant_id}` : ""}
+                    </div>
+                  ))}
+                  {(d.scope.authorization_scope.routes ?? []).map((r) => (
+                    <div key={r.route_key} className="text-xs text-ink-3">route {r.route_key} ({r.status}): {r.eligible_domains.join(", ") || "semua domain"}</div>
+                  ))}
+                </span>,
+              ],
             ]}
           />
         </Card>
@@ -247,6 +367,9 @@ export default function ComponentDetailPage() {
               ["Pin disetujui", ver.approved_pin ?? <Badge key="p" status="NO_PIN" />],
               ["Terpasang/teresolusi", ver.observed_version ?? "—"],
               ["Status versi", <Badge key="s" status={ver.status} />],
+              ["Digest disetujui / teramati", <span key="dg"><Mono>{shortHash(ver.approved_digest)}</Mono> / <Mono>{shortHash(ver.observed_digest)}</Mono> {ver.digest_status && <Badge status={ver.digest_status} />}</span>],
+              ["Artefak distribusi", asText(ver.distribution)],
+              ["Tanda tangan / provenance", asText(ver.signature)],
               ["Revisi konfigurasi", <Unknown key="c" v={ver.config_revision} />],
               ["Lockfile", ver.lockfile_refs.length ? ver.lockfile_refs.join(", ") : "—"],
               ["Catatan", <span key="n" className="text-xs text-ink-3">{ver.provenance_note}</span>],
@@ -299,6 +422,19 @@ export default function ComponentDetailPage() {
               ["Sumber", asText(d.cost.design.source)],
               ["Aktual", <span key="a">{asText(d.cost.actual.status)} {d.cost.actual.total_usd != null ? `$${d.cost.actual.total_usd}` : ""}</span>],
               ["Alasan", asText(d.cost.actual.reason)],
+              ["Masa gratis berakhir", d.cost.free_expiry ? <Unknown key="f" v={d.cost.free_expiry} /> : "—"],
+              [
+                "Sumber budget",
+                d.cost.budget_source?.items.length
+                  ? d.cost.budget_source.items.map((b) => `${b.scope_type}:${b.scope_id} ${b.period} ${b.limit_usd ?? "?"} USD`).join("; ")
+                  : <span key="b" className="text-xs text-ink-3">{d.cost.budget_source?.reason ?? "—"}</span>,
+              ],
+              [
+                "Sumber kuota",
+                d.cost.quota_source?.items.length
+                  ? d.cost.quota_source.items.map((q) => `${q.provider} ${q.state} (${q.source})`).join("; ")
+                  : <span key="q" className="text-xs text-ink-3">{d.cost.quota_source?.reason ?? "—"}</span>,
+              ],
             ]}
           />
         </Card>
@@ -386,6 +522,8 @@ export default function ComponentDetailPage() {
               )}
               {dep.recommendations && <div className="mt-1 text-xs">{dep.recommendations.join(", ")}</div>}
               {dep.package && <div className="mt-1 text-xs">{dep.package} {dep.spec} → {dep.version ?? "?"}</div>}
+              {dep.used_by_build && <div className="mt-1 text-xs text-ink-2" data-testid="used-by-build">{dep.used_by_build.label}</div>}
+              {dep.dependencies_url && <DependencyExplorer componentId={d.component_id} />}
             </div>
           ))}
         </Card>
@@ -398,11 +536,19 @@ export default function ComponentDetailPage() {
             <div className="mt-3">
               <div className="mb-1 text-xs font-semibold uppercase text-ink-3">Capability test</div>
               <ul className="list-disc pl-5 text-sm">
-                {(d.operations.capability_tests ?? []).map((t, i) => (
-                  <li key={i}>
-                    {String(t.description)} {t.requires_authorization ? <span className="text-xs text-warn">(butuh otorisasi)</span> : null}
-                  </li>
-                ))}
+                {(d.operations.capability_tests ?? []).map((t, i) => {
+                  const res = d.admission?.capability_tests.find((x) => x.id === t.id);
+                  return (
+                    <li key={i}>
+                      {String(t.description)} {t.requires_authorization ? <span className="text-xs text-warn">(butuh otorisasi)</span> : null}{" "}
+                      {res && (
+                        <span className="text-xs">
+                          <Badge status={res.stale ? "STALE" : res.result} /> {res.evidence_id ? <Mono>bukti {shortHash(res.evidence_id, 8)}</Mono> : "tanpa bukti"}
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
@@ -415,6 +561,17 @@ export default function ComponentDetailPage() {
               ["Konfigurasi diterima sebelumnya", <Unknown key="p" v={d.changes.previous_accepted_configuration} />],
             ]}
           />
+          {(d.changes.decisions ?? []).length > 0 && (
+            <ul className="mt-2 space-y-1 text-xs" data-testid="decision-bindings">
+              {(d.changes.decisions ?? []).map((x) => (
+                <li key={`${x.id}-${x.via}`}>
+                  <Badge status={x.status} /> {x.kind} ({x.via}) · target hash <Mono>{shortHash(x.binding_hash)}</Mono>
+                  {x.candidate_hash ? <> · kandidat <Mono>{shortHash(x.candidate_hash)}</Mono></> : null}
+                  {x.created_at ? ` · ${relativeTime(x.created_at)}` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
           <div className="mt-3">
             {d.changes.proposals.length === 0 ? (
               <EmptyState title="Belum ada usulan untuk komponen ini">

@@ -168,3 +168,44 @@ both sides now use it; frozen facade signatures only gained keyword arguments wi
    * Startup failures: `doctor.run.failed` carries the exception type and a message with data/repo/home paths
      replaced by logical names; `/api/doctor/checks` returns `last_failure` while no newer run exists and the
      Readiness page says the shown results come from an older run.
+
+## Amendment 2026-10-19 (C4 audit closure)
+
+* **Probed, not asserted** (E2 self-tests in-process, throw-away in-memory DB, no network): `auth.http_guard` runs the
+  real `create_app` guards (foreign Host 421, foreign Origin 403, no session 401, missing/wrong CSRF 403, VIEWER
+  write 403, HttpOnly+SameSite=Strict cookie, a legitimate request passes); `auth.interlock` refuses an unbound
+  external-write intent; `auth.sessions` is CONFIGURED (it counts rows, it does not prove enforcement);
+  `containment.protected_paths` compares AGENTS.md with the enforced lists and quarantines a synthetic diff on
+  every protected path; `evidence.verifier --functional` self-tests the trust separation (candidate shadow modules
+  detected, candidate inside the controller refused, trusted suite hashed outside the candidate).
+* **Secret**: `secret.openbao_auth` (AppRole login, token policies exactly the controller set — `aeos-office` never
+  bound, TTL <= token_ttl, last `aeos vault status --verify` roundtrip <= 7 days -> VERIFIED); a guard on
+  CAN_RUN_WORKER/CAN_PUBLISH_PERSONAL. `secret.no_raw_exposure` sweeps every row (watermark per table + newest 500
+  each run); findings are remembered until a human RISK_ACCEPTANCE decision per finding
+  (`POST /api/doctor/secret-exposures/{id}/accept`); UNKNOWN while the sweep is incomplete.
+* **Project scope**: checks may declare `targets`; the runner records one CheckResult per (check, project) with
+  `scope.project_id` (no schema change: `latest_project_results` groups by the JSON field for those checks only).
+  `adapter.project_repo` (exact provider repo id, permissions, `X-OAuth-Scopes` with --functional),
+  `adapter.project_drive_root` (stored granted scope must be drive.file; --functional reads the root folder
+  metadata) and `adapter.project_office_targets` (behind the OFFICE gate, identity probe NOT-PROVEN). Capability
+  rules gain a `project` tier evaluated when a caller passes `project_id`; a project whose repo is the platform repo
+  is covered by `adapter.github_token`.
+* **Invalidation**: adapter/delivery checks declare `integration:*` (the portfolio emits `integration:<id>`); an
+  observed change of permissions/scopes between runs invalidates `integration:<component>`; `claude.auth`'s
+  fingerprint includes the credential file's metadata (never its content); while the server runs, every
+  invalidation queues a targeted background recheck of the affected non-functional checks after the transaction
+  commits (`trigger=recheck`).
+* **Host**: `host.clock --functional` reads the OS time-sync status (w32tm / timedatectl; macOS UNKNOWN); Windows
+  ACLs of the data dir and evidence partitions are read by SID (no localized names) and broad write ACEs fail; a
+  port conflict names the owning process when visible; `host.vscode` records the VS Code distribution identity
+  (advisory); the owner's resource budget (`aeos doctor budget`, `PUT /api/doctor/resource-budget`, audited) is
+  compared by `host.platform`/`host.disk` (UNKNOWN until set). `repo.domain` guards that the platform repo is a
+  PERSONAL project on a non-OFFICE host. `evidence.acceptance_invalidation` fails while a stale acceptance is still
+  ACCEPTED. `requires_paid_write` is set on route activation / budget remedies that may authorise paid usage.
+* **Evidence levels**: every check declares its §34 level (E1 static / E2 controlled / E3 runtime, optionally higher
+  with --functional); the inventory shows those levels instead of a blanket E3.
+* `aeos doctor review-with-claude` (optional, Max quota) stores E0 advisory findings for platform-level results only.
+
+Not closed here: the scheduler does not yet cap parallel runs by `max_parallel_workers` (workforce), publisher/broker
+calls do not re-check provider permissions on every call, and the claude capability test is not flagged as a paid
+write (Max subscription quota, not a paid route).

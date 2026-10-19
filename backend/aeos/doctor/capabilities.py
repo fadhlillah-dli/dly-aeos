@@ -23,6 +23,7 @@ optional tool never blocks unrelated capabilities (§07, §50).
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -57,13 +58,18 @@ class CapRule:
     # process-sandbox containment report or an unproven worker contract (the run still ends in REVIEW).
     guard: tuple[str, ...] = ()
     live_sandbox: bool = False  # also ask worker_runtime.facade.sandbox_readiness(session, domain) live
+    # §08 "Readiness dievaluasi menurut capability dan target": project-scoped checks evaluated for the project
+    # the caller names (FAILED/MISSING/EXPIRED -> BLOCKED, never-run/STALE/UNKNOWN -> UNKNOWN, other -> DEGRADED).
+    project: tuple[str, ...] = ()
+    project_ok: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 RULES: dict[Capability, CapRule] = {
     Capability.CAN_OPEN_DASHBOARD: CapRule(
         "Membuka dashboard lokal", (*BASE, "host.port", "runtime.frontend_dist"), required=("auth.admins",),
+        guard=("auth.http_guard",),
         advisory=("host.platform", "host.disk", "host.clock", "runtime.node", "repo.root", "repo.install_manifest",
-                  "secret.no_raw_exposure"),
+                  "secret.no_raw_exposure", "host.vscode"),
         description="Server lokal, database, auth bootstrap dan build Control Center."),
     Capability.CAN_PLAN_PERSONAL: CapRule(
         "Merencanakan proyek PERSONAL", (*BASE, "claude.env"),
@@ -79,16 +85,19 @@ RULES: dict[Capability, CapRule] = {
         "Publikasi dokumen/tiket PERSONAL",
         (*BASE, "auth.interlock", "secret.status", "adapter.github_token", "adapter.google_oauth",
          "adapter.write_enablement", "secret.no_raw_exposure"),
-        required=("adapter.github_token",), advisory=("recovery.publication_idempotency", "policy.mci"),
+        required=("adapter.github_token",), guard=("auth.http_guard", "secret.openbao_auth"),
+        advisory=("recovery.publication_idempotency", "policy.mci"),
         domain="PERSONAL", required_ok={"adapter.github_token": STRICT_CONNECTED},
+        project=("adapter.project_drive_root",),
         description="Interlock external-write (bootstrap, write enablement manusia), token Google + GitHub dan akses "
-                    "target yang terbukti; setiap write tetap butuh approval versi/hash."),
+                    "target yang terbukti; setiap write tetap butuh approval versi/hash. Per proyek: root Drive "
+                    "proyek dan scope token."),
     Capability.CAN_RUN_WORKER: CapRule(
         "Menjalankan worker dalam sandbox",
         (*BASE, "worker.opencode", "worker.agent_definition", "containment.sandbox", "route.registry",
          "route.worker_key", "route.budget_admission", "secret.status", "evidence.verifier", "secret.no_raw_exposure"),
         required=("containment.protected_paths",),
-        guard=("containment.report", "worker.contract"),
+        guard=("containment.report", "worker.contract", "secret.openbao_auth"),
         advisory=("route.catalog_freshness", "containment.docker", "recovery.leases"),
         live_sandbox=True,
         description="OpenCode terpasang, agent opencode-implementer aktif, sandbox memenuhi ADR-0051 (live), route "
@@ -101,9 +110,12 @@ RULES: dict[Capability, CapRule] = {
         "Menyiapkan PR (merge tetap manusia)",
         (*BASE, "repo.origin", "adapter.github_token", "evidence.verifier", "delivery.ci_workflow"),
         required=("repo.state", "adapter.github_token", "evidence.acceptance_suite"),
+        guard=("evidence.acceptance_invalidation", "repo.domain"),
         advisory=("delivery.branch_protection", "repo.hooks"), domain="PERSONAL",
         required_ok={"adapter.github_token": STRICT_CONNECTED},
-        description="Broker membuat PR dari branch aeos/*; tidak ada operasi merge."),
+        project=("adapter.project_repo",), project_ok={"adapter.project_repo": STRICT_CONNECTED},
+        description="Broker membuat PR dari branch aeos/*; tidak ada operasi merge. Per proyek: akses repo "
+                    "proyek (ID repo persis) terbukti."),
     Capability.CAN_USE_OFFICE_INTEGRATIONS: CapRule(
         "Integrasi OFFICE (Bitbucket/Jira/Confluence)",
         (*BASE, "policy.office_defaults", "adapter.office_bitbucket", "adapter.office_jira", "adapter.office_confluence"),
@@ -117,7 +129,7 @@ RULES: dict[Capability, CapRule] = {
 def checks_for_capability(capability: str | Capability) -> list[str]:
     rule = RULES[Capability(capability)]
     seen: list[str] = []
-    for cid in (*rule.critical, *rule.required, *rule.guard, *rule.advisory):
+    for cid in (*rule.critical, *rule.required, *rule.guard, *rule.advisory, *rule.project):
         if cid not in seen:
             seen.append(cid)
     return seen
@@ -245,9 +257,68 @@ def _live_sandbox(session: Session | None, domain: str | None) -> tuple[str, lis
     return "blocked", [f"{LIVE_SANDBOX_ID}: BLOCKED ({eval_domain}) - {why}"], remedies, pending, entry
 
 
+PLATFORM_COVER = {"adapter.project_repo": "adapter.github_token"}
+
+
+def _project_tier(rule: CapRule, project: dict[str, Any] | None, project_rows: dict[str, dict[str, Any]],
+                  rows: dict[str, dict[str, Any]], *, now: datetime, excluded: set[str]
+                  ) -> tuple[list[str], list[str], list[str], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    """(blocked, unknown, degraded, notes, checks, remedies) of the project tier for one project.
+
+    A project whose GitHub repository *is* the platform repository is covered by the platform-level
+    ``adapter.github_token`` probe of exactly that repo (``PLATFORM_COVER``); any other target needs its own
+    project-scoped result — readiness of one project is never inferred from another target (§08)."""
+    from aeos.doctor.checks import REGISTRY
+
+    blocked: list[str] = []
+    unknown: list[str] = []
+    degraded: list[str] = []
+    notes: list[str] = []
+    checks: list[dict[str, Any]] = []
+    remedies: list[dict[str, Any]] = []
+    if not rule.project:
+        return blocked, unknown, degraded, notes, checks, remedies
+    if project is None:
+        notes.append(f"catatan: {', '.join(rule.project)}: target proyek dievaluasi per proyek (pilih proyek)")
+        return blocked, unknown, degraded, notes, checks, remedies
+    for cid in rule.project:
+        if cid in excluded:
+            continue
+        spec = REGISTRY.get(cid)
+        row = project_rows.get(cid)
+        covered = None
+        if row is None and cid in PLATFORM_COVER and project.get("is_platform_repo"):
+            covered = PLATFORM_COVER[cid]
+            row = rows.get(covered)
+        eff, why = effective_status(row, now, None)
+        ok_set = rule.project_ok.get(cid) or (spec.ok_statuses if spec else frozenset({"VERIFIED"}))
+        ok = eff in ok_set
+        checks.append({"check_id": cid, "title": spec.title if spec else cid, "tier": "project",
+                       "status": row["status"] if row else None, "effective_status": eff, "ok": ok,
+                       "last_checked_at": row.get("last_checked_at") if row else None,
+                       "component_id": spec.component_id if spec else None, "project_id": project.get("id"),
+                       "covered_by": covered, "residual_risks": []})
+        if ok:
+            if covered:
+                notes.append(f"catatan: {cid}: repo proyek = repo platform; dibuktikan oleh {covered}")
+            continue
+        summary = (row or {}).get("summary") or why or ""
+        reason = f"{cid} (proyek {str(project.get('id'))[:8]}): {eff}" + (f" - {summary}" if summary else "")
+        if row and row.get("remediation"):
+            remedies.append({"check_id": cid, **row["remediation"]})
+        if eff in ("FAILED", "MISSING"):
+            blocked.append(reason)
+        elif eff in ("UNKNOWN", "STALE", "EXPIRED"):
+            unknown.append(reason)
+        else:
+            degraded.append(reason)
+    return blocked, unknown, degraded, notes, checks, remedies
+
+
 def evaluate(capability: Capability, rows: dict[str, dict[str, Any]], *, now: datetime,
              fps: dict[str, str | None], domain: str | None, session: Session | None,
-             exclude_checks: tuple[str, ...] = ()) -> CapabilityState:
+             exclude_checks: tuple[str, ...] = (), project: dict[str, Any] | None = None,
+             project_rows: dict[str, dict[str, Any]] | None = None) -> CapabilityState:
     from aeos.doctor.checks import REGISTRY, load_all
 
     load_all()
@@ -300,6 +371,14 @@ def evaluate(capability: Capability, rows: dict[str, dict[str, Any]], *, now: da
                 blocked.append(reason)
             else:
                 notes.append(f"catatan: {reason}")
+    pb, pu, pd, pn, pchecks, premedies = _project_tier(rule, project, project_rows or {}, rows, now=now,
+                                                       excluded=excluded)
+    blocked += pb
+    unknown += pu
+    degraded += pd
+    notes += pn
+    checks += pchecks
+    remedies += premedies
     if rule.live_sandbox and "containment.sandbox" not in excluded:
         outcome, live_reasons, live_remedies, live_risks, entry = _live_sandbox(session, eff_domain)
         checks.append(entry)
@@ -342,23 +421,60 @@ def _rows(session: Session | None, check_ids: list[str]) -> dict[str, dict[str, 
     return {cid: row_view(r) for cid, r in latest_results(session, check_ids).items()}
 
 
+def project_target(session: Session | None, project_id: str | None) -> dict[str, Any] | None:
+    """The project a gate is evaluated for: id, domain and whether its GitHub repo is the platform repo."""
+    if session is None or not project_id:
+        return None
+    from sqlalchemy import select
+
+    from aeos.core.config import get_settings
+    from aeos.models.portfolio import Project, RepositoryReference
+
+    p = session.get(Project, project_id)
+    if p is None:
+        return {"id": project_id, "domain": None, "is_platform_repo": False, "known": False}
+    slug = get_settings().platform_repo_slug.lower()
+    repos = [r.full_name.lower() for r in session.scalars(select(RepositoryReference).where(
+        RepositoryReference.project_id == project_id)) if (r.provider or "").upper() == "GITHUB"]
+    return {"id": p.id, "domain": p.domain, "known": True, "repos": repos,
+            "is_platform_repo": bool(repos) and all(r == slug for r in repos)}
+
+
+def _project_rows(session: Session | None, check_ids: list[str], project_id: str | None) -> dict[str, dict[str, Any]]:
+    if session is None or not project_id or not check_ids:
+        return {}
+    from aeos.doctor.runner import latest_project_results, row_view
+
+    return {cid: row_view(r) for (cid, _p), r in latest_project_results(session, check_ids,
+                                                                        project_id=project_id).items()}
+
+
 def capability_state(session: Session, capability: Capability, *, domain: str | None = None,
                      project_id: str | None = None, exclude_checks: tuple[str, ...] = ()) -> CapabilityState:
-    """Facade implementation. ``project_id`` is accepted for scoping; V1 checks are platform/domain-level."""
-    ids = checks_for_capability(capability)
-    return evaluate(Capability(capability), _rows(session, ids), now=utcnow(), fps=live_fingerprints(session, ids),
-                    domain=domain, session=session, exclude_checks=tuple(exclude_checks or ()))
+    """Facade implementation. With ``project_id`` the rule's project tier is evaluated for that project's own
+    targets (repository / Drive root); without it the gate is platform/domain-level and says so."""
+    cap = Capability(capability)
+    ids = checks_for_capability(cap)
+    rule = RULES[cap]
+    return evaluate(cap, _rows(session, ids), now=utcnow(), fps=live_fingerprints(session, ids),
+                    domain=domain, session=session, exclude_checks=tuple(exclude_checks or ()),
+                    project=project_target(session, project_id),
+                    project_rows=_project_rows(session, list(rule.project), project_id))
 
 
 def capability_matrix(session: Session | None, *, domain: str | None = None,
-                      rows: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+                      rows: dict[str, dict[str, Any]] | None = None, project_id: str | None = None
+                      ) -> list[dict[str, Any]]:
     all_ids = sorted({c for cap in RULES for c in checks_for_capability(cap)})
     rows = rows if rows is not None else _rows(session, all_ids)
     fps = live_fingerprints(session, all_ids)
     now = utcnow()
+    project = project_target(session, project_id)
+    project_rows = _project_rows(session, sorted({c for r in RULES.values() for c in r.project}), project_id)
     out = []
     for cap, rule in RULES.items():
-        st = evaluate(cap, rows, now=now, fps=fps, domain=domain, session=session)
+        st = evaluate(cap, rows, now=now, fps=fps, domain=domain, session=session, project=project,
+                      project_rows=project_rows)
         out.append({"capability": cap.value, "label": rule.label, "description": rule.description,
                     "domain": rule.domain, "status": st.status, "reasons": st.reasons, "checks": st.checks,
                     "remedies": st.remedies, "residual_risks": st.residual_risks})
@@ -429,12 +545,22 @@ def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
     from aeos.inventory.observations import expire_component_observations
 
     n = 0
+    stale_ids: list[str] = []
     components: dict[str, bool] = {}  # component -> may quote the invalidator target
     label = invalidator_label(invalidator)
     why = reason or f"invalidated by {label}"
     kind, _, target = invalidator.partition(":")
     private, owner = _private_owner(invalidator)
-    for cid, row in latest_results(session).items():
+    from aeos.doctor.checks import REGISTRY, load_all
+    from aeos.doctor.runner import latest_project_results
+
+    load_all()
+    candidates = {r.id: r for r in latest_results(session).values()}
+    # project-scoped checks keep one latest result per project: every project's row may depend on it
+    candidates.update({r.id: r for r in latest_project_results(
+        session, [c for c, s in REGISTRY.items() if s.targets is not None]).values()})
+    for row in candidates.values():
+        cid = row.check_id
         if row.status == "STALE" or not _depends(invalidator, row):
             continue
         # A platform-level row (or another domain's row) is visible to every/that session, and so is its
@@ -447,6 +573,7 @@ def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
                                  "stale_reason": f"{row_why} [{row_label}]"[:300]}
         row.status = "STALE"
         n += 1
+        stale_ids.append(row.check_id)
         if row.component_id:
             components[row.component_id] = components.get(row.component_id, True) and quote
         events.emit(session, source="doctor", kind="doctor.check.stale", entity_type="check", entity_id=cid,
@@ -457,4 +584,96 @@ def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
         expire_component_observations(session, comp, reason=f"{label}: {why}" if quote
                                       else f"{PRIVATE_LABEL}: {PRIVATE_REASON}")
     session.flush()
+    _schedule_recheck(session, stale_ids)
     return n
+
+
+# ---------------------------------------------------------------- targeted recheck after invalidation (§08)
+#
+# "Perubahan ... membuat pemeriksaan terdampak STALE dan memicu recheck sebelum capability tersebut digunakan
+# kembali": while the server runs (enabled by the doctor lifecycle hook), the non-functional, loopback-only
+# checks an invalidation marked STALE are re-run in the background right after the invalidating transaction
+# commits. Until that recheck lands the gate stays UNKNOWN (fail closed). Functional/network checks (Max
+# quota, remote APIs) are never re-run implicitly; they keep waiting for an explicit --functional run.
+
+_recheck = {"enabled": False, "settings": None, "pending": set(), "thread": None}
+_recheck_lock = threading.Lock()
+RECHECK_DELAY_SECONDS = 1.0
+
+
+def enable_auto_recheck(settings: Any) -> None:
+    with _recheck_lock:
+        _recheck.update(enabled=True, settings=settings)
+
+
+def disable_auto_recheck() -> None:
+    with _recheck_lock:
+        _recheck.update(enabled=False, settings=None)
+        _recheck["pending"] = set()
+
+
+def auto_recheck_enabled() -> bool:
+    return bool(_recheck["enabled"])
+
+
+def recheckable(check_ids: list[str]) -> list[str]:
+    from aeos.doctor.checks import REGISTRY, load_all
+
+    load_all()
+    return [c for c in check_ids if c in REGISTRY and not REGISTRY[c].functional and not REGISTRY[c].network]
+
+
+def _schedule_recheck(session: Session, stale_ids: list[str]) -> None:
+    ids = recheckable(stale_ids)
+    if not ids or not auto_recheck_enabled():
+        return
+    from sqlalchemy import event
+
+    pending = session.info.setdefault("aeos_doctor_recheck", set())
+    first = not pending
+    pending.update(ids)
+    if first:
+        def _after_commit(sess: Session) -> None:
+            queued = sess.info.pop("aeos_doctor_recheck", set())
+            if queued:
+                request_recheck(sorted(queued))
+
+        event.listen(session, "after_commit", _after_commit, once=True)
+
+
+def request_recheck(check_ids: list[str]) -> None:
+    """Queue a background recheck of *check_ids* (debounced; one worker thread at a time)."""
+    with _recheck_lock:
+        if not _recheck["enabled"]:
+            return
+        _recheck["pending"] |= set(check_ids)
+        t = _recheck["thread"]
+        if t is not None and t.is_alive():
+            return
+        t = threading.Thread(target=_recheck_worker, name="aeos-doctor-recheck", daemon=True)
+        _recheck["thread"] = t
+        t.start()
+
+
+def _recheck_worker() -> None:
+    import logging
+    import time
+
+    log = logging.getLogger("aeos.doctor")
+    while True:
+        time.sleep(RECHECK_DELAY_SECONDS)
+        with _recheck_lock:
+            ids = sorted(_recheck["pending"])
+            _recheck["pending"] = set()
+            settings = _recheck["settings"]
+            if not ids or not _recheck["enabled"] or settings is None:
+                _recheck["thread"] = None
+                return
+        try:
+            from aeos.core.db import session_scope
+            from aeos.doctor.runner import run_doctor
+
+            with session_scope() as s:
+                run_doctor(settings, s, checks=ids, functional=False, actor="system", trigger="recheck")
+        except Exception:  # visible as the still-STALE result; never fatal
+            log.exception("targeted doctor recheck failed")
