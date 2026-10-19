@@ -29,7 +29,8 @@ from aeos.models.portfolio import Project
 from aeos.models.workforce import Lease, TaskExecution
 
 FALLBACK_PROTECTED_PATHS: tuple[str, ...] = (
-    "policy/**", "backend/aeos/policy/**", "backend/aeos/verification/**", "backend/aeos/broker/**",
+    "policy/**", "backend/aeos/policy/**", "backend/aeos/verification/**", "backend/aeos/evaluation/**",
+    "backend/aeos/broker/**",
     "backend/aeos/identity/**", "tests/acceptance/**", ".github/workflows/**", "install-manifest/**",
     "backend/aeos/migrations/**",
 )

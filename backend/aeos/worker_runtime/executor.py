@@ -156,6 +156,13 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
     if status["status"] != "INSTALLED":
         raise StartError("ENGINE_MISSING", f"OpenCode {status['status']}: {status['evidence']}")
     route_key = run.model_route_key or ""
+    from aeos.models.routing import ModelRoute
+
+    route = s.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
+    if route is not None and route.harness_version and status.get("version") != route.harness_version:
+        # §23 harness version is part of the approved configuration: an upgraded engine is not the reviewed one
+        raise StartError("HARNESS_VERSION_DRIFT", f"OpenCode {status.get('version')} differs from the version the "
+                                                  f"route was approved with ({route.harness_version}); re-review it")
     exposed = opencode.exposed_model_id(route_key)
     repo, isolated = resolve_repository(s, project)
     ws = workspace.create_workspace(settings.layout, domain=Domain(task.domain), project_key=project.project_key,
@@ -174,9 +181,6 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
     prompt = build_prompt(task, findings=list(te.pending_findings or []), protected=protected, branch=ws.branch)
     task_file = sandbox.config / "aeos-task.md"
     task_file.write_text(prompt, encoding="utf-8")
-    from aeos.models.routing import ModelRoute
-
-    route = s.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
     cfg = opencode.build_config(broker_base_url=broker_base_url or _broker_base_url(settings), token=token,
                                 model=exposed, tools_allowed=list(task.tools_allowed or []),
                                 egress_allowed=list(task.egress_allowed or []), max_output_tokens=per_req,

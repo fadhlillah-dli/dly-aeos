@@ -51,6 +51,14 @@ def fallback_route(session: Session, *, task: TaskSpec, failed_route_key: str) -
     return impl(session, task=task, failed_route_key=failed_route_key)
 
 
+def terms_eligibility(route: ModelRoute, *, data_classification: str) -> list[str]:
+    """Terms/data/provider eligibility reasons of *route* for a workload of *data_classification* (empty =
+    eligible). The evaluation gate of §40/§43; a subset of the routing hard filter."""
+    from aeos.routing.service import terms_eligibility as impl
+
+    return impl(route, data_classification=data_classification)
+
+
 def note_rate_limited(
     session: Session, *, provider: str, scope: str = "free-daily", retry_after_seconds: int | None = None,
     source: str = "observed-429",

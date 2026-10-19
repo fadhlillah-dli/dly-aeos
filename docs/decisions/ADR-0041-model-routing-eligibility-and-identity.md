@@ -116,3 +116,42 @@ context 262144, tools, `expiration_date` 2026-10-31; 16 `:free` models in total)
   scheme + host, so `http://localhost.example` is not loopback) and rejects an OpenRouter route without
   `credential_ref` for OFFICE (the broker's default OpenRouter references are worker/PERSONAL ones and it
   refuses such a call), so routing never selects a route the broker would refuse.
+
+## Amendment 2026-10-19 (C5: "diizinkan dan telah diuji")
+
+* **APPROVED needs test evidence.** `activate_route(mode=APPROVED)` requires `eval_run_ids`: COMPLETED EvalRuns,
+  recorded by a trusted collector on a protected suite, made on exactly the route configuration being approved
+  (`EvalRun.route_config_hash`), describing the route (model id/provider), gate-passing and without critical
+  regression (`evaluation.facade.activation_evidence`). Otherwise `TEST_EVIDENCE_REQUIRED`; TRIAL (time-limited)
+  needs no evaluation. The decision stores the run ids, the per-role pooled result, a config snapshot, the
+  previous config hash and a **rollback target** (the most recent earlier approved configuration, else "disable
+  the route"). Only this decision writes `ModelRoute.eval_results[role]` (score = Wilson 95 % lower bound, bound to
+  the config hash), so selection by evaluation happens only after evaluation **and** an owner decision. A config
+  change of a route with a tested role emits `route.needs_evaluation`. The acceptance builder activates its pilot
+  route as TRIAL accordingly.
+* **Terms re-read at activation.** Seeded worker routes no longer carry `terms_checked_at` (the master research
+  reading is kept as `data_terms.read_for_research`); `aeos seed` resets an untouched seeded research date.
+  Activation requires `terms_reviewed` whenever the last owner check is missing or older than 30 days
+  (`TERMS_REVIEW_REQUIRED`) and records `terms_review` (who/when/classes/note) on the decision.
+* **Unknown terms restrict.** A missing/None training flag (or an explicit None trial flag) is UNKNOWN and limits
+  the route to PUBLIC — at activation (`DATA_TERMS_RESTRICTED`) and in the hard filter — until the owner records
+  their reading (`terms_record`). Catalog discovery applies family terms (NVIDIA: trial only, no confidential data).
+* **Region/residency.** A provider that restricts regions (`data_terms.regions` / `unavailable_regions`) needs the
+  owner-reviewed `region` at activation (`REGION_REVIEW_REQUIRED` / `REGION_UNAVAILABLE`); the hard filter rejects a
+  missing/unavailable region and, for OFFICE, a region outside an `allowed_regions` office policy.
+* **Availability UNKNOWN is rejected** (never observed in a provider catalog), as MISSING was.
+* **Runtime binding.** Activation binds `policy_version` (hash of `policy/*.yaml`), `prompt_revision` (worker prompt +
+  OpenCode permission template), `context_strategy` (TaskSpec file + worktree, attachment budgets, default limits)
+  and the observed OpenCode `harness_version`; a change of policy/prompt/context strategy makes an activated route
+  ineligible until re-activated, a catalog refresh that observes another OpenCode version is a configuration
+  change of activated routes, and the executor refuses a run whose engine differs (`HARNESS_VERSION_DRIFT`).
+  Activation fails closed when a binding value cannot be determined (`RUNTIME_BINDING_UNKNOWN`).
+* **Reviewed tool set.** The placeholder tool set is replaced by the TaskSpec tool vocabulary; activation records
+  the reviewed set (default `fs.read`, `fs.write:allowed_paths`, `tests.run`), and selection rejects a TaskSpec
+  tool outside it.
+* **Planner seam.** `_task_policy` consumes the compiler's `requires_tools` / `min_context_tokens` (plus the old
+  keys); a policy asking to relax eligible-only / paid fallback / supervisor downgrade is refused.
+* **Honest status, not fixed here:** a supervisor alias moving to a new model is reported `NEEDS_EVALUATION`, but
+  planning continues on it because the trusted acceptance test 1.31 requires that behaviour — blocking it is an
+  owner decision. ARENA/COMPARATOR routes can be activated, but the broker serves WORKER routes only (protected
+  path), so arena feasibility runs are reported `NOT_WIRED`. No live provider endpoint/terms were exercised.

@@ -19,5 +19,9 @@ describe("Costs page renders real API payloads", () => {
     expect(screen.getAllByText("1 entri").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/BUDGET oleh/).length).toBeGreaterThan(0);
     expect(screen.getAllByText("Langganan (bukan dolar)").length).toBeGreaterThan(0);
+    // §42: latency and repairs are monitored separately from money/tokens
+    expect(screen.getByText("Latency dan repair pekerja")).toBeInTheDocument();
+    expect(screen.getByText("240 s / 600 s (n=3 dari 4 run)")).toBeInTheDocument();
+    expect(screen.getByText("2 (1 dari 2 task)")).toBeInTheDocument();
   });
 });

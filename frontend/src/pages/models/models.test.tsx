@@ -174,4 +174,48 @@ describe("Models & Routes page", () => {
     const sent = JSON.parse(calls.find((c) => c.url.endsWith("/activate"))!.body!);
     expect(sent).toMatchObject({ mode: "TRIAL", budget_decision_id: "budget-1", expected_config_hash: "sha256:" + "c".repeat(64) });
   });
+
+  it("an APPROVED (production) activation cannot be sent without EvalRun evidence (§23 telah diuji)", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByText("DeepSeek V4.1 Flash Free"));
+    const drawer = await screen.findByRole("dialog", { name: /Detail rute/ });
+    fireEvent.click(await within(drawer).findByRole("button", { name: /Aktifkan rute/ }));
+    const dialog = await screen.findByRole("dialog", { name: "Aktivasi rute" });
+    fireEvent.change(within(dialog).getByRole("combobox"), { target: { value: "APPROVED" } });
+    expect(within(dialog).getByText(/telah diuji/)).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Alasan/ }), { target: { value: "lulus evaluasi held-out" } });
+    const submit = within(dialog).getByRole("button", { name: /Catat keputusan ROUTE_ACTIVATION/ });
+    expect(submit).toBeDisabled();
+    fireEvent.change(within(dialog).getByPlaceholderText("uuid EvalRun"), { target: { value: "run-1, run-2" } });
+    expect(submit).not.toBeDisabled();
+    fireEvent.click(submit);
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/activate") && c.method === "POST")).toBe(true));
+    const sent = JSON.parse(calls.find((c) => c.url.endsWith("/activate"))!.body!);
+    expect(sent).toMatchObject({ mode: "APPROVED", eval_run_ids: ["run-1", "run-2"] });
+  });
+
+  it("shows a changed configuration as needing evaluation and an unwired arena route honestly", async () => {
+    const changed = route({
+      eval_summary: { state: "NEEDS_EVALUATION", roles: {}, stale_roles: ["feature-implementer"], note: "Konfigurasi berubah; hasil lama tidak diwariskan" },
+      execution_path: { status: "NOT_WIRED", note: "broker hanya melayani route WORKER" },
+      runtime_binding: { bound: {}, current: {}, status: "DRIFT", drift: ["policy_version changed since activation"] },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? "GET" });
+        let body: unknown = {};
+        if (url.startsWith("/api/claude/status")) body = STATUS;
+        else if (url === "/api/routes") body = { ...ROUTES, items: [changed] };
+        else if (url.startsWith("/api/routes/")) body = { ...changed, config: DS_CONFIG, decisions: [], quota_states: [] };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByText("DeepSeek V4.1 Flash Free"));
+    const drawer = await screen.findByRole("dialog", { name: /Detail rute/ });
+    expect(await within(drawer).findByText("Perlu evaluasi ulang")).toBeInTheDocument();
+    expect(within(drawer).getByText(/policy_version changed since activation/)).toBeInTheDocument();
+    expect(within(drawer).getByText("Belum tersambung")).toBeInTheDocument();
+  });
 });

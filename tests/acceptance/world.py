@@ -46,9 +46,12 @@ def register_free_route(db: Session, key: str, *, model_id: str = "vendor/acc-mo
     from aeos.routing.service import compute_config_hash
 
     now = utcnow()
+    # terms as the owner recorded them when registering the route (known, not restricted): data classes above
+    # PUBLIC are only ever allowed on known training/trial terms (§23)
     r = ModelRoute(route_key=key, pool="WORKER", provider=provider, model_id=model_id, endpoint=endpoint,
                    status="CANDIDATE", eligible_domains=["PERSONAL"], allowed_data_classes=["PUBLIC", "INTERNAL"],
                    supports_tools="YES", is_free=is_free, pricing=pricing or {}, context_window=131072,
+                   data_terms={"may_use_inputs_for_training": False, "trial_only_no_confidential": False},
                    pricing_checked_at=now, terms_checked_at=now, availability="AVAILABLE", mode="LIVE",
                    origin="CATALOG_DISCOVERED", fallback_chain=fallback_chain or [], priority=10)
     db.add(r)
@@ -58,9 +61,11 @@ def register_free_route(db: Session, key: str, *, model_id: str = "vendor/acc-mo
     return r
 
 
-def activate_route(client: AuthedClient, key: str, *, mode: str = "APPROVED", budget_decision_id: str | None = None
+def activate_route(client: AuthedClient, key: str, *, mode: str = "TRIAL", budget_decision_id: str | None = None
                    ) -> dict[str, Any]:
-    """Owner reviews the route (exact config hash) and activates it: ROUTE_ACTIVATION decision."""
+    """Owner reviews the route (exact config hash) and activates it: a TRIAL decision. A production
+    (APPROVED / ROUTE_ACTIVATION) activation additionally needs recorded EvalRuns of exactly this
+    configuration (§23 "diizinkan dan telah diuji"), which the pilot does not have."""
     route = client.get(f"/api/routes/{key}").json()
     cfg = route.get("config_hash") or route.get("route", {}).get("config_hash")
     body: dict[str, Any] = {"mode": mode, "rationale": "reviewed terms and eval for acceptance",

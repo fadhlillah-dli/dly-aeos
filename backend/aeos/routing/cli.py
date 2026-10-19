@@ -83,8 +83,16 @@ def activate_cmd(
     budget_decision: str = typer.Option(None, help="BUDGET decision id (required for paid routes)"),
     days: int = typer.Option(None, help="Decision expiry in days"),
     terms_reviewed: bool = typer.Option(False, help="You re-read pricing and data terms now"),
+    terms_note: str = typer.Option("", help="What you read (stored on the decision)"),
+    region: str = typer.Option(None, help="Region/residency you reviewed (e.g. ID) when the provider restricts regions"),
+    tool: list[str] = typer.Option(None, help="Reviewed TaskSpec tool (repeatable; default fs.read, "
+                                              "fs.write:allowed_paths, tests.run)"),
+    eval_run: list[str] = typer.Option(None, help="COMPLETED EvalRun id proving this configuration (APPROVED only; "
+                                                  "repeatable)"),
 ) -> None:
-    """Record a human ROUTE_ACTIVATION/TRIAL decision bound to the route's exact config hash."""
+    """Record a human ROUTE_ACTIVATION/TRIAL decision bound to the route's exact config hash.
+
+    APPROVED needs --eval-run ids of completed, gate-passing evaluations of exactly this configuration."""
     from aeos.audit import service as audit
     from aeos.cli import ensure_database
     from aeos.core.db import session_scope
@@ -100,7 +108,8 @@ def activate_cmd(
             route, decision = service.activate_route(
                 s, route_key, actor_user_id=uid, mode=mode.upper(), rationale=rationale,
                 expected_config_hash=expected_hash, allowed_data_classes=data_class or None,
-                budget_decision_id=budget_decision, expires_in_days=days, terms_reviewed=terms_reviewed)
+                budget_decision_id=budget_decision, expires_in_days=days, terms_reviewed=terms_reviewed,
+                terms_note=terms_note, region=region, tool_set=tool or None, eval_run_ids=eval_run or None)
             audit.record(s, actor_type="cli", actor_id=uid, action="route.activate", target_type="model_route",
                          target_id=route.route_key, details={"mode": mode, "decision_id": decision.id})
             typer.echo(f"{route.route_key} -> {route.status} (decision {decision.id}, hash {route.config_hash})")

@@ -13,14 +13,24 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
   const [budgetId, setBudgetId] = useState("");
   const [days, setDays] = useState<string>("14");
   const [termsReviewed, setTermsReviewed] = useState(false);
+  const [termsNote, setTermsNote] = useState("");
+  const [region, setRegion] = useState(route.region ?? "");
+  const [evalRuns, setEvalRuns] = useState("");
   const activate = useActivateRoute(route.route_key);
   const paid = !route.effectively_free;
   const restricted =
+    Boolean(route.terms_restriction) ||
     route.identity_status === "UNVERIFIED" ||
     route.data_terms?.may_use_inputs_for_training === true ||
     route.data_terms?.trial_only_no_confidential === true;
   const decisionKind = mode === "APPROVED" ? "ROUTE_ACTIVATION" : "TRIAL";
-  const canSubmit = rationale.trim().length >= 10 && classes.length > 0 && (!paid || budgetId.trim().length > 0);
+  const evalRunIds = evalRuns.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+  const canSubmit =
+    rationale.trim().length >= 10 &&
+    classes.length > 0 &&
+    (!paid || budgetId.trim().length > 0) &&
+    (mode !== "APPROVED" || evalRunIds.length > 0) &&
+    (!route.region_restricted || region.trim().length >= 2);
 
   const toggle = (c: string) => setClasses((cur) => (cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c]));
 
@@ -34,6 +44,9 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
         budget_decision_id: paid ? budgetId.trim() : null,
         expires_in_days: days ? Number(days) : null,
         terms_reviewed: termsReviewed,
+        terms_note: termsReviewed ? termsNote.trim() : "",
+        region: region.trim() ? region.trim().toUpperCase() : null,
+        eval_run_ids: mode === "APPROVED" ? evalRunIds : null,
       },
       { onSuccess: onClose },
     );
@@ -68,6 +81,17 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
               <option value="APPROVED">APPROVED - rute produksi pekerja</option>
             </select>
           </Field>
+          {mode === "APPROVED" && (
+            <>
+              <Notice tone="warn">
+                Rute produksi hanya untuk konfigurasi yang diizinkan <b>dan telah diuji</b> (§23): sebutkan EvalRun COMPLETED yang lulus
+                gate pada konfigurasi persis ini. Tanpa itu gunakan TRIAL.
+              </Notice>
+              <Field label="ID EvalRun bukti (wajib untuk APPROVED)" hint="Pisahkan dengan koma; run konfigurasi lain atau yang gagal gate ditolak backend.">
+                <input className={inputClass} value={evalRuns} onChange={(e) => setEvalRuns(e.target.value)} placeholder="uuid EvalRun" />
+              </Field>
+            </>
+          )}
           <Field label="Alasan (wajib)" hint="Minimal 10 karakter; tersimpan pada keputusan dan audit.">
             <textarea className={inputClass} rows={3} value={rationale} onChange={(e) => setRationale(e.target.value)} />
           </Field>
@@ -81,8 +105,17 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
                 </label>
               ))}
             </div>
-            {restricted && <p className="mt-1 text-xs text-warn">Data terms/identitas rute ini hanya mengizinkan PUBLIC.</p>}
+            {restricted && (
+              <p className="mt-1 text-xs text-warn">
+                Data terms/identitas rute ini hanya mengizinkan PUBLIC{route.terms_restriction ? ` (${route.terms_restriction})` : ""}.
+              </p>
+            )}
           </fieldset>
+          {route.region_restricted && (
+            <Field label="Region / residensi yang Anda periksa (wajib)" hint="Provider membatasi region; contoh ID, EU, GLOBAL.">
+              <input className={inputClass} value={region} onChange={(e) => setRegion(e.target.value)} placeholder="ID" />
+            </Field>
+          )}
           {paid && (
             <Field label="ID keputusan BUDGET">
               <input className={inputClass} value={budgetId} onChange={(e) => setBudgetId(e.target.value)} placeholder="uuid keputusan BUDGET" />
@@ -93,8 +126,14 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
           </Field>
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" checked={termsReviewed} onChange={(e) => setTermsReviewed(e.target.checked)} />
-            Saya sudah membaca ulang harga dan data terms rute ini sekarang (memperbarui waktu pemeriksaan).
+            Saya sudah membaca ulang harga dan data terms rute ini sekarang (memperbarui waktu pemeriksaan). Wajib bila belum pernah
+            diperiksa pemilik atau lebih dari 30 hari; tanggal riset katalog bukan pemeriksaan terms.
           </label>
+          {termsReviewed && (
+            <Field label="Catatan pemeriksaan terms" hint="Apa yang dibaca (retensi, pelatihan, trial); tersimpan pada keputusan.">
+              <input className={inputClass} value={termsNote} onChange={(e) => setTermsNote(e.target.value)} />
+            </Field>
+          )}
         </div>
         {activate.error && (
           <div className="mt-3">

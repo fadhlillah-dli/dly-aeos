@@ -65,4 +65,73 @@ def leaderboard_cmd(
                               f"accept={e['final_acceptance_rate']} ci95={e['acceptance_ci95']}"))
         for e in suite["excluded"]:
             typer.echo(_ascii(f"  excluded {e['label'][:60]}: {e['eligibility']['status']}"))
+        for e in suite.get("not_comparable", []):
+            typer.echo(_ascii(f"  not comparable {e['label'][:60]}: different limits/suite/environment"))
     typer.echo(board["route_change"])
+
+
+def _owner(session, as_user: str) -> str:
+    """Owner actions on a run are human actions: the SUPER_ADMIN proves it by password (never echoed)."""
+    from aeos.routing.cli import _admin_user_id
+
+    password = typer.prompt(f"Password for {as_user}", hide_input=True, default="", show_default=False)
+    return _admin_user_id(session, as_user, password)
+
+
+def _run_action(action: str, run_id: str, as_user: str, **kw) -> None:
+    from aeos.cli import ensure_database
+    from aeos.core.db import session_scope
+    from aeos.core.errors import AeosError
+    from aeos.evaluation import executor
+
+    ensure_database()
+    try:
+        with session_scope() as s:
+            uid = _owner(s, as_user)
+            if action == "start":
+                run = executor.start_run(s, run_id, actor_user_id=uid)
+                typer.echo(f"{run.id} RUNNING, slots: {', '.join(x['slot_id'] for x in executor.slots(s, run))}")
+            elif action == "bind":
+                run = executor.bind_task(s, run_id, slot_id=kw["slot_id"], task_id=kw["task_id"], actor_user_id=uid)
+                typer.echo(f"{run.id}: slot {kw['slot_id']} -> task {kw['task_id']}")
+            elif action == "collect":
+                out = executor.collect(s, run_id)
+                typer.echo(f"collected {out['collected']}/{out['slots']} pending={len(out['pending'])} "
+                           f"invalid={len(out['invalid'])} unbound={len(out['unbound'])} recorded={out['recorded']}")
+                for row in out["invalid"]:
+                    typer.echo(_ascii(f"  invalid {row['slot_id']}: {row['reason']}"))
+            else:
+                run = executor.finish_run(s, run_id, actor_user_id=uid, reason=kw["reason"])
+                typer.echo(f"{run.id} -> {run.status} (unexecuted slots recorded as CANCELLED)")
+    except AeosError as exc:
+        typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
+        raise typer.Exit(1) from exc
+
+
+AS_OPTION = typer.Option(..., "--as", help="Your SUPER_ADMIN username (a human owner action)")
+
+
+@app.command("start")
+def start_cmd(run_id: str = typer.Argument(...), as_user: str = AS_OPTION) -> None:
+    """Start a PLANNED run: case x repetition slots are created (nothing runs by itself)."""
+    _run_action("start", run_id, as_user)
+
+
+@app.command("bind")
+def bind_cmd(run_id: str = typer.Argument(...), slot_id: str = typer.Argument(...), task_id: str = typer.Argument(...),
+             as_user: str = AS_OPTION) -> None:
+    """Bind a TaskSpec executed through the workforce to one case slot of a RUNNING run."""
+    _run_action("bind", run_id, as_user, slot_id=slot_id, task_id=task_id)
+
+
+@app.command("collect")
+def collect_cmd(run_id: str = typer.Argument(...), as_user: str = AS_OPTION) -> None:
+    """Trusted collector: derive samples from task/run/acceptance records; records the run when complete."""
+    _run_action("collect", run_id, as_user)
+
+
+@app.command("finish")
+def finish_cmd(run_id: str = typer.Argument(...), reason: str = typer.Option(..., help="Why the run stops early"),
+               as_user: str = AS_OPTION) -> None:
+    """Stop a RUNNING run early; unexecuted slots are recorded as CANCELLED (never dropped)."""
+    _run_action("finish", run_id, as_user, reason=reason)

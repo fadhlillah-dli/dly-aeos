@@ -37,7 +37,15 @@ from aeos.models.publishing import (
     Publication,
     PublicationOperation,
 )
-from aeos.models.research import ChangeProposal, ContextPack, EvalRun, EvalSuite, MemoryRecord, ResearchEntry
+from aeos.models.research import (
+    ChangeProposal,
+    ContextPack,
+    EvalCaseCandidate,
+    EvalRun,
+    EvalSuite,
+    MemoryRecord,
+    ResearchEntry,
+)
 from aeos.models.routing import CapabilityGrant, ModelRoute
 from aeos.models.workforce import AgentDefinition, Lease, RoleSkillPack, TaskExecution, WorkerRun
 
@@ -61,6 +69,7 @@ __all__ = [
     "Decision",
     "DocumentRecord",
     "DocumentRevision",
+    "EvalCaseCandidate",
     "EvalRun",
     "EvalSuite",
     "Event",
