@@ -25,9 +25,26 @@ PII_CARD = "[PII:CARD]"
 
 _EMAIL = re.compile(r"(?<![\w.+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})*\.[A-Za-z]{2,24}\b")
 _PHONE_INTL = re.compile(r"(?<![\w+])\+\d{1,3}(?:[\s.-]?\(?\d{1,4}\)?){1,5}(?:[\s.-]?\d{2,4})(?![\w])")
-_PHONE_LOCAL = re.compile(r"(?<![\w.])0[1-9]\d{1,3}(?:[\s.-]?\d{3,4}){1,2}[\s.-]?\d{2,5}(?![\w.])")
-_NIK = re.compile(r"(?<!\d)\d{16}(?!\d)")
-_CARD = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
+# Digit-run detectors must never start or end inside an identifier: a run glued to a letter, digit or
+# a hyphenated group (UUIDs, hex digests, ULIDs, "run-1234...") is part of an id, not personal data.
+# Without this guard the digit tail of ~0.4% of uuid4 values was replaced by [PII:CARD], corrupting
+# operation/decision/publication ids in the audit trail (§29 interlock binding).
+_ID_BEFORE = r"(?<![0-9A-Za-z_-])"
+_ID_AFTER = r"(?!-?[0-9A-Za-z_])"
+_PHONE_LOCAL = re.compile(_ID_BEFORE + r"(?<!\.)0[1-9]\d{1,3}(?:[\s.-]?\d{3,4}){1,2}[\s.-]?\d{2,5}(?![\w.])(?!-\w)")
+_NIK = re.compile(_ID_BEFORE + r"\d{16}" + _ID_AFTER)
+_CARD = re.compile(_ID_BEFORE + r"(?:\d[ -]?){12,18}\d" + _ID_AFTER)
+# Canonical identifier shapes that are never personal data (used for mapping values under id keys).
+_ID_SHAPE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"|(?:sha256:)?[0-9a-fA-F]*[a-fA-F][0-9a-fA-F]*"
+)
+
+
+def is_identifier(value: str) -> bool:
+    """True when ``value`` is exactly a UUID or a hex digest with at least one hex letter (so a bare
+    16-digit NIK or card number under a key named ``*_id`` is still treated as personal data)."""
+    return bool(value) and len(value) >= 8 and _ID_SHAPE.fullmatch(value) is not None
 
 
 def _digits(s: str) -> str:
@@ -69,7 +86,7 @@ def _card(m: re.Match[str]) -> str:
 
 
 def redact_pii(text: str) -> str:
-    if not text:
+    if not text or is_identifier(text):
         return text
     text = _EMAIL.sub(PII_EMAIL, text)
     text = _CARD.sub(_card, text)

@@ -261,6 +261,38 @@ def release_build(
     _echo(f"  commit {prov['commit']}  tree {prov['tree_hash']}")
     _echo(f"  artifact {prov['artifact']}  {prov['artifact_sha256']}")
     _echo(f"  schema head: {prov.get('schema_head') or 'none (create_all baseline)'}")
+    acc = prov.get("acceptance") or {}
+    _echo(f"  acceptance: {acc.get('status', 'UNKNOWN')} via {acc.get('basis') or '-'}")
+    ui = prov.get("ui")
+    _echo(f"  ui bundle: {ui['sha256'] + ' (commit correspondence UNVERIFIED)' if ui else 'none (frontend not built)'}")
+
+
+@release_app.command("accept")
+def release_accept(
+    commit: str = typer.Option(..., help="Full commit id to accept without trusted provider-CI PASS"),
+    operator: str = typer.Option(..., help="Your SUPER_ADMIN username (recorded on the EXCEPTION decision)"),
+    reason: str = typer.Option(..., help="Why this commit may be released without CI PASS (recorded)"),
+    yes: bool = typer.Option(False, "--yes"),
+) -> None:
+    """Record a human owner EXCEPTION that lets one exact commit be built as a release (section 09 zone 3)."""
+    _settings()  # ensures the database exists
+    from aeos.core.db import session_scope
+    from aeos.operations import release
+
+    if not yes:
+        typed = typer.prompt(f"Human-only exception for commit {commit[:12]}. Type 'accept' to confirm")
+        if typed.strip().lower() != "accept":
+            _echo("Confirmation did not match; nothing changed.")
+            raise typer.Exit(1)
+    try:
+        with session_scope() as s:
+            decision_id = release.record_acceptance_exception(s, commit=commit.strip().lower(),
+                                                              operator_user_id=_operator_user_id(s, operator),
+                                                              reason=reason)
+    except AeosError as exc:
+        _fail(exc)
+    _echo(f"EXCEPTION decision {decision_id} recorded for commit {commit}; 'aeos ops release build' may now "
+          "build it.")
 
 
 @release_app.command("list")
@@ -309,6 +341,8 @@ def _transition(action: str, release_id: str | None, operator: str, reason: str,
         _fail(exc)
     finally:
         session.close()
+    acc = report.get("acceptance") or {}
+    _echo(f"  acceptance      {acc.get('status', 'UNKNOWN')} via {acc.get('basis') or '-'}")
     for step in report["steps"]:
         _echo(f"  {step['step']:<15} {step['status']}  {step.get('reason', '')}")
     _echo(f"{action.upper()} {report['status']}: active release is now {report.get('active_after')}")
