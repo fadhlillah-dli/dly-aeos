@@ -76,8 +76,9 @@ def github_token_privilege(kind: str, scopes_header: str | None) -> dict[str, An
     if broad:
         return {"kind": kind, "scopes": scopes, "least_privilege": False, "broad_scopes": broad,
                 "risk": "Token GitHub classic/OAuth dengan scope luas (" + ", ".join(broad) + ") menjangkau semua repo "
-                        "akun; gunakan fine-grained PAT khusus repo platform (Issues RW, Pull requests RW, Contents R, "
-                        "Metadata R)."}
+                        "akun; gunakan fine-grained PAT khusus repo platform (Issues RW, Pull requests RW, Contents RW "
+                        "untuk push branch aeos/* oleh broker, Metadata R; tanpa Workflows/Administration) dan "
+                        "lindungi main dengan branch protection."}
     return {"kind": kind, "scopes": scopes, "least_privilege": True, "note": "scope classic terbatas"}
 
 
@@ -128,7 +129,7 @@ def adapter_github(ctx: CheckContext) -> Outcome:
         return Outcome("CONNECTED", summary, evidence=evidence, target_identity=f"github:{slug}",
                        remedy=None if privilege["least_privilege"] is not False else set_secret_remedy(
                            GITHUB_REF, "GitHub fine-grained PAT, hanya repo platform: Issues RW, Pull requests RW, "
-                                       "Contents R, Metadata R"))
+                                       "Contents RW (push aeos/*), Metadata R"))
     if hr.status == 401:
         return Outcome("EXPIRED", "Token GitHub ditolak (kedaluwarsa/dicabut).", evidence=evidence,
                        error_code="GITHUB_TOKEN_REJECTED", remedy=set_secret_remedy(GITHUB_REF, "GitHub"))

@@ -74,8 +74,24 @@ def _commit(cwd: str) -> str | None:
     return sha if proc.returncode == 0 and len(sha) in (40, 64) else None
 
 
+# The code the self-test exercises: uncommitted changes here mean the evidence could not name the code it ran.
+CODE_PATHS: tuple[str, ...] = ("backend", "tests")
+
+
+def _uncommitted(cwd: str) -> list[str] | None:
+    """Uncommitted (modified/untracked) paths under CODE_PATHS; None when git cannot tell (treated as unclean)."""
+    try:
+        proc = subprocess.run(["git", "status", "--porcelain", "--untracked-files=normal", "--", *CODE_PATHS],
+                              cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [line[3:].strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+
+
 def run_idempotency_selftest(session: Session, *, actor: str, runner: Runner | None = None,
-                             commit: str | None = None) -> dict[str, Any]:
+                             commit: str | None = None, uncommitted: list[str] | None = None) -> dict[str, Any]:
     root = repo_root()
     missing = [t for t in TESTS if not (root / t.split("::", 1)[0]).is_file()]
     if missing:
@@ -84,11 +100,20 @@ def run_idempotency_selftest(session: Session, *, actor: str, runner: Runner | N
     argv = [sys.executable, "-m", "pytest", *TESTS, "-q", "-p", "no:cacheprovider", "-p", "no:warnings"]
     out = (runner or _default_runner)(argv, str(root))
     commit = commit or _commit(str(root))
+    dirty = uncommitted if uncommitted is not None else _uncommitted(str(root))
     tail = redact_text("\n".join((out.output or out.error).strip().splitlines()[-15:]), pii=True)
     passed = out.returncode == 0
     result: dict[str, Any] = {"status": "PASSED" if passed else "FAILED", "returncode": out.returncode,
                               "tests": list(TESTS), "commit": commit, "summary": tail, "evidence_id": None}
-    if passed and commit:
+    if passed and commit and dirty:
+        # Evidence honesty: the run exercised working-tree code that differs from the commit it would name.
+        result["status"] = "NOT_RECORDED"
+        result["reason"] = ("uncommitted changes under backend/ or tests/ (" + ", ".join(dirty[:5]) + ") — the "
+                            "evidence must name the exact code it ran; commit or stash, then run again")
+    elif passed and commit and dirty is None:
+        result["status"] = "NOT_RECORDED"
+        result["reason"] = "git status unavailable: cannot prove the tests ran the code of commit " + commit[:12]
+    elif passed and commit:
         from aeos.verification import facade as verification
 
         ev = verification.collect_evidence(

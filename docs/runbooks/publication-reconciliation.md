@@ -32,10 +32,14 @@ edit on the official document is input for a revision, it is never overwritten.
    `[SUPERSEDED]`).
 5. **Prove duplicate prevention** after an upgrade: `aeos publish idempotency-test` runs the
    timeout/partial/replay tests against loopback fakes and records `PUBLICATION_IDEMPOTENCY_TEST`
-   evidence for the Doctor check `recovery.publication_idempotency`.
+   evidence (naming the commit) for the Doctor check `recovery.publication_idempotency` — only on a
+   committed tree: with uncommitted changes under `backend/` or `tests/` nothing is recorded. The
+   Doctor check `recovery.queue` reports publication operations still IN_FLIGHT after the stale
+   window (and worker runs without an ACTIVE lease): reconcile those before any retry.
 6. **FAILED**: fix the cause (expired credential → [credential-rotation](credential-rotation.md);
    missing permission → provider console; `DOCX_TOO_LARGE` → smaller visuals, preview again;
-   `CAPABILITY_NOT_READY` → fix the FAILED Doctor check named in the error), then retry only the
+   `CAPABILITY_NOT_READY` → fix the failing/missing Doctor check named in the error; for OFFICE the
+   company authorisation behind `CAN_USE_OFFICE_INTEGRATIONS`), then retry only the
    failed operations. Successful operations stay recorded and are not recreated.
 7. **Verify** in the provider UI that exactly one resource exists per logical id.
 

@@ -167,7 +167,9 @@ with its own budget configuration and outage/fallback tests (§07 step 6).
 
 Primary path — a **fine-grained personal access token** (least privilege, §07 step 7): github.com →
 Settings → Developer settings → Fine-grained tokens → *Only select repositories*: the platform
-repository; permissions Issues: read/write, Pull requests: read/write, Contents: read, Metadata: read.
+repository; permissions Issues: read/write, Pull requests: read/write, Contents: read/write (the git broker
+pushes `aeos/*` task branches with this token; protect `main` with a branch rule so merge stays human),
+Metadata: read; no Workflows or Administration permission.
 Store it (paste at the hidden prompt twice, nothing is echoed):
 
 ```powershell
