@@ -3,6 +3,7 @@ criticality", §46 Google SRE "error budget", §13 Metric) and the outcome SLI."
 
 from __future__ import annotations
 
+import sys
 from datetime import timedelta
 
 import pytest
@@ -53,7 +54,7 @@ def test_outcome_sli_counts_accepted_outcomes_per_domain(settings, db):
 
 def test_error_budget_exhaustion_alerts_pauses_and_recovery_lifts(settings, db, monkeypatch):
     fw = fake_workforce(monkeypatch)
-    from aeos.workforce import scheduler
+    scheduler = sys.modules["aeos.workforce.scheduler"]  # the fake installed by fake_workforce
 
     monkeypatch.setattr(scheduler, "pause_info", lambda s: {"paused": fw.paused, "by": fw.by}, raising=False)
     fw.by = None
@@ -92,7 +93,7 @@ def test_error_budget_exhaustion_alerts_pauses_and_recovery_lifts(settings, db, 
 
 def test_error_budget_never_lifts_a_pause_it_did_not_set(settings, db, monkeypatch):
     fw = fake_workforce(monkeypatch)
-    from aeos.workforce import scheduler
+    scheduler = sys.modules["aeos.workforce.scheduler"]  # the fake installed by fake_workforce
 
     fw.paused = True  # e.g. an emergency stop or a human pause
     monkeypatch.setattr(scheduler, "pause_info", lambda s: {"paused": True, "by": "user:owner"}, raising=False)

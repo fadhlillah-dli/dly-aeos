@@ -96,7 +96,7 @@ def _listener(family: int, host: str) -> socket.socket:
 def test_port_check_handles_ipv6_loopback():
     from aeos.cli import port_in_use
 
-    assert Settings(host="::1").base_url == "http://[::1]:8787"
+    assert Settings(host="::1", port=8787).base_url == "http://[::1]:8787"
     with _listener(socket.AF_INET, "127.0.0.1") as sock:
         assert port_in_use("127.0.0.1", sock.getsockname()[1]) is True
     try:
