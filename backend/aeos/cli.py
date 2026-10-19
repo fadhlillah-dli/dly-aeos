@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -107,7 +108,7 @@ DEV_REAL_CREDENTIALS_RISK = (
 )
 
 
-def dev_profile_problems(settings: object) -> list[str]:
+def dev_profile_problems(settings: Any) -> list[str]:
     """Why a hot-reloading/dev server would run with the owner's real credentials (empty = separate profile)."""
     from aeos.core.paths import default_data_dir
 

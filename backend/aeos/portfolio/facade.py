@@ -51,6 +51,8 @@ def publication_targets(session: Session, project_id: str) -> list[dict]:
     out: list[dict] = []
     for purpose in ("docs", "issues"):
         provider = pv.publication_provider(project.domain, purpose)
+        if provider is None:
+            continue  # no publication provider for this purpose in the project's domain profile
         match = [r for r in rows if r.domain == project.domain and pv.normalize(r.provider) == provider
                  and r.purpose in (purpose, "default")]
         if not match:

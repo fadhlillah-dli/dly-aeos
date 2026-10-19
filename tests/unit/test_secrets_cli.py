@@ -101,7 +101,7 @@ def _mock_release(m, *, tamper: bool = False) -> tuple[str, bytes]:
     archive = _archive(name, binary)
     digest = hashlib.sha256(archive).hexdigest()
     base = "https://github.com/openbao/openbao/releases/download/v2.7.1"
-    m.get(f"{installer.GITHUB_API}/latest").mock(return_value=httpx.Response(200, json={
+    m.get(f"{installer.GITHUB_API}/tags/v2.7.1").mock(return_value=httpx.Response(200, json={
         "tag_name": "v2.7.1", "html_url": "https://github.com/openbao/openbao/releases/tag/v2.7.1",
         "published_at": "2026-10-01T14:03:19Z",
         "assets": [{"name": name, "browser_download_url": f"{base}/{name}"},
@@ -115,7 +115,7 @@ def _mock_release(m, *, tamper: bool = False) -> tuple[str, bytes]:
 def test_vault_install_shows_plan_and_needs_confirmation(settings):
     with respx.mock(assert_all_called=False) as m:
         _mock_release(m)
-        r = runner.invoke(app, ["vault", "install"], input="n\n")
+        r = runner.invoke(app, ["vault", "install", "--version", "2.7.1"], input="n\n")
     assert r.exit_code == 1 and "Install plan" in r.output and "Aborted - nothing installed" in r.output
     for word in ("source", "asset", "checksums_url", "privilege", "cost", "rollback", "not_verified"):
         assert word in r.output
@@ -125,7 +125,7 @@ def test_vault_install_shows_plan_and_needs_confirmation(settings):
 def test_vault_install_verifies_sha256_user_level(settings):
     with respx.mock(assert_all_called=False) as m:
         _, binary = _mock_release(m)
-        r = runner.invoke(app, ["vault", "install", "--yes"])
+        r = runner.invoke(app, ["vault", "install", "--version", "2.7.1", "--yes"])
     assert r.exit_code == 0, r.output
     target = settings.data_dir / "bin" / installer.binary_name()
     assert target.read_bytes() == binary and "Signature (GPG/sigstore) NOT verified" in r.output
@@ -134,7 +134,7 @@ def test_vault_install_verifies_sha256_user_level(settings):
 def test_vault_install_checksum_mismatch_installs_nothing(settings):
     with respx.mock(assert_all_called=False) as m:
         _mock_release(m, tamper=True)
-        r = runner.invoke(app, ["vault", "install", "--yes"])
+        r = runner.invoke(app, ["vault", "install", "--version", "2.7.1", "--yes"])
     assert r.exit_code == 1 and "SHA256 mismatch" in r.output
     assert not (settings.data_dir / "bin" / installer.binary_name()).exists()
 
@@ -300,3 +300,31 @@ def test_vault_status_verify_roundtrip(settings, memory_keyring):  # noqa: F811
         h = store_health(settings)
     assert h["functional_check"]["status"] == "VERIFIED" and h["status"] == "BLOCKED"  # history, not live state
     assert h["functional_check"]["stale"] is True  # never shown as a current proof
+
+
+def test_vault_install_defaults_to_the_manifest_pin_and_never_to_latest(settings, monkeypatch):
+    """§07: installers are pinned; with no approved pin the owner must name an exact version."""
+    monkeypatch.setattr(installer, "manifest_pin", lambda root=None: None)
+    r = runner.invoke(app, ["vault", "install", "--yes"])
+    assert r.exit_code == 1 and "no approved_pin for openbao" in r.output
+    r = runner.invoke(app, ["vault", "install", "--version", "latest", "--yes"])
+    assert r.exit_code == 1 and "'latest' is not a pin" in r.output
+    monkeypatch.setattr(installer, "manifest_pin", lambda root=None: "2.7.1")
+    with respx.mock(assert_all_called=False) as m:
+        _mock_release(m)
+        latest = m.get(f"{installer.GITHUB_API}/latest")
+        r = runner.invoke(app, ["vault", "install"], input="n\n")
+    assert "install-manifest approved_pin" in r.output and "2.7.1" in r.output
+    assert not latest.called
+
+
+def test_manifest_pin_reads_the_reviewed_manifest(tmp_path):
+    (tmp_path / "install-manifest").mkdir()
+    (tmp_path / "install-manifest" / "manifest.yaml").write_text(
+        "components:\n  - component_id: openbao\n    approved_pin: v2.7.1\n  - component_id: x\n    approved_pin: 9.9.9\n",
+        encoding="utf-8")
+    assert installer.manifest_pin(tmp_path) == "2.7.1"
+    (tmp_path / "install-manifest" / "manifest.yaml").write_text(
+        "components:\n  - component_id: openbao\n    approved_pin: null\n", encoding="utf-8")
+    assert installer.manifest_pin(tmp_path) is None
+    assert installer.manifest_pin() is None  # the repository manifest has no approved pin yet (owner decision)

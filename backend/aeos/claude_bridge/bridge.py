@@ -182,6 +182,22 @@ def assert_safe_argv(argv: list[str]) -> None:
         raise ValueError("--output-format json is required")
 
 
+NON_MAX_TARGET = ("claude_subscription", "non-max")
+
+
+def non_max_subscription_exception() -> bool:
+    """True only when an ACTIVE owner EXCEPTION decision accepts a non-Max login as the supervisor."""
+    try:
+        from aeos.core.db import session_scope
+        from aeos.policy import facade as policy
+
+        with session_scope() as s:
+            return policy.find_active_decision(s, kind="EXCEPTION", target_type=NON_MAX_TARGET[0],
+                                               target_id=NON_MAX_TARGET[1]) is not None
+    except Exception:  # no database / policy module: no exception can be proven -> fail closed
+        return False
+
+
 def _fail(request: ClaudeRequest, code: str, error: str, *, engine_version: str | None = None,
           trace_ref: str | None = None, quota: bool = False) -> ClaudeResult:
     return ClaudeResult(
@@ -294,6 +310,13 @@ def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) 
                      "Claude native bridge is BLOCKED: " + "; ".join(pr.reasons or ["unknown"]) +
                      " - use the manual package (official Claude Code) instead; no API fallback exists",
                      engine_version=pr.binary.version)
+    if pr.auth.status == "DEGRADED" and not non_max_subscription_exception():
+        # U-06: the supervisor is Claude Max. A Pro/other login is not silently used as the supervisor (the
+        # doctor reports SUBSCRIPTION_NOT_MAX too); the manual package stays available.
+        return _fail(request, "SUBSCRIPTION_NOT_MAX",
+                     f"Claude login subscription is {pr.auth.subscription_type!r}, not Max; the native supervisor "
+                     "is not used - run the manual package, or record an owner EXCEPTION (target "
+                     f"{NON_MAX_TARGET[0]}/{NON_MAX_TARGET[1]}) to accept it", engine_version=pr.binary.version)
     cmdline = command_line_chars(build_argv(str(pr.binary.path), schema_json=schema_json, model=request.model,
                                             tools=list(request.allowed_tools), effort=request.effort))
     if cmdline > MAX_COMMAND_LINE_CHARS:

@@ -7,6 +7,7 @@ under the data dir; ``checkout`` = the editable source tree. Release id and comm
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
@@ -23,7 +24,7 @@ def _identity(data_dir: str) -> dict[str, Any] | None:
     try:
         from aeos.operations.release import code_identity
 
-        return code_identity(Settings(data_dir=data_dir))
+        return code_identity(Settings(data_dir=Path(data_dir)))
     except Exception:
         return None
 

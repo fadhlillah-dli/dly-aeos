@@ -2,6 +2,9 @@
 # PR builds get no secrets; actions are pinned to full commit SHAs (supply-chain policy).
 # This workflow is a protected path: workers may only propose changes to it (§09, AGENTS.md).
 #
+# Gate mapping is explicit: every job name carries its gates in brackets ([G1,G2], [G3]) or [NO-GATE]
+# for report-only jobs; aeos.delivery.provider.classify_check reads the tag (ADR-0094).
+#
 # Minutes budget (private repo): macOS runners bill 10x and Windows 2x. Pull requests therefore run
 # the full suite on Linux and Windows plus a cross-platform smoke subset on macOS; every push to main
 # runs the full suite on all three operating systems.
@@ -21,7 +24,7 @@ concurrency:
 
 jobs:
   backend:
-    name: backend (${{ matrix.os }})
+    name: backend [G1,G2] (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -40,7 +43,10 @@ jobs:
           python -m pip check
       - name: G1 static — ruff
         run: python -m ruff check backend tests scripts
-      - name: G1 static — secret scan
+      - name: G1 static — mypy (ratcheted baseline in pyproject.toml)
+        if: runner.os == 'Linux'
+        run: python -m mypy
+      - name: G1 static — secret + PII scan (blueprints, contracts, docs)
         run: python scripts/secret_scan.py
       - name: G2 controlled tests
         run: python -m pytest -q -m "not integration and not network"
@@ -49,7 +55,7 @@ jobs:
         run: python -m pytest -q -m integration tests/integration/test_verification_real_suite.py
 
   backend-macos-smoke:
-    name: backend (macos-latest, smoke)
+    name: backend [G2] (macos-latest, smoke)
     if: github.event_name == 'pull_request'
     runs-on: macos-latest
     steps:
@@ -71,10 +77,10 @@ jobs:
           tests/unit/test_worker_runtime_processes.py tests/unit/test_worker_runtime_workspace.py
           tests/unit/test_worker_runtime_containment.py tests/unit/test_secrets_selection.py
           tests/unit/test_claude_bridge_run.py tests/unit/test_operations_backup.py tests/unit/test_operations_release.py
-          tests/acceptance/test_auth_boundary.py
+          tests/unit/test_core_runtime_guards.py tests/acceptance/test_auth_boundary.py
 
   frontend:
-    name: frontend
+    name: frontend [G1,G3]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -93,3 +99,120 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+
+  browser-e2e:
+    name: browser e2e + a11y smoke [G3]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+          python -m pip install --no-deps -e .
+          python -m playwright install --with-deps chromium
+      - name: Build the Control Center
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: G3 real-browser smoke (every nav route, 390px overflow, dark-mode contrast, labels)
+        run: python -m pytest -q -m integration tests/e2e/test_ui_smoke.py
+
+  bootstrap:
+    name: bootstrap [G2] (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Bootstrap (Linux)
+        if: runner.os != 'Windows'
+        env:
+          AEOS_DATA_DIR: ${{ runner.temp }}/aeos-bootstrap-data
+        run: ./scripts/bootstrap.sh --no-doctor
+      - name: Bootstrap (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AEOS_DATA_DIR: ${{ runner.temp }}/aeos-bootstrap-data
+        run: .\scripts\bootstrap.ps1 -NoDoctor
+      - name: Database at head, UI built, nothing written to the source tree
+        shell: bash
+        env:
+          AEOS_DATA_DIR: ${{ runner.temp }}/aeos-bootstrap-data
+        run: |
+          test -f "$AEOS_DATA_DIR/aeos.sqlite3"
+          test -f frontend/dist/index.html
+          if [ "$RUNNER_OS" = "Windows" ]; then PY=.venv/Scripts/python; else PY=.venv/bin/python; fi
+          "$PY" -c "from aeos.core.migrate import migration_status as m; s = m(); print(s); assert s['current'] == s['head'], s"
+          git status --porcelain
+          test -z "$(git status --porcelain)"
+      - name: Negative case — bootstrap must fail when the database step fails (invalid data dir)
+        shell: bash
+        env:
+          AEOS_DATA_DIR: relative-data-dir
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            if pwsh -File scripts/bootstrap.ps1 -NoDoctor -SkipFrontend -SkipBackup; then echo "bootstrap did not fail"; exit 1; fi
+          else
+            if ./scripts/bootstrap.sh --no-doctor --skip-frontend --skip-backup; then echo "bootstrap did not fail"; exit 1; fi
+          fi
+          test ! -e relative-data-dir
+
+  supply-chain:
+    name: supply-chain report [NO-GATE] (SBOM, licences, vulnerabilities, SAST)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+          python -m pip install --no-deps -e .
+      # Reports go to the job log and the step summary (no extra third-party action). Results are data for
+      # the owner, never a pass claim: this job is [NO-GATE] until thresholds/allow-lists are decided.
+      - name: SBOM (CycloneDX, offline, from the lockfiles)
+        run: |
+          python scripts/supply_chain.py sbom -o sbom.cdx.json
+          python -c "import json; d = json.load(open('sbom.cdx.json')); print('SBOM components:', len(d['components']))" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Licence report (REPORT_ONLY until the owner decides an allow-list)
+        run: |
+          python scripts/supply_chain.py licenses -o licenses.json
+          python -c "import json; d = json.load(open('licenses.json')); print('Licences:', d['count'], 'distributions,', len(d['unknown']), 'UNKNOWN:', d['unknown'])" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Python dependency vulnerabilities (report-only, NOT-PROVEN until thresholds are decided)
+        continue-on-error: true
+        run: |
+          python -m pip install "pip-audit==2.7.3"
+          python -m pip_audit -r requirements.lock --no-deps --disable-pip | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: npm dependency vulnerabilities (report-only)
+        continue-on-error: true
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: SAST — bandit (report-only)
+        continue-on-error: true
+        run: |
+          python -m pip install "bandit==1.7.10"
+          python -m bandit -q -r backend/aeos -ll | tee -a "$GITHUB_STEP_SUMMARY"

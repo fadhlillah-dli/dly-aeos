@@ -50,17 +50,32 @@ def _observe(status: str, version: str | None, detail: dict, *, dimension: str =
 
 @app.command("install")
 def install_cmd(
-    version: str = typer.Option(None, help="Exact OpenBao version (default: latest release via GitHub API)"),
+    version: str = typer.Option(None, help="Exact OpenBao version (default: the install-manifest approved_pin; "
+                                           "'latest' is never implied)"),
     yes: bool = typer.Option(False, "--yes", help="Confirm the shown plan without prompting"),
 ) -> None:
     """Install the official OpenBao binary into <data dir>/bin after showing the plan."""
     from aeos.secrets import installer
 
+    # §07: installers are pinned. The default is the reviewed manifest pin; without one the owner must name
+    # an exact version - an unpinned "latest" download is never the default.
+    if version is not None and version.strip().lower() == "latest":
+        _err("'latest' is not a pin. Pass an exact version (e.g. --version 2.7.1) or record approved_pin for "
+             "openbao in install-manifest/manifest.yaml.")
+        raise typer.Exit(1)
+    pin_source = "explicit --version (owner choice; not the manifest pin)"
+    if version is None:
+        version = installer.manifest_pin()
+        pin_source = "install-manifest approved_pin"
+        if version is None:
+            _err("install-manifest/manifest.yaml has no approved_pin for openbao. Pass an exact version you "
+                 "reviewed (--version X.Y.Z) or record the pin in the manifest first.")
+            raise typer.Exit(1)
     settings = _settings()
     with httpx.Client(headers={"User-Agent": "dly-aeos-vault-install"}, follow_redirects=False) as client:
         try:
             release = installer.resolve_release(client, version)
-            plan = installer.install_plan(settings, release)
+            plan = {**installer.install_plan(settings, release), "pin_source": pin_source}
         except (installer.InstallError, httpx.HTTPError) as exc:
             _err(f"cannot plan the install: {exc}")
             raise typer.Exit(1) from exc

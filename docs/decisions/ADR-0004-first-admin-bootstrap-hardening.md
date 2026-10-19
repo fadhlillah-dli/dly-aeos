@@ -1,8 +1,8 @@
 # ADR-0004 — First-admin bootstrap hardening and local recovery
 
-* Status: ACCEPTED
+* Status: PROPOSED
 * Date: 2026-10-19
-* Deciders: owner (Fadhlillah)
+* Deciders: owner (Fadhlillah) - review pending; written by the implementation agent
 
 ## Context
 
