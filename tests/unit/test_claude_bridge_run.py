@@ -387,3 +387,18 @@ def test_bridge_cli_status_and_test_are_ascii_and_fail_closed(settings, db, monk
     assert runner.invoke(app, ["bridge", "test", "--model", "sonnet"]).exit_code != 0  # supervisor aliases only
     js = runner.invoke(app, ["bridge", "status", "--json"])
     assert js.exit_code == 0 and json.loads(js.output)["auth"]["status"] == "BLOCKED"
+
+
+def test_cli_schema_drops_the_meta_schema_declaration_the_official_cli_rejects():
+    """E3 finding (Claude Code 2.1.302): --json-schema rejects a "$schema" draft-2020-12 declaration
+    ("no schema with key or ref"). The argument omits it; our own validation keeps the full schema."""
+    import json as _json
+    import pathlib
+
+    from aeos.claude_bridge.parsing import cli_schema
+
+    for f in sorted(pathlib.Path("contracts/planning").glob("*.schema.json")):
+        full = _json.loads(f.read_text(encoding="utf-8"))
+        sent = cli_schema(full)
+        assert "$schema" not in sent and "$id" not in sent, f.name
+        assert {k: v for k, v in full.items() if not k.startswith("$")} == {k: v for k, v in sent.items() if not k.startswith("$")}
