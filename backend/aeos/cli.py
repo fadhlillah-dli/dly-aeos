@@ -30,6 +30,7 @@ CLI_MODULES: list[tuple[str, str]] = [
     ("aeos.doctor.cli", "doctor"),
     ("aeos.inventory.cli", "inventory"),
     ("aeos.portfolio.cli", "project"),
+    ("aeos.intake.cli", "intake"),
     ("aeos.planning.cli", "plan"),
     ("aeos.policy.cli", "policy"),
     ("aeos.secrets.cli", "secrets"),

@@ -79,6 +79,13 @@ the API key instead of your subscription, and DLY AEOS never uses the Claude API
 
 **Evidence:** `claude auth status` as above; doctor Claude checks show version and auth mode.
 
+**Model discovery (master §12 "`/model` best for account discovery").** In an interactive `claude`
+session run `/model` and note which models your Max account offers (the "best" entry and the exact
+model IDs). Compare them with the SUPERVISOR routes on *Model & Rute* (`/models`). This is discovery
+only: AEOS never uses `best` as an alias and never changes the planning baseline from it — a different
+model becomes a route only through a recorded ROUTE_ACTIVATION decision. Then run
+`./aeos bridge test` so the resolved model ID is observed evidence.
+
 ## 3. OpenBao and the macOS Keychain
 
 ```bash

@@ -342,9 +342,18 @@ export default function WorkPage() {
               {
                 header: "Bukti",
                 cell: (r) => (
-                  <Link to={r.links.run} className="text-xs text-accent underline">
-                    {r.evidence_refs.length} referensi
-                  </Link>
+                  <div className="min-w-28 space-y-0.5 text-xs">
+                    {r.evidence_refs.slice(0, 3).map((ref) => (
+                      <div key={ref}>
+                        <Link to={`/evidence?id=${encodeURIComponent(ref)}`} className="text-accent underline" title={ref}>
+                          <Mono>{shortId(ref)}</Mono>
+                        </Link>
+                      </div>
+                    ))}
+                    <Link to={r.links.run} className="text-ink-3 underline">
+                      {r.evidence_refs.length} referensi
+                    </Link>
+                  </div>
                 ),
               },
               {

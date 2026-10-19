@@ -81,3 +81,21 @@ quota exhaustion/429 there is no paid fallback.
    the SUCCEEDED outbox row must persist with the caller's commit. The E2E now pushes through the real
    `https://github.com/...` remote path (push interlock + owner token through the secrets contract); only
    the git transfer is redirected into a local bare repository.
+
+## Addendum 2026-10-19 — role-scoped operation contract (§25, DESIGN)
+
+Master §25: "AEOS mengekspos operasi spesifik seperti claim_task, read_context, submit_result,
+request_decision, dan read_evidence sesuai role" — a design contract, not a claim that the tools exist.
+Workers get **no MCP/tool surface** today (`worker_runtime/opencode.py` writes `"mcp": {}`); every
+operation below is performed by the controller on the worker's behalf, scoped by the run's grant.
+
+| Contract operation | Status | Current equivalent (who calls it) | Scope |
+|---|---|---|---|
+| `claim_task` | DESIGN | scheduler lease + admission (`workforce/scheduler.py`, ADR-0050); the worker never claims itself | one TaskExecution per lease |
+| `read_context` | DESIGN | `aeos.knowledge.facade.use_pack` (CURRENT ContextPack only, audited with the pack hash) | the TaskSpec's allowed/forbidden paths, domain partition |
+| `submit_result` | DESIGN | executor result collection + independent verifier (`worker_runtime/executor.py`, ADR-0060); exit 0 -> REVIEW | the run's workspace and branch `aeos/*` |
+| `request_decision` | DESIGN | `aeos.policy.facade.request_decision` (single Human Decision Queue, ADR-0032); a request grants nothing | the run's project/domain |
+| `read_evidence` | DESIGN | `GET /api/evidence` for humans; workers receive no evidence API | trusted collector rows only |
+
+Exposing any of these as a worker tool is a change proposal (§39) with its own capability grant kind,
+broker enforcement and acceptance tests; until then the table's status stays DESIGN.
