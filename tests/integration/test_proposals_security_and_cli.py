@@ -23,8 +23,16 @@ WRITES = [
                                    "candidate_hash": "sha256:bbbbbbbb", "rationale": "csrf probe"}),
     ("/api/proposals/x/evidence", {"evidence_ids": ["e1"]}),
     ("/api/proposals/x/outcome", {"status": "FAILED"}),
+    ("/api/proposals/x/links", {"task_ids": ["t1"]}),
+    ("/api/proposals/x/trial/launch", {}),
+    ("/api/proposals/x/trial/stop", {"reason": "csrf probe"}),
+    ("/api/proposals/x/checkpoint", {}),
+    ("/api/proposals/suggestions", {"source_kind": "hermes", "source_id": "r1"}),
     ("/api/research", {"url": "https://github.com/a/b"}),
     ("/api/research/x/check-upstream", None),
+    ("/api/research/x/confirm-source", None),
+    ("/api/research/x/mark-reviewed", {"note": "csrf probe note"}),
+    ("/api/research/x/dependency-diff", {"base_ref": "a", "head_ref": "b"}),
     ("/api/eval/runs", {"suite_key": "eval.small-bugfix", "configuration": {}, "limits": {}}),
     ("/api/eval/scorecard", {"role": "feature-implementer"}),
 ]
@@ -37,6 +45,13 @@ def test_module_h_writes_require_csrf(personal_client: AuthedClient, path, body)
     assert r.status_code == 403 and r.json()["error"]["code"] == "CSRF_FAILED", (path, r.text)
     r2 = personal_client.post(path, headers={"X-CSRF-Token": "forged"}, json=body)
     assert r2.status_code == 403 and r2.json()["error"]["code"] == "CSRF_FAILED", path
+
+
+@pytest.mark.parametrize("path,body", [("/api/proposals/x/plan", {"operations_owner": "x"}),
+                                       ("/api/research/x", {"maintainer": "x"})])
+def test_module_h_patch_writes_require_csrf(personal_client: AuthedClient, path, body):
+    r = personal_client.client.patch(path, json=body)
+    assert r.status_code == 403 and r.json()["error"]["code"] == "CSRF_FAILED", (path, r.text)
 
 
 def _cli(*args: str, ascii_only: bool = True):

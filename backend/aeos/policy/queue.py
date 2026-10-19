@@ -55,6 +55,10 @@ PROPOSAL_WAITING: dict[str, tuple[str, str]] = {
                  "Putuskan KEEP, REJECT, DEFER, REQUEST_MORE_EVIDENCE atau setujui scope trial."),
     "PROMOTION_PENDING": ("Trial selesai; promosi menunggu keputusan terikat hash kandidat/baseline.",
                           "Setujui atau tolak promosi untuk hash yang ditampilkan."),
+    # §40 a stale binding (baseline/candidate/scope changed, or a run outside the decided scope) invalidated the
+    # proposal's decisions; the owner must re-review and decide again - it must not disappear from the queue.
+    "UNDER_REVIEW": ("Binding keputusan usulan kedaluwarsa (baseline/kandidat/scope berubah); keputusan terkait "
+                     "dibatalkan.", "Review ulang usulan lalu putuskan lagi pada hash terbaru."),
 }
 
 
