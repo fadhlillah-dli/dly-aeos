@@ -173,17 +173,45 @@ def approval_decision(session: Session, version: PlanVersion, *, for_publication
     return d
 
 
-def publish_gate(session: Session, project_id: str, domain: str) -> dict[str, Any]:
-    """Readiness Doctor gate CAN_PUBLISH_PERSONAL (§08) for a PERSONAL publication.
+def _blocking_checks(state: Any) -> list[str]:
+    """Checks whose OBSERVED result blocks the gate (§08 "operasi dengan dependency critical gagal tidak
+    dijalankan"): a critical check that ran and is not ok (FAILED, MISSING, ...), or a required/guard check that
+    FAILED. Never-run, STALE and EXPIRED results are not observations of failure (they make the gate UNKNOWN)."""
+    out = []
+    for c in state.checks or []:
+        eff = c.get("effective_status")
+        if c.get("ok"):
+            continue
+        if (c.get("tier") == "critical" and eff not in (None, "UNKNOWN", "STALE", "EXPIRED")) or \
+                (c.get("tier") in ("required", "guard") and eff == "FAILED"):
+            out.append(str(c.get("check_id")))
+    if state.status == "BLOCKED" and not out:  # e.g. a policy gate reason without a single check row
+        out.append(str(getattr(state.capability, "value", state.capability) or "gate"))
+    return out
 
-    Enforcement: a gate check that was positively observed FAILED (critical/required tier — e.g. a raw secret
-    exposure or a functionally failing token) refuses execute/retry with CAPABILITY_NOT_READY. A gate that is
-    only UNKNOWN/STALE (checks not run yet) is reported in the preview and the run view, while every write stays
-    behind the external-write interlock (bootstrap, write enablement, hash-bound human approval). Full READY
-    enforcement is an owner decision: the trusted acceptance suite defines publication readiness without
-    Doctor results (tests/acceptance is read-only for workers)."""
-    if domain != "PERSONAL":  # OFFICE: CAN_USE_OFFICE_INTEGRATIONS gates the targets themselves (targets.py)
-        return {"capability": "CAN_USE_OFFICE_INTEGRATIONS", "status": "SEE_TARGETS", "failed_checks": []}
+
+def publish_gate(session: Session, project_id: str, domain: str) -> dict[str, Any]:
+    """Readiness Doctor gate of a publication (§08): CAN_PUBLISH_PERSONAL (PERSONAL) or
+    CAN_USE_OFFICE_INTEGRATIONS (OFFICE).
+
+    PERSONAL enforcement: a gate that is BLOCKED by observed results (a critical check that ran and is not ok —
+    FAILED/MISSING, e.g. a raw secret exposure or no Google token — or a required check that FAILED) refuses
+    execute/retry with CAPABILITY_NOT_READY. A gate that is only UNKNOWN/STALE (checks not run yet / invalidated)
+    is reported in the preview and the run view, while every write stays behind the external-write interlock
+    (bootstrap, write enablement, hash-bound human approval). Full READY enforcement is an owner decision
+    (ADR-0094): the trusted acceptance suite defines publication readiness without Doctor results.
+
+    OFFICE (§23 default deny): the gate must be READY at execute/retry time too, not only when the targets were
+    resolved for the preview — a company authorisation withdrawn after the preview stops the run (fail closed)."""
+    if domain != "PERSONAL":
+        from aeos.publisher import targets as targets_mod
+
+        project = session.get(Project, project_id)
+        ready, reasons = (targets_mod.office_gate(session, project) if project is not None
+                          else (False, ["project not found — CAN_USE_OFFICE_INTEGRATIONS fail closed"]))
+        return {"capability": "CAN_USE_OFFICE_INTEGRATIONS", "status": "READY" if ready else "BLOCKED",
+                "reasons": list(reasons[:8]), "failed_checks": [] if ready else ["CAN_USE_OFFICE_INTEGRATIONS"],
+                "remedies": [], "enforcement": "READY required for every OFFICE read/write (§23 default deny)"}
     try:
         from aeos.core.enums import Capability
         from aeos.doctor import facade as doctor
@@ -192,17 +220,17 @@ def publish_gate(session: Session, project_id: str, domain: str) -> dict[str, An
     except (ImportError, ModuleNotFoundError) as exc:
         raise Blocked("Readiness Doctor unavailable — CAN_PUBLISH_PERSONAL cannot be evaluated (fail closed)",
                       code="CAPABILITY_NOT_READY") from exc
-    failed = [c["check_id"] for c in state.checks
-              if c.get("effective_status") == "FAILED" and c.get("tier") in ("critical", "required")]
     return {"capability": "CAN_PUBLISH_PERSONAL", "status": state.status, "reasons": list(state.reasons[:8]),
-            "failed_checks": failed, "remedies": list(state.remedies[:5]),
-            "enforcement": "FAILED checks block execute/retry; UNKNOWN/STALE is advisory (interlock enforces writes)"}
+            "failed_checks": _blocking_checks(state), "remedies": list(state.remedies[:5]),
+            "enforcement": "observed failing/missing checks (gate BLOCKED) refuse execute/retry; UNKNOWN/STALE is "
+                           "advisory (the interlock enforces every write)"}
 
 
 def _require_gate(session: Session, pub: Publication) -> dict[str, Any]:
     gate = publish_gate(session, pub.project_id, pub.domain)
     if gate["failed_checks"]:
-        raise Blocked("CAN_PUBLISH_PERSONAL has FAILED Doctor checks: " + ", ".join(gate["failed_checks"]),
+        raise Blocked(f"{gate['capability']} is not ready (observed failing/missing Doctor checks): "
+                      + ", ".join(gate["failed_checks"]),
                       code="CAPABILITY_NOT_READY", details={"capability": gate["capability"], "reasons": gate["reasons"],
                                                             "remedies": gate.get("remedies", [])})
     pub.summary = {**(pub.summary or {}), "capability_gate": gate}
@@ -716,9 +744,10 @@ def create_preview(session: Session, settings: Settings, *, plan_id: str, actor_
                      "pending, tidak dikarang): " + "; ".join(gaps[:8]))
     gate = publish_gate(session, project.id, project.domain)
     if gate["failed_checks"]:
-        notes.append("CAN_PUBLISH_PERSONAL memiliki check Doctor FAILED (" + ", ".join(gate["failed_checks"]) +
-                     ") — eksekusi akan ditolak sampai diperbaiki.")
-    elif gate["status"] not in ("READY", "SEE_TARGETS"):
+        detail = ("check Doctor gagal/tidak ada (" + ", ".join(gate["failed_checks"]) + ")"
+                  if gate["capability"] == "CAN_PUBLISH_PERSONAL" else "; ".join(gate.get("reasons") or []))
+        notes.append(f"{gate['capability']} {gate['status']}: {detail} — eksekusi akan ditolak sampai diperbaiki.")
+    elif gate["status"] != "READY":
         notes.append(f"CAN_PUBLISH_PERSONAL {gate['status']} (Readiness Doctor) — informasi; setiap write tetap "
                      "melalui interlock dan persetujuan manusia.")
     counts: dict[str, int] = {}
@@ -1122,7 +1151,10 @@ def _record_success(run: _Run, op: PublicationOperation, res: OpResult) -> None:
         rec = s.scalar(select(DocumentRecord).where(DocumentRecord.project_id == pub.project_id,
                                                     DocumentRecord.logical_doc_id == op.logical_id))
         if rec is not None:
-            if rec.status in (rnd.ST_APPROVED, rnd.ST_DRAFT):
+            # Only an APPROVED document becomes PUBLISHED. A DRAFT of an approved version (an operations proposal
+            # before production-validation evidence, a change record before its acceptance) stays DRAFT although
+            # its text is now in the official folder: publishing never finalises it (§19, §27, §28).
+            if rec.status == rnd.ST_APPROVED:
                 rec.status = rnd.ST_PUBLISHED
             rec.external_revision = res.external_revision
             rec.last_synced_at = now

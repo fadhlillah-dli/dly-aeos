@@ -94,7 +94,8 @@ def github_connect() -> None:
 
     _echo("GitHub Issues uses the secret reference personal/github.")
     _echo("Least privilege (recommended): a fine-grained PAT for ONLY the project repository with Issues RW,")
-    _echo("Pull requests RW, Contents R, Metadata R, stored at a hidden prompt:")
+    _echo("Pull requests RW, Contents RW (the broker pushes aeos/* task branches; protect main with a branch")
+    _echo("rule so merge stays human), Metadata R, no Workflows/Administration, stored at a hidden prompt:")
     _echo("  aeos secrets set personal/github")
     _echo("Alternative (classic OAuth token, usually repo/workflow over ALL repositories - reported as a")
     _echo("residual risk by `aeos doctor --functional`):")

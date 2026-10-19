@@ -145,7 +145,8 @@ These cannot (and must not) be automated. The dashboard and `aeos doctor` show w
    the downloaded JSON afterwards (it is git-ignored, but do not keep it around).
 6. **GitHub token (least privilege)** — create a **fine-grained PAT** on github.com (Settings → Developer
    settings → Fine-grained tokens) limited to *only* the platform repository, with Issues: read/write,
-   Pull requests: read/write, Contents: read, Metadata: read; then
+   Pull requests: read/write, Contents: read/write (the git broker pushes `aeos/*` task branches with it;
+   protect `main` with a branch rule so merge stays human), Metadata: read, no Workflows/Administration; then
    `./aeos secrets set personal/github` and paste it at the hidden prompt (Windows:
    `.\.venv\Scripts\aeos.exe secrets set personal/github`). `gh auth token` works too, but that
    classic OAuth token usually carries `repo`/`workflow` over **all** your repositories:

@@ -415,13 +415,148 @@ def test_idempotency_selftest_records_proof_only_when_every_test_passes(settings
     check = REGISTRY["recovery.publication_idempotency"]
     unknown = run_check(check, make_context(settings, db, runner=base_runner()))
     assert unknown.status == "UNKNOWN" and "publish idempotency-test" in unknown.remediation["command"]
+    # passing tests over a working tree with uncommitted code: the evidence could not name the code it ran
+    dirty = selftest.run_idempotency_selftest(db, actor="owner", runner=lambda a, c: selftest.RunOutcome(0, "6 passed"),
+                                              commit="f" * 40, uncommitted=["backend/aeos/publisher/jobs.py"])
+    assert dirty["status"] == "NOT_RECORDED" and dirty["evidence_id"] is None and "uncommitted" in dirty["reason"]
+    assert not db.scalar(select(EvidenceArtifact).where(EvidenceArtifact.kind == selftest.EVIDENCE_KIND))
     out = selftest.run_idempotency_selftest(db, actor="owner", runner=lambda a, c: selftest.RunOutcome(0, "6 passed"),
-                                            commit="f" * 40)
+                                            commit="f" * 40, uncommitted=[])
     db.commit()
     ev = db.get(EvidenceArtifact, out["evidence_id"])
     assert out["status"] == "PASSED" and ev.trusted and ev.origin == "collector" and ev.mode == "LIVE"
     assert ev.environment["commit"] == "f" * 40
-    assert run_check(check, make_context(settings, db, runner=base_runner())).status == "VERIFIED"
+    verified = run_check(check, make_context(settings, db, runner=base_runner()))
+    assert verified.status == "VERIFIED" and ("f" * 12) in verified.summary  # the proof names its commit
+
+
+def test_recovery_queue_reports_runs_without_lease_and_stale_in_flight_publications(settings, db):
+    """§08 Recovery "lease/queue restart": nothing may keep running without an owner after a restart."""
+    from aeos.doctor.checks import REGISTRY, load_all
+    from aeos.doctor.runner import make_context, run_check
+    from aeos.models.publishing import PublicationOperation
+    from aeos.models.workforce import Lease, WorkerRun
+    from tests.unit.test_inventory_fakes import base_runner
+
+    load_all()
+    spec = REGISTRY["recovery.queue"]
+
+    def run():
+        return run_check(spec, make_context(settings, db, runner=base_runner()))
+
+    assert run().status == "VERIFIED"
+    now = utcnow()
+    lease = Lease(task_id="t1", run_id="r1", owner="ctl", acquired_at=now, expires_at=now + timedelta(minutes=2),
+                  state="ACTIVE")
+    db.add(lease)
+    db.flush()
+    wr = WorkerRun(id="r1", task_id="t1", project_id="proj-777", domain="PERSONAL", execution_status="RUNNING",
+                   lease_id=lease.id, mode="LIVE")
+    db.add_all([wr, WorkerRun(task_id="t2", project_id="proj-777", domain="PERSONAL", execution_status="RUNNING",
+                              mode="DEMO")])  # DEMO fixtures are not part of the live queue
+    db.commit()
+    assert run().status == "VERIFIED"
+    lease.state = "RELEASED"  # the scheduler lost the run: a duplicate could be started
+    db.commit()
+    res = run()
+    assert res.status == "FAILED" and res.error_code == "QUEUE_NOT_RECOVERED"
+    assert res.observed_evidence["runs_without_active_lease"] == 1
+    wr.execution_status = "CANCELLED"
+    db.add(PublicationOperation(publication_id="pub-x", provider="google-drive", operation="create_doc",
+                                logical_id="root", idempotency_key="k1", payload_hash="h1", status="IN_FLIGHT",
+                                last_attempt_at=now - jobs.IN_FLIGHT_STALE_AFTER - timedelta(minutes=1)))
+    db.commit()
+    res = run()
+    assert res.status == "FAILED" and res.observed_evidence["stale_in_flight_publication_ops"] == 1
+    assert res.observed_evidence["runs_without_active_lease"] == 0
+    assert "proj-777" not in json.dumps(res.as_dict())  # counts only, no ids of either domain
+
+
+# ---------------------------------------------------------------------------------------------
+# Review fixes: gate semantics, OFFICE gate at execute time, DRAFT stays DRAFT
+
+
+def _check_row(check_id: str, status: str):
+    from aeos.doctor.checks import REGISTRY, load_all
+    from aeos.models.inventory import CheckResult
+
+    load_all()
+    spec = REGISTRY[check_id]
+    now = utcnow()
+    return CheckResult(check_id=check_id, title=spec.title, group=spec.group, component_id=spec.component_id,
+                       scope=dict(spec.scope), status=status, severity="HIGH", summary=f"unit: {status}",
+                       observed_evidence={}, last_checked_at=now, expires_at=now + timedelta(hours=1),
+                       invalidators=list(spec.invalidators), fingerprint=None, remediation={})
+
+
+def test_observed_missing_critical_publish_dependency_refuses_execute(env):
+    """§08 "operasi dengan dependency critical gagal tidak dijalankan", with the REAL gate evaluation: a Doctor run
+    that observed the Google token MISSING blocks CAN_PUBLISH_PERSONAL, so the run is refused before any write.
+    Checks that were never run (UNKNOWN) stay advisory."""
+    db = env["db"]
+    pub = _preview(env)
+    assert pub.preview["capability_gate"]["status"] == "UNKNOWN" and pub.preview["capability_gate"][
+        "failed_checks"] == []
+    db.add(_check_row("adapter.google_oauth", "MISSING"))
+    db.commit()
+    pub = _preview(env)
+    gate = pub.preview["capability_gate"]
+    assert gate["status"] == "BLOCKED" and gate["failed_checks"] == ["adapter.google_oauth"]
+    assert any("eksekusi akan ditolak" in n for n in pub.preview["notes"])
+    with pytest.raises(Blocked) as exc:
+        jobs.execute_publication(db, pub.id, actor_user_id="owner-user", confirm=confirm_of(pub))
+    assert exc.value.code == "CAPABILITY_NOT_READY" and "adapter.google_oauth" in exc.value.message
+    assert sum(len(f.calls) for f in env["fakes"].values()) == 0
+
+
+def test_office_gate_is_enforced_again_at_execute_time(settings, db, secrets_memory, monkeypatch):
+    """§23 OFFICE default deny: a company authorisation withdrawn after the preview stops the run (no OFFICE call)."""
+    from aeos.publisher import targets as targets_mod
+
+    install_fakes(monkeypatch)
+    fakes = use_fake_providers(monkeypatch)
+    gate = {"ready": True}
+    monkeypatch.setattr(targets_mod, "office_gate", lambda session, project: (
+        (True, []) if gate["ready"] else (False, ["CAN_USE_OFFICE_INTEGRATIONS BLOCKED: otorisasi dicabut"])))
+    secrets_memory.put("office/atlassian", json.dumps({"email": "a@b.invalid", "api_token": "atl-token-1234567890"}),
+                       actor="test")
+    project = make_project(db, domain="OFFICE")
+    db.add(ProjectIntegration(project_id=project.id, domain="OFFICE", provider="confluence", purpose="docs",
+                              tenant_id="corp.atlassian.net", config={"enabled": True, "deployment": "CLOUD",
+                                                                      "space_id": "SP1",
+                                                                      "CONFLUENCE_PROJECTS_PARENT_ID": "PARENT"}))
+    db.commit()
+    plan, _v = make_plan(db, project)
+    pub = jobs.create_preview(db, settings, plan_id=plan.id, actor_user_id="owner", options={"targets": ["docs"]},
+                              render_visuals=False)
+    db.commit()
+    assert pub.preview["capability_gate"]["status"] == "READY" and not pub.preview["blocked_targets"]
+    gate["ready"] = False  # the company authorisation is withdrawn after the preview
+    with pytest.raises(Blocked) as exc:
+        jobs.execute_publication(db, pub.id, actor_user_id="owner", confirm=confirm_of(pub))
+    assert exc.value.code == "CAPABILITY_NOT_READY" and "CAN_USE_OFFICE_INTEGRATIONS" in exc.value.message
+    assert not fakes["confluence"].calls
+
+
+def test_a_published_draft_stays_draft(settings, db, secrets_memory, monkeypatch):
+    """§19/§28: a DRAFT of the approved version (operations proposal before production-validation evidence)
+    is published with its DRAFT label but never becomes PUBLISHED (= approved and published) by publishing it."""
+    install_fakes(monkeypatch)
+    use_fake_providers(monkeypatch)
+    seed_personal_secrets(secrets_memory)
+    project = make_project(db)
+    plan, _v = make_plan(db, project, schema_sample_content(), tasks=[
+        {"task_key": "T1", "feature_key": "F1", "title": "API tugas", "acceptance_criteria": ["T1 works"]}])
+    pub = jobs.create_preview(db, settings, plan_id=plan.id, actor_user_id="owner-user", render_visuals=False)
+    db.commit()
+    assert jobs.execute_publication(db, pub.id, actor_user_id="owner-user", confirm=confirm_of(pub)).allowed
+    db.commit()
+    jobs.process_publication(db, pub.id)
+    ops_doc = db.scalar(select(DocumentRecord).where(DocumentRecord.logical_doc_id == "08-operational-overview"))
+    home = db.scalar(select(DocumentRecord).where(DocumentRecord.logical_doc_id == "00-product-home"))
+    assert ops_doc.status == "DRAFT" and ops_doc.links.get("external_id")  # in the folder, still a draft
+    assert home.status == "PUBLISHED"
+    assert db.scalar(select(ExternalReference).where(ExternalReference.logical_id == "08-operational-overview"))
 
 
 def test_pii_minimisation_never_mangles_record_ids():
@@ -430,3 +565,25 @@ def test_pii_minimisation_never_mangles_record_ids():
     assert redact_pii("sha256:" + "4111111111111111" * 4) == "sha256:" + "4111111111111111" * 4
     assert redact_pii("kartu 4111 1111 1111 1111") == "kartu [PII:CARD]"
     assert redact_pii("mail 0123456789abcdef0123456789abcdef@example.com") == "mail [PII:EMAIL]"
+
+
+def test_every_operation_gate_is_consulted_by_its_operation():
+    """§08 "operasi dengan dependency critical gagal tidak dijalankan": every capability gate (except the dashboard
+    and staging, which no operation of this build runs) has a call site that asks the Doctor before the operation.
+    Static check over the backend source, so a gate that is computed but never consulted fails here."""
+    import re as _re
+    from pathlib import Path
+
+    from aeos.core.enums import Capability
+
+    root = Path(jobs.__file__).resolve().parents[1]
+    text = "\n".join(p.read_text(encoding="utf-8") for p in root.rglob("*.py")
+                     if "doctor" not in p.parts and p.name != "enums.py")
+    consulted = set(_re.findall(r"Capability\.(CAN_[A-Z_]+)", text))
+    exempt = {"CAN_OPEN_DASHBOARD", "CAN_VALIDATE_STAGING"}
+    # CAN_PLAN_PERSONAL is the planning module's own audit item (§08 gates, owning_module planning); listed here
+    # so this cluster's gates (publish / office) can never silently lose their call site.
+    other_module = {"CAN_PLAN_PERSONAL"}
+    missing = {c.value for c in Capability} - exempt - other_module - consulted
+    assert missing == set(), f"gates without a call site: {sorted(missing)}"
+    assert {"CAN_PUBLISH_PERSONAL", "CAN_USE_OFFICE_INTEGRATIONS"} <= consulted

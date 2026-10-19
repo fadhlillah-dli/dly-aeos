@@ -40,11 +40,19 @@ that a human wrote in the official document after an acknowledged edit.
 6. **SUPERSEDED at the provider.** A published document dropped by a newer approved version receives a
    revision-controlled SUPERSEDED banner update; nothing is deleted.
 7. **Gates.** OFFICE targets are BLOCKED unless `CAN_USE_OFFICE_INTEGRATIONS` is READY (no OFFICE read or
-   write). For PERSONAL, a `CAN_PUBLISH_PERSONAL` check observed FAILED refuses execute/retry; UNKNOWN/STALE
-   is shown in the preview while the external-write interlock keeps enforcing every write.
+   write), and the gate is asked again at execute/retry (an authorisation withdrawn after the preview stops
+   the run). For PERSONAL, a `CAN_PUBLISH_PERSONAL` gate BLOCKED by observed results (a critical check that
+   ran and is not ok — FAILED or MISSING — or a required check that FAILED) refuses execute/retry;
+   UNKNOWN/STALE (never run / invalidated) is shown in the preview while the external-write interlock keeps
+   enforcing every write.
 8. **Proof of duplicate prevention.** `aeos publish idempotency-test` runs the timeout/partial/replay
    tests against loopback fakes and records trusted `PUBLICATION_IDEMPOTENCY_TEST` evidence only when all
-   pass.
+   pass on a committed tree (uncommitted code under `backend/`/`tests/` → nothing recorded: the evidence
+   must name the code it ran). The Doctor check `recovery.queue` reports worker runs LEASED/RUNNING without
+   an ACTIVE lease and publication operations IN_FLIGHT beyond the stale window (§08 "lease/queue restart").
+9. **A published DRAFT stays DRAFT.** Publishing a DRAFT of the approved version (operations proposal,
+   change record before acceptance) puts it in the official folder with its DRAFT label but never turns it
+   into PUBLISHED; only an APPROVED document becomes PUBLISHED.
 
 ## Consequences / open owner decisions
 
@@ -59,3 +67,8 @@ that a human wrote in the official document after an acknowledged edit.
   threat model). Context/sequence/CI-deployment diagrams are not verified against contracts, integration
   tests or IaC.
 * Product incidents/problems need a project-scoped incident record in operations; the folder says so.
+* Model/route rollback readiness (§08 Recovery "config/model rollback") is not checked by the Doctor yet;
+  it belongs to the routing module (previous approved route configuration retained).
+* The fine-grained PAT needs **Contents: read/write** on the platform repository: the git broker pushes
+  `aeos/*` task branches with the same `personal/github` token (sha-pinned, never forced); `main` stays
+  protected by a branch rule so merge remains human-only.
