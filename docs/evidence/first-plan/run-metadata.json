@@ -1,0 +1,55 @@
+{
+  "plan_id": "c09825d6-657b-4845-a959-154315737e0f",
+  "title": "Slice 1: first-run setup wizard",
+  "state": "READY_FOR_HUMAN_REVIEW",
+  "domain": "PERSONAL",
+  "version": 2,
+  "manifest_hash": "sha256:547a873dfd6c24caaf1b6482ed6b47ead7052ba0aead6ef7c7ffd56b59091a90",
+  "stages": [
+    {
+      "stage": "PRIMARY_PLANNING",
+      "role": "Primary Planner",
+      "requested": "opus",
+      "resolved": null,
+      "mode": "NATIVE",
+      "status": "FAILED",
+      "engine_version": "2.1.302"
+    },
+    {
+      "stage": "PRIMARY_PLANNING",
+      "role": "Primary Planner",
+      "requested": "opus",
+      "resolved": "claude-opus-5-5",
+      "mode": "NATIVE",
+      "status": "SUCCEEDED",
+      "engine_version": "2.1.302"
+    },
+    {
+      "stage": "CHALLENGE_REVIEW",
+      "role": "Planning Challenger",
+      "requested": "fable",
+      "resolved": "claude-fable-5-1",
+      "mode": "NATIVE",
+      "status": "SUCCEEDED",
+      "engine_version": "2.1.302"
+    },
+    {
+      "stage": "SYNTHESIS",
+      "role": "Planning Synthesizer",
+      "requested": "opus",
+      "resolved": "claude-opus-5-5",
+      "mode": "NATIVE",
+      "status": "SUCCEEDED",
+      "engine_version": "2.1.302"
+    },
+    {
+      "stage": "FINAL_REVIEW",
+      "role": "Final Planning Reviewer",
+      "requested": "fable",
+      "resolved": "claude-fable-5-1",
+      "mode": "NATIVE",
+      "status": "SUCCEEDED",
+      "engine_version": "2.1.302"
+    }
+  ]
+}

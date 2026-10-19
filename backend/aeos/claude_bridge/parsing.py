@@ -294,3 +294,17 @@ def parse_output(
         return ParsedOutput(ok=False, structured=None, error_code="MODEL_POLICY_MISMATCH",
                             error=resolution.reason, **base)
     return ParsedOutput(ok=True, structured=redact_strings(structured), **base)
+
+
+_CLI_REJECTED_META_KEYS = ("$schema", "$id")
+
+
+def cli_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """The schema as the official CLI accepts it for --json-schema.
+
+    Observed on Claude Code 2.1.302 (E3, 2026-10-19): a ``"$schema"`` meta-schema declaration such as
+    draft 2020-12 is rejected ("no schema with key or ref ..."), so the declaration (and ``$id``) is left
+    out of the argument. The full schema - including its declaration - is still used to validate the
+    structured output on our side.
+    """
+    return {k: v for k, v in schema.items() if k not in _CLI_REJECTED_META_KEYS}
