@@ -581,7 +581,8 @@ def promote(
     if proposal_id:
         from aeos.proposals import facade as proposals
 
-        decision = proposals.promotion_for_release(session, proposal_id)
+        # Controller releases are platform (PERSONAL) records: an OFFICE proposal never gates or links one (§23).
+        decision = proposals.promotion_for_release(session, proposal_id, domain="PERSONAL")
         session.commit()  # persist the invalidation of a stale proposal binding before refusing
         if decision is None:
             raise Blocked("the change proposal has no ACTIVE PROMOTION decision bound to its candidate; release "

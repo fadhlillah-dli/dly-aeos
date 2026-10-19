@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
 from aeos.core.enums import TERMINAL_EXECUTION_STATES, Capability, DataMode, ExecutionState, Verdict
-from aeos.core.errors import Blocked, Conflict, NotFound, ValidationFailed
+from aeos.core.errors import AeosError, Blocked, Conflict, NotFound, ValidationFailed
 from aeos.core.ids import new_id
 from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
@@ -756,6 +756,8 @@ def admission_check(session: Session, task_id: str) -> Admission:
     except (ImportError, ModuleNotFoundError):  # pragma: no cover - proposals ships with the foundation
         if any(str(a).startswith("change_proposal:") for a in task.input_artifacts or []):
             adm.blocks.append(("MODULE_UNAVAILABLE", "proposal trial binding cannot be verified (fail closed)"))
+    except AeosError as exc:  # a binding check that cannot complete blocks this trial task only (fail closed)
+        adm.blocks.append(("TRIAL_BINDING_UNVERIFIED", f"{exc.code}: {exc.message}"[:300]))
     adm.admitted = not adm.waits and not adm.blocks
     return adm
 
@@ -1311,7 +1313,9 @@ def _authorisation_lost(session: Session, run: WorkerRun, te: TaskExecution) -> 
 
         lost = proposals.trial_authorisation_lost(session, run.task_id)
     except (ImportError, ModuleNotFoundError):  # pragma: no cover - proposals ships with the foundation
-        lost = None
+        task = session.get(TaskSpec, run.task_id) if run.task_id else None
+        bound = any(str(a).startswith("change_proposal:") for a in (task.input_artifacts if task else None) or [])
+        lost = "proposal trial binding cannot be verified (fail closed)" if bound else None
     if lost:
         return f"proposal trial authority lost: {lost}"[:500]
     return None
