@@ -1,6 +1,6 @@
-"""Runtime hygiene and honesty guards (master §06 table "runtime state never committed", §28 "health
-probes never trigger LLM document regeneration", §37 component identity fields, §41 "a master change does
-not modify MCI/higher policy", §44 "do not judge by number of agents, messages or lines of code")."""
+"""Runtime hygiene guards (master §06 table "runtime state never committed", §28 "health probes never
+trigger LLM document regeneration"). §37 identity fields, §41 master independence and §44 volume metrics
+are proven in test_inventory_views.py, test_policy_master_independence.py and test_evaluation_not_measured.py."""
 
 from __future__ import annotations
 
@@ -63,70 +63,3 @@ def test_health_probes_never_render_documents_or_call_a_model(settings, db, monk
     db.commit()
     assert calls == []
     assert (db.query(DocumentRecord).count(), db.query(DocumentRevision).count()) == docs_before
-
-
-def test_component_identity_fields_are_present_and_logical(db, settings):
-    """§37 Identity: stable id, kind, friendly name, function, category, upstream identity, instances."""
-    import json
-    from pathlib import Path
-
-    from aeos.inventory import views
-    from aeos.inventory.reconcile import reconcile
-    from aeos.inventory.seed import run as seed_run
-    from tests.unit.test_inventory_fakes import base_runner
-
-    seed_run(db)
-    db.commit()
-    runner = base_runner()
-    runner.add_binary("node", "v24.15.0")
-    reconcile(db, settings, runner=runner)
-    db.commit()
-    ident = views.component_detail(db, "nodejs-runtime", domain="PERSONAL")["identity"]
-    assert ident["component_id"] == "nodejs-runtime" and ident["kind"] and ident["friendly_name"]
-    assert ident["function"] and ident["category"] and ident["category_label"]
-    assert ident["instances"], "an observed install must appear as an instance"
-    assert str(Path.home()) not in json.dumps(ident) and str(settings.data_dir) not in json.dumps(ident)
-    unverified = views.component_detail(db, "ddorchestrator", domain="PERSONAL")["identity"]
-    assert unverified["upstream_identity_status"] == "UNVERIFIED"
-
-
-def test_master_change_never_changes_policy_snapshot_or_mci_status(db, monkeypatch, tmp_path):
-    """§41: editing the master is documentation; policy comes only from recorded decisions."""
-    from aeos.core import paths
-    from aeos.policy import facade as policy
-
-    def snapshot() -> tuple:
-        office = policy.office_policy(db)
-        return (office.get("office_authorization"), office.get("external_worker_allowed"))
-
-    before = snapshot()
-    fake_root = tmp_path / "repo"
-    shutil.copytree(repo_root() / "policy", fake_root / "policy")
-    (fake_root / "docs" / "architecture").mkdir(parents=True)
-    master = (repo_root() / "docs" / "architecture" / "DLY_AEOS_Master_Architecture_Final.md").read_text(encoding="utf-8")
-    (fake_root / "docs" / "architecture" / "DLY_AEOS_Master_Architecture_Final.md").write_text(
-        master + "\n\nOFFICE external_worker_allowed: true. MCI status: VERIFIED.\n", encoding="utf-8")
-    monkeypatch.setattr(paths, "repo_root", lambda: fake_root)
-    assert snapshot() == before and before[1] is False
-    mci = (fake_root / "policy" / "mci-reference.yaml").read_text(encoding="utf-8")
-    status = mci.split("status:", 1)[1].splitlines()[0].split("#", 1)[0].strip()
-    assert status != "VERIFIED"  # the MCI reference status is unaffected by master text
-
-
-def test_leaderboard_never_ranks_by_agent_message_or_code_volume():
-    """§44: no metric or sort key counts agents, messages or lines of code."""
-    from aeos.evaluation import definitions
-    from aeos.evaluation.service import compute_metrics
-
-    metrics = compute_metrics([{"status": "ACCEPTED", "first_pass": True, "agents": 9, "messages": 400,
-                                "lines_of_code": 9000}])
-    keys = " ".join(metrics).lower()
-    for banned in ("agent", "message", "lines", "loc"):
-        assert banned not in keys, banned
-    assert definitions.NOT_MEASURED == ["jumlah agent", "jumlah pesan", "jumlah baris kode"]
-    import inspect
-
-    from aeos.evaluation import service
-
-    rank_src = inspect.getsource(service._rank)
-    assert "final_acceptance_rate" in rank_src and "agent" not in rank_src and "message" not in rank_src
