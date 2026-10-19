@@ -123,6 +123,17 @@ LiteLLM only when an approved API worker route needs it (§07 step 6).
 
 ## 7. PERSONAL adapters: GitHub and Google Drive/Docs
 
+Primary path — a **fine-grained PAT** limited to the platform repository (Issues RW, Pull requests RW,
+Contents RW because the git broker pushes `aeos/*` task branches with this token, Metadata R; no Workflows
+or Administration), pasted at the hidden prompt (twice). Protect `main` with a branch rule so merge stays human:
+
+```bash
+./aeos secrets set personal/github
+```
+
+Alternative (broader scopes over all repositories, reported as residual risk by
+`aeos doctor --functional`):
+
 ```bash
 brew install gh
 gh auth login

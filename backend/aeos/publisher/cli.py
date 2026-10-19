@@ -93,15 +93,50 @@ def github_connect() -> None:
     from aeos.secrets import facade as secrets
 
     _echo("GitHub Issues uses the secret reference personal/github.")
-    _echo("Store a token without echoing it:")
+    _echo("Least privilege (recommended): a fine-grained PAT for ONLY the project repository with Issues RW,")
+    _echo("Pull requests RW, Contents RW (the broker pushes aeos/* task branches; protect main with a branch")
+    _echo("rule so merge stays human), Metadata R, no Workflows/Administration, stored at a hidden prompt:")
+    _echo("  aeos secrets set personal/github")
+    _echo("Alternative (classic OAuth token, usually repo/workflow over ALL repositories - reported as a")
+    _echo("residual risk by `aeos doctor --functional`):")
     _echo("  " + github_issues.CONNECT_REMEDY)
-    _echo("Required permission: Issues read/write on the project repository (fine-grained token recommended).")
     try:
         st = secrets.secret_status(github_issues.TOKEN_REF)
         _echo("current status: " + ("CONFIGURED (stored, not yet verified)" if st.exists else "MISSING"))
     except Blocked as exc:
         _echo(f"current status: BLOCKED ({exc.message})")
     _echo("GitHub Projects (roadmap view) is optional and NOT implemented by this adapter.")
+
+
+@app.command("idempotency-test")
+def idempotency_test() -> None:
+    """Prove duplicate-publication prevention (timeout / partial / replay) at this commit with loopback fakes.
+
+    Runs the publisher's own reconciliation tests (no real tenant, no credentials) and records a trusted
+    PUBLICATION_IDEMPOTENCY_TEST evidence only when all pass (read by Doctor recovery.publication_idempotency).
+    """
+    from aeos.core.errors import AeosError
+    from aeos.publisher import selftest
+
+    session = _session()
+    try:
+        try:
+            out = selftest.run_idempotency_selftest(session, actor="local-operator")
+            session.commit()
+        except AeosError as exc:
+            session.rollback()
+            _echo(f"idempotency test unavailable: {exc.code}: {exc.message}")
+            raise typer.Exit(2) from exc
+        _echo(f"status: {out['status']} (commit {out['commit'] or 'UNKNOWN'})")
+        for line in (out.get("summary") or "").splitlines()[-5:]:
+            _echo("  " + line)
+        if out["evidence_id"]:
+            _echo(f"evidence: {out['evidence_id']} (kind {selftest.EVIDENCE_KIND}); run `aeos doctor` to refresh")
+        else:
+            _echo("no evidence recorded: " + out.get("reason", "the tests did not pass"))
+            raise typer.Exit(1)
+    finally:
+        session.close()
 
 
 @app.command("list")

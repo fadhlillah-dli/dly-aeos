@@ -50,3 +50,4 @@ never rewritten. Number ranges per module group: 0001-0009 platform, 0010 doctor
 | [ADR-0091](ADR-0091-controller-release-promotion.md) | Released controller artifacts, human-only promotion and rollback | ACCEPTED |
 | [ADR-0092](ADR-0092-sli-targets-and-alerting.md) | SLIs from records, SLO targets as owner decisions, deduplicated alerts, emergency stop | ACCEPTED |
 | [ADR-0093](ADR-0093-universal-dependency-lockfile.md) | Universal Python dependency lockfile (requirements.lock) | ACCEPTED |
+| [ADR-0094](ADR-0094-product1-schema-seam-and-human-governed-publication.md) | Product 1 from schema-v1 plans; HUMAN_GOVERNED content carried on publication; SUPERSEDED banners; publish gates | ACCEPTED |

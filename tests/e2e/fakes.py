@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import sys
@@ -164,13 +165,34 @@ class FakeDrive:
         return self._maybe_lose(meta, httpx.Response(200, json={
             "id": fid, "name": meta["name"], "webViewLink": f"https://drive.google.com/drive/folders/{fid}"}))
 
+    @staticmethod
+    def _docx_text(content: bytes) -> str:
+        """Paragraph text of the uploaded DOCX, one line per paragraph (incl. table cells) — what Google's DOCX
+        → Docs import yields for ``documents.get``; headings stay lines so section-aware updates are exercised."""
+        marker = b"wordprocessingml.document\r\n\r\n"
+        start = content.find(marker)
+        if start < 0:
+            return ""
+        blob = content[start + len(marker):]
+        blob = blob[:blob.rfind(b"\r\n--")]
+        try:
+            from docx import Document
+            from docx.oxml.ns import qn
+
+            body = Document(io.BytesIO(blob)).element.body
+            lines = ["".join(t.text or "" for t in p.iter(qn("w:t"))) for p in body.iter(qn("w:p"))]
+        except Exception:  # not a DOCX: keep the name-only text
+            return ""
+        return "\n".join(x for x in lines if x.strip()) + "\n"
+
     def _upload(self, request: httpx.Request) -> httpx.Response:
         head = request.content.split(b"\r\n\r\n", 1)[1]
         meta = json.loads(head.split(b"\r\n--", 1)[0])
         did = self._new_id("DOC")
         self.files[did] = {"id": did, "name": meta["name"], "mimeType": meta["mimeType"],
                            "appProperties": meta.get("appProperties") or {}, "parents": meta.get("parents") or [],
-                           "revision": "r1", "text": f"{meta['name']}\n", "createdTime": utcnow().isoformat()}
+                           "revision": "r1", "text": self._docx_text(request.content) or f"{meta['name']}\n",
+                           "createdTime": utcnow().isoformat()}
         return self._maybe_lose(meta, httpx.Response(200, json={
             "id": did, "name": meta["name"], "mimeType": meta["mimeType"],
             "webViewLink": f"https://docs.google.com/document/d/{did}/edit"}))
