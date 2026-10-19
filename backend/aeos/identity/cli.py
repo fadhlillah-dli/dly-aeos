@@ -64,7 +64,9 @@ def recover(username: str = typer.Argument(..., help="Account to recover")) -> N
     except AeosError as exc:
         console.print(f"[red]{exc.code}: {exc.message}[/red]")
         raise typer.Exit(1) from exc
-    console.print("Temporary password (shown once; you must change it at next login):")
+    minutes = int(identity.TEMP_PASSWORD_TTL.total_seconds() // 60)
+    console.print(f"Temporary password (shown once; valid for ONE login within {minutes} minutes; you must "
+                  "change it at that login):")
     console.print(f"[bold]{temp}[/bold]")
 
 

@@ -25,7 +25,13 @@ from aeos.models.audit import AuditEvent
 from aeos.models.portfolio import RepositoryReference
 from aeos.models.research import ContextPack, MemoryRecord
 from tests.conftest import AuthedClient
-from tests.unit.test_portfolio_support import create_project, git, make_repo, needs_git
+from tests.unit.test_portfolio_support import (
+    create_project,
+    git,
+    make_repo,
+    needs_git,
+    record_retirement_decision,
+)
 
 
 def _denied(db, action: str, code: str) -> list[AuditEvent]:
@@ -201,8 +207,9 @@ def test_archived_and_retired_projects_are_read_only(personal_client: AuthedClie
     assert writes["integration"]().status_code == 200
 
     # RETIRED is terminal and stays read-only
-    for target in ("RETIRING", "RETIRED"):
-        assert personal_client.patch(f"/api/projects/{pid}", json={"lifecycle": target}).status_code == 200
+    assert personal_client.patch(f"/api/projects/{pid}", json={"lifecycle": "RETIRING"}).status_code == 200
+    record_retirement_decision(personal_client, pid)  # §33 owner decision bound to the checklist
+    assert personal_client.patch(f"/api/projects/{pid}", json={"lifecycle": "RETIRED"}).status_code == 200
     for label in ("add repository", "upload", "edit idea"):
         r = writes[label]()
         assert r.status_code == 409 and r.json()["error"]["code"] == "PROJECT_READ_ONLY", label
