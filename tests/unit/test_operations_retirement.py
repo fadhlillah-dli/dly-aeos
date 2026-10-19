@@ -172,3 +172,22 @@ def test_retired_needs_owner_decision_bound_to_the_current_checklist(personal_cl
     d = db.scalar(select(Decision).where(Decision.target_type == "project_retirement", Decision.target_id == p.id,
                                          Decision.target_hash == body["checklist_hash"]))
     assert d is not None and d.kind == "APPROVAL" and d.allowed_operations == ["project.retire"]
+
+
+def test_a_step_cannot_cite_the_other_domains_evidence(personal_client, db):
+    """Domain-first: a PERSONAL project's retirement step only accepts PERSONAL or platform evidence; the OFFICE
+    domain's evidence id is refused like an unknown one (review finding)."""
+    from aeos.models.evidence import EvidenceArtifact
+
+    p = _project(db, key="zeta")
+    ev = {d: EvidenceArtifact(kind="LOG", origin="collector", collector_identity="c", trusted=True, claim=d,
+                              content_hash="sha256:" + d.lower(), evidence_level="E2", domain=d)
+          for d in ("PERSONAL", "OFFICE")}
+    db.add_all(ev.values())
+    db.commit()
+    r = personal_client.put(f"/api/ops/retirement/{p.id}/steps/data",
+                            json={"status": "DONE", "evidence_ids": [ev["OFFICE"].id]})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "EVIDENCE_NOT_FOUND"
+    r = personal_client.put(f"/api/ops/retirement/{p.id}/steps/data",
+                            json={"status": "DONE", "evidence_ids": [ev["PERSONAL"].id]})
+    assert r.status_code == 200 and r.json()["recorded"]["evidence_ids"] == [ev["PERSONAL"].id]

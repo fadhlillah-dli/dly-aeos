@@ -99,6 +99,17 @@ so release activity on GitHub is an owner action, not something the controller c
 criticality you decide: `aeos ops sli target queue_age_seconds --max 1800 --rationale "..."`
 (audited). A target with no data shows UNKNOWN, never "within target".
 
+**Per criticality** (§33): `aeos ops sli criticality <project> HIGH|MEDIUM|LOW` records the owner's
+criticality of a project, and `aeos ops sli target <key> --criticality HIGH --max ...` sets a target that
+applies only to projects of that level (per-project SLIs only); `by_criticality` in the result shows each.
+
+**Error budget** (§46): `aeos ops sli budget-policy --window-days 28 --objective 0.99 --action alert|pause_scheduling`
+(owner decision). Every evaluation stores its samples (`ops_sli_samples`); the budget is the share of
+measured evaluations allowed to breach over the window (UNKNOWN/NO_TARGET never count as good). When a
+budget is exhausted a HIGH `error_budget_exhausted` alert is raised; with `pause_scheduling` new work is
+paused. The scheduler pause is global, so it is lifted only when the budget of every domain that caused it
+has recovered, and never when the current pause was set by someone else (emergency stop, a human).
+
 **Alerts** are deduplicated (`ops_alerts`) and emitted once as `alert.raised` events (resolved:
 `alert.resolved`), carrying the domain so Office alerts never reach a Personal session. Objective
 anomalies alert without targets: stale leases, sync conflicts, failing integrations, no restore-tested

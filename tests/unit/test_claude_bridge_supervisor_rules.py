@@ -81,3 +81,30 @@ def test_no_claude_route_accepts_a_credential(app):
             props = (spec["components"]["schemas"].get(name, {}) if name else ref).get("properties", {})
             bad = [p for p in props if any(f in p.lower() for f in forbidden)]
             assert not bad, (path, bad)
+
+
+def test_every_supervisor_call_site_runs_without_file_tools():
+    """§12 "supervisor runtime never gets free access to both domains": every production ClaudeRequest embeds
+    its package inline and passes ``allowed_tools=[]`` (``--tools ""``), so the supervisor has no Read/Grep/
+    Glob with which to reach the other domain's partition. A new call site that keeps the read-tool default
+    fails here (review guard)."""
+    import ast
+
+    from aeos.core.paths import repo_root
+
+    sites = []
+    for path in sorted((repo_root() / "backend" / "aeos").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if name != "ClaudeRequest":
+                continue
+            tools = next((k.value for k in node.keywords if k.arg == "allowed_tools"), None)
+            ok = isinstance(tools, ast.List) and not tools.elts
+            sites.append((path.relative_to(repo_root()).as_posix(), node.lineno, ok))
+    assert len(sites) >= 6, sites  # planning, checkpoint review, proposal review, capability test, explain, reviews
+    assert all(ok for *_, ok in sites), [s for s in sites if not s[2]]
+    argv = bridge.build_argv("claude", schema_json="{}", model="opus", tools=[], effort=None)
+    assert argv[argv.index("--tools") + 1] == ""  # Claude Code: --tools "" disables every built-in tool

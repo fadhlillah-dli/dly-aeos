@@ -126,6 +126,14 @@ jobs:
           npm run build
       - name: G3 real-browser smoke (every nav route, 390px overflow, dark-mode contrast, labels)
         run: python -m pytest -q -m integration tests/e2e/test_ui_smoke.py
+      # Baseline numbers only (REPORT_ONLY): no latency objective is decided (§33); the test fails only on a
+      # pathological sanity ceiling, never on the numbers themselves.
+      - name: G3 performance baseline (report-only p50/p95 of key read endpoints)
+        env:
+          DLY_AEOS_PERF_REPORT: perf-baseline.json
+        run: |
+          python -m pytest -q tests/unit/test_perf_baseline.py
+          python -c "import json; d = json.load(open('perf-baseline.json')); [print(k, v) for k, v in d['endpoints'].items()]" | tee -a "$GITHUB_STEP_SUMMARY"
 
   bootstrap:
     name: bootstrap [G2] (${{ matrix.os }})

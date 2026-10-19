@@ -267,7 +267,10 @@ def record_step(session: Session, project: Project, key: str, *, status: str, ac
     if status not in STEP_STATUSES:
         raise ValidationFailed(f"status must be one of {STEP_STATUSES}")
     for ev_id in evidence_ids or []:
-        if session.get(EvidenceArtifact, ev_id) is None:
+        ev = session.get(EvidenceArtifact, ev_id)
+        # only evidence of the project's own domain (or platform evidence) can back a step: the other domain's
+        # records never enter this project's retirement record (domain-first)
+        if ev is None or ev.domain not in (None, project.domain):
             raise ValidationFailed(f"evidence {ev_id} does not exist", code="EVIDENCE_NOT_FOUND")
     from aeos.audit import service as audit
 

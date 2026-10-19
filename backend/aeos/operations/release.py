@@ -263,16 +263,11 @@ ACCEPTANCE_OPERATION = "release.build"
 
 def _ci_overall(ev: Any) -> str:
     """Overall provider-CI conclusion of a trusted CI_STATUS evidence row (every check-run counts)."""
-    from aeos.delivery.provider import CheckRunView, summarize_runs
-    from aeos.verification import collector
+    from aeos.delivery import facade as delivery
+    from aeos.verification import facade as verification
 
-    data = collector.read_json(ev) or {}
-    runs = [CheckRunView(name=str(r.get("name") or ""), status=str(r.get("status") or "unknown"),
-                         conclusion=r.get("conclusion"), app=r.get("app"), url=r.get("url"),
-                         started_at=r.get("started_at"), completed_at=r.get("completed_at"),
-                         gates=[str(g) for g in (r.get("gates") or [])])
-            for r in data.get("runs") or [] if isinstance(r, dict)]
-    status = summarize_runs(runs)
+    data = verification.read_json(ev) or {}
+    status = delivery.summarize_check_runs([r for r in data.get("runs") or [] if isinstance(r, dict)])
     if data.get("truncated") and status in ("PASS", "NO_CHECKS"):
         return "NOT_PROVEN"
     return status
@@ -294,7 +289,7 @@ def release_acceptance(session: Session, commit: str) -> dict[str, Any]:
     if platform_project is None:
         checked.append({"basis": "provider_ci", "status": "NO_PLATFORM_PROJECT"})
     else:
-        from aeos.delivery.gates import latest_ci_evidence
+        from aeos.delivery.facade import latest_ci_evidence
 
         ev = latest_ci_evidence(session, platform_project.id, commit)
         if ev is None:
@@ -601,7 +596,9 @@ def release_serve_command(settings: Settings, prepared: dict[str, Any]) -> tuple
     env["PYTHONPATH"] = str(release_dir / "backend")
     env["PYTHONPYCACHEPREFIX"] = str(settings.layout.root / "cache" / "release-pycache" / str(prepared["release_id"]))
     env["AEOS_DATA_DIR"] = str(settings.layout.root)
-    return [sys.executable, "-c", _SERVE_SCRIPT, str(release_dir)], env
+    # -P: never prepend the current directory (normally the editable checkout) to sys.path, so no module of
+    # the checkout can shadow the release's own dependencies; only PYTHONPATH + site-packages are used.
+    return [sys.executable, "-P", "-c", _SERVE_SCRIPT, str(release_dir)], env
 
 
 def _checkout_commit(root: Path) -> tuple[str | None, bool | None]:

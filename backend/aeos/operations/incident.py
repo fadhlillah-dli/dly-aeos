@@ -97,31 +97,66 @@ def _component_blast_radius(session: Session, component_ids: list[str], domain: 
     found: dict[str, Any] = {}
     for cid in component_ids:
         try:
-            from aeos.inventory import views
+            from aeos.inventory import facade as inventory
 
-            radius = views.blast_radius(session, cid, domain=domain, direction="dependents")
+            radius = inventory.blast_radius(session, cid, domain=domain, direction="dependents")
             found[cid] = sorted(i["component_id"] for i in radius.get("items") or [])
         except Exception:  # not an inventory component (e.g. a route key) or inventory unavailable
             found[cid] = "UNKNOWN"
     return found
 
 
-def scoped(inc: OpsIncident, domain: str | None) -> dict[str, Any]:
-    """Incident view for a session domain: derived blast radius of other domains is removed."""
+def _referenced_evidence(inc: OpsIncident) -> set[str]:
+    refs = {*(inc.evidence_ids or []), *(inc.root_cause_evidence_refs or [])}
+    for e in inc.timeline or []:
+        if isinstance(e, dict):
+            refs.update(str(x) for x in e.get("evidence_ids") or [])
+    return {r for r in refs if r}
+
+
+def visible_evidence(session: Session, inc: OpsIncident, domain: str | None) -> set[str]:
+    """Evidence ids of this incident that a session of *domain* may see: platform evidence (no domain) and
+    evidence of that domain only. A platform-wide incident (emergency stop) references the containment
+    evidence of BOTH domains; the other domain's ids are never shown (Office data never reaches Personal)."""
+    from aeos.models.evidence import EvidenceArtifact
+
+    refs = _referenced_evidence(inc)
+    if not refs:
+        return set()
+    rows = session.execute(select(EvidenceArtifact.id, EvidenceArtifact.domain).where(EvidenceArtifact.id.in_(refs)))
+    return {rid for rid, d in rows if d is None or (domain is not None and d == domain)}
+
+
+def scoped(inc: OpsIncident, domain: str | None, session: Session | None = None) -> dict[str, Any]:
+    """Incident view for a session domain: derived blast radius of other domains is removed, and (with a
+    session) evidence ids of other domains are dropped from the evidence lists and the timeline."""
     derived = inc.derived_blast_radius or {}
     if domain is None:
         visible: dict[str, Any] = {}
     else:
         visible = {domain: derived.get(domain) or {}}
+    if session is not None:
+        allowed = visible_evidence(session, inc, domain)
+
+        def keep(ids: list[str] | None) -> list[str]:
+            return [i for i in ids or [] if i in allowed]
+    else:
+        def keep(ids: list[str] | None) -> list[str]:
+            return list(ids or [])
+    # entries bound to one domain (a follow-up filed in that domain) are shown in that domain only
+    timeline = [{**e, "evidence_ids": keep(e.get("evidence_ids"))} if isinstance(e, dict) else e
+                for e in inc.timeline or [] if not isinstance(e, dict) or e.get("domain") in (None, domain)]
     return {
         "id": inc.id, "source": inc.source, "source_ref": inc.source_ref, "title": inc.title, "status": inc.status,
         "domain": inc.domain, "project_id": inc.project_id, "owner": inc.owner,
         "declared_blast_radius": inc.declared_blast_radius, "derived_blast_radius": visible,
-        "timeline": inc.timeline or [], "impact": inc.impact, "hypotheses": inc.hypotheses or [],
-        "root_cause": inc.root_cause, "root_cause_evidence_refs": inc.root_cause_evidence_refs or [],
+        "timeline": timeline, "impact": inc.impact, "hypotheses": inc.hypotheses or [],
+        "root_cause": inc.root_cause, "root_cause_evidence_refs": keep(inc.root_cause_evidence_refs),
         "root_cause_ref": inc.root_cause_ref, "corrective_actions": inc.corrective_actions or [],
         "regression_test_ids": inc.regression_test_ids or [], "eval_case_refs": inc.eval_case_refs or [],
-        "follow_ups": inc.follow_ups or [], "evidence_ids": inc.evidence_ids or [],
+        "follow_ups": [f for f in inc.follow_ups or []
+                       if not isinstance(f, dict) or f.get("domain") in (None, domain)],
+        "evidence_ids": keep(inc.evidence_ids),
         "created_by": inc.created_by, "created_at": inc.created_at.isoformat() if inc.created_at else None,
         "resolved_at": inc.resolved_at.isoformat() if inc.resolved_at else None, "resolved_by": inc.resolved_by,
         "resolution_requirements": resolution_requirements(inc),
@@ -164,14 +199,17 @@ def open_incident(
 def add_timeline(session: Session, incident_id: str, *, actor: str, note: str,
                  evidence_ids: list[str] | None = None) -> OpsIncident:
     inc = _get(session, incident_id)
-    _require_evidence(session, evidence_ids or [], required=False)
+    _require_evidence(session, evidence_ids or [], required=False, domain=inc.domain)
     _touch(inc, _entry(actor, "note", note, evidence_ids))
     inc.evidence_ids = sorted({*(inc.evidence_ids or []), *(evidence_ids or [])})
     session.flush()
     return inc
 
 
-def _require_evidence(session: Session, refs: list[str], *, required: bool) -> list[str]:
+def _require_evidence(session: Session, refs: list[str], *, required: bool,
+                      domain: str | None = None) -> list[str]:
+    """Each ref must exist (and be trusted when it supports a root cause). A domain incident may only cite
+    evidence of its own domain or platform evidence, so the other domain's records never enter it."""
     from aeos.models.evidence import EvidenceArtifact
 
     refs = [str(r).strip() for r in refs if str(r).strip()]
@@ -180,7 +218,7 @@ def _require_evidence(session: Session, refs: list[str], *, required: bool) -> l
                                "without support)", code="ROOT_CAUSE_UNSUPPORTED")
     for ref in refs:
         ev = session.get(EvidenceArtifact, ref)
-        if ev is None:
+        if ev is None or (domain is not None and ev.domain not in (None, domain)):
             raise ValidationFailed(f"evidence {ref} does not exist", code="EVIDENCE_NOT_FOUND")
         if required and not ev.trusted:
             raise ValidationFailed(f"evidence {ref} is not from a trusted collector; it cannot support a root "
@@ -200,7 +238,7 @@ def record_analysis(
     if hypotheses:
         inc.hypotheses = [*(inc.hypotheses or []), *[_clean(h, 1000) for h in hypotheses if h.strip()]]
     if root_cause:
-        refs = _require_evidence(session, root_cause_evidence_refs or [], required=True)
+        refs = _require_evidence(session, root_cause_evidence_refs or [], required=True, domain=inc.domain)
         inc.root_cause = _clean(root_cause)
         inc.root_cause_evidence_refs = refs
         inc.root_cause_ref = (root_cause_ref or None) and str(root_cause_ref)[:64]
@@ -328,16 +366,18 @@ def open_follow_up(session: Session, incident_id: str, *, actor_user_id: str, do
         raise ValidationFailed("name at least one affected inventory component")
     from aeos.proposals import facade as proposals
 
+    visible = visible_evidence(session, inc, domain) & set(inc.evidence_ids or [])
     problem = (f"Incident {inc.id}: {inc.title}. Root cause: {inc.root_cause or 'UNKNOWN (not yet evidenced)'}. "
-               f"Evidence: {', '.join(inc.evidence_ids or []) or 'none'}.")
+               f"Evidence: {', '.join(sorted(visible)) or 'none'}.")
     proposal = proposals.create_proposal(
         session, actor_user_id=actor_user_id, domain=domain, kind="UPGRADE",
         title=title or f"Corrective change for incident {inc.title}"[:200], sources=[], problem=problem,
         expected_benefit="Fix the incident root cause and add a regression/eval case (incident follow-up).",
         existing_component_ids=comps)
-    inc.follow_ups = [*(inc.follow_ups or []), {"kind": "change_proposal", "id": proposal.id,
+    inc.follow_ups = [*(inc.follow_ups or []), {"kind": "change_proposal", "id": proposal.id, "domain": domain,
                                                  "status": proposal.status, "at": utcnow().isoformat()}]
-    _touch(inc, _entry(actor_user_id, "follow_up", f"change proposal {proposal.id} filed for review"))
+    _touch(inc, {**_entry(actor_user_id, "follow_up", f"change proposal {proposal.id} filed for review"),
+                 "domain": domain})
     session.flush()
     audit.record(session, actor_type="user", actor_id=actor_user_id, action="ops.incident.follow_up",
                  target_type="incident", target_id=inc.id, domain=domain,
@@ -352,14 +392,14 @@ def list_incidents(session: Session, *, domain: str | None, status: str | None =
         q = q.where(OpsIncident.status == status)
     rows = list(session.scalars(q))
     # platform-wide incidents (domain None) are listed for every domain; domain incidents only for theirs
-    return [scoped(i, domain) for i in rows if i.domain is None or i.domain == domain]
+    return [scoped(i, domain, session) for i in rows if i.domain is None or i.domain == domain]
 
 
 def get_incident(session: Session, incident_id: str, *, domain: str | None) -> dict[str, Any]:
     inc = _get(session, incident_id)
     if inc.domain is not None and inc.domain != domain:
         raise NotFound("incident not found")
-    return scoped(inc, domain)
+    return scoped(inc, domain, session)
 
 
 # ----------------------------------------------------------------------------------------- report

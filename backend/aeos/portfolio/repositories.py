@@ -528,17 +528,12 @@ def _verify_bitbucket(session: Session, project: Project, repo: RepositoryRefere
     if integ is None or (integ.config or {}).get("enabled") is not True:
         return ("UNVERIFIED", "Bitbucket adapter is disabled for this project (integration bitbucket/code with "
                               "config.enabled=true required, ADR-0073); no provider call was made", attempt)
-    from aeos.publisher.providers.atlassian import BitbucketProvider
-    from aeos.publisher.providers.base import ProviderError
+    from aeos.publisher.facade import ProviderError, bitbucket_repository_reference
 
     attempt["auth_mode"] = "office/bitbucket"
     client = BITBUCKET_CLIENT_FACTORY() if BITBUCKET_CLIENT_FACTORY else None
     try:
-        prov = BitbucketProvider(full_name=repo.full_name, enabled=True, client=client)
-        try:
-            ref = prov.repository_reference()
-        finally:
-            prov.close()
+        ref = bitbucket_repository_reference(repo.full_name, client=client)
     except ProviderError as exc:
         attempt["error"] = getattr(exc, "code", type(exc).__name__)
         return ("UNVERIFIED", f"Bitbucket did not confirm {repo.full_name}: {redact_text(str(exc))[:200]} - the "

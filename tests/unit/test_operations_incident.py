@@ -178,3 +178,38 @@ def test_incident_api_is_scoped_and_admin_only(client, db, monkeypatch):
 def test_get_unknown_incident_is_404(db):
     with pytest.raises(NotFound):
         incident.get_incident(db, "missing", domain="PERSONAL")
+
+
+def test_platform_incident_never_shows_or_accepts_the_other_domains_evidence(db, stopped):
+    """An emergency stop is platform-wide and references the containment evidence of BOTH domains. A domain
+    view shows only its own (and platform) evidence ids, a domain incident cannot cite the other domain's
+    evidence, and a follow-up proposal names only evidence visible in its domain (review finding)."""
+    from tests.conftest import create_admin
+
+    by_domain = {e.domain: e.id for e in stopped["evidence"]}
+    assert set(by_domain) == {"PERSONAL", "OFFICE"}
+    inc_id = stopped["report"]["incident_record_id"]
+    personal = incident.get_incident(db, inc_id, domain="PERSONAL")
+    assert personal["evidence_ids"] == [by_domain["PERSONAL"]]
+    assert by_domain["OFFICE"] not in json.dumps(personal)
+    office = incident.get_incident(db, inc_id, domain="OFFICE")
+    assert office["evidence_ids"] == [by_domain["OFFICE"]] and by_domain["PERSONAL"] not in json.dumps(office)
+    assert by_domain["OFFICE"] not in json.dumps(incident.list_incidents(db, domain="PERSONAL"))
+    owner = create_admin(db)
+    result = incident.open_follow_up(db, inc_id, actor_user_id=owner.id, domain="PERSONAL", component_ids=["opencode"])
+    proposal = db.get(ChangeProposal, result["proposal_id"])
+    assert by_domain["PERSONAL"] in proposal.problem and by_domain["OFFICE"] not in proposal.problem
+    # the PERSONAL follow-up (record and timeline entry) is shown in PERSONAL only
+    office_view = incident.get_incident(db, inc_id, domain="OFFICE")
+    assert office_view["follow_ups"] == [] and result["proposal_id"] not in json.dumps(office_view)
+    assert result["proposal_id"] in json.dumps(incident.get_incident(db, inc_id, domain="PERSONAL"))
+    own = incident.open_incident(db, title="Personal sync outage", actor="owner-1", domain="PERSONAL")
+    with pytest.raises(ValidationFailed) as exc:
+        incident.record_analysis(db, own.id, actor="owner-1", root_cause="office pipeline",
+                                 root_cause_evidence_refs=[by_domain["OFFICE"]])
+    assert exc.value.code == "EVIDENCE_NOT_FOUND"
+    with pytest.raises(ValidationFailed):
+        incident.add_timeline(db, own.id, actor="owner-1", note="see office log", evidence_ids=[by_domain["OFFICE"]])
+    inc = incident.record_analysis(db, own.id, actor="owner-1", root_cause="sync token expired",
+                                   root_cause_evidence_refs=[by_domain["PERSONAL"]])
+    assert inc.root_cause_evidence_refs == [by_domain["PERSONAL"]]

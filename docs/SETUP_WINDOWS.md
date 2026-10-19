@@ -81,8 +81,8 @@ Install the official client (one of):
 
 ```powershell
 winget install --id Anthropic.ClaudeCode -e
-# or the official installer:
-irm https://claude.ai/install.ps1 | iex
+# or the official installer, downloaded and REVIEWED before it runs (never piped into a shell, section 07):
+#   irm https://claude.ai/install.ps1 -OutFile install-claude.ps1; notepad install-claude.ps1; .\install-claude.ps1
 ```
 
 Then sign in once and check the auth mode:
@@ -117,7 +117,7 @@ OpenBao is the runtime vault for integration credentials (U-13). The Windows Cre
 holds the bootstrap identity used to reach OpenBao.
 
 ```powershell
-.\aeos.ps1 vault install     # installs the reviewed OpenBao release (see install-manifest/)
+.\aeos.ps1 vault install     # the install-manifest approved_pin; while it is null: --version X.Y.Z (reviewed)
 .\aeos.ps1 vault start
 .\aeos.ps1 vault init        # prints unseal keys + root token ONCE
 .\aeos.ps1 vault unseal      # after every restart of OpenBao

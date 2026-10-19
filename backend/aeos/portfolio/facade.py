@@ -84,3 +84,21 @@ def record_integration_probe(session: Session, *, domain: str, providers: tuple[
                          evidence_ref=evidence_ref) is not None:
             updated.append(integ.id)
     return updated
+
+
+def record_publication_success(session: Session, integration_id: str, *, root_id: str, observer: str,
+                               evidence_ref: str) -> bool:
+    """A LIVE publication write succeeded against ``root_id``: functional proof for the integration, but only
+    when that is still the integration's CURRENT exact target (a changed target proves nothing about the new
+    one). Returns whether the proof was recorded."""
+    from aeos.models.portfolio import ProjectIntegration
+    from aeos.portfolio import providers as pv
+    from aeos.portfolio.integrations import mark_verified
+
+    integ = session.get(ProjectIntegration, integration_id)
+    if integ is None or not root_id:
+        return False
+    if pv.target_identity(integ.provider, integ.root_id)["root_id"] != root_id:
+        return False
+    return mark_verified(session, integ.id, connectivity="CONNECTED", functional="VERIFIED", observer=observer,
+                         evidence_ref=evidence_ref) is not None

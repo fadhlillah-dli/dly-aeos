@@ -989,6 +989,31 @@ def _record_success(run: _Run, op: PublicationOperation, res: OpResult) -> None:
                     issues.append({"provider": op.provider, "issue_id": res.external_id, "url": res.external_url,
                                    "logical_id": op.logical_id})
                     doc.links = {**(doc.links or {}), "issues": issues}
+    _record_functional_proof(run, op)
+
+
+def _record_functional_proof(run: _Run, op: PublicationOperation) -> None:
+    """§10 Integration Registry health: a LIVE write that succeeded against the exact approved target is the
+    functional proof of that project integration (CONNECTED/VERIFIED + last_verified_at). Best effort: the
+    publication result never depends on the registry update; MOCK/DEMO publications prove nothing."""
+    pub = run.pub
+    if (pub.mode or "LIVE") != "LIVE":
+        return
+    fam = FAMILY_OF.get(op.provider)
+    resolved = next((t for t in pub.targets or [] if t.get("family") == fam), {})
+    integration_id = resolved.get("integration_id")
+    if not integration_id:
+        return
+    _provider, target = _write_target(pub, op)
+    try:
+        from aeos.portfolio import facade as portfolio
+
+        with run.session.begin_nested():
+            portfolio.record_publication_success(run.session, str(integration_id),
+                                                 root_id=str(target.get("root_id") or ""), observer="publisher",
+                                                 evidence_ref=f"publication_operation:{op.id}")
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("integration functional proof not recorded: %s", type(exc).__name__)
 
 
 def _record_conflict(run: _Run, op: PublicationOperation, exc: ProviderConflict) -> None:

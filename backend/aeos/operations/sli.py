@@ -478,39 +478,52 @@ def error_budget(session: Session, *, domain: Domain, now: datetime | None = Non
                       "status": "EXHAUSTED" if bad > allowed else "OK"})
     exhausted = [i for i in items if i["status"] == "EXHAUSTED"]
     return {"policy": policy, "status": "EXHAUSTED" if exhausted else ("OK" if items else "INSUFFICIENT_DATA"),
-            "items": items}
+            "items": items, "domain": domain.value}
 
 
 def apply_error_budget_policy(session: Session, budget: dict[str, Any]) -> dict[str, Any]:
     """The owner-approved action when the budget is used up: always an alert (via observed_conditions);
     with action ``pause_scheduling`` new work is paused (reason ERROR_BUDGET_EXHAUSTED) and lifted again
-    only when every budget recovered AND the pause is still the one this policy set (an emergency or a
-    human pause is never lifted here)."""
+    only when the budget of EVERY domain that caused the pause recovered AND the pause is still the one
+    this policy set (an emergency or a human pause is never lifted here). The scheduler pause is global,
+    so one domain's recovered budget never lifts a pause another domain's exhausted budget still needs."""
     policy = budget.get("policy") or {}
     out: dict[str, Any] = {"action": policy.get("action"), "changed": None}
     if policy.get("action") != "pause_scheduling":
         return out
     try:
         from aeos.workforce import facade as workforce
-        from aeos.workforce.scheduler import pause_info
     except ImportError as exc:
         out["error"] = f"workforce unavailable ({exc.name or exc}); scheduling not paused"
         return out
+    domain = str(budget.get("domain") or "")
     ours = _setting_value(session, ERROR_BUDGET_PAUSE_KEY)
+    causes = {str(d): sorted(v) for d, v in (ours.get("by_domain") or {}).items() if isinstance(v, list)}
+    if ours.get("paused_at") and not causes:
+        causes = {"UNKNOWN": list(ours.get("keys") or [])}  # legacy record: cause unknown -> never lifted by a domain
     if budget.get("status") == "EXHAUSTED":
+        keys = sorted({i["key"] for i in budget["items"] if i["status"] == "EXHAUSTED"})
         if not workforce.scheduling_paused(session):
-            keys = sorted({i["key"] for i in budget["items"] if i["status"] == "EXHAUSTED"})
             reason = f"ERROR_BUDGET_EXHAUSTED: {', '.join(keys)}"
             workforce.set_scheduling_paused(session, True, actor="ops.error_budget", reason=reason)
-            _put_setting(session, ERROR_BUDGET_PAUSE_KEY, {"paused_at": utcnow().isoformat(), "keys": keys})
+            _put_setting(session, ERROR_BUDGET_PAUSE_KEY, {"paused_at": utcnow().isoformat(), "keys": keys,
+                                                           "by_domain": {domain: keys}})
             out["changed"] = "paused"
+        elif ours.get("paused_at"):  # our pause is in force: record this domain as a further cause
+            causes[domain] = keys
+            _put_setting(session, ERROR_BUDGET_PAUSE_KEY, {**ours, "by_domain": causes})
     elif ours and ours.get("paused_at"):
-        info = pause_info(session)
-        if info.get("paused") and info.get("by") == "ops.error_budget":
-            workforce.set_scheduling_paused(session, False, actor="ops.error_budget",
-                                            reason="error budget recovered")
-            out["changed"] = "resumed"
-        _put_setting(session, ERROR_BUDGET_PAUSE_KEY, {})
+        causes.pop(domain, None)
+        if causes:  # another domain's budget is still exhausted: the pause stays
+            _put_setting(session, ERROR_BUDGET_PAUSE_KEY, {**ours, "by_domain": causes})
+            out["held_by"] = sorted(causes)
+        else:
+            info = workforce.pause_info(session)
+            if info.get("paused") and info.get("by") == "ops.error_budget":
+                workforce.set_scheduling_paused(session, False, actor="ops.error_budget",
+                                                reason="error budget recovered")
+                out["changed"] = "resumed"
+            _put_setting(session, ERROR_BUDGET_PAUSE_KEY, {})
     session.flush()
     return out
 

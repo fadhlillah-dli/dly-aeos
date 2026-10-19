@@ -26,3 +26,11 @@ def record_observation(
 
 def get_component(session: Session, component_id: str) -> ComponentReference | None:
     return session.get(ComponentReference, component_id)
+
+
+def blast_radius(session: Session, component_id: str, *, domain: str | None,
+                 direction: str = "dependents") -> dict[str, Any]:
+    """Who is affected if *component_id* changes/fails (``dependents``) or what it relies on (read-only)."""
+    from aeos.inventory.views import blast_radius as impl
+
+    return impl(session, component_id, domain=domain, direction=direction)

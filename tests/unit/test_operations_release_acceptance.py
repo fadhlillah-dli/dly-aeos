@@ -175,9 +175,15 @@ def test_serve_runs_the_promoted_release_and_health_reports_it(settings, git_rep
     prepared = release.prepare_active_release(settings)
     argv, env = release.release_serve_command(settings, prepared)
     assert env["PYTHONPATH"] == str(prepared["dir"] / "backend")
+    assert argv[1] == "-P"  # the cwd (normally the checkout) is never prepended to sys.path
     port = free_loopback_port()
     env.update({"AEOS_PORT": str(port), "AEOS_HOST": "127.0.0.1"})
-    proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    # started from the checkout's backend/ directory: the editable aeos package sits in the cwd, yet the
+    # controller must import the release (``-P``), never the checkout
+    from aeos.core.paths import repo_root
+
+    proc = subprocess.Popen(argv, env=env, cwd=str(repo_root() / "backend"), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
     try:
         body = None
         deadline = time.time() + 90

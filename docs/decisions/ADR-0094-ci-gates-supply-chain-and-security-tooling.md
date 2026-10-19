@@ -25,6 +25,8 @@ and the build; gate membership was guessed from job names.
 | UI tests | vitest + build | G3 | enforced |
 | Browser + basic a11y | `browser-e2e` job: Playwright smoke over every nav route (no page/console errors, 390 px overflow, dark-mode contrast, labels) | G3 | enforced |
 | API contract | `tests/unit/test_api_envelope_contract.py` (route snapshot only grows; list endpoints state source + freshness) | G2/G3 | enforced |
+| Security scenarios | the trusted acceptance suite's security rows (`tests/acceptance/test_auth_boundary.py`, `test_untrusted_input.py`, `test_domain_scope.py`, `test_containment.py`) inside the backend job | G2 (counted as the G3 security scenarios) | enforced; container containment BLOCKED (no Docker, MATRIX 1.12/1.13) |
+| Performance baseline | `tests/unit/test_perf_baseline.py` in the `browser-e2e` job: p50/p95 of key read endpoints written to the step summary | G3 report | REPORT_ONLY: no latency objective decided by the owner (§33); only a pathological sanity ceiling fails |
 | SBOM | `scripts/supply_chain.py sbom` (CycloneDX 1.5 from the lockfiles, offline, deterministic) | report | produced every run |
 | Licences | `scripts/supply_chain.py licenses` | report | REPORT_ONLY - no allow-list decided |
 | Dependency vulnerabilities | pip-audit 2.7.3 (requirements.lock), `npm audit --omit=dev` | report | NOT-PROVEN until the owner sets thresholds |
@@ -47,3 +49,4 @@ bootstrap installs; until then Python dependencies are pinned by exact version (
 * Moving a report to enforced needs an owner decision on thresholds/allow-lists (and then the
   `[NO-GATE]` tag changes to the gate it belongs to).
 * IaC/DAST/load become applicable when a deployed target or infrastructure code exists (§31 G7/G8).
+* External enforcement (§48) stays outside what CI can prove: strong worker isolation needs the container sandbox (NOT-PROVEN on a host without Docker; MATRIX 1.12/1.13 BLOCKED), and provider-side branch protection / required checks are NOT_ENFORCEABLE on GitHub Free (ADR-0063). The SBOM and dependency scans above are evidence for the owner, not enforcement.

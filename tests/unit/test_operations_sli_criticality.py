@@ -107,3 +107,39 @@ def test_error_budget_never_lifts_a_pause_it_did_not_set(settings, db, monkeypat
     db.commit()
     out = sli.apply_error_budget_policy(db, sli.error_budget(db, domain=Domain.PERSONAL))
     assert out["changed"] is None and fw.paused is True
+
+
+def test_one_domains_recovered_budget_never_lifts_a_pause_another_domain_still_needs(settings, db, monkeypatch):
+    """The scheduler pause is global: OFFICE exhaustion pauses it, and a PERSONAL evaluation whose own
+    budget is fine must not lift it; only OFFICE's recovery does (review finding: cross-domain flapping)."""
+    fw = fake_workforce(monkeypatch)
+    scheduler = sys.modules["aeos.workforce.scheduler"]
+    fw.by = None
+    monkeypatch.setattr(scheduler, "pause_info", lambda s: {"paused": fw.paused, "by": fw.by}, raising=False)
+
+    def set_paused(session, paused, *, actor, reason=""):
+        fw.paused, fw.by = paused, actor
+
+    monkeypatch.setattr(scheduler, "set_scheduling_paused", set_paused)
+    make_task(db, Domain.OFFICE, "office-queue", "QUEUED", age_seconds=900)
+    make_task(db, Domain.PERSONAL, "personal-ok", "DONE")
+    sli.set_target(db, "queue_age_seconds", maximum=60, minimum=None, actor_type="cli", actor_id="owner")
+    sli.set_error_budget_policy(db, window_days=28, objective=0.9, action="pause_scheduling", actor_type="cli",
+                                actor_id="owner")
+    db.commit()
+    office = sli.evaluate(db, domain=Domain.OFFICE, settings=settings)
+    db.commit()
+    assert office["error_budget_action"]["changed"] == "paused" and fw.paused is True
+    personal = sli.evaluate(db, domain=Domain.PERSONAL, settings=settings)
+    db.commit()
+    assert {b["key"]: b for b in personal["error_budget"]["items"]}["queue_age_seconds"]["status"] == "OK"
+    assert personal["error_budget_action"]["changed"] is None and fw.paused is True
+    assert personal["error_budget_action"]["held_by"] == ["OFFICE"]
+    # OFFICE drains and accrues good evaluations: its recovery lifts the pause
+    for te in db.scalars(select(sli.TaskExecution).where(sli.TaskExecution.domain == "OFFICE")):
+        te.state = "DONE"
+    db.commit()
+    for _ in range(10):
+        office = sli.evaluate(db, domain=Domain.OFFICE, settings=settings)
+        db.commit()
+    assert fw.paused is False and fw.by == "ops.error_budget"

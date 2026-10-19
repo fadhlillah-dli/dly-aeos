@@ -60,3 +60,12 @@ def test_every_table_is_mapped_to_one_concept():
     concepts = [c.split(" (")[0] for c in mapped.values()]
     dupes = sorted({c for c in concepts if concepts.count(c) > 1})
     assert not dupes, f"two tables claim the same concept: {dupes}"
+
+
+def test_baseline_only_lists_crossings_that_still_exist():
+    """The ratchet only shrinks: a crossing that was routed through a facade must leave the baseline, so it
+    cannot silently come back (review finding: crossings introduced together with the baseline were recorded
+    as pre-existing)."""
+    mb = _script()
+    stale = sorted(set(_baseline()["crossings"]) - mb.crossings())
+    assert not stale, f"remove fixed crossings from the baseline (scripts/module_boundaries.py --update): {stale}"

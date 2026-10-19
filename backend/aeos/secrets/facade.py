@@ -74,3 +74,10 @@ def list_status() -> list[SecretStatus]:
     from aeos.secrets.provider import get_provider
 
     return get_provider().list_status()
+
+
+def install_command() -> str:
+    """The ``aeos`` sub-command that installs OpenBao as the CLI accepts it now (pinned version, §07)."""
+    from aeos.secrets.installer import install_command as impl
+
+    return impl()
