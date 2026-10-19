@@ -3,16 +3,23 @@
 * Submitting or reviewing a proposal never installs, activates, changes routes/policy, raises a
   budget or grants credentials. COMPARE ("review repo") can never be trial-approved or promoted.
 * Duplicates are linked through canonical source identity within the SAME domain only — Office and
-  Personal contexts are never merged.
+  Personal contexts are never merged; linked duplicates never hold conflicting ACTIVE decisions.
 * TRIAL_APPROVE and PROMOTE are different human decisions, each recorded through the Decision
   registry and bound to ``baseline_hash`` + ``candidate_hash`` + scope (provider/data class/budget/
-  target). Any change of baseline/candidate invalidates the binding; a stale binding is refused.
-* Outcomes are ACCEPTED / ROLLED_BACK / FAILED / PARTIAL; a rollback is never recorded as acceptance
+  target/caps/stop+rollback scope). Any change of baseline/candidate - or a run outside the decided
+  scope - invalidates the binding; a stale binding is refused at every consumer: trial launch, every
+  scheduler attempt, evidence attachment, PROMOTE and the ACCEPTED outcome.
+* Evidence must be about THIS candidate (trial TaskSpec/run/eval run, or verifier evidence naming this
+  proposal and candidate hash) and created after the TRIAL decision; anything else cannot open a gate.
+* Outcomes are ACCEPTED / ROLLED_BACK / FAILED / PARTIAL; a rollback is never recorded as acceptance,
+  ACCEPTED requires the lawful configuration change in the inventory and pre-declared acceptance met,
   and the history keeps every outcome with its evidence.
 """
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import or_, select
@@ -30,6 +37,7 @@ from aeos.models.decisions import ArchitectureSnapshot, Decision
 from aeos.models.evidence import EvidenceArtifact
 from aeos.models.research import ChangeProposal, ResearchEntry
 from aeos.proposals import review as R
+from aeos.proposals.trial import TRIAL_OPERATIONS
 from aeos.research import service as research
 from aeos.research.identity import IdentityError, canonical_identity
 
@@ -42,7 +50,10 @@ ACTION_DECISION_KIND = {"TRIAL_APPROVE": "TRIAL", "PROMOTE": "PROMOTION", "KEEP"
 ACTION_STATUS = {"TRIAL_APPROVE": "TRIAL_APPROVED", "PROMOTE": "PROMOTION_APPROVED", "KEEP": "KEEP",
                  "REJECT": "REJECTED", "DEFER": "DEFERRED", "REQUEST_MORE_EVIDENCE": "REQUEST_MORE_EVIDENCE",
                  "REFERENCE_ONLY": "REFERENCE_ONLY"}
-ACTION_OPERATIONS = {"TRIAL_APPROVE": ["trial.sandbox"], "PROMOTE": ["promote.candidate"]}
+# One authorization covers a clear series of operations (§40); consumers check each against the decision.
+PROMOTION_OPERATIONS = ["promote.candidate", "inventory.config.apply", "release.promote.candidate"]
+ROLLBACK_OPERATIONS = ["rollback.candidate", "restore.baseline"]
+ACTION_OPERATIONS = {"TRIAL_APPROVE": list(TRIAL_OPERATIONS), "PROMOTE": PROMOTION_OPERATIONS}
 OUTCOME_FINAL = ("ACCEPTED", "ROLLED_BACK", "FAILED", "PARTIAL")
 CLOSING_OUTCOMES = ("ROLLED_BACK", "FAILED")  # close the proposal; a retry needs a new proposal
 # Outcome transitions: ACCEPTED may later be rolled back/fail/turn partial; PARTIAL may be completed.
@@ -50,9 +61,29 @@ OUTCOME_TRANSITIONS = {None: OUTCOMES, "ACCEPTED": ("ROLLED_BACK", "FAILED", "PA
                        "ROLLED_BACK": (), "FAILED": ()}
 RESEARCH_SYNC = {"REJECT": "REJECTED", "DEFER": "DEFERRED", "REFERENCE_ONLY": "REFERENCE_ONLY"}
 SCOPE_REQUIRED = ("target", "environment", "provider", "data_class", "budget_usd")
+TRIAL_SCOPE_REQUIRED = (*SCOPE_REQUIRED, "max_minutes", "max_attempts", "stop_conditions", "rollback_scope")
+PROMOTE_SCOPE_REQUIRED = (*SCOPE_REQUIRED, "stop_conditions", "rollback_scope")
+TRIAL_ENVIRONMENTS = ("sandbox", "staging", "canary")
+TRIAL_STATUSES = ("TRIAL_APPROVED", "IN_TRIAL", "PROMOTION_PENDING")
 DATA_ROLLBACK = ("DONE", "NOT_POSSIBLE", "NOT_APPLICABLE", "UNKNOWN")
 LIMIT_KEYS = ("cost_usd", "max_minutes", "max_attempts", "data_class", "resource")
+ADR_REQUIRED_KINDS = ("ADD", "REPLACE", "REMOVE")
+# Audit actions that prove a stop/rollback/recovery actually ran (§40 node "Stop, rollback atau recovery").
+ROLLBACK_AUDIT_ACTIONS = ("ops.release.rollback", "ops.backup.restore", "inventory.manifest.load")
+# Baseline fields a promoted change may lawfully move (config applied / old component retired).
+ALLOWED_POST_PROMOTION = {
+    "UPGRADE": {"approved_pin", "manifest_hash", "observed_versions", "admission_status", "enablement",
+                "design_label", "requirement", "lifecycle_final"},
+    "REPLACE": {"admission_status", "enablement", "lifecycle_final", "design_label", "requirement", "relations",
+                "manifest_hash"},
+    "REMOVE": {"admission_status", "enablement", "lifecycle_final", "design_label", "requirement", "relations",
+               "manifest_hash", "observed_versions"},
+}
+# Inventory observation statuses that positively show the activated configuration (§38 dimensions).
+GOOD_OBSERVATION = ("INSTALLED", "CONFIGURED", "CONNECTED", "VERIFIED", "IN_USE", "LAST_USED", "IDLE")
 TARGET_TYPE = "change_proposal"
+_STOPWORDS = {"yang", "untuk", "dengan", "dari", "pada", "agar", "lebih", "tidak", "atau", "this", "that", "with",
+              "from", "into", "akan", "bisa", "dalam"}
 
 
 class StaleBinding(Conflict):
@@ -100,6 +131,18 @@ def _decisions(session: Session, p: ChangeProposal) -> list[Decision]:
                                 .order_by(Decision.created_at)))
 
 
+def _positive_int(v: Any, field: str) -> int:
+    if isinstance(v, bool):
+        raise ValidationFailed(f"scope.{field} must be a whole number > 0")
+    try:
+        f = float(v)
+    except (TypeError, ValueError) as exc:
+        raise ValidationFailed(f"scope.{field} must be a whole number > 0") from exc
+    if f <= 0 or f != int(f):
+        raise ValidationFailed(f"scope.{field} must be a whole number > 0")
+    return int(f)
+
+
 def normalise_scope(scope: dict[str, Any] | None) -> dict[str, Any]:
     s = dict(redact(scope or {}))
     if "budget_usd" in s and s["budget_usd"] is not None:
@@ -109,6 +152,21 @@ def normalise_scope(scope: dict[str, Any] | None) -> dict[str, Any]:
             raise ValidationFailed("scope.budget_usd must be a number") from exc
         if s["budget_usd"] < 0:
             raise ValidationFailed("scope.budget_usd must be >= 0")
+    for k in ("max_minutes", "max_attempts"):
+        if s.get(k) not in (None, ""):
+            s[k] = _positive_int(s[k], k)
+    if s.get("stop_conditions") not in (None, ""):
+        raw = s["stop_conditions"]
+        items = re.split(r"[\n;]", raw) if isinstance(raw, str) else raw
+        if not isinstance(items, list):
+            raise ValidationFailed("scope.stop_conditions must be a list or text")
+        s["stop_conditions"] = [str(x).strip()[:300] for x in items if str(x).strip()][:20]
+    if isinstance(s.get("rollback_scope"), str):
+        s["rollback_scope"] = s["rollback_scope"].strip()[:1000]
+    if isinstance(s.get("environment"), str):
+        s["environment"] = s["environment"].strip().lower()
+    if isinstance(s.get("data_class"), str):
+        s["data_class"] = s["data_class"].strip().upper()
     return {k: s[k] for k in sorted(s)}
 
 
@@ -185,6 +243,17 @@ def find_duplicate(session: Session, identities: list[str], *, domain: str,
     return None
 
 
+def duplicate_family(session: Session, p: ChangeProposal) -> list[ChangeProposal]:
+    """The canonical proposal and every proposal linked to it as a duplicate, in the same domain."""
+    root = _root(session, p)
+    out = [root]
+    for row in session.scalars(select(ChangeProposal).where(ChangeProposal.domain == p.domain,
+                                                            ChangeProposal.duplicate_of.is_not(None))):
+        if row.id != root.id and _root(session, row).id == root.id:
+            out.append(row)
+    return out
+
+
 def _validate_attachments(session: Session, attachment_ids: list[str], domain: str) -> list[str]:
     from aeos.intake import facade as intake
 
@@ -215,6 +284,7 @@ def create_proposal(
     existing_component_ids: list[str] | None = None, candidate_component_ids: list[str] | None = None,
     limits: dict[str, Any] | None = None, attachment_ids: list[str] | None = None, candidate_pin: str | None = None,
     parts: list[dict[str, Any]] | None = None, parent_id: str | None = None, emit: bool = True,
+    provenance: dict[str, Any] | None = None,
 ) -> ChangeProposal:
     kind = (kind or "").upper()
     if kind not in KINDS:
@@ -240,6 +310,10 @@ def create_proposal(
     for cid in existing:
         if inventory.get_component(session, cid) is None:
             unknown.append(f"existing_component:{cid} (tidak ada di inventaris)")
+    candidates = sorted({c.strip() for c in candidate_component_ids or [] if c and c.strip()})
+    for cid in candidates:
+        if inventory.get_component(session, cid) is None:
+            unknown.append(f"candidate_component:{cid} (belum terdaftar di inventaris)")
     atts = _validate_attachments(session, attachment_ids or [], domain)
     entry_ids = []
     for ident in resolved:
@@ -250,13 +324,14 @@ def create_proposal(
     fallback_title = refs[0] if refs else (existing[0] if existing else f"{kind} (bagian majemuk)")
     p = ChangeProposal(
         kind=kind, title=redact_text((title or "").strip() or fallback_title)[:256],
-        parent_id=parent_id, submitted_by=actor_user_id, scope_type=scope_type, project_id=project_id, domain=domain,
+        parent_id=parent_id, submitted_by=actor_user_id[:64], scope_type=scope_type, project_id=project_id, domain=domain,
         source_refs=refs, problem=redact_text(problem or "")[:8000], expected_benefit=redact_text(expected_benefit or "")[:8000],
-        existing_component_ids=existing, candidate_component_ids=sorted(set(candidate_component_ids or [])),
+        existing_component_ids=existing, candidate_component_ids=candidates,
         limits=lim, candidate_pin=redact_text(candidate_pin)[:128] if candidate_pin else None, status="SUBMITTED",
         review_package={}, decision_ids=[], task_ids=[], evidence_ids=[], outcome={}, attachment_ids=atts,
         canonical_identities=resolved, duplicate_of=duplicate.id if duplicate else None, parts=[],
-        unknown_fields=unknown, research_entry_ids=entry_ids,
+        unknown_fields=unknown, research_entry_ids=entry_ids, owner_plan={},
+        links={"provenance": redact(provenance)} if provenance else {}, trial={}, checkpoint_review={},
     )
     session.add(p)
     session.flush()
@@ -268,10 +343,12 @@ def create_proposal(
     if parts:
         _create_parts(session, p, parts, actor_user_id=actor_user_id)
     if emit:
-        audit.record(session, actor_type="user", actor_id=actor_user_id, action="proposal.create", target_type=TARGET_TYPE,
+        audit.record(session, actor_type="user" if not provenance else "system", actor_id=actor_user_id,
+                     action="proposal.create", target_type=TARGET_TYPE,
                      target_id=p.id, project_id=project_id, domain=domain,
                      details={"kind": kind, "identities": resolved, "duplicate_of": p.duplicate_of,
-                              "installed": False, "activated": False, "budget_changed": False})
+                              "installed": False, "activated": False, "budget_changed": False,
+                              "provenance": redact(provenance) if provenance else None})
         events.emit(session, source="proposals", kind="proposal.created", entity_type=TARGET_TYPE, entity_id=p.id,
                     project_id=project_id, domain=domain,
                     payload={"kind": kind, "status": p.status, "duplicate_of": p.duplicate_of})
@@ -322,6 +399,25 @@ def _create_parts(session: Session, parent: ChangeProposal, parts: list[dict[str
     session.flush()
 
 
+def file_suggestion(session: Session, *, source_kind: str, source_id: str, domain: str, project_id: str | None,
+                    kind: str, title: str | None, sources: list[str], rationale: str,
+                    existing_component_ids: list[str] | None = None) -> ChangeProposal:
+    """§24: a skill/memory/tool suggestion from Hermes or another worker enters proposal review as an
+    untrusted SUBMITTED proposal. It never becomes policy, memory or a decision by itself."""
+    if source_kind not in ("worker", "hermes", "reviewer"):
+        raise ValidationFailed("source_kind must be worker, hermes or reviewer")
+    if not source_id:
+        raise ValidationFailed("source_id (run/review id) is required for provenance")
+    note = ("Saran dari " + source_kind + " " + source_id[:36] + " - DATA tidak tepercaya, bukan kebijakan aktif. "
+            + redact_text(rationale or "")[:2000])
+    return create_proposal(
+        session, actor_user_id=f"{source_kind}:{source_id[:36]}", domain=domain, kind=kind, title=title,
+        sources=sources, problem=note, expected_benefit="", scope_type="PROJECT" if project_id else "PLATFORM",
+        project_id=project_id, existing_component_ids=existing_component_ids,
+        provenance={"source_kind": source_kind, "source_id": source_id, "trusted": False},
+    )
+
+
 # --------------------------------------------------------------------------- review
 
 
@@ -331,6 +427,11 @@ def review(session: Session, p: ChangeProposal, *, actor_user_id: str, with_clau
         raise Conflict(f"proposal outcome already recorded ({p.status}); open a new proposal")
     if p.parent_id:
         raise Conflict("review the parent proposal; parts are reviewed together")
+    if p.status == "PROMOTION_APPROVED":
+        # The promoted baseline -> candidate change is being applied; a re-review would re-bind the package to
+        # the half-applied state. Record the outcome, or KEEP/REJECT to change course (§40).
+        raise Conflict("promotion is approved; record the outcome (ACCEPTED/FAILED/PARTIAL) or decide KEEP/REJECT",
+                       code="PROMOTION_APPROVED_NO_REREVIEW")
     if candidate_pin is not None:
         pin = redact_text(candidate_pin.strip())[:128]
         p.candidate_pin = pin or None
@@ -343,14 +444,15 @@ def review(session: Session, p: ChangeProposal, *, actor_user_id: str, with_clau
     invalidated = 0
     if changed:
         invalidated = _invalidate(session, p, "baseline/candidate changed at re-review")
-        package["binding_note"] = f"Baseline/candidate berubah; {invalidated} keputusan terkait dibatalkan."
+        if invalidated:
+            package["binding_note"] = f"Baseline/candidate berubah; {invalidated} keputusan terkait dibatalkan."
     p.review_package = package
     p.review_hash = R.review_hash(package)
     p.baseline_hash = bh
     p.candidate_hash = ch
     p.reviewed_at = utcnow()
-    # An unchanged re-review keeps an approved trial/promotion; anything else returns to REVIEWED.
-    keep = p.status in ("TRIAL_APPROVED", "IN_TRIAL", "PROMOTION_PENDING", "PROMOTION_APPROVED") and not changed
+    # An unchanged re-review keeps an approved trial; anything else returns to REVIEWED.
+    keep = p.status in ("TRIAL_APPROVED", "IN_TRIAL", "PROMOTION_PENDING") and not changed
     if not keep:
         p.status = "REVIEWED"
     session.flush()
@@ -378,7 +480,7 @@ def _refresh_research_links(session: Session, p: ChangeProposal, children: list[
         p.research_entry_ids = sorted(ids)
 
 
-# --------------------------------------------------------------------------- decisions
+# --------------------------------------------------------------------------- binding
 
 
 def _active_decision(session: Session, p: ChangeProposal, kind: str) -> Decision | None:
@@ -386,9 +488,261 @@ def _active_decision(session: Session, p: ChangeProposal, kind: str) -> Decision
     return rows[-1] if rows else None
 
 
+def post_promotion_drift(session: Session, p: ChangeProposal) -> list[str]:
+    """Baseline changes after PROMOTE that are NOT the promoted change itself (§40): the reviewed baseline
+    (stored package) is compared field by field with the live inventory; only the fields the promoted
+    change lawfully moves (pin/enablement of the upgraded component, retirement of a replaced/removed one)
+    may differ. ADD/COMPARE bind to the latest same-domain snapshot: a newer snapshot (the "after"
+    snapshot) is the expected effect."""
+    if not p.existing_component_ids:
+        return []
+    stored = ((p.review_package or {}).get("baseline") or {}).get("components") or []
+    if not stored:
+        return ["reviewed baseline not available; re-review required"]
+    allowed = ALLOWED_POST_PROMOTION.get(p.kind, set())
+    problems = []
+    for b in stored:
+        before = R.baseline_fingerprint(b)
+        after = R.baseline_fingerprint(R.component_baseline(session, b["component_id"], domain=p.domain))
+        changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+        illegal = [k for k in changed if k not in allowed]
+        if illegal:
+            problems.append(f"{b['component_id']}: {', '.join(illegal)} changed outside the promoted change")
+    return problems
+
+
+def binding_problems(session: Session, p: ChangeProposal, *, action: str,
+                     after_promotion: bool = False) -> tuple[Decision | None, list[str]]:
+    """The ACTIVE decision for *action* and why it is no longer bound to the live records (empty = bound)."""
+    from aeos.proposals import trial
+
+    kind = ACTION_DECISION_KIND[action]
+    d = _active_decision(session, p, kind)
+    if d is None:
+        return None, []
+    det = d.details or {}
+    live_b, live_c = current_hashes(session, p)
+    problems: list[str] = []
+    if det.get("candidate_hash") != live_c:
+        problems.append("candidate (pin/identity/plan) changed after the decision")
+    if det.get("baseline_hash") != live_b:
+        problems += post_promotion_drift(session, p) if after_promotion else ["baseline changed after the decision"]
+    if action == "TRIAL_APPROVE":
+        problems += trial.scope_drift(session, p, d)
+    expected = binding_hash(p.id, action, det.get("baseline_hash", ""), det.get("candidate_hash", ""),
+                            normalise_scope(d.auth_scope))
+    if expected != d.target_hash:
+        problems.append("decision binding hash does not match its recorded scope")
+    return d, problems
+
+
+def verify_binding(session: Session, p: ChangeProposal, *, action: str, after_promotion: bool = False) -> Decision | None:
+    """For consumers (scheduler, release promotion, evidence, outcome): the ACTIVE decision for *action* only
+    if it is still bound to the live baseline/candidate/scope; otherwise decisions are invalidated -> None."""
+    d, problems = binding_problems(session, p, action=action, after_promotion=after_promotion)
+    if d is None:
+        return None
+    if problems:
+        _invalidate(session, p, "binding stale at verification: " + "; ".join(problems)[:300])
+        return None
+    return d
+
+
+def _stale(session: Session, p: ChangeProposal, problems: list[str], where: str) -> StaleBinding:
+    n = _invalidate(session, p, f"binding stale at {where}: " + "; ".join(problems)[:300])
+    p.status = "UNDER_REVIEW"
+    session.flush()
+    return StaleBinding(f"binding stale at {where}; re-review and decide again",
+                        details={"problems": problems, "invalidated_decisions": n})
+
+
+# --------------------------------------------------------------------------- evidence binding
+
+
+def _task_ids_of_runs(session: Session, run_ids: list[str]) -> dict[str, str | None]:
+    from aeos.models.workforce import WorkerRun
+
+    if not run_ids:
+        return {}
+    return {r.id: r.task_id for r in session.scalars(select(WorkerRun).where(WorkerRun.id.in_(run_ids)))}
+
+
+def evidence_binding_problem(session: Session, p: ChangeProposal, ev: EvidenceArtifact, *, purpose: str = "gate") -> str | None:
+    """None when *ev* is about this candidate: produced for a TaskSpec/run linked to the proposal, for an
+    eval run linked to it, or by a trusted collector naming this proposal and its candidate hash. For an
+    outcome, component observation evidence about the proposal's components also counts (§40 activation)."""
+    task_ids = set(p.task_ids or [])
+    if ev.task_id and ev.task_id in task_ids:
+        return None
+    if ev.run_id and _task_ids_of_runs(session, [ev.run_id]).get(ev.run_id) in task_ids and task_ids:
+        return None
+    if ev.subject_type == "eval_run" and ev.subject_id in ((p.links or {}).get("eval_run_ids") or []):
+        return None
+    if ev.subject_type == TARGET_TYPE and ev.subject_id == p.id and \
+            (ev.environment or {}).get("candidate_hash") == p.candidate_hash:
+        return None
+    if purpose == "outcome" and ev.subject_type == "component" and \
+            ev.subject_id in {*(p.existing_component_ids or []), *(p.candidate_component_ids or [])}:
+        return None
+    return ("evidence is not about this candidate: link the trial TaskSpec/eval run first, or use verifier evidence "
+            "naming this proposal and its candidate hash")
+
+
+def _after_trial(session: Session, p: ChangeProposal, ev: EvidenceArtifact) -> bool:
+    trial = _active_decision(session, p, "TRIAL")
+    created = ensure_aware(trial.created_at) if trial else None
+    at = ensure_aware(ev.created_at)
+    return created is None or (at is not None and at >= created)
+
+
+def bound_evidence(session: Session, p: ChangeProposal, ids: list[str], *, purpose: str = "gate") -> list[EvidenceArtifact]:
+    """Trusted LIVE evidence in this domain that is about this candidate (and, for gates, produced after the
+    TRIAL decision)."""
+    out = []
+    for i in ids:
+        ev = session.get(EvidenceArtifact, i)
+        if ev is None or not ev.trusted or ev.mode != "LIVE" or ev.domain not in (None, p.domain):
+            continue
+        if evidence_binding_problem(session, p, ev, purpose=purpose):
+            continue
+        if purpose == "gate" and not _after_trial(session, p, ev):
+            continue
+        out.append(ev)
+    return out
+
+
+def _trusted_evidence(session: Session, p: ChangeProposal, ids: list[str]) -> list[EvidenceArtifact]:
+    """Kept for the delivery dimensions: trusted LIVE evidence in this domain bound to this candidate."""
+    return bound_evidence(session, p, ids, purpose="outcome")
+
+
+# --------------------------------------------------------------------------- decisions
+
+
 def _last_closing_outcome_at(p: ChangeProposal) -> str | None:
     hist = [h for h in (p.outcome or {}).get("history") or [] if h.get("status") in CLOSING_OUTCOMES]
     return hist[-1]["at"] if hist else None
+
+
+def provider_eligibility(session: Session, p: ChangeProposal, provider: str, data_class: str) -> dict[str, Any]:
+    """§40 trial admission "model/provider eligibility": ELIGIBLE (an active route of the provider passes the
+    routing hard filter), NOT_ACTIVATED (a route of the provider exists for this domain/data class but is not
+    activated yet: the scheduler waits), INELIGIBLE or UNKNOWN_PROVIDER (refused)."""
+    from aeos.models.routing import ModelRoute
+
+    routes = [r for r in session.scalars(select(ModelRoute).where(ModelRoute.provider == provider))
+              if r.pool in ("WORKER", "LOCAL")]
+    if not routes:
+        return {"status": "UNKNOWN_PROVIDER", "routes": [],
+                "reason": f"no WORKER/LOCAL route of provider {provider!r} in the model registry"}
+    try:
+        from aeos.routing import facade as routing
+
+        decision = routing.eligible_routes(session, domain=p.domain or "", data_classification=data_class)
+        eligible = [k for k in decision.eligible if any(r.route_key == k for r in routes)]
+    except (ImportError, ModuleNotFoundError, ValidationFailed):  # pragma: no cover - routing ships with foundation
+        eligible = []
+    if eligible:
+        return {"status": "ELIGIBLE", "routes": eligible}
+    structural = [r.route_key for r in routes if p.domain in (r.eligible_domains or [])
+                  and data_class in (r.allowed_data_classes or []) and r.status != "DISABLED"
+                  and r.mode not in ("MOCK", "DEMO")]
+    if structural:
+        return {"status": "NOT_ACTIVATED", "routes": structural,
+                "reason": "route exists for this domain/data class but is not activated; trial admission waits"}
+    return {"status": "INELIGIBLE", "routes": [r.route_key for r in routes],
+            "reason": f"no route of {provider} allows domain {p.domain} with data class {data_class}"}
+
+
+def _benefit_problems(p: ChangeProposal) -> list[str]:
+    problems = []
+    if not (p.problem or "").strip():
+        problems.append("problem/goal is empty")
+    if not (p.expected_benefit or "").strip():
+        problems.append("expected benefit is empty")
+    if not R.measurable_acceptance(p):
+        problems.append("no measurable acceptance criterion (metric + threshold) declared before the trial")
+    return problems
+
+
+def _admission_scope(session: Session, p: ChangeProposal, norm: dict[str, Any], action: str) -> dict[str, Any]:
+    required = TRIAL_SCOPE_REQUIRED if action == "TRIAL_APPROVE" else PROMOTE_SCOPE_REQUIRED
+    missing = [k for k in required if norm.get(k) in (None, "", [])]
+    if missing:
+        raise ValidationFailed("scope must bind " + "/".join(required), details={"missing": missing})
+    dc = norm["data_class"]
+    if dc not in R.DATA_CLASSES:
+        raise ValidationFailed(f"scope.data_class must be one of {R.DATA_CLASSES}")
+    if dc == "RESTRICTED":
+        raise PolicyDenied("RESTRICTED data never enters a candidate trial or promotion scope", code="DATA_CLASS_RESTRICTED")
+    if action == "TRIAL_APPROVE":
+        env = norm["environment"]
+        if env not in TRIAL_ENVIRONMENTS:
+            raise ValidationFailed("a trial runs in a disposable sandbox or staging (canary only with a canary plan); "
+                                   f"environment {env!r} is not allowed", code="TRIAL_ENVIRONMENT_NOT_ALLOWED",
+                                   details={"allowed": list(TRIAL_ENVIRONMENTS)})
+        if env == "canary":
+            rp = (p.owner_plan or {}).get("replacement") or {}
+            if not (p.owner_plan or {}).get("canary"):
+                raise Blocked("canary needs a declared canary plan (target, cap, observation window, stop criteria)",
+                              code="CANARY_PLAN_REQUIRED")
+            if p.kind == "REPLACE" and rp.get("coexistence_safe") is not True:
+                raise Blocked("canary is not a safe method when coexistence is not declared safe; use sandbox/staging "
+                              "and an authorised cutover (§40)", code="CANARY_NOT_SAFE")
+    elig = provider_eligibility(session, p, str(norm["provider"]), dc)
+    if elig["status"] in ("UNKNOWN_PROVIDER", "INELIGIBLE"):
+        raise Blocked(f"provider {norm['provider']} is not eligible for this trial: {elig.get('reason')}",
+                      code="PROVIDER_NOT_ELIGIBLE", details=elig)
+    sp = R.security_privacy(session, p, data_class=dc)
+    if sp["status"] == "BLOCKED":
+        raise Blocked("Security/Privacy assessment BLOCKED for the candidate's data/access boundary",
+                      code="SECURITY_PRIVACY_BLOCKED", details=sp)
+    benefit = _benefit_problems(p)
+    if benefit:
+        raise Blocked("the benefit is not testable: " + "; ".join(benefit), code="BENEFIT_NOT_TESTABLE",
+                      details={"problems": benefit})
+    return {"provider_eligibility": elig, "security_privacy": sp["status"]}
+
+
+def _promote_gates(session: Session, p: ChangeProposal, norm: dict[str, Any]) -> dict[str, Any]:
+    from aeos.proposals import checkpoint
+
+    if (p.trial or {}).get("status") == "STOPPED":
+        raise Blocked("the trial was stopped by the owner; relaunch it or decide KEEP/REJECT", code="TRIAL_STOPPED")
+    trial, problems = binding_problems(session, p, action="TRIAL_APPROVE")
+    if trial is None or (trial.details or {}).get("baseline_hash") != p.baseline_hash or \
+            (trial.details or {}).get("candidate_hash") != p.candidate_hash:
+        raise Blocked("no ACTIVE trial decision bound to the current hashes", code="TRIAL_DECISION_MISSING")
+    if problems:
+        raise _stale(session, p, problems, "PROMOTE (trial scope)")
+    if not bound_evidence(session, p, p.evidence_ids or []):
+        raise Blocked("NOT-PROVEN: no trusted evidence about this candidate (trial TaskSpec/run/eval) produced after "
+                      "the TRIAL decision; promotion refused", code="NOT_PROVEN")
+    if not p.task_ids:
+        raise Blocked("no TaskSpec is linked to this proposal (launch the trial or link the implementing task)",
+                      code="TASK_REQUIRED")
+    ok, code, msg, rec = checkpoint.gate(session, p)
+    if not ok:
+        raise Blocked(msg, code=code, details={"checkpoint": rec})
+    plan = p.owner_plan or {}
+    rp = R.replacement_plan(p, ((p.review_package or {}).get("baseline") or {}).get("components") or []) or {}
+    owner = plan.get("operations_owner") or (plan.get("replacement") or {}).get("operations_owner") or (
+        rp.get("operations_owner") if rp.get("operations_owner") not in (None, R.UNKNOWN) else None)
+    if not owner:
+        raise Blocked("name the operations owner of the result in the owner plan before promotion", code="OWNER_REQUIRED")
+    details: dict[str, Any] = {"checkpoint": {k: rec.get(k) for k in ("status", "verdict", "mode", "package_hash")}
+                               if rec else None}
+    if p.kind in ("REPLACE", "UPGRADE"):
+        missing = [k for k in ("cutover_order", "rollback_or_forward_recovery") if rp.get(k) in (None, R.UNKNOWN)]
+        if missing:
+            raise Blocked("the replacement plan is incomplete: " + ", ".join(missing), code="REPLACEMENT_PLAN_INCOMPLETE",
+                          details={"missing": missing})
+        if rp.get("data_state_relations") and not (plan.get("replacement") or {}).get("backup_restore_evidence_id"):
+            raise Blocked("the component holds state/data: reference a restore-tested backup before promotion",
+                          code="RESTORE_EVIDENCE_REQUIRED")
+        details["cutover"] = {"order": rp.get("cutover_order"), "coexistence_safe": rp.get("coexistence_safe"),
+                              "authorised_by_this_decision": True}
+    return details
 
 
 def decide(session: Session, p: ChangeProposal, *, actor_user_id: str, action: str, baseline_hash: str,
@@ -420,30 +774,30 @@ def decide(session: Session, p: ChangeProposal, *, actor_user_id: str, action: s
                            details={"reviewed": {"baseline_hash": p.baseline_hash, "candidate_hash": p.candidate_hash},
                                     "current": {"baseline_hash": live_b, "candidate_hash": live_c},
                                     "invalidated_decisions": n})
+    # §39: linked duplicates of one canonical identity never carry contradictory ACTIVE decisions.
+    for other in duplicate_family(session, p):
+        if other.id != p.id and any(d.status == "ACTIVE" for d in _decisions(session, other)):
+            root = _root(session, p)
+            raise Conflict(f"a linked duplicate already holds an ACTIVE decision; decide on the canonical proposal "
+                           f"{root.id} (or revoke the other decision first)", code="DUPLICATE_DECISION_CONFLICT",
+                           details={"canonical_proposal_id": root.id, "conflicting_proposal_id": other.id})
     norm = normalise_scope(scope)
+    extra: dict[str, Any] = {}
     if action in ("TRIAL_APPROVE", "PROMOTE"):
-        missing = [k for k in SCOPE_REQUIRED if norm.get(k) in (None, "")]
-        if missing:
-            raise ValidationFailed("scope must bind target/environment/provider/data_class/budget_usd",
-                                   details={"missing": missing})
         if not p.candidate_pin:
             raise Blocked("candidate pin/digest is UNKNOWN; pin the candidate and re-review first",
                           code="CANDIDATE_NOT_PINNED")
         gate = R.source_identity_gate(session, p)
         if gate["status"] != "OK":
-            raise Blocked("source identity UNVERIFIED/CHANGED/NOT_FOUND; admission blocked until verified (§50)",
-                          code="SOURCE_IDENTITY_UNVERIFIED", details=gate)
+            raise Blocked("source identity UNVERIFIED/CHANGED/NOT_FOUND or the pin is affected by a published "
+                          "advisory; admission blocked (§40, §50)", code="SOURCE_IDENTITY_UNVERIFIED", details=gate)
+        extra = _admission_scope(session, p, norm, action)
     if action == "TRIAL_APPROVE" and p.status != "REVIEWED":
         raise Conflict(f"TRIAL_APPROVE needs status REVIEWED (current {p.status})")
     if action == "PROMOTE":
-        if p.status not in ("TRIAL_APPROVED", "IN_TRIAL", "PROMOTION_PENDING"):
+        if p.status not in TRIAL_STATUSES:
             raise Conflict(f"PROMOTE needs an approved trial (current {p.status}); trial approval is not promotion")
-        trial = _active_decision(session, p, "TRIAL")
-        if trial is None or (trial.details or {}).get("baseline_hash") != p.baseline_hash or \
-                (trial.details or {}).get("candidate_hash") != p.candidate_hash:
-            raise Blocked("no ACTIVE trial decision bound to the current hashes", code="TRIAL_DECISION_MISSING")
-        if not _trusted_evidence(session, p, p.evidence_ids or []):
-            raise Blocked("NOT-PROVEN: no trusted trial evidence attached; promotion refused", code="NOT_PROVEN")
+        extra |= _promote_gates(session, p, norm)
 
     if action != "PROMOTE":
         # One proposal never holds contradictory ACTIVE decisions (§39 "jangan membuat beberapa
@@ -458,7 +812,7 @@ def decide(session: Session, p: ChangeProposal, *, actor_user_id: str, action: s
         allowed_operations=ACTION_OPERATIONS.get(action, ["record.decision"]), auth_scope=norm,
         project_id=p.project_id, domain=p.domain, rationale=redact_text(rationale),
         details={"action": action, "baseline_hash": p.baseline_hash, "candidate_hash": p.candidate_hash,
-                 "proposal_kind": p.kind, "scope": norm, "budget_raised": False, "installed": False},
+                 "proposal_kind": p.kind, "scope": norm, "budget_raised": False, "installed": False, **extra},
     )
     if decision is None or decision.target_hash != bind:
         raise Blocked("decision was not recorded with the exact binding", code="DECISION_NOT_BOUND")
@@ -466,6 +820,9 @@ def decide(session: Session, p: ChangeProposal, *, actor_user_id: str, action: s
     p.status = ACTION_STATUS[action]
     if action in RESEARCH_SYNC:
         _sync_research(session, p, RESEARCH_SYNC[action], decision.id)
+    if action == "TRIAL_APPROVE":
+        _sync_research(session, p, "CANARY" if norm.get("environment") == "canary" else "CONTROLLED_EVAL",
+                       decision.id, only_from=("SOURCE_VERIFIED",))
     session.flush()
     audit.record(session, actor_type="user", actor_id=actor_user_id, action=f"proposal.decision.{action.lower()}",
                  target_type=TARGET_TYPE, target_id=p.id, project_id=p.project_id, domain=p.domain, reason=rationale,
@@ -475,23 +832,6 @@ def decide(session: Session, p: ChangeProposal, *, actor_user_id: str, action: s
                 project_id=p.project_id, domain=p.domain,
                 payload={"action": action, "decision_id": decision.id, "status": p.status})
     return decision
-
-
-def verify_binding(session: Session, p: ChangeProposal, *, action: str) -> Decision | None:
-    """For consumers (e.g. a scheduler before a trial run): the ACTIVE decision for *action* only if
-    it is still bound to the live baseline/candidate; otherwise decisions are invalidated -> None."""
-    kind = ACTION_DECISION_KIND[action]
-    d = _active_decision(session, p, kind)
-    if d is None:
-        return None
-    live_b, live_c = current_hashes(session, p)
-    det = d.details or {}
-    if det.get("baseline_hash") != live_b or det.get("candidate_hash") != live_c:
-        _invalidate(session, p, "binding stale at verification")
-        return None
-    expected = binding_hash(p.id, action, det.get("baseline_hash", ""), det.get("candidate_hash", ""),
-                            normalise_scope(d.auth_scope))
-    return d if expected == d.target_hash else None
 
 
 def _syncable(e: ResearchEntry | None, p: ChangeProposal) -> bool:
@@ -505,41 +845,67 @@ def _syncable(e: ResearchEntry | None, p: ChangeProposal) -> bool:
     return e.submitted_domain == p.domain
 
 
-def _sync_research(session: Session, p: ChangeProposal, lifecycle: str, decision_id: str) -> None:
+def _sync_research(session: Session, p: ChangeProposal, lifecycle: str, decision_id: str | None, *,
+                   only_from: tuple[str, ...] | None = None, event: str = "OWNER_DECISION") -> None:
     for eid in p.research_entry_ids or []:
         e = session.get(ResearchEntry, eid)
-        if e is None or not _syncable(e, p) or e.lifecycle == "ENABLED":
+        if e is None or not _syncable(e, p) or e.lifecycle == "ENABLED" or e.lifecycle == lifecycle:
             continue
-        e.history = [*(e.history or []), {"at": utcnow().isoformat(), "event": "OWNER_DECISION", "from": e.lifecycle,
+        if only_from is not None and e.lifecycle not in only_from:
+            continue
+        e.history = [*(e.history or []), {"at": utcnow().isoformat(), "event": event, "from": e.lifecycle,
                                           "to": lifecycle, "proposal_id": p.id, "decision_id": decision_id}]
         e.lifecycle = lifecycle
-        e.owner_decision_id = decision_id
+        if decision_id:
+            e.owner_decision_id = decision_id
+
+
+def _append_test_results(session: Session, p: ChangeProposal, rows: list[dict[str, Any]]) -> None:
+    """§47 "test results": this platform's own controlled/runtime results for the candidate (E2/E3)."""
+    if not rows:
+        return
+    for eid in p.research_entry_ids or []:
+        e = session.get(ResearchEntry, eid)
+        if e is None or not _syncable(e, p):
+            continue
+        e.test_results = [*(e.test_results or []), *rows][-100:]
 
 
 # --------------------------------------------------------------------------- evidence & outcome
 
 
-def _trusted_evidence(session: Session, p: ChangeProposal, ids: list[str]) -> list[EvidenceArtifact]:
-    out = []
-    for i in ids:
-        ev = session.get(EvidenceArtifact, i)
-        if ev is not None and ev.trusted and ev.mode == "LIVE" and (ev.domain in (None, p.domain)):
-            out.append(ev)
-    return out
-
-
 def attach_evidence(session: Session, p: ChangeProposal, *, evidence_ids: list[str], actor_user_id: str) -> ChangeProposal:
     if p.status in OUTCOME_FINAL:
         raise Conflict("outcome already recorded")
+    evs: list[EvidenceArtifact] = []
     for i in evidence_ids:
         ev = session.get(EvidenceArtifact, i)
         if ev is None or ev.domain not in (None, p.domain):
             raise ValidationFailed(f"evidence {i} not found in this domain")
         if not ev.trusted or ev.mode != "LIVE":
             raise ValidationFailed(f"evidence {i} is not trusted LIVE evidence (worker/mock material cannot support a gate)")
+        why = evidence_binding_problem(session, p, ev, purpose="gate")
+        if why:
+            raise ValidationFailed(f"evidence {i}: {why}", code="EVIDENCE_NOT_FOR_CANDIDATE")
+        if not _after_trial(session, p, ev):
+            raise ValidationFailed(f"evidence {i} predates the TRIAL decision; it is not trial evidence",
+                                   code="EVIDENCE_NOT_FOR_CANDIDATE")
+        evs.append(ev)
+    if p.status not in TRIAL_STATUSES:
+        raise Conflict(f"trial evidence is attached during an approved trial (current {p.status})")
+    _d, problems = binding_problems(session, p, action="TRIAL_APPROVE")
+    if _d is None or problems:
+        raise _stale(session, p, problems or ["no ACTIVE TRIAL decision"], "evidence attachment")
     p.evidence_ids = sorted({*(p.evidence_ids or []), *evidence_ids})
-    if p.status == "TRIAL_APPROVED":
+    if p.status in ("TRIAL_APPROVED", "IN_TRIAL"):
         p.status = "PROMOTION_PENDING"
+    _sync_research(session, p, "RECOMMENDED_FOR_PROMOTION", None, only_from=("CONTROLLED_EVAL", "CANARY"),
+                   event="TRIAL_EVIDENCE")
+    now = utcnow().isoformat()
+    _append_test_results(session, p, [{"at": now, "proposal_id": p.id, "evidence_id": ev.id, "kind": ev.kind,
+                                       "collector": ev.collector_identity, "claim": redact_text(ev.claim or "")[:200],
+                                       "candidate_pin": p.candidate_pin, "level": "E2 (controlled trial, platform ini)"}
+                                      for ev in evs])
     session.flush()
     audit.record(session, actor_type="user", actor_id=actor_user_id, action="proposal.evidence.attach",
                  target_type=TARGET_TYPE, target_id=p.id, project_id=p.project_id, domain=p.domain,
@@ -549,22 +915,197 @@ def attach_evidence(session: Session, p: ChangeProposal, *, evidence_ids: list[s
     return p
 
 
-def _snapshot(session: Session, sid: str | None) -> dict[str, Any] | None:
+def _snapshot(session: Session, sid: str | None, p: ChangeProposal) -> dict[str, Any] | None:
     if not sid:
         return None
     s = session.get(ArchitectureSnapshot, sid)
-    if s is None:
-        raise ValidationFailed(f"architecture snapshot {sid} not found")
+    if s is None or not R.snapshot_in_domain(s, p.domain):
+        raise ValidationFailed(f"architecture snapshot {sid} not found in this domain")
     return {"id": s.id, "label": s.label, "snapshot_hash": s.snapshot_hash,
             "created_at": s.created_at.isoformat() if s.created_at else None}
+
+
+def _config_targets(p: ChangeProposal, cfg: dict[str, Any]) -> list[tuple[str, str | None]]:
+    pin = cfg.get("approved_pin")
+    allowed = {*(p.candidate_component_ids or []), *((p.existing_component_ids or []) if p.kind in ("UPGRADE", "REMOVE")
+                                                      else [])}
+    if cfg.get("component_id"):
+        cid = str(cfg["component_id"])
+        if cid not in allowed:
+            raise ValidationFailed(f"accepted_configuration.component_id {cid} is not a candidate component of this "
+                                   "proposal (candidate_component_ids, or the existing component for UPGRADE/REMOVE)")
+        return [(cid, str(pin) if pin else None)]
+    if p.candidate_component_ids:
+        return [(c, str(pin) if pin else None) for c in p.candidate_component_ids]
+    if p.kind in ("UPGRADE", "REMOVE"):
+        return [(c, str(pin) if pin else None) for c in p.existing_component_ids or []]
+    return []
+
+
+def _latest_observation(session: Session, cid: str, dimensions: tuple[str, ...], since: datetime | None) -> Any:
+    from aeos.models.inventory import ComponentObservation
+
+    since = ensure_aware(since)
+    for o in session.scalars(select(ComponentObservation).where(ComponentObservation.component_id == cid,
+                                                                ComponentObservation.dimension.in_(dimensions))
+                             .order_by(ComponentObservation.observed_at.desc())):
+        at = ensure_aware(o.observed_at)
+        if since is None or (at is not None and at > since):
+            return o
+        return None
+    return None
+
+
+def observed_at_pin(session: Session, cid: str, pin: str | None, since: datetime | None) -> bool:
+    """The latest installation or configuration observation after *since* shows the component INSTALLED/
+    CONFIGURED at *pin* (§38 observed lens; desired state alone is not activation)."""
+    for dim, ok in (("installation", "INSTALLED"), ("configuration", "CONFIGURED")):
+        o = _latest_observation(session, cid, (dim,), since)
+        if o is not None and o.status == ok and (not pin or (o.observed_version or "").lstrip("v") == pin.lstrip("v")):
+            return True
+    return False
+
+
+def config_applied_problems(session: Session, p: ChangeProposal, cfg: dict[str, Any],
+                            since: datetime | None = None) -> list[str]:
+    """§47 "ENABLED hanya dicatat setelah keputusan dan perubahan konfigurasi yang sah": the inventory must show
+    the accepted configuration - the reviewed install manifest declares the accepted pin AND the component is
+    enabled by decision or observed (installed/configured at that version) after the promotion - never a
+    hand-typed dict alone. For REMOVE the component must be retired, tombstoned or observed removed."""
+    from aeos.inventory import facade as inventory
+
+    targets = _config_targets(p, cfg)
+    if not targets:
+        return ["no inventory component records the accepted configuration; register the candidate in the install "
+                "manifest (candidate_component_ids) first"]
+    problems = []
+    for cid, pin in targets:
+        comp = inventory.get_component(session, cid)
+        if comp is None:
+            problems.append(f"{cid} is not registered in the inventory")
+            continue
+        if p.kind == "REMOVE":
+            gone = _latest_observation(session, cid, ("installation",), since)
+            if not (comp.tombstoned_at or comp.lifecycle_final in ("RETIRED", "DEPRECATED")
+                    or (gone is not None and gone.status in ("NOT_INSTALLED", "REMOVED"))):
+                problems.append(f"{cid} is still {comp.enablement}/{comp.lifecycle_final} and not observed removed "
+                                "(removal not applied)")
+            continue
+        if pin and comp.approved_pin != pin:
+            problems.append(f"{cid} approved_pin {comp.approved_pin} != accepted {pin} (manifest not applied)")
+        if pin and p.candidate_pin and pin != p.candidate_pin:
+            problems.append(f"accepted pin {pin} differs from the promoted candidate pin {p.candidate_pin}")
+        if comp.enablement != "ENABLED" and not observed_at_pin(session, cid, pin, since):
+            problems.append(f"{cid} is neither enabled by decision nor observed installed/configured"
+                            + (f" at {pin}" if pin else "") + " after the promotion (configuration not applied)")
+    return problems
+
+
+def _observed_after(session: Session, p: ChangeProposal, since: datetime | None, evs: list[EvidenceArtifact],
+                    cfg: dict[str, Any]) -> bool:
+    from aeos.models.inventory import ComponentObservation
+
+    since = ensure_aware(since)
+    if since is None:
+        return False
+    if any((ensure_aware(e.created_at) or since) > since for e in evs):
+        return True
+    try:
+        targets = [c for c, _ in _config_targets(p, cfg)]
+    except ValidationFailed:
+        targets = []
+    for o in session.scalars(select(ComponentObservation).where(ComponentObservation.component_id.in_(targets))):
+        at = ensure_aware(o.observed_at)
+        if at is not None and at > since and str(o.status).upper() in GOOD_OBSERVATION:
+            return True
+    return False
+
+
+def _acceptance_met(session: Session, p: ChangeProposal, results: dict[str, Any] | None, evs: list[EvidenceArtifact],
+                    waiver_decision_id: str | None) -> dict[str, Any]:
+    declared = R.owner_acceptance(p)
+    results = dict(redact(results or {}))
+    bound_ids = {e.id for e in evs} | {e.id for e in bound_evidence(session, p, p.evidence_ids or [], purpose="outcome")}
+    rows = []
+    for a in declared:
+        r = results.get(a["id"]) if isinstance(results.get(a["id"]), dict) else {}
+        status = str(r.get("status") or "UNKNOWN").upper()
+        if status not in ("PASS", "FAIL", "UNKNOWN"):
+            raise ValidationFailed(f"acceptance_results[{a['id']}].status must be PASS, FAIL or UNKNOWN")
+        ev = r.get("evidence_id")
+        if status == "PASS" and ev not in bound_ids:
+            status = "UNKNOWN"  # a PASS without bound trusted evidence is not a pass (§34)
+        rows.append({"id": a["id"], "criterion": a["criterion"], "required": a.get("required", True), "status": status,
+                     "evidence_id": ev, "observed": redact_text(str(r.get("observed") or ""))[:200]})
+    unmet = [r["id"] for r in rows if r["required"] and r["status"] != "PASS"]
+    if not declared:
+        unmet = ["NOT_DECLARED"]
+    waiver = None
+    if unmet:
+        if waiver_decision_id:
+            d = session.get(Decision, waiver_decision_id)
+            if d is None or d.kind != "RISK_ACCEPTANCE" or d.status != "ACTIVE" or d.target_type != TARGET_TYPE or \
+                    d.target_id != p.id or d.domain not in (None, p.domain):
+                raise ValidationFailed("waiver_decision_id must be an ACTIVE RISK_ACCEPTANCE decision for this proposal")
+            waiver = d.id
+        else:
+            raise Blocked("acceptance declared before the trial is not met: " + ", ".join(unmet),
+                          code="ACCEPTANCE_NOT_MET", details={"criteria": rows, "unmet": unmet})
+    return {"criteria": rows, "unmet": unmet, "waiver_decision_id": waiver}
+
+
+def _rollback_reference(session: Session, p: ChangeProposal, rb: dict[str, Any], since: datetime | None) -> dict[str, Any]:
+    ref = rb.get("reference") if isinstance(rb.get("reference"), dict) else {}
+    aid = str(ref.get("audit_event_id") or "")
+    if not aid:
+        raise ValidationFailed("ROLLED_BACK must reference the rollback/restore operation that actually ran "
+                               "(rollback.reference.audit_event_id: ops.release.rollback, ops.backup.restore or "
+                               "inventory.manifest.load)", code="ROLLBACK_NOT_REFERENCED")
+    ev = session.scalar(select(AuditEvent).where(AuditEvent.event_id == aid))
+    if ev is None or ev.domain not in (None, p.domain):
+        raise ValidationFailed(f"audit event {aid} not found in this domain", code="ROLLBACK_NOT_REFERENCED")
+    if ev.action not in ROLLBACK_AUDIT_ACTIONS or ev.result != "SUCCESS":
+        raise ValidationFailed(f"audit event {aid} ({ev.action} {ev.result}) is not a successful rollback/restore",
+                               code="ROLLBACK_NOT_REFERENCED")
+    since = ensure_aware(since)
+    at = ensure_aware(ev.at)
+    if since is not None and (at is None or at < since):
+        raise ValidationFailed("the referenced rollback ran before the promotion; it is not this rollback",
+                               code="ROLLBACK_NOT_REFERENCED")
+    out = {"audit_event_id": aid, "action": ev.action, "at": at.isoformat() if at else None}
+    if ev.action == "inventory.manifest.load" and p.kind in ("UPGRADE", "REPLACE"):
+        from aeos.inventory import facade as inventory
+
+        prev = {b["component_id"]: b.get("approved_pin") for b in
+                ((p.review_package or {}).get("baseline") or {}).get("components") or [] if b.get("status") == "KNOWN"}
+        def live_pin(cid: str) -> str:
+            return getattr(inventory.get_component(session, cid), "approved_pin", None) or R.UNKNOWN
+
+        wrong = [f"{cid} pin {live_pin(cid)} != {pin}" for cid, pin in prev.items() if live_pin(cid) != (pin or R.UNKNOWN)]
+        if wrong:
+            raise ValidationFailed("the manifest reload did not restore the previous accepted configuration: "
+                                   + "; ".join(wrong), code="ROLLBACK_NOT_APPLIED")
+        out["restored_pins"] = prev
+    if rb.get("data_rollback") == "DONE":
+        rid = str(rb.get("restore_evidence_id") or "")
+        rev = session.get(EvidenceArtifact, rid) if rid else None
+        if rev is None or not rev.trusted or rev.mode != "LIVE" or rev.domain not in (None, p.domain) or \
+                (rev.kind != "RESTORE_TEST" and rev.origin != "restore-test"):
+            raise ValidationFailed("data_rollback DONE needs restore_evidence_id: trusted restore-test evidence",
+                                   code="ROLLBACK_NOT_REFERENCED")
+        out["restore_evidence_id"] = rev.id
+    return out
 
 
 def record_outcome(
     session: Session, p: ChangeProposal, *, actor_user_id: str, status: str, evidence_ids: list[str] | None = None,
     accepted_configuration: dict[str, Any] | None = None, partial_failures: list[Any] | None = None,
     rollback: dict[str, Any] | None = None, notes: str = "", before_snapshot_id: str | None = None,
-    after_snapshot_id: str | None = None,
+    after_snapshot_id: str | None = None, acceptance_results: dict[str, Any] | None = None,
+    waiver_decision_id: str | None = None, adr_keys: list[str] | None = None,
 ) -> ChangeProposal:
+    from aeos.proposals import links as L
+
     status = (status or "").upper()
     if status not in OUTCOMES:
         raise ValidationFailed(f"status must be one of {OUTCOMES}")
@@ -577,10 +1118,13 @@ def record_outcome(
     if status not in OUTCOME_TRANSITIONS.get(previous, ()):
         raise Conflict(f"outcome {previous} cannot change to {status}; open a new proposal")
     ev_ids = list(evidence_ids or [])
-    trusted = _trusted_evidence(session, p, ev_ids)
+    trusted = bound_evidence(session, p, ev_ids, purpose="outcome")
     if len(trusted) != len(ev_ids):
-        raise ValidationFailed("outcome evidence must be trusted LIVE evidence in this domain")
+        raise ValidationFailed("outcome evidence must be trusted LIVE evidence in this domain about this candidate")
+    if adr_keys:
+        L.add_links(session, p, actor_user_id=actor_user_id, adr_keys=adr_keys)
     promotion = _active_decision(session, p, "PROMOTION")
+    entry_extra: dict[str, Any] = {}
     if status == "ACCEPTED":
         if rollback:
             raise ValidationFailed("a rollback is never recorded as acceptance; use ROLLED_BACK")
@@ -592,10 +1136,34 @@ def record_outcome(
         if closed_at and created is not None and created.isoformat() <= closed_at:
             raise Blocked("the promotion decision predates a rollback/failure; a new promotion decision is required",
                           code="PROMOTION_DECISION_STALE")
+        _d, problems = binding_problems(session, p, action="PROMOTE", after_promotion=True)
+        if problems:
+            raise _stale(session, p, problems, "ACCEPTED outcome")
         if not trusted:
             raise Blocked("NOT-PROVEN: ACCEPTED requires trusted evidence", code="NOT_PROVEN")
         if not accepted_configuration:
             raise ValidationFailed("accepted_configuration is required for ACCEPTED")
+        cfg_problems = config_applied_problems(session, p, accepted_configuration, promotion.created_at)
+        if cfg_problems:
+            raise Blocked("the accepted configuration is not applied in the inventory: " + "; ".join(cfg_problems),
+                          code="CONFIG_NOT_APPLIED", details={"problems": cfg_problems})
+        if not _observed_after(session, p, promotion.created_at, trusted, accepted_configuration):
+            raise Blocked("no observation/evidence after activation: record the post-activation observation "
+                          "(inventory probe or verifier evidence) before ACCEPTED", code="OBSERVATION_REQUIRED")
+        entry_extra["acceptance"] = _acceptance_met(session, p, acceptance_results, trusted, waiver_decision_id)
+        if p.kind in ADR_REQUIRED_KINDS and not (p.links or {}).get("adr_keys"):
+            raise Blocked("link the ADR that records this architecture change before ACCEPTED", code="ADR_REQUIRED")
+        if p.kind == "REMOVE":
+            rem = R.removal_plan(p, ((p.review_package or {}).get("baseline") or {}).get("components") or []) or {}
+            if rem.get("open"):
+                raise Blocked("REMOVE closure items are still open: " + ", ".join(rem["open"][:10]),
+                              code="REMOVAL_NOT_CLOSED", details={"open": rem["open"]})
+        if p.kind == "REPLACE" and not (promotion.details or {}).get("cutover"):
+            raise Blocked("the cutover was not authorised by the promotion decision", code="CUTOVER_NOT_AUTHORISED")
+        if (p.owner_plan or {}).get("canary") and (p.trial or {}).get("environment") == "canary" and \
+                not (p.owner_plan or {}).get("canary_evidence_ids"):
+            raise Blocked("the canary plan requires canary observation evidence before widening/ACCEPTED",
+                          code="CANARY_EVIDENCE_REQUIRED")
     if status == "PARTIAL" and not partial_failures:
         raise ValidationFailed("PARTIAL must list the failed parts/targets")
     rb: dict[str, Any] | None = None
@@ -606,17 +1174,25 @@ def record_outcome(
             raise ValidationFailed(f"rollback.data_rollback must be one of {DATA_ROLLBACK}")
         rb["data_rollback"] = data_rb
         rb.setdefault("code_reverted", False)
+        since = promotion.created_at if promotion else None
+        if since is None:
+            last_acc = [h for h in (p.outcome or {}).get("history") or [] if h.get("status") == "ACCEPTED"]
+            since = datetime.fromisoformat(last_acc[-1]["at"]) if last_acc else None
+        rb["reference"] = _rollback_reference(session, p, rb, since)
         rb["note"] = "Rollback kode tidak menjamin rollback data; baseline sebelumnya tetap berlaku."
+    after_snap = _snapshot(session, after_snapshot_id, p)
+    if after_snap and promotion is not None and status == "ACCEPTED":
+        at = ensure_aware(datetime.fromisoformat(after_snap["created_at"])) if after_snap.get("created_at") else None
+        if at is None or at < ensure_aware(promotion.created_at):  # type: ignore[operator]
+            raise ValidationFailed("the after snapshot must be taken after the promotion decision")
     entry = {
         "status": status, "accepted": status == "ACCEPTED", "at": utcnow().isoformat(), "actor": actor_user_id,
         "evidence_ids": ev_ids, "accepted_configuration": redact(accepted_configuration) if status == "ACCEPTED" else None,
         "partial_failures": redact(partial_failures or []), "rollback": rb, "notes": redact_text(notes or "")[:4000],
-        "before_snapshot": _snapshot(session, before_snapshot_id), "after_snapshot": _snapshot(session, after_snapshot_id),
+        "before_snapshot": _snapshot(session, before_snapshot_id, p), "after_snapshot": after_snap,
         "promotion_decision_id": promotion.id if promotion else None,
-        "inventory_docs_update": "PENDING - inventory direkonsiliasi dari observasi; ADR/docs delta diperlukan",
+        "inventory_docs_update": "PENDING", **entry_extra,
     }
-    hist = [*((p.outcome or {}).get("history") or []), entry]
-    p.outcome = {"current": entry, "history": hist}
     p.evidence_ids = sorted({*(p.evidence_ids or []), *ev_ids})
     p.status = status
     if status in CLOSING_OUTCOMES:
@@ -624,7 +1200,27 @@ def record_outcome(
             _invalidate(session, p, f"outcome {status}")
         except Blocked:
             entry["decision_invalidation"] = "PENDING (decision registry unavailable)"
+    if status == "ROLLED_BACK" and rb is not None:
+        rbind = binding_hash(p.id, "ROLLBACK", p.baseline_hash or "", p.candidate_hash or "",
+                             {"reference": rb["reference"], "data_rollback": rb["data_rollback"]})
+        d = _record_decision(
+            session, kind="ROLLBACK", actor_user_id=actor_user_id, target_type=TARGET_TYPE, target_id=p.id,
+            target_version=p.review_hash, target_hash=rbind, allowed_operations=list(ROLLBACK_OPERATIONS),
+            auth_scope={"reference": rb["reference"], "data_rollback": rb["data_rollback"]}, project_id=p.project_id,
+            domain=p.domain, rationale=redact_text(notes or "rollback"),
+            details={"action": "ROLLBACK", "baseline_hash": p.baseline_hash, "candidate_hash": p.candidate_hash,
+                     "accepted_is_success": False})
+        p.decision_ids = [*(p.decision_ids or []), d.id]
+        entry["rollback_decision_id"] = d.id
+    if status in ("ACCEPTED", "ROLLED_BACK", "PARTIAL"):
+        L.finalize(session, p, entry)
+    hist = [*((p.outcome or {}).get("history") or []), entry]
+    p.outcome = {"current": entry, "history": hist}
     _sync_outcome_research(session, p, status, promotion.id if promotion else None)
+    _append_test_results(session, p, [{"at": entry["at"], "proposal_id": p.id, "outcome": status,
+                                       "evidence_ids": ev_ids, "candidate_pin": p.candidate_pin,
+                                       "level": "E3 (runtime outcome, platform ini)" if status == "ACCEPTED" else
+                                       f"outcome {status}"}])
     session.flush()
     audit.record(session, actor_type="user", actor_id=actor_user_id, action=f"proposal.outcome.{status.lower()}",
                  target_type=TARGET_TYPE, target_id=p.id, project_id=p.project_id, domain=p.domain, reason=notes,
@@ -641,7 +1237,8 @@ def _sync_outcome_research(session: Session, p: ChangeProposal, status: str, dec
             continue
         if status == "ACCEPTED":
             e.history = [*(e.history or []), {"at": utcnow().isoformat(), "event": "PROMOTED", "from": e.lifecycle,
-                                              "to": "ENABLED", "proposal_id": p.id, "decision_id": decision_id}]
+                                              "to": "ENABLED", "proposal_id": p.id, "decision_id": decision_id,
+                                              "config": "applied (inventory)"}]
             e.lifecycle = "ENABLED"
             e.owner_decision_id = decision_id
         elif e.lifecycle == "ENABLED":
@@ -669,29 +1266,82 @@ def _decision_view(d: Decision) -> dict[str, Any]:
 def delivery_dimensions(session: Session, p: ChangeProposal) -> dict[str, dict[str, str]]:
     """§41: APPROVED / IMPLEMENTED / ACTIVE / VERIFIED / ARCHITECTURE_SOURCE_UPDATED / DOCS_PUBLISHED are
     shown separately; nothing is inferred from another (an approval is not activation)."""
+    from aeos.inventory import facade as inventory
+    from aeos.proposals import links as L
+
     decisions = _decisions(session, p)
     promotion = next((d for d in reversed(decisions) if d.kind == "PROMOTION"), None)
     cur = (p.outcome or {}).get("current") or {}
     trusted = _trusted_evidence(session, p, p.evidence_ids or [])
-    from aeos.inventory import facade as inventory
-
-    enabled = [c for c in (inventory.get_component(session, cid) for cid in p.candidate_component_ids or [])
-               if c is not None and c.enablement == "ENABLED"]
+    targets = [*(p.candidate_component_ids or []), *((p.existing_component_ids or []) if p.kind == "UPGRADE" else [])]
+    enabled: list[Any] = []
+    observed: list[Any] = []
+    for c in (inventory.get_component(session, cid) for cid in targets):
+        if c is None or (p.kind == "UPGRADE" and p.candidate_pin and c.approved_pin != p.candidate_pin):
+            continue
+        if c.enablement == "ENABLED":
+            enabled.append(c)
+            continue
+        if promotion is not None and observed_at_pin(session, c.component_id, p.candidate_pin, promotion.created_at):
+            observed.append(c)
+    after = cur.get("after_snapshot") or {}
+    arch_ok = False
+    if after and promotion is not None:
+        snap = session.get(ArchitectureSnapshot, after.get("id"))
+        arch_ok = bool(snap and R.snapshot_in_domain(snap, p.domain) and ensure_aware(snap.created_at)
+                       and ensure_aware(promotion.created_at)
+                       and ensure_aware(snap.created_at) >= ensure_aware(promotion.created_at))  # type: ignore[operator]
 
     def dim(status: str, note: str) -> dict[str, str]:
         return {"status": status, "note": note}
 
+    implemented = cur.get("status") or "UNKNOWN"
+    docs = L.docs_published(session, p)
     return {
         "APPROVED": dim("YES" if promotion and promotion.status == "ACTIVE" else
                         (promotion.status if promotion else "NO"), "Keputusan PROMOTION terikat hash"),
-        "IMPLEMENTED": dim(cur.get("status") or "UNKNOWN", "Outcome yang dicatat manusia dengan bukti"),
-        "ACTIVE": dim("ENABLED_IN_CONFIG" if enabled else "UNKNOWN",
+        "IMPLEMENTED": dim(implemented, "Outcome yang dicatat manusia dengan bukti"
+                           + ("; sebagian target gagal" if implemented == "PARTIAL" else "")),
+        "ACTIVE": dim("ENABLED_IN_CONFIG" if enabled else "OBSERVED_IN_CONFIG" if observed else "UNKNOWN",
                       "Dari konfigurasi/observasi inventaris, bukan dari approval"),
-        "VERIFIED": dim("EVIDENCE_ATTACHED" if trusted else "NOT-PROVEN", "Bukti terpercaya dari verifier/collector"),
-        "ARCHITECTURE_SOURCE_UPDATED": dim("YES" if cur.get("after_snapshot") else "UNKNOWN",
-                                           "ArchitectureSnapshot sesudah perubahan"),
-        "DOCS_PUBLISHED": dim("UNKNOWN", "Status publikasi dokumen berasal dari modul publisher"),
+        "VERIFIED": dim("EVIDENCE_ATTACHED" if trusted else "NOT-PROVEN", "Bukti terpercaya tentang kandidat ini"),
+        "ARCHITECTURE_SOURCE_UPDATED": dim("YES" if arch_ok else "UNKNOWN",
+                                           "ArchitectureSnapshot domain ini, diambil sesudah keputusan PROMOTION"),
+        "DOCS_PUBLISHED": dim(docs["status"], docs["note"]),
     }
+
+
+def _goal_tokens(p: ChangeProposal) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", f"{p.title} {p.problem}".lower()) if len(t) >= 4 and t not in _STOPWORDS}
+
+
+def possible_duplicates(session: Session, p: ChangeProposal) -> list[dict[str, Any]]:
+    """§39 "Duplikat ... tujuan": same-domain proposals with the same component+kind or an overlapping goal.
+    A suggestion only - never merged automatically."""
+    family = {x.id for x in duplicate_family(session, p)} | {p.id}
+    mine = _goal_tokens(p)
+    comps = set(p.existing_component_ids or [])
+    out = []
+    for row in session.scalars(select(ChangeProposal).where(ChangeProposal.domain == p.domain,
+                                                            ChangeProposal.id != p.id,
+                                                            ChangeProposal.parent_id.is_(None))
+                               .order_by(ChangeProposal.created_at.desc()).limit(500)):
+        if row.id in family or row.parent_id == p.id:
+            continue
+        reason = None
+        if comps and row.kind == p.kind and comps & set(row.existing_component_ids or []):
+            reason = f"jenis {p.kind} pada komponen yang sama ({', '.join(sorted(comps & set(row.existing_component_ids or [])))})"
+        else:
+            other = _goal_tokens(row)
+            if mine and other:
+                jac = len(mine & other) / len(mine | other)
+                if jac >= 0.5:
+                    reason = f"tujuan/judul mirip ({round(jac * 100)}% token sama)"
+        if reason:
+            out.append({"id": row.id, "title": row.title, "status": row.status, "kind": row.kind, "reason": reason})
+        if len(out) >= 10:
+            break
+    return out
 
 
 def proposal_view(session: Session, p: ChangeProposal, *, detail: bool = False) -> dict[str, Any]:
@@ -708,11 +1358,21 @@ def proposal_view(session: Session, p: ChangeProposal, *, detail: bool = False) 
         "allowed_actions": R.allowed_actions(p),
     }
     if detail:
+        from aeos.proposals import checkpoint
+        from aeos.proposals import links as L
+
         dups = list(session.scalars(select(ChangeProposal).where(ChangeProposal.duplicate_of == p.id,
                                                                  ChangeProposal.domain == p.domain)))
         package = dict(p.review_package or {})
         if package.get("human_decision"):
             package["human_decision"] = {**package["human_decision"], "allowed_now": R.allowed_actions(p)}
+        cp = checkpoint.current(p)
+        cp_view = None
+        if cp is not None:
+            _ok, code, msg, _rec = checkpoint.gate(session, p) if p.status in TRIAL_STATUSES else (None, None, None, None)
+            cp_view = {k: v2 for k, v2 in cp.items() if k not in ("package",)} | {"gate": code, "gate_note": msg}
+            if cp.get("status") == "MANUAL_PACKAGE":
+                cp_view["package"] = cp.get("package")
         v.update({
             "problem": p.problem, "expected_benefit": p.expected_benefit, "limits": p.limits or {},
             "candidate_component_ids": p.candidate_component_ids or [], "attachment_ids": p.attachment_ids or [],
@@ -720,8 +1380,11 @@ def proposal_view(session: Session, p: ChangeProposal, *, detail: bool = False) 
             "review_hash": p.review_hash, "decisions": [_decision_view(d) for d in _decisions(session, p)],
             "evidence_ids": p.evidence_ids or [], "task_ids": p.task_ids or [], "outcome": p.outcome or {},
             "duplicates": [{"id": d.id, "title": d.title, "status": d.status} for d in dups],
+            "possible_duplicates": possible_duplicates(session, p),
             "research_entries": [research.entry_view(e) for e in R.research_entries(session, p)],
             "delivery_dimensions": delivery_dimensions(session, p),
+            "owner_plan": p.owner_plan or {}, "links": L.link_views(session, p), "trial": p.trial or {},
+            "checkpoint_review": cp_view,
             "guarantees": {"installs": False, "activates": False, "raises_budget": False, "sends_project_data": False,
                            "note": "Usulan/review tidak memasang, mengaktifkan, menaikkan budget atau mengirim data proyek."},
         })
@@ -747,6 +1410,8 @@ def list_proposals(session: Session, *, domain: str, allowed_project_ids: list[s
 
 
 def timeline(session: Session, p: ChangeProposal) -> dict[str, Any]:
+    from aeos.proposals import links as L
+
     ids = [p.id, *[c.id for c in _children(session, p)]]
     audits = list(session.scalars(select(AuditEvent).where(AuditEvent.target_type == TARGET_TYPE,
                                                            AuditEvent.target_id.in_(ids)).order_by(AuditEvent.seq)))
@@ -776,5 +1441,7 @@ def timeline(session: Session, p: ChangeProposal) -> dict[str, Any]:
             "note": None if after else "Belum ada konfigurasi diterima; baseline tetap berlaku.",
             "snapshots": {"before": current.get("before_snapshot"), "after": current.get("after_snapshot")},
         },
-        "source": "audit_events + decisions + outcome history", "checked_at": utcnow().isoformat(),
+        "links": L.link_views(session, p),
+        "trial": {k: (p.trial or {}).get(k) for k in ("status", "launched_at", "plan_id", "task_ids", "stopped_at")},
+        "source": "audit_events + decisions + outcome history + links", "checked_at": utcnow().isoformat(),
     }

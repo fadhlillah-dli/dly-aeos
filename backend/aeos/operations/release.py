@@ -569,13 +569,39 @@ def promote(
     smoke_runner: SmokeRunner = run_smoke,
     server_check: Callable[[Settings], dict[str, Any]] = server_status,
     smoke_timeout: float = 90,
+    proposal_id: str | None = None,
 ) -> dict[str, Any]:
-    """Human-only promotion of a built release. Commits *session* at checkpoints (documented)."""
+    """Human-only promotion of a built release. Commits *session* at checkpoints (documented).
+
+    With ``proposal_id`` (§40 "Human merge atau privileged promotion" after the proposal decision) the release is
+    promoted only while that ChangeProposal holds an ACTIVE PROMOTION decision still bound to its candidate and
+    authorising ``release.promote.candidate``; the release id is then recorded on the proposal."""
     refuse_worker_context("controller promotion")
     prov = _verified_prov(settings, release_id)
-    return _transition(settings, session, action="promote", target_prov=prov, operator_user_id=operator_user_id,
-                       actor_label=actor_label, reason=reason, force_maintenance=force_maintenance,
-                       smoke_runner=smoke_runner, server_check=server_check, smoke_timeout=smoke_timeout)
+    if proposal_id:
+        from aeos.proposals import facade as proposals
+
+        decision = proposals.promotion_for_release(session, proposal_id)
+        session.commit()  # persist the invalidation of a stale proposal binding before refusing
+        if decision is None:
+            raise Blocked("the change proposal has no ACTIVE PROMOTION decision bound to its candidate; release "
+                          "promotion refused", code="PROPOSAL_PROMOTION_NOT_BOUND", details={"proposal_id": proposal_id})
+        if "release.promote.candidate" not in (decision.allowed_operations or []):
+            raise Blocked("the proposal's PROMOTION decision does not authorise release promotion",
+                          code="PROPOSAL_OPERATION_NOT_AUTHORISED", details={"proposal_id": proposal_id})
+    report = _transition(settings, session, action="promote", target_prov=prov, operator_user_id=operator_user_id,
+                         actor_label=actor_label, reason=reason, force_maintenance=force_maintenance,
+                         smoke_runner=smoke_runner, server_check=server_check, smoke_timeout=smoke_timeout)
+    if proposal_id and report.get("status") == "SUCCEEDED":
+        from aeos.core.db import session_factory
+        from aeos.proposals import facade as proposals
+
+        # _transition may close *session* for a live migration; record the link in a fresh unit of work.
+        with session_factory()() as s:
+            proposals.link_release(s, proposal_id, release_id, actor=actor_label)
+            s.commit()
+        report["proposal_id"] = proposal_id
+    return report
 
 
 def rollback(

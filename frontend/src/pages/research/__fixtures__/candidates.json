@@ -1,430 +1,456 @@
 {
- "items": [
-  {
-   "id": "ea4e3823-4c86-4a8c-9300-464cbe2c5034",
-   "entry_key": "tool:copier",
-   "name": "Copier",
-   "identity": "name:copier",
-   "category": "bootstrap",
-   "urls": [],
-   "source_refs": [],
-   "evidence_level": "E0",
-   "lifecycle": "DISCOVERED",
-   "placement": "Kandidat template bootstrap; hasil tetap mengikuti manifest dan repo yang ada",
-   "identity_status": "UNVERIFIED",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "UNKNOWN",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": false,
-   "installed_or_active": "NOT_IMPLIED"
-  },
-  {
-   "id": "087fe308-7097-4d54-aabb-8bcafdbf5822",
-   "entry_key": "tool:bitbucket",
-   "name": "Bitbucket / Pipelines",
-   "identity": "url:atlassian.com/blog/bitbucket/the-atlassian-rovo-mcp-server-now-supports-bitbucket-cloud",
-   "category": "code-host",
-   "urls": [
-    "https://www.atlassian.com/blog/bitbucket/the-atlassian-rovo-mcp-server-now-supports-bitbucket-cloud",
-    "https://support.atlassian.com/bitbucket-cloud/docs/suggest-or-require-checks-before-a-merge/"
-   ],
-   "source_refs": [
-    "S14",
-    "S23"
-   ],
-   "evidence_level": "E1",
-   "lifecycle": "SOURCE_VERIFIED",
-   "placement": "OFFICE code/CI",
-   "identity_status": "STATED_BY_MASTER",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "OFFICIAL_DOCS",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": false,
-   "installed_or_active": "NOT_IMPLIED"
-  },
-  {
-   "id": "483aa856-919d-47be-a90e-aa09e6a2839f",
-   "entry_key": "tool:github",
-   "name": "GitHub / Issues / Actions",
-   "identity": "url:docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches",
-   "category": "code-host",
-   "urls": [
-    "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches",
-    "https://docs.github.com/en/account-and-profile/how-tos/contribution-settings/troubleshooting-missing-contributions"
-   ],
-   "source_refs": [
-    "S22",
-    "S36"
-   ],
-   "evidence_level": "E1",
-   "lifecycle": "SOURCE_VERIFIED",
-   "placement": "PERSONAL code/work/CI; platform repo sesuai ownership",
-   "identity_status": "STATED_BY_MASTER",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "OFFICIAL_DOCS",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": false,
-   "installed_or_active": "NOT_IMPLIED"
-  },
-  {
-   "id": "e8344f11-3eaf-4fa6-984e-a2d70c503d3e",
-   "entry_key": "tool:confluence",
-   "name": "Confluence",
-   "identity": "url:support.atlassian.com/atlassian-ai-gateway/docs/get-started-with-the-atlassian-remote-mcp-server",
-   "category": "docs-target",
-   "urls": [
-    "https://support.atlassian.com/atlassian-ai-gateway/docs/get-started-with-the-atlassian-remote-mcp-server/",
-    "https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-folder/"
-   ],
-   "source_refs": [
-    "S13",
-    "S15"
-   ],
-   "evidence_level": "E1",
-   "lifecycle": "SOURCE_VERIFIED",
-   "placement": "OFFICE docs",
-   "identity_status": "STATED_BY_MASTER",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "OFFICIAL_DOCS",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": false,
-   "installed_or_active": "NOT_IMPLIED"
-  },
-  {
-   "id": "df6f027c-923a-4140-aaea-2715db9835a9",
-   "entry_key": "tool:google-drive-docs",
-   "name": "Google Drive / Docs API",
-   "identity": "url:developers.google.com/workspace/drive/api/guides/folder",
-   "category": "docs-target",
-   "urls": [
-    "https://developers.google.com/workspace/drive/api/guides/folder",
-    "https://developers.google.com/workspace/docs/api/how-tos/overview",
-    "https://developers.google.com/workspace/drive/api/guides/api-specific-auth",
-    "https://developers.google.com/workspace/docs/api/reference/rest/v1/documents/batchUpdate",
-    "https://developers.google.com/workspace/drive/api/guides/manage-uploads",
-    "https://developers.google.com/workspace/docs/api/how-tos/images"
-   ],
-   "source_refs": [
-    "S16",
-    "S17",
-    "S18",
-    "S19",
-    "S20",
-    "S21"
-   ],
-   "evidence_level": "E1",
-   "lifecycle": "SOURCE_VERIFIED",
-   "placement": "PERSONAL folder/dokumentasi",
-   "identity_status": "STATED_BY_MASTER",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "OFFICIAL_DOCS",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": false,
-   "installed_or_active": "NOT_IMPLIED"
-  },
-  {
-   "id": "fdab5f93-29b3-4efa-a3dd-775dd1ef27d4",
-   "entry_key": "tool:promptfoo",
-   "name": "Promptfoo",
-   "identity": "name:promptfoo",
-   "category": "evaluation",
-   "urls": [],
-   "source_refs": [],
-   "evidence_level": "E0",
-   "lifecycle": "DISCOVERED",
-   "placement": "Kandidat alat untuk evaluation suite; bukan acceptance authority",
-   "identity_status": "UNVERIFIED",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "UNKNOWN",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": false,
-   "installed_or_active": "NOT_IMPLIED"
-  },
-  {
-   "id": "b1b2b1ca-fff9-4504-bd04-10ebcd2e52e4",
-   "entry_key": "tool:gastown",
-   "name": "Gas Town",
-   "identity": "github:gastownhall/gastown",
-   "category": "fleet",
-   "urls": [
-    "https://github.com/gastownhall/gastown"
-   ],
-   "source_refs": [
-    "S55"
-   ],
-   "evidence_level": "E1",
-   "lifecycle": "SOURCE_VERIFIED",
-   "placement": "Kandidat fleet/meta-harness; tidak dipasang sebagai authority paralel; perlu bukti manfaat dan boundary sebelum aktivasi",
-   "identity_status": "STATED_BY_MASTER",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "GITHUB_REPO",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45",
-    "§47"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": true,
-   "installed_or_active": "NOT_IMPLIED"
-  },
-  {
-   "id": "ca6de4b1-575e-409d-bd8a-80fcfe7f82d4",
-   "entry_key": "tool:ruflo",
-   "name": "Ruflo",
-   "identity": "github:ruvnet/ruflo",
-   "category": "fleet",
-   "urls": [
-    "https://github.com/ruvnet/ruflo"
-   ],
-   "source_refs": [
-    "S56"
-   ],
-   "evidence_level": "E1",
-   "lifecycle": "SOURCE_VERIFIED",
-   "placement": "Kandidat fleet/meta-harness; tidak dipasang sebagai authority paralel; perlu bukti manfaat dan boundary sebelum aktivasi",
-   "identity_status": "STATED_BY_MASTER",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "GITHUB_REPO",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45",
-    "§47"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": true,
-   "installed_or_active": "NOT_IMPLIED"
-  },
-  {
-   "id": "a540319b-06e2-439f-8f54-cb5e73a51a37",
-   "entry_key": "tool:litellm",
-   "name": "LiteLLM",
-   "identity": "url:docs.litellm.ai/docs/proxy/virtual_keys",
-   "category": "gateway",
-   "urls": [
-    "https://docs.litellm.ai/docs/proxy/virtual_keys"
-   ],
-   "source_refs": [
-    "S25"
-   ],
-   "evidence_level": "E1",
-   "lifecycle": "SOURCE_VERIFIED",
-   "placement": "API worker gateway ketika diperlukan; satu pemilik routing policy di AEOS",
-   "identity_status": "STATED_BY_MASTER",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "OFFICIAL_DOCS",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": false,
-   "installed_or_active": "NOT_IMPLIED"
-  },
-  {
-   "id": "ac30aa12-7f55-4d3e-b0f5-4c586d5290eb",
-   "entry_key": "tool:9router",
-   "name": "9Router",
-   "identity": "github:decolua/9router",
-   "category": "inference-route",
-   "urls": [
-    "https://github.com/decolua/9router"
-   ],
-   "source_refs": [
-    "S35"
-   ],
-   "evidence_level": "E1",
-   "lifecycle": "SOURCE_VERIFIED",
-   "placement": "Bukan default; rute berbasis session/subscription credential tidak digunakan",
-   "identity_status": "STATED_BY_MASTER",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "GITHUB_REPO",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45",
-    "§47"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": true,
-   "installed_or_active": "NOT_IMPLIED"
-  },
-  {
-   "id": "95be0abf-3fbe-4a82-8447-a1e7fff8283c",
-   "entry_key": "tool:deepseek-api",
-   "name": "DeepSeek API (provider resmi)",
-   "identity": "url:api-docs.deepseek.com",
-   "category": "inference-route",
-   "urls": [
-    "https://api-docs.deepseek.com/"
-   ],
-   "source_refs": [
-    "S10",
-    "S41",
-    "S61"
-   ],
-   "evidence_level": "E1",
-   "lifecycle": "SOURCE_VERIFIED",
-   "placement": "Route inferensi; versi yang dilayani dicatat atau UNKNOWN",
-   "identity_status": "STATED_BY_MASTER",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "OFFICIAL_DOCS",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": false,
-   "installed_or_active": "NOT_IMPLIED"
-  },
-  {
-   "id": "219db993-c1ff-456e-a816-4eb46b244bd4",
-   "entry_key": "tool:gemini-api",
-   "name": "Gemini API (provider resmi)",
-   "identity": "url:ai.google.dev/gemini-api/docs/pricing",
-   "category": "inference-route",
-   "urls": [
-    "https://ai.google.dev/gemini-api/docs/pricing",
-    "https://ai.google.dev/gemini-api/terms"
-   ],
-   "source_refs": [
-    "S09"
-   ],
-   "evidence_level": "E1",
-   "lifecycle": "SOURCE_VERIFIED",
-   "placement": "Pembanding; hanya input sesuai data terms",
-   "identity_status": "STATED_BY_MASTER",
-   "upstream_status": "NOT_CHECKED",
-   "checked_at": null,
-   "freshness": "NOT_CHECKED",
-   "research_date": "2026-10-17/18",
-   "release_date": null,
-   "component_id": null,
-   "source_kind": "OFFICIAL_DOCS",
-   "mode": "DESIGN",
-   "section_refs": [
-    "§45"
-   ],
-   "is_reference": false,
-   "latest_tag": null,
-   "update_available": null,
-   "checkable": false,
-   "installed_or_active": "NOT_IMPLIED"
-  }
- ],
- "source": "research_entries (katalog master §45/§47/§52 + entri manual)",
- "checked_at": null,
- "mode": "DESIGN",
- "lifecycles": [
-  "DISCOVERED",
-  "SOURCE_VERIFIED",
-  "CONTROLLED_EVAL",
-  "CANARY",
-  "RECOMMENDED_FOR_PROMOTION",
-  "REJECTED",
-  "DEFERRED",
-  "ENABLED",
-  "REFERENCE_ONLY"
- ],
- "evidence_limit": "Tahap riset bukan bukti instalasi/koneksi/penggunaan; E1 = kemampuan terdokumentasi, E0 = klaim komunitas.",
- "generated_at": "2026-10-18T12:09:15.075632+00:00"
+  "items": [
+    {
+      "id": "2d5522ce-a41b-4668-bc31-094db06156b4",
+      "entry_key": "tool:copier",
+      "name": "Copier",
+      "identity": "name:copier",
+      "category": "bootstrap",
+      "urls": [],
+      "source_refs": [],
+      "evidence_level": "E0",
+      "lifecycle": "DISCOVERED",
+      "placement": "Kandidat template bootstrap; hasil tetap mengikuti manifest dan repo yang ada",
+      "identity_status": "UNVERIFIED",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "UNKNOWN",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": false,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    },
+    {
+      "id": "53269112-3ef0-4cd3-93a3-4f760c041b0a",
+      "entry_key": "tool:bitbucket",
+      "name": "Bitbucket / Pipelines",
+      "identity": "url:atlassian.com/blog/bitbucket/the-atlassian-rovo-mcp-server-now-supports-bitbucket-cloud",
+      "category": "code-host",
+      "urls": [
+        "https://www.atlassian.com/blog/bitbucket/the-atlassian-rovo-mcp-server-now-supports-bitbucket-cloud",
+        "https://support.atlassian.com/bitbucket-cloud/docs/suggest-or-require-checks-before-a-merge/"
+      ],
+      "source_refs": [
+        "S14",
+        "S23"
+      ],
+      "evidence_level": "E1",
+      "lifecycle": "SOURCE_VERIFIED",
+      "placement": "OFFICE code/CI",
+      "identity_status": "STATED_BY_MASTER",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "OFFICIAL_DOCS",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": false,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    },
+    {
+      "id": "9c1e394d-61db-48c4-a129-c179eb58ef08",
+      "entry_key": "tool:github",
+      "name": "GitHub / Issues / Actions",
+      "identity": "url:docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches",
+      "category": "code-host",
+      "urls": [
+        "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches",
+        "https://docs.github.com/en/account-and-profile/how-tos/contribution-settings/troubleshooting-missing-contributions"
+      ],
+      "source_refs": [
+        "S22",
+        "S36"
+      ],
+      "evidence_level": "E1",
+      "lifecycle": "SOURCE_VERIFIED",
+      "placement": "PERSONAL code/work/CI; platform repo sesuai ownership",
+      "identity_status": "STATED_BY_MASTER",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "OFFICIAL_DOCS",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": false,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    },
+    {
+      "id": "131d537f-4786-4006-83fd-5ad36c2669c6",
+      "entry_key": "tool:confluence",
+      "name": "Confluence",
+      "identity": "url:support.atlassian.com/atlassian-ai-gateway/docs/get-started-with-the-atlassian-remote-mcp-server",
+      "category": "docs-target",
+      "urls": [
+        "https://support.atlassian.com/atlassian-ai-gateway/docs/get-started-with-the-atlassian-remote-mcp-server/",
+        "https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-folder/"
+      ],
+      "source_refs": [
+        "S13",
+        "S15"
+      ],
+      "evidence_level": "E1",
+      "lifecycle": "SOURCE_VERIFIED",
+      "placement": "OFFICE docs",
+      "identity_status": "STATED_BY_MASTER",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "OFFICIAL_DOCS",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": false,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    },
+    {
+      "id": "22d56ee1-677d-4d0a-8114-8af0235d0be1",
+      "entry_key": "tool:google-drive-docs",
+      "name": "Google Drive / Docs API",
+      "identity": "url:developers.google.com/workspace/drive/api/guides/folder",
+      "category": "docs-target",
+      "urls": [
+        "https://developers.google.com/workspace/drive/api/guides/folder",
+        "https://developers.google.com/workspace/docs/api/how-tos/overview",
+        "https://developers.google.com/workspace/drive/api/guides/api-specific-auth",
+        "https://developers.google.com/workspace/docs/api/reference/rest/v1/documents/batchUpdate",
+        "https://developers.google.com/workspace/drive/api/guides/manage-uploads",
+        "https://developers.google.com/workspace/docs/api/how-tos/images"
+      ],
+      "source_refs": [
+        "S16",
+        "S17",
+        "S18",
+        "S19",
+        "S20",
+        "S21"
+      ],
+      "evidence_level": "E1",
+      "lifecycle": "SOURCE_VERIFIED",
+      "placement": "PERSONAL folder/dokumentasi",
+      "identity_status": "STATED_BY_MASTER",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "OFFICIAL_DOCS",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": false,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    },
+    {
+      "id": "c9383676-1aa3-4e65-ad07-d9248cac67f2",
+      "entry_key": "tool:promptfoo",
+      "name": "Promptfoo",
+      "identity": "name:promptfoo",
+      "category": "evaluation",
+      "urls": [],
+      "source_refs": [],
+      "evidence_level": "E0",
+      "lifecycle": "DISCOVERED",
+      "placement": "Kandidat alat untuk evaluation suite; bukan acceptance authority",
+      "identity_status": "UNVERIFIED",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "UNKNOWN",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": false,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    },
+    {
+      "id": "fced872d-ba9d-4270-a9ec-d642cf7059ad",
+      "entry_key": "tool:gastown",
+      "name": "Gas Town",
+      "identity": "github:gastownhall/gastown",
+      "category": "fleet",
+      "urls": [
+        "https://github.com/gastownhall/gastown"
+      ],
+      "source_refs": [
+        "S55"
+      ],
+      "evidence_level": "E1",
+      "lifecycle": "SOURCE_VERIFIED",
+      "placement": "Kandidat fleet/meta-harness; tidak dipasang sebagai authority paralel; perlu bukti manfaat dan boundary sebelum aktivasi",
+      "identity_status": "STATED_BY_MASTER",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "GITHUB_REPO",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45",
+        "§47"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": true,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    },
+    {
+      "id": "5ab32311-be61-4a2e-8f0d-08f962f35220",
+      "entry_key": "tool:ruflo",
+      "name": "Ruflo",
+      "identity": "github:ruvnet/ruflo",
+      "category": "fleet",
+      "urls": [
+        "https://github.com/ruvnet/ruflo"
+      ],
+      "source_refs": [
+        "S56"
+      ],
+      "evidence_level": "E1",
+      "lifecycle": "SOURCE_VERIFIED",
+      "placement": "Kandidat fleet/meta-harness; tidak dipasang sebagai authority paralel; perlu bukti manfaat dan boundary sebelum aktivasi",
+      "identity_status": "STATED_BY_MASTER",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "GITHUB_REPO",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45",
+        "§47"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": true,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    },
+    {
+      "id": "5495a350-18be-444e-afcb-e956a802e869",
+      "entry_key": "tool:litellm",
+      "name": "LiteLLM",
+      "identity": "url:docs.litellm.ai/docs/proxy/virtual_keys",
+      "category": "gateway",
+      "urls": [
+        "https://docs.litellm.ai/docs/proxy/virtual_keys"
+      ],
+      "source_refs": [
+        "S25"
+      ],
+      "evidence_level": "E1",
+      "lifecycle": "SOURCE_VERIFIED",
+      "placement": "API worker gateway ketika diperlukan; satu pemilik routing policy di AEOS",
+      "identity_status": "STATED_BY_MASTER",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "OFFICIAL_DOCS",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": false,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    },
+    {
+      "id": "87553b22-30bf-4782-b7e3-e0e22f383e53",
+      "entry_key": "tool:9router",
+      "name": "9Router",
+      "identity": "github:decolua/9router",
+      "category": "inference-route",
+      "urls": [
+        "https://github.com/decolua/9router"
+      ],
+      "source_refs": [
+        "S35"
+      ],
+      "evidence_level": "E1",
+      "lifecycle": "SOURCE_VERIFIED",
+      "placement": "Bukan default; rute berbasis session/subscription credential tidak digunakan",
+      "identity_status": "STATED_BY_MASTER",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "GITHUB_REPO",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45",
+        "§47"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": true,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    },
+    {
+      "id": "408c3903-7935-45a2-8b08-2138abad47fd",
+      "entry_key": "tool:deepseek-api",
+      "name": "DeepSeek API (provider resmi)",
+      "identity": "url:api-docs.deepseek.com",
+      "category": "inference-route",
+      "urls": [
+        "https://api-docs.deepseek.com/"
+      ],
+      "source_refs": [
+        "S10",
+        "S41",
+        "S61"
+      ],
+      "evidence_level": "E1",
+      "lifecycle": "SOURCE_VERIFIED",
+      "placement": "Route inferensi; versi yang dilayani dicatat atau UNKNOWN",
+      "identity_status": "STATED_BY_MASTER",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "OFFICIAL_DOCS",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": false,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    },
+    {
+      "id": "80189cd1-1b60-46a1-aa64-458867ac2011",
+      "entry_key": "tool:gemini-api",
+      "name": "Gemini API (provider resmi)",
+      "identity": "url:ai.google.dev/gemini-api/docs/pricing",
+      "category": "inference-route",
+      "urls": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/terms"
+      ],
+      "source_refs": [
+        "S09"
+      ],
+      "evidence_level": "E1",
+      "lifecycle": "SOURCE_VERIFIED",
+      "placement": "Pembanding; hanya input sesuai data terms",
+      "identity_status": "STATED_BY_MASTER",
+      "upstream_status": "NOT_CHECKED",
+      "checked_at": null,
+      "reviewed_at": null,
+      "freshness": "NOT_CHECKED",
+      "research_date": "2026-10-17/18",
+      "release_date": null,
+      "component_id": null,
+      "source_kind": "OFFICIAL_DOCS",
+      "mode": "DESIGN",
+      "section_refs": [
+        "§45"
+      ],
+      "is_reference": false,
+      "latest_tag": null,
+      "update_available": null,
+      "checkable": false,
+      "platform_result": null,
+      "installed_or_active": "NOT_IMPLIED"
+    }
+  ],
+  "source": "research_entries (katalog master §45/§47/§52 + entri manual)",
+  "checked_at": null,
+  "mode": "DESIGN",
+  "lifecycles": [
+    "DISCOVERED",
+    "SOURCE_VERIFIED",
+    "CONTROLLED_EVAL",
+    "CANARY",
+    "RECOMMENDED_FOR_PROMOTION",
+    "REJECTED",
+    "DEFERRED",
+    "ENABLED",
+    "REFERENCE_ONLY"
+  ],
+  "evidence_limit": "Tahap riset bukan bukti instalasi/koneksi/penggunaan; E1 = kemampuan terdokumentasi, E0 = klaim komunitas; hasil platform ini (E2/E3) hanya dari trial/outcome tercatat. Peringkat GitHub Trending tidak dapat diverifikasi langsung; daftar ini kurasi repositori resmi/relevan dan diskusi yang berhasil dibaca, bukan klaim mencakup semua repo trending atau bahwa popularitas membuktikan kualitas.",
+  "conclusion": "Kesimpulan 18 Okt 2026: belum ada bukti DLY AEOS mengungguli seluruh metode developer atau tooling yang dibahas komunitas; rekomendasi adalah sintesis pola yang sesuai constraint pengguna.",
+  "coverage_limit": "Peringkat GitHub Trending tidak dapat diverifikasi langsung; daftar ini kurasi repositori resmi/relevan dan diskusi yang berhasil dibaca, bukan klaim mencakup semua repo trending atau bahwa popularitas membuktikan kualitas.",
+  "generated_at": "2026-10-19T01:19:45.177410+00:00"
 }

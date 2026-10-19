@@ -87,9 +87,37 @@ def test_every_section_47_comparison_row_is_covered():
 
 def test_section_46_practices_are_present():
     keys = {e.key for e in catalog.ENTRIES}
-    for k in ("practice:google-sre-slo", "practice:stripe-idempotency", "practice:owasp-asvs",
-              "practice:anthropic-long-running-harness", "practice:repo-organization"):
+    practices = ("practice:google-sre-slo", "practice:stripe-idempotency", "practice:owasp-asvs",
+                 "practice:anthropic-long-running-harness", "practice:repo-organization")
+    for k in practices:
         assert k in keys
+    # §46 "Rujukan tidak berarti afiliasi, tenaga kerja asli, atau jaminan mutu setara perusahaan tersebut."
+    for k in practices:
+        e = next(x for x in catalog.ENTRIES if x.key == k)
+        assert "Rujukan tidak berarti afiliasi, tenaga kerja asli, atau jaminan mutu setara" in e.limitations, k
+    assert [e.key for e in catalog.ENTRIES if e.category == "practice"] == list(practices)
+
+
+def test_9router_recheck_is_documented_without_adopting_the_claims():
+    """§47 18 Oct re-check: OAuth/fallback documented; unlimited/never-hit-limits/savings not adopted."""
+    e = next(x for x in catalog.ENTRIES if x.key == "tool:9router")
+    assert any("OAuth dan fitur fallback" in c and "18 Oktober" in c for c in e.claims)
+    assert "unlimited/never hit limits/savings TIDAK diadopsi" in e.limitations
+    assert "ketentuan Anthropic dan pengujian batas tetap acuan" in e.limitations
+
+
+def test_paper_and_community_version_limits_are_kept_and_never_predictions():
+    """§47: arXiv v3, repo v2.2.x and dated community discussions stay statements, never predictions/results."""
+    e = next(x for x in catalog.ENTRIES if x.key == "research:agent-scaling")
+    text = " ".join(e.claims) + " " + e.limitations
+    assert "arXiv v3" in text and "v2.2.x" in text and "tidak dijadikan prediksi" in text
+    assert e.evidence == "E1" and e.lifecycle == "REFERENCE_ONLY"
+    forum = next(x for x in catalog.ENTRIES if x.key == "research:forum-discussions")
+    assert forum.evidence == "E0" and "tidak dipromosikan menjadi hasil controlled" in forum.limitations
+    refs = catalog.REF_BY_ID
+    assert (refs["S62"].source_date, refs["S63"].source_date, refs["S41"].source_date) == \
+        ("2026-04-22", "2026-04-03", "2026-10-17")
+    assert all(refs[s].evidence == "E0" for s in ("S41", "S42", "S43", "S61", "S62", "S63"))
 
 
 def test_references_S01_to_S64_match_master_exactly():

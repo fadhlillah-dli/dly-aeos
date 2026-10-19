@@ -56,6 +56,9 @@ OWNER_RECORDED_KINDS = frozenset({"EXCEPTION"})
 DECISION_KINDS = frozenset({
     "APPROVAL", "REJECTION", "REVISION_REQUEST", "EXCEPTION", "ADR", "POLICY", "TRIAL", "PROMOTION",
     "RISK_ACCEPTANCE", "PUBLICATION", "DOMAIN_SELECTION", "ROUTE_ACTIVATION", "BUDGET", "WRITE_ENABLEMENT",
+    # §10 "Policy & Decision Registry: rollback decision": a human rollback of a change proposal, bound to the
+    # proposal + accepted candidate hash and the rollback/restore operation that actually ran (ADR-0082).
+    "ROLLBACK",
 })
 # Kinds a human may record through the generic decision endpoint. APPROVAL/REJECTION/REVISION are
 # recorded only through the plan decision endpoint, bound to an exact PlanVersion + hash.

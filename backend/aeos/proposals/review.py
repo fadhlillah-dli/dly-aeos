@@ -3,15 +3,18 @@
 Baseline/impact come from the inventory (ComponentReference + typed relations + observations);
 source identity from the research registry; anything not derivable is UNKNOWN — never guessed.
 The optional Claude recommendation (item 8) receives only generic public metadata and is DATA,
-never owner approval (§19, §39).
+never owner approval (§19, §39). Every record read here is scoped to the proposal's domain
+(snapshots, usage, drift): one domain's records never shape the other domain's package (§23, §35).
 """
 
 from __future__ import annotations
 
 import json
+import re
+from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from aeos.core.enums import Domain
@@ -21,6 +24,7 @@ from aeos.core.timeutil import utcnow
 from aeos.models.decisions import ArchitectureSnapshot
 from aeos.models.inventory import ComponentObservation, ComponentReference, ComponentRelation
 from aeos.models.research import ChangeProposal, EvalSuite, ResearchEntry
+from aeos.research import advisories
 
 UNKNOWN = "UNKNOWN"
 # §50 "Nama repo ambigu atau sumber tidak terverifikasi -> UNVERIFIED dan blocked admission";
@@ -50,6 +54,18 @@ CATEGORY_SUITES = {
     "mcp-runtime": ["eval.independent-readonly-reviews"],
     "model": ["eval.small-bugfix", "eval.feature-fe-api", "eval.docs-only-change"],
 }
+# Research category -> inventory component kinds that already provide that capability (ADD overlap).
+CATEGORY_KINDS = {
+    "worker-engine": ("worker-engine",), "inference-route": ("model-provider", "model-gateway"),
+    "gateway": ("model-gateway",), "retrieval": ("mcp-server",), "mcp-runtime": ("mcp-server",),
+    "skills": ("skill-library",), "role-method": ("skill-library", "method-reference"),
+    "orchestration": ("orchestrator",), "fleet": ("orchestrator",), "workflow": ("orchestrator",),
+    "secrets": ("secret-store",), "observability": ("observability",), "evaluation": ("evaluation", "test-tool"),
+    "model": ("model-provider",), "metering": ("observability",), "security-tools": ("test-tool",),
+}
+DATA_CLASSES = ("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED")
+LEDGER_WINDOW = timedelta(days=30)
+_PERCENT = re.compile(r"[~±+-]?\d+(?:[.,]\d+)?\s*(?:[-\u2013]|sampai|to)?\s*\d*(?:[.,]\d+)?\s*%")
 
 CLAUDE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -75,6 +91,29 @@ CLAUDE_SCHEMA: dict[str, Any] = {
 }
 
 
+def _norm_kind(kind: str | None) -> str:
+    return (kind or "").strip().lower().replace("_", "-")
+
+
+def _tokens(text: str | None) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", (text or "").lower()) if t}
+
+
+# --------------------------------------------------------------------------- snapshots (domain-scoped)
+
+
+def snapshot_in_domain(snap: ArchitectureSnapshot, domain: str | None) -> bool:
+    """Same scope rule as ``aeos.inventory.snapshots``: a snapshot belongs to the domain it was taken in."""
+    return ((snap.refs or {}).get("scope") or {}).get("domain") == domain
+
+
+def latest_snapshot(session: Session, domain: str | None) -> ArchitectureSnapshot | None:
+    for snap in session.scalars(select(ArchitectureSnapshot).order_by(ArchitectureSnapshot.created_at.desc())):
+        if snapshot_in_domain(snap, domain):
+            return snap
+    return None
+
+
 # --------------------------------------------------------------------------- baseline / candidate
 
 
@@ -98,10 +137,33 @@ def _latest_observations(session: Session, component_id: str) -> dict[str, dict[
 
 def _rel_view(r: ComponentRelation) -> dict[str, Any]:
     return {"source_id": r.source_id, "target_id": r.target_id, "relation": r.relation, "lens": r.lens,
-            "provenance": r.provenance, "data": r.data_description, "boundary": r.boundary}
+            "provenance": r.provenance, "data": r.data_description, "boundary": r.boundary,
+            "identity_ref": r.identity_ref}
 
 
-def component_baseline(session: Session, component_id: str) -> dict[str, Any]:
+def _known_issues(session: Session, component_id: str, domain: str | None) -> list[dict[str, Any]]:
+    """§39 item 3 "kekurangan yang sudah tercatat": registry limitations of the component's entries and
+    open inventory drift findings visible in this domain (never the other domain's findings)."""
+    out: list[dict[str, Any]] = []
+    for e in session.scalars(select(ResearchEntry).where(ResearchEntry.component_id == component_id)):
+        if e.submitted_domain not in (None, domain) or not (e.limitations or "").strip():
+            continue
+        out.append({"source": "research_registry", "ref": e.entry_key or e.id, "issue": e.limitations[:400]})
+    try:
+        from aeos.models.inventory_ext import DriftFinding
+
+        scopes = ["PLATFORM", *([domain] if domain else [])]
+        for f in session.scalars(select(DriftFinding).where(DriftFinding.component_id == component_id,
+                                                            DriftFinding.status == "OPEN",
+                                                            DriftFinding.domain_scope.in_(scopes))):
+            out.append({"source": "inventory_drift", "ref": f.id, "issue": f"{f.drift_class}: {f.summary}"[:400],
+                        "severity": f.severity})
+    except (ImportError, ModuleNotFoundError):  # pragma: no cover - inventory ships with the foundation
+        pass
+    return out
+
+
+def component_baseline(session: Session, component_id: str, *, domain: str | None = None) -> dict[str, Any]:
     try:
         from aeos.inventory import facade as inventory
 
@@ -115,37 +177,44 @@ def component_baseline(session: Session, component_id: str) -> dict[str, Any]:
     obs = _latest_observations(session, component_id)
     return {
         "component_id": comp.component_id, "status": "KNOWN", "name": comp.name, "friendly_name": comp.friendly_name,
-        "kind": comp.kind, "function": comp.function or UNKNOWN, "usage_role": comp.usage_role,
-        "requirement": comp.requirement, "design_label": comp.design_label, "approved_pin": comp.approved_pin or UNKNOWN,
-        "manifest_hash": comp.manifest_hash or UNKNOWN, "admission_status": comp.admission_status,
-        "enablement": comp.enablement, "lifecycle_final": comp.lifecycle_final, "source_url": comp.source_url,
-        "upstream_identity": comp.upstream_identity, "identity_verified": comp.identity_verified, "owner": comp.owner,
-        "license": comp.license or UNKNOWN, "access": comp.access or {}, "cost": comp.cost or {},
-        "operations": comp.operations or {}, "decision_refs": comp.decision_refs or [], "mode": comp.mode,
+        "kind": comp.kind, "category": comp.category, "function": comp.function or UNKNOWN,
+        "usage_role": comp.usage_role, "requirement": comp.requirement, "design_label": comp.design_label,
+        "approved_pin": comp.approved_pin or UNKNOWN, "manifest_hash": comp.manifest_hash or UNKNOWN,
+        "admission_status": comp.admission_status, "enablement": comp.enablement, "lifecycle_final": comp.lifecycle_final,
+        "source_url": comp.source_url, "upstream_identity": comp.upstream_identity,
+        "identity_verified": comp.identity_verified, "owner": comp.owner, "license": comp.license or UNKNOWN,
+        "access": comp.access or {}, "cost": comp.cost or {}, "operations": comp.operations or {},
+        "capability_tests": comp.capability_tests or [], "decision_refs": comp.decision_refs or [], "mode": comp.mode,
         "consumers": [_rel_view(r) for r in inbound], "dependencies": [_rel_view(r) for r in outbound],
-        "observations": obs,
+        "observations": obs, "known_issues": _known_issues(session, component_id, domain),
         "evidence_note": ("Observasi terakhir per dimensi (§38); desain/katalog bukan bukti instalasi."
                           if obs else "Belum ada observasi; status runtime UNKNOWN."),
     }
 
 
-def _baseline_fingerprint(b: dict[str, Any]) -> dict[str, Any]:
+FINGERPRINT_FIELDS = ("component_id", "approved_pin", "manifest_hash", "admission_status", "enablement",
+                      "lifecycle_final", "design_label", "access", "requirement")
+
+
+def baseline_fingerprint(b: dict[str, Any]) -> dict[str, Any]:
     if b.get("status") != "KNOWN":
         return {"component_id": b["component_id"], "status": b.get("status")}
     rels = sorted((r["source_id"], r["target_id"], r["relation"], r["lens"]) for r in b["consumers"] + b["dependencies"]
                   if r["lens"] in ("DESIGN", "CONFIG"))
     observed = {d: (b["observations"].get(d) or {}).get("observed_version") for d in ("installation", "configuration")}
-    return {k: b.get(k) for k in ("component_id", "approved_pin", "manifest_hash", "admission_status", "enablement",
-                                  "lifecycle_final", "design_label", "access", "requirement")} | {
-        "relations": rels, "observed_versions": observed}
+    return {k: b.get(k) for k in FINGERPRINT_FIELDS} | {"relations": rels, "observed_versions": observed}
+
+
+_baseline_fingerprint = baseline_fingerprint  # kept for existing importers
 
 
 def compute_baseline(session: Session, p: ChangeProposal) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
-    comps = [component_baseline(session, cid) for cid in sorted(set(p.existing_component_ids or []))]
-    fingerprint: dict[str, Any] = {"kind": p.kind, "components": [_baseline_fingerprint(b) for b in comps]}
+    comps = [component_baseline(session, cid, domain=p.domain) for cid in sorted(set(p.existing_component_ids or []))]
+    fingerprint: dict[str, Any] = {"kind": p.kind, "components": [baseline_fingerprint(b) for b in comps]}
     snapshot = None
     if not comps:
-        snap = session.scalar(select(ArchitectureSnapshot).order_by(ArchitectureSnapshot.created_at.desc()))
+        # Only a snapshot taken in the proposal's own domain is its architecture baseline (§23, §35, §41).
+        snap = latest_snapshot(session, p.domain)
         snapshot = {"id": snap.id, "label": snap.label, "snapshot_hash": snap.snapshot_hash} if snap else None
         fingerprint["architecture_snapshot"] = snapshot["snapshot_hash"] if snapshot else None
     return comps, content_hash(fingerprint), {"architecture_snapshot": snapshot}
@@ -167,10 +236,24 @@ def compute_candidate(session: Session, p: ChangeProposal, children: list[Change
         "parts": sorted((c.id, c.kind, tuple(sorted(c.canonical_identities or [])), c.candidate_pin or UNKNOWN)
                         for c in children),
     }
+    from aeos.proposals.plan import bound_part
+
+    bound = bound_part(p.owner_plan)
+    if bound:
+        # Acceptance, owner, cutover/rollback and canary plans are part of what the owner approves: changing
+        # them re-binds every decision (§40 "authority terkait harus dinilai ulang"). Execution progress
+        # (REMOVE closure, canary evidence) is recorded outside the hash.
+        cand["owner_plan"] = bound
     return cand, content_hash(cand)
 
 
 # --------------------------------------------------------------------------- items
+
+
+def _advisory(e: ResearchEntry | None, pin: str | None) -> dict[str, Any]:
+    if e is None:
+        return advisories.summary(None, pin)
+    return advisories.summary(e.upstream or {}, pin or e.source_version)
 
 
 def _source_identity(session: Session, p: ChangeProposal) -> list[dict[str, Any]]:
@@ -185,6 +268,7 @@ def _source_identity(session: Session, p: ChangeProposal) -> list[dict[str, Any]
             status = "VERIFIED_LIVE"
         else:
             status = e.identity_status
+        adv = _advisory(e, p.candidate_pin)
         out.append({
             "identity": ident, "status": status, "research_entry_id": e.id if e else None,
             "research_lifecycle": e.lifecycle if e else None, "evidence_level": e.evidence_level if e else "E0",
@@ -193,12 +277,19 @@ def _source_identity(session: Session, p: ChangeProposal) -> list[dict[str, Any]
             "latest_release": up.get("latest_release") or UNKNOWN,
             "maintainer": up.get("owner") or (e.maintainer if e and e.maintainer else UNKNOWN),
             "license": up.get("license_spdx") or (e.license if e and e.license else UNKNOWN),
-            "distribution": UNKNOWN, "terms": e.data_terms if e and e.data_terms else UNKNOWN,
+            "distribution": (e.distribution if e and e.distribution else UNKNOWN),
+            "terms": e.data_terms if e and e.data_terms else UNKNOWN,
+            "terms_checked_at": e.terms_checked_at.isoformat() if e and e.terms_checked_at else None,
             "checked_at": e.checked_at.isoformat() if e and e.checked_at else None,
             "research_date": e.research_date if e else None,
+            "advisories": adv,
             "flags": [f for f, on in (("IDENTITY_CHANGED", status == "CHANGED"), ("ARCHIVED", bool(up.get("archived"))),
                                       ("FORK", bool(up.get("fork"))), ("NOT_FOUND", status == "NOT_FOUND"),
-                                      ("NOT_CHECKED", not (e and e.checked_at))) if on],
+                                      ("NOT_CHECKED", not (e and e.checked_at)),
+                                      ("ADVISORIES_AFFECTED", adv["status"] == "AFFECTED"),
+                                      ("ADVISORIES_OPEN", adv["status"] in ("AFFECTED", "UNKNOWN")),
+                                      ("ADVISORIES_NOT_CHECKED", adv["status"] in ("NOT_CHECKED", "ERROR")),
+                                      ("TERMS_NOT_CHECKED", not (e and e.terms_checked_at))) if on],
             "note": ("Trust tidak diwariskan dari identitas lama." if status == "CHANGED" else
                      "Dinyatakan pada master (riset 17-18 Okt 2026), belum dicek live." if status == "STATED_BY_MASTER"
                      else ""),
@@ -208,15 +299,20 @@ def _source_identity(session: Session, p: ChangeProposal) -> list[dict[str, Any]
 
 def source_identity_gate(session: Session, p: ChangeProposal) -> dict[str, Any]:
     """Live admission gate for TRIAL/PROMOTION: every candidate source identity must be stated by the
-    master, configured by the owner, internal, or checked live - never UNVERIFIED/CHANGED/NOT_FOUND."""
-    blocking = [{"identity": s["identity"], "status": s["status"]} for s in _source_identity(session, p)
+    master, configured by the owner, internal, or checked live - never UNVERIFIED/CHANGED/NOT_FOUND - and
+    the candidate version must not lie inside a published vulnerable range (§40 "known security advisories")."""
+    rows = _source_identity(session, p)
+    blocking = [{"identity": s["identity"], "status": s["status"]} for s in rows
                 if s["status"] in ADMISSION_BLOCKING_IDENTITY]
-    return {
-        "status": "BLOCKED" if blocking else "OK", "blocking": blocking,
-        "remedy": ("Tambahkan URL kanonik di Research & Technology Registry lalu jalankan Check Upstream "
-                   "(atau perbaiki sumber usulan), kemudian review ulang. Tidak ada URL/lisensi/versi yang ditebak.")
-        if blocking else None,
-    }
+    blocking += [{"identity": s["identity"], "status": "ADVISORY_AFFECTED", "advisories": s["advisories"]["affected"]}
+                 for s in rows if s["advisories"]["status"] == "AFFECTED"]
+    remedy = None
+    if blocking:
+        remedy = ("Tambahkan URL kanonik di Research & Technology Registry lalu jalankan Check Upstream "
+                  "(atau perbaiki sumber usulan), kemudian review ulang. Tidak ada URL/lisensi/versi yang ditebak.")
+        if any(b["status"] == "ADVISORY_AFFECTED" for b in blocking):
+            remedy += " Untuk advisory: pin versi yang sudah di-patch lalu review ulang."
+    return {"status": "BLOCKED" if blocking else "OK", "blocking": blocking, "remedy": remedy}
 
 
 def _alternatives(p: ChangeProposal, has_existing: bool) -> list[dict[str, Any]]:
@@ -254,57 +350,137 @@ def _dimension(items: list[str], known_source: str | None, unknown_reason: str) 
     return {"status": UNKNOWN, "items": [], "source": None, "reason": unknown_reason}
 
 
-def _impact(p: ChangeProposal, baseline: list[dict[str, Any]]) -> dict[str, Any]:
+def _related_component(session: Session, cid: str) -> ComponentReference | None:
+    return session.get(ComponentReference, cid)
+
+
+def _route(session: Session, key: str) -> Any:
+    from aeos.models.routing import ModelRoute
+
+    return session.scalar(select(ModelRoute).where(ModelRoute.route_key == key))
+
+
+def _is_ci(comp: ComponentReference | None) -> bool:
+    """A CI system from its inventory record (category + name tokens), not a substring of an id."""
+    if comp is None:
+        return False
+    toks = _tokens(f"{comp.component_id} {comp.name}")
+    return "CI" in (comp.category or "") and bool(toks & {"ci", "actions", "pipelines", "pipeline"})
+
+
+def _is_docs(comp: ComponentReference | None) -> bool:
+    if comp is None:
+        return False
+    toks = _tokens(f"{comp.component_id} {comp.name}")
+    return bool(toks & {"docs", "confluence", "drive", "publisher", "documentation"})
+
+
+def _rollback_reference(p: ChangeProposal) -> str | None:
+    rp = (p.owner_plan or {}).get("replacement") or {}
+    return rp.get("backup_restore_evidence_id") or rp.get("rollback_evidence_id")
+
+
+def _impact(session: Session, p: ChangeProposal, baseline: list[dict[str, Any]]) -> dict[str, Any]:
     known = [b for b in baseline if b.get("status") == "KNOWN"]
-    consumers, data, policy, secrets, egress, ci, ops, pins = [], [], [], [], [], [], [], []
+    consumers, data, policy, secrets, egress, ci, docs, ops, pins = [], [], [], [], [], [], [], [], []
+    tools, identity, resources, hooks = [], [], [], []
     for b in known:
         for r in b["consumers"]:
             if r["relation"] in CONSUMER_RELATIONS:
                 consumers.append(f"{r['source_id']} {r['relation']} {b['component_id']} ({r['lens']})")
             if r["relation"] in DATA_RELATIONS:
                 data.append(f"{r['source_id']} {r['relation']} {b['component_id']}")
+            if _is_ci(_related_component(session, r["source_id"])):
+                ci.append(f"{r['source_id']} {r['relation']} {b['component_id']}")
+            if r.get("identity_ref"):
+                identity.append(f"{r['source_id']} -> {b['component_id']}: identity {r['identity_ref']} (referensi)")
         for r in b["dependencies"]:
+            target = _related_component(session, r["target_id"])
             if r["relation"] in DATA_RELATIONS:
                 data.append(f"{b['component_id']} {r['relation']} {r['target_id']}: {r['data'] or 'data UNKNOWN'}")
             if r["relation"] in POLICY_RELATIONS:
                 policy.append(f"{b['component_id']} governed_by {r['target_id']}")
             if r["boundary"]:
                 policy.append(f"{b['component_id']} -> {r['target_id']} melalui boundary {r['boundary']}")
-            if "ci" in r["target_id"].lower():
+            if _is_ci(target):
                 ci.append(f"{b['component_id']} {r['relation']} {r['target_id']}")
+            if r["relation"] == "publishes_to" or _is_docs(target):
+                docs.append(f"{b['component_id']} {r['relation']} {r['target_id']}")
+            if r.get("identity_ref"):
+                identity.append(f"{b['component_id']} -> {r['target_id']}: identity {r['identity_ref']} (referensi)")
         acc = b.get("access") or {}
         for key in ("credential_ref", "credential_refs", "secrets", "identity_ref"):
             if acc.get(key):
                 secrets.append(f"{b['component_id']}: {key} (referensi, tanpa nilai)")
+        if acc.get("identity_ref"):
+            identity.append(f"{b['component_id']}: identity_ref {acc['identity_ref']} (referensi)")
         if acc.get("egress"):
             egress.append(f"{b['component_id']}: egress {acc.get('egress')}")
         if acc.get("tools") or acc.get("paths"):
             policy.append(f"{b['component_id']}: tools/paths terbatas {acc.get('tools') or ''} {acc.get('paths') or ''}".strip())
+        if acc.get("tools") or acc.get("operations"):
+            tools.append(f"{b['component_id']}: tools {acc.get('tools') or []} operasi {acc.get('operations') or []}")
+        for t in b.get("capability_tests") or []:
+            name = t.get("name") or t.get("id") if isinstance(t, dict) else str(t)
+            tools.append(f"{b['component_id']}: capability test {name}")
+        for key in ("resources", "hardware", "resource"):
+            if acc.get(key):
+                resources.append(f"{b['component_id']}: {key} {acc.get(key)}")
+        for key in ("hooks", "prompts", "memory"):
+            if acc.get(key):
+                hooks.append(f"{b['component_id']}: {key} {acc.get(key)}")
+        route = _route(session, b["component_id"])
+        if route is not None:  # a model route as the changed component: its tool set and prompt/context config
+            if route.tool_set:
+                tools.append(f"{route.route_key}: tool set {route.tool_set}")
+            for label, val in (("prompt_revision", route.prompt_revision), ("context_strategy", route.context_strategy)):
+                if val:
+                    hooks.append(f"{route.route_key}: {label} {val}")
         if b.get("operations"):
             ops.append(f"{b['component_id']}: {', '.join(sorted(b['operations']))}")
         pins.append(f"{b['component_id']}: konfigurasi diterima sebelumnya pin={b['approved_pin']}")
+    if isinstance((p.limits or {}).get("resource"), str) and p.limits["resource"] != UNKNOWN:
+        resources.append(f"batas resource usulan: {p.limits['resource']}")
     unknown_comp = [b["component_id"] for b in baseline if b.get("status") != "KNOWN"]
     replacing = p.kind in ("REPLACE", "UPGRADE", "REMOVE")
-    rollback_items = list(pins)
-    if replacing:
-        rollback_items.append("Rollback kode tidak menjamin rollback data; status data rollback harus dinyatakan")
-    if p.kind == "ADD":
-        rollback_items.append("Nonaktifkan/lepas kandidat; credential kandidat dicabut setelah consumer dipindahkan")
+    tested = _rollback_reference(p)
+    rollback: dict[str, Any]
+    if tested:
+        rollback = {"status": "KNOWN", "items": [f"Prosedur rollback/restore teruji: bukti {tested}"],
+                    "source": "owner_plan.replacement (bukti terpercaya)", "targets": pins}
+    else:
+        rollback = {"status": UNKNOWN, "items": [], "source": None, "targets": pins,
+                    "reason": "Belum ada prosedur rollback/restore yang teruji; pin lama hanya target rollback, "
+                              "bukan bukti bahwa rollback tersedia" + (
+                                  ". Rollback kode tidak menjamin rollback data" if replacing else "")}
     src = "inventory relations/access"
     return {
         "contracts": _dimension(consumers, src, "Consumer/kontrak belum terpetakan di inventaris"),
+        "schema_api_tools": _dimension(tools, src, "Schema/API/nama tool kandidat belum dianalisis; UNKNOWN"),
+        "hooks_prompts_memory": _dimension(hooks, src, "Hooks/prompt/memory yang tersentuh UNKNOWN; perubahan "
+                                                       "ini adalah system change yang perlu eval/decision"),
+        "identity": _dimension(identity, src, "Identity/credential reference yang terdampak UNKNOWN"),
+        "resource_hardware": _dimension(resources, src, "Kebutuhan resource/hardware kandidat UNKNOWN"),
         "state_data_migration": _dimension(data, src, "Relasi data/state belum terpetakan; migration UNKNOWN"
                                            + ("; backup + restore test diperlukan" if replacing else "")),
         "own_auth_cap_enf": _dimension(policy, src, "Policy/OWN-AUTH-CAP-ENF kandidat belum direview"),
         "secrets": _dimension(secrets, src, "Kebutuhan credential kandidat UNKNOWN; tidak ada credential baru dari review"),
         "egress": _dimension(egress, src, "Egress kandidat UNKNOWN; tidak ada egress baru dari review"),
-        "ci": _dimension(ci, src, "Dampak CI UNKNOWN"),
-        "docs": {"status": "KNOWN", "items": ["Inventory, ADR/decision dan dokumentasi terdampak diperbarui saat outcome"],
-                 "source": "§41"},
+        "ci": _dimension(ci, "inventory relations ke komponen CI", "Dampak CI UNKNOWN (tidak ada relasi ke komponen CI)"),
+        "docs": _dimension(docs, "inventory relations ke target dokumentasi",
+                           "Target docs/ADR belum terpetakan di inventaris; pembaruan docs dilacak pada hasil (item 10)"),
         "operations": _dimension(ops, src, "Runbook restart/uninstall/recovery kandidat UNKNOWN"),
-        "rollback": _dimension(rollback_items, src, "Rencana rollback UNKNOWN"),
+        "rollback": rollback,
         "unmapped_components": unknown_comp,
     }
+
+
+def owner_acceptance(p: ChangeProposal) -> list[dict[str, Any]]:
+    return [dict(a) for a in (p.owner_plan or {}).get("acceptance") or [] if isinstance(a, dict)]
+
+
+def measurable_acceptance(p: ChangeProposal) -> list[dict[str, Any]]:
+    return [a for a in owner_acceptance(p) if a.get("metric") and a.get("threshold") not in (None, "")]
 
 
 def _experiment_plan(session: Session, p: ChangeProposal, baseline_hash: str, candidate_hash: str,
@@ -323,6 +499,8 @@ def _experiment_plan(session: Session, p: ChangeProposal, baseline_hash: str, ca
                 suggested.append(s)
     existing = {s.suite_key for s in session.scalars(select(EvalSuite))}
     limits = p.limits or {}
+    declared = owner_acceptance(p)
+    canary = (p.owner_plan or {}).get("canary")
     plan: dict[str, Any] = {
         "type": "CONTROLLED_TRIAL", "install": "hanya di sandbox trial setelah TRIAL_APPROVE",
         "pins": {"baseline_hash": baseline_hash, "candidate_pin": p.candidate_pin or UNKNOWN,
@@ -338,70 +516,357 @@ def _experiment_plan(session: Session, p: ChangeProposal, baseline_hash: str, ca
             "Scope adherence dan privacy/secret behavior lulus", "Correctness, recovery/cancel teruji",
             "Overhead operasional terukur", "Manfaat diukur terhadap accepted outcomes dan oversight, bukan output lebih pendek",
         ],
+        "owner_acceptance": declared or UNKNOWN,
+        "acceptance_status": ("DECLARED" if measurable_acceptance(p) else
+                              "NOT_MEASURABLE" if declared else "NOT_DECLARED"),
         "stop_conditions": ["Budget/attempt/time cap tercapai", "Pelanggaran scope/permission", "Secret terdeteksi pada output",
                             "Gate security/authority/evidence gagal", "Owner membatalkan"],
         "collector_verifier": "Verifier independen (trusted collector); worker tidak menilai hasilnya sendiri",
         "canary": "Hanya jika aman dan reversible; bila tidak, sandbox/staging dan cutover berizin (tanpa dual authority)",
+        "canary_plan": canary or None,
     }
     return plan
 
 
 def replacement_plan(p: ChangeProposal, baseline: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """§40 "Rencana penggantian dan rollback" for REPLACE/UPGRADE/REMOVE; unknown items stay UNKNOWN."""
+    """§40 "Rencana penggantian dan rollback" for REPLACE/UPGRADE/REMOVE; owner-declared values (owner_plan)
+    replace UNKNOWN; anything not declared stays UNKNOWN."""
     if p.kind not in ("REPLACE", "UPGRADE", "REMOVE"):
         return None
+    owner = (p.owner_plan or {}).get("replacement") or {}
     known = [b for b in baseline if b.get("status") == "KNOWN"]
     consumers = sorted({r["source_id"] for b in known for r in b["consumers"]})
-    creds = [b["component_id"] for b in known if any((b.get("access") or {}).get(k) for k in
-                                                       ("credential_ref", "credential_refs", "secrets"))]
+    creds: list[str] = []
+    for b in known:
+        acc = b.get("access") or {}
+        refs = acc.get("credential_refs") if isinstance(acc.get("credential_refs"), list) else []
+        for ref in [acc.get("credential_ref"), acc.get("identity_ref"), *refs]:
+            if ref:
+                creds.append(f"{b['component_id']}: {ref}")
+    egress = [f"{b['component_id']}: {(b.get('access') or {}).get('egress')}" for b in known
+              if (b.get("access") or {}).get("egress")]
+    data_state = any(r["relation"] in DATA_RELATIONS for b in known for r in b["consumers"] + b["dependencies"])
+    restore = owner.get("backup_restore_evidence_id")
+    named_owners = sorted({str(b["owner"]) for b in known if str(b.get("owner") or "").strip()})
+    ops_owner = owner.get("operations_owner") or (p.owner_plan or {}).get("operations_owner")
     return {
         "previous_accepted_configuration": [{"component_id": b["component_id"], "approved_pin": b["approved_pin"],
                                              "manifest_hash": b["manifest_hash"]} for b in known] or UNKNOWN,
-        "version_schema_data_compatibility": UNKNOWN,
-        "backup_and_restore_evidence": "Diperlukan sebelum cutover bila ada state/data; belum ada bukti restore",
+        "version_schema_data_compatibility": owner.get("version_schema_data_compatibility") or UNKNOWN,
+        "backup_and_restore_evidence": (f"Bukti restore teruji: {restore}" if restore else
+                                        "Diperlukan sebelum cutover bila ada state/data; belum ada bukti restore"),
+        "data_state_relations": data_state,
         "adapter_consumer_changes": consumers or UNKNOWN,
-        "credential_egress_changes": ({"credential_refs_to_revoke_after_cutover": creds} if creds else UNKNOWN),
-        "cutover_order": UNKNOWN,
+        "credential_egress_changes": ({"credential_refs_to_revoke_after_cutover": creds, "egress": egress}
+                                      if creds or egress else UNKNOWN),
+        "cutover_order": owner.get("cutover_order") or UNKNOWN,
+        "retire_old_version_after": owner.get("retire_old_version_after") or UNKNOWN,
         "coexistence": "Hanya bila aman; tidak menjalankan dua scheduler/vault/credential authority aktif",
+        "coexistence_safe": owner.get("coexistence_safe") if owner.get("coexistence_safe") is not None else UNKNOWN,
         "success_stop_criteria": "Acceptance trial + stop conditions pada rencana eksperimen",
-        "operations_owner": sorted({str(b.get("owner") or "owner") for b in known}) or UNKNOWN,
-        "rollback_or_forward_recovery": UNKNOWN,
+        "operations_owner": ([ops_owner] if ops_owner else named_owners) or UNKNOWN,
+        "rollback_or_forward_recovery": owner.get("rollback_or_forward_recovery") or UNKNOWN,
         "notes": ["Rollback kode tidak menjamin rollback data; migration irreversible memerlukan keputusan owner",
                   "Credential komponen lama dicabut setelah consumer sah dipindahkan; revoke/uninstall bukan efek review",
                   "Jika berhasil, komponen lama ditandai deprecated/retired, tidak dihapus dari history"],
     }
 
 
+def removal_plan(p: ChangeProposal, baseline: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """§39 REMOVE/RETIRE: dependency, data, identity, job and support items that must be closed. Each item
+    is OPEN until the owner records it CLOSED or WAIVED (``owner_plan.removal``)."""
+    if p.kind != "REMOVE":
+        return None
+    closure = (p.owner_plan or {}).get("removal") or {}
+    items: list[dict[str, Any]] = []
+
+    def add(item_id: str, kind: str, text: str) -> None:
+        if any(i["id"] == item_id for i in items):
+            return
+        rec = closure.get(item_id) if isinstance(closure.get(item_id), dict) else {}
+        items.append({"id": item_id, "kind": kind, "item": text, "status": rec.get("status") or "OPEN",
+                      "note": rec.get("note") or "", "evidence_id": rec.get("evidence_id")})
+
+    for b in baseline:
+        cid = b["component_id"]
+        if b.get("status") != "KNOWN":
+            add(f"unknown:{cid}", "unknown", f"{cid} tidak terpetakan di inventaris; dependency/data/identity UNKNOWN")
+            continue
+        for r in b["consumers"]:
+            if r["relation"] in CONSUMER_RELATIONS:
+                add(f"consumer:{r['source_id']}:{r['relation']}", "dependency",
+                    f"Pindahkan/putuskan consumer {r['source_id']} ({r['relation']} {cid})")
+            if r["relation"] in DATA_RELATIONS:
+                add(f"data:{r['source_id']}:{cid}", "data", f"Retensi/penghapusan data yang ditulis {r['source_id']} ke {cid}")
+        for r in b["dependencies"]:
+            if r["relation"] in DATA_RELATIONS:
+                add(f"data:{cid}:{r['target_id']}", "data",
+                    f"Retensi/penghapusan data {cid} di {r['target_id']}: {r['data'] or 'data UNKNOWN'}")
+            if r.get("identity_ref"):
+                add(f"identity:{r['identity_ref']}", "identity", f"Cabut identity/credential ref {r['identity_ref']} "
+                                                                 "(referensi, tanpa nilai)")
+        acc = b.get("access") or {}
+        refs = acc.get("credential_refs") if isinstance(acc.get("credential_refs"), list) else []
+        for ref in [acc.get("credential_ref"), acc.get("identity_ref"), *refs]:
+            if ref:
+                add(f"identity:{ref}", "identity", f"Cabut identity/credential ref {ref} (referensi, tanpa nilai)")
+        operations = b.get("operations") or {}
+        for key in ("uninstall", "retention", "recovery"):
+            if operations.get(key):
+                add(f"job:{cid}:{key}", "job", f"{key} {cid}: {operations[key]}")
+        add(f"support:{cid}", "support", f"Tutup support/runbook {cid} (status {operations.get('support_status', UNKNOWN)})")
+    open_items = [i["id"] for i in items if i["status"] not in ("CLOSED", "WAIVED")]
+    return {"items": items, "open": open_items, "status": "OPEN" if open_items else "CLOSED",
+            "rule": "Semua item harus CLOSED atau WAIVED (keputusan owner) sebelum outcome ACCEPTED."}
+
+
+def upgrade_delta(p: ChangeProposal, baseline: list[dict[str, Any]], entries: list[ResearchEntry]) -> dict[str, Any] | None:
+    """§39 UPGRADE: explicit delta of version/publisher/license/terms/schema for the same component."""
+    if p.kind != "UPGRADE":
+        return None
+    out = []
+    for b in baseline:
+        if b.get("status") != "KNOWN":
+            out.append({"component_id": b["component_id"], "status": UNKNOWN, "reason": b.get("reason")})
+            continue
+        e = next((x for x in entries if x.component_id == b["component_id"]), entries[0] if entries else None)
+        up = (e.upstream or {}) if e else {}
+        publisher_to = up.get("owner") or (up.get("observed_identity") if up.get("observed_identity") else None)
+        publisher_from = b.get("upstream_identity")
+        license_to = up.get("license_spdx") or (e.license if e and e.license else None)
+        dep = up.get("dependency_diff") if isinstance(up.get("dependency_diff"), dict) else None
+        dep_ok = dep and dep.get("head") == p.candidate_pin
+
+        def pair(a: Any, b2: Any) -> dict[str, Any]:
+            a = a if a not in (None, "", UNKNOWN) else UNKNOWN
+            b2 = b2 if b2 not in (None, "", UNKNOWN) else UNKNOWN
+            return {"from": a, "to": b2, "changed": UNKNOWN if UNKNOWN in (a, b2) else a != b2}
+
+        out.append({
+            "component_id": b["component_id"], "status": "KNOWN",
+            "version": pair(b.get("approved_pin"), p.candidate_pin),
+            "publisher": pair(publisher_from, publisher_to),
+            "license": pair(b.get("license"), license_to),
+            "terms": {"from": UNKNOWN, "to": (e.data_terms if e and e.data_terms else UNKNOWN),
+                      "checked_at": e.terms_checked_at.isoformat() if e and e.terms_checked_at else None},
+            "schema": ({"status": "DEPENDENCY_DIFF", "base": dep.get("base"), "head": dep.get("head"),
+                        "checked_at": dep.get("checked_at"),
+                        "changed_files": [m["path"] for m in dep.get("manifests") or [] if m.get("status") != "UNCHANGED"]}
+                       if dep_ok else {"status": UNKNOWN,
+                                       "note": "Belum ada contract/dependency diff untuk pin kandidat ini"}),
+        })
+    return {"components": out, "source": "inventory (baseline) + research registry (kandidat)"}
+
+
+def overlap_components(session: Session, p: ChangeProposal, entries: list[ResearchEntry]) -> list[dict[str, Any]]:
+    """§39 ADD "mengapa komponen yang ada tidak cukup?": existing inventory components of the same kind."""
+    if p.kind not in ("ADD", "COMPARE"):
+        return []
+    kinds: set[str] = set()
+    for e in entries:
+        kinds |= set(CATEGORY_KINDS.get(e.category, ()))
+        kinds.add(_norm_kind(e.category))
+    if not kinds:
+        return []
+    out = []
+    for c in session.scalars(select(ComponentReference).order_by(ComponentReference.component_id)):
+        if c.tombstoned_at is not None or _norm_kind(c.kind) not in kinds:
+            continue
+        if c.component_id in (p.candidate_component_ids or []):
+            continue
+        out.append({"component_id": c.component_id, "name": c.name, "kind": c.kind, "enablement": c.enablement,
+                    "admission_status": c.admission_status, "function": c.function or UNKNOWN})
+    return out[:25]
+
+
+def security_privacy(session: Session, p: ChangeProposal, *, data_class: str | None = None) -> dict[str, Any]:
+    """§39 "Security/Privacy menilai batas data/akses": code assessment of the candidate's data/access
+    boundary. PASS / UNKNOWN / BLOCKED per dimension; a BLOCKED dimension blocks TRIAL/PROMOTE."""
+    dims: dict[str, dict[str, Any]] = {}
+    dc = (data_class or (p.limits or {}).get("data_class") or "").upper()
+    office = p.domain == Domain.OFFICE.value
+    office_pol: dict[str, Any] = {}
+    if office:
+        try:
+            from aeos.policy import facade as policy
+
+            office_pol = policy.office_policy(session) or {}
+        except Exception:
+            office_pol = {}
+    if dc not in DATA_CLASSES:
+        dims["data_class"] = {"status": UNKNOWN, "note": "Kelas data trial belum dinyatakan"}
+    elif dc == "RESTRICTED":
+        dims["data_class"] = {"status": "BLOCKED", "note": "Data RESTRICTED tidak boleh masuk trial kandidat"}
+    elif dc == "CONFIDENTIAL":
+        dims["data_class"] = {"status": UNKNOWN,
+                              "note": "CONFIDENTIAL hanya lewat route yang data terms-nya mengizinkan; cek saat admission"}
+    else:
+        dims["data_class"] = {"status": "PASS", "note": f"Kelas data {dc}"}
+    if office:
+        allowed = office_pol.get("external_worker_allowed") is True
+        dims["office_eligibility"] = {"status": "PASS" if allowed else "BLOCKED",
+                                      "note": "OFFICE default deny: external_worker_allowed=false sampai ada otorisasi "
+                                              "perusahaan" if not allowed else "Otorisasi OFFICE tercatat"}
+    else:
+        dims["office_eligibility"] = {"status": "NOT_APPLICABLE", "note": "Proposal PERSONAL"}
+    cands = [c for c in (session.get(ComponentReference, cid) for cid in p.candidate_component_ids or []) if c]
+    if not cands:
+        dims["egress"] = {"status": UNKNOWN, "note": "Kandidat belum terdaftar di inventaris; egress UNKNOWN"}
+        dims["credentials"] = {"status": UNKNOWN, "note": "Kandidat belum terdaftar; kebutuhan credential UNKNOWN"}
+    else:
+        hosts = [str(h) for c in cands for h in ((c.access or {}).get("egress") or [])]
+        wild = [h for h in hosts if "*" in h or h.strip().lower() in ("any", "all", "internet")]
+        dims["egress"] = ({"status": "BLOCKED", "note": f"Egress tak terbatas: {wild}"} if wild else
+                          {"status": "PASS", "items": hosts, "note": "Egress eksplisit dari inventaris"} if hosts else
+                          {"status": "PASS", "items": [], "note": "Tidak ada egress tercatat (default deny)"})
+        refs: list[str] = []
+        for c in cands:
+            acc = c.access or {}
+            more = acc.get("credential_refs") if isinstance(acc.get("credential_refs"), list) else []
+            refs += [str(r) for r in [acc.get("credential_ref"), acc.get("identity_ref"), *more] if r]
+        try:
+            from aeos.core.redaction import redact_text
+
+            leaked = [r for r in refs if redact_text(r) != r]
+        except Exception:
+            leaked = []
+        dims["credentials"] = ({"status": "BLOCKED", "note": "Nilai menyerupai secret pada access record"} if leaked else
+                               {"status": "PASS", "items": refs, "note": "Hanya referensi credential (tanpa nilai)"})
+    entries = research_entries(session, p)
+    if not entries:
+        dims["terms"] = {"status": UNKNOWN, "note": "Tidak ada entri registry; data/terms UNKNOWN"}
+        dims["advisories"] = {"status": UNKNOWN, "note": "Tidak ada entri registry; advisory UNKNOWN"}
+    else:
+        missing = [e.name for e in entries if not (e.data_terms or "").strip()]
+        dims["terms"] = ({"status": UNKNOWN, "note": f"Data terms belum tercatat: {', '.join(missing)}"} if missing else
+                         {"status": "PASS", "note": "Data terms tercatat di registry"})
+        advs = [_advisory(e, p.candidate_pin) for e in entries]
+        if any(a["status"] == "AFFECTED" for a in advs):
+            dims["advisories"] = {"status": "BLOCKED", "note": "Versi kandidat berada dalam rentang advisory rentan",
+                                  "items": sorted({i for a in advs for i in a["affected"]})}
+        elif all(a["status"] in ("NONE", "NOT_AFFECTED") for a in advs):
+            dims["advisories"] = {"status": "PASS", "note": "Advisory dicek; tidak mencakup versi kandidat"}
+        else:
+            dims["advisories"] = {"status": UNKNOWN, "note": "Advisory belum dicek atau rentang tidak dapat dievaluasi"}
+    statuses = [d["status"] for d in dims.values()]
+    overall = "BLOCKED" if "BLOCKED" in statuses else UNKNOWN if UNKNOWN in statuses else "PASS"
+    return {"status": overall, "dimensions": dims, "performed_by": "kode (inventaris + registry + policy OFFICE)",
+            "rule": "BLOCKED memblokir TRIAL/PROMOTE; UNKNOWN tetap terlihat dan bukan PASS."}
+
+
 def review_contributors(package: dict[str, Any]) -> list[dict[str, str]]:
     """§39 "Pembagian pekerjaan review": roles are activated as needed; most work is code, not LLM."""
     claude = package.get("claude_review", {}).get("status", "NOT_REQUESTED")
+    sp = (package.get("security_privacy") or {}).get("status", UNKNOWN)
     return [
-        {"role": "Research / Supply-chain Analyst", "performed_by": "kode: registry riset + Check Upstream (metadata publik)"},
+        {"role": "Research / Supply-chain Analyst",
+         "performed_by": "kode: registry riset + Check Upstream + advisory + dependency diff (metadata publik)"},
         {"role": "Integration / Architecture specialist", "performed_by": "kode: relasi & consumer dari inventaris"},
-        {"role": "Security / Privacy", "performed_by": "BELUM DIJALANKAN — review keamanan/akses data manusia atau reviewer terpisah diperlukan"},
-        {"role": "FinOps", "performed_by": "kode: ledger/pricing; UNKNOWN bila data tidak ada"},
+        {"role": "Security / Privacy",
+         "performed_by": f"kode: batas data/akses/egress/credential/advisory kandidat — status {sp}; "
+                         "reviewer manusia dapat ditambahkan"},
+        {"role": "FinOps", "performed_by": "kode: ledger 30 hari (ACTUAL) + harga ModelRoute (ESTIMATE); UNKNOWN bila tidak ada data"},
         {"role": "Model Evaluation", "performed_by": "kode: saran suite; hasil hanya dari EvalRun tercatat"},
-        {"role": "Claude tertinggi (checkpoint)", "performed_by": f"opsional — status {claude}; findings bukan approval"},
+        {"role": "Claude tertinggi (checkpoint)", "performed_by": f"opsional pra-trial — status {claude}; checkpoint bukti "
+                                                                 "wajib sebelum PROMOTE; findings bukan approval"},
         {"role": "Owner", "performed_by": "manusia: tujuan, biaya, residual risk dan target (keputusan terikat hash)"},
     ]
 
 
-def _cost(p: ChangeProposal, baseline: list[dict[str, Any]]) -> dict[str, Any]:
+def _ledger_actual(session: Session, component_ids: list[str], domain: str | None) -> dict[str, Any] | None:
+    from aeos.models.cost import UsageLedgerEntry
+
+    if not component_ids:
+        return None
+    since = utcnow() - LEDGER_WINDOW
+    rows = list(session.scalars(select(UsageLedgerEntry).where(
+        UsageLedgerEntry.at >= since, UsageLedgerEntry.mode == "LIVE",
+        or_(UsageLedgerEntry.provider.in_(component_ids), UsageLedgerEntry.route_key.in_(component_ids)),
+        or_(UsageLedgerEntry.domain.is_(None), UsageLedgerEntry.domain == domain))))
+    if not rows:
+        return None
+    by_cat: dict[str, list[Any]] = {}
+    for r in rows:
+        by_cat.setdefault(r.category, []).append(r)
+    return {"rows": rows, "by_category": by_cat}
+
+
+def _actual_item(rows: list[Any], label: str) -> dict[str, Any]:
+    known = [float(r.cost_usd) for r in rows if r.cost_usd is not None]
+    unknown = len(rows) - len(known)
+    qty = [float(r.quantity) for r in rows if r.quantity is not None]
+    tokens = sum(int(r.input_tokens or 0) + int(r.output_tokens or 0) for r in rows)
+    item: dict[str, Any] = {"value": round(sum(known), 6) if known else None, "basis": "ACTUAL",
+                            "note": f"{label}: {len(rows)} entri ledger LIVE 30 hari"
+                                    + (f"; {unknown} entri tanpa biaya (UNKNOWN) tidak dijumlahkan" if unknown else ""),
+                            "entries": len(rows), "unknown_entries": unknown, "source": "usage_ledger (30 hari)"}
+    if qty:
+        item["quantity"] = round(sum(qty), 3)
+        item["unit"] = next((r.unit for r in rows if r.unit), None)
+    if tokens:
+        item["quantity"] = tokens
+        item["unit"] = "tokens"
+    return item
+
+
+def _route_estimate(session: Session, p: ChangeProposal) -> dict[str, Any] | None:
+    from aeos.models.routing import ModelRoute
+
+    keys = sorted(set(p.candidate_component_ids or []))
+    if not keys:
+        return None
+    routes = list(session.scalars(select(ModelRoute).where(ModelRoute.route_key.in_(keys))))
+    if not routes:
+        return None
+    prices = []
+    for r in routes:
+        pr = r.pricing or {}
+        if r.is_free == "YES":
+            prices.append(f"{r.route_key}: gratis (is_free=YES"
+                          + (f", sampai {r.free_until.isoformat()}" if r.free_until else "") + ")")
+        elif "input_per_mtok" in pr or "output_per_mtok" in pr:
+            prices.append(f"{r.route_key}: input {pr.get('input_per_mtok')} / output {pr.get('output_per_mtok')} USD per 1M token")
+        elif "prompt" in pr or "completion" in pr:
+            prices.append(f"{r.route_key}: prompt {pr.get('prompt')} / completion {pr.get('completion')} USD per token")
+    if not prices:
+        return None
+    free = all(r.is_free == "YES" for r in routes)
+    checked = [r.pricing_checked_at.isoformat() for r in routes if r.pricing_checked_at]
+    return {"value": 0.0 if free else None, "basis": "ESTIMATE",
+            "note": "Harga per unit dari ModelRoute.pricing (" + "; ".join(prices) + "); total bergantung volume trial",
+            "source": "model_routes.pricing", "pricing_checked_at": max(checked) if checked else None}
+
+
+def _cost(session: Session, p: ChangeProposal, baseline: list[dict[str, Any]]) -> dict[str, Any]:
     limits = p.limits or {}
     known_costs = {b["component_id"]: b.get("cost") for b in baseline if b.get("status") == "KNOWN" and b.get("cost")}
 
     def unknown(note: str) -> dict[str, Any]:
         return {"value": None, "basis": UNKNOWN, "note": note}
 
-    cash: dict[str, Any] = unknown("Belum ada pricing/ledger untuk kandidat")
-    if isinstance(limits.get("cost_usd"), (int, float)):
+    cash: dict[str, Any] = _route_estimate(session, p) or unknown("Belum ada pricing/ledger untuk kandidat")
+    if cash["basis"] == UNKNOWN and isinstance(limits.get("cost_usd"), (int, float)):
         cash = {"value": None, "basis": UNKNOWN, "cap_usd": limits["cost_usd"],
                 "note": "Batas yang dinyatakan pengusul; bukan estimasi biaya"}
+    actual = _ledger_actual(session, sorted(set(p.existing_component_ids or [])), p.domain)
+    by_cat = actual["by_category"] if actual else {}
+    spend_rows = [r for cat, rows in by_cat.items() if cat not in ("COMPUTE", "CI", "STORAGE", "HUMAN_TIME") for r in rows]
+
+    def cat_item(cats: tuple[str, ...], label: str, note: str) -> dict[str, Any]:
+        rows = [r for c in cats for r in by_cat.get(c, [])]
+        return _actual_item(rows, label) if rows else unknown(note)
+
     return {
-        "cash": cash, "compute": unknown("Compute kandidat belum diukur"), "ci": unknown("Menit CI belum diukur"),
-        "storage": unknown("Storage belum diukur"), "tokens": unknown("Token/context belum diukur"),
+        "cash": cash,
+        "baseline_cash_30d": _actual_item(spend_rows, "Pemakaian baseline") if spend_rows else
+        unknown("Belum ada pemakaian baseline tercatat di ledger (30 hari)"),
+        "compute": cat_item(("COMPUTE",), "Compute baseline", "Compute kandidat belum diukur"),
+        "ci": cat_item(("CI",), "Menit CI baseline", "Menit CI belum diukur"),
+        "storage": cat_item(("STORAGE",), "Storage baseline", "Storage belum diukur"),
+        "tokens": _actual_item(spend_rows, "Token baseline") if any((r.input_tokens or r.output_tokens) for r in spend_rows)
+        else unknown("Token/context belum diukur"),
         "oversight": unknown("Konsumsi review Claude belum diukur (bukan dolar)"),
-        "operations": unknown("Usaha operasi belum diperkirakan"),
+        "operations": cat_item(("HUMAN_TIME",), "Waktu operator", "Usaha operasi belum diperkirakan"),
         "migration": unknown("Usaha migrasi belum diperkirakan") if p.kind in ("REPLACE", "UPGRADE", "REMOVE")
         else {"value": None, "basis": "NOT_APPLICABLE", "note": "Tidak ada migrasi untuk ADD/COMPARE"},
         "baseline_cost_records": known_costs or UNKNOWN,
@@ -424,15 +889,26 @@ def allowed_actions(p: ChangeProposal) -> list[str]:
     return base
 
 
+SCOPE_FIELDS = ["target", "environment", "provider", "data_class", "budget_usd", "max_minutes", "max_attempts",
+                "stop_conditions", "rollback_scope"]
+
+
 def _human_decision(p: ChangeProposal, baseline_hash: str, candidate_hash: str,
-                    identity_gate: dict[str, Any]) -> dict[str, Any]:
+                    identity_gate: dict[str, Any], sp: dict[str, Any]) -> dict[str, Any]:
     blocked = identity_gate["status"] == "BLOCKED" and p.kind != "COMPARE"
     blocked_note = ([f"Identitas sumber belum terverifikasi ({', '.join(b['identity'] for b in identity_gate['blocking'])}): "
                      "TRIAL/PROMOTE diblokir. " + str(identity_gate["remedy"])] if blocked else [])
+    nexts = (["Pin candidate (versi/digest) lalu review ulang"] if not p.candidate_pin and p.kind != "COMPARE" else [])
+    if p.kind != "COMPARE" and not measurable_acceptance(p):
+        nexts.append("Tetapkan acceptance terukur (metrik + ambang) di Rencana pemilik sebelum TRIAL_APPROVE")
+    if p.kind != "COMPARE" and (not (p.problem or "").strip() or not (p.expected_benefit or "").strip()):
+        nexts.append("Isi masalah dan manfaat yang diharapkan; tanpa itu manfaat tidak dapat diuji")
+    if p.kind != "COMPARE" and sp.get("status") == "BLOCKED":
+        nexts.append("Security/Privacy BLOCKED: perbaiki batas data/akses kandidat sebelum TRIAL")
     return {
         "required": True,
         "bind": {"baseline_hash": baseline_hash, "candidate_hash": candidate_hash},
-        "scope_fields": ["target", "environment", "provider", "data_class", "budget_usd", "max_minutes", "max_attempts"],
+        "scope_fields": list(SCOPE_FIELDS),
         "options": {
             "TRIAL_APPROVE": "Izin uji terisolasi dalam scope; BUKAN promotion, tidak mengubah baseline aktif",
             "PROMOTE": "Promotion kandidat; keputusan terpisah dari trial, memerlukan bukti trial terpercaya",
@@ -443,12 +919,13 @@ def _human_decision(p: ChangeProposal, baseline_hash: str, candidate_hash: str,
         "rules": [
             "Keputusan terikat baseline_hash + candidate_hash (+ provider/data class/budget/target)",
             "Perubahan hash/target/scope membatalkan binding; keputusan harus diulang",
+            "TRIAL hanya di environment sandbox/staging (canary hanya dengan rencana canary); wajib batas waktu, "
+            "attempt, stop conditions dan rollback scope",
             "Budget tidak naik dari keputusan ini; kenaikan budget memerlukan keputusan BUDGET terpisah",
             "Pengusul/implementer/model tidak dapat memberi approval",
         ],
         "source_identity_gate": identity_gate,
-        "next_actions": (["Pin candidate (versi/digest) lalu review ulang"] if not p.candidate_pin and p.kind != "COMPARE"
-                         else []) + blocked_note + ["Pilih keputusan dan scope; sistem merekam Decision terikat hash"],
+        "next_actions": nexts + blocked_note + ["Pilih keputusan dan scope; sistem merekam Decision terikat hash"],
     }
 
 
@@ -545,24 +1022,30 @@ def build_package(session: Session, p: ChangeProposal, children: list[ChangeProp
     categories = sorted({e.category for e in entries})
     relevance = [{"name": e.name, "placement": e.placement, "relevance": e.relevance, "lifecycle": e.lifecycle}
                  for e in entries]
+    impact = _impact(session, p, baseline)
+    sp = security_privacy(session, p)
     package: dict[str, Any] = {
         "summary": {
             "kind": p.kind, "decision_question": KIND_QUESTIONS[p.kind], "problem": p.problem or UNKNOWN,
             "expected_benefit": p.expected_benefit or UNKNOWN, "relevance": relevance or UNKNOWN,
-            "plain_language": _plain_language(p, baseline, entries),
+            "plain_language": plain_language(p, baseline, entries, impact),
             "attachments": [{"attachment_id": a, "note": "lampiran adalah DATA tidak tepercaya"} for a in p.attachment_ids or []],
         },
         "source_identity": _source_identity(session, p),
         "baseline": {"components": baseline, "baseline_hash": baseline_hash, **extra,
+                     "overlap": overlap_components(session, p, entries),
                      "note": None if baseline else "Tidak ada komponen lama (ADD/COMPARE); baseline = konfigurasi berlaku"},
         "alternatives": _alternatives(p, bool(p.existing_component_ids)),
-        "impact": _impact(p, baseline),
+        "impact": impact,
         "experiment_plan": _experiment_plan(session, p, baseline_hash, candidate_hash, categories),
         "replacement_plan": replacement_plan(p, baseline),
-        "cost": _cost(p, baseline),
+        "removal_plan": removal_plan(p, baseline),
+        "upgrade_delta": upgrade_delta(p, baseline, entries),
+        "security_privacy": sp,
+        "cost": _cost(session, p, baseline),
         "claude_review": {"status": "NOT_REQUESTED",
                           "label": "Rekomendasi Claude adalah DATA review; findings bukan persetujuan pemilik"},
-        "human_decision": _human_decision(p, baseline_hash, candidate_hash, source_identity_gate(session, p)),
+        "human_decision": _human_decision(p, baseline_hash, candidate_hash, source_identity_gate(session, p), sp),
         "outcome": (p.outcome or {}).get("current") or _outcome_placeholder(),
         "parts": [{"child_id": c.id, "title": c.title, "kind": c.kind} for c in children],
         "unknown_fields": p.unknown_fields or [],
@@ -581,10 +1064,39 @@ def build_package(session: Session, p: ChangeProposal, children: list[ChangeProp
     return package, baseline_hash, candidate_hash
 
 
-def _plain_language(p: ChangeProposal, baseline: list[dict[str, Any]], entries: list[ResearchEntry]) -> list[str]:
+def _no_unmeasured_percent(text: str) -> str:
+    """§39: percentages are shown only with a measurement method and baseline. Registry text is a claim,
+    so any percentage in it is masked in the plain-language report."""
+    return _PERCENT.sub("[persentase klaim disembunyikan: belum diukur]", text)
+
+
+def plain_language(p: ChangeProposal, baseline: list[dict[str, Any]], entries: list[ResearchEntry],
+                   impact: dict[str, Any] | None = None) -> list[str]:
+    """Candidate-specific trade-offs in plain Indonesian ("menambah X, tetapi Y")."""
     out: list[str] = []
+    impact = impact or {}
+    costs: list[str] = []
+    if p.kind == "ADD":
+        costs.append("menambah dependency dan proses baru")
+    if p.kind in ("REPLACE", "UPGRADE"):
+        n = len((impact.get("contracts") or {}).get("items") or [])
+        costs.append(f"{n} consumer harus diuji/dipindahkan" if n else "consumer yang terdampak belum terpetakan")
+    if (impact.get("egress") or {}).get("status") == "KNOWN":
+        costs.append("menyentuh egress yang tercatat")
+    if (impact.get("secrets") or {}).get("status") == "KNOWN":
+        costs.append("memerlukan credential reference")
+    for e in entries:
+        gain = (e.relevance or e.placement or "").strip()
+        if gain:
+            line = f"{e.name}: {gain[:220]}"
+            if costs:
+                line += f" — tetapi {', '.join(costs)}"
+            out.append(_no_unmeasured_percent(line))
+        if (e.limitations or "").strip():
+            out.append(_no_unmeasured_percent(f"Batasan {e.name}: {e.limitations.strip()[:220]}"))
     if p.kind in ("ADD", "REPLACE", "UPGRADE"):
-        out.append("Menambah/mengubah dependency; manfaat terhadap baseline belum terbukti sampai trial terkendali.")
+        out.append("Manfaat terhadap baseline belum terbukti sampai trial terkendali; belum terbukti mengurangi "
+                   "kebutuhan review Claude.")
     if p.kind == "REMOVE":
         out.append("Menutup dependency/data/identity/job; histori dan bukti tetap disimpan.")
     if p.kind == "COMPARE":
@@ -595,6 +1107,9 @@ def _plain_language(p: ChangeProposal, baseline: list[dict[str, Any]], entries: 
         out.append("Identitas sumber belum terverifikasi; admission diblokir sampai diverifikasi.")
     out.append("Persentase penghematan/keunggulan tidak ditampilkan tanpa metode pengukuran dan baseline.")
     return out
+
+
+_plain_language = plain_language  # kept for existing importers
 
 
 def review_hash(package: dict[str, Any]) -> str:
