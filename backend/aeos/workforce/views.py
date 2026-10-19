@@ -31,7 +31,10 @@ S = ExecutionState
 STALE_HEARTBEAT_SECONDS = 60
 BLOCKING_WAIT_CODES = frozenset({"CAPABILITY_NOT_READY", "SANDBOX_NOT_READY", "ROUTE_INELIGIBLE", "AGENT_DISABLED",
                                  "OFFICE_DENIED", "PLAN_NOT_APPROVED", "DEPENDENCY_NOT_ACCEPTED", "COST_UNKNOWN",
-                                 "MODULE_UNAVAILABLE", "FAN_OUT_FORBIDDEN"})
+                                 "MODULE_UNAVAILABLE", "FAN_OUT_FORBIDDEN", "NO_ALLOWED_PATHS", "NO_EXPECTED_OUTPUT",
+                                 "ROLE_UNKNOWN", "ROLE_NOT_EVALUATED", "AGENT_OUT_OF_SCOPE", "CONTEXT_TOO_LARGE",
+                                 "UNSAFE_PATH", "FORBIDDEN_PATH_ALLOWED", "VERIFIER_UNAVAILABLE"})
+CURRENT_ACTION_LABELS = {"RUNNER": "observed tool action (runner)", "CONTROLLER": "controller status (bukan aksi tool)"}
 
 
 def _iso(dt: Any) -> str | None:
@@ -121,7 +124,14 @@ def run_row(session: Session, run: WorkerRun, *, projects: dict[str, Project] | 
         "wait_reason": run.block_reason or (te.reason if te and te.active_run_id == run.id else ""),
         "reason_code": run.outcome_code or (te.reason_code if te else ""),
         "current_action": run.current_action,
-        "current_action_source": "observed tool action (runtime)",
+        # §35: the label follows the writer (runner tool action vs controller status text), never assumed
+        "current_action_source": CURRENT_ACTION_LABELS.get(run.current_action_source or "",
+                                                           "UNKNOWN (sumber tidak tercatat)"),
+        "current_action_writer": run.current_action_source or "UNKNOWN",
+        # §35 Live Work "files/resources touched": external resources the broker touched for this run
+        "resources": [{"kind": se.kind, "target": se.target, "status": se.status, "external_url": se.external_url}
+                      for se in session.scalars(select(BrokerSideEffect).where(BrokerSideEffect.run_id == run.id)
+                                                .order_by(BrokerSideEffect.created_at).limit(25))],
         "started_at": _iso(run.started_at), "finished_at": _iso(run.finished_at),
         "last_heartbeat_at": _iso(run.last_heartbeat_at),
         "heartbeat_age_seconds": round(hb_age, 1) if hb_age is not None else None,
@@ -261,8 +271,42 @@ def _active_counts(session: Session, column: Any, *, domain: str, mode: str,
     return {k: int(n) for k, n in session.execute(q.group_by(column)) if k}
 
 
+PLANNING_STAGE_ROLES = {"PRIMARY_PLANNING": "primary-planner", "CHALLENGE_REVIEW": "planning-challenger",
+                        "SYNTHESIS": "planning-synthesizer", "FINAL_REVIEW": "final-planning-reviewer"}
+REVIEWER_KIND_ROLES = {"CLAUDE": "feature-architecture-reviewer", "SECURITY": "security-reviewer"}
+
+
+def _supervision_counts(session: Session, *, domain: str, project_ids: list[str] | None) -> dict[str, int]:
+    """§17 "slot yang punya run aktif": planning stages that are RUNNING or wait for the manual package, and
+    checkpoint/security reviews that are open (waiting for quota or the manual package), domain/project scoped."""
+    from aeos.models.planning import Plan, PlanningRun
+
+    out: dict[str, int] = {}
+    q = (select(PlanningRun.stage, func.count()).join(Plan, Plan.id == PlanningRun.plan_id)
+         .where(Plan.domain == domain, PlanningRun.status.in_(["RUNNING", "AWAITING_MANUAL"])))
+    if project_ids is not None:
+        q = q.where(PlanningRun.project_id.in_(project_ids))
+    for stage, n in session.execute(q.group_by(PlanningRun.stage)):
+        role = PLANNING_STAGE_ROLES.get(stage)
+        if role:
+            out[role] = out.get(role, 0) + int(n)
+    q = select(ReviewRecord.reviewer_kind, func.count()).where(
+        ReviewRecord.domain == domain, ReviewRecord.mode == DataMode.LIVE.value,
+        or_(ReviewRecord.status.in_(["WAITING_QUOTA", "RUNNING", "PENDING"]),
+            (ReviewRecord.status == "NEEDS_DECISION") & ReviewRecord.package_ref.is_not(None)))
+    if project_ids is not None:
+        q = q.where(ReviewRecord.project_id.in_(project_ids))
+    for kind, n in session.execute(q.group_by(ReviewRecord.reviewer_kind)):
+        role = REVIEWER_KIND_ROLES.get(kind)
+        if role:
+            out[role] = out.get(role, 0) + int(n)
+    return out
+
+
 def roles_view(session: Session, *, domain: str, project_ids: list[str] | None = None) -> dict[str, Any]:
     live = _active_counts(session, WorkerRun.role_key, domain=domain, mode=DataMode.LIVE.value, project_ids=project_ids)
+    for role, n in _supervision_counts(session, domain=domain, project_ids=project_ids).items():
+        live[role] = live.get(role, 0) + n
     demo = _active_counts(session, WorkerRun.role_key, domain=domain, mode=DataMode.DEMO.value, project_ids=project_ids)
     groups: dict[str, list[dict[str, Any]]] = {g: [] for g, _ in GROUPS}
     for r in session.scalars(select(RoleSkillPack).order_by(RoleSkillPack.name)):
@@ -273,7 +317,10 @@ def roles_view(session: Session, *, domain: str, project_ids: list[str] | None =
             "verification": r.verification, "forbidden_actions": r.forbidden_actions,
             "deterministic_service": r.deterministic_service, "engine_hint": r.engine_hint,
             "source_section": r.source_section, "version": r.version, "revision_hash": r.revision_hash,
-            "eval_status": r.eval_status, "mode": r.mode,
+            "eval_status": r.eval_status, "mode": r.mode, "inputs": r.inputs or [],
+            "example_outputs": r.example_outputs or [], "failure_modes": r.failure_modes or [],
+            "allowed_scope": r.allowed_scope or {}, "evaluation_cases": r.evaluation_cases or [],
+            "practice_sources": r.practice_sources or [],
             "active_runs": n, "demo_runs": demo.get(r.role_key, 0),
             "availability": "ACTIVE" if n else ("SERVICE" if r.deterministic_service else
                                                 "HUMAN" if r.kind == "HUMAN" else "AVAILABLE_INACTIVE"),
@@ -282,17 +329,48 @@ def roles_view(session: Session, *, domain: str, project_ids: list[str] | None =
             "note": "Org view adalah proyeksi katalog: garis organisasi tidak memberi permission atau authority."}
 
 
+def _agent_gate(session: Session, a: AgentDefinition, *, domain: str) -> tuple[bool, str]:
+    """Availability of reviewer/verifier definitions follows the gate their owning module really applies
+    (§17: the console must match what runs), not a flag nobody sets."""
+    from aeos.core.enums import Capability
+    from aeos.workforce import integrations as ext
+
+    if a.harness == "claude-native":
+        ok, reasons = ext.capability_ready(session, Capability.CAN_REVIEW_WITH_MAX, domain=domain, project_id=None)
+        return ok, "CAN_REVIEW_WITH_MAX READY" if ok else ("; ".join(reasons)[:300] or "CAN_REVIEW_WITH_MAX not READY")
+    if a.harness == "verifier-runner":
+        ok, why = ext.verifier_available()
+        return ok, "verification module present (trusted suite per project)" if ok else why
+    return bool(a.enabled), a.enabled_reason
+
+
+def _agent_in_scope(a: AgentDefinition, *, domain: str, project_ids: list[str] | None) -> bool:
+    scope = a.allowed_scope or {}
+    domains = scope.get("domains")
+    if isinstance(domains, list) and domains and domain not in domains:
+        return False
+    projects = scope.get("project_ids")
+    return not (isinstance(projects, list) and project_ids is not None and not set(projects) & set(project_ids))
+
+
 def agents_view(session: Session, *, domain: str, project_ids: list[str] | None = None) -> list[dict[str, Any]]:
     live = _active_counts(session, WorkerRun.agent_key, domain=domain, mode=DataMode.LIVE.value,
                           project_ids=project_ids)
+    sup = _supervision_counts(session, domain=domain, project_ids=project_ids)
     out = []
     for a in session.scalars(select(AgentDefinition).order_by(AgentDefinition.agent_key)):
+        if not _agent_in_scope(a, domain=domain, project_ids=project_ids):
+            continue  # §35 project/domain-scoped definitions: an agent outside the scope is not listed
+        enabled, why = _agent_gate(session, a, domain=domain)
+        active = live.get(a.agent_key, 0) + (sup.get(a.role_key, 0) if a.harness == "claude-native" else 0)
         out.append({"agent_key": a.agent_key, "role_key": a.role_key, "harness": a.harness, "description": a.description,
                     "route_policy": a.route_policy, "tools": a.tools, "limits": a.limits, "allowed_scope": a.allowed_scope,
-                    "enabled": a.enabled, "enabled_reason": a.enabled_reason, "deterministic": a.deterministic,
+                    "enabled": enabled, "enabled_reason": why, "enabled_flag": a.enabled,
+                    "enabled_source": "owning module gate" if a.harness in ("claude-native", "verifier-runner")
+                    else "owner toggle (prerequisites checked)", "deterministic": a.deterministic,
                     "revision": a.revision, "revision_hash": a.revision_hash, "mode": a.mode, "owner": a.owner,
-                    "active_runs": live.get(a.agent_key, 0),
-                    "availability": "ACTIVE" if live.get(a.agent_key) else ("ENABLED_IDLE" if a.enabled else "DISABLED")})
+                    "active_runs": active,
+                    "availability": "ACTIVE" if active else ("ENABLED_IDLE" if enabled else "DISABLED")})
     return out
 
 

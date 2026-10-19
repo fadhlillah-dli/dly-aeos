@@ -63,6 +63,8 @@ class OutcomeIn(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list, max_length=50)
     accepted_configuration: dict[str, Any] | None = None
     partial_failures: list[Any] = Field(default_factory=list, max_length=100)
+    # PARTIAL -> ACCEPTED: one {part, resolution, evidence_ids} per listed failed part (§40)
+    reconciled_failures: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
     rollback: dict[str, Any] | None = None
     notes: str = Field(default="", max_length=4000)
     before_snapshot_id: str | None = None
@@ -170,7 +172,7 @@ def record_outcome(proposal_id: str, body: OutcomeIn, db: DB, principal: AdminPr
     service.record_outcome(db, p, actor_user_id=principal.user.id, status=body.status, evidence_ids=body.evidence_ids,
                            accepted_configuration=body.accepted_configuration, partial_failures=body.partial_failures,
                            rollback=body.rollback, notes=body.notes, before_snapshot_id=body.before_snapshot_id,
-                           after_snapshot_id=body.after_snapshot_id)
+                           after_snapshot_id=body.after_snapshot_id, reconciled_failures=body.reconciled_failures)
     db.commit()
     return service.proposal_view(db, p, detail=True)
 

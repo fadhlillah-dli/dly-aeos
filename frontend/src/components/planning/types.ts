@@ -291,6 +291,10 @@ export interface DagView {
   critical_blockers: { task_key: string; state: string; reason: string; blocks: string[]; impact: number }[];
   shared_write_conflicts: { tasks: string[]; paths: string[]; serialized_by_dependency: boolean; concurrent_risk: boolean }[];
   validation_errors: Record<string, unknown>[];
+  /** Non-blocking review findings (unknown role, FE/BE split without contract, cross-feature conflict). */
+  plan_warnings?: { code: string; severity?: string; note?: string; key?: string; tasks?: string[]; feature_key?: string | null }[];
+  /** Counts from AcceptanceRecord only — never an estimated percentage (§35). */
+  progress?: { accepted_tasks: number; total_tasks: number; acceptance_criteria_total: number; criteria_with_trusted_evidence: number; basis: string };
   runtime_note?: string;
   checked_at: string;
   remedy?: string;

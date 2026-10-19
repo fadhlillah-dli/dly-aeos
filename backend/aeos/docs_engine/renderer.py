@@ -581,6 +581,12 @@ def _prd(ctx: _Ctx, f: FeatureView, parent: str) -> None:
         b.put("rollout_considerations", as_text(f.get("rollout", "rollout_considerations")))
         rel = [f"- TaskSpec `{t.task_key}` — {t.title}" for t in tasks]
         rel += [f"- RFC `{x}`" for x in rfc_ids] + [f"- TDD `{x}`" for x in tdd_ids]
+        # §28 feature approval "API/schema/design contract": the agreed interface contracts and their files
+        for c in as_list(f.raw.get("interface_contracts")):
+            if isinstance(c, dict):
+                paths = ", ".join(f"`{p}`" for p in as_list(c.get("contract_paths"))) or "path kontrak belum ditetapkan"
+                rel.append(f"- Kontrak {as_text(c.get('kind')) or 'interface'} `{as_text(c.get('key'))}` — "
+                           f"{as_text(c.get('title'))} (penyedia `{as_text(c.get('provider_task_key'))}`; {paths})")
         rel.append(f"- Test Plan `06-testing/test-plan-{f.key}`")
         b.live("related_work", _join("\n".join(rel), _live(ctx.tracker(), "Issue/work item per TaskSpec dibuat "
                                                                           "publisher dan ditautkan sebagai "

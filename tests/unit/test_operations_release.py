@@ -40,6 +40,17 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *GIT_ID, *args], check=True, capture_output=True, text=True).stdout
 
 
+def _real_head() -> str:
+    """Head of the real migration history (not hardcoded: new revisions are added by later work)."""
+    from alembic.script import ScriptDirectory
+
+    from aeos.core.migrate import alembic_config
+
+    heads = ScriptDirectory.from_config(alembic_config()).get_heads()
+    assert len(heads) == 1, heads
+    return heads[0]
+
+
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "platform"
@@ -99,7 +110,8 @@ def test_build_creates_artifact_with_provenance(settings, git_repo, db):
     assert prov["tree_hash"] == git(git_repo, "rev-parse", "HEAD^{tree}").strip()
     artifact = settings.layout.released_controller / prov["artifact"]
     assert artifact.is_file() and prov["artifact_sha256"] == release.file_sha256(artifact)
-    assert prov["schema_head"] == "0001_initial" and prov["schema_heads"] == ["0001_initial"]  # copied real history
+    head_rev = _real_head()
+    assert prov["schema_head"] == head_rev and prov["schema_heads"] == [head_rev]  # copied real history
     assert prov["builder"]["actor"] == "tester" and prov["built_at"]
     assert prov["source"]["on_main"] and prov["source"]["clean_tree"]
     again = release.build_release(settings, repo=git_repo)
@@ -230,7 +242,7 @@ def test_rollback_refused_when_database_is_ahead(settings, git_repo, db, operato
     a = release.build_release(settings, repo=git_repo)
     assert release.promote(settings, a["release_id"], **kw)["status"] == "SUCCEEDED"
     mig = git_repo / "backend" / "aeos" / "migrations" / "versions" / "r1_init.py"
-    mig.write_text('revision = "r1"\ndown_revision = "0001_initial"\n', encoding="utf-8")
+    mig.write_text(f'revision = "r1"\ndown_revision = "{_real_head()}"\n', encoding="utf-8")
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-q", "-m", "add migration")
     b = release.build_release(settings, repo=git_repo)

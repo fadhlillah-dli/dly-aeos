@@ -72,3 +72,35 @@ def scheduling_paused(session: Session) -> bool:
     from aeos.workforce.scheduler import scheduling_paused as impl
 
     return impl(session)
+
+
+# ---- additive (cluster C7, 2026-10-19): RoleSkillPack contract for the task compiler and runs ----------------
+
+
+def executor_role_keys() -> frozenset[str]:
+    """Role keys a TaskSpec may name (executor RoleSkillPacks of the §16 catalog)."""
+    from aeos.workforce.roles import executor_role_keys as impl
+
+    return impl()
+
+
+def role_revision(session: Session | None, role_key: str) -> str | None:
+    """Revision hash of an executor RoleSkillPack (None when *role_key* is not a catalog executor)."""
+    from aeos.workforce.roles import role_revision as impl
+
+    return impl(session, role_key)
+
+
+def role_contract(session: Session | None, role_key: str | None) -> dict[str, Any] | None:
+    """Competence contract of the role (inputs, outputs, boundaries, forbidden actions, verification,
+    failure modes, allowed scope, revision) — what the worker prompt and the checkpoint package carry."""
+    from aeos.workforce.roles import role_contract as impl
+
+    return impl(session, role_key)
+
+
+def refresh_role_eval_status(session: Session, role_key: str | None = None) -> int:
+    """Re-derive RoleSkillPack.eval_status from EvalRuns bound to the current revision (§46)."""
+    from aeos.workforce.roles import refresh_role_eval_status as impl
+
+    return impl(session, role_key)

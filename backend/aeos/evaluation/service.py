@@ -328,6 +328,14 @@ def record_result(session: Session, run_id: str, *, samples: list[dict[str, Any]
     run.finished_at = utcnow()
     run.started_at = run.started_at or run.finished_at
     session.flush()
+    if run.role_key:
+        # §46: the role's evaluation status follows evaluation results bound to its revision (never a title)
+        try:
+            from aeos.workforce import facade as workforce
+
+            workforce.refresh_role_eval_status(session, run.role_key)
+        except ImportError:
+            pass
     events.emit(session, source="evaluation", kind="eval.run.recorded", entity_type="eval_run", entity_id=run.id,
                 domain=run.submitted_domain, payload={"status": status, "sample_size": run.sample_size, "gates": gates,
                          "route_change": "NONE (results never change routes)"})

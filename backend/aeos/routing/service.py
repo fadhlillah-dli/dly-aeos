@@ -595,7 +595,16 @@ def activate_route(
         raise Conflict("route configuration changed since it was reviewed; reload and review again",
                        code="CONFIG_HASH_MISMATCH", details={"current": route.config_hash})
     if Domain.OFFICE.value in (route.eligible_domains or []):
-        raise ValidationFailed("OFFICE eligibility needs a recorded company authorisation (policy module)")
+        # §23: OFFICE eligibility exists only through the policy module's controlled path (company authorisation
+        # + company-approved route + owner decision bound to the route identity); anything else is refused.
+        try:
+            from aeos.policy.office_routes import office_route_authorised
+
+            authorised = office_route_authorised(session, route) is not None
+        except ImportError:  # policy module absent: fail closed
+            authorised = False
+        if not authorised:
+            raise ValidationFailed("OFFICE eligibility needs a recorded company authorisation (policy module)")
     terms = route.data_terms or {}
     if allowed_data_classes is not None:
         valid = {c.value for c in DataClassification}
