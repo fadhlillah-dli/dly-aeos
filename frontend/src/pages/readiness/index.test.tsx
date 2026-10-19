@@ -129,6 +129,39 @@ function renderPage() {
   );
 }
 
+describe("Readiness check detail (§08: a failed check opens component, evidence, dependency and remedy)", () => {
+  it("clicking a FAILED check shows the component link, the observed evidence and the remedy", async () => {
+    const failed = {
+      ...checks.items[0],
+      check_id: "host.port",
+      title: "Port lokal tersedia",
+      component_id: "dly-aeos-control-plane",
+      status: "FAILED",
+      effective_status: "FAILED",
+      stale_reason: null,
+      severity: "HIGH",
+      summary: "Port 8787 sudah dipakai proses lain.",
+      observed_evidence: { port: 8787, in_use: true },
+      error_code: "PORT_IN_USE",
+      never_run: false,
+      remediation: { operation: "Hentikan proses lain atau pilih port lain", command: "aeos serve --port 8790",
+                     source: "aeos.cli", target: "127.0.0.1:8790", privilege: "pengguna lokal" },
+      critical_for: ["CAN_OPEN_DASHBOARD"],
+    };
+    checksBody = { ...checks, items: [failed] };
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderPage();
+    await userEvent.click(await screen.findByText("Port lokal tersedia"));
+    const remedy = await screen.findByTestId("remedy-panel");
+    expect(remedy).toHaveTextContent("Hentikan proses lain atau pilih port lain");
+    expect(remedy).toHaveTextContent("aeos serve --port 8790");
+    expect(screen.getByText(/"in_use": true/)).toBeInTheDocument(); // observed (redacted) evidence
+    const componentLinks = screen.getAllByRole("link", { name: /dly-aeos-control-plane/ });
+    expect(componentLinks.some((a) => a.getAttribute("href") === "/tools/dly-aeos-control-plane")).toBe(true);
+    expect(screen.getAllByText("CAN_OPEN_DASHBOARD").length).toBeGreaterThan(0); // what depends on it
+  });
+});
+
 describe("Readiness page", () => {
   it("shows the startup run, the live sandbox gate and residual risks without turning them green", async () => {
     checksBody = {

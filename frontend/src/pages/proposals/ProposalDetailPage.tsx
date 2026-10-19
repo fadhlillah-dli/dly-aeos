@@ -10,6 +10,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, inputBase, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { absoluteTime, shortHash } from "../../lib/format";
 import { DecisionPanel } from "./DecisionPanel";
+import { CheckpointCard, LinksCard, OwnerPlanCard, PossibleDuplicates, RemovalClosure, TrialCard } from "./LifecyclePanels";
 import {
   AlternativesSection,
   BaselineSection,
@@ -19,6 +20,7 @@ import {
   ExperimentSection,
   ImpactSection,
   OutcomeSummary,
+  SecuritySection,
   SourceSection,
   SummarySection,
 } from "./ReviewSections";
@@ -79,7 +81,7 @@ function EvidenceForm({ id }: { id: string }) {
   );
 }
 
-function OutcomeForm({ id }: { id: string }) {
+function OutcomeForm({ id, criteria }: { id: string; criteria: { id: string; criterion: string }[] }) {
   const qc = useQueryClient();
   const [status, setStatus] = useState("ACCEPTED");
   const [evidence, setEvidence] = useState("");
@@ -88,6 +90,11 @@ function OutcomeForm({ id }: { id: string }) {
   const [dataRollback, setDataRollback] = useState("UNKNOWN");
   const [codeReverted, setCodeReverted] = useState(true);
   const [notes, setNotes] = useState("");
+  const [results, setResults] = useState<Record<string, { status: string; evidence_id: string }>>({});
+  const [waiver, setWaiver] = useState("");
+  const [adrs, setAdrs] = useState("");
+  const [rollbackRef, setRollbackRef] = useState("");
+  const [restoreEvidence, setRestoreEvidence] = useState("");
   const [parseError, setParseError] = useState<string | null>(null);
   const m = useMutation({
     mutationFn: (body: Record<string, unknown>) => post(`/api/proposals/${id}/outcome`, body),
@@ -110,7 +117,18 @@ function OutcomeForm({ id }: { id: string }) {
       evidence_ids: evidence.split(/[\s,]+/).filter(Boolean),
       accepted_configuration: accepted,
       partial_failures: status === "PARTIAL" ? failures.split("\n").map((x) => x.trim()).filter(Boolean) : [],
-      rollback: status === "ROLLED_BACK" ? { code_reverted: codeReverted, data_rollback: dataRollback } : null,
+      rollback:
+        status === "ROLLED_BACK"
+          ? {
+              code_reverted: codeReverted,
+              data_rollback: dataRollback,
+              reference: { audit_event_id: rollbackRef },
+              ...(restoreEvidence ? { restore_evidence_id: restoreEvidence } : {}),
+            }
+          : null,
+      acceptance_results: status === "ACCEPTED" ? results : {},
+      waiver_decision_id: waiver || null,
+      adr_keys: adrs.split(/[\s,]+/).filter(Boolean),
       notes,
     });
   };
@@ -147,6 +165,47 @@ function OutcomeForm({ id }: { id: string }) {
             <label className="flex items-center gap-2 pt-6 text-sm">
               <input type="checkbox" checked={codeReverted} onChange={(e) => setCodeReverted(e.target.checked)} /> Kode di-revert
             </label>
+            <Field label="ID audit operasi rollback/restore yang dijalankan" hint="ops.release.rollback / ops.backup.restore / inventory.manifest.load">
+              <input className={inputClass} value={rollbackRef} onChange={(e) => setRollbackRef(e.target.value)} required />
+            </Field>
+            {dataRollback === "DONE" && (
+              <Field label="ID bukti restore teruji">
+                <input className={inputClass} value={restoreEvidence} onChange={(e) => setRestoreEvidence(e.target.value)} required />
+              </Field>
+            )}
+          </>
+        )}
+        {status === "ACCEPTED" && (
+          <>
+            {criteria.map((c) => (
+              <Field key={c.id} label={`${c.id}: ${c.criterion}`}>
+                <div className="flex gap-1">
+                  <select
+                    aria-label={`Hasil ${c.id}`}
+                    className={inputClass}
+                    value={results[c.id]?.status ?? "UNKNOWN"}
+                    onChange={(e) => setResults({ ...results, [c.id]: { status: e.target.value, evidence_id: results[c.id]?.evidence_id ?? "" } })}
+                  >
+                    <option value="UNKNOWN">UNKNOWN</option>
+                    <option value="PASS">PASS</option>
+                    <option value="FAIL">FAIL</option>
+                  </select>
+                  <input
+                    aria-label={`Bukti ${c.id}`}
+                    className={inputClass}
+                    placeholder="ID bukti"
+                    value={results[c.id]?.evidence_id ?? ""}
+                    onChange={(e) => setResults({ ...results, [c.id]: { status: results[c.id]?.status ?? "UNKNOWN", evidence_id: e.target.value } })}
+                  />
+                </div>
+              </Field>
+            ))}
+            <Field label="ADR terkait (ADD/REPLACE/REMOVE)">
+              <input className={inputClass} value={adrs} onChange={(e) => setAdrs(e.target.value)} placeholder="ADR-00xx" />
+            </Field>
+            <Field label="Waiver (keputusan RISK_ACCEPTANCE) bila acceptance tidak terpenuhi">
+              <input className={inputClass} value={waiver} onChange={(e) => setWaiver(e.target.value)} />
+            </Field>
           </>
         )}
         {status === "PARTIAL" && (
@@ -251,6 +310,7 @@ export default function ProposalDetailPage() {
         source="change_proposals + inventory + research registry + decisions"
         checkedAt={p.reviewed_at}
         evidenceLimit={p.guarantees.note}
+        relatedDecisionsHref={`/decisions?target_type=change_proposal&target_id=${encodeURIComponent(p.id)}`}
         actions={
           <>
             <Link to="/proposals" className="self-center">
@@ -269,6 +329,8 @@ export default function ProposalDetailPage() {
             ["Sumber", p.source_refs.length ? p.source_refs.join(", ") : "—"],
             ["Identitas kanonik", p.canonical_identities.map((i) => <div key={i}><Mono>{i}</Mono></div>)],
             ["Komponen lama", p.existing_component_ids.length ? p.existing_component_ids.map((c) => <Link key={c} to={`/tools/${c}`} className="mr-2">{c}</Link>) : "—"],
+            ["Komponen kandidat (ditambah/pengganti)", (p.candidate_component_ids ?? []).length ? (p.candidate_component_ids ?? []).map((c) => <Link key={c} to={`/tools/${c}`} className="mr-2">{c}</Link>) : "—"],
+            ["Kapan aktif", p.delivery_dimensions?.ACTIVE?.at ? absoluteTime(p.delivery_dimensions.ACTIVE.at) : "belum aktif (tidak ada observasi ENABLED dari inventaris)"],
             ["Duplikat dari", p.duplicate_of ? <Link to={`/proposals/${p.duplicate_of}`}>{p.duplicate_of.slice(0, 8)}</Link> : "—"],
             ["Usulan duplikat yang tertaut", p.duplicates.length ? p.duplicates.map((d) => <Link key={d.id} to={`/proposals/${d.id}`} className="mr-2">{d.title}</Link>) : "—"],
             ["Field UNKNOWN", p.unknown_fields.length ? p.unknown_fields.join(", ") : "—"],
@@ -296,7 +358,8 @@ export default function ProposalDetailPage() {
             ))}
           </div>
         )}
-        {isAdmin && !p.parent_id && !["ACCEPTED", "ROLLED_BACK", "FAILED", "PARTIAL"].includes(p.status) && (
+        <PossibleDuplicates p={p} />
+        {isAdmin && !p.parent_id && !["ACCEPTED", "ROLLED_BACK", "FAILED", "PARTIAL", "PROMOTION_APPROVED"].includes(p.status) && (
           <div className="mt-4 border-t border-line pt-3">
             <ReviewControls p={p} />
           </div>
@@ -316,7 +379,14 @@ export default function ProposalDetailPage() {
           <BaselineSection pkg={pkg} />
           <AlternativesSection pkg={pkg} />
           <ImpactSection pkg={pkg} />
+          <SecuritySection pkg={pkg} />
           <ExperimentSection pkg={pkg} />
+          {pkg.removal_plan && pkg.removal_plan.items.length > 0 && (
+            <Card title="Penutupan item REMOVE (progres, tidak mengubah candidate hash)">
+              <RemovalClosure p={p} items={pkg.removal_plan.items} isAdmin={isAdmin} />
+            </Card>
+          )}
+          <OwnerPlanCard p={p} isAdmin={isAdmin} />
           <CostSection pkg={pkg} />
           <ClaudeSection pkg={pkg} />
           <ContributorsNote pkg={pkg} />
@@ -328,6 +398,9 @@ export default function ProposalDetailPage() {
               </div>
             )}
           </Card>
+          <TrialCard p={p} isAdmin={isAdmin} />
+          <CheckpointCard p={p} isAdmin={isAdmin} />
+          <LinksCard p={p} isAdmin={isAdmin} />
           <Card title={<span><span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-surface-3 text-xs">10</span>Hasil setelah implementasi</span>}>
             <OutcomeSummary pkg={{ ...pkg, outcome: p.outcome.current ?? pkg.outcome }} />
             <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -336,7 +409,17 @@ export default function ProposalDetailPage() {
                   <div className="flex items-center justify-between gap-2">
                     <Mono>{k}</Mono>
                     <StatusBadge
-                      status={["YES", "ACCEPTED", "EVIDENCE_ATTACHED", "ENABLED_IN_CONFIG"].includes(d.status) ? "CONFIGURED" : d.status === "NOT-PROVEN" ? "NOT-PROVEN" : d.status === "NO" ? "PENDING" : "UNKNOWN"}
+                      status={
+                        ["YES", "ACCEPTED", "EVIDENCE_ATTACHED", "ENABLED_IN_CONFIG", "OBSERVED_IN_CONFIG", "PUBLISHED"].includes(d.status)
+                          ? "CONFIGURED"
+                          : d.status === "NOT-PROVEN"
+                            ? "NOT-PROVEN"
+                            : ["PARTIAL", "CONFLICT"].includes(d.status)
+                              ? d.status
+                              : d.status === "NO"
+                                ? "PENDING"
+                                : "UNKNOWN"
+                      }
                       label={d.status}
                     />
                   </div>
@@ -346,7 +429,7 @@ export default function ProposalDetailPage() {
             </div>
             {isAdmin && p.kind !== "COMPARE" && ["PROMOTION_APPROVED", "ACCEPTED", "PARTIAL", "TRIAL_APPROVED", "PROMOTION_PENDING"].includes(p.status) && (
               <div className="mt-4 border-t border-line pt-3">
-                <OutcomeForm id={p.id} />
+                <OutcomeForm id={p.id} criteria={p.owner_plan?.acceptance ?? []} />
               </div>
             )}
           </Card>

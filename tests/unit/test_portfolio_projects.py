@@ -13,7 +13,7 @@ from aeos.core.enums import Domain
 from aeos.models.audit import AuditEvent
 from aeos.models.portfolio import Project
 from tests.conftest import VIEWER_PW, AuthedClient, create_viewer
-from tests.unit.test_portfolio_support import create_project
+from tests.unit.test_portfolio_support import create_project, record_retirement_decision
 
 
 def _audit(db, action: str, result: str | None = None) -> list[AuditEvent]:
@@ -151,6 +151,10 @@ def test_patch_editable_fields_and_lifecycle(personal_client: AuthedClient):
     r = personal_client.patch(f"/api/projects/{pid}", json={"lifecycle": "DELETED"})
     assert r.status_code == 422
     assert personal_client.patch(f"/api/projects/{pid}", json={"lifecycle": "RETIRING"}).status_code == 200
+    # §33: RETIRED only after the owner's final verification (RETIREMENT decision bound to the checklist)
+    r = personal_client.patch(f"/api/projects/{pid}", json={"lifecycle": "RETIRED"})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "RETIREMENT_NOT_VERIFIED"
+    record_retirement_decision(personal_client, pid)
     assert personal_client.patch(f"/api/projects/{pid}", json={"lifecycle": "RETIRED"}).status_code == 200
     r = personal_client.patch(f"/api/projects/{pid}", json={"lifecycle": "ACTIVE"})
     assert r.status_code == 409  # RETIRED is terminal; nothing is deleted

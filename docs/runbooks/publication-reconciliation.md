@@ -21,11 +21,27 @@ edit on the official document is input for a revision, it is never overwritten.
    label) and record the found external id. The publisher's reconciliation does this through its
    outbox; use the publisher CLI (`aeos publish --help`) or the publication page.
 3. **CONFLICT (revision changed)**: read the human edit, bring it into a revision request on the
-   plan, approve the new version, then publish that version. Never force-overwrite.
-4. **FAILED**: fix the cause (expired credential → [credential-rotation](credential-rotation.md);
-   missing permission → provider console), then retry only the failed operations. Successful
-   operations stay recorded and are not recreated.
-5. **Verify** in the provider UI that exactly one resource exists per logical id.
+   plan, approve the new version, then publish that version. Never force-overwrite. Once you
+   *acknowledge* the edit, the next update carries every line a human wrote in a HUMAN_GOVERNED
+   section (sign-off, approval, residual risk, decisions) into the new body under the marker
+   "Konten HUMAN_GOVERNED dari dokumen eksternal"; if such a section heading cannot be found the
+   update is refused (CONFLICT, "human-governed content would be lost") — restore the heading or
+   copy the content into the plan, then preview again.
+4. **SUPERSEDED documents** (a newer approved version dropped them) are never deleted: the preview
+   plans a revision-controlled update that adds a SUPERSEDED banner (Confluence: title prefix
+   `[SUPERSEDED]`).
+5. **Prove duplicate prevention** after an upgrade: `aeos publish idempotency-test` runs the
+   timeout/partial/replay tests against loopback fakes and records `PUBLICATION_IDEMPOTENCY_TEST`
+   evidence (naming the commit) for the Doctor check `recovery.publication_idempotency` — only on a
+   committed tree: with uncommitted changes under `backend/` or `tests/` nothing is recorded. The
+   Doctor check `recovery.queue` reports publication operations still IN_FLIGHT after the stale
+   window (and worker runs without an ACTIVE lease): reconcile those before any retry.
+6. **FAILED**: fix the cause (expired credential → [credential-rotation](credential-rotation.md);
+   missing permission → provider console; `DOCX_TOO_LARGE` → smaller visuals, preview again;
+   `CAPABILITY_NOT_READY` → fix the failing/missing Doctor check named in the error; for OFFICE the
+   company authorisation behind `CAN_USE_OFFICE_INTEGRATIONS`), then retry only the
+   failed operations. Successful operations stay recorded and are not recreated.
+7. **Verify** in the provider UI that exactly one resource exists per logical id.
 
 ## Verification
 

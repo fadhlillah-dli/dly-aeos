@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from aeos.doctor.model import CheckContext, FingerprintFn, Outcome, Remedy
+from aeos.doctor.model import CheckContext, Outcome, Remedy
 from aeos.inventory.probes import (
     clean_output,
     file_is_placeholder,
@@ -18,6 +18,9 @@ from aeos.inventory.probes import (
 )
 
 Resolver = Callable[[CheckContext], tuple[str | None, str]]
+# A FingerprintFn that always yields a fingerprint (narrower than model.FingerprintFn, still assignable to it):
+# callers such as claude._fp_claude_auth extend the result and need the non-None guarantee.
+Fingerprint = Callable[[CheckContext], dict[str, Any]]
 
 
 def resolve_binary(ctx: CheckContext, name: str, override_attr: str | None = None) -> tuple[str | None, str]:
@@ -28,7 +31,7 @@ def resolve_binary(ctx: CheckContext, name: str, override_attr: str | None = Non
     return ctx.runner.which(name), "PATH"
 
 
-def binary_fingerprint(name: str, override_attr: str | None = None, resolver: Resolver | None = None) -> FingerprintFn:
+def binary_fingerprint(name: str, override_attr: str | None = None, resolver: Resolver | None = None) -> Fingerprint:
     def fp(ctx: CheckContext) -> dict[str, Any]:
         path, lookup = resolver(ctx) if resolver else resolve_binary(ctx, name, override_attr)
         return {"binary": name, "lookup": lookup, **path_fingerprint(ctx.runner, path)}
@@ -36,7 +39,7 @@ def binary_fingerprint(name: str, override_attr: str | None = None, resolver: Re
     return fp
 
 
-def file_fingerprint(rel: str) -> FingerprintFn:
+def file_fingerprint(rel: str) -> Fingerprint:
     def fp(ctx: CheckContext) -> dict[str, Any]:
         st = ctx.runner.stat(str(ctx.repo / rel))
         return {"file": rel, **(st or {"present": False})}

@@ -1516,6 +1516,475 @@
             "description": "TaskSpec draft with every §21 field"
           }
         },
+        "feature_governance": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "feature_key": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "description": "Feature owner only if named in the input; otherwise UNKNOWN"
+              },
+              "needs_rfc": {
+                "type": "boolean",
+                "description": "true when an RFC entry with this feature_key is given"
+              },
+              "needs_tdd": {
+                "type": "boolean",
+                "description": "true when a TDD entry with this feature_key is given"
+              },
+              "personal_data": {
+                "type": "string",
+                "enum": [
+                  "UNKNOWN",
+                  "YES",
+                  "NO"
+                ],
+                "description": "Does the feature process personal data? UNKNOWN when not known"
+              },
+              "privacy": {
+                "type": "object",
+                "properties": {
+                  "processing_description": {
+                    "type": "string"
+                  },
+                  "data_types": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "necessity_proportionality": {
+                    "type": "string"
+                  },
+                  "risks_to_data_subjects": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "mitigations": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "processing_description",
+                  "data_types",
+                  "necessity_proportionality",
+                  "risks_to_data_subjects",
+                  "mitigations"
+                ],
+                "additionalProperties": false,
+                "description": "DPIA input when personal_data=YES"
+              },
+              "needs_security_assessment": {
+                "type": "boolean"
+              },
+              "security_assessment": {
+                "type": "object",
+                "properties": {
+                  "scope": {
+                    "type": "string"
+                  },
+                  "requirements": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "risks": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "mitigations": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "scope",
+                  "requirements",
+                  "risks",
+                  "mitigations"
+                ],
+                "additionalProperties": false
+              },
+              "threat_model": {
+                "type": "object",
+                "properties": {
+                  "assets": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "actors": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "trust_boundaries": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "entry_points": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "threats": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "threat": {
+                          "type": "string"
+                        },
+                        "scenario": {
+                          "type": "string"
+                        },
+                        "mitigation": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "key",
+                        "threat",
+                        "scenario",
+                        "mitigation"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "assets",
+                  "actors",
+                  "trust_boundaries",
+                  "entry_points",
+                  "threats"
+                ],
+                "additionalProperties": false,
+                "description": "Feature threat model; empty when none"
+              }
+            },
+            "required": [
+              "feature_key",
+              "owner",
+              "needs_rfc",
+              "needs_tdd",
+              "personal_data",
+              "privacy",
+              "needs_security_assessment",
+              "security_assessment",
+              "threat_model"
+            ],
+            "additionalProperties": false,
+            "description": "Per-feature approval artefacts; no findings, approvals or residual-risk acceptance"
+          },
+          "description": "One entry per feature (owner, RFC/TDD/DPIA/assessment needs)"
+        },
+        "milestone_governance": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "milestone_key": {
+                "type": "string"
+              },
+              "priority": {
+                "type": "string",
+                "enum": [
+                  "P0",
+                  "P1",
+                  "P2",
+                  "P3"
+                ]
+              },
+              "acceptance": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Milestone keys"
+              },
+              "owner": {
+                "type": "string",
+                "description": "UNKNOWN unless provided"
+              }
+            },
+            "required": [
+              "milestone_key",
+              "priority",
+              "acceptance",
+              "depends_on",
+              "owner"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "rfcs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "feature_key": {
+                "type": "string",
+                "description": "Feature key, or empty for a plan-level RFC"
+              },
+              "title": {
+                "type": "string"
+              },
+              "context_problem": {
+                "type": "string"
+              },
+              "proposal": {
+                "type": "string"
+              },
+              "goals_non_goals": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "alternatives": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "architecture_impact": {
+                "type": "string"
+              },
+              "security_impact": {
+                "type": "string"
+              },
+              "privacy_impact": {
+                "type": "string"
+              },
+              "operations_impact": {
+                "type": "string"
+              },
+              "performance_impact": {
+                "type": "string"
+              },
+              "risks_dependencies": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "migration_rollback": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "feature_key",
+              "title",
+              "context_problem",
+              "proposal",
+              "goals_non_goals",
+              "alternatives",
+              "architecture_impact",
+              "security_impact",
+              "privacy_impact",
+              "operations_impact",
+              "performance_impact",
+              "risks_dependencies",
+              "migration_rollback"
+            ],
+            "additionalProperties": false,
+            "description": "RFC proposal (decision/approval stays human)"
+          }
+        },
+        "tdds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "feature_key": {
+                "type": "string",
+                "description": "Feature key, or empty"
+              },
+              "title": {
+                "type": "string"
+              },
+              "components": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "data_model": {
+                "type": "string"
+              },
+              "data_flow": {
+                "type": "string"
+              },
+              "api_integration": {
+                "type": "string"
+              },
+              "authn_authz": {
+                "type": "string"
+              },
+              "controls": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "errors": {
+                "type": "string"
+              },
+              "logs_monitoring": {
+                "type": "string"
+              },
+              "performance": {
+                "type": "string"
+              },
+              "deployment": {
+                "type": "string"
+              },
+              "migration_rollback": {
+                "type": "string"
+              },
+              "dependencies": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "technical_risks": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "testing": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "feature_key",
+              "title",
+              "components",
+              "data_model",
+              "data_flow",
+              "api_integration",
+              "authn_authz",
+              "controls",
+              "errors",
+              "logs_monitoring",
+              "performance",
+              "deployment",
+              "migration_rollback",
+              "dependencies",
+              "technical_risks",
+              "testing"
+            ],
+            "additionalProperties": false,
+            "description": "Technical design document"
+          }
+        },
+        "interface_contracts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "api",
+                  "schema",
+                  "design_tokens",
+                  "shared_interface",
+                  "event"
+                ]
+              },
+              "feature_keys": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "provider_task_key": {
+                "type": "string",
+                "description": "Task that defines and stabilises the contract"
+              },
+              "consumer_task_keys": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Tasks built against it; each must depend on the provider task"
+              },
+              "definition": {
+                "type": "string",
+                "description": "Endpoints/schemas/tokens in short form"
+              },
+              "compatibility": {
+                "type": "string"
+              },
+              "contract_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Repository paths of the contract files, e.g. contracts/api.json"
+              }
+            },
+            "required": [
+              "key",
+              "title",
+              "kind",
+              "feature_keys",
+              "provider_task_key",
+              "consumer_task_keys",
+              "definition",
+              "compatibility",
+              "contract_paths"
+            ],
+            "additionalProperties": false,
+            "description": "Contract-first: agreed before parallel work that depends on it (§19, §22)"
+          }
+        },
         "assumptions": {
           "type": "array",
           "items": {
@@ -1620,6 +2089,11 @@
         "milestones",
         "features",
         "tasks",
+        "feature_governance",
+        "milestone_governance",
+        "rfcs",
+        "tdds",
+        "interface_contracts",
         "assumptions",
         "unknowns",
         "material_questions",

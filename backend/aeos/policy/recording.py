@@ -116,6 +116,12 @@ def record_generic_decision(
                                code="RESERVED_DETAIL_KEYS", details={"reserved": reserved})
     if exception is not None and kind != "EXCEPTION":
         raise ValidationFailed("exception presets are EXCEPTION decisions", code="EXCEPTION_TARGET_MISMATCH")
+    dedicated = catalog.DEDICATED_TARGETS.get(str(target_type or ""))
+    if dedicated:
+        # office_route / workforce decisions are recorded only where their evidence is checked (company
+        # authorisation + approved route, passing evaluation + DecisionRecord); never through this endpoint.
+        raise ValidationFailed(f"decisions on {target_type} are recorded only through {dedicated}",
+                               code="DEDICATED_ENDPOINT_REQUIRED", details={"endpoint": dedicated})
     ops = list(allowed_operations or [])
     supersede: list[Decision] = []
 

@@ -88,3 +88,44 @@ def test_pii_minimisation_detects_identifiers_but_spares_versions_and_ids():
     # opt-in through the redactor; default redaction leaves personal data untouched
     assert "[PII:EMAIL]" in redact({"note": "x " + "a" + "@b.co"}, pii=True)["note"]
     assert "@b.co" in redact({"note": "x " + "a" + "@b.co"})["note"]
+
+
+def test_pii_minimisation_never_corrupts_uuids_or_digests():
+    """§29: the audit record binding a write to its interlock check must keep operation/decision/
+    publication ids intact. Regression: the digit tail of ~0.4% of uuid4 values became [PII:CARD]."""
+    import uuid
+
+    from aeos.audit.service import record
+    from aeos.core.pii import redact_pii
+
+    known = "289f8778-6cba-415a-8323-2390263811d2"
+    assert redact_pii(known) == known
+    assert redact_pii(f"operation {known} published") == f"operation {known} published"
+    assert redact({"operation_id": known, "note": f"plan:{known}"}, pii=True) == {
+        "operation_id": known, "note": f"plan:{known}"}
+    all_digit_uuid = "12345678-1234-1234-1234-123456789012"
+    assert redact_pii(all_digit_uuid) == all_digit_uuid
+    for _ in range(10_000):
+        u = str(uuid.uuid4())
+        assert redact_pii(u) == u, u
+        assert redact_pii(f"id={u};") == f"id={u};", u
+    digest = "sha256:" + "4111111111111111" + "ab" * 24
+    assert redact_pii(digest) == digest
+    assert redact_pii("run-4111111111111111") == "run-4111111111111111"
+    # real identifiers are still minimised, including under a key that ends in _id
+    assert redact_pii("card 4111-1111-1111-1111.") == "card [PII:CARD]."
+    assert redact_pii("card 4111111111111111") == "card [PII:CARD]"
+    assert redact_pii("hp 0812-3456-7890") == "hp [PII:PHONE]"
+    assert redact({"national_id": "3174015505900001"}, pii=True) == {"national_id": "[PII:NIK]"}
+
+    class _Sess:
+        def add(self, obj):
+            self.obj = obj
+
+        def flush(self):
+            pass
+
+    s = _Sess()
+    ids = {f"k{i}": str(uuid.uuid4()) for i in range(200)}
+    ev = record(s, actor_type="user", actor_id="u", action="publication.write", details={"ids": ids, **ids})
+    assert ev.details["ids"] == ids and all(ev.details[k] == v for k, v in ids.items())

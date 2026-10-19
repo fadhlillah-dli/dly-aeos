@@ -21,9 +21,11 @@ LAGUNA = "openrouter/poolside/laguna-s-2.1:free"
 
 
 def _seed(db):
+    """Seed + what an owner terms review and a catalog refresh record (none of it is part of the identity)."""
     seed.run(db)
     for r in db.query(service.ModelRoute).all():
         r.pricing_checked_at = r.terms_checked_at = utcnow()
+        r.availability, r.availability_checked_at = "AVAILABLE", utcnow()
     db.commit()
 
 
@@ -131,6 +133,12 @@ def test_activation_conflicts_and_budget(personal_client: AuthedClient, db, monk
     r = personal_client.post(f"/api/routes/{QWEN}/activate", json={
         "mode": "APPROVED", "rationale": "paid with approved budget", "expected_config_hash": qh,
         "budget_decision_id": budget.id})
+    # a budget is not test evidence: production needs recorded EvalRuns of this configuration (§23)
+    assert r.status_code == 422 and r.json()["error"]["code"] == "TEST_EVIDENCE_REQUIRED", r.text
+    assert "no EvalRun referenced" in str(r.json()["error"]["details"]["problems"])
+    r = personal_client.post(f"/api/routes/{QWEN}/activate", json={
+        "mode": "TRIAL", "rationale": "paid trial with approved budget", "expected_config_hash": qh,
+        "budget_decision_id": budget.id})
     assert r.status_code == 200, r.text
 
 
@@ -166,6 +174,7 @@ def test_decision_view_effective_only_while_human_active_unexpired_and_current(
     r = personal_client.post(f"/api/routes/{DS}/activate", json={"mode": "TRIAL", "rationale": "pilot for slice 1",
                                                                   "expected_config_hash": h})
     assert r.status_code == 200, r.text
+    h = r.json()["route"]["config_hash"]  # the activation binds the runtime in force: the decision's hash
     detail = personal_client.get(f"/api/routes/{DS}").json()
     assert [d["effective"] for d in detail["decisions"]] == [True]
     db.expire_all()
@@ -182,11 +191,18 @@ def test_decision_view_effective_only_while_human_active_unexpired_and_current(
 
 
 def test_activation_with_same_classes_keeps_the_reviewed_hash(personal_client: AuthedClient, db, monkeypatch):
-    """Re-confirming the seeded classes (in any order) must not mint a new identity: eval results and the
-    reviewed hash stay valid. Narrowing the classes is a real change and gets a new hash."""
+    """Re-confirming the reviewed classes (in any order) must not mint a new identity: eval results and the
+    reviewed hash stay valid. Narrowing the classes is a real change and gets a new hash. (The first activation
+    binds the runtime in force - policy version, worker prompt, context strategy - which is a new identity.)"""
     install_fakes(monkeypatch)
     _seed(db)
-    h = service.get_route(db, DS).config_hash
+    h0 = service.get_route(db, DS).config_hash
+    first = personal_client.post(f"/api/routes/{DS}/activate", json={
+        "mode": "TRIAL", "rationale": "pilot for slice 1", "expected_config_hash": h0})
+    assert first.status_code == 200, first.text
+    h = first.json()["route"]["config_hash"]
+    binding = first.json()["route"]["runtime_binding"]
+    assert h != h0 and binding["status"] == "BOUND" and binding["bound"]["policy_version"].startswith("pol-")
     r = personal_client.post(f"/api/routes/{DS}/activate", json={
         "mode": "TRIAL", "rationale": "pilot for slice 1", "expected_config_hash": h,
         "allowed_data_classes": ["INTERNAL", "PUBLIC"]})
@@ -196,6 +212,48 @@ def test_activation_with_same_classes_keeps_the_reviewed_hash(personal_client: A
         "mode": "TRIAL", "rationale": "public data only now", "expected_config_hash": h,
         "allowed_data_classes": ["PUBLIC"]})
     assert r.status_code == 200 and r.json()["route"]["config_hash"] != h
+
+
+def test_approved_activation_with_recorded_evaluation_over_the_api(personal_client: AuthedClient, db, monkeypatch):
+    """§23 'diizinkan dan telah diuji' end to end over HTTP: TRIAL -> EvalRun on exactly that configuration
+    (recorded by the trusted collector) -> APPROVED referencing it -> the route view shows the tested role and
+    the rollback target; the eligibility endpoint ranks by the evaluated result."""
+    from aeos.evaluation import facade as evaluation
+    from aeos.evaluation import service as evaluation_service
+
+    install_fakes(monkeypatch)
+    _seed(db)
+    evaluation_service.seed_suites(db)
+    db.commit()
+    h0 = service.get_route(db, DS).config_hash
+    t = personal_client.post(f"/api/routes/{DS}/activate", json={"mode": "TRIAL", "rationale": "pilot for slice 1",
+                                                                  "expected_config_hash": h0})
+    h = t.json()["route"]["config_hash"]
+    route = service.get_route(db, DS)
+    cfg = {"model_id": route.model_id, "model_version": "UNKNOWN", "provider": route.provider, "provider_route": DS,
+           "harness": "opencode", "harness_version": "UNKNOWN", "prompt_revision": route.prompt_revision,
+           "tools": route.tool_set, "policy_version": route.policy_version, "context_params": {}}
+    run = personal_client.post("/api/eval/runs", json={"suite_key": "eval.small-bugfix", "configuration": cfg,
+                                                       "repetitions": 1, "limits": {"max_attempts": 2, "max_minutes": 30,
+                                                                                    "max_cost_usd": 0}})
+    assert run.status_code == 200, run.text
+    assert run.json()["route_config_hash"] == h and run.json()["route_binding"]["status"] == "ELIGIBLE"
+    evaluation.record_result(db, run.json()["id"], result_source="collector",
+                             samples=[{"sample_id": f"s{i}", "status": "ACCEPTED", "first_pass": True} for i in range(8)],
+                             gate_results={"security": "PASS", "authority": "PASS", "evidence": "PASS"})
+    db.commit()
+    r = personal_client.post(f"/api/routes/{DS}/activate", json={
+        "mode": "APPROVED", "rationale": "tested on the held-out suite", "expected_config_hash": h,
+        "eval_run_ids": [run.json()["id"]]})
+    assert r.status_code == 200, r.text
+    view = r.json()["route"]
+    assert view["status"] == "APPROVED" and view["eval_summary"]["state"] == "DIUJI"
+    assert view["eval_summary"]["roles"]["feature-implementer"]["run_ids"] == [run.json()["id"]]
+    assert view["active_decision"]["eval_run_ids"] == [run.json()["id"]]
+    assert view["active_decision"]["rollback_target"]["action"] == "DISABLE_ROUTE"
+    elig = personal_client.get("/api/routes/eligibility", params={"domain": "PERSONAL", "classification": "INTERNAL",
+                                                                 "role": "feature-implementer"}).json()
+    assert elig["eligible"][0]["route_key"] == DS and elig["eligible"][0]["basis"] == "EVAL"
 
 
 def test_list_mode_stays_design_while_seeded_rows_exist(personal_client: AuthedClient, db):

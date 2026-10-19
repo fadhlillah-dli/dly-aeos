@@ -95,6 +95,13 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 8
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: source_checkout, url: null, digest: null, channel: null, note: "Clone lokal repo platform; rilis controller dipin lewat promotion (§09). Digest artefak rilis belum ada."}
+    signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Tanda tangan commit/rilis belum diperiksa."}
+    ports:
+      - {port: 8787, host: 127.0.0.1, setting: port, purpose: "API + Control Center (loopback saja)"}
+    config_refs: ["settings:host", "settings:port", "settings:data_dir", "settings:dev_mode", "settings:extra_allowed_origins"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: "AGENTS.md (CI Windows, macOS, Linux)", note: "Kebutuhan platform AEOS; bukan klaim upstream."}
     probe:
       type: python_package
       distribution: dly-aeos
@@ -295,6 +302,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 1
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: installer, url: null, digest: null, channel: null, note: "Interpreter dipilih pemilik (python.org / package manager OS); .venv dibuat scripts/bootstrap."}
+    signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Tanda tangan installer tidak diperiksa oleh AEOS."}
+    ports: []
+    config_refs: ["file:pyproject.toml", "file:requirements.lock"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: "3.11", max_version: null, source: "pyproject.toml requires-python; ADR-0002", note: null}
     probe:
       type: python_runtime
       min_version: "3.11"
@@ -335,6 +348,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 1
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: installer, url: null, digest: null, channel: "LTS", note: "Dipasang pemilik (nodejs.org / package manager OS); hanya dibutuhkan untuk build frontend."}
+    signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Tanda tangan installer tidak diperiksa oleh AEOS."}
+    ports: []
+    config_refs: ["file:frontend/package.json", "file:frontend/package-lock.json"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: "20", max_version: null, source: "fungsi komponen ini (>=20)", note: null}
     probe:
       type: binary
       binaries:
@@ -461,6 +480,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 2
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: package_manager, url: null, digest: null, channel: "official native build", note: "Distribusi resmi Anthropic (winget Anthropic.ClaudeCode / brew cask claude-code; Linux: halaman setup resmi). Digest belum dipin."}
+    signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Authenticode/notarization tidak diperiksa oleh AEOS."}
+    ports: []
+    config_refs: ["settings:claude_binary"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: "ADR-0040", note: "Windows: hanya claude.exe native; shim .cmd/.ps1 ditolak bridge."}
     probe:
       type: binary
       binaries:
@@ -927,6 +952,36 @@ components:
     discovery: {}
     invalidators: ["secret:workers/openrouter", "secret:personal/github"]
 
+  - component_id: aeos-mcp-interface
+    kind: mcp_server
+    name: Curated AEOS MCP interface
+    friendly_name: "Antarmuka MCP AEOS terkurasi — PLANNED (belum ada)"
+    function: "Antarmuka MCP per role untuk worker (claim_task, read_context, submit_result, request_decision, read_evidence) di atas CapabilityGrant broker. Belum diimplementasikan: hanya kontrak desain."
+    why_selected: "§11, §25: kontrak operasi MCP terkurasi; ditampilkan sebagai celah desain PLANNED, bukan kemampuan aktif (ADR-0106)."
+    category: tools/context
+    domains: [PLATFORM]
+    usage_role: runtime
+    source_kind: PLATFORM_SOURCE
+    source_url: null
+    source_refs: []
+    upstream_identity: null
+    identity_verified: UNVERIFIED
+    license: null
+    requirement: OPTIONAL
+    design_label: PLANNED
+    bootstrap_order: null
+    approved_pin: null
+    probe: {type: none, reason: "PLANNED: belum ada implementasi; tidak diprobe dan tidak pernah tampil terpasang.", local_install: false}
+    capability_tests: []
+    access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
+    cost: {model: NONE, amount: null, note: null, source: null}
+    operations: {health: "Tidak berlaku (PLANNED).", restart: "Tidak berlaku.", uninstall: "Tidak berlaku.", recovery: "Tidak berlaku.", rollback: "Tidak berlaku.", retention: "Tidak berlaku.", support_status: UNKNOWN}
+    placement: "Di belakang capability broker: setiap operasi MCP per role diotorisasi oleh CapabilityGrant (READ_CONTEXT dll.) dan allow-list operasi per role (§25)."
+    relations:
+      - {target: capability-broker, relation: depends_on, data_description: "Setiap operasi MCP akan diotorisasi grant broker per run/role.", operation: NONE, boundary: "CapabilityGrant", identity_ref: null}
+    discovery: {}
+    invalidators: []
+
   - component_id: verification-review
     kind: platform_module
     name: Verification & Review
@@ -1326,6 +1381,13 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 5
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: release_asset, url: null, digest: null, channel: null, note: "Rilis resmi github:anomalyco/opencode; aset dan digest dipin setelah capability test (belum)."}
+    signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Belum diperiksa apakah rilis ditandatangani/beratestasi."}
+    ports: []
+    config_refs: ["settings:opencode_binary"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: "AGENTS.md (platform AEOS)", note: "Kebutuhan platform; dukungan upstream per OS belum diverifikasi."}
+    tool_schema_hash: null
     probe:
       type: binary
       binaries:
@@ -2631,6 +2693,13 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 3
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: release_asset, url: null, digest: null, channel: null, note: "aeos vault install mengunduh rilis resmi OpenBao dan mencocokkan SHA256 dengan checksums.txt rilis itu (versi belum dipin)."}
+    signature: {method: gpg, available: null, verified: false, verified_at: null, result: NOT_VERIFIED, note: "Tanda tangan GPG checksums.txt belum diverifikasi oleh installer (hanya SHA256)."}
+    ports:
+      - {port: 8200, host: 127.0.0.1, setting: openbao_addr, purpose: "API vault (loopback saja)"}
+    config_refs: ["settings:openbao_addr", "settings:openbao_binary", "settings:keyring_service"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: "ADR-0042", note: null}
     probe:
       type: binary
       binaries:

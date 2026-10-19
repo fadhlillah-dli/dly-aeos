@@ -171,6 +171,9 @@ DI = "DISCOVERED"
 STATED = "STATED_BY_MASTER"
 UNV = "UNVERIFIED"
 VERIFY_BEFORE_ADMISSION = "Canonical repo/distribution/version belum diverifikasi; harus dipastikan sebelum admission (tanpa URL tebakan)."
+# §46: "Rujukan tidak berarti afiliasi, tenaga kerja asli, atau jaminan mutu setara perusahaan tersebut."
+PRACTICE_LIMIT = ("Rujukan tidak berarti afiliasi, tenaga kerja asli, atau jaminan mutu setara perusahaan tersebut; "
+                  "target kualitas berupa AC, NFR, kontrol keamanan, usability dan bukti reliability.")
 
 
 def _u(*sids: str) -> tuple[str, ...]:
@@ -433,28 +436,31 @@ ENTRIES: tuple[Entry, ...] = (
           source_refs=("S60",), sections=("§23", "§52"),
           limitations="Model/quantization/inference backend/hardware membentuk konfigurasi uji tersendiri; compute/terms/eval belum diverifikasi.",
           group="Lokal/open-weight"),
-    # §46 practice references
+    # §46 practice references ("Rujukan tidak berarti afiliasi, tenaga kerja asli, atau jaminan mutu setara")
     Entry("practice:google-sre-slo", "Google SRE: SLO/error-budget-based reliability", "practice",
           "Outcome reliability dan prioritas operasi ditetapkan dari kebutuhan layanan", RO, STATED, "OFFICIAL_DOCS",
           urls=_u("S38"), source_refs=("S38",), sections=("§46",),
           claims=("Bukti dituntut: SLI yang benar-benar terukur, SLO disetujui, tindakan ketika budget terpakai.",),
-          limitations="Rujukan tidak berarti afiliasi atau jaminan mutu setara."),
+          limitations=PRACTICE_LIMIT),
     Entry("practice:stripe-idempotency", "Stripe: API idempotency", "practice",
           "Contract retry/publish tidak membuat efek eksternal duplikat", RO, STATED, "OFFICIAL_DOCS", urls=_u("S39"),
           source_refs=("S39",), sections=("§46",),
           claims=("Timeout/partial-success/replay tests sesuai semantics API tujuan.",),
-          limitations="Tidak mengasumsikan semua provider memiliki idempotency Stripe."),
+          limitations=PRACTICE_LIMIT + " Tidak mengasumsikan semua provider memiliki idempotency Stripe."),
     Entry("practice:owasp-asvs", "OWASP ASVS", "practice",
           "Requirement verifikasi keamanan dipilih sesuai aplikasi/risiko dan dipin versi", RO, STATED, "OFFICIAL_DOCS",
           urls=_u("S40"), source_refs=("S40",), sections=("§46",),
-          claims=("Test dan trace per kontrol relevan, bukan badge atau checklist saja.",)),
+          claims=("Test dan trace per kontrol relevan, bukan badge atau checklist saja.",),
+          limitations=PRACTICE_LIMIT),
     Entry("practice:anthropic-long-running-harness", "Anthropic long-running harness research", "practice",
           "Initializer, feature list, incremental implementation, explicit progress dan E2E checks", RO, STATED, "BLOG",
           urls=_u("S37"), source_refs=("S37",), sections=("§46",),
-          claims=("Bukti dituntut: satu slice selesai, accepted artifacts, regression dan startup smoke test.",)),
+          claims=("Bukti dituntut: satu slice selesai, accepted artifacts, regression dan startup smoke test.",),
+          limitations=PRACTICE_LIMIT),
     Entry("practice:repo-organization", "Repo/organization practice yang sah", "practice",
           "Existing CI, review, contract dan governance dipertahankan", RO, "INTERNAL", "PRACTICE", evidence="E0",
-          sections=("§46",), claims=("Bukti compatibility dengan consumers dan operasional nyata.",)),
+          sections=("§46",), claims=("Bukti compatibility dengan consumers dan operasional nyata.",),
+          limitations=PRACTICE_LIMIT),
     # §47 comparison rows not covered by a §45 tool entry
     Entry("research:agent-scaling", "Agent Scaling (arXiv v3 dan repo penulis)", "research",
           "Uji jumlah/topology agent per kelas tugas; jangan memakai headline lama sebagai aturan universal", RO, STATED,

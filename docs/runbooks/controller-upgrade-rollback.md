@@ -25,9 +25,13 @@ SUPER_ADMIN account.
 
 1. Make sure the working tree is clean and on the merged `main` commit:
    `git switch main && git pull --ff-only && git status`.
-2. **Build**: `aeos ops release build` — refuses dirty trees and commits that are not reachable
-   from `main`; writes the zip and `<release>.provenance.json` (commit, tree hash, artifact SHA-256,
-   schema head, built_at, builder).
+2. **Build**: `aeos ops release build` — refuses dirty trees, commits that are not reachable
+   from `main`, and commits without acceptance: trusted provider-CI PASS for that exact commit
+   (sync CI evidence first), or an owner exception
+   `aeos ops release accept --commit <full sha> --operator <you> --reason "..."`. Writes the zip,
+   the pinned UI bundle (`frontend/dist`, run `npm run build` first) and
+   `<release>.provenance.json` (commit, tree hash, artifact SHA-256, UI SHA-256, schema head,
+   acceptance basis, built_at, builder).
 3. **Review** `aeos ops release list` (integrity must be OK).
 4. **Promote**: `aeos ops release promote <release_id> --operator <your-username> --reason "..."`
    and type `promote`. The command:
@@ -37,12 +41,19 @@ SUPER_ADMIN account.
    3. takes a `pre-promote` backup and restore-tests it,
    4. smoke-tests the release in a separate process: imports the app factory from the extracted
       artifact, migrates a **copy** of the database, starts it on a temporary loopback port and
-      requires `GET /api/health` → `status: ok`,
+      requires `GET /api/health` → `status: ok`, then a functional smoke in the copy (temporary
+      admin, login, explicit PERSONAL, doctor RUNTIME run, capabilities, projects),
    5. runs live migrations only if the schema changed — this requires the server to be stopped
       (or `--force-maintenance`),
-   6. updates `ACTIVE.json`, keeping the previous release as `previous`.
+   6. updates `ACTIVE.json`, keeping the previous release as `previous` and recording the
+      runtime-config/policy-snapshot hash.
    Any failure leaves the old release active and raises a HIGH alert.
-5. **Restart** the control plane so the promoted code is what runs.
+   When the release implements a ChangeProposal, add `--proposal <proposal-id>`: the promotion is
+   refused unless that proposal holds an ACTIVE PROMOTION decision still bound to its candidate
+   (`PROPOSAL_PROMOTION_NOT_BOUND`), and the release id is recorded on the proposal (§40 "human merge
+   atau privileged promotion setelah keputusan").
+5. **Restart** the control plane: `aeos serve` (default `--release auto`) verifies and runs the
+   ACTIVE release, not the checkout; it refuses to start on any integrity failure.
 
 ## Steps — rollback
 
@@ -57,7 +68,9 @@ SUPER_ADMIN account.
 ## Verification
 
 * `aeos ops release list` shows the expected `ACTIVE` and `PREVIOUS` releases with integrity OK.
-* After restart: `GET /api/health` reports the expected version; `aeos doctor` passes core checks.
+* After restart: `GET /api/health` reports the expected version and `controller.mode = release`
+  with the ACTIVE `release_id`; `aeos doctor` passes core checks (`recovery.config_rollback` is not
+  `CONTROLLER_NOT_ACTIVE_RELEASE`).
 * `ACTIVE.json` history contains the promote/rollback entry with decision id and pre-backup id.
 
 ## Evidence
@@ -68,7 +81,8 @@ SUPER_ADMIN account.
 
 ## Known limits
 
-* The promoted artifact is a source archive; the frontend bundle (`frontend/dist`) is built from
-  the checkout by the bootstrap script. Serving the UI from the artifact itself is NOT-PROVEN.
-* The smoke test proves the app factory starts and serves `/api/health` against a migrated copy of
-  the database; it does not prove every feature works (run the test suite / CI for that).
+* The promoted artifact is a source archive run with the checkout's virtual environment. The UI
+  bundle is pinned by hash when the release is built, but that it was built from the released
+  commit is UNVERIFIED.
+* The smoke test proves the app factory starts, serves `/api/health` and a functional path against
+  a migrated copy of the database; it does not prove every feature works (run the test suite / CI).

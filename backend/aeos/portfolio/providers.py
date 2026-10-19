@@ -23,6 +23,10 @@ CONFLUENCE = "confluence"
 JIRA = "jira"
 BITBUCKET = "bitbucket"
 BITBUCKET_PIPELINES = "bitbucket-pipelines"
+# §04 "PERSONAL deployment: the chosen personal target, with owner authorisation": an owner-registered
+# staging/production target that AEOS only *observes* (delivery gates G6/G8). It is never a write provider:
+# AEOS has no deploy operation; deploying stays a human action (U-09).
+DEPLOYMENT_TARGET = "deployment-target"
 
 # domain -> provider -> allowed integration purposes (U-02..U-04, §04 table)
 INTEGRATION_PROVIDERS: dict[str, dict[str, frozenset[str]]] = {
@@ -32,6 +36,11 @@ INTEGRATION_PROVIDERS: dict[str, dict[str, frozenset[str]]] = {
         GITHUB_PROJECTS: frozenset({"roadmap"}),
         GITHUB_ACTIONS: frozenset({"ci"}),
         GOOGLE_DRIVE: frozenset({"docs"}),
+        DEPLOYMENT_TARGET: frozenset({"staging", "production"}),
+        # §01/§04 per-project environment: the owner's chosen PERSONAL staging/deploy target, named by an
+        # exact identity (container:/host:/vm:<name>). Registering it configures; deploying to it still
+        # needs a human WRITE_ENABLEMENT decision for that exact target (§04 "with owner authorisation").
+        "local-target": frozenset({"staging", "deploy"}),
     },
     Domain.OFFICE.value: {
         BITBUCKET: frozenset({"code"}),
@@ -58,6 +67,7 @@ PUBLICATION_PROVIDER: dict[str, dict[str, str]] = {
 
 # Name of the exact target identifier stored in ``ProjectIntegration.root_id``.
 ROOT_ID_NAMES: dict[str, str] = {
+    "local-target": "ENVIRONMENT_TARGET_ID",
     GOOGLE_DRIVE: "GOOGLE_DRIVE_FOLDER_ID",
     GITHUB_ISSUES: "GITHUB_REPOSITORY",
     GITHUB_REPO: "GITHUB_REPOSITORY",
@@ -65,11 +75,13 @@ ROOT_ID_NAMES: dict[str, str] = {
     CONFLUENCE: "CONFLUENCE_PROJECTS_PARENT_ID",
     JIRA: "JIRA_PROJECT_KEY",
     BITBUCKET: "BITBUCKET_REPOSITORY",
+    DEPLOYMENT_TARGET: "DEPLOYMENT_TARGET_URL",
 }
 # Google Drive root folder is optional: without it the project folder is created in My Drive.
 MY_DRIVE_ROOT = "root"
 
 LABELS: dict[str, str] = {
+    "local-target": "Target lingkungan PERSONAL (staging/deploy)",
     GOOGLE_DRIVE: "Google Drive / Google Docs",
     GITHUB_REPO: "GitHub repository",
     GITHUB_ISSUES: "GitHub Issues",
@@ -79,6 +91,7 @@ LABELS: dict[str, str] = {
     JIRA: "Jira",
     BITBUCKET: "Bitbucket",
     BITBUCKET_PIPELINES: "Bitbucket Pipelines",
+    DEPLOYMENT_TARGET: "Deployment target (staging/production, observe-only)",
 }
 
 # Default credential *references* (never values) per provider. Google: the OAuth token written by

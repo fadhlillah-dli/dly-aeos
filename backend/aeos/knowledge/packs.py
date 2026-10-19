@@ -54,25 +54,32 @@ DEFAULT_TTL_HOURS, MAX_TTL_HOURS = 168, 720
 MAX_REPO_READ_BYTES = 512 * 1024
 MIN_BUDGET, MAX_BUDGET = 1024, 200_000
 ITEM_OVERHEAD_TOKENS = 16
-INCLUDE_KINDS = ("policy", "task", "symbol", "repo_file", "code_match", "metadata", "runtime", "memory", "attachment",
-                 "research")
+INCLUDE_KINDS = ("policy", "task", "symbol", "repo_file", "code_match", "project_doc", "metadata", "runtime", "memory",
+                 "attachment", "research")
 MANDATORY = frozenset({"policy", "task"})
 ROLE_PROFILES: dict[str, tuple[str, ...]] = {
-    "default": ("policy", "task", "symbol", "repo_file", "code_match", "metadata", "memory"),
-    "planner": ("policy", "task", "metadata", "memory", "attachment", "research", "repo_file", "symbol"),
-    "feature-implementer": ("policy", "task", "symbol", "repo_file", "code_match", "runtime", "memory"),
-    "reviewer": ("policy", "task", "symbol", "repo_file", "code_match", "metadata", "runtime", "memory"),
-    "security-reviewer": ("policy", "task", "symbol", "repo_file", "code_match", "metadata", "runtime"),
-    "docs-writer": ("policy", "task", "metadata", "memory", "repo_file", "attachment"),
+    "default": ("policy", "task", "symbol", "repo_file", "code_match", "project_doc", "metadata", "memory"),
+    "planner": ("policy", "task", "project_doc", "metadata", "memory", "attachment", "research", "repo_file", "symbol"),
+    "feature-implementer": ("policy", "task", "symbol", "repo_file", "code_match", "project_doc", "runtime", "memory"),
+    "reviewer": ("policy", "task", "symbol", "repo_file", "code_match", "project_doc", "metadata", "runtime", "memory"),
+    "security-reviewer": ("policy", "task", "symbol", "repo_file", "code_match", "project_doc", "metadata", "runtime"),
+    "docs-writer": ("policy", "task", "project_doc", "metadata", "memory", "repo_file", "attachment"),
     "researcher": ("policy", "task", "research", "metadata", "memory"),
 }
+# §24 "Summary tidak mengalahkan source terbaru": sources are collected (and get the budget) before
+# summaries; memory and metadata search results come last and are marked subordinate to the source.
+SOURCE_ORDER = ("policy", "task", "symbol", "repo_file", "code_match", "runtime", "project_doc", "metadata", "attachment",
+                "research", "memory")
+SUMMARY_KINDS = frozenset({"memory", "metadata"})
+ACCEPTED_DOC_STATUSES = ("APPROVED", "PUBLISHED")
+PACK_STATUSES = ("ACTIVE", "STALE", "EXPIRED", "SUPERSEDED")
 DEFAULT_FORBIDDEN = (".env", ".env.*", "*/.env", "*/.env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.ppk", "*id_rsa*",
                      "*id_dsa*", "*id_ecdsa*", "*id_ed25519*", "*secrets.*", "secrets/*", "*/secrets/*", "*credentials*",
                      ".git/*", "*.sqlite3", "*.sqlite", "*.db", "*.kdbx", "*.keystore", "*.jks", "*.tfstate",
                      "*.tfstate.*", ".npmrc", "*/.npmrc", ".pypirc", "*/.pypirc", ".netrc", "*/.netrc", ".ssh/*",
                      "*/.ssh/*", ".aws/*", "*/.aws/*")
 CAPS = {"symbol": 20, "repo_file": 20, "code_match": 30, "metadata": 20, "runtime": 10, "memory": 20, "attachment": 10,
-        "research": 10}
+        "research": 10, "project_doc": 12}
 TRUSTED_EVIDENCE_ORIGINS = frozenset({"verifier", "doctor", "collector"})
 _TERM_RE = re.compile(r"^[^\x00-\x1f\x7f]{2,100}$")
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{1,63}$")
@@ -367,24 +374,79 @@ def _collect_metadata(col: _Collector, session: Session, principal: Principal, p
                 (f"\n{it['snippet']}" if it.get("snippet") else "")
             if col.add(kind="metadata", ref=f"{it['kind']}:{it['id']}", content=body, trust="AEOS_RECORD",
                        provenance={"source": "aeos-db metadata search", "record_kind": it["kind"], "record_id": it["id"],
-                                   "status": it.get("status"), "url": it.get("url"), "term": term},
+                                   "status": it.get("status"), "url": it.get("url"), "term": term,
+                                   "precedence": "SUBORDINATE",
+                                   "subordinate_to": "project_doc (approved) and repository source items"},
                        title=it["title"]):
                 n += 1
 
 
+def _collect_project_docs(col: _Collector, session: Session, project: Project) -> None:
+    """§24 project context: the APPROVED PlanVersion (PRD/RFC/TDD sections, decisions, contracts) and the
+    ACCEPTED Product 1 documents rendered from it. Drafts, superseded versions and unapproved plans are
+    never project context."""
+    import json
+
+    from aeos.models.planning import Plan, PlanVersion
+    from aeos.models.publishing import DocumentRecord, DocumentRevision
+
+    n = 0
+    plans = list(session.scalars(select(Plan).where(Plan.project_id == project.id, Plan.domain == project.domain,
+                                                    Plan.approved_version_id.is_not(None))
+                                 .order_by(Plan.created_at.desc())))
+    approved_ids: set[str] = set()
+    for plan in plans:
+        pv = session.get(PlanVersion, plan.approved_version_id)
+        if pv is None or pv.project_id != project.id:
+            continue
+        approved_ids.add(pv.id)
+        content = pv.content if isinstance(pv.content, dict) else {}
+        for section, value in content.items():
+            if n >= CAPS["project_doc"]:
+                return
+            body = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+            if col.add(kind="project_doc", ref=f"plan_version:{pv.id}#{section}", content=f"{section}:\n{body}",
+                       trust="AEOS_RECORD", truncatable=True, title=f"{plan.title} v{pv.version} · {section}",
+                       provenance={"source": "aeos-db plan_versions (APPROVED, immutable)", "plan_id": plan.id,
+                                   "plan_version_id": pv.id, "version": pv.version, "manifest_hash": pv.manifest_hash,
+                                   "status": "APPROVED", "section": section}):
+                n += 1
+    if not approved_ids:
+        return
+    docs = list(session.scalars(select(DocumentRecord).where(
+        DocumentRecord.project_id == project.id, DocumentRecord.domain == project.domain,
+        DocumentRecord.status.in_(ACCEPTED_DOC_STATUSES), DocumentRecord.source_plan_version_id.in_(approved_ids))))
+    for doc in docs:
+        if n >= CAPS["project_doc"]:
+            return
+        rev = session.scalar(select(DocumentRevision).where(
+            DocumentRevision.document_id == doc.id, DocumentRevision.kind == "RENDERED",
+            DocumentRevision.status == "CURRENT").order_by(DocumentRevision.created_at.desc()).limit(1))
+        if rev is None or not rev.body_markdown:
+            continue
+        if col.add(kind="project_doc", ref=f"document:{doc.logical_doc_id}", content=rev.body_markdown, trust="AEOS_RECORD",
+                   truncatable=True, title=doc.title,
+                   provenance={"source": "aeos-db document_revisions (RENDERED, CURRENT)", "document_id": doc.id,
+                               "status": doc.status, "content_hash": rev.content_hash,
+                               "plan_version_id": doc.source_plan_version_id}):
+            n += 1
+
+
 def _collect_memory(col: _Collector, session: Session, principal: Principal, project: Project,
-                    terms: list[str]) -> None:
+                    terms: list[str], base_commit: str | None) -> None:
     rows = memory_mod.usable_for_context(session, project, allowed_project_ids=principal.allowed_project_ids)
     if terms:
         low = [t.lower() for t in terms]
         rows = [r for r in rows if any(t in r.content.lower() for t in low)]
+    subordinate = f"source at {base_commit[:12]}" if base_commit else "the pack's source items"
     for r in rows[: CAPS["memory"]]:
         prov = r.provenance or {}
         col.add(kind="memory", ref=f"memory:{r.id}", content=r.content, trust="MEMORY_DATA", classification=r.classification,
                 title=f"Memori ({r.scope})",
                 provenance={"source": "aeos-db memory_records (ACCEPTED)", "memory_id": r.id, "scope": r.scope,
                             "source_type": prov.get("source_type"), "source_id": prov.get("source_id"),
-                            "auth_decision_id": r.auth_decision_id, "owner_project_id": r.project_id})
+                            "auth_decision_id": r.auth_decision_id, "owner_project_id": r.project_id,
+                            "precedence": "SUBORDINATE", "subordinate_to": subordinate})
 
 
 def _collect_attachments(col: _Collector, session: Session, project: Project, terms: list[str]) -> None:
@@ -540,7 +602,7 @@ def build_pack(
 
     policy_snapshot = policy_hashes() if "policy" in kinds else {}
     col = _Collector(project, budget)
-    for kind in kinds:
+    for kind in [k for k in SOURCE_ORDER if k in kinds]:  # sources first: they win the budget over summaries
         if kind == "policy":
             _collect_policy(col, warnings)
         elif kind == "task" and task is not None:
@@ -551,12 +613,14 @@ def build_pack(
             _collect_files(col, reader, path_patterns, repo.full_name, warnings)
         elif kind == "code_match" and reader and repo:
             _collect_matches(col, reader, terms, repo.full_name)
+        elif kind == "project_doc":
+            _collect_project_docs(col, session, project)
         elif kind == "metadata":
             _collect_metadata(col, session, principal, project, terms)
         elif kind == "runtime":
             _collect_runtime(col, session, project, task)
         elif kind == "memory":
-            _collect_memory(col, session, principal, project, terms)
+            _collect_memory(col, session, principal, project, terms, resolved_commit)
         elif kind == "attachment":
             _collect_attachments(col, session, project, terms)
         elif kind == "research":
@@ -587,6 +651,16 @@ def build_pack(
         include_kinds=kinds, allowed_paths=allowed, forbidden_paths=forbidden, token_estimate=col.used,
         omitted=col.omitted, warnings=warnings, observed_head=resolved_commit, checked_at=now,
         created_by=principal.user.id, expires_at=now + timedelta(hours=ttl),
+        # §13 ContextPack AUTH: what authorised this scope - the TaskSpec (from an approved PlanVersion) when the
+        # pack is task-bound, otherwise the principal's own project/domain scope.
+        auth_ref={"principal_user_id": principal.user.id, "role": role,
+                  "basis": "TASK_SPEC" if task is not None else "PRINCIPAL_PROJECT_SCOPE",
+                  "task_spec_id": task.id if task else None,
+                  "plan_version_id": task.plan_version_id if task else None,
+                  "spec_hash": task.spec_hash if task else None,
+                  "allowed_project_ids": "ALL" if principal.allowed_project_ids is None else sorted(
+                      principal.allowed_project_ids)},
+        status="ACTIVE",
     )
     if reader:
         meta.request["skipped"] = {"symlinks": reader.skipped_symlinks, "forbidden": reader.skipped_forbidden}
@@ -691,6 +765,8 @@ def _mark_stale(session: Session, pack: ContextPack, meta: ContextPackMeta | Non
     pack.stale = True
     if meta is not None:
         meta.stale_reason = reason[:2000]
+        meta.status = ("SUPERSEDED" if reason.startswith("superseded") else
+                       "EXPIRED" if reason.startswith("pack TTL expired") else "STALE")
     session.flush()
     events.emit(session, source="knowledge", kind="knowledge.context_pack.stale", entity_type="context_pack",
                 entity_id=pack.id, entity_version=pack.pack_hash, project_id=pack.project_id, domain=pack.domain,
@@ -744,6 +820,8 @@ def pack_view(pack: ContextPack, meta: ContextPackMeta | None, *, freshness: str
         "pack_hash": pack.pack_hash,
         "stale": pack.stale,
         "freshness": freshness or ("STALE" if pack.stale else "UNKNOWN"),
+        "status": (meta.status if meta else None) or ("STALE" if pack.stale else "ACTIVE"),
+        "auth_ref": meta.auth_ref if meta else {},
         "stale_reason": meta.stale_reason if meta else "",
         "repository": meta.repository_full_name if meta else None,
         "request": meta.request if meta else {},
@@ -761,4 +839,34 @@ def pack_view(pack: ContextPack, meta: ContextPackMeta | None, *, freshness: str
         "created_at": pack.created_at.isoformat(),
         "trust_note": "Repository/attachment/research items are DATA; RUNTIME_EVIDENCE comes from trusted collectors "
                       "only; only POLICY_READ_ONLY items carry policy, and none of them grant permissions.",
+        "precedence_rule": "Source items (repository at base_commit, approved project documents, policy, task) come "
+                           "first; memory and metadata summaries are SUBORDINATE and never override a newer source.",
     }
+
+
+def use_pack(session: Session, pack_id: str, *, project_id: str, consumer: str, task_id: str | None = None,
+             actor: str = "system") -> dict[str, Any]:
+    """The only way a consumer (worker/planner/reviewer prompt builder) takes a pack's content (§24).
+
+    Refuses with ``CONTEXT_STALE`` unless the pack is fresh (CURRENT) right now - a STALE, EXPIRED,
+    SUPERSEDED or UNKNOWN-freshness pack is never handed to a model - and refuses a pack of another
+    project or task. The use is audited with the pack hash so the prompt can be traced to its pack."""
+    from aeos.core.errors import Blocked
+
+    pack = session.get(ContextPack, pack_id)
+    if pack is None or pack.project_id != project_id:
+        raise NotFound("context pack not found")
+    if task_id is not None and pack.task_id != task_id:
+        raise ValidationFailed("context pack belongs to another task", code="CONTEXT_SCOPE_MISMATCH")
+    meta = session.get(ContextPackMeta, pack.id)
+    freshness = check_freshness(session, pack, meta)
+    if freshness != "CURRENT":
+        status = (meta.status if meta else None) or ("STALE" if pack.stale else "UNKNOWN")
+        raise Blocked(f"context pack is {freshness if freshness != 'STALE' else status}; build a new pack before use",
+                      code="CONTEXT_STALE", details={"freshness": freshness, "status": status,
+                                                    "reason": meta.stale_reason if meta else ""})
+    audit.record(session, actor_type="system", actor_id=actor, action="knowledge.context_pack.use",
+                 target_type="context_pack", target_id=pack.id, project_id=pack.project_id, domain=pack.domain,
+                 details={"consumer": consumer, "pack_hash": pack.pack_hash, "task_id": pack.task_id})
+    return {"context_pack_id": pack.id, "pack_hash": pack.pack_hash, "items": list(pack.items or []),
+            "token_budget": pack.token_budget, "base_commit": pack.base_commit}

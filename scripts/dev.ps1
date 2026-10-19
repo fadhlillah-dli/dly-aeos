@@ -47,6 +47,11 @@ if ($VitePort -ne 5173) {
     Write-Host "Note: the backend allow-lists the Vite origin on AEOS_DEV_FRONTEND_PORT=$VitePort." -ForegroundColor Yellow
 }
 $env:AEOS_DEV_FRONTEND_PORT = "$VitePort"
+# Section 09: a hot-reloading dev server never holds the owner's real credentials or data. Use a
+# separate data directory and keyring service unless the caller chose others explicitly.
+if (-not $env:AEOS_DATA_DIR) { $env:AEOS_DATA_DIR = Join-Path $env:LOCALAPPDATA "DLY-AEOS-dev" }
+if (-not $env:AEOS_KEYRING_SERVICE) { $env:AEOS_KEYRING_SERVICE = "dly-aeos-dev" }
+Write-Host "Dev profile: data $($env:AEOS_DATA_DIR), keyring service $($env:AEOS_KEYRING_SERVICE) (create a dev admin with: .\aeos.ps1 admin create, same environment)" -ForegroundColor Yellow
 
 Write-Host "Starting control plane (dev) on http://127.0.0.1:$Port ..." -ForegroundColor Cyan
 $backend = Start-Process -FilePath $aeos -ArgumentList @("serve", "--dev", "--port", "$Port") -NoNewWindow -PassThru

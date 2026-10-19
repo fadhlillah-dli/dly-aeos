@@ -113,7 +113,9 @@ def self_build(client: AuthedClient, db: Session, monkeypatch: Any, tmp_path: Pa
     responder = SupervisorResponder(review=review)
     tasks = [task("T1", paths=allowed or ["backend/aeos/feature/**"]), *(extra_tasks or [])]
     responder.planning.content = plan_content(tasks=tasks)
-    w = worker_ready(client, db, monkeypatch, tasks=tasks, platform=True, responder=responder, targets=targets)
+    # Self-build tasks that target protected paths are R3 (planning/dag): the owner covers R3 explicitly here.
+    w = worker_ready(client, db, monkeypatch, tasks=tasks, platform=True, responder=responder, targets=targets,
+                     cover_r3=True)
     run = db.get(WorkerRun, admit(db)[0])
     fake = FakeClaude(monkeypatch, responder)
     controller = trusted_controller(tmp_path, monkeypatch, grader)
@@ -164,12 +166,23 @@ def review(client: AuthedClient, run_id: str) -> dict[str, Any]:
     return r.json()
 
 
+def claude_code_envelope(structured: dict[str, Any], model: str = "claude-fable-5-1") -> dict[str, Any]:
+    """What `claude -p --output-format json` prints for the manual package: the result envelope whose
+    ``modelUsage`` proves which Claude model answered (§15 — a bare JSON object proves nothing)."""
+    import json
+
+    return {"type": "result", "subtype": "success", "is_error": False, "result": json.dumps(structured),
+            "structured_output": structured, "session_id": "manual-package-session", "duration_ms": 1200,
+            "modelUsage": {model: {"inputTokens": 1500, "outputTokens": 900}}}
+
+
 def manual_review(client: AuthedClient, run_id: str, structured: dict[str, Any] | None = None) -> dict[str, Any]:
     """§12 fallback (the path while the native bridge is not proven - the self-build world runs no Doctor
     capability test): the checkpoint package is run by the owner in official Claude Code and its JSON
-    result is submitted back."""
+    result envelope is submitted back."""
     waiting = review(client, run_id)["review"]
     assert waiting["status"] == "NEEDS_DECISION", waiting
-    r = client.post(f"/api/reviews/{waiting['id']}/manual-result", json={"structured": structured or review_output()})
+    r = client.post(f"/api/reviews/{waiting['id']}/manual-result",
+                    json={"structured": claude_code_envelope(structured or review_output())})
     assert r.status_code == 200, r.text
     return r.json()

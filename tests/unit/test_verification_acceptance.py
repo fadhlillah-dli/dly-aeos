@@ -230,3 +230,78 @@ def test_task_spec_unchanged_by_acceptance(db, wf):
     acceptance.evaluate_acceptance(db, w.run.id)
     db.commit()
     assert db.get(TaskSpec, w.task.id).spec_hash == w.task.spec_hash
+
+
+# A real git SHA that contains a Luhn-valid 13-digit run (5871949640790). Before the identity fix the
+# collector's PII minimisation rewrote it to "[PII:CARD]..." and acceptance REJECTED a valid run at
+# random (~0.2% of commits, ~0.5% of sha256 hashes) - audit §10/§13/§14.
+LUHN_SHA = "5871949640790efd065711ad0d0fdd78b3b4ca44"
+LUHN_HASH = "sha256:" + "4111111111111111" + "ab" * 24
+
+
+def test_luhn_bearing_identities_are_stored_exactly_and_accepted(db, wf):
+    w = make_world(db)
+    report = record_verification(db, w, head=LUHN_SHA, base=LUHN_SHA[::-1], artifact_hash=LUHN_HASH)
+    env = report.environment
+    assert env["commit"] == LUHN_SHA and env["base_commit"] == LUHN_SHA[::-1]
+    assert env["artifact_hash"] == LUHN_HASH and "[PII" not in str(env)
+    make_review(db, w, report)
+    rec = acceptance.evaluate_acceptance(db, w.run.id)
+    assert rec.acceptance_status == "ACCEPTED", rec.reasons
+    assert rec.head_commit == LUHN_SHA and rec.artifact_hash == LUHN_HASH
+
+
+DEFAULT_EVIDENCE = ["independent verifier test report (trusted collector)", "diff against the recorded base commit",
+                    "acceptance criteria -> evidence mapping", "owner demo screenshot"]
+
+
+def _verify_section(*statuses):
+    return {"claims": [{"claim": f"c{i}", "evidence_refs": ["x"], "status": s} for i, s in enumerate(statuses)],
+            "test_ids": [], "environment": {"commit": HEAD, "config": "c"}, "old_behavior": "", "unknowns": []}
+
+
+def test_evidence_requirements_are_checked_before_acceptance(db, wf):
+    """§21 TaskSpec evidence requirements: each machine-checkable one must be met, or acceptance is refused."""
+    w = make_world(db, evidence_requirements=DEFAULT_EVIDENCE)
+    report = record_verification(db, w)
+    rev = make_review(db, w, report)  # no VERIFY claims at all
+    rec = acceptance.evaluate_acceptance(db, w.run.id)
+    assert rec.acceptance_status == "REJECTED"
+    assert any("acceptance criteria -> evidence mapping" in r for r in rec.reasons)
+    rev2 = make_review(db, w, report)
+    rev2.verify = _verify_section("SUPPORTED", "CONTRADICTED")
+    db.commit()
+    rec = acceptance.evaluate_acceptance(db, w.run.id)
+    assert rec.acceptance_status == "REJECTED" and any("CONTRADICTED" in r for r in rec.reasons)
+    rev3 = make_review(db, w, report)
+    rev3.verify = _verify_section("SUPPORTED")
+    db.commit()
+    rec = acceptance.evaluate_acceptance(db, w.run.id)
+    assert rec.acceptance_status == "ACCEPTED", rec.reasons
+    reqs = {r["requirement"]: r for r in acceptance.acceptance_view(db, rec)["evidence_requirements"]}
+    assert reqs["independent verifier test report (trusted collector)"]["status"] == "MET"
+    assert reqs["diff against the recorded base commit"]["status"] == "MET"
+    assert reqs["acceptance criteria -> evidence mapping"]["status"] == "MET"
+    # free text cannot be checked by code: shown as reviewer-attested, never as verified
+    assert reqs["owner demo screenshot"]["status"] == "REVIEWER_ATTESTED"
+    assert rev.id != rev3.id
+
+
+def test_missing_diff_evidence_is_an_unmet_requirement(db, wf):
+    from aeos.models.evidence import EvidenceArtifact
+    from aeos.verification import collector
+
+    w = make_world(db, evidence_requirements=["diff against the recorded base commit"])
+    report = record_verification(db, w)
+    # a report that references no DIFF evidence (e.g. written by an older collector)
+    env = dict(report.environment)
+    bare = collector.collect_evidence(db, kind="VERIFICATION_REPORT", origin="verifier", collector_identity="v",
+                                      claim="no refs", content={"status": "PASS", "evidence_refs": []},
+                                      evidence_level="E2", subject_type="run", subject_id=w.run.id,
+                                      project_id=w.project.id, run_id=w.run.id, task_id=w.task.id, environment=env)
+    db.commit()
+    make_review(db, w, report)
+    rec = acceptance.evaluate_acceptance(db, w.run.id)
+    assert rec.verification_evidence_id == bare.id and db.get(EvidenceArtifact, bare.id) is not None
+    assert rec.acceptance_status == "REJECTED"
+    assert any("diff against the recorded base commit" in r for r in rec.reasons)

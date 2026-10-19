@@ -98,3 +98,38 @@ made to work end to end (`tests/e2e/test_e2e_execution_chain.py`). Reconciled co
    lease released). Left in REVIEW it kept showing "waiting for review" and could still be reviewed,
    accepted (an ACCEPTED record is written before `mark_accepted` refuses) and published by the broker
    (`_require_publishable` accepts REVIEW runs) although the task had moved on.
+
+## Amendment 2026-10-19 (cluster C7: admission answers, fairness, concurrency mode)
+
+1. **Fairness (§10).** `admit_ready_tasks` admits in `fair_order`: a task READY for longer than
+   `FAIRNESS_MAX_WAIT` (30 min) goes first (anti-starvation); otherwise projects are served round-robin, the
+   project with the oldest last lease first, one task per project per round, each project's tasks
+   oldest-READY first. Deterministic, no priority taken from model output.
+2. **Admission answers (§19).** Admission refuses a TaskSpec without `allowed_paths` (`NO_ALLOWED_PATHS`,
+   ADR-0033), without `expected_outputs` (`NO_EXPECTED_OUTPUT`), with a role that is not a catalog executor
+   (`ROLE_UNKNOWN`), with a context estimate (prompt chars/4 + output cap, or `min_context_tokens`) above the
+   route's context window (`CONTEXT_TOO_LARGE`), or with an agent outside its `allowed_scope`
+   (`AGENT_OUT_OF_SCOPE`). It waits on `RESOURCE_INSUFFICIENT` (per-run memory — `limits.memory_mb` or
+   `workforce.run_memory_mb`, default 512 MB — against a fixed worker share (50 %) of the host's physical memory
+   minus what LEASED/RUNNING runs reserved; momentary free memory is recorded as an observation/warning only, so
+   admission does not depend on other processes' load — and one CPU per worker when the cap is 2) and on `ROLE_NOT_EVALUATED` (from the risk class in
+   `workforce.role_eval_required_from`, default R4: a PASS evaluation of the role's current revision or an
+   owner EXCEPTION on `role_evaluation/<role_key>`). The answers (compute reservation, context estimate,
+   verifier suite status, reviewer path, role eligibility) are recorded on `WorkerRun.caps`. The compute
+   reservation is admission-level only; the process sandbox does not enforce it (WEAK, ADR-0051).
+3. **Serialisation classes (§19).** Two active tasks of one project conflict when their write sets overlap
+   *or* when both touch one class: migrations, schema/models, auth/IAM, control-plane policy, contracts,
+   pipelines — even with different files (two migration files can create two Alembic heads).
+4. **Concurrency mode (§19, §21, §44).** Only an ACTIVE human `POLICY` decision on exactly
+   `workforce/concurrency` raises the cap to 2. `set_concurrency` / `POST /api/workforce/concurrency` records
+   it only with a COMPLETED evaluation run whose gates all PASS, the §44 DecisionRecord fields (options, goal,
+   evidence ids, cost/quality trade-off, invalidation condition), the rollback (previous mode) and an optional
+   task-class scope (project ids, role keys, risk classes, domains) that `concurrency_cap(session, task)`
+   applies per TaskSpec. `AgentDefinition.limits.max_active` is an upper bound on the cap.
+5. **Base commit (§21).** The first attempt pins `TaskExecution.base_commit`; every later attempt of the same
+   TaskSpec starts from it. `reopen_for_reverification` (stale acceptance) releases the pin explicitly.
+6. **OFFICE route binding (§23, review).** An OFFICE task is admitted on a route only while the owner's
+   `office_route/<route_key>` POLICY decision (recorded only by `POST /api/policy/office/routes`, bound to the
+   route identity and the ACTIVE company authorisation) holds; otherwise it waits `OFFICE_ROUTE_NOT_AUTHORISED`.
+   The generic decision endpoint refuses `office_route/*` and `workforce/*` targets
+   (`DEDICATED_ENDPOINT_REQUIRED`), so neither the company-approval nor the evaluation evidence can be skipped.

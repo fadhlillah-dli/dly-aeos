@@ -36,6 +36,34 @@ describe("Upgrade Proposals (§39)", () => {
     expect(body.sources).toEqual(["https://github.com/anomalyco/opencode"]);
   });
 
+  it("posts every minimum form field: problem, benefit, scope, components from the inventory picker, limits (§39)", async () => {
+    const calls = mockApi({
+      "/api/proposals/meta": meta, "GET /api/proposals": { items: [], checked_at: null, source: "x" }, "POST /api/proposals": { id: "p3" },
+      "/api/inventory/components": { items: [{ component_id: "opencode", friendly_name: "OpenCode", name: "opencode" },
+                                             { component_id: "aider", friendly_name: "Aider", name: "aider" }] },
+    });
+    renderPage(<ProposalsPage />, { path: "/proposals", route: "/proposals?component=opencode" });
+    await screen.findByPlaceholderText("opencode");
+    await waitFor(() => expect(document.querySelectorAll("#inventory-component-ids option").length).toBe(2)); // picker
+    fireEvent.change(screen.getByPlaceholderText("https://github.com/owner/repo"), { target: { value: "https://github.com/acme/aider" } });
+    fireEvent.change(screen.getByLabelText("Komponen kandidat"), { target: { value: "aider" } });
+    // the label carries its hint ("Wajib sebelum TRIAL ...") inside the <label>: match the field name prefix
+    fireEvent.change(screen.getByLabelText(/^Masalah \/ tujuan/), { target: { value: "Engine sering gagal" } });
+    fireEvent.change(screen.getByLabelText(/Manfaat yang diharapkan/), { target: { value: "Lebih sedikit repair" } });
+    const numbers = document.querySelectorAll<HTMLInputElement>('input[type="number"]');
+    if (numbers.length > 0) fireEvent.change(numbers[0], { target: { value: "1" } });
+    fireEvent.click(screen.getByText("Kirim usulan"));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.url === "/api/proposals")).toBe(true));
+    const body = calls.find((c) => c.method === "POST" && c.url === "/api/proposals")!.body as Record<string, unknown>;
+    expect(body.problem).toBe("Engine sering gagal");
+    expect(body.expected_benefit).toBe("Lebih sedikit repair");
+    expect(body.scope_type).toBe("PLATFORM");
+    expect(body.existing_component_ids).toEqual(["opencode"]);
+    expect(body.candidate_component_ids).toEqual(["aider"]);
+    expect(typeof body.limits).toBe("object");
+    if (numbers.length > 0) expect(Object.values(body.limits as Record<string, unknown>)).toContain(1);
+  });
+
   it("'Usulkan koreksi' opens a COMPARE proposal prefilled with the subject (§41)", async () => {
     const calls = mockApi({ "/api/proposals/meta": meta, "GET /api/proposals": { items: [], checked_at: null, source: "x" }, "POST /api/proposals": { id: "p2" } });
     renderPage(<ProposalsPage />, { path: "/proposals", route: "/proposals?kind=COMPARE&source=DLY%20AEOS%20Biaya%20%26%20Kuota" });

@@ -52,8 +52,9 @@ export function useUploadQueue(policy?: IntakePolicy) {
 
   const remove = (id: string) => setItems((prev) => prev.filter((q) => q.id !== id));
 
-  const uploadAll = async (projectId: string, source = "upload"): Promise<number> => {
-    let ok = 0;
+  /** Uploads every queued file to the project; returns the ids of the attachments the backend accepted. */
+  const uploadAllIds = async (projectId: string, source = "upload"): Promise<string[]> => {
+    const ids: string[] = [];
     for (const q of items) {
       if (q.status !== "queued" && q.status !== "error") continue;
       update(q.id, { status: "uploading", error: undefined });
@@ -63,17 +64,18 @@ export function useUploadQueue(policy?: IntakePolicy) {
       try {
         const res = await post<{ attachment: AttachmentView }>(`/api/projects/${projectId}/attachments`, fd);
         update(q.id, { status: "done", result: res.attachment });
-        ok += 1;
+        ids.push(res.attachment.id);
       } catch (e) {
         update(q.id, { status: "error", error: e });
       }
     }
-    return ok;
+    return ids;
   };
+  const uploadAll = async (projectId: string, source = "upload"): Promise<number> => (await uploadAllIds(projectId, source)).length;
 
   const pending = items.filter((q) => q.status === "queued" || q.status === "error").length;
   const clearDone = () => setItems((prev) => prev.filter((q) => q.status !== "done"));
-  return { items, add, remove, uploadAll, pending, clearDone };
+  return { items, add, remove, uploadAll, uploadAllIds, pending, clearDone };
 }
 
 export function DropZone({ onFiles, disabled, policy }: { onFiles: (f: FileList | File[]) => void; disabled?: boolean; policy?: IntakePolicy }) {

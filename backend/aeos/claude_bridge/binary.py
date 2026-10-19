@@ -119,6 +119,55 @@ def _run(argv: list[str], *, timeout: float = 30.0) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
+_SIG_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def publisher_signature(path: Path | None, *, fingerprint_value: str | None = None,
+                        run: Any = None) -> dict[str, Any]:
+    """§12 "unmodified official binary": the OS code-signature report of the located binary.
+
+    Windows: ``Get-AuthenticodeSignature``; macOS: ``codesign --verify`` + ``codesign -dv`` (TeamIdentifier).
+    The result is reported (and cached per fingerprint), never assumed: VALID only when the OS verifies the
+    signature; INVALID/UNSIGNED/UNKNOWN otherwise. Whether the signer is Anthropic is shown as the observed
+    signer - AEOS has no pinned publisher identity, so authenticity stays UNVERIFIED without it."""
+    if path is None:
+        return {"status": "UNKNOWN", "method": None, "reason": "binary not available"}
+    key = (str(path), fingerprint_value or "")
+    if run is None and key in _SIG_CACHE:
+        return _SIG_CACHE[key]
+    runner = run or _run
+    result: dict[str, Any]
+    try:
+        if sys.platform == "win32":
+            quoted = str(path).replace("'", "''")  # PowerShell single-quoted literal: no expansion, quotes doubled
+            script = (f"$s = Get-AuthenticodeSignature -LiteralPath '{quoted}'; "
+                      "[pscustomobject]@{Status=[string]$s.Status; Signer=[string]$s.SignerCertificate.Subject} "
+                      "| ConvertTo-Json -Compress")
+            rc, out, _err = runner(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], timeout=30)
+            data = json.loads(out.strip() or "{}") if rc == 0 else {}
+            status = str(data.get("Status") or "")
+            result = {"method": "Authenticode", "signer": data.get("Signer") or None,
+                      "status": {"Valid": "VALID", "NotSigned": "UNSIGNED", "HashMismatch": "INVALID",
+                                 "NotTrusted": "INVALID"}.get(status, "UNKNOWN"), "os_status": status or None}
+        elif sys.platform == "darwin":
+            rc, _out, err = runner(["codesign", "--verify", "--strict", str(path)], timeout=30)
+            _rc2, out2, err2 = runner(["codesign", "-dv", "--verbose=2", str(path)], timeout=30)
+            text = (out2 or "") + (err2 or "")
+            team = re.search(r"TeamIdentifier=(\S+)", text)
+            unsigned = "not signed" in (err or "").lower() or "not signed" in text.lower()
+            result = {"method": "codesign", "signer": team.group(1) if team else None,
+                      "status": "VALID" if rc == 0 else ("UNSIGNED" if unsigned else "INVALID")}
+        else:
+            result = {"method": None, "signer": None, "status": "UNKNOWN",
+                      "reason": "no OS code-signature check on this platform"}
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        result = {"method": None, "signer": None, "status": "UNKNOWN", "reason": type(exc).__name__}
+    result["publisher_pin"] = "NONE (install-manifest has no approved pin; authenticity UNVERIFIED)"
+    if run is None:
+        _SIG_CACHE[key] = result
+    return result
+
+
 _fp_cache: dict[tuple[str, int, int], str] = {}
 _fp_lock = threading.Lock()
 

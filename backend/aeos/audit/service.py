@@ -29,8 +29,12 @@ def record(
     reason: str = "",
     details: dict[str, Any] | None = None,
     request_id: str = "",
+    run_id: str | None = None,
 ) -> AuditEvent:
+    if run_id is None and isinstance(details, dict) and isinstance(details.get("run_id"), str):
+        run_id = details["run_id"]  # §13 actor/run/target: lift a run id given in details into its column
     ev = AuditEvent(
+        run_id=(run_id or None) and str(run_id)[:36],
         actor_type=actor_type,
         actor_id=actor_id,
         action=action,
@@ -58,6 +62,7 @@ def list_events(
     target_id: str | None = None,
     before_seq: int | None = None,
     limit: int = 100,
+    run_id: str | None = None,
 ) -> list[AuditEvent]:
     q = select(AuditEvent).order_by(AuditEvent.seq.desc()).limit(min(limit, 500))
     if project_ids is not None:
@@ -70,6 +75,8 @@ def list_events(
         q = q.where(AuditEvent.target_type == target_type)
     if target_id:
         q = q.where(AuditEvent.target_id == target_id)
+    if run_id:
+        q = q.where(AuditEvent.run_id == run_id)
     if before_seq:
         q = q.where(AuditEvent.seq < before_seq)
     return list(session.scalars(q))

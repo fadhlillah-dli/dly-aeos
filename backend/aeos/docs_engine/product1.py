@@ -674,6 +674,45 @@ TREE: tuple[Node, ...] = (
 )
 
 
+# §41 "Kriteria kesiapan menentukan apakah bagian dokumentasi wajib lengkap sebelum tahap berikutnya":
+# sections that must not be "documentation pending" when a stage is passed. The release candidate snapshot is
+# refused while its required sections are pending; earlier stages are reported in the publication preview.
+REQUIRED_SECTIONS: dict[Timing, dict[str, tuple[str, ...]]] = {
+    Timing.PROJECT_CREATION: {
+        "PRODUCT_OVERVIEW": ("overview", "scope"),
+        "ARCHITECTURE_OVERVIEW": ("context",),
+        "SECURITY_OVERVIEW": ("authn_authz",),
+        "RISK_ASSESSMENT": ("risk_register",),
+    },
+    Timing.FEATURE_APPROVAL: {
+        "PRD": ("overview", "functional_requirements", "acceptance_criteria"),
+        "TEST_PLAN": ("scope", "test_cases"),
+    },
+    Timing.RELEASE_CANDIDATE: {
+        "RELEASE_PLAN": ("scope", "changes", "release_notes", "deployment", "migration", "rollback"),
+    },
+}
+
+
+def required_pending(documents: Any, stage: Timing) -> list[dict[str, Any]]:
+    """Required sections of *stage* that are still documentation pending, per rendered document."""
+    wanted = REQUIRED_SECTIONS.get(stage, {})
+    out: list[dict[str, Any]] = []
+
+    def field(s: Any, name: str) -> Any:
+        return s.get(name) if isinstance(s, dict) else getattr(s, name, None)
+
+    for d in documents:  # RenderedDocument or DocumentRecord (persisted sections are dicts)
+        keys = wanted.get(getattr(d, "doc_type", ""))
+        if not keys or getattr(d, "status", "") == "SUPERSEDED":
+            continue
+        missing = [field(s, "title") for s in (getattr(d, "sections", None) or [])
+                   if field(s, "key") in keys and field(s, "status") == "PENDING"]
+        if missing:
+            out.append({"logical_doc_id": d.logical_doc_id, "title": d.title, "sections": missing})
+    return out
+
+
 def product_title(name: str) -> str:
     return PRODUCT_TITLE_TEMPLATE.format(name=name)
 

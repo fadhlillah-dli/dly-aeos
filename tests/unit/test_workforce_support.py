@@ -29,6 +29,7 @@ from aeos.models.planning import Plan, PlanVersion, TaskSpec
 from aeos.models.portfolio import Project, RepositoryReference
 from aeos.models.routing import ModelRoute
 from aeos.models.workforce import AgentDefinition
+from aeos.routing.service import compute_config_hash as _route_config_hash  # real one, before any fake
 
 
 @dataclass
@@ -41,6 +42,7 @@ class FakeModules:
     office_allowed: bool = False
     interlock_allowed: bool = True
     evidence: bool = True
+    route_use_problem: str | None = None
     calls: dict[str, int] = field(default_factory=dict)
 
     def _count(self, name: str) -> None:
@@ -114,6 +116,8 @@ class FakeModules:
 
         routing.select_route = select_route
         routing.eligible_routes = eligible_routes
+        # per-request route authorisation (broker §23): the real rule is tested with the real routing module
+        routing.route_use_problem = lambda session, route: fake.route_use_problem
         mods["aeos.routing.service"] = routing
 
         cost = types.ModuleType("aeos.cost.service")
@@ -227,7 +231,10 @@ def make_plan(db: Session, project: Project, tasks: list[dict[str, Any]]) -> tup
         ts = TaskSpec(plan_version_id=pv.id, plan_version_hash=pv.manifest_hash, project_id=project.id,
                       domain=project.domain, task_key=t["task_key"], title=t.get("title", t["task_key"]),
                       goal=t.get("goal", "do the thing"), depends_on=t.get("depends_on", []),
-                      allowed_paths=t.get("allowed_paths", []), forbidden_paths=t.get("forbidden_paths", []),
+                      # ADR-0033: a TaskSpec always names its write scope (an empty scope is never admitted)
+                      allowed_paths=t.get("allowed_paths", [f"src/{t['task_key']}/**"]),
+                      forbidden_paths=t.get("forbidden_paths", []),
+                      expected_outputs=t.get("expected_outputs", ["code"]),
                       tools_allowed=t.get("tools_allowed", []), egress_allowed=t.get("egress_allowed", []),
                       limits=t.get("limits", {}), capability_scope=t.get("capability_scope", {}),
                       acceptance_criteria=t.get("acceptance_criteria", ["AC1"]),
@@ -249,6 +256,14 @@ def make_route(db: Session, *, key: str = "worker.test-free", provider: str = "o
                    endpoint=endpoint, mode_params=mode_params or {})
     db.add(r)
     db.flush()
+    if status in ("APPROVED", "TRIAL"):
+        # what a human activation records: a decision bound to the route's exact configuration hash —
+        # the broker re-checks it on every proxied request (§23)
+        r.config_hash = _route_config_hash(r)
+        db.add(Decision(kind="ROUTE_ACTIVATION" if status == "APPROVED" else "TRIAL", actor_user_id="owner",
+                        actor_kind="HUMAN", target_type="model_route", target_id=key, target_hash=r.config_hash,
+                        domain="PERSONAL", rationale="test activation", allowed_operations=["route.use"]))
+        db.flush()
     return r
 
 

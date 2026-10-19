@@ -41,6 +41,17 @@ PLATFORM_ENTRY_KEY = "tool:dly-aeos"
 HISTORY_CHECK_EVENTS_KEPT = 50  # routine UPSTREAM_CHECK rows are capped; trust events are never dropped
 _DESCRIPTIVE = ("name", "category", "placement", "relevance", "claims", "limitations", "source_refs", "section_refs",
                 "evidence_level", "research_date", "release_date", "source_kind")
+# §47 owner-recorded fields. Seeded rows keep the master's descriptive text (limitations are refreshed by the
+# seed), so an owner edit on them covers the live/owner fields only.
+EDITABLE_FIELDS = ("maintainer", "source_version", "data_terms", "compatibility", "limitations", "superseded_by",
+                   "distribution", "terms_checked")
+EDITABLE_FIELDS_SEEDED = tuple(f for f in EDITABLE_FIELDS if f != "limitations")
+# §47 comparison conclusion and the coverage limit of the curated list (shown with every registry listing).
+CONCLUSION = ("Kesimpulan 18 Okt 2026: belum ada bukti DLY AEOS mengungguli seluruh metode developer atau tooling yang "
+              "dibahas komunitas; rekomendasi adalah sintesis pola yang sesuai constraint pengguna.")
+COVERAGE_LIMIT = ("Peringkat GitHub Trending tidak dapat diverifikasi langsung; daftar ini kurasi repositori resmi/relevan "
+                  "dan diskusi yang berhasil dibaca, bukan klaim mencakup semua repo trending atau bahwa popularitas "
+                  "membuktikan kualitas.")
 
 
 # --------------------------------------------------------------------------- seed
@@ -164,12 +175,50 @@ def link_components(session: Session) -> int:
 # --------------------------------------------------------------------------- views
 
 
+def last_reviewed(e: ResearchEntry) -> Any:
+    """The later of the live upstream check and the owner's dated manual review (non-GitHub sources)."""
+    stamps = [ensure_aware(t) for t in (e.checked_at, e.reviewed_at) if t is not None]
+    return max(stamps) if stamps else None
+
+
 def freshness(e: ResearchEntry) -> str:
-    if e.checked_at is None:
+    checked = last_reviewed(e)
+    if checked is None:
         return "NOT_CHECKED"
-    checked = ensure_aware(e.checked_at)
-    assert checked is not None
     return "STALE" if utcnow() - checked > STALE_AFTER else "FRESH"
+
+
+def platform_result(e: ResearchEntry) -> dict[str, Any] | None:
+    """§47 "hasil controlled/runtime platform ini": the latest result this platform recorded for the entry
+    (from proposal trials/outcomes), with its own evidence level - separate from E0/E1 source evidence."""
+    rows = [r for r in e.test_results or [] if isinstance(r, dict)]
+    if not rows:
+        return None
+    last = rows[-1]
+    return {"at": last.get("at"), "level": last.get("level"), "outcome": last.get("outcome"),
+            "evidence_id": last.get("evidence_id"), "proposal_id": last.get("proposal_id"), "count": len(rows)}
+
+
+def update_notice(e: ResearchEntry) -> dict[str, Any] | None:
+    """§47 "hanya perubahan yang relevan menghasilkan proposal ringkas": a pinned entry linked to an inventory
+    component with a newer upstream tag gets a concise, prefilled UPGRADE draft - never an automatic proposal,
+    install or route/policy change."""
+    up = e.upstream or {}
+    if not (up.get("update_available") and e.source_version and e.component_id):
+        return None
+    rel = up.get("latest_release") or {}
+    from urllib.parse import quote
+
+    source = (e.urls or [""])[0]
+    return {
+        "from": e.source_version, "to": up.get("latest_tag"), "release_url": rel.get("url"),
+        "published_at": rel.get("published_at"), "component_id": e.component_id,
+        "summary": f"{e.name}: {e.source_version} -> {up.get('latest_tag')} (rilis {rel.get('published_at') or '?'}); "
+                   "update tersedia tidak berarti kompatibel",
+        "draft_link": (f"/proposals?kind=UPGRADE&component={quote(e.component_id)}&source={quote(source)}"
+                       f"&pin={quote(str(up.get('latest_tag') or ''))}"),
+        "action": "notification only; the owner opens the UPGRADE proposal",
+    }
 
 
 def entry_view(e: ResearchEntry, *, detail: bool = False) -> dict[str, Any]:
@@ -178,6 +227,7 @@ def entry_view(e: ResearchEntry, *, detail: bool = False) -> dict[str, Any]:
         "urls": e.urls or [], "source_refs": e.source_refs or [], "evidence_level": e.evidence_level,
         "lifecycle": e.lifecycle, "placement": e.placement, "identity_status": e.identity_status,
         "upstream_status": e.upstream_status, "checked_at": e.checked_at.isoformat() if e.checked_at else None,
+        "reviewed_at": e.reviewed_at.isoformat() if e.reviewed_at else None,
         "freshness": freshness(e), "research_date": e.research_date, "release_date": e.release_date,
         "component_id": e.component_id, "source_kind": e.source_kind, "mode": e.mode,
         "section_refs": e.section_refs or [], "is_reference": e.category == REFERENCE_CATEGORY,
@@ -185,16 +235,26 @@ def entry_view(e: ResearchEntry, *, detail: bool = False) -> dict[str, Any]:
         "update_available": (e.upstream or {}).get("update_available"),
         "checkable": (github_repo(e.identity or "") is not None and bool(e.urls)
                       and e.submitted_domain != Domain.OFFICE.value),
+        "platform_result": platform_result(e),
         "installed_or_active": "NOT_IMPLIED",  # §38: research lifecycle is not an inventory dimension
     }
     if detail:
+        from aeos.research import advisories
+
         v.update({
             "relevance": e.relevance, "claims": e.claims or [], "limitations": e.limitations,
             "data_terms": e.data_terms, "compatibility": e.compatibility, "test_results": e.test_results or [],
             "maintainer": e.maintainer, "license": e.license, "source_version": e.source_version,
+            "distribution": e.distribution or None,
+            "terms_checked_at": e.terms_checked_at.isoformat() if e.terms_checked_at else None,
             "upstream": {k: v2 for k, v2 in (e.upstream or {}).items() if k != "component_hints"},
+            "advisories": advisories.summary(e.upstream or {}, e.source_version),
+            "update_notice": update_notice(e),
             "history": e.history or [], "owner_decision_id": e.owner_decision_id, "superseded_by": e.superseded_by,
             "added_by": e.added_by, "created_at": e.created_at.isoformat() if e.created_at else None,
+            "editable_fields": list(EDITABLE_FIELDS if e.entry_key is None else EDITABLE_FIELDS_SEEDED),
+            "can_confirm_source": e.lifecycle == "DISCOVERED" and e.upstream_status == "OK"
+                                  and e.identity_status == "CHECKED",
         })
     return v
 
@@ -357,7 +417,8 @@ def check_upstream(session: Session, entry: ResearchEntry, *, actor_type: str, a
     own_client = client is None
     http = client or _client()
     fetch = _Fetch(http)
-    upstream: dict[str, Any] = {k: v for k, v in (entry.upstream or {}).items() if k in ("component_hints", "group")}
+    upstream: dict[str, Any] = {k: v for k, v in (entry.upstream or {}).items()
+                                if k in ("component_hints", "group", "dependency_diff")}
     upstream.update({"checked_at": now.isoformat(), "source": "GitHub REST API (public, unauthenticated)",
                      "compatibility": "UNKNOWN - update tersedia tidak berarti kompatibel; ajukan proposal untuk review"})
     try:
@@ -419,6 +480,7 @@ def check_upstream(session: Session, entry: ResearchEntry, *, actor_type: str, a
             "owner": (data.get("owner") or {}).get("login"), "latest_release": release, "latest_tag": latest_tag,
             "redirected": redirected, "redirect_chain": fetch.redirects,
         })
+        upstream["advisories"] = _advisories(_Fetch(http), full_name or f"{owner}/{repo}", now)
         pinned = entry.source_version
         upstream["update_available"] = (bool(latest_tag) and latest_tag != pinned) if pinned else None
         if not pinned:
@@ -443,6 +505,9 @@ def check_upstream(session: Session, entry: ResearchEntry, *, actor_type: str, a
             entry.identity_status = "CHECKED"
         if upstream["license_spdx"] and not entry.license:
             entry.license = str(upstream["license_spdx"])[:64]
+        if upstream["owner"] and not entry.maintainer and status == "OK":
+            # §47 maintainer: the publisher login observed live (only for an unchanged, non-fork identity).
+            entry.maintainer = redact_text(str(upstream["owner"]))[:200]
         entry.upstream = upstream
         entry.upstream_status = status
         entry.checked_at = now
@@ -450,6 +515,34 @@ def check_upstream(session: Session, entry: ResearchEntry, *, actor_type: str, a
     finally:
         if own_client:
             http.close()
+
+
+def _advisories(fetch: _Fetch, repo_path: str, now: Any) -> dict[str, Any]:
+    """Published GitHub repository security advisories (public; anyone may read published advisories of a
+    public repository). A failed read is ERROR (UNKNOWN), never "no advisories"."""
+    rec: dict[str, Any] = {"checked_at": now.isoformat(),
+                           "source": "GitHub repository security advisories (published, unauthenticated)"}
+    try:
+        resp = fetch.get(f"{GITHUB_API}/repos/{repo_path}/security-advisories?state=published&per_page=100")
+    except Exception as exc:
+        return rec | {"status": "ERROR", "reason": type(exc).__name__}
+    if _rate_limited(resp):
+        return rec | {"status": "RATE_LIMITED"}
+    data = _json(resp) if resp.status_code == 200 else None
+    if not isinstance(data, list):
+        return rec | {"status": "ERROR", "reason": f"http {resp.status_code}"}
+    items = []
+    for a in data[:100]:
+        if not isinstance(a, dict):
+            continue
+        vulns = [{"package": (v.get("package") or {}).get("name"), "ecosystem": (v.get("package") or {}).get("ecosystem"),
+                  "vulnerable_version_range": v.get("vulnerable_version_range"),
+                  "patched_versions": v.get("patched_versions")}
+                 for v in a.get("vulnerabilities") or [] if isinstance(v, dict)]
+        items.append({"ghsa_id": a.get("ghsa_id"), "cve_id": a.get("cve_id"), "severity": a.get("severity"),
+                      "summary": redact_text(str(a.get("summary") or ""))[:200], "published_at": a.get("published_at"),
+                      "withdrawn_at": a.get("withdrawn_at"), "vulnerabilities": vulns})
+    return rec | {"status": "OK", "items": items}
 
 
 def _cap_history(history: list[Any]) -> list[Any]:
@@ -478,11 +571,132 @@ def _finish(session: Session, entry: ResearchEntry, actor_type: str, actor_id: s
     events.emit(session, source="research", kind="research.upstream.checked", entity_type="research_entry",
                 entity_id=entry.id, domain=entry.submitted_domain, payload={"status": status, "identity": entry.identity})
     if (entry.upstream or {}).get("update_available"):
+        notice = update_notice(entry)
         events.emit(session, source="research", kind="research.upstream.update_detected", entity_type="research_entry",
                     entity_id=entry.id, domain=entry.submitted_domain, payload={"latest_tag": entry.upstream.get("latest_tag"),
                                                   "pinned": entry.source_version,
+                                                  # relevant = pinned AND linked to an inventory component
+                                                  "relevant": notice is not None,
+                                                  "draft_link": notice["draft_link"] if notice else None,
+                                                  "summary": notice["summary"] if notice else None,
                                                   "action": "notification only; propose an UPGRADE to review"})
     view = entry_view(entry, detail=True)
     view["check_status"] = status
     view["touched"] = touch
     return view
+
+
+# --------------------------------------------------------------------------- owner edits (§47, §52)
+
+
+def _writable(entry: ResearchEntry, domain: str | None) -> None:
+    """Shared (platform) rows are never written from an OFFICE session (Office data never reaches the
+    registry that Personal views read, §23/§35); domain rows only from their own domain."""
+    if entry.submitted_domain is None and domain == Domain.OFFICE.value:
+        raise PolicyDenied("OFFICE session cannot edit shared registry rows", code="OFFICE_RESEARCH_DENIED")
+    if entry.submitted_domain is not None and entry.submitted_domain != domain:
+        raise NotFound("research entry not found")
+    if entry.category == REFERENCE_CATEGORY:
+        raise PolicyDenied("§52 references are the master's dated sources; they are not edited",
+                           code="REFERENCE_READ_ONLY")
+
+
+def update_entry(session: Session, entry: ResearchEntry, *, fields: dict[str, Any], actor_user_id: str,
+                 domain: str | None) -> ResearchEntry:
+    """§47 owner-recorded fields: maintainer, source version (pin), data/terms (+ terms read date),
+    compatibility, distribution, known limitations (manual rows) and supersession. Nothing is installed."""
+    _writable(entry, domain)
+    allowed = EDITABLE_FIELDS if entry.entry_key is None else EDITABLE_FIELDS_SEEDED
+    unknown = sorted(set(fields) - set(allowed))
+    if unknown:
+        raise ValidationFailed("fields cannot be edited on this entry",
+                               details={"fields": unknown, "allowed": list(allowed)})
+    changes: dict[str, Any] = {}
+    sizes = {"maintainer": 200, "source_version": 128, "distribution": 256, "data_terms": 4000,
+             "compatibility": 4000, "limitations": 4000}
+    for key, n in sizes.items():
+        if key in fields:
+            val = fields[key]
+            if val is not None and not isinstance(val, str):
+                raise ValidationFailed(f"{key} must be text")
+            clean = redact_text((val or "").strip())[:n]
+            setattr(entry, key, (clean or None) if key in ("maintainer", "source_version") else clean)
+            changes[key] = clean or None
+    if fields.get("terms_checked") is True:
+        if not (entry.data_terms or "").strip():
+            raise ValidationFailed("record the data/terms text before marking it as read")
+        entry.terms_checked_at = utcnow()
+        changes["terms_checked_at"] = entry.terms_checked_at.isoformat()
+    if "superseded_by" in fields:
+        target = fields["superseded_by"]
+        if target:
+            other = get_entry(session, str(target), domain=domain)
+            if other.id == entry.id:
+                raise ValidationFailed("an entry cannot supersede itself")
+            if entry.submitted_domain is None and other.submitted_domain is not None:
+                # a shared row is read by both domains: it may only point to another shared row (§23, §35)
+                raise ValidationFailed("a shared registry entry can only be superseded by another shared entry")
+            entry.superseded_by = other.id
+        else:
+            entry.superseded_by = None
+        changes["superseded_by"] = entry.superseded_by
+    if not changes:
+        raise ValidationFailed("nothing to update")
+    if "source_version" in changes:
+        up = dict(entry.upstream or {})
+        tag = up.get("latest_tag")
+        up["update_available"] = (bool(tag) and tag != entry.source_version) if entry.source_version else None
+        entry.upstream = up
+    entry.history = [*(entry.history or []), {"at": utcnow().isoformat(), "event": "OWNER_EDIT", "by": actor_user_id,
+                                               "fields": sorted(changes)}]
+    session.flush()
+    audit.record(session, actor_type="user", actor_id=actor_user_id, action="research.entry.update",
+                 target_type="research_entry", target_id=entry.id, domain=domain,
+                 details={"fields": sorted(changes), "installed": False})
+    events.emit(session, source="research", kind="research.entry.updated", entity_type="research_entry",
+                entity_id=entry.id, domain=entry.submitted_domain, payload={"fields": sorted(changes)})
+    return entry
+
+
+def confirm_source(session: Session, entry: ResearchEntry, *, actor_user_id: str, domain: str | None) -> ResearchEntry:
+    """§47 DISCOVERED -> SOURCE_VERIFIED: only after a live check confirmed the canonical identity (OK, CHECKED)
+    and the owner confirms it. Trust is never inferred from popularity or from a renamed/forked source."""
+    _writable(entry, domain)
+    if entry.lifecycle != "DISCOVERED":
+        raise ValidationFailed(f"only DISCOVERED entries can be source-verified (current {entry.lifecycle})")
+    if entry.upstream_status != "OK" or entry.identity_status != "CHECKED":
+        raise Blocked("source verification needs a successful live Check Upstream (status OK, identity CHECKED)",
+                      code="SOURCE_NOT_CHECKED", details={"upstream_status": entry.upstream_status,
+                                                          "identity_status": entry.identity_status})
+    entry.history = [*(entry.history or []), {"at": utcnow().isoformat(), "event": "SOURCE_CONFIRMED",
+                                               "from": "DISCOVERED", "to": "SOURCE_VERIFIED", "by": actor_user_id,
+                                               "checked_at": entry.checked_at.isoformat() if entry.checked_at else None}]
+    entry.lifecycle = "SOURCE_VERIFIED"
+    session.flush()
+    audit.record(session, actor_type="user", actor_id=actor_user_id, action="research.entry.confirm_source",
+                 target_type="research_entry", target_id=entry.id, domain=domain,
+                 details={"identity": entry.identity, "installed": False})
+    events.emit(session, source="research", kind="research.entry.source_verified", entity_type="research_entry",
+                entity_id=entry.id, domain=entry.submitted_domain, payload={"identity": entry.identity})
+    return entry
+
+
+def mark_reviewed(session: Session, entry: ResearchEntry, *, note: str, actor_user_id: str,
+                  domain: str | None) -> ResearchEntry:
+    """§52 "capabilities/terms ... re-checked at implementation": a dated, audited manual review of a source that
+    Check Upstream cannot read (vendor docs, terms pages). It makes freshness FRESH/STALE; it never changes the
+    identity status or lifecycle and is not a live check."""
+    _writable(entry, domain)
+    if len((note or "").strip()) < 10:
+        raise ValidationFailed("a manual review needs a note of what was re-read (min 10 characters)")
+    now = utcnow()
+    entry.reviewed_at = now
+    entry.history = [*(entry.history or []), {"at": now.isoformat(), "event": "MANUAL_REVIEW", "by": actor_user_id,
+                                               "note": redact_text(note.strip())[:500]}]
+    session.flush()
+    audit.record(session, actor_type="user", actor_id=actor_user_id, action="research.entry.review",
+                 target_type="research_entry", target_id=entry.id, domain=domain,
+                 details={"identity": entry.identity, "live_check": False})
+    events.emit(session, source="research", kind="research.entry.reviewed", entity_type="research_entry",
+                entity_id=entry.id, domain=entry.submitted_domain, payload={"reviewed_at": now.isoformat()})
+    return entry

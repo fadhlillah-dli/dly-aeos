@@ -99,6 +99,33 @@ def test_office_items_never_in_personal_queue_and_vice_versa(db, owner):
     assert {i["title"] for i in office_items} == {"Rencana kantor rahasia", "Usulan kantor"}
 
 
+def test_proposals_waiting_on_evidence_or_outcome_appear_in_queue(db, owner):
+    """§40: PARTIAL / UNDER_REVIEW / TRIAL_APPROVED / PROMOTION_APPROVED still wait for the owner."""
+    for status in ("PARTIAL", "UNDER_REVIEW", "TRIAL_APPROVED", "PROMOTION_APPROVED", "ACCEPTED"):
+        db.add(ChangeProposal(kind="ADD", title=f"Usulan {status}", submitted_by=owner.id, status=status))
+    db.commit()
+    items = {i["target"]["status"]: i for i in queue.queue_items(db, "PERSONAL") if i["kind"] == "CHANGE_PROPOSAL"}
+    assert set(items) == {"PARTIAL", "UNDER_REVIEW", "TRIAL_APPROVED", "PROMOTION_APPROVED"}
+    assert "Rekonsiliasi" in items["PARTIAL"]["requested_decision"]
+    assert "'Selesai' tidak membuka gate" in items["PARTIAL"]["requested_decision"]
+
+
+def test_owner_delegation_without_expiry_is_surfaced(db, owner):
+    """§09 ADR-0003: the bounded seed delegation has no machine expiry, so the owner sees it as pending."""
+    from aeos.policy import adrs, seed
+
+    adrs.load_adrs(db)
+    seed._record_seed_exception(db)
+    db.commit()
+    items = [i for i in queue.queue_items(db, "PERSONAL") if i["kind"] == "DELEGATION_ACTIVE"]
+    assert len(items) == 1 and "owner:ADR-0003" in items[0]["title"]
+    assert "M4" in items[0]["why"] and items[0]["link"].startswith("/decisions?decision=")
+    assert not [i for i in queue.queue_items(db, "OFFICE") if i["kind"] == "DELEGATION_ACTIVE"]
+    registry.revoke_decision(db, items[0]["target"]["id"], actor_user_id=owner.id, reason="seed mencapai M4")
+    db.commit()
+    assert not [i for i in queue.queue_items(db, "PERSONAL") if i["kind"] == "DELEGATION_ACTIVE"]
+
+
 def test_queue_respects_project_scope(db, owner):
     personal, _office = _populate(db, owner)
     items = queue.queue_items(db, "PERSONAL", project_ids=[])

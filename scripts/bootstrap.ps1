@@ -99,14 +99,20 @@ if (-not $SkipFrontend) {
 }
 
 Write-Host "Step 3: local database"
+# Windows PowerShell 5.1 does not stop on a native non-zero exit even with ErrorActionPreference=Stop:
+# every required step checks $LASTEXITCODE explicitly so a failed migration/seed never reports success.
 & .\.venv\Scripts\aeos.exe db upgrade
+if ($LASTEXITCODE -ne 0) { Write-Host "aeos db upgrade failed (exit $LASTEXITCODE); bootstrap stopped." -ForegroundColor Red; exit 1 }
 & .\.venv\Scripts\aeos.exe seed
+if ($LASTEXITCODE -ne 0) { Write-Host "aeos seed failed (exit $LASTEXITCODE); bootstrap stopped." -ForegroundColor Red; exit 1 }
 # Observe what is actually installed so the first dashboard view is not DESIGN-only (read-only probes).
 & .\.venv\Scripts\aeos.exe inventory reconcile
+if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: inventory reconcile failed (exit $LASTEXITCODE); the dashboard shows DESIGN data until it runs." -ForegroundColor Yellow }
 
 if (-not $NoDoctor) {
     Write-Host "Step 4: Readiness Doctor"
     & .\.venv\Scripts\aeos.exe doctor
+    if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: the Readiness Doctor reported failures (exit $LASTEXITCODE); see the remedies above." -ForegroundColor Yellow }
 }
 
 Write-Host ""

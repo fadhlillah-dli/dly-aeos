@@ -115,3 +115,106 @@ def test_invalid_reviewer_role(db, wf):
     w = make_world(db)
     with pytest.raises(ValidationFailed):
         review.review_run(db, w.run.id, actor="t", reviewer="CEO")
+
+
+def _task_with(db, w, key, **fields):
+    from aeos.models.planning import TaskSpec
+
+    t = TaskSpec(plan_version_id=w.version.id, plan_version_hash=w.version.manifest_hash, project_id=w.project.id,
+                 domain="PERSONAL", task_key=key, title=key, goal="g", allowed_paths=["**"], spec_hash=f"sha256:{key}",
+                 **fields)
+    db.add(t)
+    db.flush()
+    w.run.task_id, w.task = t.id, t
+    db.commit()
+    return t
+
+
+@pytest.mark.parametrize("variant,kind", [
+    ("ui-path", "A11Y"), ("ui-role", "A11Y"), ("data-role", "PRIVACY"), ("confidential", "PRIVACY"),
+    ("iac-path", "SRE"), ("sre-role", "SRE"),
+])
+def test_specialists_activate_when_output_or_risk_requires_them(db, wf, variant, kind):
+    """§16/§17: UX/a11y, privacy/data and SRE specialists become active by output, role or data class —
+    each a separate review bound to the same artifact, required for acceptance."""
+    w = make_world(db)
+    fields = {"ui-role": {"role_key": "frontend-engineer"}, "data-role": {"role_key": "data-ai-feature-engineer"},
+              "confidential": {"data_classification": "CONFIDENTIAL"}, "sre-role": {"role_key": "sre-operations-assistant"}}
+    if variant in fields:
+        _task_with(db, w, variant, **fields[variant])
+    changed = {"ui-path": ["frontend/src/pages/x.tsx"], "iac-path": ["deploy/main.tf"]}.get(variant, ["backend/extra.py"])
+    report = record_verification(db, w, changed=changed)
+    make_review(db, w, report)
+    assert kind in review.required_reviews(db, w.task, review.report_view(report), report)
+    with pytest.raises(Blocked) as e:
+        acceptance.evaluate_acceptance(db, w.run.id)
+    assert e.value.code == f"{kind}_REVIEW_REQUIRED"
+    make_review(db, w, report, kind=kind, verdict="NOT-PROVEN")
+    assert acceptance.evaluate_acceptance(db, w.run.id).acceptance_status == "REJECTED"
+    make_review(db, w, report, kind=kind)
+    assert acceptance.evaluate_acceptance(db, w.run.id).acceptance_status == "ACCEPTED"
+
+
+def test_ordinary_backend_change_needs_no_specialist(db, wf):
+    w = make_world(db)
+    report = record_verification(db, w, changed=["backend/extra.py"])
+    assert review.required_reviews(db, w.task, review.report_view(report), report) == {}
+
+
+def test_review_all_requests_each_open_kind_within_the_review_budget(db, wf, monkeypatch):
+    """§19: independent read-only reviews (feature + a11y) for one verified package, each its own session,
+    bounded by the run's review budget."""
+    install_doctor(monkeypatch)
+    bridge = FakeBridge(result=claude_result(review_payload())).install(monkeypatch)
+    w = make_world(db)
+    _task_with(db, w, "budget", role_key="frontend-engineer", reviewer_policy={"max_reviews_per_run": 3})
+    record_verification(db, w, changed=["frontend/src/pages/x.tsx"])
+    need = review.review_required_kinds(db, w.run.id)
+    assert set(need["kinds"]) == {"FEATURE", "A11Y"} and need["budget"] == {"max": 3, "used": 0, "remaining": 3}
+    outs = review.review_all(db, w.run.id, actor="owner")
+    db.commit()
+    assert [o.review.reviewer_kind for o in outs] == ["CLAUDE", "A11Y"]
+    assert {r.purpose for r in bridge.requests} == {"review.checkpoint", "review.a11y"}
+    assert "Accessibility / UX Reviewer" in bridge.requests[1].prompt
+    assert outs[-1].acceptance and outs[-1].acceptance["acceptance_status"] == "ACCEPTED"
+    assert not any(s["open"] for s in review.review_required_kinds(db, w.run.id)["kinds"].values())
+    review.review_run(db, w.run.id, actor="owner")  # third session: still within the budget of 3
+    with pytest.raises(Blocked) as e:
+        review.review_run(db, w.run.id, actor="owner", reviewer="A11Y")
+    assert e.value.code == "REVIEW_BUDGET_EXHAUSTED"
+
+
+def test_quota_waits_do_not_consume_the_review_budget(db, wf, monkeypatch):
+    """§19 review budget counts review sessions that ran: a WAITING_QUOTA refusal (no review happened) can be
+    re-requested without stranding the run in REVIEW with REVIEW_BUDGET_EXHAUSTED."""
+    install_doctor(monkeypatch)
+    w = make_world(db)
+    _task_with(db, w, "quota-budget", reviewer_policy={"max_reviews_per_run": 1})
+    record_verification(db, w, changed=["backend/extra.py"])
+    FakeBridge(result=claude_result(None, ok=False, quota=True)).install(monkeypatch)
+    for _ in range(3):
+        assert review.review_run(db, w.run.id, actor="owner").review.status == "WAITING_QUOTA"
+    db.commit()
+    assert review.review_required_kinds(db, w.run.id)["budget"]["used"] == 0
+    FakeBridge(result=claude_result(review_payload())).install(monkeypatch)
+    out = review.review_run(db, w.run.id, actor="owner")
+    assert out.review.status == "COMPLETED"
+    with pytest.raises(Blocked) as e:
+        review.review_run(db, w.run.id, actor="owner")
+    assert e.value.code == "REVIEW_BUDGET_EXHAUSTED"
+
+
+def test_review_batch_keeps_completed_sessions_when_a_later_kind_is_refused(db, wf, monkeypatch):
+    """A batch never throws away a review session that already ran (the router commits what it returns):
+    a later refusal stops the batch and is reported in the notes."""
+    install_doctor(monkeypatch)
+    FakeBridge(result=claude_result(review_payload())).install(monkeypatch)
+    w = make_world(db)
+    _task_with(db, w, "batch-stop", role_key="frontend-engineer", reviewer_policy={"max_reviews_per_run": 1})
+    record_verification(db, w, changed=["frontend/src/pages/x.tsx"])
+    outs = review.review_all(db, w.run.id, actor="owner", kinds=["FEATURE", "A11Y", "FEATURE"])
+    assert [o.review.reviewer_kind for o in outs] == ["CLAUDE"]
+    assert outs[0].review.status == "COMPLETED"
+    assert any("REVIEW_BUDGET_EXHAUSTED" in n and "A11Y" in n for n in outs[0].notes)
+    with pytest.raises(Blocked):  # nothing ran yet -> the refusal itself is the answer
+        review.review_all(db, w.run.id, actor="owner", kinds=["A11Y"])

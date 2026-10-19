@@ -197,7 +197,9 @@ def test_checks_use_real_modules_not_not_implemented_paths(settings, db, secrets
     by_id = _run(settings, db, fake_host)
     not_impl = {cid: r.error_code for cid, r in by_id.items() if (r.error_code or "").endswith("NOT_IMPLEMENTED")}
     assert not_impl == {}
-    assert by_id["auth.interlock"].status == "CONFIGURED"
+    # the interlock is exercised by a self-test (unbound write intent refused), not inferred from module presence
+    assert by_id["auth.interlock"].status == "VERIFIED"
+    assert by_id["auth.interlock"].observed_evidence["self_test"]["allowed"] is False
     assert by_id["evidence.verifier"].status == "CONFIGURED"
     assert by_id["secret.status"].status == "CONFIGURED"  # memory provider = a reachable store
     assert by_id["worker.opencode"].status == "VERIFIED"
@@ -456,6 +458,8 @@ def test_prepare_pr_consumes_provider_capability_evidence(settings, db, secrets_
         gh.get(f"{GITHUB}/repos/{slug}/branches/main/protection").mock(return_value=Response(403, json=upgrade))
         gh.get(f"{GITHUB}/repos/{slug}/rulesets").mock(return_value=Response(403, json=upgrade))
         gh.get(f"{GITHUB}/repos/{slug}/rules/branches/main").mock(return_value=Response(200, json=[]))
+        gh.get(f"{GITHUB}/repos/{slug}/environments").mock(
+            return_value=Response(200, json={"total_count": 0, "environments": []}))
         caps = provider.check_capabilities(slug, token="t" * 40)
     provider.record_capability_evidence(db, portfolio.platform_project(db), caps)
     db.commit()
@@ -690,9 +694,12 @@ def test_openbao_found_in_data_dir_and_vault_remedies(settings, db, fake_host):
     load_all()
     ctx = make_context(settings, db, runner=fake_host)
     missing = run_check(REGISTRY["secret.openbao_binary"], ctx)
-    assert missing.status == "MISSING" and missing.remediation["command"].endswith("vault install")
+    # the repository manifest has no approved OpenBao pin yet: the remedy names the exact-version form the CLI
+    # accepts (plain `vault install` is refused without a pin, §07)
+    assert missing.status == "MISSING" and missing.remediation["command"].endswith("vault install --version <X.Y.Z>")
+    assert "approved_pin" in missing.remediation["operation"]
     health = run_check(REGISTRY["secret.openbao_health"], ctx)
-    assert health.status == "MISSING" and health.remediation["command"].endswith("vault install")
+    assert health.status == "MISSING" and health.remediation["command"].endswith("vault install --version <X.Y.Z>")
     local = settings.data_dir / "bin" / ("bao.exe" if sys.platform == "win32" else "bao")
     fake_host.stats[str(local)] = {"size": 10, "mtime_ns": 1}
     fake_host.binaries["bao"] = str(local)  # FakeRunner maps the path back to the name for the version call

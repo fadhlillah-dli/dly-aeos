@@ -51,6 +51,23 @@ def fallback_route(session: Session, *, task: TaskSpec, failed_route_key: str) -
     return impl(session, task=task, failed_route_key=failed_route_key)
 
 
+def terms_eligibility(route: ModelRoute, *, data_classification: str) -> list[str]:
+    """Terms/data/provider eligibility reasons of *route* for a workload of *data_classification* (empty =
+    eligible). The evaluation gate of §40/§43; a subset of the routing hard filter."""
+    from aeos.routing.service import terms_eligibility as impl
+
+    return impl(route, data_classification=data_classification)
+
+
+def route_use_problem(session: Session, route: ModelRoute) -> str | None:
+    """Why *route* may not serve a request right now (None = allowed): its APPROVED/TRIAL status must
+    rest on an ACTIVE human decision bound to the CURRENT configuration hash, and a route that is not
+    free (any more) needs a valid budget decision. The broker re-checks this per request (§23)."""
+    from aeos.routing.service import route_use_problem as impl
+
+    return impl(session, route)
+
+
 def note_rate_limited(
     session: Session, *, provider: str, scope: str = "free-daily", retry_after_seconds: int | None = None,
     source: str = "observed-429",

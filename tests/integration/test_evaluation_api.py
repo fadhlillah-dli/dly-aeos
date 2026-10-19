@@ -90,3 +90,100 @@ def test_office_planned_runs_never_reach_personal_views(admin_client: AuthedClie
     assert admin_client.get("/api/eval/runs").json()["items"] == []
     board = admin_client.get("/api/eval/leaderboard", params={"role": "feature-implementer"}).json()
     assert "ACME" not in str(board) and not any(c.get("configuration_hash") for c in board["candidates_not_tested"])
+
+
+def test_execution_endpoints_start_bind_collect_and_office_isolation(admin_client: AuthedClient, db):
+    """Owner starts a run, binds executed tasks to its slots and triggers the trusted collector over HTTP; an
+    OFFICE session can neither see nor drive a PERSONAL run."""
+    from aeos.routing import seed as route_seed
+    from tests.unit.test_evaluation_execution import _executed
+    from tests.unit.test_workforce_support import make_plan, make_project
+
+    route_seed.run(db)
+    _seed(db)
+    admin_client.select_domain(Domain.PERSONAL)
+    cfg = CFG | {"model_id": "opencode/deepseek-v4.1-flash-free", "provider_route": "opencode-zen/deepseek-v4.1-flash-free",
+                 "harness_version": "1.19.3"}
+    run = admin_client.post("/api/eval/runs", json={"suite_key": "eval.small-bugfix", "configuration": cfg,
+                                                   "repetitions": 1, "is_baseline": True,
+                                                   "limits": {"max_attempts": 1, "max_minutes": 5, "max_cost_usd": 0}})
+    assert run.status_code == 200, run.text
+    rid = run.json()["id"]
+    assert run.json()["is_baseline"] is True and run.json()["execution"]["status"] == "NOT_STARTED"
+    started = admin_client.post(f"/api/eval/runs/{rid}/start")
+    assert started.status_code == 200, started.text
+    slots = started.json()["slots"]
+    assert len(slots) == 5 and started.json()["execution"]["status"] == "COLLECTING"
+    project = make_project(db)
+    _, _, specs = make_plan(db, project, [{"task_key": f"T{i}"} for i in range(5)])
+    db.commit()
+    for s, spec in zip(slots, specs, strict=True):
+        r = admin_client.post(f"/api/eval/runs/{rid}/bind", json={"slot_id": s["slot_id"], "task_id": spec.id})
+        assert r.status_code == 200, r.text
+    out = admin_client.post(f"/api/eval/runs/{rid}/collect").json()
+    assert out["recorded"] is False and len(out["pending"]) == 5
+    for spec in specs:
+        _executed(db, spec, state="DONE", accepted="ACCEPTED")
+    db.commit()
+    admin_client.select_domain(Domain.OFFICE)
+    assert admin_client.get(f"/api/eval/runs/{rid}").status_code == 404
+    assert admin_client.post(f"/api/eval/runs/{rid}/collect").status_code == 404
+    admin_client.select_domain(Domain.PERSONAL)
+    out = admin_client.post(f"/api/eval/runs/{rid}/collect").json()
+    assert out["recorded"] is True and out["status"] == "COMPLETED"
+    detail = admin_client.get(f"/api/eval/runs/{rid}").json()
+    assert detail["result_source"] == "collector" and detail["sample_size"] == 5
+    assert detail["execution"]["status"] == "RECORDED" and detail["route_binding"]["route_key"].startswith("opencode-zen/")
+    # the executed run reaches the leaderboard - once the owner has reviewed the route's terms (terms gate)
+    suite = next(s for s in admin_client.get("/api/eval/leaderboard", params={"role": "feature-implementer"}).json()["suites"]
+                 if s["suite_key"] == "eval.small-bugfix")
+    assert suite["excluded"][0]["eligibility"]["status"] == "EXCLUDED_ROUTE_TERMS"
+    route = db.scalar(select(ModelRoute).where(ModelRoute.route_key == "opencode-zen/deepseek-v4.1-flash-free"))
+    from aeos.core.timeutil import utcnow
+
+    route.terms_checked_at = route.pricing_checked_at = utcnow()  # owner re-read pricing + terms (no date bomb)
+    db.commit()
+    suite = next(s for s in admin_client.get("/api/eval/leaderboard", params={"role": "feature-implementer"}).json()["suites"]
+                 if s["suite_key"] == "eval.small-bugfix")
+    assert suite["ranking"][0]["run_ids"] == [rid] and suite["ranking"][0]["sample_size"] == 5
+
+
+def test_comparison_weights_cases_and_blind_review_endpoints(personal_client: AuthedClient, db):
+    from aeos.models.workforce import WorkerRun
+    from tests.unit.test_workforce_support import make_project
+
+    _seed(db)
+    p = ChangeProposal(kind="UPGRADE", title="new harness", submitted_by="owner", status="TRIAL_APPROVED",
+                       domain="PERSONAL")
+    db.add(p)
+    db.commit()
+    limits = {"max_attempts": 1, "max_minutes": 5, "max_cost_usd": 0}
+    r = personal_client.post("/api/eval/comparisons", json={
+        "proposal_id": p.id, "suite_keys": ["eval.small-bugfix"], "baseline": CFG,
+        "candidate": CFG | {"harness_version": "1.5.0"}, "limits": limits, "repetitions": 1})
+    assert r.status_code == 200, r.text
+    assert len(r.json()["run_ids"]) == 2
+    comp = personal_client.get(f"/api/eval/comparisons/{p.id}").json()
+    assert comp["status"] == "IN_PROGRESS" and comp["suites"][0]["verdict"] == "NOT_RECORDED"
+    assert len(personal_client.get("/api/eval/runs", params={"proposal_id": p.id}).json()["items"]) == 2
+    w = personal_client.post("/api/eval/weights", json={"role": "feature-implementer", "rationale": "bugfix dominates",
+                                                       "weights": {"eval.small-bugfix": 2, "eval.feature-fe-api": 1}})
+    assert w.status_code == 200, w.text
+    board = personal_client.get("/api/eval/leaderboard", params={"role": "feature-implementer"}).json()
+    assert board["combined"]["weights"] == {"eval.small-bugfix": 2.0, "eval.feature-fe-api": 1.0}
+    project = make_project(db)
+    failed = WorkerRun(task_id="t9", project_id=project.id, domain="PERSONAL", execution_status="FAILED",
+                       outcome_code="TIMEOUT")
+    db.add(failed)
+    db.commit()
+    c = personal_client.post("/api/eval/cases", json={"source_type": "worker_run", "source_id": failed.id,
+                                                     "title": "Timeout on long migration",
+                                                     "expected": "Task finishes within its time limit or stops cleanly"})
+    assert c.status_code == 200, c.text
+    assert c.json()["status"] == "CANDIDATE"
+    assert [x["id"] for x in personal_client.get("/api/eval/cases").json()["items"]] == [c.json()["id"]]
+    adopted = personal_client.post(f"/api/eval/cases/{c.json()['id']}/adopt", json={
+        "expected_case_hash": c.json()["case_hash"], "rationale": "reviewed: a real regression case"})
+    assert adopted.status_code == 200, adopted.text
+    assert adopted.json()["suite"]["protected"] is True
+    assert personal_client.get("/api/eval/blind-review", params={"suite_key": "eval.small-bugfix"}).json()["items"] == []

@@ -25,9 +25,11 @@ NOT_PROVEN (e.g. skipped trusted tests) or BLOCKED (prerequisite missing; nothin
 
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 import json
 import logging
+import re
 import shutil
 import sys
 import tempfile
@@ -68,7 +70,9 @@ from aeos.verification.procs import (
 
 log = logging.getLogger("aeos.verification.verifier")
 
-VERIFIER_VERSION = "1"
+# v2: impact-driven checks (negative tests, dependency diff / Zone 2, frontend + migration honesty),
+# TaskSpec suite selection, E4 protected-suite references. A new version makes earlier acceptance STALE.
+VERIFIER_VERSION = "2"
 ORIGIN = "verifier"
 MARK_EXPR = "not integration and not network"
 PASSING = "PASS"
@@ -76,13 +80,34 @@ STATUSES = ("PASS", "FAIL", "QUARANTINED", "NOT_PROVEN", "BLOCKED")
 MAX_DIFF_BYTES = 20 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024
 STORED_DIFF_CHARS = 2_000_000
+MAX_PROTECTED_IDS = 2000
 
+# §20 "Verifier ENF: read-only suite, isolated runner, evidence collector": the suite is read-only and the
+# collector is enforced, but the runner is NOT an isolated sandbox yet. Stated on every VERIFICATION_REPORT
+# (``verifier_isolation``) and in its residual risks; never presented as isolated.
+VERIFIER_ISOLATION = "WEAK"
+VERIFIER_ISOLATION_NOTE = (
+    "process-level only: candidate code runs as the controller's OS user with a scrubbed environment and a "
+    "fresh temp cwd; no container/VM, no filesystem or egress enforcement (ADR-0051/ADR-0060)")
 RESIDUAL_RISKS = (
     "Candidate code runs in a child process of the same OS user as the controller; a deliberately "
-    "malicious candidate could still tamper with its own test process. Strong sandbox isolation for "
-    "verification is NOT-PROVEN (depends on worker_runtime containment).",
+    "malicious candidate could still tamper with its own test process or read the controller user's files "
+    "(data DB, keyring, controller checkout). Strong sandbox isolation for verification is NOT-PROVEN "
+    "(verifier isolation WEAK; depends on worker_runtime containment).",
     "The dead-proxy environment is an egress deterrent, not an enforced network boundary.",
 )
+# Added test lines that assert a refusal/error path (§16 negative tests, §22 adversarial cases).
+_NEGATIVE_ASSERTION = re.compile(
+    r"pytest\.raises|assertRaises|status_code\s*(?:==|in|!=)\s*[\(\[{]?\s*4\d\d|\b40[0-9]\b|\b42[29]\b|toThrow|"
+    r"\.rejects\b|\.not\.|\bassert\s+not\b|\bis\s+False\b|==\s*False\b|DENIED|Forbidden|Unauthorized|"
+    r"PolicyDenied|Blocked|ValidationFailed|NotFound|Conflict"
+)
+_TEST_FILE_PATTERNS = ("tests/**", "**/test_*.py", "**/*_test.py", "**/*.test.*", "**/*.spec.*", "**/__tests__/**")
+_MIGRATION_TEST_GLOBS = ("test_*migration*.py", "test_*alembic*.py", "*migration*.test.*")
+_PY_DEPENDENCY_FILES = ("requirements.lock", "requirements", "pyproject.toml", "poetry.lock", "uv.lock",
+                        "Pipfile.lock")
+# verifier_policy.suites -> candidate test directories the verifier runs (the trusted acceptance suite always runs)
+SUITE_DIRS = {"unit": "unit", "integration": "integration"}
 
 PYTEST_INI = """[pytest]
 markers =
@@ -284,6 +309,28 @@ class _PendingEvidence:
     content: dict[str, Any] | str | None
     level: str
     check: str | None = None
+    env_extra: dict[str, Any] = field(default_factory=dict)
+
+
+_dependency_set_cache: dict[str, Any] = {}
+
+
+def dependency_set() -> dict[str, Any]:
+    """Identity of the controller interpreter's installed distributions (what the trusted suite ran with).
+
+    §09 Zone 2: the verifier does not build a per-candidate environment; recording this hash makes the
+    dependency set of every verification explicit (and comparable) instead of implied."""
+    if "hash" not in _dependency_set_cache:
+        pins: set[str] = set()
+        for dist in importlib.metadata.distributions():
+            # PackageMetadata protocol only (``get`` is not part of it before 3.12): first Name header, a dist
+            # without one is skipped
+            name = str((dist.metadata.get_all("Name") or [""])[0] or "").strip().lower()
+            if name:
+                pins.add(f"{name}=={dist.version}")
+        ordered = sorted(pins)
+        _dependency_set_cache.update(hash=content_hash(ordered), count=len(ordered))
+    return dict(_dependency_set_cache)
 
 
 _locks_guard = threading.Lock()
@@ -357,6 +404,9 @@ def report_view(ev: EvidenceArtifact | None) -> dict[str, Any] | None:
         "quarantine_reason": summary.get("quarantine_reason"),
         "blocked_code": summary.get("blocked_code"),
         "summary": summary.get("summary"),
+        # reports written before v2 carry no isolation field: the runner was never isolated (WEAK)
+        "verifier_isolation": summary.get("verifier_isolation") or env.get("verifier_isolation") or VERIFIER_ISOLATION,
+        "dependency_set_hash": env.get("dependency_set_hash"),
     }
 
 
@@ -391,8 +441,12 @@ class _Verifier:
         self.numstat: dict[str, dict[str, int | None]] = {}
         self.identity = verifier_identity()
         self.started = time.monotonic()
+        deps = dependency_set()
         self.env_identity: dict[str, Any] = {"verifier": self.identity, "python": sys.version.split()[0],
-                                             "platform": sys.platform, "verifier_version": VERIFIER_VERSION}
+                                             "platform": sys.platform, "verifier_version": VERIFIER_VERSION,
+                                             "dependency_set_hash": deps["hash"],
+                                             "verifier_isolation": VERIFIER_ISOLATION}
+        self.diff_text = ""
 
     # ------------------------------------------------------------------ orchestration
 
@@ -445,6 +499,7 @@ class _Verifier:
             git = self._git(candidate, limits)
             self._resolve_commits(git, run, task)
             diff = self._diff_and_scope(git, task, project)
+            self.diff_text = diff
             out.config_hash = self._config_hash(trusted_root, task, policy)
             self.env_identity["config_hash"] = out.config_hash
             workdir = self._make_workdir()
@@ -469,14 +524,18 @@ class _Verifier:
                 trusted_ran = True
                 self._run_trusted_suite(snapshot, trusted_copy, ini, workdir, limits, expected)
                 self._check_suite_integrity(copied, trusted_root)
+                if policy.get("baseline"):
+                    base_code = code_root if trusted_suite.kind != "CONTROLLER" else None
+                    self._run_baseline(git, workdir, trusted_copy, ini, limits, base_code)
                 if policy.get("candidate_tests", True):
-                    self._run_candidate_tests(snapshot, ini, workdir, limits)
+                    self._run_candidate_tests(snapshot, ini, workdir, limits, suites=self._suites(policy))
                 else:
                     self._check("candidate_tests", "NOT_RUN", "disabled by TaskSpec verifier_policy")
                 if policy.get("ruff", True):
                     self._run_ruff(snapshot, trusted_root, workdir, limits)
                 else:
                     self._check("ruff", "NOT_RUN", "disabled by TaskSpec verifier_policy")
+            self._impact_checks(snapshot if snap_ok else None, policy)
             self._decide()
         except _Blocked as b:
             out.status = "BLOCKED"
@@ -485,7 +544,7 @@ class _Verifier:
         finally:
             if workdir is not None:
                 shutil.rmtree(workdir, ignore_errors=True)
-                for name in ("b1", "b2"):
+                for name in ("b1", "b2", "b3"):
                     short = _short_basetemp(workdir, name)
                     if short is not None:
                         shutil.rmtree(short, ignore_errors=True)
@@ -591,6 +650,7 @@ class _Verifier:
         result = scope.check_scope(paths, allowed=list(task.allowed_paths or []),
                                    forbidden=list(task.forbidden_paths or []), protected=protected)
         out.docs_only = result.docs_only
+        self.categories = result.impact_categories
         out.high_impact_paths = result.high_impact
         out.security_sensitive_paths = result.security_sensitive
         out.quarantine_reason = result.quarantine_reason
@@ -833,12 +893,81 @@ class _Verifier:
         counts = report.to_dict(include_cases=False) if report else {}
         self._check("trusted_suite", status, "; ".join(problems + not_proven) or
                     f"{counts.get('passed', 0)} passed of {len(expected)} expected", details=counts)
+        # §34 E4 "regression-protected": a fully passing trusted suite references the protected suite by hash
+        # and the passing test ids. The collector assigns E4 only while that hash is the *current* protected
+        # suite (otherwise it caps the claim at E2), so a stale or foreign suite can never reach E4.
+        level, env_extra = "E2", {}
+        if status == "PASS" and report is not None and out.suite_hash:
+            passing = sorted(c.key for c in report.cases if c.outcome == "passed")
+            if passing:
+                level = "E4"
+                env_extra = {"protected_suite": {"suite_hash": out.suite_hash,
+                                                 "test_ids": passing[:MAX_PROTECTED_IDS],
+                                                 "truncated": len(passing) > MAX_PROTECTED_IDS}}
         self.pending.append(_PendingEvidence(
             "TEST_REPORT",
             f"Trusted acceptance suite on {(out.head_commit or '')[:12]}: {status} "
             f"({counts.get('passed', 0)} passed, {counts.get('failures', 0)} failed, {counts.get('errors', 0)} errors, "
             f"{counts.get('skipped', 0)} skipped)",
-            content, "E2", "trusted_suite"))
+            content, level, "trusted_suite", env_extra))
+
+    def _cached_baseline(self) -> dict[str, Any] | None:
+        out = self.out
+        rows = self.session.scalars(select(EvidenceArtifact).where(
+            EvidenceArtifact.project_id == self.project.id, EvidenceArtifact.kind == "TEST_REPORT",
+            EvidenceArtifact.origin == ORIGIN, EvidenceArtifact.trusted.is_(True))
+            .order_by(EvidenceArtifact.created_at.desc()).limit(200))
+        for ev in rows:
+            env = ev.environment or {}
+            if env.get("baseline_commit") == out.base_commit and env.get("suite_hash") == out.suite_hash:
+                data = collector.read_json(ev)
+                if data and isinstance(data.get("passing"), list):
+                    return {**data, "evidence_id": ev.id}
+        return None
+
+    def _run_baseline(self, git: GitReader, workdir: Path, trusted_copy: Path, ini: Path, limits: VerifierLimits,
+                      base_code: Path | None) -> None:
+        """§34 "baseline set before the change": the trusted suite measured on the recorded base commit
+        (cached per base commit + suite hash). Head failures that passed on the base are regressions; failures
+        already present on the base are reported as pre-existing — the head still has to pass (no waiver)."""
+        out = self.out
+        cached = self._cached_baseline()
+        if cached is None:
+            base_dir = base_code or self._export_base(git, workdir)
+            junit_path = workdir / "r" / "baseline-junit.xml"
+            junit_path.parent.mkdir(parents=True, exist_ok=True)
+            env = self._env(base_dir / "backend", workdir, autoload=False)
+            args = [sys.executable, "-m", "pytest", str(trusted_copy / "tests" / "acceptance"), "-c", str(ini),
+                    "--rootdir", str(trusted_copy), "--confcutdir", str(trusted_copy), "-p", "no:cacheprovider",
+                    "-q", "--junitxml", str(junit_path), "-m", MARK_EXPR, *self._basetemp(workdir, "b3")]
+            res = run_process(args, cwd=self._cwd(workdir), env=env, timeout=limits.suite_timeout)
+            report, parse_error = self._parse(junit_path)
+            if report is None:
+                msg = f"baseline run on {(out.base_commit or '')[:12]} produced no report ({parse_error})"
+                self._check("baseline", "UNKNOWN", msg)
+                out.not_proven.append(msg)
+                return
+            cached = {"suite": "trusted-acceptance-baseline", "base_commit": out.base_commit,
+                      "suite_hash": out.suite_hash, "status": "PASS" if not report.failing_keys else "FAIL",
+                      "passing": sorted(c.key for c in report.cases if c.outcome == "passed"),
+                      "failing": sorted(report.failing_keys), "skipped": sorted(report.skipped_keys),
+                      "exit_code": res.returncode, "duration_s": res.duration_s}
+            self.pending.append(_PendingEvidence(
+                "TEST_REPORT", f"Baseline: trusted acceptance suite on base {(out.base_commit or '')[:12]}: "
+                               f"{cached['status']} ({len(cached['passing'])} passed, {len(cached['failing'])} failed)",
+                cached, "E2", None, {"baseline_commit": out.base_commit}))
+        base_pass, base_fail = set(cached.get("passing") or []), set(cached.get("failing") or [])
+        regressions = sorted(t for t in out.failing_tests if t in base_pass)
+        preexisting = sorted(t for t in out.failing_tests if t in base_fail)
+        self.regressions, self.preexisting = regressions, preexisting
+        summary = (f"{len(regressions)} regression(s) vs base {(out.base_commit or '')[:12]}"
+                   + (f"; {len(preexisting)} failure(s) already present on the base" if preexisting else ""))
+        self._check("baseline", "FAIL" if regressions else "PASS", summary,
+                    details={"regressions": regressions[:50], "preexisting_failures": preexisting[:50],
+                             "cached_evidence_id": cached.get("evidence_id")})
+        if regressions:
+            out.reasons.append(f"critical regression: {len(regressions)} trusted test(s) passed on the base and "
+                               f"fail on the head ({', '.join(regressions[:5])})")
 
     def _check_suite_integrity(self, copied: list[tuple[str, Path]], trusted_root: Path) -> None:
         try:
@@ -860,10 +989,24 @@ class _Verifier:
         except JUnitParseError as exc:
             return None, str(exc)
 
-    def _run_candidate_tests(self, snapshot: Path, ini: Path, workdir: Path, limits: VerifierLimits) -> None:
-        dirs = [snapshot / "tests" / d for d in ("unit", "integration") if (snapshot / "tests" / d).is_dir()]
+    @staticmethod
+    def _suites(policy: dict[str, Any]) -> list[str]:
+        """TaskSpec ``verifier_policy.suites`` (default unit + integration + acceptance). The trusted
+        acceptance suite always runs whatever the list says; it selects the candidate test directories."""
+        raw = policy.get("suites")
+        if not isinstance(raw, list) or not raw:
+            return ["unit", "integration", "acceptance"]
+        return [str(s).strip().lower() for s in raw if str(s).strip()]
+
+    def _run_candidate_tests(self, snapshot: Path, ini: Path, workdir: Path, limits: VerifierLimits,
+                             suites: list[str] | None = None) -> None:
+        suites = suites or ["unit", "integration", "acceptance"]
+        wanted = [SUITE_DIRS[s] for s in suites if s in SUITE_DIRS]
+        dirs =[snapshot / "tests" / d for d in wanted if (snapshot / "tests" / d).is_dir()]
         if not dirs:
-            self._check("candidate_tests", "NOT_RUN", "candidate has no tests/unit or tests/integration")
+            self._check("candidate_tests", "NOT_RUN",
+                        f"candidate has no tests/{' or tests/'.join(wanted) or '<none selected>'} "
+                        f"(TaskSpec suites: {', '.join(suites)})")
             return
         junit_path = workdir / "r" / "candidate-junit.xml"
         junit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -938,6 +1081,80 @@ class _Verifier:
             {"status": status, "count": count, "diagnostics": diagnostics, "config": "trusted controller pyproject.toml"
              if cfg.is_file() else "ruff defaults (--isolated)", "exit_code": res.returncode}, "E1", "ruff"))
 
+    # ------------------------------------------------------------------ impact-driven checks (§16, §22, §31)
+
+    def _impact_checks(self, snapshot: Path | None, policy: dict[str, Any]) -> None:
+        """Test scope follows impact, not file count: each impact category of the change adds what the
+        verifier must prove — or states honestly that it did not prove it (never a silent pass)."""
+        out = self.out
+        categories: dict[str, list[str]] = getattr(self, "categories", {}) or {}
+        suites = self._suites(policy)
+        if "integration" in suites:
+            out.not_proven.append("integration-marked tests (real tools) are not run by the verifier; only tests "
+                                  f"selectable with '{MARK_EXPR}' ran")
+        # Negative / permission tests for API and auth changes (TaskSpec verifier_policy.negative_tests_required).
+        risky = sorted({p for c in ("api", "auth") for p in categories.get(c, [])})
+        if policy.get("negative_tests_required") and risky:
+            negatives = [a for a in scope.added_lines(self.diff_text)
+                         if scope.first_match(a.path, _TEST_FILE_PATTERNS) and _NEGATIVE_ASSERTION.search(a.text)]
+            if negatives:
+                self._check("negative_tests", "PASS",
+                            f"{len(negatives)} negative/refusal assertion(s) added in changed tests (authored with "
+                            "the candidate: lower trust)", details={"tests": sorted({a.path for a in negatives})[:20]})
+            else:
+                msg = ("negative tests required for the changed API/auth surface (" + ", ".join(risky[:5]) +
+                       "): no added test asserts a refusal/error path")
+                self._check("negative_tests", "NOT_PROVEN", msg)
+                out.not_proven.append(msg)
+                self.blocking_not_proven.append(msg)
+        # Schema/data migrations: the verifier does not run upgrade/downgrade/restore round-trips itself.
+        if categories.get("migration"):
+            tests_dir = snapshot / "tests" if snapshot is not None else None
+            has_migration_tests = bool(tests_dir is not None and tests_dir.is_dir() and any(
+                next(tests_dir.rglob(g), None) is not None for g in _MIGRATION_TEST_GLOBS))
+            cand = out.checks.get("candidate_tests")
+            ran = bool(has_migration_tests and cand is not None and cand.status == "PASS")
+            msg = ("migration changed (" + ", ".join(categories["migration"][:5]) + "): upgrade/downgrade/restore "
+                   "round-trip not run by the verifier" + ("; candidate migration tests passed (lower trust)" if ran
+                                                           else "; no migration test ran"))
+            self._check("migration_rollback", "NOT_PROVEN", msg)
+            out.not_proven.append(msg)
+        # Frontend: the verifier runs Python tests only; product tests come from provider CI (gate G3).
+        if categories.get("frontend"):
+            msg = ("frontend changed: unit/browser/visual/a11y tests are not run by the verifier (Python only); "
+                   "G3 needs the provider CI frontend job")
+            self._check("frontend_tests", "NOT_PROVEN", msg)
+            out.not_proven.append(msg)
+        # Dependencies: diff evidence (§16 Supply-chain) and Zone 2 honesty (§09).
+        if categories.get("dependency"):
+            self._dependency_diff(categories["dependency"])
+
+    def _dependency_diff(self, paths: list[str]) -> None:
+        out = self.out
+        changes = scope.dependency_changes(self.diff_text, paths)
+        packages = scope.summarize_dependency_changes(changes)
+        python_pins_changed = any(
+            (c["pins_added"] or c["pins_removed"]) for p, c in changes.items()
+            if any(p == f or p.endswith("/" + f) or p.rsplit("/", 1)[-1].startswith(f) for f in _PY_DEPENDENCY_FILES))
+        status = "NOT_PROVEN"
+        msg = (f"dependency manifests changed ({', '.join(paths[:5])}): {len(packages['added'])} added, "
+               f"{len(packages['removed'])} removed, {len(packages['upgraded'])} upgraded; licences UNKNOWN "
+               "(not verified)")
+        self._check("dependency_diff", status, msg, details={"packages": packages})
+        out.not_proven.append(msg)
+        self.pending.append(_PendingEvidence(
+            "DEPENDENCY_DIFF", f"Dependency diff of {len(paths)} manifest/lock file(s): {status}",
+            {"status": status, "files": changes, "packages": packages, "licenses": "UNKNOWN",
+             "license_note": "licence/SBOM/provenance of changed packages is not verified by the verifier",
+             "controller_dependency_set_hash": self.env_identity.get("dependency_set_hash"),
+             "auto_upgrade": False}, "E1", "dependency_diff"))
+        if python_pins_changed:
+            msg = ("candidate changes the Python dependency set; the trusted suite ran with the controller's "
+                   f"installed dependencies ({self.env_identity.get('dependency_set_hash')}), so the change is "
+                   "not verified in an isolated dependency environment (§09 Zone 2)")
+            out.not_proven.append(msg)
+            self.blocking_not_proven.append(msg)
+
     # ------------------------------------------------------------------ decision & persistence
 
     def _decide(self) -> None:
@@ -971,17 +1188,25 @@ class _Verifier:
                 self.session, kind=pe.kind, origin=ORIGIN, collector_identity=self.identity, claim=pe.claim,
                 content=pe.content, evidence_level=pe.level, subject_type="run", subject_id=run.id,
                 project_id=project.id, domain=project.domain, run_id=run.id, task_id=run.task_id,
-                environment=dict(self.env_identity), classification=classification, mode=mode,
+                environment={**self.env_identity, **pe.env_extra}, classification=classification, mode=mode,
             )
             out.evidence_ids.append(ev.id)
             if pe.check and pe.check in out.checks:
                 out.checks[pe.check].evidence_id = ev.id
         checks = {k: v.status for k, v in out.checks.items()}
         trusted_counts = out.checks["trusted_suite"].details if "trusted_suite" in out.checks else {}
+        passed_summary = "trusted acceptance suite passed; scope clean" + (
+            f" ({len(out.not_proven)} NOT-PROVEN item(s) listed)" if out.not_proven else "")
         report = {
             "status": out.status,
-            "summary": (out.reasons[0] if out.reasons else (out.not_proven[0] if out.not_proven else
-                        "trusted acceptance suite passed; scope clean"))[:300],
+            "summary": (out.reasons[0] if out.reasons else passed_summary if out.status == "PASS" else
+                        (out.not_proven[0] if out.not_proven else passed_summary))[:300],
+            "verifier_isolation": VERIFIER_ISOLATION,
+            "verifier_isolation_note": VERIFIER_ISOLATION_NOTE,
+            "dependency_set_hash": self.env_identity.get("dependency_set_hash"),
+            "impact_categories": sorted(getattr(self, "categories", {}) or {}),
+            "regressions": list(getattr(self, "regressions", []))[:50],
+            "preexisting_failures": list(getattr(self, "preexisting", []))[:50],
             "blocked_code": out.blocked_code,
             "reasons": out.reasons[:30],
             "not_proven": out.not_proven[:30],

@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, Lightbulb, RefreshCw } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { get, post } from "../../api/client";
+import { get, patch, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { IDENTITY_STATUS, MappedBadge, RESEARCH_LIFECYCLE, UPSTREAM_STATUS } from "../../components/proposals/MappedBadge";
 import { RelatedLinks } from "../../components/proposals/PageLinks";
@@ -34,6 +34,9 @@ interface Entry {
   latest_tag: string | null;
   update_available: boolean | null;
   checkable: boolean;
+  reviewed_at?: string | null;
+  /** §47 this platform's own controlled/runtime result for the entry (E2/E3), separate from E0/E1. */
+  platform_result?: { at: string; level: string; outcome?: string | null; evidence_id?: string | null; proposal_id?: string; count: number } | null;
 }
 
 interface EntryDetail extends Entry {
@@ -42,8 +45,20 @@ interface EntryDetail extends Entry {
   limitations: string;
   license: string | null;
   source_version: string | null;
+  maintainer?: string | null;
+  data_terms?: string;
+  terms_checked_at?: string | null;
+  distribution?: string | null;
+  compatibility?: string;
+  superseded_by?: string | null;
+  owner_decision_id?: string | null;
+  test_results?: { at: string; level?: string; evidence_id?: string; outcome?: string; proposal_id?: string; claim?: string }[];
+  advisories?: { status: string; affected: string[]; count: number; note: string };
+  update_notice?: { from: string; to: string; summary: string; draft_link: string } | null;
+  editable_fields?: string[];
+  can_confirm_source?: boolean;
   upstream: Record<string, unknown>;
-  history: { at: string; event: string; from?: string; to?: string; status?: string; reason?: string }[];
+  history: { at: string; event: string; from?: string; to?: string; status?: string; reason?: string; note?: string }[];
   check_status?: string;
 }
 
@@ -54,6 +69,92 @@ interface ListResponse {
   mode: string;
   lifecycles: string[];
   evidence_limit: string;
+  conclusion?: string;
+  coverage_limit?: string;
+}
+
+function OwnerFields({ e }: { e: EntryDetail }) {
+  const qc = useQueryClient();
+  const editable = e.editable_fields ?? [];
+  const [form, setForm] = useState<Record<string, string>>({
+    maintainer: e.maintainer ?? "",
+    source_version: e.source_version ?? "",
+    data_terms: e.data_terms ?? "",
+    compatibility: e.compatibility ?? "",
+    distribution: e.distribution ?? "",
+    limitations: e.limitations ?? "",
+    superseded_by: e.superseded_by ?? "",
+  });
+  const [termsRead, setTermsRead] = useState(false);
+  const [note, setNote] = useState("");
+  const [base, setBase] = useState(e.source_version ?? "");
+  const [head, setHead] = useState(e.latest_tag ?? "");
+  const done = () => qc.invalidateQueries({ queryKey: ["research"] });
+  const save = useMutation({
+    mutationFn: () =>
+      patch(`/api/research/${e.id}`, {
+        ...Object.fromEntries(Object.entries(form).filter(([k]) => editable.includes(k))),
+        ...(termsRead ? { terms_checked: true } : {}),
+      }),
+    onSuccess: done,
+  });
+  const confirm = useMutation({ mutationFn: () => post(`/api/research/${e.id}/confirm-source`), onSuccess: done });
+  const review = useMutation({ mutationFn: () => post(`/api/research/${e.id}/mark-reviewed`, { note }), onSuccess: done });
+  const diff = useMutation({ mutationFn: () => post(`/api/research/${e.id}/dependency-diff`, { base_ref: base, head_ref: head }), onSuccess: done });
+  const labels: Record<string, string> = {
+    maintainer: "Maintainer",
+    source_version: "Versi dipin",
+    data_terms: "Data / terms",
+    compatibility: "Kompatibilitas",
+    distribution: "Distribusi (npm/pypi/binary/digest)",
+    limitations: "Batasan diketahui",
+    superseded_by: "Digantikan oleh (ID entri)",
+  };
+  return (
+    <div className="mt-4 space-y-3 border-t border-line pt-3">
+      <div className="text-sm font-medium">Catatan pemilik (tidak memasang atau mengaktifkan apa pun)</div>
+      <div className="grid gap-2 md:grid-cols-2">
+        {Object.keys(labels)
+          .filter((k) => editable.includes(k))
+          .map((k) => (
+            <Field key={k} label={labels[k]}>
+              <input className={inputClass} value={form[k] ?? ""} onChange={(ev) => setForm({ ...form, [k]: ev.target.value })} />
+            </Field>
+          ))}
+      </div>
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={termsRead} onChange={(ev) => setTermsRead(ev.target.checked)} /> Halaman data/terms sudah dibaca ulang hari ini
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <Button onClick={() => save.mutate()} busy={save.isPending}>Simpan catatan</Button>
+        {e.can_confirm_source && (
+          <Button variant="primary" onClick={() => confirm.mutate()} busy={confirm.isPending}>
+            Konfirmasi sumber (DISCOVERED → SOURCE_VERIFIED)
+          </Button>
+        )}
+      </div>
+      {!e.checkable && (
+        <div className="flex flex-wrap items-end gap-2">
+          <Field label="Review manual bertanggal (sumber non-GitHub)">
+            <input className={inputBase + " w-80"} value={note} onChange={(ev) => setNote(ev.target.value)} placeholder="Apa yang dibaca ulang" />
+          </Field>
+          <Button onClick={() => review.mutate()} busy={review.isPending} disabled={note.trim().length < 10}>Tandai sudah direview</Button>
+        </div>
+      )}
+      {e.checkable && (
+        <div className="flex flex-wrap items-end gap-2">
+          <Field label="Dependency diff: dari ref">
+            <input className={inputBase + " w-32"} value={base} onChange={(ev) => setBase(ev.target.value)} />
+          </Field>
+          <Field label="ke ref">
+            <input className={inputBase + " w-32"} value={head} onChange={(ev) => setHead(ev.target.value)} />
+          </Field>
+          <Button onClick={() => diff.mutate()} busy={diff.isPending} disabled={!base || !head}>Hitung dependency diff (metadata publik)</Button>
+        </div>
+      )}
+      <ErrorBox error={save.error ?? confirm.error ?? review.error ?? diff.error} />
+    </div>
+  );
 }
 
 const STALE_AFTER = 30 * 86400;
@@ -63,7 +164,7 @@ function FreshnessCell({ e }: { e: Entry }) {
   return <Freshness at={e.checked_at} staleAfterSeconds={STALE_AFTER} label="Dicek" />;
 }
 
-function EntryDetailPanel({ id, onClose }: { id: string; onClose: () => void }) {
+function EntryDetailPanel({ id, onClose, isAdmin }: { id: string; onClose: () => void; isAdmin: boolean }) {
   const q = useQuery({ queryKey: ["research", "entry", id], queryFn: () => get<EntryDetail>(`/api/research/${id}`) });
   if (q.isLoading) return <Loading />;
   if (q.error) return <ErrorBox error={q.error} />;
@@ -82,12 +183,34 @@ function EntryDetailPanel({ id, onClose }: { id: string; onClose: () => void }) 
           ["Referensi", e.source_refs.join(", ") || "—"],
           ["Bagian master", e.section_refs.join(", ") || "—"],
           ["Lisensi", e.license ?? "UNKNOWN"],
+          ["Maintainer", e.maintainer ?? "UNKNOWN"],
           ["Versi dipin", e.source_version ?? "Tidak ada (tag terbaru hanya informasi)"],
+          ["Distribusi", e.distribution ?? "UNKNOWN"],
+          ["Data / terms", e.data_terms ? `${e.data_terms}${e.terms_checked_at ? ` (dibaca ${e.terms_checked_at})` : " (tanggal baca UNKNOWN)"}` : "UNKNOWN"],
           ["Upstream", up.observed_full_name ? `${String(up.observed_full_name)} · tag ${String(up.latest_tag ?? "?")} · arsip ${String(up.archived)}` : "Belum dicek"],
-          ["Kompatibilitas", String(up.compatibility ?? "UNKNOWN")],
+          [
+            "Advisory keamanan",
+            e.advisories ? (
+              <span key="adv">
+                <StatusBadge status={e.advisories.status === "AFFECTED" ? "BLOCKED" : ["NONE", "NOT_AFFECTED"].includes(e.advisories.status) ? "PASS" : "UNKNOWN"} label={e.advisories.status} /> {e.advisories.note}
+              </span>
+            ) : (
+              "UNKNOWN"
+            ),
+          ],
+          ["Kompatibilitas", e.compatibility || String(up.compatibility ?? "UNKNOWN")],
+          ["Hasil platform ini (E2/E3)", e.test_results?.length ? e.test_results.map((r, i) => <div key={i} className="text-xs">{r.at} — {r.level ?? r.outcome} {r.evidence_id ? `bukti ${r.evidence_id.slice(0, 8)}` : ""}</div>) : "Belum ada hasil terkendali/runtime"],
+          ["Keputusan pemilik", e.owner_decision_id ? <Mono key="d">{e.owner_decision_id.slice(0, 8)}</Mono> : "—"],
+          ["Digantikan oleh", e.superseded_by ? <Mono key="s">{e.superseded_by.slice(0, 8)}</Mono> : "—"],
           ["Komponen inventaris", e.component_id ? <Link to={`/tools/${e.component_id}`}>{e.component_id}</Link> : "Belum tertaut"],
         ]}
       />
+      {e.update_notice && (
+        <Notice tone="warn">
+          {e.update_notice.summary} — <Link to={e.update_notice.draft_link}>Buka draf usulan UPGRADE</Link> (tidak ada yang dipasang otomatis)
+        </Notice>
+      )}
+      {isAdmin && !e.is_reference && <OwnerFields e={e} />}
       {e.history.length > 0 && (
         <div className="mt-3">
           <div className="mb-1 text-sm font-medium">Riwayat</div>
@@ -104,7 +227,7 @@ function EntryDetailPanel({ id, onClose }: { id: string; onClose: () => void }) 
   );
 }
 
-function AddUrlForm() {
+export function AddUrlForm() {
   const qc = useQueryClient();
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
@@ -130,6 +253,11 @@ function AddUrlForm() {
           <input className={inputClass} value={notes} onChange={(e) => setNotes(e.target.value)} />
         </Field>
       </div>
+      <p className="text-xs text-ink-3" data-testid="research-upload-note">
+        Berkas (mis. .md) tidak diunggah di sini: registry riset bersifat platform (tanpa domain), sedangkan lampiran
+        selalu disimpan per proyek dan domain. Unggah dokumen pendukung di halaman proyek atau lewat{" "}
+        <code>aeos intake upload</code>, lalu rujuk URL/nama di sini.
+      </p>
       <ErrorBox error={m.error} />
       {m.data && (
         <Notice tone={m.data.duplicate ? "warn" : "info"}>
@@ -199,6 +327,11 @@ function RegistryTable({ rows, isAdmin, onOpen }: { rows: Entry[]; isAdmin: bool
             </div>
           ),
         },
+        {
+          header: "Hasil platform",
+          cell: (r) =>
+            r.platform_result ? <StatusBadge status="REVIEW" label={`${r.platform_result.level}`} /> : <StatusBadge status="NOT_TESTED" label="Belum diuji di platform ini" />,
+        },
         { header: "Inventaris", cell: (r) => (r.component_id ? <Link to={`/tools/${r.component_id}`} onClick={(ev) => ev.stopPropagation()}>{r.component_id}</Link> : "—") },
         {
           header: "Aksi",
@@ -248,7 +381,13 @@ export default function ResearchPage() {
         Katalog bertanggal dari master (§45, §47, §52; riset 17–18 Oktober 2026) — watchlist desain, bukan daftar komponen terpasang. Check Upstream hanya
         membaca metadata publik; tidak memasang, memperbarui atau mengaktifkan apa pun. Data proyek Office tidak pernah dikirim ke riset publik.
       </Notice>
-      {openId && <EntryDetailPanel id={openId} onClose={() => setParams({})} />}
+      {(cands.data?.conclusion || cands.data?.coverage_limit) && (
+        <Notice tone="warn">
+          {cands.data?.conclusion && <p>{cands.data.conclusion}</p>}
+          {cands.data?.coverage_limit && <p className="mt-1">{cands.data.coverage_limit}</p>}
+        </Notice>
+      )}
+      {openId && <EntryDetailPanel id={openId} onClose={() => setParams({})} isAdmin={isAdmin} />}
       <Tabs
         tabs={[
           {

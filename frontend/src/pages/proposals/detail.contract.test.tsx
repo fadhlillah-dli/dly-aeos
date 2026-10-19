@@ -35,5 +35,24 @@ describe("Proposal detail renders a real review package", () => {
     expect(screen.getByText("Rencana penggantian dan rollback (§40)")).toBeInTheDocument();
     expect(await screen.findByText("Sebelum (baseline)")).toBeInTheDocument();
     expect(screen.getByText("ARCHITECTURE_SOURCE_UPDATED")).toBeInTheDocument();
+    // §41 detail: added/candidate components and "kapan aktif" (never the approval time)
+    expect(screen.getByText("Komponen kandidat (ditambah/pengganti)")).toBeInTheDocument();
+    expect(screen.getByText("Kapan aktif")).toBeInTheDocument();
+    expect(screen.getByText(/belum aktif \(tidak ada observasi ENABLED/)).toBeInTheDocument();
+  });
+
+  it("shows the candidate components and the observed activation time when the inventory saw them ENABLED", async () => {
+    const id = (detail as { id: string }).id;
+    const at = "2026-10-19T08:00:00+00:00";
+    const active = {
+      ...(detail as Record<string, unknown>),
+      candidate_component_ids: ["aider"],
+      delivery_dimensions: { ...((detail as { delivery_dimensions: Record<string, unknown> }).delivery_dimensions),
+        ACTIVE: { status: "ENABLED_IN_CONFIG", note: "inventaris", at } },
+    };
+    mockApi({ [`/api/proposals/${id}/timeline`]: timeline, [`/api/proposals/${id}`]: active });
+    renderPage(<ProposalDetailPage />, { path: "/proposals/:proposalId", route: `/proposals/${id}` });
+    expect(await screen.findByRole("link", { name: "aider" })).toHaveAttribute("href", "/tools/aider");
+    expect(screen.queryByText(/belum aktif \(tidak ada observasi ENABLED/)).not.toBeInTheDocument();
   });
 });

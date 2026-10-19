@@ -45,6 +45,8 @@ export interface Dimension {
   items: string[];
   source: string | null;
   reason?: string;
+  /** rollback: previous pins are targets, never proof that rollback works (§40). */
+  targets?: string[];
 }
 
 export interface BaselineComponent {
@@ -63,6 +65,15 @@ export interface BaselineComponent {
   evidence_note?: string;
 }
 
+export interface AdvisorySummary {
+  status: "NOT_CHECKED" | "ERROR" | "NONE" | "NOT_AFFECTED" | "UNKNOWN" | "AFFECTED";
+  affected: string[];
+  unknown: string[];
+  count: number;
+  checked_at: string | null;
+  note: string;
+}
+
 export interface SourceIdentity {
   identity: string;
   status: string;
@@ -75,10 +86,100 @@ export interface SourceIdentity {
   license: string;
   distribution: string;
   terms: string;
+  /** Date the owner last read the data/terms page (null = never). */
+  terms_checked_at?: string | null;
   checked_at: string | null;
   research_date: string | null;
+  /** §40 known security advisories for the candidate pin (from Check Upstream). */
+  advisories?: AdvisorySummary;
   flags: string[];
   note: string;
+}
+
+/** §39 Security/Privacy assessment by code: PASS / UNKNOWN / BLOCKED per dimension. */
+export interface SecurityPrivacy {
+  status: "PASS" | "UNKNOWN" | "BLOCKED";
+  dimensions: Record<string, { status: string; note: string; items?: string[] }>;
+  performed_by: string;
+  rule: string;
+}
+
+export interface RemovalItem {
+  id: string;
+  kind: string;
+  item: string;
+  status: "OPEN" | "CLOSED" | "WAIVED";
+  note: string;
+  evidence_id: string | null;
+}
+
+export interface AcceptanceCriterion {
+  id: string;
+  criterion: string;
+  metric: string;
+  baseline_value: string;
+  threshold: string;
+  suite: string | null;
+  required: boolean;
+}
+
+export interface OwnerPlan {
+  acceptance?: AcceptanceCriterion[];
+  operations_owner?: string;
+  replacement?: {
+    cutover_order?: string;
+    retire_old_version_after?: string;
+    rollback_or_forward_recovery?: string;
+    version_schema_data_compatibility?: string;
+    operations_owner?: string;
+    coexistence_safe?: boolean;
+    backup_restore_evidence_id?: string;
+  };
+  canary?: { target: string; cap: string; observation_window: string; stop_criteria: string[] };
+  removal?: Record<string, { status: string; note: string; evidence_id?: string }>;
+  canary_evidence_ids?: string[];
+}
+
+export interface TrialRecord {
+  status?: "LAUNCHED" | "STOPPED";
+  launched_at?: string;
+  launched_by?: string;
+  decision_id?: string;
+  plan_id?: string;
+  plan_version_id?: string;
+  task_ids?: string[];
+  environment?: string;
+  caps?: Record<string, unknown>;
+  execution?: { status: string; code?: string; reasons?: string[]; note?: string };
+  stopped_at?: string;
+  stop_reason?: string;
+}
+
+export interface CheckpointView {
+  status: string;
+  mode?: string;
+  verdict?: string;
+  rationale?: string;
+  reason?: string;
+  label: string;
+  at: string;
+  evidence_ids: string[];
+  package_hash: string;
+  gate?: string | null;
+  gate_note?: string | null;
+  review?: { summary: string; consistency?: string; risks?: string[] };
+  verify?: { claims: { claim: string; status: string }[]; unknowns?: string[] };
+  package?: Record<string, unknown>;
+}
+
+export interface LinkViews {
+  tasks: { id: string; task_key: string; title: string; plan_version_id: string; state: string }[];
+  publications: { id: string; status: string; plan_version_id: string }[];
+  eval_run_ids: string[];
+  release_ids: string[];
+  adr_keys: string[];
+  observation_ids: string[];
+  plan_version_ids: string[];
 }
 
 export interface ClaudeReview {
@@ -107,6 +208,9 @@ export interface CostItem {
   basis: string;
   note?: string;
   cap_usd?: number;
+  /** Non-dollar quantity from the ledger (tokens, minutes, bytes). */
+  quantity?: number;
+  unit?: string | null;
 }
 
 export interface OutcomeEntry {
@@ -121,6 +225,9 @@ export interface OutcomeEntry {
   notes?: string;
   note?: string;
   inventory_docs_update?: string;
+  acceptance?: { criteria: { id: string; criterion: string; status: string; evidence_id: string | null }[]; unmet: string[]; waiver_decision_id: string | null };
+  finalization?: { inventory: { status: string; reason?: string | null }; adr: { status: string; keys: string[] }; docs: { status: string; note: string }; ownership: { operations_owner: string; status: string } };
+  rollback_decision_id?: string;
 }
 
 export interface ReviewPackage {
@@ -134,11 +241,21 @@ export interface ReviewPackage {
     attachments: { attachment_id: string; note: string }[];
   };
   source_identity: SourceIdentity[];
-  baseline: { components: BaselineComponent[]; baseline_hash: string; note: string | null; architecture_snapshot?: { id: string; label: string; snapshot_hash: string } | null };
+  baseline: {
+    components: BaselineComponent[];
+    baseline_hash: string;
+    note: string | null;
+    architecture_snapshot?: { id: string; label: string; snapshot_hash: string } | null;
+    /** §39 ADD: existing components with the same capability ("mengapa yang ada tidak cukup?"). */
+    overlap?: { component_id: string; name: string; kind: string; enablement: string; function: string }[];
+  };
   alternatives: { option: string; applicable: boolean; summary: string; tradeoffs: string; unknowns: string[] }[];
   impact: Record<string, Dimension | string[]>;
   experiment_plan: Record<string, unknown> & { type: string; pins?: Record<string, string | null> };
   replacement_plan: Record<string, unknown> | null;
+  removal_plan?: { items: RemovalItem[]; open: string[]; status: string; rule: string } | null;
+  upgrade_delta?: { components: Record<string, unknown>[]; source: string } | null;
+  security_privacy?: SecurityPrivacy;
   review_contributors?: { role: string; performed_by: string }[];
   cost: Record<string, CostItem | string | Record<string, unknown>>;
   claude_review: ClaudeReview;
@@ -174,8 +291,15 @@ export interface ProposalDetail extends ProposalRow {
   evidence_ids: string[];
   outcome: { current?: OutcomeEntry; history?: OutcomeEntry[] };
   duplicates: { id: string; title: string; status: string }[];
+  /** Same-domain proposals with the same component+kind or a similar goal - suggestions, never merged. */
+  possible_duplicates?: { id: string; title: string; status: string; kind: string; reason: string }[];
   research_entries: { id: string; name: string; lifecycle: string; identity_status: string; checked_at: string | null }[];
-  delivery_dimensions: Record<string, { status: string; note: string }>;
+  delivery_dimensions: Record<string, { status: string; note: string; at?: string | null }>;
+  owner_plan?: OwnerPlan;
+  links?: LinkViews;
+  trial?: TrialRecord;
+  checkpoint_review?: CheckpointView | null;
+  candidate_component_ids?: string[];
   guarantees: { installs: boolean; activates: boolean; raises_budget: boolean; sends_project_data: boolean; note: string };
 }
 

@@ -1,9 +1,59 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { LastRestoreTest, RecoveryNotice } from "./BackupsTab";
-import { RetirementView } from "./RetirementTab";
+import { RetirementDecisionForm, RetirementView } from "./RetirementTab";
 import { ServicesView } from "./ServicesTab";
 import { CONFIRM_PHRASE, StepList } from "./EmergencyTab";
 import { IntFlagEditor } from "./OpsTab";
+
+describe("Audit tab (§34)", () => {
+  it("never claims the local append-only audit table is WORM / tamper-proof", async () => {
+    const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query");
+    const { AuditTab } = await import("./AuditTab");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(
+      { items: [], next_before: null, source: "audit_events", checked_at: new Date().toISOString(), mode: "LIVE" }),
+    { status: 200, headers: { "Content-Type": "application/json" } })));
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <AuditTab />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(/bukan jaminan WORM/)).toBeInTheDocument();
+    expect(screen.queryByText(/tamper-proof|anti-rusak/i)).not.toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("Attempts tab (§35 History: accepted/failed/cancelled attempts)", () => {
+  it("lists attempts with separate worker / verifier / acceptance / merge statuses", async () => {
+    const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query");
+    const { MemoryRouter } = await import("react-router-dom");
+    const { AttemptsTab } = await import("./AttemptsTab");
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (u: string) => {
+      urls.push(String(u));
+      return new Response(JSON.stringify({
+        items: [{ run_id: "run-aaaa-1111", task_id: "t", project_id: "p", attempt: 2, run_type: "IMPLEMENTATION",
+          execution_status: "FAILED", worker_reported_status: "EXITED_0", verifier_status: "FAILED",
+          acceptance_status: null, merged_status: null, started_at: null, finished_at: new Date().toISOString(),
+          mode: "LIVE", link: "/runs/run-aaaa-1111" }],
+        page: 1, page_size: 50, total: 1, source: "worker_runs", checked_at: new Date().toISOString(),
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter><AttemptsTab /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(/IMPLEMENTATION · attempt 2/)).toBeInTheDocument();
+    expect(screen.getByText("EXITED_0 (klaim)")).toBeInTheDocument(); // worker claim is not proof
+    fireEvent.change(screen.getByLabelText("Filter hasil percobaan"), { target: { value: "CANCELLED" } });
+    await screen.findByText(/IMPLEMENTATION · attempt 2/);
+    expect(urls.some((u) => u.includes("outcome=CANCELLED"))).toBe(true);
+    vi.unstubAllGlobals();
+  });
+});
 
 describe("Backups recovery notice (§33, §50)", () => {
   it("warns that restore is untested when no backup is ready", () => {
@@ -129,6 +179,38 @@ describe("Retirement checklist (§33)", () => {
     expect(screen.getByText("Memblokir")).toBeInTheDocument();
     expect(screen.getByText("Menunggu pemilik")).toBeInTheDocument();
     expect(screen.getByText(/Masih memblokir: jobs/)).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+});
+
+describe("Retirement final verification (§33)", () => {
+  const base = {
+    project: { id: "p1", name: "Alpha", domain: "PERSONAL", lifecycle: "RETIRING" },
+    items: [{ key: "final_verification", title: "Verifikasi akhir pemilik", status: "PENDING_OWNER", detail: {}, owner_action: "Catat keputusan." }],
+    blocking: [] as string[],
+    checklist_hash: "sha256:abc",
+    notice: "Daftar periksa read-only.",
+    checked_at: new Date().toISOString(),
+  };
+  const withClient = (ui: ReactElement) => render(<QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>);
+
+  it("needs an admin, no blocking item and a rationale before the decision can be recorded", () => {
+    withClient(<RetirementDecisionForm data={base} isAdmin />);
+    const button = screen.getByRole("button", { name: "Catat verifikasi akhir" });
+    expect(button).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Rationale verifikasi akhir"), { target: { value: "semua butir sudah diperiksa" } });
+    expect(button).toBeEnabled();
+  });
+
+  it("stays disabled while an item blocks or for a viewer", () => {
+    withClient(<RetirementDecisionForm data={{ ...base, blocking: ["jobs"] }} isAdmin />);
+    fireEvent.change(screen.getByLabelText("Rationale verifikasi akhir"), { target: { value: "semua butir sudah diperiksa" } });
+    expect(screen.getByRole("button", { name: "Catat verifikasi akhir" })).toBeDisabled();
+  });
+
+  it("explains that the decision waits for RETIRING", () => {
+    withClient(<RetirementDecisionForm data={{ ...base, project: { ...base.project, lifecycle: "ACTIVE" } }} isAdmin />);
+    expect(screen.getByText(/saat proyek berstatus RETIRING/)).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });

@@ -13,6 +13,11 @@ from sqlalchemy.orm import Session
 
 from aeos.models.routing import CapabilityGrant
 
+# Route pools the model proxy can serve (additive contract, ADR-0106). ARENA/COMPARATOR/LOCAL/WATCHLIST
+# have no controlled execution path through the broker yet: routing refuses such tasks at admission and
+# the proxy refuses their requests (no silent failure at the first model call).
+SERVED_POOLS: tuple[str, ...] = ("WORKER",)
+
 
 def issue_grant(
     session: Session, *, run_id: str, project_id: str, domain: str, kind: str, scope: dict[str, Any],

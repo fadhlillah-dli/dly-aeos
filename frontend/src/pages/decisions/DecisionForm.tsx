@@ -24,7 +24,7 @@ export const EXCEPTION_PRESETS: Record<string, { label: string; target: string; 
     label: "Worker di process sandbox (WEAK) untuk PERSONAL",
     target: "worker_sandbox/process",
     consumer: "aeos.worker_runtime.sandbox",
-    risk: "Tidak ada penegakan egress/filesystem oleh OS; user OS sama. bash hanya bila allow_bash dicentang (ADR-0051).",
+    risk: "Tidak ada penegakan egress/filesystem oleh OS; user OS sama. Shell (bash) dan egress tidak pernah diberikan di process sandbox (master §25, amendemen ADR-0051 2026-10-19); tugas R3 hanya bila operasi run_worker_process_sandbox_r3 dicantumkan, R4 selalu BLOCKED.",
   },
 };
 
@@ -159,8 +159,8 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
               )}
               {preset === "worker_sandbox_process" && (
                 <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={allowBash} onChange={(e) => setAllowBash(e.target.checked)} /> Izinkan bash (allow_bash) — worker
-                  menjalankan perintah sebagai user OS yang sama
+                  <input type="checkbox" checked={allowBash} onChange={(e) => setAllowBash(e.target.checked)} /> Izinkan bash (allow_bash) — hanya
+                  dicatat: tidak membuka shell di process sandbox (master §25); shell hanya di sandbox container yang containment-nya lulus
                 </label>
               )}
             </div>

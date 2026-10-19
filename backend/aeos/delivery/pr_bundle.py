@@ -63,7 +63,9 @@ def _require_valid_acceptance(session: Session, task: TaskSpec) -> Any:
 
 
 def _rollback_notes(changed: list[str]) -> list[str]:
-    migrations = [p for p in changed if "/migrations/" in p or p.endswith(".sql")]
+    from aeos.delivery.governance import change_deltas
+
+    migrations = change_deltas(changed)["migrations"]
     notes = ["Rollback kode: human reverts the merge commit (e.g. `git revert -m 1 <merge-sha>`) through a new PR."]
     if migrations:
         notes.append("Schema/data migration changed (" + ", ".join(migrations[:10]) + "): reverting code does NOT "
@@ -116,6 +118,10 @@ def build_pr_bundle(session: Session, task_id: str) -> PRBundle:
         unknowns += [str(r) for r in caps.get("residual_risks") or []]
     else:
         unknowns.append("Provider merge-gate capability not checked yet (aeos delivery capabilities)")
+    gov = gates["separate_status"]["governance"]
+    if gov["status"] not in ("HANDED_OFF", "ACCEPTED"):
+        unknowns.append(f"Governance handoff (§32): {gov['status']} via {gov['adapter']}"
+                        + (f" — {gov['note']}" if gov.get("note") else ""))
     unknowns = list(dict.fromkeys(u for u in unknowns if u))
 
     data = {
@@ -143,6 +149,9 @@ def build_pr_bundle(session: Session, task_id: str) -> PRBundle:
                        "is_human_approval": False},
         "gates": [{"gate": g["gate"], "name": g["name"], "status": g["status"], "summary": g["summary"]}
                   for g in gates["gates"]],
+        "governance": {"adapter": gov["adapter"], "contract_version": gov["contract_version"], "status": gov["status"],
+                       "result": gov["result"], "evidence_id": gov["evidence_id"],
+                       "bound_to_accepted_artifact": gov["bound_to_accepted_artifact"], "is_human_approval": False},
         "unknowns": unknowns,
         "rollback": _rollback_notes(changed),
         "changed_files": changed[:200],
@@ -207,6 +216,11 @@ def _markdown(d: dict[str, Any], bundle_hash: str) -> str:
         "| Gate | Status | Summary |", "|---|---|---|",
         *[f"| {g['gate']} {g['name']} | {g['status']} | {_cell(g['summary'])} |" for g in d["gates"]],
         "",
+        "### Governance handoff (§32)",
+        f"- Adapter `{_cell(d['governance']['adapter'])}` (contract {_cell(d['governance']['contract_version'])}): "
+        f"**{_cell(d['governance']['status'])}** — evidence `{_cell(d['governance']['evidence_id'])}`. "
+        "Not a human approval.",
+        "",
         "### Unknowns / NOT-PROVEN",
         *([f"- {_cell(u)}" for u in d["unknowns"]] or ["- None recorded."]),
         "",
@@ -233,6 +247,7 @@ def _repository(session: Session, project: Project) -> str:
 def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branch: str | None = None) -> dict[str, Any]:
     """Prepare the PR for an accepted task through the trusted broker (caller commits)."""
     from aeos.broker import facade as broker
+    from aeos.delivery import governance
     from aeos.delivery.gates import pr_view
     from aeos.doctor import facade as doctor
     from aeos.policy import facade as policy
@@ -244,6 +259,11 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
     project = session.get(Project, task.project_id)
     if project is None:
         raise NotFound("project not found")
+    if project.domain == "OFFICE":
+        from aeos.delivery.gates import OFFICE_DELIVERY_NOTE
+
+        raise Blocked(OFFICE_DELIVERY_NOTE, code="OFFICE_DELIVERY_NOT_AVAILABLE",
+                      details={"remedy": "owner: company authorisation + Bitbucket adapter (M5)"})
     acc = _require_valid_acceptance(session, task)
     # §14 "REVIEW --> DONE: penerimaan valid": the scheduler must have accepted exactly this run. An
     # ACCEPTED record whose mark_accepted was refused (task BLOCKED/READY, another attempt active,
@@ -258,6 +278,10 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
         raise Blocked("accepted run has no aeos/* task branch", code="BRANCH_NOT_TASK_BRANCH")
     if not run.workspace_ref:
         raise Blocked("accepted run has no candidate workspace", code="NO_CANDIDATE")
+    scope_problems = capability_scope_problems(task, run)
+    if scope_problems:
+        raise PolicyDenied("delivery exceeds the TaskSpec capability scope: " + "; ".join(scope_problems),
+                           code="CAPABILITY_SCOPE_DENIED", details={"problems": scope_problems})
     # The broker pushes the branch tip: it must still be exactly the accepted head (read-only git plumbing).
     try:
         local_head = GitReader(Path(run.workspace_ref)).branch_head(run.branch)
@@ -307,6 +331,18 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
         if not lock.result.allowed:
             raise PolicyDenied("external-write interlock refused the PR", code="INTERLOCK_DENIED",
                                details={"reasons": list(lock.result.reasons)})
+
+        # §01/§03/§32 order: governance runs after review/acceptance and before CI/PR. The handoff is
+        # recorded as evidence for the exact accepted artifact; a REJECTED/BLOCKED result stops delivery,
+        # NOT_CONFIGURED (no downstream harness yet) is carried visibly in the bundle — never a pass.
+        handed = governance.handoff(session, task.id, actor=actor_user_id, artifact_hash=acc.artifact_hash)
+        gov_result = str((handed.get("output") or {}).get("result") or "UNKNOWN")
+        if gov_result in ("REJECTED", "BLOCKED"):
+            raise Blocked(f"governance handoff {gov_result}: "
+                          + "; ".join((handed.get("output") or {}).get("reasons") or [])[:400],
+                          code="GOVERNANCE_REJECTED",
+                          details={"evidence_id": handed.get("evidence_id"), "result": gov_result})
+        notes.append(f"governance handoff {gov_result} (evidence {handed.get('evidence_id')})")
 
         bundle = build_pr_bundle(session, task.id)
         bundle_ev = collector.collect_evidence(
@@ -359,7 +395,7 @@ DELIVERY_GRANT_TTL = 900
 DELIVERY_GRANT_REQUESTS = 3  # push + PR + one reconciled retry
 # Broker failures whose outbox/audit rows must survive the refusal (the router commits before raising).
 PERSISTED_FAILURE_CODES = frozenset({"HEAD_MISMATCH", "BROKER_PUSH_FAILED", "BROKER_PUSH_UNKNOWN",
-                                     "BROKER_PR_FAILED", "BROKER_PR_UNKNOWN"})
+                                     "BROKER_PR_FAILED", "BROKER_PR_UNKNOWN", "GOVERNANCE_REJECTED"})
 
 
 def approval_decision_id(session: Session, task: TaskSpec, operation: str) -> str | None:
@@ -374,6 +410,25 @@ def approval_decision_id(session: Session, task: TaskSpec, operation: str) -> st
     except ImportError:
         return None
     return d.id if d is not None else None
+
+
+DELIVERY_GRANT_OPERATIONS = ("push_branch", "create_pr")
+
+
+def capability_scope_problems(task: TaskSpec, run: WorkerRun) -> list[str]:
+    """§21 TaskSpec "capability scope": the delivery grants never exceed what the TaskSpec declares —
+    the task branch must carry the declared branch prefix, and when the TaskSpec lists operations, the
+    delivery operations must be among them (an empty list means none were scoped)."""
+    scope = task.capability_scope if isinstance(task.capability_scope, dict) else {}
+    problems: list[str] = []
+    prefix = str(scope.get("branch_prefix") or "")
+    if prefix and not (run.branch or "").startswith(prefix):
+        problems.append(f"task branch {run.branch!r} is outside the TaskSpec branch prefix {prefix!r}")
+    ops = [str(o) for o in scope.get("operations") or [] if str(o).strip()]
+    missing = [o for o in DELIVERY_GRANT_OPERATIONS if ops and o not in ops]
+    if missing:
+        problems.append("TaskSpec capability scope does not list " + ", ".join(missing))
+    return problems
 
 
 def _issue_delivery_grants(session: Session, broker: Any, run: WorkerRun, *, repo: str, base: str) -> Any:

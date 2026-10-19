@@ -252,6 +252,136 @@ SERVICE_ROLES: list[dict[str, Any]] = [
           verification=["Tes cancel membunuh child dan grandchild"]),
 ]
 
+# ----------------------------------------------------------------------------- §17/§46 competence details
+# inputs (what the role consumes), example outputs (shape of a good result) and failure modes (what the
+# reviewer/verifier looks for) per role. Practice sources beyond the master are references only; nothing is
+# imported or auto-updated from them (§45).
+EXTERNAL_PRACTICE = {
+    "product-ux": "Practice reference: product discovery / UX research literature (reference only, §45)",
+    "architecture-delivery": "Practice reference: RFC/ADR and design review practice (reference only, §45)",
+    "fe-api-data": "Practice reference: OWASP ASVS, API contract testing practice (reference only, §45)",
+    "security-privacy": "Practice reference: OWASP ASVS/SAMM, NIST SSDF, GDPR DPIA guidance (reference only, §45)",
+    "platform-sre": "Practice reference: Google SRE book, NIST SSDF (reference only, §45)",
+    "qa-verification": "Practice reference: ISTQB test design techniques (reference only, §45)",
+    "docs-release": "Practice reference: Diataxis documentation, release management practice (reference only, §45)",
+    "research-eval-cost": "Practice reference: FinOps framework, ML evaluation methodology (reference only, §45)",
+}
+_D = tuple[list[str], list[str], list[str]]  # inputs, example outputs, failure modes
+ROLE_DETAILS: dict[str, _D] = {
+    "product-analyst": (["Prompt/ide pemilik", "Lampiran (DATA tak tepercaya)", "Konteks proyek"],
+                        ["PRD dengan problem, goals/non-goals, user stories dan AC yang dapat diuji"],
+                        ["Mengarang stakeholder/keputusan bisnis", "AC tidak dapat diuji", "Scope creep"]),
+    "ux-research-assistant": (["Input pemilik tentang pengguna", "Isu usability yang dilaporkan"],
+                              ["Journey + persona dengan asumsi bertanda dan sumber per persona"],
+                              ["Persona tanpa sumber", "Mengaku riset pengguna dilakukan", "Asumsi tidak ditandai"]),
+    "ux-ui-designer": (["PRD/AC", "Design tokens yang disepakati"],
+                       ["Flow + wireframe + state loading/error/empty + catatan a11y"],
+                       ["State error/loading hilang", "Kontras/a11y tidak diperiksa", "Desain berubah tanpa kontrak"]),
+    "solution-architect": (["PRD", "Inventory repo", "Kontrak yang ada"],
+                           ["RFC/TDD dengan alternatif, dampak dan rollback"],
+                           ["Kontrak berdampak tinggi tanpa keputusan", "Alternatif tidak dibandingkan"]),
+    "engineering-delivery-analyst": (["DAG TaskSpec", "Status runtime (read-only)"],
+                                     ["Usulan milestone/dependency/risiko delivery sebagai DATA"],
+                                     ["Mengubah prioritas/state scheduler", "Estimasi diklaim sebagai fakta"]),
+    "feature-implementer": (["TaskSpec (goal, AC, allowed_paths)", "Base commit", "Kontrak antarmuka"],
+                            ["Patch irisan fitur + tes yang memenuhi AC"],
+                            ["Menulis di luar allowed_paths", "Klaim selesai tanpa bukti", "Mengubah tes penerimaan"]),
+    "frontend-engineer": (["TaskSpec", "Kontrak API", "Design tokens"],
+                          ["UI/form/state + browser test + visual evidence"],
+                          ["State error/loading hilang", "Integrasi API tanpa kontrak", "a11y diabaikan"]),
+    "backend-api-engineer": (["TaskSpec", "Kontrak API/schema"],
+                             ["Endpoint + validasi + authz + tes unit/integrasi/negatif"],
+                             ["Authz hilang", "Error handling bocor detail", "Tanpa tes negatif"]),
+    "db-data-engineer": (["TaskSpec", "Schema yang ada"],
+                         ["Migration + rollback + tes migration/restore"],
+                         ["Migration tanpa rollback", "Dua head migration", "Credential migration di runtime"]),
+    "integration-engineer": (["TaskSpec", "Kontrak provider", "Target/tenant yang diizinkan"],
+                             ["Adapter + contract test provider + kunci idempotensi"],
+                             ["Akses global", "Target/tenant tidak terikat", "Tanpa idempotensi"]),
+    "data-ai-feature-engineer": (["TaskSpec", "Data yang diizinkan"],
+                                 ["Integrasi data/model + eval kualitas/privasi terpisah"],
+                                 ["Mengubah routing/policy", "Data pribadi tanpa assessment"]),
+    "security-engineer": (["TaskSpec", "Threat model", "Temuan"],
+                          ["Threat model + implementasi aman + triage berbukti"],
+                          ["Menandatangani risk acceptance", "Mengaku pentest dilakukan"]),
+    "privacy-grc-analyst": (["Data inventory", "Kontrol"],
+                            ["Assessment + mapping kontrol/bukti"],
+                            ["Mapping diklaim sebagai bukti efektivitas", "Data pribadi tidak terinventarisasi"]),
+    "supply-chain-analyst": (["Lockfile/manifest dependency"],
+                             ["Review dependency/license/SBOM dengan pin/digest"],
+                             ["Auto-upgrade seluruh proyek", "License tidak diperiksa"]),
+    "platform-devsecops-engineer": (["TaskSpec", "Pipeline/IaC yang ada"],
+                                    ["Perubahan CI/IaC + runbook proposal"],
+                                    ["Mengubah policy/IAM/secret tanpa karantina", "Diff kecil berdampak tinggi"]),
+    "qa-test-designer": (["PRD/AC", "Test Plan"],
+                         ["Skenario penerimaan + kasus edge/negatif/adversarial"],
+                         ["Suite dapat ditulis implementer", "Hanya happy path"]),
+    "independent-verifier": (["Candidate commit", "Suite tepercaya"],
+                             ["Laporan suite tepercaya dengan hash artefak"],
+                             ["Bukti dari worker dianggap tepercaya", "Exit 0 dianggap DONE"]),
+    "technical-writer": (["Artefak yang diterima", "Delta perubahan"],
+                         ["Narasi PRD/RFC/TDD/release yang menunjuk artefak"],
+                         ["Menulis status runtime/approval", "Dokumen tanpa sumber"]),
+    "diagram-visual-author": (["Kontrak/manifest/schema"],
+                              ["Sumber diagram Mermaid + manifest screenshot dari aplikasi nyata"],
+                              ["Diagram tidak cocok kontrak", "Screenshot palsu/mock tanpa label"]),
+    "release-coordinator": (["Evidence index", "Release Plan"],
+                            ["Paket rilis + checklist rollback"],
+                            ["Merge/produksi tanpa manusia", "Evidence index menunjuk bukti tak terverifikasi"]),
+    "sre-operations-assistant": (["SLI/telemetri (read-only)", "Runbook"],
+                                 ["Usulan SLI/SLO + runbook teruji"],
+                                 ["Tindakan operasional tanpa capability", "Runbook tidak diuji"]),
+    "incident-analyst": (["Timeline/log terkendali"],
+                         ["Timeline + dampak + root cause berbukti + corrective action"],
+                         ["Root cause tanpa bukti", "Bukti incident diubah"]),
+    "retirement-assistant": (["Checklist retirement", "Inventory proyek"],
+                             ["Checklist closure dependency/data/access"],
+                             ["Menghapus data/backup tanpa owner auth", "Klaim selesai sebelum verifikasi pemilik"]),
+    "context-curator": (["Sumber konteks dengan provenance"],
+                        ["Paket konteks terbatas dengan provenance per item"],
+                        ["Mengubah MCI/policy/memory dari input tak tepercaya", "Item tanpa provenance"]),
+    "model-evaluation-analyst": (["Hasil eval dari suite terproteksi"],
+                                 ["Ringkasan eksperimen + kegagalan model"],
+                                 ["Mengubah grader/hasil", "Membuang sampel gagal"]),
+    "finops-quota-analyst": (["Usage ledger"],
+                             ["Analisis penggunaan + opsi efisiensi yang ditelusuri ke ledger"],
+                             ["Angka tebakan model", "Fallback berbayar diam-diam"]),
+}
+_KIND_INPUTS = {"PLANNER": ["Konteks planning (DATA)", "Kebijakan tetap control plane"],
+                "REVIEWER": ["Paket yang dinilai saja (bukan percakapan worker)"],
+                "SERVICE": ["Record kanonik control plane"], "HUMAN": ["Paket keputusan terikat target + hash"]}
+_KIND_FAILURES = {"PLANNER": ["Mengarang owner/stakeholder", "DAG siklik atau tanpa allowed_paths"],
+                  "REVIEWER": ["Self-review", "Verdict dianggap approval", "Memperbaiki artefak sendiri"],
+                  "SERVICE": ["State tidak deterministik", "Fail-open saat modul hilang"], "HUMAN": []}
+_KIND_SCOPE: dict[str, dict[str, Any]] = {
+    "EXECUTOR": {"write": "TaskSpec.allowed_paths only", "egress": "TaskSpec.egress_allowed (default deny)",
+                 "credentials": "none (broker capability per run)", "domains": ["PERSONAL", "OFFICE"],
+                 "project_ids": "*"},
+    "PLANNER": {"write": "none (output is DATA)", "domains": ["PERSONAL", "OFFICE"], "project_ids": "*"},
+    "REVIEWER": {"write": "none (read-only)", "context": "checkpoint package only", "domains": ["PERSONAL", "OFFICE"],
+                 "project_ids": "*"},
+    "SERVICE": {"llm": False, "domains": ["PERSONAL", "OFFICE"], "project_ids": "*"},
+    "HUMAN": {"auth": "Decision rows bound to target + hash"},
+}
+
+
+def _enrich(role: dict[str, Any]) -> dict[str, Any]:
+    inputs, examples, failures = ROLE_DETAILS.get(role["role_key"], ([], [], []))
+    role["inputs"] = inputs or list(_KIND_INPUTS.get(role["kind"], []))
+    role["example_outputs"] = examples or list(role["outputs"])
+    role["failure_modes"] = role["failure_modes"] or failures or list(_KIND_FAILURES.get(role["kind"], []))
+    role["allowed_scope"] = dict(_KIND_SCOPE.get(role["kind"], {}))
+    ext = EXTERNAL_PRACTICE.get(role["group"])
+    if ext and ext not in role["practice_sources"]:
+        role["practice_sources"] = [*role["practice_sources"], ext]
+    return role
+
+
+PLANNING_ROLES = [_enrich(r) for r in PLANNING_ROLES]
+EXECUTOR_ROLES = [_enrich(r) for r in EXECUTOR_ROLES]
+SERVICE_ROLES = [_enrich(r) for r in SERVICE_ROLES]
+EXECUTOR_ROLE_KEYS = frozenset(r["role_key"] for r in EXECUTOR_ROLES)
+
 ALL_ROLES: list[dict[str, Any]] = [*PLANNING_ROLES, *EXECUTOR_ROLES, *SERVICE_ROLES]
 
 # ----------------------------------------------------------------------------- AgentDefinitions (§17)
@@ -266,10 +396,12 @@ AGENT_DEFINITIONS: list[dict[str, Any]] = [
         "route_policy": {"pool": "WORKER", "selection": "aeos.routing.facade.select_route",
                          "fallback": "approved-routes-only", "paid_fallback": False},
         "tools": DEFAULT_IMPLEMENTER_TOOLS,
-        "limits": {"max_attempts": 2, "max_active": 1, "nested_fan_out": False,
+        # upper bounds the scheduler applies (its own cap stays 1 unless a POLICY decision allows 2)
+        "limits": {"max_attempts": 2, "max_active": 2, "nested_fan_out": False,
                    "bash": "deny unless TaskSpec.tools_allowed", "webfetch": "deny unless TaskSpec.egress_allowed"},
         "allowed_scope": {"paths": "TaskSpec.allowed_paths", "forbidden": "TaskSpec.forbidden_paths + protected paths",
-                          "credentials": "capability token via broker only"},
+                          "credentials": "capability token via broker only", "domains": ["PERSONAL", "OFFICE"],
+                          "project_ids": "*"},
         "enabled": False,
         "deterministic": False,
         "enabled_reason": "Nonaktif sampai route worker APPROVED dan sandbox yang disyaratkan READY.",
@@ -282,7 +414,7 @@ AGENT_DEFINITIONS: list[dict[str, Any]] = [
         "route_policy": {"pool": "SUPERVISOR", "engine": "official claude binary", "api": "none"},
         "tools": ["read"],
         "limits": {"repairs": False, "write": False},
-        "allowed_scope": {"context": "checkpoint package only"},
+        "allowed_scope": {"context": "checkpoint package only", "domains": ["PERSONAL", "OFFICE"], "project_ids": "*"},
         "enabled": False,
         "deterministic": False,
         "enabled_reason": "Nonaktif sampai CAN_REVIEW_WITH_MAX READY (claude_bridge).",
@@ -295,7 +427,7 @@ AGENT_DEFINITIONS: list[dict[str, Any]] = [
         "route_policy": {"llm": False},
         "tools": ["trusted-suite"],
         "limits": {"suite": "read-only for implementers"},
-        "allowed_scope": {"workspace": "outside candidate"},
+        "allowed_scope": {"workspace": "outside candidate", "domains": ["PERSONAL", "OFFICE"], "project_ids": "*"},
         "enabled": False,
         "deterministic": True,
         "enabled_reason": "Nonaktif sampai modul verification menyatakan runner siap.",

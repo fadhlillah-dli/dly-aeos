@@ -88,7 +88,36 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
                 ["Data terms", <Freshness key="tc" at={r.terms_checked_at} label="Terms diperiksa" staleAfterSeconds={30 * 86400} />],
                 ["Gratis sampai", r.expires_note ?? (r.free_until ? absoluteTime(r.free_until) : "—")],
                 ["Kuota", <StatusBadge key="q" status={r.quota.state === "EXHAUSTED" ? "BLOCKED" : "UNKNOWN"} label={r.quota.state === "EXHAUSTED" ? "Kuota habis - antre" : "Sisa kuota tidak diketahui"} />],
-                ["Evaluasi", r.eval_summary.state === "DIUJI" ? Object.keys(r.eval_summary.roles).join(", ") : <StatusBadge status="NOT_TESTED" label="BELUM DIUJI" />],
+                [
+                  "Evaluasi",
+                  r.eval_summary.state === "DIUJI" ? (
+                    Object.keys(r.eval_summary.roles).join(", ")
+                  ) : r.eval_summary.state === "NEEDS_EVALUATION" ? (
+                    <span key="ne" className="space-y-1">
+                      <StatusBadge status="STALE" label="Perlu evaluasi ulang" />
+                      <span className="block text-xs text-ink-3">{r.eval_summary.note}</span>
+                    </span>
+                  ) : (
+                    <StatusBadge status="NOT_TESTED" label="BELUM DIUJI" />
+                  ),
+                ],
+                [
+                  "Binding runtime",
+                  !r.runtime_binding ? (
+                    "UNKNOWN"
+                  ) : r.runtime_binding.status === "DRIFT" ? (
+                    <span key="rb" className="space-y-1">
+                      <StatusBadge status="STALE" label="Berubah sejak aktivasi" />
+                      <span className="block text-xs text-warn">{r.runtime_binding.drift.join("; ")}</span>
+                    </span>
+                  ) : r.runtime_binding.status === "BOUND" ? (
+                    <StatusBadge key="rb" status="CONFIGURED" label="Terikat ke policy/prompt/strategi konteks saat aktivasi" />
+                  ) : (
+                    <StatusBadge key="rb" status="NOT_TESTED" label="Belum diaktifkan" />
+                  ),
+                ],
+                ["Jalur eksekusi", r.execution_path ? <span key="ep" className="text-sm">{r.execution_path.status === "NOT_WIRED" ? <StatusBadge status="NOT-PROVEN" label="Belum tersambung" /> : r.execution_path.status} <span className="block text-xs text-ink-3">{r.execution_path.note}</span></span> : "UNKNOWN"],
+                ["Rollback", r.active_decision?.rollback_target ? (r.active_decision.rollback_target.action === "DISABLE_ROUTE" ? "Nonaktifkan rute (belum ada konfigurasi lain yang pernah disetujui)" : <Mono key="rt">{r.active_decision.rollback_target.config_hash}</Mono>) : "—"],
                 ["Terakhir dipakai", r.last_used?.at ? absoluteTime(r.last_used.at) : <StatusBadge status="NEVER_OBSERVED" />],
                 ["Sumber", r.source_refs.join(", ")],
               ]}
@@ -96,7 +125,22 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
             <ExplainButtons
               content={{
                 what: <p>{r.notes || "Rute model pekerja yang tercatat di registry."}</p>,
-                why: <p>Kandidat dari master §23 / katalog ({r.evidence_level}); pemilihan produksi hanya setelah evaluasi dan keputusan manusia.</p>,
+                why: <p>Kandidat dari master §23 / katalog ({r.evidence_level}); pemilihan produksi hanya setelah evaluasi dan keputusan manusia.{r.decisions[0]?.rationale ? ` Alasan keputusan terakhir: ${r.decisions[0].rationale}` : ""}</p>,
+                usedBy: (
+                  <p>
+                    {r.last_used?.at
+                      ? `Terakhir dipakai ${absoluteTime(r.last_used.at)} oleh run ${r.last_used.run_id ?? "UNKNOWN"} (${r.last_used.status}).`
+                      : "Belum pernah dipakai oleh run mana pun (tercatat di usage ledger)."}
+                  </p>
+                ),
+                propose: (
+                  <p>
+                    <a className="text-accent underline" href={`/proposals?kind=REPLACE&source=${encodeURIComponent(r.route_key)}`}>
+                      Usulkan perubahan untuk rute ini
+                    </a>{" "}
+                    (usulan tidak mengaktifkan apa pun).
+                  </p>
+                ),
                 evidence: (
                   <pre className="mono whitespace-pre-wrap text-xs">{JSON.stringify({ pricing: r.pricing, data_terms: r.data_terms }, null, 2)}</pre>
                 ),

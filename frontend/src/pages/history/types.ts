@@ -175,6 +175,8 @@ export interface RetirementChecklist {
   project: { id: string; name: string; domain: string; lifecycle: string };
   items: RetirementItem[];
   blocking: string[];
+  /** Hash of the items the owner verifies (final verification row excluded). */
+  checklist_hash?: string;
   notice: string;
   checked_at: string;
 }

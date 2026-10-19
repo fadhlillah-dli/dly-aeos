@@ -44,8 +44,16 @@ from tests.conftest import AuthedClient
 pytestmark = pytest.mark.acceptance
 
 GH = "https://api.github.com"
+# §40 trial admission: one authorization binds target/environment/provider/data class/budget, the time and
+# attempt caps and the stop/rollback scope.
 SCOPE = {"target": "platform:dly-aeos", "environment": "sandbox", "provider": "opencode-zen",
-         "data_class": "INTERNAL", "budget_usd": 0}
+         "data_class": "INTERNAL", "budget_usd": 0, "max_minutes": 60, "max_attempts": 2,
+         "stop_conditions": ["cap waktu/attempt/budget tercapai", "pelanggaran scope"],
+         "rollback_scope": "hapus sandbox trial; baseline tetap aktif"}
+# The self-build worker route registered by tests.acceptance.world is an OpenRouter route.
+SELF_BUILD_SCOPE = SCOPE | {"provider": "openrouter"}
+ACCEPTANCE = [{"criterion": "Suite terpercaya controller lulus pada kandidat", "metric": "verifier_status",
+               "threshold": "PASS", "baseline_value": "UNKNOWN"}]
 OPENCODE = "https://github.com/anomalyco/opencode"
 
 
@@ -68,7 +76,16 @@ def _propose(client: AuthedClient, kind: str, sources: list[str], **extra: Any) 
 
 
 def _review(client: AuthedClient, p: dict[str, Any], **body: Any) -> dict[str, Any]:
-    return _ok(client.post(f"/api/proposals/{p['id']}/review", json=body))
+    reviewed = _ok(client.post(f"/api/proposals/{p['id']}/review", json=body))
+    if not reviewed["owner_plan"].get("acceptance") and reviewed["kind"] != "COMPARE":
+        # §40/§45: the owner declares measurable acceptance, the operations owner and (REPLACE/UPGRADE) the
+        # cutover/rollback plan BEFORE the trial; the plan is part of the candidate hash.
+        plan: dict[str, Any] = {"acceptance": ACCEPTANCE, "operations_owner": "owner"}
+        if reviewed["kind"] in ("REPLACE", "UPGRADE"):
+            plan["replacement"] = {"cutover_order": "pin kandidat lewat manifest yang direview, lalu probe",
+                                   "rollback_or_forward_recovery": "muat ulang manifest dengan pin sebelumnya"}
+        reviewed = _ok(client.patch(f"/api/proposals/{p['id']}/plan", json=plan))["proposal"]
+    return reviewed
 
 
 def _decide(client: AuthedClient, p: dict[str, Any], action: str, *, scope: dict[str, Any] | None = None,
@@ -102,14 +119,33 @@ def _entry(db, key: str) -> ResearchEntry:
     return db.scalar(select(ResearchEntry).where(ResearchEntry.entry_key == key))
 
 
-def _verifier_evidence(client: AuthedClient, db, monkeypatch, tmp_path: Path, host, settings) -> str:
-    """Trusted LIVE evidence produced by the REAL independent verifier on a real candidate."""
+def _verifier_evidence(client: AuthedClient, db, monkeypatch, tmp_path: Path, host, settings) -> tuple[str, str]:
+    """Trusted LIVE evidence produced by the REAL independent verifier on a real candidate run, and the
+    TaskSpec that run implemented (the owner links it to the proposal: evidence must be about the candidate)."""
     from tests.acceptance.selfbuild import self_build, verify
 
     w = self_build(client, db, monkeypatch, tmp_path, host, settings)
     out = verify(client, w["run_id"])
     assert out["status"] == "PASS", out
-    return out["report_evidence_id"]
+    return out["report_evidence_id"], w["task_id"]
+
+
+CHECKPOINT_PASS = {"review": {"summary": "laporan verifier mencakup acceptance AC1"},
+                   "verify": {"claims": [{"claim": "suite terpercaya lulus", "status": "SUPPORTED"}]},
+                   "verdict": "PASS", "rationale": "bukti verifier independen konsisten dengan kriteria"}
+
+
+def _trial_evidence(client: AuthedClient, p: dict[str, Any], evidence_id: str, task_id: str) -> dict[str, Any]:
+    """§40: evidence opens PROMOTE only when it is about this candidate - the owner links the trial TaskSpec,
+    attaches the verifier report and records the Claude checkpoint over that evidence (manual fallback)."""
+    _err(client.post(f"/api/proposals/{p['id']}/evidence", json={"evidence_ids": [evidence_id]}), 422,
+         "EVIDENCE_NOT_FOR_CANDIDATE")
+    _ok(client.post(f"/api/proposals/{p['id']}/links", json={"task_ids": [task_id]}))
+    attached = _ok(client.post(f"/api/proposals/{p['id']}/evidence", json={"evidence_ids": [evidence_id]}))
+    assert attached["status"] == "PROMOTION_PENDING"
+    _err(_decide(client, attached, "PROMOTE", scope=SELF_BUILD_SCOPE), 409, "CHECKPOINT_REVIEW_REQUIRED")
+    _ok(client.post(f"/api/proposals/{p['id']}/checkpoint", json={"manual_result": CHECKPOINT_PASS}))
+    return attached
 
 
 def _worker_claim(db) -> str:
@@ -201,7 +237,7 @@ def test_new_model_or_tool_needs_controlled_eval_version_decision_and_rollback_b
         personal_client: AuthedClient, db, monkeypatch, tmp_path, host, settings):
     from aeos.evaluation import facade as evaluation
 
-    evidence_id = _verifier_evidence(personal_client, db, monkeypatch, tmp_path, host, settings)
+    seed_catalog(db)
     register_free_route(db, "worker.new-model", model_id="new-model-free")
     before = _state(db)
     config = {"model_id": "new-model-free", "model_version": "UNKNOWN", "provider": "opencode-zen",
@@ -241,14 +277,19 @@ def test_new_model_or_tool_needs_controlled_eval_version_decision_and_rollback_b
     assert rollback["previous_accepted_configuration"][0]["component_id"] == "opencode"
     assert any("Rollback kode tidak menjamin rollback data" in n for n in rollback["notes"])
     _err(_decide(personal_client, p, "PROMOTE"), 409, "CONFLICT")  # no trial yet
-    trial = _ok(_decide(personal_client, p, "TRIAL_APPROVE"))
-    _err(_decide(personal_client, trial["proposal"], "PROMOTE"), 409, "NOT_PROVEN")
-    attached = _ok(personal_client.post(f"/api/proposals/{p['id']}/evidence", json={"evidence_ids": [evidence_id]}))
-    assert attached["status"] == "PROMOTION_PENDING"
-    promo = _ok(_decide(personal_client, attached, "PROMOTE"))
+    _err(_decide(personal_client, p, "TRIAL_APPROVE", scope=SELF_BUILD_SCOPE | {"environment": "production"}), 422,
+         "TRIAL_ENVIRONMENT_NOT_ALLOWED")  # a trial is a disposable sandbox/staging run, never production
+    trial = _ok(_decide(personal_client, p, "TRIAL_APPROVE", scope=SELF_BUILD_SCOPE))
+    _err(_decide(personal_client, trial["proposal"], "PROMOTE", scope=SELF_BUILD_SCOPE), 409, "NOT_PROVEN")
+    # the candidate run under the trial, verified by the REAL independent verifier (after the TRIAL decision)
+    evidence_id, task_id = _verifier_evidence(personal_client, db, monkeypatch, tmp_path, host, settings)
+    attached = _trial_evidence(personal_client, p, evidence_id, task_id)
+    before = _state(db)
+    promo = _ok(_decide(personal_client, attached, "PROMOTE", scope=SELF_BUILD_SCOPE))
     d_trial, d_promo = db.get(Decision, trial["decision_id"]), db.get(Decision, promo["decision_id"])
     assert (d_trial.kind, d_promo.kind) == ("TRIAL", "PROMOTION") and d_promo.target_hash != d_trial.target_hash
-    assert d_promo.allowed_operations == ["promote.candidate"] and d_promo.status == "ACTIVE"
+    assert d_promo.allowed_operations[0] == "promote.candidate" and d_promo.status == "ACTIVE"
+    assert d_promo.details["checkpoint"]["verdict"] == "PASS"
     dims = promo["proposal"]["delivery_dimensions"]
     assert dims["APPROVED"]["status"] == "YES" and dims["VERIFIED"]["status"] == "EVIDENCE_ATTACHED"
     assert dims["ACTIVE"]["status"] == "UNKNOWN", "a promotion decision is not activation"
@@ -435,7 +476,7 @@ def test_trial_approval_is_not_promotion_and_the_baseline_stays_active(personal_
                                           candidate_pin="1.4.0"))
     trial = _ok(_decide(personal_client, p, "TRIAL_APPROVE"))
     d = db.get(Decision, trial["decision_id"])
-    assert d.kind == "TRIAL" and d.allowed_operations == ["trial.sandbox"]
+    assert d.kind == "TRIAL" and d.allowed_operations[0] == "trial.sandbox" and "trial.stop" in d.allowed_operations
     assert d.details["budget_raised"] is False and d.details["installed"] is False
     assert trial["proposal"]["status"] == "TRIAL_APPROVED"
     assert trial["proposal"]["delivery_dimensions"]["APPROVED"]["status"] == "NO"
@@ -499,8 +540,10 @@ def test_replace_review_requires_impact_consumers_migration_and_rollback(persona
     assert "migration/consumer tests" in replace["tradeoffs"] and "Rollback data" in replace["unknowns"]
     plan = pkg["replacement_plan"]
     assert plan["adapter_consumer_changes"] and plan["adapter_consumer_changes"] != "UNKNOWN"
-    assert plan["version_schema_data_compatibility"] == "UNKNOWN" and plan["cutover_order"] == "UNKNOWN"
+    # what the owner declared is shown; what nobody declared stays UNKNOWN (never assumed compatible)
+    assert plan["version_schema_data_compatibility"] == "UNKNOWN" and plan["cutover_order"].startswith("pin kandidat")
     assert "restore" in plan["backup_and_restore_evidence"]
+    assert impact["rollback"]["status"] == "UNKNOWN", "an old pin is a rollback target, not proof that rollback works"
     assert "Compatibility dengan consumer terbukti" in pkg["experiment_plan"]["acceptance"]
     # nothing proceeds without the trial + trusted evidence; a rollback is never an acceptance
     _err(_decide(personal_client, p, "PROMOTE"), 409, "CONFLICT")
@@ -527,7 +570,7 @@ def test_a_second_orchestrator_never_becomes_an_active_scheduler(personal_client
     assert "tidak menjalankan dua scheduler" in plan["coexistence"]
     assert "tanpa dual authority" in p["review_package"]["experiment_plan"]["canary"]
     trial = _ok(_decide(personal_client, p, "TRIAL_APPROVE"))
-    assert db.get(Decision, trial["decision_id"]).allowed_operations == ["trial.sandbox"]
+    assert db.get(Decision, trial["decision_id"]).allowed_operations[0] == "trial.sandbox"
     assert _state(db) == before, "no orchestrator is enabled; the workforce scheduler stays the authority"
     config = _ok(personal_client.get("/api/inventory/map", params={"lens": "CONFIG"}))
     orchestrators = [n for n in config["nodes"] if n["kind"] == "orchestrator"]
@@ -554,7 +597,7 @@ def test_unsafe_canary_is_replaced_by_sandbox_staging_and_an_authorised_cutover(
     _err(_decide(personal_client, p, "TRIAL_APPROVE", scope=missing), 422, "VALIDATION_FAILED")
     trial = _ok(_decide(personal_client, p, "TRIAL_APPROVE"))
     d = db.get(Decision, trial["decision_id"])
-    assert d.allowed_operations == ["trial.sandbox"] and d.auth_scope["environment"] == "sandbox"
+    assert d.allowed_operations[0] == "trial.sandbox" and d.auth_scope["environment"] == "sandbox"
 
 
 # ---------------------------------------------------------------------------------------------- 3.28
@@ -582,26 +625,56 @@ def test_rejected_proposal_keeps_reason_and_history_and_is_never_success(persona
 def test_rolled_back_change_keeps_its_history_and_evidence_and_is_never_success(personal_client: AuthedClient, db,
                                                                                 monkeypatch, tmp_path, host,
                                                                                 settings):
-    evidence_id = _verifier_evidence(personal_client, db, monkeypatch, tmp_path, host, settings)
-    p = _review(personal_client, _propose(personal_client, "REPLACE", [OPENCODE], existing_component_ids=["opencode"],
+    from aeos.inventory.manifest import apply_manifest
+    from aeos.models.audit import AuditEvent
+
+    seed_catalog(db)
+    register_free_route(db, "worker.trial-scope")  # an OpenRouter worker route the TRIAL decision can name
+    p = _review(personal_client, _propose(personal_client, "UPGRADE", [OPENCODE], existing_component_ids=["opencode"],
                                           candidate_pin="1.4.0"))
-    trial = _ok(_decide(personal_client, p, "TRIAL_APPROVE"))
-    p = _ok(personal_client.post(f"/api/proposals/{p['id']}/evidence", json={"evidence_ids": [evidence_id]}))
-    _ok(_decide(personal_client, p, "PROMOTE"))
+    trial = _ok(_decide(personal_client, p, "TRIAL_APPROVE", scope=SELF_BUILD_SCOPE))
+    evidence_id, task_id = _verifier_evidence(personal_client, db, monkeypatch, tmp_path, host, settings)
+    p = _trial_evidence(personal_client, p, evidence_id, task_id)
+    _ok(_decide(personal_client, p, "PROMOTE", scope=SELF_BUILD_SCOPE))
+    # ACCEPTED only after the lawful configuration change: the reviewed manifest declares the pin and the
+    # reconciler observes the installed version (fake host binary) after the promotion
+    _err(_outcome(personal_client, p, status="ACCEPTED", evidence_ids=[evidence_id],
+                  accepted_configuration={"component_id": "opencode", "approved_pin": "1.4.0"},
+                  acceptance_results={"AC1": {"status": "PASS", "evidence_id": evidence_id}}), 409, "CONFIG_NOT_APPLIED")
+    apply_manifest(db, actor="owner", path=manifest_with_pin(tmp_path, "opencode", "1.4.0"), root=Path(repo_root()))
+    db.commit()
+    host.install("opencode", "1.4.0\n")
+    settings.opencode_binary = None  # resolved from PATH on the (fake) host, as the reconciler does
+    _ok(personal_client.post("/api/inventory/refresh", json={"component_id": "opencode"}))
     accepted = _ok(_outcome(personal_client, p, status="ACCEPTED", evidence_ids=[evidence_id],
-                            accepted_configuration={"component_id": "opencode", "approved_pin": "1.4.0"}))
+                            accepted_configuration={"component_id": "opencode", "approved_pin": "1.4.0"},
+                            acceptance_results={"AC1": {"status": "PASS", "evidence_id": evidence_id}}))
     assert accepted["status"] == "ACCEPTED"
+    assert _entry(db, "tool:opencode").lifecycle == "ENABLED"
+    # the rollback actually runs (manifest with the previous pin reloaded) and the outcome references it
+    _err(_outcome(personal_client, p, status="ROLLED_BACK", evidence_ids=[evidence_id],
+                  rollback={"code_reverted": True, "data_rollback": "NOT_POSSIBLE"}), 422, "ROLLBACK_NOT_REFERENCED")
+    apply_manifest(db, actor="owner", root=Path(repo_root()))
+    db.commit()
+    ref = db.scalar(select(AuditEvent).where(AuditEvent.action == "inventory.manifest.load")
+                    .order_by(AuditEvent.seq.desc())).event_id
     rolled = _ok(_outcome(personal_client, p, status="ROLLED_BACK", evidence_ids=[evidence_id],
-                          rollback={"code_reverted": True, "data_rollback": "NOT_POSSIBLE"},
+                          rollback={"code_reverted": True, "data_rollback": "NOT_POSSIBLE",
+                                    "reference": {"audit_event_id": ref}},
                           notes="regresi pada consumer workforce"))
     cur = rolled["outcome"]["current"]
     assert rolled["status"] == "ROLLED_BACK" and cur["accepted"] is False and cur["accepted_configuration"] is None
     assert cur["rollback"]["data_rollback"] == "NOT_POSSIBLE" and "tidak menjamin rollback data" in cur["rollback"]["note"]
+    assert cur["rollback"]["reference"]["action"] == "inventory.manifest.load"
     assert cur["notes"] == "regresi pada consumer workforce" and cur["evidence_ids"] == [evidence_id]
     assert [h["status"] for h in rolled["outcome"]["history"]] == ["ACCEPTED", "ROLLED_BACK"]
     db.expire_all()
-    assert all(d.status != "ACTIVE" for d in db.scalars(select(Decision).where(Decision.target_id == p["id"])))
+    decisions = list(db.scalars(select(Decision).where(Decision.target_id == p["id"])))
+    rollback_decisions = [d for d in decisions if d.kind == "ROLLBACK"]  # §10 the rollback is a Decision row
+    assert len(rollback_decisions) == 1 and rollback_decisions[0].target_hash and rollback_decisions[0].actor_kind == "HUMAN"
+    assert all(d.status != "ACTIVE" for d in decisions if d.kind != "ROLLBACK")
     assert db.get(Decision, trial["decision_id"]).status != "ACTIVE"
+    assert _entry(db, "tool:opencode").lifecycle != "ENABLED", "a rolled-back candidate is never shown as enabled"
     _err(_outcome(personal_client, p, status="ACCEPTED", evidence_ids=[evidence_id],
                   accepted_configuration={"component_id": "opencode"}), 409, "CONFLICT")
     timeline = _ok(personal_client.get(f"/api/proposals/{p['id']}/timeline"))

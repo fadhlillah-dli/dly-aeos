@@ -52,7 +52,25 @@ Runtime state never lives in the repo: data dir is `%LOCALAPPDATA%\DLY-AEOS` (Wi
 Workers building DLY AEOS may propose changes but the patch is quarantined for special review if
 it touches: `policy/**`, `backend/aeos/policy/**`, `backend/aeos/verification/**`,
 `backend/aeos/broker/**`, `backend/aeos/identity/**`, `tests/acceptance/**`, `.github/workflows/**`,
-`install-manifest/**`, `backend/aeos/migrations/**`.
+`install-manifest/**`, `backend/aeos/migrations/**`, the trust-relevant controller code (router,
+tool permissions/sandbox, capability gates, budgets, evaluator, admission, auth/CORS/config,
+secrets, supervisor bridge): `backend/aeos/routing/**`, `backend/aeos/worker_runtime/**`,
+`backend/aeos/doctor/**`, `backend/aeos/cost/**`, `backend/aeos/evaluation/**`,
+`backend/aeos/workforce/**`, `backend/aeos/api/**`, `backend/aeos/core/**`,
+`backend/aeos/secrets/**`, `backend/aeos/claude_bridge/**`, the audit/event trail and dashboard
+projections (`backend/aeos/audit/**`, `backend/aeos/events/**`, `backend/aeos/control_center/**`), the
+master and agent instructions (U-23) and prompts (§25): `docs/architecture/**`,
+`backend/aeos/planning/prompts.py`, `AGENTS.md`, `CLAUDE.md`, and the bootstrap/dependency set:
+`scripts/bootstrap.*`, `pyproject.toml`, `requirements.lock`.
+
+`backend/aeos/evaluation/**` holds the held-out evaluation suites and gates (§16/§21 "workers never change
+graders or held-out tests").
+
+The canonical list lives in `backend/aeos/core/protected_paths.py` (compiler, runtime and verifier
+import it; `tests/unit/test_protected_paths.py` keeps it equal to this section). For every managed
+project the trusted pipeline/grader/policy/agent-config paths (`opencode.json`, `.opencode/**`,
+`AGENTS.md`, `CLAUDE.md`, CI files) and the restricted areas (IaC, IAM, secrets, deploy targets) are
+quarantined as well.
 
 ## Engineering conventions
 

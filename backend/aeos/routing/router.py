@@ -58,23 +58,58 @@ def _eval_summary(r: ModelRoute) -> dict[str, Any]:
         if entry.get("config_hash") != r.config_hash:
             stale.append(role)
             continue
-        roles[role] = {k: entry.get(k) for k in ("score", "runs", "accepted", "suite", "at", "sample_size")}
-    return {"state": "DIUJI" if roles else "BELUM_DIUJI", "roles": roles, "stale_roles": stale,
-            "note": "Hasil konfigurasi lama tidak diwariskan." if stale else ""}
+        roles[role] = {k: entry.get(k) for k in ("score", "score_basis", "runs", "accepted", "suite", "at",
+                                                  "sample_size", "ci95", "run_ids", "decision_id")}
+    state = "DIUJI" if roles else "BELUM_DIUJI"
+    note = "Hasil konfigurasi lama tidak diwariskan." if stale else ""
+    if not roles and (stale or (r.pool == "SUPERVISOR" and r.config_changed_at is not None)):
+        # §02 "a version change is never silent and needs evaluation": the changed configuration is untested.
+        state = "NEEDS_EVALUATION"
+        note = ("Konfigurasi berubah (mis. alias kini me-resolve ke versi model lain); hasil lama tidak diwariskan "
+                "dan konfigurasi baru belum dievaluasi.")
+        if r.pool == "SUPERVISOR":
+            note += (" Planning tetap memakai versi baru (uji penerimaan 1.31 menetapkan perilaku ini); evaluasi "
+                     "baseline planning untuk versi ini belum tercatat - keputusan pemilik diperlukan.")
+    return {"state": state, "roles": roles, "stale_roles": stale, "note": note}
 
 
 def _active_decision_view(session: Session, r: ModelRoute) -> dict[str, Any] | None:
     for kind in ("ROUTE_ACTIVATION", "TRIAL"):
         d = service.find_route_decision(session, kind=kind, route=r)
         if d is not None:
+            details = d.details or {}
             return {"id": d.id, "kind": d.kind, "expires_at": _iso(d.expires_at), "created_at": _iso(d.created_at),
-                    "budget_decision_id": (d.details or {}).get("budget_decision_id")}
+                    "budget_decision_id": details.get("budget_decision_id"),
+                    "eval_run_ids": details.get("eval_run_ids") or [], "rollback_target": details.get("rollback_target"),
+                    "terms_review": details.get("terms_review")}
     return None
 
 
-def route_view(session: Session, r: ModelRoute, principal: Principal) -> dict[str, Any]:
+def _runtime_view(r: ModelRoute, runtime: dict[str, Any]) -> dict[str, Any]:
+    fields = service.binding_fields(r)
+    drift = service.binding_drift(r, runtime) if r.status in {"APPROVED", "TRIAL"} else []
+    current_fields = (*fields, "harness_version") if service.runs_on_worker_runtime(r) else fields
+    return {"bound": {f: getattr(r, f) for f in (*fields, "harness_version")},
+            "current": {f: runtime.get(f) for f in current_fields},
+            "status": "DRIFT" if drift else ("BOUND" if r.status in {"APPROVED", "TRIAL"} else "NOT_ACTIVATED"),
+            "drift": drift}
+
+
+def _execution_path(r: ModelRoute) -> dict[str, Any]:
+    if r.pool == "SUPERVISOR":
+        return {"status": "NATIVE_BRIDGE", "note": "Hanya lewat binary claude resmi (planning/review)."}
+    if r.pool in service.WORKER_EXECUTED_POOLS:
+        return {"status": "WORKER_RUNTIME", "note": "Dijalankan worker runtime lewat broker."}
+    return {"status": "NOT_WIRED",
+            "note": f"Pool {r.pool}: broker hanya melayani route WORKER, sehingga uji kelayakan/arena untuk route ini "
+                    "belum dapat dieksekusi di build ini (perubahan broker = protected path)."}
+
+
+def route_view(session: Session, r: ModelRoute, principal: Principal,
+               runtime: dict[str, Any] | None = None) -> dict[str, Any]:
     if r.config_hash is None:
         r.config_hash = service.compute_config_hash(r)
+    runtime = runtime if runtime is not None else service.runtime_context()
     q = service.quota_exhausted(session, r)
     return {
         "route_key": r.route_key, "pool": r.pool, "provider": r.provider, "endpoint": r.endpoint,
@@ -95,6 +130,13 @@ def route_view(session: Session, r: ModelRoute, principal: Principal) -> dict[st
         "quota": ({"state": "EXHAUSTED", "scope": q.scope, "resets_at": _iso(q.resets_at), "source": q.source}
                   if q else {"state": "UNKNOWN_OR_OK", "note": "tidak ada observasi kuota habis"}),
         "source_refs": r.source_refs, "notes": r.notes,
+        "region": r.region, "region_restricted": service.region_restricted(r),
+        "terms_restriction": (None if r.pool == "SUPERVISOR"
+                              else service.terms_restriction(r.data_terms or {}, r.identity_status)),
+        # training/trial flags still UNKNOWN: the owner records their own reading at activation (terms_record)
+        "terms_unknown": [] if r.pool == "SUPERVISOR" else service.unknown_terms_keys(r.data_terms or {}),
+        "reviewed_tool_set": service.reviewed_tool_set(r), "runtime_binding": _runtime_view(r, runtime),
+        "execution_path": _execution_path(r),
     }
 
 
@@ -109,7 +151,8 @@ def list_routes(db: DB, principal: CurrentPrincipal, pool: str | None = None, st
     rows = list(db.scalars(q))
     if domain:
         rows = [r for r in rows if domain in (r.eligible_domains or [])]
-    items = [route_view(db, r, principal) for r in rows]
+    runtime = service.runtime_context()
+    items = [route_view(db, r, principal, runtime) for r in rows]
     last = catalog.latest_refresh(db)
     checks = [r.pricing_checked_at for r in rows if r.pricing_checked_at is not None]
     return {
@@ -129,14 +172,14 @@ def list_routes(db: DB, principal: CurrentPrincipal, pool: str | None = None, st
 def route_eligibility(
     db: DB, principal: CurrentPrincipal, domain: str = Query(..., description="Explicit PERSONAL/OFFICE"),
     classification: str = Query(...), role: str | None = None, pool: str = "WORKER", needs_tools: bool = True,
-    min_context: int | None = None,
+    min_context: int | None = None, tools: list[str] | None = Query(None),
 ) -> dict[str, Any]:
     if domain not in {d.value for d in Domain}:
         raise ValidationFailed("domain must be PERSONAL or OFFICE", code="DOMAIN_REQUIRED")
     if not principal.can_access_domain(domain):
         raise Forbidden("domain outside your scope")
     decision = service.eligible_routes(db, domain=domain, data_classification=classification, needs_tools=needs_tools,
-                                       min_context=min_context, pool=pool)
+                                       min_context=min_context, pool=pool, tools=tools)
     ranked = service.rank(db, decision.eligible, role) if decision.eligible else []
     db.rollback()  # read-only: never persist incidental hash backfills from a GET
     return {
@@ -188,6 +231,12 @@ def get_route(route_key: str, db: DB, principal: CurrentPrincipal) -> dict[str, 
     return view
 
 
+class TermsRecordBody(BaseModel):
+    may_use_inputs_for_training: bool
+    trial_only_no_confidential: bool
+    note: str = Field(min_length=10, max_length=500)
+
+
 class ActivateBody(BaseModel):
     mode: Literal["APPROVED", "TRIAL"]
     rationale: str = Field(min_length=10, max_length=4000)
@@ -196,6 +245,11 @@ class ActivateBody(BaseModel):
     budget_decision_id: str | None = None
     expires_in_days: int | None = None
     terms_reviewed: bool = False
+    terms_note: str = Field(default="", max_length=500)
+    terms_record: TermsRecordBody | None = None
+    region: str | None = Field(default=None, max_length=32)
+    tool_set: list[str] | None = Field(default=None, max_length=20)
+    eval_run_ids: list[str] | None = Field(default=None, max_length=20)
 
 
 @router.post("/api/routes/{route_key:path}/activate")
@@ -204,12 +258,14 @@ def activate(route_key: str, body: ActivateBody, db: DB, principal: AdminPrincip
         db, route_key, actor_user_id=principal.user.id, mode=body.mode, rationale=body.rationale,
         expected_config_hash=body.expected_config_hash, allowed_data_classes=body.allowed_data_classes,
         budget_decision_id=body.budget_decision_id, expires_in_days=body.expires_in_days,
-        terms_reviewed=body.terms_reviewed,
+        terms_reviewed=body.terms_reviewed, terms_note=body.terms_note,
+        terms_record=body.terms_record.model_dump() if body.terms_record else None, region=body.region,
+        tool_set=body.tool_set, eval_run_ids=body.eval_run_ids,
     )
     audit.record(db, actor_type="user", actor_id=principal.user.id, action="route.activate",
                  target_type=service.TARGET_TYPE, target_id=route.route_key, domain=Domain.PERSONAL.value,
                  details={"mode": body.mode, "decision_id": decision.id, "config_hash": route.config_hash,
-                          "budget_decision_id": body.budget_decision_id})
+                          "budget_decision_id": body.budget_decision_id, "eval_run_ids": body.eval_run_ids or []})
     emit(db, source="routing", kind="route.activated", entity_type=service.TARGET_TYPE, entity_id=route.route_key,
          entity_version=route.config_hash, payload={"mode": body.mode, "decision_id": decision.id})
     db.commit()

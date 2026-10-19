@@ -45,3 +45,29 @@ quarantined for special review when DLY AEOS builds itself. §19/§22 serialise 
 * The scheduler can rely on TaskSpecs being complete and immutable; a task without allowed paths is
   flagged so the scheduler blocks it.
 * Changing caps or defaults is a policy change recorded by a new ADR, not a code tweak.
+
+## Amendment 2026-10-19 (cluster C7: plan content governance)
+
+1. **Plan content schema 1, revision 2 (additive).** Top-level `feature_governance` (owner, RFC/TDD/DPIA/
+   security-assessment needs, personal data YES/NO/UNKNOWN, feature threat model), `milestone_governance`
+   (priority, acceptance, dependencies, owner), `rfcs`, `tdds` and `interface_contracts`. The JSON Schema title
+   stays `plan-content/1` (nothing removed or renamed); stored content without the sections is read through
+   `contracts.upgrade_content` (empty list = nothing requested / UNKNOWN). The docs adapter folds these
+   sections into the feature-approval documents (§27, §28).
+2. **More DAG rules (errors).** `CONTRACT_NOT_FIRST` (every consumer of an interface contract depends,
+   transitively, on the provider task — §19/§22 contract-first), `UNKNOWN_CONTRACT_TASK`,
+   `SPECIALIST_WITHOUT_DISTINCT_OUTPUT` (a role other than `feature-implementer` needs its own outputs and
+   acceptance — §18), unknown features/milestones in the governance sections.
+3. **Review findings (non-blocking, shown to challenger/final reviewer/owner).** `ROLE_UNKNOWN`,
+   `FE_BE_SPLIT_WITHOUT_CONTRACT`, `CROSS_FEATURE_CONFLICT`; `NFR_MISSING` (§46) keeps an otherwise
+   PASS-STATIC verdict at NOT-PROVEN.
+4. **Compile.** `Feature.owner`/`Milestone.owner` are `UNKNOWN` unless named; `TaskSpec.role_revision_hash`
+   (part of `spec_hash`) records the RoleSkillPack revision (None for a non-catalog role, which the scheduler
+   refuses); `input_artifacts` are `{ref, kind, sha256, label, resolved}` bound to PRD sections and READ
+   attachments, unresolved labels stay visibly unresolved. The scheduler refuses an empty write scope
+   (`NO_ALLOWED_PATHS`) instead of only flagging it.
+5. **Role evidence and review (review).** Role-specific evidence requirements are appended at compile
+   (`ROLE_EVIDENCE`: Integration Engineer provider contract test + target/tenant/idempotency test; UX/UI Designer
+   state + accessibility check). The checkpoint review package carries the task's RoleSkillPack contract
+   (`role_contract`: boundaries, verification, failure modes) and the feature reviewer judges the result
+   against it. Route selection honours `model_route_policy.min_context_tokens`.

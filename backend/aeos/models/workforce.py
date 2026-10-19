@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, event
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aeos.core.db import Base
@@ -30,6 +30,10 @@ class RoleSkillPack(IdMixin, TimestampMixin, Base):
     kind: Mapped[str] = mapped_column(String(32), default="EXECUTOR")  # PLANNER|REVIEWER|EXECUTOR|SERVICE|HUMAN
     description: Mapped[str] = mapped_column(Text, default="")
     outputs: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # §17 competence definition: what the role consumes, where it may act, example outputs (§46)
+    inputs: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    allowed_scope: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    example_outputs: Mapped[list[Any]] = mapped_column(JSON, default=list)
     boundaries: Mapped[list[Any]] = mapped_column(JSON, default=list)
     forbidden_actions: Mapped[list[Any]] = mapped_column(JSON, default=list)
     verification: Mapped[list[Any]] = mapped_column(JSON, default=list)
@@ -94,6 +98,9 @@ class TaskExecution(IdMixin, TimestampMixin, Base):
     extra_attempts_decision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     requested_by: Mapped[str | None] = mapped_column(String(64), nullable=True)  # human who executed the plan
     mode: Mapped[str] = mapped_column(String(16), default="LIVE")
+    # §21 "base commit": pinned once when the plan is executed; every attempt starts from it. A base change
+    # is an explicit owner action (re-pin), never a silent move to the newest HEAD.
+    base_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class WorkerRun(IdMixin, TimestampMixin, Base):
@@ -120,6 +127,9 @@ class WorkerRun(IdMixin, TimestampMixin, Base):
     base_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
     head_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
     current_action: Mapped[str] = mapped_column(Text, default="")  # observed tool action, not narration
+    # Who wrote current_action (§35 Live Work): RUNNER (observed tool action via record_action) or CONTROLLER
+    # (status text from executor/broker/scheduler). Set by the attribute listener below, never by the UI.
+    current_action_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
     touched_paths: Mapped[list[str]] = mapped_column(JSON, default=list)
     # §35: these are separate fields — never merged into one check mark.
     worker_reported_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -175,3 +185,16 @@ class Lease(IdMixin, TimestampMixin, Base):
     state: Mapped[str] = mapped_column(String(16), default="ACTIVE")  # ACTIVE|RELEASED|EXPIRED|REVOKED
     ttl_seconds: Mapped[int] = mapped_column(Integer, default=120)
     release_reason: Mapped[str] = mapped_column(Text, default="")
+
+
+# ----------------------------------------------------------------------------- current-action provenance (§35)
+CURRENT_ACTION_RUNNER = "RUNNER"  # observed tool action reported through scheduler.record_action
+CURRENT_ACTION_CONTROLLER = "CONTROLLER"  # status text written by executor/broker/scheduler
+
+
+@event.listens_for(WorkerRun.current_action, "set", propagate=True)
+def _current_action_source(target: WorkerRun, value: Any, oldvalue: Any, initiator: Any) -> None:
+    """The source label follows the writer: only ``record_action`` marks its write as a runner action
+    (``_runner_action_write``); every other assignment is controller status text."""
+    runner = bool(getattr(target, "_runner_action_write", False))
+    target.current_action_source = CURRENT_ACTION_RUNNER if runner else CURRENT_ACTION_CONTROLLER

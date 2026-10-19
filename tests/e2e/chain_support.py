@@ -436,20 +436,25 @@ class Chain:
             "targets": [{"provider": "github-repo", "repo": REPO}], "rationale": "rencana disetujui pemilik"}))
         assert decided["compile"]["tasks"] == 1
         # Route activation (TRIAL) of a free worker route after the owner reviewed its terms. The seed's
-        # catalog date ages; a catalog refresh (edge) would stamp pricing_checked_at — not part of the hash.
+        # catalog date ages; a catalog refresh (edge) would stamp pricing_checked_at and observe the route in
+        # the OpenCode catalog (availability) — neither is part of the hash.
         with session_factory()() as s:
             r = s.scalar(select(ModelRoute).where(ModelRoute.route_key == ROUTE_KEY))
             r.pricing_checked_at = utcnow()
+            r.availability, r.availability_checked_at = "AVAILABLE", utcnow()
             s.commit()
         cfg = self.ok(c.get(f"/api/routes/{ROUTE_KEY}"))["config_hash"]
         self.ok(c.post(f"/api/routes/{ROUTE_KEY}/activate", json={
             "mode": "TRIAL", "rationale": "uji coba rute gratis untuk pekerja", "expected_config_hash": cfg,
             "terms_reviewed": True}))
         expires = (utcnow() + timedelta(days=2)).isoformat()
+        # The owner also covers R3 (protected-path tasks) under the process sandbox explicitly (ADR-0051
+        # amendment 2026-10-19); without it an R3 task waits for the container sandbox.
         self.ok(c.post("/api/decisions", json={
             "kind": "EXCEPTION", "target_type": "worker_sandbox", "target_id": "process",
             "auth_scope": {"domain": "PERSONAL", "sandbox": "process"}, "expires_at": expires,
-            "rationale": "process sandbox WEAK diterima untuk uji PERSONAL", "details": {"allow_process_sandbox": True}}),
+            "rationale": "process sandbox WEAK diterima untuk uji PERSONAL", "details": {"allow_process_sandbox": True},
+            "allowed_operations": ["run_worker_process_sandbox", "run_worker_process_sandbox_r3"]}),
             201)
         self.ok(c.post("/api/budgets", json={
             "scope_type": "PROJECT", "scope_id": self.project_id, "period": "MONTH", "limit_usd": 0,

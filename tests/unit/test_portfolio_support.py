@@ -79,6 +79,17 @@ def create_project(client: Any, *, domain: Domain = Domain.PERSONAL, name: str =
     return r.json()["project"]
 
 
+def record_retirement_decision(client: Any, project_id: str) -> str:
+    """§10/§33: the owner's retirement decision bound to the current checklist (needed before RETIRED)."""
+    checklist = client.get(f"/api/ops/retirement/{project_id}").json()
+    r = client.post(f"/api/ops/retirement/{project_id}/decision",
+                    json={"checklist_hash": checklist["checklist_hash"], "rationale": "owner verified every item"})
+    assert r.status_code == 201, r.text
+    assert r.json()["decision"]["kind"] == "RETIREMENT"
+    assert r.json()["decision"]["target_hash"] == checklist["checklist_hash"]
+    return r.json()["decision"]["id"]
+
+
 def install_fake_policy(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Stand-in for ``aeos.policy.decisions`` (built by another module) that records real Decision rows."""
     from aeos.models.decisions import Decision

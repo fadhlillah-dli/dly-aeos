@@ -26,3 +26,16 @@ def leaderboard(session: Session, *, role: str | None = None) -> dict[str, Any]:
     from aeos.evaluation.service import leaderboard as impl
 
     return impl(session, role=role)
+
+
+# --- additive contracts (existing signatures above are unchanged) ------------------------------
+
+
+def activation_evidence(session: Session, *, route_key: str, route_config_hash: str,
+                        run_ids: list[str]) -> dict[str, Any]:
+    """Used by routing for an APPROVED activation (§23 "telah diuji"): ``{"ok", "problems", "roles"}`` —
+    ok only when every referenced EvalRun is COMPLETED by a trusted collector on a protected suite, made on
+    exactly *route_config_hash* of *route_key*, gate-passing and without critical regression."""
+    from aeos.evaluation.service import activation_evidence as impl
+
+    return impl(session, route_key=route_key, route_config_hash=route_config_hash, run_ids=run_ids)

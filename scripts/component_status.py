@@ -33,9 +33,11 @@ HINTS: dict[str, dict[str, str]] = {
              "linux": "https://code.visualstudio.com/download"},
     "node": {"win": "winget install --id OpenJS.NodeJS.LTS -e", "mac": "brew install node@22",
              "linux": "https://nodejs.org/en/download (LTS)"},
-    "claude": {"win": "winget install --id Anthropic.ClaudeCode -e   (or: irm https://claude.ai/install.ps1 | iex)",
-               "mac": "curl -fsSL https://claude.ai/install.sh | bash   (docs: https://code.claude.com/docs/en/setup)",
-               "linux": "curl -fsSL https://claude.ai/install.sh | bash"},
+    # Section 07: never pipe a remote install script into a shell; use a package manager or the official
+    # setup page (the same rule the Readiness Doctor's claude.binary remedy follows).
+    "claude": {"win": "winget install --id Anthropic.ClaudeCode -e",
+               "mac": "brew install --cask claude-code   (docs: https://code.claude.com/docs/en/setup)",
+               "linux": "official setup: https://code.claude.com/docs/en/setup (review the installer before running it)"},
     "bao": {"win": "aeos vault install   (official releases: https://openbao.org/downloads/)",
             "mac": "aeos vault install   (or: brew install openbao)",
             "linux": "aeos vault install   (official releases: https://openbao.org/downloads/)"},

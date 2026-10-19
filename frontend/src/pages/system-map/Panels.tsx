@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Camera, Lightbulb, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
@@ -60,9 +60,16 @@ export function NodeCard({ node, lensLabel, onClose }: { node: MapNode; lensLabe
                 ["Alasan dipilih", d.usage_role.why_selected],
                 ["Dipakai oleh", d.usage_role.used_by.length ? d.usage_role.used_by.map((u) => u.name).join(", ") : "belum tercatat"],
                 ["Domain", d.scope.domains.join(", ")],
+                ["Proyek / tingkat", d.scope.level === "project" ? `proyek (${d.scope.owner || "pemilik belum ditetapkan"})` : `${d.scope.level} · ${d.scope.environment}`],
                 ["Sumber", d.source.source_url ?? "UNKNOWN (tidak ditebak)"],
                 ["Pin / teramati", `${d.versions.approved_pin ?? "UNKNOWN"} / ${d.versions.observed_version ?? "—"}`],
                 ["Biaya", String(d.cost.design.model ?? "UNKNOWN")],
+                ["Data / akses", Object.keys(d.access ?? {}).length
+                  ? Object.entries(d.access).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : String(v)}`).join(" · ")
+                  : "tidak tercatat"],
+                ["Bergantung pada", d.relations.outgoing.length
+                  ? d.relations.outgoing.map((r) => `${r.relation} → ${r.target_name || r.target}`).join(", ")
+                  : "tidak ada relasi keluar tercatat"],
               ]}
             />
             <div>
@@ -138,7 +145,21 @@ export function EdgeCard({ rels, onClose }: { rels: RelationView[]; onClose: () 
                 ["Lensa / status", <span key="s" className="inline-flex gap-1"><Badge status={r.status === "CONFIGURED" ? "CONFIGURED" : r.status} /> {r.lens}</span>],
                 ["Provenance", r.provenance || "—"],
                 ["Kesegaran", r.last_observed_at ? `${relativeTime(r.last_observed_at)}${r.freshness.stale ? " (usang)" : ""}` : "tidak ada observasi traffic"],
-                ["Hasil uji / bukti", r.evidence],
+                ["Bukti relasi", r.evidence],
+                [
+                  "Hasil uji",
+                  r.tests && r.tests.length ? (
+                    <ul key="t" className="space-y-0.5 text-xs" data-testid="edge-tests">
+                      {r.tests.map((t) => (
+                        <li key={`${t.about}-${t.check_id}`}>
+                          <Badge status={t.status} /> <Mono>{t.check_id}</Mono> <span className="text-ink-3">({t.about}{t.last_checked_at ? `, ${relativeTime(t.last_checked_at)}` : ""})</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <span key="t" className="text-xs text-ink-3">belum ada pemeriksaan Doctor untuk ujung relasi ini</span>
+                  ),
+                ],
               ]}
             />
           </div>
@@ -185,20 +206,35 @@ function DiffView({ diff }: { diff: SnapshotDiff }) {
           <div className="text-xs font-semibold uppercase text-bad">Relasi dihapus ({diff.edges.removed.length})</div>
           <ul className="text-xs">{diff.edges.removed.map((e, i) => <li key={i}>{e.source} {e.relation} {e.target} ({e.lens})</li>)}</ul>
         </div>
+        <div>
+          <div className="text-xs font-semibold uppercase text-warn">Relasi berubah ({diff.edges.changed.length})</div>
+          <ul className="text-xs" data-testid="changed-edges">
+            {diff.edges.changed.map((c, i) => (
+              <li key={i}>
+                {c.key.join(" ")}:{" "}
+                {Object.entries(c.fields)
+                  .map(([f, [a, b]]) => `${f} ${String(a)} → ${String(b)}`)
+                  .join("; ")}
+              </li>
+            ))}
+          </ul>
+        </div>
       </div>
+      {diff.approval_note && <Notice tone="warn">{diff.approval_note}</Notice>}
       {Object.keys(diff.refs_changed).length > 0 && <p className="text-xs text-ink-3">Referensi berubah: {Object.keys(diff.refs_changed).join(", ")}</p>}
       <p className="text-xs text-ink-3">{diff.note}</p>
     </div>
   );
 }
 
-export function SnapshotPanel() {
+export function SnapshotPanel({ onDiff, onShow }: { onDiff?: (d: SnapshotDiff | null) => void; onShow?: (id: string) => void } = {}) {
   const { isAdmin, domain } = useAuth();
   const qc = useQueryClient();
   const [label, setLabel] = useState("");
   const [a, setA] = useState("");
   const [b, setB] = useState("");
-  const list = useQuery({ queryKey: ["inventory", "snapshots", domain], queryFn: () => get<{ items: SnapshotMeta[] }>("/api/inventory/snapshots") });
+  const [approvedOnly, setApprovedOnly] = useState(true);
+  const list = useQuery({ queryKey: ["inventory", "snapshots", domain], queryFn: () => get<{ items: SnapshotMeta[] }>("/api/inventory/snapshots?page_size=200") });
   const create = useMutation({
     mutationFn: () => post<SnapshotMeta>("/api/inventory/snapshots", { label }),
     onSuccess: () => {
@@ -206,12 +242,22 @@ export function SnapshotPanel() {
       qc.invalidateQueries({ queryKey: ["inventory", "snapshots"] });
     },
   });
+  const approve = useMutation({
+    mutationFn: (id: string) => post<SnapshotMeta>(`/api/inventory/snapshots/${encodeURIComponent(id)}/approve`, { rationale: "Pemilik menyetujui snapshot arsitektur ini" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory", "snapshots"] }),
+  });
   const diff = useQuery({
     queryKey: ["inventory", "snapshot-diff", domain, a, b],
     queryFn: () => get<SnapshotDiff>(`/api/inventory/snapshots/diff?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
     enabled: !!a && !!b && a !== b,
   });
-  const items = list.data?.items ?? [];
+  useEffect(() => {
+    onDiff?.(diff.data && !diff.data.same_hash ? diff.data : null);
+  }, [diff.data, onDiff]);
+  const all = list.data?.items ?? [];
+  const anyApproved = all.some((s) => s.approved);
+  // §41: the diff picker defaults to approved snapshots once any exist
+  const items = approvedOnly && anyApproved ? all.filter((s) => s.approved) : all;
   return (
     <Card title="Snapshot arsitektur (immutable)" className="mt-5">
       <p className="mb-3 text-xs text-ink-3">Snapshot menyimpan referensi/hash manifest, master, ADR, kontrak, keputusan serta node/relasi Rancangan & Konfigurasi pada domain ini. Snapshot bukan live inventory.</p>
@@ -231,7 +277,7 @@ export function SnapshotPanel() {
       ) : (
         <>
           <ul className="mb-3 space-y-1 text-sm">
-            {items.map((s) => (
+            {all.map((s) => (
               <li key={s.id} className="flex flex-wrap items-center gap-2">
                 <span className="font-medium">{s.label}</span>
                 <span className="text-xs text-ink-3" title={absoluteTime(s.created_at)}>{relativeTime(s.created_at)}</span>
@@ -239,9 +285,26 @@ export function SnapshotPanel() {
                 <span className="text-xs text-ink-3">
                   {s.counts.nodes} node · {s.counts.edges} relasi
                 </span>
+                <Badge status={s.approved ? "APPROVED" : "UNVERIFIED"} />
+                {isAdmin && !s.approved && (
+                  <Button variant="ghost" busy={approve.isPending} onClick={() => approve.mutate(s.id)} title="Keputusan manusia terikat hash snapshot">
+                    Setujui
+                  </Button>
+                )}
+                {onShow && (
+                  <Button variant="ghost" onClick={() => onShow(s.id)}>
+                    Tampilkan di peta
+                  </Button>
+                )}
               </li>
             ))}
           </ul>
+          {approve.error && <ErrorBox error={approve.error} />}
+          {anyApproved && (
+            <label className="mb-2 flex items-center gap-1 text-xs">
+              <input type="checkbox" checked={approvedOnly} onChange={(e) => setApprovedOnly(e.target.checked)} /> Hanya snapshot yang disetujui
+            </label>
+          )}
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <span>Bandingkan</span>
             {(
