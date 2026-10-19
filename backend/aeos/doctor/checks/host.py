@@ -425,15 +425,16 @@ def host_vscode(ctx: CheckContext) -> Outcome:
             continue
         version, rr = run_version(ctx, path, ["--version"], regex=r"(\d+\.\d+\.\d+)", timeout=20.0)
         lines = [ln.strip() for ln in (rr.stdout or "").splitlines() if ln.strip()]
-        evidence = {"channel": channel, "location": logical(ctx, path), "operation_ref": f"{name} --version",
+        location = logical(ctx, path)
+        evidence = {"channel": channel, "location": location, "operation_ref": f"{name} --version",
                     "commit": lines[1][:40] if len(lines) > 1 else None, "arch": lines[2][:16] if len(lines) > 2 else None,
                     "distribution_verified": False}
         if version is None:
             return Outcome("UNKNOWN", f"VS Code ({channel}) ditemukan tetapi versi tidak terbaca.", evidence=evidence,
-                           error_code="VERSION_PROBE_FAILED", target_identity=evidence["location"])
+                           error_code="VERSION_PROBE_FAILED", target_identity=location)
         return Outcome("VERIFIED", f"VS Code {version} ({channel}) ditemukan; identitas distribusi tercatat (keaslian "
                        "tidak diverifikasi).", evidence=evidence, component_version=version,
-                       target_identity=evidence["location"])
+                       target_identity=location)
     return Outcome("MISSING", "VS Code tidak ditemukan di PATH (opsional bagi server; permukaan kerja U-01).",
                    severity="LOW", error_code="VSCODE_MISSING", remedy=Remedy(
                        operation="Pasang VS Code dari distribusi resmi dan aktifkan perintah 'code' di PATH",

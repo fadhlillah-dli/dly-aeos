@@ -264,7 +264,7 @@ def _environments_check(resp: httpx.Response, *, private: bool | None, plan: str
     if code == 200:
         body = resp.json() if isinstance(resp.json(), dict) else {}
         envs = [e for e in body.get("environments") or [] if isinstance(e, dict)]
-        rows = []
+        rows: list[dict[str, Any]] = []
         for e in envs:
             types = sorted({str(r.get("type")) for r in e.get("protection_rules") or [] if isinstance(r, dict)})
             rows.append({"name": e.get("name"), "protection_rules": types,

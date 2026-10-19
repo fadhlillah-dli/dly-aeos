@@ -361,6 +361,24 @@ def test_combined_ranking_only_with_declared_weights(ev):
     assert all(len(e["interval"]) == 2 and "tie" in e for e in combined["ranking"])
 
 
+def test_combined_ranking_never_ranks_a_suite_result_without_its_interval():
+    """A weighted suite result needs its rate AND its 95% interval; otherwise the configuration is incomplete
+    (never ranked on a missing bound, never a crash)."""
+    def entry(key, rate, ci):
+        return {"entry_key": key, "label": key, "configuration_hash": f"h-{key}", "topology": None,
+                "final_acceptance_rate": rate, "acceptance_ci95": ci, "sample_size": 10}
+
+    per_suite = [{"suite_key": "a", "ranking": [entry("x", 0.9, [0.6, 0.98]), entry("y", 0.5, None),
+                                                entry("z", None, None)]},
+                 {"suite_key": "b", "ranking": [entry("x", 0.2, [0.05, 0.5]), entry("y", 0.9, [0.6, 0.98])]}]
+    out = service.combined_ranking(per_suite, {"a": 3.0, "b": 1.0}, source="decision:d")
+    assert [e["entry_key"] for e in out["ranking"]] == ["x"]
+    assert out["ranking"][0]["score"] == pytest.approx((3 * 0.9 + 0.2) / 4)
+    assert out["ranking"][0]["sample_size"] == 20
+    assert out["incomplete"] == [{"entry_key": "y", "label": "y", "missing_suites": ["a"]},
+                                 {"entry_key": "z", "label": "z", "missing_suites": ["a", "b"]}]
+
+
 def test_metric_dimensions_are_computed_from_sample_values():
     """§43 Contract / Product quality / Oversight and the §44 measures, from per-sample values."""
     m = service.compute_metrics([

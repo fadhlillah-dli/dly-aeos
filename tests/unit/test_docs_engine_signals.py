@@ -111,6 +111,38 @@ def test_change_record_comes_from_the_pr_and_finalises_on_acceptance(world):
     assert prd.links["merge_commit"] == ["d" * 40] and prd.links["accepted_head"] == ["c" * 40]
 
 
+def test_change_record_rollback_and_contract_deltas_come_from_the_changed_files(world, monkeypatch):
+    """Rollback notes are the delivery rules applied to the verifier's changed files; an unknown changed set
+    yields none (no "no migration changed" claim without evidence)."""
+    from aeos.delivery.pr_bundle import _rollback_notes
+
+    db, v, project = world["db"], world["version"], world["project"]
+    task = db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v.id, TaskSpec.task_key == "T1"))
+    _pr(db, project, task, status="ACCEPTED")
+    changed = ["backend/aeos/migrations/versions/0099_x.py", "backend/aeos/x/facade.py", "README.md"]
+    monkeypatch.setattr(service, "_changed_files", lambda _s, _acc: list(changed))
+    (info,) = service.change_infos(db, project)
+    assert info.rollback_notes == tuple(_rollback_notes(changed))
+    assert info.rollback_notes[0].startswith("Rollback kode")
+    assert any("0099_x.py" in n and "does NOT revert data" in n for n in info.rollback_notes)
+    assert info.contract_deltas == ("backend/aeos/x/facade.py",)
+    monkeypatch.setattr(service, "_changed_files", lambda _s, _acc: [])
+    (info,) = service.change_infos(db, project)
+    assert info.rollback_notes == () and info.contract_deltas == ()
+
+
+def test_change_record_fails_closed_when_the_delivery_rules_are_unavailable(world, monkeypatch):
+    """Without the delivery module there is no silent fallback to empty rollback notes / "no contract delta"."""
+    import sys
+
+    db, v, project = world["db"], world["version"], world["project"]
+    task = db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v.id, TaskSpec.task_key == "T1"))
+    _pr(db, project, task, status="ACCEPTED")
+    monkeypatch.setitem(sys.modules, "aeos.delivery.pr_bundle", None)
+    with pytest.raises(ImportError):
+        service.change_infos(db, project)
+
+
 def test_only_trusted_project_evidence_creates_va_documents(world):
     db, settings, v, project = world["db"], world["settings"], world["version"], world["project"]
     common = dict(project_id=project.id, domain=project.domain, kind="VA_REPORT", content_hash="sha256:e",

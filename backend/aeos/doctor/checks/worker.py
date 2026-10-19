@@ -169,9 +169,10 @@ def worker_contract(ctx: CheckContext) -> Outcome:
     inline = ev.inline or {}
     content = inline.get("content") if isinstance(inline.get("content"), dict) else inline.get("summary") or {}
     overall = str((content or {}).get("overall") or "UNKNOWN").upper()
-    evidence = {"evidence_id": ev.id, "level": ev.evidence_level, "claim": ev.claim[:200], "overall": overall,
-                "residual_risks": ["Perilaku tool/schema model pada route nyata NOT-PROVEN (uji memakai model loopback "
-                                   "terskrip); dibuktikan per run oleh verifier independen"]}
+    evidence: dict[str, Any] = {
+        "evidence_id": ev.id, "level": ev.evidence_level, "claim": ev.claim[:200], "overall": overall,
+        "residual_risks": ["Perilaku tool/schema model pada route nyata NOT-PROVEN (uji memakai model loopback "
+                           "terskrip); dibuktikan per run oleh verifier independen"]}
     if overall == "FAIL":
         return Outcome("FAILED", f"Uji kontrak worker {ev.id[:8]} GAGAL ({ev.created_at.isoformat()}).",
                        evidence=evidence, error_code="WORKER_CONTRACT_FAILED", remedy=remedy)

@@ -63,8 +63,11 @@ def validate(data: Any) -> list[str]:
 
 
 def is_blocker(report: dict[str, Any] | None) -> bool:
-    return bool(report) and (report.get("status") == "BLOCKED" or bool(report.get("blocker"))
-                             or bool(report.get("requested_decision")))
+    """No report (None/empty) is no blocker: the run still ends in REVIEW (never DONE) and the verifier decides."""
+    if not report:
+        return False
+    return (report.get("status") == "BLOCKED" or bool(report.get("blocker"))
+            or bool(report.get("requested_decision")))
 
 
 def ref_mismatches(report: dict[str, Any], *, task_key: str, run_id: str, plan_version_hash: str | None) -> list[str]:

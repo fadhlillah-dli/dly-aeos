@@ -28,6 +28,15 @@ def test_valid_report_carries_refs_findings_evidence_blocker_and_decision():
     assert report.ref_mismatches(VALID, task_key="T2", run_id="r1", plan_version_hash="sha256:p")
 
 
+def test_only_a_report_that_asks_for_the_owner_is_a_blocker():
+    assert not report.is_blocker(None)  # no report written: the run still ends in REVIEW, never DONE
+    assert not report.is_blocker({})
+    done = {"schema_version": "1", "status": "COMPLETED", "summary": "ok", "blocker": None, "requested_decision": None}
+    assert not report.is_blocker(done)
+    assert report.is_blocker({**done, "requested_decision": VALID["requested_decision"]})
+    assert report.is_blocker({**done, "blocker": VALID["blocker"]})
+
+
 @pytest.mark.parametrize("bad", [
     {**VALID, "approve": True},                                      # no extra authority fields
     {**VALID, "status": "DONE"},                                     # a worker never reports DONE

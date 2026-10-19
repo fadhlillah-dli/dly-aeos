@@ -353,7 +353,7 @@ _KIND_INPUTS = {"PLANNER": ["Konteks planning (DATA)", "Kebijakan tetap control 
 _KIND_FAILURES = {"PLANNER": ["Mengarang owner/stakeholder", "DAG siklik atau tanpa allowed_paths"],
                   "REVIEWER": ["Self-review", "Verdict dianggap approval", "Memperbaiki artefak sendiri"],
                   "SERVICE": ["State tidak deterministik", "Fail-open saat modul hilang"], "HUMAN": []}
-_KIND_SCOPE = {
+_KIND_SCOPE: dict[str, dict[str, Any]] = {
     "EXECUTOR": {"write": "TaskSpec.allowed_paths only", "egress": "TaskSpec.egress_allowed (default deny)",
                  "credentials": "none (broker capability per run)", "domains": ["PERSONAL", "OFFICE"],
                  "project_ids": "*"},

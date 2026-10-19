@@ -134,12 +134,13 @@ def _changed_files(session: Session, acc: AcceptanceRecord | None) -> list[str]:
 
 
 def change_infos(session: Session, project: Project) -> list[r.ChangeInfo]:
-    """One ChangeInfo per pull request the broker opened for this project (newest first per task)."""
-    try:
-        from aeos.delivery.governance import CONTRACT_PATHS
-        from aeos.delivery.pr_bundle import _rollback_notes as rollback_notes
-    except ImportError:  # pragma: no cover - delivery is part of the product
-        CONTRACT_PATHS, rollback_notes = (), None  # type: ignore[assignment]
+    """One ChangeInfo per pull request the broker opened for this project (newest first per task).
+
+    Delivery is a hard dependency here (it owns the rollback/contract rules): an import failure surfaces instead of
+    silently rendering empty rollback notes and "no contract delta" (fail closed, never a quiet pass)."""
+    from aeos.delivery.governance import CONTRACT_PATHS
+    from aeos.delivery.pr_bundle import _rollback_notes as rollback_notes
+
     out: list[r.ChangeInfo] = []
     prs = session.scalars(select(PullRequestRecord).where(PullRequestRecord.project_id == project.id,
                                                           PullRequestRecord.domain == project.domain)
@@ -162,7 +163,8 @@ def change_infos(session: Session, project: Project) -> list[r.ChangeInfo]:
             acceptance_status=acc.acceptance_status if acc else "",
             evidence_ids=tuple(acc.verifier_evidence_refs or []) if acc else (),
             bundle_evidence_id=pr.bundle_evidence_id,
-            rollback_notes=tuple(rollback_notes(changed)) if (rollback_notes and changed) else (),
+            # unknown changed set ([]) -> no notes: "no migration changed" would be a claim without evidence
+            rollback_notes=tuple(rollback_notes(changed)) if changed else (),
             contract_deltas=tuple(p for p in changed if any(c in p for c in CONTRACT_PATHS)),
         ))
     return out
@@ -218,7 +220,8 @@ def render_version(session: Session, settings: Settings, version: PlanVersion, *
     state = approval_state(session, version)
     view = build_view(version.content)
     visuals = vis.render_visuals(view.diagrams, visuals_dir(settings, project), enabled=render_visuals, mmdc=mmdc)
-    tm = view.security.get("threat_model") if isinstance(view.security.get("threat_model"), dict) else {}
+    threat_model = view.security.get("threat_model")
+    tm = threat_model if isinstance(threat_model, dict) else {}
     vis.verify_visuals(visuals, trust_boundaries=[str(x) for x in (tm.get("trust_boundaries") or [])],
                        known_tables=known_schema_names(project))
     previous = r.previous_input_hashes(session, project.id) if (persist and state.approved) else {}

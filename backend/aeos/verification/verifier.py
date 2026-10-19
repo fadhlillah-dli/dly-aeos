@@ -323,7 +323,9 @@ def dependency_set() -> dict[str, Any]:
     if "hash" not in _dependency_set_cache:
         pins: set[str] = set()
         for dist in importlib.metadata.distributions():
-            name = (dist.metadata.get("Name") or "").strip().lower()
+            # PackageMetadata protocol only (``get`` is not part of it before 3.12): first Name header, a dist
+            # without one is skipped
+            name = str((dist.metadata.get_all("Name") or [""])[0] or "").strip().lower()
             if name:
                 pins.add(f"{name}=={dist.version}")
         ordered = sorted(pins)

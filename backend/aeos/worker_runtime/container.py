@@ -572,10 +572,10 @@ def containment_report(*, domain: str = Domain.PERSONAL.value) -> dict[str, Any]
         ensure_network(profile)
         ensure_gateway(profile, broker_port=int(settings.port), image=image["tag"])
     except ContainerError as exc:
-        results = [_r("network_setup", False, f"{exc.code}: {exc.message}"),
-                   *(_r(c, None, exc.message) for c in ISOLATION_CHECKS)]
-        overall, summary = _summary(results)
-        return {**base, "overall": overall, "results": results, "summary": summary, "note": exc.message}
+        setup_results = [_r("network_setup", False, f"{exc.code}: {exc.message}"),
+                         *(_r(c, None, exc.message) for c in ISOLATION_CHECKS)]
+        overall, summary = _summary(setup_results)
+        return {**base, "overall": overall, "results": setup_results, "summary": summary, "note": exc.message}
     root = Path(tempfile.mkdtemp(prefix="aeos-ccontain-"))
     wt, cfg = root / "worktree", root / "config"
     wt.mkdir()

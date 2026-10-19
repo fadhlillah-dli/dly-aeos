@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import typer
 from sqlalchemy import select
 
@@ -104,7 +106,7 @@ def activate_cmd(
     from aeos.core.errors import AeosError
     from aeos.routing import service
 
-    terms_record = None
+    terms_record: dict[str, Any] | None = None
     if training is not None or trial_only is not None:
         # the owner's own reading of UNKNOWN training/trial terms (incomplete -> refused by the service)
         terms_record = {"note": terms_note}
