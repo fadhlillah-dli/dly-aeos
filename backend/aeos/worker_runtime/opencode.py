@@ -202,15 +202,37 @@ def write_config(config_dir: Path, cfg: dict[str, Any]) -> Path:
     return path
 
 
-def opencode_env(config_path: Path) -> dict[str, str]:
-    return {
+# Repository-level OpenCode configuration a worktree could carry. OpenCode merges project config over
+# OPENCODE_CONFIG (documented precedence), so the runtime (1) delivers the security-relevant config inline
+# via OPENCODE_CONFIG_CONTENT, the highest-precedence source, (2) disables project config loading, and
+# (3) refuses to start when the worktree contains any of these (executor: WORKTREE_AGENT_CONFIG). (1)/(2)
+# are NOT verified against the pinned binary on the build host (OpenCode absent); (3) is enforced by AEOS
+# itself and the contract test (`aeos worker contract-test`) checks the effective tool set.
+PROJECT_CONFIG_FILES = ("opencode.json", "opencode.jsonc", ".opencode")
+
+
+def inline_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """The config without the capability token (the token stays only in the 0600 file)."""
+    out = json.loads(json.dumps(cfg))
+    for prov in (out.get("provider") or {}).values():
+        if isinstance(prov, dict) and isinstance(prov.get("options"), dict):
+            prov["options"].pop("apiKey", None)
+    return out
+
+
+def opencode_env(config_path: Path | str, *, inline: dict[str, Any] | None = None) -> dict[str, str]:
+    env = {
         "OPENCODE_CONFIG": str(config_path),
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
         "OPENCODE_DISABLE_AUTOUPDATE": "1",
         "OPENCODE_DISABLE_MODELS_FETCH": "1",
         "OPENCODE_DISABLE_CLAUDE_CODE": "1",
         "OPENCODE_DISABLE_LSP_DOWNLOAD": "1",
         "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",
     }
+    if inline is not None:
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline, separators=(",", ":"))
+    return env
 
 
 def build_command(binary: Path | str, *, model: str, worktree: Path, task_file: Path) -> list[str]:
@@ -218,6 +240,14 @@ def build_command(binary: Path | str, *, model: str, worktree: Path, task_file: 
         raise ValueError(f"unsafe model id {model!r}")
     return [str(binary), "run", RUN_MESSAGE, "--format", "json", "--pure", "--model", f"{PROVIDER_ID}/{model}",
             "--dir", str(worktree), "--file", str(task_file)]
+
+
+def build_container_command(*, model: str, worktree: str, task_file: str) -> list[str]:
+    """Arguments after the image name: the worker image's entrypoint is ``tini -- opencode``."""
+    if not _MODEL_ID.match(model):
+        raise ValueError(f"unsafe model id {model!r}")
+    return ["run", RUN_MESSAGE, "--format", "json", "--pure", "--model", f"{PROVIDER_ID}/{model}",
+            "--dir", worktree, "--file", task_file]
 
 
 # ----------------------------------------------------------------------------- event parsing
@@ -242,6 +272,8 @@ class ObservedAction:
 @dataclass
 class EventParser:
     worktree: Path
+    # Inside a container OpenCode sees the worktree at this POSIX path (e.g. /workspace).
+    container_root: str | None = None
     touched: list[str] = field(default_factory=list)
     outside_attempts: list[str] = field(default_factory=list)
     errors: list[dict[str, Any]] = field(default_factory=list)
@@ -256,6 +288,11 @@ class EventParser:
     def _rel(self, raw: str | None) -> tuple[str | None, bool]:
         if not raw:
             return None, False
+        if self.container_root:
+            croot = self.container_root.rstrip("/")
+            norm = raw.replace("\\", "/")
+            if norm == croot or norm.startswith(croot + "/"):
+                raw = norm[len(croot):].lstrip("/") or "."
         is_abs = PureWindowsPath(raw).is_absolute() or PurePosixPath(raw).is_absolute()
         root = self.worktree.resolve()
         candidate = Path(raw) if is_abs else root / raw.replace("\\", "/")

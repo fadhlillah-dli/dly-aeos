@@ -65,7 +65,18 @@ def _zen(model: str, display: str, *, pool: str, terms: dict[str, Any], classes:
         "expires_note": None if paid else "free for a limited time per S07 (no end date published)",
         "source_refs": ["S07", "S08"], "notes": notes, "pricing_checked_at": RESEARCH_DATE,
         "terms_checked_at": RESEARCH_DATE, "mode_params": {"credential_ref": ZEN_CREDENTIAL_REF},
+        "prompt_revision": _worker_prompt_revision(),
     }
+
+
+def _worker_prompt_revision() -> str | None:
+    """§23: OpenCode worker routes carry the worker prompt revision in their configuration identity."""
+    try:
+        from aeos.worker_runtime.facade import worker_prompt_revision
+
+        return worker_prompt_revision()
+    except (ImportError, ModuleNotFoundError):
+        return None
 
 
 def seed_routes() -> list[dict[str, Any]]:
@@ -144,6 +155,7 @@ def seed_routes() -> list[dict[str, Any]]:
             "expires_note": "free until 2026-10-31 per S11",
             "notes": "Time-limited free route; after the date it is treated as paid (budget decision required).",
             "pricing_checked_at": RESEARCH_DATE, "terms_checked_at": None,
+            "prompt_revision": _worker_prompt_revision(),
         },
         # ---- ARENA, identity not opened (never default, never sensitive data) ----
         _zen("space-bunny-free", "Space Bunny Free", pool="ARENA", terms=ZERO_RETENTION, classes=[P], priority=900,
@@ -228,6 +240,11 @@ def run(session: Session) -> dict[str, Any]:
                 row.mode_params = {**(row.mode_params or {}), "credential_ref": ref}
                 row.config_hash = compute_config_hash(row)
                 backfilled += 1
+            rev = spec.get("prompt_revision")
+            if rev and row.prompt_revision != rev:
+                # A CANDIDATE row carries no approval: binding the current worker prompt revision invalidates nothing.
+                row.prompt_revision = rev
+                row.config_hash = compute_config_hash(row)
     session.flush()
     return {"created": created, "existing": existing, "updated_descriptive": updated,
             "credential_ref_backfilled": backfilled, "mode": "DESIGN", "approved": 0}

@@ -50,10 +50,40 @@ _SECRET_NAME = re.compile(
     r"GITHUB|^GH_|^AWS_|AZURE|GOOGLE|GCLOUD|^VAULT|^BAO_|SSH_AUTH_SOCK|SSH_AGENT|^AEOS_(?!RUN_ID$)|KEYRING|NPM_TOKEN)"
 )
 # Explicit sandbox variables we set ourselves (paths/flags only, never values of secrets).
-_SANDBOX_SAFE_NAMES = {RUN_MARKER, "OPENCODE_CONFIG", "OPENCODE_DISABLE_AUTOUPDATE", "OPENCODE_DISABLE_MODELS_FETCH",
+_SANDBOX_SAFE_NAMES = {RUN_MARKER, "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_PROJECT_CONFIG",
+                       "OPENCODE_DISABLE_AUTOUPDATE", "OPENCODE_DISABLE_MODELS_FETCH",
                        "OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_LSP_DOWNLOAD",
                        "OPENCODE_DISABLE_DEFAULT_PLUGINS", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
                        "GIT_TERMINAL_PROMPT", "NO_UPDATE_NOTIFIER", "NODE_OPTIONS_DISABLED"}
+# Hard backstop of the Windows Job Object (kernel-enforced); the cross-platform watchdog in the executor
+# enforces the TaskSpec's own memory/process caps.
+DEFAULT_MAX_MEMORY_MB = 4096
+DEFAULT_MAX_PROCESSES = 64
+
+
+@dataclass(frozen=True)
+class ResourceLimits:
+    """§21/§25 process/resource caps of one run (time is enforced by the executor's timeout)."""
+
+    max_memory_mb: int = DEFAULT_MAX_MEMORY_MB
+    max_processes: int = DEFAULT_MAX_PROCESSES
+
+    @classmethod
+    def from_task(cls, limits: dict[str, Any] | None) -> ResourceLimits:
+        lim = limits or {}
+
+        def _int(key: str, default: int, lo: int, hi: int) -> int:
+            try:
+                v = int(lim.get(key) or default)
+            except (TypeError, ValueError):
+                v = default
+            return max(lo, min(v, hi))
+
+        return cls(max_memory_mb=_int("max_memory_mb", DEFAULT_MAX_MEMORY_MB, 64, 65536),
+                   max_processes=_int("max_processes", DEFAULT_MAX_PROCESSES, 2, 4096))
+
+    def as_dict(self) -> dict[str, int]:
+        return {"max_memory_mb": self.max_memory_mb, "max_processes": self.max_processes}
 
 
 @dataclass(frozen=True)
@@ -145,6 +175,8 @@ if sys.platform == "win32":  # pragma: no branch
 
     class _Win:
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+        JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
+        JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
         JobObjectExtendedLimitInformation = 9
         CREATE_SUSPENDED = 0x00000004
         CREATE_NO_WINDOW = 0x08000000
@@ -163,12 +195,19 @@ if sys.platform == "win32":  # pragma: no branch
             except (OSError, AttributeError):  # pragma: no cover
                 self.ntdll = None
 
-        def create_job(self) -> int:
+        def create_job(self, limits: ResourceLimits | None = None) -> int:
             job = self.k32.CreateJobObjectW(None, None)
             if not job:
                 raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
             info = _ExtendedLimit()
-            info.BasicLimitInformation.LimitFlags = self.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            flags = self.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if limits is not None:
+                # Kernel backstop: committed memory of the whole job (2x the watchdog's RSS cap, since commit
+                # exceeds RSS) and the number of live processes in the job.
+                flags |= self.JOB_OBJECT_LIMIT_JOB_MEMORY | self.JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+                info.JobMemoryLimit = int(limits.max_memory_mb) * 2 * 1024 * 1024
+                info.BasicLimitInformation.ActiveProcessLimit = int(limits.max_processes)
+            info.BasicLimitInformation.LimitFlags = flags
             if not self.k32.SetInformationJobObject(job, self.JobObjectExtendedLimitInformation,
                                                     ctypes.byref(info), ctypes.sizeof(info)):
                 err = ctypes.get_last_error()
@@ -232,11 +271,58 @@ class ManagedProcess:
 
 _registry_lock = threading.Lock()
 _registry: dict[str, list[ManagedProcess]] = {}
+# Runs whose worker lives in a container: killing the docker CLI client does not stop the container, so
+# kill_run_processes also removes the run's containers by label (aeos.worker_runtime.container.teardown).
+_containers: set[str] = set()
 
 
 def registered(run_id: str) -> list[ManagedProcess]:
     with _registry_lock:
         return list(_registry.get(run_id, []))
+
+
+def register_container(run_id: str) -> None:
+    with _registry_lock:
+        _containers.add(run_id)
+
+
+def _is_container_run(run_id: str) -> bool:
+    with _registry_lock:
+        if run_id in _containers:
+            return True
+    try:  # after a controller restart the registry is empty: the persisted run record decides
+        from aeos.core.db import session_factory
+        from aeos.models.workforce import WorkerRun
+
+        with session_factory()() as s:
+            run = s.get(WorkerRun, run_id)
+            return bool(run is not None and run.sandbox_kind == "container")
+    except Exception:  # DB unavailable: no container teardown attempt is cheaper than a wrong one
+        return False
+
+
+def tree_usage(run_id: str) -> dict[str, int]:
+    """Resident memory and live process count of a run's whole process tree (resource watchdog)."""
+    rss = count = 0
+    seen: set[int] = set()
+    for m in registered(run_id):
+        try:
+            root = psutil.Process(m.pid)
+            procs = [root, *root.children(recursive=True)]
+        except psutil.Error:
+            continue
+        for p in procs:
+            if p.pid in seen:
+                continue
+            seen.add(p.pid)
+            try:
+                if p.status() == psutil.STATUS_ZOMBIE:
+                    continue
+                rss += int(p.memory_info().rss)
+                count += 1
+            except psutil.Error:
+                continue
+    return {"rss_bytes": rss, "processes": count}
 
 
 def _register(mp: ManagedProcess) -> None:
@@ -247,13 +333,15 @@ def _register(mp: ManagedProcess) -> None:
 def unregister(run_id: str) -> None:
     with _registry_lock:
         items = _registry.pop(run_id, [])
+        _containers.discard(run_id)
     for mp in items:
         mp.close()
 
 
 def spawn(run_id: str, argv: list[str], *, cwd: Path, env: dict[str, str], stderr_path: Path | None = None,
-          capture_stdout: bool = True) -> ManagedProcess:
-    """Start a worker process (list argv, never a shell) and register its tree root."""
+          capture_stdout: bool = True, limits: ResourceLimits | None = None) -> ManagedProcess:
+    """Start a worker process (list argv, never a shell) and register its tree root. ``limits`` adds the
+    Windows Job Object memory/process backstop (the executor's watchdog enforces them on every OS)."""
     if not argv or not isinstance(argv, list):
         raise ValueError("argv must be a non-empty list")
     env = {**env, RUN_MARKER: run_id}
@@ -283,7 +371,7 @@ def spawn(run_id: str, argv: list[str], *, cwd: Path, env: dict[str, str], stder
         raise
     if sys.platform == "win32" and _win is not None:
         try:
-            job = _win.create_job()
+            job = _win.create_job(limits)
             _win.assign(job, int(popen._handle))  # type: ignore[attr-defined]
         except OSError as exc:
             log.warning("job object assignment failed for run %s: %s (psutil tree kill still applies)", run_id, exc)
@@ -449,13 +537,25 @@ def kill_run_processes(run_id: str, *, grace_seconds: float = 3.0, sweep: bool =
             m.wait(timeout=1)
         except subprocess.TimeoutExpired:
             pass
+    containers: list[str] = []
+    container_left: list[str] = []
+    if _is_container_run(run_id):
+        from aeos.worker_runtime import container
+
+        td = container.teardown(run_id)
+        containers = list(td.get("removed") or [])
+        if containers:
+            methods.append("container-rm")
+        container_left = list(container.remaining(run_id) or [])
     remaining = sorted(p.pid for p in still if _running(p))
-    if not remaining:
+    if not remaining and not container_left:
         unregister(run_id)
     return {
         "run_id": run_id,
-        "found": bool(roots) or bool(procs),
+        "found": bool(roots) or bool(procs) or bool(containers),
         "killed": sorted(p.pid for p in procs if p.pid not in remaining),
         "remaining": remaining,
+        "containers_removed": containers,
+        "containers_remaining": container_left,
         "methods": sorted(set(methods)),
     }

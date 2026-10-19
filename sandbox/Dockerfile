@@ -1,7 +1,8 @@
 # DLY AEOS worker sandbox image (master §11 "Sandbox: lingkungan per tugas dalam container/VM",
-# §25 minimum controls). Status: DESIGN / NOT_PROVEN - the container containment suite
-# (`aeos worker containment --kind container`) must pass on the target host before admission may
-# select this sandbox (ADR-0051). Docker was not available on the build host.
+# §25 minimum controls). Status: launch path + containment suite implemented
+# (aeos.worker_runtime.container), NOT_PROVEN on a host until `aeos worker containment --kind container`
+# passes there; admission selects this sandbox only then (ADR-0051 amendment 2026-10-19). Docker was not
+# available on the build host. The same image runs the broker gateway (node, fixed script).
 #
 # Build (pinned engine version; never `latest`):
 #   docker build --build-arg OPENCODE_VERSION=1.19.3 -t dly-aeos-worker:1.19.3 sandbox/
@@ -33,6 +34,7 @@ ENV HOME=/home/worker \
     XDG_DATA_HOME=/home/worker/.local/share \
     XDG_CACHE_HOME=/home/worker/.cache \
     OPENCODE_CONFIG=/aeos/opencode.json \
+    OPENCODE_DISABLE_PROJECT_CONFIG=1 \
     OPENCODE_DISABLE_AUTOUPDATE=1 \
     OPENCODE_DISABLE_MODELS_FETCH=1 \
     OPENCODE_DISABLE_CLAUDE_CODE=1 \

@@ -32,6 +32,7 @@ own repository config) and the run is quarantined.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -379,16 +380,96 @@ def collect_changes(ws: Workspace) -> dict[str, Any]:
             "patch_truncated": truncated, "symlinks_escaping": escaping}
 
 
-def commit_candidate(ws: Workspace, message: str) -> str | None:
-    """Commit the staged candidate on the task branch as the runtime identity; returns head sha."""
+_EMAIL = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+_NAME = re.compile(r"^[^<>\n\r\x00]{1,100}$")
+
+
+def commit_identity(name: str | None, email: str | None) -> tuple[str, str, str]:
+    """(name, email, source) for candidate commits (§06 "legitimate identity ... linked to the user's account
+    or noreply address"). The owner configures ``commit_author_name``/``commit_author_email`` (e.g. the
+    GitHub noreply address); without it the runtime identity is used and reported as NOT linked."""
+    if name and email and _NAME.match(name.strip()) and _EMAIL.match(email.strip()):
+        return name.strip(), email.strip(), "owner-configured"
+    return RUNTIME_IDENTITY[0], RUNTIME_IDENTITY[1], "runtime-default (not linked to an account)"
+
+
+def commit_candidate(ws: Workspace, message: str, *, identity: tuple[str, str] | None = None,
+                     trailers: dict[str, str] | None = None) -> str | None:
+    """Commit the staged candidate on the task branch; returns head sha. Author and committer are the owner's
+    configured identity (or the runtime identity); trailers name the run/agent/route that produced it."""
     verify_control_files(ws)
     status = cand_git(ws, ["diff", "--cached", "--quiet", "--no-ext-diff"], check=False)
     if status.returncode == 0:
         return cand_git(ws, ["rev-parse", "HEAD"]).stdout.strip() or None
-    name, email = RUNTIME_IDENTITY
+    name, email = identity or RUNTIME_IDENTITY
+    lines = [f"{k}: {str(v).splitlines()[0][:200]}" for k, v in (trailers or {}).items() if v]
+    if lines:
+        message = message.rstrip() + "\n\n" + "\n".join(lines)
     cand_git(ws, ["-c", f"user.name={name}", "-c", f"user.email={email}", "-c", "commit.gpgsign=false",
                   "commit", "--quiet", "--no-verify", "-m", message])
     return cand_git(ws, ["rev-parse", "HEAD"]).stdout.strip()
+
+
+def agent_config_files(repo: Path) -> list[str]:
+    """Repository-level OpenCode configuration present in the worktree (it would be loaded as project config)."""
+    from aeos.worker_runtime.opencode import PROJECT_CONFIG_FILES
+
+    return [n for n in PROJECT_CONFIG_FILES if os.path.lexists(repo / n)]
+
+
+# §19/§21 structured worker message: the worker writes it inside its worktree; the runtime takes it out of
+# the candidate before computing the diff. It is untrusted DATA (validated against a schema, size-capped,
+# never followed through a symlink) and can only open a decision request / stop for the owner.
+REPORT_PATH = ".aeos/report.json"
+MAX_REPORT_BYTES = 64 * 1024
+
+
+def take_worker_report(ws: Workspace) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """(parsed JSON or None, info). Removes an untracked report file from the candidate."""
+    info: dict[str, Any] = {"path": REPORT_PATH, "present": False}
+    parent = ws.repo / ".aeos"
+    target = parent / "report.json"
+    if os.path.islink(parent):
+        # Never follow (or delete through) a symlinked directory; the symlink itself stays in the candidate
+        # diff, where the scope check flags it.
+        info.update(present=True, rejected="report directory is a symlink (refused, left in the candidate)")
+        return None, info
+    if not os.path.lexists(target):
+        return None, info
+    info["present"] = True
+    verify_control_files(ws)
+    tracked = cand_git(ws, ["ls-files", "--error-unmatch", "--", REPORT_PATH], check=False).returncode == 0
+    if tracked:
+        info["ignored"] = "report path is tracked in the base commit; not a worker report"
+        return None, info
+    data: dict[str, Any] | None = None
+    try:
+        st = os.lstat(target)
+        if not stat.S_ISREG(st.st_mode):
+            info["rejected"] = "report is not a regular file inside the worktree (symlink refused)"
+        elif st.st_size > MAX_REPORT_BYTES:
+            info["rejected"] = f"report larger than {MAX_REPORT_BYTES} bytes"
+        else:
+            ensure_within(ws.repo, target)
+            raw = target.read_bytes()
+            try:
+                parsed = json.loads(raw.decode("utf-8"))
+                if isinstance(parsed, dict):
+                    data = parsed
+                else:
+                    info["rejected"] = "report is not a JSON object"
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                info["rejected"] = "report is not valid UTF-8 JSON"
+    except (OSError, ValueError) as exc:
+        info["rejected"] = f"report unreadable ({type(exc).__name__})"
+    try:
+        target.unlink()  # a symlink is removed itself (unlink never follows it)
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+        info["removed_from_candidate"] = True
+    except OSError:
+        info["removed_from_candidate"] = False
+    return data, info
 
 
 def _onerror(func: Any, path: str, _exc: Any) -> None:

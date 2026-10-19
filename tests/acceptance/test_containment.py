@@ -163,9 +163,27 @@ def test_process_sandbox_containment_is_reported_honestly(personal_client: Authe
 
 
 @pytest.mark.integration
-def test_container_sandbox_blocks_filesystem_and_egress():
-    pytest.skip("BLOCKED-docker-containment: FS/egress/keyring isolation needs a proven container/VM sandbox; "
-                "Docker is not available on this host and the container containment suite is NOT_PROVEN (ADR-0051)")
+def test_container_sandbox_blocks_filesystem_and_egress(settings):
+    """§25 minimum controls proven on a real Docker host: the containment suite runs INSIDE the pinned worker
+    image (non-root, read-only root, only worktree/config mounted, internal broker-only network, no docker
+    socket / keyring / credential helpers, cgroup limits, kill by label). Skips cleanly without Docker or the
+    image; a host that has both must PASS (never a fake)."""
+    from aeos.worker_runtime import container, sandbox
+
+    sandbox._cache.update(at=0.0, value=None)
+    caps = sandbox.sandbox_capabilities(refresh=True)["levels"]["container"]
+    if not caps["available"]:
+        pytest.skip(f"BLOCKED-docker-containment: {caps['evidence']} (install/start Docker to prove the container "
+                    "boundary on this host, ADR-0051)")
+    image = container.image_status()
+    if not image["present"]:
+        pytest.skip(f"BLOCKED-docker-containment: {image['evidence']}")
+    report = container.containment_report(domain="PERSONAL")
+    failing = {r["check"]: r["evidence"] for r in report["results"] if r["status"] != "PASS"}
+    assert report["overall"] == "PASS", failing
+    for check in ("read_data_db", "real_ssh_dir", "egress_non_broker", "keyring_unreachable", "write_outside_worktree",
+                  "docker_socket_absent", "non_root", "cancel_kills_tree"):
+        assert next(r for r in report["results"] if r["check"] == check)["status"] == "PASS", check
 
 
 # formerly strict xfail BUG_CONTAINMENT_REPORT (containment.report misread the runtime report); fixed by W3
