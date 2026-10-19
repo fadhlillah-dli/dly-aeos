@@ -280,6 +280,7 @@ export interface ComponentDetail {
     digest_status?: string;
     distribution?: Record<string, unknown>;
     signature?: Record<string, unknown>;
+    tool_schema_hash?: string | null;
   };
   usage_role: {
     usage_role: string;

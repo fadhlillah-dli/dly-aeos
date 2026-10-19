@@ -86,7 +86,12 @@ The decision-side and usage dimensions are now projections of the records that o
   (PROMOTION -> RETIRING, ACCEPTED outcome -> RETIRED/DEPRECATED, ROLLED_BACK -> ACTIVE), plus explicit component
   decisions (`target_type="component"`, e.g. SUSPENDED/QUARANTINED via `POST /api/inventory/components/{id}/decision`,
   recorded through the policy facade, bound to the manifest hash). Rows are never deleted; tombstones show RETIRED.
-  `set_admission`/`set_lifecycle` (facade) cache a value only for an ACTIVE human decision that binds the component.
+  `set_admission`/`set_lifecycle` (facade) cache a value only for an ACTIVE human decision that binds the component
+  (current manifest hash / current proposal baseline+candidate hashes) and that decided exactly that value.
+  The cached columns are never read back as authority: a revoked or stale decision stops counting at once. A direct
+  component decision can only restrict (SUSPENDED/REJECTED/UNDER_REVIEW, QUARANTINED/DEPRECATED/RETIRING/RETIRED;
+  OFFICE-only components get OFFICE-tagged decisions); TRIAL_APPROVED/APPROVED come from the proposal flow only and
+  a restriction is lifted by revoking its decision.
 * **Enablement** is ENABLED only with a human-decided basis: explicit decision, APPROVED/TRIAL route, enabled agent
   definition, a project integration whose provider write enablement is effective, or the running released
   controller. An integration record alone stays DISABLED (CONFIG lens: CONFIGURED) — the seeded catalog therefore
@@ -94,7 +99,11 @@ The decision-side and usage dimensions are now projections of the records that o
 * **Usage / OBSERVED edges** (`aeos.inventory.runtime`) come from WorkerRun+Lease (IN_USE while the lease is valid,
   STALE after it expires, LAST_USED when finished), the usage ledger written by the broker/bridge (LAST_USED, broker
   -> provider edge), SUCCEEDED LIVE publication operations and Claude capability tests — each with its run/operation
-  reference, domain-scoped. Producers may also call `record_usage_observation` / `record_relation_observation`.
+  reference, domain-scoped and limited to the projects the viewer may see (`allowed_project_ids`, like the
+  workforce views). Producers may also call `record_usage_observation` / `record_relation_observation`. Views read
+  the latest observation *visible to the session's domain* (`latest_observations(visible_to=domain)`): an
+  OFFICE-tagged observation of a shared component never reaches a PERSONAL view. Routes follow the routing
+  admission rule: an empty `eligible_domains` serves no domain (no enablement, no route node, no auth scope).
 * **Identity of the reviewed artifact**: the manifest schema gains `approved_digest`, `distribution`, `signature`,
   `ports`, `config_refs`, `compatibility`, `tool_schema_hash` and `cost.free_until` (validated: Settings keys,
   loopback ports, no guessed distribution URL). The reconciler records the sha256 of a probed executable as its

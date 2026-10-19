@@ -78,14 +78,16 @@ def list_components(
 
 @router.get("/api/inventory/components/{component_id}")
 def component_detail(component_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
-    return views.component_detail(db, component_id, domain=domain.value)
+    return views.component_detail(db, component_id, domain=domain.value,
+                                  allowed_project_ids=principal.allowed_project_ids)
 
 
 @router.get("/api/inventory/components/{component_id}/relations")
 def component_relations(component_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain,
                         page: int = Query(default=1, ge=1),
                         page_size: int = Query(default=200, ge=1, le=500)) -> dict[str, Any]:
-    return views.component_relations(db, component_id, domain=domain.value, page=page, page_size=page_size)
+    return views.component_relations(db, component_id, domain=domain.value, page=page, page_size=page_size,
+                                     allowed_project_ids=principal.allowed_project_ids)
 
 
 @router.get("/api/inventory/components/{component_id}/dependencies")
@@ -156,7 +158,7 @@ def drift(db: DB, principal: CurrentPrincipal, domain: ActiveDomain, include_res
 
 @router.get("/api/inventory/coverage")
 def coverage(db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
-    return views.coverage(db, domain=domain.value)
+    return views.coverage(db, domain=domain.value, allowed_project_ids=principal.allowed_project_ids)
 
 
 @router.get("/api/inventory/blast-radius/{component_id}")

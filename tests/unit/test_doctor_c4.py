@@ -301,20 +301,28 @@ def test_observed_permission_change_invalidates_dependent_checks(settings, db, s
 # ------------------------------------------------------------------ §08 Evidence/review
 
 
-def test_still_valid_acceptance_with_a_changed_head_fails(settings, db):
+def test_still_valid_acceptance_with_a_changed_head_fails(settings, db, monkeypatch):
     from aeos.models.evidence import AcceptanceRecord
     from aeos.models.workforce import WorkerRun
+    from aeos.verification import acceptance
 
     assert check("evidence.acceptance_invalidation", _ctx(settings, db, base_runner())).status == "NOT_APPLICABLE"
     run = WorkerRun(project_id="p", domain="PERSONAL", head_commit="b" * 40)
     db.add(run)
     db.flush()
     db.add(AcceptanceRecord(task_id="t", run_id=run.id, project_id="p", domain="PERSONAL", artifact_hash="h",
-                            head_commit="a" * 40, acceptance_status="ACCEPTED", verifier_evidence_refs=[], reasons=[]))
+                            head_commit="a" * 40, acceptance_status="ACCEPTED", verifier_evidence_refs=[], reasons=[],
+                            mode="LIVE"))
     db.commit()
+    # read-time invalidation works: the stale record is refused by the PR/merge gate -> not a failure
     res = check("evidence.acceptance_invalidation", _ctx(settings, db, base_runner()))
-    assert res.status == "FAILED" and res.error_code == "ACCEPTANCE_NOT_INVALIDATED"
-    assert "head changed" in json.dumps(res.observed_evidence)
+    assert res.status == "VERIFIED" and res.observed_evidence["stale_refused_by_gate"] == 1
+    assert "head changed" in json.dumps(res.observed_evidence) and res.remediation.get("command")
+    # a gate that still accepts a stale acceptance is the failure this check exists to catch
+    monkeypatch.setattr(acceptance, "acceptance_is_valid", lambda session, task_id, **kw: True)
+    bad = check("evidence.acceptance_invalidation", _ctx(settings, db, base_runner()))
+    assert bad.status == "FAILED" and bad.error_code == "ACCEPTANCE_NOT_INVALIDATED"
+    assert bad.observed_evidence["stale_still_accepted_by_gate"] == 1
 
 
 def test_evidence_dir_permissions_runs_and_reads_windows_acls(settings, db, monkeypatch):
@@ -397,17 +405,28 @@ def test_owner_resource_budget_is_audited_and_compared(settings, db, personal_cl
 
     assert check("host.platform", _ctx(settings, db, base_runner())).observed_evidence["resource_budget"].startswith(
         "UNKNOWN")
+    # §51 P2: until the owner sets the budget it is UNKNOWN (never a pass), with the command to set it
+    unset = check("host.resource_budget", _ctx(settings, db, base_runner()))
+    assert unset.status == "UNKNOWN" and unset.error_code == "RESOURCE_BUDGET_NOT_SET"
+    assert "doctor budget" in (unset.remediation.get("command") or "")
+    st = caps.capability_state(db, Capability.CAN_OPEN_DASHBOARD)
+    assert any("host.resource_budget" in x for x in st.reasons), "shown as a note, never as green"
     r = personal_client.put("/api/doctor/resource-budget", json={"cpu_cores": 1024, "disk_gib": 1_000_000,
                                                                  "reason": "test budget on purpose"})
     assert r.status_code == 200, r.text
     db.expire_all()
-    res = check("host.platform", _ctx(settings, db, base_runner()))
+    res = check("host.resource_budget", _ctx(settings, db, base_runner()))
     assert res.status == "FAILED" and res.error_code == "RESOURCE_BELOW_BUDGET"
+    assert check("host.platform", _ctx(settings, db, base_runner())).status == "VERIFIED", "OS facts stay separate"
     assert check("host.disk", _ctx(settings, db, base_runner())).status == "FAILED"
+    personal_client.put("/api/doctor/resource-budget", json={"cpu_cores": 1, "disk_gib": 0.001,
+                                                             "reason": "a budget this host meets"})
+    db.expire_all()
+    assert check("host.resource_budget", _ctx(settings, db, base_runner())).status == "VERIFIED"
     assert db.scalar(select(AuditEvent).where(AuditEvent.action == "doctor.resource_budget.set"))
     from aeos.doctor import facade
 
-    assert facade.resource_budget(db)["cpu_cores"] == 1024
+    assert facade.resource_budget(db)["cpu_cores"] == 1
     assert personal_client.put("/api/doctor/resource-budget", json={"cpu_cores": 0, "reason": "zero"}).status_code == 422
 
 
@@ -471,9 +490,16 @@ def test_claude_auth_fingerprint_follows_credential_metadata_without_reading_it(
 
     load_all()
     fp1 = compute_fingerprint(REGISTRY["claude.auth"], _ctx(settings, db, r))
+    # a routine token refresh rewrites the file with the same size: NOT a reason to distrust the login
+    time.sleep(0.02)
+    cred.write_text('{"a": 2}', encoding="utf-8")
+    assert compute_fingerprint(REGISTRY["claude.auth"], _ctx(settings, db, r)) == fp1
+    # a new login (different content size) or a logout (file gone) makes the stored auth result STALE at once
     cred.write_text('{"a": 1, "refreshed": true}', encoding="utf-8")
     fp2 = compute_fingerprint(REGISTRY["claude.auth"], _ctx(settings, db, r))
     assert fp1 and fp2 and fp1 != fp2
+    cred.unlink()
+    assert compute_fingerprint(REGISTRY["claude.auth"], _ctx(settings, db, r)) not in (fp1, fp2)
 
 
 # ------------------------------------------------------------------ §08 STALE -> targeted recheck
@@ -589,3 +615,149 @@ def test_project_items_hide_other_domains_and_owner_creation(settings, db):
 
     office = views.checks_view(db, domain="OFFICE")["project_items"]
     assert office and all(i["scope"]["domain"] == "OFFICE" for i in office)
+
+
+# ------------------------------------------------------------------ review hardening (C4 review)
+
+
+def test_http_guard_probe_follows_secure_cookies(settings, db, monkeypatch):
+    """With secure_cookies the session cookie only travels over https; the in-process probe must use that scheme
+    or every authenticated scenario would look like 'no session' and block the dashboard falsely."""
+    monkeypatch.setattr(settings, "secure_cookies", True)
+    res = check("auth.http_guard", _ctx(settings, db, base_runner()))
+    assert res.status == "VERIFIED", res.observed_evidence
+    assert res.observed_evidence["scenarios"]["viewer_write"]["code"] == "READ_ONLY_ROLE"
+
+
+def test_raw_secret_sweep_does_not_skip_rows_sharing_a_timestamp(settings, db, monkeypatch):
+    """All results of one Doctor run share last_checked_at: a batch boundary inside such a group must not skip
+    the rest of the group (watermark = (timestamp, id))."""
+    from aeos.doctor.checks import secret as secret_mod
+
+    monkeypatch.setattr(secret_mod, "SCAN_BATCH", 2)
+    monkeypatch.setattr(secret_mod, "RECENT_WINDOW", 0)
+    at = utcnow() - timedelta(days=3)
+    raw = "ghp_" + "Z9y8X7w6" * 4
+    for i, ev in enumerate(({}, {}, {"note": raw})):
+        _row(db, "host.platform", at=at, id=f"00000000-0000-0000-0000-00000000000{i + 1}", observed_evidence=ev)
+    db.commit()
+    first = check("secret.no_raw_exposure", _ctx(settings, db, base_runner()))
+    db.commit()
+    assert first.status == "UNKNOWN" and first.observed_evidence["rows_remaining_unscanned"]["check_results"] >= 1
+    second = check("secret.no_raw_exposure", _ctx(settings, db, base_runner()))
+    db.commit()
+    assert second.status == "FAILED" and second.observed_evidence["findings"]["check_results"] == 1
+    assert raw not in json.dumps(second.as_dict())
+
+
+def test_a_risk_acceptance_bound_to_another_hash_does_not_close_the_finding(settings, db):
+    from aeos.policy import facade as policy
+
+    fid = _old_secret_scan(settings, db)
+    owner = create_admin(db)
+    policy.record_decision(db, kind="RISK_ACCEPTANCE", actor_user_id=owner.id, target_type="secret_exposure",
+                           target_id=fid, target_hash="sha256:" + "0" * 64, allowed_operations=["x"],
+                           rationale="bound to some other content")
+    db.commit()
+    assert check("secret.no_raw_exposure", _ctx(settings, db, base_runner())).status == "FAILED"
+
+
+def test_a_permission_change_never_rechecks_the_functional_result_it_just_recorded(settings, db, secrets_memory,
+                                                                                   monkeypatch):
+    queued: list[list[str]] = []
+    monkeypatch.setattr(caps, "request_recheck", lambda ids: queued.append(list(ids)))
+    secrets_memory.put("personal/github", "t" * 40, actor="test")
+    url = f"https://api.github.com/repos/{settings.platform_repo_slug}"
+    r = base_runner()
+    r.http[url] = HttpResult(200, {"id": 1, "permissions": {"push": True, "pull": True}})
+    run_doctor(settings, db, checks=["adapter.github_token"], functional=True, runner=r)
+    db.commit()
+    _row(db, "adapter.google_oauth", status="CONFIGURED")
+    db.commit()
+    caps.enable_auto_recheck(settings)
+    try:
+        r.http[url] = HttpResult(200, {"id": 1, "permissions": {"push": False, "pull": True}})
+        run_doctor(settings, db, checks=["adapter.github_token"], functional=True, runner=r)
+        db.commit()
+    finally:
+        caps.disable_auto_recheck()
+    flat = {c for ids in queued for c in ids}
+    assert "adapter.google_oauth" in flat, "dependents of the changed permission are rechecked"
+    assert "adapter.github_token" not in flat, "the fresh --functional result is not overwritten by a recheck"
+    latest = db.scalars(select(CheckResult).where(CheckResult.check_id == "adapter.github_token")
+                        .order_by(CheckResult.last_checked_at.desc())).first()
+    assert latest.status == "CONNECTED"
+
+
+def test_a_replaced_project_repository_makes_the_project_result_stale(settings, db, secrets_memory):
+    from aeos.models.portfolio import RepositoryReference
+
+    _plat, other, office = _projects_with_repos(db)
+    secrets_memory.put("personal/github", "t" * 40, actor="test")
+    r = base_runner()
+    r.http["https://api.github.com/repos/me/other"] = HttpResult(200, {"id": 77, "permissions": {"push": True}})
+    run_doctor(settings, db, checks=["adapter.project_repo"], functional=True, runner=r)
+    db.commit()
+    st = caps.capability_state(db, Capability.CAN_PREPARE_PR, domain="PERSONAL", project_id=other.id)
+    entry = next(c for c in st.checks if c["check_id"] == "adapter.project_repo")
+    assert entry["ok"] and entry["effective_status"] == "CONNECTED"
+    # the project now points at another repository: the old proof does not cover it (no invalidator fired)
+    ref = db.scalar(select(RepositoryReference).where(RepositoryReference.project_id == other.id))
+    ref.full_name, ref.provider_repo_id = "me/renamed-target", "99"
+    db.commit()
+    st = caps.capability_state(db, Capability.CAN_PREPARE_PR, domain="PERSONAL", project_id=other.id)
+    entry = next(c for c in st.checks if c["check_id"] == "adapter.project_repo")
+    assert not entry["ok"] and entry["effective_status"] == "STALE" and st.status != "READY"
+    # a project of another domain is never evaluated as this domain's project
+    foreign = caps.capability_state(db, Capability.CAN_PREPARE_PR, domain="PERSONAL", project_id=office.id)
+    assert foreign.status != "READY" and any("tidak ditemukan pada domain ini" in x for x in foreign.reasons)
+
+
+def test_windows_acl_numeric_generic_rights_are_read_as_write(settings, db, monkeypatch):
+    """Get-Acl prints generic ACEs as numbers; GENERIC_ALL for Users is write access, GENERIC_READ|EXECUTE is not."""
+    monkeypatch.setattr(evidence_mod, "_windows", lambda: True)
+    r = base_runner()
+    r.add_binary("powershell")
+    r.outputs["powershell"] = ok(json.dumps([{"sid": "S-1-5-32-545", "rights": "268435456", "type": "Allow",
+                                              "inherited": True}]))
+    res = check("evidence.dir_permissions", _ctx(settings, db, r))
+    assert res.status == "FAILED" and res.error_code == "EVIDENCE_DIR_ACL_TOO_OPEN"
+    r.outputs["powershell"] = ok(json.dumps([{"sid": "S-1-5-32-545", "rights": "-1610612736", "type": "Allow",
+                                              "inherited": True}]))
+    assert check("evidence.dir_permissions", _ctx(settings, db, r)).status == "VERIFIED"
+
+
+def test_guard_probes_never_publish_their_synthetic_events_to_the_live_stream(settings, db, monkeypatch):
+    from aeos.events import service as events
+
+    published: list[object] = []
+    monkeypatch.setattr(events.broadcaster, "publish", lambda items: published.extend(items))
+    assert check("auth.http_guard", _ctx(settings, db, base_runner())).status == "VERIFIED"
+    assert check("auth.interlock", _ctx(settings, db, base_runner())).status == "VERIFIED"
+    from aeos.doctor.checks.local_auth import probe_database
+
+    with probe_database() as factory, factory() as s:
+        events.emit(s, source="doctor-probe", kind="probe.synthetic")
+        s.commit()
+    assert published == [], "events of the throw-away probe database never reach the live stream"
+
+
+def test_project_scoped_checks_without_a_database_are_unknown_not_not_applicable(settings):
+    from aeos.doctor.runner import run_spec
+
+    load_all()
+    ctx = make_context(settings, None, runner=base_runner())
+    (res,) = run_spec(REGISTRY["adapter.project_repo"], ctx)
+    assert res.status == "UNKNOWN" and res.error_code == "DB_NOT_INITIALISED"
+
+
+def test_a_project_without_a_drive_root_is_not_applicable_for_the_drive_tier(settings, db):
+    from aeos.models.portfolio import Project
+
+    p = Project(project_key="tickets", name="Tickets only", domain="PERSONAL")
+    db.add(p)
+    db.commit()
+    st = caps.capability_state(db, Capability.CAN_PUBLISH_PERSONAL, domain="PERSONAL", project_id=p.id)
+    entry = next(c for c in st.checks if c["check_id"] == "adapter.project_drive_root")
+    assert entry["ok"] and entry["effective_status"] == "NOT_APPLICABLE"
+    assert not any("adapter.project_drive_root" in x and "UNKNOWN" in x for x in st.reasons)

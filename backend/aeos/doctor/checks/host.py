@@ -101,12 +101,11 @@ def budget_remedy() -> Remedy:
     return Remedy(operation="Tetapkan budget resource mesin ini (keputusan pemilik dari mesin nyata, §51 P2)",
                   command=aeos_cmd("doctor budget --cpu <n> --ram <GiB> --disk <GiB> --max-workers <n> --reason <teks>"),
                   target="system setting doctor.resource_budget", privilege="pemilik (operator lokal)",
-                  rollback="jalankan ulang dengan nilai sebelumnya", evidence_to_collect="host.platform/host.disk")
+                  rollback="jalankan ulang dengan nilai sebelumnya",
+                  evidence_to_collect="host.resource_budget VERIFIED")
 
 
-@check("host.platform", "HOST", "OS, arsitektur dan resource", ttl_seconds=86400,
-       invalidators=("config:resource_budget",))
-def host_platform(ctx: CheckContext) -> Outcome:
+def _machine_facts() -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "os": SUPPORTED_PLATFORMS.get(sys.platform, sys.platform), "release": platform.release(),
         "arch": platform.machine(), "cpu_count": os.cpu_count(), "python_bits": 64 if sys.maxsize > 2**32 else 32,
@@ -119,16 +118,42 @@ def host_platform(ctx: CheckContext) -> Outcome:
         evidence["ram_available_gib"] = round(vm.available / (1 << 30), 1)
     except Exception:  # psutil missing/limited: resource facts become UNKNOWN, not guessed
         evidence["ram_total_gib"] = None
+    return evidence
+
+
+@check("host.platform", "HOST", "OS dan arsitektur (fakta resource)", ttl_seconds=86400,
+       invalidators=("config:resource_budget",),
+       description="OS/arsitektur didukung (Windows/macOS/Linux) plus fakta CPU/RAM. Perbandingan dengan budget "
+                   "resource pemilik ada di host.resource_budget (UNKNOWN sampai pemilik menetapkannya).")
+def host_platform(ctx: CheckContext) -> Outcome:
+    evidence = _machine_facts()
     budget = resource_budget(ctx.session)
+    evidence["resource_budget"] = (
+        "UNKNOWN: batas resource belum ditetapkan pemilik dari mesin nyata (§51 P2); lihat host.resource_budget"
+        if budget is None else "dibandingkan oleh host.resource_budget")
     if sys.platform not in SUPPORTED_PLATFORMS:
         return Outcome("FAILED", f"Platform {sys.platform} tidak didukung (Windows/macOS/Linux).", evidence=evidence,
                        error_code="UNSUPPORTED_PLATFORM", severity="HIGH")
+    return Outcome("VERIFIED", f"{evidence['os']} {evidence['arch']}, {evidence['cpu_count']} CPU, RAM "
+                   f"{evidence.get('ram_total_gib')} GiB (skenario: platform didukung; budget resource dinilai oleh "
+                   "host.resource_budget).", evidence=evidence, target_identity=f"{evidence['os']}/{evidence['arch']}")
+
+
+@check("host.resource_budget", "HOST", "Budget resource pemilik (CPU/RAM/worker)", ttl_seconds=86400,
+       invalidators=("config:resource_budget",), ok={"VERIFIED"}, severity_fail="HIGH",
+       description="Membandingkan CPU/RAM mesin ini dengan budget yang ditetapkan pemilik (aeos doctor budget / PUT "
+                   "/api/doctor/resource-budget, teraudit). UNKNOWN sampai pemilik menetapkan budget dari mesin nyata "
+                   "(§51 P2); tidak pernah ditebak. Lantai disk dinilai host.disk.")
+def host_resource_budget(ctx: CheckContext) -> Outcome:
+    evidence = _machine_facts()
+    budget = resource_budget(ctx.session)
     if budget is None:
-        evidence["resource_budget"] = "UNKNOWN: batas resource belum ditetapkan pemilik dari mesin nyata (§51 P2)"
-        return Outcome("VERIFIED", f"{evidence['os']} {evidence['arch']}, {evidence['cpu_count']} CPU, RAM "
-                       f"{evidence.get('ram_total_gib')} GiB (skenario: platform didukung; budget resource UNKNOWN).",
-                       evidence=evidence, target_identity=f"{evidence['os']}/{evidence['arch']}", remedy=budget_remedy())
+        evidence["resource_budget"] = None
+        return Outcome("UNKNOWN", "Budget resource belum ditetapkan pemilik dari mesin nyata (§51 P2); CPU/RAM tidak "
+                       "dibandingkan dan host.disk memakai lantai sementara 1 GiB.", evidence=evidence,
+                       error_code="RESOURCE_BUDGET_NOT_SET", remedy=budget_remedy())
     evidence["resource_budget"] = {k: budget.get(k) for k in BUDGET_FIELDS}
+    evidence["set_by"], evidence["set_at"] = budget.get("set_by"), budget.get("set_at")
     short: list[str] = []
     if budget.get("cpu_cores") and (evidence["cpu_count"] or 0) < budget["cpu_cores"]:
         short.append(f"CPU {evidence['cpu_count']} < budget {budget['cpu_cores']}")
@@ -142,7 +167,8 @@ def host_platform(ctx: CheckContext) -> Outcome:
                        evidence=evidence, error_code="RESOURCE_BELOW_BUDGET", severity="HIGH",
                        target_identity=f"{evidence['os']}/{evidence['arch']}", remedy=budget_remedy())
     return Outcome("VERIFIED", f"{evidence['os']} {evidence['arch']}, {evidence['cpu_count']} CPU, RAM "
-                   f"{evidence.get('ram_total_gib')} GiB memenuhi budget pemilik.", evidence=evidence,
+                   f"{evidence.get('ram_total_gib')} GiB memenuhi budget pemilik (max_parallel_workers "
+                   f"{budget.get('max_parallel_workers') or 'UNKNOWN'}; belum dipakai scheduler).", evidence=evidence,
                    target_identity=f"{evidence['os']}/{evidence['arch']}")
 
 

@@ -59,7 +59,7 @@ class CapRule:
     guard: tuple[str, ...] = ()
     live_sandbox: bool = False  # also ask worker_runtime.facade.sandbox_readiness(session, domain) live
     # §08 "Readiness dievaluasi menurut capability dan target": project-scoped checks evaluated for the project
-    # the caller names (FAILED/MISSING/EXPIRED -> BLOCKED, never-run/STALE/UNKNOWN -> UNKNOWN, other -> DEGRADED).
+    # the caller names (FAILED/MISSING -> BLOCKED, never-run/STALE/EXPIRED/UNKNOWN -> UNKNOWN, other -> DEGRADED).
     project: tuple[str, ...] = ()
     project_ok: dict[str, frozenset[str]] = field(default_factory=dict)
 
@@ -69,7 +69,7 @@ RULES: dict[Capability, CapRule] = {
         "Membuka dashboard lokal", (*BASE, "host.port", "runtime.frontend_dist"), required=("auth.admins",),
         guard=("auth.http_guard",),
         advisory=("host.platform", "host.disk", "host.clock", "runtime.node", "repo.root", "repo.install_manifest",
-                  "secret.no_raw_exposure", "host.vscode"),
+                  "secret.no_raw_exposure", "host.vscode", "host.resource_budget"),
         description="Server lokal, database, auth bootstrap dan build Control Center."),
     Capability.CAN_PLAN_PERSONAL: CapRule(
         "Merencanakan proyek PERSONAL", (*BASE, "claude.env"),
@@ -258,6 +258,9 @@ def _live_sandbox(session: Session | None, domain: str | None) -> tuple[str, lis
 
 
 PLATFORM_COVER = {"adapter.project_repo": "adapter.github_token"}
+# Optional per-project targets: a project that has no such target (e.g. publishes tickets only, no Drive root) is
+# NOT_APPLICABLE for that check instead of UNKNOWN; the target itself is never assumed.
+OPTIONAL_PROJECT_TARGETS = frozenset({"adapter.project_drive_root"})
 
 
 def _project_tier(rule: CapRule, project: dict[str, Any] | None, project_rows: dict[str, dict[str, Any]],
@@ -281,6 +284,10 @@ def _project_tier(rule: CapRule, project: dict[str, Any] | None, project_rows: d
     if project is None:
         notes.append(f"catatan: {', '.join(rule.project)}: target proyek dievaluasi per proyek (pilih proyek)")
         return blocked, unknown, degraded, notes, checks, remedies
+    if not project.get("known", True):
+        unknown.append(f"proyek {str(project.get('id'))[:8]}: tidak ditemukan pada domain ini; target proyek "
+                       "tidak dievaluasi (fail closed)")
+        return blocked, unknown, degraded, notes, checks, remedies
     for cid in rule.project:
         if cid in excluded:
             continue
@@ -291,6 +298,19 @@ def _project_tier(rule: CapRule, project: dict[str, Any] | None, project_rows: d
             covered = PLATFORM_COVER[cid]
             row = rows.get(covered)
         eff, why = effective_status(row, now, None)
+        if row is None and cid in OPTIONAL_PROJECT_TARGETS and not _current_target_set(cid, project):
+            eff, why = "NOT_APPLICABLE", "proyek ini tidak memiliki target tersebut"
+            checks.append({"check_id": cid, "title": spec.title if spec else cid, "tier": "project", "status": None,
+                           "effective_status": eff, "ok": True, "last_checked_at": None,
+                           "component_id": spec.component_id if spec else None, "project_id": project.get("id"),
+                           "covered_by": None, "residual_risks": []})
+            notes.append(f"catatan: {cid} (proyek {str(project.get('id'))[:8]}): NOT_APPLICABLE - {why}")
+            continue
+        if row is not None and covered is None and eff not in ("STALE", "EXPIRED"):
+            probed = _target_set(cid, row.get("observed_evidence") or {})
+            current = _current_target_set(cid, project)
+            if probed is not None and current is not None and probed != current:
+                eff, why = "STALE", "target proyek berubah sejak pemeriksaan terakhir; perlu dicek ulang"
         ok_set = rule.project_ok.get(cid) or (spec.ok_statuses if spec else frozenset({"VERIFIED"}))
         ok = eff in ok_set
         checks.append({"check_id": cid, "title": spec.title if spec else cid, "tier": "project",
@@ -421,23 +441,46 @@ def _rows(session: Session | None, check_ids: list[str]) -> dict[str, dict[str, 
     return {cid: row_view(r) for cid, r in latest_results(session, check_ids).items()}
 
 
-def project_target(session: Session | None, project_id: str | None) -> dict[str, Any] | None:
-    """The project a gate is evaluated for: id, domain and whether its GitHub repo is the platform repo."""
+def project_target(session: Session | None, project_id: str | None, domain: str | None = None
+                   ) -> dict[str, Any] | None:
+    """The project a gate is evaluated for: id, domain, its current targets (GitHub repos, Drive roots) and whether
+    its GitHub repo is the platform repo. A project of another domain than the gate's is never evaluated as if it
+    were this domain's (its targets are not loaded; the project tier stays UNKNOWN, fail closed)."""
     if session is None or not project_id:
         return None
     from sqlalchemy import select
 
     from aeos.core.config import get_settings
-    from aeos.models.portfolio import Project, RepositoryReference
+    from aeos.models.portfolio import Project, ProjectIntegration, RepositoryReference
 
     p = session.get(Project, project_id)
-    if p is None:
-        return {"id": project_id, "domain": None, "is_platform_repo": False, "known": False}
+    if p is None or (domain is not None and p.domain != domain):
+        return {"id": project_id, "domain": p.domain if p else None, "is_platform_repo": False, "known": False}
     slug = get_settings().platform_repo_slug.lower()
     repos = [r.full_name.lower() for r in session.scalars(select(RepositoryReference).where(
         RepositoryReference.project_id == project_id)) if (r.provider or "").upper() == "GITHUB"]
-    return {"id": p.id, "domain": p.domain, "known": True, "repos": repos,
+    roots = [str(i.root_id or "") for i in session.scalars(select(ProjectIntegration).where(
+        ProjectIntegration.project_id == project_id, ProjectIntegration.provider == "google-drive"))]
+    return {"id": p.id, "domain": p.domain, "known": True, "repos": repos, "drive_roots": roots,
             "is_platform_repo": bool(repos) and all(r == slug for r in repos)}
+
+
+# §08 "Perubahan target memicu invalidation": a project-scoped result only describes the targets it probed. When
+# the project's current targets differ (repository added/replaced, Drive root added) the result is STALE.
+def _target_set(check_id: str, evidence: dict[str, Any]) -> list[str] | None:
+    if check_id == "adapter.project_repo":
+        return sorted(str(x).lower() for x in evidence.get("repos") or [])
+    if check_id == "adapter.project_drive_root":
+        return sorted(str((x or {}).get("root_id") or "") for x in evidence.get("roots") or [])
+    return None
+
+
+def _current_target_set(check_id: str, project: dict[str, Any]) -> list[str] | None:
+    if check_id == "adapter.project_repo":
+        return sorted(project.get("repos") or [])
+    if check_id == "adapter.project_drive_root":
+        return sorted(project.get("drive_roots") or [])
+    return None
 
 
 def _project_rows(session: Session | None, check_ids: list[str], project_id: str | None) -> dict[str, dict[str, Any]]:
@@ -458,7 +501,7 @@ def capability_state(session: Session, capability: Capability, *, domain: str | 
     rule = RULES[cap]
     return evaluate(cap, _rows(session, ids), now=utcnow(), fps=live_fingerprints(session, ids),
                     domain=domain, session=session, exclude_checks=tuple(exclude_checks or ()),
-                    project=project_target(session, project_id),
+                    project=project_target(session, project_id, domain=RULES[cap].domain or domain),
                     project_rows=_project_rows(session, list(rule.project), project_id))
 
 
@@ -469,7 +512,7 @@ def capability_matrix(session: Session | None, *, domain: str | None = None,
     rows = rows if rows is not None else _rows(session, all_ids)
     fps = live_fingerprints(session, all_ids)
     now = utcnow()
-    project = project_target(session, project_id)
+    project = project_target(session, project_id, domain=domain)
     project_rows = _project_rows(session, sorted({c for r in RULES.values() for c in r.project}), project_id)
     out = []
     for cap, rule in RULES.items():
@@ -624,7 +667,8 @@ def recheckable(check_ids: list[str]) -> list[str]:
 
 
 def _schedule_recheck(session: Session, stale_ids: list[str]) -> None:
-    ids = recheckable(stale_ids)
+    skip = session.info.get("aeos_doctor_recheck_skip") or set()  # checks the current Doctor run records itself
+    ids = [c for c in recheckable(stale_ids) if c not in skip]
     if not ids or not auto_recheck_enabled():
         return
     from sqlalchemy import event

@@ -50,7 +50,8 @@ def build_refs(session: Session, *, domain: str | None, root: Path | None = None
     # decision-side dimensions come from the Decision registry / approved configuration, as the views show them;
     # the observation-based "released controller" basis is left out so the snapshot hash does not churn with TTLs
     states = decision_states(session, comps, domain=domain)
-    basis = config_basis(session, comps, latest_observations(session, list(comps)), utcnow(), domain=domain)
+    basis = config_basis(session, comps, latest_observations(session, list(comps), visible_to=domain), utcnow(),
+                         domain=domain)
     writable = write_enabled_components(session, domain)
     nodes = []
     for cid, c in sorted(comps.items()):

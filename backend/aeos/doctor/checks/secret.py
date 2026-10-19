@@ -278,18 +278,38 @@ RECENT_WINDOW = 500
 EXPOSURE_TARGET = "secret_exposure"
 
 
-def _scan_sources() -> dict[str, tuple[Any, Any, Any]]:
+def _scan_sources() -> dict[str, tuple[Any, Any, Any, Any]]:
+    """table -> (model, order column, unique tie-break column, text). Timestamps are not unique (every result
+    of one Doctor run shares ``last_checked_at``), so the watermark is the pair (order column, primary key)."""
     from aeos.models.audit import AuditEvent, Event
     from aeos.models.inventory import CheckResult, ComponentObservation
 
     return {
-        "audit_events": (AuditEvent, AuditEvent.seq, lambda r: json.dumps(r.details, default=str) + (r.reason or "")),
-        "events": (Event, Event.seq, lambda r: json.dumps(r.payload, default=str)),
-        "observations": (ComponentObservation, ComponentObservation.observed_at,
+        "audit_events": (AuditEvent, AuditEvent.seq, AuditEvent.seq,
+                         lambda r: json.dumps(r.details, default=str) + (r.reason or "")),
+        "events": (Event, Event.seq, Event.seq, lambda r: json.dumps(r.payload, default=str)),
+        "observations": (ComponentObservation, ComponentObservation.observed_at, ComponentObservation.id,
                          lambda r: json.dumps(r.detail, default=str)),
-        "check_results": (CheckResult, CheckResult.last_checked_at,
+        "check_results": (CheckResult, CheckResult.last_checked_at, CheckResult.id,
                           lambda r: json.dumps(r.observed_evidence, default=str) + (r.summary or "")),
     }
+
+
+def _after(order_col: Any, tie_col: Any, mark: Any) -> Any:
+    """SQL condition: rows strictly after the stored watermark (legacy scalar marks are read as (value, None))."""
+    from datetime import datetime
+
+    from sqlalchemy import and_, or_
+
+    if isinstance(mark, dict):
+        value, tie = mark.get("v"), mark.get("id")
+    else:
+        value, tie = mark, None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if tie is None or order_col is tie_col:
+        return order_col > value
+    return or_(order_col > value, and_(order_col == value, tie_col > tie))
 
 
 def _row_id(r: Any) -> str:
@@ -300,13 +320,23 @@ def _mark(value: Any) -> Any:
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
-def accepted_exposures(session: Any) -> set[str]:
-    """Finding ids an ACTIVE human RISK_ACCEPTANCE decision covers (credential rotated / accepted)."""
+def accepted_exposures(session: Any, findings: dict[str, dict[str, Any]] | None = None) -> set[str]:
+    """Finding ids an ACTIVE human RISK_ACCEPTANCE decision covers (credential rotated / accepted). With *findings*
+    the decision must be bound to that finding's exact hash (§19: risk acceptance bound to target + hash)."""
+    from aeos.core.hashing import content_hash
     from aeos.models.decisions import Decision
 
-    return {d.target_id for d in session.scalars(select(Decision).where(
-        Decision.kind == "RISK_ACCEPTANCE", Decision.target_type == EXPOSURE_TARGET, Decision.status == "ACTIVE"))
-        if d.actor_kind in ("HUMAN", "HUMAN_RECORDED")}
+    out: set[str] = set()
+    for d in session.scalars(select(Decision).where(
+            Decision.kind == "RISK_ACCEPTANCE", Decision.target_type == EXPOSURE_TARGET, Decision.status == "ACTIVE")):
+        if d.actor_kind not in ("HUMAN", "HUMAN_RECORDED"):
+            continue
+        if findings is not None:
+            f = findings.get(d.target_id)
+            if f is None or d.target_hash != content_hash(f):
+                continue
+        out.add(d.target_id)
+    return out
 
 
 @check("secret.no_raw_exposure", "SECRET", "Tidak ada secret mentah di audit/event/observasi", needs_db=True,
@@ -315,8 +345,6 @@ def accepted_exposures(session: Any) -> set[str]:
                    "plus 500 record terbaru tiap run; temuan diingat sampai pemilik merotasi credential dan "
                    "mencatat keputusan RISK_ACCEPTANCE untuk temuan itu. Nilai tidak pernah ditampilkan.")
 def secret_no_raw_exposure(ctx: CheckContext) -> Outcome:
-    from datetime import datetime
-
     from aeos.models.identity import SystemSetting
 
     assert ctx.session is not None
@@ -334,7 +362,7 @@ def secret_no_raw_exposure(ctx: CheckContext) -> Outcome:
         fid = f"{table}:{_row_id(r)}"
         findings.setdefault(fid, {"id": fid, "table": table, "row": _row_id(r), "found_at": ctx.now.isoformat()})
 
-    for table, (model, order_col, text_of) in _scan_sources().items():
+    for table, (model, order_col, tie_col, text_of) in _scan_sources().items():
         totals[table] = int(s.scalar(select(func.count()).select_from(model)) or 0)
         hits = 0
         for r in s.scalars(select(model).order_by(order_col.desc()).limit(RECENT_WINDOW)):
@@ -342,30 +370,30 @@ def secret_no_raw_exposure(ctx: CheckContext) -> Outcome:
                 hits += 1
                 note(table, r)
         recent_hits[table] = hits
-        q = select(model).order_by(order_col.asc())
+        q = select(model).order_by(order_col.asc(), tie_col.asc())
         mark = marks.get(table)
         if mark is not None:
-            value = datetime.fromisoformat(mark) if isinstance(mark, str) else mark
-            q = q.where(order_col > value)
+            q = q.where(_after(order_col, tie_col, mark))
         last = None
         n = 0
         for r in s.scalars(q.limit(SCAN_BATCH)):
             n += 1
-            last = getattr(r, order_col.key)
+            last = {"v": _mark(getattr(r, order_col.key)), "id": getattr(r, tie_col.key)}
             if contains_secret(text_of(r)):
                 note(table, r)
         if last is not None:
-            marks[table] = _mark(last)
+            marks[table] = last
         scanned[table] = int(scanned.get(table, 0)) + n
         rest_q = select(func.count()).select_from(model)
         if marks.get(table) is not None:
-            value = marks[table]
-            rest_q = rest_q.where(order_col > (datetime.fromisoformat(value) if isinstance(value, str) else value))
+            rest_q = rest_q.where(_after(order_col, tie_col, marks[table]))
         remaining[table] = int(s.scalar(rest_q) or 0)
-    accepted = accepted_exposures(s)
+    accepted = accepted_exposures(s, findings)
     open_findings = sorted(fid for fid in findings if fid not in accepted)
-    state = {"marks": marks, "findings": list(findings.values())[-500:], "scanned": scanned,
-             "updated_at": ctx.now.isoformat()}
+    # every OPEN finding is kept (forgetting one would turn the check green); only accepted ones are capped
+    kept = [f for fid, f in findings.items() if fid not in accepted]
+    kept += [f for fid, f in findings.items() if fid in accepted][-500:]
+    state = {"marks": marks, "findings": kept, "scanned": scanned, "updated_at": ctx.now.isoformat()}
     if row is None:
         s.add(SystemSetting(key=SCAN_STATE_KEY, value=state))
     else:

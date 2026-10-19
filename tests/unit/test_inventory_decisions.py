@@ -211,3 +211,105 @@ def test_integration_alone_is_configured_not_enabled_until_write_enablement(seed
     set_flag(seeded, "google-drive", True)
     seeded.commit()
     assert _dims(seeded, "google-drive")["enablement"]["value"] == "ENABLED"
+
+
+# ------------------------------------------------------------------ review hardening (C4 review)
+
+
+def test_revoked_suspension_stops_counting_even_though_the_cache_still_says_suspended(seeded, owner):
+    from aeos.policy.decisions import revoke_decision
+
+    d = record_component_decision(seeded, component_id="opencode", actor_user_id=owner.id, admission="SUSPENDED",
+                                  rationale="security finding: suspend until reviewed")
+    seeded.commit()
+    assert _dims(seeded, "opencode")["admission"]["value"] == "SUSPENDED"
+    revoke_decision(seeded, d.id, actor_user_id=owner.id, reason="finding resolved, lift the suspension")
+    seeded.commit()
+    assert seeded.get(ComponentReference, "opencode").admission_status == "SUSPENDED", "cache is not rewritten"
+    adm = _dims(seeded, "opencode")["admission"]
+    assert adm["value"] == "DISCOVERED" and d.id not in adm["decision_refs"], "the registry is the authority"
+
+
+def test_a_direct_component_decision_can_only_restrict(seeded, owner):
+    from aeos.core.errors import ValidationFailed
+
+    for kw in ({"admission": "APPROVED"}, {"admission": "TRIAL_APPROVED"}, {"lifecycle_final": "ACTIVE"}):
+        with pytest.raises(ValidationFailed):
+            record_component_decision(seeded, component_id="hermes", actor_user_id=owner.id,
+                                      rationale="owner tries to skip the proposal trial", **kw)
+
+
+def test_cached_value_must_be_what_the_decision_decided(seeded, owner):
+    from aeos.inventory.decisions import set_lifecycle
+
+    p = _proposal(seeded, candidates=["hermes"])
+    rejection = _decide(seeded, owner, p, "REJECTION")
+    with pytest.raises(PolicyDenied) as exc:
+        set_admission(seeded, component_id="hermes", status="APPROVED", decision_id=rejection.id, actor="x")
+    assert exc.value.code == "DECISION_VALUE_MISMATCH"
+    set_admission(seeded, component_id="hermes", status="REJECTED", decision_id=rejection.id, actor="x")
+    with pytest.raises(PolicyDenied):  # a candidate's REJECTION never decides a lifecycle
+        set_lifecycle(seeded, component_id="hermes", status="RETIRED", decision_id=rejection.id, actor="x")
+    d = record_component_decision(seeded, component_id="opencode", actor_user_id=owner.id, admission="SUSPENDED",
+                                  rationale="security finding: suspend until reviewed")
+    with pytest.raises(PolicyDenied) as exc:  # the suspension decision did not decide QUARANTINED
+        set_lifecycle(seeded, component_id="opencode", status="QUARANTINED", decision_id=d.id, actor="x")
+    assert exc.value.code == "DECISION_VALUE_MISMATCH"
+
+
+def test_a_proposal_decision_bound_to_an_older_candidate_hash_does_not_count(seeded, owner):
+    p = _proposal(seeded, candidates=["hermes"])
+    _decide(seeded, owner, p, "PROMOTION")
+    seeded.commit()
+    assert _dims(seeded, "hermes")["admission"]["value"] == "APPROVED"
+    p.candidate_hash = "sha256:" + "e" * 64  # re-reviewed candidate: the old binding no longer applies
+    seeded.commit()
+    assert _dims(seeded, "hermes")["admission"]["value"] == "UNDER_REVIEW"
+
+
+def test_component_decision_on_an_office_only_component_is_office_tagged(seeded):
+    from aeos.models.identity import User
+
+    office_owner = create_admin(seeded, username="office-owner")
+    seeded.get(User, office_owner.id).domain_scope = None
+    seeded.flush()
+    d = record_component_decision(seeded, component_id="jira", actor_user_id=office_owner.id,
+                                  admission="SUSPENDED", rationale="office security finding")
+    assert d.domain == "OFFICE"
+    p = record_component_decision(seeded, component_id="opencode", actor_user_id=office_owner.id,
+                                  lifecycle_final="QUARANTINED", rationale="platform quarantine")
+    assert p.domain is None
+
+
+def test_route_without_domain_eligibility_enables_nothing(seeded):
+    """Same rule as routing admission: an empty eligible_domains serves no domain (OFFICE default deny, §23)."""
+    from aeos.inventory.records import route_nodes
+    from aeos.models.routing import ModelRoute
+
+    seeded.add(ModelRoute(route_key="or-x", pool="WORKER", provider="openrouter", model_id="x/y", status="APPROVED",
+                          eligible_domains=[]))
+    seeded.commit()
+    for dom in ("PERSONAL", "OFFICE"):
+        assert views.enablement_for(seeded, "openrouter", domain=dom)["value"] == "DISABLED"
+        assert route_nodes(seeded, domain=dom) == []
+        assert views.component_detail(seeded, "openrouter", domain=dom)["scope"]["authorization_scope"]["routes"] == []
+    seeded.get(ModelRoute, seeded.query(ModelRoute).one().id).eligible_domains = ["PERSONAL"]
+    seeded.commit()
+    assert views.enablement_for(seeded, "openrouter", domain="PERSONAL")["value"] == "ENABLED"
+    assert views.enablement_for(seeded, "openrouter", domain="OFFICE")["value"] == "DISABLED"
+
+
+def test_a_remove_promotion_caches_only_what_the_outcome_currently_means(seeded, owner):
+    from aeos.inventory.decisions import set_lifecycle
+
+    p = _proposal(seeded, kind="REMOVE", existing=["ralph"])
+    promo = _decide(seeded, owner, p, "PROMOTION")
+    with pytest.raises(PolicyDenied):  # no outcome yet: RETIRING, not RETIRED
+        set_lifecycle(seeded, component_id="ralph", status="RETIRED", decision_id=promo.id, actor="x")
+    set_lifecycle(seeded, component_id="ralph", status="RETIRING", decision_id=promo.id, actor="x")
+    p.outcome = {"current": {"status": "ACCEPTED", "at": utcnow().isoformat(), "accepted_configuration": {"r": 1}},
+                 "history": []}
+    seeded.flush()
+    set_lifecycle(seeded, component_id="ralph", status="RETIRED", decision_id=promo.id, actor="x")
+    with pytest.raises(PolicyDenied):
+        set_lifecycle(seeded, component_id="ralph", status="ACTIVE", decision_id=promo.id, actor="x")
