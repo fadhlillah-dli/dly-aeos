@@ -404,6 +404,80 @@ def test_promote_needs_owner_named_and_replacement_plan_with_restore_evidence(db
     assert all(d.status != "ACTIVE" for d in db.scalars(select(Decision).where(Decision.target_id == p.id)))
 
 
+def _named_evidence(db, p):
+    return evidence(db, subject_type="change_proposal", subject_id=p.id, environment={"candidate_hash": p.candidate_hash})
+
+
+def test_promote_requires_a_linked_taskspec_and_a_named_operations_owner(db, policy):
+    research.seed_registry(db)
+    db.commit()
+    route(db)
+    p = create(db, kind="ADD", sources=["https://github.com/stacklok/toolhive"], candidate_pin="1.0.0")
+    plan.update(db, p, {"acceptance": ACCEPTANCE}, actor_user_id="owner")
+    db.commit()
+    review(db, p)
+    decide(db, p, "TRIAL_APPROVE")
+    service.attach_evidence(db, p, evidence_ids=[_named_evidence(db, p).id], actor_user_id="owner")
+    db.commit()
+    checkpoint_pass(db, p)
+    with pytest.raises(Blocked) as e:
+        decide(db, p, "PROMOTE")
+    assert e.value.code == "TASK_REQUIRED"
+    db.rollback()
+    task(db, p)
+    with pytest.raises(Blocked) as e2:
+        decide(db, p, "PROMOTE")
+    assert e2.value.code == "OWNER_REQUIRED"
+
+
+def test_promote_of_a_stateful_component_requires_restore_tested_backup(db, policy):
+    component(db)  # opencode writes to the evidence store: state/data relation
+    p = create(db, kind="UPGRADE", candidate_pin="1.4.0")
+    plan.update(db, p, {"acceptance": ACCEPTANCE, "operations_owner": "owner",
+                        "replacement": {"cutover_order": "pin baru", "rollback_or_forward_recovery": "pin lama"}},
+                actor_user_id="owner")
+    db.commit()
+    review(db, p)
+    decide(db, p, "TRIAL_APPROVE")
+    t = task(db, p)
+    service.attach_evidence(db, p, evidence_ids=[evidence(db, task_spec=t).id], actor_user_id="owner")
+    db.commit()
+    checkpoint_pass(db, p)
+    with pytest.raises(Blocked) as e:
+        decide(db, p, "PROMOTE")
+    assert e.value.code == "RESTORE_EVIDENCE_REQUIRED"
+    with pytest.raises(ValidationFailed):  # only trusted restore-test evidence counts as a tested backup
+        plan.update(db, p, {"replacement": {"cutover_order": "pin baru", "rollback_or_forward_recovery": "pin lama",
+                                            "backup_restore_evidence_id": t.id}}, actor_user_id="owner")
+
+
+def test_docs_published_dimension_follows_linked_publications(db):
+    from aeos.models.publishing import Publication
+    from aeos.proposals import links
+    from tests.unit.proposal_fixtures import project
+
+    p = create(db, kind="ADD", sources=["https://github.com/acme/widget"])
+    proj = project(db)
+    pub = Publication(project_id=proj.id, domain="PERSONAL", plan_version_id="pv", approved_hash="h", decision_id="d",
+                      status="PARTIAL")
+    office = Publication(project_id=project(db, "OFFICE").id, domain="OFFICE", plan_version_id="pv", approved_hash="h",
+                         decision_id="d", status="PUBLISHED")
+    db.add_all([pub, office])
+    db.commit()
+    assert service.delivery_dimensions(db, p)["DOCS_PUBLISHED"]["status"] == "UNKNOWN"
+    with pytest.raises(ValidationFailed):
+        links.add_links(db, p, actor_user_id="owner", publication_ids=[office.id])
+    links.add_links(db, p, actor_user_id="owner", publication_ids=[pub.id])
+    db.commit()
+    assert service.delivery_dimensions(db, p)["DOCS_PUBLISHED"]["status"] == "PARTIAL", "partial is never green"
+    pub.status = "CONFLICT"
+    db.commit()
+    assert service.delivery_dimensions(db, p)["DOCS_PUBLISHED"]["status"] == "CONFLICT"
+    pub.status = "PUBLISHED"
+    db.commit()
+    assert service.delivery_dimensions(db, p)["DOCS_PUBLISHED"]["status"] == "PUBLISHED"
+
+
 def test_plan_progress_does_not_rebind_and_bound_change_does(db, policy):
     component(db)
     p = create(db, kind="UPGRADE", candidate_pin="1.4.0")
