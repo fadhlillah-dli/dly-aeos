@@ -89,7 +89,9 @@
     }
    ],
    "integrity": "OK",
-   "results": "Tidak ada hasil di-seed; hasil hanya dari EvalRun yang tercatat."
+   "results": "Tidak ada hasil di-seed; hasil hanya dari EvalRun yang tercatat.",
+   "data_classification": "INTERNAL",
+   "grader": "Kasus held-out ini adalah definisi. Grader yang dapat dieksekusi didaftarkan pemilik sebagai trusted suite di luar workspace worker (ADR-0060); perubahan backend/aeos/evaluation/** oleh worker dikarantina (protected path)."
   },
   {
    "id": "bc449884-732c-4c36-8f63-d51c2f748c0f",
@@ -179,7 +181,9 @@
     }
    ],
    "integrity": "OK",
-   "results": "Tidak ada hasil di-seed; hasil hanya dari EvalRun yang tercatat."
+   "results": "Tidak ada hasil di-seed; hasil hanya dari EvalRun yang tercatat.",
+   "data_classification": "INTERNAL",
+   "grader": "Kasus held-out ini adalah definisi. Grader yang dapat dieksekusi didaftarkan pemilik sebagai trusted suite di luar workspace worker (ADR-0060); perubahan backend/aeos/evaluation/** oleh worker dikarantina (protected path)."
   }
  ],
  "source": "eval_suites (protected, held-out; definisi tanpa hasil)",

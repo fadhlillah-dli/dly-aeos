@@ -310,6 +310,23 @@ def test_start_blocked_without_sandbox_exception(settings, setup):
     assert te.state == "BLOCKED" and run.execution_status == "FAILED" and run.pid is None
 
 
+def test_engine_differing_from_the_approved_harness_version_never_starts(settings, setup):
+    """§23 harness version is part of the approved configuration: an upgraded/other OpenCode is not the
+    reviewed engine, so the run is refused before any workspace, grant or process exists."""
+    from aeos.models.routing import ModelRoute
+
+    make, _ = setup
+    run_id, task_id = make("ok")
+    with session_factory()() as s:
+        route = s.scalar(select(ModelRoute).where(ModelRoute.route_key == "worker.test-free"))
+        route.harness_version = "1.19.3"  # approved with 1.19.3; the installed stand-in reports fake-1
+        s.commit()
+    res = executor.execute_run(settings, run_id)
+    run, te = _load(run_id, task_id)
+    assert res["status"] == "BLOCKED" and res["code"] == "HARNESS_VERSION_DRIFT", res
+    assert run.pid is None and run.capability_id is None and te.state == "BLOCKED"
+
+
 def test_evidence_fallback_when_collector_missing(settings, setup, monkeypatch):
     make, fakes = setup
     monkeypatch.setitem(sys.modules, "aeos.verification.collector", None)

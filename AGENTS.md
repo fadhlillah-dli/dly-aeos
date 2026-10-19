@@ -61,6 +61,9 @@ secrets, supervisor bridge): `backend/aeos/routing/**`, `backend/aeos/worker_run
 `backend/aeos/planning/prompts.py`, `AGENTS.md`, `CLAUDE.md`, and the bootstrap/dependency set:
 `scripts/bootstrap.*`, `pyproject.toml`, `requirements.lock`.
 
+`backend/aeos/evaluation/**` holds the held-out evaluation suites and gates (§16/§21 "workers never change
+graders or held-out tests").
+
 The canonical list lives in `backend/aeos/core/protected_paths.py` (compiler, runtime and verifier
 import it; `tests/unit/test_protected_paths.py` keeps it equal to this section). For every managed
 project the trusted pipeline/grader/policy/agent-config paths (`opencode.json`, `.opencode/**`,

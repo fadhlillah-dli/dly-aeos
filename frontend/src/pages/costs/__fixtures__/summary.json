@@ -200,6 +200,23 @@
   "per_task": [],
   "note": "Belum ada accepted outcome; biaya per hasil diterima belum dapat dihitung."
  },
+ "operations": {
+  "latency": {
+   "p50_s": 240.0,
+   "p95_s": 600.0,
+   "samples": 3,
+   "runs": 4,
+   "basis": "WorkerRun started_at -> finished_at (run selesai saja)",
+   "status": "MEASURED"
+  },
+  "repairs": {
+   "repair_attempts": 2,
+   "tasks": 2,
+   "tasks_repaired": 1,
+   "basis": "attempts_used - 1 per task (attempt pertama bukan repair)"
+  },
+  "note": "Latency dan repair dipantau terpisah dari biaya tunai/token; bukan konversi ke dolar."
+ },
  "excluded_non_live": {
   "entries": 0,
   "modes": [],

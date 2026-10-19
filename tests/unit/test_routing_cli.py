@@ -87,6 +87,34 @@ def test_activate_without_decision_registry_fails_closed(routes, monkeypatch, ab
     assert service.get_route(routes, DS).status == "CANDIDATE"
 
 
+def test_activate_records_the_owners_reading_of_unknown_terms(routes, monkeypatch):
+    """§23 "klaim provider bukan bukti": UNKNOWN training terms allow PUBLIC only until the owner records their
+    own reading - possible from the CLI too (--inputs-used-for-training / --trial-only + --terms-note)."""
+    from datetime import timedelta
+
+    install_fakes(monkeypatch)
+    create_admin(routes)
+    key = "openrouter/poolside/laguna-s-2.1:free"
+    r = service.get_route(routes, key)
+    r.availability = "AVAILABLE"
+    r.free_until = utcnow() + timedelta(days=30)  # independent of the real end of the free period
+    r.config_hash = service.compute_config_hash(r)
+    routes.commit()
+    base = ["routes", "activate", key, "--as", "owner", "--mode", "TRIAL", "--rationale", "arena trial run",
+            "--expected-hash", r.config_hash, "--data-class", "PUBLIC", "--data-class", "INTERNAL", "--terms-reviewed",
+            "--terms-note", "OpenRouter provider page: prompts are not used for training"]
+    refused = runner.invoke(app, base, input=ADMIN_PW + "\n")
+    assert refused.exit_code == 1 and "UNKNOWN" in refused.output
+    incomplete = runner.invoke(app, [*base, "--no-inputs-used-for-training"], input=ADMIN_PW + "\n")
+    assert incomplete.exit_code == 1 and "TERMS_RECORD_INCOMPLETE" in incomplete.output
+    ok = runner.invoke(app, [*base, "--no-inputs-used-for-training", "--no-trial-only"], input=ADMIN_PW + "\n")
+    assert ok.exit_code == 0, ok.output
+    routes.expire_all()
+    route = service.get_route(routes, key)
+    assert route.status == "TRIAL" and route.allowed_data_classes == ["PUBLIC", "INTERNAL"]
+    assert route.data_terms["owner_terms_record"] is True and route.data_terms["may_use_inputs_for_training"] is False
+
+
 def test_disable_and_refresh(routes, monkeypatch):
     monkeypatch.setattr(catalog, "refresh_all", lambda s, actor: _FakeRefresh())
     r = runner.invoke(app, ["routes", "refresh"])

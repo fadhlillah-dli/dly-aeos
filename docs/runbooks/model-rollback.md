@@ -17,7 +17,10 @@ workers never select their own model, and there is no silent paid fallback (§23
    or cancel the affected runs ([cancel-runaway-run](cancel-runaway-run.md)).
 2. **Identify the last accepted configuration**: *Model & Rute* shows each route's status,
    resolved model version (UNKNOWN when an alias hides it), evaluation results and the decision
-   that activated it. *Riwayat & Pemulihan* → *Keputusan* shows the activation history.
+   that activated it. *Riwayat & Pemulihan* → *Keputusan* shows the activation history. Every APPROVED
+   activation records its `rollback_target` (the previous approved configuration hash with a config
+   snapshot in that decision, or "disable the route" for a first approval) — shown as *Rollback* in the
+   route drawer.
 3. **Disable the bad route** and re-activate the previous approved route through the routing
    module (`aeos routes --help`; UI *Model & Rute*). Record the rationale; the change is a new
    decision, history is not rewritten.
@@ -25,7 +28,9 @@ workers never select their own model, and there is no silent paid fallback (§23
    re-run `aeos doctor` before resuming.
 5. **Re-evaluate**: results produced under the changed route are recorded with that configuration
    and do not satisfy the old baseline automatically (§50). Re-run the relevant evaluation suite
-   (`aeos eval --help`) before trusting the route again.
+   (`aeos eval start|bind|collect`) before trusting the route again: an APPROVED re-activation needs
+   `--eval-run` ids of completed, gate-passing runs of exactly the new configuration; until then only
+   TRIAL is possible.
 6. **Resume scheduling**.
 
 ## Verification

@@ -86,21 +86,36 @@ PROMPT_REPORT_RULES = (
 )
 
 
+_REVISION_PLACEHOLDER = "<worker-prompt-revision>"
+
+
 def worker_prompt_revision() -> str:
     """Revision id of the worker prompt template (recorded on the route and every run, §23). It also covers the
     worker's baseline tool permissions and the report schema: §25 treats a tool/instruction change as a system
-    change, so changing either invalidates route approvals exactly like a prompt edit."""
-    from aeos.worker_runtime.opencode import ALWAYS_DENY, BASE_ALLOW, RUN_MESSAGE
+    change, so changing either invalidates route approvals exactly like a prompt edit.
 
+    Computed live (``WORKER_PROMPT_REVISION`` is this build's value): besides the template constants it hashes
+    the prompt ``build_prompt`` renders for a fixed probe TaskSpec and the OpenCode permission template the
+    adapter writes for a worker without extra tools, so a layout change of either is a new revision as well.
+    The routing module binds exactly this value at activation and compares it on every eligibility pass."""
+    from types import SimpleNamespace
+
+    from aeos.worker_runtime.opencode import ALWAYS_DENY, BASE_ALLOW, RUN_MESSAGE, build_config
+
+    probe = SimpleNamespace(task_key="fingerprint", title="fingerprint", goal="fingerprint", acceptance_criteria=[],
+                            expected_outputs=[], allowed_paths=[], forbidden_paths=[], stop_conditions=[],
+                            input_artifacts=[])
+    rendered = build_prompt(probe, findings=[], protected=(), branch="aeos/fingerprint",  # type: ignore[arg-type]
+                            revision=_REVISION_PLACEHOLDER)
+    permission = build_config(broker_base_url="http://127.0.0.1:9/broker/v1", token="fingerprint",
+                              model="fingerprint", tools_allowed=[], egress_allowed=[])["permission"]
     h = content_hash({"version": PROMPT_TEMPLATE_VERSION, "stop": PROMPT_STOP_RULES, "rules": PROMPT_RULES,
                       "report": PROMPT_REPORT_RULES, "run_message": RUN_MESSAGE,
                       "limits": [MAX_ATTACHMENT_CHARS, MAX_PROMPT_ATTACH_TOTAL, MAX_PROMPT_CONTEXT_TOTAL],
                       "tools": {"base_allow": list(BASE_ALLOW), "always_deny": list(ALWAYS_DENY)},
-                      "report_schema": worker_report.WORKER_REPORT_SCHEMA})
+                      "report_schema": worker_report.WORKER_REPORT_SCHEMA,
+                      "rendered_probe": rendered, "permission": permission})
     return f"wp{PROMPT_TEMPLATE_VERSION}-{h.split(':', 1)[1][:16]}"
-
-
-WORKER_PROMPT_REVISION = worker_prompt_revision()
 
 
 class StartError(Exception):
@@ -137,7 +152,9 @@ class Prepared:
 
 # ----------------------------------------------------------------------------- prompt
 def build_prompt(task: TaskSpec, *, findings: list[Any], protected: tuple[str, ...], branch: str,
-                 context_pack: dict[str, Any] | None = None) -> str:
+                 context_pack: dict[str, Any] | None = None, revision: str | None = None) -> str:
+    """``revision`` defaults to this build's ``WORKER_PROMPT_REVISION`` (``worker_prompt_revision`` renders
+    the probe with a placeholder: the revision cannot hash itself)."""
     def bullets(items: list[Any]) -> str:
         return "\n".join(f"- {redact_text(str(i))}" for i in items) or "- (none)"
 
@@ -146,7 +163,7 @@ def build_prompt(task: TaskSpec, *, findings: list[Any], protected: tuple[str, .
         "# AEOS TaskSpec (authoritative instructions for this run)",
         f"Task: {task.task_key} - {redact_text(task.title)}",
         f"Branch (managed by the AEOS runtime): {branch}",
-        f"Prompt revision: {WORKER_PROMPT_REVISION}",
+        f"Prompt revision: {revision or WORKER_PROMPT_REVISION}",
         "", "## Goal", redact_text(task.goal),
         "", "## Acceptance criteria", bullets(list(task.acceptance_criteria or [])),
         "", "## Expected outputs", bullets(list(task.expected_outputs or [])),
@@ -189,6 +206,9 @@ def build_prompt(task: TaskSpec, *, findings: list[Any], protected: tuple[str, .
             label = f"kind={item.get('kind')} ref={redact_text(str(item.get('ref')))[:120]} trust={item.get('trust')}"
             parts += [f"<<<BEGIN CONTEXT {label}>>>", redact_text(text), "<<<END CONTEXT>>>"]
     return "\n".join(parts) + "\n"
+
+
+WORKER_PROMPT_REVISION = worker_prompt_revision()  # this build's revision (after build_prompt exists)
 
 
 # ----------------------------------------------------------------------------- repository resolution
@@ -294,8 +314,20 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
         if status["status"] != "INSTALLED":
             raise StartError("ENGINE_MISSING", f"OpenCode {status['status']}: {status['evidence']}")
     route_key = run.model_route_key or ""
-    exposed = opencode.exposed_model_id(route_key)
     route = s.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
+    if route is not None and route.harness_version:
+        # §23 harness version is part of the approved configuration: an upgraded engine is not the reviewed one.
+        # The process sandbox runs the installed binary; the container sandbox runs the image built for the pin.
+        if kind == "process":
+            engine = status.get("version")
+        else:
+            from aeos.worker_runtime import container as _container
+
+            engine = _container.image_tag().rsplit(":", 1)[-1]
+        if engine != route.harness_version:
+            raise StartError("HARNESS_VERSION_DRIFT", f"OpenCode {engine} differs from the version the route was "
+                                                      f"approved with ({route.harness_version}); re-review it")
+    exposed = opencode.exposed_model_id(route_key)
     if bind_prompt_revision(route):
         raise StartError("PROMPT_REVISION_CHANGED", f"route {route_key} was approved without the current worker prompt "
                          f"revision {WORKER_PROMPT_REVISION}; its approval no longer matches the configuration and "
