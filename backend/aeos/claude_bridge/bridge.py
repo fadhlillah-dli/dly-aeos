@@ -724,7 +724,12 @@ def status(session: Session, settings: Settings | None = None, *, refresh: bool 
         binary_status = "CONFIGURED"
     return {
         "binary": {"found": pr.binary.found, "status": binary_status, "path_logical": pr.binary.logical_path,
-                   "version": pr.binary.version, "fingerprint": pr.binary.fingerprint, "reasons": pr.binary.reasons},
+                   "version": pr.binary.version, "fingerprint": pr.binary.fingerprint, "reasons": pr.binary.reasons,
+                   "signature": (binmod.publisher_signature(pr.binary.path, fingerprint_value=pr.binary.fingerprint)
+                                 if pr.binary.found and refresh else
+                                 binmod._SIG_CACHE.get((str(pr.binary.path), pr.binary.fingerprint or ""),
+                                                       {"status": "NOT_CHECKED",
+                                                        "reason": "refresh the status to run the OS signature check"}))},
         "auth": pr.auth.summary(),
         "bridge_status": ("BLOCKED" if not pr.usable else "CONFIGURED"),
         "env_hygiene": parent_hygiene(),
