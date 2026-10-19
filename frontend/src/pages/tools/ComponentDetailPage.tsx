@@ -370,6 +370,16 @@ export default function ComponentDetailPage() {
               ["Digest disetujui / teramati", <span key="dg"><Mono>{shortHash(ver.approved_digest)}</Mono> / <Mono>{shortHash(ver.observed_digest)}</Mono> {ver.digest_status && <Badge status={ver.digest_status} />}</span>],
               ["Artefak distribusi", asText(ver.distribution)],
               ["Tanda tangan / provenance", asText(ver.signature)],
+              [
+                "Schema tool/MCP (saat admission)",
+                ver.tool_schema_hash ? (
+                  <Mono key="ts">{shortHash(ver.tool_schema_hash)}</Mono>
+                ) : (
+                  <span key="ts" className="inline-flex items-center gap-1">
+                    <Badge status="UNKNOWN" /> <span className="text-xs text-ink-3">belum direkam saat admission; perubahan schema belum dapat dideteksi</span>
+                  </span>
+                ),
+              ],
               ["Revisi konfigurasi", <Unknown key="c" v={ver.config_revision} />],
               ["Lockfile", ver.lockfile_refs.length ? ver.lockfile_refs.join(", ") : "—"],
               ["Catatan", <span key="n" className="text-xs text-ink-3">{ver.provenance_note}</span>],

@@ -175,10 +175,11 @@ def run_check(spec: CheckSpec, ctx: CheckContext) -> CheckResultData:
 def run_spec(spec: CheckSpec, ctx: CheckContext) -> list[CheckResultData]:
     """Run one spec: a platform/domain check yields one result; a project-scoped check (``spec.targets``)
     yields one result per project target, or one NOT_APPLICABLE result when no project has such a target."""
-    if spec.targets is None:
+    if spec.targets is None or (spec.needs_db and ctx.session is None):
+        # without a database the project targets cannot be read: UNKNOWN (DB_NOT_INITIALISED), not "no project"
         return [run_check(spec, ctx)]
     try:
-        targets = list(spec.targets(ctx)) if (ctx.session is not None or not spec.needs_db) else []
+        targets = list(spec.targets(ctx))
     except Exception as exc:  # cannot enumerate targets: UNKNOWN, never a pass
         out = run_check(dataclasses.replace(spec, fn=lambda _c, e=exc: Outcome(
             "UNKNOWN", f"Target proyek tidak dapat dibaca ({type(e).__name__}).", error_code="TARGETS_UNREADABLE")),
@@ -233,6 +234,7 @@ def latest_results(session: Session, check_ids: list[str] | None = None) -> dict
 
 
 PERMISSION_KEYS = ("permissions", "token_scopes", "granted_scopes")
+RECHECK_SKIP_KEY = "aeos_doctor_recheck_skip"
 
 
 def _permission_changes(previous: dict[Any, CheckResult], results: list[CheckResultData]) -> list[tuple[str, str]]:
@@ -270,8 +272,14 @@ def _persist(session: Session, results: list[CheckResultData], run: DoctorRun, c
     previous.update(latest_project_results(session, project_ids))
     # A changed permission set invalidates the dependent results BEFORE this run's rows are added, so checks
     # outside this run that rely on the old permissions become STALE (recheck before the capability is used).
-    for invalidator, reason in _permission_changes(previous, results):
-        invalidate(session, invalidator=invalidator, reason=reason)
+    # The checks of THIS run are recorded fresh right below: a background (non-functional) recheck of them would
+    # overwrite a just-recorded --functional result, so they are excluded from the recheck this run triggers.
+    session.info[RECHECK_SKIP_KEY] = {r.check_id for r in results}
+    try:
+        for invalidator, reason in _permission_changes(previous, results):
+            invalidate(session, invalidator=invalidator, reason=reason)
+    finally:
+        session.info.pop(RECHECK_SKIP_KEY, None)
     for r in results:
         prev = previous.get(_result_key(r))
         if prev is not None and prev.fingerprint and r.fingerprint and prev.fingerprint != r.fingerprint \

@@ -20,7 +20,8 @@ _MODULES = (
 # files/config/records, E2 = controlled self-test on synthetic input, E3 = runtime probe of the real component
 # on this host/target. A check not listed is E1 (conservative: never claims runtime evidence by default).
 EVIDENCE_LEVELS: dict[str, tuple[str, str | None]] = {
-    "host.platform": ("E3", None), "host.disk": ("E3", None), "host.clock": ("E1", "E3"), "host.port": ("E3", None),
+    "host.platform": ("E3", None), "host.resource_budget": ("E3", None), "host.disk": ("E3", None),
+    "host.clock": ("E1", "E3"), "host.port": ("E3", None),
     "host.data_dir": ("E3", None), "host.vscode": ("E3", None),
     "runtime.python": ("E3", None), "runtime.backend_deps": ("E3", None), "runtime.node": ("E3", None),
     "runtime.db": ("E3", None), "runtime.storage": ("E3", None),

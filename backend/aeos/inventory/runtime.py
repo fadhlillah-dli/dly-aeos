@@ -30,7 +30,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from aeos.core.timeutil import ensure_aware, utcnow
-from aeos.inventory.configlens import HARNESS_COMPONENTS, INTEGRATION_COMPONENTS, PROVIDER_COMPONENTS
+from aeos.inventory.configlens import (
+    HARNESS_COMPONENTS,
+    INTEGRATION_COMPONENTS,
+    PROVIDER_COMPONENTS,
+    route_eligible,
+)
 
 ACTIVE_RUN_STATES = ("LEASED", "RUNNING")
 USAGE_WINDOW = timedelta(days=30)
@@ -71,6 +76,12 @@ def _visible(row_domain: str | None, domain: str | None) -> bool:
     return row_domain is None or row_domain == domain
 
 
+def _project_ok(project_id: str | None, project_ids: list[str] | None) -> bool:
+    """RBAC project scope (``principal.allowed_project_ids``; None = every project of the domain), the same
+    filter the workforce run views apply: a run/request of a project the user may not see is never projected."""
+    return project_ids is None or project_id is None or project_id in project_ids
+
+
 def _newer(a: datetime | None, b: datetime | None) -> bool:
     a, b = ensure_aware(a), ensure_aware(b)
     return a is not None and (b is None or a > b)
@@ -88,9 +99,11 @@ def _publication_component(provider: str, operation: str) -> str | None:
     return INTEGRATION_COMPONENTS.get(provider)
 
 
-def collect(session: Session, *, domain: str | None, now: datetime | None = None
+def collect(session: Session, *, domain: str | None, now: datetime | None = None,
+            project_ids: list[str] | None = None
             ) -> tuple[dict[str, UsageFact], list[EdgeFact], list[dict[str, Any]]]:
-    """(usage per component, observed edges, active runs) from the run/operation records of *domain*."""
+    """(usage per component, observed edges, active runs) from the run/operation records of *domain*, limited to
+    the projects the viewer may see (*project_ids*, None = all of the domain)."""
     from aeos.models.claude_bridge_ext import ClaudeCapabilityTest
     from aeos.models.cost import UsageLedgerEntry
     from aeos.models.publishing import Publication, PublicationOperation
@@ -122,6 +135,8 @@ def collect(session: Session, *, domain: str | None, now: datetime | None = None
     leases = {ls.id: ls for ls in session.scalars(select(Lease).where(Lease.state == "ACTIVE"))}
     for run in session.scalars(q):
         if not _visible(run.domain, domain) or (run.mode or "LIVE") != "LIVE":
+            continue
+        if not _project_ok(run.project_id, project_ids):
             continue
         engine_cid = HARNESS_COMPONENTS.get(run.engine or "")
         provider_cid = PROVIDER_COMPONENTS.get(routes.get(run.model_route_key or "", ""))
@@ -158,12 +173,16 @@ def collect(session: Session, *, domain: str | None, now: datetime | None = None
 
     # --- usage ledger (broker model proxy / Claude bridge): latest LIVE request per provider+source
     ul = UsageLedgerEntry
-    latest = (select(ul.provider, ul.source, ul.domain, func.max(ul.at).label("m"))
-              .where(ul.mode == "LIVE", ul.at >= since).group_by(ul.provider, ul.source, ul.domain))
-    for provider, source, row_domain, at in session.execute(latest):
-        if not _visible(row_domain, domain):
+    latest = (select(ul.provider, ul.source, ul.domain, ul.project_id, func.max(ul.at).label("m"))
+              .where(ul.mode == "LIVE", ul.at >= since).group_by(ul.provider, ul.source, ul.domain, ul.project_id))
+    for provider, source, row_domain, row_project, at in session.execute(latest):
+        if not _visible(row_domain, domain) or not _project_ok(row_project, project_ids):
             continue
-        row = session.scalar(select(ul).where(ul.provider == provider, ul.source == source, ul.at == at).limit(1))
+        # the representative row is taken from the same domain/project group (never another domain's request)
+        row = session.scalar(select(ul).where(
+            ul.provider == provider, ul.source == source, ul.at == at, ul.mode == "LIVE",
+            ul.domain.is_(None) if row_domain is None else ul.domain == row_domain,
+            ul.project_id.is_(None) if row_project is None else ul.project_id == row_project).limit(1))
         cid = PROVIDER_COMPONENTS.get(provider)
         refs = {"ledger_entry_id": row.id if row else None, "run_id": row.run_id if row else None,
                 "route_key": row.route_key if row else None, "category": row.category if row else None,
@@ -207,7 +226,8 @@ def collect(session: Session, *, domain: str | None, now: datetime | None = None
     return usage, list(edges.values()), active_runs
 
 
-def consuming(session: Session, component_id: str, *, domain: str | None, limit: int = 10) -> dict[str, Any]:
+def consuming(session: Session, component_id: str, *, domain: str | None, limit: int = 10,
+              project_ids: list[str] | None = None) -> dict[str, Any]:
     """Routes, agents and recent runs that consume *component_id* (§37 "consuming tasks/services/routes")."""
     from aeos.models.routing import ModelRoute
     from aeos.models.workforce import AgentDefinition, WorkerRun
@@ -217,7 +237,7 @@ def consuming(session: Session, component_id: str, *, domain: str | None, limit:
     route_rows = list(session.scalars(select(ModelRoute).where(ModelRoute.provider.in_(providers)))) if providers else []
     routes = [{"route_key": r.route_key, "status": r.status, "pool": r.pool, "provider": r.provider,
                "eligible_domains": r.eligible_domains or []} for r in route_rows
-              if domain is None or not r.eligible_domains or domain in (r.eligible_domains or [])]
+              if route_eligible(r, domain)]
     agents = [{"agent_key": a.agent_key, "role_key": a.role_key, "enabled": a.enabled, "harness": a.harness,
                "revision_hash": a.revision_hash}
               for a in session.scalars(select(AgentDefinition).where(AgentDefinition.harness.in_(harnesses)))] \
@@ -227,7 +247,7 @@ def consuming(session: Session, component_id: str, *, domain: str | None, limit:
     if harnesses or route_keys:
         q = select(WorkerRun).order_by(WorkerRun.created_at.desc()).limit(200)
         for r in session.scalars(q):
-            if not _visible(r.domain, domain):
+            if not _visible(r.domain, domain) or not _project_ok(r.project_id, project_ids):
                 continue
             if (r.engine in harnesses) or (r.model_route_key in route_keys):
                 runs.append({"run_id": r.id, "task_key": r.task_key, "task_id": r.task_id,

@@ -109,19 +109,30 @@ def auth_sessions(ctx: CheckContext) -> Outcome:
 
 @contextmanager
 def probe_database() -> Iterator[Any]:
-    """A throw-away in-memory database with the full schema (never the operator's database)."""
+    """A throw-away in-memory database with the full schema (never the operator's database).
+
+    Events the probe's synthetic users/logins emit stay in that database: they are dropped before commit, so
+    the process-wide broadcaster never pushes probe events (with the probe DB's own seq numbers) to the live
+    dashboard stream."""
     from sqlalchemy import create_engine
+    from sqlalchemy import event as sa_event
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
 
     from aeos.core.db import Base, import_all_models, install_append_only_triggers
+    from aeos.events.service import _PENDING_KEY
+
+    def _drop_probe_events(session: Any) -> None:
+        session.info.pop(_PENDING_KEY, None)
 
     engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}, future=True)
     try:
         import_all_models()
         Base.metadata.create_all(engine)
         install_append_only_triggers(engine)
-        yield sessionmaker(bind=engine, expire_on_commit=False, future=True)
+        factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+        sa_event.listen(factory, "before_commit", _drop_probe_events)
+        yield factory
     finally:
         engine.dispose()
 
@@ -163,7 +174,10 @@ def http_guard_probe(settings: Any) -> dict[str, Any]:
                 s.close()
 
         app.dependency_overrides[get_db] = _db
-        base = f"http://{settings.host}:{settings.port}"
+        # with secure_cookies the session cookie is only sent over https: probe with that scheme, otherwise the
+        # client would drop the cookie and every scenario would wrongly look like "no session" (false FAILED)
+        scheme = "https" if getattr(settings, "secure_cookies", False) else "http"
+        base = f"{scheme}://{settings.host}:{settings.port}"
         origin = settings.allowed_origins[0]
 
         def record(name: str, resp: Any, *, status: int, code: str | None = None) -> None:

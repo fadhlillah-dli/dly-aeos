@@ -45,6 +45,11 @@ ADMISSION_BY_KIND = {"PROMOTION": "APPROVED", "TRIAL": "TRIAL_APPROVED", "REJECT
 OPEN_PROPOSAL = frozenset({"SUBMITTED", "UNDER_REVIEW", "REVIEWED", "IN_TRIAL", "PROMOTION_PENDING", "DEFERRED",
                            "REQUEST_MORE_EVIDENCE"})
 RETIRING_KINDS = frozenset({"REMOVE", "REPLACE"})
+# A direct decision on a component may only RESTRICT it (security suspension, quarantine, retirement). Granting
+# admission (TRIAL_APPROVED/APPROVED) goes through the ChangeProposal flow, which demands a pinned candidate,
+# a verified source identity and trusted trial evidence (§39/§40); lifting a restriction = revoking its decision.
+DIRECT_ADMISSIONS = frozenset({"SUSPENDED", "REJECTED", "UNDER_REVIEW"})
+DIRECT_LIFECYCLES = frozenset({"QUARANTINED", "DEPRECATED", "RETIRING", "RETIRED"})
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
@@ -96,18 +101,17 @@ def decision_states(session: Session, comps: dict[str, ComponentReference], *, d
 
     out: dict[str, DecisionState] = {}
     for cid, c in comps.items():
-        st = DecisionState(admission=c.admission_status or "DISCOVERED", lifecycle=c.lifecycle_final or "ACTIVE",
-                           decision_refs=list(c.decision_refs or []))
-        if c.decision_refs:
-            st.admission_reason = "terikat keputusan yang tercatat"
-            st.admission_source = "decision registry"
+        # The cached columns are NOT an authority: a revoked/invalidated decision must stop counting, so every
+        # value below is re-derived from the ACTIVE decisions (the cache only mirrors the last explicit write).
+        st = DecisionState()
         if c.tombstoned_at is not None:
             st.lifecycle, st.lifecycle_at = "RETIRED", c.tombstoned_at
             st.lifecycle_reason = "dihapus dari manifest (tombstone); histori dipertahankan"
         out[cid] = st
     if not comps:
         return out
-    # (1) explicit component decisions (security SUSPEND/QUARANTINE, owner lifecycle decisions)
+    # (1) explicit component decisions (security SUSPEND/QUARANTINE, owner lifecycle decisions). They can only
+    # restrict (DIRECT_ADMISSIONS / DIRECT_LIFECYCLES): APPROVED/TRIAL_APPROVED come from the proposal flow only.
     direct = session.scalars(select(Decision).where(Decision.target_type == COMPONENT_TARGET,
                                                     Decision.target_id.in_(list(comps)))
                              .order_by(Decision.created_at))
@@ -119,11 +123,11 @@ def decision_states(session: Session, comps: dict[str, ComponentReference], *, d
         view = decision_view(d, via="component")
         st = out[d.target_id]
         st.decisions.append(view)
-        if det.get("admission") in ADMISSIONS:
+        if det.get("admission") in DIRECT_ADMISSIONS:
             events.setdefault(d.target_id, []).append(
                 (d.created_at, "admission", str(det["admission"]), f"keputusan {d.kind} {d.id[:8]} pada komponen",
                  view))
-        if det.get("lifecycle_final") in LIFECYCLES:
+        if det.get("lifecycle_final") in DIRECT_LIFECYCLES:
             events.setdefault(d.target_id, []).append(
                 (d.created_at, "lifecycle", str(det["lifecycle_final"]),
                  f"keputusan {d.kind} {d.id[:8]} pada komponen", view))
@@ -140,7 +144,9 @@ def decision_states(session: Session, comps: dict[str, ComponentReference], *, d
                 by_proposal.setdefault(d.target_id, []).append(d)
     for p in proposals:
         decisions = by_proposal.get(p.id, [])
-        active = [d for d in decisions if d.status == "ACTIVE"]
+        # §20 binding: a decision counts only while it is ACTIVE and bound to the proposal's CURRENT reviewed
+        # baseline/candidate hashes (the proposals module invalidates stale ones; this never trusts a stale row)
+        active = [d for d in decisions if d.status == "ACTIVE" and _bound_to_current(d, p)]
         views = [decision_view(d, via="proposal", proposal=p) for d in decisions]
         outcome = (p.outcome or {}).get("current") or {}
         for cid in set(p.candidate_component_ids or []) & set(comps):
@@ -202,6 +208,20 @@ def decision_states(session: Session, comps: dict[str, ComponentReference], *, d
     return out
 
 
+def _proposal_lifecycle(p: Any) -> str:
+    """What an ACTIVE PROMOTION of a REMOVE/REPLACE proposal means for the existing component right now: RETIRING
+    until an ACCEPTED outcome is recorded, then RETIRED (REMOVE) / DEPRECATED (REPLACE)."""
+    outcome = ((p.outcome or {}).get("current") or {}).get("status")
+    if outcome == "ACCEPTED":
+        return "RETIRED" if p.kind == "REMOVE" else "DEPRECATED"
+    return "RETIRING"
+
+
+def _bound_to_current(d: Decision, p: Any) -> bool:
+    det = d.details or {}
+    return det.get("baseline_hash") == p.baseline_hash and det.get("candidate_hash") == p.candidate_hash
+
+
 def _parse(value: Any) -> datetime | None:
     if not value:
         return None
@@ -218,11 +238,15 @@ def decision_state(session: Session, comp: ComponentReference, *, domain: str | 
 # ---------------------------------------------------------------- explicit component decisions (writes)
 
 
-def _bound_decision(session: Session, component_id: str, decision_id: str) -> Decision:
-    """The decision must exist, be ACTIVE, be human and bind this exact component (directly, or through a
-    ChangeProposal that names it)."""
+def _bound_decision(session: Session, comp: ComponentReference, decision_id: str, *, column: str,
+                    value: str) -> Decision:
+    """The decision must exist, be ACTIVE, be human, bind this exact component (directly with its current
+    manifest hash, or through a ChangeProposal that names it with its current baseline/candidate hashes) and
+    MEAN *value*: a decision is never re-used to cache a state it did not decide (e.g. APPROVED from a REJECTION,
+    or any grant from a direct component decision)."""
     from aeos.models.research import ChangeProposal
 
+    component_id = comp.component_id
     d = session.get(Decision, decision_id)
     if d is None:
         raise NotFound("decision not found")
@@ -230,12 +254,30 @@ def _bound_decision(session: Session, component_id: str, decision_id: str) -> De
         raise PolicyDenied(f"decision {decision_id} is {d.status}, not ACTIVE", code="DECISION_NOT_ACTIVE")
     if d.actor_kind not in HUMAN_ACTORS:
         raise PolicyDenied("only a human decision changes admission/lifecycle", code="DECISION_ACTOR_NOT_HUMAN")
+    det = d.details or {}
     if d.target_type == COMPONENT_TARGET and d.target_id == component_id:
+        if d.target_hash != comp.manifest_hash:
+            raise PolicyDenied("decision is bound to another manifest hash of this component",
+                               code="DECISION_HASH_MISMATCH")
+        key, direct = ("admission", DIRECT_ADMISSIONS) if column == "admission_status" else (
+            "lifecycle_final", DIRECT_LIFECYCLES)
+        if value not in direct or det.get(key) != value:
+            raise PolicyDenied(f"decision {d.id[:8]} did not decide {key}={value}", code="DECISION_VALUE_MISMATCH")
         return d
     if d.target_type == PROPOSAL_TARGET:
         p = session.get(ChangeProposal, d.target_id)
-        if p is not None and component_id in (p.candidate_component_ids or []) + (p.existing_component_ids or []):
-            return d
+        if p is None or component_id not in (p.candidate_component_ids or []) + (p.existing_component_ids or []):
+            raise PolicyDenied("decision is not bound to this component", code="DECISION_TARGET_MISMATCH")
+        if not _bound_to_current(d, p):
+            raise PolicyDenied("proposal decision is bound to an older baseline/candidate", code="DECISION_STALE")
+        if column == "admission_status":
+            meant = ADMISSION_BY_KIND.get(d.kind) if component_id in (p.candidate_component_ids or []) else None
+            if p.kind == "COMPARE" or meant != value:
+                raise PolicyDenied(f"decision {d.kind} does not mean admission {value}", code="DECISION_VALUE_MISMATCH")
+        elif not (p.kind in RETIRING_KINDS and component_id in (p.existing_component_ids or [])
+                  and d.kind == "PROMOTION" and value == _proposal_lifecycle(p)):
+            raise PolicyDenied(f"decision {d.kind} does not decide lifecycle {value}", code="DECISION_VALUE_MISMATCH")
+        return d
     raise PolicyDenied("decision is not bound to this component", code="DECISION_TARGET_MISMATCH")
 
 
@@ -250,7 +292,7 @@ def _apply(session: Session, component_id: str, *, column: str, value: str, allo
     comp = session.get(ComponentReference, component_id)
     if comp is None:
         raise NotFound("component not found")
-    d = _bound_decision(session, component_id, decision_id)
+    d = _bound_decision(session, comp, decision_id, column=column, value=value)
     before = getattr(comp, column)
     setattr(comp, column, value)
     if d.id not in (comp.decision_refs or []):
@@ -324,20 +366,29 @@ def record_component_decision(session: Session, *, component_id: str, actor_user
     """Record a human decision on one component (e.g. SUSPEND after a security finding, QUARANTINE, owner
     retirement) through the policy decision registry — bound to the component id and its current manifest
     hash — and cache it on the ComponentReference. The policy registry enforces that the actor is an
-    active SUPER_ADMIN (agents/models never decide)."""
+    active SUPER_ADMIN (agents/models never decide).
+
+    A direct decision only restricts (``DIRECT_ADMISSIONS`` / ``DIRECT_LIFECYCLES``); admission is granted
+    through the ChangeProposal flow, and a restriction is lifted by revoking its decision. *domain* defaults to
+    the component's own domain (an OFFICE-only component's decision is OFFICE-tagged; a platform one is not)."""
+    from aeos.inventory.observations import component_domain
     from aeos.policy import facade as policy
 
     if admission is None and lifecycle_final is None:
         raise ValidationFailed("admission or lifecycle_final is required")
-    if admission is not None and admission not in ADMISSIONS:
-        raise ValidationFailed(f"admission must be one of {sorted(ADMISSIONS)}")
-    if lifecycle_final is not None and lifecycle_final not in LIFECYCLES:
-        raise ValidationFailed(f"lifecycle_final must be one of {sorted(LIFECYCLES)}")
+    if admission is not None and admission not in DIRECT_ADMISSIONS:
+        raise ValidationFailed(f"a component decision may set admission to {sorted(DIRECT_ADMISSIONS)} only; "
+                               "TRIAL_APPROVED/APPROVED need a ChangeProposal trial/promotion decision",
+                               code="DIRECT_ADMISSION_NOT_ALLOWED")
+    if lifecycle_final is not None and lifecycle_final not in DIRECT_LIFECYCLES:
+        raise ValidationFailed(f"a component decision may set lifecycle_final to {sorted(DIRECT_LIFECYCLES)} only; "
+                               "revoke the restricting decision to return to ACTIVE", code="DIRECT_LIFECYCLE_NOT_ALLOWED")
     if not (rationale or "").strip():
         raise ValidationFailed("rationale is required")
     comp = session.get(ComponentReference, component_id)
     if comp is None:
         raise NotFound("component not found")
+    domain = domain or component_domain(session, component_id)
     details: dict[str, Any] = {"component_kind": comp.kind}
     if admission is not None:
         details["admission"] = admission

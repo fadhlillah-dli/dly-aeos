@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from aeos.core.enums import (
@@ -186,10 +186,22 @@ def is_stale(obs: ComponentObservation, now: datetime | None = None) -> bool:
     return exp is not None and exp <= (now or utcnow())
 
 
+ALL_DOMAINS: Any = object()  # sentinel: no domain filter (platform-internal callers: drift, reconcile, doctor)
+
+
+def visible_condition(domain: str | None) -> Any:
+    """SQL condition: observation scope has no domain tag, or the viewer's domain (§23/§35: an OFFICE-tagged
+    observation of a shared component never reaches a PERSONAL view, and vice versa)."""
+    tag = func.json_extract(ComponentObservation.scope, "$.domain")
+    return tag.is_(None) if domain is None else or_(tag.is_(None), tag == domain)
+
+
 def latest_observations(
     session: Session, component_ids: list[str] | None = None, dimensions: tuple[str, ...] | None = None,
+    *, visible_to: Any = ALL_DOMAINS,
 ) -> dict[tuple[str, str], ComponentObservation]:
-    """Latest observation per (component_id, dimension)."""
+    """Latest observation per (component_id, dimension). With ``visible_to=<domain>`` only observations that
+    domain may see count (the latest *visible* one, not the latest overall)."""
     co = ComponentObservation
     sub = select(co.component_id, co.dimension, func.max(co.observed_at).label("m")).group_by(
         co.component_id, co.dimension
@@ -198,9 +210,13 @@ def latest_observations(
         sub = sub.where(co.component_id.in_(component_ids))
     if dimensions is not None:
         sub = sub.where(co.dimension.in_(dimensions))
+    if visible_to is not ALL_DOMAINS:
+        sub = sub.where(visible_condition(visible_to))
     s = sub.subquery()
     q = select(co).join(s, and_(co.component_id == s.c.component_id, co.dimension == s.c.dimension,
                                 co.observed_at == s.c.m))
+    if visible_to is not ALL_DOMAINS:
+        q = q.where(visible_condition(visible_to))
     out: dict[tuple[str, str], ComponentObservation] = {}
     for obs in session.scalars(q):
         key = (obs.component_id, obs.dimension)

@@ -32,15 +32,18 @@ CREDENTIAL_FILES = (".credentials.json",)  # official client's credential file (
 
 
 def _fp_claude_auth(ctx: CheckContext) -> dict[str, Any]:
-    """Binary identity plus METADATA (size/mtime) of the official client's credential file: a logout/login or a
-    token refresh changes it, so a stored auth result goes STALE at once instead of at TTL expiry. The file
-    content is never read (§12: no token extraction)."""
+    """Binary identity plus METADATA (presence and size) of the official client's credential file: a logout
+    (file removed/emptied) or a new login changes it, so a stored auth result goes STALE at once instead of at TTL
+    expiry. The modification time is deliberately NOT part of it: the client rewrites the file on every routine
+    token refresh (same size), which would make every gate that needs claude.auth (e.g. CAN_REVIEW_WITH_MAX)
+    UNKNOWN after each Claude call. The file content is never read (§12: no token extraction)."""
     from pathlib import Path
 
     base = Path(ctx.env.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
-    files = {name: (ctx.runner.stat(str(base / name)) or {"present": False}) for name in CREDENTIAL_FILES}
-    return {**_fp_claude(ctx), "credential_metadata": {k: {kk: v.get(kk) for kk in ("size", "mtime_ns", "present")}
-                                                       for k, v in files.items()}}
+    files = {name: ctx.runner.stat(str(base / name)) for name in CREDENTIAL_FILES}
+    return {**_fp_claude(ctx), "credential_metadata": {
+        k: ({"present": True, "size": v.get("size")} if v is not None else {"present": False})
+        for k, v in files.items()}}
 
 
 def install_remedy() -> Remedy:

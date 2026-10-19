@@ -60,7 +60,8 @@ def record_relation_observation(
 
 def set_admission(session: Session, *, component_id: str, status: str, decision_id: str, actor: str
                   ) -> ComponentReference:
-    """Cache an admission state bound to an ACTIVE human Decision (audited; refused otherwise)."""
+    """Cache an admission state bound to an ACTIVE human Decision that decided exactly that state (audited;
+    refused otherwise). The views always re-derive admission from the Decision registry."""
     from aeos.inventory.decisions import set_admission as impl
 
     return impl(session, component_id=component_id, status=status, decision_id=decision_id, actor=actor)
@@ -68,8 +69,8 @@ def set_admission(session: Session, *, component_id: str, status: str, decision_
 
 def set_lifecycle(session: Session, *, component_id: str, status: str, decision_id: str, actor: str
                   ) -> ComponentReference:
-    """Cache a final-lifecycle state (DEPRECATED/QUARANTINED/RETIRING/RETIRED/ACTIVE) bound to an ACTIVE
-    human Decision. Never deletes rows or history."""
+    """Cache a final-lifecycle state (DEPRECATED/QUARANTINED/RETIRING/RETIRED) bound to an ACTIVE human Decision
+    that decided exactly that state. Never deletes rows or history; the views always re-derive from the registry."""
     from aeos.inventory.decisions import set_lifecycle as impl
 
     return impl(session, component_id=component_id, status=status, decision_id=decision_id, actor=actor)

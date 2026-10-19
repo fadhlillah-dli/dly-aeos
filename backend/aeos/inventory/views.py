@@ -29,7 +29,7 @@ from aeos.core.errors import NotFound, ValidationFailed
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.inventory import records as rec_views
 from aeos.inventory import runtime as rt
-from aeos.inventory.configlens import HARNESS_COMPONENTS, PROVIDER_COMPONENTS, config_basis
+from aeos.inventory.configlens import HARNESS_COMPONENTS, PROVIDER_COMPONENTS, config_basis, route_eligible
 from aeos.inventory.decisions import DecisionState, decision_states
 from aeos.inventory.drift import DRIFT_CLASSES, DRIFT_LABELS
 from aeos.inventory.manifest import CATEGORIES, CATEGORY_LABELS, current_manifest
@@ -414,18 +414,18 @@ def list_components(
     start = (page - 1) * page_size
     window = filtered[start:start + page_size]
     ids = [c.component_id for c in window]
-    latest = latest_observations(session, ids) if ids else {}
+    latest = latest_observations(session, ids, visible_to=domain) if ids else {}
     drift = _open_drift(session, ids)
     advanced = view == "advanced"
     rel_counts = _relation_counts(session, set(ids)) if advanced else None
     window_comps = {c.component_id: c for c in window}
     basis = config_basis(session, window_comps, latest, now, domain=domain) if ids else {}
     states = decision_states(session, window_comps, domain=domain) if ids else {}
-    usage, _edges, _runs = rt.collect(session, domain=domain, now=now)
+    usage, _edges, _runs = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)
     writable = write_enabled_components(session, domain)
     rec = current_manifest(session)
     last = latest_run(session)
-    cov = coverage(session, domain=domain, compact=True, usage=usage)
+    cov = coverage(session, domain=domain, compact=True, usage=usage, allowed_project_ids=allowed_project_ids)
     # LIVE only when a component visible in THIS domain has observations (no cross-domain signal).
     any_obs = (cov["totals"]["observed_fresh"] or 0) + (cov["totals"]["stale_only"] or 0)
     return {
@@ -457,7 +457,7 @@ def enablement_for(session: Session, component_id: str, *, domain: str | None = 
     if comp is None:
         raise NotFound("component not found")
     now = utcnow()
-    latest = latest_observations(session, [component_id])
+    latest = latest_observations(session, [component_id], visible_to=domain)
     basis = config_basis(session, {component_id: comp}, latest, now, domain=domain).get(component_id, [])
     return enablement_dim(comp, basis, write_enabled=component_id in write_enabled_components(session, domain))
 
@@ -466,12 +466,13 @@ def enablement_for(session: Session, component_id: str, *, domain: str | None = 
 
 
 def coverage(session: Session, *, domain: str | None, compact: bool = False,
-             usage: dict[str, rt.UsageFact] | None = None) -> dict[str, Any]:
+             usage: dict[str, rt.UsageFact] | None = None, allowed_project_ids: list[str] | None = None
+             ) -> dict[str, Any]:
     now = utcnow()
     comps = _visible_components(session, domain)
-    latest = latest_observations(session, list(comps)) if comps else {}
+    latest = latest_observations(session, list(comps), visible_to=domain) if comps else {}
     if usage is None:
-        usage = rt.collect(session, domain=domain, now=now)[0]
+        usage = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)[0]
     observed_ids = {cid for (cid, dim), o in latest.items() if dim in OBSERVED_DIMENSIONS and not is_stale(o, now)}
     stale_ids = {cid for (cid, dim), o in latest.items() if dim in OBSERVED_DIMENSIONS and is_stale(o, now)}
     probeable = [c for c in comps.values() if is_probeable(c)]
@@ -620,7 +621,7 @@ def _fact_relation(e: rt.EdgeFact, comps: dict[str, ComponentReference], now: da
 
 
 def component_relations(session: Session, component_id: str, *, domain: str | None, page: int = 1,
-                        page_size: int = 200) -> dict[str, Any]:
+                        page_size: int = 200, allowed_project_ids: list[str] | None = None) -> dict[str, Any]:
     """Relations of one component (§36/§38 API): backend-paginated over the combined list (outgoing first, in a
     stable lens/relation order); ``outgoing``/``incoming`` are the split of the returned page."""
     comps = _visible_components(session, domain, include_tombstoned=True)
@@ -638,7 +639,7 @@ def component_relations(session: Session, component_id: str, *, domain: str | No
             continue  # other end (or the observed edge itself) belongs to the other domain: never leaked
         view = _relation_view(rel, comps, now, checks=checks)
         (outgoing if rel.source_id == component_id else incoming).append(view)
-    for e in rt.collect(session, domain=domain, now=now)[1]:
+    for e in rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)[1]:
         if component_id not in (e.source_id, e.target_id) or e.source_id not in comps or e.target_id not in comps:
             continue
         (outgoing if e.source_id == component_id else incoming).append(_fact_relation(e, comps, now, checks))
@@ -870,7 +871,8 @@ def _maintainer(session: Session, comp: ComponentReference) -> dict[str, Any]:
             "source": "ditetapkan pemilik (teraudit)"}
 
 
-def _authorization_scope(session: Session, comp: ComponentReference, domain: str | None) -> dict[str, Any]:
+def _authorization_scope(session: Session, comp: ComponentReference, domain: str | None,
+                         allowed_project_ids: list[str] | None = None) -> dict[str, Any]:
     """Effective grant/target scope from the Integration Registry and route eligibility (design text kept)."""
     from aeos.inventory.configlens import INTEGRATION_COMPONENTS
     from aeos.models.portfolio import ProjectIntegration
@@ -883,13 +885,14 @@ def _authorization_scope(session: Session, comp: ComponentReference, domain: str
         integrations = [{"project_id": i.project_id, "provider": i.provider, "purpose": i.purpose,
                          "tenant_id": i.tenant_id, "root_id": i.root_id, "credential_ref": i.credential_ref}
                         for i in session.scalars(select(ProjectIntegration).where(
-                            ProjectIntegration.provider.in_(providers), ProjectIntegration.domain == domain))]
+                            ProjectIntegration.provider.in_(providers), ProjectIntegration.domain == domain))
+                        if allowed_project_ids is None or i.project_id in allowed_project_ids]
     route_providers = [p for p, cid in PROVIDER_COMPONENTS.items() if cid == comp.component_id]
     routes = [{"route_key": r.route_key, "status": r.status, "eligible_domains": r.eligible_domains or [],
                "allowed_data_classes": r.allowed_data_classes or []}
               for r in session.scalars(select(ModelRoute).where(ModelRoute.provider.in_(route_providers),
                                                                 ModelRoute.status.in_(("APPROVED", "TRIAL"))))
-              if domain is None or not r.eligible_domains or domain in r.eligible_domains] if route_providers else []
+              if route_eligible(r, domain)] if route_providers else []
     effective = bool(integrations or routes)
     return {"value": design, "design": design, "integrations": integrations, "routes": routes,
             "status": "EFFECTIVE" if effective else "DESIGN",
@@ -955,19 +958,21 @@ def latest_checks_for(session: Session, component_id: str, domain: str | None) -
     return sorted(out, key=lambda x: x["check_id"])
 
 
-def component_detail(session: Session, component_id: str, *, domain: str | None) -> dict[str, Any]:
+def component_detail(session: Session, component_id: str, *, domain: str | None,
+                     allowed_project_ids: list[str] | None = None) -> dict[str, Any]:
     comps = _visible_components(session, domain, include_tombstoned=True)
     comp = comps.get(component_id)
     if comp is None:
         raise NotFound("component not found")
     now = utcnow()
-    latest = latest_observations(session, [component_id])
+    latest = latest_observations(session, [component_id], visible_to=domain)
     basis = config_basis(session, {component_id: comp}, latest, now, domain=domain).get(component_id, [])
     state = decision_states(session, {component_id: comp}, domain=domain)[component_id]
-    usage, _edges, _runs = rt.collect(session, domain=domain, now=now)
+    usage, _edges, _runs = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)
     dims = dimension_values(comp, latest, now, state=state, basis=basis, usage_fact=usage.get(component_id),
                             write_enabled=component_id in write_enabled_components(session, domain))
-    rels = component_relations(session, component_id, domain=domain, page_size=500)
+    rels = component_relations(session, component_id, domain=domain, page_size=500,
+                               allowed_project_ids=allowed_project_ids)
     checks = latest_checks_for(session, component_id, domain)
     evals = rt.eval_runs(session, component_id, domain=domain)
     obs_hist = [o for o in history(session, component_id, limit=40) if _obs_visible(o, domain)]
@@ -1010,7 +1015,7 @@ def component_detail(session: Session, component_id: str, *, domain: str | None)
             "level": (comp.scope or {}).get("level", "platform"), "domains": domains,
             "environment": (comp.scope or {}).get("environment", "local"), "owner": comp.owner,
             "maintainer": _maintainer(session, comp),
-            "authorization_scope": _authorization_scope(session, comp, domain),
+            "authorization_scope": _authorization_scope(session, comp, domain, allowed_project_ids),
         },
         "source": {
             "source_url": comp.source_url,
@@ -1046,7 +1051,8 @@ def component_detail(session: Session, component_id: str, *, domain: str | None)
             "why_selected": comp.why_selected, "placement": comp.placement,
             "used_by": [{"component_id": r["source"], "name": r["source_name"], "relation": r["relation"],
                          "lens": r["lens"]} for r in used_by],
-            "consuming_tasks": rt.consuming(session, component_id, domain=domain),
+            "consuming_tasks": rt.consuming(session, component_id, domain=domain,
+                                            project_ids=allowed_project_ids),
             "bootstrap_order": comp.bootstrap_order,
         },
         "lifecycle": dims,
@@ -1095,7 +1101,8 @@ def component_dependencies(session: Session, component_id: str, *, domain: str |
         raise NotFound("component not found")
     if relation not in (None, "direct", "transitive"):
         raise ValidationFailed("relation must be direct or transitive")
-    obs = latest_observations(session, [component_id], ("declaration",)).get((component_id, "declaration"))
+    obs = latest_observations(session, [component_id], ("declaration",), visible_to=domain).get(
+        (component_id, "declaration"))
     out = deps.dependency_page(repo or repo_root(), component_id, page=page, page_size=page_size, q=q,
                                relation=relation, observed_sha=(obs.detail or {}).get("lockfile_sha256") if obs else None,
                                build_name=comp.friendly_name or comp.name,
@@ -1265,10 +1272,10 @@ def system_map(session: Session, *, lens: str, domain: str | None, category: str
         comps = {k: v for k, v in comps.items() if v.category == category}
     if environment:
         comps = {k: v for k, v in comps.items() if (v.scope or {}).get("environment", "local") == environment}
-    latest = latest_observations(session)
+    latest = latest_observations(session, visible_to=domain)
     drift = _open_drift(session)
     basis = config_basis(session, comps, latest, now, domain=domain) if lens == "CONFIG" else {}
-    usage, fact_edges, active_runs = rt.collect(session, domain=domain, now=now)
+    usage, fact_edges, active_runs = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)
     if project_id is not None:
         active_runs = [r for r in active_runs if r.get("project_id") == project_id]
     elif allowed_project_ids is not None:
@@ -1388,7 +1395,8 @@ def system_map(session: Session, *, lens: str, domain: str | None, category: str
         "lens": lens, "lens_label": LENS_LABELS[lens], "lens_source": LENS_SOURCES[lens],
         "nodes": nodes, "edges": edges, "groups": groups, "drift": drift_items,
         "drift_summary": {c: sum(1 for d in drift_items if d["drift_class"] == c) for c in DRIFT_CLASSES},
-        "legend": _legend(lens), "coverage": coverage(session, domain=domain, compact=True, usage=usage),
+        "legend": _legend(lens), "coverage": coverage(session, domain=domain, compact=True, usage=usage,
+                                                       allowed_project_ids=allowed_project_ids),
         "runs": active_runs[:50],
         "filters": {"project_id": project_id, "environment": environment, "category": category,
                     "environments": sorted({(c.scope or {}).get("environment", "local") for c in all_comps.values()})},

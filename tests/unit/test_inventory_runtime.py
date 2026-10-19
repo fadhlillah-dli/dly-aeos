@@ -179,3 +179,40 @@ def test_usage_instrumentation_gap_clears_when_records_exist(seeded):
     assert not any(g["code"] == "NO_USAGE_INSTRUMENTATION" for g in cov["gaps"])
     usage = views.component_detail(seeded, "claude-native-bridge", domain="PERSONAL")["lifecycle"]["usage"]
     assert usage["value"] == "LAST_USED"
+
+
+# ------------------------------------------------------------------ review hardening (C4 review)
+
+
+def test_a_domain_tagged_observation_of_a_shared_component_stays_in_its_domain(seeded):
+    facade.record_usage_observation(seeded, component_id="opencode", status="IN_USE", observer="runner",
+                                    run_id="office-run", ttl_seconds=600, domain="OFFICE")
+    seeded.commit()
+    personal = views.component_detail(seeded, "opencode", domain="PERSONAL")
+    assert personal["lifecycle"]["usage"]["value"] == "NEVER_OBSERVED", "OFFICE usage never reaches PERSONAL"
+    assert not [o for o in personal["evidence"]["observations"] if o["dimension"] == "usage"]
+    rows = {r["component_id"]: r for r in views.list_components(seeded, domain="PERSONAL", page_size=200)["items"]}
+    assert rows["opencode"]["dimensions"]["usage"]["value"] == "NEVER_OBSERVED"
+    node = next(n for n in views.system_map(seeded, lens="OBSERVED", domain="PERSONAL")["nodes"] if n["id"] == "opencode")
+    assert node["status"] != "IN_USE"
+    office = views.component_detail(seeded, "opencode", domain="OFFICE")
+    assert office["lifecycle"]["usage"]["value"] == "IN_USE"
+
+
+def test_runs_of_projects_outside_the_users_scope_are_not_projected(seeded):
+    from aeos.models.routing import ModelRoute
+
+    seeded.add(ModelRoute(route_key="or-free", pool="WORKER", provider="openrouter", model_id="x/y:free",
+                          status="APPROVED", eligible_domains=["PERSONAL"]))
+    seeded.commit()
+    run, _lease = _run(seeded, route_key="or-free")
+    mine = views.component_detail(seeded, "opencode", domain="PERSONAL", allowed_project_ids=["p-1"])
+    assert mine["lifecycle"]["usage"]["value"] == "IN_USE"
+    other = views.component_detail(seeded, "opencode", domain="PERSONAL", allowed_project_ids=["p-2"])
+    assert other["lifecycle"]["usage"]["value"] == "NEVER_OBSERVED"
+    assert other["usage_role"]["consuming_tasks"]["items"] == []
+    assert run.task_key not in str(other["lifecycle"]["usage"])
+    m = views.system_map(seeded, lens="OBSERVED", domain="PERSONAL", allowed_project_ids=["p-2"])
+    assert all(not n.get("runs") for n in m["nodes"]) and m["runs"] == []
+    rows = views.list_components(seeded, domain="PERSONAL", page_size=200, allowed_project_ids=["p-2"])["items"]
+    assert next(r for r in rows if r["component_id"] == "opencode")["dimensions"]["usage"]["value"] != "IN_USE"

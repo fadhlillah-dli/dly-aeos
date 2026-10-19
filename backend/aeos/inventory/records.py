@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from aeos.core.ids import slugify
 from aeos.core.redaction import redact_text
 from aeos.core.timeutil import ensure_aware
-from aeos.inventory.configlens import HARNESS_COMPONENTS, PROVIDER_COMPONENTS
+from aeos.inventory.configlens import HARNESS_COMPONENTS, PROVIDER_COMPONENTS, route_eligible
 
 REPO_PROVIDER_COMPONENTS = {"GITHUB": "github", "BITBUCKET": "bitbucket"}
 PLAN_TARGET = "plan_version"
@@ -165,10 +165,8 @@ def route_nodes(session: Session, *, domain: str | None) -> list[dict[str, Any]]
     out = []
     for r in session.scalars(select(ModelRoute).where(ModelRoute.status.in_(("APPROVED", "TRIAL")))
                              .order_by(ModelRoute.route_key)):
-        if domain is not None and r.eligible_domains and domain not in (r.eligible_domains or []):
-            continue
-        if domain is not None and not r.eligible_domains and domain == "OFFICE":
-            continue  # §23: an OFFICE route needs an explicit company-approved eligibility
+        if not route_eligible(r, domain):
+            continue  # same rule as routing admission; an OFFICE route needs an explicit eligibility (§23)
         out.append({"id": f"route:{r.route_key}", "kind": "route", "route_key": r.route_key, "status": r.status,
                     "pool": r.pool, "provider": r.provider, "model_id": r.model_id,
                     "provider_component": PROVIDER_COMPONENTS.get(r.provider), "config_hash": r.config_hash,

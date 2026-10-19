@@ -199,9 +199,19 @@ both sides now use it; frozen facade signatures only gained keyword arguments wi
   ACLs of the data dir and evidence partitions are read by SID (no localized names) and broad write ACEs fail; a
   port conflict names the owning process when visible; `host.vscode` records the VS Code distribution identity
   (advisory); the owner's resource budget (`aeos doctor budget`, `PUT /api/doctor/resource-budget`, audited) is
-  compared by `host.platform`/`host.disk` (UNKNOWN until set). `repo.domain` guards that the platform repo is a
-  PERSONAL project on a non-OFFICE host. `evidence.acceptance_invalidation` fails while a stale acceptance is still
-  ACCEPTED. `requires_paid_write` is set on route activation / budget remedies that may authorise paid usage.
+  compared by the advisory `host.resource_budget` (UNKNOWN until the owner sets it, never green) and gives
+  `host.disk` its floor; `host.platform` only reports OS/arch facts. `repo.domain` guards that the platform repo is
+  a PERSONAL project on a non-OFFICE host. `evidence.acceptance_invalidation` fails when a stale acceptance would
+  still be accepted by the PR/merge gate (`acceptance_is_valid`); stale acceptances the gate refuses are listed with
+  a recheck remedy, not as a failure. `requires_paid_write` is set on route activation / budget remedies that may
+  authorise paid usage.
+* **Review hardening (C4 review)**: the HTTP-guard probe uses https when `secure_cookies` is on and never publishes
+  its synthetic events to the live stream; the raw-secret sweep watermark is (timestamp, id) so rows sharing a
+  timestamp are not skipped, every open finding is kept, and a RISK_ACCEPTANCE counts only when bound to the
+  finding's hash; the project tier marks a result STALE when the project's current repositories / Drive roots
+  differ from the probed ones, and refuses a project of another domain; a Doctor run that observes a permission
+  change does not queue a background recheck of the checks it just recorded (a --functional result is never
+  overwritten by a non-functional recheck); numeric generic ACL masks (GENERIC_ALL/GENERIC_WRITE) count as write.
 * **Evidence levels**: every check declares its §34 level (E1 static / E2 controlled / E3 runtime, optionally higher
   with --functional); the inventory shows those levels instead of a blanket E3.
 * `aeos doctor review-with-claude` (optional, Max quota) stores E0 advisory findings for platform-level results only.

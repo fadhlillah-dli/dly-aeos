@@ -33,6 +33,20 @@ def _windows() -> bool:
     return sys.platform.startswith("win")
 
 
+# Generic/specific access-mask bits that allow writing (Get-Acl prints inherit-only generic ACEs as a number,
+# e.g. "268435456" = GENERIC_ALL, "-536805376" = GENERIC_EXECUTE|GENERIC_READ|...).
+WRITE_MASK = (0x10000000 | 0x40000000 | 0x00000002 | 0x00000004 | 0x00040000 | 0x00080000)
+
+
+def _grants_write(rights: str) -> bool:
+    text = rights.strip()
+    try:
+        mask = int(text)
+    except ValueError:
+        return any(w in text for w in WRITE_RIGHTS)
+    return bool((mask & 0xFFFFFFFF) & WRITE_MASK)
+
+
 def windows_acl(ctx: CheckContext, path: Path) -> tuple[list[dict[str, Any]] | None, str | None]:
     """(broad write ACEs, error) for *path* via Get-Acl with SIDs (no localized group names). ``None`` = unread."""
     ps = ctx.runner.which("powershell") or ctx.runner.which("pwsh")
@@ -53,7 +67,7 @@ def windows_acl(ctx: CheckContext, path: Path) -> tuple[list[dict[str, Any]] | N
         if not isinstance(e, dict):
             continue
         rights = str(e.get("rights") or "")
-        if str(e.get("type")) == "Allow" and e.get("sid") in BROAD_SIDS and any(w in rights for w in WRITE_RIGHTS):
+        if str(e.get("type")) == "Allow" and e.get("sid") in BROAD_SIDS and _grants_write(rights):
             broad.append({"sid": e["sid"], "principal": BROAD_SIDS[e["sid"]], "rights": rights,
                           "inherited": bool(e.get("inherited"))})
     return broad, None
@@ -231,14 +245,16 @@ MAX_ACCEPTANCES_CHECKED = 200
        component_id="verification-review", needs_db=True, ttl_seconds=900, ok={"VERIFIED", "NOT_APPLICABLE"},
        invalidators=("repo:head", "manifest", "config:policy"), severity_fail="HIGH", scope={"domain": "PERSONAL"},
        description="Setiap AcceptanceRecord ACCEPTED (PERSONAL) dibandingkan dengan identitas saat ini (head run/PR, "
-                   "hash PlanVersion, konfigurasi verifier/grader). FAILED bila acceptance masih berlaku padahal "
-                   "ikatannya berubah (harus diinvalidasi, §34). OFFICE tidak diprobe (delivery OFFICE default deny).")
+                   "hash PlanVersion, konfigurasi verifier/grader). Acceptance yang ikatannya berubah harus DITOLAK "
+                   "oleh gate konsumen (verification.acceptance_is_valid, dipakai PR/merge gate): FAILED bila gate "
+                   "masih menerimanya (§34). Acceptance usang yang ditolak saat dipakai bukan kegagalan; recheck "
+                   "mencatat invalidasinya. OFFICE tidak diprobe (delivery OFFICE default deny).")
 def evidence_acceptance_invalidation(ctx: CheckContext) -> Outcome:
     from sqlalchemy import select
 
     try:
         from aeos.models.evidence import AcceptanceRecord
-        from aeos.verification.acceptance import staleness
+        from aeos.verification.acceptance import acceptance_is_valid, latest_acceptance, staleness
     except (ImportError, ModuleNotFoundError):
         return Outcome("UNKNOWN", "Modul verification belum tersedia.", error_code="VERIFIER_NOT_IMPLEMENTED")
     assert ctx.session is not None
@@ -249,22 +265,41 @@ def evidence_acceptance_invalidation(ctx: CheckContext) -> Outcome:
     if not rows:
         return Outcome("NOT_APPLICABLE", "Belum ada acceptance ACCEPTED yang masih berlaku; tidak ada yang perlu "
                        "diinvalidasi.", evidence={"accepted": 0})
-    stale: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
+    still_accepted: list[dict[str, Any]] = []
     for rec in rows:
         try:
             reasons = staleness(ctx.session, rec)
         except Exception as exc:  # cannot compare: never claimed fine
             reasons = [f"tidak dapat dibandingkan ({type(exc).__name__})"]
-        if reasons:
-            stale.append({"acceptance_id": rec.id, "task_id": rec.task_id,
-                          "reasons": [redact_text(r)[:160] for r in reasons][:4]})
-    evidence = {"accepted_checked": len(rows), "still_valid_but_stale": len(stale), "items": stale[:20]}
-    if stale:
-        return Outcome("FAILED", f"{len(stale)} acceptance masih ACCEPTED padahal head/PlanVersion/konfigurasi verifier "
-                       "berubah; harus diinvalidasi sebelum PR/merge.", evidence=evidence,
-                       error_code="ACCEPTANCE_NOT_INVALIDATED", remedy=Remedy(
-                           operation="Jalankan recheck acceptance (menginvalidasi binding usang)",
+        if not reasons:
+            continue
+        item = {"acceptance_id": rec.id, "task_id": rec.task_id,
+                "reasons": [redact_text(r)[:160] for r in reasons][:4]}
+        try:
+            # the consumer gate (PR/merge) evaluates the task's latest acceptance; a stale one must be refused
+            latest = latest_acceptance(ctx.session, rec.task_id)
+            gate_accepts = latest is not None and latest.id == rec.id and acceptance_is_valid(ctx.session, rec.task_id)
+        except Exception as exc:  # the gate cannot be evaluated: not proven, never green
+            item["gate_error"] = type(exc).__name__
+            gate_accepts = True
+        (still_accepted if gate_accepts else refused).append(item)
+    evidence = {"accepted_checked": len(rows), "stale_refused_by_gate": len(refused),
+                "stale_still_accepted_by_gate": len(still_accepted), "items": (still_accepted + refused)[:20],
+                "gate": "aeos.verification.acceptance.acceptance_is_valid"}
+    if still_accepted:
+        return Outcome("FAILED", f"{len(still_accepted)} acceptance usang (head/PlanVersion/konfigurasi verifier berubah) "
+                       "MASIH diterima gate PR/merge; invalidasi tidak bekerja.", evidence=evidence,
+                       error_code="ACCEPTANCE_NOT_INVALIDATED", severity="CRITICAL", remedy=Remedy(
+                           operation="Hentikan PR/merge; recheck acceptance dan perbaiki gate verification",
                            command="POST /api/acceptance/<id>/recheck", privilege="SUPER_ADMIN",
                            evidence_to_collect="evidence.acceptance_invalidation VERIFIED"))
+    if refused:
+        return Outcome("VERIFIED", f"{len(rows)} acceptance ACCEPTED diperiksa; {len(refused)} sudah usang dan DITOLAK "
+                       "gate saat dipakai (invalidasi saat baca). Jalankan recheck untuk mencatat invalidasinya.",
+                       evidence=evidence, remedy=Remedy(
+                           operation="Catat invalidasi acceptance usang (opsional; gate sudah menolaknya)",
+                           command="POST /api/acceptance/<id>/recheck", privilege="SUPER_ADMIN",
+                           evidence_to_collect="acceptance INVALIDATED"))
     return Outcome("VERIFIED", f"{len(rows)} acceptance ACCEPTED masih cocok dengan head/PlanVersion/konfigurasi "
                    "verifier saat ini.", evidence=evidence)
