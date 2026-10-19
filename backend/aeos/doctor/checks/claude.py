@@ -28,6 +28,19 @@ LOGIN_DOCS = "https://support.claude.com/en/articles/11145838-use-claude-code-wi
 SETUP_DOCS = "https://docs.claude.com/en/docs/claude-code/setup"
 SHIM_SUFFIXES = (".cmd", ".bat", ".ps1")
 _fp_claude = binary_fingerprint("claude", "claude_binary")
+CREDENTIAL_FILES = (".credentials.json",)  # official client's credential file (Windows/Linux; macOS: Keychain)
+
+
+def _fp_claude_auth(ctx: CheckContext) -> dict[str, Any]:
+    """Binary identity plus METADATA (size/mtime) of the official client's credential file: a logout/login or a
+    token refresh changes it, so a stored auth result goes STALE at once instead of at TTL expiry. The file
+    content is never read (§12: no token extraction)."""
+    from pathlib import Path
+
+    base = Path(ctx.env.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
+    files = {name: (ctx.runner.stat(str(base / name)) or {"present": False}) for name in CREDENTIAL_FILES}
+    return {**_fp_claude(ctx), "credential_metadata": {k: {kk: v.get(kk) for kk in ("size", "mtime_ns", "present")}
+                                                       for k, v in files.items()}}
 
 
 def install_remedy() -> Remedy:
@@ -74,7 +87,7 @@ def _parse_status(text: str) -> dict[str, Any] | None:
 
 @check("claude.auth", "CLAUDE_NATIVE", "Login native Max (claude auth status)", component_id="claude-code",
        ttl_seconds=3600, invalidators=("auth:claude", "binary:claude"), ok={"CONNECTED", "VERIFIED"},
-       fingerprint=_fp_claude, severity_fail="HIGH", observation="connectivity")
+       fingerprint=_fp_claude_auth, severity_fail="HIGH", observation="connectivity")
 def claude_auth(ctx: CheckContext) -> Outcome:
     path, _lookup = resolve_binary(ctx, "claude", "claude_binary")
     if not path:

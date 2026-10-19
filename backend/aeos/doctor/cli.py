@@ -140,7 +140,9 @@ def _print_report(settings: Any, db_state: str, persisted: bool, report: Any, ma
     else:
         echo("DLY AEOS Readiness Doctor - bootstrap layer (no server, no LLM)")
     echo(ascii_safe(f"platform: {sys.platform}   data dir: {data_dir_label(settings)}   database: {db_state}"))
-    rows = [[r.group, r.check_id, r.status, r.severity, r.summary] for r in report.results]
+    rows = [[r.group, r.check_id + (f" @project {str((r.scope or {}).get('project_id'))[:8]}"
+                                    if (r.scope or {}).get("project_id") else ""), r.status, r.severity, r.summary]
+            for r in report.results]
     echo(table(["GROUP", "CHECK", "STATUS", "SEV", "SUMMARY"], rows, max_width=90))
     if report.skipped:
         echo(ascii_safe("Skipped (opt-in): " + ", ".join(s["check_id"] for s in report.skipped)
@@ -186,6 +188,61 @@ def _print_report(settings: Any, db_state: str, persisted: bool, report: Any, ma
         echo(ascii_safe("EXIT 1: critical check(s) for CAN_OPEN_DASHBOARD not OK: " + ", ".join(failures)))
     else:
         echo("EXIT 0: no critical CAN_OPEN_DASHBOARD check failed in this run.")
+
+
+@app.command("review-with-claude")
+def review_with_claude_cmd(model: str = typer.Option("opus", help="Supervisor model alias for the review")) -> None:
+    """Optional: ask official Claude Code (Max quota) to explain the latest platform-level results. Stored as
+    E0 advisory findings; never changes a status, grants AUTH or runs a remedy."""
+    from aeos.cli import ensure_database
+    from aeos.core.db import session_scope
+    from aeos.doctor.checks import load_all
+    from aeos.doctor.review import review_with_claude
+    from aeos.doctor.runner import latest_results, row_view
+
+    ensure_database()
+    load_all()
+    with session_scope() as s:
+        results = [row_view(r) for r in latest_results(s).values()]
+        if not results:
+            typer.echo("no stored Doctor results; run: aeos doctor", err=True)
+            raise typer.Exit(1)
+        rec = review_with_claude(s, results, model=model)
+    if not rec["ok"]:
+        typer.echo(ascii_safe(f"review not available ({rec.get('error_code') or 'BRIDGE'}); use the manual package path"),
+                   err=True)
+        raise typer.Exit(1)
+    typer.echo(ascii_safe(f"Claude review (E0 advisory, {rec['checks_sent']} checks): {rec['summary']}"))
+    for f in rec["findings"]:
+        typer.echo(ascii_safe(f"  [{f.get('check_id')}] {f.get('observation')} -> {f.get('suggestion')}"))
+
+
+@app.command("budget")
+def budget(
+    cpu: int = typer.Option(None, "--cpu", help="CPU cores this machine may dedicate to DLY AEOS"),
+    ram: float = typer.Option(None, "--ram", help="RAM budget in GiB"),
+    disk: float = typer.Option(None, "--disk", help="Free disk floor in GiB at the data dir"),
+    max_workers: int = typer.Option(None, "--max-workers", help="Maximum parallel worker runs"),
+    reason: str = typer.Option(None, "--reason", help="Why these values (recorded in the audit log)"),
+) -> None:
+    """Show or set the owner's hardware/OS resource budget (master 51 P2). Setting it is audited."""
+    from aeos.cli import ensure_database
+    from aeos.core.db import session_scope
+    from aeos.doctor.checks.host import BUDGET_FIELDS, resource_budget, set_resource_budget
+
+    ensure_database()
+    with session_scope() as s:
+        if all(v is None for v in (cpu, ram, disk, max_workers)):
+            b = resource_budget(s)
+            typer.echo("resource budget: " + (", ".join(f"{k}={b.get(k)}" for k in BUDGET_FIELDS) if b else
+                                              "UNKNOWN (not set; host checks use a provisional 1 GiB disk floor)"))
+            return
+        if not reason:
+            raise typer.BadParameter("--reason is required when setting the budget")
+        value = set_resource_budget(s, actor="local-operator", reason=reason, cpu_cores=cpu, ram_gib=ram,
+                                    disk_gib=disk, max_parallel_workers=max_workers)
+    typer.echo(ascii_safe("resource budget set: " + ", ".join(f"{k}={value.get(k)}" for k in BUDGET_FIELDS)
+                          + " (audited; host checks are rechecked on the next Doctor run)"))
 
 
 @app.command("list")

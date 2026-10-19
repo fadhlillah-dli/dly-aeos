@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import platform
 import sys
 from dataclasses import dataclass, field
@@ -86,10 +87,14 @@ def compute_fingerprint(spec: CheckSpec, ctx: CheckContext) -> str | None:
 
 
 def select_specs(groups: list[str] | None = None, capability: str | None = None,
-                 functional: bool = False) -> tuple[list[CheckSpec], list[dict[str, str]]]:
+                 functional: bool = False, checks: list[str] | None = None
+                 ) -> tuple[list[CheckSpec], list[dict[str, str]]]:
     from aeos.doctor.capabilities import checks_for_capability
 
     specs = ordered_specs()
+    if checks is not None:
+        wanted_ids = set(checks)
+        specs = [s for s in specs if s.check_id in wanted_ids]
     if groups:
         wanted = {g.upper() for g in groups}
         unknown = wanted - set(GROUP_IDS)
@@ -128,9 +133,14 @@ def run_check(spec: CheckSpec, ctx: CheckContext) -> CheckResultData:
                                 DEFAULT_SEVERITY.get(out.status, "LOW"))
     from aeos.doctor.capabilities import capability_index
 
-    # §08 scope: project/domain/capability. V1 checks are platform- or domain-level (no project);
-    # the capability part names the gates that read this result.
+    # §08 scope: project/domain/capability. Platform/domain checks carry the spec scope; a project-scoped
+    # check (spec.targets) records the project and its domain; the capability part names the gates.
     scope = dict(spec.scope)
+    target = ctx.project or {}
+    if target.get("project_id"):
+        scope["project_id"] = target["project_id"]
+        if target.get("domain"):
+            scope["domain"] = target["domain"]
     caps = capability_index().get(spec.check_id)
     if caps:
         scope["capabilities"] = caps
@@ -153,12 +163,59 @@ def run_check(spec: CheckSpec, ctx: CheckContext) -> CheckResultData:
         component_version=out.component_version, scope=scope, target_identity=out.target_identity,
         status=out.status, severity=severity, summary=redact_text(out.summary)[:1000],
         observed_evidence=redact(out.evidence), last_checked_at=ctx.now,
-        expires_at=ctx.now + timedelta(seconds=spec.ttl_seconds), invalidators=list(spec.invalidators),
+        expires_at=ctx.now + timedelta(seconds=spec.ttl_seconds),
+        invalidators=list(dict.fromkeys([*spec.invalidators, *(target.get("invalidators") or [])])),
         fingerprint=compute_fingerprint(spec, ctx), error_code=out.error_code,
         remediation=redact(out.remedy.as_dict()) if out.remedy else {},
         requires_destructive=out.requires_destructive, requires_paid_write=out.requires_paid_write,
         observations=observations,
     )
+
+
+def run_spec(spec: CheckSpec, ctx: CheckContext) -> list[CheckResultData]:
+    """Run one spec: a platform/domain check yields one result; a project-scoped check (``spec.targets``)
+    yields one result per project target, or one NOT_APPLICABLE result when no project has such a target."""
+    if spec.targets is None:
+        return [run_check(spec, ctx)]
+    try:
+        targets = list(spec.targets(ctx)) if (ctx.session is not None or not spec.needs_db) else []
+    except Exception as exc:  # cannot enumerate targets: UNKNOWN, never a pass
+        out = run_check(dataclasses.replace(spec, fn=lambda _c, e=exc: Outcome(
+            "UNKNOWN", f"Target proyek tidak dapat dibaca ({type(e).__name__}).", error_code="TARGETS_UNREADABLE")),
+            ctx)
+        return [out]
+    if not targets:
+        return [run_check(dataclasses.replace(spec, fn=lambda _c: Outcome(
+            "NOT_APPLICABLE", "Belum ada proyek dengan target integrasi ini; tidak ada yang diperiksa.",
+            evidence={"projects": 0})), ctx)]
+    return [run_check(spec, dataclasses.replace(ctx, project=t)) for t in targets]
+
+
+def _project_key() -> Any:
+    return func.coalesce(func.json_extract(CheckResult.scope, "$.project_id"), "")
+
+
+def latest_project_results(session: Session, check_ids: list[str], *, project_id: str | None = None
+                           ) -> dict[tuple[str, str], CheckResult]:
+    """Latest result per (check_id, project_id) of project-scoped checks (``project_id=None``: all projects).
+    The platform ``latest_results`` keeps its fast (check_id) grouping; only these few ids group by project."""
+    if not check_ids:
+        return {}
+    pk = _project_key()
+    sub = (select(CheckResult.check_id, pk.label("p"), func.max(CheckResult.last_checked_at).label("m"))
+           .where(CheckResult.check_id.in_(check_ids)).group_by(CheckResult.check_id, pk))
+    if project_id is not None:
+        sub = sub.where(pk == project_id)
+    s = sub.subquery()
+    q = select(CheckResult).join(s, (CheckResult.check_id == s.c.check_id) & (CheckResult.last_checked_at == s.c.m)
+                                 & (_project_key() == s.c.p))
+    out: dict[tuple[str, str], CheckResult] = {}
+    for r in session.scalars(q):
+        key = (r.check_id, str((r.scope or {}).get("project_id") or ""))
+        prev = out.get(key)
+        if prev is None or r.id > prev.id:
+            out[key] = r
+    return out
 
 
 def latest_results(session: Session, check_ids: list[str] | None = None) -> dict[str, CheckResult]:
@@ -175,13 +232,48 @@ def latest_results(session: Session, check_ids: list[str] | None = None) -> dict
     return out
 
 
-def _persist(session: Session, results: list[CheckResultData], run: DoctorRun, ctx: CheckContext) -> None:
-    from aeos.events import service as events
-    from aeos.inventory.observations import record_observation
+PERMISSION_KEYS = ("permissions", "token_scopes", "granted_scopes")
 
-    previous = latest_results(session, [r.check_id for r in results])
+
+def _permission_changes(previous: dict[Any, CheckResult], results: list[CheckResultData]) -> list[tuple[str, str]]:
+    """(invalidator, reason) for results whose observed permission set differs from the previous result of the
+    same check/target (§08 "Perubahan ... permission ... membuat pemeriksaan terdampak STALE")."""
+    out: list[tuple[str, str]] = []
     for r in results:
-        prev = previous.get(r.check_id)
+        prev = previous.get(_result_key(r))
+        if prev is None:
+            continue
+        before = {k: (prev.observed_evidence or {}).get(k) for k in PERMISSION_KEYS}
+        after = {k: (r.observed_evidence or {}).get(k) for k in PERMISSION_KEYS}
+        changed = [k for k in PERMISSION_KEYS if before[k] is not None and after[k] is not None
+                   and before[k] != after[k]]
+        if changed:
+            target = r.component_id or r.check_id
+            out.append((f"integration:{target}", f"izin/scope teramati berubah ({', '.join(changed)}) pada "
+                        f"{r.check_id}"))
+    return out
+
+
+def _result_key(r: CheckResultData | CheckResult) -> Any:
+    project = (r.scope or {}).get("project_id")
+    return (r.check_id, str(project)) if project else r.check_id
+
+
+def _persist(session: Session, results: list[CheckResultData], run: DoctorRun, ctx: CheckContext) -> None:
+    from aeos.doctor.capabilities import invalidate
+    from aeos.events import service as events
+    from aeos.inventory.observations import component_known, record_observation
+
+    previous: dict[Any, CheckResult] = dict(latest_results(session, [r.check_id for r in results
+                                                                     if not (r.scope or {}).get("project_id")]))
+    project_ids = sorted({r.check_id for r in results if (r.scope or {}).get("project_id")})
+    previous.update(latest_project_results(session, project_ids))
+    # A changed permission set invalidates the dependent results BEFORE this run's rows are added, so checks
+    # outside this run that rely on the old permissions become STALE (recheck before the capability is used).
+    for invalidator, reason in _permission_changes(previous, results):
+        invalidate(session, invalidator=invalidator, reason=reason)
+    for r in results:
+        prev = previous.get(_result_key(r))
         if prev is not None and prev.fingerprint and r.fingerprint and prev.fingerprint != r.fingerprint \
                 and prev.status != "STALE":
             prev.observed_evidence = {**(prev.observed_evidence or {}), "status_before_stale": prev.status,
@@ -208,8 +300,8 @@ def _persist(session: Session, results: list[CheckResultData], run: DoctorRun, c
                                  "run_id": run.id})
         for o in r.observations:
             cid = o.get("component_id")
-            if not cid:
-                continue
+            if not cid or not component_known(session, cid):
+                continue  # Doctor and inventory share component references; an unknown id is never recorded
             ttl = int((r.expires_at - r.last_checked_at).total_seconds()) if r.expires_at else 3600
             record_observation(session, component_id=cid, dimension=o["dimension"], status=o["status"],
                                observer="doctor", observed_version=o.get("observed_version"),
@@ -223,16 +315,17 @@ def _persist(session: Session, results: list[CheckResultData], run: DoctorRun, c
 def run_doctor(
     settings: Settings, session: Session | None, *, groups: list[str] | None = None, capability: str | None = None,
     functional: bool = False, runner: ProbeRunner | None = None, actor: str = "local-operator", trigger: str = "cli",
-    repo: Path | None = None,
+    repo: Path | None = None, checks: list[str] | None = None,
 ) -> DoctorReport:
-    """Run the selected checks. Persists (without committing) when a session is given."""
+    """Run the selected checks. Persists (without committing) when a session is given. ``checks`` limits the
+    run to those check ids (targeted recheck after an invalidation)."""
     from aeos.events import service as events
 
     load_all()
-    specs, skipped = select_specs(groups, capability, functional)
+    specs, skipped = select_specs(groups, capability, functional, checks)
     ctx = make_context(settings, session, runner=runner, functional=functional, repo=repo)
     started = ctx.now
-    results = [run_check(s, ctx) for s in specs]
+    results = [r for s in specs for r in run_spec(s, ctx)]
     finished = utcnow()
     run_id: str | None = None
     persisted = False
