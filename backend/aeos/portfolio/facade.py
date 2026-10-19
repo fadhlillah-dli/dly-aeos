@@ -68,3 +68,19 @@ def publication_targets(session: Session, project_id: str) -> list[dict]:
             continue  # no exact identifier -> nothing an approval could bind
         out.append({**ident, "purpose": purpose, "integration_id": r.id, "label": pv.LABELS.get(provider, provider)})
     return out
+
+
+def record_integration_probe(session: Session, *, domain: str, providers: tuple[str, ...], root_id: str,
+                             connectivity: str, functional: str = "NOT_TESTED", observer: str,
+                             evidence_ref: str | None = None) -> list[str]:
+    """A trusted probe (doctor check, publisher capability probe) observed the exact target
+    ``providers``/``root_id`` in ``domain``: record it on every integration bound to that target
+    (§10 Integration Registry health). Returns the updated integration ids."""
+    from aeos.portfolio.integrations import integrations_for_target, mark_verified
+
+    updated = []
+    for integ in integrations_for_target(session, domain=domain, providers=providers, root_id=root_id):
+        if mark_verified(session, integ.id, connectivity=connectivity, functional=functional, observer=observer,
+                         evidence_ref=evidence_ref) is not None:
+            updated.append(integ.id)
+    return updated

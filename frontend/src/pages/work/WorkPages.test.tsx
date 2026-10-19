@@ -104,6 +104,28 @@ describe("Live Work page", () => {
     expect(screen.getByText(/Worker tidak dapat berjalan/)).toBeInTheDocument();
   });
 
+  it("renders every Live Work contract column from the row (§35 Live Work contract)", async () => {
+    responses["/api/runs"] = {
+      items: [{ ...row, caps: { max_requests: 50, max_cost_usd: 0 }, evidence_refs: ["ev-1111111111", "ev-2222222222"],
+        started_at: new Date(Date.now() - 120_000).toISOString() }],
+      source: "x", checked_at: new Date().toISOString(), mode: "DEMO",
+    };
+    wrap(<WorkPage />);
+    expect(await screen.findByText("opencode-implementer")).toBeInTheDocument(); // agent definition id
+    expect(screen.getByText("Feature Implementer")).toBeInTheDocument(); // role
+    expect(screen.getByText(/IMPLEMENTATION · attempt 1/)).toBeInTheDocument(); // run type + attempt
+    expect(screen.getAllByText(/demo-doctor-ui/).length).toBeGreaterThan(0); // task / feature
+    expect(screen.getByText("DEMO-route")).toBeInTheDocument(); // exact route
+    expect(screen.getByText("model: UNKNOWN")).toBeInTheDocument(); // unresolved model is UNKNOWN, never guessed
+    expect(screen.getByText(/opencode DEMO/)).toBeInTheDocument(); // engine + version
+    expect(screen.getByText("Mulai")).toBeInTheDocument();
+    expect(screen.getByText(/^2 (menit|minutes|min)/)).toBeInTheDocument(); // started_at (2 min ago), relative
+    expect(screen.getByText("req ≤ 50 · biaya ≤ $0")).toBeInTheDocument(); // active caps
+    const links = screen.getAllByRole("link").map((a) => a.getAttribute("href"));
+    expect(links).toContain("/evidence?id=ev-1111111111"); // evidence links open the evidence record
+    expect(screen.getByText("2 referensi")).toBeInTheDocument();
+  });
+
   it("disables admin actions for VIEWER (backend still enforces)", async () => {
     wrap(<WorkPage />);
     const cancel = await screen.findByRole("button", { name: /Batalkan/ });

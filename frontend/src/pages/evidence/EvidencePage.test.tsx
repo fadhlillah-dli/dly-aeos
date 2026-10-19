@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { DeliveryPanel, ProviderRiskBanner } from "./DeliveryPanel";
 import { EvidenceLedger } from "./EvidenceLedger";
 import { GatesPanel } from "./GatesPanel";
@@ -20,9 +21,13 @@ function respond(routes: Record<string, unknown>) {
   }) as typeof fetch;
 }
 
-function wrap(ui: ReactNode) {
+function wrap(ui: ReactNode, path = "/evidence") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[path]}>{ui}</MemoryRouter>
+    </QueryClientProvider>,
+  );
 }
 
 const summaryRow = {
@@ -92,6 +97,31 @@ describe("Evidence & Decisions page", () => {
     expect(await within(dialog).findByText("token=[REDACTED]")).toBeInTheDocument();
     expect(within(dialog).getByText("Isi cocok dengan hash")).toBeInTheDocument();
     expect(within(dialog).getByText(/tidak pernah dihitung sebagai kelulusan/)).toBeInTheDocument();
+  });
+
+  it("opens the evidence record named by the deep link ?id= (Live Work 'Bukti' links)", async () => {
+    const item = {
+      id: "ev-42", project_id: "p", domain: "PERSONAL", subject_type: "run", subject_id: "run-1", run_id: "run-1",
+      task_id: "task-1", claim: "scope check PASS", kind: "SCOPE_CHECK", origin: "verifier", collector_identity: "aeos-verifier/1",
+      trusted: true, content_hash: "sha256:" + "3".repeat(64), content_type: "application/json", classification: "INTERNAL",
+      has_content: true, size_bytes: 2, evidence_level: "E2", level_explanation: "Uji terkendali", level_requested: "E2",
+      level_reason: "controlled test", environment: {}, created_at: new Date().toISOString(), mode: "LIVE",
+    };
+    respond({
+      "/api/evidence/ev-42": { ...item, inline: {}, integrity: "VERIFIED", content: "{}", content_note: null },
+      "/api/evidence": { items: [item], source: "s", checked_at: new Date().toISOString(), mode: "LIVE", level_explanations: {}, trusted_collectors: [] },
+    });
+    wrap(<EvidenceLedger />, "/evidence?id=ev-42");
+    const dialog = await screen.findByRole("dialog", { name: "Detail bukti" });
+    expect(await within(dialog).findByText("Isi cocok dengan hash")).toBeInTheDocument();
+  });
+
+  it("never claims the local ledger is WORM / tamper-proof (§34)", async () => {
+    respond({});
+    const { default: EvidencePage } = await import("./index");
+    wrap(<EvidencePage />);
+    expect(await screen.findByText(/append-only \(bukan WORM\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/tamper-proof|anti-rusak|WORM terjamin/i)).not.toBeInTheDocument();
   });
 
   it("warns when stored evidence no longer matches its hash and renders nested environment values", async () => {

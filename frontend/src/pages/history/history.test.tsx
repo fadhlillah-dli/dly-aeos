@@ -5,6 +5,24 @@ import { ServicesView } from "./ServicesTab";
 import { CONFIRM_PHRASE, StepList } from "./EmergencyTab";
 import { IntFlagEditor } from "./OpsTab";
 
+describe("Audit tab (§34)", () => {
+  it("never claims the local append-only audit table is WORM / tamper-proof", async () => {
+    const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query");
+    const { AuditTab } = await import("./AuditTab");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(
+      { items: [], next_before: null, source: "audit_events", checked_at: new Date().toISOString(), mode: "LIVE" }),
+    { status: 200, headers: { "Content-Type": "application/json" } })));
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <AuditTab />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(/bukan jaminan WORM/)).toBeInTheDocument();
+    expect(screen.queryByText(/tamper-proof|anti-rusak/i)).not.toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("Backups recovery notice (§33, §50)", () => {
   it("warns that restore is untested when no backup is ready", () => {
     render(<RecoveryNotice data={{ items: [], recovery_ready: false, latest_restore_tested: null }} />);

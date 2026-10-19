@@ -48,6 +48,23 @@ def github_get(ctx: CheckContext, path: str) -> Any:
     return ctx.runner.http_get(f"{GITHUB_API}{path}", timeout=10.0, headers=headers, allow_remote=True)
 
 
+def _record_probe(ctx: CheckContext, providers: tuple[str, ...], root_id: str, connectivity: str) -> None:
+    """§10 Integration Registry health: the probed exact target's integrations learn the result (best effort;
+    a read-only probe never claims functional VERIFIED)."""
+    if ctx.session is None:
+        return
+    try:
+        from aeos.portfolio import facade as portfolio
+
+        with ctx.session.begin_nested():
+            portfolio.record_integration_probe(ctx.session, domain="PERSONAL", providers=providers, root_id=root_id,
+                                               connectivity=connectivity, observer="doctor:adapter.github_token")
+    except Exception as exc:  # the check result itself must never depend on the registry write
+        import logging
+
+        logging.getLogger("aeos.doctor").warning("integration probe not recorded: %s", type(exc).__name__)
+
+
 @check("adapter.github_token", "PROJECT_ADAPTERS", "GitHub PERSONAL: token dan akses repo (read-only)",
        component_id="github", ttl_seconds=3600, invalidators=(f"secret:{GITHUB_REF}", "target"),
        ok={"CONFIGURED", "CONNECTED", "VERIFIED"}, severity_fail="HIGH", scope={"domain": "PERSONAL"},
@@ -78,9 +95,11 @@ def adapter_github(ctx: CheckContext) -> Outcome:
         evidence.update({"private": hr.body.get("private"), "default_branch": hr.body.get("default_branch"),
                          "permissions": {k: perms.get(k) for k in ("admin", "maintain", "push", "pull") if k in perms},
                          "repo_id": hr.body.get("id")})
+        _record_probe(ctx, ("github-repo", "github-issues"), slug, "CONNECTED")
         return Outcome("CONNECTED", f"Repo github:{slug} terbaca dengan token (read-only); izin tulis/enforcement belum "
                        "diverifikasi.", evidence=evidence, target_identity=f"github:{slug}")
     if hr.status == 401:
+        _record_probe(ctx, ("github-repo", "github-issues"), slug, "EXPIRED")
         return Outcome("EXPIRED", "Token GitHub ditolak (kedaluwarsa/dicabut).", evidence=evidence,
                        error_code="GITHUB_TOKEN_REJECTED", remedy=set_secret_remedy(GITHUB_REF, "GitHub"))
     if hr.status in (403, 404):
