@@ -209,5 +209,18 @@ def test_mock_untrusted_or_office_evidence_never_proves_platform_readiness(setti
     add(trusted=False, mode="LIVE")
     add(trusted=True, mode="LIVE", domain="OFFICE")
     assert _check(cid, settings, db, base_runner()).status in ("MISSING", "UNKNOWN")
-    add(trusted=True, mode="LIVE", domain=None)
+    # the recorded verdict counts, not the mere presence of a row (worker.contract reads inline.content.overall)
+    add(trusted=True, mode="LIVE", domain=None, inline={"content": {"overall": "PASS"}})
     assert _check(cid, settings, db, base_runner()).status == "VERIFIED"
+
+
+def test_worker_contract_evidence_that_failed_is_never_verified(settings, db):
+    """A WORKER_CONTRACT_TEST row with a FAIL verdict is FAILED, not VERIFIED (presence is not a pass)."""
+    from aeos.models.evidence import EvidenceArtifact
+
+    db.add(EvidenceArtifact(kind="WORKER_CONTRACT_TEST", origin="collector", collector_identity="test",
+                            content_hash="sha256:x", claim="contract", trusted=True, mode="LIVE", domain=None,
+                            inline={"content": {"overall": "FAIL"}}))
+    db.commit()
+    res = _check("worker.contract", settings, db, base_runner())
+    assert res.status == "FAILED" and res.error_code == "WORKER_CONTRACT_FAILED"

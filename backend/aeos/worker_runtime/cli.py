@@ -41,16 +41,56 @@ def status(domain: str = typer.Option("PERSONAL", help="PERSONAL or OFFICE")) ->
 
 
 @app.command("containment")
-def containment(kind: str = typer.Option("process", help="process or container")) -> None:
-    """Run the negative containment tests in a real child process and record the report."""
+def containment(kind: str = typer.Option("process", help="process or container"),
+                domain: str = typer.Option("PERSONAL", help="container profile: PERSONAL or OFFICE")) -> None:
+    """Run the negative containment tests in a real child process / the worker image and record the report."""
     from aeos.cli import ensure_database
     from aeos.core.db import session_scope
     from aeos.worker_runtime.containment import containment_report, record_containment_report
 
+    if kind not in ("process", "container") or domain.upper() not in ("PERSONAL", "OFFICE"):
+        _out("kind must be process|container and domain PERSONAL|OFFICE")
+        raise typer.Exit(2)
     ensure_database()
-    report = containment_report(kind)
+    report = containment_report(kind, domain=domain.upper())
     with session_scope() as s:
         record_containment_report(s, report, actor="cli:local-operator")
-    _out(f"containment ({report['kind']}): overall={report['overall']}  {report.get('summary')}")
+    _out(f"containment ({report['kind']}{' ' + report['domain'] if report.get('domain') else ''}): "
+         f"overall={report['overall']}  {report.get('summary')}")
     for r in report["results"]:
         _out(f"  [{r['status']:12s}] {r['check']}: {r['evidence']}")
+    if report.get("remedy"):
+        _out(f"remedy: {report['remedy']}")
+
+
+@app.command("contract-test")
+def contract_test(binary: str = typer.Option(None, help="OpenCode binary (default: configured / PATH)")) -> None:
+    """Run the worker engine contract test (real OpenCode, scripted loopback model) and record the evidence."""
+    from aeos.cli import ensure_database
+    from aeos.core.db import session_scope
+    from aeos.worker_runtime.contract import record_contract_test, run_contract_test
+
+    ensure_database()
+    report = run_contract_test(binary=binary)
+    with session_scope() as s:
+        ev = record_contract_test(s, report, actor="cli:local-operator")
+    _out(f"worker contract test: overall={report['overall']} engine={report.get('engine_status')} "
+         f"version={report.get('engine_version')} evidence={ev or 'not recorded (NOT_RUN)'}")
+    for r in report["results"]:
+        _out(f"  [{r['status']:8s}] {r['check']}: {r['evidence']}")
+    _out(f"model behaviour: {report['scope']['model_behaviour']}")
+    if report["overall"] not in ("PASS",):
+        raise typer.Exit(1)
+
+
+@app.command("reap")
+def reap() -> None:
+    """Remove worker containers whose run is no longer active (after a controller crash)."""
+    from aeos.cli import ensure_database
+    from aeos.core.db import session_scope
+    from aeos.worker_runtime.container import reap_orphans_for_session
+
+    ensure_database()
+    with session_scope() as s:
+        removed = reap_orphans_for_session(s)
+    _out(f"removed {len(removed)} orphan worker container(s): {', '.join(removed) or '-'}")

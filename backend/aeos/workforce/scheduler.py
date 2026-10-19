@@ -56,7 +56,7 @@ WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CO
                         "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED"})
 QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED"})
 # BLOCKED reason codes that only an owner action clears (retry_task / quarantine release), never a tick.
-HUMAN_BLOCK_CODES = frozenset({"QUARANTINED", "REVIEW_BLOCKED"})
+HUMAN_BLOCK_CODES = frozenset({"QUARANTINED", "REVIEW_BLOCKED", "WORKER_BLOCKER"})
 
 
 # ----------------------------------------------------------------------------- small helpers
@@ -700,16 +700,15 @@ def admission_check(session: Session, task_id: str) -> Admission:
     ok, reasons = ext.capability_ready(session, Capability.CAN_RUN_WORKER, domain=task.domain, project_id=task.project_id)
     if not ok:
         adm.waits.append(("CAPABILITY_NOT_READY", "; ".join(reasons)))
-    from aeos.worker_runtime.sandbox import process_shell_allowed, sandbox_readiness, task_wants_shell
+    from aeos.worker_runtime.sandbox import task_sandbox_readiness
 
-    sb = sandbox_readiness(session, domain=task.domain)
+    # §25: the boundary THIS TaskSpec needs (domain, risk tier R3/R4, shell and egress grants); a shell is
+    # never given under the WEAK process sandbox (ADR-0051 amendment 2026-10-19).
+    sb = task_sandbox_readiness(session, domain=task.domain, risk_class=task.risk_class,
+                                tools_allowed=list(task.tools_allowed or []),
+                                egress_allowed=list(task.egress_allowed or []))
     if sb["status"] != "READY":
         adm.waits.append(("SANDBOX_NOT_READY", "; ".join(sb["reasons"])))
-    elif (sb.get("kind") == "process" and task_wants_shell(task.tools_allowed)
-          and not process_shell_allowed(session, sb.get("decision_id"))):
-        adm.waits.append(("SANDBOX_NOT_READY", "TaskSpec grants bash but the process-sandbox exception does not "
-                          "(details.allow_bash=true): with a shell the worker acts as the same OS user, incl. OS "
-                          "credential helpers (ADR-0051)"))
     cap, _decision = concurrency_cap(session)
     adm.cap = cap
     active = active_executions(session, exclude_task=task.id)

@@ -446,10 +446,13 @@ class Chain:
             "mode": "TRIAL", "rationale": "uji coba rute gratis untuk pekerja", "expected_config_hash": cfg,
             "terms_reviewed": True}))
         expires = (utcnow() + timedelta(days=2)).isoformat()
+        # The owner also covers R3 (protected-path tasks) under the process sandbox explicitly (ADR-0051
+        # amendment 2026-10-19); without it an R3 task waits for the container sandbox.
         self.ok(c.post("/api/decisions", json={
             "kind": "EXCEPTION", "target_type": "worker_sandbox", "target_id": "process",
             "auth_scope": {"domain": "PERSONAL", "sandbox": "process"}, "expires_at": expires,
-            "rationale": "process sandbox WEAK diterima untuk uji PERSONAL", "details": {"allow_process_sandbox": True}}),
+            "rationale": "process sandbox WEAK diterima untuk uji PERSONAL", "details": {"allow_process_sandbox": True},
+            "allowed_operations": ["run_worker_process_sandbox", "run_worker_process_sandbox_r3"]}),
             201)
         self.ok(c.post("/api/budgets", json={
             "scope_type": "PROJECT", "scope_id": self.project_id, "period": "MONTH", "limit_usd": 0,

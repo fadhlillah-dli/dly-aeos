@@ -14,29 +14,13 @@ from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Any
 
+# AGENTS.md "Protected paths (self-build, §09)" (the platform's own list) and the grader / pipeline /
+# policy / agent-config / restricted-area paths protected for every managed project (§16, §21, §25):
+# one shared definition with the compiler and the worker runtime (aeos.core.protected_paths).
+from aeos.core.protected_paths import GENERIC_PROTECTED_PATHS, PLATFORM_PROTECTED_PATHS  # noqa: F401
 from aeos.core.redaction import _PATTERNS as _REDACTION_PATTERNS
 from aeos.core.redaction import UNBOUNDED_TOKEN_PATTERNS
 
-# AGENTS.md "Protected paths (self-build, §09)" — the platform's own self-build list.
-PLATFORM_PROTECTED_PATHS: tuple[str, ...] = (
-    "policy/**",
-    "backend/aeos/policy/**",
-    "backend/aeos/verification/**",
-    "backend/aeos/broker/**",
-    "backend/aeos/identity/**",
-    "tests/acceptance/**",
-    ".github/workflows/**",
-    "install-manifest/**",
-    "backend/aeos/migrations/**",
-)
-# Grader / pipeline / policy locations that are protected for every managed project (§21).
-GENERIC_PROTECTED_PATHS: tuple[str, ...] = (
-    "tests/acceptance/**",
-    ".github/workflows/**",
-    "policy/**",
-    "bitbucket-pipelines.yml",
-    ".gitlab-ci.yml",
-)
 # Files that could alter how the verifier's test process behaves rather than what it tests.
 HARNESS_TAMPER_PATHS: tuple[str, ...] = (
     "**/sitecustomize.py",

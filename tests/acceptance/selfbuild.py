@@ -113,7 +113,9 @@ def self_build(client: AuthedClient, db: Session, monkeypatch: Any, tmp_path: Pa
     responder = SupervisorResponder(review=review)
     tasks = [task("T1", paths=allowed or ["backend/aeos/feature/**"]), *(extra_tasks or [])]
     responder.planning.content = plan_content(tasks=tasks)
-    w = worker_ready(client, db, monkeypatch, tasks=tasks, platform=True, responder=responder, targets=targets)
+    # Self-build tasks that target protected paths are R3 (planning/dag): the owner covers R3 explicitly here.
+    w = worker_ready(client, db, monkeypatch, tasks=tasks, platform=True, responder=responder, targets=targets,
+                     cover_r3=True)
     run = db.get(WorkerRun, admit(db)[0])
     fake = FakeClaude(monkeypatch, responder)
     controller = trusted_controller(tmp_path, monkeypatch, grader)

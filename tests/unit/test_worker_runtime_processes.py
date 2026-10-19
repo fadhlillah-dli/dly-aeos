@@ -7,6 +7,7 @@ import os
 import sys
 
 import psutil
+import pytest
 
 from aeos.models.workforce import WorkerRun
 from aeos.worker_runtime import processes
@@ -82,6 +83,44 @@ def test_kill_after_registry_loss_uses_persisted_pid(db, tmp_path):
     res = processes.kill_run_processes(run.id)
     assert res["remaining"] == []
     assert not processes.is_alive(mp.pid, mp.create_time) and not _grandchild_alive(gpid)
+
+
+def test_tree_usage_observes_the_whole_tree(tmp_path):
+    """Resource watchdog input (§21/§25): RSS + process count of the run's tree."""
+    dirs = processes.SandboxDirs.create(tmp_path / "sbx")
+    env = processes.build_sandbox_env(dirs, run_id="usage-run")
+    code = "import subprocess, sys, time\nsubprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n" \
+           "print('ok', flush=True)\ntime.sleep(30)\n"
+    mp = processes.spawn("usage-run", [sys.executable, "-c", code], cwd=tmp_path, env=env)
+    try:
+        assert mp.stdout.readline().strip() == b"ok"
+        u = processes.tree_usage("usage-run")
+        assert u["processes"] >= 2 and u["rss_bytes"] > 0
+    finally:
+        processes.kill_run_processes("usage-run")
+    assert processes.tree_usage("usage-run") == {"rss_bytes": 0, "processes": 0}
+
+
+def test_resource_limits_from_taskspec_are_clamped():
+    lim = processes.ResourceLimits.from_task({"max_memory_mb": 10, "max_processes": 10_000})
+    assert lim.max_memory_mb == 64 and lim.max_processes == 4096
+    assert processes.ResourceLimits.from_task(None) == processes.ResourceLimits()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object kernel backstop")
+def test_windows_job_object_caps_the_process_count(tmp_path):
+    script = ("import subprocess, sys\nok = 0\nkeep = []\nfor _ in range(5):\n    try:\n"
+              "        keep.append(subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']))\n"
+              "        ok += 1\n    except OSError:\n        pass\nprint(ok, flush=True)\n")
+    dirs = processes.SandboxDirs.create(tmp_path / "sbx")
+    env = processes.build_sandbox_env(dirs, run_id="job-limit")
+    mp = processes.spawn("job-limit", [sys.executable, "-c", script], cwd=tmp_path, env=env,
+                         limits=processes.ResourceLimits(max_memory_mb=512, max_processes=3))
+    try:
+        line = mp.stdout.readline().decode().strip()
+    finally:
+        processes.kill_run_processes("job-limit")
+    assert line.isdigit() and int(line) < 5  # the job refused process creation beyond its cap
 
 
 def test_spawn_rejects_shell_strings(tmp_path):

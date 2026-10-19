@@ -33,6 +33,14 @@ def opencode_status() -> dict[str, Any]:
     return impl()
 
 
+def worker_prompt_revision() -> str:
+    """Revision id of the OpenCode worker prompt template; part of a worker route's configuration
+    identity (§23 ``ModelRoute.prompt_revision``). Added 2026-10-19; existing signatures unchanged."""
+    from aeos.worker_runtime.executor import WORKER_PROMPT_REVISION
+
+    return WORKER_PROMPT_REVISION
+
+
 def sandbox_readiness(session: Any, *, domain: str) -> dict[str, Any]:
     """Policy requirement for CAN_RUN_WORKER: READY only with a proven container or, for PERSONAL,
     an ACTIVE owner EXCEPTION allowing the weak process sandbox (ADR-0051). Added by module E;
