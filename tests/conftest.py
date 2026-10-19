@@ -18,6 +18,16 @@ ADMIN_PW = "correct-horse-battery-staple"
 VIEWER_PW = "read-only-observer-pass-77"
 
 
+@pytest.fixture(autouse=True)
+def _controller_not_elevated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI runners (GitHub-hosted Windows) run elevated; the product refuses the process sandbox for an elevated
+    controller (§25 non-root). That refusal is tested explicitly (test_worker_runtime_sandbox); every other test
+    runs as a normal user would."""
+    from aeos.worker_runtime import sandbox
+
+    monkeypatch.setattr(sandbox, "_elevation_probe", lambda: False)
+
+
 @pytest.fixture
 def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[config_mod.Settings]:
     monkeypatch.setenv("AEOS_DATA_DIR", str(tmp_path / "data"))

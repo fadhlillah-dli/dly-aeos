@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
+from aeos.core import protected_paths as _pp
 from aeos.core.enums import Domain
 from aeos.core.errors import ValidationFailed
 from aeos.core.hashing import content_hash
@@ -28,15 +29,13 @@ from aeos.models.planning import Feature, Milestone, Plan, PlanVersion, TaskDepe
 from aeos.models.portfolio import Project
 from aeos.models.workforce import Lease, TaskExecution
 
-FALLBACK_PROTECTED_PATHS: tuple[str, ...] = (
-    "policy/**", "backend/aeos/policy/**", "backend/aeos/verification/**", "backend/aeos/broker/**",
-    "backend/aeos/identity/**", "tests/acceptance/**", ".github/workflows/**", "install-manifest/**",
-    "backend/aeos/migrations/**",
-)
-# Trusted grader/pipeline paths that no worker of ANY managed project may change without quarantine
-# review (§21 "grader/held-out tests ... pipeline tepercaya"). The platform project adds the full
-# AGENTS.md protected list (§09).
-GENERIC_TRUSTED_PATHS: tuple[str, ...] = ("tests/acceptance/**", ".github/workflows/**", "bitbucket-pipelines.yml")
+# One shared definition with the worker runtime and the verifier (aeos.core.protected_paths).
+FALLBACK_PROTECTED_PATHS: tuple[str, ...] = _pp.PLATFORM_PROTECTED_PATHS
+# Trusted grader/pipeline/policy/agent-config paths that no worker of ANY managed project may change without
+# quarantine review (§21 "grader/held-out tests ... pipeline tepercaya", §25). Anchored paths only: the
+# unanchored restricted areas (IaC/IAM/secrets/deploy) are matched by runtime and verifier against the
+# concrete changed paths. The platform project adds the full AGENTS.md protected list (§09).
+GENERIC_TRUSTED_PATHS: tuple[str, ...] = _pp.GENERIC_TRUSTED_PATHS
 DEFAULT_LIMITS = {"max_attempts": 2, "timeout_seconds": 3600, "max_output_tokens": 32000}
 MAX_ATTEMPTS_CAP = 2  # §21 pilot cap: at most two implementation attempts per TaskSpec
 # §21 resource caps of the pilot: one active worker per task, no automatic nested fan-out. Fixed by the
@@ -66,11 +65,9 @@ def protected_paths() -> tuple[str, ...]:
         text = (repo_root() / "AGENTS.md").read_text(encoding="utf-8")
     except OSError:
         return FALLBACK_PROTECTED_PATHS
-    m = re.search(r"^## Protected paths.*?$(.*?)(?=^## |\Z)", text, flags=re.M | re.S)
-    if not m:
-        return FALLBACK_PROTECTED_PATHS
-    found = [p for p in re.findall(r"`([^`]+)`", m.group(1)) if "/" in p]
-    return tuple(dict.fromkeys(found)) or FALLBACK_PROTECTED_PATHS
+    found = _pp.parse_agents_md(text)
+    # The canonical code list always applies; AGENTS.md can only add to it, never shrink it.
+    return tuple(dict.fromkeys(FALLBACK_PROTECTED_PATHS + found))
 
 
 def protected_for(project: Project | None) -> tuple[str, ...]:

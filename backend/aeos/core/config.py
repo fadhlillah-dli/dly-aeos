@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     office_external_worker_allowed: bool = False
 
     platform_repo_slug: str = "fadhlillah-dli/dly-aeos"
+    # §06 commit attribution of worker candidates: the owner's own identity (e.g. the GitHub noreply address
+    # ``<id>+<user>@users.noreply.github.com``). Unset -> the runtime identity, reported as not linked.
+    commit_author_name: str | None = None
+    commit_author_email: str | None = None
 
     @field_validator("host")
     @classmethod
