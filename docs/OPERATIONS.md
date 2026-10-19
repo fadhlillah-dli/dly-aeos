@@ -173,7 +173,13 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   dedicated migration credential that is separate from the runtime credential, and keep the result
   as CI evidence.
 * **Verifier isolation:** every VERIFICATION_REPORT states `verifier_isolation: WEAK` (same OS user,
-  no container/egress enforcement) until a sandboxed runner exists.
+  no container/egress enforcement) until a sandboxed runner exists; the Gate panel shows it next to
+  the verifier status.
+* **Specialist reviews:** a UI change (or a frontend/UX role) needs the A11Y reviewer, data/AI roles or
+  CONFIDENTIAL/RESTRICTED data the PRIVACY reviewer, CI/IaC or operations roles the SRE reviewer. Request
+  them with "Review wajib (spesialis)" on the run list, `POST /api/runs/<run>/reviews/batch`, or
+  `aeos verify review <run> --kind A11Y|PRIVACY|SRE|SECURITY`. A run has a review budget
+  (`reviewer_policy.max_reviews_per_run`, default 12; quota waits do not count).
 * **OFFICE delivery:** NOT_APPLICABLE — no Bitbucket push/PR/Pipelines adapter and no company
   authorisation; `prepare-pr` refuses with `OFFICE_DELIVERY_NOT_AVAILABLE`.
 

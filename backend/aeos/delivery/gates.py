@@ -195,7 +195,9 @@ def release_approvers(session: Session, project: Project) -> tuple[list[str], st
     res = call(policy.find_active_decision, session, kind="POLICY", target_type=RELEASE_APPROVERS_TARGET,
                target_id=project.id)
     d = res.result if res.ok else None
-    if d is None or (d.actor_kind or "HUMAN") != "HUMAN":
+    # human-only AUTH (AGENTS.md #3): exactly a HUMAN decision of this project's own domain — never an
+    # owner-recorded/agent row, never a decision recorded under the other domain for this project id.
+    if d is None or d.actor_kind != "HUMAN" or (d.domain or "") != project.domain:
         return [], None
     logins = (d.auth_scope or {}).get("github_logins") or []
     return sorted({str(x).strip().lower() for x in logins if str(x).strip()}), d.id

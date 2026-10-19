@@ -498,7 +498,9 @@ def review_run(session: Session, run_id: str, *, actor: str, actor_type: str = "
     budget = _review_budget(session, run, task)
     if budget["remaining"] <= 0:
         # §19 "if scope and review budget allow": no further review session for this run; the owner decides
-        raise Blocked(f"review budget exhausted for this run ({budget['used']}/{budget['max']} reviews)",
+        raise Blocked(f"review budget exhausted for this run ({budget['used']}/{budget['max']} reviews); "
+                      "the owner decides: cancel/retry the task as a new attempt, or raise "
+                      "reviewer_policy.max_reviews_per_run in a new PlanVersion",
                       code="REVIEW_BUDGET_EXHAUSTED", details=budget)
     report = latest_report(session, run.id)
     view = report_view(report)
@@ -597,9 +599,12 @@ def _review_budget(session: Session, run: WorkerRun, task: TaskSpec) -> dict[str
     except (TypeError, ValueError):
         limit = DEFAULT_MAX_REVIEWS_PER_RUN
     limit = max(1, min(limit, 50))
-    # a manual-result import completes an existing session; it is not a new review session
+    # Only sessions that produced (or failed to produce) a reviewer answer count: COMPLETED/FAILED rows of a
+    # native call or of a manual-result import. A WAITING_QUOTA row (Claude refused before any review ran) and
+    # a NEEDS_DECISION manual package (its import is the session) never consume the budget, so re-requesting
+    # while the Max quota is exhausted cannot strand the run in REVIEW.
     used = int(session.scalar(select(func.count()).select_from(ReviewRecord).where(
-        ReviewRecord.run_id == run.id, ReviewRecord.reviewer_identity.not_like("manual-package:%"))) or 0)
+        ReviewRecord.run_id == run.id, ReviewRecord.status.in_(("COMPLETED", "FAILED")))) or 0)
     return {"max": limit, "used": used, "remaining": limit - used}
 
 
@@ -625,12 +630,34 @@ def review_all(session: Session, run_id: str, *, actor: str, actor_type: str = "
                kinds: list[str] | None = None) -> list[ReviewOutcome]:
     """§19: request every independent read-only review kind the change needs (or the given ones) for the same
     verified package — separate reviewer sessions, each bound to the artifact hash. Sessions run one after the
-    other in this process (no concurrent SQLite writers); stops when the review budget is exhausted."""
+    other in this process (no concurrent SQLite writers).
+
+    It stops — keeping the sessions that already ran, so the caller can commit them — when the run leaves
+    REVIEW (e.g. a FAIL verdict requested a repair) or a later kind is refused (budget exhausted ...); the
+    reason is added to the last outcome's notes. Only the first refusal, before any session ran, raises."""
     need = review_required_kinds(session, run_id)
-    wanted = [k for k in (kinds or [k for k, s in need["kinds"].items() if s["open"]]) if k in REVIEWER_KINDS]
+    requested = kinds or [k for k, s in need["kinds"].items() if s["open"]]
+    unknown = [k for k in requested if k not in REVIEWER_KINDS]
+    if unknown:
+        raise ValidationFailed(f"unknown review kind(s): {', '.join(map(str, unknown))}")
+    wanted = list(dict.fromkeys(requested))
     outcomes: list[ReviewOutcome] = []
-    for kind in wanted:
-        outcomes.append(review_run(session, run_id, actor=actor, actor_type=actor_type, reviewer=kind))
+    for i, kind in enumerate(wanted):
+        if outcomes:
+            run = session.get(WorkerRun, run_id)
+            if run is None or run.execution_status != ExecutionState.REVIEW.value:
+                outcomes[-1].notes.append(
+                    f"review batch stopped: run is {getattr(run, 'execution_status', 'missing')} after the "
+                    f"{outcomes[-1].review.reviewer_kind} review; not requested: {', '.join(wanted[i:])}")
+                break
+        try:
+            outcomes.append(review_run(session, run_id, actor=actor, actor_type=actor_type, reviewer=kind))
+        except AeosError as exc:
+            if not outcomes:
+                raise
+            outcomes[-1].notes.append(f"review batch stopped at {kind}: {exc.code}: {exc.message}; "
+                                      f"not requested: {', '.join(wanted[i:])}")
+            break
         session.flush()
     return outcomes
 
