@@ -1056,6 +1056,46 @@ def per_accepted_outcome(session: Session, *, domain: str | None, allowed_projec
                    "status": "COMPUTED", "per_task": per_task}
 
 
+def _percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    s = sorted(values)
+    return round(float(s[max(0, min(len(s) - 1, math.ceil(q * len(s)) - 1))]), 3)
+
+
+def operations_usage(session: Session, *, domain: str | None, allowed_project_ids: list[str] | None,
+                     start: datetime | None) -> dict[str, Any]:
+    """§42 "latency, jumlah repair" monitored separately from money and tokens: worker-run latency
+    (started -> finished, p50/p95 with sample size) and repair attempts (attempt > 1) in the window, scoped to
+    the active domain/projects like every other figure on this view."""
+    from aeos.models.workforce import TaskExecution
+
+    q = select(WorkerRun).where(WorkerRun.domain == domain)
+    if start is not None:
+        q = q.where(WorkerRun.created_at >= start)
+    runs = [r for r in session.scalars(q) if allowed_project_ids is None or r.project_id in allowed_project_ids]
+    durations = []
+    for r in runs:
+        a, b = ensure_aware(r.started_at), ensure_aware(r.finished_at)
+        if a is not None and b is not None:
+            durations.append(max(0.0, (b - a).total_seconds()))  # type: ignore[operator]
+    tq = select(TaskExecution).where(TaskExecution.domain == domain)
+    if start is not None:
+        tq = tq.where(TaskExecution.updated_at >= start)
+    tasks = [t for t in session.scalars(tq) if allowed_project_ids is None or t.project_id in allowed_project_ids]
+    repairs = sum(max(0, int(t.attempts_used or 0) - 1) for t in tasks)
+    return {
+        "latency": {"p50_s": _percentile(durations, 0.5), "p95_s": _percentile(durations, 0.95),
+                    "samples": len(durations), "runs": len(runs),
+                    "basis": "WorkerRun started_at -> finished_at (run selesai saja)",
+                    "status": "MEASURED" if durations else "NO_FINISHED_RUNS"},
+        "repairs": {"repair_attempts": repairs, "tasks": len(tasks),
+                    "tasks_repaired": sum(1 for t in tasks if int(t.attempts_used or 0) > 1),
+                    "basis": "attempts_used - 1 per task (attempt pertama bukan repair)"},
+        "note": "Latency dan repair dipantau terpisah dari biaya tunai/token; bukan konversi ke dolar.",
+    }
+
+
 def summary(session: Session, *, domain: str | None, allowed_project_ids: list[str] | None,
             cross_domain_visible: bool, period: str = "MONTH") -> dict[str, Any]:
     period = (period or "MONTH").upper()
@@ -1121,6 +1161,7 @@ def summary(session: Session, *, domain: str | None, allowed_project_ids: list[s
                                   cross_domain_visible=cross_domain_visible),
         "per_accepted_outcome": per_accepted_outcome(session, domain=domain, allowed_project_ids=allowed_project_ids,
                                                      start=start, entries=entries),
+        "operations": operations_usage(session, domain=domain, allowed_project_ids=allowed_project_ids, start=start),
         "excluded_non_live": {"entries": len(mock), "modes": sorted({e.mode for e in mock}),
                               "note": "Entri MOCK/DEMO/ESTIMATE-fixture tidak dihitung sebagai usage actual."},
     }

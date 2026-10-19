@@ -6,7 +6,9 @@ tier terms from S09; the local candidate from S60. Provider claims about retenti
 not proof that project data routing is compliant (§23). Every worker route is PERSONAL-only at
 most; OFFICE stays empty until a recorded company authorisation (``approved_worker_routes=[]``).
 Seeding never activates a route, never claims installation and never fills ``resolved_version``
-(UNKNOWN until the bridge/runtime observes it).
+(UNKNOWN until the bridge/runtime observes it). Worker routes carry NO ``terms_checked_at``: reading the
+provider statement for the master research is not an owner terms review (§23, §45, §51 P2) — the
+reading date stays in ``data_terms.read_for_research`` and the owner confirms the terms at activation.
 """
 
 from __future__ import annotations
@@ -18,9 +20,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aeos.models.routing import ModelRoute
-from aeos.routing.service import compute_config_hash
+from aeos.routing.service import REVIEWED_WORKER_TOOLS, compute_config_hash
 
 RESEARCH_DATE = datetime(2026, 10, 18, tzinfo=UTC)
+READ_FOR_RESEARCH = "2026-10-18 (master research reading; not an owner terms review)"
+WORKER_TOOL_SET = list(REVIEWED_WORKER_TOOLS)  # candidate tool set the owner reviews at activation
+LOCAL_BUILD_PARAMS = {"quantization": "UNKNOWN", "inference_backend": "UNKNOWN", "hardware": "UNKNOWN"}
 P = "PUBLIC"
 I = "INTERNAL"  # noqa: E741 - data class abbreviation
 C = "CONFIDENTIAL"
@@ -58,13 +63,14 @@ def _zen(model: str, display: str, *, pool: str, terms: dict[str, Any], classes:
     return {
         "route_key": f"opencode-zen/{model}", "pool": pool, "provider": "opencode-zen",
         "endpoint": "https://opencode.ai/zen", "model_id": f"opencode/{model}", "display_name": display,
-        "harness": "opencode", "tool_set": ["opencode-default"], "is_free": "NO" if paid else "YES",
-        "pricing": paid or ZEN_FREE_PRICING, "data_terms": terms, "eligible_domains": ["PERSONAL"],
+        "harness": "opencode", "tool_set": list(WORKER_TOOL_SET), "is_free": "NO" if paid else "YES",
+        "pricing": paid or ZEN_FREE_PRICING, "data_terms": {**terms, "read_for_research": READ_FOR_RESEARCH},
+        "eligible_domains": ["PERSONAL"],
         "allowed_data_classes": classes, "supports_tools": "YES" if pool in {"WORKER", "ARENA"} and not paid else "UNKNOWN",
         "identity_status": identity, "priority": priority, "fallback_chain": fallback or [],
         "expires_note": None if paid else "free for a limited time per S07 (no end date published)",
         "source_refs": ["S07", "S08"], "notes": notes, "pricing_checked_at": RESEARCH_DATE,
-        "terms_checked_at": RESEARCH_DATE, "mode_params": {"credential_ref": ZEN_CREDENTIAL_REF},
+        "terms_checked_at": None, "mode_params": {"credential_ref": ZEN_CREDENTIAL_REF},
         "prompt_revision": _worker_prompt_revision(),
     }
 
@@ -124,10 +130,10 @@ def seed_routes() -> list[dict[str, Any]]:
             "data_terms": {"retention": "per Gemini API terms (S09)",
                            "training": "free tier: content may be used to improve Google products (S09)",
                            "may_use_inputs_for_training": True, "trial_only_no_confidential": False,
-                           "claim_level": "E1 terms reading"},
+                           "claim_level": "E1 terms reading", "read_for_research": READ_FOR_RESEARCH},
             "eligible_domains": ["PERSONAL"], "allowed_data_classes": [P], "supports_tools": "UNKNOWN",
             "priority": 10, "source_refs": ["S09"], "notes": "Comparator only; input limited by the free-tier data terms.",
-            "pricing_checked_at": RESEARCH_DATE, "terms_checked_at": RESEARCH_DATE,
+            "pricing_checked_at": RESEARCH_DATE, "terms_checked_at": None,
             "mode_params": {"credential_ref": "workers/gemini"},
         },
         # ---- ARENA (feasibility of route and data) ----
@@ -200,6 +206,8 @@ def seed_routes() -> list[dict[str, Any]]:
         "notes": "Model/quantization/inference backend/hardware form a separate configuration; GGUF/quantized "
                  "variants never inherit benchmark results.",
         "pricing_checked_at": None, "terms_checked_at": None,
+        # part of the identity: a quantized/other-backend build is another configuration (§23)
+        "mode_params": dict(LOCAL_BUILD_PARAMS),
     })
     return routes
 
@@ -212,8 +220,10 @@ def run(session: Session) -> dict[str, Any]:
 
     Integration amendment (ADR-0041): an untouched CANDIDATE seed row that predates the explicit
     ``mode_params.credential_ref`` gets it backfilled. That is a configuration change, but a CANDIDATE
-    row carries no approval, so nothing is invalidated; the config hash is recomputed."""
-    created = updated = existing = backfilled = 0
+    row carries no approval, so nothing is invalidated; the config hash is recomputed. The same applies to
+    the C5 amendment: the placeholder tool set becomes the reviewable candidate tool set, the local build
+    parameters are stated, and a seeded research date is no longer kept as a terms check."""
+    created = updated = existing = backfilled = terms_reset = 0
     for spec in seed_routes():
         spec = dict(spec)
         mode_params = dict(spec.pop("mode_params", None) or {})
@@ -235,9 +245,20 @@ def run(session: Session) -> dict[str, Any]:
                     setattr(row, f, spec[f])
                     changed = True
             updated += int(changed)
+            config_changed = False
             ref = mode_params.get("credential_ref")
             if ref and not (row.mode_params or {}).get("credential_ref"):
                 row.mode_params = {**(row.mode_params or {}), "credential_ref": ref}
+                config_changed = True
+            missing_build = {k: v for k, v in mode_params.items() if k in LOCAL_BUILD_PARAMS
+                             and k not in (row.mode_params or {})}
+            if missing_build:
+                row.mode_params = {**(row.mode_params or {}), **missing_build}
+                config_changed = True
+            if set(row.tool_set or []) == {"opencode-default"} and spec.get("tool_set"):
+                row.tool_set = list(spec["tool_set"])
+                config_changed = True
+            if config_changed:
                 row.config_hash = compute_config_hash(row)
                 backfilled += 1
             rev = spec.get("prompt_revision")
@@ -245,6 +266,12 @@ def run(session: Session) -> dict[str, Any]:
                 # A CANDIDATE row carries no approval: binding the current worker prompt revision invalidates nothing.
                 row.prompt_revision = rev
                 row.config_hash = compute_config_hash(row)
+            seeded_check = row.terms_checked_at is not None and spec.get("terms_checked_at") is None \
+                and row.terms_checked_at.date() == RESEARCH_DATE.date() and not (row.data_terms or {}).get("checked_by")
+            if seeded_check:
+                row.terms_checked_at = None  # not part of the identity: nothing to invalidate
+                terms_reset += 1
     session.flush()
     return {"created": created, "existing": existing, "updated_descriptive": updated,
-            "credential_ref_backfilled": backfilled, "mode": "DESIGN", "approved": 0}
+            "credential_ref_backfilled": backfilled, "seeded_terms_check_reset": terms_reset, "mode": "DESIGN",
+            "approved": 0}

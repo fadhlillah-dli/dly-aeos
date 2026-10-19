@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aeos.core.db import Base
@@ -172,6 +172,40 @@ class EvalRun(IdMixin, TimestampMixin, Base):
     # Session domain the run was planned from (None = platform/facade). Runs planned in OFFICE are never
     # listed or ranked in a PERSONAL view (§23, §35); suites themselves are generic platform definitions.
     submitted_domain: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # --- execution / comparison (§23 "telah diuji", §40 controlled comparison, §43 protocol, §44) -----------
+    # ModelRoute.config_hash of the registered provider route when the run was planned: activation evidence
+    # (routing) only counts a run made on exactly the configuration being approved.
+    route_config_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    is_baseline: Mapped[bool] = mapped_column(Boolean, default=False)  # §43 "baseline ... ditetapkan"
+    proposal_id: Mapped[str | None] = mapped_column(String(36), nullable=True)  # §40 controlled comparison link
+    # Hash of the declared limits + suite content + environment: only runs under equal conditions are ranked
+    # against each other (§43 "environment/input/resource/repair budget setara").
+    conditions_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    environment: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # os/python/controller/harness
+    # Case-slot bindings (case x repetition -> executed TaskSpec) used by the trusted collector.
+    bindings: Mapped[list[Any]] = mapped_column(JSON, default=list)
+
+
+class EvalCaseCandidate(IdMixin, TimestampMixin, Base):
+    """§28 "failures become regression/eval cases": a CANDIDATE case derived from an observed failure.
+    It is never used by an evaluation until a human PROMOTION decision adopts it into its own protected,
+    held-out regression suite (a new suite: existing protected suites are never edited)."""
+
+    __tablename__ = "eval_case_candidates"
+    __table_args__ = (Index("ix_eval_case_candidates_source", "source_type", "source_id"),)
+
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)  # evidence|worker_run|alert
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    domain: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    role_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    related_suite_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    case: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # redacted case definition
+    case_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="CANDIDATE")  # CANDIDATE|ADOPTED|REJECTED
+    proposed_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    adopted_suite_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
 
 
 class ContextPack(IdMixin, TimestampMixin, Base):

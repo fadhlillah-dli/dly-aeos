@@ -436,10 +436,12 @@ class Chain:
             "targets": [{"provider": "github-repo", "repo": REPO}], "rationale": "rencana disetujui pemilik"}))
         assert decided["compile"]["tasks"] == 1
         # Route activation (TRIAL) of a free worker route after the owner reviewed its terms. The seed's
-        # catalog date ages; a catalog refresh (edge) would stamp pricing_checked_at — not part of the hash.
+        # catalog date ages; a catalog refresh (edge) would stamp pricing_checked_at and observe the route in
+        # the OpenCode catalog (availability) — neither is part of the hash.
         with session_factory()() as s:
             r = s.scalar(select(ModelRoute).where(ModelRoute.route_key == ROUTE_KEY))
             r.pricing_checked_at = utcnow()
+            r.availability, r.availability_checked_at = "AVAILABLE", utcnow()
             s.commit()
         cfg = self.ok(c.get(f"/api/routes/{ROUTE_KEY}"))["config_hash"]
         self.ok(c.post(f"/api/routes/{ROUTE_KEY}/activate", json={

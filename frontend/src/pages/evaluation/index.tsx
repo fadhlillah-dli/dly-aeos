@@ -60,10 +60,26 @@ interface RankEntry {
   acceptance_variance: number | null;
   failures_reported: number;
   metrics: { performance: { latency_p50_s: number | null; latency_p95_s: number | null }; economics: { worker_cost_per_accepted_usd: number | null; worker_cost_status: string } };
-  eligibility: { eligible: boolean; status: string; gates_failed: string[]; gates_unproven: string[] };
+  eligibility: { eligible: boolean; status: string; gates_failed: string[]; gates_unproven: string[]; route_reasons?: string[] };
   small_sample: boolean;
   rank?: number;
   tie?: boolean;
+  // §43/§44 (absent on older servers)
+  entry_key?: string;
+  topology?: string | null;
+  is_baseline?: boolean;
+  delta_vs_baseline?: { acceptance_rate: number | null; interval: [number, number] | null; conclusion: string } | null;
+  route_binding?: { status: string; reasons: string[] };
+  environment_mixed?: boolean;
+  comparability?: string;
+}
+
+interface Combined {
+  weights: Record<string, number>;
+  source: string | null;
+  ranking: { entry_key: string; label: string; score: number; interval: [number, number]; sample_size: number; rank: number; tie: boolean }[];
+  incomplete: { entry_key: string; label: string; missing_suites: string[] }[];
+  rule: string;
 }
 
 interface Leaderboard {
@@ -72,8 +88,19 @@ interface Leaderboard {
   checked_at: string;
   status: string;
   message: string | null;
-  suites: { suite_key: string; title: string; role_key: string | null; ranking: RankEntry[]; excluded: RankEntry[]; status: string }[];
+  suites: {
+    suite_key: string;
+    title: string;
+    role_key: string | null;
+    ranking: RankEntry[];
+    excluded: RankEntry[];
+    not_comparable?: RankEntry[];
+    baseline?: string | null;
+    baseline_note?: string | null;
+    status: string;
+  }[];
   candidates_not_tested: { label: string; route_key: string | null; status: string; source: string }[];
+  combined?: Combined | null;
   combined_note: string | null;
   route_change: string;
   ranking_rule: string;
@@ -91,6 +118,57 @@ interface Run {
   sample_size: number;
   failures: unknown[];
   created_at: string | null;
+  is_baseline?: boolean;
+  proposal_id?: string | null;
+  execution?: { status: string; note: string; fixtures?: string };
+}
+
+interface ComparisonSide {
+  status: string;
+  run_ids: string[];
+  result: RankEntry | null;
+}
+
+interface Comparison {
+  proposal_id: string;
+  status: string;
+  rule: string;
+  route_change: string;
+  suites: {
+    suite_key: string;
+    baseline: ComparisonSide | null;
+    candidate: ComparisonSide | null;
+    equal_conditions: boolean;
+    delta: { acceptance_rate: number | null; interval: [number, number] | null; conclusion: string } | null;
+    verdict: string;
+  }[];
+}
+
+// §40 controlled comparison verdicts (baseline vs candidate on the same suites, limits and environment)
+const VERDICT: Record<string, [string, string]> = {
+  BETTER: ["PASS", "Kandidat lebih baik dari baseline"],
+  WORSE: ["FAIL", "Kandidat lebih buruk dari baseline"],
+  NOT_DISTINGUISHABLE: ["NOT-PROVEN", "Tidak dapat dibedakan (interval tumpang tindih)"],
+  NOT_COMPARABLE: ["NOT-PROVEN", "Tidak sebanding: kondisi berbeda"],
+  CANDIDATE_EXCLUDED: ["FAIL", "Kandidat dikecualikan (gate/regresi/terms)"],
+  NOT_RECORDED: ["PENDING", "Belum tercatat"],
+  UNKNOWN: ["UNKNOWN", "UNKNOWN"],
+};
+
+const EXECUTION_LABEL: Record<string, string> = {
+  NOT_STARTED: "Belum dimulai",
+  COLLECTING: "Mengumpulkan sampel",
+  RECORDED: "Tercatat kolektor",
+};
+
+const entryKey = (e: RankEntry) => e.entry_key ?? e.configuration_hash;
+
+function delta(e: RankEntry) {
+  const d = e.delta_vs_baseline;
+  if (e.is_baseline) return <StatusBadge status="CONFIGURED" label="Baseline" />;
+  if (!d || d.acceptance_rate === null) return "—";
+  const label = d.conclusion === "BETTER" ? "lebih baik" : d.conclusion === "WORSE" ? "lebih buruk" : "tidak terbedakan";
+  return `${d.acceptance_rate > 0 ? "+" : ""}${(d.acceptance_rate * 100).toFixed(0)} pp (${label})`;
 }
 
 const pct = (v: number | null | undefined) => (v === null || v === undefined ? "—" : `${(v * 100).toFixed(0)}%`);
@@ -117,16 +195,29 @@ function LeaderboardView({ role }: { role: string }) {
         </EmptyState>
       )}
       {b.suites
-        .filter((s) => s.ranking.length || s.excluded.length)
+        .filter((s) => s.ranking.length || s.excluded.length || (s.not_comparable ?? []).length)
         .map((s) => (
           <Card key={s.suite_key} title={`${s.title} (${s.suite_key})`} actions={<MappedBadge value={s.status} map={ELIGIBILITY} />}>
+            {s.baseline_note && <p className="mb-2 text-xs text-ink-3">{s.baseline_note}</p>}
             <Table
               rows={s.ranking}
-              rowKey={(e) => e.configuration_hash}
+              rowKey={entryKey}
               empty="Tidak ada konfigurasi yang lulus gate"
               columns={[
                 { header: "Peringkat", cell: (e) => <span className="font-semibold">#{e.rank}{e.tie ? " (seri)" : ""}</span> },
-                { header: "Konfigurasi", cell: (e) => <div><div>{e.label}</div><Mono>{shortHash(e.configuration_hash)}</Mono></div> },
+                {
+                  header: "Konfigurasi",
+                  cell: (e) => (
+                    <div>
+                      <div>{e.label}</div>
+                      <Mono>{shortHash(e.configuration_hash)}</Mono>
+                      {e.route_binding?.status === "NOT_REGISTERED" && <div className="text-xs text-ink-3">Rute tidak terdaftar: terms belum dinilai</div>}
+                      {e.environment_mixed && <div className="text-xs text-warn">Environment campuran — kesimpulan terbatas</div>}
+                    </div>
+                  ),
+                },
+                { header: "Topologi", cell: (e) => e.topology ?? "—" },
+                { header: "Δ baseline", cell: (e) => delta(e) },
                 { header: "n", cell: (e) => <span>{e.sample_size}{e.small_sample ? " (kecil)" : ""}</span> },
                 { header: "Diterima", cell: (e) => pct(e.final_acceptance_rate) },
                 { header: "First-pass", cell: (e) => pct(e.first_pass_acceptance_rate) },
@@ -139,21 +230,66 @@ function LeaderboardView({ role }: { role: string }) {
             />
             {s.excluded.length > 0 && (
               <div className="mt-3">
-                <div className="mb-1 text-sm font-medium">Dikecualikan (gate keamanan/authority/bukti — tidak ditebus skor)</div>
+                <div className="mb-1 text-sm font-medium">Dikecualikan (gate keamanan/authority/bukti, regresi kritis, terms rute — tidak ditebus skor)</div>
                 <Table
                   rows={s.excluded}
-                  rowKey={(e) => e.configuration_hash}
+                  rowKey={entryKey}
                   columns={[
                     { header: "Konfigurasi", cell: (e) => e.label },
                     { header: "Alasan", cell: (e) => <MappedBadge value={e.eligibility.status} map={ELIGIBILITY} /> },
-                    { header: "Gate", cell: (e) => [...e.eligibility.gates_failed.map((g) => `${g}: FAIL`), ...e.eligibility.gates_unproven.map((g) => `${g}: belum terbukti`)].join(", ") },
+                    {
+                      header: "Gate",
+                      cell: (e) =>
+                        [
+                          ...e.eligibility.gates_failed.map((g) => `${g}: FAIL`),
+                          ...e.eligibility.gates_unproven.map((g) => `${g}: belum terbukti`),
+                          ...(e.eligibility.route_reasons ?? []),
+                        ].join(", "),
+                    },
                     { header: "n", cell: (e) => e.sample_size },
+                  ]}
+                />
+              </div>
+            )}
+            {(s.not_comparable ?? []).length > 0 && (
+              <div className="mt-3">
+                <div className="mb-1 text-sm font-medium">Tidak dibandingkan (limit/suite/environment berbeda dari referensi)</div>
+                <Table
+                  rows={s.not_comparable ?? []}
+                  rowKey={entryKey}
+                  columns={[
+                    { header: "Konfigurasi", cell: (e) => e.label },
+                    { header: "Topologi", cell: (e) => e.topology ?? "—" },
+                    { header: "n", cell: (e) => e.sample_size },
+                    { header: "Diterima", cell: (e) => pct(e.final_acceptance_rate) },
                   ]}
                 />
               </div>
             )}
           </Card>
         ))}
+      {b.combined && (
+        <Card title="Ranking gabungan (bobot workload yang dideklarasikan)">
+          <p className="mb-2 text-xs text-ink-3">
+            Bobot: {Object.entries(b.combined.weights).map(([k, v]) => `${k} × ${v}`).join(", ")} · {b.combined.rule}
+          </p>
+          <Table
+            rows={b.combined.ranking}
+            rowKey={(e) => e.entry_key}
+            empty="Belum ada konfigurasi dengan hasil eligible pada semua suite berbobot"
+            columns={[
+              { header: "Peringkat", cell: (e) => <span className="font-semibold">#{e.rank}{e.tie ? " (seri)" : ""}</span> },
+              { header: "Konfigurasi", cell: (e) => e.label },
+              { header: "Skor", cell: (e) => pct(e.score) },
+              { header: "Interval", cell: (e) => `${pct(e.interval[0])}–${pct(e.interval[1])}` },
+              { header: "n", cell: (e) => e.sample_size },
+            ]}
+          />
+          {b.combined.incomplete.length > 0 && (
+            <p className="mt-2 text-xs text-ink-3">Tidak diranking (hasil belum lengkap): {b.combined.incomplete.map((i) => i.label).join(", ")}</p>
+          )}
+        </Card>
+      )}
       <Card title="Kandidat yang BELUM DIUJI">
         <Table
           rows={b.candidates_not_tested}
@@ -180,6 +316,64 @@ function LeaderboardView({ role }: { role: string }) {
   );
 }
 
+function sideSummary(side: ComparisonSide | null) {
+  if (!side) return "—";
+  if (!side.result) return `${side.status} (${side.run_ids.length} run)`;
+  const e = side.result;
+  const rate = e.final_acceptance_rate == null ? "UNKNOWN" : `${Math.round(e.final_acceptance_rate * 100)}%`;
+  const cost = e.metrics.economics.worker_cost_per_accepted_usd;
+  return `accepted ${rate} · n=${e.sample_size} · biaya/accepted ${cost == null ? e.metrics.economics.worker_cost_status : `$${cost}`}`;
+}
+
+/** §39/§40 "Controlled comparison": the side-by-side verdict of a proposal's baseline and candidate runs. */
+function ComparisonView({ proposalId }: { proposalId: string }) {
+  const q = useQuery({
+    queryKey: ["eval", "comparison", proposalId],
+    queryFn: () => get<Comparison>(`/api/eval/comparisons/${encodeURIComponent(proposalId)}`),
+  });
+  if (q.isLoading) return <Loading />;
+  if (q.error) return <ErrorBox error={q.error} />;
+  const c = q.data;
+  if (!c) return null;
+  return (
+    <div className="space-y-2">
+      <p className="text-sm">
+        Proposal <Mono>{c.proposal_id}</Mono> · status <b>{c.status}</b>
+      </p>
+      <Table
+        rows={c.suites}
+        rowKey={(x) => x.suite_key}
+        empty="Belum ada run perbandingan"
+        columns={[
+          { header: "Suite", cell: (x) => <Mono>{x.suite_key}</Mono> },
+          { header: "Baseline", cell: (x) => sideSummary(x.baseline) },
+          { header: "Kandidat", cell: (x) => sideSummary(x.candidate) },
+          { header: "Kondisi setara", cell: (x) => (x.equal_conditions ? "Ya" : "Tidak") },
+          {
+            header: "Verdict",
+            cell: (x) => {
+              const [status, label] = VERDICT[x.verdict] ?? [x.verdict, x.verdict];
+              return (
+                <span>
+                  <StatusBadge status={status} label={label} />
+                  {x.delta?.interval && (
+                    <span className="block text-xs text-ink-3">
+                      Δ {x.delta.acceptance_rate} [{x.delta.interval[0]}, {x.delta.interval[1]}]
+                    </span>
+                  )}
+                </span>
+              );
+            },
+          },
+        ]}
+      />
+      <p className="text-xs text-ink-3">
+        {c.rule} Rute tidak berubah otomatis ({c.route_change}).
+      </p>
+    </div>
+  );
+}
+
 function PlanRunForm({ suites }: { suites: Suite[] }) {
   const qc = useQueryClient();
   const [suite, setSuite] = useState(suites[0]?.suite_key ?? "");
@@ -196,6 +390,7 @@ function PlanRunForm({ suites }: { suites: Suite[] }) {
     context_params: "{}",
   });
   const [topology, setTopology] = useState("");
+  const [baseline, setBaseline] = useState(false);
   const [reps, setReps] = useState("3");
   const [limits, setLimits] = useState({ max_attempts: "2", max_minutes: "30", max_cost_usd: "0" });
   const [err, setErr] = useState<string | null>(null);
@@ -216,6 +411,7 @@ function PlanRunForm({ suites }: { suites: Suite[] }) {
     m.mutate({
       suite_key: suite,
       topology: topology || null,
+      is_baseline: baseline,
       repetitions: Number(reps),
       configuration: { ...cfg, tools: cfg.tools.split(",").map((t) => t.trim()).filter(Boolean), context_params: ctx },
       limits: { max_attempts: Number(limits.max_attempts), max_minutes: Number(limits.max_minutes), max_cost_usd: Number(limits.max_cost_usd) },
@@ -273,6 +469,10 @@ function PlanRunForm({ suites }: { suites: Suite[] }) {
           <input className={inputClass} type="number" min={0} step="0.01" value={limits.max_cost_usd} onChange={(e) => setLimits({ ...limits, max_cost_usd: e.target.value })} />
         </Field>
       </div>
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={baseline} onChange={(e) => setBaseline(e.target.checked)} />
+        Tetapkan sebagai baseline suite ini (kandidat lain ditampilkan dengan selisih terhadapnya)
+      </label>
       {err && <ErrorBox error={new Error(err)} />}
       <ErrorBox error={m.error} />
       {m.data && <Notice>Run {m.data.id.slice(0, 8)} tercatat PLANNED (hash {shortHash(m.data.configuration_hash)}).</Notice>}
@@ -292,6 +492,7 @@ export default function EvaluationPage() {
   });
   const runs = useQuery({ queryKey: ["eval", "runs"], queryFn: () => get<{ items: Run[] }>("/api/eval/runs") });
   const roles = Array.from(new Set((suites.data?.items ?? []).map((s) => s.role_key).filter((r): r is string => Boolean(r))));
+  const proposalIds = Array.from(new Set((runs.data?.items ?? []).map((r) => r.proposal_id).filter((p): p is string => Boolean(p))));
   const [role, setRole] = useState("");
 
   return (
@@ -435,11 +636,37 @@ export default function EvaluationPage() {
                       { header: "Suite", cell: (r) => <Mono>{r.suite_key}</Mono> },
                       { header: "Konfigurasi", cell: (r) => <span>{String(r.configuration.model_id)} @ {String(r.configuration.provider_route)}</span> },
                       { header: "Topologi", cell: (r) => r.topology ?? "—" },
+                      { header: "Baseline", cell: (r) => (r.is_baseline ? "Ya" : "—") },
                       { header: "Status", cell: (r) => <StatusBadge status={r.status === "PLANNED" ? "PENDING" : r.status === "COMPLETED" ? "CONFIGURED" : r.status} label={r.status} /> },
+                      {
+                        header: "Eksekusi",
+                        cell: (r) =>
+                          r.execution ? (
+                            <span title={r.execution.note}>
+                              {EXECUTION_LABEL[r.execution.status] ?? r.execution.status}
+                              {r.execution.fixtures === "NOT_AVAILABLE_IN_BUILD" && <span className="block text-xs text-ink-3">Fixture held-out belum tersedia</span>}
+                            </span>
+                          ) : (
+                            "—"
+                          ),
+                      },
                       { header: "n / gagal", cell: (r) => `${r.sample_size} / ${r.failures.length}` },
                     ]}
                   />
+                  <p className="mt-2 text-xs text-ink-3">
+                    Eksekusi: pemilik memulai run, menautkan task yang dijalankan workforce ke tiap slot kasus, lalu kolektor tepercaya merekam
+                    sampel dari catatan task/verifier (<Mono>aeos eval start|bind|collect</Mono>). Planning tidak menjalankan model.
+                  </p>
                 </Card>
+                {proposalIds.length > 0 && (
+                  <Card title="Perbandingan terkendali per proposal (baseline vs kandidat, §40)">
+                    <div className="space-y-4">
+                      {proposalIds.map((pid) => (
+                        <ComparisonView key={pid} proposalId={pid} />
+                      ))}
+                    </div>
+                  </Card>
+                )}
               </div>
             ),
           },

@@ -13,14 +13,34 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
   const [budgetId, setBudgetId] = useState("");
   const [days, setDays] = useState<string>("14");
   const [termsReviewed, setTermsReviewed] = useState(false);
+  const [termsNote, setTermsNote] = useState("");
+  const [region, setRegion] = useState(route.region ?? "");
+  const [evalRuns, setEvalRuns] = useState("");
+  const [recTraining, setRecTraining] = useState<"" | "yes" | "no">("");
+  const [recTrial, setRecTrial] = useState<"" | "yes" | "no">("");
   const activate = useActivateRoute(route.route_key);
   const paid = !route.effectively_free;
-  const restricted =
+  // §23 "klaim provider bukan bukti": UNKNOWN training/trial terms limit the route to PUBLIC until the owner records
+  // their own reading of the provider terms (terms_record, stored on the decision).
+  const termsUnknown = (route.terms_unknown ?? []).length > 0;
+  const flagRestricted =
     route.identity_status === "UNVERIFIED" ||
     route.data_terms?.may_use_inputs_for_training === true ||
     route.data_terms?.trial_only_no_confidential === true;
+  const recordStarted = termsUnknown && (recTraining !== "" || recTrial !== "");
+  const recordComplete = termsUnknown && termsReviewed && recTraining !== "" && recTrial !== "" && termsNote.trim().length >= 10;
+  const recordClears = recordComplete && recTraining === "no" && recTrial === "no" && !flagRestricted;
+  const restricted = (Boolean(route.terms_restriction) && !recordClears) || flagRestricted;
   const decisionKind = mode === "APPROVED" ? "ROUTE_ACTIVATION" : "TRIAL";
-  const canSubmit = rationale.trim().length >= 10 && classes.length > 0 && (!paid || budgetId.trim().length > 0);
+  const evalRunIds = evalRuns.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+  const canSubmit =
+    rationale.trim().length >= 10 &&
+    classes.length > 0 &&
+    (!paid || budgetId.trim().length > 0) &&
+    (mode !== "APPROVED" || evalRunIds.length > 0) &&
+    (!route.region_restricted || region.trim().length >= 2) &&
+    (!recordStarted || recordComplete) &&
+    (!restricted || classes.every((c) => c === "PUBLIC"));
 
   const toggle = (c: string) => setClasses((cur) => (cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c]));
 
@@ -34,6 +54,12 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
         budget_decision_id: paid ? budgetId.trim() : null,
         expires_in_days: days ? Number(days) : null,
         terms_reviewed: termsReviewed,
+        terms_note: termsReviewed ? termsNote.trim() : "",
+        region: region.trim() ? region.trim().toUpperCase() : null,
+        terms_record: recordComplete
+          ? { may_use_inputs_for_training: recTraining === "yes", trial_only_no_confidential: recTrial === "yes", note: termsNote.trim() }
+          : null,
+        eval_run_ids: mode === "APPROVED" ? evalRunIds : null,
       },
       { onSuccess: onClose },
     );
@@ -68,6 +94,17 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
               <option value="APPROVED">APPROVED - rute produksi pekerja</option>
             </select>
           </Field>
+          {mode === "APPROVED" && (
+            <>
+              <Notice tone="warn">
+                Rute produksi hanya untuk konfigurasi yang diizinkan <b>dan telah diuji</b> (§23): sebutkan EvalRun COMPLETED yang lulus
+                gate pada konfigurasi persis ini. Tanpa itu gunakan TRIAL.
+              </Notice>
+              <Field label="ID EvalRun bukti (wajib untuk APPROVED)" hint="Pisahkan dengan koma; run konfigurasi lain atau yang gagal gate ditolak backend.">
+                <input className={inputClass} value={evalRuns} onChange={(e) => setEvalRuns(e.target.value)} placeholder="uuid EvalRun" />
+              </Field>
+            </>
+          )}
           <Field label="Alasan (wajib)" hint="Minimal 10 karakter; tersimpan pada keputusan dan audit.">
             <textarea className={inputClass} rows={3} value={rationale} onChange={(e) => setRationale(e.target.value)} />
           </Field>
@@ -76,13 +113,22 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
             <div className="flex flex-wrap gap-3 text-sm">
               {DATA_CLASSES.map((c) => (
                 <label key={c} className="inline-flex items-center gap-1">
-                  <input type="checkbox" checked={classes.includes(c)} disabled={restricted && c !== "PUBLIC"} onChange={() => toggle(c)} />
+                  <input type="checkbox" checked={classes.includes(c)} disabled={restricted && c !== "PUBLIC" && !classes.includes(c)} onChange={() => toggle(c)} />
                   {c}
                 </label>
               ))}
             </div>
-            {restricted && <p className="mt-1 text-xs text-warn">Data terms/identitas rute ini hanya mengizinkan PUBLIC.</p>}
+            {restricted && (
+              <p className="mt-1 text-xs text-warn">
+                Data terms/identitas rute ini hanya mengizinkan PUBLIC{route.terms_restriction ? ` (${route.terms_restriction})` : ""}.
+              </p>
+            )}
           </fieldset>
+          {route.region_restricted && (
+            <Field label="Region / residensi yang Anda periksa (wajib)" hint="Provider membatasi region; contoh ID, EU, GLOBAL.">
+              <input className={inputClass} value={region} onChange={(e) => setRegion(e.target.value)} placeholder="ID" />
+            </Field>
+          )}
           {paid && (
             <Field label="ID keputusan BUDGET">
               <input className={inputClass} value={budgetId} onChange={(e) => setBudgetId(e.target.value)} placeholder="uuid keputusan BUDGET" />
@@ -93,8 +139,40 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
           </Field>
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" checked={termsReviewed} onChange={(e) => setTermsReviewed(e.target.checked)} />
-            Saya sudah membaca ulang harga dan data terms rute ini sekarang (memperbarui waktu pemeriksaan).
+            Saya sudah membaca ulang harga dan data terms rute ini sekarang (memperbarui waktu pemeriksaan). Wajib bila belum pernah
+            diperiksa pemilik atau lebih dari 30 hari; tanggal riset katalog bukan pemeriksaan terms.
           </label>
+          {termsReviewed && (
+            <Field label="Catatan pemeriksaan terms" hint="Apa yang dibaca (retensi, pelatihan, trial); tersimpan pada keputusan.">
+              <input className={inputClass} value={termsNote} onChange={(e) => setTermsNote(e.target.value)} />
+            </Field>
+          )}
+          {termsUnknown && (
+            <fieldset className="rounded border border-line p-3">
+              <legend className="px-1 text-sm font-medium">Terms belum diketahui: catat bacaan Anda</legend>
+              <p className="mb-2 text-xs text-ink-3">
+                Katalog tidak menyatakan {(route.terms_unknown ?? []).join(", ")}. Klaim provider bukan bukti; tanpa catatan Anda rute ini
+                hanya untuk PUBLIC. Wajib: centang pemeriksaan terms di atas dan catatan minimal 10 karakter.
+              </p>
+              <Field label="Input dipakai untuk pelatihan model?">
+                <select aria-label="Input dipakai untuk pelatihan model" className={inputClass} value={recTraining} onChange={(e) => setRecTraining(e.target.value as "" | "yes" | "no")}>
+                  <option value="">Belum dicatat (UNKNOWN)</option>
+                  <option value="yes">Ya - hanya PUBLIC</option>
+                  <option value="no">Tidak</option>
+                </select>
+              </Field>
+              <Field label="Hanya trial / tanpa data rahasia?">
+                <select aria-label="Hanya trial tanpa data rahasia" className={inputClass} value={recTrial} onChange={(e) => setRecTrial(e.target.value as "" | "yes" | "no")}>
+                  <option value="">Belum dicatat (UNKNOWN)</option>
+                  <option value="yes">Ya - hanya PUBLIC</option>
+                  <option value="no">Tidak</option>
+                </select>
+              </Field>
+              {recordStarted && !recordComplete && (
+                <p className="mt-1 text-xs text-warn">Lengkapi kedua jawaban, centang pemeriksaan terms dan isi catatan (min 10 karakter).</p>
+              )}
+            </fieldset>
+          )}
         </div>
         {activate.error && (
           <div className="mt-3">

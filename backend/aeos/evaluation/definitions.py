@@ -362,12 +362,43 @@ DIMENSIONS: list[dict[str, Any]] = [
      "explain": "End-to-end p50/p95 latency dan queue/quota delays, dengan ukuran sampel",
      "metrics": ["latency_p50_s", "latency_p95_s", "queue_wait_p50_s", "quota_delay_total_s", "sample_size"]},
 ]
+# §44 measures that are not one of the seven §43 dimensions; computed under ``metrics.usage`` and the
+# outcome/contract/reliability blocks (critical vs adjacent regression, security violations, merge conflicts).
+SECTION_44_METRICS: list[dict[str, Any]] = [
+    {"key": "usage", "label": "Usage (§44)",
+     "explain": "Token konteks/koordinasi, penggunaan worker, merge conflict; regresi kritis vs adjacent dipisah",
+     "metrics": ["context_tokens", "coordination_tokens", "worker_tokens", "merge_conflicts", "critical_regressions",
+                 "adjacent_regressions", "security_violations"]},
+]
 
 # Fields that make up an AIConfiguration (§43 unit of evaluation, §23 ModelRoute contract).
 AI_CONFIGURATION_FIELDS = ("model_id", "model_version", "provider", "provider_route", "harness", "harness_version",
                            "prompt_revision", "tools", "policy_version", "context_params")
+# §23 "Model/quantization/inference backend/hardware membentuk konfigurasi uji tersendiri": a local/open-weight
+# configuration must state them (UNKNOWN explicitly), so a GGUF/quantized variant never shares an identity
+# (and therefore never inherits results) with another build of the same model.
+LOCAL_CONFIGURATION_FIELDS = ("quantization", "inference_backend", "hardware")
+LOCAL_PROVIDERS = frozenset({"local"})
 GATES = ("security", "authority", "evidence")
 SAMPLE_STATUSES = ("ACCEPTED", "REJECTED", "FAILED", "TIMEOUT", "QUOTA_INTERRUPTED", "CANCELLED")
 FAILURE_STATUSES = ("FAILED", "TIMEOUT", "QUOTA_INTERRUPTED", "CANCELLED")
-# Composite (cross-suite) ranking needs declared workload weights; none are declared yet (§43).
+# Composite (cross-suite) ranking needs declared workload weights (§43). None are declared in code; the
+# owner declares them per role as a POLICY decision (target ``eval_workload_weights``/<role>).
 ROLE_WORKLOAD_WEIGHTS: dict[str, dict[str, float]] = {}
+WEIGHTS_TARGET_TYPE = "eval_workload_weights"
+# §40/§43 "terms/provider eligibility as gate": the data class the evaluated workloads represent. Held-out
+# fixtures are generated from the accepted baseline of project code, i.e. INTERNAL project data.
+WORKLOAD_DATA_CLASSIFICATION = "INTERNAL"
+SUITE_DATA_CLASSIFICATION: dict[str, str] = {}
+# §44 measures collected per sample (in addition to the §43 dimensions).
+SECTION_44_SAMPLE_FIELDS = ("context_tokens", "coordination_tokens", "worker_tokens", "merge_conflicts",
+                            "critical_regressions", "adjacent_regressions", "security_violations")
+# Where executable graders live: the held-out case definitions above are descriptions; an executable grader
+# is a trusted suite registered by the owner outside every worker workspace (§21, ADR-0060).
+GRADER_NOTE = ("Kasus held-out ini adalah definisi. Grader yang dapat dieksekusi didaftarkan pemilik sebagai "
+               "trusted suite di luar workspace worker (ADR-0060); perubahan backend/aeos/evaluation/** oleh worker "
+               "dikarantina (protected path).")
+
+
+def suite_data_classification(suite_key: str) -> str:
+    return SUITE_DATA_CLASSIFICATION.get(suite_key, WORKLOAD_DATA_CLASSIFICATION)
