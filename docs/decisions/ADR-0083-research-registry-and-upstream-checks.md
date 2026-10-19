@@ -50,3 +50,32 @@ REJECTED/DEFERRED; ENABLED only after a legitimate decision and configuration ch
 
 * Non-GitHub sources (vendor docs) are reviewed manually; the API answers `UPSTREAM_CHECK_NOT_SUPPORTED`.
 * Scheduled update checks are out of scope until configured as an opt-in feature (§47).
+
+## Amendment 2026-10-19 (audit gap closure, §39 item 2, §40 source verification, §47, §52)
+
+1. **Owner-recorded fields.** `PATCH /api/research/{id}` (admin) records maintainer, source version
+   (pin), data/terms with the date they were read (`terms_checked_at`), compatibility, distribution
+   channel and supersession; known limitations only on manual rows (seeded rows keep the master's text).
+   Shared rows are never edited from OFFICE; §52 references are read-only. Check Upstream fills an empty
+   maintainer from the observed owner of an unchanged identity.
+2. **Lifecycle stages are reachable.** `POST /api/research/{id}/confirm-source` moves DISCOVERED to
+   SOURCE_VERIFIED only after a live check with status OK and identity CHECKED. A TRIAL decision moves
+   linked SOURCE_VERIFIED entries to CONTROLLED_EVAL (CANARY for a canary trial); trial evidence moves
+   them to RECOMMENDED_FOR_PROMOTION; ENABLED only with an ACCEPTED outcome after the lawful
+   configuration change; a rollback/failure returns the previous stage. Each step is a history event.
+3. **Advisories and dependency diff by code.** Check Upstream also reads the repository's published
+   security advisories (public); `advisories.summary` evaluates GitHub vulnerable ranges against the
+   pin (unparseable = UNKNOWN, a failed read = ERROR, never "clean"). An advisory affecting the
+   candidate pin blocks trial/promotion admission. `POST /api/research/{id}/dependency-diff`
+   (base/head refs) fetches the manifests/lockfiles at both refs through the public contents API and
+   stores a dated diff (licenses of new packages stay UNKNOWN).
+4. **Freshness and manual review.** `POST /api/research/{id}/mark-reviewed` records a dated, audited
+   manual review of a source that Check Upstream cannot read; freshness uses the later of the live check
+   and the manual review (STALE after 30 days). It never changes identity status or lifecycle.
+5. **Platform results and notices.** `test_results` receives this platform's trial evidence (E2) and
+   outcomes (E3) from proposals; the list shows the latest as "platform result". An update of a pinned
+   entry linked to an inventory component produces a concise prefilled UPGRADE draft link
+   (`update_notice`, event payload `relevant`/`draft_link`) — never an automatic proposal or install.
+6. **Stated limits.** Every listing carries the §47 conclusion ("belum ada bukti DLY AEOS mengungguli
+   seluruh metode") and the curation/coverage limit (GitHub Trending not verifiable; not exhaustive;
+   popularity is not quality); every §46 practice carries the non-affiliation limitation.

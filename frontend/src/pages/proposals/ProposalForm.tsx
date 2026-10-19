@@ -33,6 +33,7 @@ export function ProposalForm({
   initialComponent,
   initialSource,
   initialKind,
+  initialPin,
   onCreated,
   onCancel,
 }: {
@@ -40,6 +41,8 @@ export function ProposalForm({
   initialComponent?: string | null;
   initialSource?: string | null;
   initialKind?: Kind | null;
+  /** Prefilled from a research "update available" draft link (§47): the owner still submits it. */
+  initialPin?: string | null;
   onCreated: (p: ProposalDetail) => void;
   onCancel: () => void;
 }) {
@@ -51,7 +54,8 @@ export function ProposalForm({
   const [benefit, setBenefit] = useState("");
   const [scopeType, setScopeType] = useState<"PLATFORM" | "PROJECT">("PLATFORM");
   const [components, setComponents] = useState(initialComponent ?? "");
-  const [pin, setPin] = useState("");
+  const [candidates, setCandidates] = useState("");
+  const [pin, setPin] = useState(initialPin ?? "");
   const [costUsd, setCostUsd] = useState("");
   const [maxMinutes, setMaxMinutes] = useState("");
   const [maxAttempts, setMaxAttempts] = useState("");
@@ -76,6 +80,7 @@ export function ProposalForm({
         scope_type: scopeType,
         project_id: scopeType === "PROJECT" ? projectId : null,
         existing_component_ids: lines(components),
+        candidate_component_ids: lines(candidates),
         candidate_pin: pin || null,
         attachment_ids: attachments.map((a) => a.id),
         limits: Object.fromEntries(
@@ -142,7 +147,10 @@ export function ProposalForm({
         <Field label="Komponen lama (ID inventaris)" hint="Wajib untuk REPLACE/UPGRADE/REMOVE; pisahkan dengan koma">
           <input className={inputClass} value={components} onChange={(e) => setComponents(e.target.value)} placeholder="opencode" />
         </Field>
-        <Field label="Masalah / tujuan">
+        <Field label="Komponen kandidat (ID inventaris, opsional)" hint="Komponen baru di install manifest; status ACTIVE dan ENABLED dibaca dari komponen ini">
+          <input className={inputClass} value={candidates} onChange={(e) => setCandidates(e.target.value)} placeholder="temporal" />
+        </Field>
+        <Field label="Masalah / tujuan" hint="Wajib sebelum TRIAL: manfaat harus dapat diuji">
           <textarea className={inputClass} rows={3} value={problem} onChange={(e) => setProblem(e.target.value)} />
         </Field>
         <Field label="Manfaat yang diharapkan" hint="Persentase penghematan tidak ditampilkan tanpa metode pengukuran">

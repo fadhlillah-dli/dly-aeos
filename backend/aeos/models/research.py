@@ -61,6 +61,11 @@ class ResearchEntry(IdMixin, TimestampMixin, Base):
     submitted_domain: Mapped[str | None] = mapped_column(String(16), nullable=True)  # session domain of add-by-URL
     added_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mode: Mapped[str] = mapped_column(String(16), default="DESIGN")  # seeded rows are design catalog
+    # --- 0002 (§39 item 2, §47, §52): owner-recorded distribution channel (npm/pypi/binary/container digest),
+    # the date the terms/privacy page was last read, and a dated manual review of a non-GitHub source.
+    distribution: Mapped[str] = mapped_column(String(256), default="")
+    terms_checked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class ChangeProposal(IdMixin, TimestampMixin, Base):
@@ -103,6 +108,15 @@ class ChangeProposal(IdMixin, TimestampMixin, Base):
     research_entry_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     review_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # --- 0002 (§39/§40/§41): owner-declared plan (acceptance criteria before the trial, replacement/
+    # cutover/rollback plan, REMOVE closure, canary), part of the candidate hash so an edit re-binds.
+    owner_plan: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Links validated per domain: publication/release/eval-run/observation/ADR/plan records (§40, §41).
+    links: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Trial launched under the TRIAL decision: plan/version/task ids, caps, status, stop record (§40).
+    trial: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Claude checkpoint review of the attached evidence, bound to candidate hash + evidence set (§39, §40).
+    checkpoint_review: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class EvalSuite(IdMixin, TimestampMixin, Base):

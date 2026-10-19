@@ -746,6 +746,16 @@ def admission_check(session: Session, task_id: str) -> Admission:
                                               "limits.max_cost_usd; no paid run without a cost decision"))
         else:
             adm.est_usd, adm.est_tokens = est_usd, est_tokens
+    # §40 trial admission: a TaskSpec launched for a change-proposal trial runs only while its TRIAL decision is
+    # still bound to the live baseline/candidate/scope (provider, operations, caps) - re-checked every attempt.
+    try:
+        from aeos.proposals import facade as proposals
+
+        for code, why in proposals.trial_admission_problems(session, task, route=adm.route):
+            adm.blocks.append((code, why))
+    except (ImportError, ModuleNotFoundError):  # pragma: no cover - proposals ships with the foundation
+        if any(str(a).startswith("change_proposal:") for a in task.input_artifacts or []):
+            adm.blocks.append(("MODULE_UNAVAILABLE", "proposal trial binding cannot be verified (fail closed)"))
     adm.admitted = not adm.waits and not adm.blocks
     return adm
 
@@ -1296,6 +1306,14 @@ def _authorisation_lost(session: Session, run: WorkerRun, te: TaskExecution) -> 
         ok, owhy = ext.office_external_allowed(session)
         if not ok:
             return owhy
+    try:
+        from aeos.proposals import facade as proposals
+
+        lost = proposals.trial_authorisation_lost(session, run.task_id)
+    except (ImportError, ModuleNotFoundError):  # pragma: no cover - proposals ships with the foundation
+        lost = None
+    if lost:
+        return f"proposal trial authority lost: {lost}"[:500]
     return None
 
 

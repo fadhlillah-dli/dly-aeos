@@ -42,6 +42,10 @@ SUPER_ADMIN account.
       (or `--force-maintenance`),
    6. updates `ACTIVE.json`, keeping the previous release as `previous`.
    Any failure leaves the old release active and raises a HIGH alert.
+   When the release implements a ChangeProposal, add `--proposal <proposal-id>`: the promotion is
+   refused unless that proposal holds an ACTIVE PROMOTION decision still bound to its candidate
+   (`PROPOSAL_PROMOTION_NOT_BOUND`), and the release id is recorded on the proposal (§40 "human merge
+   atau privileged promotion setelah keputusan").
 5. **Restart** the control plane so the promoted code is what runs.
 
 ## Steps — rollback

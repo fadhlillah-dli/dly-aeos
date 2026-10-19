@@ -8,6 +8,10 @@ import type { CostItem, Dimension, ReviewPackage } from "./types";
 
 const IMPACT_LABELS: Record<string, string> = {
   contracts: "Kontrak / consumer",
+  schema_api_tools: "Schema / API / nama tool",
+  hooks_prompts_memory: "Hooks / prompt / memory",
+  identity: "Identity",
+  resource_hardware: "Resource / hardware",
   state_data_migration: "State, data & migration",
   own_auth_cap_enf: "Policy / OWN-AUTH-CAP-ENF",
   secrets: "Secrets (referensi saja)",
@@ -19,7 +23,8 @@ const IMPACT_LABELS: Record<string, string> = {
 };
 
 const COST_LABELS: Record<string, string> = {
-  cash: "Biaya tunai",
+  cash: "Biaya tunai (kandidat)",
+  baseline_cash_30d: "Biaya baseline 30 hari (ledger)",
   compute: "Compute",
   ci: "CI",
   storage: "Storage",
@@ -117,7 +122,30 @@ export function SourceSection({ pkg }: { pkg: ReviewPackage }) {
           { header: "Rilis / commit", cell: (r) => <Unknown v={r.release_or_commit} /> },
           { header: "Maintainer", cell: (r) => <Unknown v={r.maintainer} /> },
           { header: "Lisensi", cell: (r) => <Unknown v={r.license} /> },
-          { header: "Distribusi / terms", cell: (r) => <span><Unknown v={r.distribution} /> <Unknown v={r.terms} /></span> },
+          {
+            header: "Distribusi / terms",
+            cell: (r) => (
+              <span>
+                <Unknown v={r.distribution} /> <Unknown v={r.terms} />
+                <span className="block text-xs text-ink-3">{r.terms_checked_at ? `terms dibaca ${absoluteTime(r.terms_checked_at)}` : "terms belum dibaca ulang"}</span>
+              </span>
+            ),
+          },
+          {
+            header: "Advisory",
+            cell: (r) =>
+              r.advisories ? (
+                <span>
+                  <StatusBadge
+                    status={r.advisories.status === "AFFECTED" ? "BLOCKED" : r.advisories.status === "NOT_AFFECTED" || r.advisories.status === "NONE" ? "PASS" : "UNKNOWN"}
+                    label={r.advisories.status}
+                  />
+                  {r.advisories.affected.length > 0 && <span className="block text-xs">{r.advisories.affected.join(", ")}</span>}
+                </span>
+              ) : (
+                <StatusBadge status="UNKNOWN" />
+              ),
+          },
           { header: "Diperiksa", cell: (r) => (r.checked_at ? absoluteTime(r.checked_at) : `belum live (riset ${r.research_date ?? "?"})`) },
           { header: "Catatan", cell: (r) => <span className="text-xs">{[...r.flags, r.note].filter(Boolean).join(" · ")}</span> },
         ]}
@@ -162,9 +190,60 @@ export function BaselineSection({ pkg }: { pkg: ReviewPackage }) {
               </span>
             ),
           },
+          {
+            header: "Kekurangan tercatat",
+            cell: (c) => {
+              const issues = (c as { known_issues?: { source: string; issue: string }[] }).known_issues ?? [];
+              return issues.length ? (
+                <ul className="list-disc pl-4 text-xs">
+                  {issues.map((i, n) => (
+                    <li key={n}>{i.issue}</li>
+                  ))}
+                </ul>
+              ) : (
+                "—"
+              );
+            },
+          },
         ]}
       />
+      {b.overlap && b.overlap.length > 0 && (
+        <div className="mt-3 text-sm">
+          <div className="font-medium">Komponen yang sudah ada dengan capability serupa (jelaskan mengapa tidak cukup)</div>
+          <ul className="list-disc pl-5">
+            {b.overlap.map((o) => (
+              <li key={o.component_id}>
+                <Link to={`/tools/${o.component_id}`}>{o.name}</Link> ({o.kind}, {o.enablement}) — {o.function}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </Section>
+  );
+}
+
+/** §39 "Security/Privacy menilai batas data/akses": code assessment; BLOCKED blocks TRIAL/PROMOTE. */
+export function SecuritySection({ pkg }: { pkg: ReviewPackage }) {
+  const sp = pkg.security_privacy;
+  if (!sp) return null;
+  return (
+    <Card title="Security / Privacy — batas data dan akses kandidat">
+      <div className="mb-2 flex items-center gap-2 text-sm">
+        <StatusBadge status={sp.status === "PASS" ? "PASS" : sp.status === "BLOCKED" ? "BLOCKED" : "UNKNOWN"} label={sp.status} />
+        <span className="text-xs text-ink-3">{sp.rule}</span>
+      </div>
+      <Table
+        rows={Object.entries(sp.dimensions)}
+        rowKey={([k]) => k}
+        columns={[
+          { header: "Dimensi", cell: ([k]) => <Mono>{k}</Mono> },
+          { header: "Status", cell: ([, d]) => <StatusBadge status={d.status === "PASS" ? "PASS" : d.status === "BLOCKED" ? "BLOCKED" : d.status === "NOT_APPLICABLE" ? "NOT_APPLICABLE" : "UNKNOWN"} label={d.status} /> },
+          { header: "Catatan", cell: ([, d]) => <span className="text-xs">{d.note}{d.items?.length ? ` (${d.items.join(", ")})` : ""}</span> },
+        ]}
+      />
+      <p className="mt-2 text-xs text-ink-3">{sp.performed_by}</p>
+    </Card>
   );
 }
 
@@ -208,6 +287,7 @@ export function ImpactSection({ pkg }: { pkg: ReviewPackage }) {
             ) : (
               <p className="text-sm text-ink-3">{d.reason}</p>
             )}
+            {d.targets && d.targets.length > 0 && <p className="mt-1 text-xs text-ink-3">Target rollback (bukan bukti): {d.targets.join("; ")}</p>}
           </div>
         ))}
       </div>
@@ -243,6 +323,9 @@ export function ExperimentSection({ pkg }: { pkg: ReviewPackage }) {
     isolation: "Isolasi",
     limits: "Batas",
     acceptance: "Acceptance (ditetapkan sebelum eksekusi)",
+    owner_acceptance: "Acceptance terukur dari pemilik",
+    acceptance_status: "Status acceptance",
+    canary_plan: "Rencana canary",
     stop_conditions: "Stop conditions",
     collector_verifier: "Collector / verifier",
     canary: "Canary",
@@ -256,7 +339,10 @@ export function ExperimentSection({ pkg }: { pkg: ReviewPackage }) {
     adapter_consumer_changes: "Perubahan adapter/consumer",
     credential_egress_changes: "Perubahan credential/egress",
     cutover_order: "Urutan cutover",
+    retire_old_version_after: "Versi lama boleh dihentikan",
     coexistence: "Masa coexistence",
+    coexistence_safe: "Coexistence aman?",
+    data_state_relations: "Ada state/data (perlu restore teruji)",
     success_stop_criteria: "Kriteria sukses/stop",
     operations_owner: "Pemilik operasi",
     rollback_or_forward_recovery: "Rollback / forward recovery",
@@ -269,6 +355,27 @@ export function ExperimentSection({ pkg }: { pkg: ReviewPackage }) {
         <div className="mt-4 border-t border-line pt-3">
           <div className="mb-2 text-sm font-medium">Rencana penggantian dan rollback (§40)</div>
           <KeyValue items={Object.entries(rp).map(([k, v]) => [rpLabels[k] ?? k, renderValue(v)] as [ReactNode, ReactNode])} />
+        </div>
+      )}
+      {pkg.upgrade_delta && (
+        <div className="mt-4 border-t border-line pt-3">
+          <div className="mb-2 text-sm font-medium">Delta UPGRADE: versi / publisher / lisensi / terms / schema</div>
+          {pkg.upgrade_delta.components.map((c, i) => (
+            <KeyValue key={i} items={Object.entries(c).map(([k, v]) => [k, renderValue(v)] as [ReactNode, ReactNode])} />
+          ))}
+        </div>
+      )}
+      {pkg.removal_plan && (
+        <div className="mt-4 border-t border-line pt-3">
+          <div className="mb-1 text-sm font-medium">Penutupan REMOVE/RETIRE: dependency, data, identity, job, support</div>
+          <p className="text-xs text-ink-3">{pkg.removal_plan.rule}</p>
+          <ul className="list-disc pl-5 text-sm">
+            {pkg.removal_plan.items.map((i) => (
+              <li key={i.id}>
+                <Mono>{i.kind}</Mono> {i.item} — {i.status}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </Section>
@@ -301,7 +408,15 @@ export function CostSection({ pkg }: { pkg: ReviewPackage }) {
         rowKey={([k]) => k}
         columns={[
           { header: "Komponen biaya", cell: ([k]) => COST_LABELS[k] ?? k },
-          { header: "Nilai", cell: ([, v]) => (v.value === null ? (v.cap_usd !== undefined ? `batas ${usd(v.cap_usd)}` : "—") : usd(v.value)) },
+          {
+            header: "Nilai",
+            cell: ([, v]) => (
+              <span>
+                {v.value === null ? (v.cap_usd !== undefined ? `batas ${usd(v.cap_usd)}` : "—") : usd(v.value)}
+                {v.quantity !== undefined && <span className="block text-xs text-ink-3">{v.quantity} {v.unit ?? ""}</span>}
+              </span>
+            ),
+          },
           {
             header: "Dasar",
             cell: ([, v]) => <StatusBadge status={v.basis === "ACTUAL" ? "LIVE" : v.basis} label={v.basis === "NOT_APPLICABLE" ? "Tidak berlaku" : v.basis} />,
@@ -380,6 +495,27 @@ export function OutcomeSummary({ pkg }: { pkg: ReviewPackage }) {
         ["Kegagalan parsial", o.partial_failures?.length ? o.partial_failures.map(String).join("; ") : "—"],
         ["Rollback", o.rollback ? <Mono>{JSON.stringify(o.rollback)}</Mono> : "—"],
         ["Inventaris/docs", o.inventory_docs_update ?? "PENDING"],
+        [
+          "Acceptance (ditetapkan sebelum trial)",
+          o.acceptance ? (
+            <span key="a">
+              {o.acceptance.criteria.map((c) => `${c.id}: ${c.status}`).join(", ") || "—"}
+              {o.acceptance.waiver_decision_id && ` · waiver ${o.acceptance.waiver_decision_id.slice(0, 8)}`}
+            </span>
+          ) : (
+            "—"
+          ),
+        ],
+        [
+          "Finalisasi",
+          o.finalization ? (
+            <span key="f" className="text-xs">
+              inventaris {o.finalization.inventory.status} · ADR {o.finalization.adr.status} · docs {o.finalization.docs.status} · pemilik {o.finalization.ownership.status}
+            </span>
+          ) : (
+            "—"
+          ),
+        ],
         ["Catatan", o.notes || o.note || "—"],
       ]}
     />

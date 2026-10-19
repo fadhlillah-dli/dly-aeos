@@ -281,7 +281,7 @@ def release_list(as_json: bool = typer.Option(False, "--json")) -> None:
 
 
 def _transition(action: str, release_id: str | None, operator: str, reason: str, force_maintenance: bool,
-                yes: bool) -> None:
+                yes: bool, proposal_id: str | None = None) -> None:
     settings = _settings()
     from aeos.core.db import session_factory
     from aeos.operations import release
@@ -299,7 +299,7 @@ def _transition(action: str, release_id: str | None, operator: str, reason: str,
             assert release_id is not None
             report = release.promote(settings, release_id, session=session, operator_user_id=op_id,
                                      actor_label=f"{_local_actor()}:{operator}"[:64], reason=reason,
-                                     force_maintenance=force_maintenance)
+                                     force_maintenance=force_maintenance, proposal_id=proposal_id)
         else:
             report = release.rollback(settings, session=session, operator_user_id=op_id,
                                       actor_label=f"{_local_actor()}:{operator}"[:64], reason=reason,
@@ -324,9 +324,11 @@ def release_promote(
     reason: str = typer.Option("", help="Why this release is promoted"),
     force_maintenance: bool = typer.Option(False, "--force-maintenance"),
     yes: bool = typer.Option(False, "--yes"),
+    proposal: str = typer.Option(None, "--proposal",
+                                 help="ChangeProposal id whose bound PROMOTION decision this release implements"),
 ) -> None:
     """Promote a built release (backup + restore test + smoke test first; old release kept on failure)."""
-    _transition("promote", release_id, operator, reason, force_maintenance, yes)
+    _transition("promote", release_id, operator, reason, force_maintenance, yes, proposal_id=proposal)
 
 
 @release_app.command("rollback")
