@@ -349,13 +349,16 @@ def test_running_attempt_stops_when_sandbox_exception_revoked(db, fakes):
     assert scheduler.get_te(db, specs[0].id).state == "BLOCKED"  # LEASED -> BLOCKED
 
 
-def test_bash_under_process_sandbox_needs_explicit_exception(db, fakes):
-    """ADR-0051: a shell under the WEAK process sandbox acts as the same OS user (OS credential
-    helpers included), so the owner exception must allow it explicitly."""
+def test_bash_under_process_sandbox_is_never_admitted(db, fakes):
+    """Master §25 'Worker tidak mendapat shell host' (ADR-0051 amendment 2026-10-19): a shell under the WEAK
+    process sandbox acts as the same OS user (OS credential helpers, keyring, data DB included), so no
+    exception flag admits it; shell-capable TaskSpecs need the container sandbox with a passing report."""
     _p, specs = _ready(db, fakes, [{"task_key": "a", "tools_allowed": ["bash:pytest *"]}])
     adm = scheduler.admission_check(db, specs[0].id)
-    assert not adm.admitted and any("allow_bash" in m for c, m in adm.waits if c == "SANDBOX_NOT_READY")
+    assert not adm.admitted and any("allow_bash" in m and "container" in m
+                                    for c, m in adm.waits if c == "SANDBOX_NOT_READY")
     d = db.scalar(select(Decision).where(Decision.target_type == "worker_sandbox"))
     d.details = {"allow_process_sandbox": True, "allow_bash": True}
     db.flush()
-    assert scheduler.admission_check(db, specs[0].id).admitted
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert not adm.admitted and any("shell" in m for c, m in adm.waits if c == "SANDBOX_NOT_READY")

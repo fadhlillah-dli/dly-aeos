@@ -148,12 +148,34 @@ python -m pip install -r requirements.lock && python -m pip install --no-deps -e
 Review the diff (new packages are supply-chain changes) and commit it with the dependency change.
 Hash pinning (`--generate-hashes`) is a possible hardening step recorded in ADR-0093.
 
+## Worker runtime (sandbox, engine contract, attribution)
+
+| Command / setting | What it does |
+|---|---|
+| `aeos worker status [--domain OFFICE]` | sandbox levels, the policy requirement for the domain, residual risks, OpenCode status |
+| `aeos worker containment --kind process` | negative containment tests in a real child process (WEAK: NOT_ENFORCED items are residual risks) |
+| `aeos worker containment --kind container [--domain OFFICE]` | the 20-check suite INSIDE the worker image (build it first: see `sandbox/README.md`); a fresh PASS for the current image is what lets admission select the container sandbox |
+| `aeos worker contract-test` | real OpenCode against a scripted loopback model with a hostile repository `opencode.json`: request contract, output cap, tool list, project config ignored, outside-file denied, patch-only, watchdog, kill. Records `WORKER_CONTRACT_TEST` evidence (Doctor `worker.contract`); a real route's model behaviour stays NOT_PROVEN |
+| `aeos worker reap` | remove worker containers whose run is no longer active (after a controller crash) |
+| `commit_author_name` / `commit_author_email` (`aeos.yaml` in the OS config dir, see `config/aeos.example.yaml`, or `AEOS_COMMIT_AUTHOR_NAME` / `AEOS_COMMIT_AUTHOR_EMAIL`) | §06 attribution of candidate commits: set the owner's GitHub noreply address (`<id>+<user>@users.noreply.github.com`). Unset, commits use `AEOS Runtime <aeos-runtime@localhost>` and the run records `commit_identity.source = runtime-default (not linked to an account)` (the run record keeps the address minimised; it is in the commit only). Every candidate commit carries `AEOS-Run-Id`, `AEOS-Task`, `AEOS-Agent`, `AEOS-Route`, `AEOS-Engine` and `AEOS-Prompt-Revision` trailers |
+
+Worker rules enforced by the runtime (ADR-0051 amendment 2026-10-19): no shell and no egress TaskSpec under
+the process sandbox; R3 under the process sandbox only when the owner's exception lists
+`run_worker_process_sandbox_r3`; R4 always BLOCKED (no VM sandbox); no process sandbox while AEOS runs
+elevated; a repository carrying `opencode.json` / `.opencode/` is refused (`WORKTREE_AGENT_CONFIG`); an
+out-of-scope edit stops the run immediately; memory/process caps (`limits.max_memory_mb`,
+`limits.max_processes`) stop it with `RESOURCE_LIMIT`; a change to the running controller checkout fails and
+quarantines the run (HIGH alert); a worker blocker (`.aeos/report.json`, schema
+`contracts/worker/aeos-report.schema.json`) becomes an AGENT decision request and the task waits BLOCKED
+(`WORKER_BLOCKER`) for the owner. A worker prompt template change changes `ModelRoute.prompt_revision`, which
+invalidates route approvals bound to the old configuration hash (`PROMPT_REVISION_CHANGED`).
+
 ## Scenarios tested as normal operations (§33)
 
 | Scenario | Where it is handled |
 |---|---|
 | Worker crash / controller restart | [restart-recovery](runbooks/restart-recovery.md); lease reconciliation (workforce) |
-| Broker outage / expired credential | fail closed (capabilities BLOCKED); [credential-rotation](runbooks/credential-rotation.md) |
+| Broker outage / expired credential | fail closed (capabilities BLOCKED); executor: no grant -> `BROKER_UNAVAILABLE` before start, broker unreachable mid-run -> attempt FAILED (never DONE, no fallback); [credential-rotation](runbooks/credential-rotation.md) |
 | Quota exhaustion | queue/backoff, no paid fallback; [queue-drain](runbooks/queue-drain.md) |
 | Partial publication / provider outage | [publication-reconciliation](runbooks/publication-reconciliation.md) |
 | Runaway run | [cancel-runaway-run](runbooks/cancel-runaway-run.md), emergency stop |

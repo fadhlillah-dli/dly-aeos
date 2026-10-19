@@ -12,26 +12,14 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 
-# AGENTS.md "Protected paths (self-build, §09)" — patches touching these are quarantined.
-PLATFORM_PROTECTED_PATHS: tuple[str, ...] = (
-    "policy/**",
-    "backend/aeos/policy/**",
-    "backend/aeos/verification/**",
-    "backend/aeos/broker/**",
-    "backend/aeos/identity/**",
-    "tests/acceptance/**",
-    ".github/workflows/**",
-    "install-manifest/**",
-    "backend/aeos/migrations/**",
+# AGENTS.md "Protected paths (self-build, §09)" and the generic trusted/restricted paths of every
+# managed project (§16, §21, §25) - one shared definition for compiler, runtime and verifier.
+from aeos.core.protected_paths import (  # noqa: F401 - re-exported for existing importers
+    GENERIC_PROTECTED_PATHS,
+    PLATFORM_PROTECTED_PATHS,
+    platform_protected_paths,
 )
-# §21/§31: trusted pipeline definitions of any project.
-GENERIC_PROTECTED_PATHS: tuple[str, ...] = (
-    ".github/workflows/**",
-    ".gitlab-ci.yml",
-    "bitbucket-pipelines.yml",
-    "azure-pipelines.yml",
-    ".circleci/**",
-)
+
 _GLOB_CHARS = re.compile(r"[*?\[]")
 
 

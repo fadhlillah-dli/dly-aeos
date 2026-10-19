@@ -33,6 +33,7 @@ from aeos.core.timeutil import utcnow
 from aeos.models.cost import QuotaState
 from aeos.models.routing import ModelRoute
 from aeos.models.routing_ext import CatalogRefresh
+from aeos.routing.seed import _worker_prompt_revision
 from aeos.routing.service import compute_config_hash, refresh_config_hash
 
 log = logging.getLogger("aeos.routing.catalog")
@@ -138,6 +139,7 @@ def refresh_openrouter_catalog(session: Session, client: httpx.Client) -> dict[s
             identity_status="UNVERIFIED" if author in {"openrouter", "stealth"} else "PROVIDER_CLAIMED",
             priority=800, source_refs=["S11", "S12"], eval_results={}, mode_params={}, tool_set=[], fallback_chain=[],
             notes=f"Discovered in the OpenRouter catalog on {now.date().isoformat()}; never activated automatically.",
+            prompt_revision=_worker_prompt_revision(),
         )
         _apply_openrouter(route, m, now)
         route.config_hash = compute_config_hash(route)

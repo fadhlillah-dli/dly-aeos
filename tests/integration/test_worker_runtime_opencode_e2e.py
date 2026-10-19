@@ -143,3 +143,15 @@ def test_real_opencode_through_broker_lands_in_review(servers, monkeypatch, tmp_
         assert s.scalar(select(func.count()).select_from(UsageLedgerEntry).where(UsageLedgerEntry.run_id == run_id)) >= 2
     assert _Upstream.seen and all(x["body"]["model"] == "fake-upstream-model" for x in _Upstream.seen)
     assert all(not (x["auth"] or "").count("aeoscap_") for x in _Upstream.seen)  # worker token never forwarded
+
+
+def test_real_opencode_contract_test_and_repository_config_cannot_widen_tools(settings, db):
+    """§08 worker contract + §25 'konfigurasi OpenCode tingkat repository tidak dapat mengubah permission/tool/MCP':
+    the pinned binary, a hostile repository opencode.json (bash/webfetch/MCP), and the tool list the engine
+    really offers the model. Recorded as WORKER_CONTRACT_TEST evidence for the Readiness Doctor."""
+    from aeos.worker_runtime.contract import record_contract_test, run_contract_test
+
+    rep = run_contract_test(binary=str(_BIN))
+    failing = {r["check"]: r["evidence"] for r in rep["results"] if r["status"] != "PASS"}
+    assert rep["overall"] == "PASS", failing
+    assert record_contract_test(db, rep, actor="cli:integration")
