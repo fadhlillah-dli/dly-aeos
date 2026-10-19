@@ -11,8 +11,8 @@ quarantines can never slip past another (audit 2026-10-19: the three copies had 
   secrets, prompts/instructions). A candidate touching them is quarantined for special review.
 * ``GENERIC_TRUSTED_PATHS`` - anchored trusted pipeline / grader / agent-configuration paths of ANY
   managed project. The planner forbids them by default; runtime and verifier quarantine them.
-* ``GENERIC_RESTRICTED_AREAS`` - unanchored restricted areas of any project (§16 Platform/DevSecOps:
-  IaC, IAM, secrets, deploy targets). Matched against concrete changed paths only (runtime and
+* ``GENERIC_RESTRICTED_AREAS`` - restricted areas of any project (§16 Platform/DevSecOps: policy,
+  IaC, IAM, secrets, deploy targets; mostly unanchored). Matched against concrete changed paths only (runtime and
   verifier quarantine); never used for the planner's conservative prefix-overlap test, where a
   leading ``**`` would overlap every task.
 * ``GENERIC_PROTECTED_PATHS`` = trusted paths + restricted areas (runtime and verifier view).
@@ -73,7 +73,10 @@ GENERIC_TRUSTED_PATHS: tuple[str, ...] = (
 )
 
 GENERIC_RESTRICTED_AREAS: tuple[str, ...] = (
-    # §16 restricted areas: IaC / IAM / secrets / deploy targets of any managed project
+    # §16 restricted areas: policy / IaC / IAM / secrets / deploy targets of any managed project. The
+    # project's top-level ``policy/`` tree was quarantined by the verifier before the lists were shared
+    # (review 2026-10-19: keep it - sharing one list must never drop a protection).
+    "policy/**",
     "**/*.tf",
     "**/*.tfvars",
     "**/iam/**",

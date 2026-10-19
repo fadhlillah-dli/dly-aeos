@@ -99,8 +99,8 @@ if scenario in ("blocker", "badreport"):
            "task_key": "task-blocker"}
     if scenario == "badreport":
         rep["approve"] = True
-    with open(".aeos/report.json", "w", encoding="utf-8") as fh:
-        json.dump(rep, fh)
+    # written with the engine's write tool, exactly as OpenCode does (observed edit_file event)
+    write(".aeos/report.json", json.dumps(rep))
     sys.exit(0)
 if scenario == "broker":
     import urllib.request
@@ -511,7 +511,13 @@ def test_prompt_template_change_is_a_configuration_change(settings, setup, monke
         assert route.config_hash == compute_config_hash(route)
         assert s.get(Decision, did).status == "INVALIDATED"
     # and the revision really follows the template text
-    monkeypatch.setattr(executor, "PROMPT_RULES", (*executor.PROMPT_RULES, "- a new rule"))
+    rules = executor.PROMPT_RULES
+    monkeypatch.setattr(executor, "PROMPT_RULES", (*rules, "- a new rule"))
+    assert executor.worker_prompt_revision() != executor.WORKER_PROMPT_REVISION
+    # §25 a worker tool change is a system change too: the baseline tool permissions are part of the revision
+    monkeypatch.setattr(executor, "PROMPT_RULES", rules)
+    assert executor.worker_prompt_revision() == executor.WORKER_PROMPT_REVISION
+    monkeypatch.setattr(opencode, "BASE_ALLOW", (*opencode.BASE_ALLOW, "webfetch"))
     assert executor.worker_prompt_revision() != executor.WORKER_PROMPT_REVISION
 
 
@@ -561,15 +567,21 @@ def test_stale_or_expired_context_pack_is_never_given_to_the_worker(settings, se
     assert run.caps["context_pack"]["used"] is False and run.caps["context_pack"]["freshness"] == "STALE"
 
 
-def test_worker_writing_the_controller_checkout_fails_and_is_quarantined(settings, setup, tmp_path, monkeypatch):
-    """§09 Zone 1 'read-only for workers': a change to the running controller's trust-relevant files is detected
-    after the run (process sandbox has no OS boundary), the run fails + is quarantined, and a HIGH alert is raised."""
+@pytest.mark.parametrize("rel", [
+    "policy/office.yaml",                 # trust-relevant (protected list)
+    "backend/aeos/knowledge/notes.py",    # any controller code: loaded on the next restart (§09, review 2026-10-19)
+    "frontend/dist/assets/app.js",        # the served Control Center build (approval UI)
+])
+def test_worker_writing_the_controller_checkout_fails_and_is_quarantined(settings, setup, tmp_path, monkeypatch, rel):
+    """§09 Zone 1 'read-only for workers' / 'a worker cannot load its changes into the active controller': a
+    change to the running controller's files is detected after the run (process sandbox has no OS boundary), the
+    run fails + is quarantined, and a HIGH alert is raised."""
     from aeos.core import paths
     from aeos.models.audit import AuditEvent, Event
 
     controller = tmp_path / "controller"
-    (controller / "policy").mkdir(parents=True)
-    target = controller / "policy" / "office.yaml"
+    target = controller / rel
+    target.parent.mkdir(parents=True)
     target.write_text("external_worker_allowed: false\n", encoding="utf-8")
     monkeypatch.setattr(paths, "repo_root", lambda: controller)
     make, _ = setup
@@ -577,7 +589,7 @@ def test_worker_writing_the_controller_checkout_fails_and_is_quarantined(setting
     res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, _te = _load(run_id, task_id)
     assert res["status"] == "FAILED" and run.outcome_code == "SCOPE_VIOLATION" and run.quarantined
-    assert any(q["rule"] == "controller-modified" and q["path"] == "controller:policy/office.yaml"
+    assert any(q["rule"] == "controller-modified" and q["path"] == f"controller:{rel}"
                for q in run.quarantine_reasons)
     with session_factory()() as s:
         assert s.scalar(select(AuditEvent).where(AuditEvent.action == "worker_runtime.controller_modified",
@@ -665,6 +677,7 @@ def test_candidate_commit_uses_the_owners_configured_identity(settings, setup):
     assert out.startswith("Owner Name|123+owner@users.noreply.github.com|Owner Name|123+owner@users.noreply.github.com")
     assert f"AEOS-Run-Id: {run_id}" in out and "AEOS-Route: worker.test-free" in out
     assert run.caps["commit_identity"]["source"] == "owner-configured"
+    assert "123+owner@users.noreply.github.com" not in json.dumps(run.caps)  # PII stays in the commit only
 
 
 def test_default_commit_identity_is_reported_as_not_linked(settings, setup):

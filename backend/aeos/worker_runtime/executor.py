@@ -30,6 +30,7 @@ from aeos.core.db import session_factory
 from aeos.core.enums import Domain, ExecutionState
 from aeos.core.errors import AeosError
 from aeos.core.hashing import content_hash
+from aeos.core.pii import redact_pii
 from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import utcnow
 from aeos.models.broker_ext import BrokerRequest
@@ -86,12 +87,16 @@ PROMPT_REPORT_RULES = (
 
 
 def worker_prompt_revision() -> str:
-    """Revision id of the worker prompt template (recorded on the route and every run, §23)."""
-    from aeos.worker_runtime.opencode import RUN_MESSAGE
+    """Revision id of the worker prompt template (recorded on the route and every run, §23). It also covers the
+    worker's baseline tool permissions and the report schema: §25 treats a tool/instruction change as a system
+    change, so changing either invalidates route approvals exactly like a prompt edit."""
+    from aeos.worker_runtime.opencode import ALWAYS_DENY, BASE_ALLOW, RUN_MESSAGE
 
     h = content_hash({"version": PROMPT_TEMPLATE_VERSION, "stop": PROMPT_STOP_RULES, "rules": PROMPT_RULES,
                       "report": PROMPT_REPORT_RULES, "run_message": RUN_MESSAGE,
-                      "limits": [MAX_ATTACHMENT_CHARS, MAX_PROMPT_ATTACH_TOTAL, MAX_PROMPT_CONTEXT_TOTAL]})
+                      "limits": [MAX_ATTACHMENT_CHARS, MAX_PROMPT_ATTACH_TOTAL, MAX_PROMPT_CONTEXT_TOTAL],
+                      "tools": {"base_allow": list(BASE_ALLOW), "always_deny": list(ALWAYS_DENY)},
+                      "report_schema": worker_report.WORKER_REPORT_SCHEMA})
     return f"wp{PROMPT_TEMPLATE_VERSION}-{h.split(':', 1)[1][:16]}"
 
 
@@ -127,6 +132,7 @@ class Prepared:
     agent_key: str | None = None
     route_key: str | None = None
     engine_version: str | None = None
+    commit_identity: tuple[str, str] | None = None
 
 
 # ----------------------------------------------------------------------------- prompt
@@ -279,6 +285,9 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
     kind = req["kind"]
     if kind not in ("process", "container"):
         raise StartError("SANDBOX_NOT_IMPLEMENTED", f"sandbox kind {kind} is not implemented")
+    # §09 Zone 1: fingerprint the running controller checkout first - before this session writes anything
+    # (the grant insert below holds the SQLite write lock until commit; hashing must not happen under it).
+    controller_snapshot = integrity.snapshot()
     status: dict[str, Any] = {}
     if kind == "process":
         status = opencode.opencode_status(binary or settings.opencode_binary)
@@ -373,7 +382,8 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
                 "capability_expires_at": grant.expires_at.isoformat(), "per_request_output_cap": per_req,
                 "prompt_revision": WORKER_PROMPT_REVISION, "context_pack": pack_info,
                 "resource_limits": limits.as_dict(), "timeout_seconds_effective": None,
-                "commit_identity": {"name": ident[0], "email": ident[1], "source": ident[2]},
+                # the address itself stays out of the run record (PII minimisation, §50 1.37); it is in the commit
+                "commit_identity": {"name": ident[0], "email": redact_pii(ident[1]), "source": ident[2]},
                 "residual_risks": list(req.get("residual_risks") or [])}
     run.current_action = "Menyiapkan workspace dan sandbox"
     timeout = int(caps.get("timeout_seconds") or (task.limits or {}).get("timeout_seconds", 1800))
@@ -381,9 +391,20 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
     return Prepared(run_id=run.id, lease_id=run.lease_id or "", ws=ws, sandbox=sandbox, argv=argv, env=env,
                     timeout=timeout, allowed=list(task.allowed_paths or []), forbidden=list(task.forbidden_paths or []),
                     protected=protected, task_key=task.task_key, config_path=config_path, kind=kind,
-                    container_root=container_root, limits=limits, controller_snapshot=integrity.snapshot(),
+                    container_root=container_root, limits=limits, controller_snapshot=controller_snapshot,
                     plan_version_hash=task.plan_version_hash, agent_key=run.agent_key, route_key=route_key,
-                    engine_version=engine_version)
+                    engine_version=engine_version, commit_identity=(ident[0], ident[1]))
+
+
+def _is_report_path(path: str) -> bool:
+    """True for the worker report file the prompt tells the worker to write (never a candidate change).
+    Case-insensitive like the protected-path match (Windows/macOS file systems)."""
+    from aeos.worker_runtime.scope import ScopePathError, normalize
+
+    try:
+        return normalize(path).lower() == workspace.REPORT_PATH.lower()
+    except ScopePathError:
+        return False
 
 
 def _abort_before_start(run_id: str, code: str, message: str) -> None:
@@ -531,8 +552,11 @@ def execute_run(settings: Settings, run_id: str, *, shutdown: threading.Event | 
                 act = parser.parse_line(text)
                 if act is not None:
                     pending.append(act.as_payload() | {"is_narration": act.is_narration})
-                    if act.kind == "edit_file" and act.status == "completed" and act.path and stop_reason is None:
+                    if act.kind == "edit_file" and act.status == "completed" and act.path and stop_reason is None \
+                            and not _is_report_path(act.path):
                         # §22 "Stop berlaku saat ... scope dilanggar": stop at the out-of-scope edit, not after exit.
+                        # The worker's own report (.aeos/report.json, §19/§21 blocker channel) is not a candidate
+                        # change: the runtime takes it out of the worktree before the diff/scope check.
                         res = check_scope([ChangedPath(path=act.path, status="M")], allowed=prep.allowed,
                                           forbidden=prep.forbidden, protected=prep.protected)
                         if res.violations:
@@ -693,6 +717,12 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
     extra = extra or {}
     sf = session_factory()
     blocker = False
+    # §09 Zone 1: the running controller checkout must be untouched by the worker (hashed outside any DB
+    # transaction).
+    try:
+        touched = integrity.compare(prep.controller_snapshot)
+    except Exception as exc:  # an unverifiable controller is treated as modified (fail closed)
+        touched = [{"path": "*", "change": f"integrity check failed ({type(exc).__name__})"}]
     with sf() as s:
         run = s.get(WorkerRun, run_id)
         run.exit_code = exit_code
@@ -713,11 +743,10 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
             protected_hits = result.protected_hits
             for p in changes["symlinks_escaping"]:
                 violations.append({"path": p, "rule": "symlink-escapes-worktree", "detail": "symlink target outside"})
-            ident = (run.caps or {}).get("commit_identity") or {}
             head = workspace.commit_candidate(
                 prep.ws, f"aeos: candidate for {prep.task_key} (run {run_id[:8]})\n\nCommitted by the AEOS runtime; "
                          "worker output is unverified until independent verification and review.",
-                identity=(ident["name"], ident["email"]) if ident.get("name") and ident.get("email") else None,
+                identity=prep.commit_identity,
                 trailers={"AEOS-Run-Id": run_id, "AEOS-Task": prep.task_key, "AEOS-Agent": prep.agent_key or "",
                           "AEOS-Route": prep.route_key or "",
                           "AEOS-Engine": f"opencode {prep.engine_version or 'UNKNOWN'} ({prep.kind} sandbox)",
@@ -745,8 +774,6 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
                          details={"changed": exc.changed[:20], "restored": exc.restored[:20]})
         except workspace.WorkspaceError as exc:
             violations.append({"path": "*", "rule": "diff-unavailable", "detail": redact_text(str(exc))[:300]})
-        # §09 Zone 1: the running controller checkout must be untouched by the worker.
-        touched = integrity.compare(prep.controller_snapshot)
         if touched:
             for c in touched[:50]:
                 violations.append({"path": f"controller:{c['path']}", "rule": "controller-modified", "detail": c["change"]})
