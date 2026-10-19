@@ -90,6 +90,23 @@ def github_get(ctx: CheckContext, path: str) -> Any:
     return ctx.runner.http_get(f"{GITHUB_API}{path}", timeout=10.0, headers=headers, allow_remote=True)
 
 
+def _record_probe(ctx: CheckContext, providers: tuple[str, ...], root_id: str, connectivity: str) -> None:
+    """§10 Integration Registry health: the probed exact target's integrations learn the result (best effort;
+    a read-only probe never claims functional VERIFIED)."""
+    if ctx.session is None:
+        return
+    try:
+        from aeos.portfolio import facade as portfolio
+
+        with ctx.session.begin_nested():
+            portfolio.record_integration_probe(ctx.session, domain="PERSONAL", providers=providers, root_id=root_id,
+                                               connectivity=connectivity, observer="doctor:adapter.github_token")
+    except Exception as exc:  # the check result itself must never depend on the registry write
+        import logging
+
+        logging.getLogger("aeos.doctor").warning("integration probe not recorded: %s", type(exc).__name__)
+
+
 def _scopes(headers: dict[str, str] | None) -> list[str] | str:
     """Token scopes GitHub reports for classic tokens (``X-OAuth-Scopes``); fine-grained tokens expose none."""
     raw = (headers or {}).get("x-oauth-scopes")
@@ -137,11 +154,13 @@ def adapter_github(ctx: CheckContext) -> Outcome:
         if privilege["least_privilege"] is False:
             evidence["residual_risks"] = [privilege["risk"]]
             summary += " " + privilege["risk"]
+        _record_probe(ctx, ("github-repo", "github-issues"), slug, "CONNECTED")
         return Outcome("CONNECTED", summary, evidence=evidence, target_identity=f"github:{slug}",
                        remedy=None if privilege["least_privilege"] is not False else set_secret_remedy(
                            GITHUB_REF, "GitHub fine-grained PAT, hanya repo platform: Issues RW, Pull requests RW, "
                                        "Contents RW (push aeos/*), Metadata R"))
     if hr.status == 401:
+        _record_probe(ctx, ("github-repo", "github-issues"), slug, "EXPIRED")
         return Outcome("EXPIRED", "Token GitHub ditolak (kedaluwarsa/dicabut).", evidence=evidence,
                        error_code="GITHUB_TOKEN_REJECTED", remedy=set_secret_remedy(GITHUB_REF, "GitHub"))
     if hr.status in (403, 404):

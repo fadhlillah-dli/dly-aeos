@@ -282,6 +282,7 @@ export interface ProposalDetail extends ProposalRow {
   problem: string;
   expected_benefit: string;
   limits: Record<string, unknown>;
+  candidate_component_ids?: string[];
   attachment_ids: string[];
   unknown_fields: string[];
   parts: { child_id: string; title: string; kind: string; depends_on: string[] }[];
@@ -294,7 +295,7 @@ export interface ProposalDetail extends ProposalRow {
   /** Same-domain proposals with the same component+kind or a similar goal - suggestions, never merged. */
   possible_duplicates?: { id: string; title: string; status: string; kind: string; reason: string }[];
   research_entries: { id: string; name: string; lifecycle: string; identity_status: string; checked_at: string | null }[];
-  delivery_dimensions: Record<string, { status: string; note: string }>;
+  delivery_dimensions: Record<string, { status: string; note: string; at?: string | null }>;
   owner_plan?: OwnerPlan;
   links?: LinkViews;
   trial?: TrialRecord;

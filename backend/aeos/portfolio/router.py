@@ -137,7 +137,7 @@ def add_repository(project_id: str, body: RepositoryIn, principal: AdminPrincipa
 @router.get("/api/repositories/{repository_id}")
 def get_repository(repository_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     _project, repo = _scoped_repo(db, principal, domain, repository_id)
-    return {"repository": repos.repository_view(repo), **_freshness()}
+    return {"repository": repos.repository_detail(db, repo), **_freshness()}
 
 
 @router.post("/api/repositories/{repository_id}/verify")

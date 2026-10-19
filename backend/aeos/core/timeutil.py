@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import overload
 
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+@overload
+def ensure_aware(dt: datetime) -> datetime: ...
+@overload
+def ensure_aware(dt: None) -> None: ...
+@overload
+def ensure_aware(dt: datetime | None) -> datetime | None: ...
 def ensure_aware(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None

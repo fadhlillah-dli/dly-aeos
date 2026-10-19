@@ -12,6 +12,7 @@ import { Button, Card, EmptyState, ErrorBox, inputBase, Loading, Notice, PageHea
 import { useEventStream } from "../../lib/events";
 import { applyDiff, foldGraph, groupId, hideNodes, type GEdge, type GNode } from "./layout";
 import { MapGraph } from "./MapGraph";
+import { DataFlowView } from "./DataFlow";
 import { EdgeCard, NodeCard, SnapshotPanel } from "./Panels";
 
 const LENSES = ["DESIGN", "CONFIG", "OBSERVED"] as const;
@@ -35,7 +36,7 @@ export default function SystemMapPage() {
   const environment = params.get("env") ?? "";
   const snapshotId = params.get("snapshot") ?? "";
   const [snapshotDiff, setSnapshotDiff] = useState<SnapshotDiff | null>(null);
-  const [view, setView] = useState<"graph" | "table">("graph");
+  const [view, setView] = useState<"graph" | "table" | "flow">("graph");
   const [advanced, setAdvanced] = useState(false);
   const [hideAbsent, setHideAbsent] = useState(false);
   const [folded, setFolded] = useState<Set<string>>(new Set());
@@ -190,6 +191,9 @@ export default function SystemMapPage() {
           <Button variant={view === "table" ? "primary" : "secondary"} onClick={() => setView("table")}>
             <TableIcon className="h-4 w-4" aria-hidden /> Tabel
           </Button>
+          <Button variant={view === "flow" ? "primary" : "secondary"} onClick={() => setView("flow")}>
+            <Layers className="h-4 w-4" aria-hidden /> Aliran data
+          </Button>
         </div>
       </div>
       {!domain && <DomainRequired />}
@@ -248,7 +252,9 @@ export default function SystemMapPage() {
 
           <div className={clsx("grid gap-4", (selected || selectedRels.length > 0) && "xl:grid-cols-[minmax(0,1fr)_380px]")}>
             <div className="min-w-0">
-              {view === "graph" ? (
+              {view === "flow" ? (
+                <DataFlowView edges={data.edges.filter((e) => visibleNodes.some((n) => n.id === e.source) && visibleNodes.some((n) => n.id === e.target))} />
+              ) : view === "graph" ? (
                 <MapGraph
                   nodes={graph.nodes}
                   edges={graph.edges}

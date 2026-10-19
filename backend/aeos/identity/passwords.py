@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from argon2 import PasswordHasher
+from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
 from aeos.core.errors import ValidationFailed
 
-# argon2-cffi defaults are Argon2id (RFC 9106 low-memory profile).
-_hasher = PasswordHasher()
+# Argon2id, RFC 9106 low-memory profile (time_cost=3, memory_cost=64 MiB, parallelism=4), pinned
+# explicitly so a library default change can never silently switch the algorithm or weaken it.
+ARGON2_TIME_COST = 3
+ARGON2_MEMORY_COST_KIB = 65536
+ARGON2_PARALLELISM = 4
+_hasher = PasswordHasher(time_cost=ARGON2_TIME_COST, memory_cost=ARGON2_MEMORY_COST_KIB,
+                         parallelism=ARGON2_PARALLELISM, hash_len=32, salt_len=16, type=Type.ID)
 
 MIN_LENGTH = 12
 _COMMON = {"password1234", "123456789012", "qwertyuiopas", "adminadmin12", "changeme1234"}

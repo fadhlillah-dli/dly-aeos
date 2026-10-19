@@ -87,3 +87,27 @@ packages = ["aeos"]
 ignore_missing_imports = true
 warn_unused_ignores = false
 check_untyped_defs = true
+
+# Ratcheted type-check baseline (master §11 "type checking", CI step "G1 static - mypy"): these
+# modules had errors when the gate was introduced (2026-10-19, 230 errors in 33 files) and are
+# exempt until fixed. Every other module - including every NEW module - must type-check cleanly.
+# Remove an entry once its module is clean; never add one (tests/unit/test_ci_gates.py enforces it).
+[[tool.mypy.overrides]]
+module = [
+  "aeos.broker.git_broker", "aeos.broker.grants", "aeos.broker.model_proxy",
+  "aeos.cost.service",
+  "aeos.delivery.pr_bundle",
+  "aeos.docs_engine.renderer",
+  "aeos.doctor.capabilities", "aeos.doctor.checks.delivery", "aeos.doctor.checks.evidence",
+  "aeos.doctor.checks.secret", "aeos.doctor.cli", "aeos.doctor.views",
+  "aeos.inventory.drift", "aeos.inventory.manifest", "aeos.inventory.snapshots", "aeos.inventory.views",
+  "aeos.planning.dag",
+  "aeos.policy.decisions", "aeos.policy.queue", "aeos.policy.router", "aeos.policy.snapshot",
+  "aeos.proposals.review",
+  "aeos.publisher.jobs", "aeos.publisher.targets",
+  "aeos.routing.catalog", "aeos.routing.service",
+  "aeos.worker_runtime.executor", "aeos.worker_runtime.opencode", "aeos.worker_runtime.processes",
+  "aeos.worker_runtime.sandbox",
+  "aeos.workforce.demo", "aeos.workforce.loop", "aeos.workforce.scheduler",
+]
+ignore_errors = true

@@ -81,8 +81,8 @@ Install the official client (one of):
 
 ```powershell
 winget install --id Anthropic.ClaudeCode -e
-# or the official installer:
-irm https://claude.ai/install.ps1 | iex
+# or the official installer, downloaded and REVIEWED before it runs (never piped into a shell, section 07):
+#   irm https://claude.ai/install.ps1 -OutFile install-claude.ps1; notepad install-claude.ps1; .\install-claude.ps1
 ```
 
 Then sign in once and check the auth mode:
@@ -104,13 +104,20 @@ DLY AEOS uses only this binary (never `--bare`, never the Claude API); credentia
 official client. **Evidence:** `claude auth status` as above; the doctor's Claude checks show the
 binary version and auth mode; the bootstrap component list shows `auth: loggedIn=True`.
 
+**Model discovery (master §12 "`/model` best for account discovery").** In an interactive `claude`
+session run `/model` and note which models your Max account offers (the "best" entry and the exact
+model IDs). Compare them with the SUPERVISOR routes on *Model & Rute* (`/models`). This is discovery
+only: AEOS never uses `best` as an alias and never changes the planning baseline from it — a different
+model becomes a route only through a recorded ROUTE_ACTIVATION decision. Record what you saw, then run
+`.\aeos.ps1 bridge test` so the resolved model ID is observed evidence.
+
 ## 3. OpenBao and the OS credential store
 
 OpenBao is the runtime vault for integration credentials (U-13). The Windows Credential Manager
 holds the bootstrap identity used to reach OpenBao.
 
 ```powershell
-.\aeos.ps1 vault install     # installs the reviewed OpenBao release (see install-manifest/)
+.\aeos.ps1 vault install     # the install-manifest approved_pin; while it is null: --version X.Y.Z (reviewed)
 .\aeos.ps1 vault start
 .\aeos.ps1 vault init        # prints unseal keys + root token ONCE
 .\aeos.ps1 vault unseal      # after every restart of OpenBao

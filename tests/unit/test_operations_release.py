@@ -53,6 +53,10 @@ def _real_schema_head() -> str:
 
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
+    return make_git_repo(tmp_path)
+
+
+def make_git_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "platform"
     (repo / "backend").mkdir(parents=True)
     shutil.copytree(repo_root() / "backend" / "aeos", repo / "backend" / "aeos",
@@ -88,6 +92,14 @@ def operator(db):
     return create_admin(db).id
 
 
+@pytest.fixture(autouse=True)
+def _accepted_commits(monkeypatch):
+    """These tests exercise build/promote mechanics; acceptance gating (trusted CI PASS or an owner
+    EXCEPTION, §09 zone 3) is exercised for real in test_operations_release_acceptance.py."""
+    monkeypatch.setattr(release, "release_acceptance",
+                        lambda session, commit: {"status": "ACCEPTED", "basis": "test-fixture", "commit": commit})
+
+
 def test_build_refuses_dirty_tree(settings, git_repo):
     (git_repo / "untracked.txt").write_text("x", encoding="utf-8")
     with pytest.raises(Blocked) as exc:
@@ -114,7 +126,7 @@ def test_build_creates_artifact_with_provenance(settings, git_repo, db):
     assert prov["schema_head"] == head_rev and prov["schema_heads"] == [head_rev]  # copied real history
     assert prov["builder"]["actor"] == "tester" and prov["built_at"]
     assert prov["source"]["on_main"] and prov["source"]["clean_tree"]
-    again = release.build_release(settings, repo=git_repo)
+    again = release.build_release(settings, repo=git_repo, session=db)
     assert again["already_built"] is True
     listed = release.list_releases(settings)
     assert listed["items"][0]["integrity"] == "OK" and listed["items"][0]["role"] == "AVAILABLE"
@@ -161,9 +173,9 @@ def test_compatibility_rules(settings, db):
 def test_promote_keeps_previous_and_rollback_restores_it(settings, git_repo, db, operator, monkeypatch):
     fake_verification(monkeypatch)
     policy_log = fake_policy(monkeypatch)
-    a = release.build_release(settings, repo=git_repo)
+    a = release.build_release(settings, repo=git_repo, session=db)
     _commit_change(git_repo)
-    c = release.build_release(settings, repo=git_repo)
+    c = release.build_release(settings, repo=git_repo, session=db)
     assert a["release_id"] != c["release_id"]
     kw = {"session": db, "operator_user_id": operator, "smoke_runner": ok_smoke, "server_check": no_server}
     r1 = release.promote(settings, a["release_id"], **kw)
@@ -190,11 +202,11 @@ def test_promote_keeps_previous_and_rollback_restores_it(settings, git_repo, db,
 def test_failed_smoke_keeps_old_release_active(settings, git_repo, db, operator, monkeypatch):
     fake_verification(monkeypatch)
     policy_log = fake_policy(monkeypatch)
-    a = release.build_release(settings, repo=git_repo)
+    a = release.build_release(settings, repo=git_repo, session=db)
     kw = {"session": db, "operator_user_id": operator, "server_check": no_server}
     assert release.promote(settings, a["release_id"], smoke_runner=ok_smoke, **kw)["status"] == "SUCCEEDED"
     _commit_change(git_repo)
-    b = release.build_release(settings, repo=git_repo)
+    b = release.build_release(settings, repo=git_repo, session=db)
     report = release.promote(settings, b["release_id"], smoke_runner=bad_smoke, **kw)
     assert report["status"] == "FAILED" and "smoke test failed" in report["reason"]
     assert report["active_after"] == a["release_id"]
@@ -211,7 +223,7 @@ def test_failed_smoke_keeps_old_release_active(settings, git_repo, db, operator,
 def test_promote_fails_closed_without_policy_module(settings, git_repo, db, operator, monkeypatch):
     fake_verification(monkeypatch)
     block_module(monkeypatch, "aeos.policy.decisions")
-    a = release.build_release(settings, repo=git_repo)
+    a = release.build_release(settings, repo=git_repo, session=db)
     report = release.promote(settings, a["release_id"], session=db, operator_user_id=operator,
                              smoke_runner=ok_smoke, server_check=no_server)
     assert report["status"] == "FAILED" and "fail closed" in report["reason"]
@@ -219,7 +231,7 @@ def test_promote_fails_closed_without_policy_module(settings, git_repo, db, oper
 
 
 def test_promote_refused_in_worker_context(settings, git_repo, db, operator, monkeypatch):
-    a = release.build_release(settings, repo=git_repo)
+    a = release.build_release(settings, repo=git_repo, session=db)
     monkeypatch.setenv("AEOS_CAPABILITY_TOKEN", "x")
     with pytest.raises(PolicyDenied):
         release.promote(settings, a["release_id"], session=db, operator_user_id=operator, smoke_runner=ok_smoke)
@@ -227,7 +239,7 @@ def test_promote_refused_in_worker_context(settings, git_repo, db, operator, mon
 
 def test_tampered_artifact_is_refused(settings, git_repo, db, operator, monkeypatch):
     fake_policy(monkeypatch)
-    a = release.build_release(settings, repo=git_repo)
+    a = release.build_release(settings, repo=git_repo, session=db)
     artifact = settings.layout.released_controller / a["artifact"]
     artifact.write_bytes(artifact.read_bytes() + b"tamper")
     with pytest.raises(Blocked) as exc:
@@ -239,13 +251,14 @@ def test_rollback_refused_when_database_is_ahead(settings, git_repo, db, operato
     fake_verification(monkeypatch)
     fake_policy(monkeypatch)
     kw = {"session": db, "operator_user_id": operator, "smoke_runner": ok_smoke, "server_check": no_server}
-    a = release.build_release(settings, repo=git_repo)
+    a = release.build_release(settings, repo=git_repo, session=db)
     assert release.promote(settings, a["release_id"], **kw)["status"] == "SUCCEEDED"
     mig = git_repo / "backend" / "aeos" / "migrations" / "versions" / "r1_init.py"
     mig.write_text(f'revision = "r1"\ndown_revision = "{_real_schema_head()}"\n', encoding="utf-8")
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-q", "-m", "add migration")
-    b = release.build_release(settings, repo=git_repo)
+    b = release.build_release(settings, repo=git_repo, session=db)
+    db.commit()  # the build audit row; the raw sqlite connection below needs the write lock
     assert b["schema_head"] == "r1"
     _alembic_db(settings, "r1")  # database migrated by release b (simulated)
     assert release.promote(settings, b["release_id"], **kw)["status"] == "SUCCEEDED"
@@ -256,8 +269,13 @@ def test_rollback_refused_when_database_is_ahead(settings, git_repo, db, operato
 
 
 def test_no_http_route_for_promote_or_rollback(app, admin_client):
-    paths = " ".join(getattr(r, "path", "") for r in app.routes)
+    # app.routes nests included routers (_IncludedRouter has no .path): read the real route table.
+    all_paths = list(app.openapi()["paths"])
+    paths = " ".join(all_paths)
+    assert "/api/ops/releases" in paths  # the table is really populated
     assert "promote" not in paths and "rollback" not in paths
+    # release acceptance is CLI-only too (other modules' /accept routes, e.g. memory items, are unrelated)
+    assert [p for p in all_paths if p.startswith("/api/ops") and "accept" in p] == []
     assert admin_client.post("/api/ops/releases/x/promote").status_code in (404, 405)
     assert admin_client.get("/api/ops/releases").json()["notice"].startswith("Promote/rollback hanya lewat CLI")
 
@@ -268,16 +286,20 @@ def test_real_smoke_subprocess_promotes_good_and_rejects_broken_release(settings
     fake_verification(monkeypatch)
     fake_policy(monkeypatch)
     kw = {"session": db, "operator_user_id": operator, "server_check": no_server, "smoke_timeout": 120}
-    good = release.build_release(settings, repo=git_repo)
+    good = release.build_release(settings, repo=git_repo, session=db)
     report = release.promote(settings, good["release_id"], **kw)
     assert report["status"] == "SUCCEEDED", report
     assert report["smoke"]["health"]["status_code"] == 200
+    # §09 functional smoke: login, explicit domain choice, doctor run, capabilities and projects on the release
+    assert report["smoke"]["functional"]["ok"] is True
+    assert report["smoke"]["functional"]["steps"] == {"login": 200, "domain_select": 200, "doctor_run": 200,
+                                                      "capabilities": 200, "projects": 200}
     system = git_repo / "backend" / "aeos" / "api" / "system.py"
     system.write_text(system.read_text(encoding="utf-8").replace('"status": "ok"', '"status": "broken"'),
                       encoding="utf-8")
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-q", "-m", "break health")
-    broken = release.build_release(settings, repo=git_repo)
+    broken = release.build_release(settings, repo=git_repo, session=db)
     report = release.promote(settings, broken["release_id"], **kw)
     assert report["status"] == "FAILED", report
     assert release.read_pointer(settings)["active"]["release_id"] == good["release_id"]

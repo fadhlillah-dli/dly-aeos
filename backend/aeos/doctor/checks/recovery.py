@@ -166,5 +166,31 @@ def recovery_config_rollback(ctx: CheckContext) -> Outcome:
     if not releases:
         return Outcome("MISSING", "Belum ada released controller artifact; rollback controller/konfigurasi belum tersedia.",
                        error_code="NO_RELEASE_ARTIFACT", severity="LOW")
-    return Outcome("CONFIGURED", f"{len(releases)} rilis controller tersimpan untuk rollback.",
-                   evidence={"releases": releases[-5:]})
+    # §09 zones: the trusted controller is the pinned ACTIVE release, not whatever the checkout contains.
+    try:
+        from aeos.operations.facade import controller_report
+
+        ctl: dict[str, Any] | None = controller_report(ctx.settings, ctx.session)
+    except Exception:  # operations module absent/broken: no claim either way
+        ctl = None
+    evidence: dict[str, Any] = {"releases": releases[-5:]}
+    if ctl is not None:
+        evidence["controller"] = {k: ctl.get(k) for k in ("source", "mode", "release_id", "commit", "dirty",
+                                                          "active_release_id", "matches_active", "config_drift")}
+        if ctl.get("active_release_id") and ctl.get("matches_active") is False:
+            return Outcome("FAILED", f"Controller yang berjalan ({ctl.get('mode')}, commit "
+                                     f"{str(ctl.get('commit') or 'UNKNOWN')[:12]}) bukan rilis aktif "
+                                     f"{ctl.get('active_release_id')}; perubahan checkout/git pull mengubah controller "
+                                     "tanpa promosi.", evidence=evidence, error_code="CONTROLLER_NOT_ACTIVE_RELEASE",
+                           severity="MEDIUM",
+                           remedy=Remedy(operation="Jalankan controller dari rilis aktif yang terverifikasi",
+                                         command=aeos_cmd("serve --release active"), source="aeos.operations.release",
+                                         evidence_to_collect="/api/health controller.mode = release"))
+        if ctl.get("config_drift"):
+            return Outcome("FAILED", "Konfigurasi runtime/policy snapshot berubah sejak promosi rilis aktif; perubahan "
+                                     "ini tidak terikat pada keputusan PROMOTION.", evidence=evidence,
+                           error_code="CONFIG_CHANGED_SINCE_PROMOTION", severity="LOW",
+                           remedy=Remedy(operation="Tinjau perubahan konfigurasi; promosikan ulang bila disengaja",
+                                         command=aeos_cmd("ops release list"),
+                                         evidence_to_collect="config_hash sama dengan ACTIVE.json"))
+    return Outcome("CONFIGURED", f"{len(releases)} rilis controller tersimpan untuk rollback.", evidence=evidence)

@@ -437,13 +437,21 @@ class CIStatus:
         return status, [r.name for r in runs]
 
 
+_EXPLICIT_GATES = re.compile(r"\[(G[0-8](?:\s*,\s*G[0-8])*|NO-GATE)\]", re.I)
+
+
 def classify_check(name: str, gate_map: dict[str, list[str]] | None = None) -> list[str]:
     """Gates a CI job (check-run name) proves. With the project's pipeline reference (§31 "pipeline reference
-    per project") the mapping is explicit: exact job names per gate; otherwise the name heuristics apply
-    (and the CI evidence says so)."""
-    low = name.lower().strip()
+    per project") the mapping is explicit: exact job names per gate. Otherwise an explicit tag in the job
+    name - ``[G1,G2]`` or ``[NO-GATE]`` for report-only jobs - wins over the name heuristics (the CI evidence
+    then still says NAME_HEURISTIC: no project pipeline reference was configured)."""
+    low = (name or "").lower().strip()
     if gate_map:
         return sorted(g for g, jobs in gate_map.items() if low in {j.lower().strip() for j in jobs})
+    m = _EXPLICIT_GATES.search(name or "")
+    if m:
+        tag = m.group(1).upper()
+        return [] if tag == "NO-GATE" else sorted({g.strip() for g in tag.split(",")})
     return [g for g, needles in GATE_HINTS.items() if any(n in low for n in needles)]
 
 

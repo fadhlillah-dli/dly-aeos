@@ -578,6 +578,10 @@ def review_run(session: Session, run_id: str, *, actor: str, actor_type: str = "
         json_schema=REVIEW_SCHEMA, project_id=project.id, domain=project.domain,
         context_files=[package_path] if package_path else [],
         timeout_seconds=int(policy.get("timeout_seconds") or 900),
+        # §12: the package is embedded inline in the prompt, so the supervisor needs no file tools at all; with
+        # none it cannot read anything outside the package (e.g. the other domain's partition), whatever the
+        # --restricted semantics are (ADR-0040 addendum 2026-10-19).
+        allowed_tools=[],
     )
     notes: list[str] = []
     cap = call(doctor.capability_state, session, Capability.CAN_REVIEW_WITH_MAX, domain=project.domain,

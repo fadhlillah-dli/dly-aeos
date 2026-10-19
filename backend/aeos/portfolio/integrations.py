@@ -26,7 +26,8 @@ from aeos.models.portfolio import Project, ProjectIntegration
 from aeos.portfolio import providers as pv
 from aeos.portfolio.service import deny, require_writable
 
-PURPOSES = ("docs", "issues", "code", "ci", "roadmap", "staging", "production")
+PURPOSES = ("docs", "issues", "code", "ci", "roadmap", "staging", "production", "deploy")
+LOCAL_TARGET = "local-target"
 # domain -> provider -> allowed purposes (U-02..U-04, §04 table). One vocabulary: aeos.portfolio.providers.
 PROVIDERS: dict[str, dict[str, frozenset[str]]] = pv.INTEGRATION_PROVIDERS
 OFFICE_PROVIDERS = frozenset(PROVIDERS[Domain.OFFICE.value])
@@ -34,11 +35,13 @@ ATLASSIAN_PROVIDERS = pv.ATLASSIAN
 CREDENTIAL_NAMESPACES = {Domain.PERSONAL.value: ("personal", "projects"), Domain.OFFICE.value: ("office", "projects")}
 ROOT_ID_NAMES = pv.ROOT_ID_NAMES
 # Google Drive is optional: without a folder id the project folder is created in My Drive (§04, S16).
-ROOT_REQUIRED = frozenset({pv.CONFLUENCE, pv.JIRA, pv.GITHUB_ISSUES, pv.DEPLOYMENT_TARGET})
-# Observe-only targets (GET of a health/version URL) may run without a credential reference.
-CREDENTIAL_OPTIONAL = frozenset({pv.DEPLOYMENT_TARGET})
+ROOT_REQUIRED = frozenset({pv.CONFLUENCE, pv.JIRA, pv.GITHUB_ISSUES, pv.DEPLOYMENT_TARGET, LOCAL_TARGET})
+# Providers that authenticate nothing themselves: observe-only targets (GET of a health/version URL) and the
+# local environment the owner runs may be registered without a credential reference.
+CREDENTIAL_OPTIONAL = frozenset({pv.DEPLOYMENT_TARGET, LOCAL_TARGET})
 _REPO_SLUG = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
 _ROOT_PATTERNS = {
+    "local-target": re.compile(r"^(container|host|vm):[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"),
     pv.GOOGLE_DRIVE: re.compile(r"^[A-Za-z0-9_-]{10,128}$"),
     pv.CONFLUENCE: re.compile(r"^\d{1,20}$"),
     pv.JIRA: re.compile(r"^[A-Z][A-Z0-9_]{1,19}$"),
@@ -126,6 +129,9 @@ def _validate_config(config: Any) -> dict[str, Any]:
         raise ValidationFailed("config must be an object", code="INVALID_CONFIG")
     out: dict[str, Any] = {}
     for k, v in config.items():
+        if isinstance(k, str) and k.startswith("_"):
+            # reserved for controller-written proof (``_verification``): never settable through the API
+            raise ValidationFailed(f"config key {k!r} is reserved", code="INVALID_CONFIG")
         if not isinstance(k, str) or _SENSITIVE_KEY.search(k):
             raise ValidationFailed(f"config key {k!r} is not allowed (credentials go to the secret store)",
                                    code="SECRET_IN_FIELD")
@@ -169,6 +175,60 @@ def _credential_state(ref: str | None) -> dict[str, Any]:
             "expires_at": st.expires_at.isoformat() if st.expires_at else None}
 
 
+PROOF_KEY = "_verification"
+CONNECTIVITY_STATES = ("NOT_CHECKED", "CONNECTED", "FAILED", "EXPIRED")
+FUNCTIONAL_STATES = ("NOT_TESTED", "VERIFIED", "FAILED")
+
+
+def _target_string(integration: ProjectIntegration) -> str:
+    ident = pv.target_identity(integration.provider, integration.root_id)
+    return f"{ident['provider']}:{ident['root_id']}|tenant={integration.tenant_id or ''}"
+
+
+def _proof_state(integration: ProjectIntegration) -> dict[str, Any]:
+    """Connectivity/functional state from a controller-recorded probe of the CURRENT exact target only."""
+    proof = (integration.config or {}).get(PROOF_KEY)
+    if not isinstance(proof, dict) or proof.get("target") != _target_string(integration):
+        return {"connectivity": "NOT_CHECKED", "functional": "NOT_TESTED"}
+    return {"connectivity": proof.get("connectivity", "NOT_CHECKED"), "functional": proof.get("functional", "NOT_TESTED"),
+            "verification": {k: proof.get(k) for k in ("observer", "evidence_ref", "at")}}
+
+
+def mark_verified(session: Session, integration_id: str, *, connectivity: str, functional: str = "NOT_TESTED",
+                  observer: str, evidence_ref: str | None = None) -> ProjectIntegration | None:
+    """Record a probe result for the integration's CURRENT exact target (§10 Integration Registry health,
+    §13 ProjectIntegration last_verified_at). Only trusted in-process probes call this (doctor check,
+    publisher capability probe). ``last_verified_at`` is set only for a functional VERIFIED result; a target
+    change later drops the proof (upsert_integration)."""
+    if connectivity not in CONNECTIVITY_STATES or functional not in FUNCTIONAL_STATES:
+        raise ValidationFailed("invalid probe state", details={"connectivity": CONNECTIVITY_STATES,
+                                                                "functional": FUNCTIONAL_STATES})
+    integ = session.get(ProjectIntegration, integration_id)
+    if integ is None:
+        return None
+    now = utcnow()
+    integ.config = {**(integ.config or {}), PROOF_KEY: {
+        "target": _target_string(integ), "connectivity": connectivity, "functional": functional,
+        "observer": observer[:128], "evidence_ref": evidence_ref, "at": now.isoformat()}}
+    if functional == "VERIFIED":
+        integ.last_verified_at = now
+    elif functional == "FAILED" or connectivity in ("FAILED", "EXPIRED"):
+        integ.last_verified_at = None
+    integ.capability_status = compute_capability_status(integ)
+    session.flush()
+    audit.record(session, actor_type="system", actor_id=observer[:128], action="portfolio.integration.probe",
+                 target_type="integration", target_id=integ.id, project_id=integ.project_id, domain=integ.domain,
+                 details={"connectivity": connectivity, "functional": functional, "evidence_ref": evidence_ref})
+    return integ
+
+
+def integrations_for_target(session: Session, *, domain: str, providers: tuple[str, ...],
+                            root_id: str) -> list[ProjectIntegration]:
+    return list(session.scalars(select(ProjectIntegration).where(
+        ProjectIntegration.domain == domain, ProjectIntegration.provider.in_(providers),
+        ProjectIntegration.root_id == root_id)))
+
+
 def compute_capability_status(integration: ProjectIntegration) -> dict[str, Any]:
     """Configuration-level state only; never VERIFIED here (that needs a functional probe)."""
     root_needed = integration.provider in ROOT_REQUIRED
@@ -177,7 +237,9 @@ def compute_capability_status(integration: ProjectIntegration) -> dict[str, Any]
         root_state = "DEFAULT"  # optional: the project folder is created in My Drive (drive.file scope)
     cred = _credential_state(integration.credential_ref)
     if integration.provider in CREDENTIAL_OPTIONAL and not integration.credential_ref:
-        cred = {"status": "NOT_APPLICABLE", "reason": "observe-only target; no credential needed"}
+        cred = {"status": "NOT_APPLICABLE",
+                "reason": "local environment target; no provider credential" if integration.provider == LOCAL_TARGET
+                else "observe-only target; no credential needed"}
     remedies: list[dict[str, str]] = []
     if root_state == "MISSING":
         remedies.append({"issue": f"{ROOT_ID_NAMES.get(integration.provider, 'root_id')} belum diatur",
@@ -185,6 +247,9 @@ def compute_capability_status(integration: ProjectIntegration) -> dict[str, Any]
     if cred["status"] not in ("CONFIGURED", "NOT_APPLICABLE"):
         remedies.append({"issue": f"credential {integration.credential_ref or '(none)'}: {cred['status']}",
                          "command": _remedy(integration.provider, "credential", integration.credential_ref)})
+    if integration.provider in CREDENTIAL_OPTIONAL:
+        remedies.append({"issue": "deploy ke target ini butuh keputusan WRITE_ENABLEMENT manusia untuk target persis ini",
+                         "command": "POST /api/decisions (kind WRITE_ENABLEMENT, target integration)"})
     office = integration.domain == Domain.OFFICE.value
     if office:
         remedies.append({"issue": "OFFICE default deny (§23): needs a recorded company authorisation",
@@ -218,8 +283,7 @@ def compute_capability_status(integration: ProjectIntegration) -> dict[str, Any]
         "target": pv.target_identity(integration.provider, integration.root_id),
         "doctor_checks": list(pv.DOCTOR_CHECKS.get(integration.provider, ())),
         "credential": cred,
-        "connectivity": "NOT_CHECKED",
-        "functional": "NOT_TESTED",
+        **_proof_state(integration),
         "write_enabled": False,
         "office_default_deny": office,
         "remedies": remedies,
@@ -256,8 +320,11 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
     root = _validate_id(body.get("root_id"), field="root_id", pattern=_ROOT_PATTERNS.get(provider))
     cred_ref = _validate_credential_ref(body.get("credential_ref"), project)
     config = _validate_config(body.get("config"))
-    if provider not in ATLASSIAN_PROVIDERS and ({"deployment", "enabled", "space_id", "base_url"} & set(config)):
-        raise ValidationFailed("deployment/enabled/space_id/base_url apply to Confluence/Jira only",
+    if provider not in ATLASSIAN_PROVIDERS and ({"deployment", "space_id", "base_url"} & set(config)):
+        raise ValidationFailed("deployment/space_id/base_url apply to Confluence/Jira only", code="INVALID_CONFIG")
+    if "enabled" in config and provider not in ATLASSIAN_PROVIDERS | {pv.BITBUCKET}:
+        # OFFICE adapters are disabled by default (ADR-0073); `enabled` exists for them only
+        raise ValidationFailed("enabled applies to the OFFICE adapters (Confluence/Jira/Bitbucket) only",
                                code="INVALID_CONFIG")
 
     same_purpose = list(session.scalars(select(ProjectIntegration).where(
@@ -274,11 +341,14 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
         integ = ProjectIntegration(project_id=project.id, domain=project.domain, provider=provider, purpose=purpose)
         session.add(integ)
     before = {"tenant_id": integ.tenant_id, "root_id": integ.root_id, "credential_ref": integ.credential_ref}
+    proof = (integ.config or {}).get(PROOF_KEY)
     integ.tenant_id = tenant
     integ.root_id = root
     integ.credential_ref = cred_ref
     integ.config = {**config, "root_id_name": ROOT_ID_NAMES.get(provider)}
     target_changed = not created and before != {"tenant_id": tenant, "root_id": root, "credential_ref": cred_ref}
+    if proof and not target_changed:
+        integ.config = {**integ.config, PROOF_KEY: proof}  # same target: earlier proof still describes it
     if target_changed:
         integ.last_verified_at = None  # a new target/identity invalidates earlier proof (§08)
     integ.capability_status = compute_capability_status(integ)
@@ -395,7 +465,7 @@ def integration_view(integ: ProjectIntegration) -> dict[str, Any]:
         "root_id": integ.root_id,
         "root_id_name": (integ.config or {}).get("root_id_name") or ROOT_ID_NAMES.get(integ.provider),
         "credential_ref": integ.credential_ref,
-        "config": {k: v for k, v in (integ.config or {}).items() if k != "root_id_name"},
+        "config": {k: v for k, v in (integ.config or {}).items() if k != "root_id_name" and not k.startswith("_")},
         "capability_status": integ.capability_status or {},
         "last_verified_at": integ.last_verified_at.isoformat() if integ.last_verified_at else None,
         "updated_at": integ.updated_at.isoformat() if integ.updated_at else None,

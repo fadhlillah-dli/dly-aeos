@@ -694,9 +694,12 @@ def test_openbao_found_in_data_dir_and_vault_remedies(settings, db, fake_host):
     load_all()
     ctx = make_context(settings, db, runner=fake_host)
     missing = run_check(REGISTRY["secret.openbao_binary"], ctx)
-    assert missing.status == "MISSING" and missing.remediation["command"].endswith("vault install")
+    # the repository manifest has no approved OpenBao pin yet: the remedy names the exact-version form the CLI
+    # accepts (plain `vault install` is refused without a pin, §07)
+    assert missing.status == "MISSING" and missing.remediation["command"].endswith("vault install --version <X.Y.Z>")
+    assert "approved_pin" in missing.remediation["operation"]
     health = run_check(REGISTRY["secret.openbao_health"], ctx)
-    assert health.status == "MISSING" and health.remediation["command"].endswith("vault install")
+    assert health.status == "MISSING" and health.remediation["command"].endswith("vault install --version <X.Y.Z>")
     local = settings.data_dir / "bin" / ("bao.exe" if sys.platform == "win32" else "bao")
     fake_host.stats[str(local)] = {"size": 10, "mtime_ns": 1}
     fake_host.binaries["bao"] = str(local)  # FakeRunner maps the path back to the name for the version call

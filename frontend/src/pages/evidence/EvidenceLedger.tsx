@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useAuth } from "../../auth/AuthContext";
 import { EmptyState, ErrorBox, Freshness, Loading, Mono, Table, inputClass } from "../../components/ui";
 import { relativeTime, shortHash } from "../../lib/format";
@@ -15,7 +16,9 @@ export function EvidenceLedger({ runId }: { runId?: string }) {
   const [level, setLevel] = useState("");
   const [trusted, setTrusted] = useState("");
   const [kind, setKind] = useState("");
-  const [open, setOpen] = useState<string | null>(null);
+  // Deep link (e.g. from Live Work "Bukti"): /evidence?id=<evidence id> opens that record's drawer.
+  const [params] = useSearchParams();
+  const [open, setOpen] = useState<string | null>(runId ? null : params.get("id"));
   const filters = { level: level || undefined, trusted: trusted || undefined, kind: kind || undefined, run_id: runId };
   const q = useQuery({ queryKey: ["evidence", domain, filters], queryFn: () => evidenceApi.list(filters) });
   const env = (e: EvidenceItem, k: string) => (e.environment?.[k] as string | undefined) ?? null;

@@ -51,6 +51,9 @@ function RoleCardView({ role }: { role: RoleCard }) {
         </div>
         <Availability role={role} />
       </header>
+      <p className="text-xs text-ink-2" data-testid={`assigned-${role.role_key}`}>
+        Penugasan: {role.assigned_tasks ?? 0} task aktif memakai peran ini (proyeksi; bukan izin atau wewenang).
+      </p>
       {role.engine_hint && <p className="text-xs text-ink-2">Engine/model (panduan desain, bukan route aktif): {role.engine_hint}</p>}
       <Bullets title="Masukan" items={role.inputs ?? []} />
       <Bullets title="Keluaran" items={role.outputs} />
@@ -105,6 +108,7 @@ function AgentCard({ a }: { a: AgentDef }) {
             <div className="text-xs text-ink-3">
               harness {a.harness} · peran {a.role_key} · rev {a.revision}
             </div>
+            <div className="text-xs text-ink-2">Pemilik (manusia yang bertanggung jawab): {a.owner || "belum ditetapkan"}</div>
           </div>
         </div>
         {a.active_runs > 0 ? (
@@ -152,6 +156,13 @@ export default function OrganizationPage() {
   const services = (roles.data?.items ?? []).flatMap((g) => g.roles.filter((r) => r.deterministic_service));
   const total = (roles.data?.items ?? []).reduce((n, g) => n + g.roles.length, 0);
   const active = (roles.data?.items ?? []).reduce((n, g) => n + g.roles.reduce((m, r) => m + r.active_runs, 0), 0);
+  const assigned = (roles.data?.items ?? []).reduce((n, g) => n + g.roles.reduce((m, r) => m + (r.assigned_tasks ?? 0), 0), 0);
+  // "Lihat bukti" is derived from the records (never a fixed claim): evaluation status counts of the roles
+  const evalCounts = (roles.data?.items ?? []).flatMap((g) => g.roles).reduce<Record<string, number>>((acc, r) => {
+    acc[r.eval_status] = (acc[r.eval_status] ?? 0) + 1;
+    return acc;
+  }, {});
+  const evalText = Object.entries(evalCounts).map(([k, v]) => `${k}: ${v}`).join(", ") || "belum ada data peran";
 
   return (
     <div className="space-y-5">
@@ -172,8 +183,8 @@ export default function OrganizationPage() {
         content={{
           what: "Proyeksi katalog peran (§16), kelompok organisasi (§17) dan konfigurasi agent. Tidak menjalankan LLM apa pun.",
           why: "Pola terpilih: controller deterministik + spesialis on-demand + review frontier (§18). Satu implementer cukup untuk tugas kecil.",
-          usedBy: `Run aktif saat ini: ${active}. Scheduler memilih agent per TaskSpec; peran lain tidak otomatis dipanggil.`,
-          evidence: "Setiap kartu memuat versi + revision hash; status evaluasi masih NOT_EVALUATED sampai §43/§44 dijalankan.",
+          usedBy: `Run aktif saat ini: ${active}; task aktif yang ditugaskan ke peran: ${assigned}. Scheduler memilih agent per TaskSpec; peran lain tidak otomatis dipanggil.`,
+          evidence: `Setiap kartu memuat versi + revision hash. Status evaluasi peran (dari katalog): ${evalText}.`,
           impact: "Mengubah peran/agent membuat revisi baru; riwayat run lama tidak ditulis ulang.",
           propose: "Gunakan Usulan Upgrade (ChangeProposal) untuk menambah/mengganti peran.",
         }}

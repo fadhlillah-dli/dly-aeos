@@ -9,7 +9,9 @@ own machine (Windows or macOS, also Linux) from a clone of this repository, serv
 * **You approve concrete plan versions.** Approvals are `Decision` records bound to an exact
   target and content hash; agent output is data, never approval.
 * **A deterministic controller enforces scope, access, cost and state.** Eligible low-cost worker
-  models (via OpenCode) execute bounded tasks in sandboxes with short-lived capabilities.
+  models (via OpenCode) are designed to execute bounded tasks in sandboxes with short-lived
+  capabilities — **NOT-PROVEN** on a real machine until OpenCode, a proven container sandbox and the
+  broker/verifier pass the Readiness Doctor (`CAN_RUN_WORKER` stays BLOCKED until then, master §09).
 * **Claude supervises through the official Claude Code client** with your native Max login — never
   the Claude API, never `--bare`, never `ANTHROPIC_API_KEY`.
 * **Merge to `main` and production stay human-only.** Evidence decides acceptance: worker exit 0
@@ -115,13 +117,13 @@ Status per capability, with evidence level and what is still NOT-PROVEN, is trac
 
 | Milestone | Scope | Status |
 |---|---|---|
-| M0 Baseline & seed | AGENTS/master, doctor CLI, install manifest, decision register | see coverage matrix |
-| M1 Foundation | local auth, domain-first gateway, Control Center, inventory, mock labels | see coverage matrix |
-| M2 Planning & Docs | native Claude bridge, Product 1 renderer, PERSONAL publisher | see coverage matrix |
-| M3 Workforce & self-build | sandbox + broker + OpenCode, verifier, live console | see coverage matrix |
-| M4 Delivery | CI/PR evidence, human-only merge/production enforcement | see coverage matrix |
+| M0 Baseline & seed | AGENTS/master, doctor CLI, install manifest, decision register | done — [owner/target/capability matrix](docs/OWNER_TARGET_CAPABILITY_MATRIX.md) |
+| M1 Foundation | local auth, domain-first gateway, Control Center, inventory, mock labels | done (see coverage matrix) |
+| M2 Planning & Docs | native Claude bridge, Product 1 renderer, PERSONAL publisher | partial — real publication NOT-PROVEN |
+| M3 Workforce & self-build | sandbox + broker + OpenCode, verifier, live console | partial — container sandbox / OpenCode NOT-PROVEN |
+| M4 Delivery | CI/PR evidence, human-only merge/production enforcement | partial — branch protection NOT_ENFORCEABLE on GitHub Free |
 | M5 OFFICE | company-approved adapters/routes, isolated runtime | not started (default deny) |
-| M6 Optimization & Ops | arena/scorecards, SLO/runbook/restore/incident loop | see coverage matrix |
+| M6 Optimization & Ops | arena/scorecards, SLO/runbook/restore/incident loop | partial (see coverage matrix) |
 
 Nothing in this repository claims a capability works unless the Readiness Doctor or a recorded test
 proves it. MCI alignment remains **UNVERIFIED** until the canonical source can be read (§51).
@@ -136,7 +138,9 @@ These cannot (and must not) be automated. The dashboard and `aeos doctor` show w
    `authMethod: claude.ai`. Make sure `ANTHROPIC_API_KEY` is **not** set in your environment.
 3. **OpenRouter key into the secret store** — create a key with a spend limit at openrouter.ai,
    then `aeos secrets set workers/openrouter` (input is not echoed). Never put it in a file.
-4. **OpenBao** — `aeos vault install`, `aeos vault start`, `aeos vault init` (store the unseal keys
+4. **OpenBao** — `aeos vault install` (installs the install-manifest `approved_pin`; while none is
+   recorded pass `--version X.Y.Z` for a version you reviewed - `latest` is never implied),
+   `aeos vault start`, `aeos vault init` (store the unseal keys
    and root token **offline**, never in the repo or chat), `aeos vault unseal` after each restart.
 5. **Google OAuth client + consent** (PERSONAL docs) — in Google Cloud Console create a project,
    enable the Google Drive API and Google Docs API, configure the OAuth consent screen, create an

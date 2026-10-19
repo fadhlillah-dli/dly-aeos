@@ -31,6 +31,13 @@ def collect_evidence(
     return impl(**kwargs)
 
 
+def read_json(ev: EvidenceArtifact | None) -> dict[str, Any] | None:
+    """Full JSON content of an artifact, only when its stored bytes still match its ``content_hash``."""
+    from aeos.verification.collector import read_json as impl
+
+    return impl(ev)
+
+
 def latest_acceptance(session: Session, task_id: str) -> AcceptanceRecord | None:
     from aeos.verification.acceptance import latest_acceptance as impl
 

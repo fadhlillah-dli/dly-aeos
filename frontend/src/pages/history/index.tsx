@@ -1,5 +1,8 @@
+import { useQuery } from "@tanstack/react-query";
+import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { Notice, PageHeader, Tabs } from "../../components/ui";
+import { AttemptsTab } from "./AttemptsTab";
 import { AuditTab } from "./AuditTab";
 import { BackupsTab } from "./BackupsTab";
 import { EmergencyTab } from "./EmergencyTab";
@@ -13,12 +16,18 @@ import { DecisionsTab, PublicationsTab, SnapshotsTab } from "./TimelineTabs";
 // Riwayat, Audit & Pemulihan (§35 History / Audit / Recovery, §33, §41).
 export default function Page() {
   const { domain } = useAuth();
+  // "Diperiksa pada" of the page = the audit timeline read (same query/cache as the default Audit tab).
+  const audit = useQuery({
+    queryKey: ["history-audit", "limit=50"],
+    queryFn: () => get<{ checked_at?: string | null }>("/api/control-center/history/audit?limit=50"),
+  });
   return (
     <div>
       <PageHeader
         title="Riwayat, Audit & Pemulihan"
         question="Apa yang berubah, siapa menyetujui dan bagaimana memulihkannya?"
         source="audit_events, decisions, architecture_snapshots, publications, backup manifests, release provenance (waktu periksa per tab)"
+        checkedAt={audit.data?.checked_at ?? null}
         evidenceLimit="Riwayat lokal append-only (bukan WORM); pemulihan terbukti hanya setelah restore test berhasil."
       />
       {!domain && (
@@ -32,6 +41,7 @@ export default function Page() {
       <Tabs
         tabs={[
           { id: "audit", label: "Audit", content: <AuditTab /> },
+          { id: "attempts", label: "Percobaan", content: <AttemptsTab /> },
           { id: "decisions", label: "Keputusan", content: <DecisionsTab /> },
           { id: "snapshots", label: "Snapshot arsitektur", content: <SnapshotsTab /> },
           { id: "publications", label: "Publikasi", content: <PublicationsTab /> },

@@ -60,9 +60,16 @@ export function NodeCard({ node, lensLabel, onClose }: { node: MapNode; lensLabe
                 ["Alasan dipilih", d.usage_role.why_selected],
                 ["Dipakai oleh", d.usage_role.used_by.length ? d.usage_role.used_by.map((u) => u.name).join(", ") : "belum tercatat"],
                 ["Domain", d.scope.domains.join(", ")],
+                ["Proyek / tingkat", d.scope.level === "project" ? `proyek (${d.scope.owner || "pemilik belum ditetapkan"})` : `${d.scope.level} · ${d.scope.environment}`],
                 ["Sumber", d.source.source_url ?? "UNKNOWN (tidak ditebak)"],
                 ["Pin / teramati", `${d.versions.approved_pin ?? "UNKNOWN"} / ${d.versions.observed_version ?? "—"}`],
                 ["Biaya", String(d.cost.design.model ?? "UNKNOWN")],
+                ["Data / akses", Object.keys(d.access ?? {}).length
+                  ? Object.entries(d.access).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : String(v)}`).join(" · ")
+                  : "tidak tercatat"],
+                ["Bergantung pada", d.relations.outgoing.length
+                  ? d.relations.outgoing.map((r) => `${r.relation} → ${r.target_name || r.target}`).join(", ")
+                  : "tidak ada relasi keluar tercatat"],
               ]}
             />
             <div>

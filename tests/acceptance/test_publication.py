@@ -326,6 +326,61 @@ def test_one_failing_target_is_partial_and_successes_are_kept(personal_client: A
         assert retried["status"] == "PUBLISHED"
 
 
+def test_partial_publication_never_makes_work_run_on_an_incomplete_contract(
+        personal_client: AuthedClient, db, vault, monkeypatch):
+    """§03: one failing publication target leaves execution bound to the complete approved TaskSpecs;
+    the missing external ticket is reported on the publication, never substituted into the work."""
+    from aeos.core.enums import Capability
+    from aeos.models.planning import PlanVersion, TaskSpec
+    from aeos.models.workforce import TaskExecution
+    from aeos.planning import facade as planning
+    from tests.acceptance.world import (
+        WORKER_ROUTE,
+        activate_route,
+        doctor_ready,
+        fake_opencode,
+        owner_exception,
+        register_free_route,
+        seed_catalog,
+    )
+
+    world = publication_ready(personal_client, db, vault, monkeypatch)
+    plan_id = world["plan"]["id"]
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+        FakeGoogleApi().mount(router)
+        github = FakeGitHubApi(PUB_REPO).mount(router)
+        github.fail_create_issue["Task T1"] = 422
+        pub = preview_and_execute(personal_client, plan_id)
+        view = run_outbox(db, pub["id"])
+    assert view["status"] == "PARTIAL"
+
+    # the owner then readies the worker side; publication state is not an input to execution
+    seed_catalog(db)
+    fake_opencode(monkeypatch)
+    register_free_route(db, WORKER_ROUTE)
+    activate_route(personal_client, WORKER_ROUTE)
+    owner_exception(personal_client, target_type="worker_sandbox", target_id="process",
+                    details={"allow_process_sandbox": True})
+    doctor_ready(db, Capability.CAN_RUN_WORKER)
+    r = personal_client.post("/api/workforce/agents/opencode-implementer/enable", json={"reason": "pilot"})
+    assert r.status_code == 200, r.text
+    ex = personal_client.post(f"/api/plans/{plan_id}/execute")
+    assert ex.status_code == 200, ex.text
+
+    approved = planning.get_approved_version(db, plan_id)
+    assert isinstance(approved, PlanVersion) and ex.json()["plan_version_id"] == approved.id
+    specs = {t.id: t for t in db.scalars(select(TaskSpec).where(TaskSpec.plan_version_id == approved.id))}
+    executions = list(db.scalars(select(TaskExecution).where(TaskExecution.plan_id == plan_id)))
+    assert specs and {te.task_id for te in executions} == set(specs), "every approved TaskSpec, nothing else"
+    for te in executions:
+        assert te.plan_version_id == approved.id and te.task_key == specs[te.task_id].task_key
+    # the failed ticket stays reported as missing on the publication; no reference is invented for it
+    after = personal_client.get(f"/api/publications/{pub['id']}").json()
+    assert after["status"] == "PARTIAL"
+    titles = [ref.title for ref in db.scalars(select(ExternalReference))]
+    assert titles and "Task T1" not in titles, titles
+
+
 def test_publication_status_keeps_docs_published_separate_from_active_and_verified(
         personal_client: AuthedClient, db, vault, monkeypatch):
     world = publication_ready(personal_client, db, vault, monkeypatch)

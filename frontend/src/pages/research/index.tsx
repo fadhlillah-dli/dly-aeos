@@ -227,7 +227,7 @@ function EntryDetailPanel({ id, onClose, isAdmin }: { id: string; onClose: () =>
   );
 }
 
-function AddUrlForm() {
+export function AddUrlForm() {
   const qc = useQueryClient();
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
@@ -253,6 +253,11 @@ function AddUrlForm() {
           <input className={inputClass} value={notes} onChange={(e) => setNotes(e.target.value)} />
         </Field>
       </div>
+      <p className="text-xs text-ink-3" data-testid="research-upload-note">
+        Berkas (mis. .md) tidak diunggah di sini: registry riset bersifat platform (tanpa domain), sedangkan lampiran
+        selalu disimpan per proyek dan domain. Unggah dokumen pendukung di halaman proyek atau lewat{" "}
+        <code>aeos intake upload</code>, lalu rujuk URL/nama di sini.
+      </p>
       <ErrorBox error={m.error} />
       {m.data && (
         <Notice tone={m.data.duplicate ? "warn" : "info"}>

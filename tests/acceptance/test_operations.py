@@ -53,6 +53,21 @@ def _no_server(_settings):
     return {"running": False}
 
 
+def _accepted_build(settings, repo: Path, db, operator: str):
+    """§09 zone 3: a release is built only for an accepted commit. No provider CI exists here, so the
+    owner records the EXCEPTION decision bound to the exact commit (the real human path)."""
+    from aeos.operations import release
+
+    commit = _git(repo, "rev-parse", "HEAD").strip()
+    release.record_acceptance_exception(db, commit=commit, operator_user_id=operator,
+                                        reason="acceptance test: no provider CI for this local repository")
+    db.commit()
+    prov = release.build_release(settings, repo=repo, session=db)
+    db.commit()
+    assert prov["acceptance"]["basis"] == "owner_exception"
+    return prov
+
+
 # ---------------------------------------------------------------------------------------------- 1.7
 def test_failed_controller_upgrade_keeps_the_old_release_and_recoverable_data(personal_client: AuthedClient, db,
                                                                               settings, tmp_path):
@@ -61,7 +76,7 @@ def test_failed_controller_upgrade_keeps_the_old_release_and_recoverable_data(pe
     repo = _platform_repo(tmp_path)
     operator = owner_id(db)
     kw = {"session": db, "operator_user_id": operator, "server_check": _no_server, "smoke_timeout": 180}
-    good = release.build_release(settings, repo=repo)
+    good = _accepted_build(settings, repo, db, operator)
     report = release.promote(settings, good["release_id"], **kw)
     assert report["status"] == "SUCCEEDED", report
     assert report["smoke"]["health"]["status_code"] == 200
@@ -71,7 +86,7 @@ def test_failed_controller_upgrade_keeps_the_old_release_and_recoverable_data(pe
                       encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "broken health")
-    bad = release.build_release(settings, repo=repo)
+    bad = _accepted_build(settings, repo, db, operator)
     failed = release.promote(settings, bad["release_id"], **kw)
     assert failed["status"] == "FAILED" and failed["steps"][-1]["step"] == "smoke"
     pointer = release.read_pointer(settings)
@@ -120,7 +135,7 @@ def test_code_rollback_is_refused_when_data_cannot_roll_back(personal_client: Au
         return {"ok": True, "version": aeos.__version__, "health": {"status_code": 200}}
 
     kw = {"session": db, "operator_user_id": operator, "server_check": _no_server, "smoke_runner": smoke}
-    a = release.build_release(settings, repo=repo)
+    a = _accepted_build(settings, repo, db, operator)
     assert release.promote(settings, a["release_id"], **kw)["status"] == "SUCCEEDED"
     versions = repo / "backend" / "aeos" / "migrations" / "versions"
     heads = release.read_pointer(settings)["active"]
@@ -128,7 +143,7 @@ def test_code_rollback_is_refused_when_data_cannot_roll_back(personal_client: Au
         f'revision = "zz_acc_r2"\ndown_revision = {a.get("schema_head")!r}\n', encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "add migration")
-    b = release.build_release(settings, repo=repo)
+    b = _accepted_build(settings, repo, db, operator)
     assert b["schema_head"] == "zz_acc_r2"
     # the database was migrated by release B (its live migration ran)
     con = sqlite3.connect(str(settings.layout.db_path))
@@ -218,3 +233,4 @@ def test_trace_pii_is_redacted_or_limited_before_storage_and_export(personal_cli
     stored = (settings.layout.root / ev.location).read_text(encoding="utf-8")
     export = personal_client.get("/api/ops/export", params={"kind": "audit"}).text
     assert email not in stored and email not in export and phone not in export
+    assert phone not in stored  # the phone number is minimised in storage too, not only in the export
