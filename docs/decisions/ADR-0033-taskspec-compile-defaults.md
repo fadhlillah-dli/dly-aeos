@@ -66,3 +66,8 @@ quarantined for special review when DLY AEOS builds itself. §19/§22 serialise 
    refuses); `input_artifacts` are `{ref, kind, sha256, label, resolved}` bound to PRD sections and READ
    attachments, unresolved labels stay visibly unresolved. The scheduler refuses an empty write scope
    (`NO_ALLOWED_PATHS`) instead of only flagging it.
+5. **Role evidence and review (review).** Role-specific evidence requirements are appended at compile
+   (`ROLE_EVIDENCE`: Integration Engineer provider contract test + target/tenant/idempotency test; UX/UI Designer
+   state + accessibility check). The checkpoint review package carries the task's RoleSkillPack contract
+   (`role_contract`: boundaries, verification, failure modes) and the feature reviewer judges the result
+   against it. Route selection honours `model_route_policy.min_context_tokens`.

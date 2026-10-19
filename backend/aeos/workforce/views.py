@@ -33,7 +33,8 @@ BLOCKING_WAIT_CODES = frozenset({"CAPABILITY_NOT_READY", "SANDBOX_NOT_READY", "R
                                  "OFFICE_DENIED", "PLAN_NOT_APPROVED", "DEPENDENCY_NOT_ACCEPTED", "COST_UNKNOWN",
                                  "MODULE_UNAVAILABLE", "FAN_OUT_FORBIDDEN", "NO_ALLOWED_PATHS", "NO_EXPECTED_OUTPUT",
                                  "ROLE_UNKNOWN", "ROLE_NOT_EVALUATED", "AGENT_OUT_OF_SCOPE", "CONTEXT_TOO_LARGE",
-                                 "UNSAFE_PATH", "FORBIDDEN_PATH_ALLOWED", "VERIFIER_UNAVAILABLE"})
+                                 "UNSAFE_PATH", "FORBIDDEN_PATH_ALLOWED", "VERIFIER_UNAVAILABLE",
+                                 "OFFICE_ROUTE_NOT_AUTHORISED"})
 CURRENT_ACTION_LABELS = {"RUNNER": "observed tool action (runner)", "CONTROLLER": "controller status (bukan aksi tool)"}
 
 
@@ -290,8 +291,13 @@ def _supervision_counts(session: Session, *, domain: str, project_ids: list[str]
         role = PLANNING_STAGE_ROLES.get(stage)
         if role:
             out[role] = out.get(role, 0) + int(n)
+    # an open review counts only while its run still waits in REVIEW and no newer review superseded it (an
+    # uncollected manual package of a cancelled/reopened run is history, not current activity)
+    newer = select(ReviewRecord.supersedes_id).where(ReviewRecord.supersedes_id.is_not(None))
     q = select(ReviewRecord.reviewer_kind, func.count()).where(
         ReviewRecord.domain == domain, ReviewRecord.mode == DataMode.LIVE.value,
+        ReviewRecord.run_id.in_(select(WorkerRun.id).where(WorkerRun.execution_status == S.REVIEW.value)),
+        ReviewRecord.id.not_in(newer),
         or_(ReviewRecord.status.in_(["WAITING_QUOTA", "RUNNING", "PENDING"]),
             (ReviewRecord.status == "NEEDS_DECISION") & ReviewRecord.package_ref.is_not(None)))
     if project_ids is not None:
@@ -322,7 +328,9 @@ def roles_view(session: Session, *, domain: str, project_ids: list[str] | None =
             "allowed_scope": r.allowed_scope or {}, "evaluation_cases": r.evaluation_cases or [],
             "practice_sources": r.practice_sources or [],
             "active_runs": n, "demo_runs": demo.get(r.role_key, 0),
-            "availability": "ACTIVE" if n else ("SERVICE" if r.deterministic_service else
+            # an imported pack (§45) is a CANDIDATE: never runnable before review + evaluation, never "available"
+            "availability": "ACTIVE" if n else ("CANDIDATE" if r.mode == "CANDIDATE" else
+                                                "SERVICE" if r.deterministic_service else
                                                 "HUMAN" if r.kind == "HUMAN" else "AVAILABLE_INACTIVE"),
         })
     return {"groups": [{"key": g, "label": GROUP_LABELS.get(g, g), "roles": groups.get(g, [])} for g, _ in GROUPS],

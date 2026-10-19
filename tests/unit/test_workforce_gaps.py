@@ -211,13 +211,25 @@ def test_host_without_free_memory_waits_and_compute_is_reserved(db, fakes, monke
     import psutil
 
     _p, _pv, specs = _env(db, fakes, [{"task_key": "a", "limits": {"memory_mb": 2048}}])
-    monkeypatch.setattr(psutil, "virtual_memory", lambda: types.SimpleNamespace(available=1024 * 1024 * 1024))
+    # a 2 GB host: the worker share (1 GB) cannot hold a 2 GB reservation
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: types.SimpleNamespace(total=2 * 1024 ** 3,
+                                                                                available=1024 ** 3))
     adm = scheduler.admission_check(db, specs[0].id)
     assert "RESOURCE_INSUFFICIENT" in _codes(adm) and adm.answers["compute"]["status"] == "INSUFFICIENT"
-    monkeypatch.setattr(psutil, "virtual_memory", lambda: types.SimpleNamespace(available=64 * 1024 ** 3))
-    run = scheduler.acquire_lease(db, specs[0].id, actor="t")
+    # the reservation is checked against capacity, not against other processes' momentary memory use: a busy
+    # 64 GB host with little free memory still admits (and the observation is recorded as a warning)
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: types.SimpleNamespace(total=64 * 1024 ** 3,
+                                                                                available=256 * 1024 ** 2))
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert adm.admitted and "below this run's reservation" in adm.answers["compute"]["warning"]
+    run = scheduler.acquire_lease(db, specs[0].id, actor="t", admission=adm)
     assert run.caps["compute"] == {"memory_mb": 2048, "status": "OK", "enforced": False}
     assert scheduler._reserved_compute_mb(db, exclude_task=None) == 2048
+    # LEASED and RUNNING runs keep their reservation: a host whose remaining budget is too small waits
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: types.SimpleNamespace(total=6 * 1024 ** 3,
+                                                                                available=4 * 1024 ** 3))
+    other = scheduler.compute_check(db, types.SimpleNamespace(id="other", limits={"memory_mb": 2048}), active=1, cap=2)
+    assert other["status"] == "INSUFFICIENT" and other["reserved_mb"] == 2048 and other["worker_budget_mb"] == 3072
 
 
 def test_context_larger_than_the_route_window_is_refused(db, fakes):
@@ -355,13 +367,23 @@ def test_org_view_counts_running_planning_stages_and_open_reviews(db):
     db.flush()
     db.add(PlanningRun(plan_id=plan.id, project_id=p.id, stage="CHALLENGE_REVIEW", role="Planning Challenger",
                        status="RUNNING"))
-    db.add(ReviewRecord(target_type="worker_run", target_id="r", project_id=p.id, domain="PERSONAL",
-                        reviewer_kind="SECURITY", verdict="NOT-PROVEN", status="WAITING_QUOTA", mode="LIVE"))
+    in_review = WorkerRun(project_id=p.id, domain="PERSONAL", attempt=1, execution_status="REVIEW", mode="LIVE")
+    finished = WorkerRun(project_id=p.id, domain="PERSONAL", attempt=1, execution_status="CANCELLED", mode="LIVE")
+    db.add_all([in_review, finished])
+    db.flush()
+    db.add(ReviewRecord(target_type="worker_run", target_id=in_review.id, run_id=in_review.id, project_id=p.id,
+                        domain="PERSONAL", reviewer_kind="SECURITY", verdict="NOT-PROVEN", status="WAITING_QUOTA",
+                        mode="LIVE"))
+    # an uncollected manual package of a run that left REVIEW is history, not current activity
+    db.add(ReviewRecord(target_type="worker_run", target_id=finished.id, run_id=finished.id, project_id=p.id,
+                        domain="PERSONAL", reviewer_kind="CLAUDE", verdict="NOT-PROVEN", status="NEEDS_DECISION",
+                        package_ref="pkg-old", mode="LIVE"))
     db.flush()
     rows = {r["role_key"]: r for g in views.roles_view(db, domain="PERSONAL")["groups"] for r in g["roles"]}
     assert rows["planning-challenger"]["availability"] == "ACTIVE"
     assert rows["security-reviewer"]["availability"] == "ACTIVE"
     assert rows["primary-planner"]["availability"] == "AVAILABLE_INACTIVE"
+    assert rows["feature-architecture-reviewer"]["active_runs"] == 0
     office = {r["role_key"]: r for g in views.roles_view(db, domain="OFFICE")["groups"] for r in g["roles"]}
     assert office["planning-challenger"]["active_runs"] == 0  # domain scoped
     scoped = {r["role_key"]: r for g in views.roles_view(db, domain="PERSONAL", project_ids=[])["groups"]
@@ -426,3 +448,60 @@ def test_scheduler_ticks_and_heartbeats_never_invoke_the_claude_bridge(settings,
             assert scheduler.heartbeat(db, run.id, lease_id=run.lease_id)
         scheduler.reconcile(db)
         db.commit()
+
+
+# ----------------------------------------------------------------------------- review (C7): §23 OFFICE route binding
+def test_office_task_waits_until_the_route_office_decision_holds(db, fakes, monkeypatch):
+    """§23 controlled path: an OFFICE task runs on a route only while the owner's office_route decision (company
+    authorisation + company-approved route, bound to the route identity) holds; revoking it ends admission."""
+    from aeos.policy import office_routes
+
+    project = make_project(db, domain="OFFICE")
+    make_route(db, domains=["PERSONAL", "OFFICE"])
+    _p, _pv, specs = _env(db, fakes, [{"task_key": "a"}], project=project)
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert "OFFICE_ROUTE_NOT_AUTHORISED" in _codes(adm) and not adm.admitted
+    monkeypatch.setattr(office_routes, "office_route_authorised", lambda s, r: types.SimpleNamespace(id="d-1"))
+    assert "OFFICE_ROUTE_NOT_AUTHORISED" not in _codes(scheduler.admission_check(db, specs[0].id))
+    assert "OFFICE_ROUTE_NOT_AUTHORISED" in views.BLOCKING_WAIT_CODES
+
+
+def test_imported_candidate_pack_is_shown_as_candidate_not_available(db):
+    seed.run(db)
+    db.add(RoleSkillPack(role_key="ext-helper", name="Ext Helper", group="fe-api-data", kind="EXECUTOR",
+                         version="1", revision_hash="sha256:x", eval_status="NOT_EVALUATED", mode="CANDIDATE"))
+    db.flush()
+    rows = {r["role_key"]: r for g in views.roles_view(db, domain="PERSONAL")["groups"] for r in g["roles"]}
+    assert rows["ext-helper"]["availability"] == "CANDIDATE"
+    assert rows["feature-implementer"]["availability"] == "AVAILABLE_INACTIVE"
+
+
+def test_skill_pack_text_is_redacted_before_it_is_stored():
+    from aeos.workforce import skill_import
+
+    pack = {"role_key": "ext-leaky", "name": "Leaky", "group": "fe-api-data", "inputs": ["x"],
+            "outputs": ["password=hunter2-very-secret"], "boundaries": ["b"],
+            "forbidden_actions": list(catalog.COMMON_FORBIDDEN), "verification": ["v"], "failure_modes": ["f"]}
+    clean = skill_import.validate_pack(pack)
+    assert "hunter2-very-secret" not in clean["outputs"][0]
+
+
+def test_viewer_cannot_change_concurrency_or_import_skill_packs(client, db):
+    """§19/§45: the concurrency mode and a skill-pack import are owner (SUPER_ADMIN) actions."""
+    from tests.conftest import VIEWER_PW, create_admin, create_viewer
+
+    create_admin(db)
+    create_viewer(db)
+    client.login("viewer", VIEWER_PW)
+    assert client.post("/api/session/context", json={"domain": "PERSONAL"}).status_code == 200
+    ok = _eval_run(db)
+    db.commit()
+    r = client.post("/api/workforce/concurrency", json={"max_active": 2, "rationale": "uji dua worker",
+                                                         "eval_run_id": ok.id, "decision_record": RECORD})
+    assert r.status_code == 403, r.text
+    r = client.post("/api/workforce/role-packs/import", json={
+        "pack": {"role_key": "ext-x"}, "source_url": "https://example.org/x", "commit_pin": "a" * 40,
+        "license_spdx": "MIT", "rationale": "uji impor oleh viewer"})
+    assert r.status_code == 403, r.text
+    assert scheduler.concurrency_cap(db) == (1, None)
+    assert db.scalar(select(Decision).where(Decision.target_type == "workforce")) is None

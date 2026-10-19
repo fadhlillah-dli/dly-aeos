@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from aeos.core.errors import Conflict, ValidationFailed
 from aeos.core.hashing import content_hash
+from aeos.core.redaction import redact_text
 from aeos.models.decisions import Decision
 from aeos.models.workforce import RoleSkillPack
 from aeos.workforce import catalog
@@ -75,10 +76,11 @@ def validate_pack(pack: Any) -> dict[str, Any]:
     if lacking:
         raise ValidationFailed("a pack must keep the common forbidden actions (§21)", code="SKILL_PACK_INVALID",
                                details={"missing": lacking})
-    return {"role_key": key, "name": str(pack["name"])[:128], "group": pack["group"], "kind": "EXECUTOR",
-            "description": str(pack.get("description") or "")[:2000],
-            **{f: [str(x)[:500] for x in pack[f]][:50] for f in REQUIRED_LISTS},
-            "example_outputs": [str(x)[:500] for x in (pack.get("example_outputs") or [])][:20]}
+    # External text is untrusted DATA: redacted before it is persisted (AGENTS.md invariant 5) and bounded.
+    return {"role_key": key, "name": redact_text(str(pack["name"]))[:128], "group": pack["group"], "kind": "EXECUTOR",
+            "description": redact_text(str(pack.get("description") or ""))[:2000],
+            **{f: [redact_text(str(x))[:500] for x in pack[f]][:50] for f in REQUIRED_LISTS},
+            "example_outputs": [redact_text(str(x))[:500] for x in (pack.get("example_outputs") or [])][:20]}
 
 
 def import_pack(session: Session, *, pack: Any, source_url: str, commit_pin: str, license_spdx: str,

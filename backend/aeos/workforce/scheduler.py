@@ -832,8 +832,12 @@ def context_estimate(session: Session, task: TaskSpec, te: TaskExecution, route:
             "output_cap": output_cap, "min_context_tokens": minimum, "needed": needed, "context_window": window}
 
 
+WORKER_MEMORY_SHARE = 0.5  # share of the host's physical memory the scheduler may reserve for worker runs
+
+
 def _reserved_compute_mb(session: Session, *, exclude_task: str | None) -> int:
-    rows = session.scalars(select(WorkerRun).where(WorkerRun.execution_status.in_([S.LEASED.value]),
+    """Memory reserved by runs that hold a slot (LEASED or RUNNING)."""
+    rows = session.scalars(select(WorkerRun).where(WorkerRun.execution_status.in_([S.LEASED.value, S.RUNNING.value]),
                                                    WorkerRun.mode == DataMode.LIVE.value))
     return sum(int(((r.caps or {}).get("compute") or {}).get("memory_mb") or 0) for r in rows
                if r.task_id != exclude_task)
@@ -841,8 +845,10 @@ def _reserved_compute_mb(session: Session, *, exclude_task: str | None) -> int:
 
 def compute_check(session: Session, task: TaskSpec, *, active: int, cap: int) -> dict[str, Any]:
     """§19 "batas resource/biaya" + §22 "mencadangkan compute": per-run memory (TaskSpec.limits.memory_mb or the
-    ``workforce.run_memory_mb`` setting) must fit the host's available memory minus runs already leased but not
-    yet started; a second worker also needs a second CPU. The process sandbox cannot enforce the limit (WEAK)."""
+    ``workforce.run_memory_mb`` setting) is reserved against a fixed worker share of the host's physical memory
+    (``WORKER_MEMORY_SHARE``) minus what LEASED/RUNNING runs already reserved — a deterministic capacity, not the
+    momentary free memory of other processes (that is recorded as an observation and a warning). A second worker
+    also needs a second CPU. The process sandbox cannot enforce the limit (WEAK)."""
     import psutil
 
     try:
@@ -850,16 +856,22 @@ def compute_check(session: Session, task: TaskSpec, *, active: int, cap: int) ->
     except (TypeError, ValueError):
         need_mb = DEFAULT_RUN_MEMORY_MB
     try:
-        available_mb = int(psutil.virtual_memory().available // (1024 * 1024))
+        vm = psutil.virtual_memory()
+        total_mb = int(vm.total // (1024 * 1024))
+        available_mb = int(getattr(vm, "available", 0) // (1024 * 1024))
         cpus = int(psutil.cpu_count(logical=True) or 1)
     except Exception:
         return {"status": "UNKNOWN", "memory_mb": need_mb, "reason": "host resource probe failed"}
+    budget = int(total_mb * WORKER_MEMORY_SHARE)
     reserved = _reserved_compute_mb(session, exclude_task=task.id)
-    out = {"memory_mb": need_mb, "available_mb": available_mb, "reserved_mb": reserved, "cpus": cpus,
-           "enforced": False, "note": "process sandbox: limit reserved by admission, not enforced by the OS"}
-    if available_mb - reserved < need_mb:
-        return {**out, "status": "INSUFFICIENT", "reason": f"{available_mb - reserved} MB free after reservations, "
-                                                           f"{need_mb} MB needed"}
+    out: dict[str, Any] = {
+        "memory_mb": need_mb, "worker_budget_mb": budget, "reserved_mb": reserved, "available_mb_observed": available_mb,
+        "cpus": cpus, "enforced": False, "note": "process sandbox: limit reserved by admission, not enforced by the OS"}
+    if available_mb < need_mb:
+        out["warning"] = f"host free memory {available_mb} MB is below this run's reservation ({need_mb} MB) right now"
+    if budget - reserved < need_mb:
+        return {**out, "status": "INSUFFICIENT", "reason": f"{budget - reserved} MB of the worker memory budget left "
+                                                           f"after reservations, {need_mb} MB needed"}
     if cap >= 2 and active + 1 > cpus:
         return {**out, "status": "INSUFFICIENT", "reason": f"{active + 1} workers need {active + 1} CPUs, host has {cpus}"}
     return {**out, "status": "OK"}
@@ -1025,6 +1037,12 @@ def admission_check(session: Session, task_id: str) -> Admission:
         adm.waits.append(("ROUTE_INELIGIBLE", "; ".join(rreasons)))
     else:
         adm.route = route
+        if task.domain == "OFFICE":
+            # §23 controlled path: the route's owner decision (company authorisation + company-approved route,
+            # bound to the route identity) must still hold at admission — a revoked decision ends it here.
+            ok, why = ext.office_route_authorised(session, route)
+            if not ok:
+                adm.waits.append(("OFFICE_ROUTE_NOT_AUTHORISED", why))
         ctx = context_estimate(session, task, te, route)
         adm.answers["context"] = ctx
         if ctx["status"] == "TOO_LARGE":

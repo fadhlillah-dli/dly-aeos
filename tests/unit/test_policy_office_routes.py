@@ -74,6 +74,9 @@ def test_authorised_company_route_becomes_office_eligible_and_activatable(office
     db.expire_all()
     route = db.scalar(select(ModelRoute).where(ModelRoute.route_key == ROUTE))
     assert "OFFICE" in route.eligible_domains and route.mode_params["credential_ref"] == "office/openrouter"
+    # an office/ credential never serves PERSONAL calls: the route is recorded OFFICE-only, not PERSONAL+OFFICE
+    assert route.eligible_domains == ["OFFICE"]
+    assert db.get(Decision, d["id"]).details["previous_eligible_domains"] == ["PERSONAL"]
     assert office_routes.office_route_authorised(db, route) is not None
     activated, decision = routing.activate_route(db, ROUTE, actor_user_id=_owner(db), mode="TRIAL",
                                                  rationale="uji rute office terbatas", expected_config_hash=route.config_hash)
@@ -118,3 +121,21 @@ def test_unauthorised_office_eligibility_set_by_hand_is_still_refused(db, admin_
     with pytest.raises(ValidationFailed):
         routing.activate_route(db, ROUTE, actor_user_id=_owner(db), mode="TRIAL", rationale="uji rute office terbatas",
                                expected_config_hash=route.config_hash)
+
+
+def test_generic_decision_endpoint_cannot_write_the_dedicated_targets(office_client, db):
+    """A POLICY decision on office_route/* or workforce/* through the generic endpoint would skip the company
+    authorisation / approved-route / evaluation checks of the dedicated endpoints; it is refused."""
+    _route(db)
+    _authorise_company(db)
+    auth_id = office.company_authorisation(db).id
+    for target_type, target_id, details in (
+            ("office_route", ROUTE, {"company_authorisation_id": auth_id, "credential_ref": "office/openrouter"}),
+            ("workforce", "concurrency", {"max_active_workers": 2})):
+        r = office_client.post("/api/decisions", json={
+            "kind": "POLICY", "rationale": "langsung lewat endpoint generik", "auth_scope": {"scope": "test"},
+            "target_type": target_type, "target_id": target_id, "target_hash": "sha256:x", "details": details})
+        assert r.status_code == 422 and r.json()["error"]["code"] == "DEDICATED_ENDPOINT_REQUIRED", r.text
+    assert db.scalar(select(Decision).where(Decision.target_type.in_(["office_route", "workforce"]))) is None
+    # the dedicated path still works
+    assert office_client.post("/api/policy/office/routes", json=BODY).status_code == 201

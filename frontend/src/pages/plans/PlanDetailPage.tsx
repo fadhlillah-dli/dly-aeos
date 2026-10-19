@@ -11,6 +11,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, Loading, Mono, Notice, PageHeader, Table, Tabs } from "../../components/ui";
 import { useEventStream } from "../../lib/events";
 import { relativeTime, shortHash } from "../../lib/format";
+import { type BridgeProof, BridgeProofNotice } from "./BridgeProof";
 import { ContentViewer } from "./ContentViewer";
 import { ContextPanel, ReviewPanel } from "./ContextPanel";
 import { DecisionPanel } from "./DecisionPanel";
@@ -127,6 +128,9 @@ export default function PlanDetailPage() {
             <Radio className="h-3 w-3" aria-hidden /> Stream {streamStatus}
           </span>
           <Freshness at={lastSeenAt ?? plan.checked_at ?? null} label="Pembaruan terakhir" staleAfterSeconds={120} />
+        </div>
+        <div className="mt-2">
+          <BridgeProofNotice proof={(plan.checkpoint ?? {})["bridge_proof"] as BridgeProof | undefined} />
         </div>
       </Card>
 

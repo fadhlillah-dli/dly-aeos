@@ -1388,6 +1388,13 @@ def import_manual_result(session: Session, plan_id: str, *, actor: str, continue
     if ok and continue_pipeline:
         nxt = plan.checkpoint.get("stage")
         if nxt:
+            # §05 step 2 / §08: readiness is checked again before the next stage's prompt is executed (a bridge
+            # that became BLOCKED stops here; DEGRADED keeps using the manual package).
+            try:
+                personal_gate(session, plan, actor=actor)
+            except Blocked:
+                return plan
+            session.commit()
             _continue(session, plan, start=STAGE_BY_STATE[S(nxt)], actor=actor)
     return plan
 

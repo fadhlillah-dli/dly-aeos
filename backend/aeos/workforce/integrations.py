@@ -118,6 +118,21 @@ def office_external_allowed(session: Session) -> tuple[bool, str]:
     return True, ""
 
 
+def office_route_authorised(session: Session, route: ModelRoute) -> tuple[bool, str]:
+    """§23: an OFFICE task runs on a route only while the owner's office_route decision (bound to the route
+    identity and the ACTIVE company authorisation) holds. Policy module absent -> denied (fail closed)."""
+    try:
+        from aeos.policy.office_routes import office_route_authorised as impl
+
+        decision = impl(session, route)
+    except (ImportError, AttributeError) as exc:  # policy module (or one of its seams) missing: denied
+        return False, _unavailable("policy", exc)
+    if decision is None:
+        return False, (f"route {route.route_key} has no ACTIVE OFFICE eligibility decision bound to its identity and "
+                       "the current company authorisation (POST /api/policy/office/routes)")
+    return True, ""
+
+
 def reserve(session: Session, *, run_id: str, project_id: str, domain: str, route_key: str | None,
             est_usd: float, est_tokens: int, est_requests: int) -> Any:
     """Raises ``Blocked`` when the reservation is refused or the budget module is unavailable."""

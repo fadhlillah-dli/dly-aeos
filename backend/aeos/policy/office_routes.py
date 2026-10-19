@@ -7,9 +7,11 @@ OFFICE stays default deny. A route becomes OFFICE-eligible only through this ope
 * the upstream credential is an ``office/`` reference (OFFICE credentials never come from PERSONAL refs).
 
 The owner's POLICY decision on ``office_route/<route_key>`` is bound to the route identity (provider, model,
-endpoint, credential reference) and to the company authorisation it relies on. ``routing.activate_route``
-accepts an OFFICE-eligible route only while that binding holds; revoking the company authorisation (or the
-decision) ends it. Does not commit.
+endpoint, credential reference) and to the company authorisation it relies on. It is recorded only here (the
+generic decision endpoint refuses ``office_route`` targets). ``routing.activate_route`` accepts an
+OFFICE-eligible route only while that binding holds, and the scheduler admits an OFFICE task on a route only
+while it holds (``OFFICE_ROUTE_NOT_AUTHORISED``): revoking the company authorisation or the decision ends it.
+Does not commit.
 """
 
 from __future__ import annotations
@@ -24,10 +26,10 @@ from aeos.core.errors import NotFound, PolicyDenied, ValidationFailed
 from aeos.core.hashing import content_hash
 from aeos.models.decisions import Decision
 from aeos.models.routing import ModelRoute
+from aeos.policy import catalog, office
 from aeos.policy import decisions as registry
-from aeos.policy import office
 
-TARGET_OFFICE_ROUTE = "office_route"
+TARGET_OFFICE_ROUTE = catalog.TARGET_OFFICE_ROUTE
 
 
 def route_identity(route: ModelRoute, credential_ref: str | None = None) -> str:
@@ -62,9 +64,14 @@ def authorise_office_route(session: Session, *, route_key: str, credential_ref: 
         target_hash=identity, allowed_operations=["route.office_eligible"], domain=Domain.OFFICE.value,
         auth_scope={"route_key": route_key, "company_authorisation_id": auth.id}, rationale=rationale,
         details={"company_authorisation_id": auth.id, "credential_ref": ref,
-                 "note": "OFFICE eligibility only; activation still needs ROUTE_ACTIVATION/TRIAL bound to the route hash"},
+                 "previous_eligible_domains": list(route.eligible_domains or []),
+                 "note": "OFFICE eligibility only; activation still needs ROUTE_ACTIVATION/TRIAL bound to the route "
+                         "hash. An office/ credential never serves a PERSONAL call (ADR-0041), so the route is "
+                         "OFFICE-only from now on."},
     )
-    route.eligible_domains = list(dict.fromkeys([*(route.eligible_domains or []), Domain.OFFICE.value]))
+    # the office/ credential cannot serve PERSONAL calls (broker + routing credential namespace rule): the route is
+    # recorded as OFFICE-only instead of claiming a PERSONAL eligibility it can no longer honour
+    route.eligible_domains = [Domain.OFFICE.value]
     route.mode_params = {**(route.mode_params or {}), "credential_ref": ref}
     try:
         from aeos.routing.service import refresh_config_hash

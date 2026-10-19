@@ -425,10 +425,15 @@ def _task_policy(task: TaskSpec) -> dict[str, Any]:
     pool = str(pol.get("pool") or "WORKER")
     if pool == "SUPERVISOR":
         raise Blocked("worker tasks are never routed to the supervisor pool", code="SUPERVISOR_NOT_ROUTABLE")
+    # The task compiler writes ``min_context_tokens`` (planning.dag, §21 model route policy); ``min_context`` is the
+    # older spelling. Either one filters routes whose context window is too small (§19 "berapa konteks").
+    min_context = pol.get("min_context_tokens") if isinstance(pol.get("min_context_tokens"), int) else None
+    if not min_context and isinstance(pol.get("min_context"), int):
+        min_context = pol.get("min_context")
     return {
         "pool": pool,
         "needs_tools": bool(pol.get("needs_tools", True)),
-        "min_context": pol.get("min_context") if isinstance(pol.get("min_context"), int) else None,
+        "min_context": min_context or None,
         "routes": [str(x) for x in pol.get("routes") or []],
         "primary": str(pol["primary"]) if pol.get("primary") else None,
     }

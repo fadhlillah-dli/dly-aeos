@@ -262,4 +262,30 @@ describe("Organization page", () => {
     await waitFor(() => expect(screen.getByText("Nonaktif")).toBeInTheDocument());
     expect(screen.getAllByText("Belum dievaluasi")).toHaveLength(2);
   });
+
+  it("shows the competence definition (inputs, failure modes, eval cases) and an imported pack as a candidate", async () => {
+    const base = { kind: "EXECUTOR", group: "fe-api-data", description: "", boundaries: [], verification: [], forbidden_actions: [], deterministic_service: false, engine_hint: "", source_section: "§16", version: "1", revision_hash: "h", eval_status: "NOT_EVALUATED", active_runs: 0, demo_runs: 0 };
+    responses["/api/workforce/roles"] = {
+      items: [
+        {
+          key: "fe-api-data",
+          label: "FE/API/Data",
+          roles: [
+            { ...base, role_key: "integration-engineer", name: "Integration Engineer", outputs: ["Adapter"], mode: "DESIGN", availability: "AVAILABLE_INACTIVE", inputs: ["Kontrak provider"], failure_modes: ["Tanpa idempotensi"], example_outputs: ["Adapter + contract test"], evaluation_cases: [] },
+            { ...base, role_key: "ext-api-reviewer", name: "API Contract Helper", outputs: ["Diff kontrak"], mode: "CANDIDATE", availability: "CANDIDATE", evaluation_cases: [{ suite_key: "eval.x", case_ids: ["c1", "c2"] }] },
+          ],
+        },
+      ],
+      note: "Org view adalah proyeksi katalog: garis organisasi tidak memberi permission atau authority.",
+      checked_at: new Date().toISOString(),
+      mode: "DESIGN",
+    };
+    responses["/api/workforce/agents"] = { items: [], checked_at: new Date().toISOString() };
+    wrap(<OrganizationPage />);
+    expect(await screen.findByText("Kontrak provider")).toBeInTheDocument();
+    expect(screen.getByText("Tanpa idempotensi")).toBeInTheDocument();
+    expect(screen.getByText(/belum ada suite evaluasi terproteksi/)).toBeInTheDocument();
+    expect(screen.getByText(/eval\.x \(2 kasus\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Kandidat impor/)).toBeInTheDocument();
+  });
 });

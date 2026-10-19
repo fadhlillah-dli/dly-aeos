@@ -73,7 +73,8 @@ export function DecisionPanel({ plan, version, catalog }: { plan: PlanDetail; ve
   const stale = decide.error instanceof ApiError && decide.error.code === "STALE_PLAN_VERSION" ? decide.error.details : null;
   const reviewedOther = plan.current_version_reviewed === false;
   const nonLive = version.mode && version.mode !== "LIVE" ? version.mode : null;
-  // §15: an unreviewed version is approvable only with the explicit acknowledgement (backend: UNREVIEWED_VERSION)
+  // §15: in the UI an unreviewed version is approvable only with the explicit acknowledgement; the backend records
+  // planning_review {stages_skipped, unreviewed_acknowledged} on the decision (it does not refuse: owner decision)
   const canApprove = plan.allowed.approve && (!reviewedOther || ackUnreviewed);
   const canRevise = plan.allowed.revise_or_reject;
   const opsPublish = operationsFor("APPROVE_AND_PUBLISH", targets, catalog);
