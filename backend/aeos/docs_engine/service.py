@@ -8,6 +8,7 @@ approved (fail closed): a local preview is still possible, DocumentRecords are n
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,18 +16,26 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from aeos.audit import service as audit
 from aeos.core.config import Settings
 from aeos.core.enums import Domain
-from aeos.core.errors import NotFound
+from aeos.core.errors import Conflict, NotFound, ValidationFailed
+from aeos.core.hashing import content_hash
 from aeos.core.paths import ensure_within, safe_segment
+from aeos.core.redaction import redact_text
+from aeos.docs_engine import product1 as p1
 from aeos.docs_engine import renderer as r
 from aeos.docs_engine import visuals as vis
 from aeos.docs_engine.docx import markdown_to_docx
-from aeos.docs_engine.plan_content import build_view
+from aeos.docs_engine.plan_content import build_view, feature_slug
+from aeos.events import service as events
+from aeos.models.delivery_ext import PullRequestRecord
+from aeos.models.evidence import AcceptanceRecord, EvidenceArtifact
 from aeos.models.identity import User
-from aeos.models.planning import PlanVersion
+from aeos.models.planning import PlanVersion, TaskSpec
 from aeos.models.portfolio import Project
-from aeos.models.publishing import DocumentRecord
+from aeos.models.publishing import DocumentRecord, DocumentRevision
+from aeos.models.research import ChangeProposal
 from aeos.planning import facade as planning
 from aeos.portfolio import facade as portfolio
 
@@ -84,6 +93,121 @@ def visuals_dir(settings: Settings, project: Project) -> Path:
     return settings.layout.publications(Domain(project.domain), project.project_key) / "visuals"
 
 
+# Trusted, project-scoped evidence kinds that §28 timings depend on (referenced by id, never copied as status).
+SIGNAL_EVIDENCE_KINDS = ("PRODUCTION_VALIDATION", "RESTORE_TEST", "SCREENSHOT", *r.VA_EVIDENCE_KINDS,
+                         *r.PT_EVIDENCE_KINDS)
+_SUMMARY_KEYS = ("scope", "method", "tools", "remediation", "target", "environment")
+
+
+def evidence_refs(session: Session, project: Project) -> list[r.EvidenceRef]:
+    rows = session.scalars(select(EvidenceArtifact).where(
+        EvidenceArtifact.project_id == project.id, EvidenceArtifact.domain == project.domain,
+        EvidenceArtifact.kind.in_(SIGNAL_EVIDENCE_KINDS), EvidenceArtifact.trusted.is_(True),
+        EvidenceArtifact.origin != "worker").order_by(EvidenceArtifact.created_at))
+    out = []
+    for ev in rows:
+        inline = ev.inline if isinstance(ev.inline, dict) else {}
+        env = ev.environment if isinstance(ev.environment, dict) else {}
+        summary = tuple((k, redact_text(str(inline[k]))[:500]) for k in _SUMMARY_KEYS
+                        if isinstance(inline.get(k), (str, int, float)) and str(inline[k]).strip())
+        out.append(r.EvidenceRef(id=ev.id, kind=ev.kind, claim=redact_text(ev.claim or "")[:200], origin=ev.origin,
+                                 evidence_level=ev.evidence_level, commit=str(env.get("commit") or "") or None,
+                                 environment=str(env.get("name") or env.get("environment") or "") or None,
+                                 created_at=ev.created_at.isoformat() if ev.created_at else None, summary=summary))
+    return out
+
+
+def _changed_files(session: Session, acc: AcceptanceRecord | None) -> list[str]:
+    """Changed paths of an accepted run (the verifier's SCOPE_CHECK), read-only; [] when unknown."""
+    if acc is None or not acc.verification_evidence_id:
+        return []
+    try:
+        from aeos.verification import collector
+        from aeos.verification.verifier import related_evidence
+
+        report = session.get(EvidenceArtifact, acc.verification_evidence_id)
+        scope = related_evidence(session, report, "SCOPE_CHECK")
+        return [str(p) for p in ((collector.read_json(scope) or {}).get("changed_files") or [])][:200]
+    except Exception:  # evidence unreadable: the change record says documentation pending, never guesses
+        log.warning("changed files of acceptance %s unavailable", acc.id)
+        return []
+
+
+def change_infos(session: Session, project: Project) -> list[r.ChangeInfo]:
+    """One ChangeInfo per pull request the broker opened for this project (newest first per task)."""
+    try:
+        from aeos.delivery.governance import CONTRACT_PATHS
+        from aeos.delivery.pr_bundle import _rollback_notes as rollback_notes
+    except ImportError:  # pragma: no cover - delivery is part of the product
+        CONTRACT_PATHS, rollback_notes = (), None  # type: ignore[assignment]
+    out: list[r.ChangeInfo] = []
+    prs = session.scalars(select(PullRequestRecord).where(PullRequestRecord.project_id == project.id,
+                                                          PullRequestRecord.domain == project.domain)
+                          .order_by(PullRequestRecord.created_at.desc()))
+    for pr in prs:
+        task = session.get(TaskSpec, pr.task_id)
+        if task is None:
+            continue
+        acc = session.get(AcceptanceRecord, pr.acceptance_id) if pr.acceptance_id else None
+        changed = _changed_files(session, acc)
+        out.append(r.ChangeInfo(
+            task_id=task.id, task_key=task.task_key, title=task.title, goal=task.goal or "",
+            feature_key=task.feature_key, risk_class=getattr(task, "risk_class", "") or "",
+            acceptance_criteria=tuple(str(x) if not isinstance(x, dict) else str(x.get("text") or x.get("title") or x)
+                                      for x in (task.acceptance_criteria or [])),
+            allowed_paths=tuple(str(p) for p in (getattr(task, "allowed_paths", None) or [])),
+            pr_id=pr.id, pr_number=pr.number, pr_url=pr.url, pr_state=pr.state, repo=pr.repo_full_name,
+            head_ref=pr.head_ref, base_ref=pr.base_ref, accepted_head_sha=pr.accepted_head_sha,
+            merge_commit_sha=pr.merge_commit_sha, merged=bool(pr.merged), acceptance_id=pr.acceptance_id or "",
+            acceptance_status=acc.acceptance_status if acc else "",
+            evidence_ids=tuple(acc.verifier_evidence_refs or []) if acc else (),
+            bundle_evidence_id=pr.bundle_evidence_id,
+            rollback_notes=tuple(rollback_notes(changed)) if (rollback_notes and changed) else (),
+            contract_deltas=tuple(p for p in changed if any(c in p for c in CONTRACT_PATHS)),
+        ))
+    return out
+
+
+def improvement_infos(session: Session, project: Project) -> list[r.ImprovementInfo]:
+    out = []
+    for p in session.scalars(select(ChangeProposal).where(ChangeProposal.scope_type == "PROJECT",
+                                                          ChangeProposal.project_id == project.id,
+                                                          ChangeProposal.domain == project.domain)):
+        pkg = p.review_package if isinstance(p.review_package, dict) else {}
+        owner = session.get(User, p.submitted_by) if p.submitted_by else None
+        out.append(r.ImprovementInfo(
+            id=p.id, title=p.title, kind=p.kind, status=p.status, problem=redact_text(p.problem or ""),
+            expected_benefit=redact_text(p.expected_benefit or ""),
+            risk=redact_text(str(pkg.get("risk") or pkg.get("risks") or ""))[:2000],
+            owner=(owner.display_name or owner.username) if owner else "",
+            source_refs=tuple(str(x) for x in (p.source_refs or [])), task_ids=tuple(p.task_ids or []),
+            evidence_ids=tuple(p.evidence_ids or []), decision_ids=tuple(p.decision_ids or [])))
+    return out
+
+
+def render_signals(session: Session, settings: Settings, project: Project) -> r.RenderSignals:
+    """Read-only inputs for documents whose §28 timing is not plan approval (PR, release, production, retirement)."""
+    retirement = None
+    if (project.lifecycle or "").upper() in ("RETIRING", "RETIRED"):
+        from aeos.operations import retirement as retirement_mod
+
+        retirement = retirement_mod.checklist(session, settings, project)
+    return r.RenderSignals(evidence=evidence_refs(session, project), changes=change_infos(session, project),
+                           improvements=improvement_infos(session, project), retirement=retirement)
+
+
+def known_schema_names(project: Project) -> set[str] | None:
+    """The schema an ERD of this project must match. Only the platform project's schema is known to AEOS
+    (SQLAlchemy metadata at the running commit); other projects → None (ERD stays UNVERIFIED)."""
+    if not project.is_platform:
+        return None
+    from aeos.core.db import Base
+
+    names = set(Base.metadata.tables)
+    names |= {m.class_.__name__ for m in Base.registry.mappers}
+    return names
+
+
 def render_version(session: Session, settings: Settings, version: PlanVersion, *, persist: bool,
                    render_visuals: bool = True, decision_id: str | None = None,
                    mmdc: vis.MmdcInfo | None = None) -> tuple[r.RenderResult, r.DeltaReport | None, ApprovalState]:
@@ -94,6 +218,9 @@ def render_version(session: Session, settings: Settings, version: PlanVersion, *
     state = approval_state(session, version)
     view = build_view(version.content)
     visuals = vis.render_visuals(view.diagrams, visuals_dir(settings, project), enabled=render_visuals, mmdc=mmdc)
+    tm = view.security.get("threat_model") if isinstance(view.security.get("threat_model"), dict) else {}
+    vis.verify_visuals(visuals, trust_boundaries=[str(x) for x in (tm.get("trust_boundaries") or [])],
+                       known_tables=known_schema_names(project))
     previous = r.previous_input_hashes(session, project.id) if (persist and state.approved) else {}
     result = r.render_document_set(
         project=project_identity(session, project),
@@ -101,10 +228,80 @@ def render_version(session: Session, settings: Settings, version: PlanVersion, *
                                   manifest_hash=version.manifest_hash, approved=state.approved,
                                   approval_decision_id=decision_id, created_at=version.created_at),
         content=version.content, tasks=task_infos(session, version.id), visuals=visuals,
-        previous_input_hashes=previous,
+        previous_input_hashes=previous, signals=render_signals(session, settings, project),
     )
     delta = r.sync_document_records(session, result, domain=project.domain) if (persist and state.approved) else None
     return result, delta, state
+
+
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
+RC_KIND = "RELEASE_CANDIDATE"
+
+
+def record_release_candidate(session: Session, settings: Settings, version: PlanVersion, *, release_key: str,
+                             commit: str, actor_user_id: str, actor_type: str = "user") -> dict[str, Any]:
+    """§28 release candidate: a CONSISTENT SNAPSHOT of the Product 1 set for one release.
+
+    Binds the exact commit, the APPROVED PlanVersion (id + manifest hash) and the content hash of every current
+    document (Release Plan incl. Release Notes, runbooks, ...) into one immutable DocumentRevision of kind
+    RELEASE_CANDIDATE on the Release Plan. Refused (Conflict) while a required release section is documentation
+    pending (§41 readiness). It records documentation state only — no readiness, deployment or sign-off claim."""
+    commit = (commit or "").strip().lower()
+    if not _SHA_RE.match(commit):
+        raise ValidationFailed("commit must be a full git SHA (40 or 64 hex characters)", code="COMMIT_INVALID")
+    project = session.get(Project, version.project_id)
+    if project is None:
+        raise NotFound("project not found")
+    result, _delta, state = render_version(session, settings, version, persist=True, render_visuals=False)
+    if not state.approved:
+        raise Conflict("a release candidate needs the APPROVED plan version", code="PLAN_NOT_APPROVED",
+                       details={"reason": state.reason})
+    session.flush()
+    key = feature_slug(release_key)
+    lid = f"07-release-deployment/release-plan-{key}"
+    records = {x.logical_doc_id: x for x in session.scalars(select(DocumentRecord).where(
+        DocumentRecord.project_id == project.id))}
+    rel = records.get(lid)
+    if rel is None or rel.status == r.ST_SUPERSEDED:
+        raise NotFound(f"release plan {release_key!r} is not part of the approved plan version",
+                       details={"release_plans": sorted(k for k in records if k.startswith("07-release-deployment/"))})
+    missing = p1.required_pending([rel], p1.Timing.RELEASE_CANDIDATE)
+    if missing:
+        raise Conflict("required Release Plan sections are still documentation pending", code="RELEASE_DOCS_INCOMPLETE",
+                       details={"pending": missing})
+    current = {d.logical_doc_id for d in result.documents}
+    docs = sorted(((x.logical_doc_id, x.content_hash, x.status) for x in records.values()
+                   if x.kind == "DOC" and x.logical_doc_id in current), key=lambda t: t[0])
+    snapshot = {"project_id": project.id, "release": key, "commit": commit, "plan_version_id": version.id,
+                "plan_manifest_hash": version.manifest_hash, "documents": [list(d) for d in docs]}
+    snapshot_hash = content_hash(snapshot)
+    existing = session.scalar(select(DocumentRevision).where(DocumentRevision.document_id == rel.id,
+                                                             DocumentRevision.kind == RC_KIND,
+                                                             DocumentRevision.content_hash == snapshot_hash))
+    if existing is not None:
+        return {"id": existing.id, "snapshot_hash": snapshot_hash, "documents": len(docs), "created": False,
+                "release_plan": lid, "commit": commit}
+    lines = [f"# Release candidate {key} @ {commit}", "",
+             f"PlanVersion `{version.id}` v{version.version} (`{version.manifest_hash}`)", "",
+             "| Dokumen | Content hash | Status |", "|---|---|---|"]
+    lines += [f"| `{d[0]}` | `{d[1] or '-'}` | {d[2]} |" for d in docs]
+    rev = DocumentRevision(document_id=rel.id, project_id=project.id, domain=project.domain, logical_doc_id=lid,
+                           kind=RC_KIND, status="RECORDED", plan_version_id=version.id, content_hash=snapshot_hash,
+                           body_markdown="\n".join(lines) + "\n", details=snapshot)
+    session.add(rev)
+    session.flush()
+    rel.links = {**(rel.links or {}), "release_candidate": {"revision_id": rev.id, "commit": commit,
+                                                             "snapshot_hash": snapshot_hash}}
+    audit.record(session, actor_type=actor_type, actor_id=actor_user_id, action="documents.release_candidate",
+                 target_type="document", target_id=rel.id, project_id=project.id, domain=project.domain,
+                 details={"release": key, "commit": commit, "snapshot_hash": snapshot_hash, "documents": len(docs),
+                          "plan_version_id": version.id})
+    events.emit(session, source="docs_engine", kind="documents.release_candidate", entity_type="document",
+                entity_id=rel.id, entity_version=snapshot_hash, project_id=project.id, domain=project.domain,
+                payload={"release": key, "commit": commit, "documents": len(docs)})
+    session.flush()
+    return {"id": rev.id, "snapshot_hash": snapshot_hash, "documents": len(docs), "created": True,
+            "release_plan": lid, "commit": commit}
 
 
 def document_body(session: Session, project_id: str, doc: r.RenderedDocument) -> str:

@@ -190,6 +190,11 @@ def test_bitbucket_is_read_only_references():
 
 def test_office_end_to_end_blocks_when_folders_unsupported(settings, db, secrets_memory, monkeypatch):
     install_fakes(monkeypatch)
+    from aeos.publisher import targets as targets_mod
+
+    # CONTROLLED PRECONDITION: the company authorisation / CAN_USE_OFFICE_INTEGRATIONS gate is READY here; this
+    # test is about the tenant's missing folder support (the gate itself: test_publisher_gaps).
+    monkeypatch.setattr(targets_mod, "office_gate", lambda session, project: (True, []))
     secrets_memory.put("office/atlassian", json.dumps({"email": "a@b.invalid", "api_token": "atl-token-1234567890"}),
                        actor="test")
     project = make_project(db, domain="OFFICE")

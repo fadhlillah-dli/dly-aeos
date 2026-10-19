@@ -103,7 +103,10 @@ def recovery_publication_idempotency(ctx: CheckContext) -> Outcome:
                             .order_by(EvidenceArtifact.created_at.desc()).limit(1))
     if ev is None:
         return Outcome("UNKNOWN", "Pencegahan publikasi ganda (timeout/partial/replay) belum dibuktikan.",
-                       error_code="IDEMPOTENCY_NOT_PROVEN")
+                       error_code="IDEMPOTENCY_NOT_PROVEN", remedy=Remedy(
+                           operation="Jalankan uji idempotensi publikasi (fake loopback; tanpa tenant/credential nyata)",
+                           command=aeos_cmd("publish idempotency-test"), target="recovery.publication_idempotency",
+                           evidence_to_collect="EvidenceArtifact PUBLICATION_IDEMPOTENCY_TEST (trusted) pada commit ini"))
     return Outcome("VERIFIED", f"Bukti uji idempotensi publikasi {ev.id[:8]}.", evidence={"evidence_id": ev.id})
 
 

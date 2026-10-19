@@ -143,9 +143,13 @@ These cannot (and must not) be automated. The dashboard and `aeos doctor` show w
    OAuth client of type **Desktop app**, download the JSON, then
    `aeos publish google-connect --client-secret <file>` and complete consent in the browser. Delete
    the downloaded JSON afterwards (it is git-ignored, but do not keep it around).
-6. **GitHub token** — `gh auth login`, then `gh auth token | ./aeos secrets set personal/github --stdin`
-   (Windows: `gh auth token | .\.venv\Scripts\aeos.exe secrets set personal/github --stdin`), or a
-   fine-grained PAT limited to the repositories AEOS may touch.
+6. **GitHub token (least privilege)** — create a **fine-grained PAT** on github.com (Settings → Developer
+   settings → Fine-grained tokens) limited to *only* the platform repository, with Issues: read/write,
+   Pull requests: read/write, Contents: read, Metadata: read; then
+   `./aeos secrets set personal/github` and paste it at the hidden prompt (Windows:
+   `.\.venv\Scripts\aeos.exe secrets set personal/github`). `gh auth token` works too, but that
+   classic OAuth token usually carries `repo`/`workflow` over **all** your repositories:
+   `aeos doctor --functional` reports it as a residual risk (`adapter.github_token`, token privilege).
 7. **Route activation decision** — enabling a worker model route (and any paid route or budget) is
    your explicit decision in *Model & Rute*; nothing is activated by default.
 8. **Optional: Docker Desktop** — for container sandboxes (stronger worker isolation).
