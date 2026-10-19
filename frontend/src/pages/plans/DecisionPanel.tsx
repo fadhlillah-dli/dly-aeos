@@ -54,6 +54,7 @@ export function DecisionPanel({ plan, version, catalog }: { plan: PlanDetail; ve
   const configured = catalog.configured_targets ?? [];
   const [rationale, setRationale] = useState("");
   const [rerun, setRerun] = useState(true);
+  const [ackUnreviewed, setAckUnreviewed] = useState(false);
   const targets = parseTargets(rows);
   const publishTargets = targets.filter((t) => (catalog.publish[t.provider] ?? []).length);
   const decide = useMutation({
@@ -65,13 +66,15 @@ export function DecisionPanel({ plan, version, catalog }: { plan: PlanDetail; ve
         targets: action === "APPROVE" ? targets.filter((t) => !(catalog.publish[t.provider] ?? []).length) : targets,
         rationale,
         rerun: action === "REQUEST_REVISION" ? rerun : false,
+        acknowledge_unreviewed: ackUnreviewed,
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["plan", plan.id] }),
   });
   const stale = decide.error instanceof ApiError && decide.error.code === "STALE_PLAN_VERSION" ? decide.error.details : null;
   const reviewedOther = plan.current_version_reviewed === false;
   const nonLive = version.mode && version.mode !== "LIVE" ? version.mode : null;
-  const canApprove = plan.allowed.approve;
+  // §15: an unreviewed version is approvable only with the explicit acknowledgement (backend: UNREVIEWED_VERSION)
+  const canApprove = plan.allowed.approve && (!reviewedOther || ackUnreviewed);
   const canRevise = plan.allowed.revise_or_reject;
   const opsPublish = operationsFor("APPROVE_AND_PUBLISH", targets, catalog);
   const opsApprove = operationsFor("APPROVE", targets.filter((t) => !(catalog.publish[t.provider] ?? []).length), catalog);
@@ -95,6 +98,10 @@ export function DecisionPanel({ plan, version, catalog }: { plan: PlanDetail; ve
             Versi v{version.version} belum melalui review akhir (Fable).{" "}
             {plan.verdict_version_id ? "Verdict yang tampil berlaku untuk versi lain." : "Belum ada verdict untuk versi ini."} Anda tetap berwenang memutuskan;
             keputusan mencatat versi mana yang terakhir direview.
+            <label className="mt-2 flex items-center gap-2">
+              <input type="checkbox" checked={ackUnreviewed} onChange={(e) => setAckUnreviewed(e.target.checked)} /> Saya sadar tahap Challenger,
+              Synthesizer dan Final Review tidak menilai versi ini (dicatat di keputusan; wajib untuk Approve)
+            </label>
           </Notice>
         )}
         {nonLive && (

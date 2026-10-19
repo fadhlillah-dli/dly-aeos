@@ -53,6 +53,14 @@ describe("decision panel honesty (§14, §35, §49)", () => {
     expect(screen.getByText("sha256:feedbeef")).toBeInTheDocument();
   });
 
+  it("keeps Approve disabled for an unreviewed version until the skipped review is acknowledged", () => {
+    renderPanel(plan(false), version("LIVE"));
+    const approve = screen.getByRole("button", { name: /^Approve$/ });
+    expect(approve).toBeDisabled();
+    fireEvent.click(screen.getByLabelText(/tidak menilai versi ini/));
+    expect(approve).not.toBeDisabled();
+  });
+
   it("labels MOCK content and states that its external publication is refused", () => {
     renderPanel(plan(true), version("MOCK"));
     expect(screen.queryByText(/belum melalui review akhir/)).not.toBeInTheDocument();

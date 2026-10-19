@@ -563,7 +563,7 @@ def record_outcome(
     session: Session, p: ChangeProposal, *, actor_user_id: str, status: str, evidence_ids: list[str] | None = None,
     accepted_configuration: dict[str, Any] | None = None, partial_failures: list[Any] | None = None,
     rollback: dict[str, Any] | None = None, notes: str = "", before_snapshot_id: str | None = None,
-    after_snapshot_id: str | None = None,
+    after_snapshot_id: str | None = None, reconciled_failures: list[Any] | None = None,
 ) -> ChangeProposal:
     status = (status or "").upper()
     if status not in OUTCOMES:
@@ -598,6 +598,11 @@ def record_outcome(
             raise ValidationFailed("accepted_configuration is required for ACCEPTED")
     if status == "PARTIAL" and not partial_failures:
         raise ValidationFailed("PARTIAL must list the failed parts/targets")
+    reconciliation: list[dict[str, Any]] = []
+    if previous == "PARTIAL" and status == "ACCEPTED":
+        # §40 "tombol 'selesai' tidak membuka gate": completing a PARTIAL outcome needs every listed failed part
+        # reconciled with a resolution and trusted evidence (it is never a plain status flip).
+        reconciliation = _reconcile_partial(session, p, reconciled_failures or [])
     rb: dict[str, Any] | None = None
     if status == "ROLLED_BACK":
         rb = dict(redact(rollback or {}))
@@ -615,6 +620,8 @@ def record_outcome(
         "promotion_decision_id": promotion.id if promotion else None,
         "inventory_docs_update": "PENDING - inventory direkonsiliasi dari observasi; ADR/docs delta diperlukan",
     }
+    if reconciliation:
+        entry["reconciled_failures"] = reconciliation
     hist = [*((p.outcome or {}).get("history") or []), entry]
     p.outcome = {"current": entry, "history": hist}
     p.evidence_ids = sorted({*(p.evidence_ids or []), *ev_ids})
@@ -632,6 +639,39 @@ def record_outcome(
     events.emit(session, source="proposals", kind="proposal.outcome", entity_type=TARGET_TYPE, entity_id=p.id,
                 project_id=p.project_id, domain=p.domain, payload={"status": status, "accepted": status == "ACCEPTED"})
     return p
+
+
+def _failure_label(item: Any) -> str:
+    if isinstance(item, dict):
+        for k in ("part", "target", "title", "name", "id"):
+            if str(item.get(k) or "").strip():
+                return str(item[k]).strip()
+        return str(redact(item))
+    return str(item).strip()
+
+
+def _reconcile_partial(session: Session, p: ChangeProposal, reconciled: list[Any]) -> list[dict[str, Any]]:
+    """Every failed part of the current PARTIAL outcome needs ``{part, resolution, evidence_ids}`` with trusted
+    LIVE evidence before the outcome may become ACCEPTED (ValidationFailed/Blocked otherwise)."""
+    failures = [_failure_label(f) for f in ((p.outcome or {}).get("current") or {}).get("partial_failures") or []]
+    by_part: dict[str, dict[str, Any]] = {}
+    for r in reconciled:
+        if isinstance(r, dict) and str(r.get("part") or "").strip():
+            by_part[str(r["part"]).strip()] = r
+    missing = [f for f in failures if f not in by_part]
+    if missing:
+        raise ValidationFailed("PARTIAL -> ACCEPTED needs a reconciliation for every failed part",
+                               code="PARTIAL_NOT_RECONCILED", details={"unreconciled": missing})
+    out: list[dict[str, Any]] = []
+    for f in failures:
+        r = by_part[f]
+        ev = [str(x) for x in r.get("evidence_ids") or []]
+        resolution = redact_text(str(r.get("resolution") or "")).strip()
+        if not resolution or not ev or len(_trusted_evidence(session, p, ev)) != len(ev):
+            raise Blocked(f"NOT-PROVEN: failed part {f!r} needs a resolution and trusted LIVE evidence",
+                          code="PARTIAL_NOT_RECONCILED", details={"part": f})
+        out.append({"part": f, "resolution": resolution[:1000], "evidence_ids": ev})
+    return out
 
 
 def _sync_outcome_research(session: Session, p: ChangeProposal, status: str, decision_id: str | None) -> None:

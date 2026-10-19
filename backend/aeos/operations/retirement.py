@@ -17,7 +17,6 @@ from sqlalchemy.orm import Session
 
 from aeos.core.config import Settings
 from aeos.core.errors import NotFound, ValidationFailed
-from aeos.models.decisions import Decision
 from aeos.models.evidence import EvidenceArtifact
 from aeos.models.identity import SystemSetting
 from aeos.models.portfolio import Attachment, Project, ProjectIntegration, RepositoryReference
@@ -45,8 +44,6 @@ def checklist(session: Session, settings: Settings, project: Project) -> dict[st
     attachments = _count(session, Attachment, Attachment.project_id == pid)
     evidence = _count(session, EvidenceArtifact, EvidenceArtifact.project_id == pid)
     legal_hold = session.get(SystemSetting, f"retirement.legal_hold.{pid}")
-    final = session.scalar(select(Decision).where(Decision.kind == "RETIREMENT", Decision.target_type == "project",
-                                                  Decision.target_id == pid, Decision.status == "ACTIVE"))
     from aeos.operations import backup
 
     key_prefix = f"projects/{project.project_key}/"
@@ -87,11 +84,18 @@ def checklist(session: Session, settings: Settings, project: Project) -> dict[st
              "Backup tidak pernah dihapus otomatis; putuskan penanganannya secara manual."),
         item("communication", "Komunikasi", "OWNER_ACTION", {},
              "Informasikan stakeholder dan pemilik integrasi tentang retirement."),
-        item("final_verification", "Verifikasi akhir pemilik", "VERIFIED" if final else "PENDING_OWNER",
-             {"decision_id": final.id if final else None},
-             "Pemilik yang sah mencatat keputusan RETIREMENT setelah semua butir di atas selesai."),
     ]
+    project_view = {"id": project.id, "name": project.name, "domain": project.domain, "lifecycle": project.lifecycle}
+    # §33 final verification: an ACTIVE RETIREMENT decision bound to the hash of exactly these items
+    # (aeos.policy.retirement). A checklist that changed after the owner verified it is STALE, not VERIFIED.
+    from aeos.policy import retirement as owner_verification
+
+    current_hash = owner_verification.checklist_hash({"project": project_view, "items": items})
+    final = owner_verification.binding_status(session, project, current_hash=current_hash)
+    items.append(item("final_verification", "Verifikasi akhir pemilik", final["status"],
+                      {"decision_id": final["decision_id"], "bound_hash": final["bound_hash"]},
+                      "Pemilik yang sah mencatat keputusan RETIREMENT (terikat hash daftar periksa ini) setelah semua "
+                      "butir di atas selesai; RETIRED hanya dapat dicapai setelahnya."))
     blocking = [i["key"] for i in items if i["status"] == "BLOCKING"]
-    return {"project": {"id": project.id, "name": project.name, "domain": project.domain, "lifecycle": project.lifecycle},
-            "items": items, "blocking": blocking,
+    return {"project": project_view, "items": items, "blocking": blocking, "checklist_hash": current_hash,
             "notice": "Daftar periksa read-only. Tidak ada data, resource atau backup yang dihapus otomatis (§33)."}

@@ -104,6 +104,18 @@ describe("Live Work page", () => {
     expect(screen.getByText(/Worker tidak dapat berjalan/)).toBeInTheDocument();
   });
 
+  it("shows the current action with the source its writer recorded and the external resources touched", async () => {
+    responses["/api/runs"] = {
+      items: [{ ...row, current_action: "WAITING_QUOTA: upstream 429", current_action_source: "controller status (bukan aksi tool)",
+                current_action_writer: "CONTROLLER", resources: [{ kind: "push_branch", target: "owner/repo:aeos/a", status: "DONE", external_url: null }] }],
+      source: "x", checked_at: new Date().toISOString(), mode: "DEMO",
+    };
+    wrap(<WorkPage />);
+    expect(await screen.findByText("WAITING_QUOTA: upstream 429")).toBeInTheDocument();
+    expect(screen.getByText(/sumber: controller status/)).toBeInTheDocument();
+    expect(screen.getByText(/push_branch: owner\/repo:aeos\/a \(DONE\)/)).toBeInTheDocument();
+  });
+
   it("disables admin actions for VIEWER (backend still enforces)", async () => {
     wrap(<WorkPage />);
     const cancel = await screen.findByRole("button", { name: /Batalkan/ });

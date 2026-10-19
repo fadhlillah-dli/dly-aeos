@@ -1,6 +1,8 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { LastRestoreTest, RecoveryNotice } from "./BackupsTab";
-import { RetirementView } from "./RetirementTab";
+import { RetirementDecisionForm, RetirementView } from "./RetirementTab";
 import { ServicesView } from "./ServicesTab";
 import { CONFIRM_PHRASE, StepList } from "./EmergencyTab";
 import { IntFlagEditor } from "./OpsTab";
@@ -129,6 +131,38 @@ describe("Retirement checklist (§33)", () => {
     expect(screen.getByText("Memblokir")).toBeInTheDocument();
     expect(screen.getByText("Menunggu pemilik")).toBeInTheDocument();
     expect(screen.getByText(/Masih memblokir: jobs/)).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+});
+
+describe("Retirement final verification (§33)", () => {
+  const base = {
+    project: { id: "p1", name: "Alpha", domain: "PERSONAL", lifecycle: "RETIRING" },
+    items: [{ key: "final_verification", title: "Verifikasi akhir pemilik", status: "PENDING_OWNER", detail: {}, owner_action: "Catat keputusan." }],
+    blocking: [] as string[],
+    checklist_hash: "sha256:abc",
+    notice: "Daftar periksa read-only.",
+    checked_at: new Date().toISOString(),
+  };
+  const withClient = (ui: ReactElement) => render(<QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>);
+
+  it("needs an admin, no blocking item and a rationale before the decision can be recorded", () => {
+    withClient(<RetirementDecisionForm data={base} isAdmin />);
+    const button = screen.getByRole("button", { name: "Catat verifikasi akhir" });
+    expect(button).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Rationale verifikasi akhir"), { target: { value: "semua butir sudah diperiksa" } });
+    expect(button).toBeEnabled();
+  });
+
+  it("stays disabled while an item blocks or for a viewer", () => {
+    withClient(<RetirementDecisionForm data={{ ...base, blocking: ["jobs"] }} isAdmin />);
+    fireEvent.change(screen.getByLabelText("Rationale verifikasi akhir"), { target: { value: "semua butir sudah diperiksa" } });
+    expect(screen.getByRole("button", { name: "Catat verifikasi akhir" })).toBeDisabled();
+  });
+
+  it("explains that the decision waits for RETIRING", () => {
+    withClient(<RetirementDecisionForm data={{ ...base, project: { ...base.project, lifecycle: "ACTIVE" } }} isAdmin />);
+    expect(screen.getByText(/saat proyek berstatus RETIRING/)).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });

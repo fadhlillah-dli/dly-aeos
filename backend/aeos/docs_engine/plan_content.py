@@ -231,12 +231,83 @@ def _feature_key(raw: dict[str, Any], index: int) -> str:
     return slugify(key, max_len=40)
 
 
+_PRD_KEYS = ("overview", "problem", "background", "goals", "non_goals", "business_requirements",
+             "functional_requirements", "non_functional_requirements", "user_stories", "acceptance_criteria",
+             "user_impact", "dependencies", "assumptions", "risks", "success_metrics", "rollout_considerations")
+_PERSONAL_DATA = {"YES": True, "NO": False}
+
+
+def _has_content(d: Any) -> bool:
+    return isinstance(d, dict) and any(as_list(v) if isinstance(v, list) else as_text(v) for v in d.values())
+
+
+def _planning_schema_view(content: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Fold the planning schema's per-feature sections (``requirements[]`` PRDs, ``feature_governance[]``,
+    feature-bound ``rfcs[]``/``tdds[]`` and ``interface_contracts[]``) into the feature dicts the renderer reads.
+    Returns (plan raw with feature-bound RFC/TDD entries removed from the plan-level lists, extra per feature)."""
+    extra: dict[str, dict[str, Any]] = {}
+
+    def slot(key: Any) -> dict[str, Any]:
+        return extra.setdefault(as_text(key), {})
+
+    for prd in as_list(content.get("requirements")):
+        if isinstance(prd, dict) and as_text(prd.get("feature_key")):
+            slot(prd["feature_key"]).update({"_prd": prd})
+    for g in as_list(content.get("feature_governance")):
+        if not isinstance(g, dict) or not as_text(g.get("feature_key")):
+            continue
+        s = slot(g["feature_key"])
+        owner = as_text(g.get("owner"))
+        if owner and owner.upper() != "UNKNOWN":
+            s["owner"] = owner
+        s["needs_rfc"] = bool(g.get("needs_rfc"))
+        s["needs_tdd"] = bool(g.get("needs_tdd"))
+        pd = _PERSONAL_DATA.get(as_text(g.get("personal_data")).upper())  # UNKNOWN -> None (never a pass)
+        s["personal_data"] = pd
+        if pd and isinstance(g.get("privacy"), dict):
+            s["privacy"] = g["privacy"]
+        if g.get("needs_security_assessment"):
+            s["needs_security_assessment"] = True
+            if isinstance(g.get("security_assessment"), dict):
+                s["security_assessment"] = g["security_assessment"]
+        tm = g.get("threat_model")
+        if _has_content(tm):
+            s["threat_model"] = tm
+    raw = dict(content)
+    feature_keys = {as_text(f.get("key") or f.get("feature_key") or f.get("id"))
+                    for f in as_list(content.get("features")) if isinstance(f, dict)}
+    for kind in ("rfc", "tdd"):
+        unbound = []
+        for d in as_list(content.get(kind + "s")):
+            fk = as_text(d.get("feature_key")) if isinstance(d, dict) else ""
+            if fk and fk in feature_keys and kind not in slot(fk):
+                extra[fk][kind] = d
+            else:
+                unbound.append(d)
+        if kind + "s" in content:
+            raw[kind + "s"] = unbound
+    for c in as_list(content.get("interface_contracts")):
+        if isinstance(c, dict):
+            for fk in as_list(c.get("feature_keys")):
+                slot(fk).setdefault("interface_contracts", []).append(c)
+    return raw, extra
+
+
 def build_view(content: dict[str, Any] | None) -> PlanView:
     content = content if isinstance(content, dict) else {}
-    view = PlanView(raw=content)
+    raw_plan, extra = _planning_schema_view(content)
+    view = PlanView(raw=raw_plan)
     seen: set[str] = set()
     for i, f in enumerate(as_list(content.get("features"))):
         raw = f if isinstance(f, dict) else {"title": as_text(f)}
+        more = extra.get(as_text(raw.get("key") or raw.get("feature_key") or raw.get("id")))
+        if more:
+            prd = more.get("_prd") or {}
+            merged = {**{k: prd[k] for k in _PRD_KEYS if k in prd and k not in raw}, **raw}
+            for k, v in more.items():
+                if k != "_prd" and k not in raw:
+                    merged[k] = v
+            raw = merged
         key = _feature_key(raw, i)
         base, n = key, 2
         while key in seen:  # duplicate keys never collapse two features into one document

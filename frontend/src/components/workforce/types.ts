@@ -38,6 +38,10 @@ export interface RunRow {
   reason_code: string;
   current_action: string;
   current_action_source: string;
+  /** RUNNER (observed tool action) | CONTROLLER (status text) | UNKNOWN — set by the writer, not the UI. */
+  current_action_writer?: string;
+  /** External resources the broker touched for this run (branch, PR, document). */
+  resources?: { kind: string; target: string | null; status: string; external_url: string | null }[];
   started_at: string | null;
   finished_at: string | null;
   last_heartbeat_at: string | null;

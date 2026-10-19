@@ -201,8 +201,11 @@ def test_archived_and_retired_projects_are_read_only(personal_client: AuthedClie
     assert writes["integration"]().status_code == 200
 
     # RETIRED is terminal and stays read-only
-    for target in ("RETIRING", "RETIRED"):
-        assert personal_client.patch(f"/api/projects/{pid}", json={"lifecycle": target}).status_code == 200
+    assert personal_client.patch(f"/api/projects/{pid}", json={"lifecycle": "RETIRING"}).status_code == 200
+    # §33: the owner's final verification (RETIREMENT decision) comes before RETIRED
+    r = personal_client.post(f"/api/ops/retirement/{pid}/decision", json={"rationale": "verifikasi akhir pemilik"})
+    assert r.status_code == 201, r.text
+    assert personal_client.patch(f"/api/projects/{pid}", json={"lifecycle": "RETIRED"}).status_code == 200
     for label in ("add repository", "upload", "edit idea"):
         r = writes[label]()
         assert r.status_code == 409 and r.json()["error"]["code"] == "PROJECT_READ_ONLY", label

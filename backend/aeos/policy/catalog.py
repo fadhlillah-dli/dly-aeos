@@ -56,7 +56,20 @@ OWNER_RECORDED_KINDS = frozenset({"EXCEPTION"})
 DECISION_KINDS = frozenset({
     "APPROVAL", "REJECTION", "REVISION_REQUEST", "EXCEPTION", "ADR", "POLICY", "TRIAL", "PROMOTION",
     "RISK_ACCEPTANCE", "PUBLICATION", "DOMAIN_SELECTION", "ROUTE_ACTIVATION", "BUDGET", "WRITE_ENABLEMENT",
+    "RETIREMENT",
 })
+# §33 "verifikasi final oleh pemilik yang sah": a RETIREMENT decision is recorded only through the
+# retirement endpoint (``aeos.policy.retirement``), bound to the project and the hash of the checklist the
+# owner verified. ``RETIRED`` is reachable only while that binding still matches the live checklist.
+TARGET_PROJECT_RETIREMENT = "project"
+RETIREMENT_OPERATIONS: tuple[str, ...] = ("retire_project",)
+# §19/§21 "dua worker aktif": the concurrency mode is a POLICY decision on exactly this target, carrying
+# the evaluation evidence and the rollback (previous mode) in its details (ADR-0050 amendment).
+TARGET_WORKFORCE = "workforce"
+TARGET_ID_CONCURRENCY = "concurrency"
+# §44 DecisionRecord fields for adopting a routing/role/mode result. A mode/route adoption decision that
+# lacks one of them is refused (the owner sees options, goal, evidence, trade-off and when it stops applying).
+DECISION_RECORD_FIELDS: tuple[str, ...] = ("options", "goal", "evidence_ids", "cost_quality_tradeoff", "invalidate_if")
 # Kinds a human may record through the generic decision endpoint. APPROVAL/REJECTION/REVISION are
 # recorded only through the plan decision endpoint, bound to an exact PlanVersion + hash.
 GENERIC_DECISION_KINDS: tuple[str, ...] = ("EXCEPTION", "RISK_ACCEPTANCE", "WRITE_ENABLEMENT", "POLICY", "BUDGET")

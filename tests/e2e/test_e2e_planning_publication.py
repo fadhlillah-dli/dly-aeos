@@ -93,7 +93,9 @@ def _approve(c: AuthedClient, plan_id: str, detail: dict) -> dict:
                for t in detail["operation_catalog"]["configured_targets"]]
     return _ok(c.post(f"/api/plans/{plan_id}/decision", json={
         "action": "APPROVE_AND_PUBLISH", "version_id": v["id"], "version_hash": v["manifest_hash"],
-        "targets": targets, "rationale": "Setuju versi ini dan target terkonfigurasinya"}))
+        "targets": targets, "rationale": "Setuju versi ini dan target terkonfigurasinya",
+        # §15: a human edit was not judged by the planning review; the owner acknowledges that explicitly
+        "acknowledge_unreviewed": detail.get("current_version_reviewed") is False}))
 
 
 def _human_edit(c: AuthedClient, plan_id: str, detail: dict, note: str) -> dict:
