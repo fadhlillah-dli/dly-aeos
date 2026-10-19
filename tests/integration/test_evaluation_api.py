@@ -141,7 +141,7 @@ def test_execution_endpoints_start_bind_collect_and_office_isolation(admin_clien
     route = db.scalar(select(ModelRoute).where(ModelRoute.route_key == "opencode-zen/deepseek-v4.1-flash-free"))
     from aeos.core.timeutil import utcnow
 
-    route.terms_checked_at = utcnow()
+    route.terms_checked_at = route.pricing_checked_at = utcnow()  # owner re-read pricing + terms (no date bomb)
     db.commit()
     suite = next(s for s in admin_client.get("/api/eval/leaderboard", params={"role": "feature-implementer"}).json()["suites"]
                  if s["suite_key"] == "eval.small-bugfix")

@@ -152,7 +152,7 @@ def test_collector_records_samples_only_from_executed_task_records(ev):
     assert excluded["eligibility"]["status"] == "EXCLUDED_ROUTE_TERMS"  # seeded route: terms never reviewed by owner
     assert "pricing/terms never checked" in excluded["eligibility"]["route_reasons"]
     route = db.scalar(select(ModelRoute).where(ModelRoute.route_key == ROUTE))
-    route.terms_checked_at = utcnow()  # the owner's terms review (not part of the identity)
+    route.terms_checked_at = route.pricing_checked_at = utcnow()  # the owner's terms review (not in the identity)
     entry = suite_of(service.leaderboard(db, role="feature-implementer"))["ranking"][0]
     assert entry["run_ids"] == [run.id] and entry["route_binding"]["route_config_current"] is True
 
@@ -174,6 +174,34 @@ def test_collector_refuses_tasks_run_on_another_route_or_harness(ev):
                            actor_user_id="owner")
     _, _, more = make_plan(db, make_project(db), [{"task_key": "R1"}])
     executor.bind_task(db, run.id, slot_id=s1["slot_id"], task_id=more[0].id, actor_user_id="owner")  # ... an invalid one is
+
+
+def test_collector_refuses_earlier_attempts_and_a_route_changed_during_the_run(ev):
+    """Samples describe exactly the configuration the run started on: an attempt made before the start, or a
+    route configuration that changed (even back again) during the run, never becomes test evidence."""
+    db = ev
+    run, specs = _running(db, 5)
+    for s, spec in zip(executor.slots(db, run), specs, strict=True):
+        executor.bind_task(db, run.id, slot_id=s["slot_id"], task_id=spec.id, actor_user_id="owner")
+        _executed(db, spec, state="DONE", accepted="ACCEPTED")
+    earlier = db.scalar(select(WorkerRun).where(WorkerRun.task_id == specs[0].id))
+    earlier.created_at = run.started_at - timedelta(minutes=5)  # executed before the evaluation started
+    out = executor.collect(db, run.id)
+    assert out["recorded"] is False and "before this evaluation started" in out["invalid"][0]["reason"]
+    earlier.created_at = utcnow()
+    route = db.scalar(select(ModelRoute).where(ModelRoute.route_key == ROUTE))
+    original = route.context_window
+    route.context_window = 64_000  # e.g. a catalog observation: another configuration
+    with pytest.raises(Conflict) as ei:
+        executor.collect(db, run.id)
+    assert ei.value.code == "ROUTE_CONFIG_CHANGED" and run.status == "RUNNING"
+    route.context_window = original  # changed back: same hash, but the run spanned two configurations
+    route.config_changed_at = utcnow() + timedelta(seconds=1)
+    with pytest.raises(Conflict) as ei:
+        executor.collect(db, run.id)
+    assert "during the run" in ei.value.message
+    executor.finish_run(db, run.id, actor_user_id="owner", reason="route changed during the evaluation")
+    assert run.status == "CANCELLED"  # stopped, never COMPLETED evidence
 
 
 def test_unexecuted_slots_are_recorded_as_cancelled_never_dropped(ev):
@@ -383,35 +411,54 @@ def test_observed_failure_becomes_a_candidate_case_adopted_only_by_a_human_promo
                                  content_hash="sha256:w", claim="all tests pass")
     db.add_all([run, ok, untrusted])
     db.flush()
+    P = "PERSONAL"
     with pytest.raises(Conflict):
         service.propose_case_from_failure(db, source_type="worker_run", source_id=ok.id, actor_user_id="owner",
-                                          title="not a failure", expected="nothing to reproduce here")
+                                          title="not a failure", expected="nothing to reproduce here", viewer_domain=P)
     with pytest.raises(PolicyDenied):
         service.propose_case_from_failure(db, source_type="evidence", source_id=untrusted.id, actor_user_id="owner",
                                           title="worker claim", expected="a worker claim is not a failure record")
+    with pytest.raises(NotFound):  # domain-first: a PERSONAL failure is never read from a session without a domain
+        service.propose_case_from_failure(db, source_type="worker_run", source_id=run.id, actor_user_id="owner",
+                                          title="Write outside allowed paths",
+                                          expected="Changes stay inside the TaskSpec write set; violation reported")
     cand = service.propose_case_from_failure(db, source_type="worker_run", source_id=run.id, actor_user_id="owner",
                                              title="Write outside allowed paths", related_suite_key=SUITE,
-                                             expected="Changes stay inside the TaskSpec write set; violation reported")
+                                             expected="Changes stay inside the TaskSpec write set; violation reported",
+                                             viewer_domain=P)
     assert cand.status == "CANDIDATE" and cand.case["source"]["id"] == run.id and cand.role_key == "feature-implementer"
     with pytest.raises(Conflict):
         service.propose_case_from_failure(db, source_type="worker_run", source_id=run.id, actor_user_id="owner",
-                                          title="duplicate", expected="the same failure is proposed only once")
+                                          title="duplicate", expected="the same failure is proposed only once",
+                                          viewer_domain=P)
     assert not db.scalar(select(EvalSuite).where(EvalSuite.task_class == "regression"))  # unused until adopted
     with pytest.raises(Conflict):
         service.adopt_case(db, cand.id, actor_user_id="owner", expected_case_hash="sha256:other",
-                           rationale="reviewed the regression case")
+                           rationale="reviewed the regression case", viewer_domain=P)
+    for viewer in (None, "OFFICE"):  # a PERSONAL candidate is invisible outside PERSONAL
+        with pytest.raises(NotFound):
+            service.adopt_case(db, cand.id, actor_user_id="owner", expected_case_hash=cand.case_hash,
+                               rationale="reviewed the regression case", viewer_domain=viewer)
+        with pytest.raises(NotFound):
+            service.reject_case(db, cand.id, actor_user_id="owner", reason="not relevant", viewer_domain=viewer)
     suite = service.adopt_case(db, cand.id, actor_user_id="owner", expected_case_hash=cand.case_hash,
-                               rationale="reviewed the regression case")
+                               rationale="reviewed the regression case", viewer_domain=P)
     assert suite.protected and suite.held_out and service.suite_view(suite)["integrity"] == "OK"
     assert cand.status == "ADOPTED" and cand.decision_id and cand.adopted_suite_key == suite.suite_key
-    office = WorkerRun(task_id="t3", project_id=project.id, domain="OFFICE", execution_status="FAILED")
+    office = WorkerRun(task_id="t3", project_id=project.id, domain="OFFICE", execution_status="DONE")
     db.add(office)
     db.flush()
+    with pytest.raises(NotFound):  # not "NOT_A_FAILURE": the state of an Office run is not revealed to PERSONAL
+        service.propose_case_from_failure(db, source_type="worker_run", source_id=office.id, actor_user_id="owner",
+                                          title="Office failure", expected="never promoted into platform suites",
+                                          viewer_domain=P)
+    office.execution_status = "FAILED"
     oc = service.propose_case_from_failure(db, source_type="worker_run", source_id=office.id, actor_user_id="owner",
-                                           title="Office failure", expected="never promoted into platform suites")
+                                           title="Office failure", expected="never promoted into platform suites",
+                                           viewer_domain="OFFICE")
     with pytest.raises(PolicyDenied):
         service.adopt_case(db, oc.id, actor_user_id="owner", expected_case_hash=oc.case_hash,
-                           rationale="trying to promote office data")
+                           rationale="trying to promote office data", viewer_domain="OFFICE")
     assert db.get(EvalCaseCandidate, oc.id).status == "CANDIDATE"
 
 
@@ -450,9 +497,13 @@ def test_controlled_comparison_for_a_proposal_uses_cost_per_accepted_outcome(ev)
     base, cand = cfg(model="base", route="r-base"), cfg(model="base", route="r-base", context_params={"rtk": True})
     with pytest.raises(ValidationFailed):
         service.plan_comparison(db, proposal_id=p.id, suite_keys=[SUITE], baseline=base, candidate=base, limits=LIMITS,
-                                repetitions=1, actor_user_id="owner")
+                                repetitions=1, actor_user_id="owner", domain="PERSONAL")
+    for viewer in (None, "OFFICE"):  # domain-first: a PERSONAL proposal is prepared only from PERSONAL
+        with pytest.raises(NotFound):
+            service.plan_comparison(db, proposal_id=p.id, suite_keys=[SUITE], baseline=base, candidate=cand,
+                                    limits=LIMITS, repetitions=1, actor_user_id="owner", domain=viewer)
     runs = service.plan_comparison(db, proposal_id=p.id, suite_keys=[SUITE], baseline=base, candidate=cand,
-                                   limits=LIMITS, repetitions=1, actor_user_id="owner")
+                                   limits=LIMITS, repetitions=1, actor_user_id="owner", domain="PERSONAL")
     assert [r.is_baseline for r in runs] == [True, False] and {r.proposal_id for r in runs} == {p.id}
     assert service.comparison(db, proposal_id=p.id)["status"] == "IN_PROGRESS"
     gates = {"security": "PASS", "authority": "PASS", "evidence": "PASS"}
@@ -471,7 +522,7 @@ def test_controlled_comparison_for_a_proposal_uses_cost_per_accepted_outcome(ev)
     p.status = "REJECTED"
     with pytest.raises(Conflict):
         service.plan_comparison(db, proposal_id=p.id, suite_keys=[SUITE], baseline=base, candidate=cand,
-                                limits=LIMITS, repetitions=1, actor_user_id="owner")
+                                limits=LIMITS, repetitions=1, actor_user_id="owner", domain="PERSONAL")
 
 
 def test_activation_evidence_contract(ev):
@@ -487,6 +538,38 @@ def test_activation_evidence_contract(ev):
     assert any("does not describe this route" in p for p in out["problems"])
     ok = service.activation_evidence(db, route_key=ROUTE, route_config_hash=compute_config_hash(route), run_ids=[good.id])
     assert ok["ok"] and ok["roles"]["feature-implementer"]["run_ids"] == [good.id]
+
+
+def test_activation_evidence_needs_an_accepted_outcome_and_never_an_office_run(ev):
+    """U-07 "lolos evaluasi": gate-passing runs without a single accepted outcome did not pass; an evaluation
+    planned in OFFICE never flows into the (PERSONAL-only) route activation and its shared eval results."""
+    db = ev
+    from aeos.routing.service import compute_config_hash
+
+    h = compute_config_hash(db.scalar(select(ModelRoute).where(ModelRoute.route_key == ROUTE)))
+    none_accepted = record(db, cfg(), accepted=0, total=10)
+    office = record(db, cfg(), accepted=8, total=10, domain="OFFICE")
+    out = service.activation_evidence(db, route_key=ROUTE, route_config_hash=h, run_ids=[none_accepted.id])
+    assert out["ok"] is False and "NO_ACCEPTED_OUTCOME" in out["problems"][0]
+    out = service.activation_evidence(db, route_key=ROUTE, route_config_hash=h, run_ids=[office.id])
+    assert out["ok"] is False and "never evidence for a PERSONAL route activation" in out["problems"][0]
+    good = record(db, cfg(), accepted=1, total=10)
+    assert service.activation_evidence(db, route_key=ROUTE, route_config_hash=h, run_ids=[good.id])["ok"] is True
+
+
+def test_runs_of_another_route_configuration_are_never_pooled(ev):
+    """The same declared AIConfiguration on a route whose configuration changed is another configuration (§23)."""
+    db = ev
+    route = db.scalar(select(ModelRoute).where(ModelRoute.route_key == ROUTE))
+    route.terms_checked_at = route.pricing_checked_at = utcnow()  # owner terms review: the terms gate passes
+    old = record(db, cfg(), accepted=2, total=10)
+    route.context_window = 64_000  # the route changed; the declared configuration did not
+    new = record(db, cfg(), accepted=9, total=10)
+    assert old.configuration_hash == new.configuration_hash and old.route_config_hash != new.route_config_hash
+    s = suite_of(service.leaderboard(db, role="feature-implementer"))
+    assert [e["run_ids"] for e in s["ranking"]] == [[new.id]] and s["ranking"][0]["sample_size"] == 10
+    assert [e["run_ids"] for e in s["excluded"]] == [[old.id]]
+    assert s["excluded"][0]["eligibility"]["status"] == "EXCLUDED_STALE_CONFIGURATION"
 
 
 def test_held_out_evaluation_code_is_a_protected_path():

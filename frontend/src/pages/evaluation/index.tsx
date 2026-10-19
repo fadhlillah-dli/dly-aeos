@@ -119,8 +119,41 @@ interface Run {
   failures: unknown[];
   created_at: string | null;
   is_baseline?: boolean;
+  proposal_id?: string | null;
   execution?: { status: string; note: string; fixtures?: string };
 }
+
+interface ComparisonSide {
+  status: string;
+  run_ids: string[];
+  result: RankEntry | null;
+}
+
+interface Comparison {
+  proposal_id: string;
+  status: string;
+  rule: string;
+  route_change: string;
+  suites: {
+    suite_key: string;
+    baseline: ComparisonSide | null;
+    candidate: ComparisonSide | null;
+    equal_conditions: boolean;
+    delta: { acceptance_rate: number | null; interval: [number, number] | null; conclusion: string } | null;
+    verdict: string;
+  }[];
+}
+
+// §40 controlled comparison verdicts (baseline vs candidate on the same suites, limits and environment)
+const VERDICT: Record<string, [string, string]> = {
+  BETTER: ["PASS", "Kandidat lebih baik dari baseline"],
+  WORSE: ["FAIL", "Kandidat lebih buruk dari baseline"],
+  NOT_DISTINGUISHABLE: ["NOT-PROVEN", "Tidak dapat dibedakan (interval tumpang tindih)"],
+  NOT_COMPARABLE: ["NOT-PROVEN", "Tidak sebanding: kondisi berbeda"],
+  CANDIDATE_EXCLUDED: ["FAIL", "Kandidat dikecualikan (gate/regresi/terms)"],
+  NOT_RECORDED: ["PENDING", "Belum tercatat"],
+  UNKNOWN: ["UNKNOWN", "UNKNOWN"],
+};
 
 const EXECUTION_LABEL: Record<string, string> = {
   NOT_STARTED: "Belum dimulai",
@@ -283,6 +316,64 @@ function LeaderboardView({ role }: { role: string }) {
   );
 }
 
+function sideSummary(side: ComparisonSide | null) {
+  if (!side) return "—";
+  if (!side.result) return `${side.status} (${side.run_ids.length} run)`;
+  const e = side.result;
+  const rate = e.final_acceptance_rate == null ? "UNKNOWN" : `${Math.round(e.final_acceptance_rate * 100)}%`;
+  const cost = e.metrics.economics.worker_cost_per_accepted_usd;
+  return `accepted ${rate} · n=${e.sample_size} · biaya/accepted ${cost == null ? e.metrics.economics.worker_cost_status : `$${cost}`}`;
+}
+
+/** §39/§40 "Controlled comparison": the side-by-side verdict of a proposal's baseline and candidate runs. */
+function ComparisonView({ proposalId }: { proposalId: string }) {
+  const q = useQuery({
+    queryKey: ["eval", "comparison", proposalId],
+    queryFn: () => get<Comparison>(`/api/eval/comparisons/${encodeURIComponent(proposalId)}`),
+  });
+  if (q.isLoading) return <Loading />;
+  if (q.error) return <ErrorBox error={q.error} />;
+  const c = q.data;
+  if (!c) return null;
+  return (
+    <div className="space-y-2">
+      <p className="text-sm">
+        Proposal <Mono>{c.proposal_id}</Mono> · status <b>{c.status}</b>
+      </p>
+      <Table
+        rows={c.suites}
+        rowKey={(x) => x.suite_key}
+        empty="Belum ada run perbandingan"
+        columns={[
+          { header: "Suite", cell: (x) => <Mono>{x.suite_key}</Mono> },
+          { header: "Baseline", cell: (x) => sideSummary(x.baseline) },
+          { header: "Kandidat", cell: (x) => sideSummary(x.candidate) },
+          { header: "Kondisi setara", cell: (x) => (x.equal_conditions ? "Ya" : "Tidak") },
+          {
+            header: "Verdict",
+            cell: (x) => {
+              const [status, label] = VERDICT[x.verdict] ?? [x.verdict, x.verdict];
+              return (
+                <span>
+                  <StatusBadge status={status} label={label} />
+                  {x.delta?.interval && (
+                    <span className="block text-xs text-ink-3">
+                      Δ {x.delta.acceptance_rate} [{x.delta.interval[0]}, {x.delta.interval[1]}]
+                    </span>
+                  )}
+                </span>
+              );
+            },
+          },
+        ]}
+      />
+      <p className="text-xs text-ink-3">
+        {c.rule} Rute tidak berubah otomatis ({c.route_change}).
+      </p>
+    </div>
+  );
+}
+
 function PlanRunForm({ suites }: { suites: Suite[] }) {
   const qc = useQueryClient();
   const [suite, setSuite] = useState(suites[0]?.suite_key ?? "");
@@ -401,6 +492,7 @@ export default function EvaluationPage() {
   });
   const runs = useQuery({ queryKey: ["eval", "runs"], queryFn: () => get<{ items: Run[] }>("/api/eval/runs") });
   const roles = Array.from(new Set((suites.data?.items ?? []).map((s) => s.role_key).filter((r): r is string => Boolean(r))));
+  const proposalIds = Array.from(new Set((runs.data?.items ?? []).map((r) => r.proposal_id).filter((p): p is string => Boolean(p))));
   const [role, setRole] = useState("");
 
   return (
@@ -566,6 +658,15 @@ export default function EvaluationPage() {
                     sampel dari catatan task/verifier (<Mono>aeos eval start|bind|collect</Mono>). Planning tidak menjalankan model.
                   </p>
                 </Card>
+                {proposalIds.length > 0 && (
+                  <Card title="Perbandingan terkendali per proposal (baseline vs kandidat, §40)">
+                    <div className="space-y-4">
+                      {proposalIds.map((pid) => (
+                        <ComparisonView key={pid} proposalId={pid} />
+                      ))}
+                    </div>
+                  </Card>
+                )}
               </div>
             ),
           },

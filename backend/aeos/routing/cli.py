@@ -89,6 +89,11 @@ def activate_cmd(
                                               "fs.write:allowed_paths, tests.run)"),
     eval_run: list[str] = typer.Option(None, help="COMPLETED EvalRun id proving this configuration (APPROVED only; "
                                                   "repeatable)"),
+    training: bool = typer.Option(None, "--inputs-used-for-training/--no-inputs-used-for-training",
+                                  help="Your reading of the provider terms when they are UNKNOWN (with --trial-only/"
+                                       "--no-trial-only and --terms-note; needs --terms-reviewed)"),
+    trial_only: bool = typer.Option(None, "--trial-only/--no-trial-only",
+                                    help="Provider terms: trial use only / no confidential data"),
 ) -> None:
     """Record a human ROUTE_ACTIVATION/TRIAL decision bound to the route's exact config hash.
 
@@ -99,6 +104,14 @@ def activate_cmd(
     from aeos.core.errors import AeosError
     from aeos.routing import service
 
+    terms_record = None
+    if training is not None or trial_only is not None:
+        # the owner's own reading of UNKNOWN training/trial terms (incomplete -> refused by the service)
+        terms_record = {"note": terms_note}
+        if training is not None:
+            terms_record["may_use_inputs_for_training"] = training
+        if trial_only is not None:
+            terms_record["trial_only_no_confidential"] = trial_only
     ensure_database()
     password = typer.prompt(f"Password for {as_user} (confirms this human decision)", hide_input=True,
                             default="", show_default=False)
@@ -109,7 +122,8 @@ def activate_cmd(
                 s, route_key, actor_user_id=uid, mode=mode.upper(), rationale=rationale,
                 expected_config_hash=expected_hash, allowed_data_classes=data_class or None,
                 budget_decision_id=budget_decision, expires_in_days=days, terms_reviewed=terms_reviewed,
-                terms_note=terms_note, region=region, tool_set=tool or None, eval_run_ids=eval_run or None)
+                terms_note=terms_note, terms_record=terms_record, region=region, tool_set=tool or None,
+                eval_run_ids=eval_run or None)
             audit.record(s, actor_type="cli", actor_id=uid, action="route.activate", target_type="model_route",
                          target_id=route.route_key, details={"mode": mode, "decision_id": decision.id})
             typer.echo(f"{route.route_key} -> {route.status} (decision {decision.id}, hash {route.config_hash})")

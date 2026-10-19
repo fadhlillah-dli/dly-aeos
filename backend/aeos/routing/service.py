@@ -62,6 +62,8 @@ WORKER_EXECUTED_POOLS = ("WORKER",)
 REVIEWED_WORKER_TOOLS = ("fs.read", "fs.write:allowed_paths", "tests.run")
 TOOL_VOCABULARY = frozenset({*REVIEWED_WORKER_TOOLS, "bash", "webfetch"})
 PLACEHOLDER_TOOL_SETS = frozenset({"opencode-default"})
+# Providers whose availability a catalog refresh observes (routing.catalog: OpenRouter models, `opencode models`).
+CATALOG_OBSERVED_PROVIDERS = frozenset({"openrouter", "opencode-zen"})
 _REGION = re.compile(r"^[A-Z0-9][A-Z0-9-]{1,31}$")
 # TaskSpec model_route_policy keys: consumed by routing, or constraints routing always enforces (a TaskSpec
 # asking to relax one of them is refused rather than silently ignored).
@@ -364,8 +366,10 @@ def observed_harness_version() -> str | None:
 
 
 def runtime_context() -> dict[str, str | None]:
-    """The runtime values approvals are bound to, computed once per eligibility pass."""
-    return {"policy_version": current_policy_version(), **current_worker_runtime()}
+    """The runtime values approvals are bound to, computed once per eligibility pass. ``harness_version`` is the
+    OpenCode version observable now (None = not installed/observable: the executor refuses ENGINE_MISSING)."""
+    return {"policy_version": current_policy_version(), **current_worker_runtime(),
+            "harness_version": observed_harness_version()}
 
 
 def runs_on_worker_runtime(route: ModelRoute) -> bool:
@@ -388,6 +392,16 @@ def binding_drift(route: ModelRoute, runtime: dict[str, str | None]) -> list[str
             reasons.append(f"{f} was not bound at activation: re-activate after review")
         elif bound != current:
             reasons.append(f"{f} changed since activation ({bound} -> {current}): re-review and re-activate")
+    observed = runtime.get("harness_version")
+    if runs_on_worker_runtime(route) and observed is not None:
+        # §23 "harness version": an engine installed or upgraded after the activation is not the reviewed one
+        # (a catalog refresh records it as a configuration change; until then the hard filter fails closed)
+        if route.harness_version is None:
+            reasons.append(f"harness_version was not bound at activation (OpenCode {observed} observed now): "
+                           "refresh the catalog and re-activate after review")
+        elif route.harness_version != observed:
+            reasons.append(f"harness_version changed since activation ({route.harness_version} -> {observed}): "
+                           "re-review and re-activate")
     return reasons
 
 
@@ -436,6 +450,12 @@ def region_rejections(route: ModelRoute, *, domain: str, office: dict[str, Any] 
     return reasons
 
 
+def unknown_terms_keys(terms: dict[str, Any]) -> list[str]:
+    """Training/trial flags whose value is UNKNOWN: a missing/None training flag, or an explicit None trial flag."""
+    return [k for k in RESTRICTED_TERMS_KEYS
+            if (k == "may_use_inputs_for_training" and terms.get(k) is None) or (k in terms and terms.get(k) is None)]
+
+
 def terms_restriction(terms: dict[str, Any], identity_status: str | None) -> str | None:
     """Why only PUBLIC data may be sent on these terms, or None. Training/trial flags that are True
     restrict; a training flag that is missing or None is UNKNOWN and restricts too (§23 "klaim provider
@@ -445,9 +465,7 @@ def terms_restriction(terms: dict[str, Any], identity_status: str | None) -> str
     hit = [k for k in RESTRICTED_TERMS_KEYS if terms.get(k) is True]
     if hit:
         return f"data terms restrict to PUBLIC ({', '.join(hit)})"
-    unknown = [k for k in RESTRICTED_TERMS_KEYS
-               if (k == "may_use_inputs_for_training" and terms.get(k) is None)
-               or (k in terms and terms.get(k) is None)]
+    unknown = unknown_terms_keys(terms)
     if unknown:
         return f"data terms UNKNOWN ({', '.join(unknown)}): record the reviewed terms (terms_record) first"
     return None
@@ -550,8 +568,10 @@ def route_rejections(
         reasons.append("route missing from the provider catalog at the last refresh")
     elif route.availability != "AVAILABLE":
         # UNKNOWN is never OK (AGENTS.md #7): a route no catalog refresh has observed is not routable.
+        remedy = ("run `aeos routes refresh`" if route.provider in CATALOG_OBSERVED_PROVIDERS
+                  else f"no catalog source observes provider {route.provider} in this build")
         reasons.append(f"availability {route.availability or 'UNKNOWN'}: never observed in a provider catalog "
-                       "(run `aeos routes refresh`)")
+                       f"({remedy})")
     reasons += region_rejections(route, domain=domain, office=office)
     reasons += credential_rejections(route, domain=domain)
     q = quota_exhausted(session, route)
@@ -985,7 +1005,7 @@ def activate_route(
     for f in binding_fields(route):
         setattr(route, f, runtime[f])
     if runs_on_worker_runtime(route):
-        route.harness_version = observed_harness_version() or route.harness_version
+        route.harness_version = runtime.get("harness_version") or route.harness_version
     route.config_hash = compute_config_hash(route)
     evidence: dict[str, Any] = {"ok": True, "problems": [], "roles": {}}
     if mode == "APPROVED":

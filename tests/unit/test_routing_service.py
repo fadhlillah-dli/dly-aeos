@@ -42,6 +42,8 @@ def bind_runtime(r: ModelRoute) -> None:
     runtime = service.runtime_context()
     for f in service.binding_fields(r):
         setattr(r, f, runtime[f])
+    if service.runs_on_worker_runtime(r):
+        r.harness_version = runtime.get("harness_version") or r.harness_version
 
 
 def approve(db, key: str, *, kind: str = "ROUTE_ACTIVATION", details: dict | None = None, expires_at=None,

@@ -6,6 +6,7 @@ provider-scoped quota and the planner -> routing seam."""
 
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -203,6 +204,8 @@ def test_unknown_or_trial_terms_allow_public_only_until_the_owner_records_them(w
                                allowed_data_classes=["PUBLIC", "INTERNAL", "CONFIDENTIAL"])
     # UNKNOWN training terms (no family flag): restricted until the owner's own reading is recorded
     lag = observed(db, "openrouter/poolside/laguna-s-2.1:free")
+    lag.free_until = utcnow() + timedelta(days=30)  # independent of the real end of the free period (2026-10-31)
+    lag.config_hash = service.compute_config_hash(lag)  # a CANDIDATE row: nothing bound to its identity yet
     with pytest.raises(ValidationFailed) as ei:
         service.activate_route(db, lag.route_key, actor_user_id="owner", mode="TRIAL", rationale="arena trial run",
                                expected_config_hash=lag.config_hash, terms_reviewed=True,
@@ -256,8 +259,13 @@ def test_availability_never_observed_is_not_eligible(world):
     r.availability = "UNKNOWN"
     d = eligible_routes(db, domain="PERSONAL", data_classification="INTERNAL")
     assert d.eligible == [] and any("availability UNKNOWN" in x for x in d.rejected[DS])
+    assert any("run `aeos routes refresh`" in x for x in d.rejected[DS])
     r.availability = "AVAILABLE"
     assert eligible_routes(db, domain="PERSONAL", data_classification="INTERNAL").eligible == [DS]
+    gemini = service.get_route(db, "gemini/gemini-3.8-flash-free-tier")  # no catalog source for this provider
+    reasons = service.route_rejections(db, gemini, domain="PERSONAL", data_classification="PUBLIC", needs_tools=False,
+                                       min_context=None)
+    assert any("no catalog source observes provider gemini" in x for x in reasons)
 
 
 def test_task_tools_must_be_inside_the_reviewed_tool_set(world):
@@ -356,6 +364,29 @@ def test_new_harness_version_is_a_new_configuration(world, monkeypatch):
     assert service.get_route(db, GLM).harness_version is None
 
 
+def test_engine_installed_or_upgraded_after_activation_is_not_the_reviewed_harness(world, monkeypatch):
+    """§23 harness version: a route activated while OpenCode was absent has no bound version; once an engine is
+    observable the hard filter refuses the route until it is re-activated on that version (fail closed, even
+    before a catalog refresh records it as a configuration change)."""
+    from aeos.worker_runtime import opencode
+
+    db = world.db
+    monkeypatch.setattr(opencode, "opencode_status", lambda configured=None, refresh=False: {"status": "MISSING"})
+    r = trial(db, DS)
+    assert r.harness_version is None
+    assert eligible_routes(db, domain="PERSONAL", data_classification="INTERNAL").eligible == [DS]  # ENGINE_MISSING later
+    _installed(monkeypatch, "1.19.3")
+    d = eligible_routes(db, domain="PERSONAL", data_classification="INTERNAL")
+    assert d.eligible == [] and any("harness_version was not bound at activation" in x for x in d.rejected[DS])
+    route, _ = service.activate_route(db, DS, actor_user_id="owner", mode="TRIAL", rationale="re-review on 1.19.3",
+                                      expected_config_hash=service.get_route(db, DS).config_hash)
+    assert route.harness_version == "1.19.3"
+    assert eligible_routes(db, domain="PERSONAL", data_classification="INTERNAL").eligible == [DS]
+    _installed(monkeypatch, "1.20.0")  # upgraded, no catalog refresh yet
+    d = eligible_routes(db, domain="PERSONAL", data_classification="INTERNAL")
+    assert any("harness_version changed since activation (1.19.3 -> 1.20.0)" in x for x in d.rejected[DS])
+
+
 def test_activation_fails_closed_when_the_runtime_cannot_be_fingerprinted(world, monkeypatch):
     db = world.db
     monkeypatch.setattr(service, "current_policy_version", lambda: None)
@@ -443,4 +474,7 @@ def test_route_view_reports_binding_execution_path_and_restrictions(world):
     arena = route_view(db, service.get_route(db, NEMO), principal)
     assert arena["execution_path"]["status"] == "NOT_WIRED" and arena["terms_restriction"]
     assert route_view(db, service.get_route(db, BEAM), principal)["region_restricted"] is True
+    laguna = route_view(db, service.get_route(db, "openrouter/poolside/laguna-s-2.1:free"), principal)
+    assert laguna["terms_unknown"] == ["may_use_inputs_for_training"] and "UNKNOWN" in laguna["terms_restriction"]
+    assert view["terms_unknown"] == [] and view["runtime_binding"]["current"].keys() >= {"harness_version"}
     assert db.query(Decision).filter_by(target_id=DS, kind="TRIAL").count() == 1
