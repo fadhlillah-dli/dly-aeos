@@ -134,3 +134,29 @@ ACCEPTED / ROLLED_BACK / FAILED / PARTIAL where a rollback is never shown as acc
     Security/Privacy assessment. Same-domain possible duplicates by goal/component are suggested, never
     merged. Worker/Hermes/reviewer suggestions enter as untrusted SUBMITTED proposals
     (`POST /api/proposals/suggestions`, `proposals.facade.file_suggestion`).
+
+## Amendment 2026-10-19 (adversarial review of the gap closure)
+
+11. **Duplicates and finished changes.** The "no contradictory ACTIVE decisions" rule applies to OPEN
+    duplicates. A duplicate whose outcome is recorded (ACCEPTED/ROLLED_BACK/FAILED/PARTIAL) is a finished
+    change: its decisions (and its ROLLBACK record) are history, so the next proposal for the same source
+    identity - e.g. the next UPGRADE - can be decided.
+12. **The promoted pin is the accepted configuration.** Without an explicit `approved_pin` the ACCEPTED
+    check uses the promoted candidate pin; an already-enabled component at its old pin is never the
+    accepted upgrade.
+13. **REMOVE never enables.** An accepted removal moves an ENABLED registry entry to REFERENCE_ONLY (event
+    RETIRED); a failed/rolled-back removal restores it. A removal trial does not move entries through the
+    adoption stages (CONTROLLED_EVAL/CANARY/RECOMMENDED_FOR_PROMOTION).
+14. **REPLACE names the retirement point** (`retire_old_version_after`) before PROMOTE.
+15. **Evidence stays about this candidate.** A TaskSpec created for another proposal's trial cannot be
+    linked (`TASK_OF_OTHER_PROPOSAL`); canary evidence must be bound to the candidate and postdate the
+    TRIAL decision, and the canary requirement follows the TRIAL decision's environment (not only a
+    launched trial).
+16. **Rollback needs something that ran.** ROLLED_BACK without any trial/promotion is refused; without a
+    promotion the referenced rollback must postdate the TRIAL decision.
+17. **Platform records.** `aeos ops release promote --proposal` only accepts PERSONAL (platform)
+    proposals; a shared registry row is superseded only by another shared row; goal-duplicate suggestions
+    stay within the proposal's project scope.
+18. **Visible and fail-closed.** UNDER_REVIEW (a stale binding) is listed in the decision queue; a
+    binding check that cannot complete blocks only that trial task (`TRIAL_BINDING_UNVERIFIED`) and a
+    running proposal-bound attempt stops when the check is unavailable.

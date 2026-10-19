@@ -106,6 +106,21 @@ def _trusted_any(session: Session, p: ChangeProposal, evidence_id: str) -> str:
     return ev.id
 
 
+def _canary_evidence(session: Session, p: ChangeProposal, evidence_id: str) -> str:
+    """§40 canary "evidence sebelum pelebaran": trusted evidence about THIS candidate (linked trial task/run/eval,
+    verifier evidence naming the proposal, or an observation of its components) produced after the TRIAL decision."""
+    from aeos.proposals import service
+
+    ev = session.get(EvidenceArtifact, _trusted_any(session, p, evidence_id))
+    why = service.evidence_binding_problem(session, p, ev, purpose="outcome")  # type: ignore[arg-type]
+    if why:
+        raise ValidationFailed(f"canary evidence {evidence_id}: {why}", code="EVIDENCE_NOT_FOR_CANDIDATE")
+    if not service._after_trial(session, p, ev):  # type: ignore[arg-type]
+        raise ValidationFailed(f"canary evidence {evidence_id} predates the TRIAL decision",
+                               code="EVIDENCE_NOT_FOR_CANDIDATE")
+    return ev.id  # type: ignore[union-attr]
+
+
 def _canary(raw: Any) -> dict[str, Any] | None:
     if raw in (None, {}):
         return None
@@ -193,7 +208,7 @@ def normalise(session: Session, p: ChangeProposal, patch: dict[str, Any]) -> dic
             raise ValidationFailed("canary_evidence_ids must be a list")
         if "canary" not in plan:
             raise ValidationFailed("record canary evidence only after a canary plan was declared")
-        plan["canary_evidence_ids"] = sorted({_trusted_any(session, p, str(i)) for i in ids})
+        plan["canary_evidence_ids"] = sorted({_canary_evidence(session, p, str(i)) for i in ids})
     return redact(plan)
 
 

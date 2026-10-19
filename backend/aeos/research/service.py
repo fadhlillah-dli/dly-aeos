@@ -633,6 +633,9 @@ def update_entry(session: Session, entry: ResearchEntry, *, fields: dict[str, An
             other = get_entry(session, str(target), domain=domain)
             if other.id == entry.id:
                 raise ValidationFailed("an entry cannot supersede itself")
+            if entry.submitted_domain is None and other.submitted_domain is not None:
+                # a shared row is read by both domains: it may only point to another shared row (§23, §35)
+                raise ValidationFailed("a shared registry entry can only be superseded by another shared entry")
             entry.superseded_by = other.id
         else:
             entry.superseded_by = None

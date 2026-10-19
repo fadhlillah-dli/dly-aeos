@@ -733,7 +733,10 @@ def _promote_gates(session: Session, p: ChangeProposal, norm: dict[str, Any]) ->
     details: dict[str, Any] = {"checkpoint": {k: rec.get(k) for k in ("status", "verdict", "mode", "package_hash")}
                                if rec else None}
     if p.kind in ("REPLACE", "UPGRADE"):
-        missing = [k for k in ("cutover_order", "rollback_or_forward_recovery") if rp.get(k) in (None, R.UNKNOWN)]
+        # §39 REPLACE "kapan versi lama boleh dihentikan": a replacement names when the old version may retire.
+        needed = ("cutover_order", "rollback_or_forward_recovery",
+                  *(("retire_old_version_after",) if p.kind == "REPLACE" else ()))
+        missing = [k for k in needed if rp.get(k) in (None, R.UNKNOWN)]
         if missing:
             raise Blocked("the replacement plan is incomplete: " + ", ".join(missing), code="REPLACEMENT_PLAN_INCOMPLETE",
                           details={"missing": missing})
@@ -774,9 +777,14 @@ def decide(session: Session, p: ChangeProposal, *, actor_user_id: str, action: s
                            details={"reviewed": {"baseline_hash": p.baseline_hash, "candidate_hash": p.candidate_hash},
                                     "current": {"baseline_hash": live_b, "candidate_hash": live_c},
                                     "invalidated_decisions": n})
-    # §39: linked duplicates of one canonical identity never carry contradictory ACTIVE decisions.
+    # §39: linked duplicates of one canonical identity never carry contradictory ACTIVE decisions. A duplicate
+    # whose outcome is recorded (ACCEPTED/ROLLED_BACK/FAILED/PARTIAL) is a finished change: its decisions are
+    # history (and a ROLLBACK record), so a new proposal for the same source - e.g. the next UPGRADE - can be
+    # decided; otherwise one accepted or rolled-back change would block that identity forever.
     for other in duplicate_family(session, p):
-        if other.id != p.id and any(d.status == "ACTIVE" for d in _decisions(session, other)):
+        if other.id == p.id or other.status in OUTCOME_FINAL:
+            continue
+        if any(d.status == "ACTIVE" and d.kind != "ROLLBACK" for d in _decisions(session, other)):
             root = _root(session, p)
             raise Conflict(f"a linked duplicate already holds an ACTIVE decision; decide on the canonical proposal "
                            f"{root.id} (or revoke the other decision first)", code="DUPLICATE_DECISION_CONFLICT",
@@ -820,7 +828,7 @@ def decide(session: Session, p: ChangeProposal, *, actor_user_id: str, action: s
     p.status = ACTION_STATUS[action]
     if action in RESEARCH_SYNC:
         _sync_research(session, p, RESEARCH_SYNC[action], decision.id)
-    if action == "TRIAL_APPROVE":
+    if action == "TRIAL_APPROVE" and p.kind != "REMOVE":  # adoption stages; a removal is not a candidate eval
         _sync_research(session, p, "CANARY" if norm.get("environment") == "canary" else "CONTROLLED_EVAL",
                        decision.id, only_from=("SOURCE_VERIFIED",))
     session.flush()
@@ -899,8 +907,9 @@ def attach_evidence(session: Session, p: ChangeProposal, *, evidence_ids: list[s
     p.evidence_ids = sorted({*(p.evidence_ids or []), *evidence_ids})
     if p.status in ("TRIAL_APPROVED", "IN_TRIAL"):
         p.status = "PROMOTION_PENDING"
-    _sync_research(session, p, "RECOMMENDED_FOR_PROMOTION", None, only_from=("CONTROLLED_EVAL", "CANARY"),
-                   event="TRIAL_EVIDENCE")
+    if p.kind != "REMOVE":
+        _sync_research(session, p, "RECOMMENDED_FOR_PROMOTION", None, only_from=("CONTROLLED_EVAL", "CANARY"),
+                       event="TRIAL_EVIDENCE")
     now = utcnow().isoformat()
     _append_test_results(session, p, [{"at": now, "proposal_id": p.id, "evidence_id": ev.id, "kind": ev.kind,
                                        "collector": ev.collector_identity, "claim": redact_text(ev.claim or "")[:200],
@@ -926,7 +935,9 @@ def _snapshot(session: Session, sid: str | None, p: ChangeProposal) -> dict[str,
 
 
 def _config_targets(p: ChangeProposal, cfg: dict[str, Any]) -> list[tuple[str, str | None]]:
-    pin = cfg.get("approved_pin")
+    # The lawful configuration is the PROMOTED candidate: without an explicit pin the candidate pin is checked
+    # (never "any pin" - an already-enabled component at its old pin is not the accepted upgrade, §47).
+    pin = cfg.get("approved_pin") or (p.candidate_pin if p.kind != "REMOVE" else None)
     allowed = {*(p.candidate_component_ids or []), *((p.existing_component_ids or []) if p.kind in ("UPGRADE", "REMOVE")
                                                       else [])}
     if cfg.get("component_id"):
@@ -1068,9 +1079,13 @@ def _rollback_reference(session: Session, p: ChangeProposal, rb: dict[str, Any],
         raise ValidationFailed(f"audit event {aid} ({ev.action} {ev.result}) is not a successful rollback/restore",
                                code="ROLLBACK_NOT_REFERENCED")
     since = ensure_aware(since)
+    if since is None:
+        raise ValidationFailed("nothing was trialled or promoted under this proposal, so nothing can be rolled back; "
+                               "record FAILED or decide KEEP/REJECT", code="ROLLBACK_NOT_REFERENCED")
     at = ensure_aware(ev.at)
-    if since is not None and (at is None or at < since):
-        raise ValidationFailed("the referenced rollback ran before the promotion; it is not this rollback",
+    if at is None or at < since:
+        raise ValidationFailed("the referenced rollback ran before the promotion/trial it would undo; it is not this "
+                               "rollback",
                                code="ROLLBACK_NOT_REFERENCED")
     out = {"audit_event_id": aid, "action": ev.action, "at": at.isoformat() if at else None}
     if ev.action == "inventory.manifest.load" and p.kind in ("UPGRADE", "REPLACE"):
@@ -1160,7 +1175,10 @@ def record_outcome(
                               code="REMOVAL_NOT_CLOSED", details={"open": rem["open"]})
         if p.kind == "REPLACE" and not (promotion.details or {}).get("cutover"):
             raise Blocked("the cutover was not authorised by the promotion decision", code="CUTOVER_NOT_AUTHORISED")
-        if (p.owner_plan or {}).get("canary") and (p.trial or {}).get("environment") == "canary" and \
+        trial_d = _active_decision(session, p, "TRIAL")
+        trial_env = (p.trial or {}).get("environment") or ((trial_d.auth_scope or {}).get("environment") if trial_d
+                                                           else None)
+        if (p.owner_plan or {}).get("canary") and trial_env == "canary" and \
                 not (p.owner_plan or {}).get("canary_evidence_ids"):
             raise Blocked("the canary plan requires canary observation evidence before widening/ACCEPTED",
                           code="CANARY_EVIDENCE_REQUIRED")
@@ -1178,6 +1196,12 @@ def record_outcome(
         if since is None:
             last_acc = [h for h in (p.outcome or {}).get("history") or [] if h.get("status") == "ACCEPTED"]
             since = datetime.fromisoformat(last_acc[-1]["at"]) if last_acc else None
+        if since is None:
+            # no promotion/acceptance: what is rolled back is the trial, so the rollback must postdate the
+            # TRIAL decision (an old, unrelated rollback/restore is never "this" rollback)
+            trial_d = _active_decision(session, p, "TRIAL") or next(
+                (d for d in reversed(_decisions(session, p)) if d.kind == "TRIAL"), None)
+            since = trial_d.created_at if trial_d else None
         rb["reference"] = _rollback_reference(session, p, rb, since)
         rb["note"] = "Rollback kode tidak menjamin rollback data; baseline sebelumnya tetap berlaku."
     after_snap = _snapshot(session, after_snapshot_id, p)
@@ -1235,12 +1259,30 @@ def _sync_outcome_research(session: Session, p: ChangeProposal, status: str, dec
         e = session.get(ResearchEntry, eid)
         if e is None or not _syncable(e, p):
             continue
-        if status == "ACCEPTED":
+        if status == "ACCEPTED" and p.kind == "REMOVE":
+            # §47 ENABLED only after a lawful configuration change that ENABLES the candidate: an accepted removal
+            # retires the component, so its entry leaves ENABLED (kept as a dated reference, history intact).
+            to = "REFERENCE_ONLY" if e.lifecycle == "ENABLED" else e.lifecycle
+            e.history = [*(e.history or []), {"at": utcnow().isoformat(), "event": "RETIRED", "from": e.lifecycle,
+                                              "to": to, "proposal_id": p.id, "decision_id": decision_id,
+                                              "config": "removed (inventory)"}]
+            e.lifecycle = to
+            e.owner_decision_id = decision_id
+        elif status == "ACCEPTED":
             e.history = [*(e.history or []), {"at": utcnow().isoformat(), "event": "PROMOTED", "from": e.lifecycle,
                                               "to": "ENABLED", "proposal_id": p.id, "decision_id": decision_id,
                                               "config": "applied (inventory)"}]
             e.lifecycle = "ENABLED"
             e.owner_decision_id = decision_id
+        elif p.kind == "REMOVE":
+            # A removal that failed/was rolled back leaves the component in place: restore what the accepted
+            # removal changed (never demote an entry this proposal did not retire).
+            hit = next((h for h in reversed(e.history or [])
+                        if h.get("event") == "RETIRED" and h.get("proposal_id") == p.id), None)
+            if hit and e.lifecycle == hit.get("to") and hit.get("from") not in (None, e.lifecycle):
+                e.history = [*(e.history or []), {"at": utcnow().isoformat(), "event": status, "from": e.lifecycle,
+                                                  "to": hit["from"], "proposal_id": p.id}]
+                e.lifecycle = hit["from"]
         elif e.lifecycle == "ENABLED":
             prev = next((h.get("from") for h in reversed(e.history or [])
                          if h.get("event") == "PROMOTED" and h.get("proposal_id") == p.id), "DISCOVERED")
@@ -1322,9 +1364,13 @@ def possible_duplicates(session: Session, p: ChangeProposal) -> list[dict[str, A
     mine = _goal_tokens(p)
     comps = set(p.existing_component_ids or [])
     out = []
+    # Same domain AND the same project scope (platform proposals or this proposal's project): a viewer of this
+    # proposal never learns titles of proposals in projects outside its access (§35).
+    scope = or_(ChangeProposal.project_id.is_(None), ChangeProposal.project_id == p.project_id) if p.project_id \
+        else ChangeProposal.project_id.is_(None)
     for row in session.scalars(select(ChangeProposal).where(ChangeProposal.domain == p.domain,
                                                             ChangeProposal.id != p.id,
-                                                            ChangeProposal.parent_id.is_(None))
+                                                            ChangeProposal.parent_id.is_(None), scope)
                                .order_by(ChangeProposal.created_at.desc()).limit(500)):
         if row.id in family or row.parent_id == p.id:
             continue

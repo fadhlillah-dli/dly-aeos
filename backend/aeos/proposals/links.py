@@ -51,6 +51,14 @@ def validate(session: Session, p: ChangeProposal, kind: str, ids: list[str], *,
             t = session.get(TaskSpec, i)
             if t is None or t.domain != p.domain or (allowed_project_ids is not None and t.project_id not in allowed_project_ids):
                 raise ValidationFailed(f"task {i} not found in this domain")
+            from aeos.proposals.trial import proposal_id_for_task
+
+            owner = proposal_id_for_task(t)
+            if owner is not None and owner != p.id:
+                # a trial TaskSpec of ANOTHER proposal is about another candidate: its evidence never opens this
+                # proposal's gates (§40 "bukti harus tentang kandidat itu")
+                raise ValidationFailed(f"task {i} belongs to the trial of proposal {owner}; link it there",
+                                       code="TASK_OF_OTHER_PROPOSAL")
             out.append(t.id)
         elif kind == "eval_run_ids":
             r = session.get(EvalRun, i)
