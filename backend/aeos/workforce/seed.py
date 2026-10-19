@@ -21,6 +21,7 @@ from aeos.workforce.catalog import AGENT_DEFINITIONS, ALL_ROLES
 _ROLE_FIELDS = (
     "name", "group", "kind", "description", "outputs", "boundaries", "forbidden_actions", "verification",
     "failure_modes", "practice_sources", "deterministic_service", "engine_hint", "source_section",
+    "inputs", "allowed_scope", "example_outputs", "evaluation_cases",
 )
 _AGENT_FIELDS = (
     "role_key", "harness", "description", "route_policy", "tools", "limits", "allowed_scope", "deterministic",
@@ -34,15 +35,40 @@ def _bump(version: str) -> str:
         return "2"
 
 
+def evaluation_cases_for(role_key: str) -> list[dict[str, Any]]:
+    """References to the protected evaluation suites written for *role_key* (§43, §46). The suites live in
+    ``aeos.evaluation.definitions``; a role without a suite has no cases (it stays NOT_EVALUATED)."""
+    try:
+        from aeos.evaluation import definitions
+    except ImportError:
+        return []
+    out = []
+    for suite in definitions.SUITES:
+        if suite.get("role_key") == role_key:
+            out.append({"suite_key": suite["suite_key"], "task_class": suite.get("task_class", ""),
+                        "case_ids": [c["case_id"] for c in suite.get("cases") or []]})
+    return out
+
+
+def role_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """Catalog entry with its evaluation case references (the revision covers them too)."""
+    return {**spec, "evaluation_cases": evaluation_cases_for(spec["role_key"])}
+
+
+def role_revision_hash(spec: dict[str, Any]) -> str:
+    full = role_spec(spec)
+    return content_hash({k: full[k] for k in ("role_key", *_ROLE_FIELDS)})
+
+
 def seed_roles(session: Session) -> dict[str, int]:
     created = updated = unchanged = 0
-    for spec in ALL_ROLES:
-        rev = content_hash({k: spec[k] for k in ("role_key", *_ROLE_FIELDS)})
+    for raw in ALL_ROLES:
+        spec = role_spec(raw)
+        rev = role_revision_hash(raw)
         row = session.scalar(select(RoleSkillPack).where(RoleSkillPack.role_key == spec["role_key"]))
         if row is None:
             row = RoleSkillPack(role_key=spec["role_key"], version="1", revision_hash=rev,
-                                eval_status="NOT_EVALUATED", mode=DataMode.DESIGN.value,
-                                evaluation_cases=[])
+                                eval_status="NOT_EVALUATED", mode=DataMode.DESIGN.value)
             for f in _ROLE_FIELDS:
                 setattr(row, f, spec[f])
             session.add(row)

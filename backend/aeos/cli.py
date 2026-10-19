@@ -118,6 +118,13 @@ def serve(
             raise typer.Exit(2)
     ensure_database()
     console.print(f"DLY AEOS listening on [bold]{settings.base_url}[/bold] (login required)")
+    extra: dict[str, object] = {}
+    if reload:
+        from aeos.core.paths import repo_root
+
+        # §09: hot reload watches only the trusted controller's own backend code. Candidate workspaces, the
+        # data dir and policy/** are never watched, so nothing from a candidate is (re)loaded into the controller.
+        extra["reload_dirs"] = [str(repo_root() / "backend")]
     uvicorn.run(
         "aeos.api.app:create_app",
         factory=True,
@@ -125,6 +132,7 @@ def serve(
         port=settings.port,
         reload=reload,
         log_level="info",
+        **extra,
     )
 
 

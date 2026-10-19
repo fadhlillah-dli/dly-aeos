@@ -38,6 +38,10 @@ export interface RunRow {
   reason_code: string;
   current_action: string;
   current_action_source: string;
+  /** RUNNER (observed tool action) | CONTROLLER (status text) | UNKNOWN — set by the writer, not the UI. */
+  current_action_writer?: string;
+  /** External resources the broker touched for this run (branch, PR, document). */
+  resources?: { kind: string; target: string | null; status: string; external_url: string | null }[];
   started_at: string | null;
   finished_at: string | null;
   last_heartbeat_at: string | null;
@@ -194,6 +198,12 @@ export interface RoleCard {
   active_runs: number;
   demo_runs: number;
   availability: string;
+  /** §17/§46 competence definition: inputs, example outputs, failure modes, evaluation case references. */
+  inputs?: string[];
+  example_outputs?: string[];
+  failure_modes?: string[];
+  evaluation_cases?: { suite_key: string; task_class?: string; case_ids: string[] }[];
+  practice_sources?: string[];
 }
 
 export interface RoleGroup {

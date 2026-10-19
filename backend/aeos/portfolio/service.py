@@ -242,6 +242,12 @@ def update_project(session: Session, principal: Principal, project: Project, bod
             if project.is_platform and target in {"RETIRING", "RETIRED"}:
                 _deny(session, principal, action="portfolio.project.update", code="PLATFORM_RETIREMENT_DENIED",
                       project=project, reason="retiring the DLY AEOS platform project needs a migration decision")
+            if target == "RETIRED":
+                # §33: RETIRED only after the legitimate owner's final verification (a RETIREMENT decision bound to
+                # the current checklist hash, nothing BLOCKING). Fail closed otherwise.
+                from aeos.policy import retirement as owner_verification
+
+                owner_verification.require_retirement_verified(session, project)
             changes["lifecycle"] = target
     if "lifecycle_reason" in body:
         changes["lifecycle_reason"] = redact_text(clean_text(body["lifecycle_reason"], field="lifecycle_reason",

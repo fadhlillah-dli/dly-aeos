@@ -1,9 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
-import { get } from "../../api/client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { OpsBadge } from "../../components/control_center/OpsBadge";
 import { Provenance } from "../../components/control_center/Provenance";
-import { EmptyState, ErrorBox, Loading, Mono, Notice } from "../../components/ui";
+import { Button, EmptyState, ErrorBox, inputClass, Loading, Mono, Notice } from "../../components/ui";
 import type { RetirementChecklist } from "./types";
 
 function detailText(detail: Record<string, unknown>): string {
@@ -43,8 +44,41 @@ export function RetirementView({ data }: { data: RetirementChecklist }) {
   );
 }
 
+/** §33 final verification by the legitimate owner: a RETIREMENT decision bound to the checklist hash shown. */
+export function RetirementDecisionForm({ data, isAdmin }: { data: RetirementChecklist; isAdmin: boolean }) {
+  const qc = useQueryClient();
+  const [rationale, setRationale] = useState("");
+  const record = useMutation({
+    mutationFn: () =>
+      post(`/api/ops/retirement/${encodeURIComponent(data.project.id)}/decision`, { rationale, checklist_hash: data.checklist_hash ?? null }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ops-retirement", data.project.id] }),
+  });
+  if (data.project.lifecycle !== "RETIRING") {
+    return <Notice tone="info">Verifikasi akhir dicatat saat proyek berstatus RETIRING; RETIRED hanya setelah keputusan RETIREMENT pemilik.</Notice>;
+  }
+  return (
+    <div className="grid gap-2 rounded-md border border-line p-2 text-sm">
+      <div className="font-medium">Verifikasi akhir pemilik (keputusan RETIREMENT)</div>
+      <textarea
+        aria-label="Rationale verifikasi akhir"
+        className={inputClass}
+        value={rationale}
+        onChange={(e) => setRationale(e.target.value)}
+        placeholder="Apa yang sudah Anda periksa (min. 10 karakter)"
+      />
+      <ErrorBox error={record.error} />
+      <div>
+        <Button disabled={!isAdmin || data.blocking.length > 0 || rationale.trim().length < 10} busy={record.isPending} onClick={() => record.mutate()}>
+          Catat verifikasi akhir
+        </Button>
+      </div>
+      <div className="text-xs text-ink-3">Terikat hash daftar periksa ini; perubahan setelahnya membuat verifikasi STALE. Tidak ada yang dihapus.</div>
+    </div>
+  );
+}
+
 export function RetirementTab() {
-  const { projectId } = useAuth();
+  const { projectId, isAdmin } = useAuth();
   const q = useQuery({
     queryKey: ["ops-retirement", projectId],
     queryFn: () => get<RetirementChecklist>(`/api/ops/retirement/${encodeURIComponent(projectId ?? "")}`),
@@ -59,5 +93,10 @@ export function RetirementTab() {
   }
   if (q.isLoading) return <Loading />;
   if (q.error) return <ErrorBox error={q.error} />;
-  return q.data ? <RetirementView data={q.data} /> : null;
+  return q.data ? (
+    <div className="space-y-3">
+      <RetirementView data={q.data} />
+      <RetirementDecisionForm data={q.data} isAdmin={!!isAdmin} />
+    </div>
+  ) : null;
 }

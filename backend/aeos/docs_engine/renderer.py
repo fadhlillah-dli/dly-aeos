@@ -56,7 +56,7 @@ from aeos.docs_engine.plan_content import _first as pick
 from aeos.docs_engine.visuals import STATUS_RENDERED, VisualArtifact
 from aeos.models.publishing import DocumentRecord, DocumentRevision
 
-RENDERER_VERSION = "3"  # part of every input_hash: a renderer change re-renders (never reuses stale bodies)
+RENDERER_VERSION = "4"  # part of every input_hash: a renderer change re-renders (never reuses stale bodies)
 
 # Trusted EvidenceArtifact kinds whose real results create §27 04 VA / PT documents.
 VA_EVIDENCE_KINDS = ("VA_REPORT", "VULNERABILITY_ASSESSMENT")
@@ -724,8 +724,21 @@ def _product_overview(ctx: _Ctx, node: p1.Node, parent: str) -> None:
             feats = [f.title for f in v.features if f.milestone and f.milestone == mkey]
             roadmap_rows.append([as_text(m.get("title")) or mkey, ", ".join(feats) or "—",
                                  as_text(m.get("exit_evidence")) or "—"])
+        governance = []  # planning schema rev 2 milestone governance (UNKNOWN owner is never shown as a name)
+        for m in v.milestones:
+            parts = [f"prioritas {as_text(m.get('priority'))}" if as_text(m.get("priority")) else "",
+                     f"owner {known(m.get('owner'))}" if known(m.get("owner")) else "",
+                     ("bergantung pada " + ", ".join(f"`{as_text(d)}`" for d in as_list(m.get("depends_on"))))
+                     if as_list(m.get("depends_on")) else ""]
+            acc = [as_text(a) for a in as_list(m.get("acceptance")) if as_text(a)]
+            if any(parts) or acc:
+                head = f"**{as_text(m.get('title')) or as_text(m.get('key'))}**"
+                line = head + (" — " + "; ".join(p for p in parts if p) if any(parts) else "")
+                governance.append(line + ("\n" + "\n".join(f"  - Acceptance: {a}" for a in acc) if acc else ""))
         b.put("roadmap", _join(_bullets(as_list(v.get("roadmap"))),
-                               _table(["Milestone", "Fitur", "Exit evidence"], roadmap_rows) if roadmap_rows else ""))
+                               _table(["Milestone", "Fitur", "Exit evidence"], roadmap_rows) if roadmap_rows else "",
+                               "**Governance milestone (rencana)**\n\n" + "\n".join(f"- {g}" for g in governance)
+                               if governance else ""))
         inventory = as_list(v.get("system_inventory")) + as_list(v.architecture.get("services"))
         if not inventory:
             inventory = as_list(v.architecture.get("components"))
@@ -786,6 +799,17 @@ def _prd(ctx: _Ctx, f: FeatureView, parent: str) -> None:
         b.put("rollout_considerations", as_text(f.get("rollout", "rollout_considerations")))
         rel = [f"- TaskSpec `{t.task_key}` — {t.title}" for t in tasks]
         rel += [f"- RFC `{x}`" for x in rfc_ids] + [f"- TDD `{x}`" for x in tdd_ids]
+        # §28 feature approval "API/schema/design contract": the agreed interface contracts and their files
+        for c in as_list(f.raw.get("interface_contracts")):
+            if isinstance(c, dict):
+                paths = ", ".join(f"`{p}`" for p in as_list(c.get("contract_paths"))) or "path kontrak belum ditetapkan"
+                consumers = ", ".join(f"`{as_text(x)}`" for x in as_list(c.get("consumer_task_keys")) if as_text(x))
+                rel.append(f"- Kontrak {as_text(c.get('kind')) or 'interface'} `{as_text(c.get('key'))}` — "
+                           f"{as_text(c.get('title'))} (penyedia `{as_text(c.get('provider_task_key'))}`"
+                           + (f"; konsumen {consumers}" if consumers else "") + f"; {paths})"
+                           + (f"\n  - Definisi: {as_text(c.get('definition'))}" if as_text(c.get("definition")) else "")
+                           + (f"\n  - Kompatibilitas: {as_text(c.get('compatibility'))}"
+                              if as_text(c.get("compatibility")) else ""))
         rel += [f"- Test Plan `{x}`" for x in test_plan_ids]
         rel += [f"- Rencana: {as_text(x)}" for x in as_list(f.get("related_work")) if as_text(x)]
         rel += [f"- Change record `10-changes/change-{feature_slug(c.task_key)}`" for c in ctx.changes_for(f.key)]
@@ -860,8 +884,11 @@ def _rfc_or_tdd(ctx: _Ctx, kind: str, key: str, title: str, data: dict[str, Any]
             else:
                 b.put(s.key, as_text(data.get(s.key)) if not isinstance(data.get(s.key), list)
                       else _bullets(data[s.key]))
+        entry_key, entry_title = as_text(data.get("key")), as_text(data.get("title"))
+        entry = (f"Entri rencana: `{entry_key}`" + (f" — {entry_title}" if entry_title else "")) if entry_key else (
+            f"Entri rencana: {entry_title}" if entry_title else "")
         intro = _join(f"{spec.title} ini diperlukan karena dirujuk oleh PRD `02-requirements/prd-{feature.key}` "
-                      "(rencana yang disetujui):" if refs and feature else "", _bullets(refs))
+                      "(rencana yang disetujui):" if refs and feature else "", _bullets(refs), entry)
         _compose(doc, b, header_title=f"{spec.title} — {title}", metadata=ctx.metadata(doc), intro=intro)
 
     ctx.add(logical_id=logical_id, node="03", title=f"{spec.title} — {title}", kind="DOC", doc_type=kind,
@@ -1806,8 +1833,8 @@ def render_document_set(*, project: ProjectIdentity, version: VersionIdentity, c
                     unknown = any(f.personal_data is None for f in view.features)
                     _folder(ctx, child, node.key, has_items=bool(pd),
                             reason="Tidak ada fitur yang dinyatakan memproses data pribadi" +
-                                   ("; status data pribadi sebagian fitur belum dinyatakan di rencana (schema rencana "
-                                    "v1 tidak memiliki penanda data pribadi per fitur) — DPIA dibuat bila manusia/"
+                                   ("; status data pribadi sebagian fitur belum diketahui (rencana menyatakan UNKNOWN "
+                                    "atau tidak mengisi feature_governance.personal_data) — DPIA dibuat bila manusia/"
                                     "rencana menyatakannya." if unknown else "."))
                     for f in pd:
                         _privacy_assessment(ctx, f, child.key)

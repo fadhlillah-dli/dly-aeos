@@ -400,3 +400,17 @@ def test_disable_route_excludes_and_invalidates(routes, monkeypatch):
     service.disable_route(routes, DS, reason="terms changed")
     d = eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL")
     assert any("DISABLED" in x for x in d.rejected[DS]) and reg.invalidated_decisions
+
+
+def test_compiled_min_context_tokens_filters_routes(routes):
+    """§19/§21: the task compiler writes model_route_policy.min_context_tokens; route selection honours it
+    (the older spelling min_context keeps working)."""
+    r = service.get_route(routes, DS)
+    r.context_window = 65_536
+    service.refresh_config_hash(routes, r, reason="test")
+    approve(routes, DS)
+    assert select_route(routes, task=task(min_context_tokens=32_000)).route.route_key == DS
+    with pytest.raises(Blocked):
+        select_route(routes, task=task(min_context_tokens=128_000))
+    with pytest.raises(Blocked):
+        select_route(routes, task=task(min_context=128_000))

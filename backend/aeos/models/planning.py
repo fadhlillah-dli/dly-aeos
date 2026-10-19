@@ -136,6 +136,9 @@ class TaskSpec(Base):
     title: Mapped[str] = mapped_column(String(256), nullable=False)
     goal: Mapped[str] = mapped_column(Text, nullable=False)
     role_key: Mapped[str] = mapped_column(String(64), default="feature-implementer")
+    # Revision of the executor RoleSkillPack the spec was compiled against (part of spec_hash, §19 diagram
+    # "katalog role/skill -> task compiler"); None = role_key is not a catalog executor (never admitted).
+    role_revision_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     input_artifacts: Mapped[list[Any]] = mapped_column(JSON, default=list)
     expected_outputs: Mapped[list[Any]] = mapped_column(JSON, default=list)
     acceptance_criteria: Mapped[list[Any]] = mapped_column(JSON, default=list)
@@ -196,3 +199,8 @@ class Milestone(IdMixin, CreatedMixin, Base):
     title: Mapped[str] = mapped_column(String(256), nullable=False)
     exit_evidence: Mapped[str] = mapped_column(Text, default="")
     order_index: Mapped[int] = mapped_column(Integer, default=0)
+    # §13 "requirement, priority, acceptance, dependency, owner" (from plan milestone_governance)
+    priority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    acceptance: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    depends_on: Mapped[list[str]] = mapped_column(JSON, default=list)
+    owner: Mapped[str | None] = mapped_column(String(128), nullable=True)

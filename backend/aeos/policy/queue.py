@@ -59,6 +59,14 @@ PROPOSAL_WAITING: dict[str, tuple[str, str]] = {
     # proposal's decisions; the owner must re-review and decide again - it must not disappear from the queue.
     "UNDER_REVIEW": ("Binding keputusan usulan kedaluwarsa (baseline/kandidat/scope berubah); keputusan terkait "
                      "dibatalkan.", "Review ulang usulan lalu putuskan lagi pada hash terbaru."),
+    # §40: states that still need the owner although no button is "pending" — never silently finished.
+    "TRIAL_APPROVED": ("Trial disetujui; menunggu bukti trial tepercaya sebelum promosi.",
+                       "Lampirkan bukti trial (sandbox/eval) atau hentikan usulan."),
+    "PROMOTION_APPROVED": ("Promosi disetujui; hasil implementasi (outcome) belum dicatat.",
+                           "Catat outcome ACCEPTED/PARTIAL/FAILED/ROLLED_BACK dengan bukti tepercaya."),
+    "PARTIAL": ("Sebagian target gagal (PARTIAL); bagian yang gagal belum direkonsiliasi.",
+                "Rekonsiliasi setiap bagian gagal dengan resolusi + bukti tepercaya, atau catat ROLLED_BACK/FAILED. "
+                "'Selesai' tidak membuka gate."),
 }
 
 
@@ -195,6 +203,26 @@ def queue_items(session: Session, domain: str | Domain, project_ids: list[str] |
             requested="Perpanjang dengan keputusan baru (scope eksplisit) atau biarkan kedaluwarsa.",
             link=f"/decisions?decision={d.id}", created_at=d.created_at, project_id=d.project_id, domain=d.domain,
             priority=2, extra={"expires_at": exp.isoformat()},
+        ))
+
+    # Owner delegations recorded from an ADR (ADR-0003 seed exception) that have no machine expiry: the owner
+    # sees them as pending so the bounded delegation is ended deliberately (§09), never forgotten.
+    q = select(Decision).where(Decision.status == "ACTIVE", Decision.actor_kind == "HUMAN_RECORDED",
+                               Decision.expires_at.is_(None), or_(Decision.domain == domain, Decision.domain.is_(None)))
+    if project_ids is not None:
+        q = q.where(or_(Decision.project_id.in_(project_ids), Decision.project_id.is_(None)))
+    for d in session.scalars(q):
+        until = str((d.details or {}).get("expires_when") or "pemilik mencabutnya")
+        items.append(_item(
+            kind="DELEGATION_ACTIVE", title=f"Delegasi {d.actor_user_id} masih aktif",
+            target={"type": "decision", "id": d.id, "target_type": d.target_type, "target_id": d.target_id,
+                    "hash": d.target_hash},
+            why=f"Pengecualian {d.kind} ({', '.join(d.allowed_operations or [])}) tidak memiliki tanggal kedaluwarsa; "
+                f"berlaku sampai: {until}. Akhirnya tidak ditegakkan mesin.",
+            requested="Cabut delegasi bila syarat berakhirnya sudah tercapai (mis. seed mencapai M4), atau biarkan "
+                      "aktif secara sadar.",
+            link=f"/decisions?decision={d.id}", created_at=d.created_at, project_id=d.project_id, domain=d.domain,
+            priority=3, extra={"expires_when": until},
         ))
 
     # Open decision requests (exception/risk/budget/...).

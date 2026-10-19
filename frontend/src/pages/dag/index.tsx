@@ -192,6 +192,18 @@ export default function DagPage() {
           {view.validation_errors.length > 0 && (
             <Notice tone="warn">DAG tidak valid: {view.validation_errors.map((e) => String(e.code)).join(", ")}. Persetujuan dan kompilasi akan ditolak.</Notice>
           )}
+          {view.progress && (
+            <div className="text-sm" aria-label="Progres berbasis bukti">
+              Progres (dari AcceptanceRecord, bukan estimasi): <strong>{view.progress.accepted_tasks}/{view.progress.total_tasks}</strong> task diterima ·{" "}
+              {view.progress.criteria_with_trusted_evidence}/{view.progress.acceptance_criteria_total} acceptance criteria berbukti tepercaya
+            </div>
+          )}
+          {(view.plan_warnings ?? []).length > 0 && (
+            <Notice tone="warn">
+              Temuan review (tidak memblokir DAG, ditinjau pemilik/reviewer):{" "}
+              {(view.plan_warnings ?? []).map((w) => `${w.code}${w.key ? ` (${w.key})` : w.tasks ? ` (${w.tasks.join(", ")})` : ""}`).join("; ")}
+            </Notice>
+          )}
           {!view.nodes.length ? (
             <EmptyState title="Versi ini tidak memiliki task">{view.remedy ?? "Tambahkan TaskSpec melalui revisi rencana."}</EmptyState>
           ) : (

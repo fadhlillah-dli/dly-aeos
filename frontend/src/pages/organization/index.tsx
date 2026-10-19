@@ -21,6 +21,7 @@ function Availability({ role }: { role: RoleCard }) {
   if (role.active_runs > 0) return <StatusBadge status="IN_USE" label={`Menjalankan ${role.active_runs} run`} />;
   if (role.availability === "SERVICE") return <StatusBadge status="CONFIGURED" label="Layanan kode, bukan LLM" />;
   if (role.availability === "HUMAN") return <StatusBadge status="CONFIGURED" label="Peran manusia" />;
+  if (role.availability === "CANDIDATE") return <StatusBadge status="CANDIDATE" label="Kandidat impor — tidak dijalankan sebelum review & evaluasi" />;
   return <StatusBadge status="IDLE" label="Tersedia, tidak aktif" />;
 }
 
@@ -51,9 +52,27 @@ function RoleCardView({ role }: { role: RoleCard }) {
         <Availability role={role} />
       </header>
       {role.engine_hint && <p className="text-xs text-ink-2">Engine/model (panduan desain, bukan route aktif): {role.engine_hint}</p>}
+      <Bullets title="Masukan" items={role.inputs ?? []} />
       <Bullets title="Keluaran" items={role.outputs} />
       <Bullets title="Batas" items={role.boundaries} />
       <Bullets title="Verifikasi" items={role.verification} />
+      <Bullets title="Mode kegagalan yang diperiksa" items={role.failure_modes ?? []} />
+      {(role.example_outputs ?? []).length > 0 && (
+        <details className="text-sm">
+          <summary className="cursor-pointer text-xs text-ink-3">Contoh keluaran ({(role.example_outputs ?? []).length})</summary>
+          <ul className="list-disc pl-5">
+            {(role.example_outputs ?? []).map((x) => (
+              <li key={x}>{x}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+      <div className="text-xs text-ink-3">
+        Kasus evaluasi:{" "}
+        {(role.evaluation_cases ?? []).length
+          ? (role.evaluation_cases ?? []).map((c) => `${c.suite_key} (${c.case_ids.length} kasus)`).join(", ")
+          : "belum ada suite evaluasi terproteksi untuk peran ini"}
+      </div>
       <div className="flex flex-wrap gap-1.5">
         <StatusBadge status={role.mode} />
         <StatusBadge status={role.eval_status === "NOT_EVALUATED" ? "NOT_TESTED" : role.eval_status} label={role.eval_status === "NOT_EVALUATED" ? "Belum dievaluasi" : role.eval_status} />

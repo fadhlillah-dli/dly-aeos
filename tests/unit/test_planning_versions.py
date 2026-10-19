@@ -45,10 +45,11 @@ def _current(db, plan):
     return db.get(PlanVersion, plan.current_version_id)
 
 
-def _approve(db, owner, plan, version=None, action="APPROVE_AND_PUBLISH", targets=None):
+def _approve(db, owner, plan, version=None, action="APPROVE_AND_PUBLISH", targets=None, ack=False):
     v = version or _current(db, plan)
     res = service.decide(db, plan.id, action=action, version_id=v.id, version_hash=v.manifest_hash,
-                         targets=[TARGET] if targets is None else targets, rationale="ok", actor_user_id=owner.id)
+                         targets=[TARGET] if targets is None else targets, rationale="ok", actor_user_id=owner.id,
+                         acknowledge_unreviewed=ack)
     db.commit()
     return res
 
@@ -144,7 +145,14 @@ def test_verdict_is_tied_to_the_reviewed_version(db, owner, ready_plan):
     db.commit()
     detail = service.plan_detail(db, ready_plan)
     assert detail["verdict_version_id"] == v.id and detail["current_version_reviewed"] is False
+    # §15: the skipped review stages are never cut silently - the decision names them and the acknowledgement
     res = _approve(db, owner, ready_plan)  # the human may still decide; the decision records provenance
+    review = res["decision"]["details"]["planning_review"]
+    assert review == {"reviewed": False, "stages_skipped": ["CHALLENGE_REVIEW", "SYNTHESIS", "FINAL_REVIEW"],
+                      "unreviewed_acknowledged": False}
+    assert res["decision"]["details"]["verdict_effective"] is None  # the old verdict is not reused
+    res = _approve(db, owner, ready_plan, ack=True)
+    assert res["decision"]["details"]["planning_review"]["unreviewed_acknowledged"] is True
     assert res["decision"]["details"]["reviewed_version_id"] == v.id
     assert res["decision"]["details"]["version_source"] == "HUMAN_EDIT"
     # the fake bridge output is MOCK; a human edit of MOCK content stays MOCK (never becomes LIVE)

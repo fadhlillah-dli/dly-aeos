@@ -206,6 +206,51 @@ def set_scheduler(body: Enable, principal: AdminPrincipal, db: DB) -> dict[str, 
     return {"enabled": body.enabled}
 
 
+class ConcurrencyIn(BaseModel):
+    max_active: int = Field(ge=1, le=2)
+    rationale: str = Field(default="", max_length=2000)
+    eval_run_id: str | None = Field(default=None, max_length=64)
+    # §44 task-class scope: project_ids / role_keys / risk_classes / domains (empty = every task class)
+    scope: dict[str, list[str]] = Field(default_factory=dict)
+    # §44 DecisionRecord: options, goal, evidence_ids, cost_quality_tradeoff, invalidate_if
+    decision_record: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/api/workforce/concurrency")
+def set_concurrency(body: ConcurrencyIn, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
+    """Owner action: run 1 or 2 implementation workers (§19, §21). Two workers need a human POLICY decision on
+    workforce/concurrency that references a passing evaluation run (integration evidence) and its rollback."""
+    out = scheduler.set_concurrency(db, max_active=body.max_active, actor=_actor(principal),
+                                    actor_user_id=principal.user.id, rationale=body.rationale,
+                                    eval_run_id=body.eval_run_id, scope=body.scope,
+                                    decision_record=body.decision_record)
+    db.commit()
+    cap, decision_id = scheduler.concurrency_cap(db)
+    return {**out, "effective_cap": cap, "cap_decision_id": decision_id}
+
+
+class RolePackImport(BaseModel):
+    pack: dict[str, Any]
+    source_url: str = Field(min_length=8, max_length=500)
+    commit_pin: str = Field(min_length=40, max_length=40)
+    license_spdx: str = Field(min_length=1, max_length=64)
+    rationale: str = Field(min_length=10, max_length=2000)
+
+
+@router.post("/api/workforce/role-packs/import", status_code=201)
+def import_role_pack(body: RolePackImport, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
+    """§45 selective import after review/license/pin: a CANDIDATE RoleSkillPack version bound to a PROMOTION
+    decision; refused when the pack carries hooks/auto-update/policy/settings (SKILL_PACK_FORBIDDEN_FIELD)."""
+    from aeos.workforce import skill_import
+
+    row = skill_import.import_pack(db, pack=body.pack, source_url=body.source_url, commit_pin=body.commit_pin,
+                                   license_spdx=body.license_spdx, actor_user_id=principal.user.id,
+                                   rationale=body.rationale)
+    db.commit()
+    return {"role_key": row.role_key, "version": row.version, "mode": row.mode, "eval_status": row.eval_status,
+            "revision_hash": row.revision_hash}
+
+
 class Retry(BaseModel):
     extra_attempts: int = Field(default=0, ge=0, le=3)
     rationale: str = Field(default="", max_length=2000)
