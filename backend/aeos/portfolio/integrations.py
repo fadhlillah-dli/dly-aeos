@@ -26,7 +26,7 @@ from aeos.models.portfolio import Project, ProjectIntegration
 from aeos.portfolio import providers as pv
 from aeos.portfolio.service import deny, require_writable
 
-PURPOSES = ("docs", "issues", "code", "ci", "roadmap")
+PURPOSES = ("docs", "issues", "code", "ci", "roadmap", "staging", "production")
 # domain -> provider -> allowed purposes (U-02..U-04, §04 table). One vocabulary: aeos.portfolio.providers.
 PROVIDERS: dict[str, dict[str, frozenset[str]]] = pv.INTEGRATION_PROVIDERS
 OFFICE_PROVIDERS = frozenset(PROVIDERS[Domain.OFFICE.value])
@@ -34,7 +34,9 @@ ATLASSIAN_PROVIDERS = pv.ATLASSIAN
 CREDENTIAL_NAMESPACES = {Domain.PERSONAL.value: ("personal", "projects"), Domain.OFFICE.value: ("office", "projects")}
 ROOT_ID_NAMES = pv.ROOT_ID_NAMES
 # Google Drive is optional: without a folder id the project folder is created in My Drive (§04, S16).
-ROOT_REQUIRED = frozenset({pv.CONFLUENCE, pv.JIRA, pv.GITHUB_ISSUES})
+ROOT_REQUIRED = frozenset({pv.CONFLUENCE, pv.JIRA, pv.GITHUB_ISSUES, pv.DEPLOYMENT_TARGET})
+# Observe-only targets (GET of a health/version URL) may run without a credential reference.
+CREDENTIAL_OPTIONAL = frozenset({pv.DEPLOYMENT_TARGET})
 _REPO_SLUG = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
 _ROOT_PATTERNS = {
     pv.GOOGLE_DRIVE: re.compile(r"^[A-Za-z0-9_-]{10,128}$"),
@@ -43,6 +45,9 @@ _ROOT_PATTERNS = {
     pv.GITHUB_ISSUES: _REPO_SLUG,
     pv.GITHUB_REPO: _REPO_SLUG,
     pv.BITBUCKET: re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,61}/[A-Za-z0-9._-]{1,100}$"),
+    # exact target identity: an https base URL (or loopback http) without credentials/query
+    pv.DEPLOYMENT_TARGET: re.compile(r"^(?:https://[A-Za-z0-9.-]{1,253}|http://(?:127\.0\.0\.1|localhost))"
+                                     r"(?::\d{1,5})?(?:/[A-Za-z0-9._~/-]{0,200})?$"),
 }
 _GENERIC_ID = re.compile(r"^[A-Za-z0-9._:/@-]{1,256}$")
 _TENANT = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
@@ -171,11 +176,13 @@ def compute_capability_status(integration: ProjectIntegration) -> dict[str, Any]
     if not integration.root_id and integration.provider == pv.GOOGLE_DRIVE:
         root_state = "DEFAULT"  # optional: the project folder is created in My Drive (drive.file scope)
     cred = _credential_state(integration.credential_ref)
+    if integration.provider in CREDENTIAL_OPTIONAL and not integration.credential_ref:
+        cred = {"status": "NOT_APPLICABLE", "reason": "observe-only target; no credential needed"}
     remedies: list[dict[str, str]] = []
     if root_state == "MISSING":
         remedies.append({"issue": f"{ROOT_ID_NAMES.get(integration.provider, 'root_id')} belum diatur",
                          "command": _remedy(integration.provider, "root", integration.credential_ref)})
-    if cred["status"] != "CONFIGURED":
+    if cred["status"] not in ("CONFIGURED", "NOT_APPLICABLE"):
         remedies.append({"issue": f"credential {integration.credential_ref or '(none)'}: {cred['status']}",
                          "command": _remedy(integration.provider, "credential", integration.credential_ref)})
     office = integration.domain == Domain.OFFICE.value
@@ -201,7 +208,7 @@ def compute_capability_status(integration: ProjectIntegration) -> dict[str, Any]
         if not integration.tenant_id and not cfg.get("base_url"):
             remedies.append({"issue": "tenant Atlassian (mis. perusahaan.atlassian.net) belum diatur",
                              "command": _remedy(integration.provider, "tenant", integration.credential_ref)})
-    configured = root_state != "MISSING" and cred["status"] == "CONFIGURED"
+    configured = root_state != "MISSING" and cred["status"] in ("CONFIGURED", "NOT_APPLICABLE")
     return {
         **extra,
         "configuration": "CONFIGURED" if configured else "MISSING",

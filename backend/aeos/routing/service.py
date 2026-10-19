@@ -208,6 +208,23 @@ def budget_decision_valid(session: Session, decision_id: str | None, route: Mode
 # ------------------------------------------------------------------------------ helpers
 
 
+def route_use_problem(session: Session, route: ModelRoute) -> str | None:
+    """Per-request authorisation of an admitted route (broker, §23); see ``facade.route_use_problem``."""
+    if route.status not in {"APPROVED", "TRIAL"}:
+        return f"route status {route.status}"
+    kind = "ROUTE_ACTIVATION" if route.status == "APPROVED" else "TRIAL"
+    decision = find_route_decision(session, kind=kind, route=route)
+    if decision is None:
+        return (f"route {route.status} has no ACTIVE human {kind} decision bound to its current configuration "
+                "(configuration changed, approval expired or revoked)")
+    if not is_effectively_free(route):
+        ok, why = budget_decision_valid(session, (decision.details or {}).get("budget_decision_id"), route)
+        if not ok:
+            label = "free period ended" if route.is_free == "YES" else f"is_free={route.is_free}"
+            return f"route is no longer free ({label}) and has no valid budget decision: {why}"
+    return None
+
+
 def is_effectively_free(route: ModelRoute, now: datetime | None = None) -> bool:
     if route.is_free != "YES":
         return False
@@ -436,6 +453,15 @@ def _task_policy(task: TaskSpec) -> dict[str, Any]:
 
 def select_route(session: Session, *, task: TaskSpec) -> RouteDecision:
     pol = _task_policy(task)
+    try:
+        from aeos.broker.facade import SERVED_POOLS as served
+    except ImportError:  # pragma: no cover - broker is part of the platform
+        served = ("WORKER",)
+    if pol["pool"] not in served:
+        # §23: refuse at admission instead of failing at the worker's first model call (ADR-0106).
+        raise Blocked(f"pool {pol['pool']} has no controlled execution path through the broker yet; "
+                      f"only {', '.join(served)} routes are served", code="POOL_NOT_SERVED",
+                      details={"pool": pol["pool"], "served_pools": list(served)})
     decision = eligible_routes(session, domain=task.domain, data_classification=task.data_classification,
                                needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=pol["pool"])
     eligible = list(decision.eligible)

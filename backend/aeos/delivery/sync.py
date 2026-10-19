@@ -92,9 +92,17 @@ def sync_pull_request(session: Session, pr_id: str, *, actor: str) -> dict[str, 
     pr.merge_commit_sha = data.get("merge_commit_sha") if pr.merged else None
     notes += observe_pr_commits(session, pr, head_sha=data.get("head_sha"), base_sha=data.get("base_sha"), actor=actor)
 
+    if pr.merged and pr.merge_commit_sha:
+        # G5 on the merged state: which files the merge commit brought in (relative to its first parent),
+        # so protected policy/pipeline/verifier paths outside the accepted change are detected.
+        delta = provider.fetch_commit_files(pr.repo_full_name, pr.merge_commit_sha, token=token)
+        pr.details = {**(pr.details or {}), "merge_delta": delta}
+        if delta.get("error"):
+            notes.append(f"merge-commit file delta UNKNOWN: {delta['error']}")
     ci_ids: list[str] = []
+    gate_map = provider.pipeline_reference(session, project)
     for sha in filter(None, [pr.observed_head_sha, pr.merge_commit_sha]):
-        ci = provider.fetch_check_runs(pr.repo_full_name, sha, token=token)
+        ci = provider.fetch_check_runs(pr.repo_full_name, sha, token=token, gate_map=gate_map)
         ev = provider.record_ci_evidence(session, project, ci, task_id=pr.task_id, run_id=pr.run_id)
         if ev is not None:
             ci_ids.append(ev.id)

@@ -47,7 +47,19 @@ log = logging.getLogger("aeos.verification.review")
 
 REVIEWER_ROLE = "Feature / Architecture Reviewer"
 SECURITY_ROLE = "Security Reviewer"
-REVIEWER_KINDS = {"FEATURE": ("CLAUDE", REVIEWER_ROLE), "SECURITY": ("SECURITY", SECURITY_ROLE)}
+A11Y_ROLE = "Accessibility / UX Reviewer"
+PRIVACY_ROLE = "Privacy / Data Reviewer"
+SRE_ROLE = "SRE / Operations Reviewer"
+# §15/§17: the feature reviewer always; specialists become active when the output or risk requires it.
+REVIEWER_KINDS = {"FEATURE": ("CLAUDE", REVIEWER_ROLE), "SECURITY": ("SECURITY", SECURITY_ROLE),
+                  "A11Y": ("A11Y", A11Y_ROLE), "PRIVACY": ("PRIVACY", PRIVACY_ROLE), "SRE": ("SRE", SRE_ROLE)}
+SPECIALIST_KINDS: tuple[str, ...] = ("SECURITY", "A11Y", "PRIVACY", "SRE")
+A11Y_ROLES = frozenset({"frontend-engineer", "ux-ui-designer"})
+PRIVACY_ROLES = frozenset({"data-ai-feature-engineer", "privacy-grc-analyst", "db-data-engineer"})
+SRE_ROLES = frozenset({"sre-operations-assistant", "platform-devsecops-engineer", "release-coordinator"})
+SENSITIVE_CLASSES = frozenset({"CONFIDENTIAL", "RESTRICTED"})
+# §19 review budget: independent read-only reviews per run (all kinds, re-requests included)
+DEFAULT_MAX_REVIEWS_PER_RUN = 12
 DEFAULT_REVIEW_MODEL = "fable"
 PACKAGE_VERSION = "1"
 PACKAGER_IDENTITY = f"aeos-review-packager/{__version__}"
@@ -126,6 +138,9 @@ REVIEW_SCHEMA: dict[str, Any] = {
         },
         "verdict": {"enum": VERDICTS},
         "verdict_rationale": _STR,
+        # §20 CAP "can request (re)verification rather than repair": checks the reviewer needs before it can
+        # decide (optional). With verdict NOT-PROVEN they are recorded as a verification request — no repair.
+        "requested_verification": _STR_LIST,
         "findings": {"type": "array", "items": {
             "type": "object", "required": ["severity", "title", "detail", "required_action"],
             "properties": {"severity": {"enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]}, "title": _STR,
@@ -143,7 +158,8 @@ Produce JSON matching the provided schema with:
 - REVIEW: outcome/change/why, architecture upstream/downstream, owner/auth, blast radius, baseline,
   contradictions, scope.
 - VERIFY: each claim vs evidence refs (evidence ids from the package), test ids, environment
-  (commit + config hash), old behaviour, unknowns.
+  (commit + config hash), old behaviour, unknowns. Map every task acceptance criterion to one claim
+  (quote the criterion) with the verifier evidence ids that support it; mark it UNSUPPORTED when none do.
 - non_regression: one entry per scope key (existing_behavior, callers, contract_consumers,
   authn_authz, fallback_order, state_data, recovery, integration).
 - VERDICT: PASS-STATIC | PASS-CONTROLLED | PASS-STAGING | PASS-PRODUCTION | NOT-PROVEN | BLOCKED | FAIL,
@@ -151,6 +167,8 @@ Produce JSON matching the provided schema with:
   no staging or production evidence unless the package contains it. Use NOT-PROVEN when evidence is
   insufficient, FAIL when the change is wrong, BLOCKED when an owner decision is missing.
 - findings: concrete, with required_action for a NEW repair attempt.
+- requested_verification (optional): when evidence is insufficient but the change may be right, list the
+  additional verification you need and answer NOT-PROVEN; this asks for re-verification, not a repair.
 
 Checkpoint package (JSON):
 {package}
@@ -162,6 +180,14 @@ FOCUS = {
     "SECURITY": ("Focus (Security Reviewer): controls — authentication/authorization, domain scoping, secrets "
                  "handling and redaction, capability/egress boundaries, supply chain, injection, fail-closed paths. "
                  "You do not accept residual risk on behalf of the owner and do not self-repair."),
+    "A11Y": ("Focus (Accessibility / UX Reviewer): UI states, keyboard and screen-reader access, labels, contrast, "
+             "status shown as text + icon + colour, responsive layout, Indonesian copy. Without browser/a11y test "
+             "evidence in the package, answer NOT-PROVEN and list it under requested_verification."),
+    "PRIVACY": ("Focus (Privacy / Data Reviewer): data classification, personal-data minimisation and redaction, "
+                "retention, domain separation (OFFICE data never in PERSONAL views), schema/migration safety, "
+                "quality/eval evidence for data or AI features. You do not accept residual risk for the owner."),
+    "SRE": ("Focus (SRE / Operations Reviewer): deployability, rollback and recovery, CI/IaC changes, health/"
+            "observability, failure modes and blast radius. Production remains a human action."),
 }
 
 
@@ -173,10 +199,10 @@ class ReviewOutcome:
 
 
 def latest_review(session: Session, run_id: str, *, reviewer: str = "FEATURE") -> ReviewRecord | None:
-    """Latest checkpoint review of a run for one reviewer role (FEATURE or SECURITY)."""
+    """Latest checkpoint review of a run for one reviewer role (FEATURE or a specialist kind)."""
     q = select(ReviewRecord).where(ReviewRecord.run_id == run_id)
-    q = q.where(ReviewRecord.reviewer_kind == "SECURITY") if reviewer == "SECURITY" else \
-        q.where(ReviewRecord.reviewer_kind != "SECURITY")
+    q = q.where(ReviewRecord.reviewer_kind == reviewer) if reviewer in SPECIALIST_KINDS else \
+        q.where(ReviewRecord.reviewer_kind.not_in(SPECIALIST_KINDS))
     return session.scalar(q.order_by(ReviewRecord.created_at.desc()).limit(1))
 
 
@@ -186,6 +212,38 @@ def security_review_required(task: TaskSpec, view: dict[str, Any] | None) -> boo
     policy = task.reviewer_policy or {}
     return bool(policy.get("security_review")) or task.risk_class in ("R3", "R4") or bool(
         (view or {}).get("security_sensitive"))
+
+
+def _changed_files(session: Session, report: EvidenceArtifact | None) -> list[str]:
+    scope_ev = related_evidence(session, report, "SCOPE_CHECK") if report is not None else None
+    return list((collector.read_json(scope_ev) or {}).get("changed_files") or []) if scope_ev is not None else []
+
+
+def required_reviews(session: Session, task: TaskSpec, view: dict[str, Any] | None,
+                     report: EvidenceArtifact | None) -> dict[str, str]:
+    """§15/§16/§17/§19: the specialist reviews this change needs (kind -> why), beyond the feature review.
+
+    * SECURITY — R3/R4, reviewer policy, security-sensitive paths (``security_review_required``);
+    * A11Y — UI output: frontend paths changed, a frontend/UX role, or ``reviewer_policy.a11y_review``;
+    * PRIVACY — data/AI or data roles, CONFIDENTIAL/RESTRICTED data, or ``reviewer_policy.privacy_review``;
+    * SRE — CI/IaC/container changes, platform/SRE/release roles, or ``reviewer_policy.sre_review``.
+    """
+    from aeos.verification.scope import impact_categories
+
+    policy = task.reviewer_policy or {}
+    cats = impact_categories(_changed_files(session, report))
+    role = task.role_key or ""
+    out: dict[str, str] = {}
+    if security_review_required(task, view):
+        out["SECURITY"] = "risk class / reviewer policy / security-sensitive paths"
+    if policy.get("a11y_review") or role in A11Y_ROLES or "frontend" in cats:
+        out["A11Y"] = "UI output: " + (", ".join(cats.get("frontend", [])[:5]) or f"role {role or 'policy'}")
+    if policy.get("privacy_review") or role in PRIVACY_ROLES or (task.data_classification or "") in SENSITIVE_CLASSES:
+        out["PRIVACY"] = f"data/AI or sensitive data (role {role or '-'}, classification {task.data_classification})"
+    if policy.get("sre_review") or role in SRE_ROLES or ({"infrastructure", "ci"} & set(cats)):
+        out["SRE"] = "operations risk: " + (", ".join((cats.get("infrastructure", []) + cats.get("ci", []))[:5])
+                                            or f"role {role or 'policy'}")
+    return out
 
 
 def review_view(rec: ReviewRecord) -> dict[str, Any]:
@@ -319,50 +377,94 @@ def clamp_verdict(requested: str, *, has_controlled_evidence: bool, findings: li
     return verdict, notes
 
 
-def _model_policy_problem(policy: dict[str, Any], resolved: str | None) -> str | None:
+def model_family(model: str | None) -> str | None:
+    """Claude model family of an alias or id (``fable``, ``opus`` ...), None when not a Claude model."""
+    m = (model or "").strip().lower()
+    if m in _NATIVE_FAMILIES:
+        return m
+    hit = _NATIVE_FAMILY_RE.search(m)
+    return hit.group(1) if hit else None
+
+
+def _model_policy_problem(policy: dict[str, Any], resolved: str | None, requested: str | None = None) -> str | None:
+    """Why the reviewer's model identity does not satisfy the review policy (None = proven and allowed).
+
+    §15 "highest Claude per policy": the review half of acceptance needs a *proven* Claude identity. An
+    UNKNOWN resolution (a bare JSON pasted by a person, a result without client provenance) or an answer
+    from another family than the requested one never counts, whether or not ``allowed_models`` is set.
+    """
     allowed = policy.get("allowed_models")
-    if not allowed:
-        return None
-    if not resolved:
-        return "resolved reviewer model is UNKNOWN; policy requires one of " + ", ".join(map(str, allowed))
-    if not any(resolved == a or resolved.startswith(str(a)) for a in allowed):
+    if not resolved or str(resolved).strip().upper() in ("UNKNOWN", "UNVERIFIED"):
+        return ("resolved reviewer model is UNKNOWN: the Claude reviewer identity is not proven"
+                + (f"; policy requires one of {', '.join(map(str, allowed))}" if allowed else ""))
+    if allowed and not any(resolved == a or resolved.startswith(str(a)) for a in allowed):
         return f"resolved reviewer model {resolved!r} is not allowed by reviewer policy"
+    want = model_family(requested)
+    got = model_family(resolved)
+    if want and got != want:
+        return (f"resolved reviewer model {resolved!r} (family {got or 'UNKNOWN'}) is not the requested "
+                f"family {want}")
+    if not want and not got:
+        return f"resolved reviewer model {resolved!r} is not a recognised Claude model"
     return None
 
 
+REQUESTED_VERIFICATION_NOTE = "reviewer requested more verification evidence; no repair attempt is consumed"
+
+
 def apply_structured(rec: ReviewRecord, structured: dict[str, Any], *, model_resolved: str | None,
-                     policy: dict[str, Any], has_controlled_evidence: bool) -> None:
-    """Validate reviewer output and fill the record (never raises on bad model output)."""
+                     policy: dict[str, Any], has_controlled_evidence: bool,
+                     model_requested: str | None = None) -> None:
+    """Validate reviewer output and fill the record (never raises on bad model output).
+
+    Reviewer-side problems — output that violates the schema, or a reviewer model identity that is not
+    proven/allowed — mark the review FAILED (re-requestable). They are never turned into a repair attempt
+    for the implementer (§20: the reviewer cannot repair, and a broken review is not the candidate's
+    fault)."""
     try:
         jsonschema.validate(structured, REVIEW_SCHEMA)
     except jsonschema.ValidationError as exc:
-        rec.status = "COMPLETED"
+        rec.status = "FAILED"
         rec.verdict = Verdict.NOT_PROVEN.value
         rec.verdict_requested = str(structured.get("verdict")) if isinstance(structured, dict) else None
-        rec.status_reason = "reviewer output did not match the REVIEW/VERIFY/VERDICT schema"
+        rec.status_reason = ("reviewer output did not match the REVIEW/VERIFY/VERDICT schema; request the "
+                             "checkpoint review again (no repair attempt consumed)")
         rec.unknowns = [f"schema violation: {redact_text(exc.message)[:300]}"]
         rec.findings = [{"severity": "MEDIUM", "title": "Invalid reviewer output", "detail": rec.unknowns[0],
                          "required_action": "re-run the checkpoint review", "source": "review-validator"}]
+        rec.repair_status = "NO_REPAIR (reviewer output invalid; re-request the review)"
         return
     data = redact(structured)
     findings = [dict(f) for f in data.get("findings", [])]
     verdict, notes = clamp_verdict(data["verdict"], has_controlled_evidence=has_controlled_evidence, findings=findings)
-    problem = _model_policy_problem(policy, model_resolved)
+    problem = _model_policy_problem(policy, model_resolved, model_requested or rec.model_requested)
     unknowns = list(data["verify"].get("unknowns", [])) + notes
-    if problem:
-        verdict = Verdict.NOT_PROVEN.value
-        unknowns.append(problem)
-    elif not policy.get("allowed_models"):
-        unknowns.append(f"reviewer model policy not configured; resolved model recorded as {model_resolved or 'UNKNOWN'}")
-    rec.status = "COMPLETED"
+    requested_checks = [str(c)[:300] for c in data.get("requested_verification") or [] if str(c).strip()][:20]
     rec.review = data["review"]
     rec.verify = data["verify"]
     rec.non_regression = data["non_regression"]
     rec.verdict_requested = data["verdict"]
-    rec.verdict = verdict
     rec.findings = findings
+    if problem:
+        rec.status = "FAILED"
+        rec.verdict = Verdict.NOT_PROVEN.value
+        rec.unknowns = [*unknowns, problem]
+        rec.status_reason = redact_text(
+            f"{problem}. The review does not count; request it again through the native bridge or submit the "
+            "full `claude -p --output-format json` result envelope (type=result) of the manual package.")[:2000]
+        rec.repair_status = "NO_REPAIR (reviewer identity not proven)"
+        return
+    if not policy.get("allowed_models"):
+        unknowns.append(f"reviewer model allow-list not configured; resolved model {model_resolved} matches the "
+                        f"requested family {model_family(model_requested or rec.model_requested) or 'UNKNOWN'}")
+    if requested_checks:
+        unknowns += [f"requested verification: {c}" for c in requested_checks]
+    rec.status = "COMPLETED"
+    rec.verdict = verdict
     rec.unknowns = unknowns
     rec.status_reason = redact_text(str(data.get("verdict_rationale", "")))[:2000]
+    if requested_checks and verdict == Verdict.NOT_PROVEN.value:
+        rec.repair_status = f"VERIFICATION_REQUESTED ({len(requested_checks)} check(s)); {REQUESTED_VERIFICATION_NOTE}"
 
 
 # ---------------------------------------------------------------------------- flow
@@ -382,17 +484,22 @@ def _load(session: Session, run_id: str) -> tuple[WorkerRun, Project, TaskSpec]:
 
 def review_run(session: Session, run_id: str, *, actor: str, actor_type: str = "user",
                reviewer: str = "FEATURE") -> ReviewOutcome:
-    """Request a Claude checkpoint review (FEATURE or SECURITY role) for a verified run (caller commits)."""
+    """Request a Claude checkpoint review (FEATURE or a specialist kind) for a verified run (caller commits)."""
     from aeos.claude_bridge import facade as bridge
     from aeos.doctor import facade as doctor
 
     if reviewer not in REVIEWER_KINDS:
-        raise ValidationFailed("reviewer must be FEATURE or SECURITY")
+        raise ValidationFailed(f"reviewer must be one of {', '.join(REVIEWER_KINDS)}")
     reviewer_kind, role = REVIEWER_KINDS[reviewer]
     run, project, task = _load(session, run_id)
     if run.execution_status != ExecutionState.REVIEW.value:
         raise Conflict("only runs in REVIEW can be reviewed", code="RUN_NOT_IN_REVIEW",
                        details={"execution_status": run.execution_status})
+    budget = _review_budget(session, run, task)
+    if budget["remaining"] <= 0:
+        # §19 "if scope and review budget allow": no further review session for this run; the owner decides
+        raise Blocked(f"review budget exhausted for this run ({budget['used']}/{budget['max']} reviews)",
+                      code="REVIEW_BUDGET_EXHAUSTED", details=budget)
     report = latest_report(session, run.id)
     view = report_view(report)
     if report is None or view is None:
@@ -416,8 +523,8 @@ def review_run(session: Session, run_id: str, *, actor: str, actor_type: str = "
         mode=run.mode if run.mode in ("LIVE", "MOCK", "DEMO") else "LIVE",
     )
     policy = dict(task.reviewer_policy or {})
-    model = str(policy.get("security_model" if reviewer == "SECURITY" else "model") or policy.get("model")
-                or DEFAULT_REVIEW_MODEL)
+    model = str(policy.get(f"{reviewer.lower()}_model" if reviewer in SPECIALIST_KINDS else "model")
+                or policy.get("model") or DEFAULT_REVIEW_MODEL)
     previous = latest_review(session, run.id, reviewer=reviewer)
     rec = ReviewRecord(
         target_type="worker_run", target_id=run.id, target_hash=view.get("artifact_hash"), project_id=project.id,
@@ -433,7 +540,8 @@ def review_run(session: Session, run_id: str, *, actor: str, actor_type: str = "
     settings = get_settings()
     package_path = settings.layout.root / pkg_ev.location if pkg_ev.location else None
     request = bridge.ClaudeRequest(
-        purpose="review.security" if reviewer == "SECURITY" else "review.checkpoint", role=role, model=model,
+        purpose=f"review.{reviewer.lower()}" if reviewer in SPECIALIST_KINDS else "review.checkpoint", role=role,
+        model=model,
         prompt=PROMPT_TEMPLATE.format(role=role, focus=FOCUS[reviewer],
                                       package=json.dumps(package, indent=1, ensure_ascii=False)),
         json_schema=REVIEW_SCHEMA, project_id=project.id, domain=project.domain,
@@ -472,11 +580,59 @@ def review_run(session: Session, run_id: str, *, actor: str, actor_type: str = "
             rec.model_resolved = result.model_resolved
             rec.engine_version = result.engine_version
             apply_structured(rec, result.structured, model_resolved=result.model_resolved, policy=policy,
-                             has_controlled_evidence=report.evidence_level in ("E2", "E3", "E4") and report.trusted)
+                             has_controlled_evidence=report.evidence_level in ("E2", "E3", "E4") and report.trusted,
+                             model_requested=model)
     session.flush()
     acceptance = _after_review(session, rec, run, actor=actor, notes=notes)
     _audit_emit(session, rec, run, actor=actor, actor_type=actor_type)
     return ReviewOutcome(review=rec, acceptance=acceptance, notes=notes)
+
+
+def _review_budget(session: Session, run: WorkerRun, task: TaskSpec) -> dict[str, int]:
+    """§19 review budget: independent review sessions per run (TaskSpec ``reviewer_policy.max_reviews_per_run``)."""
+    from sqlalchemy import func
+
+    try:
+        limit = int((task.reviewer_policy or {}).get("max_reviews_per_run") or DEFAULT_MAX_REVIEWS_PER_RUN)
+    except (TypeError, ValueError):
+        limit = DEFAULT_MAX_REVIEWS_PER_RUN
+    limit = max(1, min(limit, 50))
+    # a manual-result import completes an existing session; it is not a new review session
+    used = int(session.scalar(select(func.count()).select_from(ReviewRecord).where(
+        ReviewRecord.run_id == run.id, ReviewRecord.reviewer_identity.not_like("manual-package:%"))) or 0)
+    return {"max": limit, "used": used, "remaining": limit - used}
+
+
+def review_required_kinds(session: Session, run_id: str) -> dict[str, Any]:
+    """Which independent review kinds the verified run needs, and which are still open (read-only)."""
+    run, _project, task = _load(session, run_id)
+    report = latest_report(session, run.id)
+    view = report_view(report)
+    required = {"FEATURE": "always (§15, §19)", **required_reviews(session, task, view, report)}
+    status = {}
+    for kind in required:
+        rec = latest_review(session, run.id, reviewer=kind)
+        bound = rec is not None and view is not None and rec.target_hash == view.get("artifact_hash")
+        status[kind] = {"reason": required[kind], "review_id": rec.id if rec else None,
+                        "status": rec.status if rec else None, "verdict": rec.verdict if rec else None,
+                        "bound_to_verified_artifact": bound,
+                        "open": not (rec is not None and bound and rec.status == "COMPLETED"
+                                     and rec.verdict in PASS_VERDICTS)}
+    return {"run_id": run.id, "kinds": status, "budget": _review_budget(session, run, task)}
+
+
+def review_all(session: Session, run_id: str, *, actor: str, actor_type: str = "user",
+               kinds: list[str] | None = None) -> list[ReviewOutcome]:
+    """§19: request every independent read-only review kind the change needs (or the given ones) for the same
+    verified package — separate reviewer sessions, each bound to the artifact hash. Sessions run one after the
+    other in this process (no concurrent SQLite writers); stops when the review budget is exhausted."""
+    need = review_required_kinds(session, run_id)
+    wanted = [k for k in (kinds or [k for k, s in need["kinds"].items() if s["open"]]) if k in REVIEWER_KINDS]
+    outcomes: list[ReviewOutcome] = []
+    for kind in wanted:
+        outcomes.append(review_run(session, run_id, actor=actor, actor_type=actor_type, reviewer=kind))
+        session.flush()
+    return outcomes
 
 
 def _manual_path(session: Session, rec: ReviewRecord, request: Any, bridge: Any, reason: str) -> None:
@@ -505,8 +661,9 @@ def _after_review(session: Session, rec: ReviewRecord, run: WorkerRun, *, actor:
     # A review that got past the quota (completed, manual path, failed output) no longer waits for it:
     # the run must not keep showing WAITING_QUOTA after the limit lifted.
     stop_waiting = not waiting and run.quota_status == "WAITING_QUOTA"
-    if rec.reviewer_kind != "SECURITY" or waiting or stop_waiting:  # review_verdict mirrors the feature review
-        fields: dict[str, Any] = {"review_verdict": run_verdict} if rec.reviewer_kind != "SECURITY" else {}
+    specialist = rec.reviewer_kind in SPECIALIST_KINDS
+    if not specialist or waiting or stop_waiting:  # review_verdict mirrors the feature review
+        fields: dict[str, Any] = {"review_verdict": run_verdict} if not specialist else {}
         if waiting:
             fields["quota_status"] = "WAITING_QUOTA"
         elif stop_waiting:
@@ -527,6 +684,17 @@ def _after_review(session: Session, rec: ReviewRecord, run: WorkerRun, *, actor:
             notes.append(f"acceptance not decided: {exc.code}: {exc.message}")
             return None
         return acceptance.acceptance_view(session, acc)
+    if rec.verdict == Verdict.NOT_PROVEN.value and (rec.repair_status or "").startswith("VERIFICATION_REQUESTED"):
+        # §20 CAP: the reviewer may ask for (re)verification instead of a repair. The run stays in REVIEW,
+        # no implementer attempt is consumed; the request is visible to the operator / verifier.
+        requested = [u.removeprefix("requested verification: ") for u in rec.unknowns or []
+                     if str(u).startswith("requested verification: ")]
+        events.emit(session, source="reviewer", kind="review.verification_requested", entity_type="review",
+                    entity_id=rec.id, entity_version=rec.target_hash, project_id=rec.project_id, domain=rec.domain,
+                    run_id=run.id, attempt=run.attempt, mode=rec.mode if rec.mode in ("LIVE", "MOCK", "DEMO") else "LIVE",
+                    payload={"task_id": rec.task_id, "requested_verification": requested[:20]})
+        notes.append(REQUESTED_VERIFICATION_NOTE)
+        return None
     if rec.verdict == Verdict.BLOCKED.value:
         t = call(workforce.transition_task, session, run.task_id, ExecutionState.BLOCKED.value,
                  reason=f"REVIEW_BLOCKED: {rec.status_reason}"[:1000], actor="reviewer",
@@ -601,6 +769,16 @@ def _audit_emit(session: Session, rec: ReviewRecord, run: WorkerRun, *, actor: s
                 payload={"status": rec.status, "verdict": rec.verdict, "task_id": rec.task_id})
 
 
+def _parse_envelope(envelope: dict[str, Any], model_requested: str) -> Any:
+    """Parse a submitted Claude Code result envelope with the bridge's own parser (model resolution)."""
+    try:
+        from aeos.claude_bridge.parsing import parse_output
+    except ImportError as exc:
+        raise Blocked("the Claude result parser is not available; the envelope cannot be checked",
+                      code="MANUAL_RESULT_UNAVAILABLE") from exc
+    return parse_output(json.dumps(envelope), "", returncode=0, schema=REVIEW_SCHEMA, model_requested=model_requested)
+
+
 def collect_manual_review(session: Session, review_id: str, *, actor: str, actor_type: str = "user",
                           structured: dict[str, Any] | None = None) -> ReviewOutcome:
     """Import the result of a manual package run in official Claude Code (§12 fallback).
@@ -630,7 +808,7 @@ def collect_manual_review(session: Session, review_id: str, *, actor: str, actor
                       code="VERIFICATION_NOT_PASSED", details={"verifier_status": view.get("status")})
     model_resolved: str | None = None
     engine_version: str | None = None
-    role = SECURITY_ROLE if waiting.reviewer_kind == "SECURITY" else REVIEWER_ROLE
+    role = {code: r for code, r in REVIEWER_KINDS.values()}.get(waiting.reviewer_kind, REVIEWER_ROLE)
     if structured is None:
         res = call(bridge.read_manual_result, waiting.package_ref or waiting.id)
         if not res.ok:
@@ -647,6 +825,17 @@ def collect_manual_review(session: Session, review_id: str, *, actor: str, actor
         if not isinstance(structured, dict):
             raise ValidationFailed("manual review result must be a JSON object")
         identity = f"manual-package:{role} (submitted by {actor})"
+        if structured.get("type") == "result":
+            # The full `claude -p --output-format json` envelope: its modelUsage proves which Claude model
+            # answered (parsed exactly like a native result). A bare structured object proves nothing about
+            # the model and stays UNKNOWN, so it can never satisfy the review half of acceptance (§15).
+            parsed = _parse_envelope(structured, waiting.model_requested or DEFAULT_REVIEW_MODEL)
+            if not parsed.ok or not isinstance(parsed.structured, dict):
+                raise ValidationFailed(f"manual review envelope refused: {parsed.error_code}: {parsed.error}"[:500],
+                                       code="MANUAL_RESULT_INVALID")
+            structured = parsed.structured
+            model_resolved = parsed.model_resolved
+            identity = f"manual-package:{role} (envelope submitted by {actor})"
     rec = ReviewRecord(
         target_type=waiting.target_type, target_id=waiting.target_id, target_hash=waiting.target_hash,
         project_id=waiting.project_id, domain=waiting.domain, run_id=waiting.run_id, task_id=waiting.task_id,
@@ -657,7 +846,8 @@ def collect_manual_review(session: Session, review_id: str, *, actor: str, actor
         supersedes_id=waiting.id, mode="MANUAL_FALLBACK" if waiting.mode != "MOCK" else "MOCK",
     )
     apply_structured(rec, structured, model_resolved=model_resolved, policy=dict(task.reviewer_policy or {}),
-                     has_controlled_evidence=bool(report and report.trusted and report.evidence_level in ("E2", "E3", "E4")))
+                     has_controlled_evidence=bool(report and report.trusted and report.evidence_level in ("E2", "E3", "E4")),
+                     model_requested=waiting.model_requested)
     session.add(rec)
     session.flush()
     notes: list[str] = []

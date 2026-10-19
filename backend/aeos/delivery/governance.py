@@ -155,6 +155,21 @@ def configured_adapter() -> GovernanceHarnessAdapter:
     return _adapter
 
 
+def change_deltas(changed: list[str]) -> dict[str, list[str]]:
+    """§32 inputs "dependency/contract deltas" and rollback metadata, for AEOS *and* generic product layouts
+    (openapi/proto/graphql/schema, lockfiles, alembic/*.sql migrations) — same categories as the verifier."""
+    from aeos.verification.scope import impact_categories
+
+    cats = impact_categories(changed)
+    deps = set(cats.get("dependency", [])) | {p for p in changed if any(p.endswith(d) or d in p
+                                                                        for d in DEPENDENCY_FILES)}
+    contracts = set(cats.get("contract", [])) | set(cats.get("api", [])) | {
+        p for p in changed if any(c in p for c in CONTRACT_PATHS)}
+    migrations = set(cats.get("migration", [])) - {p for p in changed if p.startswith("backend/aeos/models/")}
+    migrations |= {p for p in changed if "/migrations/" in p}
+    return {"dependencies": sorted(deps), "contracts": sorted(contracts), "migrations": sorted(migrations)}
+
+
 def build_input(session: Session, task_id: str) -> tuple[GovernanceHandoffInput, Any]:
     task = session.get(TaskSpec, task_id)
     if task is None:
@@ -170,7 +185,8 @@ def build_input(session: Session, task_id: str) -> tuple[GovernanceHandoffInput,
     scope_ev = related_evidence(session, report, "SCOPE_CHECK")
     changed = list((collector.read_json(scope_ev) or {}).get("changed_files") or [])
     review = session.get(ReviewRecord, acc.review_record_id) if acc.review_record_id else None
-    migrations = [p for p in changed if "/migrations/" in p]
+    deltas = change_deltas(changed)
+    migrations = deltas["migrations"]
     # §32 input "risk/owner decisions": ACTIVE human decisions bound to this task, its PlanVersion or plan
     # (read-only; the policy module owns Decision rows). References only — the adapter never writes them.
     pv = session.get(PlanVersion, task.plan_version_id)
@@ -185,8 +201,8 @@ def build_input(session: Session, task_id: str) -> tuple[GovernanceHandoffInput,
         plan_version_hash=task.plan_version_hash, acceptance_id=acc.id, artifact_hash=acc.artifact_hash,
         base_commit=acc.base_commit, head_commit=acc.head_commit, config_hash=acc.config_hash,
         change_scope=tuple(changed),
-        dependency_deltas=tuple(p for p in changed if any(p.endswith(d) or d in p for d in DEPENDENCY_FILES)),
-        contract_deltas=tuple(p for p in changed if any(c in p for c in CONTRACT_PATHS)),
+        dependency_deltas=tuple(deltas["dependencies"]),
+        contract_deltas=tuple(deltas["contracts"]),
         verifier_reports=_freeze([{"evidence_id": report.id, "content_hash": report.content_hash,
                                    "status": full.get("status"), "level": report.evidence_level}] if report else []),
         reviewer=_freeze({"review_record_id": review.id, "verdict": review.verdict,

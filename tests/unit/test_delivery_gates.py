@@ -18,6 +18,7 @@ from tests.unit.test_verification_support import (
     install_planning,
     make_review,
     make_world,
+    record_release_approvers,
     record_verification,
     remove_module,
 )
@@ -68,10 +69,11 @@ def test_g0_binding_variants(db, wf, monkeypatch):
 
 
 def test_full_happy_path_then_human_merge(db, wf, monkeypatch):
-    w = make_world(db)
+    w = make_world(db, repo="o/r")
     install_planning(monkeypatch, w.version)
     report = record_verification(db, w, changed=["backend/extra.py", "frontend/src/x.tsx"])
     make_review(db, w, report)
+    make_review(db, w, report, kind="A11Y")  # §17: a UI change activates the accessibility/UX reviewer
     acc = acceptance.evaluate_acceptance(db, w.run.id)
     _ci(db, w, HEAD, [("backend (ubuntu-latest)", "success"), ("frontend", "success")])
     db.commit()
@@ -96,13 +98,190 @@ def test_full_happy_path_then_human_merge(db, wf, monkeypatch):
     pr.merge_commit_sha = "m" * 40
     db.commit()
     g = _by(gates.compute_gates(db, w.task.id))
+    # §31 G7: a human merged, but nobody recorded who is authorised to release -> not proven yet
+    assert g["G7"]["status"] == "NOT_PROVEN" and "approver" in g["G7"]["summary"]
+    record_release_approvers(db, w.project, ["Fadhlillah-DLI"])
+    g = _by(gates.compute_gates(db, w.task.id))
     assert g["G7"]["status"] == "PASS"
     assert g["G5"]["status"] == "NOT_PROVEN", "no retest on the merged state yet"
     _ci(db, w, "m" * 40, [("backend (ubuntu-latest)", "success")])
     db.commit()
     g = _by(gates.compute_gates(db, w.task.id))
+    assert g["G5"]["status"] == "NOT_PROVEN", "the merged-state file delta was not observed yet"
+    pr.details = {"merge_delta": {"files": ["backend/extra.py", "frontend/src/x.tsx"], "truncated": False}}
+    db.commit()
+    g = _by(gates.compute_gates(db, w.task.id))
     assert g["G5"]["status"] == "PASS"
     assert g["G6"]["status"] == "NOT_APPLICABLE" and g["G8"]["status"] == "NOT_APPLICABLE"
+
+
+def test_g7_merge_by_an_unauthorised_human_fails(db, wf, monkeypatch):
+    w = make_world(db, repo="o/r")
+    install_planning(monkeypatch, w.version)
+    report = record_verification(db, w)
+    make_review(db, w, report)
+    acc = acceptance.evaluate_acceptance(db, w.run.id)
+    record_release_approvers(db, w.project, ["fadhlillah-dli"])
+    db.add(PullRequestRecord(project_id=w.project.id, domain="PERSONAL", task_id=w.task.id, run_id=w.run.id,
+                             acceptance_id=acc.id, repo_full_name="o/r", number=5, head_ref="aeos/t1", base_ref="main",
+                             accepted_head_sha=HEAD, observed_head_sha=HEAD, bundle_hash="sha256:b", state="MERGED",
+                             merged=True, merged_by_login="someone-else", merged_by_type="User",
+                             merge_commit_sha="m" * 40))
+    db.commit()
+    g = _by(gates.compute_gates(db, w.task.id))
+    assert g["G7"]["status"] == "FAIL" and "tidak berwenang" in g["G7"]["summary"]
+
+
+def test_g5_fails_when_the_merge_brings_protected_paths_beyond_the_verified_change(db, wf, monkeypatch):
+    w = make_world(db, repo="o/r")
+    install_planning(monkeypatch, w.version)
+    report = record_verification(db, w, changed=["backend/extra.py"])
+    make_review(db, w, report)
+    acc = acceptance.evaluate_acceptance(db, w.run.id)
+    pr = PullRequestRecord(project_id=w.project.id, domain="PERSONAL", task_id=w.task.id, run_id=w.run.id,
+                           acceptance_id=acc.id, repo_full_name="o/r", number=6, head_ref="aeos/t1", base_ref="main",
+                           accepted_head_sha=HEAD, observed_head_sha=HEAD, bundle_hash="sha256:b", state="MERGED",
+                           merged=True, merged_by_login="fadhlillah-dli", merged_by_type="User",
+                           merge_commit_sha="m" * 40,
+                           details={"merge_delta": {"files": ["backend/extra.py", "policy/office.yaml",
+                                                              ".github/workflows/ci.yml"]}})
+    db.add(pr)
+    _ci(db, w, "m" * 40, [("backend (ubuntu-latest)", "success")])
+    db.commit()
+    g = _by(gates.compute_gates(db, w.task.id))
+    assert g["G5"]["status"] == "FAIL"
+    assert set(g["G5"]["reasons"]) == {"policy/office.yaml", ".github/workflows/ci.yml"}
+
+
+def test_g0_checks_target_repository_classification_and_scope(db, wf, monkeypatch):
+    w = make_world(db, repo="o/r")
+    install_planning(monkeypatch, w.version)
+    assert _by(gates.compute_gates(db, w.task.id))["G0"]["status"] == "PASS"
+    # a PR against a repository that is not registered for the project
+    report = record_verification(db, w)
+    make_review(db, w, report)
+    acc = acceptance.evaluate_acceptance(db, w.run.id)
+    db.add(PullRequestRecord(project_id=w.project.id, domain="PERSONAL", task_id=w.task.id, run_id=w.run.id,
+                             acceptance_id=acc.id, repo_full_name="evil/fork", number=7, head_ref="aeos/t1",
+                             base_ref="main", accepted_head_sha=HEAD, observed_head_sha=HEAD, bundle_hash="sha256:b",
+                             state="OPEN"))
+    db.commit()
+    g0 = _by(gates.compute_gates(db, w.task.id))["G0"]
+    assert g0["status"] == "FAIL" and any("evil/fork" in r for r in g0["reasons"])
+    # classification below the project floor, and an empty scope
+    w2 = make_world(db, project_key="cls", allowed_paths=[])
+    w2.project.data_classification = "CONFIDENTIAL"
+    db.commit()
+    install_planning(monkeypatch, w2.version)
+    g0 = _by(gates.compute_gates(db, w2.task.id))["G0"]
+    assert g0["status"] == "FAIL"
+    assert any("lebih rendah" in r for r in g0["reasons"]) and any("allowed_paths" in r for r in g0["reasons"])
+    w3 = make_world(db, project_key="unsafe", allowed_paths=["../outside/**"])
+    install_planning(monkeypatch, w3.version)
+    g0 = _by(gates.compute_gates(db, w3.task.id))["G0"]
+    assert g0["status"] == "FAIL" and any("tidak aman" in r for r in g0["reasons"])
+
+
+def _deploy_target(db, project, purpose, url="https://staging.example.org"):
+    from aeos.models.portfolio import ProjectIntegration
+
+    integ = ProjectIntegration(project_id=project.id, domain=project.domain, provider="deployment-target",
+                               purpose=purpose, root_id=url, config={})
+    db.add(integ)
+    db.commit()
+    return integ
+
+
+def test_g6_and_g8_are_evaluated_once_targets_are_registered(db, wf, monkeypatch):
+    """§04/§31: a registered staging/production target makes G6/G8 evaluable from trusted runtime
+    observations of the exact commit; without one they stay NOT_APPLICABLE (never a pass)."""
+    import httpx
+    import respx
+
+    from aeos.delivery import deployment
+
+    w = make_world(db, repo="o/r")
+    install_planning(monkeypatch, w.version)
+    report = record_verification(db, w)
+    make_review(db, w, report)
+    acc = acceptance.evaluate_acceptance(db, w.run.id)
+    db.commit()
+    _deploy_target(db, w.project, "staging")
+    _deploy_target(db, w.project, "production", url="https://app.example.org")
+    g = _by(gates.compute_gates(db, w.task.id))
+    assert g["G6"]["status"] == "NOT_PROVEN" and g["G8"]["status"] == "PENDING"
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://staging.example.org/health").mock(
+            return_value=httpx.Response(200, json={"status": "ok", "commit": HEAD}))
+        out = deployment.observe(db, w.project.id, "staging", HEAD, actor="owner")
+        assert all(c.request.method == "GET" for c in mock.calls)
+    db.commit()
+    assert out["status"] == "PASS"
+    g = _by(gates.compute_gates(db, w.task.id))
+    assert g["G6"]["status"] == "PASS"
+    # another commit on the target is not attributable -> NOT_PROVEN, never PASS
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://staging.example.org/health").mock(
+            return_value=httpx.Response(200, json={"status": "ok", "commit": "f" * 40}))
+        assert deployment.observe(db, w.project.id, "staging", HEAD, actor="owner")["status"] == "NOT_PROVEN"
+    db.add(PullRequestRecord(project_id=w.project.id, domain="PERSONAL", task_id=w.task.id, run_id=w.run.id,
+                             acceptance_id=acc.id, repo_full_name="o/r", number=8, head_ref="aeos/t1", base_ref="main",
+                             accepted_head_sha=HEAD, observed_head_sha=HEAD, bundle_hash="sha256:b", state="MERGED",
+                             merged=True, merged_by_login="fadhlillah-dli", merged_by_type="User",
+                             merge_commit_sha="e" * 40))
+    db.commit()
+    assert _by(gates.compute_gates(db, w.task.id))["G8"]["status"] == "NOT_PROVEN"
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://app.example.org/health").mock(
+            return_value=httpx.Response(503, json={"status": "down", "commit": "e" * 40}))
+        assert deployment.observe(db, w.project.id, "production", "e" * 40, actor="owner")["status"] == "FAIL"
+    db.commit()
+    assert _by(gates.compute_gates(db, w.task.id))["G8"]["status"] == "FAIL"
+
+
+def test_office_delivery_is_stated_not_applicable(db, wf, monkeypatch):
+    w = make_world(db, domain="OFFICE", is_platform=False, project_key="office-app")
+    install_planning(monkeypatch, w.version)
+    r = gates.compute_gates(db, w.task.id)
+    dp = r["separate_status"]["delivery_provider"]
+    assert dp["status"] == "NOT_APPLICABLE" and "Bitbucket" in dp["reason"]
+
+
+def test_governance_status_is_shown_and_gates_promotion(db, wf, monkeypatch):
+    """§32: the handoff result is visible next to the gates; with a configured (non-null) adapter a
+    BLOCKED/REJECTED or missing handoff keeps ready_for_human_merge false."""
+    from aeos.delivery import governance
+
+    w = make_world(db, repo="o/r")
+    install_planning(monkeypatch, w.version)
+    report = record_verification(db, w)
+    make_review(db, w, report)
+    acceptance.evaluate_acceptance(db, w.run.id)
+    _ci(db, w, HEAD, [("backend (ubuntu-latest)", "success")])
+    db.commit()
+    r = gates.compute_gates(db, w.task.id)
+    gov = r["separate_status"]["governance"]
+    assert gov["status"] == "NOT_RUN" and gov["adapter_configured"] is False and r["ready_for_human_merge"] is True
+    governance.handoff(db, w.task.id, actor="owner")
+    db.commit()
+    gov = gates.compute_gates(db, w.task.id)["separate_status"]["governance"]
+    assert gov["status"] == "NOT_CONFIGURED" and gov["bound_to_accepted_artifact"] is True
+
+    class Strict:
+        name, version, contract_version = "strict-harness", "1", governance.CONTRACT_VERSION
+
+        def handoff(self, payload):
+            return governance.GovernanceHandoffOutput(contract_version=governance.CONTRACT_VERSION, adapter=self.name,
+                                                      adapter_version="1", result="BLOCKED",
+                                                      input_hash=payload.digest(), reasons=("owner review",))
+
+    monkeypatch.setattr(governance, "_adapter", Strict())
+    r = gates.compute_gates(db, w.task.id)
+    assert r["separate_status"]["governance"]["allows_promotion"] is False and r["ready_for_human_merge"] is False
+    governance.handoff(db, w.task.id, actor="owner")
+    db.commit()
+    r = gates.compute_gates(db, w.task.id)
+    assert r["separate_status"]["governance"]["status"] == "BLOCKED" and r["ready_for_human_merge"] is False
 
 
 def test_non_human_merge_fails_g7_and_head_mismatch_fails_g5(db, wf, monkeypatch):

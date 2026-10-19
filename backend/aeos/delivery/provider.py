@@ -118,6 +118,8 @@ class ProviderCapabilities:
     permissions: dict[str, Any] = field(default_factory=dict)
     checks: list[CapabilityCheck] = field(default_factory=list)
     required_status_checks: list[str] = field(default_factory=list)
+    status_check_identity: str = "UNKNOWN"  # CONFIGURED | NOT_CONFIGURED | NOT_APPLICABLE | UNKNOWN
+    deploy_restrictions: str = "UNKNOWN"  # CONFIGURED | NOT_CONFIGURED | NOT_ENFORCEABLE | UNKNOWN
     merge_gate: str = "UNKNOWN"
     enforcement_tested: str = "NOT-PROVEN"
     residual_risks: list[str] = field(default_factory=list)
@@ -153,8 +155,16 @@ def _protection_check(resp: httpx.Response, *, private: bool | None, plan: str |
         rsc = data.get("required_status_checks") or {}
         contexts: list[str] = [str(c) for c in (rsc.get("contexts") or []) if c] + [
             str(c["context"]) for c in (rsc.get("checks") or []) if isinstance(c, dict) and c.get("context")]
+        # Status-check identity (§08): which GitHub App must report each required check. ``app_id`` null/-1
+        # (or a legacy ``contexts`` entry) means any app/user with status-write access can satisfy it.
+        apps = {str(c["context"]): c.get("app_id") for c in (rsc.get("checks") or [])
+                if isinstance(c, dict) and c.get("context")}
+        for ctx in rsc.get("contexts") or []:
+            apps.setdefault(str(ctx), None)
         reviews = data.get("required_pull_request_reviews") or {}
         detail = {
+            "required_status_check_apps": {k: (v if isinstance(v, int) and v > 0 else None)
+                                           for k, v in sorted(apps.items())},
             "required_status_checks": sorted(set(contexts)),
             "strict": bool(rsc.get("strict")),
             "required_reviews": reviews.get("required_approving_review_count") if reviews else None,
@@ -213,15 +223,71 @@ def _branch_rules_check(resp: httpx.Response) -> CapabilityCheck:
         rows = resp.json() if isinstance(resp.json(), list) else []
         types = sorted({str(r["type"]) for r in rows if isinstance(r, dict) and r.get("type")})
         contexts: list[str] = []
+        apps: dict[str, int | None] = {}
         for r in rows:
             if isinstance(r, dict) and r.get("type") == "required_status_checks":
                 for c in (r.get("parameters") or {}).get("required_status_checks") or []:
                     if isinstance(c, dict) and c.get("context"):
                         contexts.append(c["context"])
-        detail = {"rule_types": types, "required_status_checks": sorted(set(contexts))}
+                        iid = c.get("integration_id")
+                        apps[str(c["context"])] = iid if isinstance(iid, int) and iid > 0 else None
+        detail = {"rule_types": types, "required_status_checks": sorted(set(contexts)),
+                  "required_status_check_apps": dict(sorted(apps.items()))}
         status = "CONFIGURED" if types else "NOT_CONFIGURED"
         return CapabilityCheck("branch_rules", status, f"{len(types)} jenis aturan berlaku pada branch", code, detail)
     return CapabilityCheck("branch_rules", "UNKNOWN", f"Tidak dapat membaca aturan branch (HTTP {code})", code)
+
+
+def _status_check_identity(prot: CapabilityCheck, branch_rules: CapabilityCheck,
+                           required: list[str]) -> CapabilityCheck:
+    """§08 "status-check identity": each required check bound to the app that must report it."""
+    apps: dict[str, int | None] = {}
+    for src in (prot.detail.get("required_status_check_apps") or {}, branch_rules.detail.get(
+            "required_status_check_apps") or {}):
+        for ctx, app in src.items():
+            apps[ctx] = apps.get(ctx) or app
+    if not required:
+        return CapabilityCheck("status_check_identity", "NOT_APPLICABLE",
+                               "Tidak ada required status check; identitas pelapor tidak relevan")
+    unbound = sorted(c for c in required if not apps.get(c))
+    if unbound:
+        return CapabilityCheck("status_check_identity", "NOT_CONFIGURED",
+                               "Check tanpa app_id (pelapor bebas): " + ", ".join(unbound[:10]),
+                               detail={"apps": apps, "unbound": unbound})
+    return CapabilityCheck("status_check_identity", "CONFIGURED",
+                           "Setiap required status check terikat ke GitHub App tertentu", detail={"apps": apps})
+
+
+def _environments_check(resp: httpx.Response, *, private: bool | None, plan: str | None) -> CapabilityCheck:
+    """§08 deploy restrictions: deployment environments and their protection rules (GET only)."""
+    code = resp.status_code
+    if code == 200:
+        body = resp.json() if isinstance(resp.json(), dict) else {}
+        envs = [e for e in body.get("environments") or [] if isinstance(e, dict)]
+        rows = []
+        for e in envs:
+            types = sorted({str(r.get("type")) for r in e.get("protection_rules") or [] if isinstance(r, dict)})
+            rows.append({"name": e.get("name"), "protection_rules": types,
+                         "branch_policy": e.get("deployment_branch_policy")})
+        if not rows:
+            return CapabilityCheck("deploy_environments", "NOT_CONFIGURED",
+                                   "Tidak ada deployment environment di provider", code, {"environments": []})
+        unprotected = [r["name"] for r in rows if "required_reviewers" not in r["protection_rules"]]
+        if unprotected:
+            return CapabilityCheck("deploy_environments", "NOT_CONFIGURED",
+                                   "Environment tanpa required reviewers: " + ", ".join(map(str, unprotected[:10])),
+                                   code, {"environments": rows})
+        return CapabilityCheck("deploy_environments", "CONFIGURED",
+                               f"{len(rows)} environment dengan required reviewers (penegakan belum diuji)", code,
+                               {"environments": rows})
+    if _rate_limited(resp):
+        return CapabilityCheck("deploy_environments", "UNKNOWN", "GitHub rate limit; coba lagi nanti", code)
+    if _upgrade_required(resp) or (code == 404 and private and (plan or "").lower() == "free"):
+        return CapabilityCheck("deploy_environments", "NOT_ENFORCEABLE",
+                               "Proteksi environment tidak tersedia pada paket GitHub ini", code,
+                               {"provider_message": _message(resp)})
+    return CapabilityCheck("deploy_environments", "UNKNOWN", f"Tidak dapat membaca environments (HTTP {code})", code,
+                           {"provider_message": _message(resp)})
 
 
 def check_capabilities(repo: str, branch: str | None = None, *, token: str | None, credential: str = "AVAILABLE",
@@ -290,6 +356,19 @@ def check_capabilities(repo: str, branch: str | None = None, *, token: str | Non
             "required_status_checks", rsc_status,
             ", ".join(required) if required else "Tidak ada required status check yang terlihat",
         ))
+        identity = _status_check_identity(prot, branch_rules, required)
+        caps.checks.append(identity)
+        caps.status_check_identity = identity.status
+        if identity.status == "NOT_CONFIGURED":
+            caps.residual_risks.append("Required status check tidak terikat ke GitHub App tertentu — status dapat "
+                                       "dilaporkan oleh app/pengguna lain dengan izin statuses:write")
+        env_check = _environments_check(gh.get(f"/repos/{repo}/environments", params={"per_page": 100}),
+                                        private=private, plan=plan)
+        caps.checks.append(env_check)
+        caps.deploy_restrictions = env_check.status
+        if env_check.status != "CONFIGURED":
+            caps.residual_risks.append("Pembatasan deploy/environment provider: " + env_check.summary +
+                                       " — AEOS tidak memiliki operasi deploy; produksi tetap tindakan manusia")
         rule_types = set(branch_rules.detail.get("rule_types", []))
         gate_configured = (
             (prot.status == "CONFIGURED" and (prot.detail.get("requires_pull_request")
@@ -344,6 +423,8 @@ class CIStatus:
     error: str | None = None
     source: str = "GitHub check-runs API (provider is the CI source of truth)"
     truncated: bool = False  # the provider reported more check-runs than were read
+    # PIPELINE_REFERENCE: gates from the project's explicit job -> gate map; NAME_HEURISTIC: GATE_HINTS
+    gate_mapping: str = "NAME_HEURISTIC"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -356,9 +437,33 @@ class CIStatus:
         return status, [r.name for r in runs]
 
 
-def classify_check(name: str) -> list[str]:
-    low = name.lower()
+def classify_check(name: str, gate_map: dict[str, list[str]] | None = None) -> list[str]:
+    """Gates a CI job (check-run name) proves. With the project's pipeline reference (§31 "pipeline reference
+    per project") the mapping is explicit: exact job names per gate; otherwise the name heuristics apply
+    (and the CI evidence says so)."""
+    low = name.lower().strip()
+    if gate_map:
+        return sorted(g for g, jobs in gate_map.items() if low in {j.lower().strip() for j in jobs})
     return [g for g, needles in GATE_HINTS.items() if any(n in low for n in needles)]
+
+
+PIPELINE_GATES = ("G1", "G2", "G3", "G5")
+
+
+def pipeline_reference(session: Session, project: Project) -> dict[str, list[str]] | None:
+    """The project's pipeline reference: the CI integration's ``config.gate_G1`` ... ``gate_G5`` entries,
+    each a comma-separated list of exact CI job (check-run) names (blueprints/pipeline-reference.yaml)."""
+    from sqlalchemy import select
+
+    from aeos.models.portfolio import ProjectIntegration
+
+    row = session.scalar(select(ProjectIntegration).where(ProjectIntegration.project_id == project.id,
+                                                          ProjectIntegration.purpose == "ci")
+                         .order_by(ProjectIntegration.created_at.desc()).limit(1))
+    cfg = (row.config or {}) if row is not None else {}
+    out = {g: [j.strip() for j in str(cfg[f"gate_{g}"]).split(",") if j.strip()]
+           for g in PIPELINE_GATES if cfg.get(f"gate_{g}")}
+    return out or None
 
 
 def summarize_runs(runs: list[CheckRunView], *, error: str | None = None) -> str:
@@ -377,7 +482,8 @@ def summarize_runs(runs: list[CheckRunView], *, error: str | None = None) -> str
     return "PASS"
 
 
-def parse_check_runs(repo: str, sha: str, payloads: list[dict[str, Any]]) -> CIStatus:
+def parse_check_runs(repo: str, sha: str, payloads: list[dict[str, Any]],
+                     gate_map: dict[str, list[str]] | None = None) -> CIStatus:
     runs: list[CheckRunView] = []
     total = 0
     read = 0
@@ -393,18 +499,19 @@ def parse_check_runs(repo: str, sha: str, payloads: list[dict[str, Any]]) -> CIS
             runs.append(CheckRunView(
                 name=name, status=str(cr.get("status") or "unknown"), conclusion=cr.get("conclusion"),
                 app=(cr.get("app") or {}).get("slug"), url=cr.get("html_url"), started_at=cr.get("started_at"),
-                completed_at=cr.get("completed_at"), gates=classify_check(name),
+                completed_at=cr.get("completed_at"), gates=classify_check(name, gate_map),
             ))
     truncated = total > read
     overall = summarize_runs(runs)
     if truncated and overall in ("PASS", "NO_CHECKS"):
         overall = "NOT_PROVEN"  # unseen check-runs could be failing: a partial read is never a pass
     return CIStatus(repo=repo, sha=sha, overall=overall, total=len(runs), runs=runs,
-                    checked_at=utcnow().isoformat(), truncated=truncated)
+                    checked_at=utcnow().isoformat(), truncated=truncated,
+                    gate_mapping="PIPELINE_REFERENCE" if gate_map else "NAME_HEURISTIC")
 
 
 def fetch_check_runs(repo: str, sha: str, *, token: str | None, client: httpx.Client | None = None,
-                     max_pages: int = 5) -> CIStatus:
+                     max_pages: int = 5, gate_map: dict[str, list[str]] | None = None) -> CIStatus:
     validate_repo(repo)
     if not re.fullmatch(r"[0-9a-fA-F]{7,64}", sha or ""):
         raise ValidationFailed("commit sha required", code="SHA_INVALID")
@@ -426,7 +533,7 @@ def fetch_check_runs(repo: str, sha: str, *, token: str | None, client: httpx.Cl
         return CIStatus(repo, sha, "UNKNOWN", 0, [], utcnow().isoformat(), error=f"unreachable: {type(exc).__name__}")
     finally:
         gh.close()
-    return parse_check_runs(repo, sha, payloads)
+    return parse_check_runs(repo, sha, payloads, gate_map)
 
 
 def fetch_pull(repo: str, number: int, *, token: str | None, client: httpx.Client | None = None) -> dict[str, Any]:
@@ -452,6 +559,35 @@ def fetch_pull(repo: str, number: int, *, token: str | None, client: httpx.Clien
         "base_sha": (d.get("base") or {}).get("sha"), "base_ref": (d.get("base") or {}).get("ref"),
         "url": d.get("html_url"),
     }
+
+
+COMMIT_FILES_LIMIT = 300  # GitHub lists at most 300 files on the single-commit endpoint
+
+
+def fetch_commit_files(repo: str, sha: str, *, token: str | None, client: httpx.Client | None = None) -> dict[str, Any]:
+    """Files a commit changed relative to its first parent (GET only) — for a merge commit: what the merge
+    actually brought into the integration branch (G5 "policy files protected" on the merged state)."""
+    validate_repo(repo)
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", sha or ""):
+        raise ValidationFailed("commit sha required", code="SHA_INVALID")
+    if not token:
+        return {"error": "GitHub credential unavailable"}
+    gh = GitHubReader(token, client=client)
+    try:
+        r = gh.get(f"/repos/{repo}/commits/{sha}")
+        if r.status_code != 200:
+            return {"error": f"HTTP {r.status_code}: {_message(r)}"}
+        d = r.json()
+    except httpx.HTTPError as exc:
+        return {"error": f"unreachable: {type(exc).__name__}"}
+    finally:
+        gh.close()
+    files = [str(f.get("filename")) for f in d.get("files") or [] if isinstance(f, dict) and f.get("filename")]
+    files += [str(f.get("previous_filename")) for f in d.get("files") or []
+              if isinstance(f, dict) and f.get("previous_filename")]
+    return {"sha": sha, "files": sorted(set(files)), "parents": [p.get("sha") for p in d.get("parents") or []
+                                                                  if isinstance(p, dict)],
+            "truncated": len(d.get("files") or []) >= COMMIT_FILES_LIMIT, "checked_at": utcnow().isoformat()}
 
 
 def parse_time(value: str | None) -> datetime | None:

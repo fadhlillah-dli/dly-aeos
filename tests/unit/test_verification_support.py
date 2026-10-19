@@ -270,13 +270,14 @@ NR_COVERED = {k: {"status": "COVERED", "note": "ok"} for k in (
 
 def make_review(db, world: World, report, *, verdict: str = "PASS-CONTROLLED", status: str = "COMPLETED",
                 mode: str = "LIVE", target_hash: str | None = None, kind: str = "CLAUDE",
-                non_regression: dict[str, Any] | None = None):
+                non_regression: dict[str, Any] | None = None, model_resolved: str | None = "claude-fable-5-1"):
     from aeos.models.evidence import ReviewRecord
 
     rec = ReviewRecord(target_type="worker_run", target_id=world.run.id,
                        target_hash=target_hash or report.environment["artifact_hash"], project_id=world.project.id,
                        domain=world.project.domain, run_id=world.run.id, task_id=world.task.id,
                        reviewer_kind=kind, verdict=verdict, status=status, mode=mode,
+                       model_requested="fable", model_resolved=model_resolved,
                        non_regression=non_regression if non_regression is not None else NR_COVERED)
     db.add(rec)
     db.commit()
@@ -299,6 +300,15 @@ def review_payload(verdict: str = "PASS-CONTROLLED", findings: list[dict[str, An
         "verdict_rationale": "evidence supports the change",
         "findings": findings or [],
     }
+
+
+def claude_envelope(payload: dict[str, Any], model: str = "claude-fable-5-1") -> dict[str, Any]:
+    """The `claude -p --output-format json` result envelope of a manual package run (proves the model)."""
+    import json
+
+    return {"type": "result", "subtype": "success", "is_error": False, "result": json.dumps(payload),
+            "structured_output": payload, "session_id": "s-manual", "duration_ms": 10,
+            "modelUsage": {model: {"inputTokens": 100, "outputTokens": 900}}}
 
 
 @dataclass
@@ -344,6 +354,18 @@ def install_doctor(monkeypatch: pytest.MonkeyPatch, status: str = "READY", reaso
 
     install_module(monkeypatch, "aeos.doctor.capabilities", capability_state=capability_state,
                    invalidate=lambda session, *, invalidator, reason="": 0)
+
+
+def record_release_approvers(db, project, logins: list[str]):
+    """The owner's human POLICY decision naming the GitHub logins authorised to merge/release (G7)."""
+    from aeos.models.decisions import Decision
+
+    d = Decision(kind="POLICY", actor_user_id="owner", actor_kind="HUMAN", target_type="release_approvers",
+                 target_id=project.id, project_id=project.id, domain=project.domain,
+                 auth_scope={"github_logins": logins}, rationale="owner names the release approvers")
+    db.add(d)
+    db.commit()
+    return d
 
 
 def install_planning(monkeypatch: pytest.MonkeyPatch, approved: Any) -> None:

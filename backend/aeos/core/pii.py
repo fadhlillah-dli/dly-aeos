@@ -26,8 +26,12 @@ PII_CARD = "[PII:CARD]"
 _EMAIL = re.compile(r"(?<![\w.+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})*\.[A-Za-z]{2,24}\b")
 _PHONE_INTL = re.compile(r"(?<![\w+])\+\d{1,3}(?:[\s.-]?\(?\d{1,4}\)?){1,5}(?:[\s.-]?\d{2,4})(?![\w])")
 _PHONE_LOCAL = re.compile(r"(?<![\w.])0[1-9]\d{1,3}(?:[\s.-]?\d{3,4}){1,2}[\s.-]?\d{2,5}(?![\w.])")
-_NIK = re.compile(r"(?<!\d)\d{16}(?!\d)")
-_CARD = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
+# NIK and card numbers need a non-alphanumeric boundary on both sides: a digit run *inside* an
+# alphanumeric token (a hex commit SHA, a sha256 digest, an id) is never a personal identifier. With
+# digit-only boundaries ~0.5% of random sha256 digests contained a Luhn-valid 13-19 digit run and were
+# rewritten to [PII:CARD], corrupting evidence identities (artifact/commit/config hashes).
+_NIK = re.compile(r"(?<![0-9A-Za-z])\d{16}(?![0-9A-Za-z])")
+_CARD = re.compile(r"(?<![0-9A-Za-z])(?:\d[ -]?){12,18}\d(?![0-9A-Za-z])")
 
 
 def _digits(s: str) -> str:

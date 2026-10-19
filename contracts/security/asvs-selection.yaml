@@ -1,0 +1,102 @@
+# OWASP ASVS control selection for DLY AEOS itself (master §46: "requirements selected per application/risk
+# and version-pinned; evidence = a test and trace per relevant control").
+#
+# * Version pinned: ASVS 4.0.3 (the control ids below are 4.0.3 ids). Moving to ASVS 5.0.x renumbers the
+#   chapters and is an owner decision (POLICY/ADR), not an automatic upgrade.
+# * Risk profile: local-first, single owner, bound to 127.0.0.1, browser session + CSRF, secrets in a vault,
+#   workers sandboxed behind a capability broker. Controls outside that profile are listed under `not_selected`
+#   with the reason, never silently dropped.
+# * Every selected control names the pytest node ids that prove it (tests/unit/test_asvs_trace.py checks that
+#   each id exists). A selected control without tests is `NOT_PROVEN` — never shown as met.
+asvs_version: "4.0.3"
+application: dly-aeos-control-plane
+selected:
+  - id: V2.1.1
+    title: User-set passwords are at least 12 characters
+    status: TESTED
+    tests:
+      - tests/unit/test_identity.py::test_weak_password_rejected
+  - id: V2.2.1
+    title: Anti-automation controls against credential stuffing / brute force
+    status: TESTED
+    tests:
+      - tests/unit/test_identity.py::test_login_throttling
+  - id: V2.5.4
+    title: No shared or default accounts
+    status: TESTED
+    tests:
+      - tests/acceptance/test_auth_boundary.py::test_no_default_credentials
+      - tests/acceptance/test_auth_boundary.py::test_default_passwords_rejected_even_after_bootstrap
+      - tests/unit/test_identity.py::test_no_default_credentials_bootstrap_required
+  - id: V3.3.1
+    title: Logout and expiration invalidate the session token
+    status: TESTED
+    tests:
+      - tests/unit/test_identity.py::test_logout_revokes_session
+      - tests/unit/test_identity.py::test_recovery_revokes_sessions_and_forces_change
+  - id: V3.4.2
+    title: Cookie-based session tokens have the HttpOnly attribute
+    status: TESTED
+    tests:
+      - tests/unit/test_identity.py::test_login_session_cookie_is_httponly_strict
+  - id: V3.4.3
+    title: Cookie-based session tokens use the SameSite attribute
+    status: TESTED
+    tests:
+      - tests/unit/test_identity.py::test_login_session_cookie_is_httponly_strict
+  - id: V4.1.1
+    title: Access control rules are enforced on a trusted service layer
+    status: TESTED
+    tests:
+      - tests/acceptance/test_auth_boundary.py::test_viewer_is_denied_on_every_write_route
+      - tests/acceptance/test_auth_boundary.py::test_unauthenticated_reads_refused
+      - tests/unit/test_operations_api_security.py::test_viewer_is_refused_on_every_ops_write
+  - id: V4.1.3
+    title: Principle of least privilege (users and workers only reach what they are authorised for)
+    status: TESTED
+    tests:
+      - tests/acceptance/test_containment.py::test_worker_calls_outside_its_capability_are_refused
+      - tests/unit/test_verification_evidence_api.py::test_restricted_evidence_content_only_for_super_admin
+  - id: V4.2.2
+    title: Strong anti-CSRF mechanism for authenticated functionality
+    status: TESTED
+    tests:
+      - tests/acceptance/test_auth_boundary.py::test_write_without_csrf_token_rejected
+      - tests/acceptance/test_auth_boundary.py::test_cross_origin_write_rejected
+      - tests/unit/test_operations_api_security.py::test_admin_write_without_csrf_is_refused
+  - id: V6.4.1
+    title: A secrets management solution (key vault) creates, stores and controls access to secrets
+    status: TESTED
+    tests:
+      - tests/unit/test_secrets_openbao.py::test_put_status_list_and_delete_never_return_values
+      - tests/unit/test_secrets_openbao.py::test_sealed_or_uninitialised_blocks
+  - id: V7.1.1
+    title: Credentials and payment details are not logged
+    status: TESTED
+    tests:
+      - tests/unit/test_identity.py::test_audit_redacts_secrets
+      - tests/unit/test_core.py::test_redaction_patterns_and_registry
+      - tests/unit/test_pii_identity_values.py::test_collector_redaction_keeps_identities_but_still_masks_secrets_and_pii
+  - id: V12.3.1
+    title: User-submitted file names/paths are not used directly on the filesystem (path traversal)
+    status: TESTED
+    tests:
+      - tests/unit/test_core.py::test_safe_segment_blocks_traversal
+      - tests/unit/test_core.py::test_ensure_within
+  - id: V14.4.3
+    title: A Content Security Policy response header is in place
+    status: NOT_PROVEN
+    note: headers are set in backend/aeos/api/security.py but no test asserts them yet
+    tests: []
+  - id: V14.4.4
+    title: All responses contain X-Content-Type-Options nosniff
+    status: NOT_PROVEN
+    note: set in backend/aeos/api/security.py; untested
+    tests: []
+not_selected:
+  - id: V2.7.1
+    reason: no out-of-band authenticator; single local owner on 127.0.0.1 (re-evaluate for any non-local deployment)
+  - id: V2.8.1
+    reason: no one-time-password factor in the local profile (owner decision for multi-user or remote access)
+  - id: V9.1.1
+    reason: TLS is not used on the loopback-only bind (§06); any non-loopback exposure needs a new selection

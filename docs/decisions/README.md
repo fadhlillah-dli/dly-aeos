@@ -50,3 +50,4 @@ never rewritten. Number ranges per module group: 0001-0009 platform, 0010 doctor
 | [ADR-0091](ADR-0091-controller-release-promotion.md) | Released controller artifacts, human-only promotion and rollback | ACCEPTED |
 | [ADR-0092](ADR-0092-sli-targets-and-alerting.md) | SLIs from records, SLO targets as owner decisions, deduplicated alerts, emergency stop | ACCEPTED |
 | [ADR-0093](ADR-0093-universal-dependency-lockfile.md) | Universal Python dependency lockfile (requirements.lock) | ACCEPTED |
+| [ADR-0106](ADR-0106-verification-delivery-broker-audit-closure.md) | Verification, delivery and broker: closing the audited gaps honestly | PROPOSED |

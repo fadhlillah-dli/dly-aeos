@@ -23,6 +23,10 @@ CONFLUENCE = "confluence"
 JIRA = "jira"
 BITBUCKET = "bitbucket"
 BITBUCKET_PIPELINES = "bitbucket-pipelines"
+# §04 "PERSONAL deployment: the chosen personal target, with owner authorisation": an owner-registered
+# staging/production target that AEOS only *observes* (delivery gates G6/G8). It is never a write provider:
+# AEOS has no deploy operation; deploying stays a human action (U-09).
+DEPLOYMENT_TARGET = "deployment-target"
 
 # domain -> provider -> allowed integration purposes (U-02..U-04, §04 table)
 INTEGRATION_PROVIDERS: dict[str, dict[str, frozenset[str]]] = {
@@ -32,6 +36,7 @@ INTEGRATION_PROVIDERS: dict[str, dict[str, frozenset[str]]] = {
         GITHUB_PROJECTS: frozenset({"roadmap"}),
         GITHUB_ACTIONS: frozenset({"ci"}),
         GOOGLE_DRIVE: frozenset({"docs"}),
+        DEPLOYMENT_TARGET: frozenset({"staging", "production"}),
     },
     Domain.OFFICE.value: {
         BITBUCKET: frozenset({"code"}),
@@ -65,6 +70,7 @@ ROOT_ID_NAMES: dict[str, str] = {
     CONFLUENCE: "CONFLUENCE_PROJECTS_PARENT_ID",
     JIRA: "JIRA_PROJECT_KEY",
     BITBUCKET: "BITBUCKET_REPOSITORY",
+    DEPLOYMENT_TARGET: "DEPLOYMENT_TARGET_URL",
 }
 # Google Drive root folder is optional: without it the project folder is created in My Drive.
 MY_DRIVE_ROOT = "root"
@@ -79,6 +85,7 @@ LABELS: dict[str, str] = {
     JIRA: "Jira",
     BITBUCKET: "Bitbucket",
     BITBUCKET_PIPELINES: "Bitbucket Pipelines",
+    DEPLOYMENT_TARGET: "Deployment target (staging/production, observe-only)",
 }
 
 # Default credential *references* (never values) per provider. Google: the OAuth token written by
