@@ -126,7 +126,7 @@ def _canary(raw: Any) -> dict[str, Any] | None:
         return None
     if not isinstance(raw, dict):
         raise ValidationFailed("canary must be an object")
-    out = {k: _text(raw.get(k), 500, f"canary.{k}") for k in ("target", "cap", "observation_window")}
+    out: dict[str, Any] = {k: _text(raw.get(k), 500, f"canary.{k}") for k in ("target", "cap", "observation_window")}
     stops = raw.get("stop_criteria")
     if isinstance(stops, str):
         stops = [s for s in (x.strip() for x in stops.splitlines()) if s]

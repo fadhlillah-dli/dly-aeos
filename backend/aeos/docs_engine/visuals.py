@@ -312,7 +312,7 @@ def screenshot_manifest(*, project_id: str, commit: str | None, environment: str
     environment) exist for the project; those are referenced by id — never generated or copied here."""
     items = [e for e in (evidence or []) if e.get("kind") == "SCREENSHOT" and e.get("trusted")
              and e.get("origin") != "worker" and (e.get("environment") or {}).get("commit")]
-    out = {
+    out: dict[str, Any] = {
         "kind": "screenshot",
         "project_id": project_id,
         "commit": commit,

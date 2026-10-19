@@ -183,19 +183,19 @@ def collect(session: Session, *, domain: str | None, now: datetime | None = None
             ul.provider == provider, ul.source == source, ul.at == at, ul.mode == "LIVE",
             ul.domain.is_(None) if row_domain is None else ul.domain == row_domain,
             ul.project_id.is_(None) if row_project is None else ul.project_id == row_project).limit(1))
-        cid = PROVIDER_COMPONENTS.get(provider)
+        ledger_cid = PROVIDER_COMPONENTS.get(provider)
         refs = {"ledger_entry_id": row.id if row else None, "run_id": row.run_id if row else None,
                 "route_key": row.route_key if row else None, "category": row.category if row else None,
                 "record": "usage_ledger", "source": source}
-        if cid:
-            use(UsageFact(cid, "LAST_USED", at, f"usage ledger ({source})",
+        if ledger_cid:
+            use(UsageFact(ledger_cid, "LAST_USED", at, f"usage ledger ({source})",
                           f"permintaan model selesai (LAST_USED, bukan proses yang masih hidup) via {source}", refs))
         caller = LEDGER_CALLERS.get(source)
         if caller:
             use(UsageFact(caller, "LAST_USED", at, f"usage ledger ({source})",
                           f"meneruskan permintaan ke {provider}", refs))
-            if cid:
-                edge(caller, cid, LEDGER_CALL_RELATION[source], at, f"usage ledger ({source})", refs)
+            if ledger_cid:
+                edge(caller, ledger_cid, LEDGER_CALL_RELATION[source], at, f"usage ledger ({source})", refs)
 
     # --- publisher outbox: SUCCEEDED writes of LIVE publications
     po, pub = PublicationOperation, Publication
@@ -206,13 +206,13 @@ def collect(session: Session, *, domain: str | None, now: datetime | None = None
     for provider, operation, row_domain, at in rows:
         if not _visible(row_domain, domain):
             continue
-        cid = _publication_component(provider, operation)
+        pub_cid = _publication_component(provider, operation)
         refs = {"provider": provider, "operation": operation, "record": "publication_operation"}
         use(UsageFact("publisher", "LAST_USED", at, "publication outbox", f"write {operation} ke {provider}", refs))
-        if cid:
-            use(UsageFact(cid, "LAST_USED", at, "publication outbox",
+        if pub_cid:
+            use(UsageFact(pub_cid, "LAST_USED", at, "publication outbox",
                           f"publisher menulis ({operation}); operasi selesai", refs))
-            edge("publisher", cid, "publishes_to", at, "publication outbox", refs)
+            edge("publisher", pub_cid, "publishes_to", at, "publication outbox", refs)
 
     # --- Claude bridge capability tests (LIVE)
     t = session.scalar(select(ClaudeCapabilityTest).where(ClaudeCapabilityTest.mode == "LIVE")

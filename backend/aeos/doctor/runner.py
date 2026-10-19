@@ -181,10 +181,13 @@ def run_spec(spec: CheckSpec, ctx: CheckContext) -> list[CheckResultData]:
     try:
         targets = list(spec.targets(ctx))
     except Exception as exc:  # cannot enumerate targets: UNKNOWN, never a pass
-        out = run_check(dataclasses.replace(spec, fn=lambda _c, e=exc: Outcome(
-            "UNKNOWN", f"Target proyek tidak dapat dibaca ({type(e).__name__}).", error_code="TARGETS_UNREADABLE")),
-            ctx)
-        return [out]
+        error_name = type(exc).__name__
+
+        def unreadable(_c: CheckContext) -> Outcome:
+            return Outcome("UNKNOWN", f"Target proyek tidak dapat dibaca ({error_name}).",
+                           error_code="TARGETS_UNREADABLE")
+
+        return [run_check(dataclasses.replace(spec, fn=unreadable), ctx)]
     if not targets:
         return [run_check(dataclasses.replace(spec, fn=lambda _c: Outcome(
             "NOT_APPLICABLE", "Belum ada proyek dengan target integrasi ini; tidak ada yang diperiksa.",

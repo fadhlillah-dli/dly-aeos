@@ -265,7 +265,7 @@ def run_contract_test(*, binary: str | None = None) -> dict[str, Any]:
     """Run the contract test on this host. NOT_RUN (nothing recorded) when the binary is missing."""
     checked = utcnow().isoformat()
     status = opencode.opencode_status(binary, refresh=True)
-    base = {"kind": "WORKER_CONTRACT_TEST", "engine": "opencode", "engine_status": status.get("status"),
+    base: dict[str, Any] = {"kind": "WORKER_CONTRACT_TEST", "engine": "opencode", "engine_status": status.get("status"),
             "engine_version": status.get("version"), "pinned_version": opencode.PINNED_VERSION,
             "drift": status.get("drift"), "checked_at": checked, "platform": sys.platform,
             "model": "scripted loopback endpoint (no provider, no credential)",

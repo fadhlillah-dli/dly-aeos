@@ -300,9 +300,9 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, *, planning: bool = True, pol
 
         # NOTE: the frozen facade calls ``impl(**locals())``, which also passes ``impl`` and ``session``
         # as keyword arguments; implementations must tolerate that (reported as a shared change request).
-        def record_decision(**kw: Any) -> Decision:
+        # Like the real registry, ``session`` may also come positionally (aeos.policy modules call it directly).
+        def record_decision(session: Session, **kw: Any) -> Decision:
             kw.pop("impl", None)
-            session = kw.pop("session")
             d = Decision(kind=kw["kind"], actor_user_id=kw["actor_user_id"], target_type=kw["target_type"],
                          target_id=kw["target_id"], target_version=kw.get("target_version"),
                          target_hash=kw.get("target_hash"), allowed_operations=kw.get("allowed_operations") or [],
@@ -313,9 +313,8 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, *, planning: bool = True, pol
             session.flush()
             return d
 
-        def find_active_decision(**kw: Any) -> Decision | None:
+        def find_active_decision(session: Session, **kw: Any) -> Decision | None:
             kw.pop("impl", None)
-            session = kw.pop("session")
             return _find_active(session, **kw)
 
         def invalidate_decisions(session: Session, *, target_type: str, target_id: str, reason: str,

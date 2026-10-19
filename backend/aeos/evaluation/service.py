@@ -720,18 +720,21 @@ def combined_ranking(per_suite: list[dict[str, Any]], weights: dict[str, float],
     incomplete: list[dict[str, Any]] = []
     for ek in sorted(keys):
         parts = {sk: by_suite.get(sk, {}).get(ek) for sk in weighted}
-        missing = [sk for sk, e in parts.items() if e is None or e["final_acceptance_rate"] is None]
+        # a weighted suite counts only with both its rate and its interval: never ranked on a missing bound
+        complete = {sk: e for sk, e in parts.items()
+                    if e is not None and e["final_acceptance_rate"] is not None and e.get("acceptance_ci95")}
+        missing = [sk for sk in weighted if sk not in complete]
         any_entry = next(e for e in parts.values() if e is not None)
         if missing or total_w <= 0:
             incomplete.append({"entry_key": ek, "label": any_entry["label"], "missing_suites": missing})
             continue
-        score = sum(weighted[sk] * parts[sk]["final_acceptance_rate"] for sk in weighted) / total_w
-        low = sum(weighted[sk] * parts[sk]["acceptance_ci95"][0] for sk in weighted) / total_w
-        high = sum(weighted[sk] * parts[sk]["acceptance_ci95"][1] for sk in weighted) / total_w
+        score = sum(weighted[sk] * complete[sk]["final_acceptance_rate"] for sk in weighted) / total_w
+        low = sum(weighted[sk] * complete[sk]["acceptance_ci95"][0] for sk in weighted) / total_w
+        high = sum(weighted[sk] * complete[sk]["acceptance_ci95"][1] for sk in weighted) / total_w
         ranking.append({"entry_key": ek, "label": any_entry["label"],
                         "configuration_hash": any_entry["configuration_hash"], "topology": any_entry["topology"],
                         "score": round(score, 4), "interval": [round(low, 4), round(high, 4)],
-                        "sample_size": sum(parts[sk]["sample_size"] for sk in weighted)})
+                        "sample_size": sum(complete[sk]["sample_size"] for sk in weighted)})
     ranking.sort(key=lambda e: (-e["score"], -e["sample_size"]))
     _tie_groups(ranking, rate_key="score", ci_key="interval")
     return {"weights": weighted, "source": source, "ranking": ranking, "incomplete": incomplete,

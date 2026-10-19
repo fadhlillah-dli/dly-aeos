@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -33,6 +33,9 @@ from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.events import service as events
 from aeos.models.planning import TaskSpec
 from aeos.models.research import ChangeProposal
+
+if TYPE_CHECKING:
+    from aeos.models.portfolio import Project
 
 ARTIFACT_PREFIX = "change_proposal:"
 TRIAL_OPERATIONS = ["trial.sandbox", "trial.task.run", "trial.eval.run", "trial.verifier.collect", "trial.stop"]
@@ -110,8 +113,9 @@ def scope_drift(session: Session, p: ChangeProposal, decision: Any) -> list[str]
     if isinstance(budget, (int, float)) and runs:
         spent = session.scalar(select(func.coalesce(func.sum(UsageLedgerEntry.cost_usd), 0)).where(
             UsageLedgerEntry.run_id.in_([r.id for r in runs]), UsageLedgerEntry.mode == "LIVE"))
-        if float(spent or 0) > float(budget) + 1e-9:
-            problems.append(f"trial spend {float(spent):.4f} USD exceeds the decided budget {float(budget):.4f} USD")
+        spent_usd = float(spent or 0)
+        if spent_usd > float(budget) + 1e-9:
+            problems.append(f"trial spend {spent_usd:.4f} USD exceeds the decided budget {float(budget):.4f} USD")
     return problems
 
 
@@ -178,7 +182,8 @@ def authorisation_lost(session: Session, task_id: str | None) -> str | None:
 # --------------------------------------------------------------------------- launch / stop
 
 
-def _trial_project(session: Session, p: ChangeProposal) -> Any:
+def _trial_project(session: Session, p: ChangeProposal) -> Project:
+    """The project hosting the trial; its domain equals the proposal's (a domain-less proposal is Blocked)."""
     from aeos.models.portfolio import Project
 
     if p.project_id:
@@ -279,7 +284,8 @@ def launch_trial(session: Session, p: ChangeProposal, *, actor_user_id: str,
               f"{p.candidate_pin}; environment {scope.get('environment')}; batas {scope.get('max_minutes')} menit, "
               f"{scope.get('max_attempts')} attempt, budget {scope.get('budget_usd')} USD, kelas data "
               f"{scope.get('data_class')}. Tidak ada promosi tanpa keputusan PROMOTION terpisah.")
-    plan = planning.create_plan(session, project=project, domain=p.domain, title=f"Trial: {p.title}"[:256],
+    # project.domain == p.domain (checked by _trial_project): the proposal's recorded domain, never inferred
+    plan = planning.create_plan(session, project=project, domain=project.domain, title=f"Trial: {p.title}"[:256],
                                 prompt=prompt, attachment_ids=[], actor_user_id=actor_user_id)
     version = planning.create_version(session, plan, _plan_content(p, d, allowed), source=TRIAL_PLAN_SOURCE,
                                       parent_version_id=None, run_ids=[], created_by=actor_user_id)

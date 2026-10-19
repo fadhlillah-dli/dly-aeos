@@ -1039,15 +1039,16 @@ def _acceptance_met(session: Session, p: ChangeProposal, results: dict[str, Any]
     bound_ids = {e.id for e in evs} | {e.id for e in bound_evidence(session, p, p.evidence_ids or [], purpose="outcome")}
     rows = []
     for a in declared:
-        r = results.get(a["id"]) if isinstance(results.get(a["id"]), dict) else {}
-        status = str(r.get("status") or "UNKNOWN").upper()
+        raw = results.get(a["id"])
+        given: dict[str, Any] = raw if isinstance(raw, dict) else {}  # absent/non-object result -> UNKNOWN
+        status = str(given.get("status") or "UNKNOWN").upper()
         if status not in ("PASS", "FAIL", "UNKNOWN"):
             raise ValidationFailed(f"acceptance_results[{a['id']}].status must be PASS, FAIL or UNKNOWN")
-        ev = r.get("evidence_id")
+        ev = given.get("evidence_id")
         if status == "PASS" and ev not in bound_ids:
             status = "UNKNOWN"  # a PASS without bound trusted evidence is not a pass (§34)
         rows.append({"id": a["id"], "criterion": a["criterion"], "required": a.get("required", True), "status": status,
-                     "evidence_id": ev, "observed": redact_text(str(r.get("observed") or ""))[:200]})
+                     "evidence_id": ev, "observed": redact_text(str(given.get("observed") or ""))[:200]})
     unmet = [r["id"] for r in rows if r["required"] and r["status"] != "PASS"]
     if not declared:
         unmet = ["NOT_DECLARED"]
@@ -1066,7 +1067,8 @@ def _acceptance_met(session: Session, p: ChangeProposal, results: dict[str, Any]
 
 
 def _rollback_reference(session: Session, p: ChangeProposal, rb: dict[str, Any], since: datetime | None) -> dict[str, Any]:
-    ref = rb.get("reference") if isinstance(rb.get("reference"), dict) else {}
+    raw_ref = rb.get("reference")
+    ref: dict[str, Any] = raw_ref if isinstance(raw_ref, dict) else {}  # no reference object -> not referenced
     aid = str(ref.get("audit_event_id") or "")
     if not aid:
         raise ValidationFailed("ROLLED_BACK must reference the rollback/restore operation that actually ran "
@@ -1087,7 +1089,7 @@ def _rollback_reference(session: Session, p: ChangeProposal, rb: dict[str, Any],
         raise ValidationFailed("the referenced rollback ran before the promotion/trial it would undo; it is not this "
                                "rollback",
                                code="ROLLBACK_NOT_REFERENCED")
-    out = {"audit_event_id": aid, "action": ev.action, "at": at.isoformat() if at else None}
+    out: dict[str, Any] = {"audit_event_id": aid, "action": ev.action, "at": at.isoformat() if at else None}
     if ev.action == "inventory.manifest.load" and p.kind in ("UPGRADE", "REPLACE"):
         from aeos.inventory import facade as inventory
 

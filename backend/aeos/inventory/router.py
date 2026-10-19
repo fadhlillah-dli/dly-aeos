@@ -186,7 +186,7 @@ def refresh(body: RefreshIn, request: Request, db: DB, principal: AdminPrincipal
     else:
         last = latest_run(db, full_only=True)
         finished = ensure_aware(last.finished_at) if last is not None else None
-        if finished is not None and utcnow() - finished < FULL_REFRESH_MIN_INTERVAL:
+        if last is not None and finished is not None and utcnow() - finished < FULL_REFRESH_MIN_INTERVAL:
             wait = int((FULL_REFRESH_MIN_INTERVAL - (utcnow() - finished)).total_seconds()) + 1
             raise Conflict("the full inventory was just reconciled; retry shortly", code="REFRESH_TOO_SOON",
                            details={"retry_after_seconds": wait, "last_run_id": last.id})

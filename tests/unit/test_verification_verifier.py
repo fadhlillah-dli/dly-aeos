@@ -468,3 +468,22 @@ def test_scope_without_allowed_paths_fails_closed(db, settings, controller, wf):
     out = _verify(db, world)
     assert out.status == "FAIL"
     assert any("OUTSIDE_ALLOWED" in r for r in out.reasons)
+
+
+def test_dependency_set_pins_named_distributions_and_skips_nameless_ones(monkeypatch):
+    """The dependency identity reads metadata only through the PackageMetadata protocol; a distribution
+    without a Name (broken dist-info) is skipped instead of crashing the verification."""
+    import email.message
+
+    from aeos.core.hashing import content_hash
+
+    class Dist:
+        def __init__(self, name, version):
+            self.metadata, self.version = email.message.Message(), version
+            if name is not None:
+                self.metadata["Name"] = name
+
+    dists = [Dist("Foo", "1.0"), Dist(None, "9"), Dist("  ", "2"), Dist("foo", "1.0"), Dist("Bar", "2.1")]
+    monkeypatch.setattr(verifier.importlib.metadata, "distributions", lambda: dists)
+    monkeypatch.setattr(verifier, "_dependency_set_cache", {})
+    assert verifier.dependency_set() == {"hash": content_hash(["bar==2.1", "foo==1.0"]), "count": 2}
