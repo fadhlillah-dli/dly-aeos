@@ -95,7 +95,9 @@ export default function NewProjectPage() {
         title="Proyek baru"
         question="Proyek apa yang ingin dibangun atau dikelola, dan dari mana sumbernya?"
         source="Formulir ini → POST /api/projects (domain dicek ulang di backend)"
+        checkedAt={null}
         evidenceLimit="Lampiran adalah DATA; repository belum terverifikasi sampai lookup provider berhasil"
+        relatedDecisionsHref="/decisions?target_type=project"
       />
 
       <Card>

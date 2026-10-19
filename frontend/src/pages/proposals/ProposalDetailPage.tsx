@@ -251,6 +251,7 @@ export default function ProposalDetailPage() {
         source="change_proposals + inventory + research registry + decisions"
         checkedAt={p.reviewed_at}
         evidenceLimit={p.guarantees.note}
+        relatedDecisionsHref={`/decisions?target_type=change_proposal&target_id=${encodeURIComponent(p.id)}`}
         actions={
           <>
             <Link to="/proposals" className="self-center">

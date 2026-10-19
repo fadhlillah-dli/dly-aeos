@@ -233,3 +233,4 @@ def test_trace_pii_is_redacted_or_limited_before_storage_and_export(personal_cli
     stored = (settings.layout.root / ev.location).read_text(encoding="utf-8")
     export = personal_client.get("/api/ops/export", params={"kind": "audit"}).text
     assert email not in stored and email not in export and phone not in export
+    assert phone not in stored  # the phone number is minimised in storage too, not only in the export

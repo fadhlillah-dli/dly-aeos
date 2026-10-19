@@ -73,6 +73,13 @@ def audit_history(principal: CurrentPrincipal, domain: ActiveDomain, db: DB,
                                       target_id=target_id, result=result, before=before, limit=limit)
 
 
+@router.get("/api/control-center/history/attempts")
+def attempt_history(principal: CurrentPrincipal, domain: ActiveDomain, db: DB,
+                    outcome: str | None = Query(None, pattern="^(ACCEPTED|FAILED|CANCELLED)$"),
+                    page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+    return projections.attempt_timeline(db, principal, domain, outcome=outcome, page=page, page_size=page_size)
+
+
 @router.get("/api/control-center/history/decisions")
 def decision_history(principal: CurrentPrincipal, domain: ActiveDomain, db: DB,
                      limit: int = Query(200, ge=1, le=500)) -> dict[str, Any]:
