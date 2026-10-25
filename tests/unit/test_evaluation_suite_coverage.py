@@ -23,9 +23,27 @@ def test_every_suite_covers_the_section_43_case_kinds():
 
 
 def test_section_44_task_classes_are_all_present():
-    assert {s["task_class"] for s in D.SUITES} == {
+    assert {s["task_class"] for s in D.SUITES} >= {
         "small-bugfix", "feature-fe-api", "shared-schema-auth-change", "independent-readonly-reviews",
         "docs-only-change", "provider-quota-interruption", "self-build-controller-change", "crash-recovery"}
+    assert len({s["suite_key"] for s in D.SUITES}) == len(D.SUITES)
+
+
+def test_every_executor_role_and_tech_area_has_a_protected_suite():
+    """§46/§48 (re-audit): only 6 of 26 executor roles (and ~5 of the 10 named areas) could be assessed. Every
+    executor role now has a protected suite definition, so product discovery, UX, architecture, data and delivery
+    outcomes can be scored once the owner-authored fixtures exist (results stay BELUM DIUJI until then)."""
+    from aeos.workforce import catalog
+
+    covered = {s["role_key"] for s in D.SUITES}
+    assert covered >= catalog.EXECUTOR_ROLE_KEYS, sorted(catalog.EXECUTOR_ROLE_KEYS - covered)
+    areas = {  # the §46 areas -> a role that is assessed in that area
+        "product discovery": "product-analyst", "UX": "ux-ui-designer", "architecture": "solution-architect",
+        "coding": "feature-implementer", "data": "db-data-engineer", "security": "security-engineer",
+        "delivery": "release-coordinator", "reliability": "sre-operations-assistant",
+        "documentation": "technical-writer", "operations": "incident-analyst"}
+    assert all(role in covered for role in areas.values())
+    assert covered <= catalog.EXECUTOR_ROLE_KEYS  # no suite for a title that grants nothing
 
 
 def test_planned_run_notes_and_limits_are_redacted(db):

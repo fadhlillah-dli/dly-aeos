@@ -61,6 +61,14 @@ MAX_ATTACHMENTS = 20
 STAGE_TIMEOUT_SECONDS = 900
 STALE_RUN_GRACE = timedelta(seconds=STAGE_TIMEOUT_SECONDS + 300)
 ACTIONS = ("APPROVE_AND_PUBLISH", "APPROVE", "REQUEST_REVISION", "REJECT")
+# §24 "Konteks yang benar-benar diterima model ... adalah ContextPack minimum ber-budget": not yet for the supervisor
+# stages. Each planning/review prompt is assembled from the PlanningContext (intake + scanned attachments, character
+# caps above) and the PlanVersion under review; a task-scoped ContextPack needs a principal-bound pack build per stage
+# (knowledge) that this build does not do. Recorded on every PlanningRun so the gap is never implied closed.
+PLANNING_CONTEXT_SOURCE: dict[str, Any] = {
+    "context_pack": None, "basis": "PLANNING_CONTEXT",
+    "budget": f"character caps (prompt {MAX_PROMPT_CHARS}, attachments {MAX_ATTACHMENT_CHARS}), not a token budget",
+    "status": "NOT_A_CONTEXT_PACK"}
 # Bridge refusals that are hard stops (ADR-0030/0040 amendments): the stage is checkpointed and the plan
 # waits in NEEDS_DECISION. Nothing is retried with another model, no stage is skipped, no manual package is
 # offered as a way around the refusal (the manual path has the same preflight). code -> PlanningRun.status
@@ -862,6 +870,13 @@ def personal_gate(session: Session, plan: Plan, *, actor: str) -> dict[str, Any]
     proof = {"capability": Capability.CAN_PLAN_PERSONAL.value, "status": status,
              "label": {"READY": "PROVEN", "DEGRADED": "MANUAL_PACKAGE", "BLOCKED": "BLOCKED"}.get(status, "NOT-PROVEN"),
              "reasons": [redact_text(r)[:300] for r in reasons[:10]], "checked_at": utcnow().isoformat()}
+    if proof["label"] == "NOT-PROVEN":
+        # §02 Istilah: UNKNOWN is not proven. This build still runs the official bridge on UNKNOWN (the trusted
+        # acceptance helper relies on it); stated on the plan as an open owner decision, never as automatic/proven.
+        proof["owner_decision"] = "OPEN"
+        proof["note"] = ("CAN_PLAN_PERSONAL UNKNOWN: pemeriksaan kritis Doctor belum pernah dijalankan, jadi bridge "
+                         "resmi dipakai TANPA BUKTI (NOT-PROVEN). Apakah UNKNOWN boleh dieksekusi adalah keputusan "
+                         "pemilik; jalankan `aeos doctor` untuk membuktikan integrasi.")
     _set_cp(plan, bridge_proof=proof)
     if status != "BLOCKED":
         return proof
@@ -1111,9 +1126,15 @@ def _run_stage(session: Session, plan: Plan, spec: StageSpec, *, actor: str) -> 
                          "model_family": spec.family, "schema": spec.schema,
                          "schema_hash": content_hash(request.json_schema), "prompt_revision": prompts.PROMPT_REVISION,
                          "allowed_tools": [], "timeout_seconds": request.timeout_seconds,
+                         # §23 mode/thinking: the effort the bridge is asked to pass (None = Claude Code default);
+                         # bound to the supervisor route identity when the stage completes
+                         "effort": request.effort,
                          "policy_snapshot": (plan.policy_baseline or {}).get("policy_snapshot"),
                          "bridge_proof": ((cp.get("bridge_proof") or {}).get("label") or
-                                          ("OFFICE_GATE" if plan.domain == Domain.OFFICE.value else "NOT-PROVEN"))},
+                                          ("OFFICE_GATE" if plan.domain == Domain.OFFICE.value else "NOT-PROVEN")),
+                         # §24 stated, not implied: the stage prompt is assembled from the PlanningContext (intake +
+                         # attachments) and the PlanVersion under review, not from a budgeted ContextPack
+                         "context_source": PLANNING_CONTEXT_SOURCE},
     )
     session.add(run)
     session.flush()
@@ -1228,6 +1249,27 @@ def _complete_stage(session: Session, plan: Plan, run: PlanningRun, spec: StageS
                     manual: bool) -> bool:
     run.model_resolved = (result.model_resolved or None)
     run.engine_version = result.engine_version
+    if not manual and result.engine_version:
+        # §23: the Claude Code version and effort/thinking setting are part of the supervisor route's configuration
+        # identity (a later change is a new configuration: STALE + NEEDS_EVALUATION, never silent).
+        try:
+            from aeos.routing import facade as routing
+
+            routing.observe_supervisor_call(session, model=run.model_requested, engine_version=result.engine_version,
+                                            effort=(run.config_identity or {}).get("effort"))
+            supervisor = routing.supervisor_configuration(session, run.model_requested)
+        except (ImportError, ModuleNotFoundError):  # pragma: no cover - routing ships with the foundation
+            supervisor = None
+        if supervisor is not None:
+            # §02: the configuration this stage ran on and whether it was evaluated, stated on the run and the plan
+            run.config_identity = {**(run.config_identity or {}), "supervisor_route": supervisor}
+            unevaluated = dict((plan.checkpoint or {}).get("supervisor_unevaluated") or {})
+            if supervisor["evaluation"] == "NEEDS_EVALUATION":
+                unevaluated[run.stage] = {k: supervisor[k] for k in ("route_key", "config_hash", "resolved_version",
+                                                                      "harness_version", "note")}
+            else:
+                unevaluated.pop(run.stage, None)
+            _set_cp(plan, supervisor_unevaluated=unevaluated)
     run.session_id = result.session_id
     run.usage = prompts.scrub(result.usage or {})
     run.trace_ref = result.trace_ref
@@ -1433,6 +1475,10 @@ def run_view(session: Session, run: PlanningRun) -> dict[str, Any]:
         "finished_at": run.finished_at.isoformat() if run.finished_at else None, "duration_ms": duration,
         "input_version_id": run.input_version_id, "output_version_id": run.output_version_id,
         "manual_package_id": run.manual_package_id, "session_id_present": bool(run.session_id),
+        # §02/§23: the supervisor route configuration this run used and its evaluation state (NEEDS_EVALUATION = a
+        # new, unevaluated version; never silent)
+        "supervisor_route": (run.config_identity or {}).get("supervisor_route"),
+        "context_source": (run.config_identity or {}).get("context_source"),  # §24: not a ContextPack (stated)
         "artifact": {"id": artifact.id, "kind": artifact.kind, "content_hash": artifact.content_hash} if artifact else None,
     }
 

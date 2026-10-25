@@ -2,7 +2,14 @@
 # DLY AEOS development mode on macOS/Linux: starts the control plane with `aeos serve --dev` on
 # 127.0.0.1:8787 (allows the Vite origin, enables API docs) and the Vite dev server on
 # 127.0.0.1:5173 (proxies /api to 8787). Ctrl+C stops both. Loopback only (master section 06).
-# bash 3.2 compatible.   ./scripts/dev.sh [PORT] [VITE_PORT]
+# bash 3.2 compatible.   ./scripts/dev.sh [PORT] [VITE_PORT]   (or: sh scripts/dev.sh ...)
+if [ -z "${BASH_VERSION:-}" ]; then
+  if ! command -v bash >/dev/null 2>&1; then
+    echo "bash is required (macOS ships bash 3.2; on Linux install it with your package manager)." >&2
+    exit 1
+  fi
+  exec bash "$0" "$@"
+fi
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -12,7 +19,7 @@ PY=".venv/bin/python"
 AEOS=".venv/bin/aeos"
 
 if [ ! -x "$AEOS" ]; then
-  echo "Virtual environment not found. Run: ./scripts/bootstrap.sh" >&2
+  echo "Virtual environment not found. Run: ./scripts/bootstrap.sh (or: sh scripts/bootstrap.sh)" >&2
   exit 1
 fi
 if [ ! -d frontend/node_modules ]; then

@@ -26,6 +26,8 @@ interface Suite {
   cases: { case_id: string; kind: string; title: string; expected: string; acceptance: string[] }[];
   integrity: string;
   results: string;
+  /** §21: what a worker can reach (definitions readable in a self-build platform clone; grader drift refused) */
+  held_out_scope?: { worker_can_read_definitions: string; note: string };
 }
 
 interface Experiment {
@@ -503,6 +505,7 @@ export default function EvaluationPage() {
         source={suites.data?.source ?? "eval_suites / eval_runs"}
         checkedAt={suites.data?.checked_at ?? null}
         evidenceLimit="Peringkat hanya dari EvalRun tercatat; unit evaluasi = AIConfiguration lengkap; tidak ada juara yang dinyatakan tanpa hasil"
+        relatedDecisionsHref="/decisions?target_type=eval_workload_weights"
       />
       <Tabs
         tabs={[
@@ -548,7 +551,7 @@ export default function EvaluationPage() {
                           <StatusBadge status="DESIGN" />
                         </summary>
                         <p className="mt-2 text-sm">{s.description}</p>
-                        <KeyValue items={[["Isolasi", s.isolation], ["Acceptance suite", <ul key="a" className="list-disc pl-5">{s.acceptance.map((a) => <li key={a}>{a}</li>)}</ul>], ["Hash", <Mono key="h">{shortHash(s.content_hash, 16)}</Mono>], ["Hasil", s.results]]} />
+                        <KeyValue items={[["Isolasi", s.isolation], ["Acceptance suite", <ul key="a" className="list-disc pl-5">{s.acceptance.map((a) => <li key={a}>{a}</li>)}</ul>], ["Hash", <Mono key="h">{shortHash(s.content_hash, 16)}</Mono>], ["Hasil", s.results], ...(s.held_out_scope ? [["Held-out", s.held_out_scope.note] as [string, string]] : [])]} />
                         <Table
                           rows={s.cases}
                           rowKey={(c) => c.case_id}

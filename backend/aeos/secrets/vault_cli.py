@@ -30,7 +30,8 @@ def _settings():
     return get_settings()
 
 
-def _observe(status: str, version: str | None, detail: dict, *, dimension: str = "installation") -> None:
+def _observe(status: str, version: str | None, detail: dict, *, dimension: str = "installation",
+             identity: str | None = None) -> None:
     """Best-effort inventory observation (installation / functional dimension)."""
     try:
         from aeos.cli import ensure_database
@@ -41,6 +42,7 @@ def _observe(status: str, version: str | None, detail: dict, *, dimension: str =
         with session_scope() as s:
             record_observation(s, component_id="openbao", dimension=dimension, status=status,
                                observer="aeos.secrets.vault_cli", observed_version=version, detail=detail,
+                               observed_identity=identity,
                                ttl_seconds=None if dimension == "installation" else 7 * 86400)
     except (ImportError, ModuleNotFoundError):
         pass
@@ -91,9 +93,17 @@ def install_cmd(
             _err(f"install failed, nothing installed: {exc}")
             _observe("INSTALL_FAILED", plan["version"], {"error": str(exc)[:200]})
             raise typer.Exit(1) from exc
-    _observe("INSTALLED", result["version"], {k: result[k] for k in ("archive_sha256", "binary_sha256", "verification")})
+    _observe("INSTALLED", result["version"],
+             {k: result[k] for k in ("archive_sha256", "binary_sha256", "verification", "digest_status")},
+             identity=result["binary_digest"])  # the executable digest the inventory drift check compares
     typer.echo(f"Installed OpenBao {result['version']} -> {result['installed']}")
     typer.echo("Signature (GPG/sigstore) NOT verified; SHA256 matched checksums.txt.")
+    if result["digest_status"] == "MATCH":
+        typer.echo("Binary digest matched the install-manifest approved_digest.")
+    else:
+        typer.secho(f"Binary digest NOT checked against a reviewed digest ({result['digest_status']}): record "
+                    f"approved_digest {result['binary_digest']} for this pin in install-manifest/manifest.yaml "
+                    "through a reviewed PR.", fg="yellow")
     typer.echo("Next: aeos vault start  then  aeos vault init")
 
 

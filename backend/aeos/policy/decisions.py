@@ -380,7 +380,7 @@ def expire_due_decisions(session: Session) -> int:
     """Persist EXPIRED for ACTIVE decisions past ``expires_at`` (idempotent reconciliation)."""
     now = utcnow()
     due = [d for d in session.scalars(select(Decision).where(Decision.status == "ACTIVE", Decision.expires_at.is_not(None)))
-           if ensure_aware(d.expires_at) is not None and ensure_aware(d.expires_at) <= now]
+           if (exp := ensure_aware(d.expires_at)) is not None and exp <= now]
     for d in due:
         _set_lifecycle(session, d, status="EXPIRED", reason="expires_at reached", actor_type="system", actor_id="policy")
     _after_lifecycle(session, due)

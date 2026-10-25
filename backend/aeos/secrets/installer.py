@@ -1,10 +1,12 @@
 """OpenBao user-level install from the official GitHub release (§07 bootstrap order 3, §08 remedy).
 
-The plan is shown before anything happens (source, version, asset, checksum file, target, privilege,
-cost, rollback) and an explicit confirmation is required. Integrity: SHA256 of the asset must match
-``checksums.txt`` of the same release. Authenticity (GPG ``.gpgsig`` / sigstore bundle) is NOT
-verified here — that limitation is printed in the plan and recorded as NOT-PROVEN. Never
-system-wide, never elevated, no package manager, no PATH changes.
+The plan is shown before anything happens (source, version, asset, checksum file, digest requirement,
+target, privilege, cost, rollback) and an explicit confirmation is required. Integrity: SHA256 of the
+asset must match ``checksums.txt`` of the same release, and - when the owner recorded one for the
+manifest pin - the extracted ``bao`` binary must equal the install-manifest ``approved_digest`` before
+anything is written. Authenticity (GPG ``.gpgsig`` / sigstore bundle of checksums.txt) is NOT verified
+here — that limitation is printed in the plan and recorded as NOT-PROVEN. Never system-wide, never
+elevated, no package manager, no PATH changes.
 """
 
 from __future__ import annotations
@@ -79,8 +81,10 @@ def _check_host(url: str) -> None:
         raise InstallError(f"refusing download from non-official host {host!r}")
 
 
-def manifest_pin(root: Path | None = None) -> str | None:
-    """The owner-approved OpenBao version pin from the reviewed install manifest (§07), or None."""
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _manifest_entry(root: Path | None = None) -> dict[str, Any] | None:
     import yaml
 
     from aeos.core.paths import repo_root
@@ -92,11 +96,48 @@ def manifest_pin(root: Path | None = None) -> str | None:
         return None
     for comp in data.get("components") or []:
         if isinstance(comp, dict) and comp.get("component_id") == "openbao":
-            pin = comp.get("approved_pin")
-            if isinstance(pin, dict):
-                pin = pin.get("version")
-            return str(pin).lstrip("v") if pin and _VERSION.match(str(pin).lstrip("v")) else None
+            return comp
     return None
+
+
+def manifest_pin(root: Path | None = None) -> str | None:
+    """The owner-approved OpenBao version pin from the reviewed install manifest (§07), or None."""
+    comp = _manifest_entry(root)
+    if comp is None:
+        return None
+    pin = comp.get("approved_pin")
+    if isinstance(pin, dict):
+        pin = pin.get("version")
+    return str(pin).lstrip("v") if pin and _VERSION.match(str(pin).lstrip("v")) else None
+
+
+def manifest_digest(root: Path | None = None) -> str | None:
+    """The owner-approved digest (``sha256:<hex>`` of the ``bao`` executable) that belongs to the manifest pin, or
+    None when the owner has not recorded one. A malformed value is refused rather than ignored (fail closed)."""
+    comp = _manifest_entry(root)
+    raw = (comp or {}).get("approved_digest")
+    if not raw:
+        return None
+    digest = str(raw).strip().lower()
+    if not _DIGEST.match(digest):
+        raise InstallError(f"install-manifest approved_digest for openbao is not 'sha256:<64 hex>': {raw!r}")
+    return digest
+
+
+def digest_requirement(version: str, root: Path | None = None) -> dict[str, Any]:
+    """§07 "installer dipin ke versi/digest dan diverifikasi": what the install will hold the binary to. The manifest
+    digest applies only to the manifest pin (an explicit other version is the owner's choice and has no digest)."""
+    pin = manifest_pin(root)
+    if pin is None or pin != version.lstrip("v"):
+        return {"approved_digest": None, "digest_status": "NOT_APPLICABLE",
+                "digest_note": "version differs from the manifest approved_pin; no reviewed digest for it"}
+    digest = manifest_digest(root)
+    if digest is None:
+        return {"approved_digest": None, "digest_status": "NOT_RECORDED",
+                "digest_note": "owner has not recorded approved_digest for this pin in install-manifest/manifest.yaml "
+                               "(reviewed PR); only checksums.txt of the release is checked"}
+    return {"approved_digest": digest, "digest_status": "REQUIRED",
+            "digest_note": "the extracted bao binary must equal the manifest approved_digest before it is installed"}
 
 
 def install_command(root: Path | None = None) -> str:
@@ -125,7 +166,7 @@ def resolve_release(client: httpx.Client, version: str | None = None) -> Release
                    published_at=data.get("published_at"))
 
 
-def install_plan(settings: Settings, release: Release) -> dict[str, Any]:
+def install_plan(settings: Settings, release: Release, *, manifest_root: Path | None = None) -> dict[str, Any]:
     os_name, arch = platform_target()
     name = asset_name(release.version, os_name, arch)
     if name not in release.assets:
@@ -133,13 +174,16 @@ def install_plan(settings: Settings, release: Release) -> dict[str, Any]:
     if "checksums.txt" not in release.assets:
         raise InstallError(f"release {release.tag} has no checksums.txt")
     target = install_dir(settings) / binary_name()
+    digest = digest_requirement(release.version, manifest_root)
     return {
         "operation": "install OpenBao server binary (user level)",
         "source": release.html_url, "version": release.version, "published_at": release.published_at,
         "asset": name, "asset_url": release.assets[name], "checksums_url": release.assets["checksums.txt"],
         "target": str(target), "privilege": "current user only (no admin/sudo, no PATH change, no service)",
         "cost": "none", "network": "github.com release download only",
-        "verification": "SHA256 vs checksums.txt of the same release",
+        "verification": "SHA256 vs checksums.txt of the same release"
+                        + (" + bao binary vs install-manifest approved_digest" if digest["approved_digest"] else ""),
+        **digest,
         "not_verified": "GPG/sigstore signature of checksums.txt (authenticity NOT-PROVEN)",
         "rollback": f"delete {target} (and {settings.data_dir / 'openbao'} if the server was initialised)",
         "evidence": "inventory observation openbao/installation with version + sha256",
@@ -202,6 +246,14 @@ def install(settings: Settings, client: httpx.Client, plan: dict[str, Any]) -> d
     if actual != expected:
         raise InstallError(f"SHA256 mismatch for {plan['asset']}: expected {expected}, got {actual} - nothing installed")
     binary = _extract_binary(archive, plan["asset"])
+    binary_digest = "sha256:" + hashlib.sha256(binary).hexdigest()
+    approved = plan.get("approved_digest")
+    if approved and binary_digest != str(approved).lower():
+        # §07: the reviewed digest is checked BEFORE anything is written, not only by post-install drift
+        raise InstallError(f"bao binary digest {binary_digest} differs from the install-manifest approved_digest "
+                           f"{approved} - nothing installed")
+    if plan.get("digest_status") == "REQUIRED" and not approved:
+        raise InstallError("the plan requires an approved digest but carries none - nothing installed")
     target = Path(plan["target"])
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + ".partial")
@@ -210,5 +262,7 @@ def install(settings: Settings, client: httpx.Client, plan: dict[str, Any]) -> d
         os.chmod(tmp, stat.S_IRWXU)  # owner-only rwx: user-level install
     tmp.replace(target)
     return {"installed": str(target), "version": plan["version"], "archive_sha256": actual,
-            "binary_sha256": hashlib.sha256(binary).hexdigest(), "verification": "sha256-checksums",
+            "binary_sha256": binary_digest.split(":", 1)[1], "binary_digest": binary_digest,
+            "verification": "sha256-checksums" + ("+approved-digest" if approved else ""),
+            "digest_status": "MATCH" if approved else plan.get("digest_status") or "NOT_RECORDED",
             "signature_verified": False}

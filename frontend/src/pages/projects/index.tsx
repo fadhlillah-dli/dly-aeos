@@ -73,6 +73,7 @@ export default function ProjectsPage() {
         source="AEOS control plane — proyek, referensi repository, registri integrasi"
         checkedAt={q.data?.checked_at ?? null}
         evidenceLimit="Status repository = lookup provider terakhir; integrasi = konfigurasi saja (koneksi dibuktikan Doctor)"
+        relatedDecisionsHref="/decisions?target_type=project"
         mode={q.data?.mode}
         actions={
           <Button variant="primary" onClick={() => nav("/projects/new")} disabled={!isAdmin} title={isAdmin ? undefined : "Hanya SUPER_ADMIN"}>

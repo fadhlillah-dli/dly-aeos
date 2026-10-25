@@ -198,20 +198,64 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
 * **Pipeline reference (§31):** set `config.gate_G1 ... gate_G5` on the project's `ci` integration
   to exact CI job names (template: `blueprints/pipeline-reference.yaml`); otherwise CI jobs are
   classified by name heuristics and the evidence says `NAME_HEURISTIC`.
-* **Database migrations of managed projects:** the verifier does not run upgrade/downgrade/restore
-  round-trips (`migration_rollback` NOT-PROVEN). Run them in the project's own pipeline with a
-  dedicated migration credential that is separate from the runtime credential, and keep the result
-  as CI evidence.
-* **Verifier isolation:** every VERIFICATION_REPORT states `verifier_isolation: WEAK` (same OS user,
-  no container/egress enforcement) until a sandboxed runner exists; the Gate panel shows it next to
-  the verifier status.
+* **Database migrations:** when a change touches a migration/schema path and the candidate has an
+  Alembic tree (`env.py` + `versions/`), the verifier now runs an upgrade -> downgrade(base) ->
+  upgrade round-trip and reopens the database (restore) as candidate code through its runner, and
+  `migration_rollback` is PASS/FAIL (not merely NOT-PROVEN). A candidate without an Alembic tree, or
+  a managed project whose migrations run only in its own pipeline, is a **blocking** NOT-PROVEN (G2
+  needs a migration/rollback test per migration change) unless the TaskSpec sets
+  `verifier_policy.migration_roundtrip: optional`; run those in the project's pipeline with a dedicated
+  migration credential separate from the runtime credential.
+* **Verifier isolation (§20 isolated runner):** the verifier executes candidate code (the trusted
+  suite against the candidate, the candidate's own tests, the migration round-trip) through one of two
+  runners, stated on every VERIFICATION_REPORT (`verifier_isolation` / `verifier_runner`) and shown in
+  the Gate panel next to the verifier status, and surfaced by Doctor `evidence.verifier`:
+  * `CONTAINER` - selected automatically when this host has a fresh PASS **container** containment
+    report for the domain profile (the same proof that admits container workers, `aeos worker
+    containment --kind container`) **and** the pinned verifier image is built (`docker build -f
+    sandbox/verifier.Dockerfile -t dly-aeos-verifier:<controller version> .`). Each step runs
+    `docker run --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pull
+    never` as a non-root user with only the run directory mounted (the trusted controller `backend/`
+    read-only for the expected-id collection step alone); it cannot reach the data DB, the
+    OS keyring, `gh`/git credentials, the host home, an SSH agent or the docker socket.
+  * `WEAK` (process) - the fallback when the container boundary is not proven here. Candidate code
+    runs as the controller's OS user with a scrubbed, **redirected** environment
+    (`HOME`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA`/`XDG_*`/platformdirs `WIN_PD_OVERRIDE_*`/
+    `GH_CONFIG_DIR`/docker/npm/claude config into the empty run home, null keyring backend, no git system/global config or credential helper,
+    no SSH agent socket, no D-Bus session bus). That stops credential discovery **through the
+    environment** only; a deliberately malicious candidate could still read a file by absolute path or
+    call the OS credential API directly. The residual risk is recorded on the report (`residual_risks`)
+    and on Doctor `evidence.verifier`; it is never presented as isolated. OFFICE verifications, a
+    worker run that executed in the container sandbox (isolation is never downgraded) and a TaskSpec
+    `verifier_policy.isolated_runner: required` are BLOCKED rather than run on this runner. The run
+    directory is a private temp directory outside the data dir, so no candidate-visible path leads to
+    the live DB.
+  Either way, writes made by candidate code during a verification to the controller checkout, the
+  controller interpreter's site-packages (the editable-install finder/`.pth`) or the DB trust tables
+  (decisions, policy, routes, budgets, TaskSpecs, acceptance/evidence, sessions, capability grants,
+  projects/integrations, eval suites, containment proofs/write enablement/flags) and the SQLite schema (tables,
+  indexes, append-only/immutability triggers) are detected and the run is
+  QUARANTINED for the owner's special review with a HIGH alert.
 * **Specialist reviews:** a UI change (or a frontend/UX role) needs the A11Y reviewer, data/AI roles or
   CONFIDENTIAL/RESTRICTED data the PRIVACY reviewer, CI/IaC or operations roles the SRE reviewer. Request
   them with "Review wajib (spesialis)" on the run list, `POST /api/runs/<run>/reviews/batch`, or
   `aeos verify review <run> --kind A11Y|PRIVACY|SRE|SECURITY`. A run has a review budget
   (`reviewer_policy.max_reviews_per_run`, default 12; quota waits do not count).
-* **OFFICE delivery:** NOT_APPLICABLE — no Bitbucket push/PR/Pipelines adapter and no company
-  authorisation; `prepare-pr` refuses with `OFFICE_DELIVERY_NOT_AVAILABLE`.
+* **OFFICE delivery (Bitbucket Cloud, ADR-0111):** DISABLED by default. It becomes AVAILABLE only with
+  (1) a company-authorisation POLICY decision on `office_policy` listing `bitbucket` whose
+  `office_policy.atlassian_deployment` is `"CLOUD"` (the interlock needs it too), (2) the project
+  integration `bitbucket/code` with `root_id=<workspace>/<repo_slug>` and `config={"enabled": true}`, (3) the
+  registered Bitbucket repository VERIFIED (`POST
+  /api/repositories/<id>/verify`), (4) `office/bitbucket` stored: `{"access_token": "..."}` (repository access
+  token) or `{"email": "...", "api_token": "..."}` (Atlassian API token; optional `git_username`), and (5)
+  `CAN_USE_OFFICE_INTEGRATIONS` READY. Data Center (`atlassian_deployment: "DATA_CENTER"`) is `NOT_SUPPORTED`. The broker then pushes the accepted head
+  sha-pinned to `aeos/*` and opens a draft PR; nothing merges, declines or approves. Pipelines/commit-status CI
+  becomes provider-ci evidence (pipeline reference on `bitbucket-pipelines/ci`: step names per gate). Without
+  Bitbucket Premium's "enforce merge checks" the merge gate is NOT_ENFORCEABLE. G7 release approvers for OFFICE:
+  `auth_scope={"bitbucket_accounts": ["<Atlassian account id>"]}`. Live tenant behaviour is NOT-PROVEN (M5).
+* **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111):** activate the free route as TRIAL (owner decision),
+  then `aeos broker probe-route <route_key>` / `POST /api/broker/routes/<key>/feasibility` sends one synthetic
+  PUBLIC prompt and records PROBE evidence; the route never serves worker tasks and its status is unchanged.
 
 ## Worker runtime (sandbox, engine contract, attribution)
 

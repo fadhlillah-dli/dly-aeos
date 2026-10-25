@@ -23,6 +23,9 @@ from tests.unit.test_routing_fakes import install_fakes
 from tests.unit.test_routing_service import DS, GLM, approve, task
 
 LIMITS = {"max_attempts": 2, "max_minutes": 30, "max_cost_usd": 0}
+# §44 DecisionRecord for adopting an evaluated route (APPROVED activation)
+RECORD = {"options": ["keep TRIAL", "APPROVED"], "goal": "production worker route for small slices",
+          "cost_quality_tradeoff": "free route; acceptance on the held-out suite", "invalidate_if": "config changes"}
 BEAM = "opencode-zen/beam-free"
 NEMO = "opencode-zen/nemotron-3.5-lightning-free"
 
@@ -94,11 +97,16 @@ def test_approved_needs_test_evidence_of_exactly_this_configuration(world):
                                    expected_config_hash=h, eval_run_ids=[bad.id])
         assert why in str(ei.value.details["problems"])
     good = recorded_run(db, glm, accepted=9, total=10)
+    with pytest.raises(ValidationFailed) as ei:  # §44 (re-audit): adopting a routing result needs a DecisionRecord
+        service.activate_route(db, GLM, actor_user_id="owner", mode="APPROVED", rationale="promote to production",
+                               expected_config_hash=h, eval_run_ids=[good.id], decision_record={"goal": "x"})
+    assert ei.value.code == "DECISION_RECORD_INCOMPLETE" and glm.status == "TRIAL" and glm.config_hash == h
     route, decision = service.activate_route(db, GLM, actor_user_id="owner", mode="APPROVED",
                                              rationale="promote to production", expected_config_hash=h,
-                                             eval_run_ids=[good.id])
+                                             eval_run_ids=[good.id], decision_record=RECORD)
     assert route.status == "APPROVED" and decision.kind == "ROUTE_ACTIVATION" and decision.target_hash == h
     assert decision.details["eval_run_ids"] == [good.id]
+    assert decision.details["decision_record"] == {**RECORD, "evidence_ids": [good.id]}
     assert decision.details["rollback_target"]["action"] == "DISABLE_ROUTE"  # first approved configuration
     assert decision.details["previous_config_hash"] == h and decision.details["config_snapshot"]["route_key"] == GLM
     entry = route.eval_results["feature-implementer"]
@@ -114,7 +122,7 @@ def test_eval_result_drives_selection_only_after_the_decision_and_never_after_a_
     run = recorded_run(db, glm, accepted=10, total=10)
     assert select_route(db, task=task()).route.route_key == DS  # a recorded result alone never changes routing
     service.activate_route(db, GLM, actor_user_id="owner", mode="APPROVED", rationale="promote to production",
-                           expected_config_hash=glm.config_hash, eval_run_ids=[run.id])
+                           expected_config_hash=glm.config_hash, eval_run_ids=[run.id], decision_record=RECORD)
     sel = select_route(db, task=task())
     assert sel.route.route_key == GLM and "eval" in sel.reason
     glm.resolved_version = "glm-5.3-flash-1101"  # provider changed the model behind the alias
@@ -145,13 +153,14 @@ def test_second_approved_configuration_records_the_previous_one_as_rollback_targ
     glm = trial(db, GLM)
     first = recorded_run(db, glm)
     _, d1 = service.activate_route(db, GLM, actor_user_id="owner", mode="APPROVED", rationale="promote to production",
-                                   expected_config_hash=glm.config_hash, eval_run_ids=[first.id])
+                                   expected_config_hash=glm.config_hash, eval_run_ids=[first.id], decision_record=RECORD)
     glm.context_window = 131072  # catalog-observed change -> new configuration
     service.refresh_config_hash(db, glm, reason="context window observed")
     glm = trial(db, GLM)
     second = recorded_run(db, glm)
     _, d2 = service.activate_route(db, GLM, actor_user_id="owner", mode="APPROVED", rationale="promote the new config",
-                                   expected_config_hash=glm.config_hash, eval_run_ids=[second.id])
+                                   expected_config_hash=glm.config_hash, eval_run_ids=[second.id],
+                                   decision_record=RECORD)
     rb = d2.details["rollback_target"]
     assert rb["action"] == "RESTORE_PREVIOUS_CONFIGURATION" and rb["decision_id"] == d1.id
     assert rb["config_hash"] == d1.target_hash and rb["config_snapshot_in_decision"] is True
@@ -467,6 +476,36 @@ def test_supervisor_alias_change_is_reported_as_needing_evaluation(world):
     assert summary["state"] == "NEEDS_EVALUATION" and "keputusan pemilik" in summary["note"]
 
 
+def test_supervisor_harness_version_and_effort_are_part_of_the_route_identity(world):
+    """§23 (re-audit): the Claude Code version was never written to the supervisor routes and no mode/thinking
+    parameter was recorded, so an upgrade or an effort level was not a configuration change of the route."""
+    from aeos.routing.router import _eval_summary, route_view
+
+    db = world.db
+    opus = service.get_route(db, "claude-native/opus")
+    assert opus.mode_params["effort"] == "CLI_DEFAULT"  # stated by the seed: the bridge passes no --effort
+    out = service.observe_supervisor_call(db, model="opus", engine_version="2.1.301", effort=None)
+    assert out == {"route_key": "claude-native/opus", "changed": False}  # first binding is not a change
+    assert opus.harness_version == "2.1.301" and opus.config_hash == service.compute_config_hash(opus)
+    bound = opus.config_hash
+    assert service.observe_supervisor_call(db, model="claude-opus-5-5", engine_version="2.1.301")["changed"] is False
+    assert opus.config_hash == bound
+    service.observe_supervisor_resolution(db, route_key="claude-native/opus", requested="opus", resolved="claude-opus-5-5")
+    bound = opus.config_hash
+    upgraded = service.observe_supervisor_call(db, model="opus", engine_version="2.2.0")
+    assert upgraded["changed"] is True and "harness claude-code 2.1.301 -> 2.2.0" in upgraded["reasons"]
+    assert opus.config_hash != bound and opus.config_changed_at is not None
+    assert _eval_summary(opus)["state"] == "NEEDS_EVALUATION"
+    bound = opus.config_hash
+    effort = service.observe_supervisor_call(db, model="opus", engine_version="2.2.0", effort="high")
+    assert effort["changed"] is True and opus.mode_params["effort"] == "high" and opus.config_hash != bound
+    view = route_view(db, opus, SimpleNamespace(active_domain=None))
+    assert view["mode_thinking"]["effort"] == "high" and view["harness_version"] == "2.2.0"
+    worker = route_view(db, service.get_route(db, DS), SimpleNamespace(active_domain=None))
+    assert worker["mode_thinking"]["reasoning"] == "HARNESS_DEFAULT"
+    assert worker["mode_thinking"]["bound_in"] == ["harness_version", "context_strategy"]
+
+
 def test_route_view_reports_binding_execution_path_and_restrictions(world):
     from aeos.routing.router import route_view
 
@@ -476,7 +515,9 @@ def test_route_view_reports_binding_execution_path_and_restrictions(world):
     view = route_view(db, service.get_route(db, DS), principal)
     assert view["runtime_binding"]["status"] == "BOUND" and view["execution_path"]["status"] == "WORKER_RUNTIME"
     arena = route_view(db, service.get_route(db, NEMO), principal)
-    assert arena["execution_path"]["status"] == "NOT_WIRED" and arena["terms_restriction"]
+    # ADR-0111: ARENA never serves worker tasks; its feasibility runs only through the broker probe
+    assert arena["execution_path"]["status"] == "FEASIBILITY_PROBE_ONLY" and arena["terms_restriction"]
+    assert "/feasibility" in arena["execution_path"]["note"]
     assert route_view(db, service.get_route(db, BEAM), principal)["region_restricted"] is True
     laguna = route_view(db, service.get_route(db, "openrouter/poolside/laguna-s-2.1:free"), principal)
     assert laguna["terms_unknown"] == ["may_use_inputs_for_training"] and "UNKNOWN" in laguna["terms_restriction"]

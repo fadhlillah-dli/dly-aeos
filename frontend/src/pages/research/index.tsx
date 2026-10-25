@@ -374,6 +374,7 @@ export default function ResearchPage() {
         source={cands.data?.source ?? "research_entries"}
         checkedAt={cands.data?.checked_at ?? null}
         evidenceLimit={cands.data?.evidence_limit ?? "Tahap riset bukan bukti instalasi/koneksi/penggunaan"}
+        relatedDecisionsHref="/decisions?target_type=change_proposal"
         mode="DESIGN"
         actions={<RelatedLinks subject="DLY AEOS Research & Technology Registry" />}
       />

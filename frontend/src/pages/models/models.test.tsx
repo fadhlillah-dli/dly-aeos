@@ -197,11 +197,20 @@ describe("Models & Routes page", () => {
     const submit = within(dialog).getByRole("button", { name: /Catat keputusan ROUTE_ACTIVATION/ });
     expect(submit).toBeDisabled();
     fireEvent.change(within(dialog).getByPlaceholderText("uuid EvalRun"), { target: { value: "run-1, run-2" } });
+    expect(submit).toBeDisabled(); // §44: adopting a routing result also needs the DecisionRecord
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Opsi yang dipertimbangkan/ }), { target: { value: "tetap TRIAL\nAPPROVED" } });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Tujuan/ }), { target: { value: "rute produksi slice kecil" } });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Trade-off/ }), { target: { value: "gratis; lulus suite" } });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Batal berlaku bila/ }), { target: { value: "konfigurasi berubah" } });
     expect(submit).not.toBeDisabled();
     fireEvent.click(submit);
     await waitFor(() => expect(calls.some((c) => c.url.endsWith("/activate") && c.method === "POST")).toBe(true));
     const sent = JSON.parse(calls.find((c) => c.url.endsWith("/activate"))!.body!);
-    expect(sent).toMatchObject({ mode: "APPROVED", eval_run_ids: ["run-1", "run-2"] });
+    expect(sent).toMatchObject({
+      mode: "APPROVED",
+      eval_run_ids: ["run-1", "run-2"],
+      decision_record: { options: ["tetap TRIAL", "APPROVED"], goal: "rute produksi slice kecil", invalidate_if: "konfigurasi berubah" },
+    });
   });
 
   it("UNKNOWN data terms allow PUBLIC only until the owner records their own reading (§23)", async () => {
@@ -279,5 +288,27 @@ describe("Models & Routes page", () => {
     expect(await within(drawer).findByText("Perlu evaluasi ulang")).toBeInTheDocument();
     expect(within(drawer).getByText(/policy_version changed since activation/)).toBeInTheDocument();
     expect(within(drawer).getByText("Belum tersambung")).toBeInTheDocument();
+  });
+
+  it("labels an arena route as feasibility-probe only, never as a worker path", async () => {
+    const arena = route({
+      execution_path: { status: "FEASIBILITY_PROBE_ONLY", note: "Uji kelayakan lewat probe broker" },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? "GET" });
+        let body: unknown = {};
+        if (url.startsWith("/api/claude/status")) body = STATUS;
+        else if (url === "/api/routes") body = { ...ROUTES, items: [arena] };
+        else if (url.startsWith("/api/routes/")) body = { ...arena, config: DS_CONFIG, decisions: [], quota_states: [] };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByText("DeepSeek V4.1 Flash Free"));
+    const drawer = await screen.findByRole("dialog", { name: /Detail rute/ });
+    expect(await within(drawer).findByText("Hanya probe kelayakan (bukan task worker)")).toBeInTheDocument();
+    expect(within(drawer).getByText("Uji kelayakan lewat probe broker")).toBeInTheDocument();
   });
 });

@@ -50,27 +50,7 @@ def _last_used(session: Session, route_key: str, principal: Principal) -> dict[s
 
 
 def _eval_summary(r: ModelRoute) -> dict[str, Any]:
-    roles: dict[str, Any] = {}
-    stale: list[str] = []
-    for role, entry in (r.eval_results or {}).items():
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("config_hash") != r.config_hash:
-            stale.append(role)
-            continue
-        roles[role] = {k: entry.get(k) for k in ("score", "score_basis", "runs", "accepted", "suite", "at",
-                                                  "sample_size", "ci95", "run_ids", "decision_id")}
-    state = "DIUJI" if roles else "BELUM_DIUJI"
-    note = "Hasil konfigurasi lama tidak diwariskan." if stale else ""
-    if not roles and (stale or (r.pool == "SUPERVISOR" and r.config_changed_at is not None)):
-        # §02 "a version change is never silent and needs evaluation": the changed configuration is untested.
-        state = "NEEDS_EVALUATION"
-        note = ("Konfigurasi berubah (mis. alias kini me-resolve ke versi model lain); hasil lama tidak diwariskan "
-                "dan konfigurasi baru belum dievaluasi.")
-        if r.pool == "SUPERVISOR":
-            note += (" Planning tetap memakai versi baru (uji penerimaan 1.31 menetapkan perilaku ini); evaluasi "
-                     "baseline planning untuk versi ini belum tercatat - keputusan pemilik diperlukan.")
-    return {"state": state, "roles": roles, "stale_roles": stale, "note": note}
+    return service.eval_summary(r)
 
 
 def _active_decision_view(session: Session, r: ModelRoute) -> dict[str, Any] | None:
@@ -100,9 +80,21 @@ def _execution_path(r: ModelRoute) -> dict[str, Any]:
         return {"status": "NATIVE_BRIDGE", "note": "Hanya lewat binary claude resmi (planning/review)."}
     if r.pool in service.WORKER_EXECUTED_POOLS:
         return {"status": "WORKER_RUNTIME", "note": "Dijalankan worker runtime lewat broker."}
+    probe_pools: tuple[str, ...] = ()
+    try:
+        from aeos.broker import facade as broker_facade
+
+        probe_pools = broker_facade.PROBE_POOLS
+    except ImportError:  # broker unavailable: nothing can execute
+        pass
+    if r.pool in probe_pools:
+        return {"status": "FEASIBILITY_PROBE_ONLY",
+                "note": f"Pool {r.pool}: tidak melayani task worker. Uji kelayakan lewat probe broker (satu prompt "
+                        "sintetis PUBLIC, route gratis berstatus TRIAL/APPROVED oleh pemilik): POST /api/broker/routes/"
+                        f"{r.route_key}/feasibility atau aeos broker probe-route (ADR-0111). EvalRun ke pool ini "
+                        "belum tersambung."}
     return {"status": "NOT_WIRED",
-            "note": f"Pool {r.pool}: broker hanya melayani route WORKER, sehingga uji kelayakan/arena untuk route ini "
-                    "belum dapat dieksekusi di build ini (perubahan broker = protected path)."}
+            "note": f"Pool {r.pool}: broker tidak melayani route ini (bukan task worker, bukan probe kelayakan)."}
 
 
 def route_view(session: Session, r: ModelRoute, principal: Principal,
@@ -123,7 +115,8 @@ def route_view(session: Session, r: ModelRoute, principal: Principal,
         "context_window": r.context_window, "supports_tools": r.supports_tools, "status": r.status, "mode": r.mode,
         "origin": r.origin, "evidence_level": r.evidence_level, "availability": r.availability,
         "availability_checked_at": _iso(r.availability_checked_at), "harness": r.harness,
-        "harness_version": r.harness_version, "tool_set": r.tool_set, "fallback_chain": r.fallback_chain,
+        "harness_version": r.harness_version, "mode_thinking": service.mode_thinking(r),
+        "tool_set": r.tool_set, "fallback_chain": r.fallback_chain,
         "priority": r.priority, "config_hash": r.config_hash, "config_changed_at": _iso(r.config_changed_at),
         "eval_summary": _eval_summary(r), "last_used": _last_used(session, r.route_key, principal),
         "active_decision": _active_decision_view(session, r),
@@ -159,6 +152,7 @@ def list_routes(db: DB, principal: CurrentPrincipal, pool: str | None = None, st
         "items": items,
         "source": "model_routes (seed DESIGN dari master §23 + katalog E1 + observasi bridge)",
         "checked_at": _iso(last.created_at) if last else (_iso(max(checks)) if checks else None),
+        "generated_at": _iso(utcnow()),  # when this registry view was read (checked_at null = never refreshed)
         "catalog_refresh": ({"at": _iso(last.created_at), "status": last.status, "results": last.results}
                             if last else None),
         # DESIGN as long as any seeded design row is listed: a few catalog-discovered LIVE rows never
@@ -250,6 +244,8 @@ class ActivateBody(BaseModel):
     region: str | None = Field(default=None, max_length=32)
     tool_set: list[str] | None = Field(default=None, max_length=20)
     eval_run_ids: list[str] | None = Field(default=None, max_length=20)
+    # §44 DecisionRecord (options, goal, evidence_ids, cost_quality_tradeoff, invalidate_if): required for APPROVED
+    decision_record: dict[str, Any] | None = None
 
 
 @router.post("/api/routes/{route_key:path}/activate")
@@ -260,7 +256,7 @@ def activate(route_key: str, body: ActivateBody, db: DB, principal: AdminPrincip
         budget_decision_id=body.budget_decision_id, expires_in_days=body.expires_in_days,
         terms_reviewed=body.terms_reviewed, terms_note=body.terms_note,
         terms_record=body.terms_record.model_dump() if body.terms_record else None, region=body.region,
-        tool_set=body.tool_set, eval_run_ids=body.eval_run_ids,
+        tool_set=body.tool_set, eval_run_ids=body.eval_run_ids, decision_record=body.decision_record,
     )
     audit.record(db, actor_type="user", actor_id=principal.user.id, action="route.activate",
                  target_type=service.TARGET_TYPE, target_id=route.route_key, domain=Domain.PERSONAL.value,

@@ -164,7 +164,7 @@ def schema_sample_content(name: str = "Contoh App") -> dict[str, Any]:
         "runbooks": [{"key": "restart", "title": "Restart", "purpose": "Pulihkan server lokal yang macet"}],
         "monitoring": ["Jumlah error 5xx"], "logging": "Log aplikasi lokal 14 hari", "alerting": ["5xx > 5/menit"],
         "backup": {"scope": "File SQLite", "frequency": "Harian", "retention": "7 hari",
-                   "restore_procedure": "Salin file backup"},
+                   "restore_procedure": "Salin file backup", "storage": ""},
         "maintenance": ["Vacuum SQLite bulanan"]})
     c["tasks"] = [schema_task("T1", "F1"), schema_task("T2", "F2", risk_class="R3", deps=["T1"])]
     c["assumptions"] = [{"statement": "Satu pengguna", "source": "brief"}]

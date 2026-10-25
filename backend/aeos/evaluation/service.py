@@ -88,6 +88,7 @@ def suite_view(s: EvalSuite) -> dict[str, Any]:
         "results": "Tidak ada hasil di-seed; hasil hanya dari EvalRun yang tercatat.",
         "data_classification": D.suite_data_classification(s.suite_key),
         "grader": D.GRADER_NOTE,
+        "held_out_scope": dict(D.HELD_OUT_SCOPE),
     }
 
 
@@ -229,7 +230,26 @@ def environment_fingerprint() -> dict[str, Any]:
         harness = "UNKNOWN"
     return {"os": platform.system() or "UNKNOWN", "python": f"{sys.version_info.major}.{sys.version_info.minor}",
             "controller": controller, "harness": f"opencode {harness}",
-            "sandbox": "process (WEAK) - the only launchable kind in this build"}
+            "sandbox": "process (WEAK) - the only launchable kind in this build",
+            "grader_fingerprint": grader_fingerprint()}
+
+
+def grader_fingerprint() -> str:
+    """§16/§21 "worker tidak mengubah grader/held-out tests": content hash of the controller's evaluation code on disk
+    (suite definitions, collector, metrics, gates). Recorded when a run is planned and re-checked before its result
+    is recorded: evaluation code changed in the controller checkout during a run (e.g. by verifier-executed candidate
+    code) is detected and the run is never recorded with it."""
+    from pathlib import Path
+
+    from aeos.core.hashing import sha256_bytes
+
+    root = Path(__file__).resolve().parent
+    try:
+        files = {p.relative_to(root).as_posix(): sha256_bytes(p.read_bytes()) for p in sorted(root.rglob("*.py"))
+                 if "__pycache__" not in p.parts}
+    except OSError:
+        return "UNKNOWN"
+    return content_hash(files)
 
 
 def conditions_of(suite: EvalSuite, limits: dict[str, Any], environment: dict[str, Any]) -> str:
@@ -328,6 +348,12 @@ def _num(v: Any) -> float | None:
     return None
 
 
+# Per-sample counts that only some sources record (the trusted collector derives false_claims/context_tokens; the
+# others have no producing record yet). Summed only over samples that recorded them; None when none did.
+OPTIONAL_SAMPLE_COUNTS = ("false_claims", "tool_failures", "merge_conflicts", "context_tokens", "coordination_tokens",
+                          "adjacent_regressions")
+
+
 def compute_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
     """§43 dimensions (+ §44 measures) computed by code from per-sample verifier/collector observations."""
     n = len(samples)
@@ -353,6 +379,12 @@ def compute_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
     def collected(key: str) -> int:
         return sum(1 for s in samples if _num(s.get(key)) is not None)
 
+    def optional(key: str) -> int | None:
+        # §34/§44: a measure no sample recorded is UNKNOWN (None), never a zero
+        return total(key) if collected(key) else None
+
+    unmeasured = sorted(k for k in OPTIONAL_SAMPLE_COUNTS if samples and not collected(k))
+
     def quality(key: str) -> float | None:
         vals = [x for s in samples if (x := _num((s.get("quality") or {}).get(key))) is not None]
         return round(statistics.fmean(vals), 4) if vals else None
@@ -360,26 +392,27 @@ def compute_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
     # An unsplit "regressions" count is treated as critical (conservative); adjacent ones are reported only.
     critical = total("regressions") + total("critical_regressions") + sum(
         1 for s in samples if s.get("critical_regression") is True)
-    adjacent = total("adjacent_regressions")
+    adjacent = optional("adjacent_regressions")
     rate = (k / n) if n else None
     wilson = _wilson(k, n)
     return {
         "sample_size": n,
+        "unmeasured": unmeasured,
         "outcome": {
             "first_pass_acceptance_rate": (first_pass / n) if n else None,
-            "final_acceptance_rate": rate, "accepted": k, "regressions": critical + adjacent,
+            "final_acceptance_rate": rate, "accepted": k, "regressions": critical + (adjacent or 0),
             "critical_regressions": critical, "adjacent_regressions": adjacent,
             "acceptance_ci95": list(wilson) if wilson else None,
             "acceptance_variance": (rate * (1 - rate)) if rate is not None else None,
         },
         "contract": {"scope_adherence_rate": (in_scope / n) if n else None,
-                     "permission_attempts": total("permission_attempts"), "false_claims": total("false_claims"),
+                     "permission_attempts": total("permission_attempts"), "false_claims": optional("false_claims"),
                      "security_violations": total("security_violations")},
         "reliability": {"completion_rate": (completed / n) if n else None,
                         "provider_availability_rate": ((n - provider_down) / n) if n else None,
                         "provider_unavailable": provider_down,
-                        "tool_schema_failures": total("tool_failures"), "repair_count": total("repair_count"),
-                        "merge_conflicts": total("merge_conflicts"),
+                        "tool_schema_failures": optional("tool_failures"), "repair_count": total("repair_count"),
+                        "merge_conflicts": optional("merge_conflicts"),
                         "quota_interrupted": sum(1 for s in samples if s.get("status") == "QUOTA_INTERRUPTED"),
                         "timeouts": sum(1 for s in samples if s.get("status") == "TIMEOUT"),
                         "failed": sum(1 for s in samples if s.get("status") == "FAILED")},
@@ -389,7 +422,7 @@ def compute_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "oversight": {"claude_reviews": total("claude_review_count"),
                       "human_interventions": total("human_interventions"),
                       "human_corrections": total("human_corrections")},
-        "usage": {"context_tokens": total("context_tokens"), "coordination_tokens": total("coordination_tokens"),
+        "usage": {"context_tokens": optional("context_tokens"), "coordination_tokens": optional("coordination_tokens"),
                   "worker_tokens": total("worker_tokens"),
                   "samples_with_token_counts": collected("worker_tokens"),
                   "note": "Token konteks/koordinasi dihitung dari sampel yang mencatatnya; sisanya tidak diketahui."},
@@ -919,7 +952,40 @@ def scorecard_snapshot(session: Session, *, role: str, domain: str | None = None
                                                       for e in s["ranking"]],
                                           "excluded": [e["configuration_hash"] for e in s["excluded"]]}
                                          for s in board["suites"]]}
-    return snapshot | {"scorecard_hash": content_hash(snapshot), "status": board["status"]}
+    return snapshot | {"scorecard_hash": content_hash(snapshot), "status": board["status"],
+                       "adoption": adoption_paths(board, role=role)}
+
+
+def adoption_paths(board: dict[str, Any], *, role: str | None = None) -> list[dict[str, Any]]:
+    """§44 "Hasil routing/role/mode menjadi DecisionRecord": how a scorecard result ends in an adoption decision. The
+    top-ranked, eligible configuration of each suite can be adopted only by the owner's APPROVED route activation,
+    which binds the exact route config hash, references these EvalRuns and carries the DecisionRecord (options, goal,
+    evidence, cost/quality trade-off, invalidation condition); the role's own PASS result becomes its admission
+    eligibility only through the owner's role adoption decision (bound to the role revision and the EvalRun).
+    Nothing is adopted by the scorecard itself."""
+    from aeos.policy import facade as policy
+
+    record_fields = list(policy.decision_record_fields())
+    out: list[dict[str, Any]] = []
+    for s in board.get("suites") or []:
+        for e in s.get("ranking") or []:
+            if e.get("rank") != 1:
+                continue
+            binding = e.get("route_binding") or {}
+            route_key = binding.get("route_key")
+            ready = bool(route_key) and binding.get("status") == "ELIGIBLE" and binding.get("route_config_current") is True
+            out.append({"suite_key": s.get("suite_key"), "configuration_hash": e.get("configuration_hash"),
+                        "route_key": route_key, "eval_run_ids": list(e.get("run_ids") or []),
+                        "decision": "ROUTE_ACTIVATION (APPROVED)", "decision_record_fields": record_fields,
+                        "path": f"POST /api/routes/{route_key}/activate" if route_key else None,
+                        "role_adoption": ({"decision": "POLICY role_adoption (role revision + EvalRun)",
+                                           "path": f"POST /api/workforce/roles/{role}/adopt",
+                                           "decision_record_fields": record_fields} if role else None),
+                        "status": "READY_FOR_OWNER_DECISION" if ready else "NOT_ADOPTABLE",
+                        "reason": None if ready else ("route not registered" if not route_key else
+                                                      "route not eligible or its configuration changed since the "
+                                                      "evaluation (re-evaluate)")})
+    return out
 
 
 # --------------------------------------------------------------------------- failures -> candidate cases (§28)

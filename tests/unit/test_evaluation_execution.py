@@ -78,7 +78,7 @@ def suite_of(board, key=SUITE):
 
 
 def _executed(db, spec, *, state, route=ROUTE, attempts=1, accepted=None, quota=False, engine="1.19.3",
-              denied=0, quarantined=False, claude_reviews=1, cost=0.01):
+              denied=0, quarantined=False, claude_reviews=1, cost=0.01, report=None, verifier=None):
     """Canonical records the workforce/verifier would leave behind for one executed task."""
     now = utcnow()
     te = TaskExecution(task_id=spec.id, project_id=spec.project_id, domain=spec.domain, state=state,
@@ -91,7 +91,8 @@ def _executed(db, spec, *, state, route=ROUTE, attempts=1, accepted=None, quota=
                         execution_status="DONE" if state == "DONE" and i == attempts - 1 else "FAILED",
                         started_at=now - timedelta(minutes=20 - i), finished_at=now - timedelta(minutes=10 - i),
                         quota_status="RATE_LIMITED" if quota else None, quarantined=quarantined,
-                        quarantine_reasons=["protected path"] if quarantined else [])
+                        quarantine_reasons=["protected path"] if quarantined else [],
+                        caps={"worker_report": report} if report else {}, verifier_status=verifier)
         db.add(run)
         db.flush()
         runs.append(run)
@@ -155,6 +156,72 @@ def test_collector_records_samples_only_from_executed_task_records(ev):
     route.terms_checked_at = route.pricing_checked_at = utcnow()  # the owner's terms review (not in the identity)
     entry = suite_of(service.leaderboard(db, role="feature-implementer"))["ranking"][0]
     assert entry["run_ids"] == [run.id] and entry["route_binding"]["route_config_current"] is True
+
+
+def test_collector_derives_false_claims_and_context_tokens_and_states_the_rest_unknown(ev):
+    """§43 Contract "false evidence/claim" and §44 context tokens (re-audit): the collector never produced them,
+    so they were reported unknown for every real run - and measures nobody recorded were summed as 0."""
+    db = ev
+    run, specs = _running(db)
+    for s, spec in zip(executor.slots(db, run), specs, strict=True):
+        executor.bind_task(db, run.id, slot_id=s["slot_id"], task_id=spec.id, actor_user_id="owner")
+    done = {"status": "COMPLETED"}
+    _executed(db, specs[0], state="DONE", accepted="ACCEPTED", report=done, verifier="PASS")  # true claim
+    _executed(db, specs[1], state="FAILED", accepted="REJECTED", report=done, verifier="FAIL")  # contradicted
+    _executed(db, specs[2], state="FAILED", report={"status": "BLOCKED", "ref_mismatches": ["run_id x != y"]})
+    _executed(db, specs[3], state="CANCELLED", report=done, verifier="NOT_RUN")  # never checked: unknown
+    _executed(db, specs[4], state="DONE", accepted="ACCEPTED")  # no report: no claim
+    # §43 Reliability "tool/schema failures": the runner's observed tool errors + an invalid worker report
+    from aeos.events.service import emit
+    from aeos.models.workforce import WorkerRun as WR
+
+    first = db.scalar(select(WR).where(WR.task_id == specs[0].id))
+    for kind in ("tool_error", "tool_error", "edit_file"):
+        emit(db, source="runner", kind="run.action", entity_type="run", entity_id=first.id, run_id=first.id,
+             payload={"kind": kind, "label": "x"})
+    emit(db, source="worker", kind="run.action", entity_type="run", entity_id=first.id, run_id=first.id,
+         payload={"kind": "tool_error"})  # not the runner's record: never counted
+    fourth = db.scalar(select(WR).where(WR.task_id == specs[4].id))
+    fourth.caps = {"worker_report": {"status": "INVALID", "schema_errors": ["status: required"]}}
+    db.flush()
+    out = executor.collect(db, run.id)
+    assert out["recorded"] is True
+    by = {s["task_id"]: s for s in run.samples}
+    assert [by[s.id]["false_claims"] for s in specs] == [0, 1, 1, None, 0]
+    assert "false_claims" in by[specs[3].id]["unknown_fields"] and "false_claims" not in by[specs[0].id]["unknown_fields"]
+    assert by[specs[0].id]["context_tokens"] == 100 and "context_tokens" not in by[specs[0].id]["unknown_fields"]
+    assert [by[s.id]["tool_failures"] for s in specs] == [2, 0, 0, 0, 1]
+    assert "tool_failures" not in by[specs[0].id]["unknown_fields"]
+    assert set(executor.UNDERIVED_FIELDS) <= set(by[specs[0].id]["unknown_fields"])
+    m = run.metrics
+    assert m["contract"]["false_claims"] == 2 and m["usage"]["context_tokens"] == 500
+    assert m["reliability"]["tool_schema_failures"] == 3
+    # measures no trusted record produced are UNKNOWN (None), never a zero
+    assert m["outcome"]["adjacent_regressions"] is None and m["reliability"]["merge_conflicts"] is None
+    assert m["usage"]["coordination_tokens"] is None
+    assert set(m["unmeasured"]) == set(executor.UNDERIVED_FIELDS)
+
+
+def test_collector_never_records_a_run_whose_graders_changed_during_it(ev, monkeypatch):
+    """§21 "worker tidak mengubah grader/held-out tests" (re-audit): verifier-executed candidate code could change the
+    controller's evaluation code undetected. The run carries the evaluation-code fingerprint it was planned with; a
+    different fingerprint at collection refuses the result (fail closed)."""
+    db = ev
+    run, specs = _running(db, 1)
+    assert run.environment["grader_fingerprint"] == service.grader_fingerprint() != "UNKNOWN"
+    slot = executor.slots(db, run)[0]
+    executor.bind_task(db, run.id, slot_id=slot["slot_id"], task_id=specs[0].id, actor_user_id="owner")
+    _executed(db, specs[0], state="DONE", accepted="ACCEPTED")
+    monkeypatch.setattr(service, "grader_fingerprint", lambda: "sha256:" + "f" * 64)  # evaluation code edited on disk
+    with pytest.raises(Conflict) as exc:
+        executor.collect(db, run.id)
+    assert exc.value.code == "GRADER_CHANGED" and run.status == "RUNNING" and not run.samples
+    monkeypatch.undo()
+    assert executor.collect(db, run.id)["collected"] == 1  # unchanged graders: collection proceeds
+    run.environment = {k: v for k, v in run.environment.items() if k != "grader_fingerprint"}
+    with pytest.raises(Conflict) as exc:  # a run without the fingerprint is UNKNOWN: refused, never recorded
+        executor.collect(db, run.id)
+    assert exc.value.code == "GRADER_CHANGED"
 
 
 def test_collector_refuses_tasks_run_on_another_route_or_harness(ev):
@@ -605,7 +672,11 @@ def test_held_out_evaluation_code_is_a_protected_path():
     assert other.protected_hits == []
     assert "backend/aeos/evaluation/**" in vscope.PLATFORM_PROTECTED_PATHS
     assert "backend/aeos/evaluation/**" in dag.protected_paths() and "backend/aeos/evaluation/**" in dag.FALLBACK_PROTECTED_PATHS
-    assert D.GRADER_NOTE and service.suite_view(EvalSuite(suite_key="x", title="x", cases=[]))["grader"] == D.GRADER_NOTE
+    view = service.suite_view(EvalSuite(suite_key="x", title="x", cases=[]))
+    assert D.GRADER_NOTE and view["grader"] == D.GRADER_NOTE
+    # §21 (re-audit): the definitions are readable in a self-build platform clone - stated, never claimed hidden
+    assert view["held_out_scope"]["worker_can_read_definitions"] == "SELF_BUILD_ONLY"
+    assert "GRADER_CHANGED" in view["held_out_scope"]["note"]
 
 
 def test_run_rows_survive_without_new_fields():

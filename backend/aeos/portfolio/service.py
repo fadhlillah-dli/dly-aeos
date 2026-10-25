@@ -329,6 +329,7 @@ def project_view(session: Session, project: Project, *, detail: bool = False) ->
         "repositories": [repositories.repository_view(r, summary=not detail) for r in repos],
         "integrations": int_views,
         "integration_state": integ.integration_state(ints, statuses),
+        "environment": integ.environment_state(project, ints),
         "links": links(project),
     }
     if detail:

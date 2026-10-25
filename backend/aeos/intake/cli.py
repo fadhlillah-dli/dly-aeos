@@ -35,7 +35,7 @@ def upload(
     from aeos.core.config import get_settings
     from aeos.core.db import session_scope
     from aeos.core.timeutil import utcnow
-    from aeos.identity.service import Principal
+    from aeos.identity.facade import Principal
     from aeos.intake import service
     from aeos.models.identity import AuthSession, User
     from aeos.models.portfolio import Project

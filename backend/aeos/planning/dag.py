@@ -38,9 +38,15 @@ FALLBACK_PROTECTED_PATHS: tuple[str, ...] = _pp.PLATFORM_PROTECTED_PATHS
 GENERIC_TRUSTED_PATHS: tuple[str, ...] = _pp.GENERIC_TRUSTED_PATHS
 DEFAULT_LIMITS = {"max_attempts": 2, "timeout_seconds": 3600, "max_output_tokens": 32000}
 MAX_ATTEMPTS_CAP = 2  # §21 pilot cap: at most two implementation attempts per TaskSpec
-# §21 resource caps of the pilot: one active worker per task, no automatic nested fan-out. Fixed by the
-# control plane (never taken from model output); raising them is a recorded human decision.
-RESOURCE_LIMITS = {"max_active_workers": 1, "nested_fan_out": False}
+# §21 resource caps of the pilot: one active worker per task, no automatic nested fan-out, and the per-run compute
+# (§19 "batas resource", §22 "mencadangkan compute") written into the TaskSpec so that the runtime enforces and the
+# scheduler reserves the SAME values: max_memory_mb is the runtime's RSS/--memory cap (default of
+# aeos.worker_runtime.processes.DEFAULT_MAX_MEMORY_MB), max_cpus the container --cpus cap and the CPU reservation.
+# Fixed by the control plane (never taken from model output); raising them is a recorded human decision.
+RUN_MEMORY_MB = 4096
+RUN_CPUS = 1
+RESOURCE_LIMITS = {"max_active_workers": 1, "nested_fan_out": False, "max_memory_mb": RUN_MEMORY_MB,
+                   "max_cpus": RUN_CPUS}
 DEFAULT_TOOLS = ["fs.read", "fs.write:allowed_paths", "tests.run"]
 DEFAULT_STOP_CONDITIONS = [
     "quota exhausted", "deadline/timeout reached", "lease lost", "policy changed", "scope violated (write outside "

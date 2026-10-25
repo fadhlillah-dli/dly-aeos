@@ -60,15 +60,67 @@ def _token_kind() -> str:
     return "unknown"
 
 
-def github_token_privilege(kind: str, scopes_header: str | None) -> dict[str, Any]:
-    """Least-privilege verdict from the token kind and GitHub's ``X-OAuth-Scopes`` header (classic tokens only).
+FINE_GRAINED_REMEDY = ("gunakan fine-grained PAT dengan 'Only select repositories' (repo platform + repo proyek "
+                       "terdaftar saja): Issues RW, Pull requests RW, Contents RW, Metadata R; tanpa Administration/"
+                       "Workflows")
 
-    Fine-grained PATs are limited to selected repositories/permissions by construction; a classic/OAuth token
-    (e.g. ``gh auth token``) with ``repo`` reaches every repository of the account — a residual risk the owner sees."""
+
+ADMINISTRATION_GRANTED, ADMINISTRATION_NOT_GRANTED = "GRANTED", "NOT_GRANTED"
+ADMINISTRATION_UNKNOWN, ADMINISTRATION_NOT_POSSIBLE = "UNKNOWN", "NOT_POSSIBLE"
+
+
+def _fine_grained_privilege(permissions: dict[str, Any] | None, reachable: list[str] | None,
+                            allowed_repos: list[str] | None, truncated: bool,
+                            administration: str | None = None) -> dict[str, Any]:
+    """A fine-grained PAT is only least privilege when what it can actually reach is observed: no repository
+    beyond the ones AEOS registered (a token created for "All repositories" lists them all) and no Administration
+    permission on the token itself.
+
+    ``permissions.admin`` of ``GET /repos/{repo}`` is what GitHub reports for the token's *account* on the
+    repository: a token never exceeds it, but the owner of a personal repository always shows ``admin`` while their
+    token may carry no Administration at all. So it is never read as the token's grant: with an admin account role
+    the token's Administration permission must be observed (``administration``: GRANTED / NOT_GRANTED, see
+    ``_administration_grant``) or least privilege stays NOT proven (None, never True and never a false "has
+    Administration" claim). The Workflows permission is not observable through the API."""
+    allowed = {a.lower() for a in allowed_repos or []}
+    admin_role = bool((permissions or {}).get("admin"))
+    grant = (administration or ADMINISTRATION_UNKNOWN) if admin_role else ADMINISTRATION_NOT_POSSIBLE
+    problems: list[str] = []
+    if grant == ADMINISTRATION_GRANTED:
+        problems.append("token membawa izin Administration pada repo platform (GET branch protection diizinkan)")
+    extra = sorted(r for r in reachable or [] if r.lower() not in allowed)
+    if extra:
+        problems.append(f"token menjangkau {len(extra)} repo di luar repo terdaftar AEOS (pemilihan 'All repositories'?):"
+                        " " + ", ".join(extra[:5]) + (" ..." if len(extra) > 5 else ""))
+    out: dict[str, Any] = {"kind": "fine-grained", "scopes": [], "reachable_repositories": len(reachable or []),
+                           "beyond_registered": extra[:20], "admin": admin_role, "administration_permission": grant,
+                           "workflows_permission": "NOT_OBSERVABLE"}
+    if problems:
+        return {**out, "least_privilege": False,
+                "risk": "Fine-grained PAT melebihi least privilege: " + "; ".join(problems) + " - " + FINE_GRAINED_REMEDY}
+    if reachable is None or truncated:
+        return {**out, "least_privilege": None,
+                "note": "pemilihan repo token belum terbaca (GET /user/repos gagal atau terpotong) - least privilege "
+                        "belum terbukti"}
+    if grant == ADMINISTRATION_UNKNOWN:
+        return {**out, "least_privilege": None,
+                "note": "akun pemilik token berperan admin pada repo; izin Administration token itu sendiri tidak "
+                        "teramati (probe branch protection tidak konklusif) - least privilege belum terbukti"}
+    return {**out, "least_privilege": True,
+            "note": "fine-grained PAT: hanya repo terdaftar, tanpa izin Administration (izin Workflows tidak terlihat "
+                    "lewat API)"}
+
+
+def github_token_privilege(kind: str, scopes_header: str | None, *, permissions: dict[str, Any] | None = None,
+                           reachable: list[str] | None = None, allowed_repos: list[str] | None = None,
+                           truncated: bool = False, administration: str | None = None) -> dict[str, Any]:
+    """Least-privilege verdict from the token kind and GitHub's ``X-OAuth-Scopes`` header (classic tokens) or,
+    for a fine-grained PAT, from what it observably reaches (``reachable`` repositories vs the registered ones, the
+    observed ``administration`` grant). A classic/OAuth token (e.g. ``gh auth token``) with ``repo`` reaches every
+    repository of the account — a residual risk the owner sees."""
     scopes = sorted({s.strip() for s in (scopes_header or "").split(",") if s.strip()})
     if kind == "fine-grained":
-        return {"kind": kind, "scopes": [], "least_privilege": True,
-                "note": "fine-grained PAT (repo terpilih, izin per resource)"}
+        return _fine_grained_privilege(permissions, reachable, allowed_repos, truncated, administration)
     if scopes_header is None:
         return {"kind": kind, "scopes": [], "least_privilege": None,
                 "note": "jenis/scope token tidak terbaca — least privilege belum terbukti"}
@@ -105,6 +157,59 @@ def _record_probe(ctx: CheckContext, providers: tuple[str, ...], root_id: str, c
         import logging
 
         logging.getLogger("aeos.doctor").warning("integration probe not recorded: %s", type(exc).__name__)
+
+
+REACHABLE_PAGE = 100
+
+
+def _reachable_repos(ctx: CheckContext) -> tuple[list[str] | None, bool]:
+    """Repositories the stored token can reach (read-only ``GET /user/repos``; a fine-grained PAT lists only its
+    selected repositories). (None, False) when unreadable; truncated when a full page came back."""
+    try:
+        hr = github_get(ctx, f"/user/repos?per_page={REACHABLE_PAGE}")
+    except Exception:
+        return None, False
+    if getattr(hr, "status", None) != 200 or not isinstance(getattr(hr, "body", None), list):
+        return None, False
+    names = [str(r.get("full_name")) for r in hr.body if isinstance(r, dict) and r.get("full_name")]
+    return names, len(hr.body) >= REACHABLE_PAGE
+
+
+def _administration_grant(ctx: CheckContext, slug: str, branch: str) -> str:
+    """Whether the fine-grained token itself carries the repository Administration permission (read-only probe).
+
+    ``GET /repos/{repo}/branches/{branch}/protection`` needs Administration (read). A fine-grained token without it
+    is refused with 403 "Resource not accessible by personal access token"; a token with it gets 200 (protected) or
+    404 "Branch not protected". Anything else (plan limits, rate limit, network) is UNKNOWN - never a pass."""
+    from urllib.parse import quote
+
+    try:
+        hr = github_get(ctx, f"/repos/{slug}/branches/{quote(branch or 'main', safe='')}/protection")
+    except Exception:
+        return ADMINISTRATION_UNKNOWN
+    status = getattr(hr, "status", None)
+    body = getattr(hr, "body", None)
+    message = str(body.get("message") or "").lower() if isinstance(body, dict) else ""
+    if status == 403 and "not accessible by personal access token" in message:
+        return ADMINISTRATION_NOT_GRANTED
+    if status == 200 or (status == 404 and "branch not protected" in message):
+        return ADMINISTRATION_GRANTED
+    return ADMINISTRATION_UNKNOWN
+
+
+def _registered_github_repos(ctx: CheckContext) -> list[str]:
+    """GitHub repositories registered for PERSONAL projects (the token may legitimately reach those)."""
+    if ctx.session is None:
+        return []
+    try:
+        from sqlalchemy import select
+
+        from aeos.models.portfolio import RepositoryReference
+
+        return [r.full_name for r in ctx.session.scalars(select(RepositoryReference))
+                if (r.provider or "").upper() == "GITHUB"]
+    except Exception:
+        return []
 
 
 def _scopes(headers: dict[str, str] | None) -> list[str] | str:
@@ -148,12 +253,22 @@ def adapter_github(ctx: CheckContext) -> Outcome:
                          "permissions": {k: perms.get(k) for k in ("admin", "maintain", "push", "pull") if k in perms},
                          "repo_id": hr.body.get("id"),
                          "token_scopes": _scopes(getattr(hr, "headers", None))})
-        privilege = github_token_privilege(_token_kind(), (getattr(hr, "headers", None) or {}).get("x-oauth-scopes"))
+        kind = _token_kind()
+        reachable, truncated = _reachable_repos(ctx) if kind == "fine-grained" else (None, False)
+        # the account's admin role does not show the token's own grant: observe it (fine-grained only)
+        administration = (_administration_grant(ctx, slug, str(hr.body.get("default_branch") or "main"))
+                          if kind == "fine-grained" and isinstance(perms, dict) and perms.get("admin") else None)
+        privilege = github_token_privilege(kind, (getattr(hr, "headers", None) or {}).get("x-oauth-scopes"),
+                                           permissions=perms if isinstance(perms, dict) else {}, reachable=reachable,
+                                           allowed_repos=[slug, *_registered_github_repos(ctx)], truncated=truncated,
+                                           administration=administration)
         evidence["token_privilege"] = privilege
         summary = f"Repo github:{slug} terbaca dengan token (read-only); izin tulis/enforcement belum diverifikasi."
         if privilege["least_privilege"] is False:
             evidence["residual_risks"] = [privilege["risk"]]
             summary += " " + privilege["risk"]
+        elif privilege["least_privilege"] is None:
+            summary += " Least privilege token belum terbukti: " + str(privilege.get("note") or "")
         _record_probe(ctx, ("github-repo", "github-issues"), slug, "CONNECTED")
         return Outcome("CONNECTED", summary, evidence=evidence, target_identity=f"github:{slug}",
                        remedy=None if privilege["least_privilege"] is not False else set_secret_remedy(
@@ -558,10 +673,112 @@ def project_office_targets(ctx: CheckContext) -> list[dict[str, Any]]:
             continue
         t = out.setdefault(p.id, {"project_id": p.id, "domain": p.domain, "project_key": p.project_key,
                                   "targets": [], "invalidators": []})
+        # config holds no secret (Integration Registry rule); it carries deployment/space_id/enabled
         t["targets"].append({"provider": integ.provider, "purpose": integ.purpose, "root_id": integ.root_id,
-                             "tenant_id": integ.tenant_id})
+                             "tenant_id": integ.tenant_id, "config": dict(integ.config or {})})
         t["invalidators"].append(f"integration:{integ.id}")
     return list(out.values())
+
+
+OFFICE_PURPOSE = "office:doctor.atlassian-readonly-probe"
+
+
+def _office_auth(ref: str) -> str:
+    """Basic auth header from the stored OFFICE credential (email/username + API token / app password), registered
+    for redaction; read only after the company authorisation gate opened."""
+    import base64
+    import json
+
+    from aeos.core.redaction import register_secret
+    from aeos.secrets import facade as secrets
+
+    raw = secrets.get_secret(ref, purpose=OFFICE_PURPOSE, actor="doctor")
+    try:
+        data = json.loads(raw)
+        user = str(data.get("email") or data.get("username") or "")
+        token = str(data.get("api_token") or data.get("app_password") or data.get("token") or "")
+    except (ValueError, AttributeError):
+        user, _, token = raw.partition(":")
+    if not user or not token:
+        raise ValueError(f"credential {ref} is incomplete")
+    register_secret(token)
+    encoded = base64.b64encode(f"{user}:{token}".encode()).decode()
+    register_secret(encoded)
+    return "Basic " + encoded
+
+
+def _http_verdict(status: int | None, error: Any, what: str) -> tuple[str, str] | None:
+    """Common HTTP outcome of a read-only identity probe; None = 200 (the caller checks the identity)."""
+    if status == 200:
+        return None
+    if status == 401:
+        return "EXPIRED", "OFFICE_CREDENTIAL_REJECTED"
+    if status in (403, 404):
+        return "FAILED", f"{what}_NOT_VISIBLE"
+    return "UNKNOWN", str(error or status or "NO_RESPONSE")
+
+
+def _probe_office_target(ctx: CheckContext, t: dict[str, Any]) -> dict[str, Any]:
+    """One read-only GET that proves the exact OFFICE target exists and is reachable with the stored credential:
+    Jira project key, Confluence parent folder/page (and its space), Bitbucket workspace/repo. Never a write."""
+    from urllib.parse import quote
+
+    from aeos.publisher.providers.atlassian import BITBUCKET_API, AtlassianConfig
+
+    provider, root = str(t.get("provider") or ""), str(t.get("root_id") or "")
+    item: dict[str, Any] = {"provider": provider, "root_id": root}
+    if provider == pv.BITBUCKET:
+        if "/" not in root:
+            return {**item, "status": "FAILED", "error": "BITBUCKET_REPO_INVALID"}
+        ws, slug = root.split("/", 1)
+        url, ref = f"{BITBUCKET_API}/repositories/{quote(ws, safe='')}/{quote(slug, safe='')}", BITBUCKET_REF
+    else:
+        product = "jira" if provider == pv.JIRA else "confluence"
+        cfg = AtlassianConfig.from_integration(t.get("tenant_id"), root, t.get("config"), product=product)
+        if cfg.deployment == "DATA_CENTER":
+            return {**item, "status": "FAILED", "error": "ATLASSIAN_DC_NOT_SUPPORTED"}
+        if not cfg.base_url.startswith("https://"):
+            return {**item, "status": "FAILED", "error": "ATLASSIAN_TENANT_MISSING"}
+        item["tenant"] = cfg.base_url
+        if product == "jira":
+            url = f"{cfg.base_url}/rest/api/3/project/{quote(cfg.project_key, safe='')}"
+        else:
+            url = f"{cfg.base_url}/wiki/api/v2/folders/{quote(cfg.parent_id, safe='')}"
+            item["space_id"] = cfg.space_id or None
+        ref = ATLASSIAN_REF
+    try:
+        auth = _office_auth(ref)
+    except Exception as exc:  # missing/incomplete credential: never green
+        return {**item, "status": "MISSING", "error": "OFFICE_CREDENTIAL_MISSING", "detail": type(exc).__name__}
+    headers = {"Authorization": auth, "Accept": "application/json", "User-Agent": "dly-aeos-doctor"}
+    try:
+        hr = ctx.runner.http_get(url, timeout=10.0, headers=headers, allow_remote=True)
+        if provider == pv.CONFLUENCE and hr.status == 404:  # the parent may be a page (folders not supported)
+            hr = ctx.runner.http_get(url.replace("/folders/", "/pages/"), timeout=10.0, headers=headers,
+                                     allow_remote=True)
+            item["parent_kind"] = "page" if hr.status == 200 else None
+    except Exception as exc:  # never green
+        return {**item, "status": "UNKNOWN", "error": type(exc).__name__}
+    item["http_status"] = hr.status
+    verdict = _http_verdict(hr.status, hr.error, provider.upper())
+    if verdict is not None:
+        return {**item, "status": verdict[0], "error": verdict[1]}
+    body = hr.body if isinstance(hr.body, dict) else {}
+    if provider == pv.JIRA:
+        observed = str(body.get("key") or "")
+        if observed.upper() != root.upper():
+            return {**item, "status": "FAILED", "error": "JIRA_PROJECT_MISMATCH", "observed": observed}
+        return {**item, "status": "CONNECTED", "project_id": str(body.get("id") or ""), "name": body.get("name")}
+    if provider == pv.BITBUCKET:
+        observed = str(body.get("full_name") or "")
+        if observed.lower() != root.lower():
+            return {**item, "status": "FAILED", "error": "BITBUCKET_REPO_MISMATCH", "observed": observed}
+        return {**item, "status": "CONNECTED", "uuid": body.get("uuid"), "is_private": body.get("is_private")}
+    space = str(body.get("spaceId") or "")
+    if item.get("space_id") and space and space != item["space_id"]:
+        return {**item, "status": "FAILED", "error": "CONFLUENCE_PARENT_OTHER_SPACE", "observed_space": space}
+    item.setdefault("parent_kind", "folder")
+    return {**item, "status": "CONNECTED", "observed_space": space or None}
 
 
 @check("adapter.project_office_targets", "PROJECT_ADAPTERS",
@@ -570,7 +787,8 @@ def project_office_targets(ctx: CheckContext) -> list[dict[str, Any]]:
        invalidators=("config:office_policy", "integration:*", f"secret:{ATLASSIAN_REF}", f"secret:{BITBUCKET_REF}"),
        ok={"CONFIGURED", "CONNECTED", "VERIFIED"}, targets=project_office_targets,
        description="Per proyek OFFICE: identitas target (repo/project key/parent id + tenant). Tetap diblokir sampai "
-                   "otorisasi perusahaan tercatat (§23); probe identitas Atlassian belum diimplementasikan (NOT-PROVEN).")
+                   "otorisasi perusahaan tercatat (§23); dengan --functional satu GET read-only per target "
+                   "(Jira project, parent/space Confluence, repo Bitbucket) membuktikan identitasnya.")
 def adapter_project_office_targets(ctx: CheckContext) -> Outcome:
     from aeos.doctor.office import office_gate
 
@@ -588,5 +806,17 @@ def adapter_project_office_targets(ctx: CheckContext) -> Outcome:
     if missing:
         return Outcome("MISSING", f"Target OFFICE belum lengkap (root_id): {', '.join(missing)}.", evidence=evidence,
                        error_code="OFFICE_TARGET_MISSING")
-    return Outcome("CONFIGURED", "Target OFFICE terkonfigurasi; identitas project/parent/repo belum diprobe oleh Doctor "
-                   "(NOT-PROVEN, probe Atlassian belum diimplementasikan).", evidence=evidence)
+    if not ctx.functional:
+        return Outcome("CONFIGURED", "Target OFFICE terkonfigurasi; identitas project/parent/repo belum diprobe "
+                       "(gunakan --functional: GET read-only per target).", evidence=evidence)
+    results = [_probe_office_target(ctx, t) for t in items]
+    evidence["results"] = results
+    statuses = {x["status"] for x in results}
+    line = ", ".join(f"{x['provider']}:{x['root_id']} {x['status']}" for x in results)
+    for bad, code in (("EXPIRED", "OFFICE_CREDENTIAL_REJECTED"), ("MISSING", "OFFICE_CREDENTIAL_MISSING"),
+                      ("FAILED", "OFFICE_TARGET_NOT_VERIFIED"), ("UNKNOWN", "OFFICE_PROBE_INCONCLUSIVE")):
+        if bad in statuses:
+            return Outcome(bad, f"Target OFFICE: {line}.", evidence=evidence, error_code=code)
+    return Outcome("CONNECTED", f"{len(results)} target OFFICE terbaca read-only dan identitasnya cocok ({line}); "
+                   "izin tulis tidak diuji.", evidence=evidence,
+                   target_identity=", ".join(f"{x['provider']}:{x['root_id']}" for x in results)[:250])

@@ -204,6 +204,7 @@ export default function ComponentDetailPage() {
         source="InstallManifest + observasi + keputusan"
         checkedAt={ev.last_observed_at ?? ev.last_checked_at}
         evidenceLimit="Rancangan ≠ terpasang ≠ aktif ≠ dipakai; tiap dimensi punya waktu dan sumber sendiri"
+        relatedDecisionsHref={`/decisions?target_type=component&target_id=${encodeURIComponent(componentId ?? "")}`}
         mode={d.mode}
         actions={
           isAdmin ? (

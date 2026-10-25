@@ -3,6 +3,10 @@
 * Host header allow-list (DNS-rebinding protection) — loopback names on the configured port only.
 * Origin allow-list for unsafe methods (explicit dev origin only in dev mode; no wildcard CORS).
 * Strict security headers / CSP.
+* Claim context (master Header/Istilah "every claim is read with ... version/config"): every /api response
+  names the controller version, schema version and the hash of the non-secret runtime settings it was
+  produced under (``X-AEOS-Version`` / ``X-AEOS-Schema-Version`` / ``X-AEOS-Settings-Hash``; the hash is the
+  ``settings_hash`` that ``aeos.operations.release.runtime_config`` records at promotion).
 """
 
 from __future__ import annotations
@@ -14,7 +18,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from aeos import SCHEMA_VERSION, __version__
 from aeos.core.config import Settings
+from aeos.core.hashing import content_hash
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -42,6 +48,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         self.allowed_origins = set(settings.allowed_origins)
         if allow_test_host:
             self.allowed_origins.add("http://testserver")
+        # Settings never hold secrets (core/config.py rejects them), so the dump is safe to hash; the
+        # settings of a running process do not change, so this is computed once.
+        self.claim_headers = {"X-AEOS-Version": __version__, "X-AEOS-Schema-Version": SCHEMA_VERSION,
+                              "X-AEOS-Settings-Hash": content_hash(settings.model_dump(mode="json"))}
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         host = (request.headers.get("host") or "").lower()
@@ -68,4 +78,5 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("Content-Security-Policy", CSP)
         if request.url.path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
+            response.headers.update(self.claim_headers)
         return response

@@ -380,13 +380,75 @@ def test_unproven_bridge_is_labelled_not_proven_and_ready_is_proven(db, owner, m
     service.run_pipeline(db, plan.id, actor=owner.id)
     db.refresh(plan)
     assert plan.checkpoint["bridge_proof"]["label"] == "NOT-PROVEN"
+    # §02 (re-audit, owner decision): UNKNOWN still executes in this build; the plan states it as an open decision
+    assert plan.checkpoint["bridge_proof"]["owner_decision"] == "OPEN"
+    assert "aeos doctor" in plan.checkpoint["bridge_proof"]["note"]
     runs = list(db.scalars(select(PlanningRun).where(PlanningRun.plan_id == plan.id)))
     assert {run.config_identity["bridge_proof"] for run in runs} == {"NOT-PROVEN"}
+    # §24 (re-audit): the stage prompts are not a ContextPack; every run states it instead of implying one
+    assert all(service.run_view(db, run)["context_source"]["status"] == "NOT_A_CONTEXT_PACK" for run in runs)
     _cap(monkeypatch, "READY")
     plan2 = _plan(db, owner)
     service.run_pipeline(db, plan2.id, actor=owner.id)
     db.refresh(plan2)
     assert plan2.checkpoint["bridge_proof"]["label"] == "PROVEN" and plan2.state == "READY_FOR_HUMAN_REVIEW"
+    assert "owner_decision" not in plan2.checkpoint["bridge_proof"]
+
+
+def test_planning_calls_bind_the_claude_code_version_to_the_supervisor_route(db, owner, monkeypatch, tmp_path):
+    """§23 (re-audit): the supervisor ModelRoute never recorded the Claude Code version (harness_version), so an
+    upgrade was caught only by the Doctor fingerprint, not by the route's configuration identity."""
+    from aeos.routing import seed as routing_seed
+    from aeos.routing import service as routing
+
+    routing_seed.run(db)
+    db.commit()
+    FakeBridge(monkeypatch, tmp_path)
+    plan = _plan(db, owner)
+    service.run_pipeline(db, plan.id, actor=owner.id)
+    db.expire_all()
+    opus, fable = routing.get_route(db, "claude-native/opus"), routing.get_route(db, "claude-native/fable")
+    assert opus.harness_version == fable.harness_version == "2.1.301 (fake)"
+    assert opus.mode_params["effort"] == "CLI_DEFAULT"  # planning passes no --effort
+    assert opus.config_hash == routing.compute_config_hash(opus)
+
+
+def test_a_plan_run_on_an_unevaluated_supervisor_version_states_it(db, owner, monkeypatch, tmp_path):
+    """§02 (re-audit): after a supervisor version change planning keeps running on the new version (trusted
+    acceptance 1.31) with no evaluation; the run and the plan now state that the configuration is NEEDS_EVALUATION
+    so the owner reviewing the plan sees it - never silent."""
+    from aeos.models.planning import PlanningRun
+    from aeos.routing import seed as routing_seed
+    from aeos.routing import service as routing
+
+    routing_seed.run(db)
+    db.commit()
+    FakeBridge(monkeypatch, tmp_path)
+    plan = _plan(db, owner)
+    service.run_pipeline(db, plan.id, actor=owner.id)
+    db.refresh(plan)
+    runs = list(db.scalars(select(PlanningRun).where(PlanningRun.plan_id == plan.id)))
+    assert {service.run_view(db, r)["supervisor_route"]["evaluation"] for r in runs} == {"BELUM_DIUJI"}
+    assert plan.checkpoint["supervisor_unevaluated"] == {}
+    opus = routing.get_route(db, "claude-native/opus")
+    routing.observe_supervisor_resolution(db, route_key=opus.route_key, requested="opus", resolved="claude-opus-5-5")
+    routing.observe_supervisor_resolution(db, route_key=opus.route_key, requested="opus", resolved="claude-opus-5-6")
+    db.commit()
+    plan2 = _plan(db, owner)
+    service.run_pipeline(db, plan2.id, actor=owner.id)
+    db.refresh(plan2)
+    assert plan2.state == "READY_FOR_HUMAN_REVIEW"  # 1.31: planning continues on the new version ...
+    unevaluated = plan2.checkpoint["supervisor_unevaluated"]  # ... and states it on the plan
+    opus_stages = {r.stage for r in db.scalars(select(PlanningRun).where(PlanningRun.plan_id == plan2.id))
+                   if r.model_requested == "opus"}
+    assert opus_stages and set(unevaluated) == opus_stages
+    entry = next(iter(unevaluated.values()))
+    assert entry["route_key"] == "claude-native/opus" and entry["resolved_version"] == "claude-opus-5-6"
+    assert "keputusan pemilik" in entry["note"]
+    detail = service.plan_detail(db, plan2)
+    assert detail["checkpoint"]["supervisor_unevaluated"] == unevaluated
+    latest = {s["stage"]: s["latest"] for s in detail["stages"]}
+    assert all(latest[st]["supervisor_route"]["evaluation"] == "NEEDS_EVALUATION" for st in opus_stages)
 
 
 def _stage_model_decision(db, owner, *, gates=None, models=None):

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { get, post } from "../../api/client";
+import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, inputClass, Loading, Mono, Notice } from "../../components/ui";
 import { absoluteTime } from "../../lib/format";
 import { ClassificationBadge, ModuleBadge } from "./badges";
@@ -55,6 +56,21 @@ function MemoryRow({ m, isAdmin, onChanged }: { m: MemoryView; isAdmin: boolean;
           </>
         )}
       </div>
+      {m.system_change && (
+        // §41/§43: accepted memory reaches model prompts, so it is a system change - its evaluation state and
+        // rollback target are stated, never implied
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-3" aria-label="System change memori">
+          <StatusBadge
+            status={m.system_change.evaluation === "EVALUATED" ? "PASS" : "NOT_TESTED"}
+            label={m.system_change.evaluation === "EVALUATED" ? "System change dievaluasi" : "System change belum dievaluasi"}
+          />
+          {m.system_change.rollback_target && (
+            <span>
+              rollback: <Mono>{m.system_change.rollback_target}</Mono>
+            </span>
+          )}
+        </div>
+      )}
       {act.error ? (
         <div className="mt-2">
           <ErrorBox error={act.error} />

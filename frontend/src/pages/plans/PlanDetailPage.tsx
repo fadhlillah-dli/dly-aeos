@@ -11,7 +11,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, Loading, Mono, Notice, PageHeader, Table, Tabs } from "../../components/ui";
 import { useEventStream } from "../../lib/events";
 import { relativeTime, shortHash } from "../../lib/format";
-import { type BridgeProof, BridgeProofNotice } from "./BridgeProof";
+import { type BridgeProof, BridgeProofNotice, SupervisorConfigNotice, type SupervisorUnevaluated } from "./BridgeProof";
 import { ContentViewer } from "./ContentViewer";
 import { ContextPanel, ReviewPanel } from "./ContextPanel";
 import { DecisionPanel } from "./DecisionPanel";
@@ -92,6 +92,7 @@ export default function PlanDetailPage() {
         source="plans, plan_versions, planning_runs, planning_artifacts, decisions"
         checkedAt={plan.checked_at ?? null}
         evidenceLimit={plan.evidence_limit}
+        relatedDecisionsHref="/decisions?target_type=plan_version"
         mode={mode}
         actions={
           <>
@@ -131,6 +132,7 @@ export default function PlanDetailPage() {
         </div>
         <div className="mt-2">
           <BridgeProofNotice proof={(plan.checkpoint ?? {})["bridge_proof"] as BridgeProof | undefined} />
+          <SupervisorConfigNotice unevaluated={(plan.checkpoint ?? {})["supervisor_unevaluated"] as SupervisorUnevaluated | undefined} />
         </div>
       </Card>
 

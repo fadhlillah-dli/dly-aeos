@@ -281,6 +281,15 @@ SUITES: list[dict[str, Any]] = [
     },
 ]
 
+# §46/§48: one protected suite definition for every other executor role (product discovery, UX, architecture,
+# delivery, data, privacy, supply chain, QA, verification, diagrams, release, incidents, retirement, context,
+# model evaluation, FinOps), so every RoleSkillPack carries acceptance/evaluation cases.
+from aeos.evaluation.role_suites import ROLE_SUITES  # noqa: E402 - data module, no import cycle
+
+for _spec in ROLE_SUITES:
+    SUITES.append({**{k: v for k, v in _spec.items() if k != "cases"},
+                   "cases": [_case(*c) for c in _spec["cases"]]})
+
 for _s in SUITES:
     _s["acceptance"] = list(COMMON_ACCEPTANCE)
     _s["isolation"] = ISOLATION
@@ -398,6 +407,14 @@ SECTION_44_SAMPLE_FIELDS = ("context_tokens", "coordination_tokens", "worker_tok
 GRADER_NOTE = ("Kasus held-out ini adalah definisi. Grader yang dapat dieksekusi didaftarkan pemilik sebagai "
                "trusted suite di luar workspace worker (ADR-0060); perubahan backend/aeos/evaluation/** oleh worker "
                "dikarantina (protected path).")
+# §21 "held-out" stated precisely: what a worker can and cannot reach in this build.
+HELD_OUT_SCOPE = {
+    "worker_can_read_definitions": "SELF_BUILD_ONLY",
+    "note": ("Definisi kasus ada di backend/aeos/evaluation/** repository platform: worker self-build yang meng-clone "
+             "platform dapat MEMBACANYA (tidak benar-benar tersembunyi); worker proyek lain tidak. Menulisnya selalu "
+             "dikarantina. Kode evaluasi controller di-fingerprint per EvalRun: bila berubah selama run (mis. oleh "
+             "kode kandidat yang dijalankan verifier), hasil ditolak (GRADER_CHANGED)."),
+}
 
 
 def suite_data_classification(suite_key: str) -> str:

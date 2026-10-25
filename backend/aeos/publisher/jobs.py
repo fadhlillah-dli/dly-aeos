@@ -175,15 +175,21 @@ def approval_decision(session: Session, version: PlanVersion, *, for_publication
 
 def _blocking_checks(state: Any) -> list[str]:
     """Checks whose OBSERVED result blocks the gate (§08 "operasi dengan dependency critical gagal tidak
-    dijalankan"): a critical check that ran and is not ok (FAILED, MISSING, ...), or a required/guard check that
-    FAILED. Never-run, STALE and EXPIRED results are not observations of failure (they make the gate UNKNOWN)."""
+    dijalankan"): a critical check that ran and is not ok (FAILED, MISSING, ...), a required/guard check that
+    FAILED, or a critical/required check invalidated (STALE) after it passed. Never-run (UNKNOWN) and TTL-EXPIRED
+    results are not observations of failure: they make the gate UNKNOWN and stay advisory (owner decision,
+    ADR-0094 - enforcing them changes the protected acceptance publication fixtures)."""
     out = []
     for c in state.checks or []:
         eff = c.get("effective_status")
         if c.get("ok"):
             continue
-        if (c.get("tier") == "critical" and eff not in (None, "UNKNOWN", "STALE", "EXPIRED")) or \
-                (c.get("tier") in ("required", "guard") and eff == "FAILED"):
+        # STALE = the check ran and was then invalidated by a recorded change (token rotated, target or
+        # configuration changed): the verified state no longer holds, so it blocks like an observed failure.
+        # Never-run (None/UNKNOWN) and TTL-EXPIRED results carry no new information and stay advisory (ADR-0094).
+        if (c.get("tier") == "critical" and eff not in (None, "UNKNOWN", "EXPIRED")) or \
+                (c.get("tier") == "required" and eff in ("FAILED", "STALE")) or \
+                (c.get("tier") == "guard" and eff == "FAILED"):
             out.append(str(c.get("check_id")))
     if state.status == "BLOCKED" and not out:  # e.g. a policy gate reason without a single check row
         out.append(str(getattr(state.capability, "value", state.capability) or "gate"))
@@ -196,10 +202,12 @@ def publish_gate(session: Session, project_id: str, domain: str) -> dict[str, An
 
     PERSONAL enforcement: a gate that is BLOCKED by observed results (a critical check that ran and is not ok —
     FAILED/MISSING, e.g. a raw secret exposure or no Google token — or a required check that FAILED) refuses
-    execute/retry with CAPABILITY_NOT_READY. A gate that is only UNKNOWN/STALE (checks not run yet / invalidated)
-    is reported in the preview and the run view, while every write stays behind the external-write interlock
-    (bootstrap, write enablement, hash-bound human approval). Full READY enforcement is an owner decision
-    (ADR-0094): the trusted acceptance suite defines publication readiness without Doctor results.
+    execute/retry with CAPABILITY_NOT_READY, and so does a critical/required check that passed earlier but was
+    invalidated since (STALE: token rotated, target/config changed — re-run the Doctor). A gate that is only
+    UNKNOWN (checks never run) or EXPIRED (TTL) is reported in the preview and the run view, while every write stays
+    behind the external-write interlock (bootstrap, write enablement, hash-bound human approval). Full READY
+    enforcement is an owner decision (ADR-0094): the trusted acceptance suite (read-only for workers) defines
+    publication readiness without Doctor results.
 
     OFFICE (§23 default deny): the gate must be READY at execute/retry time too, not only when the targets were
     resolved for the preview — a company authorisation withdrawn after the preview stops the run (fail closed)."""
@@ -222,15 +230,17 @@ def publish_gate(session: Session, project_id: str, domain: str) -> dict[str, An
                       code="CAPABILITY_NOT_READY") from exc
     return {"capability": "CAN_PUBLISH_PERSONAL", "status": state.status, "reasons": list(state.reasons[:8]),
             "failed_checks": _blocking_checks(state), "remedies": list(state.remedies[:5]),
-            "enforcement": "observed failing/missing checks (gate BLOCKED) refuse execute/retry; UNKNOWN/STALE is "
-                           "advisory (the interlock enforces every write)"}
+            "enforcement": "observed failing/missing checks and checks invalidated since they passed (STALE) refuse "
+                           "execute/retry; never-run (UNKNOWN) or TTL-expired results are advisory until the owner "
+                           "adopts full READY enforcement (ADR-0094; the interlock enforces every write)",
+            "full_ready_enforcement": "OWNER_DECISION_PENDING"}
 
 
 def _require_gate(session: Session, pub: Publication) -> dict[str, Any]:
     gate = publish_gate(session, pub.project_id, pub.domain)
     if gate["failed_checks"]:
-        raise Blocked(f"{gate['capability']} is not ready (observed failing/missing Doctor checks): "
-                      + ", ".join(gate["failed_checks"]),
+        raise Blocked(f"{gate['capability']} is not ready (observed failing/missing or invalidated (STALE) Doctor "
+                      "checks): " + ", ".join(gate["failed_checks"]),
                       code="CAPABILITY_NOT_READY", details={"capability": gate["capability"], "reasons": gate["reasons"],
                                                             "remedies": gate.get("remedies", [])})
     pub.summary = {**(pub.summary or {}), "capability_gate": gate}
@@ -393,11 +403,19 @@ def _doc_ops(session: Session, project: Project, version: PlanVersion, result: r
         elif ref.content_hash == chash:
             op = PlannedOp(update_provider, "update_doc", doc.logical_doc_id, title, "doc", base_target,
                            {"content_hash": chash}, status=OP_SKIPPED, reason="konten tidak berubah (hash sama)")
+        elif family == "google" and rendered:
+            # §29 "Update incremental gambar memerlukan jalur akses yang disetujui; jika belum ada, siapkan snapshot
+            # baru dan keputusan publikasi": there is no approved incremental image path (the Docs API needs a
+            # reachable image URI and nothing is ever made public for it). The lossy text-only update is NOT run;
+            # a new DOCX snapshot (images embedded) is planned as its own document, covered by this publication's
+            # human decision. The existing document is left untouched (no overwrite of human or older content).
+            op = _snapshot_op(session, project, version, doc, rec, ref, base_target, payload, title, chash,
+                              provider=create_provider, parent=parent)
         else:
             if family == "google":
-                # §29: the Docs API update path carries text/headings/bullets only. Embedded images and real
-                # tables need a new DOCX snapshot + its own publication decision — say so BEFORE approval.
-                lossy = (["gambar tersemat"] if rendered else []) + (["tabel (menjadi teks)"] if "\n|" in body else [])
+                # §29: the Docs API update path carries text/headings/bullets only: real tables become text.
+                # Disclosed BEFORE approval (images never reach this branch: they get a DOCX snapshot above).
+                lossy = ["tabel (menjadi teks)"] if "\n|" in body else []
                 if lossy:
                     payload = {**payload, "lossy_update": lossy}
             guard = _human_guard(session, rec, ref, doc.doc_type)
@@ -423,6 +441,48 @@ def _doc_ops(session: Session, project: Project, version: PlanVersion, result: r
                                      parent_ref=(ref_provider, doc.logical_doc_id)))
     ops += _superseded_ops(session, project, version, result, target, records)
     return ops
+
+
+SNAPSHOT_MARK = "@snapshot-"
+
+
+def snapshot_logical_id(logical_id: str, chash: str) -> str:
+    """Logical id of the DOCX snapshot of *logical_id* for exactly this content (idempotent per content hash)."""
+    digest = str(chash).split(":", 1)[-1][:12]
+    return f"{logical_id}{SNAPSHOT_MARK}{digest}"
+
+
+def _snapshot_op(session: Session, project: Project, version: PlanVersion, doc: Any, rec: DocumentRecord | None,
+                 ref: ExternalReference, base_target: dict[str, Any], payload: dict[str, Any], title: str, chash: str,
+                 *, provider: str, parent: tuple[str, str] | None) -> PlannedOp:
+    """A ``create_doc`` of a new DOCX snapshot (images embedded) instead of a lossy incremental update (§29)."""
+    snap_id = snapshot_logical_id(doc.logical_doc_id, chash)
+    digest = snap_id.rsplit("-", 1)[-1]
+    snap_title = f"{title} [snapshot {digest}]"[:250]
+    target = {**base_target, "logical_id": snap_id, "title": snap_title, "snapshot_of": doc.logical_doc_id,
+              "previous_external_id": ref.external_id}
+    op = PlannedOp(provider, "create_doc", snap_id, snap_title, "doc", target,
+                   {**payload, "snapshot_of": doc.logical_doc_id, "previous_external_id": ref.external_id,
+                    "snapshot_reason": "gambar tersemat tidak dapat diperbarui inkremental (tidak ada jalur akses "
+                                       "gambar yang disetujui) - snapshot DOCX baru"},
+                   parent_ref=parent)
+    snap_ref = _ref(session, project.id, ref.provider, snap_id)
+    if snap_ref is not None and snap_ref.content_hash == chash:
+        op.status, op.reason = OP_SKIPPED, f"snapshot DOCX konten ini sudah dipublikasikan ({snap_ref.external_id})"
+        return op
+    # A snapshot carries the AEOS render only. Human content in the official document is never left behind
+    # silently: an unreviewed human edit, a pending revision conflict, or HUMAN_GOVERNED text a human already wrote
+    # there stops it for the owner (CONFLICT) - fail closed, nothing is created.
+    why = _human_edit_block(session, rec, version)
+    if not why and ref.sync_status == "CONFLICT":
+        why = "konflik revisi sebelumnya belum diselesaikan"
+    guard = _human_guard(session, rec, ref, doc.doc_type)
+    if not why and guard and guard.get("human_content_possible"):
+        why = ("dokumen resmi memuat konten HUMAN_GOVERNED tulisan manusia yang tidak dibawa snapshot DOCX baru; "
+               "salin bagian itu ke PlanVersion baru atau terbitkan tanpa gambar (keputusan pemilik)")
+    if why:
+        op.status, op.reason = OP_CONFLICT, why
+    return op
 
 
 SUPERSEDED_TITLE_PREFIX = "[SUPERSEDED] "
@@ -451,30 +511,33 @@ def _superseded_ops(session: Session, project: Project, version: PlanVersion, re
     for lid, rec in sorted(records.items()):
         if lid in current or rec.status != rnd.ST_SUPERSEDED or rec.kind != "DOC":
             continue
-        ref = _ref(session, project.id, target.provider, lid)
-        if ref is None:
-            continue  # never published: nothing to mark
-        body = superseded_body(rec, version)
-        chash = content_hash({"markdown": body})
-        payload: dict[str, Any] = {"markdown": body, "content_hash": chash, "doc_type": rec.doc_type,
-                                   "status": rnd.ST_SUPERSEDED, "superseded": True, "rendered_visuals": [],
-                                   "visual_paths": {}, "visual_titles": {}}
-        guard = _human_guard(session, rec, ref, rec.doc_type)
-        if guard:
-            payload["human_guard"] = guard
-        op = PlannedOp(target.provider, "update_doc", lid, (SUPERSEDED_TITLE_PREFIX + rec.title)[:256], "doc",
-                       {**ident, "family": target.family, "logical_id": lid, "title": rec.title,
-                        "parent_logical_id": rec.parent_logical_id, "doc_type": rec.doc_type,
-                        "external_id": ref.external_id, "baseline_revision": ref.external_revision}, payload)
-        if ref.content_hash == chash:
-            op.status, op.reason = OP_SKIPPED, "banner SUPERSEDED sudah dipublikasikan"
-        else:
-            why = _human_edit_block(session, rec, version)
-            if not why and ref.sync_status == "CONFLICT":
-                why = "konflik revisi sebelumnya belum diselesaikan"
-            if why:
-                op.status, op.reason = OP_CONFLICT, why
-        out.append(op)
+        # §29: a document last published as a DOCX snapshot gets the banner on that snapshot document too.
+        snap_lid = str(((rec.links or {}).get("snapshot") or {}).get("logical_id") or "")
+        for ext_lid in [lid, *([snap_lid] if snap_lid else [])]:
+            ref = _ref(session, project.id, target.provider, ext_lid)
+            if ref is None:
+                continue  # never published: nothing to mark
+            body = superseded_body(rec, version)
+            chash = content_hash({"markdown": body})
+            payload: dict[str, Any] = {"markdown": body, "content_hash": chash, "doc_type": rec.doc_type,
+                                       "status": rnd.ST_SUPERSEDED, "superseded": True, "rendered_visuals": [],
+                                       "visual_paths": {}, "visual_titles": {}}
+            guard = _human_guard(session, rec, ref, rec.doc_type)
+            if guard:
+                payload["human_guard"] = guard
+            op = PlannedOp(target.provider, "update_doc", ext_lid, (SUPERSEDED_TITLE_PREFIX + rec.title)[:256], "doc",
+                           {**ident, "family": target.family, "logical_id": ext_lid, "title": rec.title,
+                            "parent_logical_id": rec.parent_logical_id, "doc_type": rec.doc_type,
+                            "external_id": ref.external_id, "baseline_revision": ref.external_revision}, payload)
+            if ref.content_hash == chash:
+                op.status, op.reason = OP_SKIPPED, "banner SUPERSEDED sudah dipublikasikan"
+            else:
+                why = _human_edit_block(session, rec, version)
+                if not why and ref.sync_status == "CONFLICT":
+                    why = "konflik revisi sebelumnya belum diselesaikan"
+                if why:
+                    op.status, op.reason = OP_CONFLICT, why
+            out.append(op)
     return out
 
 
@@ -724,10 +787,16 @@ def create_preview(session: Session, settings: Settings, *, plan_id: str, actor_
     executable = [o for o in ops if o.status not in (OP_SKIPPED, OP_CONFLICT)]
     lossy = [o.title or o.logical_id for o in executable if (o.payload or {}).get("lossy_update")]
     if lossy:
-        notes.append(f"{len(lossy)} dokumen Google Docs diperbarui inkremental (requiredRevisionId) tanpa gambar/tabel "
-                     "asli — snapshot DOCX baru memerlukan publikasi/keputusan terpisah (§29); snapshot dapat "
-                     f"disiapkan lokal: aeos docs render {version.id} --docx (impor manual oleh pemilik): "
+        notes.append(f"{len(lossy)} dokumen Google Docs diperbarui inkremental (requiredRevisionId) tanpa tabel asli "
+                     "(tabel menjadi teks) — snapshot DOCX baru memerlukan publikasi/keputusan terpisah (§29); snapshot "
+                     f"dapat disiapkan lokal: aeos docs render {version.id} --docx (impor manual oleh pemilik): "
                      + ", ".join(lossy[:10]))
+    snaps = [o.title or o.logical_id for o in executable if (o.payload or {}).get("snapshot_of")]
+    if snaps:
+        notes.append(f"{len(snaps)} dokumen Google Docs berisi gambar: pembaruan inkremental tidak dapat membawa gambar "
+                     "(tidak ada jalur akses gambar yang disetujui), jadi snapshot DOCX baru dengan gambar tertanam "
+                     "dibuat sebagai dokumen terpisah — bagian dari keputusan publikasi ini; dokumen lama tidak ditimpa "
+                     "(§29): " + ", ".join(snaps[:10]))
     acked = [o.title or o.logical_id for o in executable if (o.payload or {}).get("human_edit_acknowledged")]
     if acked:
         notes.append(f"{len(acked)} dokumen memuat human edit yang sudah di-acknowledge: konten HUMAN_GOVERNED yang "
@@ -1147,6 +1216,23 @@ def _record_success(run: _Run, op: PublicationOperation, res: OpResult) -> None:
     ref.title = (op.title or "")[:256]
     ref.content_hash = (op.payload or {}).get("content_hash") or ref.content_hash
     ref.last_publication_id = pub.id
+    snapshot_of = (op.payload or {}).get("snapshot_of") if op.operation == "create_doc" else None
+    if snapshot_of:
+        # §29: the logical document is now published as a new DOCX snapshot (images embedded); the earlier external
+        # document stays as it was. The record links the snapshot; its visuals are no longer pending.
+        rec = s.scalar(select(DocumentRecord).where(DocumentRecord.project_id == pub.project_id,
+                                                    DocumentRecord.logical_doc_id == snapshot_of))
+        if rec is not None:
+            if rec.status == rnd.ST_APPROVED:
+                rec.status = rnd.ST_PUBLISHED
+            rec.last_synced_at = now
+            rec.links = {**(rec.links or {}), "external_url": res.external_url, "external_id": res.external_id,
+                         "external_provider": ref_provider, "visual_update_pending": False,
+                         "snapshot": {"logical_id": op.logical_id, "external_id": res.external_id,
+                                      "external_url": res.external_url, "publication_id": pub.id,
+                                      "content_hash": (op.payload or {}).get("content_hash"),
+                                      "previous_external_id": (op.payload or {}).get("previous_external_id"),
+                                      "fidelity": ((res.response or {}).get("fidelity") or {}).get("status")}}
     if op.operation in ("create_doc", "update_doc", "create_folder"):
         rec = s.scalar(select(DocumentRecord).where(DocumentRecord.project_id == pub.project_id,
                                                     DocumentRecord.logical_doc_id == op.logical_id))
@@ -1165,6 +1251,11 @@ def _record_success(run: _Run, op: PublicationOperation, res: OpResult) -> None:
                          "visual_update_pending": bool((res.response or {}).get("images_not_updated")),
                          # sticky: once human HUMAN_GOVERNED lines live in the external doc, every update keeps them
                          "human_sections_kept": kept or (rec.links or {}).get("human_sections_kept") or {}}
+            fid = (res.response or {}).get("fidelity")
+            if isinstance(fid, dict):  # §29 DOCX -> Google Docs import check of exactly this publication
+                rec.links = {**rec.links, "docx_fidelity": {"status": fid.get("status"),
+                                                            "mismatches": list(fid.get("mismatches") or [])[:10],
+                                                            "publication_id": pub.id}}
     if op.operation == "create_issue":
         tgt = op.target or {}
         proj = s.scalar(select(OperationalWorkProjection).where(
@@ -1855,7 +1946,8 @@ def operation_view(op: PublicationOperation) -> dict[str, Any]:
         "payload_hash": op.payload_hash,
         "payload_summary": {"bytes": len(payload.get("markdown", "") or payload.get("body", "") or ""),
                             "labels": payload.get("labels"), "rendered_visuals": payload.get("rendered_visuals"),
-                            "lossy_update": payload.get("lossy_update") or []},
+                            "lossy_update": payload.get("lossy_update") or [],
+                            "snapshot_of": payload.get("snapshot_of")},
         "response": redact({k: v for k, v in (op.response or {}).items() if k != "history"}),
         "history": (op.response or {}).get("history", []),
     }

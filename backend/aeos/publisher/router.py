@@ -145,7 +145,8 @@ def retry(pub_id: str, db: DB, principal: AdminPrincipal, domain: ActiveDomain,
 @router.get("/api/projects/{project_id}/work-items")
 def get_work_items(project_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
     project = load_project(db, principal, project_id, domain=domain)
-    return work_items.list_work_items(db, project)
+    # checked_at = last provider sync (null = never synced); generated_at = when this list was read
+    return {**work_items.list_work_items(db, project), "generated_at": utcnow().isoformat()}
 
 
 @router.post("/api/projects/{project_id}/work-items/sync")
@@ -191,7 +192,8 @@ def publication_targets(project_id: str, db: DB, principal: CurrentPrincipal, do
 
 @router.get("/api/publisher/connections")
 def connections(principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
-    out: dict[str, Any] = {"domain": domain.value, "checked_at": utcnow().isoformat(), "mode": "LIVE"}
+    out: dict[str, Any] = {"domain": domain.value, "checked_at": utcnow().isoformat(), "mode": "LIVE",
+                           "source": "secret store metadata + stored OAuth token status (no provider call)"}
     if domain.value == "PERSONAL":
         out["google"] = gg.google_status()
         from aeos.core.errors import Blocked

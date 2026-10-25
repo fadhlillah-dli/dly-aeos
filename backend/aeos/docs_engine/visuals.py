@@ -6,8 +6,8 @@
   visual is reported as ``VISUAL_PENDING`` — never replaced by a fake/placeholder image.
 * Diagrams are design artefacts (DESIGN / ILLUSTRATIVE) and are never used as runtime proof.
 * Screenshots must come from the running app at a known commit/environment without secrets/PII.
-  This module defines the manifest; capture itself is NOT-PROVEN here (no browser automation is
-  installed/approved), so manifests stay ``NOT_PROVEN`` until a collector fills them.
+  This module defines the manifest; the trusted collector ``aeos.docs_engine.screenshots`` captures
+  them, and manifests stay ``NOT_PROVEN`` until it stored SCREENSHOT evidence for the project.
 
 Optional binary override: environment variable ``AEOS_MMDC_BINARY`` (path to mmdc/mmdc.cmd).
 """
@@ -91,16 +91,17 @@ VISUAL_KINDS: dict[str, dict[str, str]] = {
 
 # Why a model-authored diagram stays UNVERIFIED until a real check exists (§29 table, evidence honesty).
 _UNVERIFIED_NOTE: dict[str, str] = {
-    "context": "Dari rencana (model-authored); belum dibandingkan dengan contract/manifest — review arsitektur manusia "
-               "lewat approval rencana saja.",
-    "component": "Dari rencana (model-authored); belum dibandingkan dengan contract/manifest — review arsitektur "
-                 "manusia lewat approval rencana saja.",
-    "sequence": "Dari rencana (model-authored); VERIFIED hanya bila ditautkan ke evidence integration test — belum ada.",
+    "context": "Dari rencana (model-authored); tidak ada InstallManifest/inventory yang dirujuk untuk proyek ini, "
+               "jadi node belum dibandingkan — review arsitektur manusia lewat approval rencana saja.",
+    "component": "Dari rencana (model-authored); tidak ada InstallManifest/inventory yang dirujuk untuk proyek ini, "
+                 "jadi node belum dibandingkan — review arsitektur manusia lewat approval rencana saja.",
+    "sequence": "Dari rencana (model-authored); tidak ada route contract yang dirujuk untuk proyek ini; VERIFIED hanya "
+                "bila ditautkan ke evidence integration test — belum ada.",
     "erd": "ERD dari rencana (PROPOSAL); belum diturunkan dari schema/migration yang dirujuk.",
     "trust_boundary": "Dari rencana; dicek silang hanya terhadap label trust boundary di threat model rencana.",
-    "data_flow": "Dari rencana; dicek silang hanya terhadap label trust boundary di threat model rencana.",
-    "cicd": "Topologi dari rencana; belum diverifikasi terhadap pipeline/IaC dan target environment.",
-    "deployment": "Topologi dari rencana; belum diverifikasi terhadap pipeline/IaC dan target environment.",
+    "data_flow": "Dari rencana; dicek silang terhadap trust boundary threat model dan data inventory rencana.",
+    "cicd": "Topologi dari rencana; dicek silang hanya terhadap environment dengan target deployment terdaftar.",
+    "deployment": "Topologi dari rencana; dicek silang hanya terhadap environment dengan target deployment terdaftar.",
     "journey": "Proposal UX (status desain), bukan perilaku aplikasi yang terverifikasi.",
     "wireframe": "Proposal UX (status desain), bukan perilaku aplikasi yang terverifikasi.",
 }
@@ -177,20 +178,30 @@ def _kind_meta(kind: str) -> dict[str, str]:
     return VISUAL_KINDS.get(kind, {"label": kind or "diagram", "source": "Source diagram terversi yang direview"})
 
 
-def render_diagram(diagram: DiagramView, out_dir: Path, *, mmdc: MmdcInfo | None = None,
-                   timeout: int = RENDER_TIMEOUT_S) -> VisualArtifact:
-    """Render one Mermaid diagram to PNG+SVG under *out_dir* (content-addressed by source hash)."""
+def _source_artifact(diagram: DiagramView) -> VisualArtifact:
     meta = _kind_meta(diagram.kind)
-    source_hash = "sha256:" + sha256_text(diagram.source)
-    short = source_hash[7:23]
-    art = VisualArtifact(
-        key=diagram.key, title=diagram.title, kind=diagram.kind, source=diagram.source, source_hash=source_hash,
-        status=STATUS_PENDING, kind_label=meta["label"], required_source=meta["source"],
+    return VisualArtifact(
+        key=diagram.key, title=diagram.title, kind=diagram.kind, source=diagram.source,
+        source_hash="sha256:" + sha256_text(diagram.source), status=STATUS_PENDING, kind_label=meta["label"],
+        required_source=meta["source"],
         design_status="DESIGN" if diagram.kind not in ("screenshot", "evidence_chart") else "NOT_PROVEN",
         verification_source=diagram.verification_source,
         verification_notes=[_UNVERIFIED_NOTE.get(diagram.kind, "Diagram dari rencana (model-authored); belum "
                                                                 "diverifikasi terhadap sumbernya.")],
     )
+
+
+def source_only(diagrams: list[DiagramView]) -> list[VisualArtifact]:
+    """The plan's diagrams as VISUAL_PENDING artifacts carrying only their source: nothing is written or rendered
+    (pure; used where only the document text matters, e.g. the §41 readiness check)."""
+    return [_source_artifact(d) for d in diagrams]
+
+
+def render_diagram(diagram: DiagramView, out_dir: Path, *, mmdc: MmdcInfo | None = None,
+                   timeout: int = RENDER_TIMEOUT_S) -> VisualArtifact:
+    """Render one Mermaid diagram to PNG+SVG under *out_dir* (content-addressed by source hash)."""
+    art = _source_artifact(diagram)
+    short = art.source_hash[7:23]
     if diagram.language != "mermaid":
         art.reason = f"bahasa diagram {diagram.language!r} tidak didukung renderer; source disimpan"
         return art
@@ -260,22 +271,154 @@ def erd_entities(source: str) -> set[str]:
     return out
 
 
+_ERD_ATTR = re.compile(r"^\s*[A-Za-z_][\w()\[\],]*\s+([A-Za-z_][\w]*)")
+
+
+def erd_attributes(source: str) -> dict[str, set[str]]:
+    """Attribute names per entity block of a Mermaid ``erDiagram`` (``type name [PK|FK] ["comment"]``)."""
+    out: dict[str, set[str]] = {}
+    current: str | None = None
+    for line in source.splitlines():
+        m = _ERD_ENTITY.match(line)
+        if m:
+            current = m.group(1)
+            out.setdefault(current, set())
+            continue
+        if current is not None:
+            if line.strip().startswith("}"):
+                current = None
+                continue
+            a = _ERD_ATTR.match(line)
+            if a:
+                out[current].add(a.group(1))
+    return out
+
+
 def _norm_label(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.lower())
 
 
+_FLOW_LABELLED = re.compile(r"([A-Za-z_][\w-]*)\s*(\[\[|\[\(|\(\(|\[|\(|\{\{|\{|>)\s*\"?([^\]\)\}\"]{1,120}?)\"?\s*"
+                            r"(\]\]|\)\]|\)\)|\]|\)|\}\}|\})")
+_FLOW_SKIP = ("%%", "flowchart", "graph", "classdef", "class ", "style ", "linkstyle", "click ", "end", "direction",
+              "subgraph")
+_FLOW_ARROW = re.compile(r"<?[-.=]{2,}>?|&|\|[^|]*\|")
+_API_PATH = re.compile(r"(/api/[A-Za-z0-9_./{}:-]+)")
+
+
+def flow_nodes(source: str) -> dict[str, str]:
+    """Node id -> label of a Mermaid flowchart/graph (``A[Label]``, ``B((x))``, bare ``A --> B``); subgraph
+    titles, styles and edge labels are not nodes."""
+    nodes: dict[str, str] = {}
+    for line in source.splitlines():
+        s = line.strip()
+        if not s or s.lower().startswith(_FLOW_SKIP):
+            continue
+        for m in _FLOW_LABELLED.finditer(s):
+            nodes[m.group(1)] = m.group(3).strip()
+        bare = _FLOW_LABELLED.sub(lambda m: f" {m.group(1)} ", s)
+        for token in _FLOW_ARROW.sub(" ", bare).split():
+            if re.fullmatch(r"[A-Za-z_][\w-]*", token):
+                nodes.setdefault(token, token)
+    return nodes
+
+
+def _route_matches(path: str, templates: set[str]) -> bool:
+    segs = [s for s in path.rstrip("/.").split("/") if s]
+    for t in templates:
+        tsegs = [s for s in t.split("/") if s]
+        if len(tsegs) == len(segs) and all(a == b or (a.startswith("{") and a.endswith("}")) or
+                                           (b.startswith("{") and b.endswith("}")) for a, b in zip(tsegs, segs,
+                                                                                                    strict=True)):
+            return True
+    return False
+
+
+def _labels_present(labels: list[str], source: str) -> list[str]:
+    src = _norm_label(source)
+    return [x for x in labels if _norm_label(x) and _norm_label(x) not in src]
+
+
 def verify_visuals(visuals: list[VisualArtifact], *, trust_boundaries: list[str] | None = None,
-                   known_tables: set[str] | None = None) -> list[VisualArtifact]:
-    """Annotate visuals with the checks AEOS can run deterministically:
+                   known_tables: set[str] | None = None, known_components: set[str] | None = None,
+                   known_routes: set[str] | None = None, data_items: list[str] | None = None,
+                   deployment_environments: list[str] | None = None,
+                   known_columns: dict[str, set[str]] | None = None) -> list[VisualArtifact]:
+    """Annotate visuals with the checks AEOS can run deterministically (labels/names, never runtime proof):
 
     * ``erd`` — entity names vs the referenced schema's table names (``known_tables``; for the platform
       project these come from the SQLAlchemy metadata at the running commit). Tables the schema does not
       have are reported as MISMATCH (never silently accepted); without a referenced schema → UNVERIFIED.
-    * ``trust_boundary``/``data_flow`` — every trust boundary named in the plan's threat model must appear in
-      the diagram source; missing ones → MISMATCH.
-    Everything else stays UNVERIFIED with the reason in ``verification_notes``."""
+    * ``trust_boundary``/``data_flow`` — every trust boundary named in the plan's threat model, and (data flow)
+      every data type of the plan's data inventory, must appear in the diagram source; missing ones → MISMATCH.
+    * ``context``/``component`` — every node must name a registered component (``known_components``: the
+      platform's InstallManifest/inventory ids and names); unknown nodes → MISMATCH.
+    * ``sequence`` — every ``/api/...`` path in the diagram must exist in the route contract (``known_routes``);
+      unknown paths → MISMATCH. The message order is not proven (integration-test evidence is separate).
+    * ``deployment``/``cicd`` — every environment with a registered deployment target must appear.
+    Without a reference to compare against, a diagram stays UNVERIFIED with the reason in ``verification_notes``."""
     boundaries = [b for b in (trust_boundaries or []) if b.strip()]
+    data_names = [d for d in (data_items or []) if d.strip()]
+    envs = [e for e in (deployment_environments or []) if e.strip()]
     for v in visuals:
+        if v.kind in ("context", "component") and known_components:
+            known = {_norm_label(c) for c in known_components}
+            nodes = flow_nodes(v.source)
+            unknown = sorted({label for nid, label in nodes.items()
+                              if _norm_label(label) not in known and _norm_label(nid) not in known})
+            if not nodes:
+                v.verification_notes = ["Diagram tanpa node yang dapat dibaca; tidak dapat dibandingkan dengan "
+                                        "InstallManifest."]
+            elif unknown:
+                v.verification_status = "MISMATCH"
+                v.verification_notes = ["Node tidak terdaftar di InstallManifest/inventory (tidak diterima sebagai "
+                                        f"fakta): {', '.join(unknown[:20])}"]
+            else:
+                v.verification_status = "CONSISTENT"
+                v.verification_notes = [f"Semua {len(nodes)} node cocok dengan komponen InstallManifest/inventory "
+                                        "(cek nama; relasi belum dibandingkan)."]
+            continue
+        if v.kind == "sequence" and known_routes:
+            paths = sorted(set(_API_PATH.findall(v.source)))
+            unknown = [p for p in paths if not _route_matches(p, known_routes)]
+            if not paths:
+                v.verification_notes = ["Sequence tanpa path /api yang dapat dibandingkan dengan route contract; "
+                                        "tetap UNVERIFIED."]
+            elif unknown:
+                v.verification_status = "MISMATCH"
+                v.verification_notes = ["Path API tidak ada di route contract (contracts/api/routes.json): "
+                                        + ", ".join(unknown[:20])]
+            else:
+                v.verification_status = "CONSISTENT"
+                v.verification_notes = [f"Semua {len(paths)} path API ada di route contract; urutan pesan belum "
+                                        "dibuktikan oleh evidence integration test."]
+            continue
+        if v.kind in ("deployment", "cicd") and envs:
+            missing = _labels_present(envs, v.source)
+            if missing:
+                v.verification_status = "MISMATCH"
+                v.verification_notes = ["Environment dengan target deployment terdaftar tidak muncul di diagram: "
+                                        + ", ".join(missing)]
+            else:
+                v.verification_status = "CONSISTENT"
+                v.verification_notes = [f"Semua {len(envs)} environment target deployment terdaftar muncul di "
+                                        "diagram (cek label; pipeline/IaC belum dibandingkan)."]
+            continue
+        if v.kind == "data_flow" and (boundaries or data_names):
+            notes, bad = [], False
+            if boundaries:
+                miss_b = _labels_present(boundaries, v.source)
+                bad = bad or bool(miss_b)
+                notes.append("Trust boundary di threat model tidak muncul di diagram: " + ", ".join(miss_b) if miss_b
+                             else f"Semua {len(boundaries)} trust boundary threat model muncul di diagram.")
+            if data_names:
+                miss_d = _labels_present(data_names, v.source)
+                bad = bad or bool(miss_d)
+                notes.append("Data dari data inventory tidak muncul di diagram: " + ", ".join(miss_d) if miss_d
+                             else f"Semua {len(data_names)} jenis data di data inventory muncul di diagram.")
+            v.verification_status = "MISMATCH" if bad else "CONSISTENT"
+            v.verification_notes = [*notes, "Cek label, bukan verifikasi runtime."]
+            continue
         if v.kind == "erd" and known_tables is not None:
             entities = erd_entities(v.source)
             tables = {_norm_label(t) for t in known_tables}
@@ -288,9 +431,18 @@ def verify_visuals(visuals: list[VisualArtifact], *, trust_boundaries: list[str]
                 v.verification_notes = [f"Entitas tidak ada di schema yang dirujuk (tidak diterima sebagai fakta): "
                                         f"{', '.join(unknown[:20])}"]
             else:
-                v.verification_status = "CONSISTENT"
-                v.verification_notes = [f"Semua {len(entities)} entitas ada di schema yang dirujuk (nama tabel); "
-                                        "kolom/relasi belum dibandingkan."]
+                cols = {_norm_label(t): {_norm_label(c) for c in cs} for t, cs in (known_columns or {}).items()}
+                bad_cols = sorted(f"{e}.{a}" for e, attrs in erd_attributes(v.source).items()
+                                  if _norm_label(e) in cols for a in attrs if _norm_label(a) not in cols[_norm_label(e)])
+                if bad_cols:
+                    v.verification_status = "MISMATCH"
+                    v.verification_notes = ["Kolom tidak ada di tabel schema yang dirujuk (tidak diterima sebagai "
+                                            f"fakta): {', '.join(bad_cols[:20])}"]
+                else:
+                    v.verification_status = "CONSISTENT"
+                    v.verification_notes = [f"Semua {len(entities)} entitas ada di schema yang dirujuk (nama tabel)"
+                                            + ("; atribut yang ditulis cocok dengan kolom tabel" if known_columns
+                                               else "; kolom belum dibandingkan") + "; relasi belum dibandingkan."]
         elif v.kind in ("trust_boundary", "data_flow") and boundaries:
             src = _norm_label(v.source)
             missing = [b for b in boundaries if _norm_label(b) and _norm_label(b) not in src]
@@ -304,12 +456,36 @@ def verify_visuals(visuals: list[VisualArtifact], *, trust_boundaries: list[str]
     return visuals
 
 
+def evidence_chart(*, title: str, unit: str, source: str, points: list[dict[str, Any]]) -> dict[str, Any]:
+    """§29 evidence chart: drawn only from recorded data, every point bound to its record id and time; a missing
+    value is an UNKNOWN gap (never plotted as 0) and the chart never states PASS/FAIL (that is the record's job).
+    ``points``: ``{"ref": record id, "at": ISO time, "value": float | None}`` oldest first."""
+    bound = [p for p in points if p.get("ref") and p.get("at")]
+    measured = [p for p in bound if isinstance(p.get("value"), (int, float))]
+    out: dict[str, Any] = {"kind": "evidence_chart", "title": title, "unit": unit, "source": source,
+                           "evidence_role": "RECORDED_DATA_NOT_A_VERDICT", "points": bound,
+                           "unknown_points": len(bound) - len(measured), "unbound_points_dropped": len(points) - len(bound),
+                           "refs": [p["ref"] for p in measured]}
+    if not measured:
+        out.update(status="NO_DATA", mermaid=None, reason="Belum ada nilai tercatat; tidak ada grafik yang dikarang.")
+        return out
+    labels = ", ".join(f'"{str(p["at"])[5:16]}"' for p in measured)
+    values = ", ".join(f"{float(p['value']):g}" for p in measured)
+    safe_title = re.sub(r'["\n]', " ", title)[:80]
+    out.update(status="EVIDENCE_BOUND", reason=f"{len(measured)} nilai tercatat dari {source}.",
+               mermaid=f'xychart-beta\n  title "{safe_title}"\n  x-axis [{labels}]\n  y-axis "{unit}"\n'
+                       f"  line [{values}]")
+    return out
+
+
 def screenshot_manifest(*, project_id: str, commit: str | None, environment: str | None,
                         routes: list[str] | None = None,
                         evidence: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """§29 screenshot contract. AEOS itself has no approved browser-automation collector in this build, so a
-    manifest stays NOT_PROVEN unless trusted SCREENSHOT EvidenceArtifacts (collector origin, recorded commit/
-    environment) exist for the project; those are referenced by id — never generated or copied here."""
+    """§29 screenshot contract. A manifest stays NOT_PROVEN unless trusted SCREENSHOT EvidenceArtifacts
+    (collector origin, recorded commit/environment) exist for the project; those are referenced by id — never
+    generated or copied here. They are produced by the trusted collector ``aeos.docs_engine.screenshots``
+    (``aeos docs screenshot``: registered deployment target, commit proven by its health endpoint first, page
+    text checked for secrets/PII before the image is stored)."""
     items = [e for e in (evidence or []) if e.get("kind") == "SCREENSHOT" and e.get("trusted")
              and e.get("origin") != "worker" and (e.get("environment") or {}).get("commit")]
     out: dict[str, Any] = {
@@ -324,8 +500,9 @@ def screenshot_manifest(*, project_id: str, commit: str | None, environment: str
             "Disimpan sebagai EvidenceArtifact oleh collector tepercaya, bukan oleh worker",
         ],
         "status": "NOT_PROVEN",
-        "reason": "Capture screenshot belum diimplementasikan/diizinkan pada build ini (tidak ada browser "
-                  "automation yang disetujui).",
+        "reason": "Belum ada screenshot tepercaya untuk proyek ini. Collector: `aeos docs screenshot <project_id> "
+                  "--environment staging|production --commit <sha> --route /...` (target deployment terdaftar; "
+                  "commit dibuktikan lewat health endpoint; teks halaman diperiksa untuk secret/PII).",
         "items": [],
         "evidence_role": "SCREENSHOT_REQUIRES_COLLECTOR",
     }

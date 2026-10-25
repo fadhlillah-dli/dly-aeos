@@ -205,6 +205,13 @@ class FakeModules:
         for name, mod in mods.items():
             if name not in skip:
                 monkeypatch.setitem(sys.modules, name, mod)
+        if "host" not in skip:
+            # §22 admission reserves each run's enforced memory cap (4 GB by default) against the host capacity: a
+            # deterministic 32 GB host keeps scheduler tests independent of the CI runner's RAM (7 GB on macOS).
+            import psutil
+
+            monkeypatch.setattr(psutil, "virtual_memory",
+                                lambda: types.SimpleNamespace(total=32 * 1024 ** 3, available=16 * 1024 ** 3))
         return self
 
 

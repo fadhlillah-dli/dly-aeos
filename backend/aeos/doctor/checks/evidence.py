@@ -186,12 +186,44 @@ def verifier_independence_self_test(repo: Path) -> dict[str, Any]:
     return out
 
 
+def _verifier_runner_view(ctx: CheckContext) -> dict[str, Any]:
+    """Which runner the verifier executes candidate code in (§20 isolated runner). CONTAINER only on a host with
+    a proven container boundary + the verifier image; otherwise WEAK, whose residual risk is reported, never
+    hidden. Fail closed: any error is reported as WEAK with the reason."""
+    domain = Domain.PERSONAL.value  # OFFICE is always BLOCKED by the worker runtime; verifier re-checks per domain
+    if ctx.session is None:  # bootstrap layer without a database: the runner state cannot be read
+        return {"isolation": "WEAK", "runner": "process", "reasons": ["no database: verifier runner state not readable"],
+                "residual_risks": ["verifier isolation NOT-PROVEN: runner state could not be read (fail closed)"]}
+    try:
+        from aeos.verification import facade as verification
+
+        st = verification.verifier_runner_status(ctx.session, domain=domain)
+    except Exception as exc:
+        return {"isolation": "WEAK", "runner": "process", "reasons": [f"verifier runner unreadable ({type(exc).__name__})"],
+                "residual_risks": ["verifier isolation NOT-PROVEN: runner state could not be read (fail closed)"]}
+    isolation = str(st.get("isolation") or "WEAK")
+    view: dict[str, Any] = {"isolation": isolation, "runner": st.get("runner"), "domain": domain,
+                            "reasons": st.get("reasons") or [], "remedies": st.get("remedies") or [],
+                            "image": st.get("image"), "containment": st.get("containment") or {}}
+    if isolation != "CONTAINER":
+        view["residual_risks"] = [
+            "Verifier isolation WEAK: candidate code the verifier executes (trusted suite, candidate tests, "
+            "migration round-trip) runs as the controller's OS user with a scrubbed, redirected environment; no "
+            "container boundary proven on this host, so filesystem/egress are not OS-enforced (ADR-0051). Writes "
+            "to the controller checkout/interpreter and the DB trust tables during a verification are detected and "
+            "QUARANTINED; reads by absolute path or the OS credential API are not prevented.",
+            *([f"verifier container runner not available: {r}" for r in (st.get('reasons') or [])[:3]]),
+        ]
+    return view
+
+
 @check("evidence.verifier", "EVIDENCE_REVIEW", "Verifier/collector independen tersedia",
        component_id="verification-review", ttl_seconds=3600, ok={"CONFIGURED", "VERIFIED"}, severity_fail="HIGH",
        level="E1", functional_level="E2",
-       description="Tanpa --functional: modul collector/acceptance ada. Dengan --functional: uji mandiri pemisahan "
-                   "zona kepercayaan (shadow module kandidat terdeteksi, kandidat di dalam controller ditolak, suite "
-                   "tepercaya dibaca dari luar kandidat).")
+       description="Tanpa --functional: modul collector/acceptance ada dan runner isolasi dilaporkan (CONTAINER "
+                   "bila boundary terbukti, selainnya WEAK + residual risk). Dengan --functional: uji mandiri "
+                   "pemisahan zona kepercayaan (shadow module kandidat terdeteksi, kandidat di dalam controller "
+                   "ditolak, suite tepercaya dibaca dari luar kandidat).")
 def evidence_verifier(ctx: CheckContext) -> Outcome:
     present, placeholder = module_present("aeos.verification.collector")
     acc, acc_ph = module_present("aeos.verification.acceptance")
@@ -199,9 +231,21 @@ def evidence_verifier(ctx: CheckContext) -> Outcome:
     if not evidence["collector"] or not evidence["acceptance"]:
         return Outcome("MISSING", "Verifier/collector independen belum diimplementasikan; hasil worker tetap "
                        "REVIEW/NOT-PROVEN.", evidence=evidence, error_code="VERIFIER_NOT_IMPLEMENTED")
+    runner_view = _verifier_runner_view(ctx)
+    evidence["verifier_runner"] = runner_view
+    risks = list(runner_view.get("residual_risks") or [])
+    if risks:
+        evidence["residual_risks"] = risks
+    iso = runner_view["isolation"]
+    # Honest wording: the WEAK runner's residual risk is stated, not owner-accepted (no Decision records an
+    # acceptance of it); OFFICE and runs produced in a container are BLOCKED instead of using it.
+    iso_note = (f" Runner candidate code: isolasi {iso}"
+                + ("" if iso == "CONTAINER" else " (WEAK: belum terisolasi, residual risk dinyatakan; OFFICE dan "
+                   "run dari sandbox container diblokir; buktikan containment container + build image verifier "
+                   "untuk CONTAINER)") + ".")
     if not ctx.functional:
         return Outcome("CONFIGURED", "Collector dan acceptance tersedia; independensi diuji dengan --functional "
-                       "(uji mandiri pemisahan zona kepercayaan).", evidence=evidence)
+                       "(uji mandiri pemisahan zona kepercayaan)." + iso_note, evidence=evidence)
     try:
         test = verifier_independence_self_test(ctx.repo)
     except Exception as exc:  # never green on an error
@@ -214,8 +258,8 @@ def evidence_verifier(ctx: CheckContext) -> Outcome:
             + ("" if test.get("trusted_suite_hash") else " (suite tepercaya tidak terbaca)") + ".",
             evidence=evidence, error_code="VERIFIER_NOT_INDEPENDENT")
     return Outcome("VERIFIED", "Independensi verifier: shadow module kandidat terdeteksi, kandidat di dalam controller "
-                   "ditolak, suite tepercaya di-hash dari checkout controller (skenario: uji mandiri, bukan run worker).",
-                   evidence=evidence)
+                   "ditolak, suite tepercaya di-hash dari checkout controller (skenario: uji mandiri, bukan run worker)."
+                   + iso_note, evidence=evidence)
 
 
 @check("evidence.trace_redaction", "EVIDENCE_REVIEW", "Redaksi trace/log berfungsi", ttl_seconds=86400,
@@ -303,3 +347,55 @@ def evidence_acceptance_invalidation(ctx: CheckContext) -> Outcome:
                            evidence_to_collect="acceptance INVALIDATED"))
     return Outcome("VERIFIED", f"{len(rows)} acceptance ACCEPTED masih cocok dengan head/PlanVersion/konfigurasi "
                    "verifier saat ini.", evidence=evidence)
+
+
+# Append-only tables whose sequence number is an INTEGER PRIMARY KEY (rowid): a row deleted in the middle
+# leaves a gap that never closes, so a gap proves rows were removed below the application.
+SEQ_TABLES = ("audit_events", "events")
+
+
+def expected_guard_triggers(existing_tables: set[str]) -> list[str]:
+    from aeos.core.db import APPEND_ONLY_TABLES, IMMUTABLE_COLUMNS
+
+    names = [f"trg_{t}_{k}" for t in APPEND_ONLY_TABLES if t in existing_tables for k in ("no_update", "no_delete")]
+    return names + [f"trg_{t}_immutable_cols" for t in IMMUTABLE_COLUMNS if t in existing_tables]
+
+
+@check("evidence.append_only_guard", "EVIDENCE_REVIEW", "Guard append-only audit/evidence utuh",
+       component_id="evidence-store", needs_db=True, ttl_seconds=900, severity_fail="CRITICAL",
+       invalidators=("db:schema",))
+def evidence_append_only_guard(ctx: CheckContext) -> Outcome:
+    """§21/§34: detects what the triggers alone cannot - a guard trigger dropped at the database level, or audit/
+    event rows deleted below the application. Detection only: the database stays writable by the controller OS
+    user until verifier/worker code runs isolated (§20)."""
+    from sqlalchemy import text
+
+    assert ctx.session is not None
+    rows = ctx.session.execute(text("SELECT type, name FROM sqlite_master WHERE type IN ('table', 'trigger')")).all()
+    tables = {n for t, n in rows if t == "table"}
+    triggers = {n for t, n in rows if t == "trigger"}
+    expected = expected_guard_triggers(tables)
+    missing = sorted(set(expected) - triggers)
+    gaps: dict[str, int] = {}
+    for table in SEQ_TABLES:
+        if table not in tables:
+            continue
+        # table names come from the SEQ_TABLES constant above, never from input
+        count, low, high = ctx.session.execute(text(f"SELECT count(*), min(seq), max(seq) FROM {table}")).one()  # noqa: S608
+        if count and (high - low + 1 != count or low != 1):
+            gaps[table] = int(high - count)  # rows missing from 1..max(seq)
+    evidence = {"triggers_expected": len(expected), "triggers_missing": missing, "seq_gaps": gaps,
+                "limit": "deteksi saja: DB dapat ditulis oleh pengguna OS controller sampai runner terisolasi (§20)"}
+    remedy = Remedy(operation="Hentikan run (emergency stop), bandingkan dengan backup terakhir, lalu pasang ulang guard",
+                    command=aeos_cmd("db upgrade"), source="aeos.core.db.install_append_only_triggers",
+                    target="<data>/aeos.sqlite3", privilege="pengguna lokal",
+                    rollback="restore backup yang lolos restore test", evidence_to_collect="evidence.append_only_guard")
+    if missing:
+        return Outcome("FAILED", f"{len(missing)} trigger append-only/immutable hilang: {', '.join(missing[:6])}. "
+                       "Perubahan di bawah aplikasi mungkin terjadi.", evidence=evidence,
+                       error_code="APPEND_ONLY_GUARD_MISSING", remedy=remedy)
+    if gaps:
+        return Outcome("FAILED", "Baris audit/event hilang dari urutan seq ("
+                       + ", ".join(f"{t}: {n}" for t, n in sorted(gaps.items())) + "); catatan dihapus di bawah aplikasi.",
+                       evidence=evidence, error_code="AUDIT_SEQ_GAP", remedy=remedy)
+    return Outcome("VERIFIED", f"{len(expected)} trigger guard ada; urutan audit/event tanpa celah.", evidence=evidence)

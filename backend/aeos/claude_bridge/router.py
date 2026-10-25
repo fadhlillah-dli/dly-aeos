@@ -11,7 +11,7 @@ from sqlalchemy import select
 from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, SettingsDep
 from aeos.audit import service as audit
 from aeos.claude_bridge import bridge
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.claude_bridge_ext import ClaudeCapabilityTest
 
 router = APIRouter(tags=["claude_bridge"])
@@ -272,6 +272,38 @@ def review_final_acceptance(body: FinalAcceptanceReviewBody, db: DB, settings: S
                                        "facts": facts, "tasks": tasks},
         domain=plan.domain, project_id=plan.project_id, target_type="plan", target_id=plan.id)
     return {"plan_id": plan.id, "facts": facts, **out}
+
+
+class DocsCheckpointReviewBody(BaseModel):
+    revision_id: str
+
+
+@router.post("/api/claude/review-docs-checkpoint")
+def review_docs_checkpoint(body: DocsCheckpointReviewBody, db: DB, settings: SettingsDep, principal: AdminPrincipal,
+                           domain: ActiveDomain) -> dict[str, Any]:
+    """§41 "Claude memeriksa paket perubahan material": advisory supervisor review of a recorded documentation
+    checkpoint package (changed documents/sections, architecture and diagram delta, the Tech Writer draft). The
+    package stays as recorded; nothing is approved, published or changed."""
+    from aeos.core.errors import Conflict, NotFound
+    from aeos.docs_engine import facade as docs
+
+    require_subscription_owner(db, principal)
+    try:
+        view = docs.documentation_checkpoint(db, body.revision_id)
+    except NotFound:
+        view = None
+    if view is None or view["domain"] != domain.value or not principal.can_access_project(view["project_id"],
+                                                                                           view["domain"]):
+        raise NotFound("documentation checkpoint not found in the active domain")
+    if not view.get("material"):
+        raise Conflict("the package has no material change; only material documentation changes are reviewed",
+                       code="PACKAGE_NOT_MATERIAL")
+    data = {k: view[k] for k in ("kind", "ref", "package_hash", "finalised", "changed_documents", "removed_documents",
+                                 "diagram_delta", "contract_deltas", "architecture_delta", "writer_task")}
+    out = _supervisor_review(db, settings, principal, purpose="review.docs_checkpoint", role="architecture-reviewer",
+                             what="documentation change package", data=data, domain=view["domain"],
+                             project_id=view["project_id"], target_type="document_revision", target_id=view["id"])
+    return {"revision_id": view["id"], "package_hash": view["package_hash"], "package_unchanged": True, **out}
 
 
 @router.get("/api/claude/capability-tests")

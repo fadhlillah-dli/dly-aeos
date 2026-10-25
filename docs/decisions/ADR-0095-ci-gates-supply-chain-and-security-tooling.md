@@ -24,7 +24,7 @@ and the build; gate membership was guessed from job names.
 | Bootstrap | `bootstrap` job runs both scripts for real on Linux/Windows + a negative case | G2 | enforced |
 | UI tests | vitest + build | G3 | enforced |
 | Browser + basic a11y | `browser-e2e` job: Playwright smoke over every nav route (no page/console errors, 390 px overflow, dark-mode contrast, labels) | G3 | enforced |
-| API contract | `tests/unit/test_api_envelope_contract.py` (route snapshot only grows; list endpoints state source + freshness) | G2/G3 | enforced |
+| API contract | `tests/unit/test_api_envelope_contract.py` (route snapshot only grows; list, claim and project/component-scoped endpoints state source + freshness, no ratchet; every /api response carries version/schema/settings-hash headers) | G2/G3 | enforced |
 | Security scenarios | the trusted acceptance suite's security rows (`tests/acceptance/test_auth_boundary.py`, `test_untrusted_input.py`, `test_domain_scope.py`, `test_containment.py`) inside the backend job | G2 (counted as the G3 security scenarios) | enforced; container containment BLOCKED (no Docker, MATRIX 1.12/1.13) |
 | Performance baseline | `tests/unit/test_perf_baseline.py` in the `browser-e2e` job: p50/p95 of key read endpoints written to the step summary | G3 report | REPORT_ONLY: no latency objective decided by the owner (§33); only a pathological sanity ceiling fails |
 | SBOM | `scripts/supply_chain.py sbom` (CycloneDX 1.5 from the lockfiles, offline, deterministic) | report | produced every run |

@@ -198,6 +198,7 @@ export default function ProjectDetailPage() {
         source={q.data!.source}
         checkedAt={q.data!.checked_at}
         evidenceLimit="Repository/integrasi menampilkan status terakhir yang tercatat; lampiran adalah DATA"
+        relatedDecisionsHref={`/decisions?target_type=project&target_id=${encodeURIComponent(project.id)}`}
         mode={project.mode}
         actions={
           <>
@@ -235,8 +236,17 @@ export default function ProjectDetailPage() {
         <span className="text-xs text-ink-3">
           Dokumen: <ModuleBadge kind="config" value={project.integration_state.docs} /> · Issue:{" "}
           <ModuleBadge kind="config" value={project.integration_state.issues} />
+          {project.environment && (
+            <>
+              {" "}
+              · Environment: <ModuleBadge kind="config" value={project.environment.status} />
+            </>
+          )}
         </span>
       </div>
+      {project.environment?.status === "NOT_AVAILABLE" && project.environment.reason && (
+        <Notice tone="info">{project.environment.reason}</Notice>
+      )}
       {ctxError ? <ErrorBox error={ctxError} /> : null}
       {readOnly && (
         <Notice tone="warn">

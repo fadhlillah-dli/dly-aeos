@@ -40,9 +40,62 @@ def containers():
 if args[:1] == ["version"]:
     print("27.0.0"); sys.exit(0)
 if args[:2] == ["image", "inspect"]:
+    if args[-1] == cfg.get("verifier_image"):
+        if cfg.get("verifier_image_present", True):
+            print(cfg.get("verifier_image_id", "sha256:fakeverifier")); sys.exit(0)
+        sys.stderr.write("No such image\n"); sys.exit(1)
     if cfg.get("image_present", True):
         print(cfg.get("image_id", "sha256:fakeimage")); sys.exit(0)
     sys.stderr.write("No such image\n"); sys.exit(1)
+vimg = cfg.get("verifier_image")
+if args[:1] == ["run"] and vimg and vimg in args:
+    # verifier step: run the inner command on this host with the container paths mapped back to their bind
+    # sources and the two tmpfs mounts to fresh host dirs (proves argv/paths/lifecycle, not isolation)
+    import subprocess, tempfile
+    with open(st / "verifier_runs.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(args) + "\n")
+    inner = args[args.index(vimg) + 1:]
+    vid = next(x.split("=", 1)[1] for x in labels() if x.startswith("aeos.verify_id="))
+    cid = uuid.uuid4().hex[:12]
+    marker = st / "containers" / f"{cid}.json"
+    marker.write_text(json.dumps({"run_id": vid}), encoding="utf-8")
+    maps = []
+    for i, a in enumerate(args):
+        if a == "--mount":
+            spec = args[i + 1]
+            src = spec.split("source=", 1)[1].split(",target=", 1)[0]
+            tgt = spec.split(",target=", 1)[1].split(",", 1)[0]
+            maps.append((tgt, src))
+    for t in ("/tmp", "/home/verifier"):
+        maps.append((t, tempfile.mkdtemp(prefix="fakefs-")))
+    maps.sort(key=lambda m: len(m[0]), reverse=True)
+    def host(v):
+        if v == "/dev/null":
+            return os.devnull
+        for tgt, src in maps:
+            if v == tgt:
+                return src
+            if v.startswith(tgt + "/"):
+                return os.path.join(src, *v[len(tgt) + 1:].split("/"))
+        return v
+    envs = dict(args[j + 1].split("=", 1) for j, x in enumerate(args) if x == "-e")
+    env = {k: host(v) for k, v in envs.items()}
+    env["PYTHONPATH"] = os.pathsep.join(host(p) for p in envs.get("PYTHONPATH", "").split(":") if p)
+    for k in ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "PATH"):
+        if k in os.environ:
+            env[k] = os.environ[k]
+    exe = sys.executable if inner[0] == "python" else inner[0]
+    cwd = host(args[args.index("--workdir") + 1])
+    rc = subprocess.run([exe, *[host(a) for a in inner[1:]]], env=env, cwd=cwd, stdin=subprocess.DEVNULL).returncode
+    import shutil
+    for tgt, src in maps:
+        if tgt in ("/tmp", "/home/verifier"):
+            shutil.rmtree(src, ignore_errors=True)
+    try:
+        marker.unlink()
+    except OSError:
+        pass
+    sys.exit(rc)
 if args[:2] == ["network", "inspect"]:
     f = st / "networks" / args[-1]
     if not f.exists():
@@ -150,6 +203,10 @@ class FakeDocker:
 
     def containers(self) -> list[str]:
         return [f.stem for f in (self.state / "containers").glob("*.json")] if (self.state / "containers").exists() else []
+
+    def verifier_runs(self) -> list[list[str]]:
+        f = self.state / "verifier_runs.jsonl"
+        return [json.loads(x) for x in f.read_text(encoding="utf-8").splitlines()] if f.exists() else []
 
 
 def install_fake_docker(monkeypatch: Any, tmp_path: Path, **cfg: Any) -> FakeDocker:

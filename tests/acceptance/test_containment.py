@@ -208,10 +208,18 @@ def test_pr_code_under_the_verifier_sees_no_production_secret(tmp_path: Path, mo
                        data_dir=tmp_path / "d", disable_plugin_autoload=True)
     assert not [k for k in SECRET_ENV if k in env]
     assert not [k for k, v in env.items() if v in SECRET_ENV.values()]
-    assert env["PYTHON_KEYRING_BACKEND"] == "keyring.backends.fail.Keyring"
+    # null backend: answers "no password" and stores nothing (the fail backend raised, inviting a fallback)
+    assert env["PYTHON_KEYRING_BACKEND"] == "keyring.backends.null.Keyring"
+    # git reads no system/global config and has no credential helper or askpass; no SSH agent reaches the child
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and "SSH_AUTH_SOCK" not in env
+    assert env.get("GIT_CONFIG_KEY_0") == "credential.helper" and env.get("GIT_CONFIG_VALUE_0") == ""
+    # gh/docker/npm/claude config dirs are redirected into the run home (empty), never the owner's
+    assert env["GH_CONFIG_DIR"].startswith(str(tmp_path / "h")) and env["DBUS_SESSION_BUS_ADDRESS"] == "disabled:"
     assert env["AEOS_DATA_DIR"] == str(tmp_path / "d")  # never the controller's data dir / vault bootstrap
+    # GIT_CONFIG_KEY_* are structural git directive names (values asserted above: credential.helper="" etc.),
+    # not credentials - exclude them from the secret-shaped-name probe.
     probe = ("import os, json; print(json.dumps(sorted(k for k in os.environ if any(s in k for s in "
-             "('TOKEN','KEY','SECRET','ANTHROPIC','VAULT','BAO')))))")
+             "('TOKEN','KEY','SECRET','ANTHROPIC','VAULT','BAO')) and not k.startswith('GIT_CONFIG_KEY_'))))")
     import sys
 
     out = subprocess.run([sys.executable, "-I", "-c", probe], env=env, capture_output=True, text=True, check=True,

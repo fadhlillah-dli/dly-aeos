@@ -91,7 +91,11 @@
    "integrity": "OK",
    "results": "Tidak ada hasil di-seed; hasil hanya dari EvalRun yang tercatat.",
    "data_classification": "INTERNAL",
-   "grader": "Kasus held-out ini adalah definisi. Grader yang dapat dieksekusi didaftarkan pemilik sebagai trusted suite di luar workspace worker (ADR-0060); perubahan backend/aeos/evaluation/** oleh worker dikarantina (protected path)."
+   "grader": "Kasus held-out ini adalah definisi. Grader yang dapat dieksekusi didaftarkan pemilik sebagai trusted suite di luar workspace worker (ADR-0060); perubahan backend/aeos/evaluation/** oleh worker dikarantina (protected path).",
+   "held_out_scope": {
+    "worker_can_read_definitions": "SELF_BUILD_ONLY",
+    "note": "Definisi kasus ada di backend/aeos/evaluation/** repository platform: worker self-build yang meng-clone platform dapat MEMBACANYA (tidak benar-benar tersembunyi); worker proyek lain tidak. Menulisnya selalu dikarantina. Kode evaluasi controller di-fingerprint per EvalRun: bila berubah selama run (mis. oleh kode kandidat yang dijalankan verifier), hasil ditolak (GRADER_CHANGED)."
+   }
   },
   {
    "id": "bc449884-732c-4c36-8f63-d51c2f748c0f",
@@ -183,7 +187,11 @@
    "integrity": "OK",
    "results": "Tidak ada hasil di-seed; hasil hanya dari EvalRun yang tercatat.",
    "data_classification": "INTERNAL",
-   "grader": "Kasus held-out ini adalah definisi. Grader yang dapat dieksekusi didaftarkan pemilik sebagai trusted suite di luar workspace worker (ADR-0060); perubahan backend/aeos/evaluation/** oleh worker dikarantina (protected path)."
+   "grader": "Kasus held-out ini adalah definisi. Grader yang dapat dieksekusi didaftarkan pemilik sebagai trusted suite di luar workspace worker (ADR-0060); perubahan backend/aeos/evaluation/** oleh worker dikarantina (protected path).",
+   "held_out_scope": {
+    "worker_can_read_definitions": "SELF_BUILD_ONLY",
+    "note": "Definisi kasus ada di backend/aeos/evaluation/** repository platform: worker self-build yang meng-clone platform dapat MEMBACANYA (tidak benar-benar tersembunyi); worker proyek lain tidak. Menulisnya selalu dikarantina. Kode evaluasi controller di-fingerprint per EvalRun: bila berubah selama run (mis. oleh kode kandidat yang dijalankan verifier), hasil ditolak (GRADER_CHANGED)."
+   }
   }
  ],
  "source": "eval_suites (protected, held-out; definisi tanpa hasil)",

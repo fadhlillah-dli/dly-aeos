@@ -10,16 +10,18 @@ from __future__ import annotations
 
 import sys
 import types
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
 
 from aeos.claude_bridge.facade import ClaudeResult
 from aeos.core.errors import Blocked, Conflict, PolicyDenied, ValidationFailed
+from aeos.core.timeutil import utcnow
 from aeos.models.decisions import ArchitectureSnapshot, Decision
-from aeos.models.inventory import ComponentReference
+from aeos.models.inventory import ComponentObservation, ComponentReference, ComponentRelation
 from aeos.models.research import ResearchEntry
-from aeos.proposals import checkpoint, plan, service
+from aeos.proposals import checkpoint, links, plan, service
 from aeos.research import service as research
 from tests.unit.proposal_fixtures import (
     ACCEPTANCE,
@@ -70,6 +72,69 @@ def test_add_baseline_uses_only_its_own_domain_snapshot(db, mine, other):
     with pytest.raises(ValidationFailed):  # an outcome can never cite the other domain's snapshot
         service._snapshot(db, leaked.id, p)
     assert service._snapshot(db, own.id, p)["id"] == own.id
+
+
+def _obs(db, domain, version, *, dimension="installation", status="INSTALLED", age_minutes=0):
+    o = ComponentObservation(component_id="opencode", dimension=dimension, status=status, observer=f"probe-{domain}",
+                             observed_version=version, scope={"domain": domain},
+                             observed_at=utcnow() - timedelta(minutes=age_minutes))
+    db.add(o)
+    db.commit()
+    return o
+
+
+@pytest.mark.parametrize("mine, other", [("PERSONAL", "OFFICE"), ("OFFICE", "PERSONAL")])
+def test_other_domain_inventory_records_never_shape_the_package_or_outcome(db, mine, other):
+    """§23/§41 (re-audit HIGH): the other domain's relations, domain-only components and observations never
+    appear in this domain's package, never move its baseline_hash and never satisfy its outcome gates."""
+    component(db)  # opencode: a PLATFORM component, shared by both domains
+    zqx = f"zqx-{other.lower()}-engine"
+    db.add(ComponentReference(component_id=zqx, kind="worker-engine", name=f"ZQX {other} engine",
+                              scope={"domains": [other]}, access={"egress": ["zqx.example"]}))
+    db.add(ComponentRelation(source_id=f"zqx-{other.lower()}-consumer", target_id="opencode", relation="calls",
+                             lens="DESIGN", scope={"domain": other}))  # an edge tagged with the other domain
+    db.add(ComponentRelation(source_id=zqx, target_id="opencode", relation="depends_on", lens="DESIGN"))  # its end
+    db.commit()
+    p = review(db, create(db, kind="UPGRADE", candidate_pin="1.4.0", domain=mine))
+    base = p.review_package["baseline"]["components"][0]
+    assert [r["source_id"] for r in base["consumers"]] == ["workforce"]
+    assert "zqx" not in str(p.review_package).lower()
+    before = p.baseline_hash
+
+    _obs(db, other, "9.9.9", age_minutes=60)  # the other domain observes the shared component at another version
+    review(db, p)
+    assert p.baseline_hash == before, "another domain's observation never re-binds this domain's decisions"
+    assert "9.9.9" not in str(p.review_package)
+    _obs(db, mine, "1.3.0", age_minutes=50)  # control: this domain's own observation is part of its baseline
+    review(db, p)
+    assert p.baseline_hash != before
+    assert p.review_package["baseline"]["components"][0]["observations"]["installation"]["observed_version"] == "1.3.0"
+
+    # ADD overlap + security/privacy: an other-domain-only component is "not in this domain's inventory"
+    a = review(db, create(db, kind="ADD", sources=["https://github.com/anomalyco/opencode"], domain=mine,
+                          candidate_component_ids=[zqx]))
+    assert zqx not in [c["component_id"] for c in a.review_package["baseline"]["overlap"]]
+    assert a.review_package["security_privacy"]["dimensions"]["egress"]["status"] == "UNKNOWN"
+    assert "zqx.example" not in str(a.review_package)
+    assert f"candidate_component:{zqx} (belum terdaftar di inventaris)" in a.unknown_fields
+    u = review(db, create(db, kind="UPGRADE", existing_component_ids=[zqx], candidate_pin="2.0.0", domain=mine))
+    assert u.review_package["baseline"]["components"][0]["status"] == "UNKNOWN"
+    assert "ZQX" not in str(u.review_package)
+
+    # outcome: only this domain's observation shows the candidate installed at the promoted pin
+    since = utcnow() - timedelta(minutes=5)
+    _obs(db, other, "1.4.0")
+    assert not service.observed_at_pin(db, "opencode", "1.4.0", since, domain=mine)
+    assert not service._observed_after(db, p, since, [], {})
+    assert any("neither enabled by decision nor observed" in x
+               for x in service.config_applied_problems(db, p, {}, since))
+    with pytest.raises(ValidationFailed):
+        links.add_links(db, p, actor_user_id="owner",
+                        observation_ids=[_obs(db, other, "1.4.0", dimension="configuration", status="CONFIGURED").id])
+    db.rollback()
+    _obs(db, mine, "1.4.0")
+    assert service.observed_at_pin(db, "opencode", "1.4.0", since, domain=mine)
+    assert service._observed_after(db, p, since, [], {})
 
 
 # ---------------------------------------------------------------- §40 evidence must be about the candidate (probe p4)

@@ -102,7 +102,7 @@ def test_compile_fills_every_section21_field_and_is_idempotent(db):
     assert spec.plan_version_hash == v.manifest_hash and spec.feature_key == "F1"
     # §21 time/token/attempt limits (clamped) + resource caps fixed by the control plane
     assert spec.limits == {"max_attempts": 2, "timeout_seconds": 3600, "max_output_tokens": 128000,
-                           "max_active_workers": 1, "nested_fan_out": False}
+                           "max_active_workers": 1, "nested_fan_out": False, "max_memory_mb": 4096, "max_cpus": 1}
     assert any("decision request" in s for s in spec.stop_conditions)  # §21 scope growth -> blocker
     # §21 grader/trusted pipeline paths are forbidden for every managed project
     assert set(dag.GENERIC_TRUSTED_PATHS) <= set(spec.forbidden_paths)
