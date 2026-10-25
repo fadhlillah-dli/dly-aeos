@@ -1,4 +1,4 @@
-"""§08 Recovery: lease/queue restart, duplicate publication prevention, backups/restore, config rollback.
+"""§08 Recovery: lease/queue restart, duplicate publication prevention, backups/restore, config/model rollback.
 
 A backup that was never restored is not "recovery ready" (§33, §50 "Restore backup belum pernah diuji").
 """
@@ -156,6 +156,71 @@ def recovery_publication_idempotency(ctx: CheckContext) -> Outcome:
                    + (f" pada commit {commit[:12]} (mekanisme pada commit itu; uji ulang setelah perubahan publisher)."
                       if commit else "."),
                    evidence={"evidence_id": ev.id, "commit": commit or None})
+
+
+ROUTE_ROLLBACK_RUNBOOK = "docs/runbooks/model-rollback.md"
+
+
+@check("recovery.route_rollback", "RECOVERY", "Rollback model/route: konfigurasi route sebelumnya tersimpan",
+       component_id="model-routing", needs_db=True, ttl_seconds=3600, ok={"CONFIGURED", "VERIFIED"},
+       invalidators=("config:routes", "model:route"), severity_fail="LOW",
+       description="§08 config/model rollback, §33 runbook model rollback: setiap route APPROVED/TRIAL punya target "
+                   "rollback yang tercatat pada keputusan aktivasinya, dan konfigurasi sebelumnya (snapshot) masih ada "
+                   "untuk dipulihkan - atau rollback-nya menonaktifkan route. Rollback sendiri belum pernah dijalankan "
+                   "di sini (NOT-PROVEN).")
+def recovery_route_rollback(ctx: CheckContext) -> Outcome:
+    """Model/route rollback readiness: is the previous approved route configuration retained and restorable?"""
+    from aeos.models.decisions import Decision
+    from aeos.models.routing import ModelRoute
+
+    assert ctx.session is not None
+    s = ctx.session
+    routes = list(s.scalars(select(ModelRoute).where(ModelRoute.status.in_(("APPROVED", "TRIAL")),
+                                                     ModelRoute.pool != "SUPERVISOR")))
+    runbook = (ctx.repo / ROUTE_ROLLBACK_RUNBOOK).is_file()
+    if not routes:
+        return Outcome("NOT_APPLICABLE", "Belum ada route pekerja APPROVED/TRIAL; tidak ada konfigurasi model untuk "
+                       "di-rollback.", evidence={"active_routes": 0, "runbook": runbook})
+    rows: list[dict[str, Any]] = []
+    problems: list[str] = []
+    for r in routes:
+        kind = "ROUTE_ACTIVATION" if r.status == "APPROVED" else "TRIAL"
+        d = s.scalar(select(Decision).where(Decision.kind == kind, Decision.target_type == "model_route",
+                                            Decision.target_id == r.route_key, Decision.status == "ACTIVE")
+                     .order_by(Decision.created_at.desc()).limit(1))
+        target = ((d.details or {}).get("rollback_target") if d is not None else None) or {}
+        row: dict[str, Any] = {"route_key": r.route_key, "status": r.status, "decision_id": d.id if d else None,
+                               "action": target.get("action")}
+        if d is None:
+            problems.append(f"{r.route_key}: tidak ada keputusan {kind} ACTIVE (rollback target tidak tercatat)")
+        elif target.get("action") == "RESTORE_PREVIOUS_CONFIGURATION":
+            prev = s.get(Decision, str(target.get("decision_id") or ""))
+            snapshot = (prev.details or {}).get("config_snapshot") if prev is not None else None
+            row["previous_config_hash"] = target.get("config_hash")
+            row["restorable"] = bool(snapshot) and prev is not None and prev.target_hash == target.get("config_hash")
+            if not row["restorable"]:
+                problems.append(f"{r.route_key}: konfigurasi sebelumnya ({str(target.get('config_hash'))[:19]}) tidak "
+                                "tersimpan lengkap (keputusan/snapshot hilang) - tidak dapat dipulihkan")
+        elif target.get("action") == "DISABLE_ROUTE":
+            row["restorable"] = True  # no earlier approved configuration: rollback = disable the route
+        else:
+            problems.append(f"{r.route_key}: target rollback tidak tercatat pada keputusan aktivasi")
+        rows.append(row)
+    if not runbook:
+        problems.append(f"runbook {ROUTE_ROLLBACK_RUNBOOK} tidak ada")
+    evidence = {"active_routes": len(routes), "routes": rows[:50], "runbook": runbook,
+                "rollback_exercised": "NOT-PROVEN"}
+    if problems:
+        return Outcome("MISSING", "Rollback model/route belum siap: " + "; ".join(problems[:5]), evidence=evidence,
+                       error_code="ROUTE_ROLLBACK_NOT_READY", severity="LOW", remedy=Remedy(
+                           operation="Aktifkan ulang route lewat keputusan manusia (menyimpan target rollback dan "
+                                     "snapshot konfigurasi) atau nonaktifkan route yang tidak dapat dipulihkan",
+                           source=ROUTE_ROLLBACK_RUNBOOK, target="model routes", privilege="SUPER_ADMIN",
+                           evidence_to_collect="recovery.route_rollback CONFIGURED"))
+    restore = sum(1 for x in rows if x.get("action") == "RESTORE_PREVIOUS_CONFIGURATION")
+    return Outcome("CONFIGURED", f"{len(rows)} route aktif punya target rollback ({restore} pulihkan konfigurasi "
+                   f"sebelumnya, {len(rows) - restore} nonaktifkan route); rollback belum pernah dijalankan (NOT-PROVEN).",
+                   evidence=evidence)
 
 
 @check("recovery.config_rollback", "RECOVERY", "Rilis controller sebelumnya untuk rollback",

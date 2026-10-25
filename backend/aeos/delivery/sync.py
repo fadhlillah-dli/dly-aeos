@@ -4,10 +4,16 @@
 commit, and CI check-runs for the head and — after a human merge — the merge commit (G5 retest on the
 merged state). New commits on the PR (head changed) or a moved base make the bound acceptance STALE.
 ``on_branch_updated`` is the hook a poller/webhook calls when a task branch receives commits.
+
+The provider follows the PR's domain: GitHub for PERSONAL, Bitbucket Cloud (``aeos.delivery.bitbucket``,
+commit statuses + Pipelines steps, ``closed_by``) for OFFICE - the latter only while the OFFICE adapter is
+AVAILABLE (company authorisation, ADR-0111).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
@@ -60,6 +66,41 @@ def on_branch_updated(session: Session, *, repo: str, branch: str, head_sha: str
     return count
 
 
+@dataclass
+class _Reader:
+    """GET-only provider reads for one PR record: GitHub (PERSONAL) or Bitbucket Cloud (OFFICE)."""
+
+    credential: str
+    pull: Callable[[int], dict[str, Any]]
+    commit_files: Callable[[str], dict[str, Any]]
+    ci: Callable[[str, dict[str, list[str]] | None], provider.CIStatus]
+    blocked: str = ""
+
+
+def _reader(session: Session, project: Project, pr: PullRequestRecord) -> _Reader:
+    repo = pr.repo_full_name
+    if project.domain == "OFFICE" or (pr.provider or "").upper() == "BITBUCKET":
+        from aeos.delivery import bitbucket
+
+        ready = bitbucket.office_delivery_readiness(session, project)
+        if ready.status != "AVAILABLE":
+            return _Reader("NOT_READ", lambda n: {}, lambda s: {}, lambda s, g: provider.CIStatus(
+                repo, s, "UNKNOWN", 0, [], utcnow().isoformat(), error="not read", provider="bitbucket"),
+                blocked=f"Bitbucket {ready.status}: " + "; ".join(ready.reasons))
+        auth, credential = bitbucket.read_auth(project.domain)
+        return _Reader(
+            credential,
+            pull=lambda n: bitbucket.fetch_pull(repo, n, auth_header=auth),
+            commit_files=lambda sha: bitbucket.fetch_commit_files(repo, sha, auth_header=auth),
+            ci=lambda sha, gate_map: bitbucket.fetch_ci_status(repo, sha, auth_header=auth, gate_map=gate_map))
+    token, credential = provider.github_token(project.domain)
+    return _Reader(
+        credential,
+        pull=lambda n: provider.fetch_pull(repo, n, token=token),
+        commit_files=lambda sha: provider.fetch_commit_files(repo, sha, token=token),
+        ci=lambda sha, gate_map: provider.fetch_check_runs(repo, sha, token=token, gate_map=gate_map))
+
+
 def sync_pull_request(session: Session, pr_id: str, *, actor: str) -> dict[str, Any]:
     """Read the provider state of one PR (caller commits)."""
     from aeos.workforce import facade as workforce
@@ -70,12 +111,19 @@ def sync_pull_request(session: Session, pr_id: str, *, actor: str) -> dict[str, 
     project = session.get(Project, pr.project_id)
     if project is None:
         raise NotFound("project not found")
-    token, credential = provider.github_token(project.domain)
     notes: list[str] = []
     if pr.number is None:
         pr.sync_status, pr.sync_error = "FAILED", "PR number unknown (broker did not report it)"
         return {"pull_request": pr_view(pr), "notes": notes}
-    data = provider.fetch_pull(pr.repo_full_name, pr.number, token=token)
+    reader = _reader(session, project, pr)
+    if reader.blocked:
+        # OFFICE: no provider read without the company authorisation / enabled Cloud adapter (§23, ADR-0111).
+        pr.last_synced_at = utcnow()
+        pr.sync_status, pr.sync_error = "FAILED", reader.blocked[:1000]
+        session.flush()
+        return {"pull_request": pr_view(pr), "notes": [pr.sync_error]}
+    credential = reader.credential
+    data = reader.pull(pr.number)
     pr.last_synced_at = utcnow()
     if "error" in data:
         pr.sync_status = "FAILED"
@@ -90,19 +138,22 @@ def sync_pull_request(session: Session, pr_id: str, *, actor: str) -> dict[str, 
     pr.merged_by_type = data.get("merged_by_type")
     pr.merged_at = provider.parse_time(data.get("merged_at"))
     pr.merge_commit_sha = data.get("merge_commit_sha") if pr.merged else None
+    if data.get("provider_state") or data.get("merged_by_name"):
+        pr.details = {**(pr.details or {}), "provider_state": data.get("provider_state"),
+                      "merged_by_name": data.get("merged_by_name")}
     notes += observe_pr_commits(session, pr, head_sha=data.get("head_sha"), base_sha=data.get("base_sha"), actor=actor)
 
     if pr.merged and pr.merge_commit_sha:
         # G5 on the merged state: which files the merge commit brought in (relative to its first parent),
         # so protected policy/pipeline/verifier paths outside the accepted change are detected.
-        delta = provider.fetch_commit_files(pr.repo_full_name, pr.merge_commit_sha, token=token)
+        delta = reader.commit_files(pr.merge_commit_sha)
         pr.details = {**(pr.details or {}), "merge_delta": delta}
         if delta.get("error"):
             notes.append(f"merge-commit file delta UNKNOWN: {delta['error']}")
     ci_ids: list[str] = []
     gate_map = provider.pipeline_reference(session, project)
     for sha in filter(None, [pr.observed_head_sha, pr.merge_commit_sha]):
-        ci = provider.fetch_check_runs(pr.repo_full_name, sha, token=token, gate_map=gate_map)
+        ci = reader.ci(sha, gate_map)
         ev = provider.record_ci_evidence(session, project, ci, task_id=pr.task_id, run_id=pr.run_id)
         if ev is not None:
             ci_ids.append(ev.id)

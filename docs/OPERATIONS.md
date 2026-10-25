@@ -210,8 +210,21 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   them with "Review wajib (spesialis)" on the run list, `POST /api/runs/<run>/reviews/batch`, or
   `aeos verify review <run> --kind A11Y|PRIVACY|SRE|SECURITY`. A run has a review budget
   (`reviewer_policy.max_reviews_per_run`, default 12; quota waits do not count).
-* **OFFICE delivery:** NOT_APPLICABLE — no Bitbucket push/PR/Pipelines adapter and no company
-  authorisation; `prepare-pr` refuses with `OFFICE_DELIVERY_NOT_AVAILABLE`.
+* **OFFICE delivery (Bitbucket Cloud, ADR-0111):** DISABLED by default. It becomes AVAILABLE only with
+  (1) a company-authorisation POLICY decision on `office_policy` listing `bitbucket` whose
+  `office_policy.atlassian_deployment` is `"CLOUD"` (the interlock needs it too), (2) the project
+  integration `bitbucket/code` with `root_id=<workspace>/<repo_slug>` and `config={"enabled": true}`, (3) the
+  registered Bitbucket repository VERIFIED (`POST
+  /api/repositories/<id>/verify`), (4) `office/bitbucket` stored: `{"access_token": "..."}` (repository access
+  token) or `{"email": "...", "api_token": "..."}` (Atlassian API token; optional `git_username`), and (5)
+  `CAN_USE_OFFICE_INTEGRATIONS` READY. Data Center (`atlassian_deployment: "DATA_CENTER"`) is `NOT_SUPPORTED`. The broker then pushes the accepted head
+  sha-pinned to `aeos/*` and opens a draft PR; nothing merges, declines or approves. Pipelines/commit-status CI
+  becomes provider-ci evidence (pipeline reference on `bitbucket-pipelines/ci`: step names per gate). Without
+  Bitbucket Premium's "enforce merge checks" the merge gate is NOT_ENFORCEABLE. G7 release approvers for OFFICE:
+  `auth_scope={"bitbucket_accounts": ["<Atlassian account id>"]}`. Live tenant behaviour is NOT-PROVEN (M5).
+* **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111):** activate the free route as TRIAL (owner decision),
+  then `aeos broker probe-route <route_key>` / `POST /api/broker/routes/<key>/feasibility` sends one synthetic
+  PUBLIC prompt and records PROBE evidence; the route never serves worker tasks and its status is unchanged.
 
 ## Worker runtime (sandbox, engine contract, attribution)
 

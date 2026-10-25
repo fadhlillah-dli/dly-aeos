@@ -116,7 +116,7 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
                     <StatusBadge key="rb" status="NOT_TESTED" label="Belum diaktifkan" />
                   ),
                 ],
-                ["Jalur eksekusi", r.execution_path ? <span key="ep" className="text-sm">{r.execution_path.status === "NOT_WIRED" ? <StatusBadge status="NOT-PROVEN" label="Belum tersambung" /> : r.execution_path.status} <span className="block text-xs text-ink-3">{r.execution_path.note}</span></span> : "UNKNOWN"],
+                ["Jalur eksekusi", r.execution_path ? <span key="ep" className="text-sm">{r.execution_path.status === "NOT_WIRED" ? <StatusBadge status="NOT-PROVEN" label="Belum tersambung" /> : r.execution_path.status === "FEASIBILITY_PROBE_ONLY" ? <StatusBadge status="NOT-PROVEN" label="Hanya probe kelayakan (bukan task worker)" /> : r.execution_path.status} <span className="block text-xs text-ink-3">{r.execution_path.note}</span></span> : "UNKNOWN"],
                 ["Rollback", r.active_decision?.rollback_target ? (r.active_decision.rollback_target.action === "DISABLE_ROUTE" ? "Nonaktifkan rute (belum ada konfigurasi lain yang pernah disetujui)" : <Mono key="rt">{r.active_decision.rollback_target.config_hash}</Mono>) : "—"],
                 ["Terakhir dipakai", r.last_used?.at ? absoluteTime(r.last_used.at) : <StatusBadge status="NEVER_OBSERVED" />],
                 ["Sumber", r.source_refs.join(", ")],

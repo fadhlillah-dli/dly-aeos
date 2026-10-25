@@ -5,6 +5,11 @@ what is UNKNOWN / NOT-PROVEN. PR preparation requires an ACCEPTED, still-valid a
 ``CAN_PREPARE_PR`` capability, passes the external-write interlock, and then uses only the trusted
 broker (``push_task_branch`` for ``aeos/*`` branches + ``create_pull_request``). There is no merge or
 deploy call anywhere in delivery: merge to main is a human action (U-09).
+
+OFFICE (ADR-0111): the same flow on Bitbucket Cloud. It runs only when ``office_delivery_readiness`` is
+AVAILABLE (company authorisation listing ``bitbucket``, enabled ``bitbucket/code`` integration, Cloud, verified
+repository) and ``CAN_USE_OFFICE_INTEGRATIONS`` is READY; the interlock provider is ``bitbucket``. Data Center
+is refused with ``BITBUCKET_DC_NOT_SUPPORTED``; the disabled default with ``OFFICE_DELIVERY_NOT_AVAILABLE``.
 """
 
 from __future__ import annotations
@@ -234,14 +239,35 @@ def _markdown(d: dict[str, Any], bundle_hash: str) -> str:
     return "\n".join(lines)
 
 
+CODE_HOST = {"PERSONAL": "GITHUB", "OFFICE": "BITBUCKET"}  # U-02..U-04: the provider follows the domain
+WRITE_PROVIDER = {"PERSONAL": "github-repo", "OFFICE": "bitbucket"}  # interlock provider of delivery writes
+
+
 def _repository(session: Session, project: Project) -> str:
     from aeos.portfolio import facade as portfolio
 
-    repos = [r for r in portfolio.repositories(session, project.id) if r.provider.upper() == "GITHUB"]
+    host = CODE_HOST.get(project.domain, "GITHUB")
+    repos = [r for r in portfolio.repositories(session, project.id) if r.provider.upper() == host]
     repos.sort(key=lambda r: 0 if r.role == "platform" else 1)
     if not repos:
-        raise Blocked("no GitHub repository is registered for this project", code="NO_REPOSITORY")
+        raise Blocked(f"no {host.title()} repository is registered for this project", code="NO_REPOSITORY")
     return repos[0].full_name
+
+
+def _office_ready(session: Session, project: Project) -> Any:
+    """OFFICE delivery runs only through Bitbucket Cloud behind the company authorisation (ADR-0111)."""
+    from aeos.delivery.bitbucket import office_delivery_readiness
+
+    ready = office_delivery_readiness(session, project)
+    if ready.status != "AVAILABLE":
+        from aeos.delivery.gates import OFFICE_DELIVERY_NOTE
+
+        code = "BITBUCKET_DC_NOT_SUPPORTED" if ready.status == "NOT_SUPPORTED" else "OFFICE_DELIVERY_NOT_AVAILABLE"
+        raise Blocked(f"OFFICE delivery (Bitbucket Cloud) {ready.status}: " + "; ".join(ready.reasons) + " - "
+                      + OFFICE_DELIVERY_NOTE, code=code,
+                      details={"status": ready.status, "reasons": ready.reasons, "remedy": ready.remedy,
+                               "deployment": ready.deployment})
+    return ready
 
 
 def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branch: str | None = None) -> dict[str, Any]:
@@ -259,11 +285,8 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
     project = session.get(Project, task.project_id)
     if project is None:
         raise NotFound("project not found")
-    if project.domain == "OFFICE":
-        from aeos.delivery.gates import OFFICE_DELIVERY_NOTE
-
-        raise Blocked(OFFICE_DELIVERY_NOTE, code="OFFICE_DELIVERY_NOT_AVAILABLE",
-                      details={"remedy": "owner: company authorisation + Bitbucket adapter (M5)"})
+    office = project.domain == "OFFICE"
+    office_ready = _office_ready(session, project) if office else None
     acc = _require_valid_acceptance(session, task)
     # §14 "REVIEW --> DONE: penerimaan valid": the scheduler must have accepted exactly this run. An
     # ACCEPTED record whose mark_accepted was refused (task BLOCKED/READY, another attempt active,
@@ -299,12 +322,13 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
         raise Conflict("a PR is already prepared for this acceptance", code="PR_EXISTS",
                        details={"pr_id": existing.id, "url": existing.url})
 
-    cap = call(doctor.require_capability, session, Capability.CAN_PREPARE_PR, domain=project.domain,
-               project_id=project.id)
+    # OFFICE: the OFFICE integration gate (company authorisation, §23) — CAN_PREPARE_PR is a PERSONAL capability.
+    capability = Capability.CAN_USE_OFFICE_INTEGRATIONS if office else Capability.CAN_PREPARE_PR
+    cap = call(doctor.require_capability, session, capability, domain=project.domain, project_id=project.id)
     if not cap.ok:
-        raise Blocked(f"CAN_PREPARE_PR not ready ({cap.label()})", code="CAPABILITY_NOT_READY")
+        raise Blocked(f"{capability.value} not ready ({cap.label()})", code="CAPABILITY_NOT_READY")
 
-    repo = _repository(session, project)
+    repo = office_ready.repo if office_ready is not None and office_ready.repo else _repository(session, project)
     default_branch = next((r.default_branch for r in portfolio.repositories(session, project.id)
                            if r.full_name == repo), "main")
     base = base_branch or default_branch or "main"
@@ -319,7 +343,8 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
         # The interlock binds the write to the ACTIVE human APPROVAL of the task's exact plan version
         # (its allowed_operations must include create_pr and its targets the repository) — §26.
         intent = policy.WriteIntent(
-            actor_user_id=actor_user_id, project_id=project.id, domain=project.domain, provider="github-repo",
+            actor_user_id=actor_user_id, project_id=project.id, domain=project.domain,
+            provider=WRITE_PROVIDER.get(project.domain, "github-repo"),
             operation="create_pr", target={"repo": repo, "head": run.branch, "base": base},
             approved_plan_version_id=task.plan_version_id, approved_hash=task.plan_version_hash,
             decision_id=approval_decision_id(session, task, "create_pr"), capability_expires_at=grant_expires,
@@ -371,6 +396,7 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
     number = res.get("number")
     pr = PullRequestRecord(
         project_id=project.id, domain=project.domain, task_id=task.id, run_id=run.id, acceptance_id=acc.id,
+        provider=CODE_HOST.get(project.domain, "GITHUB"),
         repo_full_name=repo, number=int(number) if str(number or "").isdigit() else None,
         url=res.get("url") or res.get("html_url"),
         head_ref=run.branch, base_ref=base, accepted_head_sha=acc.head_commit,

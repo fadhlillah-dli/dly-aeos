@@ -591,8 +591,71 @@ class JiraProvider:
         return {"external_status": status, "url": f"{self.cfg.base_url}/browse/{key}", "title": f.get("summary", "")}
 
 
+def bitbucket_auth_header(raw: str) -> str:
+    """API ``Authorization`` value for a stored ``office/bitbucket`` credential (never logged).
+
+    Accepted shapes (JSON, no other fields are read): ``{"access_token": ...}`` (repository/workspace access
+    token -> Bearer), ``{"email": ..., "api_token": ...}`` (Atlassian API token -> Basic email:token) or the
+    legacy ``{"username": ..., "app_password": ...}`` / plain ``user:secret`` (Basic)."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = None
+    if isinstance(data, dict) and data.get("access_token"):
+        token = str(data["access_token"])
+        register_secret(token)
+        return f"Bearer {token}"
+    if isinstance(data, dict):
+        user = str(data.get("email") or data.get("username") or "")
+        token = str(data.get("api_token") or data.get("app_password") or data.get("token") or "")
+    else:
+        user, _, token = raw.partition(":")
+    if not user or not token:
+        raise ProviderBlocked(f"credential {BITBUCKET_REF} is incomplete", remedy=f"aeos secrets set {BITBUCKET_REF}",
+                              code="BITBUCKET_CREDENTIAL_INVALID")
+    register_secret(token)
+    value = base64.b64encode(f"{user}:{token}".encode()).decode()
+    register_secret(value)
+    return f"Basic {value}"
+
+
+def bitbucket_read_auth(*, use: str = "publisher.bitbucket", actor: str = ACTOR) -> str:
+    """Read the OFFICE Bitbucket credential for a trusted in-process GET caller (purpose ``office:<use>``)."""
+    return bitbucket_auth_header(secrets.get_secret(BITBUCKET_REF, purpose=f"office:{use}", actor=actor))
+
+
+def _branch_applies(rule: dict[str, Any], branch: str, model: dict[str, Any]) -> bool:
+    """Does a Bitbucket branch restriction apply to *branch*? ``glob`` patterns use fnmatch; ``branching_model``
+    rules resolve through the repository's branching model (development/production branch, type prefixes)."""
+    import fnmatch
+
+    kind = str(rule.get("branch_match_kind") or "glob")
+    if kind == "glob":
+        return fnmatch.fnmatchcase(branch, str(rule.get("pattern") or ""))
+    btype = str(rule.get("branch_type") or "")
+    if btype in ("development", "production"):
+        name = ((model.get(btype) or {}) if isinstance(model.get(btype), dict) else {}).get("name")
+        return bool(name) and name == branch
+    for bt in model.get("branch_types") or []:
+        if isinstance(bt, dict) and bt.get("kind") == btype and bt.get("prefix"):
+            return branch.startswith(str(bt["prefix"]))
+    return False
+
+
+# Bitbucket Cloud merge checks (branch restriction kinds). Without ``enforce_merge_checks`` (a Premium feature,
+# master §31 / S23) every one of them is only a *recommended* check: the merge button stays usable.
+MERGE_CHECK_KINDS = (
+    "require_passing_builds_to_merge", "require_approvals_to_merge", "require_default_reviewer_approvals_to_merge",
+    "require_no_changes_requested", "require_tasks_to_be_completed", "require_commits_behind",
+    "require_all_dependencies_merged",
+)
+ENFORCE_MERGE_CHECKS = "enforce_merge_checks"
+
+
 class BitbucketProvider:
-    """Read-only repository / pull-request references for OFFICE projects (no merge, U-09)."""
+    """Read-only Bitbucket Cloud reads for OFFICE projects: repository/PR references, branch restrictions,
+    commit statuses, Pipelines steps, diffstat (GET only; no merge, U-09). Writes (branch push, PR creation)
+    exist only in the trusted broker (``aeos.broker.bitbucket_broker``)."""
 
     name = "bitbucket"
 
@@ -614,6 +677,105 @@ class BitbucketProvider:
 
     def _url(self, path: str = "") -> str:
         return f"{BITBUCKET_API}/repositories/{quote(self.workspace, safe='')}/{quote(self.slug, safe='')}{path}"
+
+    def _h(self) -> dict[str, str]:
+        return {"Authorization": self._auth, "Accept": "application/json"}
+
+    def _get(self, path: str, what: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        resp = send(self.client, "GET", self._url(path), write=False, what=what, headers=self._h(), params=params)
+        if resp.status_code != 200:
+            raise classify_http_error(resp, write=False, what=what)
+        data = _json(resp)
+        if data is None:
+            raise ProviderError(f"{what}: provider returned no JSON object", retryable=True)
+        return data
+
+    def _paged(self, path: str, what: str, params: dict[str, Any] | None = None,
+               max_pages: int = 5) -> tuple[list[dict[str, Any]], bool]:
+        """(values, truncated). ``next`` links are followed only on the Bitbucket API host (the credential is
+        never sent anywhere else); a remaining page after *max_pages* is reported as truncated."""
+        out: list[dict[str, Any]] = []
+        url: str | None = self._url(path)
+        query: dict[str, Any] | None = dict(params or {})
+        for _ in range(max_pages):
+            assert url is not None
+            resp = send(self.client, "GET", url, write=False, what=what, headers=self._h(), params=query)
+            if resp.status_code != 200:
+                raise classify_http_error(resp, write=False, what=what)
+            body = _json(resp) or {}
+            out += [v for v in body.get("values") or [] if isinstance(v, dict)]
+            nxt = body.get("next")
+            if not nxt:
+                return out, False
+            if not str(nxt).startswith(BITBUCKET_API + "/"):
+                raise ProviderError(f"{what}: pagination link leaves the Bitbucket API host", retryable=False)
+            url, query = str(nxt), None
+        return out, True
+
+    def repository(self) -> dict[str, Any]:
+        return self._get("", "bitbucket repository")
+
+    def branching_model(self) -> dict[str, Any]:
+        return self._get("/branching-model", "bitbucket branching model")
+
+    def branch_restrictions(self) -> tuple[list[dict[str, Any]], bool]:
+        """Raw branch restrictions (needs repository admin; 403 raises ProviderBlocked with the status code)."""
+        return self._paged("/branch-restrictions", "bitbucket branch restrictions", {"pagelen": 100})
+
+    def restriction_summary(self, branch: str) -> dict[str, Any]:
+        """Which restrictions/merge checks apply to *branch* (read-only interpretation, never a claim that
+        they are enforced: Bitbucket only blocks a merge on failed checks with ``enforce_merge_checks``)."""
+        rules, truncated = self.branch_restrictions()
+        try:
+            model = self.branching_model()
+        except ProviderError:
+            model = {}
+        applies = [r for r in rules if _branch_applies(r, branch, model)]
+        kinds = sorted({str(r.get("kind")) for r in applies if r.get("kind")})
+        min_builds = max([int(r.get("value") or 0) for r in applies
+                          if r.get("kind") == "require_passing_builds_to_merge"] or [0])
+        return {
+            "branch": branch, "restriction_kinds": kinds, "truncated": truncated,
+            "direct_push_restricted": "push" in kinds,
+            "history_rewrite_prevented": "force" in kinds,
+            "deletion_prevented": "delete" in kinds,
+            "merge_access_restricted": "restrict_merges" in kinds,
+            "merge_checks": [k for k in kinds if k in MERGE_CHECK_KINDS],
+            "min_successful_builds": min_builds,
+            "merge_checks_enforced": ENFORCE_MERGE_CHECKS in kinds,
+        }
+
+    def commit(self, sha: str) -> dict[str, Any]:
+        d = self._get(f"/commit/{quote(sha, safe='')}", "bitbucket commit")
+        return {"hash": d.get("hash"), "parents": [p.get("hash") for p in d.get("parents") or []
+                                                    if isinstance(p, dict)]}
+
+    def commit_statuses(self, sha: str, *, max_pages: int = 5) -> tuple[list[dict[str, Any]], bool]:
+        return self._paged(f"/commit/{quote(sha, safe='')}/statuses", "bitbucket commit statuses",
+                           {"pagelen": 100}, max_pages=max_pages)
+
+    def pipelines_for_commit(self, sha: str) -> tuple[list[dict[str, Any]], bool]:
+        """Pipelines whose target commit is exactly *sha* (filtered again client-side: never another commit's)."""
+        rows, truncated = self._paged("/pipelines", "bitbucket pipelines",
+                                      {"target.commit.hash": sha, "sort": "-created_on", "pagelen": 50},
+                                      max_pages=2)
+        own = [p for p in rows if str(((p.get("target") or {}).get("commit") or {}).get("hash") or "") == sha]
+        return own, truncated
+
+    def pipeline_steps(self, pipeline_uuid: str) -> tuple[list[dict[str, Any]], bool]:
+        return self._paged(f"/pipelines/{quote(pipeline_uuid, safe='')}/steps", "bitbucket pipeline steps",
+                           {"pagelen": 100})
+
+    def pull_request(self, number: int) -> dict[str, Any]:
+        return self._get(f"/pullrequests/{int(number)}", "bitbucket pull request")
+
+    def diffstat(self, sha: str) -> tuple[list[dict[str, Any]], bool]:
+        """Files a commit changed relative to its first parent (for a merge commit: what it brought in)."""
+        return self._paged(f"/diffstat/{quote(sha, safe='')}", "bitbucket diffstat", {"pagelen": 500})
+
+    def environments(self) -> list[dict[str, Any]]:
+        rows, _ = self._paged("/environments", "bitbucket environments", {"pagelen": 100}, max_pages=2)
+        return rows
 
     def repository_reference(self) -> dict[str, Any]:
         resp = send(self.client, "GET", self._url(), write=False, what="bitbucket repository",
