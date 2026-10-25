@@ -80,9 +80,22 @@ export function AsvsPanel() {
         <Table
           rows={d.chapters}
           rowKey={(c) => c.chapter}
-          onRowClick={(c) => setChapter(chapter === c.chapter ? "ALL" : c.chapter)}
           columns={[
-            { header: "Bab", cell: (c) => <span className={chapter === c.chapter ? "font-semibold" : undefined}>{c.chapter} {c.name}</span> },
+            {
+              header: "Bab",
+              // a real button (keyboard and screen reader reachable), its pressed state announced - not a clickable row
+              cell: (c) => (
+                <button
+                  type="button"
+                  aria-pressed={chapter === c.chapter}
+                  title={chapter === c.chapter ? "Tampilkan semua bab" : `Saring ke bab ${c.chapter}`}
+                  onClick={() => setChapter(chapter === c.chapter ? "ALL" : c.chapter)}
+                  className={"text-left underline-offset-2 hover:underline " + (chapter === c.chapter ? "font-semibold" : "")}
+                >
+                  {c.chapter} {c.name}
+                </button>
+              ),
+            },
             { header: "Ada test", cell: (c) => c.tested },
             { header: "Belum terbukti", cell: (c) => (c.not_proven ? <Status status="NOT-PROVEN" label={String(c.not_proven)} /> : "0") },
             { header: "Tidak dipilih", cell: (c) => c.not_selected },

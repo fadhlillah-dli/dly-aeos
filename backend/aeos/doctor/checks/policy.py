@@ -50,45 +50,59 @@ def _master_rel() -> str:
 
 
 def _approved_master_binding(session: Any, sha: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """(binding of *sha*, newest approved snapshot) - the binding is the newest human-approved
-    ArchitectureSnapshot whose master reference is *sha*, else an ACTIVE human APPROVAL/POLICY Decision on
-    ``master_architecture`` bound to *sha*. Platform/PERSONAL-scoped snapshots only (an OFFICE snapshot's label
-    never reaches this platform row)."""
+    """(binding of *sha*, newest master approval). The owner's *newest* approval of the master decides: the newest
+    human-approved ArchitectureSnapshot (by when it was taken; its stored content must still hash to its
+    ``snapshot_hash``, the hash the approval is bound to) or the newest ACTIVE, unexpired human APPROVAL/POLICY
+    Decision on ``master_architecture``, whichever is newer. *sha* is bound only when that newest approval names it:
+    a master reverted to an older approved text after a newer approval is not approved (the owner's latest decision
+    binds another text). Platform/PERSONAL scope only (an OFFICE snapshot or decision never reaches this platform
+    row). A tie in time is resolved in favour of the approval that names *sha*."""
+    from aeos.core.hashing import content_hash
     from aeos.core.timeutil import ensure_aware, utcnow
     from aeos.models.decisions import ArchitectureSnapshot, Decision
+
+    human = Decision.actor_kind.in_(("HUMAN", "HUMAN_RECORDED"))
+    platform_scope = or_(Decision.domain.is_(None), Decision.domain == "PERSONAL")
 
     def approval(snap: ArchitectureSnapshot) -> Decision | None:
         d = session.scalar(select(Decision).where(
             Decision.kind == "APPROVAL", Decision.target_type == "architecture_snapshot",
             Decision.target_id == snap.id, Decision.status == "ACTIVE", Decision.target_hash == snap.snapshot_hash,
-            Decision.actor_kind.in_(("HUMAN", "HUMAN_RECORDED"))).order_by(Decision.created_at.desc()).limit(1))
+            human, platform_scope).order_by(Decision.created_at.desc()).limit(1))
         return d
 
-    newest: dict[str, Any] | None = None
+    candidates: list[tuple[Any, bool, dict[str, Any]]] = []
     for snap in session.scalars(select(ArchitectureSnapshot).order_by(ArchitectureSnapshot.created_at.desc())):
         refs = snap.refs or {}
         if (refs.get("scope") or {}).get("domain") not in (None, "PERSONAL"):
             continue
+        if content_hash({k: v for k, v in refs.items() if k != "taken_at"}) != snap.snapshot_hash:
+            continue  # its content no longer matches the hash the approval is bound to: proves nothing
         d = approval(snap)
         if d is None:
             continue
-        info = {"via": "architecture_snapshot", "snapshot_id": snap.id, "label": snap.label,
-                "snapshot_master_sha256": (refs.get("master") or {}).get("sha256"), "decision_id": d.id,
-                "approved_at": d.created_at.isoformat() if d.created_at else None}
-        newest = newest or info
-        if info["snapshot_master_sha256"] == sha:
-            return info, newest
+        master_sha = (refs.get("master") or {}).get("sha256")
+        candidates.append((ensure_aware(snap.created_at), master_sha == sha, {
+            "via": "architecture_snapshot", "snapshot_id": snap.id, "label": snap.label,
+            "snapshot_master_sha256": master_sha, "decision_id": d.id,
+            "approved_at": d.created_at.isoformat() if d.created_at else None}))
+        if len(candidates) >= 2 and candidates[-1][0] < candidates[0][0]:
+            break  # older than the newest approved snapshot: never the newest approval
     now = utcnow()
     for d in session.scalars(select(Decision).where(
             Decision.kind.in_(("APPROVAL", "POLICY")), Decision.target_type == MASTER_TARGET_TYPE,
-            Decision.status == "ACTIVE", Decision.target_hash == sha,
-            Decision.actor_kind.in_(("HUMAN", "HUMAN_RECORDED"))).order_by(Decision.created_at.desc())):
+            Decision.status == "ACTIVE", human, platform_scope)):
         exp = ensure_aware(d.expires_at) if d.expires_at else None
         if exp is not None and exp <= now:
             continue
-        return {"via": "decision", "decision_id": d.id,
-                "approved_at": d.created_at.isoformat() if d.created_at else None}, newest
-    return None, newest
+        candidates.append((ensure_aware(d.created_at), d.target_hash == sha, {
+            "via": "decision", "decision_id": d.id, "label": f"Decision {d.id[:8]}",
+            "snapshot_master_sha256": d.target_hash,
+            "approved_at": d.created_at.isoformat() if d.created_at else None}))
+    if not candidates:
+        return None, None
+    _at, matches, info = max(candidates, key=lambda c: (c[0], c[1]))
+    return (info if matches else None), info
 
 
 @check("policy.master_approval", "CANONICAL_POLICY", "Master arsitektur terikat persetujuan tercatat",
@@ -96,8 +110,9 @@ def _approved_master_binding(session: Any, sha: str) -> tuple[dict[str, Any] | N
        invalidators=("config:policy", "config:master"), fingerprint=file_fingerprint(
            "docs/architecture/DLY_AEOS_Master_Architecture_Final.md"),
        description="U-23: nama master tetap dan perubahan berikutnya harus punya persetujuan yang dapat ditelusuri. "
-                   "Membandingkan sha256 file master dengan snapshot arsitektur terbaru yang disetujui manusia (atau "
-                   "Decision APPROVAL/POLICY pada master_architecture dengan hash yang sama).")
+                   "Membandingkan sha256 file master dengan persetujuan manusia terbaru: snapshot arsitektur terbaru "
+                   "yang disetujui (isinya masih cocok dengan hash yang disetujui) atau Decision APPROVAL/POLICY "
+                   "terbaru pada master_architecture, mana yang lebih baru.")
 def policy_master_approval(ctx: CheckContext) -> Outcome:
     from aeos.core.hashing import file_sha256
 
@@ -109,7 +124,7 @@ def policy_master_approval(ctx: CheckContext) -> Outcome:
                        error_code="MASTER_MISSING", severity="HIGH")
     sha = file_sha256(path)
     binding, newest = _approved_master_binding(ctx.session, sha)
-    evidence: dict[str, Any] = {"path": rel, "sha256": sha, "binding": binding, "newest_approved_snapshot": newest}
+    evidence: dict[str, Any] = {"path": rel, "sha256": sha, "binding": binding, "newest_approval": newest}
     remedy = Remedy(operation="Pemilik meninjau isi master saat ini, lalu membuat snapshot arsitektur dan "
                               "menyetujuinya (keputusan manusia terikat hash snapshot, yang memuat sha256 master)",
                     target="http://127.0.0.1:8787/system-map (panel snapshot: Buat snapshot, lalu Setujui)",
@@ -121,10 +136,12 @@ def policy_master_approval(ctx: CheckContext) -> Outcome:
         return Outcome("VERIFIED", f"sha256 master {sha[:19]} terikat {via}; perubahan master dapat ditelusuri ke "
                        "persetujuan manusia.", evidence=evidence)
     if newest is not None:
-        return Outcome("UNKNOWN", f"Master berubah sejak snapshot terakhir yang disetujui ('{newest.get('label')}'): "
-                       f"sha256 sekarang {sha[:19]}, snapshot memuat "
+        what = "snapshot" if newest.get("via") == "architecture_snapshot" else "Decision itu"
+        return Outcome("UNKNOWN", f"Master berbeda dari persetujuan terakhir ('{newest.get('label')}'): "
+                       f"sha256 sekarang {sha[:19]}, {what} memuat "
                        f"{str(newest.get('snapshot_master_sha256') or 'tanpa master')[:19]}. Persetujuan perubahan "
-                       "NOT-PROVEN (hanya riwayat git).", evidence=evidence,
+                       "NOT-PROVEN (hanya riwayat git); isi yang sama dengan persetujuan yang lebih lama juga tidak "
+                       "dihitung.", evidence=evidence,
                        error_code="MASTER_CHANGED_SINCE_APPROVAL", severity="MEDIUM", remedy=remedy)
     return Outcome("UNKNOWN", f"Belum ada snapshot arsitektur yang disetujui untuk sha256 master {sha[:19]}; "
                    "persetujuan isi master NOT-PROVEN (hanya riwayat git).", evidence=evidence,

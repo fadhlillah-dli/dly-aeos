@@ -151,6 +151,34 @@ def test_forged_channel_lines_and_terminal_summaries_are_detected(tmp_path: Path
     assert bad2.status == "FAIL" and any("terminal summary differs" in p for p in bad2.problems)
 
 
+# An honest failing test whose output shows another seal session's lines - e.g. a self-build candidate's own verifier
+# test that prints a nested run's stdout, or whose failing assertion's repr contains it.
+NESTED_SEAL_OUTPUT = (
+    "def test_nested_run_output_is_shown():\n"
+    "    out = '\\n@@AEOS-VSEAL1 {\"e\":\"finish\",\"i\":0,\"n\":\"" + "f" * 32 + "\",\"x\":0} ' + '0' * 64 + '\\n'\n"
+    "    print(out)\n"
+    "    assert out == ''\n")
+
+
+def test_another_sessions_seal_lines_never_read_as_tampering(tmp_path: Path):
+    """Only lines naming this step's nonce are its channel. Before, any seal-format line with a MAC that did not
+    verify was a forgery, so an honest failing test that printed a nested run's output was QUARANTINED."""
+    _, res, report, check = _sealed_pytest(tmp_path, {"test_n.py": NESTED_SEAL_OUTPUT})
+    assert res.returncode == 1 and report is not None and report.failures == 1
+    assert check.status == "PASS", check.problems
+    assert check.other_session_lines >= 2  # the printed line and the assertion's repr of it
+
+
+def test_a_key_file_left_behind_is_never_a_pass(tmp_path: Path):
+    """The plugin read the key but could not remove its file: code under test could have read the key, so the seal
+    proves nothing - the step cannot pass (MISSING), without blaming the candidate for tampering."""
+    st, res, report, check = _sealed_pytest(tmp_path, {"test_a.py": PASSING})
+    assert check.status == "PASS" and check.key_consumed is True
+    left = seal.check_pytest(st, stdout=res.stdout, returncode=res.returncode, timed_out=False,
+                             junit_path=tmp_path / "wd" / "r" / "j.xml", report=report, key_consumed=False)
+    assert left.status == "MISSING" and left.problems == [seal.KEY_LEFT_PROBLEM]
+
+
 def test_a_long_failing_run_keeps_its_whole_sealed_stream(tmp_path: Path):
     """The stdout evidence tail is bounded; the seal lines are collected in full beside it, so a run whose output
     exceeds the bound is still consistent (losing the first events would read as tampering)."""
@@ -243,8 +271,20 @@ if sys.argv and sys.argv[0] == "-c":
 X = 1
 '''
 
-# ... or prints a line in the seal's format (it has no key: the MAC cannot be valid) and carries on.
+# ... or prints a line in the seal's format naming the step (the nonce is readable in the loaded plugin; the key file
+# is already gone, so the MAC cannot be valid) and carries on.
 FAKE_SEAL_LINE = r'''
+import sys
+
+if sys.argv and sys.argv[0] == "-c":
+    _n = sys.modules["aeos_vseal"]._S["nonce"]
+    print('@@AEOS-VSEAL1 {"d":{"extra":"/elsewhere/extra.py"},"e":"result","i":0,"n":"' + _n + '"} ' + "0" * 64)
+X = 1
+'''
+
+# ... a seal-format line of another session (a guessed nonce): never this step's channel, so it is neither used as
+# the mapping nor taken for a forgery - the sealed mapping of the driver itself decides.
+OTHER_SESSION_LINE = r'''
 import sys
 
 if sys.argv and sys.argv[0] == "-c":
@@ -282,6 +322,20 @@ def test_a_forged_seal_line_in_the_preflight_is_result_tampering(db, settings, c
                for f in out.tamper_findings), out.tamper_findings
     assert not wf.of("request_repair")
     assert not wf.of("set_scheduling_paused")  # nothing stays in effect: no integrity hold
+
+
+@requires_git
+def test_another_sessions_seal_line_in_the_preflight_is_ignored(db, settings, controller, monkeypatch):
+    FakeWorkforce().install(monkeypatch)
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, head = make_candidate(settings, world, head_files={"backend/extra.py": OTHER_SESSION_LINE})
+    bind_candidate(db, world, cand, base, head)
+    out = verifier.verify_run(db, world.run.id, actor="tester")
+    db.commit()
+    assert out.status == "PASS", (out.status, out.reasons, out.not_proven)
+    assert not out.tamper_findings
+    data = collector.read_json(db.get(EvidenceArtifact, out.report_evidence_id))
+    assert data["result_seal"]["preflight"]["status"] == "PASS"
 
 
 def test_every_report_states_the_in_process_forgery_risk():

@@ -100,10 +100,13 @@ The verifier version becomes `3`, which makes earlier acceptance STALE by design
    of `pytest_sessionfinish`, the exit status, the junit sha256 and pytest's own counts - HMAC-authenticated and
    sequence-numbered. The host requires a sealed session end, the same exit code, an unchanged junit digest, the
    same per-test outcomes and the same terminal summary. A disagreement is a `result` tamper finding
-   (QUARANTINED, HIGH alert); no sealed session end FAILS the step. The import preflight and the migration
-   round-trip driver seal their result the same way (a mapping or result an imported candidate module prints
-   itself is never used; no sealed preflight result is a blocking NOT-PROVEN, a forged seal line is a `result`
-   tamper finding). Residual (stated on every
+   (QUARANTINED, HIGH alert); no sealed session end FAILS the step, and so does a key file the plugin did not
+   remove (code under test could have read the key). Only lines naming the step's own nonce are its channel: a
+   seal line of another session (a nested verifier run's output that a test printed, or an assertion's repr of
+   it) is counted and ignored, so an honest failing self-build test is never QUARANTINED for it. The import
+   preflight and the migration round-trip driver seal their result the same way (a mapping or result an imported
+   candidate module prints itself is never used; no sealed preflight result is a blocking NOT-PROVEN, a forged
+   seal line naming the step is a `result` tamper finding). Residual (stated on every
    report, both runners): code that deliberately subverts the plugin inside the interpreter is not excluded, and
    black-box assertions from a separate trusted process are not implemented.
 8. **Every process-runner step runs in its own kill group** (`aeos.verification.procgroup`): a Windows Job
@@ -120,9 +123,13 @@ The verifier version becomes `3`, which makes earlier acceptance STALE by design
    decision is INVALIDATED, an open decision request WITHDRAWN, the task's acceptance INVALIDATED, a session or
    capability grant revoked, a route DISABLED (ineligible until a human re-activates its configuration hash), a
    policy snapshot deactivated and the active one rebuilt, a containment proof removed and write enablement
-   switched off - audited as `verification.tamper.neutralize`. Every foreign row is neutralised by its full key,
-   not only the first rows the report lists. Rows without a safe inverse (removed rows, schema, TaskSpecs,
-   budgets, a modified existing account, a row that cannot be found again, ...) are listed for the owner with the
+   switched off, a forged or modified account deactivated (its password hash or role may be the candidate's; the
+   owner re-activates it locally with `aeos admin recover <username>`) - audited as
+   `verification.tamper.neutralize`. Every foreign row is neutralised by its full key, not only the first rows
+   the report lists; the activity timestamps `auth_sessions.last_seen_at` and `users.last_login_at` are not
+   compared (no trust attribute), so an open dashboard during a CLI verification is not tampering. Rows without
+   a safe inverse (removed rows, schema, TaskSpecs, budgets, a row that cannot be found again, ...) and a
+   modified account's role/scope are listed for the owner with the
    remedy. Controller checkout/interpreter files are never restored automatically (the checkout may hold the
    owner's own work); whatever stays in effect - such a file, a manual row, a failed neutralisation - puts the
    control plane on an **integrity hold**: the verifier pauses admission of new worker runs

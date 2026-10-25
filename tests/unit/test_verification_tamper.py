@@ -345,9 +345,45 @@ def test_every_supported_foreign_row_is_neutralised(db, settings):
     assert db.get(SystemSetting, "worker_runtime.containment.container") is None  # the proof must be re-run
     assert db.get(SystemSetting, "write_enabled.github").value is False
     assert db.get(AcceptanceRecord, acc.id).acceptance_status == "INVALIDATED"
-    # a modified existing account: its sessions revoked, the account itself is the owner's call
+    # a modified existing account (its password hash or role may be the candidate's): deactivated, so neither a web
+    # sign-in nor a CLI decision (--as: password + is_active) works with it; listed for the owner's role review and
+    # recovered locally - before, it stayed active and only its sessions were revoked
+    from aeos.identity import service as identity
+    from aeos.models.identity import User
+
+    assert acted[("users", owner.id)] == "DEACTIVATED" and db.get(User, owner.id).is_active is False
     assert any(m["table"] == "users" and "aeos admin recover" in m["remedy"] for m in out["manual"])
     assert not out["failed"], out["failed"]
+    identity.recover_user(db, username=owner.username)
+    assert db.get(User, owner.id).is_active is True  # no lock-out: the local operator always recovers it
+
+
+def test_activity_timestamps_are_not_foreign_writes_but_session_and_account_changes_are(db, settings):
+    """The API server rewrites a session's last_seen_at on ordinary use and an account's last_login_at on sign-in: an
+    open dashboard during a CLI verification (another AEOS process) is not tampering, and neutralisation must never
+    revoke the owner's live session for it. Any other change to those rows still is a foreign write."""
+    from datetime import timedelta
+
+    from aeos.core.timeutil import utcnow
+    from aeos.models.identity import AuthSession
+    from tests.conftest import create_admin
+
+    owner = create_admin(db)
+    sess = AuthSession(token_hash="h-activity", user_id=owner.id, csrf_token="c",
+                       expires_at=utcnow() + timedelta(hours=1))
+    db.add(sess)
+    db.commit()
+    tamper.install()
+    win = tamper.Window(db.get_bind())
+    _raw(settings, f"UPDATE auth_sessions SET last_seen_at='2099-01-01 00:00:00' WHERE id='{sess.id}'",
+         f"UPDATE users SET last_login_at='2099-01-01 00:00:00' WHERE id='{owner.id}'")
+    assert win.close()["status"] == "PASS"
+    win = tamper.Window(db.get_bind())
+    _raw(settings, f"UPDATE auth_sessions SET expires_at='2099-01-01 00:00:00' WHERE id='{sess.id}'",
+         f"UPDATE users SET password_hash='forged' WHERE id='{owner.id}'")
+    result = win.close()
+    assert result["status"] == "FAIL"
+    assert {(f["table"], f["id"]) for f in result["foreign"]} == {("auth_sessions", sess.id), ("users", owner.id)}
 
 
 def test_every_foreign_row_is_neutralised_not_only_the_listed_ones(db, settings):

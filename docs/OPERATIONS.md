@@ -238,9 +238,11 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   QUARANTINED for the owner's special review with a HIGH alert. Foreign approval/session/grant/route/policy rows
   are neutralised at once (decision INVALIDATED, request WITHDRAWN, acceptance INVALIDATED, session/grant
   revoked, route DISABLED until you re-activate its configuration hash, policy snapshot rebuilt, a forged
-  containment proof removed, write enablement off; audit `verification.tamper.neutralize`); the alert lists what
-  still needs your review (removed rows, schema, a modified existing account, ...) with the remedy. If a listed
-  decision was your own (recorded from another AEOS process during the verification), record it again.
+  containment proof removed, write enablement off, a forged or modified account deactivated; audit
+  `verification.tamper.neutralize`); the alert lists what still needs your review (removed rows, schema, a
+  modified account's role and scope, ...) with the remedy. A deactivated account is re-activated locally with a
+  one-time password: Windows `.\aeos.ps1 admin recover <username>`, macOS `./aeos admin recover <username>`. If a
+  listed decision was your own (recorded from another AEOS process during the verification), record it again.
   When something stays in effect (a changed controller file such as `policy/**`, a row without a safe inverse,
   a failed neutralisation) the verifier also pauses admission of new worker runs (**integrity hold**, reason
   `VERIFIER_TAMPER integrity hold`; the alert lists each remedy). Reconcile, then resume: Windows

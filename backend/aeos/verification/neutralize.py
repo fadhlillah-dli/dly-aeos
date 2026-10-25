@@ -11,7 +11,9 @@ reported and makes it ineffective - fail closed, never by trusting the row's con
 ``acceptance_records``     the task's ACCEPTED/PENDING acceptance -> INVALIDATED (re-verification required)
 ``auth_sessions``          revoked (``revoked_reason = verifier-tamper``)
 ``capability_grants``      revoked and inactive
-``users``                  an *added* user deactivated; every foreign user row's sessions revoked
+``users``                  deactivated, sessions revoked (a modified existing account too - its password hash or role
+                           may be the candidate's; ``aeos admin recover`` re-activates it locally); a modified one is
+                           also listed for the owner's role/scope review
 ``model_routes``           DISABLED (ineligible until a human re-activates its configuration hash); its route
                            decisions invalidated, readiness checks marked STALE
 ``policy_snapshots``       deactivated; the active snapshot rebuilt from the policy files + decisions
@@ -129,12 +131,12 @@ def _user(session: Session, row_id: str, reason: str, change: str) -> str:
     if u is None:
         return "GONE"
     identity.revoke_all_sessions(session, u.id, reason=REVOKED_REASON)
-    if change == "added":
-        u.is_active = False
-        return "DEACTIVATED"
-    # a modified existing account (possibly the owner's own): sessions revoked, the account itself is the owner's
-    # call (password reset / role check) - deactivating could lock the only administrator out
-    return "MANUAL"
+    # An added account is forged. A modified existing one (possibly the owner's own) may carry a password hash or
+    # role the candidate chose: it must not sign in on the web or prove a CLI decision (``--as``, which checks the
+    # password and ``is_active`` only) with it. Deactivated, it is recovered locally by the owner - ``aeos admin
+    # recover <username>`` re-activates it with a one-time password (no lock-out: the local operator always can).
+    u.is_active = False
+    return "DEACTIVATED"
 
 
 def _route(session: Session, row_id: str, reason: str) -> str:
@@ -193,7 +195,9 @@ _MANUAL_REMEDY = {
                "changed since) after review",
     "sqlite_schema": "schema/trigger changed: restore the newest backup taken before the run if one exists (aeos ops "
                      "backup list, aeos ops backup restore) after review; aeos db status shows the migration head",
-    "users": "an existing account was modified: reset its password (aeos admin recover) and check its role",
+    "users": "an existing account was modified: it is deactivated and its sessions revoked - recover it locally "
+             "(aeos admin recover <username>: re-activates it with a one-time password), then check its role and "
+             "project/domain scope",
     "decision_requests": "a resolved request was modified: compare it with the decision it names",
     "system_settings": "a feature/bootstrap setting was changed: compare it with the last known value",
 }
@@ -284,6 +288,9 @@ def neutralize_foreign_rows(session: Session, foreign: list[dict[str, Any]], *, 
                                               "check the table for it before resuming"})
         else:
             actions.append({**entry, "action": result})
+            if table == "users" and change != "added":
+                # the owner's own account, perhaps: deactivated (above), and its role/scope are the owner's review
+                manual.append({**entry, "remedy": _MANUAL_REMEDY["users"]})
     if snapshot_touched:
         try:
             from aeos.policy import decisions as registry

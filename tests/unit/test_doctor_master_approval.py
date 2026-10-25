@@ -30,10 +30,11 @@ def _repo(tmp_path: Path, text: str = "# DLY AEOS Master Architecture Final\n\nv
 
 
 def _approved_snapshot(db, sha: str | None, *, domain: str | None = None, label: str = "baseline",
-                       approve: bool = True) -> ArchitectureSnapshot:
+                       approve: bool = True, created_at=None) -> ArchitectureSnapshot:
     refs = {"schema": "architecture-snapshot/1", "scope": {"domain": domain, "lenses": ["DESIGN", "CONFIG"]},
             "master": {"path": MASTER_REL, "sha256": sha} if sha else None}
-    snap = ArchitectureSnapshot(label=label, refs=refs, snapshot_hash=content_hash(refs), created_by="owner")
+    snap = ArchitectureSnapshot(label=label, refs=refs, snapshot_hash=content_hash(refs), created_by="owner",
+                                **({"created_at": created_at} if created_at is not None else {}))
     db.add(snap)
     db.flush()
     if approve:
@@ -82,6 +83,50 @@ def test_an_edited_master_is_flagged_until_a_new_approval(settings, db, tmp_path
     # the owner approves the new state: traceable again
     _approved_snapshot(db, file_sha256(repo / MASTER_REL), label="v2")
     assert _check(settings, db, repo).status == "VERIFIED"
+
+
+def test_a_master_reverted_to_an_older_approved_text_is_not_approved(settings, db, tmp_path):
+    """The owner's newest approval decides: v1 approved, then v2 approved, then the file is put back to v1 outside
+    the pipeline - v1 was approved once, but the owner's latest decision binds v2 (before, any approved snapshot that
+    named the current sha256 made the check VERIFIED)."""
+    from datetime import timedelta
+
+    from aeos.core.timeutil import utcnow
+
+    v1 = "# DLY AEOS Master Architecture Final\n\nv1\n"
+    repo = _repo(tmp_path, v1)
+    t0 = utcnow() - timedelta(hours=2)
+    _approved_snapshot(db, file_sha256(repo / MASTER_REL), label="v1", created_at=t0)
+    (repo / MASTER_REL).write_text("# DLY AEOS Master Architecture Final\n\nv2\n", encoding="utf-8")
+    _approved_snapshot(db, file_sha256(repo / MASTER_REL), label="v2", created_at=t0 + timedelta(hours=1))
+    assert _check(settings, db, repo).status == "VERIFIED"
+    (repo / MASTER_REL).write_text(v1, encoding="utf-8")
+    res = _check(settings, db, repo)
+    assert res.status == "UNKNOWN" and res.error_code == "MASTER_CHANGED_SINCE_APPROVAL", res.summary
+    assert res.observed_evidence["newest_approval"]["label"] == "v2"
+    # the same holds for a direct decision: a newer decision on another hash outranks an older matching snapshot
+    db.add(Decision(kind="APPROVAL", actor_user_id="owner", actor_kind="HUMAN", target_type="master_architecture",
+                    target_id=MASTER_REL, target_hash=file_sha256(repo / MASTER_REL), rationale="owner: v1 again"))
+    db.commit()
+    assert _check(settings, db, repo).status == "VERIFIED"  # the owner approves the revert: traceable again
+
+
+def test_an_approved_snapshot_whose_content_was_changed_proves_nothing(settings, db, tmp_path):
+    """The approval binds the snapshot's hash; a snapshot row whose stored content (here its master sha256) does not
+    hash to that value - the append-only trigger dropped and the row rewritten, or a row written that way - is
+    ignored."""
+    repo = _repo(tmp_path)
+    approved = {"schema": "architecture-snapshot/1", "scope": {"domain": None, "lenses": ["DESIGN", "CONFIG"]},
+                "master": {"path": MASTER_REL, "sha256": "sha256:" + "e" * 64}}
+    stored = {**approved, "master": {"path": MASTER_REL, "sha256": file_sha256(repo / MASTER_REL)}}
+    snap = ArchitectureSnapshot(label="rewritten", refs=stored, snapshot_hash=content_hash(approved), created_by="x")
+    db.add(snap)
+    db.flush()
+    db.add(Decision(kind="APPROVAL", actor_user_id="owner", actor_kind="HUMAN", target_type="architecture_snapshot",
+                    target_id=snap.id, target_hash=snap.snapshot_hash, rationale="owner approved the original"))
+    db.commit()
+    res = _check(settings, db, repo)
+    assert res.status == "UNKNOWN" and res.error_code == "MASTER_APPROVAL_MISSING", res.summary
 
 
 def test_a_human_decision_bound_to_the_master_hash_verifies(settings, db, tmp_path):

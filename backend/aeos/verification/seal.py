@@ -18,7 +18,12 @@ consistent with the junit - are defeated by forging both). The seal raises that 
   streamed ones; the terminal summary line must equal pytest's own counts.
 
 Any disagreement is ``FAIL`` (the verifier QUARANTINES the run as result tampering); no sealed session end at all is
-``MISSING`` (the step cannot pass - fail closed). Residual risk, stated on every report: candidate code shares the
+``MISSING`` (the step cannot pass - fail closed), and so is a key file the plugin did not remove (code under test could
+have read the key, so the seal proves nothing). Only lines naming this step's nonce belong to its channel: a seal line
+of another session - a nested verifier run's output that a test printed, or that an assertion's repr shows when it
+fails - is counted and ignored (it cannot authenticate as this step's, and taking it for a forgery would QUARANTINE an
+honest failing test); a line naming this step's nonce with an invalid MAC is forged. Residual risk, stated on every
+report: candidate code shares the
 interpreter with the plugin, so code that deliberately subverts the plugin itself in memory (finds the key, patches
 its hooks) is not excluded - the seal detects after-the-fact report/exit-code forgery, it is not a sandbox.
 """
@@ -205,19 +210,32 @@ class SealResult:
     junit_sha256: str | None = None
     key_consumed: bool | None = None
     plugin_sha256: str = PLUGIN_SHA256
+    # seal lines of other sessions in the output (a nested run a test printed): never this step's channel
+    other_session_lines: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def _events(text: str, seal: StepSeal) -> tuple[list[dict[str, Any]], list[str]]:
+KEY_LEFT_PROBLEM = ("the seal's key file was still there after the step (the plugin did not remove it): code under "
+                    "test could have read the key, so the seal proves nothing")
+
+
+def _events(text: str, seal: StepSeal) -> tuple[list[dict[str, Any]], list[str], int]:
+    """This step's authenticated events, the problems, and the number of seal lines of *other* sessions (ignored)."""
     events: list[dict[str, Any]] = []
     problems: list[str] = []
+    others = 0
     for m in _LINE.finditer(text or ""):
         body, _, mac = m.group(1).rpartition(" ")
+        if seal.nonce not in body:
+            # another session's line (a nested verifier run's output a test printed or an assertion repr shows):
+            # it cannot authenticate as this step's (other key); counted, never a forgery of this step's result
+            others += 1
+            continue
         expect = hmac.new(seal.key, body.encode("utf-8", "replace"), hashlib.sha256).hexdigest()
         if not body or not hmac.compare_digest(expect, mac.strip()):
-            problems.append("a result-channel line carries an invalid MAC (forged or corrupted)")
+            problems.append("a result-channel line naming this step carries an invalid MAC (forged or corrupted)")
             continue
         try:
             ev = json.loads(body)
@@ -230,7 +248,7 @@ def _events(text: str, seal: StepSeal) -> tuple[list[dict[str, Any]], list[str]]
         if ev.get("i") != len(events):
             problems.append(f"result-channel sequence broken at event {len(events)} (lines removed or replayed)")
         events.append(ev)
-    return events, list(dict.fromkeys(problems))
+    return events, list(dict.fromkeys(problems)), others
 
 
 def _worst(pairs: list[tuple[str, str]]) -> dict[str, str]:
@@ -288,8 +306,8 @@ def check_pytest(seal: StepSeal, *, stdout: str, returncode: int | None, timed_o
                  channel: str | None = None) -> SealResult:
     """Cross-check one sealed pytest step (see the module docstring). *report* is the parsed ``JUnitReport``;
     *channel* the full set of seal lines (``ProcResult.channel``) when *stdout* is only a trimmed tail."""
-    events, problems = _events(channel or stdout, seal)
-    res = SealResult(status="PASS", events=len(events), key_consumed=key_consumed)
+    events, problems, others = _events(channel or stdout, seal)
+    res = SealResult(status="PASS", events=len(events), key_consumed=key_consumed, other_session_lines=others)
     finish = [e for e in events if e.get("e") == "finish"]
     if not finish:
         why = ("the verifier result seal reported nothing (plugin not loaded, or its channel closed)" if not events
@@ -298,6 +316,9 @@ def check_pytest(seal: StepSeal, *, stdout: str, returncode: int | None, timed_o
         res.status = "FAIL" if problems else "MISSING"
         res.problems = [*problems, why]
         return res
+    if key_consumed is False:
+        # the plugin ran (sealed events exist) but its key file is still there: fail closed, never a PASS
+        problems.append(KEY_LEFT_PROBLEM)
     fin = finish[-1]
     res.exit_status, res.junit_sha256 = fin.get("x"), fin.get("j")
     if len(finish) > 1 or events[-1] is not fin:
@@ -329,7 +350,9 @@ def check_pytest(seal: StepSeal, *, stdout: str, returncode: int | None, timed_o
             problems.append("the terminal summary differs from pytest's own counts (" + ", ".join(
                 f"{k}: {summary.get(k, 0)} printed, {counts.get(k, 0)} counted" for k in mismatch) + ")")
     if problems:
-        res.status = "FAIL"
+        # a key file left behind alone is MISSING (a harness defect: the step cannot pass, but nothing was forged);
+        # any disagreement is FAIL (result tampering)
+        res.status = "MISSING" if problems == [KEY_LEFT_PROBLEM] else "FAIL"
         res.problems = list(dict.fromkeys(problems))
     return res
 
@@ -337,7 +360,7 @@ def check_pytest(seal: StepSeal, *, stdout: str, returncode: int | None, timed_o
 def sealed_result(seal: StepSeal, stdout: str, event: str = "result") -> tuple[dict[str, Any] | None, list[str]]:
     """The payload of the last authenticated *event* line of a non-pytest driver (e.g. the migration round-trip),
     or None with the problems (fail closed: an unsealed result is never used)."""
-    events, problems = _events(stdout, seal)
+    events, problems, _others = _events(stdout, seal)
     found = [e for e in events if e.get("e") == event]
     if not found:
         return None, [*problems, f"no sealed '{event}' line (the driver ended before reporting)"]

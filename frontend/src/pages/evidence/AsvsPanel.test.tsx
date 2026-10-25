@@ -62,8 +62,23 @@ describe("AsvsPanel", () => {
     expect(screen.getByText("loopback only")).toBeInTheDocument();
     expect(screen.getByText("Tidak dipilih (alasan tercatat)")).toBeInTheDocument();
     const chapters = screen.getByText("Per bab").closest("section") as HTMLElement;
-    await userEvent.click(within(chapters).getByText(/V9 Communication/));
+    await userEvent.click(within(chapters).getByRole("button", { name: /V9 Communication/ }));
     expect(screen.getByText("Kontrol V9 Communication")).toBeInTheDocument();
     expect(screen.queryByText("V3.3.4")).not.toBeInTheDocument();
+    expect(within(chapters).getByRole("button", { name: /V9 Communication/ })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("filters by chapter from the keyboard (a button, not a mouse-only row)", async () => {
+    wrap();
+    await screen.findByText("V3.3.4");
+    await userEvent.click(screen.getByRole("button", { name: "Semua" }));
+    const chapters = screen.getByText("Per bab").closest("section") as HTMLElement;
+    const v3 = within(chapters).getByRole("button", { name: /V3 Session Management/ });
+    v3.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByText("Kontrol V3 Session Management")).toBeInTheDocument();
+    expect(screen.queryByText("loopback only")).not.toBeInTheDocument();
+    await userEvent.keyboard(" ");
+    expect(screen.getByText("loopback only")).toBeInTheDocument(); // pressed again: every chapter
   });
 });

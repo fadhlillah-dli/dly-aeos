@@ -21,7 +21,9 @@ before the window closes is not detected; a foreign write to a table this contro
 through a non-ORM statement in the same window is masked; a write by *another* AEOS process (a CLI command
 recording a decision during a verification) is reported as foreign (fail closed - re-run the verification);
 the rows of the high-volume append-only logs (``audit_events``, ``events``) are not digested - only their
-guarding triggers are (a drop-modify-recreate inside the window is not detected for those two tables).
+guarding triggers are (a drop-modify-recreate inside the window is not detected for those two tables); the
+activity timestamps ``auth_sessions.last_seen_at`` and ``users.last_login_at`` are not compared (``_VOLATILE_COLUMNS``:
+no trust attribute, rewritten by the server on ordinary use).
 The container runner never mounts the data dir, which is the actual prevention.
 """
 
@@ -53,6 +55,15 @@ _TRUST = frozenset(TRUST_TABLES)
 _ROW_FILTERS: dict[str, str] = {
     "system_settings": ("key LIKE 'worker_runtime.containment.%' OR key LIKE 'write_enabled.%' "
                         "OR key LIKE 'flags.%' OR key LIKE 'bootstrap.%'"),
+}
+# Activity timestamps the API server rewrites on ordinary use (a session's last request, at most every 30 s; an
+# account's last sign-in). They are no trust attribute - a changed value grants nothing without the session token or
+# the password - so they are left out of the row digest: an open dashboard during a CLI verification (another AEOS
+# process) is not taken for tampering, and neutralisation never revokes the owner's live session for it. Every other
+# column of these rows (token hash, user, expiry, revocation, password hash, role, scopes, ...) is compared.
+_VOLATILE_COLUMNS: dict[str, frozenset[str]] = {
+    "auth_sessions": frozenset({"last_seen_at"}),
+    "users": frozenset({"last_login_at"}),
 }
 _WRITE_RE = re.compile(r'^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+'
                        r'["`\[]?(\w+)', re.IGNORECASE)
@@ -156,13 +167,16 @@ def digest(engine: Engine) -> tuple[dict[str, dict[str, str]], list[str]]:
             # the row key is the primary key, as the controller's own writes are journaled (_after_flush)
             key_col = "id" if "id" in cols else "key" if "key" in cols else None
             key_idx = cols.index(key_col) if key_col is not None else None
+            volatile = _VOLATILE_COLUMNS.get(table, frozenset())
+            keep = [i for i, c in enumerate(cols) if c not in volatile]
             rows: dict[str, str] = {}
             for i, row in enumerate(res):
                 if i >= MAX_ROWS_PER_TABLE:
                     truncated.append(table)
                     break
                 key = str(row[key_idx]) if key_idx is not None else f"#{i}"
-                rows[key] = hashlib.sha256(repr(tuple(row)).encode("utf-8", "replace")).hexdigest()
+                values = tuple(row) if not volatile else tuple(row[j] for j in keep)
+                rows[key] = hashlib.sha256(repr(values).encode("utf-8", "replace")).hexdigest()
             out[table] = rows
         if sqlite:
             # The schema itself: tables, indexes and the append-only / immutable-binding triggers that guard

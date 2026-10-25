@@ -1042,13 +1042,17 @@ class _Verifier:
 
     def _driver_seal(self, step_seal: seal.StepSeal, res: ProcResult) -> dict[str, Any] | None:
         """The result a non-pytest driver step (import preflight, migration round-trip) sealed at its very end
-        (``seal.sealed_result``), recorded under the step's name. Forged, foreign or out-of-sequence channel lines
-        are result tampering (a ``result`` finding: QUARANTINED) whether or not a sealed result exists; no sealed
-        result at all is MISSING and nothing is returned (the caller fails closed)."""
+        (``seal.sealed_result``), recorded under the step's name. Forged or out-of-sequence channel lines naming
+        this step are result tampering (a ``result`` finding: QUARANTINED) whether or not a sealed result exists
+        (another session's seal lines are ignored); no sealed result at all, or a key file the plugin did not
+        remove, is MISSING and nothing is returned (the caller fails closed)."""
         consumed = step_seal.discard()
         sealed, problems = seal.sealed_result(step_seal, res.channel or res.stdout)
         forged = [p for p in problems if not p.startswith("no sealed")]
-        status = "FAIL" if forged else ("PASS" if sealed is not None else "MISSING")
+        if sealed is not None and not consumed:
+            # the driver sealed a result but its key file is still there: candidate code could have read the key
+            problems.append(seal.KEY_LEFT_PROBLEM)
+        status = "FAIL" if forged else ("PASS" if sealed is not None and consumed else "MISSING")
         if forged:
             self.tamper_findings += [{"kind": "result", "path": step_seal.name, "change": p[:300]} for p in forged[:5]]
         self.result_seals[step_seal.name] = {"status": status, "problems": problems[:5], "key_consumed": consumed}
@@ -1266,9 +1270,24 @@ class _Verifier:
         # every foreign row (full keys), not only the ones the report lists
         foreign = [f for f in (self.foreign_all or db.get("foreign") or []) if isinstance(f, dict)]
         if foreign:
-            self.neutralized = neutralize.neutralize_foreign_rows(
-                self.session, foreign, run_id=self.run_id, project_id=self.out.project_id, domain=self.out.domain,
-                foreign_count=max(len(foreign), int(db.get("foreign_count") or 0)))
+            try:
+                # one savepoint around the whole neutralisation: an unexpected error (beyond the per-row handling)
+                # leaves the session usable, so the QUARANTINE, the report and the alert are still recorded
+                with self.session.begin_nested():
+                    self.neutralized = neutralize.neutralize_foreign_rows(
+                        self.session, foreign, run_id=self.run_id, project_id=self.out.project_id,
+                        domain=self.out.domain, foreign_count=max(len(foreign), int(db.get("foreign_count") or 0)))
+            except Exception as exc:  # never hides the findings: everything stays in effect -> integrity hold
+                log.exception("tamper neutralisation failed")
+                self.neutralized = {"actions": [], "manual": [], "not_listed": 0,
+                                    "failed": [{"table": "*", "id": "*", "change": f"{len(foreign)} foreign row(s)",
+                                                "error": type(exc).__name__}],
+                                    "counts": {"actions": 0, "manual": 0, "failed": 1}}
+            counts = (self.neutralized or {}).get("counts") or {}
+            self.out.reasons.append(
+                f"VERIFIER_TAMPER: {counts.get('actions', 0)} foreign control-plane row(s) neutralised, "
+                f"{counts.get('manual', 0)} item(s) need the owner's review, {counts.get('failed', 0)} "
+                "neutralisation(s) failed (report tamper.neutralized and the HIGH alert list each row and remedy)")
         self._integrity_hold()
 
     def _integrity_hold(self) -> None:
