@@ -199,6 +199,47 @@ def test_office_needs_its_own_proven_container_profile(db, monkeypatch):
     assert personal.network != off.network and personal.gateway != off.gateway and personal.user != off.user
 
 
+def test_container_names_never_collide_for_runs_sharing_a_prefix():
+    """Found on a real Docker host: the probe and cancel runs of the containment suite both truncated to
+    'aeos-run-containment-' and the second launch failed with a docker name conflict."""
+    import re
+
+    names = [sandbox.container_name(r) for r in ("containment-probe-120000000001", "containment-cancel-120000000002",
+                                                 "containment-probe-120000000001")]
+    assert len(set(names)) == 3  # a retry of the same run id gets a fresh name as well
+    assert all(re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+", n) and len(n) <= 63 for n in names)
+    assert "containment-probe-120000000001" in names[0]
+    odd = sandbox.container_name("run/with spaces:and:colons")
+    assert re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+", odd)
+    argv = sandbox.container_command(image="aeos-worker:1", run_id="containment-cancel-1", worktree="/w",
+                                     config_dir="/c", inner_argv=["x"], env={})
+    assert argv[argv.index("--name") + 1].startswith("aeos-run-containment-cancel-1-")
+    assert "aeos.run_id=containment-cancel-1" in argv  # teardown/reap still go by the full id label
+
+
+def test_worker_status_shows_the_container_proven_only_with_a_fresh_pass(settings, monkeypatch):
+    from typer.testing import CliRunner
+
+    from aeos.cli import app, ensure_database
+    from aeos.core.db import session_scope
+    from aeos.worker_runtime import opencode
+
+    monkeypatch.setattr(opencode, "opencode_status", lambda refresh=False: {
+        "status": "MISSING", "version": None, "pinned_version": "1", "functional": "NOT_PROVEN"})
+    _docker_ok(monkeypatch)
+    ensure_database()
+
+    def container_line(*args: str) -> str:  # the console wraps long lines; judge the unwrapped text
+        flat = " ".join(CliRunner().invoke(app, ["worker", "status", *args]).output.split())
+        return flat.split("sandbox container", 1)[1].split("sandbox vm", 1)[0]
+
+    assert "strength=NOT_PROVEN" in container_line() and "PROVEN for" not in container_line()
+    with session_scope() as s:
+        _record(s)
+    assert "strength=PROVEN for PERSONAL (containment PASS" in container_line()
+    assert "strength=NOT_PROVEN" in container_line("--domain", "OFFICE")
+
+
 def test_remedy_names_the_implemented_container_suite(db):
     r = facade.sandbox_readiness(db, domain="PERSONAL")
     assert any("docker build" in x and "aeos worker containment --kind container" in x for x in r["remedies"])
