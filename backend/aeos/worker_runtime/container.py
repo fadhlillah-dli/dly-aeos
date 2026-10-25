@@ -361,6 +361,9 @@ def verifier_readiness(session: Any, *, domain: str) -> dict[str, Any]:
     if not container.get("available"):
         return {**base, "status": "UNAVAILABLE", "remedies": [remedy],
                 "reasons": ["container sandbox not available: " + str(container.get("evidence"))]}
+    if session is None:  # e.g. a Doctor run without the database: the containment proof cannot be read
+        return {**base, "status": "UNAVAILABLE", "remedies": [remedy],
+                "reasons": ["no database session: the container containment report cannot be read (NOT-PROVEN)"]}
     report = _last_containment(session, "container", domain)
     problems = container_report_problems(report, domain=domain, caps=caps)
     image = verifier_image_status()

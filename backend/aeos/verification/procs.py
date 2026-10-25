@@ -4,7 +4,8 @@
 * a scrubbed child environment built from an allow-list — no credentials, no provider keys, no
   ``AEOS_*`` overrides; every per-user location a tool discovers through the environment is redirected
   into the verifier's run dir (``HOME``/``USERPROFILE``/``APPDATA``/``LOCALAPPDATA``/``XDG_*``,
-  ``GH_CONFIG_DIR``, docker/npm/claude config dirs), the Python keyring is the null backend, git reads no
+  the platformdirs Windows overrides, ``GH_CONFIG_DIR``, docker/npm/claude config dirs), the Python keyring
+  is the null backend, git reads no
   system/global config and has no credential helper or askpass and only the local ``file`` transport, no
   SSH agent socket, no D-Bus session bus, and outbound HTTP points at a dead proxy (an egress deterrent,
   not an enforcement claim). This stops credential discovery *through the environment*; code running as
@@ -130,6 +131,16 @@ def child_env_values(*, home: str, tmp: str, data_dir: str, pythonpath: str, emp
         "XDG_CACHE_HOME": j(".cache"),
         "XDG_STATE_HOME": j(".local", "state"),
         "XDG_RUNTIME_DIR": j(".run"),
+        # Windows: platformdirs (and so aeos.core.paths.default_data_dir) asks the Known Folder API, which
+        # ignores LOCALAPPDATA/APPDATA (it follows only a profile-relative registry entry through USERPROFILE);
+        # these explicit overrides keep every platformdirs location - the AEOS data dir included - inside the
+        # run home even when the owner relocated AppData/Documents (review 2026-10-19, K2). Ignored elsewhere.
+        "WIN_PD_OVERRIDE_LOCAL_APPDATA": j("AppData", "Local"),
+        "WIN_PD_OVERRIDE_APPDATA": j("AppData", "Roaming"),
+        "WIN_PD_OVERRIDE_COMMON_APPDATA": j("ProgramData"),
+        "WIN_PD_OVERRIDE_PERSONAL": j("Documents"),
+        "WIN_PD_OVERRIDE_DOWNLOADS": j("Downloads"),
+        "WIN_PD_OVERRIDE_DESKTOPDIRECTORY": j("Desktop"),
         "GH_CONFIG_DIR": j(".config", "gh"),
         "GH_PROMPT_DISABLED": "1",
         "GH_NO_UPDATE_NOTIFIER": "1",

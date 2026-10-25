@@ -3,9 +3,12 @@ not change approval records / policy / routing policy", §20 Verifier ENF; defen
 process runner, where candidate code runs as the controller's OS user and could open the SQLite DB).
 
 A ``Window`` digests every row of the trust tables (approval decisions and requests, policy snapshots,
-model routes, agent definitions/skill packs, budgets, users, install manifests, TaskSpecs/PlanVersions,
-acceptance/review records and evidence) through a fresh connection before the first candidate step and again
-after the last one. Writes made *by this controller process* in that window are journaled by SQLAlchemy
+model routes, agent definitions/skill packs, budgets, users and their server-side sessions, capability
+grants, projects and their integrations, held-out eval suites, install manifests, TaskSpecs/PlanVersions,
+acceptance/review records, evidence, and the trust-relevant system settings: containment proofs, write
+enablement, flags, bootstrap) - and the SQLite schema with its append-only/immutability triggers - through a
+fresh connection before the first candidate step and again after the last one. Writes made *by this
+controller process* in that window are journaled by SQLAlchemy
 event hooks (ORM flushes per row id; any other write statement per table), so the controller's own legitimate
 work is not mistaken for tampering. Any other changed row - added, modified or removed - is a foreign write:
 the verification is QUARANTINED and a HIGH alert raised.
@@ -13,7 +16,9 @@ the verification is QUARANTINED and a HIGH alert raised.
 Residual risks (stated, not hidden): reads of the DB are not detected; a foreign write that is undone
 before the window closes is not detected; a foreign write to a table this controller process also wrote
 through a non-ORM statement in the same window is masked; a write by *another* AEOS process (a CLI command
-recording a decision during a verification) is reported as foreign (fail closed - re-run the verification).
+recording a decision during a verification) is reported as foreign (fail closed - re-run the verification);
+the rows of the high-volume append-only logs (``audit_events``, ``events``) are not digested - only their
+guarding triggers are (a drop-modify-recreate inside the window is not detected for those two tables).
 The container runner never mounts the data dir, which is the actual prevention.
 """
 
@@ -33,11 +38,24 @@ TRUST_TABLES: tuple[str, ...] = (
     "decisions", "decision_requests", "policy_snapshots", "model_routes", "agent_definitions", "role_skill_packs",
     "budgets", "users", "install_manifests", "task_specs", "plan_versions", "acceptance_records", "review_records",
     "evidence_artifacts",
+    # review 2026-10-19 (K2): a forged server-side session impersonates a human (AUTH), a forged capability grant
+    # widens a run's broker scope, an integration row redirects an external write target, an eval suite is a
+    # held-out grader (§21), the project row carries domain/classification policy, and system_settings holds
+    # the isolation proofs (container containment reports), external-write enablement and feature flags.
+    "auth_sessions", "capability_grants", "project_integrations", "eval_suites", "projects", "system_settings",
 )
 _TRUST = frozenset(TRUST_TABLES)
+# Only the trust-relevant rows of a general key/value table are compared (its other rows are caches and
+# counters other AEOS processes - e.g. a Doctor CLI run - update legitimately). Fixed SQL, no user input.
+_ROW_FILTERS: dict[str, str] = {
+    "system_settings": ("key LIKE 'worker_runtime.containment.%' OR key LIKE 'write_enabled.%' "
+                        "OR key LIKE 'flags.%' OR key LIKE 'bootstrap.%'"),
+}
 _WRITE_RE = re.compile(r'^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+'
                        r'["`\[]?(\w+)', re.IGNORECASE)
 MAX_ROWS_PER_TABLE = 200_000
+# pseudo-table of the window: the SQLite schema (sqlite_master), compared like the trust tables
+SCHEMA_KEY = "sqlite_schema"
 
 _lock = threading.Lock()
 _windows: dict[int, Journal] = {}
@@ -115,24 +133,46 @@ def install() -> None:
     _installed = True
 
 
-def digest(engine: Engine) -> dict[str, dict[str, str]]:
-    """Row digests of every trust table that exists, read through a fresh connection (committed state)."""
+def digest(engine: Engine) -> tuple[dict[str, dict[str, str]], list[str]]:
+    """Row digests of every trust table that exists, read through a fresh connection (committed state), and
+    the tables with more rows than ``MAX_ROWS_PER_TABLE`` (only partly compared: never a PASS, fail closed)."""
     out: dict[str, dict[str, str]] = {}
+    truncated: list[str] = []
+    sqlite = engine.dialect.name == "sqlite"
     with engine.connect() as conn:
         names = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))} \
-            if engine.dialect.name == "sqlite" else set(TRUST_TABLES)
+            if sqlite else set(TRUST_TABLES)
         for table in TRUST_TABLES:
             if table not in names:
                 continue
-            res = conn.execute(text(f'SELECT * FROM "{table}" LIMIT {MAX_ROWS_PER_TABLE}'))  # noqa: S608 - fixed names
+            order = " ORDER BY rowid" if sqlite else ""  # deterministic position keys for tables without an id
+            where = f" WHERE {_ROW_FILTERS[table]}" if table in _ROW_FILTERS else ""
+            res = conn.execute(text(f'SELECT * FROM "{table}"{where}{order} '  # noqa: S608 - fixed names
+                                    f"LIMIT {MAX_ROWS_PER_TABLE + 1}"))
             cols = list(res.keys())
-            key_idx = cols.index("id") if "id" in cols else None
+            # the row key is the primary key, as the controller's own writes are journaled (_after_flush)
+            key_col = "id" if "id" in cols else "key" if "key" in cols else None
+            key_idx = cols.index(key_col) if key_col is not None else None
             rows: dict[str, str] = {}
             for i, row in enumerate(res):
+                if i >= MAX_ROWS_PER_TABLE:
+                    truncated.append(table)
+                    break
                 key = str(row[key_idx]) if key_idx is not None else f"#{i}"
                 rows[key] = hashlib.sha256(repr(tuple(row)).encode("utf-8", "replace")).hexdigest()
             out[table] = rows
-    return out
+        if sqlite:
+            # The schema itself: tables, indexes and the append-only / immutable-binding triggers that guard
+            # Decision, AuditEvent, EvidenceArtifact, PlanVersion and TaskSpec rows (AGENTS.md invariant 4).
+            # The controller never changes its schema while it runs (migrations run at startup only), so any
+            # change here - e.g. candidate code dropping a trigger to rewrite "append-only" history - is
+            # foreign (review 2026-10-19, K2).
+            schema: dict[str, str] = {}
+            for typ, name, tbl, sql in conn.execute(text("SELECT type, name, tbl_name, sql FROM sqlite_master")):
+                schema[f"{typ}:{name}"] = hashlib.sha256(
+                    repr((typ, name, tbl, sql)).encode("utf-8", "replace")).hexdigest()
+            out[SCHEMA_KEY] = schema
+    return out, truncated
 
 
 class Window:
@@ -144,8 +184,11 @@ class Window:
         self.journal = Journal()
         with _lock:
             _windows[id(self)] = self.journal
+        self.truncated: set[str] = set()
         try:
-            self.before: dict[str, dict[str, str]] | None = digest(engine)
+            self.before: dict[str, dict[str, str]] | None
+            self.before, cut = digest(engine)
+            self.truncated.update(cut)
             self.error: str | None = None
         except Exception as exc:  # unreadable: the comparison is UNKNOWN (reported, never PASS)
             self.before, self.error = None, type(exc).__name__
@@ -156,9 +199,10 @@ class Window:
         if self.before is None:
             return {"status": "UNKNOWN", "error": self.error, "foreign": [], "own_writes": 0}
         try:
-            after = digest(self.engine)
+            after, cut = digest(self.engine)
         except Exception as exc:
             return {"status": "UNKNOWN", "error": type(exc).__name__, "foreign": [], "own_writes": 0}
+        self.truncated.update(cut)
         foreign: list[dict[str, str]] = []
         for table in sorted(set(self.before) | set(after)):
             if table in self.journal.tables:
@@ -169,6 +213,13 @@ class Window:
                     continue
                 change = "added" if key not in old else "removed" if key not in new else "modified"
                 foreign.append({"table": table, "id": key[:64], "change": change})
-        return {"status": "FAIL" if foreign else "PASS", "foreign": foreign[:100], "foreign_count": len(foreign),
-                "tables": len(after), "rows": sum(len(v) for v in after.values()),
-                "own_writes": len(self.journal.rows), "own_tables": sorted(self.journal.tables)}
+        status = "FAIL" if foreign else ("UNKNOWN" if self.truncated else "PASS")
+        result: dict[str, Any] = {
+            "status": status, "foreign": foreign[:100], "foreign_count": len(foreign), "tables": len(after),
+            "rows": sum(len(v) for v in after.values()), "own_writes": len(self.journal.rows),
+            "own_tables": sorted(self.journal.tables)}
+        if self.truncated:
+            result["truncated_tables"] = sorted(self.truncated)
+            result["error"] = (f"more than {MAX_ROWS_PER_TABLE} rows in {', '.join(sorted(self.truncated))}: "
+                               "only partly compared")
+        return result

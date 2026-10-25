@@ -551,6 +551,8 @@ def test_verifier_independence_is_self_tested_with_functional(settings, db, monk
     rv = res0.observed_evidence["verifier_runner"]
     assert rv["isolation"] == "WEAK" and rv["runner"] == "process"
     assert any("isolation WEAK" in r for r in res0.observed_evidence["residual_risks"])
+    # evidence honesty: the residual risk is stated, never claimed as owner-accepted (no Decision records that)
+    assert "isolasi WEAK" in res0.summary and "diterima pemilik" not in res0.summary
     res = check("evidence.verifier", _ctx(settings, db, base_runner(), functional=True))
     assert res.status == "VERIFIED", res.observed_evidence
     test = res.observed_evidence["independence_self_test"]

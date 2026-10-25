@@ -4,6 +4,7 @@ home/temp redirected, keyring disabled, timeouts kill the whole process tree."""
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -31,6 +32,10 @@ def test_scrubbed_env_is_allow_list(monkeypatch, tmp_path: Path):
     assert env["HTTPS_PROXY"] == procs.DEAD_PROXY and "testserver" in env["NO_PROXY"]
     assert env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
     assert env["AEOS_DATA_DIR"] == str(tmp_path / "d")
+    # Windows platformdirs ignores LOCALAPPDATA (Known Folder API); its explicit overrides point into the run home
+    for name, rel in (("LOCAL_APPDATA", ("AppData", "Local")), ("APPDATA", ("AppData", "Roaming")),
+                      ("PERSONAL", ("Documents",))):
+        assert env[f"WIN_PD_OVERRIDE_{name}"] == str(tmp_path.joinpath("h", *rel)), name
     if sys.platform == "win32":
         assert "SYSTEMROOT" in env
 
@@ -70,6 +75,8 @@ import platformdirs
 data_candidates = [os.environ.get("AEOS_DATA_DIR"), platformdirs.user_data_dir("DLY-AEOS", appauthor=False, roaming=False)]
 res["data_dbs"] = [d for d in data_candidates if d and os.path.isfile(os.path.join(d, "aeos.sqlite3"))]
 res["data_candidates"] = [d for d in data_candidates if d]
+res["pd_data_dir"] = platformdirs.user_data_dir("DLY-AEOS", appauthor=False, roaming=False)
+res["pd_documents_dir"] = platformdirs.user_documents_dir()
 res["ssh_agent"] = bool(os.environ.get("SSH_AUTH_SOCK"))
 res["dbus"] = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
 print(json.dumps(res))
@@ -121,6 +128,11 @@ def test_candidate_child_finds_no_owner_credentials_through_the_environment(monk
     assert found["git_helpers"], "credential.helper is explicitly reset for the child"
     assert found["keyring_backend"] == "keyring.backends.null" and found["keyring_value"] is None
     assert found["data_dbs"] == [] and all(str(planted["owner"]) not in d for d in found["data_candidates"])
+    # platformdirs (aeos.core.paths.default_data_dir) resolves inside the run home on every OS - on Windows
+    # through the WIN_PD_OVERRIDE_* variables, not the Known Folder API of the owner profile
+    home = os.path.normcase(str(run / "h"))
+    assert os.path.normcase(found["pd_data_dir"]).startswith(home), found["pd_data_dir"]
+    assert os.path.normcase(found["pd_documents_dir"]).startswith(home), found["pd_documents_dir"]
     assert found["ssh_agent"] is False and found["dbus"] == "disabled:"
     assert str(planted["token"]) not in res.stdout
 

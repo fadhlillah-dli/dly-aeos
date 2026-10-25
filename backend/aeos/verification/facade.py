@@ -52,3 +52,12 @@ def acceptance_is_valid(
     from aeos.verification.acceptance import acceptance_is_valid as impl
 
     return impl(session, task_id, base_commit=base_commit, config_hash=config_hash, plan_version_hash=plan_version_hash)
+
+
+def verifier_runner_status(session: Session, *, domain: str) -> dict[str, Any]:
+    """Which runner the verifier executes candidate code in for *domain* now (§20 "isolated runner"):
+    ``isolation`` CONTAINER on a host with a proven container boundary + the verifier image, else WEAK, with the
+    reasons, remedies and residual risks (additive 2026-10-19, K2)."""
+    from aeos.verification.runner import runner_status as impl
+
+    return impl(session, domain=domain)

@@ -76,15 +76,90 @@ def test_clean_window_passes(db, settings):
     assert result["status"] == "PASS" and not result["foreign"]
 
 
+def test_a_trust_table_larger_than_the_cap_is_never_reported_clean(db, settings, monkeypatch):
+    """Fail closed: rows beyond MAX_ROWS_PER_TABLE are not compared, so such a window is UNKNOWN (a blocking
+    NOT-PROVEN in the verifier), never a silent PASS (review 2026-10-19: the LIMIT truncated silently)."""
+    db.add(Decision(kind="POLICY", actor_user_id="o", actor_kind="HUMAN", target_type="t", target_id="cap"))
+    db.commit()
+    monkeypatch.setattr(tamper, "MAX_ROWS_PER_TABLE", 0)
+    tamper.install()
+    win = tamper.Window(db.get_bind())
+    result = win.close()
+    assert result["status"] == "UNKNOWN", result
+    assert "decisions" in result["truncated_tables"] and "only partly compared" in result["error"]
+
+
+def test_forged_session_and_containment_proof_are_foreign_writes(db, settings):
+    """Candidate code under the WEAK runner forging a server-side session (impersonating a human, AUTH) or a PASS
+    container containment report (the isolation proof itself) is caught; a cache row of system_settings that other
+    AEOS processes update legitimately is not compared; the controller's own setting write is journaled by key."""
+    import sqlite3
+
+    from aeos.models.identity import SystemSetting
+
+    tamper.install()
+    win = tamper.Window(db.get_bind())
+    db.add(SystemSetting(key="flags.own-controller-write", value=True))  # this process: journaled by its key
+    db.commit()
+    raw = sqlite3.connect(str(settings.layout.db_path))
+    try:
+        raw.execute("INSERT INTO auth_sessions (id, token_hash, user_id, csrf_token, created_at, last_seen_at, "
+                    "expires_at, user_agent, client_ip) VALUES ('forged-session', 'h', 'owner', 'c', "
+                    "'2026-01-01 00:00:00', '2026-01-01 00:00:00', '2099-01-01 00:00:00', '', '')")
+        raw.execute("INSERT INTO system_settings (key, value, updated_at, version) VALUES "
+                    "('worker_runtime.containment.container', '{\"overall\": \"PASS\"}', '2026-01-01 00:00:00', 1)")
+        raw.execute("INSERT INTO system_settings (key, value, updated_at, version) VALUES "
+                    "('doctor.cache.probe', '1', '2026-01-01 00:00:00', 1)")
+        raw.commit()
+        result = win.close()
+    finally:
+        for stmt in ("DELETE FROM auth_sessions WHERE id='forged-session'",
+                     "DELETE FROM system_settings WHERE key IN ('worker_runtime.containment.container', "
+                     "'doctor.cache.probe')"):
+            raw.execute(stmt)
+        raw.commit()
+        raw.close()
+    found = {(f["table"], f["id"]) for f in result["foreign"]}
+    assert result["status"] == "FAIL", result
+    assert ("auth_sessions", "forged-session") in found
+    assert ("system_settings", "worker_runtime.containment.container") in found
+    assert not [f for f in found if f[1] in ("doctor.cache.probe", "flags.own-controller-write")], found
+
+
+def test_dropping_an_append_only_trigger_is_a_foreign_write(db, settings):
+    """Candidate code that drops the append-only/immutability trigger guarding evidence or decisions (so it can
+    rewrite "immutable" history) changes the schema: a foreign write, never a clean window (review 2026-10-19)."""
+    import sqlite3
+
+    tamper.install()
+    raw = sqlite3.connect(str(settings.layout.db_path))
+    try:
+        name, sql = raw.execute("SELECT name, sql FROM sqlite_master WHERE type='trigger' "
+                                "AND tbl_name='evidence_artifacts' ORDER BY name").fetchone()
+    finally:
+        raw.close()
+    win = tamper.Window(db.get_bind())
+    raw = sqlite3.connect(str(settings.layout.db_path))
+    try:
+        raw.execute(f'DROP TRIGGER "{name}"')
+        raw.commit()
+        result = win.close()
+        raw.execute(sql)  # restore the guard for the rest of the test session
+        raw.commit()
+    finally:
+        raw.close()
+    assert result["status"] == "FAIL", result
+    assert {"table": tamper.SCHEMA_KEY, "id": f"trigger:{name}", "change": "removed"} in result["foreign"]
+
+
 def _verify(db, world, **kw):
     out = verifier.verify_run(db, world.run.id, actor="tester", **kw)
     db.commit()
     return out
 
 
-# A candidate test that opens the AEOS data DB directly (the path leaks via AEOS_DATA_DIR in the WEAK runner)
-# and inserts an approval decision - exactly the §21 attack through verifier-executed code.
-# A candidate test that reaches the controller DB by an absolute path it was told (a candidate that discovered
+# A candidate test that inserts an approval decision - exactly the §21 attack through verifier-executed code.
+# It reaches the controller DB by an absolute path it was told (a candidate that discovered
 # the path some other way than the - redirected - environment). The WEAK runner cannot stop this; the tamper
 # window is the defence in depth that catches it.
 DB_TAMPER_TEST = r'''
