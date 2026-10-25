@@ -156,9 +156,12 @@ def run_view(r: EvalRun, session: Session | None = None) -> dict[str, Any]:
     }
     from aeos.evaluation import executor
 
-    view["execution"] = executor.execution_view(r)
+    execution = executor.execution_view(r)
+    view["execution"] = execution
     if session is not None:
         view["route_binding"] = route_binding(session, r)
+        if r.status in ("PLANNED", "RUNNING"):
+            execution["serving"] = executor.serving_view(session, r)
     return view
 
 
@@ -351,7 +354,7 @@ def _num(v: Any) -> float | None:
 # Per-sample counts that only some sources record (the trusted collector derives false_claims/context_tokens; the
 # others have no producing record yet). Summed only over samples that recorded them; None when none did.
 OPTIONAL_SAMPLE_COUNTS = ("false_claims", "tool_failures", "merge_conflicts", "context_tokens", "coordination_tokens",
-                          "adjacent_regressions")
+                          "adjacent_regressions", "non_regression_unargued")
 
 
 def compute_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -390,8 +393,13 @@ def compute_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
         return round(statistics.fmean(vals), 4) if vals else None
 
     # An unsplit "regressions" count is treated as critical (conservative); adjacent ones are reported only.
-    critical = total("regressions") + total("critical_regressions") + sum(
+    proven = total("regressions") + total("critical_regressions") + sum(
         1 for s in samples if s.get("critical_regression") is True)
+    # §34: a sample whose source states the critical-regression measure but could not establish it (the trusted
+    # collector without a verifier baseline) is UNKNOWN - the run's count is then not a zero but unknown, unless a
+    # regression is already proven (which excludes the configuration either way).
+    unknown_critical = sum(1 for s in samples if "critical_regressions" in s and _num(s.get("critical_regressions")) is None)
+    critical: int | None = proven if proven or not unknown_critical else None
     adjacent = optional("adjacent_regressions")
     rate = (k / n) if n else None
     wilson = _wilson(k, n)
@@ -400,8 +408,10 @@ def compute_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "unmeasured": unmeasured,
         "outcome": {
             "first_pass_acceptance_rate": (first_pass / n) if n else None,
-            "final_acceptance_rate": rate, "accepted": k, "regressions": critical + (adjacent or 0),
+            "final_acceptance_rate": rate, "accepted": k,
+            "regressions": None if critical is None else critical + (adjacent or 0),
             "critical_regressions": critical, "adjacent_regressions": adjacent,
+            "critical_regressions_unknown_samples": unknown_critical,
             "acceptance_ci95": list(wilson) if wilson else None,
             "acceptance_variance": (rate * (1 - rate)) if rate is not None else None,
         },
@@ -421,7 +431,10 @@ def compute_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
                             "reviewed_samples": sum(1 for s in samples if s.get("quality"))},
         "oversight": {"claude_reviews": total("claude_review_count"),
                       "human_interventions": total("human_interventions"),
-                      "human_corrections": total("human_corrections")},
+                      "human_corrections": total("human_corrections"),
+                      # §34 review coverage: non-regression dimensions a high-impact review did not argue (not a
+                      # regression; kept apart from critical_regressions)
+                      "non_regression_unargued": optional("non_regression_unargued")},
         "usage": {"context_tokens": optional("context_tokens"), "coordination_tokens": optional("coordination_tokens"),
                   "worker_tokens": total("worker_tokens"),
                   "samples_with_token_counts": collected("worker_tokens"),
@@ -499,10 +512,14 @@ def record_result(session: Session, run_id: str, *, samples: list[dict[str, Any]
 # --------------------------------------------------------------------------- leaderboard
 
 
-def critical_regressions(metrics: dict[str, Any] | None) -> int:
+def critical_regressions(metrics: dict[str, Any] | None) -> int | None:
+    """Recorded critical regressions of a run; None = UNKNOWN (the collector could not establish the baseline)."""
     outcome = (metrics or {}).get("outcome") or {}
     if "critical_regressions" in outcome:
-        return int(outcome.get("critical_regressions") or 0)
+        value = outcome.get("critical_regressions")
+        if value is None and outcome.get("critical_regressions_unknown_samples"):
+            return None
+        return int(value or 0)
     return int(outcome.get("regressions") or 0)  # runs recorded before the split: unsplit = critical
 
 
@@ -513,9 +530,12 @@ def eligibility(gates: dict[str, Any], metrics: dict[str, Any] | None = None) ->
     base = {"gates_failed": failed, "gates_unproven": unproven, "critical_regressions": regressions}
     if failed:
         return {"eligible": False, "status": "EXCLUDED_GATE_FAILED", **base}
-    if regressions > 0:
+    if regressions is not None and regressions > 0:
         # §34 "Critical regression is not redeemed by an aggregate score"
         return {"eligible": False, "status": "EXCLUDED_REGRESSION", **base}
+    if regressions is None:
+        # §34/§35 UNKNOWN is never a pass: no verifier baseline proved the absence of a critical regression
+        return {"eligible": False, "status": "EXCLUDED_REGRESSION_NOT_PROVEN", **base}
     if unproven:
         return {"eligible": False, "status": "EXCLUDED_GATE_NOT_PROVEN", **base}
     return {"eligible": True, "status": "ELIGIBLE", **base}

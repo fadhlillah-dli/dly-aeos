@@ -82,3 +82,18 @@ fidelity and treated invalidated (STALE) readiness as advisory (§08, §29).
   suite: owner decision (ADR-0094). Tables in incremental Google updates still become text (disclosed).
 * EvalRuns reaching ARENA routes and routing's view of ARENA TRIAL activations belong to the evaluation and
   routing modules; the probe is their controlled execution path to build on.
+
+### Amendment 2026-10-25 (wave 7, W6-141): eval-only serving of ARENA routes
+
+* `broker.facade.EVAL_POOLS = ("ARENA",)`: pools served **only** to a TaskSpec bound to a slot of a RUNNING EvalRun
+  of exactly that route. `SERVED_POOLS` stays `("WORKER",)` for every ordinary task.
+* One answer, `evaluation.facade.eval_serving(task, route_key)`, is read by routing admission
+  (`select_route` picks exactly the evaluated route; `fallback_route` refuses `EVAL_NO_FALLBACK`), by the workforce
+  defence in depth (`integrations.select_route`, the agent's WORKER route policy) and by the broker.
+* The broker derives the grant's evaluation scope from the canonical binding (`MODEL_PROXY` scope `eval`:
+  eval run, slot, route, task - a caller-supplied `eval` key is dropped) and refuses to issue a grant naming an
+  ARENA route for any other run (`EVAL_SCOPE_REQUIRED`). The proxy re-checks the scope on **every request**
+  (`EVAL_SCOPE_INVALID`): the run still RUNNING, the binding valid, the route configuration unchanged since the
+  start, PERSONAL, TRIAL/APPROVED on a decision bound to the current configuration hash, free (no budget path for
+  an eval-only route, no silent paid spend) and terms allowing the task's data classification - the probe's
+  checks applied to a controlled evaluation. Usage, ledger, 429/quota and caps follow the ordinary proxy path.

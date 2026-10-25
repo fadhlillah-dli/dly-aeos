@@ -58,6 +58,53 @@ def _validate_scope(kind: str, scope: dict[str, Any]) -> dict[str, Any]:
     return dict(scope)
 
 
+EVAL_SCOPE_KEY = "eval"
+
+
+def eval_scope(session: Session, *, run_id: str, route_key: str) -> tuple[dict[str, Any] | None, str | None]:
+    """(evaluation scope, problem) for serving *route_key* of an eval-only pool (``facade.EVAL_POOLS``) to worker run
+    *run_id*: its TaskSpec must be bound to a RUNNING EvalRun of exactly that route and the evaluation must still be
+    servable (``evaluation.facade.eval_serving``). Re-checked on every proxied request (fail closed)."""
+    from aeos.models.planning import TaskSpec
+    from aeos.models.workforce import WorkerRun
+
+    run = session.get(WorkerRun, run_id)
+    task = session.get(TaskSpec, run.task_id) if run is not None and run.task_id else None
+    if task is None:
+        return None, "the run has no TaskSpec: an eval-only route serves evaluation tasks only"
+    try:
+        from aeos.evaluation import facade as evaluation
+    except ImportError:
+        return None, "evaluation module unavailable: the evaluation binding cannot be checked"
+    out = evaluation.eval_serving(session, task=task, route_key=route_key)
+    if out.get("status") != "SERVED":
+        why = "; ".join(out.get("reasons") or []) or "the task is not bound to a RUNNING evaluation of this route"
+        return None, why
+    return {"eval_run_id": out["eval_run_id"], "slot_id": out.get("slot_id"), "route_key": route_key,
+            "task_id": task.id}, None
+
+
+def _eval_scoped(session: Session, run_id: str, scope: dict[str, Any]) -> dict[str, Any]:
+    """A MODEL_PROXY scope naming an eval-only route gets the evaluation scope it is served under, or is refused."""
+    from aeos.broker.facade import EVAL_POOLS
+    from aeos.models.routing import ModelRoute
+
+    scoped = dict(scope)
+    scoped.pop(EVAL_SCOPE_KEY, None)  # never taken from the caller: derived from the canonical binding only
+    for route_key in sorted({str(v) for v in (scope.get("models") or {}).values()}):
+        route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
+        if route is None or route.pool not in EVAL_POOLS:
+            continue  # unknown/other pools: refused by the proxy (ROUTE_UNKNOWN / ROUTE_NOT_WORKER)
+        ev, problem = eval_scope(session, run_id=run_id, route_key=route_key)
+        if ev is None:
+            raise Forbidden(f"route {route_key} ({route.pool}) is served only to a task bound to a RUNNING evaluation "
+                            f"of it: {problem}", code="EVAL_SCOPE_REQUIRED")
+        if EVAL_SCOPE_KEY in scoped:
+            raise ValidationFailed("one grant serves at most one eval-only route", code="EVAL_SCOPE_REQUIRED")
+        scoped[EVAL_SCOPE_KEY] = ev
+    return scoped
+
+
 def issue_grant(
     session: Session, *, run_id: str, project_id: str, domain: str, kind: str, scope: dict[str, Any],
     ttl_seconds: int, max_requests: int | None = None, max_tokens: int | None = None,
@@ -75,6 +122,8 @@ def issue_grant(
         if cap is not None and cap < 0:
             raise ValidationFailed(f"{name} must be >= 0")
     clean_scope = _validate_scope(kind, scope)
+    if kind == "MODEL_PROXY":
+        clean_scope = _eval_scoped(session, run_id, clean_scope)
     raw = TOKEN_PREFIX + secrets.token_urlsafe(32)
     register_secret(raw)
     grant = CapabilityGrant(

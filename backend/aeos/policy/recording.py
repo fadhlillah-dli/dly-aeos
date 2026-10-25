@@ -20,6 +20,7 @@ still re-checks that the actor is an active SUPER_ADMIN whose scope covers the d
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -94,11 +95,96 @@ def _exception_shape(domain: Domain, *, exception: str | None, target_type: str 
     return spec.target_type, spec.target_id, out, ops or list(spec.allowed_operations)
 
 
+# Values that never bind evidence to a change (an UNKNOWN model/prompt matches nothing, §34).
+_UNBOUND_VALUES = frozenset({"", "unknown", "none", "null", "n/a", "-"})
+
+
+def _norm(value: Any) -> str:
+    return str(value if value is not None else "").strip().lower()
+
+
+def _strings(value: Any) -> set[str]:
+    """Every string leaf of a JSON value, normalised (context parameters may nest)."""
+    if isinstance(value, dict):
+        return {s for v in value.values() for s in _strings(v)}
+    if isinstance(value, list):
+        return {s for v in value for s in _strings(v)}
+    return {_norm(value)} - _UNBOUND_VALUES if isinstance(value, (str, int, float)) and not isinstance(value, bool) \
+        else set()
+
+
+def _carries(cfg: dict[str, Any], field: str, wanted: str) -> bool:
+    """Whether the evaluated AIConfiguration carries *wanted* in *field* (exact, normalised)."""
+    if field == "tools":
+        tools = {_norm(t) for t in cfg.get("tools") or [] if isinstance(t, str)} - _UNBOUND_VALUES
+        given = {t for t in re.split(r"[\s,]+", wanted) if t} - _UNBOUND_VALUES
+        return bool(tools) and tools == given
+    if field == "context_params":
+        return wanted in _strings(cfg.get("context_params"))
+    if field == "harness_version":
+        harness, version = _norm(cfg.get("harness")), _norm(cfg.get("harness_version"))
+        return version not in _UNBOUND_VALUES and wanted in {version, f"{harness} {version}", f"{harness}@{version}"}
+    return _norm(cfg.get(field)) == wanted
+
+
+def change_of(*, target_type: str | None, target_id: str | None, target_version: str | None = None,
+              target_hash: str | None = None, models: Any = None) -> dict[str, Any]:
+    """The identity of a system change as the decision states it (what its evaluation must be evidence of)."""
+    out: dict[str, Any] = {"target_type": target_type, "target_id": target_id, "target_version": target_version,
+                           "target_hash": target_hash}
+    if catalog.is_stage_model_pin(target_type, target_id):
+        out["models"] = {str(k): str(v) for k, v in models.items()} if isinstance(models, dict) else {}
+    return out
+
+
+def _pinned(change: dict[str, Any]) -> set[str] | None:
+    if not catalog.is_stage_model_pin(change.get("target_type"), change.get("target_id")):
+        return None
+    return {_norm(m) for m in (change.get("models") or {}).values()} - _UNBOUND_VALUES
+
+
+def _bind(run: Any, change: dict[str, Any]) -> tuple[str | None, str]:
+    """(how *run* is bound to *change*, or None + why not). See ``catalog.SYSTEM_CHANGE_CONFIG_FIELDS``."""
+    cfg = run.configuration if isinstance(run.configuration, dict) else {}
+    pinned = _pinned(change)
+    if pinned is not None:  # stage-model pin: only a run of exactly a pinned model is evidence of it
+        evaluated = {_norm(cfg.get("model_id")), _norm(cfg.get("model_version"))} - _UNBOUND_VALUES
+        hit = sorted(evaluated & pinned)
+        if hit:
+            return f"model_id={hit[0]}", ""
+        return None, (f"evaluated model {cfg.get('model_id')!r} is none of the pinned models "
+                      f"{sorted(pinned) or '(details.models names none)'}")
+    want_hash = _norm(change.get("target_hash"))
+    if want_hash not in _UNBOUND_VALUES and want_hash in {_norm(run.configuration_hash), _norm(run.route_config_hash)}:
+        return f"configuration_hash={change.get('target_hash')}", ""
+    ttype = catalog.normalize_target_type(change.get("target_type"))
+    fields = catalog.SYSTEM_CHANGE_CONFIG_FIELDS.get(ttype, ())
+    if not fields:
+        return None, (f"{ttype or 'the target'} has no AIConfiguration field: bind it with target_hash = the run's "
+                      f"configuration_hash ({run.configuration_hash})")
+    wanted = [_norm(change.get("target_version"))]
+    if ttype in catalog.IDENTITY_BOUND_TARGETS:
+        wanted += [_norm(change.get("target_id")), want_hash]
+    wanted = [w for w in dict.fromkeys(wanted) if w not in _UNBOUND_VALUES]
+    if not wanted:
+        return None, (f"the decision names no new value: target_version = the new {'/'.join(fields)} (or "
+                      f"target_hash = the run's configuration_hash {run.configuration_hash})")
+    for field in fields:
+        for value in wanted:
+            if _carries(cfg, field, value):
+                return f"{field}={value}", ""
+    shown = ", ".join(f"{f}={cfg.get(f)!r}" for f in fields)
+    return None, f"its configuration ({shown}) does not carry {wanted[0] if len(wanted) == 1 else wanted}"
+
+
 def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids: Any,
-                           rollback_target: Any) -> dict[str, Any]:
+                           rollback_target: Any, change: dict[str, Any] | None = None) -> dict[str, Any]:
     """§41/§43: validate the evaluation and rollback of a system change (policy/model/tools/hooks/prompt/memory/
     fallback/context strategy). Every named run must be a COMPLETED evaluation whose gates all PASS, planned in this
-    domain or the platform; the rollback target names what the change replaces. Returns the stored record."""
+    domain or the platform, and bound to exactly this *change* (``change_of``: target type/id/version/hash and, for a
+    stage-model pin, every pinned model id); the rollback target names what the change replaces. Returns the stored
+    record. Missing/unfinished evidence -> SYSTEM_CHANGE_EVIDENCE_REQUIRED; evidence of another configuration ->
+    SYSTEM_CHANGE_EVIDENCE_UNRELATED (an unstated change is never bound, fail closed)."""
     from aeos.models.research import EvalRun
 
     ids = [str(i).strip() for i in (eval_run_ids if isinstance(eval_run_ids, list) else []) if str(i).strip()]
@@ -106,7 +192,7 @@ def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids
     problems: list[str] = []
     if not ids:
         problems.append("no evaluation run (system_change.eval_run_ids)")
-    runs = []
+    valid = []
     for rid in dict.fromkeys(ids):
         run = session.get(EvalRun, rid)
         if run is None or run.submitted_domain not in (None, domain):
@@ -117,14 +203,42 @@ def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids
             problems.append(f"evaluation run {rid} is {run.status} with gates {gates or 'none'} (needs COMPLETED, "
                             "every gate PASS)")
             continue
-        runs.append({"id": run.id, "suite_key": run.suite_key, "configuration_hash": run.configuration_hash})
+        valid.append(run)
     if len(rollback) < 3:
         problems.append("no rollback target (system_change.rollback_target: the version/config/decision it replaces)")
     if problems:
         raise ValidationFailed("a system change (§41/§43) needs evaluation and a rollback target: "
                                + "; ".join(problems), code="SYSTEM_CHANGE_EVIDENCE_REQUIRED",
                                details={"problems": problems})
-    return {"class": "SYSTEM_CHANGE", "evaluation": "EVALUATED", "eval_runs": runs, "rollback_target": rollback[:256]}
+    unrelated: list[str] = []
+    runs: list[dict[str, Any]] = []
+    if change is None:
+        unrelated.append("the change this evaluation is evidence of is not stated")
+    else:
+        for run in valid:
+            how, why = _bind(run, change)
+            if how is None:
+                unrelated.append(f"evaluation run {run.id} ({run.suite_key}) is not evidence of this change: {why}")
+                continue
+            cfg = run.configuration if isinstance(run.configuration, dict) else {}
+            runs.append({"id": run.id, "suite_key": run.suite_key, "configuration_hash": run.configuration_hash,
+                         "model_id": cfg.get("model_id"), "binding": how})
+        pinned = _pinned(change)
+        if pinned is not None:
+            covered = {r["binding"].split("=", 1)[1] for r in runs}
+            unrelated += [f"pinned model {m} has no passing evaluation run of exactly that model"
+                          for m in sorted(pinned - covered)]
+            if not pinned:
+                unrelated.append("a stage-model pin names its models (details.models {STAGE: model id})")
+    if unrelated:
+        raise ValidationFailed("the evaluation runs of a system change (§41/§43) must be evidence of exactly this "
+                               "change: " + "; ".join(unrelated), code="SYSTEM_CHANGE_EVIDENCE_UNRELATED",
+                               details={"problems": unrelated, "change": change,
+                                        "binding": "target_hash = the run's configuration_hash, or target_version = "
+                                                   "the new value of the changed AIConfiguration field; a stage-model "
+                                                   "pin needs a run of every pinned model"})
+    return {"class": "SYSTEM_CHANGE", "evaluation": "EVALUATED", "eval_runs": runs, "rollback_target": rollback[:256],
+            "bound_to": {k: v for k, v in (change or {}).items() if v not in (None, "", {})}}
 
 
 def record_generic_decision(
@@ -218,7 +332,9 @@ def record_generic_decision(
                 # validated run: it is part of the system-change evidence, never a second unchecked reference
                 ids.append(str(details["eval_run_id"]))
             details["system_change"] = system_change_evidence(
-                session, domain=domain.value, eval_run_ids=ids, rollback_target=sc.get("rollback_target"))
+                session, domain=domain.value, eval_run_ids=ids, rollback_target=sc.get("rollback_target"),
+                change=change_of(target_type=target_type, target_id=target_id, target_version=target_version,
+                                 target_hash=target_hash, models=details.get("models")))
         else:
             # governance/convention policy: not an agent/model configuration change; stated, never implied evaluated
             details["system_change"] = {"class": "NOT_A_SYSTEM_CHANGE", "evaluation": "NOT_APPLICABLE",

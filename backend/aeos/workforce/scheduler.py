@@ -1194,7 +1194,7 @@ def _agent_permits(agent: AgentDefinition, tool: str) -> bool:
 
 
 def agent_configuration_problems(agent: AgentDefinition | None, task: TaskSpec,
-                                 route: ModelRoute | None) -> list[tuple[str, str]]:
+                                 route: ModelRoute | None, *, eval_route: bool = False) -> list[tuple[str, str]]:
     """§17 "AgentDefinition: konfigurasi worker (role, harness, route policy, tools, limits, owner)": the definition
     CONFIGURES the run rather than only describing it - the runtime's tool grant and the TaskSpec's bash/webfetch
     requests must lie inside the agent's tools/limits, and the selected route must satisfy the agent's
@@ -1217,7 +1217,9 @@ def agent_configuration_problems(agent: AgentDefinition | None, task: TaskSpec,
     if route is not None:
         policy = agent.route_policy or {}
         pool = policy.get("pool")
-        if pool and route.pool != pool:
+        # §49 M6 arena: a WORKER agent evaluated on an eval-only (ARENA) candidate route of a RUNNING evaluation this
+        # task is bound to (``eval_route``: re-checked by the caller) - the route is evaluated as a worker candidate
+        if pool and route.pool != pool and not (eval_route and pool == "WORKER"):
             problems.append(("AGENT_ROUTE_POLICY", f"route {route.route_key} is in pool {route.pool}; agent "
                                                    f"{agent.agent_key} runs only on {pool} routes"))
         allowed = policy.get("allowed_routes")
@@ -1354,7 +1356,8 @@ def admission_check(session: Session, task_id: str) -> Admission:
     route, rreasons = ext.select_route(session, task)
     implementer = agent if agent is not None and agent.harness == "opencode" and \
         agent.agent_key not in REVIEWER_AGENT_KEYS else None
-    for code, why in agent_configuration_problems(implementer, task, route):
+    eval_route = route is not None and route.pool != "WORKER" and ext.eval_served(session, task, route)
+    for code, why in agent_configuration_problems(implementer, task, route, eval_route=eval_route):
         adm.blocks.append((code, why))
     if route is None:
         adm.waits.append(("ROUTE_INELIGIBLE", "; ".join(rreasons)))

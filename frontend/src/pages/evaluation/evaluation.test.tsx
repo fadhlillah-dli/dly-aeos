@@ -139,6 +139,39 @@ describe("Evaluation page (§43)", () => {
     expect(screen.getByText(/Ranking gabungan \(bobot workload/)).toBeInTheDocument();
   });
 
+  it("states the controlled execution path of a planned run and why it cannot start (§49 M6 arena)", async () => {
+    const run = (id: string, route: string, serving: Record<string, unknown>) => ({
+      id, suite_key: "eval.small-bugfix", role_key: null, topology: null, status: "PLANNED", configuration: { model_id: "m", provider_route: route },
+      configuration_hash: "sha256:x", sample_size: 0, failures: [], created_at: null, is_baseline: false,
+      execution: { status: "NOT_STARTED", note: "belum", fixtures: "NOT_AVAILABLE_IN_BUILD", serving },
+    });
+    mockApi({
+      "/api/eval/suites": { items: [], checked_at: null, source: "eval_suites" },
+      "/api/eval/experiments": { items: [], common_gates: {}, measures: [], not_measured: [], dimensions: [], note: "" },
+      "/api/eval/runs": {
+        items: [
+          run("r-arena", "arena.free-x", { path: "EVAL_ONLY", pool: "ARENA", reasons: [] }),
+          run("r-comp", "comparator.x", { path: "NONE", pool: "COMPARATOR", reasons: ["pool COMPARATOR has no controlled execution path in this build"] }),
+          run("r-paid", "arena.paid", { path: "EVAL_ONLY", pool: "ARENA", reasons: ["route is not free (is_free=NO)"] }),
+        ],
+      },
+      "/api/eval/leaderboard": emptyBoard,
+    });
+    renderPage(<EvaluationPage />);
+    fireEvent.click(await screen.findByRole("tab", { name: "Run" }));
+    expect(await screen.findByText("Rute ARENA: hanya task yang terikat run ini")).toBeInTheDocument();
+    expect(screen.getByText("Tidak dapat dieksekusi (COMPARATOR)")).toBeInTheDocument();
+    expect(screen.getByText(/no controlled execution path in this build/)).toBeInTheDocument();
+    expect(screen.getByText("Tidak dapat dieksekusi (ARENA)")).toBeInTheDocument();
+    expect(screen.getByText(/route is not free/)).toBeInTheDocument();
+  });
+
+  it("shows a run excluded because no verifier baseline proved it regression-free as not proven, never as a pass", async () => {
+    const { ELIGIBILITY } = await import("../../components/proposals/MappedBadge");
+    expect(ELIGIBILITY.EXCLUDED_REGRESSION_NOT_PROVEN[0]).toBe("NOT-PROVEN");
+    expect(ELIGIBILITY.EXCLUDED_REGRESSION_NOT_PROVEN[1]).toMatch(/belum terbukti/);
+  });
+
   it("shows the controlled baseline-vs-candidate comparison of a proposal (§40), never as a route change", async () => {
     const side = (rate: number, cost: number) => ({
       status: "RECORDED",

@@ -699,12 +699,47 @@ def _task_policy(task: TaskSpec) -> dict[str, Any]:
     }
 
 
+def _eval_serving(session: Session, task: TaskSpec) -> dict[str, Any]:
+    try:
+        from aeos.evaluation import facade as evaluation
+    except ImportError:  # pragma: no cover - evaluation is part of the platform
+        return {"status": "NOT_BOUND"}
+    return evaluation.eval_serving(session, task=task)
+
+
+def _select_eval_route(session: Session, task: TaskSpec, pol: dict[str, Any], bound: dict[str, Any]) -> RouteDecision:
+    """§43 "konfigurasi yang dievaluasi persis" / §49 M6 arena: a TaskSpec bound to a slot of a RUNNING EvalRun runs on
+    exactly the evaluated route - never ranked against others, never a fallback - and only when that route passes the
+    same hard eligibility filter for this task (an eval-only ARENA route additionally the evaluation's own checks)."""
+    key = str(bound.get("route_key") or "")
+    label = f"evaluation {bound.get('eval_run_id')} (slot {bound.get('slot_id')})"
+    if bound.get("status") != "SERVED":
+        raise Blocked(f"the task is bound to {label}; its route {key or 'UNKNOWN'} cannot serve it: "
+                      + "; ".join(bound.get("reasons") or []), code="EVAL_ROUTE_NOT_SERVED", details=bound)
+    route = get_route(session, key)
+    decision = eligible_routes(session, domain=task.domain, data_classification=task.data_classification,
+                               needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=route.pool,
+                               tools=[str(t) for t in task.tools_allowed or []])
+    reasons = list(decision.rejected.get(key) or ([] if key in decision.eligible else ["not eligible"]))
+    if pol["routes"] and key not in pol["routes"]:
+        reasons.append("not in the approved TaskSpec route allow-list")
+    if reasons:
+        raise Blocked(f"the task is bound to {label}, but route {key} is not eligible for it: {'; '.join(reasons)}",
+                      code="EVAL_ROUTE_NOT_ELIGIBLE", details={**bound, "rejected": {key: reasons}})
+    return RouteDecision(route=route, eligible=[key], rejected={},
+                         reason=f"controlled {label}: exactly route {key} ({route.pool}), no ranking, no fallback",
+                         eval_run_id=str(bound.get("eval_run_id")))
+
+
 def select_route(session: Session, *, task: TaskSpec) -> RouteDecision:
     pol = _task_policy(task)
     try:
         from aeos.broker.facade import SERVED_POOLS as served
     except ImportError:  # pragma: no cover - broker is part of the platform
         served = ("WORKER",)
+    bound = _eval_serving(session, task)
+    if bound.get("status") != "NOT_BOUND":
+        return _select_eval_route(session, task, pol, bound)
     if pol["pool"] not in served:
         # §23: refuse at admission instead of failing at the worker's first model call (ADR-0106).
         raise Blocked(f"pool {pol['pool']} has no controlled execution path through the broker yet; "
@@ -769,6 +804,11 @@ def _walk_fallback(session: Session, failed: ModelRoute, eligible: list[str],
 
 def fallback_route(session: Session, *, task: TaskSpec, failed_route_key: str) -> RouteDecision:
     """Next route after *failed_route_key* failed (e.g. 429): along its chain, eligible, free."""
+    bound = _eval_serving(session, task)
+    if bound.get("status") != "NOT_BOUND":
+        # §43: another route would describe another configuration - the evaluation slot waits (back off) instead
+        raise Blocked(f"the task is bound to evaluation {bound.get('eval_run_id')}: no fallback away from the "
+                      f"evaluated route {bound.get('route_key')}", code="EVAL_NO_FALLBACK", details=bound)
     failed = get_route(session, failed_route_key)
     pol = _task_policy(task)
     decision = eligible_routes(session, domain=task.domain, data_classification=task.data_classification,

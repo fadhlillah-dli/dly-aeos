@@ -170,3 +170,24 @@ context 262144, tools, `expiration_date` 2026-10-31; 16 `:free` models in total)
 * **Owner terms record from UI and CLI.** The route view lists `terms_unknown`; the activation dialog and
   `aeos routes activate --inputs-used-for-training/--no-... --trial-only/--no-... --terms-note` record the
   owner's reading (`terms_record`), so UNKNOWN terms can be lifted above PUBLIC only by that recorded review.
+
+### Amendment 2026-10-25 (wave 7, W6-008 / W6-114 / W6-120): system-change evidence bound to the change
+
+* **Evidence of exactly this change (§41/§43).** `policy.recording.system_change_evidence` (and the facade, additive
+  `change=`) binds every cited EvalRun to the decision's change: `target_hash` equal to the run's
+  `configuration_hash` (or `route_config_hash`), or `target_version` equal to the changed AIConfiguration field
+  (`catalog.SYSTEM_CHANGE_CONFIG_FIELDS`: policy -> `policy_version`, model/supervisor -> `model_id`/`model_version`,
+  route/fallback -> `provider_route`, prompt/instruction -> `prompt_revision`, tool set -> `tools` as a set,
+  harness -> `harness_version`, context strategy/retrieval/memory -> a `context_params` value). Hooks, tool schemas,
+  skills, schemas and agent definitions bind by the configuration hash only. UNKNOWN never binds. A run of another
+  configuration is refused `SYSTEM_CHANGE_EVIDENCE_UNRELATED`; a caller that states no change binds nothing.
+* **Supervisor stage-model pin (rollback of §02).** `planning_baseline/stage_models` needs, for every pinned model
+  id, a cited COMPLETED all-PASS run whose `model_id`/`model_version` is exactly that id (never a hash alone);
+  `planning.configured_stage_models` re-checks this live and ignores a pin whose evaluation is of another model.
+  The pin is recorded from the Decisions page ("Pin model supervisor per tahap") or
+  `aeos policy decide --kind POLICY --stage-model STAGE=ID --eval-run RUN --rollback-target ...`; other system
+  changes use `--target-version/--target-hash --eval-run --rollback-target`.
+* **Memory acceptance** binds its evaluation to the record (a `context_params` value naming the record id or its
+  content hash); the Control Center memory tab accepts the EvalRun ids. Requiring EVALUATED stays an owner decision.
+* **Unchanged (owner decision):** planning/review continue on a re-resolved supervisor version (protected
+  acceptance 1.31); the change is stated as NEEDS_EVALUATION / `supervisor_unevaluated`.

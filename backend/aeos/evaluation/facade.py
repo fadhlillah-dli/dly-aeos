@@ -50,3 +50,15 @@ def propose_case_from_failure(session: Session, *, source_type: str, source_id: 
 
     return impl(session, source_type=source_type, source_id=source_id, actor_user_id=actor_user_id, title=title,
                 expected=expected, kind=kind, viewer_domain=viewer_domain)
+
+
+def eval_serving(session: Session, *, task: Any, route_key: str | None = None) -> dict[str, Any]:
+    """How a TaskSpec bound to a RUNNING EvalRun slot is served (additive, wave 7, §43/§49 M6 arena):
+    ``{"status": "NOT_BOUND"}``, or ``{"status": "SERVED"|"REFUSED", "eval_run_id", "slot_id", "route_key", "pool",
+    "reasons"}``. SERVED = exactly the evaluated route (no ranking, no fallback); an eval-only (ARENA) route is SERVED
+    only while the run is RUNNING, PERSONAL, TRIAL/APPROVED on a hash-bound decision, free and terms-eligible for the
+    task's data. Routing (admission), workforce (defence in depth) and the broker (eval-scoped grant, per request)
+    all read this one answer."""
+    from aeos.evaluation.executor import eval_serving as impl
+
+    return impl(session, task=task, route_key=route_key)

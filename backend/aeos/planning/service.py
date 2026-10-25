@@ -344,10 +344,37 @@ def _is_pinned(model: str) -> bool:
     return is_pinned_id(model)
 
 
+def _evaluated_models(session: Session, decision: Any) -> dict[str, str]:
+    """Normalised model id -> EvalRun id for every run the stage-model decision cites (``details.eval_run_id`` and the
+    validated ``details.system_change.eval_runs``) that is still a COMPLETED evaluation with every gate PASS, planned
+    in the decision's domain or the platform. Re-read live: a run's evidence is never taken from the decision text."""
+    try:
+        from aeos.models.research import EvalRun
+    except ImportError:
+        return {}
+    details = decision.details or {}
+    cited = [details.get("eval_run_id"), *[r.get("id") for r in (details.get("system_change") or {}).get("eval_runs")
+                                           or [] if isinstance(r, dict)]]
+    out: dict[str, str] = {}
+    for rid in dict.fromkeys(str(i) for i in cited if i):
+        run = session.get(EvalRun, rid)
+        gates = {str(v).upper() for v in ((run.gate_results or {}) if run else {}).values()}
+        if run is None or run.status != "COMPLETED" or gates != {"PASS"} or \
+                run.submitted_domain not in (None, decision.domain):
+            continue
+        cfg = run.configuration if isinstance(run.configuration, dict) else {}
+        for model in (cfg.get("model_id"), cfg.get("model_version")):
+            if isinstance(model, str) and model.strip() and model.strip().upper() != "UNKNOWN":
+                out.setdefault(model.strip().lower(), run.id)
+    return out
+
+
 def configured_stage_models(session: Session) -> tuple[dict[str, str], dict[str, Any]]:
     """§15 "Opus family, versi terkonfigurasi": the owner may pin a stage to an exact model id of its policy family
     through a human POLICY decision on planning_baseline/stage_models that references a COMPLETED evaluation run
-    with every gate PASS. Anything else (other family, alias, no evaluation) is ignored and reported."""
+    with every gate PASS **of exactly that model** (the run's configuration model_id/model_version, §02 "a version
+    change needs evaluation"). Anything else (other family, alias, no evaluation, an evaluation of another model) is
+    ignored and reported."""
     from aeos.policy import decisions as registry
 
     d = registry.find_active_decision(session, kind="POLICY", target_type=STAGE_MODEL_TARGET[0],
@@ -356,25 +383,31 @@ def configured_stage_models(session: Session) -> tuple[dict[str, str], dict[str,
         return {}, {}
     details = d.details or {}
     note: dict[str, Any] = {"decision_id": d.id}
-    try:
-        from aeos.models.research import EvalRun
-
-        run = session.get(EvalRun, str(details.get("eval_run_id") or "")) if details.get("eval_run_id") else None
-    except ImportError:
-        run = None
-    gates = {str(v).upper() for v in ((run.gate_results or {}) if run else {}).values()}
-    if d.actor_kind != "HUMAN" or run is None or run.status != "COMPLETED" or gates != {"PASS"}:
-        return {}, {**note, "ignored": "a stage model change needs a COMPLETED evaluation run with every gate PASS"}
+    evaluated = _evaluated_models(session, d) if d.actor_kind == "HUMAN" else {}
+    if not evaluated:
+        return {}, {**note, "ignored": "a stage model change needs a COMPLETED evaluation run with every gate PASS "
+                                       "of exactly the pinned model"}
     out: dict[str, str] = {}
     rejected: dict[str, str] = {}
+    reasons: dict[str, str] = {}
+    bound: dict[str, str] = {}
     families = {s.state.value: s.family for s in STAGES}
     for stage, model in (details.get("models") or {}).items():
         fam = families.get(str(stage))
-        if fam and isinstance(model, str) and _is_pinned(model) and model_matches(fam, model):
-            out[str(stage)] = model.strip()
-        else:
+        if not (fam and isinstance(model, str) and _is_pinned(model) and model_matches(fam, model)):
             rejected[str(stage)] = str(model)[:64]
-    return out, {**note, "eval_run_id": run.id, **({"rejected": rejected} if rejected else {})}
+            reasons[str(stage)] = "not an exact model id of the stage's policy family"
+            continue
+        run_id = evaluated.get(model.strip().lower())
+        if run_id is None:
+            rejected[str(stage)] = str(model)[:64]
+            reasons[str(stage)] = "no cited passing evaluation run of exactly this model"
+            continue
+        out[str(stage)] = model.strip()
+        bound[str(stage)] = run_id
+    first = next(iter(bound.values()), None) or next(iter(evaluated.values()))
+    return out, {**note, "eval_run_id": first, "eval_runs": bound,
+                 **({"rejected": rejected, "rejected_reasons": reasons} if rejected else {})}
 
 
 def stage_model(plan: Plan, spec: StageSpec) -> str:

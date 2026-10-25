@@ -28,6 +28,15 @@ export const EXCEPTION_PRESETS: Record<string, { label: string; target: string; 
   },
 };
 
+/** §15 supervisor stage-model pin: the exact target planning.configured_stage_models reads, and its stages. */
+export const STAGE_MODEL_TARGET = { type: "planning_baseline", id: "stage_models" } as const;
+export const PLANNING_STAGES: { stage: string; family: string }[] = [
+  { stage: "PRIMARY_PLANNING", family: "opus" },
+  { stage: "CHALLENGE_REVIEW", family: "fable" },
+  { stage: "SYNTHESIS", family: "opus" },
+  { stage: "FINAL_REVIEW", family: "fable" },
+];
+
 const OFFICE_KEYS = ["external_worker_allowed", "approved_worker_routes", "claude_max_allowed_for_office_data", "trace_destinations_allowed", "requires_isolated_runtime", "atlassian_deployment"];
 
 /** "k=v; k2=v2" -> {k: "v", k2: "v2"}; JSON objects are accepted as-is. */
@@ -68,6 +77,12 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
   // COMPLETED all-gates-PASS evaluation runs and the rollback target it replaces (backend SYSTEM_CHANGE_TARGET_TYPES)
   const [scEvalRuns, setScEvalRuns] = useState("");
   const [scRollback, setScRollback] = useState("");
+  // the evaluated runs must be evidence of exactly this change: the new value (target_version) the run's
+  // configuration carries, or the run's configuration hash as the target hash (backend SYSTEM_CHANGE_EVIDENCE_UNRELATED)
+  const [targetVersion, setTargetVersion] = useState("");
+  // §15 supervisor stage-model pin (planning_baseline/stage_models): exact model id per stage, each evaluated
+  const [stagePin, setStagePin] = useState(false);
+  const [stageModels, setStageModels] = useState<Record<string, string>>({});
   const [localError, setLocalError] = useState<string | null>(null);
   const usePreset = kind === "EXCEPTION" && domain === "PERSONAL" && !!preset;
 
@@ -118,18 +133,36 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
       }
       if (overrides) body.office_policy = overrides;
     } else {
-      body.target_type = targetType;
-      body.target_id = targetId;
-      if (targetHash) body.target_hash = targetHash;
+      const pin = kind === "POLICY" && stagePin;
+      body.target_type = pin ? STAGE_MODEL_TARGET.type : targetType;
+      body.target_id = pin ? STAGE_MODEL_TARGET.id : targetId;
+      if (targetHash.trim()) body.target_hash = targetHash.trim();
+      if (kind === "POLICY" && !pin && targetVersion.trim()) body.target_version = targetVersion.trim();
       const evalRunIds = scEvalRuns.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
-      if (kind === "POLICY" && (evalRunIds.length || scRollback.trim())) {
-        body.details = { system_change: { eval_run_ids: evalRunIds, rollback_target: scRollback.trim() } };
+      const details: Record<string, unknown> = {};
+      if (pin) {
+        const models = Object.fromEntries(
+          Object.entries(stageModels)
+            .map(([k, v]) => [k, v.trim()])
+            .filter(([, v]) => v),
+        );
+        if (!Object.keys(models).length) {
+          setLocalError("Isi minimal satu ID model persis untuk tahap yang di-pin.");
+          return;
+        }
+        details.models = models;
       }
+      if (kind === "POLICY" && (evalRunIds.length || scRollback.trim())) {
+        details.system_change = { eval_run_ids: evalRunIds, rollback_target: scRollback.trim() };
+      }
+      if (Object.keys(details).length) body.details = details;
     }
     save.mutate(body);
   };
 
-  const needsTarget = kind !== "WRITE_ENABLEMENT" && !usePreset && !(kind === "POLICY" && domain === "OFFICE" && officeAuth);
+  const officePolicy = kind === "POLICY" && domain === "OFFICE" && officeAuth;
+  const needsTarget = kind !== "WRITE_ENABLEMENT" && !usePreset && !officePolicy && !(kind === "POLICY" && stagePin);
+  const systemChange = kind === "POLICY" && !officePolicy;
   return (
     <Card title="Catat keputusan manusia">
       <div className="grid gap-3">
@@ -235,12 +268,37 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
             </Field>
           </div>
         )}
-        {needsTarget && kind === "POLICY" && (
+        {systemChange && (
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={stagePin} onChange={(e) => setStagePin(e.target.checked)} /> Pin model supervisor per tahap perencanaan (target{" "}
+            {STAGE_MODEL_TARGET.type}/{STAGE_MODEL_TARGET.id})
+          </label>
+        )}
+        {systemChange && stagePin && (
+          <fieldset className="grid gap-3 rounded-md border border-line p-3 sm:grid-cols-2" aria-label="Pin model tahap">
+            <legend className="px-1 text-sm font-medium">Model persis per tahap (§15)</legend>
+            <p className="text-xs text-ink-3 sm:col-span-2">
+              Hanya ID model persis dari keluarga tahapnya. Setiap model yang di-pin wajib punya EvalRun COMPLETED (semua gate PASS) dengan model_id persis sama;
+              tahap yang dikosongkan tetap memakai alias baseline. Target rollback: alias baseline atau pin sebelumnya.
+            </p>
+            {PLANNING_STAGES.map((st) => (
+              <Field key={st.stage} label={`${st.stage} (${st.family})`}>
+                <input
+                  className={`${inputClass} mono`}
+                  value={stageModels[st.stage] ?? ""}
+                  onChange={(e) => setStageModels({ ...stageModels, [st.stage]: e.target.value })}
+                  placeholder={`claude-${st.family}-…`}
+                />
+              </Field>
+            ))}
+          </fieldset>
+        )}
+        {systemChange && (needsTarget || stagePin) && (
           <fieldset className="grid gap-3 rounded-md border border-line p-3 sm:grid-cols-2">
             <legend className="px-1 text-sm font-medium">System change (§41/§43)</legend>
             <p className="text-xs text-ink-3 sm:col-span-2">
               Wajib bila target adalah policy, model/route, pin model tahap (planning_baseline), tool schema/tools, hooks, prompt/instruction, schema, skill/agent definition, memory, fallback, context strategy, retrieval atau harness:
-              EvalRun COMPLETED dengan semua gate PASS dan target rollback. Kebijakan tata kelola lain tercatat sebagai bukan system change.
+              EvalRun COMPLETED dengan semua gate PASS yang menjadi bukti perubahan persis ini, dan target rollback. Kebijakan tata kelola lain tercatat sebagai bukan system change.
             </p>
             <Field label="ID EvalRun bukti" hint="Pisahkan dengan koma.">
               <input className={inputClass} value={scEvalRuns} onChange={(e) => setScEvalRuns(e.target.value)} placeholder="uuid EvalRun" />
@@ -248,6 +306,16 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
             <Field label="Target rollback" hint="Versi/konfigurasi/keputusan yang digantikan.">
               <input className={inputClass} value={scRollback} onChange={(e) => setScRollback(e.target.value)} placeholder="mis. prompt rev r41" />
             </Field>
+            {!stagePin && (
+              <div className="sm:col-span-2">
+                <Field
+                  label="Nilai baru yang dievaluasi (target_version)"
+                  hint="Sama persis dengan nilai di konfigurasi EvalRun: revisi prompt, versi policy, model id, route key, versi harness, tool set (pisahkan koma) atau nilai context_params. Hooks/tool schema/skill: isi Hash target = configuration_hash EvalRun."
+                >
+                  <input className={inputClass} value={targetVersion} onChange={(e) => setTargetVersion(e.target.value)} placeholder="mis. wp-42" />
+                </Field>
+              </div>
+            )}
           </fieldset>
         )}
         {kind !== "WRITE_ENABLEMENT" && (

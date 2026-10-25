@@ -77,9 +77,26 @@ def suite_of(board, key=SUITE):
 # ------------------------------------------------------------------------------------------- the collector
 
 
+def _verifier_report(db, run, *, baseline="PASS", regressions=(), origin="verifier"):
+    """The independent verifier's VERIFICATION_REPORT of one attempt (its baseline check, §34)."""
+    checks = {"baseline": {"status": baseline, "summary": f"{len(regressions)} regression(s)"}} if baseline else {}
+    content = {"status": "FAIL" if regressions else "PASS", "checks": checks, "regressions": list(regressions),
+               "preexisting_failures": []}
+    ev = EvidenceArtifact(kind="VERIFICATION_REPORT", origin=origin, collector_identity="aeos-verifier/test",
+                          trusted=origin == "verifier", content_hash="sha256:" + new_id().replace("-", ""),
+                          claim=f"verification of {run.id}", inline={"content": content}, evidence_level="E2",
+                          subject_type="run", subject_id=run.id, project_id=run.project_id, domain=run.domain,
+                          run_id=run.id, task_id=run.task_id)
+    db.add(ev)
+    db.flush()
+    return ev
+
+
 def _executed(db, spec, *, state, route=ROUTE, attempts=1, accepted=None, quota=False, engine="1.19.3",
-              denied=0, quarantined=False, claude_reviews=1, cost=0.01, report=None, verifier=None):
-    """Canonical records the workforce/verifier would leave behind for one executed task."""
+              denied=0, quarantined=False, claude_reviews=1, cost=0.01, report=None, verifier=None,
+              baseline="PASS", regressions=None, reasons=None):
+    """Canonical records the workforce/verifier would leave behind for one executed task. ``baseline`` is the
+    verifier's baseline check of every attempt (None: no trusted report); ``regressions`` maps attempt -> tests."""
     now = utcnow()
     te = TaskExecution(task_id=spec.id, project_id=spec.project_id, domain=spec.domain, state=state,
                        attempts_used=attempts, created_at=now - timedelta(minutes=30))
@@ -96,6 +113,9 @@ def _executed(db, spec, *, state, route=ROUTE, attempts=1, accepted=None, quota=
         db.add(run)
         db.flush()
         runs.append(run)
+        failing = (regressions or {}).get(i + 1, ())
+        if baseline is not None or failing:
+            _verifier_report(db, run, baseline="FAIL" if failing else baseline, regressions=failing)
         db.add(UsageLedgerEntry(run_id=run.id, task_id=spec.id, provider="opencode-zen", category="WORKER_API",
                                 source="broker", cost_usd=cost, input_tokens=100, output_tokens=50, route_key=route))
         for _ in range(denied):
@@ -106,7 +126,8 @@ def _executed(db, spec, *, state, route=ROUTE, attempts=1, accepted=None, quota=
     if accepted is not None:
         db.add(AcceptanceRecord(task_id=spec.id, run_id=runs[-1].id, project_id=spec.project_id,
                                 artifact_hash="sha256:a", acceptance_status=accepted,
-                                reasons=[] if accepted == "ACCEPTED" else ["verifier status is FAIL (PASS required)"]))
+                                reasons=reasons if reasons is not None else
+                                [] if accepted == "ACCEPTED" else ["verifier status is FAIL (PASS required)"]))
     for _ in range(claude_reviews):
         db.add(ReviewRecord(target_type="run", target_id=runs[-1].id, task_id=spec.id, reviewer_kind="CLAUDE",
                             verdict="PASS"))
@@ -200,6 +221,59 @@ def test_collector_derives_false_claims_and_context_tokens_and_states_the_rest_u
     assert m["outcome"]["adjacent_regressions"] is None and m["reliability"]["merge_conflicts"] is None
     assert m["usage"]["coordination_tokens"] is None
     assert set(m["unmeasured"]) == set(executor.UNDERIVED_FIELDS)
+
+
+def test_collector_derives_critical_regressions_from_the_verifier_baseline(ev):
+    """W6-121 (§34, §44): critical regressions were counted from acceptance reasons "non-regression <key> is missing"
+    (a review that did not argue a dimension), so a real baseline regression (trusted test passing on the base and
+    failing on the head) was collected as a false 0. They now come from the verifier's baseline check; the review
+    coverage is its own measure; a sample without a verifier baseline is UNKNOWN, never 0."""
+    db = ev
+    run, specs = _running(db)
+    for s, spec in zip(executor.slots(db, run), specs, strict=True):
+        executor.bind_task(db, run.id, slot_id=s["slot_id"], task_id=spec.id, actor_user_id="owner")
+    regressed = "tests/acceptance/test_auth.py::test_login"
+    # the skeptic's probe: verifier FAILED (a real regression), acceptance REJECTED, no "non-regression" reason
+    _executed(db, specs[0], state="FAILED", accepted="REJECTED", verifier="FAIL", regressions={1: [regressed]})
+    # a review that did not argue a non-regression dimension: review coverage, NOT a regression
+    _executed(db, specs[1], state="DONE", accepted="ACCEPTED", verifier="PASS",
+              reasons=["high-impact change: non-regression callers is missing"])
+    _executed(db, specs[2], state="DONE", accepted="ACCEPTED", verifier="PASS", baseline=None)  # no trusted report
+    # repaired on attempt 2: the regression of attempt 1 is not redeemed by the repair
+    _executed(db, specs[3], state="DONE", accepted="ACCEPTED", attempts=2, regressions={1: [regressed, "t::b"]})
+    _executed(db, specs[4], state="DONE", accepted="ACCEPTED", verifier="PASS", baseline="UNKNOWN")
+    out = executor.collect(db, run.id)
+    assert out["recorded"] is True
+    by = {s["task_id"]: s for s in run.samples}
+    assert [by[s.id]["critical_regressions"] for s in specs] == [1, 0, None, 2, None]
+    assert by[specs[3].id]["regressions_by_attempt"] == {"1": 2, "2": 0}
+    assert [by[s.id]["non_regression_unargued"] for s in specs] == [0, 1, 0, 0, 0]
+    assert "critical_regressions" in by[specs[2].id]["unknown_fields"]
+    assert "critical_regressions" not in by[specs[0].id]["unknown_fields"]
+    m = run.metrics
+    assert m["outcome"]["critical_regressions"] == 3 and m["outcome"]["critical_regressions_unknown_samples"] == 2
+    assert m["oversight"]["non_regression_unargued"] == 1
+    assert service.run_view(run)["eligibility"]["status"] == "EXCLUDED_REGRESSION"
+    # no proven regression, but samples without a verifier baseline: UNKNOWN, never ranked as regression-free
+    clean, more = _running(db, 5)
+    for s, spec in zip(executor.slots(db, clean), more, strict=True):
+        executor.bind_task(db, clean.id, slot_id=s["slot_id"], task_id=spec.id, actor_user_id="owner")
+        _executed(db, spec, state="DONE", accepted="ACCEPTED", verifier="PASS",
+                  baseline=None if spec is more[0] else "PASS")
+    assert executor.collect(db, clean.id)["recorded"] is True
+    assert clean.metrics["outcome"]["critical_regressions"] is None
+    assert clean.metrics["outcome"]["regressions"] is None
+    view = service.run_view(clean)["eligibility"]
+    assert view["status"] == "EXCLUDED_REGRESSION_NOT_PROVEN" and view["eligible"] is False
+    # an untrusted (worker-origin) report never proves anything
+    untrusted, last = _running(db, 1)
+    executor.bind_task(db, untrusted.id, slot_id=executor.slots(db, untrusted)[0]["slot_id"], task_id=last[0].id,
+                       actor_user_id="owner")
+    te = _executed(db, last[0], state="DONE", accepted="ACCEPTED", verifier="PASS", baseline=None)
+    worker_run = db.scalar(select(WorkerRun).where(WorkerRun.task_id == te.task_id))
+    _verifier_report(db, worker_run, baseline="PASS", origin="worker")
+    state, sample, _ = executor.derive_sample(db, untrusted, untrusted.bindings[0])
+    assert state == "READY" and sample["critical_regressions"] is None
 
 
 def test_collector_never_records_a_run_whose_graders_changed_during_it(ev, monkeypatch):
@@ -460,7 +534,8 @@ def test_metric_dimensions_are_computed_from_sample_values():
                              "security_violations": 0}
     assert m["product_quality"]["ui_a11y"] == pytest.approx(0.6) and m["product_quality"]["maintainability"] == 0.6
     assert m["product_quality"]["api_data_behavior"] is None and m["product_quality"]["reviewed_samples"] == 2
-    assert m["oversight"] == {"claude_reviews": 3, "human_interventions": 1, "human_corrections": 1}
+    assert m["oversight"] == {"claude_reviews": 3, "human_interventions": 1, "human_corrections": 1,
+                              "non_regression_unargued": None}
     assert m["usage"]["context_tokens"] == 1000 and m["usage"]["coordination_tokens"] == 200
     assert m["usage"]["worker_tokens"] == 8000 and m["usage"]["samples_with_token_counts"] == 2
     assert m["reliability"]["merge_conflicts"] == 1
