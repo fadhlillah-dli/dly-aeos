@@ -77,6 +77,13 @@ def sample_content(name: str = "Demo", *, tasks: list[dict[str, Any]] | None = N
     }]
     c["architecture"]["diagrams"] = [{"key": "D1", "title": "Context", "kind": "context",
                                       "mermaid": "flowchart TD\n  A-->B", "verification_source": "contract"}]
+    # §41 readiness: the PROJECT_CREATION required sections (scope, context, authn/authz, risk register) are
+    # stated, so implementation of this plan is not held by documentation pending
+    c["overview"]["scope_in"] = ["Fitur pertama end-to-end"]
+    c["security_privacy"]["overview"]["authn_authz"] = "Sesi lokal; satu peran pemilik"
+    c["security_privacy"]["initial_risks"] = [{"key": "R1", "title": "Kehilangan data", "description": "File DB rusak",
+                                              "likelihood": "LOW", "impact": "MEDIUM", "mitigation": "Backup harian",
+                                              "residual_risk": "Rendah", "owner": "UNKNOWN"}]
     return c
 
 

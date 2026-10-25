@@ -17,6 +17,8 @@ Error taxonomy (the executor maps these to outbox states):
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -26,6 +28,30 @@ from aeos.core.redaction import redact_text
 
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 HTTP_ERROR_BODY_LIMIT = 400
+
+# Response observers (§08 "a change of endpoint/permission makes the affected checks STALE"): another module (the
+# Readiness Doctor) registers a callback that sees the method, URL, status and RESPONSE headers of every provider
+# call - never a body or the request headers (credentials). An observer can never fail or change a call.
+ResponseObserver = Callable[[str, str, int, Mapping[str, str]], None]
+_response_observers: list[ResponseObserver] = []
+
+
+def add_response_observer(fn: ResponseObserver) -> None:
+    if fn not in _response_observers:
+        _response_observers.append(fn)
+
+
+def remove_response_observer(fn: ResponseObserver) -> None:
+    if fn in _response_observers:
+        _response_observers.remove(fn)
+
+
+def _notify_observers(method: str, url: str, resp: httpx.Response) -> None:
+    for fn in list(_response_observers):
+        try:
+            fn(method, url, resp.status_code, resp.headers)
+        except Exception:  # an observer never breaks a provider call
+            logging.getLogger("aeos.publisher").debug("response observer failed", exc_info=True)
 
 
 class ProviderError(Exception):
@@ -136,7 +162,7 @@ def classify_http_error(resp: httpx.Response, *, write: bool, what: str) -> Prov
 def send(client: httpx.Client, method: str, url: str, *, write: bool, what: str, **kw: Any) -> httpx.Response:
     """Send one request with the timeout/unknown-outcome rules applied."""
     try:
-        return client.request(method, url, **kw)
+        resp = client.request(method, url, **kw)
     except httpx.ConnectError as exc:  # nothing was sent
         raise ProviderError(f"{what}: connection failed ({exc.__class__.__name__})", retryable=True) from exc
     except httpx.TimeoutException as exc:
@@ -147,3 +173,5 @@ def send(client: httpx.Client, method: str, url: str, *, write: bool, what: str,
         if write:
             raise ProviderTimeout(f"{what}: transport error — outcome unknown ({exc.__class__.__name__})") from exc
         raise ProviderError(f"{what}: transport error ({exc.__class__.__name__})", retryable=True) from exc
+    _notify_observers(method, url, resp)
+    return resp

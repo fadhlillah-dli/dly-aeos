@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useAuth } from "../../auth/AuthContext";
+import { RetentionBadge } from "../../components/control_center/RetentionBadge";
 import { EmptyState, ErrorBox, Freshness, Loading, Mono, Table, inputClass } from "../../components/ui";
 import { relativeTime, shortHash } from "../../lib/format";
 import { evidenceApi, type EvidenceItem } from "./api";
@@ -89,6 +90,7 @@ export function EvidenceLedger({ runId }: { runId?: string }) {
             },
             { header: "Mode", cell: (r) => (r.mode === "LIVE" ? <span className="text-xs text-ink-3">LIVE</span> : <Status status={r.mode} />) },
             { header: "Waktu", cell: (r) => <span className="text-xs" title={r.created_at}>{relativeTime(r.created_at)}</span> },
+            { header: "Retensi", cell: (r) => <RetentionBadge marker={r.retention} /> },
           ]}
         />
       )}

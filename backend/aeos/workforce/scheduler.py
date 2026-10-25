@@ -956,6 +956,8 @@ def admission_check(session: Session, task_id: str) -> Admission:
     approved, why = ext.approved_version(session, te.plan_id)
     if approved is None or approved.id != task.plan_version_id:
         adm.waits.append(("PLAN_NOT_APPROVED", why or "task version is not the approved version"))
+    else:  # §41: required documentation of the earlier stages is complete before implementation starts
+        adm.waits.extend(ext.documentation_blockers(session, task, approved))
     for dep_key in task.depends_on or []:
         dep = session.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == task.plan_version_id,
                                                     TaskSpec.task_key == dep_key))

@@ -181,6 +181,7 @@ export default function ToolsPage() {
       source={data?.source ?? "InstallManifest + observasi"}
       checkedAt={data?.checked_at ?? null}
       evidenceLimit="Katalog desain bukan bukti instalasi; tiap dimensi berasal dari observasi bertanggal"
+      relatedDecisionsHref="/decisions?target_type=component"
       mode={data?.mode}
       actions={
         domain ? (

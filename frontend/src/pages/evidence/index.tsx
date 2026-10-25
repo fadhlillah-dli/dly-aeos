@@ -50,6 +50,7 @@ export default function EvidencePage() {
         source="evidence_artifacts · review_records · acceptance_records · delivery_pull_requests"
         checkedAt={head.data?.checked_at ?? null}
         evidenceLimit="Ledger lokal append-only (bukan WORM); klaim worker = E0; verdict reviewer ≠ penerimaan; merge tetap tindakan manusia"
+        relatedDecisionsHref="/decisions?target_type=trusted_suite"
         mode={head.data?.mode}
       />
       <Tabs

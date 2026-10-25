@@ -123,12 +123,12 @@ def resolve_target(session: Session, project: Project, purpose: str) -> Target:
             t.reasons.append(why)
             t.remedies.append(gh.CONNECT_REMEDY)
     else:
-        cfg = atl.AtlassianConfig.from_integration(integ.tenant_id if integ else None,
-                                                   integ.root_id if integ else None, integ.config if integ else None,
-                                                   product=family)
-        t.root_id = cfg.parent_id if family == "confluence" else cfg.project_key
-        status, reasons, remedy = atl.readiness(cfg, product=family)
-        t.config = {"atlassian": asdict(cfg) | {"extra": {}}, "deployment": cfg.deployment, "enabled": cfg.enabled,
+        acfg = atl.AtlassianConfig.from_integration(integ.tenant_id if integ else None,
+                                                    integ.root_id if integ else None, integ.config if integ else None,
+                                                    product=family)
+        t.root_id = acfg.parent_id if family == "confluence" else acfg.project_key
+        status, reasons, remedy = atl.readiness(acfg, product=family)
+        t.config = {"atlassian": asdict(acfg) | {"extra": {}}, "deployment": acfg.deployment, "enabled": acfg.enabled,
                     "parent_key": atl.CONFLUENCE_PARENT_KEY}
         if status != "READY_TO_CHECK":
             t.status = "NOT_SUPPORTED" if status == "NOT_SUPPORTED" else "BLOCKED"

@@ -168,6 +168,46 @@ def publisher_signature(path: Path | None, *, fingerprint_value: str | None = No
     return result
 
 
+def invocation_signature(path: Path | None, fingerprint_value: str | None) -> dict[str, Any]:
+    """The OS signature report that gates a native invocation: checked once per binary fingerprint per process
+    (``publisher_signature`` caches it), so a swapped binary is checked again before it is used."""
+    return publisher_signature(path, fingerprint_value=fingerprint_value)
+
+
+def approved_publisher() -> str | None:
+    """Owner-pinned Claude Code publisher identity from the reviewed InstallManifest (None = not pinned)."""
+    try:
+        from aeos.inventory import facade as inventory
+
+        return inventory.approved_signer("claude-code")
+    except ImportError:
+        return None
+
+
+def signature_gate(sig: dict[str, Any] | None, approved_signer: str | None) -> tuple[str, str]:
+    """What the observed OS code signature means for the bridge (§12 "unmodified official binary").
+
+    * ``BLOCKED``: the OS reports the signature INVALID (e.g. Authenticode HashMismatch / NotTrusted, codesign
+      verify failure), or the owner pinned a publisher identity and the observed signer differs;
+    * ``DEGRADED``: the binary is not signed (reported, never treated as the official build);
+    * ``OK``: VALID and the observed signer matches the owner-pinned identity;
+    * ``UNVERIFIED``: VALID without a pinned identity, or no check ran / UNKNOWN (never shown as authentic)."""
+    status = str((sig or {}).get("status") or "NOT_CHECKED")
+    signer = str((sig or {}).get("signer") or "")
+    if status == "INVALID":
+        return "BLOCKED", "OS reports the code signature of the claude binary INVALID (modified or untrusted build)"
+    if approved_signer and status == "VALID" and approved_signer.lower() not in signer.lower():
+        return "BLOCKED", (f"observed signer {signer or 'unknown'!r} is not the owner-pinned publisher "
+                           f"{approved_signer!r} (install-manifest claude-code signature.approved_signer)")
+    if status == "UNSIGNED":
+        return "DEGRADED", "the claude binary is not code-signed; it cannot be shown to be the official build"
+    if status == "VALID" and approved_signer:
+        return "OK", f"signature VALID and signer matches the pinned publisher {approved_signer!r}"
+    if status == "VALID":
+        return "UNVERIFIED", "signature VALID; no publisher identity pinned in the install-manifest (owner step)"
+    return "UNVERIFIED", f"code signature {status}: authenticity not established"
+
+
 _fp_cache: dict[tuple[str, int, int], str] = {}
 _fp_lock = threading.Lock()
 

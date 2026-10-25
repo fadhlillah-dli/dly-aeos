@@ -26,6 +26,7 @@ from aeos.models.identity import SystemSetting
 from aeos.models.portfolio import Project, ProjectIntegration
 from aeos.models.publishing import ExternalReference, OperationalWorkProjection
 from aeos.models.workforce import Lease, TaskExecution, WorkerRun
+from aeos.operations import alerts
 
 TARGETS_KEY = "ops.sli.targets"
 CRITICALITY_KEY = "ops.criticality"
@@ -359,26 +360,26 @@ def observed_conditions(result: dict[str, Any]) -> tuple[list[dict[str, Any]], l
     platform_conds: list[dict[str, Any]] = []
     stale = by_key["stale_leases"]
     if (stale["value"] or 0) > 0:
-        domain_conds.append({"dedup_key": f"{d}:stale_leases", "kind": "stale_leases", "severity": "HIGH",
+        domain_conds.append({"dedup_key": f"{d}:stale_leases", "kind": "stale_leases", "severity": alerts.rule_severity("stale_leases"),
                              "title": f"{int(stale['value'])} lease usang terdeteksi ({d})", "detail": stale["detail"]})
     if result.get("_conflicts"):
-        domain_conds.append({"dedup_key": f"{d}:sync_conflict", "kind": "sync_conflict", "severity": "MEDIUM",
+        domain_conds.append({"dedup_key": f"{d}:sync_conflict", "kind": "sync_conflict", "severity": alerts.rule_severity("sync_conflict"),
                              "title": f"Konflik revisi pada sinkronisasi eksternal ({d})",
                              "detail": {"conflicts": result["_conflicts"]}})
     integ = by_key["integration_failures"]
     if (integ["value"] or 0) > 0:
         domain_conds.append({"dedup_key": f"{d}:integration_failures", "kind": "integration_failure",
-                             "severity": "MEDIUM", "title": f"Integrasi eksternal gagal/kedaluwarsa ({d})",
+                             "severity": alerts.rule_severity("integration_failure"), "title": f"Integrasi eksternal gagal/kedaluwarsa ({d})",
                              "detail": integ["detail"]})
     recovery = by_key["recovery_point_age_seconds"]
     if recovery["value"] is None:
-        platform_conds.append({"dedup_key": "GLOBAL:restore_untested", "kind": "restore_untested", "severity": "MEDIUM",
+        platform_conds.append({"dedup_key": "GLOBAL:restore_untested", "kind": "restore_untested", "severity": alerts.rule_severity("restore_untested"),
                                "title": "Restore backup belum pernah diuji - pemulihan belum terbukti",
                                "detail": recovery["detail"], "domain": None})
     for item in result["items"]:
         if item["status"] == "BREACH":
             cond = {"dedup_key": f"{'GLOBAL' if item['scope'] == 'PLATFORM' else d}:sli_breach:{item['key']}",
-                    "kind": "sli_breach", "severity": "MEDIUM",
+                    "kind": "sli_breach", "severity": alerts.rule_severity("sli_breach"),
                     "title": f"SLI di luar target pemilik: {item['title']}",
                     "detail": {"value": item["value"], "target": item["target"],
                                "by_criticality": {k: {"value": v["value"], "status": v["status"], "target": v["target"]}
@@ -389,7 +390,7 @@ def observed_conditions(result: dict[str, Any]) -> tuple[list[dict[str, Any]], l
         if b["status"] == "EXHAUSTED":
             scope = "GLOBAL" if b["scope"] == "PLATFORM" else d
             cond = {"dedup_key": f"{scope}:error_budget:{b['key']}:{b.get('criticality') or 'ALL'}",
-                    "kind": "error_budget_exhausted", "severity": "HIGH",
+                    "kind": "error_budget_exhausted", "severity": alerts.rule_severity("error_budget_exhausted"),
                     "title": f"Error budget habis: {b['key']}" + (f" ({b['criticality']})" if b.get("criticality") else ""),
                     "detail": {k: b[k] for k in ("bad", "samples", "allowed_bad", "burn_rate", "window_days")}}
             (platform_conds if b["scope"] == "PLATFORM" else domain_conds).append(
@@ -531,8 +532,6 @@ def apply_error_budget_policy(session: Session, budget: dict[str, Any]) -> dict[
 def evaluate(session: Session, *, domain: Domain, settings: Settings | None = None) -> dict[str, Any]:
     """Compute SLIs, record the samples, account the error budget, apply the owner's budget policy and
     reconcile alerts (raises/resolves; caller commits)."""
-    from aeos.operations import alerts
-
     result = compute(session, domain=domain, settings=settings)
     record_samples(session, result)
     result["error_budget"] = error_budget(session, domain=domain)

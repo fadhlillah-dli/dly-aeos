@@ -11,6 +11,9 @@ Schema 1, revision 2 (additive): top-level ``feature_governance`` (owner, RFC/TD
 needs, threat model per feature), ``milestone_governance``, ``rfcs``, ``tdds`` and ``interface_contracts``
 (contract-first, §19/§22). The schema title stays ``plan-content/1`` because nothing was removed or renamed;
 content stored before revision 2 is read through ``upgrade_content`` (empty lists = nothing requested).
+Revision 3 (additive, nested): ``operations`` gains ``support``, ``log_policy``, ``alert_policy``,
+``backup.storage``, ``maintenance_checks`` and ``routine_activities`` (§27 08. sections that had no source),
+and the diagram kind ``cicd`` (§29); older content gets them empty (= not given).
 """
 
 from __future__ import annotations
@@ -29,7 +32,8 @@ RISK_CLASSES = ["R0", "R1", "R2", "R3", "R4"]
 DATA_CLASSES = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"]
 PRIORITIES = ["P0", "P1", "P2", "P3"]
 LEVELS = ["LOW", "MEDIUM", "HIGH", "UNKNOWN"]
-DIAGRAM_KINDS = ["context", "component", "sequence", "erd", "data_flow", "trust_boundary", "deployment", "journey"]
+DIAGRAM_KINDS = ["context", "component", "sequence", "erd", "data_flow", "trust_boundary", "deployment", "cicd",
+                 "journey"]
 SCENARIO_TYPES = ["functional", "regression", "integration", "negative", "edge", "performance", "security",
                   "accessibility", "uat"]
 QUESTION_CATEGORIES = ["architecture", "scope", "cost", "security", "legal", "external_target"]
@@ -237,16 +241,31 @@ RELEASE = _o({"release_plans": _a(RELEASE_PLAN)}, "07. Release & Deployment")
 OPERATIONS = _o({
     "overview": _s(),
     "ownership": _s(),
+    "support": _s(),
     "dependencies": _sa(),
     "criticality": _e(LEVELS),
     "sli_slo_proposals": _a(_o({"indicator": _s(), "objective": _s(), "rationale": _s()})),
     "runbooks": _a(_o({"key": _s(), "title": _s(), "purpose": _s()})),
     "monitoring": _sa(),
     "logging": _s(),
+    "log_policy": _o({"audit_logs": _s(), "security_logs": _s(), "retention": _s(), "access": _s()}),
     "alerting": _sa(),
-    "backup": _o({"scope": _s(), "frequency": _s(), "retention": _s(), "restore_procedure": _s()}),
+    "alert_policy": _o({"severity": _s(), "notification": _s(), "escalation": _s()}),
+    "backup": _o({"scope": _s(), "frequency": _s(), "retention": _s(), "restore_procedure": _s(), "storage": _s()}),
     "maintenance": _sa(),
+    "maintenance_checks": _sa(),
+    "routine_activities": _sa(),
 }, "08. Operations (proposals; restore/SLO evidence comes from runtime only)")
+# Schema 1, revision 3 (additive, nested): operations fields added after content was stored. ``upgrade_content``
+# fills them empty (= not given; the document section stays documentation pending, never invented). They carry no
+# descriptions: the synthesis schema must still fit the Claude CLI command line WITH its annotations
+# (tests/unit/test_planning_bridge_seam.py::test_planning_contract_schemas_fit_the_windows_command_line).
+OPERATIONS_ADDITIVE: dict[str, Any] = {
+    "support": "", "log_policy": {"audit_logs": "", "security_logs": "", "retention": "", "access": ""},
+    "alert_policy": {"severity": "", "notification": "", "escalation": ""}, "maintenance_checks": [],
+    "routine_activities": [],
+}
+BACKUP_ADDITIVE: dict[str, Any] = {"storage": ""}
 
 MILESTONE = _o({"key": _s(), "title": _s(), "exit_evidence": _s(), "order": _i()})
 FEATURE = _o({
@@ -452,9 +471,16 @@ def upgrade_content(content: Any) -> Any:
     if not isinstance(content, dict):
         return content
     missing = [k for k in ADDITIVE_SECTIONS if k not in content]
-    if not missing:
-        return content
-    return {**content, **{k: [] for k in missing}}
+    out = {**content, **{k: [] for k in missing}} if missing else content
+    ops = out.get("operations")
+    if isinstance(ops, dict):  # revision 3: nested additive operations fields (empty = not given)
+        new_ops = {**{k: json.loads(json.dumps(v)) for k, v in OPERATIONS_ADDITIVE.items() if k not in ops}, **ops}
+        backup = new_ops.get("backup")
+        if isinstance(backup, dict) and any(k not in backup for k in BACKUP_ADDITIVE):
+            new_ops["backup"] = {**backup, **{k: v for k, v in BACKUP_ADDITIVE.items() if k not in backup}}
+        if new_ops != ops:
+            out = {**out, "operations": new_ops}
+    return out
 
 
 def empty_plan_content(name: str = "", *, data_classification: str = "INTERNAL") -> dict[str, Any]:

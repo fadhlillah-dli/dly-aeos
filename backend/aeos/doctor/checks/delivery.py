@@ -120,7 +120,8 @@ def delivery_branch_protection(ctx: CheckContext) -> Outcome:
                                cost="tidak ada (GET saja)",
                                evidence_to_collect="EvidenceArtifact PROVIDER_CAPABILITY"))
         inline = ev.inline or {}
-        caps = inline.get("content") if isinstance(inline.get("content"), dict) else (inline.get("summary") or {})
+        raw = inline.get("content") if isinstance(inline.get("content"), dict) else inline.get("summary")
+        caps: dict[str, Any] = raw if isinstance(raw, dict) else {}
         out = _merge_gate_outcome(caps, origin=f"evidence {ev.id[:8]} ({ev.created_at.isoformat()})")
         out.evidence["evidence_id"] = ev.id
         return out

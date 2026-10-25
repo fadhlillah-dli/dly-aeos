@@ -1,5 +1,6 @@
 // Shapes returned by /api/ops/* and /api/control-center/history/* (backend: aeos.operations,
 // aeos.control_center).
+import type { RetentionMarker } from "../../components/control_center/RetentionBadge";
 
 export interface ListMeta {
   source?: string;
@@ -19,6 +20,19 @@ export interface AuditRow {
   result: string;
   reason: string;
   details: Record<string, unknown>;
+  retention?: RetentionMarker;
+}
+
+/** One data class of GET /api/ops/retention: the owner's rule and how it applies to stored records. */
+export interface RetentionRow {
+  data_class: string;
+  domain: string;
+  rule: string;
+  retain_days: number | null;
+  label: string;
+  records: number | null;
+  expired_by_policy: number | null;
+  evaluated: boolean;
 }
 
 export interface DecisionRow {

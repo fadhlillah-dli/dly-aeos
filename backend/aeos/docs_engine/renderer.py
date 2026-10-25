@@ -56,7 +56,7 @@ from aeos.docs_engine.plan_content import _first as pick
 from aeos.docs_engine.visuals import STATUS_RENDERED, VisualArtifact
 from aeos.models.publishing import DocumentRecord, DocumentRevision
 
-RENDERER_VERSION = "4"  # part of every input_hash: a renderer change re-renders (never reuses stale bodies)
+RENDERER_VERSION = "5"  # part of every input_hash: a renderer change re-renders (never reuses stale bodies)
 
 # Trusted EvidenceArtifact kinds whose real results create §27 04 VA / PT documents.
 VA_EVIDENCE_KINDS = ("VA_REPORT", "VULNERABILITY_ASSESSMENT")
@@ -201,6 +201,8 @@ class ChangeInfo:
     bundle_evidence_id: str | None = None
     rollback_notes: tuple[str, ...] = ()
     contract_deltas: tuple[str, ...] = ()
+    dependency_deltas: tuple[str, ...] = ()
+    decision_refs: tuple[str, ...] = ()  # "KIND:decision_id" of ACTIVE human owner decisions bound to the change
 
     def slice(self) -> dict[str, Any]:
         return {k: (list(v) if isinstance(v, tuple) else v) for k, v in self.__dict__.items()}
@@ -227,6 +229,56 @@ class ImprovementInfo:
         return {k: (list(v) if isinstance(v, tuple) else v) for k, v in self.__dict__.items()}
 
 
+@dataclass(frozen=True)
+class IncidentInfo:
+    """One OpsIncident that concerns the project (aeos.operations incident record, domain-scoped view: the other
+    domain's evidence and blast radius are already removed), §27 09. / §28 Incident."""
+
+    id: str
+    title: str
+    status: str
+    owner: str = ""
+    source: str = ""
+    source_ref: str | None = None
+    created_at: str | None = None
+    resolved_at: str | None = None
+    impact: str = ""
+    declared_blast_radius: str = ""
+    derived_blast_radius: tuple[str, ...] = ()  # one summary line per visible domain
+    timeline: tuple[tuple[str, str, str, tuple[str, ...]], ...] = ()  # (at, kind, note, evidence ids)
+    hypotheses: tuple[str, ...] = ()
+    root_cause: str = ""
+    root_cause_evidence: tuple[str, ...] = ()
+    root_cause_ref: str | None = None
+    corrective_actions: tuple[str, ...] = ()
+    regression_tests: tuple[str, ...] = ()
+    eval_cases: tuple[str, ...] = ()
+    follow_ups: tuple[str, ...] = ()  # "change_proposal <id>"
+    follow_up_ids: tuple[str, ...] = ()
+    evidence_ids: tuple[str, ...] = ()
+    resolution_missing: tuple[str, ...] = ()
+
+    def slice(self) -> dict[str, Any]:
+        return {k: (list(v) if isinstance(v, tuple) else v) for k, v in self.__dict__.items()}
+
+
+@dataclass(frozen=True)
+class RunbookSource:
+    """A reviewed runbook of the project's own repository (platform: ``docs/runbooks/*.md``), §27 08. Runbooks."""
+
+    key: str
+    title: str
+    path: str
+    sections: tuple[tuple[str, str], ...] = ()  # (lower-case heading, markdown body)
+
+    def get(self, *names: str) -> str:
+        return next((text for head, text in self.sections if any(head == n or head.startswith(n + " ")
+                                                                 for n in names)), "")
+
+    def slice(self) -> dict[str, Any]:
+        return {"key": self.key, "title": self.title, "path": self.path, "sections": [list(s) for s in self.sections]}
+
+
 @dataclass
 class RenderSignals:
     """Records outside the plan that §28 timings depend on, gathered read-only by the service layer."""
@@ -235,9 +287,19 @@ class RenderSignals:
     changes: list[ChangeInfo] = field(default_factory=list)
     improvements: list[ImprovementInfo] = field(default_factory=list)
     retirement: dict[str, Any] | None = None
+    incidents: list[IncidentInfo] = field(default_factory=list)
+    runbooks: list[RunbookSource] = field(default_factory=list)
+    # platform project only: 08 sections the plan schema has no field for, from the controller's own rules
+    platform_ops: dict[str, str] = field(default_factory=dict)
 
     def evidence_of(self, *kinds: str) -> list[EvidenceRef]:
         return [e for e in self.evidence if e.kind in kinds]
+
+    def production_evidence(self) -> list[EvidenceRef]:
+        """Production validation evidence, oldest first: PRODUCTION_VALIDATION artefacts and the trusted
+        RUNTIME_OBSERVATION the deployment observer records for the registered production target (§28)."""
+        return [e for e in self.evidence if e.kind == "PRODUCTION_VALIDATION" or
+                (e.kind == "RUNTIME_OBSERVATION" and (e.environment or "").lower() == "production")]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -334,6 +396,11 @@ def _live(source: str, what: str) -> str:
     body = "\n".join(f"> {line}" if line.strip() else ">" for line in what.strip().splitlines())
     return (f"{body}\n>\n> Sumber live: {source}. Status dinamis dibaca dari sumber tersebut dan diproyeksikan "
             f"di AEOS Control Center; dokumen ini tidak menyalin atau menyatakan status.")
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    """Plan content is DATA: a sub-object is used only when it really is a mapping."""
+    return value if isinstance(value, dict) else {}
 
 
 def _refs(label: str, ids: Iterable[str]) -> str:
@@ -436,6 +503,21 @@ class _Ctx:
             "pull_request": sorted({c.pr_url for c in changes if c.pr_url}),
         }.items() if v}
 
+    def project_links(self, *, evidence_kinds: tuple[str, ...] = (), commits: bool = False) -> dict[str, list[str]]:
+        """§27 "every document links to relevant requirement/commit/issue/evidence": the approved requirement set
+        (the 02-requirements folder: a stable link, so adding/removing one feature does not re-render every
+        project-level document - "Hash/diff menentukan bagian dokumentasi yang berubah", §41), optionally the
+        project's accepted/merged commits and PRs, and trusted evidence of given kinds."""
+        out: dict[str, list[str]] = {"requirement": ["02-requirements"] if self.view.features else []}
+        if commits:
+            changes = self.signals.changes
+            out["accepted_head"] = sorted({c.accepted_head_sha for c in changes if c.accepted_head_sha})
+            out["merge_commit"] = sorted({c.merge_commit_sha for c in changes if c.merge_commit_sha})
+            out["pull_request"] = sorted({c.pr_url for c in changes if c.pr_url})
+        if evidence_kinds:
+            out["evidence"] = [e.id for e in self.signals.evidence_of(*evidence_kinds)]
+        return {k: v for k, v in out.items() if v}
+
     # -- owners: a role is never assigned to an invented person (§27 "owner yang sah")
     def owner(self, role: str) -> str:
         team = self.view.team
@@ -496,9 +578,13 @@ class _Ctx:
             template_key: str | None = None, links: dict[str, Any] | None = None,
             build: Callable[[RenderedDocument], None] | None = None) -> RenderedDocument:
         self.order += 1
+        # the links the body's metadata table shows are part of the input (a new commit/evidence link re-renders);
+        # task_ids are version-specific record ids that are never shown, so a new plan version alone re-renders
+        # nothing (§41 "hash/diff menentukan bagian dokumentasi yang berubah")
+        shown_links = {k: v for k, v in (links or {}).items() if k != "task_ids"}
         input_hash = content_hash({"renderer": RENDERER_VERSION, "structure": p1.STRUCTURE_VERSION,
                                    "logical_id": logical_id, "status": status, "reason": reason, "owner": owner,
-                                   "approved": self.version.approved, "slice": slice_})
+                                   "approved": self.version.approved, "slice": slice_, "links": shown_links})
         doc = RenderedDocument(
             logical_doc_id=logical_id, node=node, title=title, kind=kind, doc_type=doc_type, parent_logical_id=parent,
             timing=timing.value, status=status, status_reason=reason, owner=owner, order_index=self.order,
@@ -752,7 +838,7 @@ def _product_overview(ctx: _Ctx, node: p1.Node, parent: str) -> None:
 
     ctx.add(logical_id=node.key, node=node.number, title=node.title, kind="DOC", doc_type=spec.doc_type, parent=parent,
             timing=node.timing, status=_ok_status(ctx), reason="", owner=ctx.owner("Product Owner"), slice_=slice_,
-            build=build)
+            links=ctx.project_links(), build=build)
 
 
 def _prd(ctx: _Ctx, f: FeatureView, parent: str) -> None:
@@ -917,7 +1003,8 @@ def _security_overview(ctx: _Ctx, node: p1.Node, parent: str) -> None:
     ctx.add(logical_id=node.key, node=node.number, title=node.title, kind="DOC", doc_type=spec.doc_type, parent=parent,
             timing=node.timing, status=_ok_status(ctx), reason="", owner=ctx.owner("Security Lead"),
             slice_={"security": {k: x for k, x in sec.items() if k not in ("threats", "threat_model")},
-                    "team": ctx.view.team, "owner": ctx.project.owner_name}, build=build)
+                    "team": ctx.view.team, "owner": ctx.project.owner_name},
+            links=ctx.project_links(evidence_kinds=(*VA_EVIDENCE_KINDS, *PT_EVIDENCE_KINDS)), build=build)
 
 
 def _initial_risk_assessment(ctx: _Ctx, parent: str) -> None:
@@ -963,6 +1050,7 @@ def _initial_risk_assessment(ctx: _Ctx, parent: str) -> None:
 
     ctx.add(logical_id=logical_id, node="04", title="Initial Risk Assessment", kind="DOC", doc_type="RISK_ASSESSMENT",
             parent=parent, timing=p1.Timing.PROJECT_CREATION, status=_ok_status(ctx), reason="",
+            links=ctx.project_links(),
             owner=ctx.owner("Product Owner"), slice_={"risks": risks, "summary": ctx.view.summary,
                                                      "team": ctx.view.team, "owner": ctx.project.owner_name,
                                                      "questions": questions},
@@ -971,7 +1059,7 @@ def _initial_risk_assessment(ctx: _Ctx, parent: str) -> None:
 
 def _threat_model_input(ctx: _Ctx) -> tuple[dict[str, Any], list[Any]] | None:
     sec = ctx.view.security
-    tm = sec.get("threat_model") if isinstance(sec.get("threat_model"), dict) else {}
+    tm = _mapping(sec.get("threat_model"))
     threats = as_list(sec.get("threats")) or as_list(tm.get("threats"))
     if not threats and not tm:
         return None
@@ -979,7 +1067,7 @@ def _threat_model_input(ctx: _Ctx) -> tuple[dict[str, Any], list[Any]] | None:
 
 
 def _feature_threat_model_input(f: FeatureView) -> tuple[dict[str, Any], list[Any]] | None:
-    tm = f.raw.get("threat_model") if isinstance(f.raw.get("threat_model"), dict) else {}
+    tm = _mapping(f.raw.get("threat_model"))
     threats = as_list(f.raw.get("threats")) or as_list(tm.get("threats"))
     if not threats and not tm:
         return None
@@ -1013,7 +1101,9 @@ def _threat_model(ctx: _Ctx, parent: str) -> None:
         return
     tm, threats = data
     _threat_model_doc(ctx, logical_id=f"{parent}/threat-model-initial", title="Threat Model — Initial",
-                      parent=parent, tm=tm, threats=threats, with_visuals=True)
+                      parent=parent, tm=tm, threats=threats, with_visuals=True,
+                      links={**ctx.project_links(evidence_kinds=(*VA_EVIDENCE_KINDS, *PT_EVIDENCE_KINDS)),
+                             "visuals": [v.key for v in ctx.visuals_for("trust_boundary", "data_flow")]})
 
 
 def _feature_threat_model(ctx: _Ctx, f: FeatureView, parent: str) -> None:
@@ -1070,7 +1160,7 @@ def _security_assessment(ctx: _Ctx, f: FeatureView, parent: str) -> None:
 
 def _privacy_assessment(ctx: _Ctx, f: FeatureView, parent: str) -> None:
     spec = p1.DOC_TYPES["PRIVACY_ASSESSMENT"]
-    privacy = f.raw.get("privacy") if isinstance(f.raw.get("privacy"), dict) else {}
+    privacy = _mapping(f.raw.get("privacy"))
     logical_id = f"{parent}/dpia-{f.key}"
 
     def build(doc: RenderedDocument) -> None:
@@ -1131,7 +1221,8 @@ def _data_inventory(ctx: _Ctx, node: p1.Node, parent: str) -> None:
     ctx.add(logical_id=node.key, node=node.number, title=node.title, kind="DOC", doc_type=spec.doc_type, parent=parent,
             timing=node.timing, status=_ok_status(ctx), reason="", owner=ctx.owner("Privacy Officer"),
             slice_={"data": d, "classification": ctx.project.data_classification, "team": ctx.view.team,
-                    "owner": ctx.project.owner_name}, build=build)
+                    "owner": ctx.project.owner_name},
+            links={**ctx.project_links(), "related": ["04-threat-models/threat-model-initial"]}, build=build)
 
 
 def _security_decisions(ctx: _Ctx, node: p1.Node, parent: str) -> None:
@@ -1145,7 +1236,7 @@ def _security_decisions(ctx: _Ctx, node: p1.Node, parent: str) -> None:
 
     ctx.add(logical_id=node.key, node=node.number, title=node.title, kind="DOC", doc_type=spec.doc_type, parent=parent,
             timing=node.timing, status=_ok_status(ctx), reason="", owner=ctx.owner("Security Lead"),
-            slice_={"team": ctx.view.team, "owner": ctx.project.owner_name}, build=build)
+            slice_={"team": ctx.view.team, "owner": ctx.project.owner_name}, links=ctx.project_links(), build=build)
 
 
 def _development(ctx: _Ctx, node: p1.Node, parent: str) -> None:
@@ -1167,7 +1258,8 @@ def _development(ctx: _Ctx, node: p1.Node, parent: str) -> None:
 
     ctx.add(logical_id=node.key, node=node.number, title=node.title, kind="DOC", doc_type=spec.doc_type, parent=parent,
             timing=node.timing, status=_ok_status(ctx), reason="", owner=ctx.owner("Engineering Lead"),
-            slice_={"development": dev, "team": ctx.view.team, "owner": ctx.project.owner_name}, build=build)
+            slice_={"development": dev, "team": ctx.view.team, "owner": ctx.project.owner_name},
+            links=ctx.project_links(commits=True), build=build)
 
 
 _SCENARIO_GROUPS = {
@@ -1201,8 +1293,8 @@ def _test_plan(ctx: _Ctx, key: str, tp: dict[str, Any], feature_keys: list[str],
     feats = [f for f in ctx.view.features if f.key in feature_keys]
     f = feats[0] if feats and not tp else None
     legacy = ctx.view.testing
-    ft = f.raw.get("testing") if f is not None and isinstance(f.raw.get("testing"), dict) else {}
-    ts = tp.get("test_strategy") if isinstance(tp.get("test_strategy"), dict) else {}
+    ft = _mapping(f.raw.get("testing")) if f is not None else {}
+    ts = _mapping(tp.get("test_strategy"))
     tasks = [t for fk in feature_keys for t in ctx.tasks_for(fk)]
     logical_id = f"{parent}/test-plan-{key}"
     scenarios = [s for s in as_list(tp.get("scenarios")) if isinstance(s, dict)]
@@ -1368,7 +1460,7 @@ def _release_plan(ctx: _Ctx, key: str, rp: dict[str, Any], parent: str) -> None:
             ("Known issues tercatat di rencana:\n\n" + _bullets(known_issues)) if known_issues else "",
             ("Risiko tercatat di rencana:\n\n" + _bullets(risks)) if risks else "",
             "Issue terbuka dibaca live dari tracker.")))
-        notes = rp.get("release_notes") if isinstance(rp.get("release_notes"), dict) else {}
+        notes = _mapping(rp.get("release_notes"))
         b.put("release_notes", _join(
             as_text(notes.get("summary")),
             ("**Highlights**\n\n" + _bullets(as_list(notes.get("highlights")))) if as_list(notes.get("highlights")) else "",
@@ -1384,8 +1476,11 @@ def _release_plan(ctx: _Ctx, key: str, rp: dict[str, Any], parent: str) -> None:
             "Kesiapan produksi hanya dari evidence; dokumen tidak menyatakan siap/tidak siap.")))
         b.human("sign_off", "Sign-off rilis hanya oleh manusia yang berwenang (Decision).")
         checks = [as_text(x) for x in as_list(rp.get("post_release_validation")) if as_text(x)]
+        prod = ctx.signals.production_evidence()[-5:]
         b.live("post_release_validation", _live("AEOS Operations (production evidence)", _join(
             ("Pemeriksaan pasca-rilis yang direncanakan:\n\n" + _bullets(checks)) if checks else "",
+            _refs("Evidence produksi tercatat (deployment observer / production validation)", [e.id for e in prod]),
+            _refs("Commit yang diamati", sorted({e.commit[:12] for e in prod if e.commit})),
             "Hasil validasi hanya dari evidence runtime/production.")))
         b.live("evidence", _live("AEOS Evidence & Decisions", "Snapshot release candidate (commit + content hash "
                                                               "dokumen) dicatat AEOS sebagai DocumentRevision "
@@ -1395,24 +1490,57 @@ def _release_plan(ctx: _Ctx, key: str, rp: dict[str, Any], parent: str) -> None:
     ctx.add(logical_id=logical_id, node="07", title=title, kind="DOC", doc_type="RELEASE_PLAN", parent=parent,
             timing=p1.Timing.RELEASE_CANDIDATE, status=_ok_status(ctx), reason="", owner=ctx.owner("Release Manager"),
             slice_={"release": rp, "features": [(f.key, f.title) for f in feats], "tasks": [t.task_key for t in tasks],
-                    "test_plans": test_plans},
+                    "test_plans": test_plans,
+                    "production": [e.slice() for e in ctx.signals.production_evidence()[-5:]]},
             template_key="release-plan",
             links={"requirement": [f.key for f in feats], "related": test_plans,
-                   "release": [x for x in dict.fromkeys([version, as_text(rp.get("key"))]) if x] or [key]},
+                   "release": [x for x in dict.fromkeys([version, as_text(rp.get("key"))]) if x] or [key],
+                   **_ops_links(ctx.signals.production_evidence()[-5:])},
             build=build)
 
 
 # --- §27 08. Operations -------------------------------------------------------------------------
 
 
+def _validates_production(e: EvidenceRef) -> bool:
+    # The deployment observer's verdict lives in the artefact; the document only *uses* it for the status.
+    return e.kind == "PRODUCTION_VALIDATION" or e.get("status") == "PASS"
+
+
 def _ops_status(ctx: _Ctx) -> tuple[str, str, list[EvidenceRef]]:
-    """Operations documents carry proposals from the plan; they become APPROVED only after trusted
-    production-validation evidence exists (§28 "status hanya berdasarkan evidence")."""
-    ev = ctx.signals.evidence_of("PRODUCTION_VALIDATION")
-    if ev and ctx.version.approved:
-        return ST_APPROVED, f"production validation evidence: {', '.join(e.id for e in ev[:5])}", ev
-    return (ST_DRAFT, "Usulan operasional dari rencana yang disetujui; status APPROVED hanya setelah evidence "
-                      "production validation (§28).", ev)
+    """Operations documents carry proposals from the plan; they become APPROVED only while the NEWEST trusted
+    production evidence validates production (§28 "status hanya berdasarkan evidence"): a PRODUCTION_VALIDATION
+    artefact or a deployment observation of the production target that served the expected commit healthy.
+    A newer failed / unattributable observation returns the documents to DRAFT."""
+    ev = ctx.signals.production_evidence()
+    latest = ev[-1] if ev else None
+    if latest is not None and _validates_production(latest) and ctx.version.approved:
+        at = f" (commit {latest.commit[:12]})" if latest.commit else ""
+        return ST_APPROVED, f"production validation evidence: {latest.id}{at}", [latest]
+    reason = ("Usulan operasional dari rencana yang disetujui; status APPROVED hanya setelah evidence production "
+              "validation (§28).")
+    if latest is not None and not _validates_production(latest):
+        reason += (f" Observasi produksi terbaru `{latest.id}` tidak memvalidasi produksi "
+                   f"({latest.get('status') or 'UNKNOWN'}).")
+    return ST_DRAFT, reason, [latest] if latest else []
+
+
+def _deployment_reference(ctx: _Ctx) -> str:
+    """Reference (never a verdict) to the newest observation of the registered production target."""
+    obs = [e for e in ctx.signals.production_evidence() if e.kind == "RUNTIME_OBSERVATION"]
+    if not obs:
+        return ""  # nothing observed: the section keeps only the plan text (or stays documentation pending)
+    e = obs[-1]
+    parts = [f"target `{e.get('target')}`" if e.get("target") else "",
+             f"commit yang diharapkan `{e.commit[:12]}`" if e.commit else "",
+             f"observasi `{e.id}`" + (f" pada {e.get('observed_at') or e.created_at}" if (e.get("observed_at") or
+                                                                                    e.created_at) else "")]
+    return "**Referensi deployment (observe-only):** " + ", ".join(p for p in parts if p) + "."
+
+
+def _ops_links(ev: list[EvidenceRef]) -> dict[str, Any]:
+    return {k: v for k, v in {"evidence": [e.id for e in ev], "commit": sorted({e.commit for e in ev if e.commit})}
+            .items() if v}
 
 
 def _ops_doc(ctx: _Ctx, node: p1.Node, parent: str, fill: Callable[[_Doc], bool]) -> None:
@@ -1437,16 +1565,26 @@ def _ops_doc(ctx: _Ctx, node: p1.Node, parent: str, fill: Callable[[_Doc], bool]
     ctx.add(logical_id=node.key, node=node.number, title=node.title, kind="DOC", doc_type=spec.doc_type, parent=parent,
             timing=node.timing, status=status, reason=reason, owner=ctx.owner(node.owner_role),
             slice_={"ops": ops, "evidence": [e.slice() for e in ev], "kind": node.doc_type,
-                    "restore": [e.slice() for e in ctx.signals.evidence_of("RESTORE_TEST")]},
-            build=build)
+                    "restore": [e.slice() for e in ctx.signals.evidence_of("RESTORE_TEST")],
+                    "deployment": _deployment_reference(ctx) if node.doc_type == "OPERATIONAL_OVERVIEW" else "",
+                    "platform_ops": ctx.signals.platform_ops},
+            links={**ctx.project_links(), **_ops_links(ev + ctx.signals.evidence_of("RESTORE_TEST"))}, build=build)
 
 
 def _ops_fillers(ctx: _Ctx) -> dict[str, Callable[[_Doc], bool]]:
     ops = ctx.view.operations
     restore = ctx.signals.evidence_of("RESTORE_TEST")
+    facts = ctx.signals.platform_ops  # platform project: the controller's own rules (empty for products)
 
     def lst(key: str) -> list[str]:
         return [as_text(x) for x in as_list(ops.get(key)) if as_text(x)]
+
+    def plan_or_fact(plan_text: str, fact_key: str) -> str:
+        # the plan's proposal (schema revision 3) and, for the platform project, the controller's own rule
+        return _join(plan_text, facts.get(fact_key, ""))
+
+    log_policy = _mapping(ops.get("log_policy"))
+    alert_policy = _mapping(ops.get("alert_policy"))
 
     slo = [x for x in as_list(ops.get("sli_slo_proposals")) if isinstance(x, dict) and as_text(x.get("indicator"))]
 
@@ -1458,10 +1596,10 @@ def _ops_fillers(ctx: _Ctx) -> dict[str, Callable[[_Doc], bool]]:
         return [x for x in slo if any(w in as_text(x.get("indicator")).lower() for w in words)]
 
     def overview(b: _Doc) -> bool:
-        b.put("production_architecture", as_text(ops.get("overview")))
+        b.put("production_architecture", _join(as_text(ops.get("overview")), _deployment_reference(ctx)))
         b.put("ownership", known(ops.get("ownership")) or ctx.owner("Operations Owner"))
         b.put("dependencies", _bullets(lst("dependencies")))
-        b.put("support", "")  # not in the plan schema: documentation pending
+        b.put("support", plan_or_fact(as_text(ops.get("support")), "overview.support"))
         crit = known(ops.get("criticality"))
         b.put("criticality", f"{crit} (usulan rencana)" if crit else "UNKNOWN (belum ditetapkan di rencana)")
         b.put("sli_slo_sla", _bullets([slo_line(x) for x in slo]))
@@ -1478,14 +1616,15 @@ def _ops_fillers(ctx: _Ctx) -> dict[str, Callable[[_Doc], bool]]:
         text = as_text(ops.get("logging"))
         b.put("application_logs", text)
         for k in ("audit_logs", "security_logs", "retention", "access"):
-            b.put(k, "")  # the plan schema has one logging statement: the rest is documentation pending
-        return bool(text)
+            b.put(k, plan_or_fact(as_text(log_policy.get(k)), f"logging.{k}"))
+        return bool(text or any(as_text(v) for v in log_policy.values()) or any(k.startswith("logging.") for k in facts))
 
     def alerting(b: _Doc) -> bool:
         b.put("alert_rules", _bullets(lst("alerting")))
         for k in ("severity", "notification", "escalation"):
-            b.put(k, "")
-        return bool(lst("alerting"))
+            b.put(k, plan_or_fact(as_text(alert_policy.get(k)), f"alerting.{k}"))
+        return bool(lst("alerting") or any(as_text(v) for v in alert_policy.values())
+                    or any(k.startswith("alerting.") for k in facts))
 
     def slo_doc(b: _Doc) -> bool:
         avail = match("avail", "uptime")
@@ -1502,40 +1641,67 @@ def _ops_fillers(ctx: _Ctx) -> dict[str, Callable[[_Doc], bool]]:
         return bool(slo)
 
     def backup(b: _Doc) -> bool:
-        bk = ops.get("backup") if isinstance(ops.get("backup"), dict) else {}
+        bk = _mapping(ops.get("backup"))
         for k in ("scope", "frequency", "retention", "restore_procedure"):
             b.put(k, as_text(bk.get(k)))
-        b.put("storage", "")
+        b.put("storage", plan_or_fact(as_text(bk.get("storage")), "backup.storage"))
         b.live("restore_testing", _live("EvidenceArtifact RESTORE_TEST (tepercaya)", _join(
             _refs("Restore test tercatat", [e.id for e in restore]),
             "Tanpa evidence restore test = belum teruji; dokumen tidak menyatakan restore berhasil.")))
-        return any(as_text(bk.get(k)) for k in ("scope", "frequency", "retention", "restore_procedure"))
+        return any(as_text(bk.get(k)) for k in ("scope", "frequency", "retention", "restore_procedure", "storage"))
 
     def maintenance(b: _Doc) -> bool:
         b.put("jobs", _bullets(lst("maintenance")))
-        b.put("checks", "")
-        b.put("routine_activities", "")
-        return bool(lst("maintenance"))
+        b.put("checks", plan_or_fact(_bullets(lst("maintenance_checks")), "maintenance.checks"))
+        b.put("routine_activities", plan_or_fact(_bullets(lst("routine_activities")), "maintenance.routine_activities"))
+        return bool(lst("maintenance") or lst("maintenance_checks") or lst("routine_activities")
+                    or any(k.startswith("maintenance.") for k in facts))
 
     return {"OPERATIONAL_OVERVIEW": overview, "MONITORING": monitoring, "LOGGING": logging, "ALERTING": alerting,
             "SLO": slo_doc, "BACKUP_RESTORE": backup, "MAINTENANCE": maintenance}
 
 
+# Plan runbook keys (SUGGESTED_RUNBOOKS) -> the repository runbook that carries that procedure.
+RUNBOOK_ALIASES = {"restart": "restart-recovery", "recovery": "restart-recovery", "db-recovery": "backup-restore",
+                   "backup": "backup-restore", "restore": "backup-restore"}
+
+
+def _repo_runbook(ctx: _Ctx, key: str) -> RunbookSource | None:
+    by = {r.key: r for r in ctx.signals.runbooks}
+    return by.get(key) or by.get(RUNBOOK_ALIASES.get(key, "")) or next(
+        (r for k, r in sorted(by.items()) if k.startswith(key + "-")), None)
+
+
 def _runbook(ctx: _Ctx, key: str, rb: dict[str, Any], parent: str) -> None:
+    """Runbook per plan entry. Procedure/verification/rollback come only from a reviewed runbook of the project's
+    own repository (platform: docs/runbooks); without one they stay pending for the Operations Owner."""
     spec = p1.DOC_TYPES["RUNBOOK"]
     logical_id = f"{parent}/runbook-{key}"
-    title = f"Runbook — {as_text(rb.get('title')) or key}"
+    src = _repo_runbook(ctx, key)
+    title = f"Runbook — {as_text(rb.get('title')) or (src.title if src else '') or key}"
 
     def build(doc: RenderedDocument) -> None:
         b = _Doc(spec, doc.logical_doc_id)
-        b.put("purpose_trigger", as_text(rb.get("purpose")))
-        for k in ("prerequisites", "procedure", "verification", "rollback", "escalation"):
-            b.put(k, "")  # written by the Operations Owner at release candidate; never invented
+        b.put("purpose_trigger", _join(as_text(rb.get("purpose")), src.get("trigger") if src else "",
+                                       f"_Sumber prosedur: `{src.path}` (runbook repositori yang direview)._"
+                                       if src else ""))
+        if src is None:
+            for k in ("prerequisites", "procedure", "verification", "rollback", "escalation"):
+                b.put(k, "")  # written by the Operations Owner at release candidate; never invented
+        else:
+            b.put("prerequisites", src.get("prerequisites", "authority"))
+            b.put("procedure", src.get("steps", "procedure"))
+            b.put("verification", src.get("verification"))
+            b.put("rollback", src.get("steps — rollback", "rollback"))
+            b.put("escalation", src.get("escalation"))
         _compose(doc, b, header_title=title, metadata=ctx.metadata(doc))
 
     ctx.add(logical_id=logical_id, node="08", title=title, kind="DOC", doc_type="RUNBOOK", parent=parent,
             timing=p1.Timing.RELEASE_CANDIDATE, status=_ok_status(ctx), reason="",
-            owner=ctx.owner("Operations Owner"), slice_={"runbook": rb}, template_key="runbook", build=build)
+            owner=ctx.owner("Operations Owner"), slice_={"runbook": rb, "source": src.slice() if src else None},
+            template_key="runbook",
+            links={"related": ["08-operational-overview"],
+                   **ctx.project_links(evidence_kinds=("RESTORE_TEST",))}, build=build)
 
 
 # --- §27 04. VA / PT from real results ------------------------------------------------------------
@@ -1563,9 +1729,12 @@ def _assessment_from_evidence(ctx: _Ctx, ev: EvidenceRef, parent: str, doc_type:
                                  f"{ev.origin or '—'})", "Temuan dibaca dari artefak hasil nyata; tidak disalin atau "
                                                          "diringkas sebagai status di dokumen."))
         b.put("remediation", ev.get("remediation"))
-        b.live("evidence", _live("AEOS Evidence", _join(_refs("EvidenceArtifact", [ev.id]),
-                                                        f"Commit: `{ev.commit}`" if ev.commit else "",
-                                                        f"Environment: {ev.environment}" if ev.environment else "")))
+        external = ev.get("provenance") == "EXTERNAL_HUMAN_PROVIDED"
+        b.live("evidence", _live("AEOS Evidence", _join(
+            _refs("EvidenceArtifact", [ev.id]), f"Commit: `{ev.commit}`" if ev.commit else "",
+            f"Environment: {ev.environment}" if ev.environment else "",
+            (f"Laporan eksternal ({ev.get('tester') or 'penguji tidak tercatat'}, {ev.get('performed_on') or '—'}) "
+             "didaftarkan operator; AEOS tidak melakukan atau memverifikasi pengujian ini.") if external else "")))
         _compose(doc, b, header_title=title, metadata=ctx.metadata(doc))
 
     ctx.add(logical_id=logical_id, node="04", title=title, kind="DOC", doc_type=doc_type, parent=parent,
@@ -1601,8 +1770,12 @@ def _change_record(ctx: _Ctx, c: ChangeInfo, parent: str) -> None:
                              ("**Acceptance criteria**\n\n" + _bullets(c.acceptance_criteria))
                              if c.acceptance_criteria else "",
                              ("**Delta kontrak (path kontrak yang berubah)**\n\n" +
-                              _bullets([f"`{p}`" for p in c.contract_deltas])) if c.contract_deltas else ""))
-        b.put("risk", f"Risk class TaskSpec: {c.risk_class}" if c.risk_class else "")
+                              _bullets([f"`{p}`" for p in c.contract_deltas])) if c.contract_deltas else "",
+                             ("**Delta dependensi (manifest/lockfile yang berubah)**\n\n" +
+                              _bullets([f"`{p}`" for p in c.dependency_deltas])) if c.dependency_deltas else ""))
+        b.put("risk", _join(f"Risk class TaskSpec: {c.risk_class}" if c.risk_class else "",
+                            ("**Delta keputusan (keputusan pemilik yang terikat pada perubahan ini)**\n\n"
+                             + _bullets([f"`{d}`" for d in c.decision_refs])) if c.decision_refs else ""))
         b.put("impact", as_text(f.get("user_impact")) if f is not None else "")
         b.live("implementation", _live(f"{c.repo or 'repository'} pull request", _join(
             f"PR: {c.pr_url}" if c.pr_url else (f"PR #{c.pr_number}" if c.pr_number else ""),
@@ -1625,10 +1798,135 @@ def _change_record(ctx: _Ctx, c: ChangeInfo, parent: str) -> None:
     links = {"requirement": [f.key] if f is not None else [], "tasks": [c.task_key], "task_ids": [c.task_id],
              **{k: v for k, v in {"accepted_head": [c.accepted_head_sha] if c.accepted_head_sha else [],
                                   "merge_commit": [c.merge_commit_sha] if c.merge_commit_sha else [],
-                                  "pull_request": [c.pr_url] if c.pr_url else []}.items() if v}}
+                                  "pull_request": [c.pr_url] if c.pr_url else [],
+                                  "evidence": list(c.evidence_ids),
+                                  "decision": [d.split(":", 1)[-1] for d in c.decision_refs]}.items() if v}}
     ctx.add(logical_id=logical_id, node="10", title=title, kind="DOC", doc_type="CHANGE_RECORD", parent=parent,
             timing=p1.Timing.IMPLEMENTATION_PR, status=status, reason=reason, owner=ctx.owner("Change Owner"),
             slice_={"change": c.slice(), "feature": f.raw if f is not None else None}, links=links, build=build)
+
+
+# --- §27 09. Incidents & Problems (from AEOS Operations incident records) ---------------------------
+
+_DETECTED_BY = {"emergency_stop": "emergency stop oleh operator", "alert": "alert operasi",
+                "manual": "laporan operator"}
+
+
+def _incident_links(inc: IncidentInfo) -> dict[str, Any]:
+    return {k: v for k, v in {
+        "incident": [inc.id], "evidence": sorted({*inc.evidence_ids, *inc.root_cause_evidence}),
+        "related": list(inc.follow_up_ids) + ([inc.root_cause_ref] if inc.root_cause_ref else []),
+        "regression": list(inc.regression_tests) + list(inc.eval_cases)}.items() if v}
+
+
+def _incident_report(ctx: _Ctx, inc: IncidentInfo, parent: str, used: set[str]) -> None:
+    """INCIDENT_REPORT per recorded incident (§28 Incident: timeline + evidence, analysis/decision, corrective
+    action). Every section comes from the OpsIncident record; what the record lacks stays pending, a root cause
+    is shown only with its supporting evidence (§16) and nothing is inferred."""
+    spec = p1.DOC_TYPES["INCIDENT_REPORT"]
+    logical_id = f"{parent}/{_unique_key('incident-' + feature_slug(inc.id)[:12], used, fallback='incident')}"
+    title = f"Incident — {inc.title[:80]}"
+    resolved = inc.status == "RESOLVED"
+    if resolved:
+        status, reason = _ok_status(ctx), f"incident RESOLVED pada {inc.resolved_at or '—'} (root cause dengan bukti, " \
+                                          "corrective action dan regression/eval case tercatat)"
+    else:
+        status = ST_DRAFT
+        reason = f"incident {inc.status}; belum dapat ditutup: {', '.join(inc.resolution_missing) or '—'}"
+
+    def build(doc: RenderedDocument) -> None:
+        b = _Doc(spec, doc.logical_doc_id)
+        b.put("summary", _join(f"**{inc.title}**", _table(["Field", "Nilai"], [
+            ["Incident", f"`{inc.id}`"], ["Sumber", f"{inc.source}" + (f" (`{inc.source_ref}`)" if inc.source_ref
+                                                                         else "")],
+            ["Owner", inc.owner or "—"], ["Dibuka", inc.created_at or "—"]])))
+        b.put("impact", _join(inc.impact, f"Blast radius (dideklarasikan): {inc.declared_blast_radius}"
+                              if inc.declared_blast_radius else "",
+                              ("Blast radius (diturunkan dari catatan AEOS):\n\n" + _bullets(inc.derived_blast_radius))
+                              if inc.derived_blast_radius else ""))
+        b.live("detection", _live(f"AEOS Operations (OpsIncident `{inc.id}`)", _join(
+            f"Terdeteksi melalui {_DETECTED_BY.get(inc.source, inc.source)}"
+            + (f" (`{inc.source_ref}`)" if inc.source_ref else "") + f" pada {inc.created_at or '—'}.",
+            _refs("Evidence saat dibuka", list(inc.timeline[0][3]) if inc.timeline else []))))
+        b.live("timeline", _live(f"AEOS Operations (OpsIncident `{inc.id}`)", _bullets(
+            [f"{at} — {kind}: {note}" + (f" (evidence: {', '.join(ev)})" if ev else "")
+             for at, kind, note, ev in inc.timeline]) or "Timeline dibaca dari record insiden."))
+        response = [f"{at} — {note}" for at, kind, note, _ev in inc.timeline if kind in ("note", "follow_up")]
+        if inc.source == "emergency_stop" and inc.source_ref:
+            response.insert(0, f"Emergency stop `{inc.source_ref}` menghentikan capability berisiko (§33); "
+                               "langkah containment tercatat sebagai evidence insiden.")
+        b.put("response", _bullets(response))
+        if inc.root_cause:
+            b.put("root_cause", _join(inc.root_cause, _refs("Bukti pendukung", list(inc.root_cause_evidence)),
+                                      _refs("Referensi (proposal/TaskSpec)", [inc.root_cause_ref or ""])))
+        elif inc.hypotheses:
+            b.put("root_cause", _join("Belum ada root cause yang didukung bukti (§16: tidak ada root cause tanpa "
+                                      "bukti). Hipotesis yang tercatat:", _bullets(inc.hypotheses)))
+        else:
+            b.put("root_cause", "")
+        resolution_note = next((note for _at, kind, note, _ev in reversed(inc.timeline) if kind == "resolved"), "")
+        b.put("resolution", _join(f"Diselesaikan pada {inc.resolved_at}.", resolution_note) if resolved else
+              f"Belum diselesaikan. Syarat penutupan yang belum terpenuhi: {', '.join(inc.resolution_missing)}."
+              if inc.resolution_missing else "")
+        b.put("corrective_actions", _bullets(inc.corrective_actions))
+        b.put("preventive_actions", _join(
+            ("Regression test / eval case yang menjaga agar tidak terulang (§33):\n\n"
+             + _bullets([f"`{t}`" for t in (*inc.regression_tests, *inc.eval_cases)]))
+            if inc.regression_tests or inc.eval_cases else "",
+            ("Tindak lanjut lewat proses perubahan (review manusia):\n\n" + _bullets(inc.follow_ups))
+            if inc.follow_ups else ""))
+        b.live("evidence", _live("AEOS Evidence", _join(
+            _refs("EvidenceArtifact", sorted({*inc.evidence_ids, *inc.root_cause_evidence})) or
+            "Belum ada evidence yang ditautkan ke insiden ini.")))
+        _compose(doc, b, header_title=title, metadata=ctx.metadata(doc))
+
+    ctx.add(logical_id=logical_id, node="09", title=title, kind="DOC", doc_type="INCIDENT_REPORT", parent=parent,
+            timing=p1.Timing.INCIDENT, status=status, reason=reason, owner=inc.owner or ctx.owner("Incident Commander"),
+            slice_={"incident": inc.slice()}, links=_incident_links(inc), build=build)
+
+
+def _problem_groups(incidents: list[IncidentInfo]) -> list[tuple[str, list[IncidentInfo]]]:
+    """A problem record exists only for an evidenced root cause (a known error, §16). Incidents that name the
+    same root-cause reference (proposal/TaskSpec) share one problem; otherwise one problem per incident."""
+    groups: dict[str, list[IncidentInfo]] = {}
+    for inc in incidents:
+        if inc.root_cause and inc.root_cause_evidence:
+            groups.setdefault(inc.root_cause_ref or inc.id, []).append(inc)
+    return sorted(groups.items())
+
+
+def _problem_record(ctx: _Ctx, key: str, incs: list[IncidentInfo], parent: str, used: set[str]) -> None:
+    spec = p1.DOC_TYPES["PROBLEM_RECORD"]
+    logical_id = f"{parent}/{_unique_key('problem-' + feature_slug(key)[:12], used, fallback='problem')}"
+    title = f"Problem — {incs[0].root_cause[:80]}"
+    closed = all(i.status == "RESOLVED" for i in incs)
+    status = _ok_status(ctx) if closed else ST_DRAFT
+    reason = "semua insiden terkait RESOLVED" if closed else \
+        "insiden terkait belum RESOLVED: " + ", ".join(i.id for i in incs if i.status != "RESOLVED")
+
+    def build(doc: RenderedDocument) -> None:
+        b = _Doc(spec, doc.logical_doc_id)
+        b.put("problem_statement", _join(incs[0].root_cause, "Insiden terkait:\n\n" + _bullets(
+            [f"`{i.id}` — {i.title}" for i in incs])))
+        b.put("root_cause", _join(*[_join(i.root_cause, _refs("Bukti pendukung", list(i.root_cause_evidence)))
+                                    for i in incs], _refs("Referensi (proposal/TaskSpec)", [key])
+                                  if key not in {i.id for i in incs} else ""))
+        b.put("impact", _bullets([f"`{i.id}`: {i.impact}" for i in incs if i.impact]))
+        b.put("actions", _join(_bullets([a for i in incs for a in i.corrective_actions]),
+                               _bullets([f for i in incs for f in i.follow_ups])))
+        b.live("validation", _live("AEOS verifier / evaluation (hasil test dan eval nyata)", _join(
+            _refs("Regression test / eval case", sorted({t for i in incs for t in (*i.regression_tests,
+                                                                                      *i.eval_cases)})),
+            "Validasi bahwa problem tidak terulang dibaca dari hasil test/eval yang dijalankan.")))
+        _compose(doc, b, header_title=title, metadata=ctx.metadata(doc))
+
+    links: dict[str, list[str]] = {}
+    for i in incs:
+        for k, v in _incident_links(i).items():
+            links[k] = sorted({*links.get(k, []), *v})
+    ctx.add(logical_id=logical_id, node="09", title=title, kind="DOC", doc_type="PROBLEM_RECORD", parent=parent,
+            timing=p1.Timing.INCIDENT, status=status, reason=reason, owner=ctx.owner("Problem Manager"),
+            slice_={"problem": key, "incidents": [i.slice() for i in incs]}, links=links, build=build)
 
 
 def _improvement(ctx: _Ctx, imp: ImprovementInfo, parent: str) -> None:
@@ -1659,6 +1957,13 @@ def _improvement(ctx: _Ctx, imp: ImprovementInfo, parent: str) -> None:
 
 
 # --- §27 12. Retirement ---------------------------------------------------------------------------------
+
+
+def _retirement_links(items: dict[Any, dict[str, Any]]) -> dict[str, list[str]]:
+    """Evidence / decision ids the retirement checklist items carry (closure execution is linked, never copied)."""
+    ev = sorted({str(e) for i in items.values() for e in (i.get("evidence_ids") or []) if e})
+    dec = sorted({str(i["decision_id"]) for i in items.values() if i.get("decision_id")})
+    return {k: v for k, v in {"evidence": ev, "decision": dec}.items() if v}
 
 
 def _retirement(ctx: _Ctx, node: p1.Node, parent: str) -> None:
@@ -1702,15 +2007,16 @@ def _retirement(ctx: _Ctx, node: p1.Node, parent: str) -> None:
         b.human("final_approval", "Final approval retirement hanya melalui Decision manusia (kind RETIREMENT).")
         _compose(doc, b, header_title=node.title, metadata=ctx.metadata(doc))
 
-    slice_ = {"items": [{k: v for k, v in i.items() if k in ("key", "title", "owner_action", "detail")}
-                        for i in items.values()],
-              "data": ctx.view.data.get("items"), "lifecycle": ctx.project.lifecycle}
+    slice_items: list[dict[str, Any]] = [{k: v for k, v in i.items() if k in ("key", "title", "owner_action", "detail")}
+                                         for i in items.values()]
     # live counts in the checklist (open tasks, attachments ...) are not part of the hash: only names/actions are
-    for i in slice_["items"]:
+    for i in slice_items:
         i["detail"] = {k: v for k, v in (i.get("detail") or {}).items() if isinstance(v, list)}
+    slice_ = {"items": slice_items, "data": ctx.view.data.get("items"), "lifecycle": ctx.project.lifecycle}
     ctx.add(logical_id=node.key, node=node.number, title=node.title, kind="DOC", doc_type=spec.doc_type, parent=parent,
             timing=node.timing, status=_ok_status(ctx), reason="", owner=ctx.owner(node.owner_role), slice_=slice_,
-            template_key="retirement-decommission", build=build)
+            template_key="retirement-decommission", links={**ctx.project_links(commits=True), **_retirement_links(items)},
+            build=build)
 
 
 def _template_doc(ctx: _Ctx, tpl: p1.TemplateSpec, parent: str) -> None:
@@ -1783,7 +2089,7 @@ def render_document_set(*, project: ProjectIdentity, version: VersionIdentity, c
                     # the PRD links to; plan-level RFC/TDD entries are de-duplicated against them.
                     for f in view.features:
                         flag = f.needs_rfc if kind == "RFC" else f.needs_tdd
-                        data = f.raw.get(kind.lower()) if isinstance(f.raw.get(kind.lower()), dict) else {}
+                        data = _mapping(f.raw.get(kind.lower()))
                         if flag:
                             entries.append((_unique_key(f.key, used), f.title, data, f))
                     for i, raw in enumerate(as_list(view.get("rfcs" if kind == "RFC" else "tdds"))):
@@ -1863,10 +2169,14 @@ def render_document_set(*, project: ProjectIdentity, version: VersionIdentity, c
             for child in node.children:
                 if child.kind == p1.NodeKind.FOLDER:
                     names = ", ".join(t for _k, t in p1.SUGGESTED_RUNBOOKS)
-                    used: set[str] = set()
-                    books = [(_unique_key(as_text(rb.get("key") or rb.get("title")) or f"runbook-{i + 1}", used,
+                    used_books: set[str] = set()
+                    books = [(_unique_key(as_text(rb.get("key") or rb.get("title")) or f"runbook-{i + 1}", used_books,
                                           fallback=f"runbook-{i + 1}"), rb)
                              for i, rb in enumerate(as_list(view.operations.get("runbooks"))) if isinstance(rb, dict)]
+                    # reviewed repository runbooks the plan does not list are real procedures too (platform)
+                    covered = {src.key for key, _rb in books if (src := _repo_runbook(ctx, key)) is not None}
+                    books += [(_unique_key(r.key, used_books), {"key": r.key, "title": r.title, "purpose": ""})
+                              for r in ctx.signals.runbooks if r.key not in covered]
                     _folder(ctx, child, node.key, has_items=bool(books),
                             reason=f"Runbook ({names}) dibuat sesuai scope saat release candidate; rencana belum "
                                    "memuat runbook.")
@@ -1876,10 +2186,24 @@ def render_document_set(*, project: ProjectIdentity, version: VersionIdentity, c
                     _ops_doc(ctx, child, node.key, fillers[child.doc_type or ""])
         elif node.key == "09-incidents-problems":
             _folder(ctx, node, root, has_items=True)
+            incidents = sorted(ctx.signals.incidents, key=lambda i: (i.created_at or "", i.id))
+            problems = _problem_groups(incidents)
+            used_09: set[str] = set()
             for child in node.children:
-                _folder(ctx, child, node.key, has_items=False,
-                        reason="Dibuat ketika insiden/problem nyata terjadi dan tercatat; AEOS belum memiliki record "
-                               "insiden/problem produk untuk proyek ini (tidak dikarang).")
+                if child.key == "09-incidents":
+                    _folder(ctx, child, node.key, has_items=bool(incidents),
+                            reason="Dibuat ketika insiden nyata tercatat di AEOS Operations (OpsIncident); belum ada "
+                                   "insiden untuk proyek ini (tidak dikarang).")
+                    for inc in incidents:
+                        _incident_report(ctx, inc, child.key, used_09)
+                elif child.key == "09-problems":
+                    _folder(ctx, child, node.key, has_items=bool(problems),
+                            reason="Problem record dibuat dari insiden dengan root cause yang didukung bukti (known "
+                                   "error); belum ada untuk proyek ini (tidak dikarang).")
+                    for key, group in problems:
+                        _problem_record(ctx, key, group, child.key, used_09)
+                else:
+                    _folder(ctx, child, node.key, has_items=False, reason="Belum ada record untuk bagian ini.")
         elif node.key == "10-changes":
             changes = sorted(ctx.signals.changes, key=lambda c: c.task_key)
             _folder(ctx, node, root, has_items=bool(changes),

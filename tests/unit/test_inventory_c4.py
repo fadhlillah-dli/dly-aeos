@@ -190,6 +190,26 @@ def test_manifest_records_digest_ports_config_refs_and_compatibility(seeded):
     assert oc["compatibility"]["compatibility"]["os"] == ["windows", "macos", "linux"]
 
 
+def test_every_installable_binary_component_records_its_identity_fields():
+    """§07: digest, port, configuration references and compatibility per component - every REQUIRED/OPTIONAL
+    component the bootstrap probes as a binary (git, vscode, docker, ...) states them, nothing guessed."""
+    from aeos.inventory.manifest import load_manifest
+
+    fields = ("approved_digest", "distribution", "signature", "ports", "config_refs", "compatibility")
+    missing = {}
+    for c in load_manifest().data["components"]:
+        if (c.get("probe") or {}).get("type") == "binary" and c.get("requirement") in ("REQUIRED", "OPTIONAL"):
+            gaps = [f for f in fields if f not in c]
+            if gaps:
+                missing[c["component_id"]] = gaps
+            assert c.get("approved_digest") is None or c.get("approved_pin"), c["component_id"]
+    assert not missing, missing
+    by = {c["component_id"]: c for c in load_manifest().data["components"]}
+    assert set(by["git"]["compatibility"]["os"]) == {"windows", "macos", "linux"}
+    assert "settings:commit_author_email" in by["git"]["config_refs"]
+    assert by["mermaid-cli"]["config_refs"] == ["settings:mmdc_binary"] and by["docker"]["ports"] == []
+
+
 def test_manifest_rejects_guessed_or_invalid_identity_fields():
     from aeos.inventory.manifest import validate_manifest
 

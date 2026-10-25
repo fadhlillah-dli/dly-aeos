@@ -55,3 +55,4 @@ never rewritten. Number ranges per module group: 0001-0009 platform, 0010 doctor
 | [ADR-0094](ADR-0094-product1-schema-seam-and-human-governed-publication.md) | Product 1 from schema-v1 plans; HUMAN_GOVERNED content carried on publication; SUPERSEDED banners; publish gates | ACCEPTED |
 | [ADR-0095](ADR-0095-ci-gates-supply-chain-and-security-tooling.md) | CI gates, explicit gate mapping, supply-chain reports and security tooling | PROPOSED |
 | [ADR-0106](ADR-0106-verification-delivery-broker-audit-closure.md) | Verification, delivery and broker: closing the audited gaps honestly | PROPOSED |
+| [ADR-0114](ADR-0114-platform-docs-readiness-and-evidence-producers.md) | Platform, documentation readiness and real evidence producers (K4 audit closure) | PROPOSED |

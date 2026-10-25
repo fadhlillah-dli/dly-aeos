@@ -57,6 +57,9 @@ cd dly-aeos
 ./aeos serve                     # http://127.0.0.1:8787
 ```
 
+If `./scripts/bootstrap.sh` says `Permission denied` (a ZIP download or copy lost the executable
+bit), run `sh scripts/bootstrap.sh` instead: it re-runs itself under bash and restores the bit on
+`./aeos` and `./scripts/dev.sh`.
 Full guide: [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md).
 
 The bootstrap scripts **never install system software silently**. They print what is missing with

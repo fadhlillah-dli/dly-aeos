@@ -78,7 +78,7 @@ def build_refs(session: Session, *, domain: str | None, root: Path | None = None
             continue
         decisions.append({"id": d.id, "kind": d.kind, "target_type": d.target_type, "target_id": d.target_id,
                           "target_hash": d.target_hash})
-    decisions.sort(key=lambda d: d["id"])
+    decisions.sort(key=lambda d: d["id"] or "")
     master = root / MASTER_REL
     contracts = _file_refs(root, [root / SCHEMA_REL, *(root / "backend" / "aeos").glob("*/facade.py")])
     adrs = _file_refs(root, list((root / "docs" / "decisions").glob("ADR-*.md")))

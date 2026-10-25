@@ -3,6 +3,7 @@ import { useState } from "react";
 import { get } from "../../api/client";
 import { OpsBadge } from "../../components/control_center/OpsBadge";
 import { Provenance } from "../../components/control_center/Provenance";
+import { RetentionBadge } from "../../components/control_center/RetentionBadge";
 import { Button, ErrorBox, Field, inputClass, Loading, Mono, Table } from "../../components/ui";
 import { absoluteTime, relativeTime } from "../../lib/format";
 import type { AuditRow, ListMeta } from "./types";
@@ -59,6 +60,7 @@ export function AuditTab() {
             { header: "Aktor", cell: (r) => `${r.actor_type}:${r.actor_id.slice(0, 18)}` },
             { header: "Hasil", cell: (r) => <OpsBadge status={r.result} /> },
             { header: "Alasan", cell: (r) => <span className="text-ink-3">{r.reason}</span> },
+            { header: "Retensi", cell: (r) => <RetentionBadge marker={r.retention} /> },
           ]}
         />
       )}

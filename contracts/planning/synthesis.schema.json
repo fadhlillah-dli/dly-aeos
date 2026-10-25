@@ -413,6 +413,7 @@
                       "data_flow",
                       "trust_boundary",
                       "deployment",
+                      "cicd",
                       "journey"
                     ]
                   },
@@ -1052,6 +1053,9 @@
             "ownership": {
               "type": "string"
             },
+            "support": {
+              "type": "string"
+            },
             "dependencies": {
               "type": "array",
               "items": {
@@ -1122,11 +1126,55 @@
             "logging": {
               "type": "string"
             },
+            "log_policy": {
+              "type": "object",
+              "properties": {
+                "audit_logs": {
+                  "type": "string"
+                },
+                "security_logs": {
+                  "type": "string"
+                },
+                "retention": {
+                  "type": "string"
+                },
+                "access": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "audit_logs",
+                "security_logs",
+                "retention",
+                "access"
+              ],
+              "additionalProperties": false
+            },
             "alerting": {
               "type": "array",
               "items": {
                 "type": "string"
               }
+            },
+            "alert_policy": {
+              "type": "object",
+              "properties": {
+                "severity": {
+                  "type": "string"
+                },
+                "notification": {
+                  "type": "string"
+                },
+                "escalation": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "severity",
+                "notification",
+                "escalation"
+              ],
+              "additionalProperties": false
             },
             "backup": {
               "type": "object",
@@ -1142,17 +1190,33 @@
                 },
                 "restore_procedure": {
                   "type": "string"
+                },
+                "storage": {
+                  "type": "string"
                 }
               },
               "required": [
                 "scope",
                 "frequency",
                 "retention",
-                "restore_procedure"
+                "restore_procedure",
+                "storage"
               ],
               "additionalProperties": false
             },
             "maintenance": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "maintenance_checks": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "routine_activities": {
               "type": "array",
               "items": {
                 "type": "string"
@@ -1162,15 +1226,20 @@
           "required": [
             "overview",
             "ownership",
+            "support",
             "dependencies",
             "criticality",
             "sli_slo_proposals",
             "runbooks",
             "monitoring",
             "logging",
+            "log_policy",
             "alerting",
+            "alert_policy",
             "backup",
-            "maintenance"
+            "maintenance",
+            "maintenance_checks",
+            "routine_activities"
           ],
           "additionalProperties": false,
           "description": "08. Operations (proposals; restore/SLO evidence comes from runtime only)"

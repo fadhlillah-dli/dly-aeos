@@ -69,3 +69,28 @@ def test_baseline_only_lists_crossings_that_still_exist():
     mb = _script()
     stale = sorted(set(_baseline()["crossings"]) - mb.crossings())
     assert not stale, f"remove fixed crossings from the baseline (scripts/module_boundaries.py --update): {stale}"
+
+
+# 2026-10-19 (K4): 137 -> 132 after identity got a facade. Lower this number when crossings are removed; raising
+# it means a reviewed change ADDS internal crossings, which this ratchet exists to prevent.
+MAX_CROSSINGS = 132
+
+
+def test_the_crossing_baseline_never_grows():
+    assert len(_baseline()["crossings"]) <= MAX_CROSSINGS
+
+
+def test_every_control_plane_module_with_cross_module_consumers_has_a_facade():
+    """§10: identity, docs_engine and control_center (formerly without one) publish a frozen contract."""
+    for mod in ("identity", "docs_engine", "control_center"):
+        assert (ROOT / "backend" / "aeos" / mod / "facade.py").is_file(), mod
+    targets = {c.split(" -> ")[1].split(".")[0] for c in _baseline()["crossings"]}
+    missing = sorted(t for t in targets if not (ROOT / "backend" / "aeos" / t / "facade.py").is_file())
+    assert not missing, f"modules other modules reach into, without a facade: {missing}"
+
+
+def test_facades_import_cleanly():
+    import importlib
+
+    for mod in ("identity", "docs_engine", "control_center"):
+        importlib.import_module(f"aeos.{mod}.facade")

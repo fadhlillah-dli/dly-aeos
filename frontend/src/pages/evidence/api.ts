@@ -1,5 +1,6 @@
 // Typed client for the Verification & Delivery API (§34, §35). All lists are domain-scoped by the backend.
 import { get, post } from "../../api/client";
+import type { RetentionMarker } from "../../components/control_center/RetentionBadge";
 
 export type Level = "E0" | "E1" | "E2" | "E3" | "E4";
 
@@ -28,6 +29,7 @@ export interface EvidenceItem {
   environment: Record<string, unknown>;
   created_at: string;
   mode: string;
+  retention?: RetentionMarker;
 }
 
 export interface EvidenceList {

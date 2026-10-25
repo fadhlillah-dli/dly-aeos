@@ -75,6 +75,7 @@ def insert(session: Session, *, domain: str = Domain.PERSONAL.value, actor: str 
 
 def remove(session: Session, *, actor: str = "cli:local-operator") -> dict[str, Any]:
     res = session.execute(delete(WorkerRun).where(WorkerRun.mode == DataMode.DEMO.value))
+    removed = int(getattr(res, "rowcount", 0) or 0)  # a DELETE returns a CursorResult (rowcount)
     audit.record(session, actor_type="cli", actor_id=actor, action="workforce.demo.remove", target_type="worker_run",
-                 target_id="*", details={"removed": res.rowcount})
-    return {"removed": res.rowcount}
+                 target_id="*", details={"removed": removed})
+    return {"removed": removed}

@@ -119,6 +119,7 @@ export default function WorkPage() {
         source="WorkerRun / TaskExecution / Lease (scheduler deterministik) + usage dari broker"
         checkedAt={runs.data?.checked_at ?? null}
         evidenceLimit="Heartbeat = liveness, bukan kemajuan/kualitas. Status worker, verifier, review, acceptance dan merge terpisah."
+        relatedDecisionsHref="/decisions?target_type=workforce"
         mode={runs.data?.mode}
         actions={
           <div className="flex flex-wrap items-start gap-2">

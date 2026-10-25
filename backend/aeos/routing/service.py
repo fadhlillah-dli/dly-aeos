@@ -1008,6 +1008,7 @@ def activate_route(
                                code="DATA_TERMS_RESTRICTED", details={"requested": classes})
     reviewed_region = _validated_region(region, route, terms)
     tools = _validated_tool_set(tool_set, route) if runs_on_worker_runtime(route) else list(route.tool_set or [])
+    days: int | None
     if mode == "TRIAL":
         days = expires_in_days or TRIAL_DEFAULT_DAYS
         if not 1 <= days <= TRIAL_MAX_DAYS:

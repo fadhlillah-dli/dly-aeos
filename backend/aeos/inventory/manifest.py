@@ -372,8 +372,8 @@ def upsert_components(session: Session, data: dict[str, Any], *, manifest_hash: 
             "identity_ref": rel.get("identity_ref"),
             "scope": {"domains": sorted(set(domains_src) | set(domains_tgt)), "source": "manifest"},
         }
-        row = rows.get(key)
-        if row is None:
+        rel_row = rows.get(key)
+        if rel_row is None:
             session.add(ComponentRelation(source_id=src, target_id=tgt, relation=kind, lens="DESIGN", **vals))
             counts["relations_created"] += 1
             continue
@@ -381,18 +381,18 @@ def upsert_components(session: Session, data: dict[str, Any], *, manifest_hash: 
         for k, v in vals.items():
             if k == "provenance":
                 continue
-            if getattr(row, k) != v:
-                setattr(row, k, v)
+            if getattr(rel_row, k) != v:
+                setattr(rel_row, k, v)
                 changed = True
-        if row.tombstoned_at is not None:
-            row.tombstoned_at = None
+        if rel_row.tombstoned_at is not None:
+            rel_row.tombstoned_at = None
             changed = True
-        if changed or not row.provenance:
-            row.provenance = vals["provenance"]
+        if changed or not rel_row.provenance:
+            rel_row.provenance = vals["provenance"]
             counts["relations_updated"] += 1
-    for key, row in rows.items():
-        if key not in desired_edges and row.tombstoned_at is None:
-            row.tombstoned_at = now
+    for key, stale_row in rows.items():
+        if key not in desired_edges and stale_row.tombstoned_at is None:
+            stale_row.tombstoned_at = now
             counts["relations_tombstoned"] += 1
     session.flush()
     return counts

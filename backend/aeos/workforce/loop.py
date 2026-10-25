@@ -38,7 +38,9 @@ class SchedulerLoop:
     def _execute(self, run_id: str) -> None:
         fn = self._executor
         if fn is None:
-            from aeos.worker_runtime.executor import execute_run as fn
+            from aeos.worker_runtime.executor import execute_run
+
+            fn = execute_run
         try:
             fn(self.settings, run_id, shutdown=self.shutdown)
         except Exception:  # logged; the lease expires and reconciliation takes over
@@ -156,7 +158,9 @@ def run_once(settings: Settings, *, execute: bool = True,
         for run_id in info["leased"]:
             fn = executor
             if fn is None:
-                from aeos.worker_runtime.executor import execute_run as fn
+                from aeos.worker_runtime.executor import execute_run
+
+                fn = execute_run
             results.append(fn(settings, run_id))
     info["results"] = results
     return info

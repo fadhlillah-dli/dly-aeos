@@ -44,6 +44,7 @@ export default function ProposalsPage() {
         source={list.data?.source ?? "change_proposals + decisions"}
         checkedAt={list.data?.checked_at ?? null}
         evidenceLimit="Usulan dan review bukan instalasi/aktivasi; keputusan manusia terikat baseline/candidate hash"
+        relatedDecisionsHref="/decisions?target_type=change_proposal"
         actions={
           <>
             {isAdmin && (

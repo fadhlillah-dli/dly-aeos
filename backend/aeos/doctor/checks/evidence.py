@@ -303,3 +303,55 @@ def evidence_acceptance_invalidation(ctx: CheckContext) -> Outcome:
                            evidence_to_collect="acceptance INVALIDATED"))
     return Outcome("VERIFIED", f"{len(rows)} acceptance ACCEPTED masih cocok dengan head/PlanVersion/konfigurasi "
                    "verifier saat ini.", evidence=evidence)
+
+
+# Append-only tables whose sequence number is an INTEGER PRIMARY KEY (rowid): a row deleted in the middle
+# leaves a gap that never closes, so a gap proves rows were removed below the application.
+SEQ_TABLES = ("audit_events", "events")
+
+
+def expected_guard_triggers(existing_tables: set[str]) -> list[str]:
+    from aeos.core.db import APPEND_ONLY_TABLES, IMMUTABLE_COLUMNS
+
+    names = [f"trg_{t}_{k}" for t in APPEND_ONLY_TABLES if t in existing_tables for k in ("no_update", "no_delete")]
+    return names + [f"trg_{t}_immutable_cols" for t in IMMUTABLE_COLUMNS if t in existing_tables]
+
+
+@check("evidence.append_only_guard", "EVIDENCE_REVIEW", "Guard append-only audit/evidence utuh",
+       component_id="evidence-store", needs_db=True, ttl_seconds=900, severity_fail="CRITICAL",
+       invalidators=("db:schema",))
+def evidence_append_only_guard(ctx: CheckContext) -> Outcome:
+    """§21/§34: detects what the triggers alone cannot - a guard trigger dropped at the database level, or audit/
+    event rows deleted below the application. Detection only: the database stays writable by the controller OS
+    user until verifier/worker code runs isolated (§20)."""
+    from sqlalchemy import text
+
+    assert ctx.session is not None
+    rows = ctx.session.execute(text("SELECT type, name FROM sqlite_master WHERE type IN ('table', 'trigger')")).all()
+    tables = {n for t, n in rows if t == "table"}
+    triggers = {n for t, n in rows if t == "trigger"}
+    expected = expected_guard_triggers(tables)
+    missing = sorted(set(expected) - triggers)
+    gaps: dict[str, int] = {}
+    for table in SEQ_TABLES:
+        if table not in tables:
+            continue
+        # table names come from the SEQ_TABLES constant above, never from input
+        count, low, high = ctx.session.execute(text(f"SELECT count(*), min(seq), max(seq) FROM {table}")).one()  # noqa: S608
+        if count and (high - low + 1 != count or low != 1):
+            gaps[table] = int(high - count)  # rows missing from 1..max(seq)
+    evidence = {"triggers_expected": len(expected), "triggers_missing": missing, "seq_gaps": gaps,
+                "limit": "deteksi saja: DB dapat ditulis oleh pengguna OS controller sampai runner terisolasi (§20)"}
+    remedy = Remedy(operation="Hentikan run (emergency stop), bandingkan dengan backup terakhir, lalu pasang ulang guard",
+                    command=aeos_cmd("db upgrade"), source="aeos.core.db.install_append_only_triggers",
+                    target="<data>/aeos.sqlite3", privilege="pengguna lokal",
+                    rollback="restore backup yang lolos restore test", evidence_to_collect="evidence.append_only_guard")
+    if missing:
+        return Outcome("FAILED", f"{len(missing)} trigger append-only/immutable hilang: {', '.join(missing[:6])}. "
+                       "Perubahan di bawah aplikasi mungkin terjadi.", evidence=evidence,
+                       error_code="APPEND_ONLY_GUARD_MISSING", remedy=remedy)
+    if gaps:
+        return Outcome("FAILED", "Baris audit/event hilang dari urutan seq ("
+                       + ", ".join(f"{t}: {n}" for t, n in sorted(gaps.items())) + "); catatan dihapus di bawah aplikasi.",
+                       evidence=evidence, error_code="AUDIT_SEQ_GAP", remedy=remedy)
+    return Outcome("VERIFIED", f"{len(expected)} trigger guard ada; urutan audit/event tanpa celah.", evidence=evidence)
