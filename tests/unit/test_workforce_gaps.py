@@ -157,13 +157,33 @@ def _metrics(*, rate=0.8, latency=600.0, queue=120.0, critical=0, security=0, sc
             "performance": {"latency_p50_s": latency, "queue_wait_p50_s": queue}}
 
 
-def _topology_runs(db, *, candidate_metrics=None, baseline_metrics=None, baseline_conditions="sha256:cond"):
+def parallel_attempts(db, run, *, cap=2, overlap=True):
+    """Two bound implementation attempts of *run* as the runtime records them (W6-122: a topology-C result is a
+    two-worker result only when two attempts ran with cap 2 and overlapping windows)."""
+    from aeos.core.ids import new_id
+
+    t0 = utcnow() - timedelta(hours=2)
+    bindings = []
+    for i in range(2):
+        tid = new_id()
+        start = t0 + timedelta(minutes=0 if overlap else 40 * i)
+        db.add(WorkerRun(task_id=tid, project_id="p", domain="PERSONAL", run_type="IMPLEMENTATION",
+                         execution_status="DONE", mode="LIVE", caps={"concurrency_cap": cap}, started_at=start,
+                         finished_at=start + timedelta(minutes=30)))
+        bindings.append({"slot_id": f"c{i}#1", "case_id": f"c{i}", "repetition": 1, "task_id": tid})
+    run.bindings = bindings
+    db.flush()
+
+
+def _topology_runs(db, *, candidate_metrics=None, baseline_metrics=None, baseline_conditions="sha256:cond",
+                   cap=2, overlap=True, role_key="feature-implementer"):
     """A sequential baseline (A) and a bounded-parallel run (C) of the same suite/configuration/conditions."""
-    base = _eval_run(db)
+    base = _eval_run(db, role_key=role_key)
     base.topology, base.conditions_hash, base.metrics = "A", baseline_conditions, baseline_metrics or _metrics()
-    cand = _eval_run(db)
+    cand = _eval_run(db, role_key=role_key)
     cand.topology, cand.conditions_hash = "C", "sha256:cond"
     cand.metrics = candidate_metrics or _metrics(latency=360.0, queue=30.0)  # same acceptance, faster
+    parallel_attempts(db, cand, cap=cap, overlap=overlap)
     db.flush()
     return cand, base
 
@@ -200,7 +220,9 @@ def test_owner_sets_two_workers_only_with_passing_evaluation_and_record(db, fake
     assert seen["details"]["baseline_eval_run_id"] == baseline.id
     assert set(seen["details"]["benefit"]["gains"]) == {"latency_p50_s", "queue_wait_p50_s"}
     assert seen["details"]["decision_record"]["evidence_ids"] == [ok.id, baseline.id]
-    assert out["scope"] == {"risk_classes": ["R1"]}
+    # §44 the scope is the task class the evaluation proved (the suite's role), never wider (W6-122)
+    assert out["scope"] == {"risk_classes": ["R1"], "role_keys": ["feature-implementer"]}
+    assert seen["details"]["parallel_execution"]["status"] == "PROVEN"
     assert scheduler.concurrency_cap(db)[0] == 2
     # §44: the mode is adopted per task class only
     t_r1 = types.SimpleNamespace(project_id="p", role_key="feature-implementer", risk_class="R1", domain="PERSONAL")
@@ -224,13 +246,17 @@ def _decision(db, **kw):
     ("no gain", _metrics(), None, "sha256:cond"),
     ("unmeasured", {"performance": {"latency_p50_s": 100.0}}, None, "sha256:cond"),
     ("other conditions", None, None, "sha256:other"),
+    # W6-122: a run labelled C whose attempts never ran as two overlapping workers is not a bounded-parallel result
+    ("sequential run labelled C", None, None, "seq"),
+    ("one worker cap", None, None, "cap1"),
 ])
 def test_two_workers_need_a_measured_benefit_over_the_sequential_baseline(db, fakes, problem, candidate, baseline,
                                                                          conditions):
     """§44 (re-audit): any single gate-passing EvalRun used to be accepted; the bounded-parallel topology must be
     shown better than the sequential baseline on the same configuration for that task class."""
     cand, base = _topology_runs(db, candidate_metrics=candidate, baseline_metrics=baseline,
-                                baseline_conditions=conditions)
+                                baseline_conditions="sha256:cond" if conditions in ("seq", "cap1") else conditions,
+                                overlap=conditions != "seq", cap=1 if conditions == "cap1" else 2)
     with pytest.raises(Blocked) as exc:
         scheduler.set_concurrency(db, max_active=2, actor="user:o", actor_user_id="owner-1", rationale="uji dua worker",
                                   eval_run_id=cand.id, decision_record=RECORD, scope={"risk_classes": ["R1"]},

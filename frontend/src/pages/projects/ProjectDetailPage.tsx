@@ -5,6 +5,7 @@ import { Link, useLocation, useParams } from "react-router-dom";
 import { ApiError, get, patch } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { Button, Card, EmptyState, ErrorBox, Field, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Tabs } from "../../components/ui";
+import { TrustedSuitePanel } from "../../components/workforce/TrustedSuitePanel";
 import { absoluteTime } from "../../lib/format";
 import { AttachmentsPanel } from "./AttachmentsPanel";
 import { ClassificationBadge, DomainBadge, ModuleBadge, PlatformBadge } from "./badges";
@@ -269,6 +270,8 @@ export default function ProjectDetailPage() {
           { id: "attachments", label: `Lampiran (${project.attachments?.total ?? 0})`, content: <AttachmentsPanel projectId={project.id} isAdmin={canWrite} /> },
           { id: "context", label: "Konteks", content: <ContextPanel project={project} isAdmin={canWrite} /> },
           { id: "memory", label: "Memori", content: <MemoryPanel project={project} isAdmin={canWrite} /> },
+          // ADR-0060: the grader of this project's tasks, registered by the owner outside every candidate
+          { id: "trusted-suite", label: "Suite tepercaya", content: <TrustedSuitePanel projectId={project.id} isPlatform={project.is_platform} isAdmin={canWrite} /> },
         ]}
       />
     </div>

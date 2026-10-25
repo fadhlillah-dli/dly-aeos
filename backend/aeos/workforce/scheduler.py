@@ -107,6 +107,11 @@ def get_run(session: Session, run_id: str) -> WorkerRun:
 
 
 def max_attempts(task: TaskSpec, te: TaskExecution | None = None) -> int:
+    from aeos.workforce import investigation
+
+    inv = investigation.spec_of(task)
+    if inv is not None:  # §19 one timeboxed read-only run per hypothesis (+ owner-granted extra attempts)
+        return investigation.max_attempts(inv, te.extra_attempts if te else 0)
     try:
         base = int((task.limits or {}).get("max_attempts", DEFAULT_MAX_ATTEMPTS))
     except (TypeError, ValueError):
@@ -145,10 +150,11 @@ def scheduler_enabled(session: Session) -> bool:
     return bool(_setting(session, KEY_ENABLED, False))
 
 
-def set_scheduler_enabled(session: Session, enabled: bool, *, actor: str) -> None:
+def set_scheduler_enabled(session: Session, enabled: bool, *, actor: str, reason: str = "") -> None:
     _set_setting(session, KEY_ENABLED, bool(enabled))
     _audit(session, actor, "workforce.scheduler.enable" if enabled else "workforce.scheduler.disable",
-           target_type="scheduler", target_id="scheduler", project_id=None, domain=None)
+           target_type="scheduler", target_id="scheduler", project_id=None, domain=None,
+           reason=redact_text(reason or "")[:500])
     events.emit(session, source="controller", kind="scheduler.enabled_changed", entity_type="scheduler",
                 entity_id="scheduler", payload={"enabled": bool(enabled)})
 
@@ -190,22 +196,68 @@ def _scope_matches(scope: dict[str, Any], task: TaskSpec | None) -> bool:
     return True
 
 
-def concurrency_cap(session: Session, task: TaskSpec | None = None) -> tuple[int, str | None]:
-    """1 active implementation worker; 2 only with an ACTIVE human POLICY decision on workforce/concurrency
-    whose task-class scope covers *task* (§19, §21, §44)."""
+def _policy_cap(session: Session, task: TaskSpec | None) -> tuple[int, str | None, str]:
+    """(cap, decision id, reason) from the owner's POLICY decision on workforce/concurrency alone."""
     v = _setting(session, KEY_CONCURRENCY)
     d = _concurrency_decision(session)
     if d is None or not isinstance(v, dict):
-        return 1, None
+        return 1, None, "pilot default: one active implementation worker (no ACTIVE workforce/concurrency decision)"
     details = d.details or {}
     if not _scope_matches(details.get("scope") or {}, task):
-        return 1, None
+        return 1, None, f"task is outside the task-class scope of concurrency decision {d.id}"
     try:
         allowed = int(details.get("max_active_workers", 1))
     except (TypeError, ValueError):
         allowed = 1
     wanted = min(int(v.get("max_active", 1)), HARD_MAX_ACTIVE)
-    return (min(wanted, allowed), d.id) if allowed >= 2 else (1, None)
+    if allowed < 2:
+        return 1, None, f"concurrency decision {d.id} allows one worker"
+    return min(wanted, allowed), d.id, f"owner POLICY decision {d.id} on workforce/concurrency"
+
+
+def concurrency_detail(session: Session, task: TaskSpec | None = None) -> dict[str, Any]:
+    """The effective cap and where it comes from (§19, §21, §44, §51 P2):
+
+    * pilot default 1;
+    * 2 with an ACTIVE human POLICY decision on workforce/concurrency whose task-class scope covers *task*;
+    * 2 for a TaskSpec bound to a RUNNING topology-C EvalRun that carries the owner's experiment grant, while every
+      other active worker belongs to that run (``aeos.workforce.experiments``);
+    * never above ``HARD_MAX_ACTIVE`` nor above the owner's resource budget ``max_parallel_workers`` when it is set.
+    """
+    from aeos.workforce import experiments
+
+    cap, decision_id, reason = _policy_cap(session, task)
+    source = experiments.SOURCE_POLICY if decision_id else experiments.SOURCE_PILOT
+    out: dict[str, Any] = {"policy_cap": cap, "policy_decision_id": decision_id, "experiment": None}
+    if task is not None and cap < experiments.EXPERIMENT_MAX_ACTIVE:
+        others = [te.task_id for te in active_executions(session, exclude_task=getattr(task, "id", None))]
+        exp = experiments.experiment_for_task(session, task, other_active_task_ids=others)
+        out["experiment"] = exp
+        if exp.get("applies"):
+            cap, decision_id, reason = int(exp["cap"]), exp["decision_id"], exp["reason"]
+            source = experiments.SOURCE_EXPERIMENT
+    cap = min(cap, HARD_MAX_ACTIVE)
+    budget, budget_note = experiments.budget_max_workers(session)
+    out["budget_max_parallel_workers"] = budget
+    out["budget_note"] = budget_note
+    out["budget_limited"] = budget is not None and budget < cap
+    if budget is not None and budget < cap:
+        reason = f"{reason}; limited to {budget} by the {budget_note}"
+        cap = max(1, budget)
+    if cap <= 1:
+        decision_id = None  # a decision that does not raise the cap is not the cap's source
+        if source != experiments.SOURCE_PILOT and not out["budget_limited"]:
+            source = experiments.SOURCE_PILOT
+    out.update(cap=cap, decision_id=decision_id, source=source, reason=reason)
+    return out
+
+
+def concurrency_cap(session: Session, task: TaskSpec | None = None) -> tuple[int, str | None]:
+    """(cap, decision id): 1 active implementation worker; 2 only with an ACTIVE human POLICY decision on
+    workforce/concurrency whose task-class scope covers *task*, or with the owner's experiment grant for the
+    RUNNING topology-C EvalRun *task* is bound to; never above the owner's resource budget (``concurrency_detail``)."""
+    d = concurrency_detail(session, task)
+    return d["cap"], d["decision_id"]
 
 
 BASELINE_TOPOLOGY = "A"  # §44 sequential baseline
@@ -217,17 +269,25 @@ def _metric(run: Any, dim: str, key: str) -> float | None:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
-def topology_benefit(candidate: Any, baseline: Any) -> dict[str, Any]:
+def topology_benefit(candidate: Any, baseline: Any, *, parallel: dict[str, Any] | None = None) -> dict[str, Any]:
     """§44 "Mode baru dipromosikan hanya untuk kelas tugas yang terbukti bermanfaat vs baseline": the bounded-parallel
     run (topology C) is compared with the sequential baseline (topology A) on the SAME suite, the SAME fixed
     model/tool configuration and the SAME conditions. It must be no worse on outcome, safety and contract and
-    strictly better on accepted outcomes or latency/queue wait. Missing metrics are UNKNOWN, never a benefit."""
+    strictly better on accepted outcomes or latency/queue wait. Missing metrics are UNKNOWN, never a benefit.
+
+    *parallel* is ``experiments.parallel_execution_evidence`` of the candidate: a run labelled C whose bound
+    attempts never ran as two overlapping workers (cap 2) is not a bounded-parallel result."""
     problems: list[str] = []
     if baseline is None:
         return {"status": "NO_BASELINE", "problems": ["no sequential baseline evaluation run (topology A) given"]}
     if candidate.topology != PARALLEL_TOPOLOGY:
         problems.append(f"the evaluation run must test topology {PARALLEL_TOPOLOGY} (bounded parallel), "
                         f"not {candidate.topology or 'none'}")
+    elif parallel is None:
+        problems.append("two-worker execution of the topology C run was not checked (UNKNOWN is not a benefit)")
+    elif parallel.get("status") != "PROVEN":
+        problems.append("the topology C run did not execute two workers at once: "
+                        + "; ".join(parallel.get("problems") or ["NOT_PROVEN"]))
     if baseline.topology != BASELINE_TOPOLOGY:
         problems.append(f"the baseline run must be topology {BASELINE_TOPOLOGY} (sequential), "
                         f"not {baseline.topology or 'none'}")
@@ -269,7 +329,19 @@ def topology_benefit(candidate: Any, baseline: Any) -> dict[str, Any]:
     if not gains:
         problems.append("no measured benefit over the baseline (accepted outcomes or latency/queue wait)")
     return {"status": "BENEFIT" if not problems else "NO_BENEFIT", "problems": problems, "gains": gains,
-            "compared": compared, "baseline_eval_run_id": baseline.id, "eval_run_id": candidate.id}
+            "compared": compared, "baseline_eval_run_id": baseline.id, "eval_run_id": candidate.id,
+            "parallel_execution": parallel}
+
+
+def _proven_task_class(session: Session, run: Any) -> dict[str, Any]:
+    """§44 "hanya untuk kelas tugas yang terbukti": the role (TaskSpec.role_key) and task class the evaluation suite
+    measured. A suite that names no role proves no task class a scheduler scope can match."""
+    from aeos.models.research import EvalSuite
+
+    suite = session.scalar(select(EvalSuite).where(EvalSuite.suite_key == run.suite_key))
+    role = (suite.role_key if suite is not None else None) or run.role_key
+    return {"role_key": role, "task_class": (suite.task_class if suite is not None else "") or "",
+            "suite_key": run.suite_key}
 
 
 def set_concurrency(session: Session, *, max_active: int, actor: str, actor_user_id: str, rationale: str,
@@ -303,7 +375,9 @@ def set_concurrency(session: Session, *, max_active: int, actor: str, actor_user
                       code="CONCURRENCY_EVIDENCE_MISSING",
                       details={"eval_run_id": eval_run_id, "status": run.status if run else None, "gates": gates})
     baseline = session.get(EvalRun, baseline_eval_run_id) if baseline_eval_run_id else None
-    benefit = topology_benefit(run, baseline)
+    from aeos.workforce import experiments
+
+    benefit = topology_benefit(run, baseline, parallel=experiments.parallel_execution_evidence(session, run))
     if benefit["status"] != "BENEFIT":
         raise Blocked("two workers are adopted only for a task class where the bounded-parallel topology (C) is "
                       "proven better than the sequential baseline (A) on the same configuration: "
@@ -321,13 +395,26 @@ def set_concurrency(session: Session, *, max_active: int, actor: str, actor_user
         # on, never for every project/role at once
         raise ValidationFailed("two workers need a task-class scope (project_ids, role_keys, risk_classes or domains)",
                                code="CONCURRENCY_SCOPE_REQUIRED")
+    # §44 "hanya untuk kelas tugas yang terbukti": the scope is the role the suite measured, never wider
+    proven = _proven_task_class(session, run)
+    if not proven["role_key"]:
+        raise ValidationFailed(f"evaluation suite {run.suite_key} names no role/task class; a two-worker mode can only "
+                               "be scoped to the task class an evaluation proved", code="CONCURRENCY_TASK_CLASS_UNKNOWN",
+                               details=proven)
+    roles_asked = clean_scope.get("role_keys")
+    if roles_asked and set(roles_asked) != {proven["role_key"]}:
+        raise ValidationFailed(f"scope role_keys {roles_asked} is wider than (or different from) the task class the "
+                               f"evaluation proved ({proven['role_key']})", code="CONCURRENCY_SCOPE_OUTSIDE_EVIDENCE",
+                               details=proven)
+    clean_scope["role_keys"] = [proven["role_key"]]
     d = ext.record_decision(
         session, kind="POLICY", actor_user_id=actor_user_id, target_type=policy_catalog.TARGET_WORKFORCE,
         target_id=policy_catalog.TARGET_ID_CONCURRENCY, target_hash=content_hash({"max_active": 2, "scope": clean_scope}),
         allowed_operations=["run_two_workers"], auth_scope={"scope": clean_scope or "all task classes"},
         rationale=rationale,
         details={"max_active_workers": 2, "eval_run_id": run.id, "suite_key": run.suite_key, "scope": clean_scope,
-                 "baseline_eval_run_id": benefit["baseline_eval_run_id"],
+                 "task_class": proven, "baseline_eval_run_id": benefit["baseline_eval_run_id"],
+                 "parallel_execution": benefit.get("parallel_execution"),
                  "benefit": {"gains": benefit["gains"], "compared": benefit["compared"]},
                  "rollback": {"previous_max_active": previous, "how": "set concurrency 1 (no decision needed)"},
                  "decision_record": record})
@@ -603,11 +690,18 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
         reasons.append(("PLAN_NOT_APPROVED", approval_reason or "plan version is not the ACTIVE approved version"))
     if task.task_key in dag:
         reasons.append(("INVALID_DAG", dag[task.task_key]))
+    from aeos.workforce import investigation
+
     for dep_key in task.depends_on or []:
         dep = by_key.get(dep_key)
         if dep is None:
             continue
         dep_te = te_by_task.get(dep.id)
+        inv_dep = investigation.dependency_satisfied(session, dep, dep_te)
+        if inv_dep is not None:  # §19 an investigation is never accepted: the integrator's choice satisfies it
+            if not inv_dep[0]:
+                reasons.append(("DEPENDENCY_NOT_ACCEPTED", f"dependency {dep_key}: {inv_dep[1]}"))
+            continue
         if dep_te is None or dep_te.state != S.DONE.value:
             reasons.append(("DEPENDENCY_NOT_ACCEPTED", f"dependency {dep_key} is {dep_te.state if dep_te else 'not queued'}"))
             continue
@@ -617,6 +711,9 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
     fan = _fan_out_problem(task)
     if fan:
         reasons.append(("FAN_OUT_FORBIDDEN", fan))
+    inv = investigation.spec_of(task)
+    if inv is not None:  # §19 an invalid investigation pattern needs a new plan version, never a tick
+        reasons += [("INVESTIGATION_INVALID", why) for why in investigation.spec_problems(session, task, inv)]
     from aeos.workforce import roles
 
     if task.role_key not in roles.executor_role_keys():
@@ -902,8 +999,9 @@ def role_eligibility(session: Session, task: TaskSpec) -> dict[str, Any]:
     elif evaluation["status"] == "PASS":
         out["eligibility_basis"] = "EVALUATION_RESULT_NOT_ADOPTED" if required else "PILOT_THRESHOLD_PASS_NOT_ADOPTED"
         out["note"] = (f"Role {task.role_key} lulus evaluasi (EvalRun {evaluation.get('run_id')}), tetapi hasilnya belum "
-                       "diadopsi pemilik (DecisionRecord §44): POST /api/workforce/roles/"
-                       f"{task.role_key}/adopt.")
+                       "diadopsi pemilik (DecisionRecord §44): Organisasi & Peran -> kartu peran -> Adopsi hasil "
+                       f"evaluasi, atau aeos work adopt-role {task.role_key} --eval-run {evaluation.get('run_id')} "
+                       "--as <admin> ...")
     elif required:
         out["eligibility_basis"] = "NOT_ELIGIBLE"
     else:
@@ -1265,8 +1363,8 @@ def admission_check(session: Session, task_id: str) -> Admission:
                 # §44: a PASS result is eligibility only after the owner's adoption decision (DecisionRecord)
                 adm.waits.append(("ROLE_RESULT_NOT_ADOPTED", f"risk {elig['risk_class']} >= {elig['threshold']}: "
                                   f"role {task.role_key} passed its evaluation but the result is not adopted "
-                                  f"({elig.get('adoption_problem')}); owner: POST /api/workforce/roles/"
-                                  f"{task.role_key}/adopt"))
+                                  f"({elig.get('adoption_problem')}); owner: Organisasi & Peran -> Adopsi hasil "
+                                  f"evaluasi, or aeos work adopt-role {task.role_key}"))
             else:
                 adm.waits.append(("ROLE_NOT_EVALUATED", f"risk {elig['risk_class']} >= {elig['threshold']}: role "
                                   f"{task.role_key} needs an adopted PASS evaluation of revision "
@@ -1283,7 +1381,11 @@ def admission_check(session: Session, task_id: str) -> Admission:
         dep = session.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == task.plan_version_id,
                                                     TaskSpec.task_key == dep_key))
         dep_te = session.scalar(select(TaskExecution).where(TaskExecution.task_id == dep.id)) if dep else None
-        ok = bool(dep and dep_te and dep_te.state == S.DONE.value and ext.acceptance_valid(session, dep)[0])
+        from aeos.workforce import investigation
+
+        inv_dep = investigation.dependency_satisfied(session, dep, dep_te) if dep is not None else None
+        ok = inv_dep[0] if inv_dep is not None else bool(
+            dep and dep_te and dep_te.state == S.DONE.value and ext.acceptance_valid(session, dep)[0])
         if not ok:
             adm.waits.append(("DEPENDENCY_NOT_ACCEPTED", f"dependency {dep_key} not DONE with valid acceptance"))
     if te.attempts_used >= max_attempts(task, te):
@@ -1291,6 +1393,18 @@ def admission_check(session: Session, task_id: str) -> Admission:
     fan = _fan_out_problem(task)
     if fan:
         adm.blocks.append(("FAN_OUT_FORBIDDEN", fan))
+    from aeos.workforce import investigation
+
+    inv = investigation.spec_of(task)
+    if inv is not None:  # §19 read-only investigation: a valid pattern and a hypothesis left to investigate
+        for why in investigation.spec_problems(session, task, inv):
+            adm.blocks.append(("INVESTIGATION_INVALID", why))
+        nxt = investigation.next_hypothesis(session, task, inv)
+        if nxt is None:
+            adm.blocks.append(("INVESTIGATION_COMPLETE", "every hypothesis has been investigated"))
+        else:
+            adm.answers["investigation"] = {"hypothesis": nxt["key"], "index": nxt["index"],
+                                            "of": len(inv["hypotheses"]), "timebox_seconds": inv["timebox_seconds"]}
     agent_key = te.assigned_agent_key or IMPLEMENTER_AGENT_KEY
     agent = session.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == agent_key))
     if agent is None or agent.harness != "opencode" or agent_key in REVIEWER_AGENT_KEYS:
@@ -1317,16 +1431,22 @@ def admission_check(session: Session, task_id: str) -> Admission:
                                 egress_allowed=list(task.egress_allowed or []))
     if sb["status"] != "READY":
         adm.waits.append(("SANDBOX_NOT_READY", "; ".join(sb["reasons"])))
-    cap, _decision = concurrency_cap(session, task)
+    conc = concurrency_detail(session, task)
+    cap = conc["cap"]
     if agent is not None:
         try:  # AgentDefinition.limits are an upper bound on the scheduler's own cap (§17)
             cap = max(1, min(cap, int((agent.limits or {}).get("max_active", cap))))
         except (TypeError, ValueError):
             cap = 1
     adm.cap = cap
+    adm.answers["concurrency"] = {"cap": cap, "source": conc["source"], "decision_id": conc["decision_id"],
+                                  "reason": conc["reason"], "budget_max_parallel_workers":
+                                      conc["budget_max_parallel_workers"],
+                                  "eval_run_id": (conc.get("experiment") or {}).get("eval_run_id")}
     active = active_executions(session, exclude_task=task.id)
     if len(active) >= cap:
-        adm.waits.append(("CONCURRENCY_CAP", f"{len(active)} active implementation worker(s); cap {cap}"))
+        adm.waits.append(("CONCURRENCY_CAP", f"{len(active)} active implementation worker(s); cap {cap} "
+                                             f"({conc['reason']})"))
     compute = compute_check(session, task, active=len(active), cap=cap, sandbox_kind=sb.get("kind"))
     adm.answers["compute"] = compute
     if compute["status"] == "INSUFFICIENT":
@@ -1434,6 +1554,18 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
         raise Blocked("admission refused: " + "; ".join(adm.reasons), code="ADMISSION_REFUSED",
                       details={"reasons": adm.reasons})
     assert adm.route is not None and adm.agent is not None
+    from aeos.workforce import investigation
+
+    limits = task.limits or {}
+    inv_spec = investigation.spec_of(task)
+    timeout_s = int(limits.get("timeout_seconds", 1800))
+    inv_caps: dict[str, Any] = {}
+    if inv_spec is not None:  # §19 this attempt investigates exactly one hypothesis, read-only, timeboxed
+        hyp = investigation.next_hypothesis(session, task, inv_spec)
+        if hyp is None:
+            raise Conflict("every hypothesis has been investigated", code="INVESTIGATION_COMPLETE")
+        inv_caps = investigation.lease_caps(inv_spec, hyp, timeout_seconds=timeout_s)
+        timeout_s = int(inv_caps["timeout_seconds"])
     run_id = new_id()
     expected_rv = te.row_version
     reservation = ext.reserve(session, run_id=run_id, project_id=task.project_id, domain=task.domain,
@@ -1453,10 +1585,10 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
     te = get_te(session, task_id)
     ttl = ttl_seconds or lease_ttl(session)
     lease_id = new_id()
-    limits = task.limits or {}
     run = WorkerRun(
         id=run_id, task_id=task.id, project_id=task.project_id, domain=task.domain, attempt=te.attempts_used,
-        run_type="IMPLEMENTATION", agent_key=adm.agent.agent_key, role_key=task.role_key,
+        run_type=investigation.RUN_TYPE if inv_spec is not None else "IMPLEMENTATION",
+        agent_key=adm.agent.agent_key, role_key=task.role_key,
         execution_status=S.LEASED.value, model_route_key=adm.route.route_key,
         model_resolved=adm.route.resolved_version or None, engine=adm.agent.harness, lease_id=lease_id,
         plan_version_id=task.plan_version_id, task_key=task.task_key, requested_by=te.requested_by,
@@ -1464,9 +1596,12 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
         agent_revision_hash=adm.agent.revision_hash, role_revision_hash=_role_revision(session, task.role_key),
         caps={"max_requests": int(limits.get("max_requests", DEFAULT_MAX_REQUESTS)),
               "max_tokens": int(limits.get("max_tokens", DEFAULT_MAX_TOKENS)),
-              "max_cost_usd": adm.est_usd, "timeout_seconds": int(limits.get("timeout_seconds", 1800)),
+              "max_cost_usd": adm.est_usd, "timeout_seconds": timeout_s,
+              **({"investigation": inv_caps["investigation"]} if inv_caps else {}),
               "max_attempts": max_attempts(task, te), "capability_ttl_seconds": task.capability_ttl_seconds,
               "concurrency_cap": adm.cap,
+              # where the cap came from (pilot / owner POLICY decision / experiment grant for one EvalRun)
+              "concurrency": adm.answers.get("concurrency"),
               # §22 compute reserved with the slot and the cost (released when the run is no longer LEASED)
               "compute": {k: v for k, v in (adm.answers.get("compute") or {}).items()
                           if k in ("memory_mb", "cpus", "status", "enforced", "memory_enforced", "cpu_enforced",
@@ -2051,7 +2186,7 @@ def enforce_stop_conditions(session: Session, *, actor: str = "system:scheduler"
 
 
 # ----------------------------------------------------------------------------- plan execution
-def execute_plan(session: Session, plan_id: str, *, actor: str, user_id: str | None) -> dict[str, Any]:
+def execute_plan(session: Session, plan_id: str, *, actor: str, user_id: str | None, reason: str = "") -> dict[str, Any]:
     from aeos.models.planning import Plan
 
     plan = session.get(Plan, plan_id)
@@ -2066,7 +2201,7 @@ def execute_plan(session: Session, plan_id: str, *, actor: str, user_id: str | N
     tes = ensure_executions(session, approved.id, actor=actor, requested_by=user_id)
     counts = refresh_readiness(session, approved.id, actor=actor)
     _audit(session, actor, "workforce.plan.execute", target_type="plan", target_id=plan_id, project_id=plan.project_id,
-           domain=plan.domain, details={"plan_version_id": approved.id, **counts})
+           domain=plan.domain, reason=redact_text(reason or "")[:500], details={"plan_version_id": approved.id, **counts})
     return {"plan_id": plan_id, "plan_version_id": approved.id, "tasks": len(tes), **counts,
             "scheduler_enabled": scheduler_enabled(session), "paused": scheduling_paused(session),
             "note": "READY tasks are admitted by the scheduler loop (or `aeos work run-once`)"}

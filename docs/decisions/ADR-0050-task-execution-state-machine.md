@@ -133,3 +133,63 @@ made to work end to end (`tests/e2e/test_e2e_execution_chain.py`). Reconciled co
    route identity and the ACTIVE company authorisation) holds; otherwise it waits `OFFICE_ROUTE_NOT_AUTHORISED`.
    The generic decision endpoint refuses `office_route/*` and `workforce/*` targets
    (`DEDICATED_ENDPOINT_REQUIRED`), so neither the company-approval nor the evaluation evidence can be skipped.
+
+## Amendment 2026-10-26 (wave 7 cluster D: owner controls, resource budget, two-worker experiment, investigations)
+
+1. **Owner controls (§07 step 9, §17, §35).** Enabling or disabling an implementation agent, executing an approved
+   plan, registering a project's trusted suite, adopting a role result and setting the concurrency mode are no
+   longer API-only. Each is an owner action in the Control Center (Organisasi & Peran: agent card
+   *Aktifkan/Nonaktifkan* and the role card *Adopsi hasil evaluasi*; Rencana/:id *Jalankan rencana*; Proyek/:id
+   *Suite tepercaya*; Pekerjaan Live: scheduler loop toggle and the concurrency panel) and in the CLI
+   (`aeos work agent-prereqs|agent-enable|agent-disable|execute|adopt-role|concurrency|experiment-grant`,
+   `aeos verify suite-register|suite-status`). A CLI owner action proves the active SUPER_ADMIN by its password
+   (never stored or logged); a username alone is not enough. One service (`aeos.workforce.agents`) serves both
+   surfaces: enabling is refused with every unmet prerequisite (`AGENT_PREREQUISITES`, also audited as DENIED);
+   under the container sandbox the pinned worker image is checked instead of the host OpenCode binary. Enabling
+   or disabling re-runs the DB-only Doctor check `worker.agent_definition` (`doctor.facade.recheck`), so
+   `CAN_RUN_WORKER` does not keep the result the action itself made STALE. Enabled is never "in use".
+2. **Resource budget (§51 P2).** The owner's recorded `max_parallel_workers` (`aeos doctor budget`) is an upper
+   bound on every cap: `concurrency_cap = min(policy or experiment cap, HARD_MAX_ACTIVE, budget)`. While no budget is
+   recorded it is UNKNOWN and nothing is guessed. `concurrency_detail` states the cap, its source
+   (`PILOT_DEFAULT`, `POLICY_DECISION`, `EXPERIMENT_GRANT`) and the budget; admission records it on
+   `WorkerRun.caps.concurrency`.
+3. **Two-worker experiment grant (§19, §44).** The permanent two-worker mode needs a completed topology-C evaluation
+   that beat the sequential baseline, which needed two workers to exist first (a circular gate). The way out is a
+   human EXCEPTION on `workforce/concurrency-experiment:<eval_run_id>` (dedicated endpoint
+   `POST /api/workforce/concurrency/experiment`; the generic decision endpoint refuses `workforce/*`), bound to the
+   run's identity, suite, configuration, conditions, topology and start time, with an owner-chosen expiry
+   (1-30 days, never defaulted) in the domain of the run's tasks. While that run is RUNNING the cap is 2 only for
+   TaskSpecs bound to its slots and only while every other active worker is one of them; write sets, compute,
+   budget, sandbox, route and verifier are checked unchanged. A restart, the run leaving RUNNING, expiry or
+   revocation ends it.
+4. **Bounded-parallel evidence (§44).** `topology_benefit` now also requires `parallel_execution_evidence` PROVEN: at
+   least two bound implementation attempts admitted with `caps.concurrency_cap == 2` whose recorded execution
+   windows overlapped. A sequential run labelled C is not a bounded-parallel result. The adopted scope is the
+   role the suite measured (`CONCURRENCY_TASK_CLASS_UNKNOWN` when the suite names none,
+   `CONCURRENCY_SCOPE_OUTSIDE_EVIDENCE` for a wider role list). The critical-regression measure the benefit guard
+   compares comes from the evaluation collector (W6-121, cluster C2); an UNKNOWN value is never a benefit.
+5. **Ordered task set per slot (§44 B/C/D, §47).** `aeos eval bind --append` / `POST /api/eval/runs/{id}/bind`
+   with `append` adds a TaskSpec to an already bound slot. `evaluation.topology.derive_slot_sample` collects one
+   sample per slot: ACCEPTED only when every task was accepted; numeric measures summed with UNKNOWN kept UNKNOWN;
+   latency is the wall clock from the first start to the last finish; `parallel_overlap_s` is measured from
+   WorkerRun timestamps. A one-task slot is collected exactly as before.
+6. **Read-only investigations (§19 "Beberapa hipotesis bug").** `run_type=INVESTIGATION`: a TaskSpec whose
+   `capability_scope.operations` declares `investigation`, `investigation.timebox=<60..3600>`,
+   `investigation.repair=<task_key>` and 1-5 `hypothesis:<key>=<statement>` entries (part of the approved
+   PlanVersion). Each hypothesis is its own WorkerRun, one at a time under the cap; OpenCode runs with
+   read/glob/grep/list only (edit/write/patch, bash, web denied); the timebox caps the run timeout; the answer is a
+   JSON report in the final message, its evidence references checked against the worktree, stored as untrusted
+   E0 evidence; any file change is a SCOPE_VIOLATION and nothing is committed. When every hypothesis is
+   investigated the task waits in REVIEW (`INVESTIGATION_COMPLETE`). The integrator (a human owner) records the
+   chosen EVIDENCED fix (verdict SUPPORTED and at least one reference found) as an APPROVAL decision bound to the
+   hash of the compared reports (`POST /api/tasks/{id}/investigation/choose`, `aeos work investigation-choose`);
+   the plan's one repair IMPLEMENTATION task, which depends on the investigation, then carries the finding as
+   input and runs through normal admission, verification, review and acceptance. An investigation is never DONE
+   or accepted. The investigation template and read-only permission set are part of `WORKER_PROMPT_REVISION`.
+   Review additions: the hypothesis outcome is recorded once when its run ends (`caps.investigation_outcome`), so
+   later lifecycle codes (chosen / not chosen / review findings) never make a hypothesis look uninvestigated or
+   change the compared reports; only a run that ended `INVESTIGATION_REPORTED` can be evidenced (a report from a
+   run that wrote a file, timed out or exited non-zero is inconclusive whatever it claims); the read-only rule is
+   also checked on the worktree after the run, not only on tool events; and the repair task's dependency re-checks
+   the choice's hash against the reports on record at use (a changed comparison needs a new choice). A refused CLI
+   `agent-enable` keeps its DENIED audit row, as the Control Center does.

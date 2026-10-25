@@ -115,10 +115,19 @@ def worker_prompt_revision() -> str:
     probe = SimpleNamespace(task_key="fingerprint", title="fingerprint", goal="fingerprint", acceptance_criteria=[],
                             expected_outputs=[], allowed_paths=[], forbidden_paths=[], stop_conditions=[],
                             input_artifacts=[])
+    from aeos.worker_runtime import investigation as inv_rt
+
     rendered = build_prompt(probe, findings=[], protected=(), branch="aeos/fingerprint",  # type: ignore[arg-type]
                             revision=_REVISION_PLACEHOLDER)
     permission = build_config(broker_base_url="http://127.0.0.1:9/broker/v1", token="fingerprint",
                               model="fingerprint", tools_allowed=[], egress_allowed=[])["permission"]
+    # the read-only INVESTIGATION variant (§19) is part of the same revision: its rules and permission set too
+    inv_probe = {"hypothesis": {"key": "fingerprint", "statement": "fingerprint"}, "index": 1, "of": 1,
+                 "timebox_seconds": 60}
+    rendered_inv = build_prompt(probe, findings=[], protected=(), branch="aeos/fingerprint",  # type: ignore[arg-type]
+                                revision=_REVISION_PLACEHOLDER, investigation=inv_probe)
+    permission_ro = build_config(broker_base_url="http://127.0.0.1:9/broker/v1", token="fingerprint",
+                                 model="fingerprint", tools_allowed=[], egress_allowed=[], read_only=True)["permission"]
     h = content_hash({"version": PROMPT_TEMPLATE_VERSION, "stop": PROMPT_STOP_RULES, "rules": PROMPT_RULES,
                       "report": PROMPT_REPORT_RULES, "run_message": RUN_MESSAGE,
                       "limits": [MAX_ATTACHMENT_CHARS, MAX_PROMPT_ATTACH_TOTAL, MAX_PROMPT_CONTEXT_TOTAL],
@@ -127,7 +136,9 @@ def worker_prompt_revision() -> str:
                       "rendered_probe": rendered, "permission": permission,
                       # §25 a tool change is a system change: the granted-shell runner and its prompt rules (W6-117)
                       "shell": {"runner": SHELL_RUNNER_COMMAND, "runner_sha": content_hash(SHELL_RUNNER_JS),
-                                "rules": PROMPT_SHELL_RULES}})
+                                "rules": PROMPT_SHELL_RULES},
+                      "investigation": {**inv_rt.fingerprint_material(), "rendered_probe": rendered_inv,
+                                        "permission": permission_ro}})
     return f"wp{PROMPT_TEMPLATE_VERSION}-{h.split(':', 1)[1][:16]}"
 
 
@@ -171,6 +182,8 @@ class Prepared:
     # started still runs them: fail closed, never skipped)
     tamper_findings: list[dict[str, Any]] | None = None
     hold_recorded: bool = False
+    # §19 read-only INVESTIGATION run (hypothesis, timebox): read-only tools, report only, never a candidate commit
+    investigation: dict[str, Any] | None = None
 
 
 # ----------------------------------------------------------------------------- DB trust-table tamper window
@@ -235,14 +248,23 @@ def resolve_artifacts(session: Any, task: TaskSpec) -> list[Any]:
 def build_prompt(task: TaskSpec, *, findings: list[Any], protected: tuple[str, ...], branch: str,
                  context_pack: dict[str, Any] | None = None, revision: str | None = None,
                  role_contract: dict[str, Any] | None = None, artifacts: list[Any] | None = None,
-                 shell_runner: str | None = None) -> str:
+                 shell_runner: str | None = None, investigation: dict[str, Any] | None = None) -> str:
     """``revision`` defaults to this build's ``WORKER_PROMPT_REVISION`` (``worker_prompt_revision`` renders
     the probe with a placeholder: the revision cannot hash itself). ``shell_runner``: the granted shell is usable
-    only through the AEOS runner (container sandbox, §42)."""
+    only through the AEOS runner (container sandbox, §42). ``investigation`` renders the read-only
+    INVESTIGATION variant (§19): the scope is read-only and the report is the final message, not a file."""
     def bullets(items: list[Any]) -> str:
         return "\n".join(f"- {redact_text(str(i))}" for i in items) or "- (none)"
 
     stop = [*(task.stop_conditions or []), *PROMPT_STOP_RULES]
+    scope_header = ("## Paths in scope (READ-ONLY investigation: modify NOTHING)" if investigation is not None
+                    else "## Allowed paths (you may modify ONLY these, relative to the working directory)")
+    if investigation is not None:
+        from aeos.worker_runtime import investigation as inv_rt
+
+        reporting = inv_rt.prompt_section(investigation)
+    else:
+        reporting = ["", "## Reporting", *PROMPT_REPORT_RULES]
     parts = [
         "# AEOS TaskSpec (authoritative instructions for this run)",
         f"Task: {task.task_key} - {redact_text(task.title)}",
@@ -251,13 +273,13 @@ def build_prompt(task: TaskSpec, *, findings: list[Any], protected: tuple[str, .
         "", "## Goal", redact_text(task.goal),
         "", "## Acceptance criteria", bullets(list(task.acceptance_criteria or [])),
         "", "## Expected outputs", bullets(list(task.expected_outputs or [])),
-        "", "## Allowed paths (you may modify ONLY these, relative to the working directory)",
+        "", scope_header,
         bullets(list(task.allowed_paths or [])) if task.allowed_paths
         else "- NONE: do not modify any file (the scheduler never admits a TaskSpec without allowed paths)",
         "", "## Forbidden paths (never modify)", bullets([*list(task.forbidden_paths or []), *protected]),
         "", "## Stop conditions", bullets(stop),
         "", "## Rules", *PROMPT_RULES,
-        "", "## Reporting", *PROMPT_REPORT_RULES,
+        *reporting,
     ]
     if shell_runner:
         parts += ["", "## Shell", *(r.format(runner=shell_runner) for r in PROMPT_SHELL_RULES)]
@@ -544,16 +566,18 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
     protected = platform_protected_paths() if project.is_platform else GENERIC_PROTECTED_PATHS
     from aeos.workforce import facade as workforce
 
+    investigation = (caps.get("investigation") or None) if run.run_type == "INVESTIGATION" else None
     shell_runner: str | None = None
-    if kind == "container" and sbx.task_wants_shell(list(task.tools_allowed or [])):
-        # §42 (W6-117): a granted shell runs only through the AEOS runner (bounded head/tail, full log kept)
+    if kind == "container" and investigation is None and sbx.task_wants_shell(list(task.tools_allowed or [])):
+        # §42 (W6-117): a granted shell runs only through the AEOS runner (bounded head/tail, full log kept); a
+        # read-only INVESTIGATION run never gets a shell (§19: bash is denied whatever the TaskSpec asks)
         from aeos.worker_runtime import container as _ctr
 
         _ctr.write_shell_runner(sandbox.config)
         shell_runner = _ctr.SHELL_RUNNER_COMMAND
     prompt = build_prompt(task, findings=list(te.pending_findings or []), protected=protected, branch=ws.branch,
                           context_pack=pack, role_contract=workforce.role_contract(s, task.role_key),
-                          artifacts=artifacts, shell_runner=shell_runner)
+                          artifacts=artifacts, shell_runner=shell_runner, investigation=investigation)
     task_file = sandbox.config / "aeos-task.md"
     task_file.write_text(prompt, encoding="utf-8")
     base_url = broker_base_url or (launch["broker_url"] if kind == "container" else _broker_base_url(settings))
@@ -561,7 +585,7 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
                                 model=exposed, tools_allowed=list(task.tools_allowed or []),
                                 egress_allowed=list(task.egress_allowed or []), max_output_tokens=per_req,
                                 context_limit=route.context_window if route is not None else None,
-                                shell_runner=shell_runner)
+                                shell_runner=shell_runner, read_only=investigation is not None)
     config_path = opencode.write_config(sandbox.config, cfg)
     limits = processes.ResourceLimits.from_task(task.limits)
     container_root: str | None = None
@@ -610,7 +634,8 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
                     protected=protected, task_key=task.task_key, config_path=config_path, kind=kind,
                     container_root=container_root, limits=limits, controller_snapshot=controller_snapshot,
                     plan_version_hash=task.plan_version_hash, agent_key=run.agent_key, route_key=route_key,
-                    engine_version=engine_version, commit_identity=(ident[0], ident[1]), shell_runner=shell_runner)
+                    engine_version=engine_version, commit_identity=(ident[0], ident[1]), shell_runner=shell_runner,
+                    investigation=investigation)
 
 
 def _is_report_path(path: str) -> bool:
@@ -805,6 +830,13 @@ def _monitor_and_finalize(settings: Settings, run_id: str, prep: Prepared, mp: p
                 if act is not None:
                     pending.append(act.as_payload() | {"is_narration": act.is_narration})
                     if act.kind == "edit_file" and act.status == "completed" and act.path and stop_reason is None \
+                            and prep.investigation is not None:
+                        # §19 read-only investigation: any completed write is a violation (defence in depth; the
+                        # OpenCode config already denies every edit tool)
+                        scope_stop.append({"path": act.path, "rule": "investigation-read-only",
+                                           "detail": "a read-only investigation wrote a file"})
+                        stop_reason = "SCOPE_VIOLATION"
+                    elif act.kind == "edit_file" and act.status == "completed" and act.path and stop_reason is None \
                             and not _is_report_path(act.path):
                         # §22 "Stop berlaku saat ... scope dilanggar": stop at the out-of-scope edit, not after exit.
                         # The worker's own report (.aeos/report.json, §19/§21 blocker channel) is not a candidate
@@ -887,6 +919,12 @@ def _decide(s: Any, run: WorkerRun, task: TaskSpec, te: TaskExecution | None, *,
             scheduler.transition_task(s, te.task_id, S.BLOCKED.value, reason=f"run stopped: {stop_reason}",
                                       actor=ACTOR, reason_code=code, expected_from=S.RUNNING.value)
         return "STOPPED"
+    if run.run_type == "INVESTIGATION":
+        # §19 one hypothesis investigated: next hypothesis (READY) or the integrator's choice (REVIEW); never DONE
+        from aeos.workforce import facade as workforce
+
+        return workforce.investigation_after_run(s, run, te, task, exit_code=exit_code, stop_reason=stop_reason,
+                                                 violations=[*violations, *protected_hits], actor=ACTOR)
     if stop_reason in FAILED_STOPS or violations or (exit_code != 0 and not blocker):
         if stop_reason in ("TIMEOUT", "RESOURCE_LIMIT"):
             code = stop_reason
@@ -1063,6 +1101,25 @@ def _guard_after_kill(prep: Prepared, run_id: str) -> None:
         log.exception("could not record the integrity hold for run %s", run_id)
 
 
+def _record_investigation(s: Any, run: WorkerRun, prep: Prepared, raw_log: list[str], evidence_dir: Path) -> None:
+    """§19 the investigation report (final message JSON) as untrusted evidence; evidence refs checked against the
+    worktree at the base commit (exists or not), never trusted as findings."""
+    from aeos.worker_runtime import investigation as inv_rt
+
+    inv = prep.investigation or {}
+    key = str((inv.get("hypothesis") or {}).get("key") or "")
+    data = inv_rt.extract_report(raw_log)
+    summary = inv_rt.summarise(data, hypothesis_key=key, repo=prep.ws.repo)
+    if data is not None:
+        ref = _collect_evidence(s, run, kind="NOTE", origin="worker",
+                                claim=f"investigation report {key} (untrusted)", content={"report": redact(data),
+                                                                                       "checked": summary},
+                                level="E0", fallback_dir=evidence_dir, name="investigation-report.json")
+        run.evidence_refs = [*(run.evidence_refs or []), ref]
+        summary["evidence_ref"] = ref
+    run.caps = {**(run.caps or {}), "investigation_report": redact(summary)}
+
+
 def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.EventParser, raw_log: list[str],
               exit_code: int | None, stop_reason: str | None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     extra = extra or {}
@@ -1096,22 +1153,33 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
             protected_hits = result.protected_hits
             for p in changes["symlinks_escaping"]:
                 violations.append({"path": p, "rule": "symlink-escapes-worktree", "detail": "symlink target outside"})
-            head = workspace.commit_candidate(
-                prep.ws, f"aeos: candidate for {prep.task_key} (run {run_id[:8]})\n\nCommitted by the AEOS runtime; "
-                         "worker output is unverified until independent verification and review.",
-                identity=prep.commit_identity,
-                trailers={"AEOS-Run-Id": run_id, "AEOS-Task": prep.task_key, "AEOS-Agent": prep.agent_key or "",
-                          "AEOS-Route": prep.route_key or "",
-                          "AEOS-Engine": f"opencode {prep.engine_version or 'UNKNOWN'} ({prep.kind} sandbox)",
-                          "AEOS-Prompt-Revision": WORKER_PROMPT_REVISION})
-            run.head_commit = head
-            diff_info = {"files": changes["files"], "added": changes["added"], "deleted": changes["deleted"],
-                         "paths": [{"path": c.path, "status": c.status, "mode": c.mode} for c in changes["changes"]][:500],
-                         "patch_truncated": changes["patch_truncated"], "strategy": prep.ws.strategy}
-            ref = _collect_evidence(s, run, kind="DIFF", origin="collector",
-                                    claim=f"runtime-computed diff {run.base_commit}..{head}", content=changes["patch"] or "",
-                                    level="E1", fallback_dir=evidence_dir, name="candidate.patch")
-            run.evidence_refs = [*(run.evidence_refs or []), ref]
+            if prep.investigation is not None:
+                # §19 read-only investigation: a report, never a candidate - any change (or a written report file)
+                # is a violation and nothing is committed
+                violations += [{"path": c.path, "rule": "investigation-read-only", "detail": "file changed"}
+                               for c in changes["changes"]]
+                if report_info.get("present"):
+                    violations.append({"path": workspace.REPORT_PATH, "rule": "investigation-read-only",
+                                       "detail": "report file written"})
+            else:
+                head = workspace.commit_candidate(
+                    prep.ws, f"aeos: candidate for {prep.task_key} (run {run_id[:8]})\n\nCommitted by the AEOS runtime; "
+                             "worker output is unverified until independent verification and review.",
+                    identity=prep.commit_identity,
+                    trailers={"AEOS-Run-Id": run_id, "AEOS-Task": prep.task_key, "AEOS-Agent": prep.agent_key or "",
+                              "AEOS-Route": prep.route_key or "",
+                              "AEOS-Engine": f"opencode {prep.engine_version or 'UNKNOWN'} ({prep.kind} sandbox)",
+                              "AEOS-Prompt-Revision": WORKER_PROMPT_REVISION})
+                run.head_commit = head
+                diff_info = {"files": changes["files"], "added": changes["added"], "deleted": changes["deleted"],
+                             "paths": [{"path": c.path, "status": c.status, "mode": c.mode}
+                                       for c in changes["changes"]][:500],
+                             "patch_truncated": changes["patch_truncated"], "strategy": prep.ws.strategy}
+                ref = _collect_evidence(s, run, kind="DIFF", origin="collector",
+                                        claim=f"runtime-computed diff {run.base_commit}..{head}",
+                                        content=changes["patch"] or "", level="E1", fallback_dir=evidence_dir,
+                                        name="candidate.patch")
+                run.evidence_refs = [*(run.evidence_refs or []), ref]
         except workspace.GitControlTampered as exc:
             # A planted git config/hook would execute in the controller's context: git is never run
             # on this candidate again, the original control files are restored, and the run fails
@@ -1183,7 +1251,9 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
             run.evidence_refs = [*(run.evidence_refs or []), cmd_info["evidence_ref"]]
         if cmd_info.get("present"):
             run.caps = {**(run.caps or {}), "command_logs": {k: v for k, v in cmd_info.items() if k != "path"}}
-        if report_info.get("present"):
+        if prep.investigation is not None:
+            _record_investigation(s, run, prep, raw_log, evidence_dir)
+        elif report_info.get("present"):
             blocker = _record_report(s, run, prep, report_data, report_info, evidence_dir)
         for p in parser.outside_attempts:
             protected_hits.append({"path": p, "rule": "outside-worktree-attempt", "detail": "tool call outside worktree"})

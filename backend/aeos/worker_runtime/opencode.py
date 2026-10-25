@@ -195,8 +195,11 @@ def _webfetch_rule(tools_allowed: list[str], egress_allowed: list[str]) -> str:
 def build_config(
     *, broker_base_url: str, token: str, model: str, tools_allowed: list[str], egress_allowed: list[str],
     max_output_tokens: int | None = None, context_limit: int | None = None, shell_runner: str | None = None,
+    read_only: bool = False,
 ) -> dict[str, Any]:
-    """``shell_runner`` (additive, wave 7): granted shell commands are allowed only through the AEOS runner."""
+    """``shell_runner`` (additive, wave 7): granted shell commands are allowed only through the AEOS runner.
+    ``read_only`` (INVESTIGATION runs, §19): only read/glob/grep/list are allowed - edit/write/patch, todowrite,
+    bash and webfetch are denied whatever the TaskSpec asks."""
     if not _MODEL_ID.match(model):
         raise ValueError(f"unsafe model id {model!r}")
     model_entry: dict[str, Any] = {"name": model}
@@ -206,10 +209,18 @@ def build_config(
         model_entry["limit"] = {"context": int(context_limit or DEFAULT_CONTEXT_LIMIT),
                                 "output": int(max_output_tokens or DEFAULT_OUTPUT_LIMIT)}
     permission: dict[str, Any] = {"*": "deny"}
-    for t in BASE_ALLOW:
-        permission[t] = "allow"
-    permission["bash"] = _bash_rules(tools_allowed, runner=shell_runner)
-    permission["webfetch"] = _webfetch_rule(tools_allowed, egress_allowed)
+    if read_only:
+        from aeos.worker_runtime.investigation import READ_ONLY_ALLOW
+
+        for t in BASE_ALLOW:
+            permission[t] = "allow" if t in READ_ONLY_ALLOW else "deny"
+        permission["bash"] = "deny"
+        permission["webfetch"] = "deny"
+    else:
+        for t in BASE_ALLOW:
+            permission[t] = "allow"
+        permission["bash"] = _bash_rules(tools_allowed, runner=shell_runner)
+        permission["webfetch"] = _webfetch_rule(tools_allowed, egress_allowed)
     for t in ALWAYS_DENY:
         permission[t] = "deny"
     return {

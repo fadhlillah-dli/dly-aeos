@@ -280,11 +280,13 @@ def route_changed_since_start(session: Session, run: EvalRun) -> str | None:
 
 
 def _task_bound_elsewhere(session: Session, task_id: str, run_id: str) -> str | None:
+    from aeos.evaluation.topology import slot_task_ids  # a slot may hold an ordered set of tasks (§44 B/C/D)
+
     for other in session.scalars(select(EvalRun).where(EvalRun.status.in_(("RUNNING", "COMPLETED", "FAILED",
                                                                            "CANCELLED")))):
         if other.id == run_id:
             continue
-        if any(b.get("task_id") == task_id for b in other.bindings or []):
+        if any(task_id in slot_task_ids(b) for b in other.bindings or []):
             return other.id
     return None
 
@@ -310,7 +312,9 @@ def bind_task(session: Session, run_id: str, *, slot_id: str, task_id: str, acto
     current = next((b for b in bindings if b["slot_id"] == slot_id), None)
     if current is not None and not current.get("invalid"):
         raise Conflict(f"slot {slot_id} is already bound to task {current['task_id']}", code="SLOT_BOUND")
-    if any(b.get("task_id") == task_id and b["slot_id"] != slot_id for b in bindings):
+    from aeos.evaluation.topology import slot_task_ids
+
+    if any(task_id in slot_task_ids(b) and b["slot_id"] != slot_id for b in bindings):
         raise Conflict("this task already fills another slot of the run", code="TASK_ALREADY_BOUND")
     other = _task_bound_elsewhere(session, task_id, run.id)
     if other:
@@ -638,8 +642,10 @@ def collect(session: Session, run_id: str, *, viewer_domain: str | None = None, 
     invalid: list[dict[str, Any]] = []
     unbound = [s["slot_id"] for s in all_slots if s["slot_id"] not in by_slot]
     bindings = [dict(b) for b in run.bindings or []]
+    from aeos.evaluation.topology import derive_slot_sample  # one sample per slot, over its ordered task set
+
     for b in bindings:
-        state, sample, why = derive_sample(session, run, b)
+        state, sample, why = derive_slot_sample(session, run, b)
         b.pop("invalid", None)
         if state == "READY":
             collected.append(sample)  # type: ignore[arg-type]
@@ -672,9 +678,11 @@ def finish_run(session: Session, run_id: str, *, actor_user_id: str, reason: str
         raise Conflict(f"eval run is {run.status}")
     by_slot = {b["slot_id"]: b for b in run.bindings or []}
     samples: list[dict[str, Any]] = []
+    from aeos.evaluation.topology import derive_slot_sample
+
     for s in slots(session, run):
         b = by_slot.get(s["slot_id"])
-        state, sample, why = derive_sample(session, run, b) if b else ("PENDING", None, "slot never bound")
+        state, sample, why = derive_slot_sample(session, run, b) if b else ("PENDING", None, "slot never bound")
         if state == "READY":
             samples.append(sample)  # type: ignore[arg-type]
         else:

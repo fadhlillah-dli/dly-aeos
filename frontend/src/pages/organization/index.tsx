@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, Cog, Search, UserRound } from "lucide-react";
 import { useMemo, useState } from "react";
 import { get } from "../../api/client";
@@ -6,6 +6,8 @@ import { useAuth } from "../../auth/AuthContext";
 import { ExplainButtons } from "../../components/ExplainButtons";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Card, EmptyState, ErrorBox, inputClass, Loading, Mono, Notice, PageHeader } from "../../components/ui";
+import { AgentControls } from "../../components/workforce/AgentControls";
+import { RoleAdoption } from "../../components/workforce/RoleAdoption";
 import type { AgentDef, RoleCard, RoleGroup } from "../../components/workforce/types";
 import { useLiveInvalidation } from "../../components/workforce/useLive";
 
@@ -39,7 +41,7 @@ function Bullets({ title, items }: { title: string; items: string[] }) {
   );
 }
 
-function RoleCardView({ role }: { role: RoleCard }) {
+function RoleCardView({ role, isAdmin = false, onChanged }: { role: RoleCard; isAdmin?: boolean; onChanged?: () => void }) {
   return (
     <article className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-3">
       <header className="flex flex-wrap items-start justify-between gap-2">
@@ -81,6 +83,7 @@ function RoleCardView({ role }: { role: RoleCard }) {
         <StatusBadge status={role.eval_status === "NOT_EVALUATED" ? "NOT_TESTED" : role.eval_status} label={role.eval_status === "NOT_EVALUATED" ? "Belum dievaluasi" : role.eval_status} />
         {role.demo_runs > 0 && <StatusBadge status="DEMO" label={`${role.demo_runs} run DEMO (tidak dihitung)`} />}
       </div>
+      {role.evaluation && <RoleAdoption role={role} isAdmin={isAdmin} onChanged={onChanged ?? (() => undefined)} />}
       {role.forbidden_actions.length > 0 && (
         <details className="text-sm">
           <summary className="cursor-pointer text-xs text-ink-3">Tindakan terlarang ({role.forbidden_actions.length})</summary>
@@ -95,7 +98,7 @@ function RoleCardView({ role }: { role: RoleCard }) {
   );
 }
 
-function AgentCard({ a }: { a: AgentDef }) {
+function AgentCard({ a, isAdmin, onChanged }: { a: AgentDef; isAdmin: boolean; onChanged: () => void }) {
   return (
     <article className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-3">
       <header className="flex flex-wrap items-start justify-between gap-2">
@@ -128,12 +131,18 @@ function AgentCard({ a }: { a: AgentDef }) {
         <summary className="cursor-pointer text-ink-3">Batas & scope</summary>
         <pre className="mono mt-1 overflow-x-auto rounded bg-surface-2 p-2">{JSON.stringify({ limits: a.limits, scope: a.allowed_scope, route: a.route_policy }, null, 2)}</pre>
       </details>
+      <AgentControls agent={a} isAdmin={isAdmin} onChanged={onChanged} />
     </article>
   );
 }
 
 export default function OrganizationPage() {
-  const { domain } = useAuth();
+  const { domain, isAdmin } = useAuth();
+  const qc = useQueryClient();
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["workforce-agents", domain] });
+    qc.invalidateQueries({ queryKey: ["workforce-roles", domain] });
+  };
   const roles = useQuery({
     queryKey: ["workforce-roles", domain],
     queryFn: () => get<{ items: RoleGroup[]; note: string; source?: string; checked_at: string; mode: string }>("/api/workforce/roles"),
@@ -144,7 +153,10 @@ export default function OrganizationPage() {
     queryFn: () => get<{ items: AgentDef[]; checked_at: string }>("/api/workforce/agents"),
     refetchInterval: 30_000,
   });
-  useLiveInvalidation([["workforce-roles", domain], ["workforce-agents", domain]], (e) => e.kind === "run.state_changed");
+  useLiveInvalidation(
+    [["workforce-roles", domain], ["workforce-agents", domain]],
+    (e) => e.kind === "run.state_changed" || e.kind.startsWith("scheduler.agent_") || e.kind === "scheduler.role_result_adopted",
+  );
   const [query, setQuery] = useState("");
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -222,7 +234,7 @@ export default function OrganizationPage() {
         ) : (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {agents.data!.items.map((a) => (
-              <AgentCard key={a.agent_key} a={a} />
+              <AgentCard key={a.agent_key} a={a} isAdmin={isAdmin} onChanged={refresh} />
             ))}
           </div>
         )}
@@ -254,7 +266,7 @@ export default function OrganizationPage() {
               ) : (
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {g.roles.map((r) => (
-                    <RoleCardView key={r.role_key} role={r} />
+                    <RoleCardView key={r.role_key} role={r} isAdmin={isAdmin} onChanged={refresh} />
                   ))}
                 </div>
               )}
