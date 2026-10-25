@@ -37,6 +37,7 @@ __all__ = [
     "Timing",
     "as_text",
     "build_view",
+    "checkpoint_artifacts",
     "document_body",
     "documentation_checkpoint",
     "feature_slug",
@@ -92,6 +93,16 @@ def documentation_checkpoint(session: Session, revision_id: str) -> dict[str, An
 
     rev = get_checkpoint(session, revision_id)
     return {**checkpoint_view(rev), "project_id": rev.project_id, "domain": rev.domain}
+
+
+def checkpoint_artifacts(session: Session, project_id: str) -> list[tuple[str, dict[str, Any]]]:
+    """(label, hash-bound artifact) pairs of the project's recorded documentation checkpoint packages, newest first:
+    ``doc_checkpoint:<revision id>`` (exactly that package) and ``documentation_checkpoint:<project>:<kind>:<ref>``
+    (the newest package of that checkpoint) -> {ref, kind, sha256, name, content}. Read-only; used by the task
+    compiler to resolve a writer task's input artifact (§21, §41)."""
+    from aeos.docs_engine.checkpoints import checkpoint_artifacts as impl
+
+    return impl(session, project_id)
 
 
 def build_view(content: dict[str, Any] | None) -> Any:

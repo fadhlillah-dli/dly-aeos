@@ -69,6 +69,70 @@ def repository_checkout(session: Session, project_id: str, *, principal: Any = N
     return project, repo, path
 
 
+# ---- read-only checkout access at an exact commit (docs_engine §29 diagram references) -------------------------
+
+
+def project_checkout(session: Session, project: Project, *, action: str) -> tuple[RepositoryReference | None,
+                                                                                    Path | None]:
+    """(primary repository, its registered local checkout) of *project*, after the use-time domain checks
+    (``PolicyDenied`` when the checkout overlaps the other domain or lives on its provider). ``(None, None)`` = no
+    repository; ``(repo, None)`` = no local checkout registered. Never guesses a path."""
+    from aeos.portfolio import repositories as repos
+
+    repo = repos.primary_repository(session, project.id)
+    if repo is None:
+        return None, None
+    path = repos.resolve_local_path(repo)
+    if path is None:
+        return repo, None
+    repos.require_checkout_in_domain(session, None, project, repo, path, action=action)
+    return repo, path
+
+
+def git_toplevel(path: Path) -> Path:
+    from aeos.portfolio import gitread
+
+    return gitread.toplevel(path)
+
+
+def git_resolve_commit(repo: Path, commitish: str = "HEAD") -> str:
+    """Full SHA of *commitish* in *repo*; ``ValidationFailed`` (COMMIT_NOT_FOUND / INVALID_COMMIT) otherwise."""
+    from aeos.portfolio import gitread
+
+    return gitread.resolve_commit(repo, commitish)
+
+
+def git_list_files(repo: Path, commit: str, *, max_entries: int = 100_000) -> tuple[list[str], bool]:
+    """Regular files of *commit* (``git ls-tree``; no symlinks/submodules, sensitive names such as ``.env`` or keys
+    excluded) and whether the listing was truncated."""
+    from aeos.portfolio import gitread
+    from aeos.portfolio.inventory import SENSITIVE_NAMES
+
+    entries, truncated = gitread.ls_tree(repo, commit, max_entries=max_entries)
+    files = [e.path for e in entries if e.kind == "blob" and not e.is_symlink and not SENSITIVE_NAMES.search(e.path)]
+    return sorted(files), truncated
+
+
+def git_read_file(repo: Path, commit: str, path: str, *, max_bytes: int = 256 * 1024) -> bytes | None:
+    """Content of *path* at *commit* from the object database (never the working tree, no filters); ``None`` when
+    missing, a sensitive name, or larger than *max_bytes*."""
+    from aeos.portfolio import gitread
+    from aeos.portfolio.inventory import SENSITIVE_NAMES
+
+    if SENSITIVE_NAMES.search(path):
+        return None
+    return gitread.show_blob(repo, commit, path, max_bytes=max_bytes, complete_only=True)
+
+
+def classify_repo_path(path: str) -> dict[str, str | None]:
+    """The portfolio inventory's classification of one repository path: ``ci`` (e.g. GitHub Actions), ``deploy``
+    (container/compose/terraform/...) and ``contract`` (openapi/prisma/db-migrations/...) labels, or None."""
+    from aeos.portfolio.inventory import CI_PATTERNS, CONTRACT_PATTERNS, DEPLOY_PATTERNS, _match
+
+    return {"ci": _match(CI_PATTERNS, path), "deploy": _match(DEPLOY_PATTERNS, path),
+            "contract": _match(CONTRACT_PATTERNS, path)}
+
+
 def publication_targets(session: Session, project_id: str) -> list[dict]:
     """The exact publication targets configured for a project, in the one provider vocabulary
     (``aeos.portfolio.providers``): ``{"provider", "root_id", "purpose", "integration_id", "label"}``.

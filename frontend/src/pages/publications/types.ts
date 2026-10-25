@@ -210,6 +210,68 @@ export interface WorkItemsResponse extends ListResponse<WorkItem> {
   capabilities: Record<string, string>;
 }
 
+// §28/§41 documentation checkpoints (aeos.docs_engine.checkpoints)
+export interface CheckpointWriterTask {
+  status: string;
+  key: string;
+  title: string;
+  goal: string;
+  role_key: string;
+  supporting_roles?: string[];
+  changed_sections?: { document: string; sections: string[] }[];
+  diagrams?: string[];
+}
+
+export interface CheckpointView {
+  id: string;
+  kind: string;
+  ref: string;
+  package_hash: string;
+  plan_version_id: string | null;
+  material: boolean;
+  finalised: boolean;
+  changed_documents: { logical_doc_id: string; title?: string; change: string; sections: string[] }[];
+  removed_documents: string[];
+  diagram_delta: string[];
+  contract_deltas: string[];
+  architecture_delta: { nodes?: { added: string[]; removed: string[]; changed: string[] } } | null;
+  writer_task: CheckpointWriterTask | null;
+  previous_checkpoint_id: string | null;
+  created_at: string | null;
+  writer_task_planned?: { plan_version_id: string; version: number; task_key: string } | null;
+}
+
+export interface CheckpointsResponse extends ListResponse<CheckpointView> {
+  generated_at?: string;
+}
+
+export interface CheckpointOffer {
+  kind: "MILESTONE" | "ARCHITECTURE_SNAPSHOT";
+  ref: string;
+  plan_version_id: string;
+  reason: string;
+}
+
+export interface CheckpointCandidates {
+  plan_version: { id: string; version: number; manifest_hash: string } | null;
+  milestones: { key: string; title: string; tasks_total: number; tasks_accepted: number; accepted: boolean; checkpoint_id: string | null }[];
+  snapshots: { id: string; label: string | null; snapshot_hash: string | null; approved: boolean; created_at: string | null; checkpoint_id: string | null }[];
+  offers: CheckpointOffer[];
+  source: string;
+  checked_at: string | null;
+  mode?: string;
+}
+
+export interface ClaudeAdvisory {
+  status: "NARRATION" | "UNAVAILABLE";
+  assessment?: string;
+  concerns?: string[];
+  questions_for_owner?: string[];
+  label: string;
+  error_code?: string | null;
+  error?: string | null;
+}
+
 export interface Connections {
   domain: string;
   checked_at: string;

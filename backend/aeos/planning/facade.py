@@ -27,6 +27,17 @@ def tasks_for_version(session: Session, plan_version_id: str) -> list[TaskSpec]:
 # ---- additive (non-breaking) contract ---------------------------------------------------------------
 
 
+def create_human_version(session: Session, plan_id: str, *, content: dict, parent_version_id: str, rationale: str,
+                         actor_user_id: str) -> PlanVersion:
+    """A HUMAN_EDIT PlanVersion from *content* on top of the current version (schema + DAG validated, stale parent
+    refused); the plan returns to READY_FOR_HUMAN_REVIEW and needs a new owner decision on the new hash. Used by
+    docs_engine when the owner adds a documentation checkpoint's writer draft to the next plan version."""
+    from aeos.planning.service import create_human_version as impl
+
+    return impl(session, plan_id, content=content, parent_version_id=parent_version_id, rationale=rationale,
+                actor_user_id=actor_user_id)
+
+
 # Publication states another module (the publisher) may set. Human decisions (APPROVED, REJECTED,
 # REVISION_REQUESTED, ...) are recorded only through ``aeos.planning.service.decide`` with a Decision row
 # bound to the exact version + hash; the pipeline states belong to the planning service itself.

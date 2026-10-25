@@ -239,6 +239,41 @@ def test_recorded_incident_becomes_an_incident_report_and_a_problem_record(world
     problem = problems[0]
     assert problem.status == "APPROVED" and inc.id in _section(problem, "problem_statement")
     assert ev in _section(problem, "root_cause") and REGRESSION in _section(problem, "validation")
+    # §27 09. Problems: statement / root cause / impact / actions / validation all come from the record
+    assert not problem.pending_sections, problem.pending_sections
+    assert "Satu branch kandidat tercemar" in _section(problem, "impact")
+    assert "Normalisasi glob" in _section(problem, "actions")
+
+
+def test_a_real_restore_test_reaches_the_platform_backup_document_only(world):
+    """§27 08. Backup "restore procedure/testing": the only RESTORE_TEST producer (operations.backup.restore_test)
+    records PLATFORM-level evidence (no project, no domain). The platform project's 08-backup-restore names and
+    links it; a product project never sees it (it is not that product's restore test)."""
+    from aeos.operations import backup
+
+    db, settings, project = world["db"], world["settings"], world["project"]
+    bid = backup.create_backup(settings, label="docs", actor="owner")["backup_id"]
+    result = backup.restore_test(settings, bid, session=db, actor="owner")
+    db.commit()
+    assert result["status"] == "PASSED", result
+    ev = db.get(EvidenceArtifact, result["evidence_id"])
+    assert ev.project_id is None and ev.domain is None and ev.origin == "restore-test"
+
+    product = _render(world)["08-backup-restore"]
+    assert ev.id not in (product.body_markdown or "") and ev.id not in product.links.get("evidence", [])
+    assert "belum teruji" in _section(product, "restore_testing")
+
+    project.is_platform = True
+    db.commit()
+    doc = _render(world)["08-backup-restore"]
+    assert ev.id in _section(doc, "restore_testing") and ev.id in doc.links["evidence"]
+    runbook = _render(world)["08-runbooks/runbook-restart"]
+    assert ev.id in runbook.links["evidence"]
+    # a restore-test-kind row from any other origin is not this controller's restore test
+    db.add(EvidenceArtifact(kind="RESTORE_TEST", origin="collector", collector_identity="x", trusted=True,
+                            content_hash="sha256:other", claim="other", inline={}))
+    db.commit()
+    assert [e.id for e in service.evidence_refs(db, project) if e.kind == "RESTORE_TEST"] == [ev.id]
 
 
 def test_platform_wide_incident_reaches_the_projects_its_blast_radius_names(world):

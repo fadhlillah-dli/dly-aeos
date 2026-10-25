@@ -44,6 +44,7 @@ never rewritten. Number ranges per module group: 0001-0009 platform, 0010 doctor
 | [ADR-0072](ADR-0072-google-drive-file-scope-docx-import.md) | PERSONAL docs: drive.file scope, DOCX import, requiredRevisionId updates | PROPOSED |
 | [ADR-0073](ADR-0073-office-atlassian-adapters-disabled-by-default.md) | OFFICE Atlassian adapters: disabled by default, Cloud-only, real folders or BLOCKED | PROPOSED |
 | [ADR-0074](ADR-0074-publication-approval-decision-binding.md) | One human PUBLICATION decision per run, bound to version + hash + preview | PROPOSED |
+| [ADR-0075](ADR-0075-diagram-contract-references-and-checkpoint-handoff.md) | Diagram checks against the project's own contracts at a recorded commit; checkpoint hand-off to planning | PROPOSED |
 | [ADR-0080](ADR-0080-budget-admission-and-native-usage.md) | Budget admission: $0 default hard stop, serialised reservations, fail-closed state, native usage never in dollars | ACCEPTED |
 | [ADR-0081](ADR-0081-evaluation-gates-and-leaderboard.md) | Evaluation: AIConfiguration unit, eligibility gates, honest leaderboard, no automatic route change | ACCEPTED |
 | [ADR-0082](ADR-0082-change-proposal-hash-binding.md) | Change proposals: canonical identity, deterministic review package, trial ≠ promotion, hash-bound decisions | ACCEPTED |

@@ -161,7 +161,9 @@ def schema_sample_content(name: str = "Contoh App") -> dict[str, Any]:
         "overview": "Aplikasi lokal satu pengguna.", "ownership": "Fadhlillah", "dependencies": ["SQLite"],
         "criticality": "LOW", "sli_slo_proposals": [{"indicator": "Availability lokal", "objective": "99%",
                                                     "rationale": "Pemakaian pribadi"}],
-        "runbooks": [{"key": "restart", "title": "Restart", "purpose": "Pulihkan server lokal yang macet"}],
+        # schema revision 4 fields given empty: the procedure is not proposed (stays documentation pending)
+        "runbooks": [{"key": "restart", "title": "Restart", "purpose": "Pulihkan server lokal yang macet",
+                      "prerequisites": "", "procedure": "", "verification": "", "rollback": "", "escalation": ""}],
         "monitoring": ["Jumlah error 5xx"], "logging": "Log aplikasi lokal 14 hari", "alerting": ["5xx > 5/menit"],
         "backup": {"scope": "File SQLite", "frequency": "Harian", "retention": "7 hari",
                    "restore_procedure": "Salin file backup", "storage": ""},

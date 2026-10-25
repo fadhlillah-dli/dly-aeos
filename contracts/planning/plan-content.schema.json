@@ -14,7 +14,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Product name (display only; identity is the project UUID)"
+          "description": "Product name (display only)"
         },
         "summary": {
           "type": "string"
@@ -368,7 +368,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Architecture decisions proposed (become ADR/Decision only after human approval)"
+              "description": "Proposed decisions (ADR/Decision only after human approval)"
             }
           },
           "required": [
@@ -413,11 +413,11 @@
               },
               "mermaid": {
                 "type": "string",
-                "description": "Mermaid source (diffable); rendered by the platform, never treated as runtime evidence"
+                "description": "Mermaid source; never runtime evidence"
               },
               "verification_source": {
                 "type": "string",
-                "description": "What the diagram must be checked against (contract/manifest/schema/threat model)"
+                "description": "Checked against (contract/manifest/schema/threat model; test node ids)"
               }
             },
             "required": [
@@ -1101,12 +1101,32 @@
               },
               "purpose": {
                 "type": "string"
+              },
+              "prerequisites": {
+                "type": "string"
+              },
+              "procedure": {
+                "type": "string"
+              },
+              "verification": {
+                "type": "string"
+              },
+              "rollback": {
+                "type": "string"
+              },
+              "escalation": {
+                "type": "string"
               }
             },
             "required": [
               "key",
               "title",
-              "purpose"
+              "purpose",
+              "prerequisites",
+              "procedure",
+              "verification",
+              "rollback",
+              "escalation"
             ],
             "additionalProperties": false
           }
@@ -2045,7 +2065,7 @@
           "contract_paths"
         ],
         "additionalProperties": false,
-        "description": "Contract-first: agreed before parallel work that depends on it (§19, §22)"
+        "description": "Contract-first: agreed before parallel work that depends on it"
       }
     },
     "assumptions": {
@@ -2163,5 +2183,5 @@
     "facts"
   ],
   "additionalProperties": false,
-  "description": "DLY AEOS PlanVersion content (Product 1 nodes 00-08 + DAG)"
+  "description": "PlanVersion content (Product 1 nodes 00-08 + DAG)"
 }
