@@ -14,7 +14,7 @@ from aeos.audit import service as audit
 from aeos.core.enums import Domain
 from aeos.core.errors import AeosError, NotFound
 from aeos.core.timeutil import utcnow
-from aeos.delivery import gates, governance, pr_bundle, provider, sync
+from aeos.delivery import bitbucket, gates, governance, pr_bundle, provider, sync
 from aeos.identity.service import Principal
 from aeos.models.delivery_ext import PullRequestRecord
 from aeos.models.evidence import EvidenceArtifact
@@ -71,15 +71,18 @@ def delivery_gates(principal: CurrentPrincipal, domain: ActiveDomain, db: DB, ta
 
 
 def _repo_for(db: Session, principal: Principal, domain: Domain, repo: str | None) -> tuple[RepositoryReference, Project]:
+    # U-02..U-04: PERSONAL code lives on GitHub, OFFICE code on Bitbucket (ADR-0111).
+    office = domain == Domain.OFFICE
+    host = "Bitbucket" if office else "GitHub"
     ids = visible_project_ids(db, principal, domain)
     q = select(RepositoryReference).where(RepositoryReference.project_id.in_(ids),
-                                          RepositoryReference.provider.in_(["GITHUB", "github"]))
+                                          RepositoryReference.provider.in_([host.upper(), host.lower()]))
     if repo:
-        provider.validate_repo(repo)
+        (bitbucket.validate_repo if office else provider.validate_repo)(repo)
         q = q.where(RepositoryReference.full_name == repo)
     rows = list(db.scalars(q))
     if not rows:
-        raise NotFound("no registered GitHub repository in this domain" + (f" named {repo}" if repo else ""))
+        raise NotFound(f"no registered {host} repository in this domain" + (f" named {repo}" if repo else ""))
     rows.sort(key=lambda r: 0 if r.role == "platform" else 1)
     ref = rows[0]
     project = db.get(Project, ref.project_id)
@@ -88,12 +91,18 @@ def _repo_for(db: Session, principal: Principal, domain: Domain, repo: str | Non
     return ref, project
 
 
+def _capabilities(db: Session, ref: RepositoryReference, project: Project, branch: str | None) -> Any:
+    if project.domain == "OFFICE":
+        return bitbucket.capabilities_for(db, project, ref.full_name, branch or ref.default_branch)
+    token, credential = provider.github_token(project.domain)
+    return provider.check_capabilities(ref.full_name, branch or ref.default_branch, token=token, credential=credential)
+
+
 @router.get("/api/delivery/provider-capabilities")
 def provider_capabilities(principal: CurrentPrincipal, domain: ActiveDomain, db: DB, repo: str | None = None,
                           branch: str | None = Query(None, max_length=200)) -> dict[str, Any]:
     ref, project = _repo_for(db, principal, domain, repo)
-    token, credential = provider.github_token(project.domain)
-    caps = provider.check_capabilities(ref.full_name, branch or ref.default_branch, token=token, credential=credential)
+    caps = _capabilities(db, ref, project, branch)
     out = caps.to_dict()
     out["checked_at"] = caps.checked_at
     out["project_id"] = project.id
@@ -108,9 +117,7 @@ class CapabilityRecordIn(BaseModel):
 @router.post("/api/delivery/provider-capabilities/record")
 def record_capabilities(body: CapabilityRecordIn, principal: AdminPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     ref, project = _repo_for(db, principal, domain, body.repo)
-    token, credential = provider.github_token(project.domain)
-    caps = provider.check_capabilities(ref.full_name, body.branch or ref.default_branch, token=token,
-                                       credential=credential)
+    caps = _capabilities(db, ref, project, body.branch)
     ev = provider.record_capability_evidence(db, project, caps)
     audit.record(db, actor_type="user", actor_id=principal.user.id, action="delivery.provider.capabilities",
                  result="SUCCESS", target_type="repository", target_id=ref.full_name, project_id=project.id,

@@ -63,7 +63,8 @@ def validate_repo(full_name: str) -> str:
 def github_token(domain: str) -> tuple[str | None, str]:
     """Read token for a trusted in-process caller. Never returned to UI/logs; registered for redaction."""
     if domain != "PERSONAL":
-        return None, "NOT_APPLICABLE: OFFICE code lives in Bitbucket; the Bitbucket adapter is not implemented"
+        return None, ("NOT_APPLICABLE: OFFICE code lives in Bitbucket Cloud (aeos.delivery.bitbucket, disabled until "
+                      "a recorded company authorisation)")
     try:
         from aeos.secrets import facade as secrets
 
@@ -125,6 +126,11 @@ class ProviderCapabilities:
     residual_risks: list[str] = field(default_factory=list)
     source: str = "GitHub REST API (GET only)"
     mode: str = "LIVE"
+    # Provider plan entitlement for merge enforcement as far as it is observable: OBSERVED (an enforcing rule is
+    # in place) | AVAILABLE (the provider answers the feature, nothing configured) | NOT_ENTITLED (the provider says
+    # this plan/visibility cannot enforce it, e.g. GitHub "Upgrade to GitHub Pro") | NOT_OBSERVED (not visible
+    # without an enforcing rule - never claimed; Bitbucket "enforce merge checks" is Premium) | UNKNOWN.
+    entitlement: str = "UNKNOWN"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -215,6 +221,21 @@ def _rulesets_check(resp: httpx.Response, *, private: bool | None, plan: str | N
                                {"provider_message": _message(resp)})
     return CapabilityCheck("rulesets", "UNKNOWN", f"Tidak dapat membaca rulesets (HTTP {code})", code,
                            {"provider_message": _message(resp)})
+
+
+def github_entitlement(prot: CapabilityCheck, rules: CapabilityCheck, *, gate_configured: bool) -> str:
+    """§08 "actual provider entitlements": what GitHub itself shows about merge enforcement on this repository,
+    never inferred from a missing plan name. OBSERVED - an enforcing rule is in place; NOT_ENTITLED - GitHub says
+    the plan/visibility cannot enforce it (upgrade required, or 404 on a private repository of a Free plan);
+    AVAILABLE - GitHub answered "Branch not protected" (the feature exists, nothing configured); UNKNOWN otherwise
+    (an empty rulesets list alone does not show that a private repository can enforce rulesets)."""
+    if gate_configured:
+        return "OBSERVED"
+    if "NOT_ENFORCEABLE" in (prot.status, rules.status):
+        return "NOT_ENTITLED"
+    if prot.status == "NOT_CONFIGURED":
+        return "AVAILABLE"
+    return "UNKNOWN"
 
 
 def _branch_rules_check(resp: httpx.Response) -> CapabilityCheck:
@@ -388,6 +409,7 @@ def check_capabilities(repo: str, branch: str | None = None, *, token: str | Non
         else:
             caps.merge_gate = "UNKNOWN"
             caps.residual_risks.append("Kemampuan penegakan merge UNKNOWN — merge tetap tindakan manusia")
+        caps.entitlement = github_entitlement(prot, rules, gate_configured=bool(gate_configured))
         return caps
     except httpx.HTTPError as exc:
         caps.checks.append(CapabilityCheck("network", "UNKNOWN", f"GitHub tidak terjangkau: {type(exc).__name__}"))
@@ -425,6 +447,7 @@ class CIStatus:
     truncated: bool = False  # the provider reported more check-runs than were read
     # PIPELINE_REFERENCE: gates from the project's explicit job -> gate map; NAME_HEURISTIC: GATE_HINTS
     gate_mapping: str = "NAME_HEURISTIC"
+    provider: str = "github"  # github | bitbucket (the CI source of truth of the project's domain)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -509,13 +532,22 @@ def parse_check_runs(repo: str, sha: str, payloads: list[dict[str, Any]],
                 app=(cr.get("app") or {}).get("slug"), url=cr.get("html_url"), started_at=cr.get("started_at"),
                 completed_at=cr.get("completed_at"), gates=classify_check(name, gate_map),
             ))
-    truncated = total > read
+    return parse_check_runs_summary(repo, sha, runs, truncated=total > read, gate_map=gate_map)
+
+
+def parse_check_runs_summary(repo: str, sha: str, runs: list[CheckRunView], *, truncated: bool,
+                             gate_map: dict[str, list[str]] | None, provider: str = "github",
+                             source: str | None = None) -> CIStatus:
+    """One rule for every CI provider: a partial read is never a pass."""
     overall = summarize_runs(runs)
     if truncated and overall in ("PASS", "NO_CHECKS"):
         overall = "NOT_PROVEN"  # unseen check-runs could be failing: a partial read is never a pass
-    return CIStatus(repo=repo, sha=sha, overall=overall, total=len(runs), runs=runs,
-                    checked_at=utcnow().isoformat(), truncated=truncated,
-                    gate_mapping="PIPELINE_REFERENCE" if gate_map else "NAME_HEURISTIC")
+    ci = CIStatus(repo=repo, sha=sha, overall=overall, total=len(runs), runs=runs,
+                  checked_at=utcnow().isoformat(), truncated=truncated,
+                  gate_mapping="PIPELINE_REFERENCE" if gate_map else "NAME_HEURISTIC", provider=provider)
+    if source:
+        ci.source = source
+    return ci
 
 
 def fetch_check_runs(repo: str, sha: str, *, token: str | None, client: httpx.Client | None = None,
@@ -617,23 +649,27 @@ def record_ci_evidence(session: Session, project: Project, ci: CIStatus, *, task
         return None
     from aeos.verification import facade as verification
 
+    identity, label = (("bitbucket-commit-statuses", "Bitbucket commit statuses/Pipelines") if ci.provider == "bitbucket"
+                       else ("github-check-runs", "GitHub check-runs"))
     return verification.collect_evidence(
-        session, kind="CI_STATUS", origin="provider-ci", collector_identity=f"github-check-runs:{ci.repo}"[:128],
-        claim=f"GitHub check-runs for {ci.sha[:12]}: {ci.overall} ({ci.total} run(s))", content=ci.to_dict(),
+        session, kind="CI_STATUS", origin="provider-ci", collector_identity=f"{identity}:{ci.repo}"[:128],
+        claim=f"{label} for {ci.sha[:12]}: {ci.overall} ({ci.total} run(s))", content=ci.to_dict(),
         evidence_level="E3", subject_type="commit", subject_id=ci.sha, project_id=project.id, domain=project.domain,
         run_id=run_id, task_id=task_id,
-        environment={"commit": ci.sha, "repo": ci.repo, "provider": "github", "checked_at": ci.checked_at},
+        environment={"commit": ci.sha, "repo": ci.repo, "provider": ci.provider, "checked_at": ci.checked_at},
     )
 
 
 def record_capability_evidence(session: Session, project: Project, caps: ProviderCapabilities) -> EvidenceArtifact:
     from aeos.verification import facade as verification
 
+    provider = caps.provider.lower()
+    label = "Bitbucket" if provider == "bitbucket" else "GitHub"
     return verification.collect_evidence(
-        session, kind="PROVIDER_CAPABILITY", origin="collector", collector_identity="github-capability-probe",
-        claim=f"GitHub merge-gate capability for {caps.repo}@{caps.branch}: {caps.merge_gate} "
-              f"(enforcement {caps.enforcement_tested})",
+        session, kind="PROVIDER_CAPABILITY", origin="collector", collector_identity=f"{provider}-capability-probe",
+        claim=f"{label} merge-gate capability for {caps.repo}@{caps.branch}: {caps.merge_gate} "
+              f"(enforcement {caps.enforcement_tested}, entitlement {caps.entitlement})",
         content=caps.to_dict(), evidence_level="E1", subject_type="repository", subject_id=caps.repo,
         project_id=project.id, domain=project.domain,
-        environment={"repo": caps.repo, "branch": caps.branch, "provider": "github", "checked_at": caps.checked_at},
+        environment={"repo": caps.repo, "branch": caps.branch, "provider": provider, "checked_at": caps.checked_at},
     )

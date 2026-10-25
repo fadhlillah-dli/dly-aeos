@@ -3,6 +3,10 @@
 Workers never receive upstream credentials. They receive a short-lived capability token bound to
 one run, scope and caps. Only the broker may push ``aeos/*`` task branches and open PRs; there is
 no merge operation anywhere in the broker (human-only merge, U-09).
+
+Provider follows the domain (U-02/U-03): PERSONAL runs push/open PRs on GitHub, OFFICE runs (and any
+registered Bitbucket repository) on Bitbucket Cloud through ``aeos.broker.bitbucket_broker`` - same
+signatures, same sha-pinned push / grant / interlock / no-integration guarantees (additive, ADR-0111).
 """
 
 from __future__ import annotations
@@ -13,10 +17,12 @@ from sqlalchemy.orm import Session
 
 from aeos.models.routing import CapabilityGrant
 
-# Route pools the model proxy can serve (additive contract, ADR-0106). ARENA/COMPARATOR/LOCAL/WATCHLIST
-# have no controlled execution path through the broker yet: routing refuses such tasks at admission and
-# the proxy refuses their requests (no silent failure at the first model call).
+# Route pools the model proxy can serve for worker tasks (additive contract, ADR-0106). ARENA/COMPARATOR/LOCAL/
+# WATCHLIST never serve tasks: routing refuses such tasks at admission and the proxy refuses their requests.
 SERVED_POOLS: tuple[str, ...] = ("WORKER",)
+# Pools whose feasibility the owner can test through the controlled probe (additive, ADR-0111): one synthetic
+# PUBLIC request on a free, TRIAL/APPROVED (hash-bound human decision) PERSONAL route; evidence only.
+PROBE_POOLS: tuple[str, ...] = ("ARENA", "COMPARATOR", "LOCAL", "WORKER")
 
 
 def issue_grant(
@@ -69,6 +75,15 @@ def credential_ref_problem(domain: str, ref: str, *, project_id: str | None = No
     from aeos.broker.model_proxy import credential_namespace_problem as impl
 
     return impl(domain, ref, project_id=project_id)
+
+
+def probe_route(session: Session, *, route_key: str, actor: str) -> dict[str, Any]:
+    """§23 route feasibility: one synthetic PUBLIC request to a free, human-activated (TRIAL/APPROVED, hash-bound)
+    PERSONAL route of ``PROBE_POOLS``; records PROBE evidence (E3) + ledger + audit and changes nothing about the
+    route. Raises PolicyDenied when the route may not be probed (additive, ADR-0111; caller commits)."""
+    from aeos.broker.feasibility import probe_route as impl
+
+    return impl(session, route_key, actor=actor)
 
 
 def reconcile_side_effect(session: Session, *, side_effect_id: str, actor: str) -> dict[str, Any]:

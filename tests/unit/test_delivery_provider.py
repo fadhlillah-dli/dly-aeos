@@ -45,6 +45,7 @@ def test_free_private_403_upgrade_is_not_enforceable(respx_mock):
     assert provider.NOT_ENFORCEABLE_MESSAGE in caps.residual_risks
     assert caps.enforcement_tested == "NOT-PROVEN"
     assert caps.plan == "free" and caps.visibility == "private"
+    assert caps.entitlement == "NOT_ENTITLED"  # GitHub said so: an observed absence, never a pass
     assert all(call.request.method == "GET" for call in respx_mock.calls)
     assert TOKEN not in str(caps.to_dict())
 
@@ -57,7 +58,7 @@ def test_free_private_404_is_not_enforceable(respx_mock):
     respx_mock.get(f"{API}/repos/{REPO}/rules/branches/main").respond(404, json={"message": "Not Found"})
     caps = provider.check_capabilities(REPO, token=TOKEN)
     assert {c.key: c.status for c in caps.checks}["branch_protection"] == "NOT_ENFORCEABLE"
-    assert caps.merge_gate == "NOT_ENFORCEABLE"
+    assert caps.merge_gate == "NOT_ENFORCEABLE" and caps.entitlement == "NOT_ENTITLED"
 
 
 @respx.mock(assert_all_called=False)
@@ -68,6 +69,7 @@ def test_public_repo_not_protected_is_not_configured(respx_mock):
     respx_mock.get(f"{API}/repos/{REPO}/rules/branches/main").respond(200, json=[])
     caps = provider.check_capabilities(REPO, token=TOKEN)
     assert caps.merge_gate == "NOT_CONFIGURED"
+    assert caps.entitlement == "AVAILABLE"  # "Branch not protected": the feature exists, nothing configured
     assert provider.NOT_CONFIGURED_MESSAGE in caps.residual_risks
 
 
@@ -85,7 +87,7 @@ def test_configured_protection_reports_required_checks_but_not_proven(respx_mock
         {"type": "pull_request"}, {"type": "required_status_checks",
                                    "parameters": {"required_status_checks": [{"context": "secret-scan"}]}}])
     caps = provider.check_capabilities(REPO, token=TOKEN)
-    assert caps.merge_gate == "CONFIGURED"
+    assert caps.merge_gate == "CONFIGURED" and caps.entitlement == "OBSERVED"
     assert caps.required_status_checks == ["backend (ubuntu-latest)", "frontend", "secret-scan"]
     assert caps.enforcement_tested == "NOT-PROVEN"
     assert any("enforce_admins=false" in r for r in caps.residual_risks)
@@ -155,7 +157,7 @@ def test_no_token_means_no_network_and_unknown():
     with respx.mock(assert_all_called=False) as mock:
         caps = provider.check_capabilities(REPO, token=None, credential="MISSING: SECRET_MISSING")
         assert not mock.calls
-    assert caps.merge_gate == "UNKNOWN"
+    assert caps.merge_gate == "UNKNOWN" and caps.entitlement == "UNKNOWN"
     assert caps.checks[0].status == "UNKNOWN"
 
 

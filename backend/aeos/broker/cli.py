@@ -42,6 +42,26 @@ def grants_cmd(active: bool = typer.Option(False, help="Only active grants"),
                       f"expires={g['expires_at']}  used={g['used']}")
 
 
+@app.command("probe-route")
+def probe_route_cmd(route_key: str = typer.Argument(..., help="Route key (ARENA/COMPARATOR/LOCAL/WORKER pool)")) -> None:
+    """One synthetic PUBLIC feasibility request to a free, owner-activated (TRIAL) route; evidence only."""
+    from aeos.broker.feasibility import probe_route
+    from aeos.cli import ensure_database
+    from aeos.core.db import session_scope
+    from aeos.core.errors import AeosError
+
+    ensure_database()
+    try:
+        with session_scope() as s:
+            out = probe_route(s, route_key, actor="cli:local-operator")
+    except AeosError as exc:
+        _out(f"{exc.code}: {exc.message}")
+        raise typer.Exit(2) from exc
+    _out(f"{out['route_key']} ({out['pool']}): {out['outcome']} http={out['http_status']} "
+         f"latency={out['latency_ms']}ms model={out['model_resolved'] or 'UNKNOWN'} cost={out['cost_usd']}")
+    _out(f"evidence {out['evidence_id']}; {out['note']}")
+
+
 @app.command("revoke")
 def revoke_cmd(run: str = typer.Argument(..., help="Run id"),
                reason: str = typer.Option("revoked by local operator", help="Reason")) -> None:
