@@ -108,6 +108,25 @@ def test_install_on_both_platforms_from_one_reviewed_manifest(settings, monkeypa
             assert "darwin_arm64" in r.output  # the owner is told which platform entry to record
 
 
+def test_install_records_signature_authenticity_as_not_verified(settings, monkeypatch):
+    """W6-075 (owner/tool part): OpenBao publishes a GPG signature of checksums.txt, but neither gpg nor an
+    owner-pinned release-key fingerprint is part of the reviewed toolchain - the observation says so explicitly."""
+    from aeos.core.db import session_scope
+    from aeos.models.inventory import ComponentObservation
+
+    _openbao(monkeypatch, {"windows_amd64": GOOD})
+    monkeypatch.setattr(installer, "platform_target", lambda: ("windows", "amd64"))
+    with respx.mock(assert_all_called=False) as m:
+        _mock_release(m)
+        r = runner.invoke(app, ["vault", "install", "--yes"])
+    assert r.exit_code == 0, r.output
+    with session_scope() as s:
+        obs = [o for o in s.query(ComponentObservation).filter_by(component_id="openbao", dimension="installation")
+               if o.status == "INSTALLED"]
+        assert obs and obs[-1].detail["signature"]["result"] == "NOT_VERIFIED"
+        assert obs[-1].detail["digest_platform"] == "windows_amd64" and obs[-1].detail["digest_status"] == "MATCH"
+
+
 # ------------------------------------------------------------------------------------------- inventory drift
 @pytest.fixture
 def seeded(db):

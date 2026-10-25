@@ -162,6 +162,23 @@ def _manifest_component(component_id: str) -> dict[str, Any] | None:
     return None
 
 
+def host_platform() -> tuple[str, str | None]:
+    """(os, arch) of this host in the pin naming (``windows|darwin|linux``, ``amd64|arm64`` or None when no reviewed
+    artifact exists for the architecture) - the ``<os>_<arch>`` key of a per-platform ``approved_digest`` and the OS
+    key of a per-OS ``signature.approved_signer``."""
+    from aeos.inventory.pins import host_arch, host_os
+
+    return host_os(), host_arch()
+
+
+def select_digest(raw: Any, platform: str | None = None) -> dict[str, Any]:
+    """Select the approved digest for *platform* (default: this host) from a manifest ``approved_digest`` value (one
+    ``sha256:`` for all platforms, or a mapping keyed ``<os>_<arch>``). See ``aeos.inventory.pins.select_digest``."""
+    from aeos.inventory.pins import select_digest as impl
+
+    return impl(raw, platform)
+
+
 def approved_signer(component_id: str, *, os_name: str | None = None) -> str | None:
     """The publisher identity the owner pinned for *component_id* in the reviewed InstallManifest
     (``signature.approved_signer``) that applies on this host's OS (or *os_name*): a plain string applies on

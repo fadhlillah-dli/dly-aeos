@@ -50,6 +50,21 @@ report steps run under `shell: bash` (`-eo pipefail`), so a crashed tool is a fa
 success; the evaluation treats a missing or unreadable report as such. Severity filtering is done only by the
 evaluator from the owner's values - no `--audit-level`/`-ll` threshold is chosen in the workflow.
 
+To decide, the owner - in the reviewed PR that accepts this ADR - edits `policy/supply-chain.yaml`:
+
+* `status: DECIDED`, `decision_ref` (this ADR or the Decision id), `decided_by`, `decided_at`
+  (a DECIDED policy without `decision_ref`, or with an unknown value, is POLICY_INVALID: exit 2);
+* `licenses.allow`: allowed licence identifiers (SPDX ids such as `MIT`, `Apache-2.0`), matched exactly and
+  case-insensitively; `A OR B` passes when either is allowed, `A AND B` only when both are. Once set, an
+  UNKNOWN licence or one outside the list FAILS;
+* `vulnerabilities.python|npm.fail_at_or_above` and `sast.bandit.fail_at_or_above`: one of
+  `LOW | MEDIUM | HIGH | CRITICAL`. Once set, a finding at or above it FAILS, a finding whose severity the
+  scanner does not report (pip-audit 2.7.3 reports none) counts as UNKNOWN and FAILS, and a missing or
+  unreadable scanner report FAILS;
+* optionally `sast.bandit.min_confidence` (`LOW | MEDIUM | HIGH`): bandit findings below it are listed but
+  do not fail;
+* then the supply-chain job tag in `.github/workflows/ci.yml` changes from `[NO-GATE]` to `G1`.
+
 **Explicit gate mapping.** Every CI job name carries its gates in brackets (`[G1,G2]`, `[G3]`) or
 `[NO-GATE]` for report-only jobs. `aeos.delivery.provider.classify_check` uses the tag when present
 and falls back to the name heuristics only for untagged provider checks.

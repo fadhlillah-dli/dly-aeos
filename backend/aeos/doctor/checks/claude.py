@@ -63,9 +63,9 @@ INSTALL_REMEDY = install_remedy()  # import-time copy (current OS); checks call 
 
 
 def _pinned_signer() -> str | None:
-    from aeos.claude_bridge import binary as binmod
+    from aeos.claude_bridge import facade as bridge
 
-    return binmod.approved_publisher()
+    return bridge.approved_publisher()
 
 
 def _fp_claude_binary(ctx: CheckContext) -> dict[str, Any]:
@@ -75,12 +75,12 @@ def _fp_claude_binary(ctx: CheckContext) -> dict[str, Any]:
 
 
 def signature_remedy() -> Remedy:
-    from aeos.claude_bridge.binary import SIGNATURE_REMEDY
+    from aeos.claude_bridge import facade as bridge
 
+    spec = bridge.signature_remedy()
     return Remedy(
-        operation=SIGNATURE_REMEDY["operation"] + ". " + SIGNATURE_REMEDY["pin_note"],
-        command=os_install_command(windows=" ; ".join(SIGNATURE_REMEDY["windows"]),
-                                   macos=" ; ".join(SIGNATURE_REMEDY["darwin"])),
+        operation=spec["operation"] + ". " + spec["pin_note"],
+        command=os_install_command(windows=" ; ".join(spec["windows"]), macos=" ; ".join(spec["darwin"])),
         source=f"dokumentasi resmi Claude Code ({SETUP_DOCS}); install-manifest claude-code signature.approved_signer",
         target="binary claude di PATH atau setelan claude_binary", privilege="pengguna lokal (pin baru: reviewer manusia)",
         cost="tidak ada", rollback="uninstall lewat package manager yang sama",
@@ -112,12 +112,10 @@ def _with_authenticity(out: Outcome, path: str) -> Outcome:
     DEGRADED/UNVERIFIED/NOT_CHECKED stay visible in the evidence and summary, never shown as authentic."""
     from pathlib import Path
 
-    from aeos.claude_bridge import binary as binmod
+    from aeos.claude_bridge import facade as bridge
 
-    p = Path(path)
-    sig = binmod.invocation_signature(p, binmod.fingerprint(p))
-    pinned = _pinned_signer()
-    auth = binmod.authenticity_view(sig, pinned)
+    auth = bridge.binary_authenticity(Path(path))
+    pinned = auth["approved_signer"]
     gate = auth["gate"]
     evidence = {**out.evidence, "authenticity": {k: auth[k] for k in ("gate", "reason", "approved_signer", "os",
                                                                       "signature_status", "observed_signer")},

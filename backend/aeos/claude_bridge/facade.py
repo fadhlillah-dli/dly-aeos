@@ -76,3 +76,28 @@ def read_manual_result(package_id: str) -> ClaudeResult | None:
     from aeos.claude_bridge.manual import read_manual_result as impl
 
     return impl(package_id)
+
+
+def approved_publisher() -> str | None:
+    """The owner-pinned Claude Code publisher identity that applies on this OS (None = not pinned)."""
+    from aeos.claude_bridge.binary import approved_publisher as impl
+
+    return impl()
+
+
+def binary_authenticity(path: Path) -> dict[str, Any]:
+    """§12 "unmodified official binary": the authenticity view of the binary at *path* - the same OS code-signature
+    gate the bridge applies before every native call (``gate`` OK/UNVERIFIED/DEGRADED/BLOCKED/NOT_CHECKED, reason,
+    the pin that applies on this OS, a signature-specific remedy). Checked once per binary fingerprint."""
+    from aeos.claude_bridge import binary as binmod
+
+    sig = binmod.invocation_signature(path, binmod.fingerprint(path))
+    return binmod.authenticity_view(sig, binmod.approved_publisher())
+
+
+def signature_remedy() -> dict[str, Any]:
+    """The signature-specific remedy (reinstall the official build, check the OS signature, change the pin only by
+    a reviewed install-manifest PR) - never the /login remedy."""
+    from aeos.claude_bridge.binary import SIGNATURE_REMEDY
+
+    return dict(SIGNATURE_REMEDY)

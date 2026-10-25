@@ -257,7 +257,7 @@ def authenticity_view(sig: dict[str, Any] | None, approved_signer: str | None, *
                       ) -> dict[str, Any]:
     """The §12 authenticity claim as status pages and the Doctor show it: the gate, its reason, the pin that applies
     on this OS and - when not authentic - the signature-specific remedy (never the login remedy)."""
-    from aeos.inventory.pins import host_os
+    from aeos.inventory import facade as inventory
 
     status = str((sig or {}).get("status") or "NOT_CHECKED")
     if not found:
@@ -268,7 +268,7 @@ def authenticity_view(sig: dict[str, Any] | None, approved_signer: str | None, *
                                                             if approved_signer else ""))
     else:
         gate, reason = signature_gate(sig, approved_signer)
-    os_name = host_os()
+    os_name = inventory.host_platform()[0]
     return {"gate": gate, "reason": reason, "approved_signer": approved_signer, "os": os_name,
             "signature_status": status, "observed_signer": (sig or {}).get("signer"),
             "owner_step": None if approved_signer else

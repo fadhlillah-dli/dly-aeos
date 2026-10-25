@@ -47,12 +47,12 @@ class InstallError(RuntimeError):
 def platform_target() -> tuple[str, str]:
     """(os, arch) of this host in the OpenBao release naming; also the ``<os>_<arch>`` key of a per-platform
     ``approved_digest`` in the install-manifest."""
-    from aeos.inventory.pins import host_arch, host_os
+    from aeos.inventory import facade as inventory
 
-    arch = host_arch()
+    os_name, arch = inventory.host_platform()
     if arch is None:
         raise InstallError(f"unsupported CPU architecture {platform.machine().lower()!r}")
-    return host_os(), arch
+    return os_name, arch
 
 
 def platform_key() -> str:
@@ -122,13 +122,13 @@ def manifest_digest(root: Path | None = None) -> str | None:
     digest for every platform or a mapping keyed ``<os>_<arch>`` (``platform_target``), because the release
     executable differs per OS/arch; a mapping without this platform's entry is None (NOT_RECORDED), never another
     platform's value. A malformed value is refused rather than ignored (fail closed)."""
-    from aeos.inventory.pins import select_digest
+    from aeos.inventory import facade as inventory
 
     comp = _manifest_entry(root)
     raw = (comp or {}).get("approved_digest")
     if not raw:
         return None
-    sel = select_digest(raw, platform_key())
+    sel = inventory.select_digest(raw, platform_key())
     if sel["status"] == "INVALID":
         raise InstallError(f"install-manifest approved_digest for openbao is invalid: {sel['reason']}")
     return sel["digest"]
