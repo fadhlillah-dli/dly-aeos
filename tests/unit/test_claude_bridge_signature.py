@@ -41,6 +41,28 @@ def test_macos_unsigned_binary_is_reported():
     assert binmod.publisher_signature(Path("/x/claude"), run=run)["status"] == "UNSIGNED"
 
 
+@pytest.mark.parametrize("verify,detail,expected", [
+    ((0, "", ""), (0, "", "Authority=Developer ID Application\nTeamIdentifier=Q6L2SF6YDW"), "VALID"),
+    ((1, "", "/x/claude: code object is not signed at all"), (1, "", "code object is not signed at all"), "UNSIGNED"),
+    ((1, "", "/x/claude: invalid signature (code or signature have been modified)"), (0, "", "TeamIdentifier=X"),
+     "INVALID"),
+    ((1, "", "/x/claude: a sealed resource is missing or invalid"), (0, "", ""), "INVALID"),
+    # found on the macOS CI runner: a path that is not there is not a tampered build
+    ((1, "", "claude.exe: No such file or directory"), (1, "", "claude.exe: No such file or directory"), "UNKNOWN"),
+    ((1, "", "/x/claude: Permission denied"), (1, "", ""), "UNKNOWN"),
+    ((2, "", "Usage: codesign -s identity [-fv*]"), (2, "", ""), "UNKNOWN"),
+])
+def test_macos_codesign_failures_are_invalid_only_when_the_signature_is_broken(monkeypatch, verify, detail,
+                                                                               expected):
+    monkeypatch.setattr(binmod.sys, "platform", "darwin")
+    sig = binmod.publisher_signature(Path("/x/claude"), run=_runner({"--verify": verify, "-dv": detail}))
+    assert sig["method"] == "codesign" and sig["status"] == expected
+    if expected == "UNKNOWN":
+        assert sig["reason"] and binmod.signature_gate(sig, None)[0] == "UNVERIFIED"  # never BLOCKED for this
+    if expected == "VALID":
+        assert sig["signer"] == "Q6L2SF6YDW"
+
+
 def test_missing_binary_or_failing_check_is_unknown_never_valid():
     assert binmod.publisher_signature(None)["status"] == "UNKNOWN"
 
