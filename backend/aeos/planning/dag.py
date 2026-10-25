@@ -533,6 +533,15 @@ def artifact_index(session: Session | None, version: PlanVersion) -> dict[str, d
             for label in (a.get("filename"), a.get("id")):
                 if label:
                     idx.setdefault(str(label).casefold(), entry)
+        # §41 documentation checkpoint packages (``documentation_checkpoint:<project>:<kind>:<ref>``), recorded by
+        # docs_engine: the Tech Writer task of the next plan version reads exactly the recorded, hash-bound package
+        try:
+            from aeos.docs_engine import facade as docs
+        except ImportError:  # docs engine absent: the label stays visibly unresolved
+            docs = None  # type: ignore[assignment]
+        if docs is not None:
+            for label, entry in docs.checkpoint_artifacts(session, version.project_id):
+                idx.setdefault(label.strip().casefold(), entry)
     return idx
 
 

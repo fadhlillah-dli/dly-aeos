@@ -252,11 +252,13 @@ def checkpoint_view(rev: DocumentRevision) -> dict[str, Any]:
             "created_at": rev.created_at.isoformat() if rev.created_at else None}
 
 
-def list_checkpoints(session: Session, project_id: str) -> list[dict[str, Any]]:
+def list_checkpoints(session: Session, project_id: str, *, with_planning: bool = False) -> list[dict[str, Any]]:
     rows = session.scalars(select(DocumentRevision).where(
         DocumentRevision.project_id == project_id, DocumentRevision.kind == CHECKPOINT_KIND)
         .order_by(DocumentRevision.created_at.desc()).limit(100))
-    return [checkpoint_view(x) for x in rows]
+    if not with_planning:
+        return [checkpoint_view(x) for x in rows]
+    return [{**checkpoint_view(x), "writer_task_planned": _writer_planned(session, x)} for x in rows]
 
 
 def get_checkpoint(session: Session, revision_id: str) -> DocumentRevision:
@@ -264,3 +266,182 @@ def get_checkpoint(session: Session, revision_id: str) -> DocumentRevision:
     if rev is None or rev.kind != CHECKPOINT_KIND:
         raise NotFound("documentation checkpoint not found")
     return rev
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Control Center / CLI support: which checkpoints are ready to record (an offer, never an automatic record), and the
+# owner-chosen hand-off of the writer draft into the NEXT plan version (it becomes an executable TaskSpec only when
+# the owner approves that version, §21).
+
+
+def _approved_version(session: Session, project: Project) -> PlanVersion | None:
+    from aeos.models.planning import Plan
+    from aeos.planning import facade as planning
+
+    plans = session.scalars(select(Plan).where(Plan.project_id == project.id, Plan.domain == project.domain)
+                            .order_by(Plan.created_at.desc()))
+    for plan in plans:
+        v = planning.get_approved_version(session, plan.id)
+        if v is not None:
+            return v
+    return None
+
+
+def checkpoint_candidates(session: Session, project: Project) -> dict[str, Any]:
+    """§41 "finalisasi pada accepted milestone": per milestone of the APPROVED plan version how many TaskSpecs are
+    ACCEPTED, approved ArchitectureSnapshots (platform project), and an OFFER for every fully accepted milestone /
+    approved snapshot that has no checkpoint yet. Read-only; recording stays an explicit admin action."""
+    from aeos.models.decisions import ArchitectureSnapshot
+    from aeos.planning import facade as planning
+    from aeos.verification import facade as verification
+
+    recorded = {(c["kind"], str(c["ref"])): c["id"] for c in list_checkpoints(session, project.id)}
+    version = _approved_version(session, project)
+    out: dict[str, Any] = {"plan_version": None, "milestones": [], "snapshots": [], "offers": []}
+    if version is not None:
+        out["plan_version"] = {"id": version.id, "version": version.version, "manifest_hash": version.manifest_hash}
+        content = version.content if isinstance(version.content, dict) else {}
+        tasks = planning.tasks_for_version(session, version.id)
+        for m in content.get("milestones") or []:
+            if not isinstance(m, dict) or not as_text(m.get("key")):
+                continue
+            key = as_text(m.get("key"))
+            slugs = {feature_slug(as_text(f.get("key"))) for f in content.get("features") or []
+                     if isinstance(f, dict) and as_text(f.get("milestone")) == key}
+            mine = [t for t in tasks if feature_slug(t.feature_key or "") in slugs]
+            accepted = [t for t in mine if verification.acceptance_is_valid(session, t.id,
+                                                                             plan_version_hash=t.plan_version_hash)]
+            row = {"key": key, "title": as_text(m.get("title")), "tasks_total": len(mine),
+                   "tasks_accepted": len(accepted), "accepted": bool(mine) and len(accepted) == len(mine),
+                   "checkpoint_id": recorded.get(("MILESTONE", key))}
+            out["milestones"].append(row)
+            if row["accepted"] and not row["checkpoint_id"]:
+                out["offers"].append({"kind": "MILESTONE", "ref": key, "plan_version_id": version.id,
+                                      "reason": f"Semua {len(mine)} task milestone {key} ACCEPTED; catat checkpoint "
+                                                "untuk memfinalisasi dokumentasinya."})
+    if project.is_platform:
+        from aeos.inventory import facade as inventory
+
+        for snap in session.scalars(select(ArchitectureSnapshot).order_by(ArchitectureSnapshot.created_at.desc())
+                                    .limit(20)):
+            try:
+                meta = inventory.snapshot_checkpoint(session, snap.id, domain=project.domain)
+            except (NotFound, ValidationFailed):
+                continue  # another domain's snapshot is never listed
+            row = {"id": snap.id, "label": meta.get("label"), "snapshot_hash": meta.get("snapshot_hash"),
+                   "approved": bool(meta.get("approved")), "created_at": meta.get("created_at"),
+                   "checkpoint_id": recorded.get(("ARCHITECTURE_SNAPSHOT", snap.id))}
+            out["snapshots"].append(row)
+            if row["approved"] and not row["checkpoint_id"] and version is not None:
+                out["offers"].append({"kind": "ARCHITECTURE_SNAPSHOT", "ref": snap.id, "plan_version_id": version.id,
+                                      "reason": f"Snapshot arsitektur {meta.get('label') or snap.id} disetujui; catat "
+                                                "checkpoint agar narasi terpadu memuat deltanya."})
+    return out
+
+
+def writer_task_spec(rev: DocumentRevision, project: Project) -> dict[str, Any]:
+    """The Tech Writer / Diagram Author draft as a complete plan TASK (planning schema). Write scope stays EMPTY:
+    which paths the writer may change is the owner's decision in the plan version, and the scheduler never runs a
+    TaskSpec without allowed paths."""
+    d = rev.details or {}
+    w = d.get("writer_task") or {}
+    sections = [f"{c.get('document')}: {', '.join(c.get('sections') or []) or '-'}" for c in w.get("changed_sections")
+                or [] if isinstance(c, dict)]
+    return {
+        "key": str(w.get("key") or "DOC-CHECKPOINT")[:64], "feature_key": "", "title": str(w.get("title") or ""),
+        "goal": str(w.get("goal") or ""), "role_key": str(w.get("role_key") or "technical-writer"),
+        "input_artifacts": [str(x) for x in w.get("input_artifacts") or []],
+        "expected_outputs": [*[str(x) for x in w.get("expected_outputs") or []],
+                             *[f"bagian berubah: {s}" for s in sections[:20]],
+                             *[f"diagram berubah: {k}" for k in (w.get("diagrams") or [])[:20]]],
+        "acceptance_criteria": [str(x) for x in w.get("acceptance_criteria") or []],
+        "depends_on": [], "allowed_paths": [], "forbidden_paths": [], "tools_allowed": [], "egress_allowed": [],
+        "capability_scope": {"operations": [], "paths": [],
+                             "notes": "Path tulis ditetapkan pemilik di versi rencana sebelum approval."},
+        "capability_ttl_seconds": 0, "data_classification": project.data_classification or "INTERNAL",
+        "model_route_policy": {"pool": "WORKER", "requires_tools": True, "min_context_tokens": 0, "notes": ""},
+        "reviewer_policy": {"required": True, "reviewer_role": "", "checkpoint": ""},
+        "verifier_policy": {"required": True, "suites": [], "negative_tests_required": False},
+        "limits": {"max_attempts": 0, "timeout_seconds": 0, "max_output_tokens": 0},
+        "stop_conditions": [], "evidence_requirements": [f"paket checkpoint {rev.content_hash}"],
+        "risk_class": "R1", "artifact_schema_version": "1",
+    }
+
+
+def _writer_planned(session: Session, rev: DocumentRevision) -> dict[str, Any] | None:
+    """The newest plan version that already carries this checkpoint's writer task (by input-artifact label)."""
+    version = session.get(PlanVersion, rev.plan_version_id) if rev.plan_version_id else None
+    labels = set(((rev.details or {}).get("writer_task") or {}).get("input_artifacts") or [])
+    if version is None or not labels:
+        return None
+    for v in session.scalars(select(PlanVersion).where(PlanVersion.plan_id == version.plan_id)
+                             .order_by(PlanVersion.version.desc())):
+        for t in (v.content or {}).get("tasks") or [] if isinstance(v.content, dict) else []:
+            if isinstance(t, dict) and labels & set(t.get("input_artifacts") or []):
+                return {"plan_version_id": v.id, "version": v.version, "task_key": t.get("key")}
+    return None
+
+
+def plan_writer_task(session: Session, revision_id: str, project: Project, *, actor_user_id: str,
+                     rationale: str) -> dict[str, Any]:
+    """The owner adds the checkpoint's writer draft to a NEW plan version (a human edit of the current version).
+    That version is DRAFT (READY_FOR_HUMAN_REVIEW): the task becomes executable only after the owner approves it,
+    with its write paths set (§21). Refused when the draft is already planned or the package is not material."""
+    import copy
+
+    from aeos.planning import facade as planning
+
+    rev = get_checkpoint(session, revision_id)
+    if rev.project_id != project.id or rev.domain != project.domain:
+        raise NotFound("documentation checkpoint not found")
+    if not (rev.details or {}).get("material"):
+        raise Conflict("the package has no material change; there is nothing for the Tech Writer to integrate",
+                       code="PACKAGE_NOT_MATERIAL")
+    planned = _writer_planned(session, rev)
+    if planned is not None:
+        raise Conflict("the writer draft of this checkpoint is already part of a plan version",
+                       code="WRITER_TASK_ALREADY_PLANNED", details=planned)
+    base = session.get(PlanVersion, rev.plan_version_id) if rev.plan_version_id else None
+    plan = planning.get_plan(session, base.plan_id) if base is not None else None
+    latest = session.get(PlanVersion, plan.current_version_id) if plan is not None and plan.current_version_id else None
+    if latest is None or plan is None:
+        raise NotFound("the plan of this checkpoint has no current version")
+    # the planning service upgrades older content (additive schema revisions) and validates schema + DAG
+    content = copy.deepcopy(latest.content if isinstance(latest.content, dict) else {})
+    task = writer_task_spec(rev, project)
+    if any(isinstance(t, dict) and t.get("key") == task["key"] for t in content.get("tasks") or []):
+        raise Conflict(f"task key {task['key']} already exists in the current plan version",
+                       code="WRITER_TASK_KEY_TAKEN")
+    content["tasks"] = [*(content.get("tasks") or []), task]
+    version = planning.create_human_version(
+        session, plan.id, content=content, parent_version_id=latest.id, actor_user_id=actor_user_id,
+        rationale=(rationale or "").strip() or f"Tambahkan draft Tech Writer dari checkpoint {revision_id}")
+    audit.record(session, actor_type="user", actor_id=actor_user_id, action="documents.checkpoint.writer_task_planned",
+                 target_type="document_revision", target_id=rev.id, project_id=project.id, domain=project.domain,
+                 details={"plan_version_id": version.id, "task_key": task["key"], "package_hash": rev.content_hash})
+    return {"plan_version_id": version.id, "version": version.version, "task_key": task["key"],
+            "status": "READY_FOR_HUMAN_REVIEW",
+            "note": "Versi rencana baru menunggu keputusan pemilik; path tulis task harus ditetapkan sebelum approval."}
+
+
+def checkpoint_artifacts(session: Session, project_id: str) -> list[tuple[str, dict[str, Any]]]:
+    """Input artifacts a planner may name: ``documentation_checkpoint:<project>:<kind>:<ref>`` -> the recorded package
+    (hash-bound DATA, newest first). The compiled TaskSpec carries the content, so the writer reads exactly what
+    was recorded."""
+    out: list[tuple[str, dict[str, Any]]] = []
+    for rev in session.scalars(select(DocumentRevision).where(
+            DocumentRevision.project_id == project_id, DocumentRevision.kind == CHECKPOINT_KIND)
+            .order_by(DocumentRevision.created_at.desc()).limit(50)):
+        view = checkpoint_view(rev)
+        writer = view.get("writer_task") or {}
+        content = {k: view.get(k) for k in ("kind", "ref", "package_hash", "material", "finalised",
+                                             "diagram_delta", "contract_deltas", "architecture_delta")}
+        content["changed_documents"] = [{"logical_doc_id": c.get("logical_doc_id"), "change": c.get("change"),
+                                         "sections": (c.get("sections") or [])[:12]}
+                                        for c in view.get("changed_documents") or []][:40]
+        content["writer_task"] = {k: writer.get(k) for k in ("goal", "changed_sections", "diagrams")}
+        entry = {"ref": f"doc_checkpoint:{rev.id}", "kind": "documentation_checkpoint", "sha256": rev.content_hash,
+                 "name": f"Documentation checkpoint {view.get('kind')} {view.get('ref')}", "content": content}
+        for label in writer.get("input_artifacts") or []:
+            out.append((str(label), entry))
+    return out

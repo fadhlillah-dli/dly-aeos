@@ -128,6 +128,48 @@ def test_platform_runbooks_come_from_the_reviewed_repository_runbooks():
     assert "Procedure" in product.pending_sections
 
 
+def test_product_runbook_procedures_come_from_the_plan_schema_revision_4():
+    """§27 08. Runbooks for a PRODUCT: prerequisites/procedure/verification/rollback/escalation are per-runbook plan
+    proposals (schema revision 4, AI_MAINTAINED, labelled); a reviewed repository runbook still wins; content
+    stored before revision 4 is upgraded with empty fields (still pending, never invented)."""
+    from aeos.docs_engine import renderer as r
+    from aeos.docs_engine import service
+    from aeos.models.portfolio import Project
+    from aeos.planning import contracts
+    from aeos.planning.service import schema_errors
+    from tests.unit.test_docs_engine_schema_seam import _render, _section_text
+    from tests.unit.test_publisher_support import schema_sample_content
+
+    content = schema_sample_content()
+    content["operations"]["runbooks"][0].update({
+        "prerequisites": "Akses SSH ke host produksi", "procedure": "1. systemctl restart contoh-api",
+        "verification": "GET /health mengembalikan 200", "rollback": "Kembalikan rilis sebelumnya",
+        "escalation": "Pemilik produk dalam 30 menit"})
+    assert schema_errors("plan_content", content) == []
+    rb = _render(content).by_id()["08-runbooks/runbook-restart"]
+    assert not rb.pending_sections, rb.pending_sections
+    assert "systemctl restart contoh-api" in _section_text(rb, "procedure")
+    assert "AI_MAINTAINED proposal" in _section_text(rb, "procedure"), "a proposal is labelled, never a tested runbook"
+    assert "30 menit" in _section_text(rb, "escalation")
+
+    books = service.repo_runbooks(Project(project_key="p", name="DLY AEOS", domain="PERSONAL", is_platform=True))
+    reviewed = _render(content, signals=r.RenderSignals(runbooks=books)).by_id()["08-runbooks/runbook-restart"]
+    assert "aeos serve" in _section_text(reviewed, "procedure")
+    assert "systemctl restart contoh-api" not in _section_text(reviewed, "procedure"), "the reviewed runbook wins"
+    assert books[0].commit and books[0].commit[:12] in reviewed.body_markdown, "read at a recorded commit"
+
+    old = schema_sample_content()
+    for key in contracts.RUNBOOK_ADDITIVE:
+        old["operations"]["runbooks"][0].pop(key)
+    assert schema_errors("plan_content", old), "the revision-3 runbook shape is not valid without the upgrade"
+    upgraded = contracts.upgrade_content(old)
+    assert schema_errors("plan_content", upgraded) == []
+    assert all(upgraded["operations"]["runbooks"][0][k] == "" for k in contracts.RUNBOOK_ADDITIVE)
+    assert "procedure" not in old["operations"]["runbooks"][0], "the stored content itself is never mutated"
+    assert contracts.upgrade_content(upgraded) is upgraded
+    assert "Procedure" in _render(upgraded).by_id()["08-runbooks/runbook-restart"].pending_sections
+
+
 def test_platform_operations_sections_come_from_the_controllers_own_rules():
     """§27 08: Logs (audit/security/retention/access), Alerts (severity/notification/escalation), Backup storage,
     Maintenance checks/routines and Support for DLY AEOS itself come from its alert catalog, retention policy,

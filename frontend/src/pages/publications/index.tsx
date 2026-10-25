@@ -5,6 +5,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { StatusBadge } from "../../components/StatusBadge";
 import { EmptyState, Mono, PageHeader, Tabs } from "../../components/ui";
 import { useEventStream } from "../../lib/events";
+import { CheckpointPanel } from "./CheckpointPanel";
 import { ConnectionsPanel } from "./ConnectionsPanel";
 import { DocumentsPanel } from "./DocumentTree";
 import { PublicationPanel } from "./PublicationPanel";
@@ -28,6 +29,10 @@ export default function PublicationsPage() {
     }
     if (e.kind.startsWith("publication.operation") || e.kind.startsWith("documents") || e.kind.startsWith("document")) {
       qc.invalidateQueries({ queryKey: ["project-documents"] });
+    }
+    if (e.kind.startsWith("documents.checkpoint") || e.kind.startsWith("plan.version") || e.kind.startsWith("acceptance")) {
+      qc.invalidateQueries({ queryKey: ["doc-checkpoints"] });
+      qc.invalidateQueries({ queryKey: ["doc-checkpoint-candidates"] });
     }
     if (e.kind.startsWith("work_items")) qc.invalidateQueries({ queryKey: ["work-items"] });
   }, !!projectId);
@@ -72,6 +77,7 @@ export default function PublicationsPage() {
       <Tabs
         tabs={[
           { id: "docs", label: "Struktur Product 1", content: <DocumentsPanel projectId={projectId} /> },
+          { id: "checkpoints", label: "Checkpoint", content: <CheckpointPanel projectId={projectId} /> },
           { id: "publications", label: "Publikasi", content: <PublicationPanel projectId={projectId} /> },
           { id: "work", label: "Work items", content: <WorkItemsPanel projectId={projectId} /> },
           { id: "connections", label: "Koneksi & remedy", content: <ConnectionsPanel projectId={projectId} /> },

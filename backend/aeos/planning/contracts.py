@@ -14,6 +14,8 @@ content stored before revision 2 is read through ``upgrade_content`` (empty list
 Revision 3 (additive, nested): ``operations`` gains ``support``, ``log_policy``, ``alert_policy``,
 ``backup.storage``, ``maintenance_checks`` and ``routine_activities`` (§27 08. sections that had no source),
 and the diagram kind ``cicd`` (§29); older content gets them empty (= not given).
+Revision 4 (additive, nested): every ``operations.runbooks`` entry gains ``prerequisites``, ``procedure``,
+``verification``, ``rollback`` and ``escalation`` (§27 08. Runbooks proposals); older entries get them empty.
 """
 
 from __future__ import annotations
@@ -81,7 +83,7 @@ def _o(properties: dict[str, Any], description: str = "") -> dict[str, Any]:
 # ---------------------------------------------------------------- plan content (PlanVersion.content)
 
 PRODUCT_HOME = _o({
-    "name": _s("Product name (display only; identity is the project UUID)"),
+    "name": _s("Product name (display only)"),
     "summary": _s(),
     "product_owner": _s("Named only if given in the input; otherwise UNKNOWN (never invent stakeholders)"),
     "engineering_lead": _s("UNKNOWN unless provided"),
@@ -139,8 +141,8 @@ DIAGRAM = _o({
     "key": _s(),
     "title": _s(),
     "kind": _e(DIAGRAM_KINDS),
-    "mermaid": _s("Mermaid source (diffable); rendered by the platform, never treated as runtime evidence"),
-    "verification_source": _s("What the diagram must be checked against (contract/manifest/schema/threat model)"),
+    "mermaid": _s("Mermaid source; never runtime evidence"),
+    "verification_source": _s("Checked against (contract/manifest/schema/threat model; test node ids)"),
 })
 
 ARCHITECTURE = _o({
@@ -155,7 +157,7 @@ ARCHITECTURE = _o({
         "infrastructure": _s(),
         "security_architecture": _s(),
         "principles": _sa(),
-        "decisions": _sa("Architecture decisions proposed (become ADR/Decision only after human approval)"),
+        "decisions": _sa("Proposed decisions (ADR/Decision only after human approval)"),
     }),
     "diagrams": _a(DIAGRAM),
 }, "03. Architecture & Design")
@@ -245,7 +247,8 @@ OPERATIONS = _o({
     "dependencies": _sa(),
     "criticality": _e(LEVELS),
     "sli_slo_proposals": _a(_o({"indicator": _s(), "objective": _s(), "rationale": _s()})),
-    "runbooks": _a(_o({"key": _s(), "title": _s(), "purpose": _s()})),
+    "runbooks": _a(_o({"key": _s(), "title": _s(), "purpose": _s(), "prerequisites": _s(), "procedure": _s(),
+                       "verification": _s(), "rollback": _s(), "escalation": _s()})),
     "monitoring": _sa(),
     "logging": _s(),
     "log_policy": _o({"audit_logs": _s(), "security_logs": _s(), "retention": _s(), "access": _s()}),
@@ -266,6 +269,11 @@ OPERATIONS_ADDITIVE: dict[str, Any] = {
     "routine_activities": [],
 }
 BACKUP_ADDITIVE: dict[str, Any] = {"storage": ""}
+# Revision 4 (additive, nested): each ``operations.runbooks`` entry gains the §27 08. Runbook procedure fields as
+# AI_MAINTAINED proposals (a reviewed runbook of the project's repository still wins). Older entries get them empty
+# (= not given; the section stays documentation pending). No descriptions, for the same command-line budget.
+RUNBOOK_ADDITIVE: dict[str, Any] = {"prerequisites": "", "procedure": "", "verification": "", "rollback": "",
+                                    "escalation": ""}
 
 MILESTONE = _o({"key": _s(), "title": _s(), "exit_evidence": _s(), "order": _i()})
 FEATURE = _o({
@@ -349,7 +357,7 @@ INTERFACE_CONTRACT = _o({
     "consumer_task_keys": _sa("Tasks built against it; each must depend on the provider task"),
     "definition": _s("Endpoints/schemas/tokens in short form"), "compatibility": _s(),
     "contract_paths": _sa("Repository paths of the contract files, e.g. contracts/api.json"),
-}, "Contract-first: agreed before parallel work that depends on it (§19, §22)")
+}, "Contract-first: agreed before parallel work that depends on it")
 ADDITIVE_SECTIONS: tuple[str, ...] = ("rfcs", "tdds", "feature_governance", "milestone_governance",
                                       "interface_contracts")
 
@@ -381,7 +389,7 @@ PLAN_SECTIONS: tuple[str, ...] = tuple(k for k in PLAN_CONTENT_PROPERTIES if k !
 
 
 def plan_content_schema(*, with_header: bool = True) -> dict[str, Any]:
-    schema = _o(dict(PLAN_CONTENT_PROPERTIES), "DLY AEOS PlanVersion content (Product 1 nodes 00-08 + DAG)")
+    schema = _o(dict(PLAN_CONTENT_PROPERTIES), "PlanVersion content (Product 1 nodes 00-08 + DAG)")
     if with_header:
         return {"$schema": DRAFT, "title": "aeos.planning.plan-content/1", **schema}
     return schema
@@ -478,6 +486,11 @@ def upgrade_content(content: Any) -> Any:
         backup = new_ops.get("backup")
         if isinstance(backup, dict) and any(k not in backup for k in BACKUP_ADDITIVE):
             new_ops["backup"] = {**backup, **{k: v for k, v in BACKUP_ADDITIVE.items() if k not in backup}}
+        books = new_ops.get("runbooks")
+        if isinstance(books, list) and any(isinstance(b, dict) and any(k not in b for k in RUNBOOK_ADDITIVE)
+                                           for b in books):  # revision 4: per-runbook procedure fields
+            new_ops["runbooks"] = [{**{k: v for k, v in RUNBOOK_ADDITIVE.items() if k not in b}, **b}
+                                   if isinstance(b, dict) else b for b in books]
         if new_ops != ops:
             out = {**out, "operations": new_ops}
     return out

@@ -56,7 +56,7 @@ from aeos.docs_engine.plan_content import _first as pick
 from aeos.docs_engine.visuals import STATUS_RENDERED, VisualArtifact
 from aeos.models.publishing import DocumentRecord, DocumentRevision
 
-RENDERER_VERSION = "5"  # part of every input_hash: a renderer change re-renders (never reuses stale bodies)
+RENDERER_VERSION = "6"  # part of every input_hash: a renderer change re-renders (never reuses stale bodies)
 
 # Trusted EvidenceArtifact kinds whose real results create §27 04 VA / PT documents.
 VA_EVIDENCE_KINDS = ("VA_REPORT", "VULNERABILITY_ASSESSMENT")
@@ -203,6 +203,9 @@ class ChangeInfo:
     contract_deltas: tuple[str, ...] = ()
     dependency_deltas: tuple[str, ...] = ()
     decision_refs: tuple[str, ...] = ()  # "KIND:decision_id" of ACTIVE human owner decisions bound to the change
+    # §41 the documentation checkpoint packages this change integrates: "doc_checkpoint:<id> (<package hash>)" of the
+    # task's RESOLVED (hash-bound) ``documentation_checkpoint`` input artifacts (the Tech Writer / Diagram Author task)
+    checkpoint_refs: tuple[str, ...] = ()
 
     def slice(self) -> dict[str, Any]:
         return {k: (list(v) if isinstance(v, tuple) else v) for k, v in self.__dict__.items()}
@@ -270,13 +273,15 @@ class RunbookSource:
     title: str
     path: str
     sections: tuple[tuple[str, str], ...] = ()  # (lower-case heading, markdown body)
+    commit: str | None = None  # the commit it was read at (None = working tree, not recorded)
 
     def get(self, *names: str) -> str:
         return next((text for head, text in self.sections if any(head == n or head.startswith(n + " ")
                                                                  for n in names)), "")
 
     def slice(self) -> dict[str, Any]:
-        return {"key": self.key, "title": self.title, "path": self.path, "sections": [list(s) for s in self.sections]}
+        return {"key": self.key, "title": self.title, "path": self.path, "commit": self.commit,
+                "sections": [list(s) for s in self.sections]}
 
 
 @dataclass
@@ -921,8 +926,28 @@ def _prd(ctx: _Ctx, f: FeatureView, parent: str) -> None:
 def _architecture_overview(ctx: _Ctx, node: p1.Node, parent: str) -> None:
     a = ctx.view.architecture
     spec = p1.DOC_TYPES["ARCHITECTURE_OVERVIEW"]
+    # §28/§41 "unified narrative updated at an approved checkpoint": the ACCEPTED changes of the Tech Writer / Diagram
+    # Author tasks that integrate a recorded checkpoint package. Their accepted output re-renders this narrative
+    # (input slice); the prose and diagram sources of the plan itself still change only via an approved plan version.
+    integrated = sorted((c for c in ctx.signals.changes if c.checkpoint_refs and c.acceptance_status == "ACCEPTED"),
+                        key=lambda c: c.task_key)
     slice_ = {"architecture": {k: x for k, x in a.items() if k != "diagrams"}, "visuals": _visual_slice(ctx),
-              "features": [f.key for f in ctx.view.features]}
+              "features": [f.key for f in ctx.view.features],
+              "checkpoint_changes": [{"task_key": c.task_key, "acceptance_id": c.acceptance_id, "pr": c.pr_url,
+                                      "merged": c.merged, "merge_commit": c.merge_commit_sha,
+                                      "checkpoint_refs": list(c.checkpoint_refs)} for c in integrated]}
+
+    def checkpoint_intro() -> str:
+        if not integrated:
+            return ""
+        rows = []
+        for c in integrated:
+            pr = f"PR #{c.pr_number}" if c.pr_number else (c.pr_url or "PR")
+            merged = f"merge commit `{c.merge_commit_sha[:12]}`" if c.merged and c.merge_commit_sha else "belum di-merge"
+            rows.append(f"`{c.task_key}` — change record `10-changes/change-{feature_slug(c.task_key)}` ({pr}, "
+                        f"{merged}); paket checkpoint {', '.join(f'`{x}`' for x in c.checkpoint_refs[:4])}")
+        return ("**Narasi terpadu dari checkpoint dokumentasi** (Tech Writer / Diagram Author, task ACCEPTED; "
+                "observasi, bukan approval):\n\n" + _bullets(rows))
 
     def build(doc: RenderedDocument) -> None:
         b = _Doc(spec, doc.logical_doc_id)
@@ -944,12 +969,18 @@ def _architecture_overview(ctx: _Ctx, node: p1.Node, parent: str) -> None:
         decisions = as_list(a.get("decisions"))
         b.human("decisions", ("Usulan keputusan dari rencana (DATA, bukan approval):\n\n" + _bullets(decisions))
                 if decisions else "")
-        _compose(doc, b, header_title=node.title, metadata=ctx.metadata(doc))
+        _compose(doc, b, header_title=node.title, metadata=ctx.metadata(doc), intro=checkpoint_intro())
 
+    links = {"visuals": [x.key for x in ctx.visuals],
+             "requirement": [f"02-requirements/prd-{f.key}" for f in ctx.view.features]}
+    if integrated:
+        links["change_records"] = [f"10-changes/change-{feature_slug(c.task_key)}" for c in integrated]
+        merges = sorted({c.merge_commit_sha for c in integrated if c.merged and c.merge_commit_sha})
+        if merges:
+            links["merge_commit"] = merges
     ctx.add(logical_id=node.key, node=node.number, title=node.title, kind="DOC", doc_type=spec.doc_type, parent=parent,
             timing=node.timing, status=_ok_status(ctx), reason="", owner=ctx.owner("Tech Lead"), slice_=slice_,
-            links={"visuals": [x.key for x in ctx.visuals],
-                   "requirement": [f"02-requirements/prd-{f.key}" for f in ctx.view.features]}, build=build)
+            links=links, build=build)
 
 
 def _rfc_or_tdd(ctx: _Ctx, kind: str, key: str, title: str, data: dict[str, Any], parent: str,
@@ -1676,28 +1707,35 @@ def _repo_runbook(ctx: _Ctx, key: str) -> RunbookSource | None:
         (r for k, r in sorted(by.items()) if k.startswith(key + "-")), None)
 
 
+RUNBOOK_FIELDS = ("prerequisites", "procedure", "verification", "rollback", "escalation")
+
+
 def _runbook(ctx: _Ctx, key: str, rb: dict[str, Any], parent: str) -> None:
-    """Runbook per plan entry. Procedure/verification/rollback come only from a reviewed runbook of the project's
-    own repository (platform: docs/runbooks); without one they stay pending for the Operations Owner."""
+    """Runbook per plan entry. Procedure/verification/rollback come from a reviewed runbook of the project's own
+    repository at a recorded commit (platform: docs/runbooks; product: docs/runbooks of its checkout) and, where that
+    has none, from the plan's per-runbook proposal (schema revision 4, AI_MAINTAINED, labelled as a proposal).
+    Without either they stay pending for the Operations Owner (never invented)."""
     spec = p1.DOC_TYPES["RUNBOOK"]
     logical_id = f"{parent}/runbook-{key}"
     src = _repo_runbook(ctx, key)
     title = f"Runbook — {as_text(rb.get('title')) or (src.title if src else '') or key}"
+    proposal = {k: as_text(rb.get(k)) for k in RUNBOOK_FIELDS}
 
     def build(doc: RenderedDocument) -> None:
         b = _Doc(spec, doc.logical_doc_id)
+        where = (f"`{src.path}`" + (f" @ `{src.commit[:12]}`" if src.commit else " (working tree, commit tidak "
+                                                                                     "tercatat)")) if src else ""
         b.put("purpose_trigger", _join(as_text(rb.get("purpose")), src.get("trigger") if src else "",
-                                       f"_Sumber prosedur: `{src.path}` (runbook repositori yang direview)._"
+                                       f"_Sumber prosedur: {where} (runbook repositori yang direview)._"
                                        if src else ""))
-        if src is None:
-            for k in ("prerequisites", "procedure", "verification", "rollback", "escalation"):
-                b.put(k, "")  # written by the Operations Owner at release candidate; never invented
-        else:
-            b.put("prerequisites", src.get("prerequisites", "authority"))
-            b.put("procedure", src.get("steps", "procedure"))
-            b.put("verification", src.get("verification"))
-            b.put("rollback", src.get("steps — rollback", "rollback"))
-            b.put("escalation", src.get("escalation"))
+        reviewed = {k: "" for k in RUNBOOK_FIELDS} if src is None else {
+            "prerequisites": src.get("prerequisites", "authority"), "procedure": src.get("steps", "procedure"),
+            "verification": src.get("verification"), "rollback": src.get("steps — rollback", "rollback"),
+            "escalation": src.get("escalation")}
+        for k in RUNBOOK_FIELDS:
+            # the reviewed repository runbook wins; the plan's proposal fills only what it does not state
+            b.put(k, reviewed[k] or (_join(proposal[k], "_Usulan dari rencana (AI_MAINTAINED proposal); belum "
+                                                        "diuji sebagai runbook._") if proposal[k] else ""))
         _compose(doc, b, header_title=title, metadata=ctx.metadata(doc))
 
     ctx.add(logical_id=logical_id, node="08", title=title, kind="DOC", doc_type="RUNBOOK", parent=parent,
