@@ -27,7 +27,11 @@ def routes(db):
     return db
 
 
-def _activate(*extra: str, password: str, user: str = "owner"):
+# the owner's decision on the S07 client restriction of the free Zen route (ADR-0041 amendment 2026-10-25)
+CLIENT_TERMS = ("--accept-client-terms", "--client-terms-note", "read S07 client rule; broker proxying accepted")
+
+
+def _activate(*extra: str, password: str, user: str = "owner", client_terms: bool = True):
     h = None
     from aeos.core.db import session_factory
 
@@ -37,8 +41,48 @@ def _activate(*extra: str, password: str, user: str = "owner"):
     finally:
         s.close()
     args = ["routes", "activate", DS, "--as", user, "--mode", "TRIAL", "--rationale", "pilot slice one",
-            "--expected-hash", h, *extra]
+            "--expected-hash", h, *(CLIENT_TERMS if client_terms else ()), *extra]
     return runner.invoke(app, args, input=password + "\n")
+
+
+def test_activate_refuses_a_client_restricted_route_without_the_owners_decision(routes, monkeypatch):
+    install_fakes(monkeypatch)
+    create_admin(routes)
+    r = _activate(password=ADMIN_PW, client_terms=False)
+    assert r.exit_code == 1 and "CLIENT_TERMS_DECISION_REQUIRED" in r.output and r.output.isascii()
+    routes.expire_all()
+    assert routes.query(Decision).count() == 0 and service.get_route(routes, DS).status == "CANDIDATE"
+    listed = runner.invoke(app, ["routes", "list", "--pool", "WORKER"])
+    assert "client-terms=OWNER_DECISION_REQUIRED" in listed.output
+    ok = _activate(password=ADMIN_PW)
+    assert ok.exit_code == 0, ok.output
+    routes.expire_all()
+    d = routes.query(Decision).one()
+    assert d.details["client_terms"]["decision"] == service.CLIENT_TERMS_ACCEPTED
+    assert "client-terms=" not in runner.invoke(app, ["routes", "list", "--pool", "WORKER"]).output.split(DS)[1] \
+        .splitlines()[0]
+
+
+def test_set_endpoint_points_a_local_route_at_a_loopback_server(routes, monkeypatch):
+    install_fakes(monkeypatch)
+    create_admin(routes)
+    key = "local/qwen3.8-flash-next"
+    before = service.get_route(routes, key).config_hash
+    base = ["routes", "set-endpoint", key, "--as", "owner", "--rationale", "llama.cpp server on this laptop"]
+    bad = runner.invoke(app, [*base, "--endpoint", "http://192.168.1.5:8080/v1"], input=ADMIN_PW + "\n")
+    assert bad.exit_code == 1 and "ENDPOINT_NOT_LOOPBACK" in bad.output
+    wrong = runner.invoke(app, [*base, "--endpoint", "http://127.0.0.1:8080/v1"], input="nope\n")
+    assert wrong.exit_code != 0 and "password check failed" in wrong.output
+    ok = runner.invoke(app, [*base, "--endpoint", "http://127.0.0.1:8080/v1", "--model", "qwen3.8-flash-next-q4",
+                             "--quantization", "Q4_K_M", "--hardware", "M3 Max 64GB"], input=ADMIN_PW + "\n")
+    assert ok.exit_code == 0, ok.output
+    assert "endpoint=http://127.0.0.1:8080/v1" in ok.output and ok.output.isascii() and ADMIN_PW not in ok.output
+    routes.expire_all()
+    r = service.get_route(routes, key)
+    assert r.endpoint == "http://127.0.0.1:8080/v1" and r.config_hash != before
+    assert r.mode_params["upstream_model"] == "qwen3.8-flash-next-q4" and r.mode_params["quantization"] == "Q4_K_M"
+    assert r.mode_params["hardware"] == "M3 Max 64GB" and r.mode_params["inference_backend"] == "UNKNOWN"
+    assert routes.query(AuditEvent).filter_by(action="route.set_endpoint", target_id=key).count() == 1
 
 
 def test_list_shows_candidates_and_unknown_resolution(routes):

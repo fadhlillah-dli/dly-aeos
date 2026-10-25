@@ -102,8 +102,12 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     paid = _free_or_local(route, upstream.base_url)
     if paid:
         raise PolicyDenied(paid, code="ROUTE_NOT_FREE")
+    # the route's own request shape (ADR-0041 amendment 2026-10-25): <endpoint>/chat/completions, the bare upstream
+    # model id, the route's reasoning level when it states one - the probe tests the configuration that would serve
     body: dict[str, Any] = {"model": upstream.model_id, "messages": [{"role": "user", "content": PROBE_PROMPT}],
                             "max_tokens": PROBE_MAX_TOKENS, "temperature": 0, "stream": False, "n": 1}
+    if upstream.reasoning_effort:
+        body["reasoning_effort"] = upstream.reasoning_effort
     if upstream.is_openrouter:
         body["usage"] = {"include": True}
     started = time.monotonic()
@@ -114,7 +118,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     own = client is None
     http = client or httpx.Client(timeout=PROBE_TIMEOUT, follow_redirects=False, trust_env=False)
     try:
-        resp = http.post(f"{upstream.base_url}/chat/completions", json=body, headers=_upstream_headers(upstream))
+        resp = http.post(upstream.url, json=body, headers=_upstream_headers(upstream))
         status = resp.status_code
         if status == 200:
             try:
@@ -139,6 +143,8 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
                     and str(((choices[0].get("message") or {}).get("content")) or "").strip())
     result: dict[str, Any] = {
         "route_key": route_key, "pool": route.pool, "provider": upstream.provider, "model_id": upstream.model_id,
+        "catalog_model_id": route.model_id, "upstream_url": upstream.url,
+        "reasoning_effort": upstream.reasoning_effort or "NOT_SENT",
         "config_hash": route.config_hash, "outcome": outcome, "http_status": status, "latency_ms": latency_ms,
         "answered": answered, "model_resolved": model_resolved, "prompt_tokens": prompt,
         "completion_tokens": completion, "cost_usd": cost if cost is not None else "UNKNOWN",
@@ -209,7 +215,9 @@ def _evidence(session: Session, route: ModelRoute, result: dict[str, Any]) -> st
             evidence_level="E3", subject_type="model_route", subject_id=route.route_key, domain="PERSONAL",
             classification="PUBLIC",
             environment={"route_key": route.route_key, "pool": route.pool, "config_hash": route.config_hash,
-                         "model_id": route.model_id, "provider": route.provider, "checked_at": result["checked_at"]})
+                         "model_id": route.model_id, "upstream_model": result["model_id"],
+                         "upstream_url": result["upstream_url"], "provider": route.provider,
+                         "checked_at": result["checked_at"]})
     except AeosError:
         return None
     return ev.id

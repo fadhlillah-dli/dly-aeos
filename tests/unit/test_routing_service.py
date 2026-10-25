@@ -14,7 +14,12 @@ from aeos.models.planning import TaskSpec
 from aeos.models.routing import ModelRoute
 from aeos.routing import seed, service
 from aeos.routing.facade import eligible_routes, fallback_route, note_rate_limited, select_route
-from tests.unit.test_routing_fakes import human_decision, install_fakes
+from tests.unit.test_routing_fakes import (
+    OWNER_CLIENT_TERMS,
+    accept_client_terms,
+    human_decision,
+    install_fakes,
+)
 
 DS = "opencode-zen/deepseek-v4.1-flash-free"
 GLM = "opencode-zen/glm-5.3-flash-free"
@@ -22,6 +27,7 @@ GEMINI = "gemini/gemini-3.8-flash-free-tier"
 PICKLE = "opencode-zen/big-pickle"
 LAGUNA = "openrouter/poolside/laguna-s-2.1:free"
 QWEN = "opencode-zen/qwen3.8-flash"
+KIMI = "opencode-zen/kimi-k2.7-code"  # paid, chat-completions API (QWEN: anthropic.messages, never served)
 
 
 @pytest.fixture
@@ -53,6 +59,7 @@ def approve(db, key: str, *, kind: str = "ROUTE_ACTIVATION", details: dict | Non
     r = service.get_route(db, key)
     _fresh(r)
     bind_runtime(r)
+    accept_client_terms(r)  # the owner's S07 client-terms decision an activation of a free Zen route records
     r.status = "APPROVED" if kind == "ROUTE_ACTIVATION" else "TRIAL"
     r.config_hash = service.compute_config_hash(r)
     for old in db.query(Decision).filter_by(target_type="model_route", target_id=key, kind=kind, status="ACTIVE"):
@@ -217,13 +224,18 @@ def test_non_human_decision_never_counts(routes):
 
 
 def test_paid_route_requires_budget_decision(routes):
-    approve(routes, QWEN)
+    approve(routes, KIMI)
     d = eligible_routes(routes, domain="PERSONAL", data_classification="PUBLIC", needs_tools=False, pool="WATCHLIST")
-    assert QWEN in d.rejected and any("paid route" in x for x in d.rejected[QWEN])
-    budget = human_decision(routes, kind="BUDGET", target_type="model_route", target_id=QWEN)
-    approve(routes, QWEN, details={"budget_decision_id": budget.id})
+    assert KIMI in d.rejected and any("paid route" in x for x in d.rejected[KIMI])
+    budget = human_decision(routes, kind="BUDGET", target_type="model_route", target_id=KIMI)
+    approve(routes, KIMI, details={"budget_decision_id": budget.id})
     d = eligible_routes(routes, domain="PERSONAL", data_classification="PUBLIC", needs_tools=False, pool="WATCHLIST")
-    assert d.eligible == [QWEN]
+    assert d.eligible == [KIMI]
+    # S07 documents the anthropic.messages API for qwen3.8-flash: the broker never speaks it, so never eligible
+    q_budget = human_decision(routes, kind="BUDGET", target_type="model_route", target_id=QWEN)
+    approve(routes, QWEN, details={"budget_decision_id": q_budget.id})
+    d = eligible_routes(routes, domain="PERSONAL", data_classification="PUBLIC", needs_tools=False, pool="WATCHLIST")
+    assert any("ROUTE_API_UNSUPPORTED" in x for x in d.rejected[QWEN])
     budget.status = "INVALIDATED"
     routes.flush()
     d = eligible_routes(routes, domain="PERSONAL", data_classification="PUBLIC", needs_tools=False, pool="WATCHLIST")
@@ -343,10 +355,16 @@ def test_activation_records_hash_bound_decision(routes, monkeypatch):
     _fresh(r)
     h = service.compute_config_hash(r)
     r.config_hash = h
+    with pytest.raises(ValidationFailed) as ei:  # S07: free-tier Zen models require the OpenCode client
+        service.activate_route(routes, DS, actor_user_id="owner", mode="TRIAL", rationale="pilot slice for self-build",
+                               expected_config_hash=h)
+    assert ei.value.code == "CLIENT_TERMS_DECISION_REQUIRED" and r.status == "CANDIDATE"
     route, decision = service.activate_route(routes, DS, actor_user_id="owner", mode="TRIAL",
-                                             rationale="pilot slice for self-build", expected_config_hash=h)
+                                             rationale="pilot slice for self-build", expected_config_hash=h,
+                                             client_terms=OWNER_CLIENT_TERMS)
     assert route.status == "TRIAL" and decision.kind == "TRIAL" and decision.target_hash == route.config_hash
     assert decision.expires_at is not None and decision.domain == "PERSONAL"
+    assert decision.details["client_terms"]["decision"] == service.CLIENT_TERMS_ACCEPTED
     assert eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL").eligible == [DS]
 
 
@@ -356,11 +374,16 @@ def test_activation_guards(routes, monkeypatch):
     with pytest.raises(Conflict):
         service.activate_route(routes, DS, actor_user_id="o", mode="APPROVED", rationale="long enough rationale",
                                expected_config_hash="sha256:stale")
-    q = service.get_route(routes, QWEN)
+    q = service.get_route(routes, KIMI)
+    with pytest.raises(ValidationFailed) as ei:
+        service.activate_route(routes, KIMI, actor_user_id="o", mode="APPROVED", rationale="paid model trial please",
+                               expected_config_hash=q.config_hash, terms_reviewed=True)
+    assert ei.value.code == "BUDGET_DECISION_REQUIRED"
+    q = service.get_route(routes, QWEN)  # S07: anthropic.messages API - the broker could never call it
     with pytest.raises(ValidationFailed) as ei:
         service.activate_route(routes, QWEN, actor_user_id="o", mode="APPROVED", rationale="paid model trial please",
                                expected_config_hash=q.config_hash, terms_reviewed=True)
-    assert ei.value.code == "BUDGET_DECISION_REQUIRED"
+    assert ei.value.code == "ROUTE_REQUEST_SHAPE_REFUSED"
     g = service.get_route(routes, GEMINI)
     with pytest.raises(ValidationFailed) as ei:
         service.activate_route(routes, GEMINI, actor_user_id="o", mode="APPROVED", rationale="compare internal docs",
@@ -382,7 +405,7 @@ def test_activation_fails_closed_without_decision_registry(routes, absent_module
     r = service.get_route(routes, DS)
     with pytest.raises(Blocked) as ei:
         service.activate_route(routes, DS, actor_user_id="o", mode="TRIAL", rationale="no policy module here",
-                               expected_config_hash=r.config_hash, terms_reviewed=True)
+                               expected_config_hash=r.config_hash, terms_reviewed=True, client_terms=OWNER_CLIENT_TERMS)
     assert ei.value.code == "DECISION_REGISTRY_UNAVAILABLE"
     assert r.status == "CANDIDATE" and r.terms_checked_at is None  # nothing applied when the decision cannot be recorded
 

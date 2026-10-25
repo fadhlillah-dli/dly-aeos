@@ -286,7 +286,8 @@ def test_secret_purposes_follow_the_secrets_contract():
 def test_routing_rejects_routes_the_broker_could_not_authenticate(db):
     from aeos.routing.service import credential_rejections
 
-    zen = ModelRoute(route_key="z", pool="WORKER", provider="opencode-zen", endpoint="https://opencode.ai/zen",
+    zen = ModelRoute(route_key="z", pool="WORKER", provider="opencode-zen",
+                     endpoint="https://opencode.ai/inference/openai/v1",  # S07 (ADR-0041 amendment 2026-10-25)
                      model_id="m", mode_params={})
     assert credential_rejections(zen, domain="PERSONAL")
     zen.mode_params = {"credential_ref": "workers/opencode-zen"}

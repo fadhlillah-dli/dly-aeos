@@ -444,9 +444,12 @@ class Chain:
             r.availability, r.availability_checked_at = "AVAILABLE", utcnow()
             s.commit()
         cfg = self.ok(c.get(f"/api/routes/{ROUTE_KEY}"))["config_hash"]
+        # S07: free-tier Zen chat models require the OpenCode client; the owner decides explicitly that the broker may
+        # call the route as its own client (ADR-0041 amendment 2026-10-25) - without it the activation is refused
         self.ok(c.post(f"/api/routes/{ROUTE_KEY}/activate", json={
             "mode": "TRIAL", "rationale": "uji coba rute gratis untuk pekerja", "expected_config_hash": cfg,
-            "terms_reviewed": True}))
+            "terms_reviewed": True,
+            "client_terms": {"accepted": True, "note": "aturan klien S07 dibaca; pemilik menerima proksi broker"}}))
         expires = (utcnow() + timedelta(days=2)).isoformat()
         # The owner also covers R3 (protected-path tasks) under the process sandbox explicitly (ADR-0051
         # amendment 2026-10-19); without it an R3 task waits for the container sandbox.

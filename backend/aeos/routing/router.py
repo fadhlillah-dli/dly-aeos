@@ -88,13 +88,59 @@ def _execution_path(r: ModelRoute) -> dict[str, Any]:
     except ImportError:  # broker unavailable: nothing can execute
         pass
     if r.pool in probe_pools:
+        local = (" Route LOKAL: pemilik dulu menetapkan endpoint loopback server lokalnya (aeos routes set-endpoint "
+                 "atau POST /api/routes/<key>/endpoint); itu konfigurasi baru dan perlu TRIAL baru."
+                 if r.pool == "LOCAL" else "")
         return {"status": "FEASIBILITY_PROBE_ONLY",
                 "note": f"Pool {r.pool}: tidak melayani task worker. Uji kelayakan lewat probe broker (satu prompt "
                         "sintetis PUBLIC, route gratis berstatus TRIAL/APPROVED oleh pemilik): POST /api/broker/routes/"
                         f"{r.route_key}/feasibility atau aeos broker probe-route (ADR-0111). EvalRun ke pool ini "
-                        "belum tersambung."}
+                        f"belum tersambung.{local}"}
     return {"status": "NOT_WIRED",
             "note": f"Pool {r.pool}: broker tidak melayani route ini (bukan task worker, bukan probe kelayakan)."}
+
+
+def _evaluation_path(r: ModelRoute) -> dict[str, Any]:
+    """§48 arena / M6: which evaluation can produce results for this route (stated, never implied by a probe)."""
+    if r.pool == "SUPERVISOR":
+        return {"status": "PLANNING_BASELINE", "note": "Dievaluasi sebagai baseline perencanaan (bukan EvalRun pekerja)."}
+    if r.pool in service.WORKER_EXECUTED_POOLS:
+        return {"status": "EVAL_RUN", "note": "EvalRun memakai task pekerja yang dieksekusi dan diverifikasi lewat rute ini."}
+    return {"status": "NOT_WIRED",
+            "note": f"Pool {r.pool}: EvalRun/scorecard arena belum tersambung (DESIGN, NOT-PROVEN). Probe kelayakan "
+                    "hanya menjawab 'apakah rute merespons', bukan kualitas; tidak ada perbandingan scorecard (M6)."}
+
+
+def _upstream_request(r: ModelRoute) -> dict[str, Any] | None:
+    """The exact upstream request the broker would build (E1 documentation shape until a probe observes it)."""
+    if r.pool == "SUPERVISOR" or r.provider == "claude-native":
+        return None
+    try:
+        from aeos.broker import facade as broker_facade
+
+        shape = broker_facade.upstream_request_shape(r)
+    except ImportError:  # broker unavailable: nothing can be sent
+        return {"status": "UNKNOWN", "note": "Broker tidak tersedia: bentuk permintaan tidak dapat diperiksa."}
+    status = "REFUSED" if shape.get("code") else "READY_SHAPE"
+    note = (f"{shape['code']}: {shape['problem']}" if shape.get("code") else
+            "Bentuk permintaan sesuai dokumentasi provider (E1); belum dibuktikan dengan panggilan nyata sampai probe "
+            "kelayakan mencatat bukti E3.")
+    return {**shape, "status": status, "note": note}
+
+
+def _client_restriction_view(r: ModelRoute) -> dict[str, Any] | None:
+    cr = service.client_restriction(r)
+    if cr is None:
+        return None
+    decided = cr.get("owner_decision") == service.CLIENT_TERMS_ACCEPTED
+    return {"status": "OWNER_ACCEPTED" if decided else "OWNER_DECISION_REQUIRED",
+            "statement": cr.get("statement"), "source": cr.get("source"), "applies_to": cr.get("applies_to"),
+            "owner_note": cr.get("owner_note") if decided else None,
+            "note": ("Pemilik mencatat keputusan pada aktivasi (terikat hash konfigurasi). Apakah provider menerima "
+                     "panggilan broker tetap NOT-PROVEN sampai probe kelayakan." if decided else
+                     "Broker AEOS memanggil upstream sebagai klien HTTP sendiri, bukan OpenCode. Rute ini tidak dapat "
+                     "diaktifkan atau diproksikan sampai pemilik memutuskan: OpenCode Go, rute berbayar dengan "
+                     "keputusan BUDGET, atau keputusan syarat-klien eksplisit saat aktivasi (ADR-0041).")}
 
 
 def route_view(session: Session, r: ModelRoute, principal: Principal,
@@ -129,7 +175,9 @@ def route_view(session: Session, r: ModelRoute, principal: Principal,
         # training/trial flags still UNKNOWN: the owner records their own reading at activation (terms_record)
         "terms_unknown": [] if r.pool == "SUPERVISOR" else service.unknown_terms_keys(r.data_terms or {}),
         "reviewed_tool_set": service.reviewed_tool_set(r), "runtime_binding": _runtime_view(r, runtime),
-        "execution_path": _execution_path(r),
+        "execution_path": _execution_path(r), "evaluation_path": _evaluation_path(r),
+        "upstream_request": _upstream_request(r), "client_restriction": _client_restriction_view(r),
+        "budget_required": service.needs_budget(r) if r.pool != "SUPERVISOR" else False,
     }
 
 
@@ -231,6 +279,13 @@ class TermsRecordBody(BaseModel):
     note: str = Field(min_length=10, max_length=500)
 
 
+class ClientTermsBody(BaseModel):
+    """The owner's decision on a provider client restriction (S07 free-tier models require the OpenCode client)."""
+
+    accepted: bool
+    note: str = Field(min_length=10, max_length=500)
+
+
 class ActivateBody(BaseModel):
     mode: Literal["APPROVED", "TRIAL"]
     rationale: str = Field(min_length=10, max_length=4000)
@@ -246,6 +301,8 @@ class ActivateBody(BaseModel):
     eval_run_ids: list[str] | None = Field(default=None, max_length=20)
     # §44 DecisionRecord (options, goal, evidence_ids, cost_quality_tradeoff, invalidate_if): required for APPROVED
     decision_record: dict[str, Any] | None = None
+    # ADR-0041 amendment 2026-10-25: required for a route with an undecided provider client restriction
+    client_terms: ClientTermsBody | None = None
 
 
 @router.post("/api/routes/{route_key:path}/activate")
@@ -257,15 +314,48 @@ def activate(route_key: str, body: ActivateBody, db: DB, principal: AdminPrincip
         terms_reviewed=body.terms_reviewed, terms_note=body.terms_note,
         terms_record=body.terms_record.model_dump() if body.terms_record else None, region=body.region,
         tool_set=body.tool_set, eval_run_ids=body.eval_run_ids, decision_record=body.decision_record,
+        client_terms=body.client_terms.model_dump() if body.client_terms else None,
     )
     audit.record(db, actor_type="user", actor_id=principal.user.id, action="route.activate",
                  target_type=service.TARGET_TYPE, target_id=route.route_key, domain=Domain.PERSONAL.value,
                  details={"mode": body.mode, "decision_id": decision.id, "config_hash": route.config_hash,
-                          "budget_decision_id": body.budget_decision_id, "eval_run_ids": body.eval_run_ids or []})
+                          "budget_decision_id": body.budget_decision_id, "eval_run_ids": body.eval_run_ids or [],
+                          "client_terms": bool(body.client_terms)})
     emit(db, source="routing", kind="route.activated", entity_type=service.TARGET_TYPE, entity_id=route.route_key,
          entity_version=route.config_hash, payload={"mode": body.mode, "decision_id": decision.id})
     db.commit()
     return {"route": route_view(db, route, principal), "decision_id": decision.id, "decision_kind": decision.kind}
+
+
+class EndpointBody(BaseModel):
+    """Owner-set loopback endpoint of a LOCAL route (the OpenAI-compatible base of a server on this host)."""
+
+    endpoint: str = Field(min_length=10, max_length=512)
+    rationale: str = Field(min_length=10, max_length=2000)
+    upstream_model: str | None = Field(default=None, max_length=160)  # model name the local server serves
+    quantization: str | None = Field(default=None, max_length=64)
+    inference_backend: str | None = Field(default=None, max_length=64)
+    hardware: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/api/routes/{route_key:path}/endpoint")
+def set_endpoint(route_key: str, body: EndpointBody, db: DB, principal: AdminPrincipal) -> dict[str, Any]:
+    """§23 LOCAL / ADR-0111 amendment: a configuration change (new config hash -> the owner activates a new TRIAL)."""
+    route, change = service.set_local_endpoint(
+        db, route_key, endpoint=body.endpoint, rationale=body.rationale, upstream_model=body.upstream_model,
+        build={"quantization": body.quantization or "", "inference_backend": body.inference_backend or "",
+               "hardware": body.hardware or ""})
+    audit.record(db, actor_type="user", actor_id=principal.user.id, action="route.set_endpoint",
+                 target_type=service.TARGET_TYPE, target_id=route.route_key, domain=Domain.PERSONAL.value,
+                 reason=body.rationale[:500],
+                 details={"endpoint": route.endpoint, "previous_endpoint": change["previous"]["endpoint"],
+                          "previous_config_hash": change["previous"]["config_hash"], "config_hash": route.config_hash,
+                          "needs_new_trial": change["needs_new_trial"]})
+    emit(db, source="routing", kind="route.endpoint_set", entity_type=service.TARGET_TYPE, entity_id=route.route_key,
+         entity_version=route.config_hash, payload={"endpoint": route.endpoint, "config_changed": change["config_changed"]})
+    db.commit()
+    return {"route": route_view(db, route, principal), "config_changed": change["config_changed"],
+            "needs_new_trial": change["needs_new_trial"]}
 
 
 class DisableBody(BaseModel):

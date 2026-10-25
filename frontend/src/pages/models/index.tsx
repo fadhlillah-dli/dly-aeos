@@ -82,6 +82,10 @@ export default function ModelsPage() {
           <StatusBadge status={r.status} />
           {r.mode !== "LIVE" && <StatusBadge status={r.mode} />}
           {r.quota.state === "EXHAUSTED" && <Badge status="EXHAUSTED" />}
+          {r.client_restriction?.status === "OWNER_DECISION_REQUIRED" && (
+            <StatusBadge status="NEEDS_DECISION" label="Syarat klien: perlu keputusan pemilik" />
+          )}
+          {r.upstream_request?.status === "REFUSED" && <StatusBadge status="BLOCKED" label="Permintaan ditolak broker" />}
         </div>
       ),
     },

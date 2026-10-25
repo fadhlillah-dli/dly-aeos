@@ -13,10 +13,12 @@ from aeos.models.cost import UsageLedgerEntry
 from aeos.routing import catalog, seed, service
 from aeos.secrets.provider import reset_provider_cache
 from tests.conftest import VIEWER_PW, AuthedClient, create_viewer
+from tests.unit.test_routing_fakes import OWNER_CLIENT_TERMS as CT
 from tests.unit.test_routing_fakes import human_decision, install_fakes
 
 DS = "opencode-zen/deepseek-v4.1-flash-free"
 QWEN = "opencode-zen/qwen3.8-flash"
+KIMI = "opencode-zen/kimi-k2.7-code"
 LAGUNA = "openrouter/poolside/laguna-s-2.1:free"
 
 
@@ -104,10 +106,15 @@ def test_admin_activation_flow_records_decision_audit_event(personal_client: Aut
     install_fakes(monkeypatch)
     _seed(db)
     h = service.get_route(db, DS).config_hash
+    # S07: free-tier Zen chat models require the OpenCode client - never activated without the owner's decision
     r = personal_client.post(f"/api/routes/{DS}/activate", json={"mode": "TRIAL", "rationale": "pilot for slice 1",
                                                                   "expected_config_hash": h})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "CLIENT_TERMS_DECISION_REQUIRED", r.text
+    r = personal_client.post(f"/api/routes/{DS}/activate", json={"mode": "TRIAL", "rationale": "pilot for slice 1",
+                                                                  "expected_config_hash": h, "client_terms": CT})
     assert r.status_code == 200, r.text
     out = r.json()
+    assert out["route"]["client_restriction"]["status"] == "OWNER_ACCEPTED"
     assert out["decision_kind"] == "TRIAL" and out["route"]["status"] == "TRIAL"
     assert out["route"]["active_decision"]["id"] == out["decision_id"]
     assert db.query(AuditEvent).filter_by(action="route.activate", target_id=DS).count() == 1
@@ -124,22 +131,28 @@ def test_activation_conflicts_and_budget(personal_client: AuthedClient, db, monk
     r = personal_client.post(f"/api/routes/{DS}/activate", json={"mode": "APPROVED", "rationale": "stale review here",
                                                                   "expected_config_hash": "sha256:" + "0" * 64})
     assert r.status_code == 409 and r.json()["error"]["code"] == "CONFIG_HASH_MISMATCH"
-    qh = service.get_route(db, QWEN).config_hash
-    r = personal_client.post(f"/api/routes/{QWEN}/activate", json={"mode": "APPROVED", "rationale": "paid but no budget",
+    qh = service.get_route(db, KIMI).config_hash
+    r = personal_client.post(f"/api/routes/{KIMI}/activate", json={"mode": "APPROVED", "rationale": "paid but no budget",
                                                                     "expected_config_hash": qh})
     assert r.status_code == 422 and r.json()["error"]["code"] == "BUDGET_DECISION_REQUIRED"
-    budget = human_decision(db, kind="BUDGET", target_type="model_route", target_id=QWEN)
+    budget = human_decision(db, kind="BUDGET", target_type="model_route", target_id=KIMI)
     db.commit()
-    r = personal_client.post(f"/api/routes/{QWEN}/activate", json={
+    r = personal_client.post(f"/api/routes/{KIMI}/activate", json={
         "mode": "APPROVED", "rationale": "paid with approved budget", "expected_config_hash": qh,
         "budget_decision_id": budget.id})
     # a budget is not test evidence: production needs recorded EvalRuns of this configuration (§23)
     assert r.status_code == 422 and r.json()["error"]["code"] == "TEST_EVIDENCE_REQUIRED", r.text
     assert "no EvalRun referenced" in str(r.json()["error"]["details"]["problems"])
-    r = personal_client.post(f"/api/routes/{QWEN}/activate", json={
+    r = personal_client.post(f"/api/routes/{KIMI}/activate", json={
         "mode": "TRIAL", "rationale": "paid trial with approved budget", "expected_config_hash": qh,
         "budget_decision_id": budget.id})
     assert r.status_code == 200, r.text
+    # S07 documents the anthropic.messages API for qwen3.8-flash: the broker cannot serve it, so no decision is recorded
+    qwen = service.get_route(db, QWEN)
+    r = personal_client.post(f"/api/routes/{QWEN}/activate", json={
+        "mode": "TRIAL", "rationale": "paid trial with approved budget", "expected_config_hash": qwen.config_hash})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "ROUTE_REQUEST_SHAPE_REFUSED", r.text
+    assert "anthropic.messages" in r.json()["error"]["message"]
 
 
 @respx.mock
@@ -172,7 +185,7 @@ def test_decision_view_effective_only_while_human_active_unexpired_and_current(
     _seed(db)
     h = service.get_route(db, DS).config_hash
     r = personal_client.post(f"/api/routes/{DS}/activate", json={"mode": "TRIAL", "rationale": "pilot for slice 1",
-                                                                  "expected_config_hash": h})
+                                                                  "expected_config_hash": h, "client_terms": CT})
     assert r.status_code == 200, r.text
     h = r.json()["route"]["config_hash"]  # the activation binds the runtime in force: the decision's hash
     detail = personal_client.get(f"/api/routes/{DS}").json()
@@ -198,7 +211,7 @@ def test_activation_with_same_classes_keeps_the_reviewed_hash(personal_client: A
     _seed(db)
     h0 = service.get_route(db, DS).config_hash
     first = personal_client.post(f"/api/routes/{DS}/activate", json={
-        "mode": "TRIAL", "rationale": "pilot for slice 1", "expected_config_hash": h0})
+        "mode": "TRIAL", "rationale": "pilot for slice 1", "expected_config_hash": h0, "client_terms": CT})
     assert first.status_code == 200, first.text
     h = first.json()["route"]["config_hash"]
     binding = first.json()["route"]["runtime_binding"]
@@ -227,7 +240,7 @@ def test_approved_activation_with_recorded_evaluation_over_the_api(personal_clie
     db.commit()
     h0 = service.get_route(db, DS).config_hash
     t = personal_client.post(f"/api/routes/{DS}/activate", json={"mode": "TRIAL", "rationale": "pilot for slice 1",
-                                                                  "expected_config_hash": h0})
+                                                                  "expected_config_hash": h0, "client_terms": CT})
     h = t.json()["route"]["config_hash"]
     route = service.get_route(db, DS)
     cfg = {"model_id": route.model_id, "model_version": "UNKNOWN", "provider": route.provider, "provider_route": DS,

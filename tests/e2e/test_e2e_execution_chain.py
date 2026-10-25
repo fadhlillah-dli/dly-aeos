@@ -97,9 +97,12 @@ def test_full_chain_plan_to_pr_then_new_commit_reopens(chain):
     assert run.execution_status == "REVIEW" and te.state == "REVIEW", "exit 0 is REVIEW, never DONE"
     assert run.worker_reported_status == "EXITED_0" and run.head_commit and not run.quarantined
     assert run.diff_summary["paths"][0]["path"] == "backend/e2ecalc/__init__.py"
-    # broker forwarded the exact route model with the upstream key; the capability token stayed local
+    # broker forwarded the exact route model with the upstream key; the capability token stayed local. The request
+    # shape is the documented one (S07, ADR-0041 amendment 2026-10-25): /inference/openai/v1 + the BARE model id
     assert len(chain.upstream_calls) == 2
-    assert {c["model"] for c in chain.upstream_calls} == {chain.route().model_id}
+    assert {c["model"] for c in chain.upstream_calls} == {chain.route().mode_params["upstream_model"]} \
+        == {"deepseek-v4.1-flash-free"}
+    assert {c["url"] for c in chain.upstream_calls} == {"https://opencode.ai/inference/openai/v1/chat/completions"}
     assert all(c["auth"] == f"Bearer {FAKE_ZEN_KEY}" for c in chain.upstream_calls)
     with session_factory()() as s:
         reqs = list(s.scalars(select(BrokerRequest).where(BrokerRequest.run_id == run_id)))
@@ -270,7 +273,7 @@ def test_upstream_429_waits_for_quota_without_fallback(chain):
     assert views.derive_ui_state(None, te) == "WAITING_QUOTA"
     # every upstream call went to the same approved route/model: no fallback model, no paid route
     assert len(chain.upstream_calls) >= 3
-    assert {c["model"] for c in chain.upstream_calls} == {chain.route().model_id}
+    assert {c["model"] for c in chain.upstream_calls} == {chain.route().mode_params["upstream_model"]}
     with session_factory()() as s:
         q = s.scalar(select(QuotaState).where(QuotaState.scope == ROUTE_KEY))
         assert q.state == "EXHAUSTED" and q.source == "observed-429" and q.provider == "opencode-zen"

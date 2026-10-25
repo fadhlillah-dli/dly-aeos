@@ -118,6 +118,7 @@ class FakeModules:
         routing.eligible_routes = eligible_routes
         # per-request route authorisation (broker §23): the real rule is tested with the real routing module
         routing.route_use_problem = lambda session, route: fake.route_use_problem
+        routing.client_restriction_problem = lambda route: None  # the real rule: test_w7c1_route_request_shape.py
         mods["aeos.routing.service"] = routing
 
         cost = types.ModuleType("aeos.cost.service")

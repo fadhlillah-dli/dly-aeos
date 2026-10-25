@@ -23,8 +23,16 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
   const [goal, setGoal] = useState("");
   const [tradeoff, setTradeoff] = useState("");
   const [invalidateIf, setInvalidateIf] = useState("");
+  const [clientAccepted, setClientAccepted] = useState(false);
+  const [clientNote, setClientNote] = useState("");
   const activate = useActivateRoute(route.route_key);
-  const paid = !route.effectively_free;
+  // a loopback LOCAL route spends no money through the broker (budget_required=false); older servers: effectively_free
+  const paid = route.budget_required ?? !route.effectively_free;
+  // ADR-0041 (2026-10-25): S07 "free-tier chat models require OpenCode" - the broker is its own client, so the route is
+  // activated only with the owner's explicit decision, recorded on the decision and bound to the configuration hash
+  const clientRestricted = route.client_restriction?.status === "OWNER_DECISION_REQUIRED";
+  const clientDecided = !clientRestricted || (clientAccepted && clientNote.trim().length >= 10);
+  const shapeRefused = route.upstream_request?.status === "REFUSED";
   // §23 "klaim provider bukan bukti": UNKNOWN training/trial terms limit the route to PUBLIC until the owner records
   // their own reading of the provider terms (terms_record, stored on the decision).
   const termsUnknown = (route.terms_unknown ?? []).length > 0;
@@ -47,7 +55,9 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
     (mode !== "APPROVED" || (evalRunIds.length > 0 && recordFilled)) &&
     (!route.region_restricted || region.trim().length >= 2) &&
     (!recordStarted || recordComplete) &&
-    (!restricted || classes.every((c) => c === "PUBLIC"));
+    (!restricted || classes.every((c) => c === "PUBLIC")) &&
+    clientDecided &&
+    !shapeRefused;
 
   const toggle = (c: string) => setClasses((cur) => (cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c]));
 
@@ -71,6 +81,7 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
           mode === "APPROVED"
             ? { options: optionList, goal: goal.trim(), cost_quality_tradeoff: tradeoff.trim(), invalidate_if: invalidateIf.trim() }
             : null,
+        client_terms: clientRestricted && clientAccepted ? { accepted: true, note: clientNote.trim() } : null,
       },
       { onSuccess: onClose },
     );
@@ -95,6 +106,14 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
             <Notice tone="warn">
               Rute ini berbayar atau status gratisnya tidak terjamin. Aktivasi memerlukan ID keputusan <b>BUDGET</b> yang sah dan
               terpisah; tidak ada fallback berbayar otomatis.
+            </Notice>
+          </div>
+        )}
+        {shapeRefused && (
+          <div className="mt-3">
+            <Notice tone="warn">
+              Broker tidak dapat membangun permintaan upstream untuk rute ini, jadi tidak ada keputusan yang dicatat:{" "}
+              {route.upstream_request?.note}
             </Notice>
           </div>
         )}
@@ -172,6 +191,28 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
             <Field label="Catatan pemeriksaan terms" hint="Apa yang dibaca (retensi, pelatihan, trial); tersimpan pada keputusan.">
               <input className={inputClass} value={termsNote} onChange={(e) => setTermsNote(e.target.value)} />
             </Field>
+          )}
+          {clientRestricted && (
+            <fieldset className="rounded border border-line p-3">
+              <legend className="px-1 text-sm font-medium">Syarat klien penyedia: keputusan Anda (wajib)</legend>
+              <p className="mb-2 text-xs text-ink-3">
+                Penyedia menyatakan: “{route.client_restriction?.statement ?? "UNKNOWN"}” ({route.client_restriction?.source ?? "sumber UNKNOWN"}).
+                Broker AEOS memanggil upstream sebagai klien HTTP sendiri, bukan OpenCode; panggilan bisa ditolak dan itu baru terbukti lewat
+                probe kelayakan. Memilih ini berarti Anda sendiri yang menilai dan menanggung kepatuhan pada syarat penyedia; AEOS
+                tidak memilih untuk Anda. Pilihan lain: OpenCode Go, atau rute berbayar dengan keputusan BUDGET (ADR-0041).
+              </p>
+              <label className="flex items-start gap-2 text-sm">
+                <input type="checkbox" checked={clientAccepted} onChange={(e) => setClientAccepted(e.target.checked)} />
+                Saya memutuskan broker AEOS boleh memanggil rute ini sebagai klien sendiri. Keputusan ini tercatat pada keputusan dan
+                menjadi bagian hash konfigurasi.
+              </label>
+              {clientAccepted && (
+                <Field label="Catatan keputusan syarat klien" hint="Apa yang Anda baca/konfirmasi; minimal 10 karakter.">
+                  <input aria-label="Catatan keputusan syarat klien" className={inputClass} value={clientNote} onChange={(e) => setClientNote(e.target.value)} />
+                </Field>
+              )}
+              {!clientDecided && <p className="mt-1 text-xs text-warn">Tanpa keputusan ini rute tidak dapat diaktifkan.</p>}
+            </fieldset>
           )}
           {termsUnknown && (
             <fieldset className="rounded border border-line p-3">

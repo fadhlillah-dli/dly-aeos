@@ -3,10 +3,10 @@ import { useState } from "react";
 import { useAuth } from "../../auth/AuthContext";
 import { ExplainButtons } from "../../components/ExplainButtons";
 import { StatusBadge } from "../../components/StatusBadge";
-import { Button, ErrorBox, Freshness, KeyValue, Loading, Mono, Notice, inputClass } from "../../components/ui";
+import { Button, ErrorBox, Field, Freshness, KeyValue, Loading, Mono, Notice, inputClass } from "../../components/ui";
 import { absoluteTime } from "../../lib/format";
 import { ActivationDialog } from "./ActivationDialog";
-import { useDisableRoute, useRouteDetail } from "./api";
+import { useDisableRoute, useRouteDetail, useSetRouteEndpoint } from "./api";
 import { POOL_LABELS, type RouteItem } from "./types";
 
 function freeLabel(r: RouteItem) {
@@ -25,6 +25,105 @@ function cfgText(config: Record<string, unknown> | undefined, key: string): stri
   if (Array.isArray(v)) return v.length ? v.join(", ") : "UNKNOWN";
   if (typeof v === "object") return Object.keys(v as object).length ? JSON.stringify(v) : "UNKNOWN";
   return String(v);
+}
+
+/** ADR-0041 (2026-10-25): the exact upstream request the broker would send - an E1 documentation shape, never a pass. */
+function upstreamRequest(r: RouteItem) {
+  const u = r.upstream_request;
+  if (!u) return r.pool === "SUPERVISOR" ? "Bridge native (bukan broker)" : "UNKNOWN";
+  if (u.status === "REFUSED")
+    return (
+      <span key="ur" className="space-y-1">
+        <StatusBadge status="BLOCKED" label="Ditolak broker" />
+        <span className="block text-xs text-warn">{u.note}</span>
+      </span>
+    );
+  if (u.status !== "READY_SHAPE") return <StatusBadge key="ur" status="UNKNOWN" label={u.note} />;
+  return (
+    <span key="ur" className="space-y-1">
+      <StatusBadge status="NOT-PROVEN" label="Sesuai dokumen provider (E1), belum dibuktikan" />
+      <span className="block text-xs">
+        POST <Mono>{u.url ?? "UNKNOWN"}</Mono> · model <Mono>{u.model ?? "UNKNOWN"}</Mono> · reasoning {u.reasoning_effort ?? "UNKNOWN"}
+      </span>
+      <span className="block text-xs text-ink-3">{u.note}</span>
+    </span>
+  );
+}
+
+function clientRestriction(r: RouteItem) {
+  const c = r.client_restriction;
+  if (!c) return "Tidak ada batasan klien tercatat";
+  return (
+    <span key="cr" className="space-y-1">
+      {c.status === "OWNER_ACCEPTED" ? (
+        <StatusBadge status="REVIEWED" label="Diputuskan pemilik; penerimaan provider NOT-PROVEN" />
+      ) : (
+        <StatusBadge status="NEEDS_DECISION" label="Perlu keputusan pemilik - tidak dapat diaktifkan" />
+      )}
+      <span className="block text-xs">“{c.statement ?? "UNKNOWN"}” ({c.source ?? "sumber UNKNOWN"})</span>
+      {c.owner_note && <span className="block text-xs">Catatan pemilik: {c.owner_note}</span>}
+      <span className="block text-xs text-ink-3">{c.note}</span>
+    </span>
+  );
+}
+
+/** LOCAL route: the owner points it at a loopback OpenAI-compatible server (a new configuration, new TRIAL). */
+function LocalEndpointForm({ route }: { route: RouteItem }) {
+  const save = useSetRouteEndpoint(route.route_key);
+  const [endpoint, setEndpoint] = useState(route.endpoint ?? "");
+  const [model, setModel] = useState("");
+  const [why, setWhy] = useState("");
+  // §23 LOCAL: the build (quantization, inference backend, hardware) is part of the route's identity; empty = unchanged
+  const [quantization, setQuantization] = useState("");
+  const [backend, setBackend] = useState("");
+  const [hardware, setHardware] = useState("");
+  const loopback = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+(\/.*)?$/.test(endpoint.trim());
+  return (
+    <fieldset className="space-y-2 rounded border border-line p-3">
+      <legend className="px-1 text-sm font-medium">Endpoint server lokal (loopback)</legend>
+      <p className="text-xs text-ink-3">
+        Base OpenAI-compatible server di komputer ini, mis. <Mono>http://127.0.0.1:8080/v1</Mono>; broker menambahkan{" "}
+        <Mono>/chat/completions</Mono>. Mengubahnya = konfigurasi baru: keputusan lama tidak berlaku, perlu TRIAL baru.
+      </p>
+      <Field label="Endpoint loopback">
+        <input aria-label="Endpoint loopback" className={inputClass} value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="http://127.0.0.1:8080/v1" />
+      </Field>
+      <Field label="Nama model di server lokal (opsional)">
+        <input aria-label="Nama model di server lokal" className={inputClass} value={model} onChange={(e) => setModel(e.target.value)} />
+      </Field>
+      <Field label="Kuantisasi (opsional)" hint="Mis. Q4_K_M; kosong = tidak diubah.">
+        <input aria-label="Kuantisasi" className={inputClass} value={quantization} onChange={(e) => setQuantization(e.target.value)} />
+      </Field>
+      <Field label="Backend inferensi (opsional)" hint="Mis. llama.cpp beserta versinya.">
+        <input aria-label="Backend inferensi" className={inputClass} value={backend} onChange={(e) => setBackend(e.target.value)} />
+      </Field>
+      <Field label="Perangkat keras (opsional)">
+        <input aria-label="Perangkat keras" className={inputClass} value={hardware} onChange={(e) => setHardware(e.target.value)} />
+      </Field>
+      <Field label="Alasan perubahan">
+        <input aria-label="Alasan perubahan endpoint" className={inputClass} value={why} onChange={(e) => setWhy(e.target.value)} />
+      </Field>
+      {endpoint.trim() && !loopback && <p className="text-xs text-warn">Hanya http pada 127.0.0.1, localhost atau [::1] dengan port.</p>}
+      <Button
+        disabled={!loopback || why.trim().length < 10}
+        busy={save.isPending}
+        onClick={() =>
+          save.mutate({
+            endpoint: endpoint.trim(),
+            rationale: why.trim(),
+            upstream_model: model.trim() || null,
+            quantization: quantization.trim() || null,
+            inference_backend: backend.trim() || null,
+            hardware: hardware.trim() || null,
+          })
+        }
+      >
+        Tetapkan endpoint
+      </Button>
+      {save.data?.needs_new_trial && <Notice tone="warn">Konfigurasi berubah: aktifkan TRIAL baru sebelum probe.</Notice>}
+      {save.error && <ErrorBox error={save.error} />}
+    </fieldset>
+  );
 }
 
 export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: () => void }) {
@@ -71,6 +170,8 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
                 ["Pool", POOL_LABELS[r.pool] ?? r.pool],
                 ["Penyedia / endpoint", <span key="p">{r.provider} {r.endpoint ? <Mono>{r.endpoint}</Mono> : null}</span>],
                 ["Model ID persis", <Mono key="m">{r.model_id}</Mono>],
+                ["Permintaan upstream", upstreamRequest(r)],
+                ["Syarat klien penyedia", clientRestriction(r)],
                 ["Versi teresolusi", r.resolved_version === "UNKNOWN" ? <StatusBadge status="UNKNOWN" /> : <Mono>{r.resolved_version}</Mono>],
                 ["Hash konfigurasi", <Mono key="h">{r.config_hash}</Mono>],
                 ["Konfigurasi berubah", r.config_changed_at ? absoluteTime(r.config_changed_at) : "—"],
@@ -116,6 +217,7 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
                     <StatusBadge key="rb" status="NOT_TESTED" label="Belum diaktifkan" />
                   ),
                 ],
+                ["Jalur evaluasi", r.evaluation_path ? (r.evaluation_path.status === "NOT_WIRED" ? <span key="ev" className="text-sm"><StatusBadge status="NOT-PROVEN" label="Evaluasi/scorecard belum tersambung" /><span className="block text-xs text-ink-3">{r.evaluation_path.note}</span></span> : <span key="ev" className="text-xs">{r.evaluation_path.note}</span>) : "UNKNOWN"],
                 ["Jalur eksekusi", r.execution_path ? <span key="ep" className="text-sm">{r.execution_path.status === "NOT_WIRED" ? <StatusBadge status="NOT-PROVEN" label="Belum tersambung" /> : r.execution_path.status === "FEASIBILITY_PROBE_ONLY" ? <StatusBadge status="NOT-PROVEN" label="Hanya probe kelayakan (bukan task worker)" /> : r.execution_path.status} <span className="block text-xs text-ink-3">{r.execution_path.note}</span></span> : "UNKNOWN"],
                 ["Rollback", r.active_decision?.rollback_target ? (r.active_decision.rollback_target.action === "DISABLE_ROUTE" ? "Nonaktifkan rute (belum ada konfigurasi lain yang pernah disetujui)" : <Mono key="rt">{r.active_decision.rollback_target.config_hash}</Mono>) : "—"],
                 ["Terakhir dipakai", r.last_used?.at ? absoluteTime(r.last_used.at) : <StatusBadge status="NEVER_OBSERVED" />],
@@ -167,6 +269,7 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
                 </ul>
               )}
             </div>
+            {isAdmin && r.pool === "LOCAL" && r.provider === "local" && <LocalEndpointForm route={r} />}
             {isAdmin && r.pool !== "SUPERVISOR" && (
               <div className="space-y-2 border-t border-line pt-3">
                 <Button variant="primary" onClick={() => setActivating(true)} disabled={r.mode === "MOCK" || r.mode === "DEMO"}>

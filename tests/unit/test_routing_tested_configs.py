@@ -19,7 +19,7 @@ from aeos.models.decisions import Decision
 from aeos.models.routing import ModelRoute
 from aeos.routing import catalog, seed, service
 from aeos.routing.facade import eligible_routes, note_rate_limited, select_route
-from tests.unit.test_routing_fakes import install_fakes
+from tests.unit.test_routing_fakes import OWNER_CLIENT_TERMS, client_terms_for, install_fakes
 from tests.unit.test_routing_service import DS, GLM, approve, task
 
 LIMITS = {"max_attempts": 2, "max_minutes": 30, "max_cost_usd": 0}
@@ -49,6 +49,7 @@ def observed(db, key: str) -> ModelRoute:
 
 def trial(db, key: str, **kw) -> ModelRoute:
     r = observed(db, key)
+    kw.setdefault("client_terms", client_terms_for(r))  # the owner's S07 client-terms decision (free Zen routes)
     route, _ = service.activate_route(db, key, actor_user_id="owner", mode="TRIAL", rationale="pilot slice trial run",
                                       expected_config_hash=r.config_hash, terms_reviewed=True, **kw)
     return route
@@ -180,7 +181,8 @@ def test_seeded_route_needs_an_owner_terms_review_at_activation(world):
     assert ei.value.code == "TERMS_REVIEW_REQUIRED"
     route, d = service.activate_route(db, DS, actor_user_id="owner", mode="TRIAL", rationale="pilot slice trial run",
                                       expected_config_hash=r.config_hash, terms_reviewed=True,
-                                      terms_note="Zen privacy page re-read: zero retention for free models")
+                                      terms_note="Zen privacy page re-read: zero retention for free models",
+                                      client_terms=OWNER_CLIENT_TERMS)
     review = d.details["terms_review"]
     assert review["checked_by"] == "owner" and review["data_classes"] == ["PUBLIC", "INTERNAL"] and "Zen" in review["note"]
     assert route.terms_checked_at is not None and eligible_routes(db, domain="PERSONAL",
@@ -242,7 +244,8 @@ def test_region_restricted_provider_needs_a_reviewed_region(world):
                                expected_config_hash=beam.config_hash, terms_reviewed=True, region="cn")
     assert ei.value.code == "REGION_UNAVAILABLE"
     route, d = service.activate_route(db, BEAM, actor_user_id="owner", mode="TRIAL", rationale="arena trial for beam",
-                                      expected_config_hash=beam.config_hash, terms_reviewed=True, region="ID")
+                                      expected_config_hash=beam.config_hash, terms_reviewed=True, region="ID",
+                                      client_terms=OWNER_CLIENT_TERMS)
     assert route.region == "ID" and d.details["region"] == "ID"
     assert BEAM in eligible_routes(db, domain="PERSONAL", data_classification="PUBLIC", pool="ARENA").eligible
     route.region = None  # e.g. edited away: the hard filter fails closed
@@ -406,7 +409,7 @@ def test_activation_fails_closed_when_the_runtime_cannot_be_fingerprinted(world,
     r = observed(db, DS)
     with pytest.raises(Blocked) as ei:
         service.activate_route(db, DS, actor_user_id="owner", mode="TRIAL", rationale="pilot slice trial run",
-                               expected_config_hash=r.config_hash, terms_reviewed=True)
+                               expected_config_hash=r.config_hash, terms_reviewed=True, client_terms=OWNER_CLIENT_TERMS)
     assert ei.value.code == "RUNTIME_BINDING_UNKNOWN"
 
 
@@ -502,8 +505,9 @@ def test_supervisor_harness_version_and_effort_are_part_of_the_route_identity(wo
     view = route_view(db, opus, SimpleNamespace(active_domain=None))
     assert view["mode_thinking"]["effort"] == "high" and view["harness_version"] == "2.2.0"
     worker = route_view(db, service.get_route(db, DS), SimpleNamespace(active_domain=None))
-    assert worker["mode_thinking"]["reasoning"] == "HARNESS_DEFAULT"
-    assert worker["mode_thinking"]["bound_in"] == ["harness_version", "context_strategy"]
+    # ADR-0041 amendment 2026-10-25: the route states its level (the broker never forwards the worker's)
+    assert worker["mode_thinking"]["reasoning"] == "PROVIDER_DEFAULT"
+    assert worker["mode_thinking"]["bound_in"] == ["mode_params", "harness_version", "context_strategy"]
 
 
 def test_route_view_reports_binding_execution_path_and_restrictions(world):
