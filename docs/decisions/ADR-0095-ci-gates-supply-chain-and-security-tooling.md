@@ -56,7 +56,11 @@ To decide, the owner - in the reviewed PR that accepts this ADR - edits `policy/
   (a DECIDED policy without `decision_ref`, or with an unknown value, is POLICY_INVALID: exit 2);
 * `licenses.allow`: allowed licence identifiers (SPDX ids such as `MIT`, `Apache-2.0`), matched exactly and
   case-insensitively; `A OR B` passes when either is allowed, `A AND B` only when both are. Once set, an
-  UNKNOWN licence or one outside the list FAILS;
+  UNKNOWN licence or one outside the list FAILS. A Python distribution without a `License-Expression` is
+  reported by its licence classifier names verbatim (`MIT License` is not mapped to `MIT`, so list it as
+  written if it is acceptable); several classifiers are reported as `A AND B`, because the metadata does not
+  say whether they are alternatives - the lenient reading is never assumed. A missing, unreadable or
+  non-mapping policy file is POLICY_INVALID (exit 2), never UNDECIDED;
 * `vulnerabilities.python|npm.fail_at_or_above` and `sast.bandit.fail_at_or_above`: one of
   `LOW | MEDIUM | HIGH | CRITICAL`. Once set, a finding at or above it FAILS, a finding whose severity the
   scanner does not report (pip-audit 2.7.3 reports none) counts as UNKNOWN and FAILS, and a missing or

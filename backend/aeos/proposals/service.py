@@ -1008,15 +1008,27 @@ def candidate_digest_gate(session: Session, p: ChangeProposal) -> dict[str, Any]
             "status": "RECORDED" if p.candidate_digest else ("MISSING" if pinned else "NOT_RECORDED")}
 
 
-def candidate_digest_problems(session: Session, p: ChangeProposal, since: datetime | None) -> list[str]:
+def candidate_digest_problems(session: Session, p: ChangeProposal, since: datetime | None,
+                              targets: list[str] | None = None) -> list[str]:
     """ACCEPTED with a candidate digest: the executable this domain observed installed after the promotion must be
-    exactly that digest, and a digest the reviewed manifest records for this platform must be it too."""
+    exactly that digest, and a digest the reviewed manifest records for this platform must be it too.
+
+    Only the ACCEPTED component is compared (*targets*: the accepted configuration's component, else the candidate
+    components, or the upgraded component itself) - never the old component a REPLACE retires, whose bytes are
+    not the candidate's. A candidate digest names one artifact, so several targets need
+    ``accepted_configuration.component_id`` to say which one it belongs to."""
     from aeos.inventory import facade as inventory
 
     if not p.candidate_digest:
         return []
+    if targets is None:
+        targets = list(p.candidate_component_ids or []) or (
+            list(p.existing_component_ids or []) if p.kind == "UPGRADE" else [])
+    if len(targets) > 1:
+        return [f"candidate_digest names one artifact but the accepted configuration covers {sorted(targets)}; set "
+                "accepted_configuration.component_id to the component the digest belongs to"]
     problems: list[str] = []
-    for cid in _digest_targets(p):
+    for cid in targets:
         comp = inventory.get_component(session, cid)
         if not R.component_in_domain(comp, p.domain):
             continue
@@ -1099,7 +1111,7 @@ def config_applied_problems(session: Session, p: ChangeProposal, cfg: dict[str, 
             problems.append(f"{cid} is neither enabled by decision nor observed installed/configured"
                             + (f" at {pin}" if pin else "") + " after the promotion (configuration not applied)")
     if p.kind != "REMOVE":
-        problems += candidate_digest_problems(session, p, since)
+        problems += candidate_digest_problems(session, p, since, [cid for cid, _pin in targets])
     return problems
 
 

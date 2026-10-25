@@ -41,6 +41,8 @@ export interface BinaryAuthenticity {
   gate: string;
   reason: string;
   approved_signer: string | null;
+  /** PINNED | NOT_PINNED | UNREADABLE (the reviewed install-manifest cannot be read: the pin is unknown, the gate blocks) */
+  pin_status?: string;
   os: string;
   signature_status: string;
   observed_signer: string | null;

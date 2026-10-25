@@ -33,12 +33,12 @@ def _approved_pin(ctx: CheckContext) -> str | None:
     if ctx.session is None:
         return None
     try:
-        from aeos.models.inventory import ComponentReference
+        from aeos.inventory import facade as inventory
 
-        ref = ctx.session.get(ComponentReference, "opencode")
+        # normalised exactly as the runtime resolves it (opencode.resolve_pin): "v1.20.0" is the pin 1.20.0
+        return inventory.approved_pin("opencode", session=ctx.session)
     except Exception:  # inventory tables unavailable: fall back to the runtime default
         return None
-    return str(ref.approved_pin) if ref is not None and ref.approved_pin else None
 
 
 @check("worker.opencode", "WORKER", "Engine pekerja OpenCode", component_id="opencode", ttl_seconds=86400,

@@ -204,7 +204,18 @@ def _component_items(comp: ComponentReference, latest: dict[tuple[str, str], Com
             ))
     # §07: the reviewed digest of THIS host's <os>_<arch> (a per-platform mapping without an entry for it is
     # NOT_RECORDED here - never compared with another platform's executable)
-    approved_digest = select_digest((comp.details or {}).get("approved_digest"))["digest"]
+    digest_sel = select_digest((comp.details or {}).get("approved_digest"))
+    approved_digest = digest_sel["digest"]
+    if digest_sel["status"] == "INVALID" and inst is not None and inst.status == "INSTALLED":
+        # a malformed reviewed digest cannot be compared: fail closed (drift), never "nothing to compare"
+        items.append(DriftItem(
+            cid, "resolved-version-mismatch", severity(policy, "resolved-version-mismatch", "digest"),
+            f"Digest yang disetujui tidak valid ({digest_sel['reason']}); executable teramati tidak dapat dibandingkan",
+            key="digest", detail={"approved_digest_status": "INVALID", "reason": digest_sel["reason"],
+                                  "observed_digest": inst.observed_identity, "platform": digest_sel["platform"],
+                                  "observation_id": inst.id},
+            domain_scope=scope,
+        ))
     if approved_digest and inst is not None and inst.status == "INSTALLED" and inst.observed_identity \
             and str(inst.observed_identity).startswith("sha256:") and inst.observed_identity != approved_digest:
         # same --version but different bytes: the executable is not the reviewed artifact (§37)

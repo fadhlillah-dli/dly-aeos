@@ -324,7 +324,7 @@ describe("Models & Routes page", () => {
     );
   const authenticity = (over: Record<string, unknown>) => ({
     gate: "UNVERIFIED", reason: "signature VALID; no publisher identity pinned", approved_signer: null, os: "windows",
-    signature_status: "VALID", observed_signer: "CN=\"Anthropic, PBC\"", owner_step: "pin the Anthropic signer for windows",
+    signature_status: "VALID", observed_signer: "CN=\"Anthropic, PBC\"", owner_step: "Pin penerbit Anthropic untuk windows di install-manifest claude-code signature.approved_signer",
     remedy: null, ...over,
   });
 
@@ -334,7 +334,27 @@ describe("Models & Routes page", () => {
     const cell = await screen.findByTestId("binary-authenticity");
     expect(within(cell).getByText("Belum diverifikasi")).toBeInTheDocument();
     expect(within(cell).getByText(/belum dipin/)).toBeInTheDocument();
-    expect(screen.getByText(/Langkah pemilik: pin the Anthropic signer/)).toBeInTheDocument();
+    expect(screen.getByText(/Langkah pemilik: Pin penerbit Anthropic untuk windows/)).toBeInTheDocument();
+    // the owner-facing explanation is Indonesian; the backend reason is shown only as technical detail
+    expect(screen.getByText(/Keaslian belum terverifikasi/)).toBeInTheDocument();
+    expect(screen.getByText("signature VALID; no publisher identity pinned")).toBeInTheDocument();
+  });
+
+  it("an unreadable install-manifest blocks with a manifest remedy, never 'belum dipin' (fail closed)", async () => {
+    const remedy = { operation: "Perbaiki install-manifest/manifest.yaml", commands: ["./aeos seed --only aeos.inventory.seed"], note: "lewat PR" };
+    withStatus({
+      ...STATUS,
+      bridge_status: "BLOCKED",
+      blocked_by: ["signature"],
+      binary: { ...STATUS.binary, authenticity: authenticity({ gate: "BLOCKED", pin_status: "UNREADABLE", owner_step: null, reason: "install-manifest cannot be read/validated (MANIFEST_INVALID)", remedy }) },
+    });
+    renderPage();
+    const cell = await screen.findByTestId("binary-authenticity");
+    expect(within(cell).getByText(/tidak dapat dibaca/)).toBeInTheDocument();
+    expect(within(cell).queryByText(/belum dipin/)).toBeNull();
+    expect(screen.getByText("Langkah perbaikan install-manifest")).toBeInTheDocument();
+    expect(screen.getByText(/pin penerbit tidak diketahui/)).toBeInTheDocument();
+    expect(screen.queryByText(/ketik \/login/)).toBeNull();
   });
 
   it("a signature block shows the signature remedy, never the /login remedy", async () => {

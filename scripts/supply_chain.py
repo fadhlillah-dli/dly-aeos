@@ -15,8 +15,9 @@ Offline and deterministic; nothing here contacts the network or installs anythin
 The policy file holds OWNER decisions only. While it says ``status: UNDECIDED`` (or a value is null) the
 evaluation is REPORT_ONLY: findings and failed/missing scanner reports are listed, exit code 0, the CI job
 stays [NO-GATE]. Once the owner records values (status DECIDED) a violation, an UNKNOWN licence, a finding
-of unknown severity or a missing/unreadable scanner report FAILS (exit 1); a malformed decided policy is
-exit 2 (fail closed). No threshold or allow-list is ever defaulted here. See ADR-0095.
+of unknown severity or a missing/unreadable scanner report FAILS (exit 1); a malformed decided policy, or a
+policy file that is missing, unreadable or not a mapping, is exit 2 (fail closed). No threshold or allow-list is
+ever defaulted here. See ADR-0095.
 
 Usage: python scripts/supply_chain.py sbom [-o sbom.json]
        python scripts/supply_chain.py licenses [--policy policy/supply-chain.yaml] [-o licenses.json]
@@ -108,7 +109,9 @@ def _license_of(dist: Any) -> str:
         return str(expr).strip()
     classifiers = [c.split("::")[-1].strip() for c in meta.get_all("Classifier") or [] if c.startswith("License ::")]
     if classifiers:
-        return " OR ".join(sorted(set(classifiers)))
+        # Several licence classifiers do not say whether they are alternatives or all apply: never guess the lenient
+        # "OR" - every one of them must be on the owner's allow-list (fail closed).
+        return " AND ".join(sorted(set(classifiers)))
     lic = (meta.get("License") or "").strip()
     if lic and len(lic) <= 80 and "\n" not in lic:
         return lic
@@ -162,12 +165,16 @@ def load_policy(path: Path) -> dict[str, Any]:
 
     out: dict[str, Any] = {"path": str(path), "status": "UNDECIDED", "errors": [], "licenses_allow": None,
                            "thresholds": {k: None for k in SCANNERS}, "min_confidence": None, "decision_ref": None}
+    # An unreadable or malformed policy file is INVALID, never UNDECIDED: a decided policy that got lost or broken
+    # must not quietly turn the gate back into a report (fail closed, exit 2).
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
+        out.update(status="INVALID")
         out["errors"].append(f"policy file unreadable: {type(exc).__name__}")
         return out
     if not isinstance(raw, dict):
+        out.update(status="INVALID")
         out["errors"].append("policy file is not a mapping")
         return out
     status = str(raw.get("status") or "UNDECIDED").upper()
@@ -380,7 +387,19 @@ def evaluate(policy: dict[str, Any], *, licenses: str | None = None, pip_audit: 
                                          "decision pending, ADR-0095)"}
 
 
+SUMMARY_FINDINGS_MAX = 50  # per section; the full list is in the -o JSON
+
+
+def _finding_line(f: dict[str, Any]) -> str:
+    if f.get("file"):  # bandit
+        return f"{f.get('id')} {f.get('file')}:{f.get('line')} severity={f.get('severity')} confidence={f.get('confidence')}"
+    return " ".join(str(x) for x in (f.get("package"), f.get("version") or f.get("range") or "", f.get("id") or "",
+                                     f"severity={f.get('severity')}") if x)
+
+
 def summary_lines(result: dict[str, Any]) -> list[str]:
+    """The step-summary text: the mode, each section's status and every finding (capped), so a report-only run still
+    shows WHAT was found, not only how many."""
     lines = [f"Supply-chain policy: mode={result['mode']} overall={result['overall']} "
              f"(policy {result['policy']['status']})"]
     for name, s in result["sections"].items():
@@ -388,6 +407,12 @@ def summary_lines(result: dict[str, Any]) -> list[str]:
         lines.append(f"- {name}: {s['status']} report={s.get('report')} "
                      f"violations={len(s.get('violations') or [])}" + (f" counts={counts}" if counts else "")
                      + (f" note={s['note']}" if s.get("note") else ""))
+        findings = s.get("findings") or s.get("violations") or []
+        for f in findings[:SUMMARY_FINDINGS_MAX]:
+            lines.append(f"  - {_finding_line(f) if 'severity' in f else f.get('name')} "
+                         + (f"({f.get('license')}: {f.get('reason')})" if "license" in f else "").rstrip())
+        if len(findings) > SUMMARY_FINDINGS_MAX:
+            lines.append(f"  - ... {len(findings) - SUMMARY_FINDINGS_MAX} more (see the JSON report)")
     for err in result["policy"].get("errors") or []:
         lines.append(f"- policy error: {err}")
     return lines

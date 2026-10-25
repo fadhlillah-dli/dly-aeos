@@ -500,7 +500,7 @@ components:
     approved_pin: null
     approved_digest: null
     distribution: {kind: package_manager, url: null, digest: null, channel: "official native build", note: "Distribusi resmi Anthropic (winget Anthropic.ClaudeCode / brew cask claude-code; Linux: halaman setup resmi). Digest belum dipin."}
-    signature: {method: os_codesign, available: null, verified: false, verified_at: null, result: UNKNOWN, approved_signer: null, note: "Bridge dan Doctor (claude.binary) memeriksa tanda tangan OS sebelum dipakai: Windows Get-AuthenticodeSignature, macOS codesign (TeamIdentifier). INVALID selalu BLOCKED; tanpa pin keaslian UNVERIFIED (UNSIGNED = DEGRADED). Langkah pemilik: isi approved_signer per OS {windows: subject/CN/O Authenticode, darwin: TeamIdentifier} lewat PR yang direview; setelah dipin, apa pun selain VALID + penerbit cocok = BLOCKED."}
+    signature: {method: os_codesign, available: null, verified: false, verified_at: null, result: UNKNOWN, approved_signer: null, note: "Bridge dan Doctor (claude.binary) memeriksa tanda tangan OS sebelum dipakai: Windows Get-AuthenticodeSignature, macOS codesign (TeamIdentifier). INVALID selalu BLOCKED; tanpa pin keaslian UNVERIFIED (UNSIGNED = DEGRADED). Langkah pemilik: isi approved_signer per OS {windows: subject/CN/O Authenticode, darwin: TeamIdentifier} lewat PR yang direview; setelah dipin, apa pun selain VALID + penerbit cocok = BLOCKED. Manifest yang gagal divalidasi = pin tidak diketahui = BLOCKED."}
     ports: []
     config_refs: ["settings:claude_binary"]
     compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: "ADR-0040", note: "Windows: hanya claude.exe native; shim .cmd/.ps1 ditolak bridge."}

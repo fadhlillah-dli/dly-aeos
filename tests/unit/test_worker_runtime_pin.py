@@ -55,6 +55,18 @@ def test_without_an_approved_pin_the_labelled_default_applies(monkeypatch):
     assert st["drift"] is True and st["pin_source"] == opencode.PIN_SOURCE_DEFAULT
 
 
+def test_an_unreadable_manifest_labels_the_pin_unknown_not_unapproved(monkeypatch):
+    from aeos.core.errors import ValidationFailed
+
+    def broken(*_a, **_k):
+        raise ValidationFailed("install manifest failed validation (1 errors)", code="MANIFEST_INVALID")
+
+    monkeypatch.setattr(manifest, "load_manifest", broken)
+    pin = opencode.resolve_pin()
+    assert pin["version"] == opencode.PINNED_VERSION and pin["source"] != opencode.PIN_SOURCE_DEFAULT
+    assert "MANIFEST_INVALID" in pin["source"] and "UNKNOWN" in pin["source"]
+
+
 def test_a_changed_pin_is_not_served_from_the_status_cache(monkeypatch):
     _installed(monkeypatch, "1.20.0")
     _reviewed_pin(monkeypatch, None)
@@ -72,6 +84,71 @@ def test_the_seeded_component_reference_is_used_with_a_session(db, monkeypatch):
                               admission_status="DISCOVERED", enablement="DISABLED", lifecycle_final="ACTIVE"))
     db.flush()
     assert opencode.resolve_pin(db) == {"version": "1.21.0", "source": opencode.PIN_SOURCE_MANIFEST}
+
+
+def test_the_doctor_reads_the_seeded_pin_normalised_like_the_runtime(settings, db, monkeypatch):
+    """The Doctor and the runtime compare the same pin: a seeded ``v1.21.0`` is 1.21.0 for both (the Doctor used to
+    compare the raw string and reported drift for an engine that the runtime considered pinned)."""
+    from aeos.worker_runtime import facade as worker
+    from tests.unit.test_doctor_checks import _ctx, check
+    from tests.unit.test_inventory_fakes import base_runner as runner
+
+    db.add(ComponentReference(component_id="opencode", kind="worker_engine", name="OpenCode", friendly_name="OpenCode",
+                              function="f", why_selected="w", category="workforce", source_kind="GITHUB_REPO",
+                              requirement="REQUIRED", design_label="SELECTED_DESIGN", approved_pin="v1.21.0",
+                              admission_status="DISCOVERED", enablement="DISABLED", lifecycle_final="ACTIVE"))
+    db.commit()
+    monkeypatch.setattr(worker, "opencode_status", lambda configured=None, *, refresh=False: {
+        "status": "INSTALLED", "binary": None, "version": "1.21.0", "pinned_version": "1.21.0",
+        "pin_source": opencode.PIN_SOURCE_MANIFEST, "drift": False, "functional": "NOT_PROVEN"})
+    res = check("worker.opencode", _ctx(settings, db, runner()))
+    assert res.status == "VERIFIED", (res.status, res.error_code, res.summary)
+    assert res.observed_evidence["pinned_version"] == "1.21.0"
+    assert res.observed_evidence["pin_source"] == "install-manifest approved_pin"
+
+
+def _inspect(monkeypatch, *, rc: int = 0, labels: dict | None = None, image_id: str = "sha256:img") -> None:
+    import json
+
+    config = {"User": "10001:10001", "Labels": labels}
+
+    def run_docker(args, *, timeout=60):
+        assert args[:2] == ["image", "inspect"]
+        out = f"{image_id}|{json.dumps(config)}" if rc == 0 else ""
+        return subprocess.CompletedProcess(args, rc, stdout=out, stderr="" if rc == 0 else "No such image")
+
+    monkeypatch.setattr(container, "run_docker", run_docker)
+
+
+def test_the_image_hints_build_the_approved_pin_not_the_dockerfile_default(monkeypatch):
+    """`docker build -t dly-aeos-worker:1.20.0 sandbox/` without the build arg installs the Dockerfile default (1.19.3)
+    under the 1.20.0 tag: every hint carries the pin as the build arg too."""
+    _reviewed_pin(monkeypatch, "1.20.0")
+    want = "docker build --build-arg OPENCODE_VERSION=1.20.0 -t dly-aeos-worker:1.20.0 sandbox/"
+    assert container.image_build_command() == want
+    _inspect(monkeypatch, rc=1)
+    st = container.image_status()
+    assert st["present"] is False and want in st["evidence"]
+
+
+def test_an_image_built_with_another_engine_is_never_run_as_the_pin(monkeypatch):
+    _reviewed_pin(monkeypatch, "1.20.0")
+    _inspect(monkeypatch, labels={"aeos.opencode_version": "1.19.3"})
+    st = container.image_status()
+    assert st["present"] is False and st["opencode_version"] == "1.19.3" and "not the pin 1.20.0" in st["evidence"]
+    _inspect(monkeypatch, labels={"aeos.opencode_version": "1.20.0"})
+    assert container.image_status()["present"] is True
+    _inspect(monkeypatch, labels=None)  # built before the label existed: accepted, and said so
+    st = container.image_status()
+    assert st["present"] is True and st["opencode_version"] is None and "no OpenCode version label" in st["evidence"]
+
+
+def test_the_dockerfile_labels_the_engine_version_it_installs():
+    from aeos.core.paths import repo_root
+
+    text = (Path(repo_root()) / "sandbox" / "Dockerfile").read_text(encoding="utf-8")
+    assert f'LABEL {container.OPENCODE_VERSION_LABEL}="${{OPENCODE_VERSION}}"' in text
+    assert f"ARG OPENCODE_VERSION={opencode.PINNED_VERSION}" in text  # the default is the runtime default
 
 
 def test_build_hint_and_contract_report_name_the_approved_pin(monkeypatch, tmp_path):

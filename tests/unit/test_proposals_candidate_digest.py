@@ -129,6 +129,74 @@ def test_accepted_compares_the_observed_executable_with_the_candidate_digest(db,
     assert p.status == "ACCEPTED"
 
 
+def test_replace_compares_the_digest_with_the_new_component_not_the_retired_one(db, policy):
+    """REPLACE: the old engine is digest-pinned, so the candidate must name its digest - and at ACCEPTED that digest
+    is the NEW component's executable. The old component keeps its own (different) bytes; comparing it with the
+    candidate digest would refuse every replacement."""
+    _digest_pinned(db)  # opencode (the component being replaced) is held to BASELINE
+    component(db, "opencode-next")
+    p = create(db, kind="REPLACE", candidate_pin="1.4.0", candidate_component_ids=["opencode-next"])
+    p.links = {"adr_keys": ["ADR-9100"]}  # a REPLACE is an architecture change: ACCEPTED needs its ADR link
+    db.commit()
+    owner_plan(db, p)
+    review(db, p)
+    with pytest.raises(Blocked) as e:
+        decide(db, p, "TRIAL_APPROVE")
+    assert e.value.code == "CANDIDATE_DIGEST_REQUIRED"
+    db.rollback()
+    review(db, p, candidate_digest=CANDIDATE)
+    decide(db, p, "TRIAL_APPROVE")
+    t = task(db, p)
+    service.attach_evidence(db, p, evidence_ids=[evidence(db, task_spec=t).id], actor_user_id="owner")
+    db.commit()
+    checkpoint_pass(db, p)
+    decide(db, p, "PROMOTE")
+    apply_config(db, "opencode-next")
+    record_observation(db, component_id="opencode-next", dimension="installation", status="INSTALLED",
+                       observer="reconciler", observed_version="1.4.0", observed_identity=CANDIDATE)
+    db.commit()
+    ev = evidence(db, task_spec=t)
+    service.record_outcome(db, p, actor_user_id="owner", status="ACCEPTED", evidence_ids=[ev.id],
+                           accepted_configuration={"component_id": "opencode-next", "approved_pin": "1.4.0"},
+                           acceptance_results={"AC1": {"status": "PASS", "evidence_id": ev.id}})
+    db.commit()
+    assert p.status == "ACCEPTED"
+
+
+def test_one_candidate_digest_names_one_accepted_component(db, policy):
+    """A candidate digest is the digest of ONE artifact: with several candidate components the accepted
+    configuration must say which component it belongs to (never compared with all of them)."""
+    component(db)
+    component(db, "opencode-a")
+    component(db, "opencode-b")
+    p = create(db, kind="ADD", candidate_pin="1.4.0", candidate_digest=CANDIDATE,
+               candidate_component_ids=["opencode-a", "opencode-b"])
+    problems = service.candidate_digest_problems(db, p, None, ["opencode-a", "opencode-b"])
+    assert any("accepted_configuration.component_id" in x for x in problems), problems
+
+
+def test_a_parts_candidate_digest_is_validated_and_bound_in_the_parent_hash(db, policy):
+    from aeos.proposals import review as R
+
+    component(db)
+    with pytest.raises(ValidationFailed):
+        service.create_proposal(db, actor_user_id="owner", domain="PERSONAL", kind="ADD", title="Stack", sources=[],
+                                parts=[{"title": "Serena", "sources": ["https://github.com/oraios/serena"],
+                                        "candidate_pin": "1.0.0", "candidate_digest": "latest"}])
+    db.rollback()
+    parent = service.create_proposal(
+        db, actor_user_id="owner", domain="PERSONAL", kind="ADD", title="Stack", sources=[],
+        parts=[{"title": "Serena", "sources": ["https://github.com/oraios/serena"], "candidate_pin": "1.0.0",
+                "candidate_digest": CANDIDATE}])
+    db.commit()
+    child = service._children(db, parent)[0]
+    assert child.candidate_digest == CANDIDATE
+    cand, with_digest = R.compute_candidate(db, parent, [child])
+    assert any(CANDIDATE in part for part in cand["parts"])
+    child.candidate_digest = OTHER
+    assert R.compute_candidate(db, parent, [child])[1] != with_digest, "a part's digest is part of the approval"
+
+
 def test_accepted_refuses_a_manifest_digest_other_than_the_candidate(db, policy):
     p, t = _promoted_with_digest(db)
     apply_config(db)  # approved_digest is still the BASELINE one

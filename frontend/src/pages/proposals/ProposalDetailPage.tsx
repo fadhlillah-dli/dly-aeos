@@ -271,7 +271,8 @@ function TimelineCard({ id }: { id: string }) {
           {ba.after ? (
             <>
               <div className="text-xs">
-                candidate <Mono>{shortHash(ba.after.candidate_hash, 12)}</Mono> pin {ba.after.candidate_pin ?? "UNKNOWN"}
+                candidate <Mono>{shortHash(ba.after.candidate_hash, 12)}</Mono> pin {ba.after.candidate_pin ?? "UNKNOWN"} · digest{" "}
+                {ba.after.candidate_digest ? <Mono>{shortHash(ba.after.candidate_digest, 12)}</Mono> : "belum tercatat"}
               </div>
               <Mono>{JSON.stringify(ba.after.accepted_configuration)}</Mono>
             </>

@@ -62,22 +62,28 @@ def install_remedy() -> Remedy:
 INSTALL_REMEDY = install_remedy()  # import-time copy (current OS); checks call install_remedy()
 
 
-def _pinned_signer() -> str | None:
-    from aeos.claude_bridge import facade as bridge
-
-    return bridge.approved_publisher()
-
-
 def _fp_claude_binary(ctx: CheckContext) -> dict[str, Any]:
     """Binary identity plus the publisher pin that applies on this OS: pinning (or changing) the signer in the
-    reviewed manifest makes a stored authenticity result STALE."""
-    return {**_fp_claude(ctx), "approved_signer": _pinned_signer()}
-
-
-def signature_remedy() -> Remedy:
+    reviewed manifest - or the manifest becoming unreadable - makes a stored authenticity result STALE."""
     from aeos.claude_bridge import facade as bridge
 
-    spec = bridge.signature_remedy()
+    pin = bridge.publisher_pin()
+    return {**_fp_claude(ctx), "approved_signer": pin["signer"], "signer_pin_status": pin["status"]}
+
+
+def signature_remedy(*, pin_unreadable: bool = False) -> Remedy:
+    from aeos.claude_bridge import facade as bridge
+
+    spec = bridge.signature_remedy(pin_unreadable=pin_unreadable)
+    if pin_unreadable:
+        return Remedy(
+            operation=spec["operation"] + ". " + spec["pin_note"],
+            command=os_install_command(windows=" ; ".join(spec["windows"]), macos=" ; ".join(spec["darwin"])),
+            source="install-manifest/manifest.yaml + install-manifest/schema.json (validasi manifest)",
+            target="install-manifest/manifest.yaml", privilege="reviewer manusia (PR yang direview)", cost="tidak ada",
+            rollback="kembalikan commit manifest yang terakhir lolos validasi",
+            evidence_to_collect="seed inventaris lolos validasi; claude.binary diperiksa ulang",
+        )
     return Remedy(
         operation=spec["operation"] + ". " + spec["pin_note"],
         command=os_install_command(windows=" ; ".join(spec["windows"]), macos=" ; ".join(spec["darwin"])),
@@ -117,14 +123,16 @@ def _with_authenticity(out: Outcome, path: str) -> Outcome:
     auth = bridge.binary_authenticity(Path(path))
     pinned = auth["approved_signer"]
     gate = auth["gate"]
-    evidence = {**out.evidence, "authenticity": {k: auth[k] for k in ("gate", "reason", "approved_signer", "os",
-                                                                      "signature_status", "observed_signer")},
+    evidence = {**out.evidence, "authenticity": {k: auth.get(k) for k in ("gate", "reason", "approved_signer", "os",
+                                                                          "pin_status", "signature_status",
+                                                                          "observed_signer")},
                 "distribution_verified": gate == "OK"}
     if gate == "BLOCKED":
         return Outcome("FAILED", f"{out.summary.split(' (skenario')[0]}, tetapi keaslian binary DIBLOKIR: "
                        f"{auth['reason']}. Bridge menolak panggilan native; gunakan paket manual.",
                        evidence=evidence, component_version=out.component_version, target_identity=out.target_identity,
-                       error_code="BINARY_SIGNATURE_BLOCKED", severity="HIGH", remedy=signature_remedy(),
+                       error_code="BINARY_SIGNATURE_BLOCKED", severity="HIGH",
+                       remedy=signature_remedy(pin_unreadable=auth.get("pin_status") == "UNREADABLE"),
                        # the binary is installed (its authenticity failed): the inventory still records INSTALLED
                        observations=[{"component_id": "claude-code", "dimension": "installation",
                                       "status": "INSTALLED", "observed_version": out.component_version}])

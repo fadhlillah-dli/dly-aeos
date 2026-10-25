@@ -273,8 +273,9 @@ def compute_candidate(session: Session, p: ChangeProposal, children: list[Change
     cand = {
         "kind": p.kind, "identities": sorted(p.canonical_identities or []), "candidate_pin": p.candidate_pin or UNKNOWN,
         "candidate_component_ids": sorted(p.candidate_component_ids or []), "identity_state": material,
-        "parts": sorted((c.id, c.kind, tuple(sorted(c.canonical_identities or [])), c.candidate_pin or UNKNOWN)
-                        for c in children),
+        # a part's candidate digest is bound too (appended only when recorded: existing hashes stay unchanged)
+        "parts": sorted((c.id, c.kind, tuple(sorted(c.canonical_identities or [])), c.candidate_pin or UNKNOWN,
+                         *((c.candidate_digest,) if c.candidate_digest else ())) for c in children),
     }
     if p.candidate_digest:
         # §25: the structured candidate digest is part of what the owner approves (added only when recorded, so

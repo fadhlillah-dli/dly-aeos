@@ -282,8 +282,9 @@ def install(settings: Settings, client: httpx.Client, plan: dict[str, Any]) -> d
             "digest_platform": plan.get("digest_platform"),
             "signature_verified": False,
             # §25 "signature/provenance bila tersedia": OpenBao publishes a GPG signature of checksums.txt, but no
-            # verifier (gpg) and no owner-pinned release-key fingerprint are part of the reviewed toolchain yet
+            # OpenPGP verifier and no owner-pinned release-key fingerprint are part of the reviewed toolchain yet
             "signature": {"method": "gpg", "result": "NOT_VERIFIED",
-                          "reason": "checksums.txt signature not verified: no gpg in the reviewed toolchain and no "
-                                    "owner-pinned OpenBao release-key fingerprint (install-manifest "
-                                    "openbao.signature.approved_signer)"}}
+                          "reason": "checksums.txt GPG signature not verified: verifying it needs an OpenPGP verifier "
+                                    "(gpg or a library), which is not in the reviewed toolchain (adding one is a "
+                                    "reviewed bootstrap change), and an owner-pinned OpenBao release-key fingerprint; "
+                                    "integrity rests on checksums.txt plus the approved_digest when recorded"}}

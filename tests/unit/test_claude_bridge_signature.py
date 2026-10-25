@@ -254,6 +254,46 @@ def test_doctor_claude_binary_applies_the_same_gate(settings, db, monkeypatch):
     assert res.observed_evidence["distribution_verified"] is True
 
 
+def test_an_unreadable_manifest_is_an_unknown_pin_and_blocks_never_unpinned(settings, db, monkeypatch):
+    """Fail closed: when the reviewed install-manifest cannot be read/validated, whether a publisher is pinned is
+    UNKNOWN - the bridge, the status page and the Doctor block (with a manifest remedy), even for a VALID binary."""
+    from aeos.claude_bridge import bridge
+    from aeos.claude_bridge.facade import ClaudeRequest
+    from aeos.core.errors import ValidationFailed
+    from aeos.inventory import manifest
+    from tests.unit.test_claude_bridge_run import PROMPT, SCHEMA, _probe
+    from tests.unit.test_doctor_checks import NATIVE, _ctx, check, claude_runner
+
+    def broken(*_a, **_k):
+        raise ValidationFailed("install manifest failed validation (1 errors)", code="MANIFEST_INVALID")
+
+    monkeypatch.setattr(manifest, "load_manifest", broken)
+    pin = binmod.publisher_pin()
+    assert pin["status"] == "UNREADABLE" and pin["signer"] is None and "MANIFEST_INVALID" in pin["reason"]
+    valid = {"status": "VALID", "signer": REAL_WINDOWS}
+    assert binmod.signature_gate(valid, None, pin_problem=binmod.pin_error(pin))[0] == "BLOCKED"
+
+    called: list[int] = []
+    monkeypatch.setattr(bridge, "run_process", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(binmod, "probe", lambda settings, refresh=False: _probe())
+    monkeypatch.setattr(binmod, "invocation_signature", lambda path, fingerprint_value: valid)
+    res = bridge.run_structured(ClaudeRequest(purpose="x", role="r", model="opus", prompt=PROMPT, json_schema=SCHEMA,
+                                              domain="PERSONAL"), settings=settings)
+    assert not res.ok and res.error_code == "BINARY_SIGNATURE_BLOCKED" and not called
+
+    monkeypatch.setattr(binmod, "publisher_signature", lambda path, fingerprint_value=None: valid)
+    out = bridge.status(db, settings, refresh=True)
+    au = out["binary"]["authenticity"]
+    assert out["bridge_status"] == "BLOCKED" and out["blocked_by"] == ["signature"]
+    assert au["gate"] == "BLOCKED" and au["pin_status"] == "UNREADABLE" and au["owner_step"] is None
+    assert any("aeos.inventory.seed" in c for c in au["remedy"]["commands"]) and "/login" not in str(au["remedy"])
+
+    res = check("claude.binary", _ctx(settings, db, claude_runner(NATIVE)))
+    assert res.status == "FAILED" and res.error_code == "BINARY_SIGNATURE_BLOCKED"
+    assert res.observed_evidence["authenticity"]["pin_status"] == "UNREADABLE"
+    assert "install-manifest" in res.remediation["operation"] and "login" not in res.remediation["operation"].lower()
+
+
 def test_the_manifest_note_no_longer_claims_the_signature_is_unchecked():
     from aeos.inventory.manifest import load_manifest
 

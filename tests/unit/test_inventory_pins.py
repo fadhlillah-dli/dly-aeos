@@ -164,6 +164,20 @@ def test_drift_compares_only_this_platforms_digest(seeded, monkeypatch):
     assert digest_items[0].detail["platform"] == "windows_amd64"
 
 
+def test_a_malformed_approved_digest_fails_closed_in_drift_and_the_view(seeded, monkeypatch):
+    """A reviewed digest that cannot be read is never treated as 'nothing to compare' (it used to be compared, and
+    differed, as a raw string): drift is raised and the component view says INVALID_APPROVED_DIGEST."""
+    comp = seeded.get(ComponentReference, "openbao")
+    comp.details = {**comp.details, "approved_digest": {"windows_amd64": "sha256:nothex"}}
+    seeded.commit()
+    _installed(seeded, WIN)
+    _host(monkeypatch, "windows", "amd64")
+    digest_items = [i for i in drift_mod.compute_drift(seeded, evaluated={"openbao"}) if i.key == "digest"]
+    assert len(digest_items) == 1 and digest_items[0].detail["approved_digest_status"] == "INVALID"
+    detail = views.component_detail(seeded, "openbao", domain="PERSONAL")["versions"]
+    assert detail["digest_status"] == "INVALID_APPROVED_DIGEST" and detail["approved_digest_reason"]
+
+
 # ------------------------------------------------------------------------------------------- manifest schema
 def test_manifest_accepts_per_platform_digests_and_per_os_signers():
     from aeos.inventory.manifest import validate_manifest

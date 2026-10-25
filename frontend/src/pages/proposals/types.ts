@@ -320,7 +320,13 @@ export interface Timeline {
   outcome_history: OutcomeEntry[];
   before_after: {
     before: { baseline_hash: string | null; components: { component_id: string; name?: string; approved_pin?: string; status: string }[] };
-    after: { candidate_hash: string | null; candidate_pin: string | null; accepted_configuration: Record<string, unknown> | null } | null;
+    after: {
+      candidate_hash: string | null;
+      candidate_pin: string | null;
+      /** §25: the structured candidate digest compared at ACCEPTED (null = not recorded) */
+      candidate_digest?: string | null;
+      accepted_configuration: Record<string, unknown> | null;
+    } | null;
     status: string;
     note: string | null;
     snapshots: { before: { label: string; snapshot_hash: string } | null; after: { label: string; snapshot_hash: string } | null };

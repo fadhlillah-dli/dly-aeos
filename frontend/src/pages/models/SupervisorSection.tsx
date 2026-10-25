@@ -5,7 +5,21 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, ErrorBox, Freshness, inputBase, KeyValue, Loading, Mono, Notice } from "../../components/ui";
 import { CopyCommand } from "../integrations/CopyCommand";
 import { useCapabilityTest, useClaudeStatus } from "./api";
+import type { ClaudeStatus } from "./types";
 import { Badge } from "./badges";
+
+/** §12: what each authenticity gate means, in the owner's language (the backend reason stays as technical detail). */
+const GATE_TEXT: Record<string, string> = {
+  BLOCKED: "Bridge menolak panggilan native: binary ini tidak terbukti sebagai build resmi dari penerbit yang dipin.",
+  DEGRADED: "Binary tidak ditandatangani; tidak dapat dibuktikan sebagai build resmi (tetap dilaporkan, bukan lulus).",
+  UNVERIFIED: "Keaslian belum terverifikasi: tidak ada pin penerbit untuk OS ini atau tanda tangan tidak dapat diperiksa.",
+  NOT_CHECKED: "Tanda tangan OS belum diperiksa di proses ini; setiap panggilan native memeriksanya lebih dulu.",
+};
+
+function pinLabel(au: NonNullable<ClaudeStatus["binary"]["authenticity"]>) {
+  if (au.pin_status === "UNREADABLE") return "tidak dapat dibaca (install-manifest gagal divalidasi)";
+  return au.approved_signer ? <Mono>{au.approved_signer}</Mono> : "belum dipin";
+}
 
 export function SupervisorSection() {
   const { isAdmin } = useAuth();
@@ -46,7 +60,7 @@ export function SupervisorSection() {
                     <span className="text-xs text-ink-3">
                       tanda tangan {au.signature_status}
                       {au.observed_signer ? <> · penerbit teramati <Mono>{au.observed_signer}</Mono></> : null}
-                      {" · "}pin pemilik ({au.os}): {au.approved_signer ? <Mono>{au.approved_signer}</Mono> : "belum dipin"}
+                      {" · "}pin pemilik ({au.os}): {pinLabel(au)}
                     </span>
                   </span>
                 ) : (
@@ -78,13 +92,20 @@ export function SupervisorSection() {
           )}
           {au && au.gate !== "OK" && (
             <Notice tone={au.gate === "BLOCKED" ? "bad" : "warn"}>
-              Keaslian binary {au.gate}: {au.reason}
+              {au.pin_status === "UNREADABLE"
+                ? "Bridge menolak panggilan native: install-manifest tidak dapat dibaca, jadi pin penerbit tidak diketahui (gagal tertutup)."
+                : (GATE_TEXT[au.gate] ?? `Keaslian binary ${au.gate}.`)}
+              <span className="mt-1 block text-xs">
+                Detail teknis: <Mono>{au.reason}</Mono>
+              </span>
               {au.owner_step && <span className="mt-1 block text-xs">Langkah pemilik: {au.owner_step}</span>}
             </Notice>
           )}
           {(signatureBlocked || au?.gate === "DEGRADED") && au?.remedy && (
             <div className="space-y-1" data-testid="signature-remedy">
-              <div className="text-sm font-medium">Langkah perbaikan tanda tangan</div>
+              <div className="text-sm font-medium">
+                {au.pin_status === "UNREADABLE" ? "Langkah perbaikan install-manifest" : "Langkah perbaikan tanda tangan"}
+              </div>
               <p className="text-xs text-ink-3">{au.remedy.operation}</p>
               {au.remedy.commands.map((c) => (
                 <CopyCommand key={c} command={c} />

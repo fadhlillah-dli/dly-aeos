@@ -61,15 +61,25 @@ def resolve_pin(session: Any = None) -> dict[str, str]:
     ``approved_pin`` of component ``opencode`` in the reviewed InstallManifest when set (the seeded
     ComponentReference with a *session*, else the reviewed manifest file), otherwise the built-in
     ``PINNED_VERSION`` default, labelled as such. Used by the image tag, the drift flag, the contract test and the
-    image build hint, so an approved pin other than the default is what gets built, run and compared."""
+    image build hint, so an approved pin other than the default is what gets built, run and compared. When the
+    reviewed manifest cannot be read the default is still the runtime's value, but its label says the approved pin
+    is UNKNOWN (never "no approved_pin")."""
+    problem: str | None = None
     try:
         from aeos.inventory import facade as inventory
 
-        approved = inventory.approved_pin("opencode", session=session)
-    except Exception:  # inventory unavailable: the labelled default, never a guessed pin
-        approved = None
+        if session is not None:
+            approved = inventory.approved_pin("opencode", session=session)
+        else:
+            state = inventory.manifest_pin("opencode")
+            approved, problem = state["pin"], state["problem"]
+    except Exception as exc:  # inventory unavailable: the labelled default, never a guessed pin
+        approved, problem = None, f"inventory unavailable ({type(exc).__name__})"
     if approved:
         return {"version": approved, "source": PIN_SOURCE_MANIFEST}
+    if problem:
+        return {"version": PINNED_VERSION,
+                "source": f"worker runtime default (install-manifest unreadable: {problem}; the approved pin is UNKNOWN)"}
     return {"version": PINNED_VERSION, "source": PIN_SOURCE_DEFAULT}
 
 

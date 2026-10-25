@@ -231,6 +231,17 @@ def test_undecided_policy_is_report_only_even_with_findings_and_crashed_scans(tm
     assert json.loads(out.read_text(encoding="utf-8"))["mode"] == "REPORT_ONLY"
 
 
+def test_the_step_summary_lists_what_was_found_not_only_counts(tmp_path: Path):
+    """The scanner output no longer goes to the step summary directly (JSON for the evaluator), so the evaluation
+    summary must name each finding - a report-only run is useless if it only says 'counts={UNKNOWN: 1}'."""
+    sc = _script("supply_chain")
+    res = sc.evaluate(sc.load_policy(ROOT / "policy" / "supply-chain.yaml"), **_reports(tmp_path))
+    text = "\n".join(sc.summary_lines(res))
+    assert "jinja2 3.1.0 PYSEC-X severity=UNKNOWN" in text
+    assert "vite <6 severity=HIGH" in text and "esbuild <0.25 severity=MEDIUM" in text
+    assert "B608 b.py:2 severity=MEDIUM confidence=LOW" in text
+
+
 def test_decided_policy_fails_on_violations_unknown_severity_and_missing_reports(tmp_path: Path):
     sc = _script("supply_chain")
     pol = sc.load_policy(_policy(tmp_path, DECIDED))
@@ -279,6 +290,35 @@ def test_a_malformed_decided_policy_fails_closed(tmp_path: Path):
     assert bad["errors"] and sc.evaluate(bad, **_reports(tmp_path))["overall"] == "POLICY_INVALID"
     assert sc.main(["evaluate", "--policy", str(_policy(tmp_path, "status: DECIDED\n"))]) == 2  # no decision_ref
     assert any("decision_ref" in e for e in sc.load_policy(_policy(tmp_path, "status: DECIDED\n"))["errors"])
+
+
+@pytest.mark.parametrize("body", [None, "status: [DECIDED\n", "- just\n- a list\n"])
+def test_a_missing_or_unreadable_policy_file_fails_closed_never_undecided(tmp_path: Path, body):
+    """A decided policy that got deleted or broken must not quietly turn the gate back into a report."""
+    sc = _script("supply_chain")
+    path = tmp_path / "supply-chain.yaml" if body is None else _policy(tmp_path, body)
+    pol = sc.load_policy(path)
+    assert pol["status"] == "INVALID" and pol["errors"]
+    assert sc.evaluate(pol, **_reports(tmp_path))["overall"] == "POLICY_INVALID"
+    assert sc.main(["evaluate", "--policy", str(path)]) == 2
+    assert sc.main(["licenses", "--policy", str(path), "-o", str(tmp_path / "lic.json")]) == 2
+
+
+def test_several_licence_classifiers_are_never_read_as_alternatives():
+    """Classifiers do not say whether several licences are alternatives: every one must be allowed (no lenient OR)."""
+    sc = _script("supply_chain")
+
+    class Meta:
+        def get(self, key, default=None):
+            return None
+
+        def get_all(self, key):
+            return ["License :: OSI Approved :: MIT License", "License :: OSI Approved :: GNU General Public License v3"]
+
+    lic = sc._license_of(type("Dist", (), {"metadata": Meta()})())
+    assert lic == "GNU General Public License v3 AND MIT License"
+    assert not sc.licence_allowed(lic, ["MIT License"]) and sc.licence_allowed(lic, ["MIT License",
+                                                                                     "GNU General Public License v3"])
 
 
 # ------------------------------------------------------------------ W6-126: §45 tool licences + restore tests

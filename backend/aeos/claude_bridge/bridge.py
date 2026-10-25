@@ -312,10 +312,13 @@ def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) 
                      "Claude native bridge is BLOCKED: " + "; ".join(pr.reasons or ["unknown"]) +
                      " - use the manual package (official Claude Code) instead; no API fallback exists",
                      engine_version=pr.binary.version)
-    # §12 unmodified official binary: an OS-reported INVALID signature or a signer other than the owner-pinned
-    # publisher refuses the native call (fail closed); an unsigned binary is reported DEGRADED in the status.
+    # §12 unmodified official binary: an OS-reported INVALID signature refuses the native call (fail closed); once a
+    # publisher is pinned for this OS, anything but a VALID signature by exactly that signer is refused too. Without
+    # a pin an unsigned binary is reported DEGRADED in the status. An unreadable reviewed manifest means the pin is
+    # unknown, never "not pinned": refused as well.
+    pin = binmod.publisher_pin()
     gate, gate_reason = binmod.signature_gate(binmod.invocation_signature(pr.binary.path, pr.binary.fingerprint),
-                                              binmod.approved_publisher())
+                                              pin["signer"], pin_problem=binmod.pin_error(pin))
     if gate == "BLOCKED":
         return _fail(request, "BINARY_SIGNATURE_BLOCKED",
                      f"Claude native bridge is BLOCKED: {gate_reason} - use the manual package (official Claude "
@@ -737,8 +740,9 @@ def status(session: Session, settings: Settings | None = None, *, refresh: bool 
                  binmod._SIG_CACHE.get((str(pr.binary.path), pr.binary.fingerprint or ""),
                                        {"status": "NOT_CHECKED",
                                         "reason": "refresh the status to run the OS signature check"}))
-    pinned = binmod.approved_publisher()
-    authenticity = binmod.authenticity_view(signature, pinned, found=pr.binary.found)
+    pin = binmod.publisher_pin()
+    authenticity = binmod.authenticity_view(signature, pin["signer"], found=pr.binary.found,
+                                            pin_problem=binmod.pin_error(pin))
     gate = authenticity["gate"]
     bridge_status = "BLOCKED" if (not pr.usable or gate == "BLOCKED") else (
         "DEGRADED" if gate == "DEGRADED" else "CONFIGURED")

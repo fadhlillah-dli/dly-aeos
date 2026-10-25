@@ -1042,8 +1042,10 @@ def component_detail(session: Session, component_id: str, *, domain: str | None,
             "approved_digest_platform": digest_sel["platform"],
             "approved_digest_form": digest_sel["form"],
             "approved_digest_platforms": digest_sel["recorded_platforms"],
+            "approved_digest_reason": digest_sel["reason"],
             "observed_digest": observed_digest,
-            "digest_status": ("MATCH" if digest_sel["digest"] and observed_digest == digest_sel["digest"]
+            "digest_status": ("INVALID_APPROVED_DIGEST" if digest_sel["status"] == "INVALID"
+                              else "MATCH" if digest_sel["digest"] and observed_digest == digest_sel["digest"]
                               else "MISMATCH" if digest_sel["digest"] and observed_digest
                               else "NO_APPROVED_DIGEST" if not digest_sel["digest"] else "UNKNOWN"),
             "distribution": details.get("distribution") or {**unknown, "reason": "artefak distribusi belum dicatat"},

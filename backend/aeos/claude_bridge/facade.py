@@ -92,12 +92,22 @@ def binary_authenticity(path: Path) -> dict[str, Any]:
     from aeos.claude_bridge import binary as binmod
 
     sig = binmod.invocation_signature(path, binmod.fingerprint(path))
-    return binmod.authenticity_view(sig, binmod.approved_publisher())
+    pin = binmod.publisher_pin()
+    return binmod.authenticity_view(sig, pin["signer"], pin_problem=binmod.pin_error(pin))
 
 
-def signature_remedy() -> dict[str, Any]:
+def publisher_pin() -> dict[str, Any]:
+    """``{"signer", "status" PINNED|NOT_PINNED|UNREADABLE, "reason"}`` of the Claude Code publisher pin on this OS
+    (UNREADABLE = the reviewed install-manifest cannot be read: the pin is unknown and the gate blocks)."""
+    from aeos.claude_bridge.binary import publisher_pin as impl
+
+    return impl()
+
+
+def signature_remedy(*, pin_unreadable: bool = False) -> dict[str, Any]:
     """The signature-specific remedy (reinstall the official build, check the OS signature, change the pin only by
-    a reviewed install-manifest PR) - never the /login remedy."""
-    from aeos.claude_bridge.binary import SIGNATURE_REMEDY
+    a reviewed install-manifest PR) - never the /login remedy. With *pin_unreadable*: repair the install-manifest
+    whose publisher pin cannot be read."""
+    from aeos.claude_bridge.binary import MANIFEST_REMEDY, SIGNATURE_REMEDY
 
-    return dict(SIGNATURE_REMEDY)
+    return dict(MANIFEST_REMEDY if pin_unreadable else SIGNATURE_REMEDY)
