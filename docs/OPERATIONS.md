@@ -279,6 +279,40 @@ quarantines the run (HIGH alert); a worker blocker (`.aeos/report.json`, schema
 (`WORKER_BLOCKER`) for the owner. A worker prompt template change changes `ModelRoute.prompt_revision`, which
 invalidates route approvals bound to the old configuration hash (`PROMPT_REVISION_CHANGED`).
 
+Wave 7 additions:
+
+* **Tamper checks around every run** (§09 Zone 1): besides the checkout and interpreter, the bytecode the next
+  start would load (`__pycache__` of the checkout and site-packages, and in release mode the
+  `PYTHONPYCACHEPREFIX` tree under the data dir) and the owner config file (`AEOS_CONFIG` / `aeos.yaml`) are
+  fingerprinted. A new/changed `.pyc` is accepted only when its code equals a fresh compile of its source
+  (checked in a separate `python -I -S -B` process); anything else is a finding and the file is deleted. A changed
+  `aeos.yaml` is restored to its pre-run bytes. Under the WEAK process sandbox a DB trust-table tamper window
+  (decisions, budgets, routes, agents, policy snapshots, grants, ...) wraps the run: a row changed by another
+  process fails and quarantines the run (`db-trust-table-modified`, HIGH alert `DB_TRUST_TAMPER`). The
+  bookkeeping the server process does for a run when the executor runs in the CLI (`aeos work run-once`) is
+  tolerated: the run's grant usage growing, a grant/session revoked, a session's `last_seen_at` moving forward.
+  Anything else written by another AEOS process during the run (for example a decision recorded from the CLI, or
+  a new sign-in) is reported as foreign: fail closed, review and reconcile.
+* **Integrity hold**: any controller/config/bytecode/DB finding (from a worker run or a verification) sets the
+  host-wide hold `worker_runtime.integrity_hold`: admission, the executor's start check, running attempts and
+  `CAN_RUN_WORKER` are BLOCKED (`INTEGRITY_HOLD`) until the owner reviews the findings (`aeos worker status`),
+  restores the checkout (`git status` / `git checkout -- <path>`) and records the reconciliation for exactly that
+  hold: `aeos policy decide --kind RISK_ACCEPTANCE --target-type worker_integrity_hold --target-id <hold id> --as
+  <SUPER_ADMIN> --domain PERSONAL --days 1 --rationale "<what you checked>"`. A later finding needs a new one.
+* **CPU cap**: `limits.max_cpus` is a Windows Job Object CPU-rate hard cap in the process sandbox (`run.caps.cpu_cap`
+  records the rate in force); on macOS/Linux it stays a reservation only. `limits.max_processes` is part of every
+  TaskSpec (256), the same cap for both sandboxes.
+* **Granted shell (container only)**: commands run only through the AEOS runner `node /aeos/aeos-run.js <command>`
+  (bash permission patterns); the engine sees the first 40 and last 80 lines, the full output is collected as
+  untrusted evidence (`worker-command-logs.json`) and removed from the candidate.
+* **Context**: a run without a CURRENT task-scoped ContextPack gets one built at start (knowledge facade, system
+  principal bound to the TaskSpec, the TaskSpec's input artifacts as DATA items under the pack's token budget).
+* **Doctor `worker.route_behaviour`**: per APPROVED/TRIAL worker route, the §43 measure `tool_schema_failures` of a
+  trusted evaluation on the route's current configuration (+ verified runs). UNKNOWN until such runs exist, STALE
+  after a configuration/engine change; FAILED only above the owner's threshold - a POLICY decision with target
+  `worker_route_behaviour:tool_schema_failures` and `details.max_failure_rate` (0..1, `POST /api/decisions`).
+  Without it, measured failures are reported, never judged.
+
 ## Scenarios tested as normal operations (§33)
 
 | Scenario | Where it is handled |

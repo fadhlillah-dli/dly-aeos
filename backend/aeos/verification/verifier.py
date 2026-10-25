@@ -1526,6 +1526,12 @@ class _Verifier:
                 payload={"severity": "HIGH", "code": "VERIFIER_TAMPER", "findings": self.tamper_findings[:20],
                          "report_evidence_id": out.report_evidence_id},
             )
+            # wave 7 (W6-005): no further worker is admitted until the owner reconciles (fail closed)
+            from aeos.worker_runtime import facade as worker
+
+            worker.raise_integrity_hold(self.session, source="verification", subject_id=run.id,
+                                        findings=self.tamper_findings[:50], project_id=out.project_id,
+                                        domain=out.domain)
         audit.record(
             self.session, actor_type=self.actor_type, actor_id=self.actor, action="verification.run",
             result="FAILED" if out.status == "BLOCKED" else "SUCCESS", target_type="worker_run", target_id=run.id,

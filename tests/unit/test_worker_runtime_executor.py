@@ -6,6 +6,7 @@ ada child process', 'Free quota habis / 429', 'Worker membaca vault/SSH' (env)."
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -63,7 +64,8 @@ if scenario == "fail":
 if scenario == "env":
     names = sorted(os.environ)
     write("envdump.json", json.dumps({"names": names, "home": os.path.expanduser("~"),
-                                     "prompt_has_data_block": "DATA (untrusted" in prompt,
+                                     "prompt_has_data_block": "DATA (untrusted" in prompt
+                                     or "kind=attachment ref=task-artifact:" in prompt and "trust=UNTRUSTED_DATA" in prompt,
                                      "values": [k for k, v in os.environ.items()
                                                 if "sk-or-v1-" in v or "ghp_" in v or "aeoscap_" in v]}))
     sys.exit(0)
@@ -123,6 +125,35 @@ if scenario.startswith("controller:"):
     with open(scenario.split(":", 1)[1], "w", encoding="utf-8") as fh:
         fh.write("external_worker_allowed: true\n")
     write("src/feature.py", "VALUE = 9\n")
+    sys.exit(0)
+if scenario == "cmdlog":
+    # what the AEOS shell runner leaves in the worktree: the complete output of each granted command
+    os.makedirs(".aeos/cmdlog", exist_ok=True)
+    with open(".aeos/cmdlog/1-1.log", "w", encoding="utf-8") as fh:
+        fh.write("$ npm test\n" + "".join("output line %d\n" % i for i in range(1000)))
+    write("src/feature.py", "VALUE = 11\n")
+    sys.exit(0)
+if scenario.startswith("dbwrite:"):
+    # same OS user as the controller (WEAK process sandbox): the worker opens the controller DB directly
+    import sqlite3
+    conn = sqlite3.connect(scenario.split(":", 1)[1], timeout=30)
+    conn.execute("UPDATE model_routes SET display_name = 'forged by the worker'")
+    conn.commit()
+    conn.close()
+    write("src/feature.py", "VALUE = 7\n")
+    sys.exit(0)
+if scenario.startswith("grantusage:") or scenario.startswith("grantforge:"):
+    # another process writing this run's grant row: the server's broker counting usage (`aeos work run-once` runs
+    # the executor in the CLI process), or a forged cap
+    import sqlite3
+    conn = sqlite3.connect(scenario.split(":", 1)[1], timeout=30)
+    sql = ("UPDATE capability_grants SET used_requests = used_requests + 2, used_tokens = used_tokens + 77 "
+           "WHERE run_id = ?") if scenario.startswith("grantusage:") else \
+        "UPDATE capability_grants SET max_requests = 999999 WHERE run_id = ?"
+    conn.execute(sql, (os.environ["AEOS_RUN_ID"],))
+    conn.commit()
+    conn.close()
+    write("src/feature.py", "VALUE = 8\n")
     sys.exit(0)
 '''
 
@@ -452,6 +483,21 @@ def test_memory_cap_stops_the_worker(settings, setup):
     assert not processes.is_alive(run.pid, run.pid_create_time)
 
 
+def test_cpu_cap_in_force_is_recorded_per_run(settings, setup):
+    """W6-055: the TaskSpec's max_cpus is a Windows Job Object hard cap in the process sandbox (recorded with the
+    rate the kernel holds); on macOS/Linux the run states it is a reservation only."""
+    make, _ = setup
+    run_id, task_id = make("ok", task={"limits": {"timeout_seconds": 60, "max_cpus": 1}})
+    executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, _te = _load(run_id, task_id)
+    cap = run.caps["cpu_cap"]
+    assert run.caps["resource_limits"]["max_cpus"] == 1.0 and cap["max_cpus"] == 1.0
+    if sys.platform == "win32":
+        assert cap["enforced"] is True and cap["job_cpu_rate"] == processes.cpu_rate_for(1, os.cpu_count())
+    else:
+        assert cap["enforced"] is False and cap["by"] == "none (reservation only)"
+
+
 def test_worker_blocker_opens_a_decision_request_and_waits_for_the_owner(settings, setup):
     """§19/§21: the worker's blocker becomes an AGENT DecisionRequest (DATA, grants nothing); the task stops
     BLOCKED (owner-only code) and the report never enters the candidate."""
@@ -599,12 +645,64 @@ def test_current_context_pack_is_the_prompt_context_and_is_recorded(settings, se
 def test_stale_or_expired_context_pack_is_never_given_to_the_worker(settings, setup, kw):
     make, _ = setup
     run_id, task_id = make("inline", task={"allowed_paths": ["inline.json"]})  # explicit write scope (ADR-0033)
-    _pack(task_id, **kw)
+    stale_id = _pack(task_id, **kw)
     executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, _te = _load(run_id, task_id)
     prompt = json.loads((Path(run.workspace_ref) / "inline.json").read_text(encoding="utf-8"))["prompt"]
-    assert "Use snake_case" not in prompt
-    assert run.caps["context_pack"]["used"] is False and run.caps["context_pack"]["freshness"] == "STALE"
+    assert "Use snake_case" not in prompt and stale_id not in prompt
+    # wave 7 (W6-071): instead of no pack at all, the run got a FRESH task-scoped pack built at start
+    info = run.caps["context_pack"]
+    assert info["build"]["built"] is True and info["used"] is True and info["pack_id"] != stale_id
+    assert info["freshness"] == "CURRENT"
+
+
+def test_run_without_a_prebuilt_pack_gets_a_fresh_budgeted_task_pack(settings, setup):
+    """W6-071 §24: what the worker receives is a minimum, budgeted ContextPack built for exactly this TaskSpec and
+    base commit (through the knowledge facade, by a system principal bound to the TaskSpec); the TaskSpec's input
+    artifacts are DATA items of that pack under its token budget, not a second char-capped section."""
+    from aeos.models.audit import AuditEvent
+    from aeos.models.knowledge_ext import ContextPackMeta
+    from aeos.models.research import ContextPack
+
+    make, _ = setup
+    run_id, task_id = make("inline", task={"allowed_paths": ["inline.json", "src/**"], "input_artifacts": [
+        {"name": "notes.md", "ref": "inline:notes", "content": "Keep VALUE stable across releases"}]})
+    executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, _te = _load(run_id, task_id)
+    info = run.caps["context_pack"]
+    assert info["build"]["built"] is True and info["used"] is True and info["freshness"] == "CURRENT", info
+    assert info["base_commit"] == run.base_commit and info["artifacts_in_pack"] is True
+    prompt = json.loads((Path(run.workspace_ref) / "inline.json").read_text(encoding="utf-8"))["prompt"]
+    assert f"CONTEXT (curated ContextPack {info['pack_id']} hash {info['pack_hash']}" in prompt
+    assert "kind=attachment ref=task-artifact:inline:notes trust=UNTRUSTED_DATA" in prompt
+    assert "Keep VALUE stable" in prompt and "## DATA (untrusted attachments" not in prompt  # inside the pack only
+    assert "kind=repo_file" in prompt and "VALUE = 1" in prompt  # allowed-path file at exactly the base commit
+    with session_factory()() as s:
+        pack = s.get(ContextPack, info["pack_id"])
+        meta = s.get(ContextPackMeta, pack.id)
+        assert pack.task_id == task_id and pack.base_commit == run.base_commit and not pack.stale
+        assert meta.auth_ref["basis"] == "TASK_SPEC" and meta.created_by == "system:executor"
+        from aeos.models.identity import AuthSession, User
+
+        # the TaskSpec-bound principal is never persisted (no user or session row is created for it)
+        assert s.get(User, "system:executor") is None
+        assert s.scalar(select(AuthSession).where(AuthSession.token_hash == "system:system:executor")) is None
+        assert meta.token_estimate <= pack.token_budget
+        assert {"policy", "task", "attachment", "repo_file"} <= {i["kind"] for i in pack.items}
+        built = s.scalar(select(AuditEvent).where(AuditEvent.action == "knowledge.context_pack.build",
+                                                  AuditEvent.target_id == pack.id))
+        assert built is not None and built.actor_type == "system"
+        assert s.scalar(select(AuditEvent).where(AuditEvent.action == "knowledge.context_pack.use",
+                                                 AuditEvent.target_id == pack.id)) is not None
+
+
+def test_owner_curated_current_pack_is_kept_not_superseded(settings, setup):
+    make, _ = setup
+    run_id, task_id = make("inline", task={"allowed_paths": ["inline.json"]})
+    pid = _pack(task_id)
+    executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, _te = _load(run_id, task_id)
+    assert run.caps["context_pack"]["build"]["built"] is False and run.caps["context_pack"]["pack_id"] == pid
 
 
 @pytest.mark.parametrize("rel", [
@@ -636,6 +734,13 @@ def test_worker_writing_the_controller_checkout_fails_and_is_quarantined(setting
                                                  AuditEvent.target_id == run_id))
         alert = s.scalar(select(Event).where(Event.kind == "worker_runtime.alert", Event.entity_id == run_id))
         assert alert is not None and alert.payload["severity"] == "HIGH"
+        # wave 7 (W6-005 d): nothing pauses admission was the gap - the host-wide integrity hold now does
+        from aeos.worker_runtime import integrity, sandbox
+
+        hold = integrity.hold_status(s)
+        assert hold is not None and hold["subject_id"] == run_id
+        assert any(f["path"] == rel for f in hold["findings"])
+        assert sandbox.sandbox_readiness(s, domain="PERSONAL")["code"] == "INTEGRITY_HOLD"
 
 
 def test_untouched_controller_checkout_passes_the_integrity_check(settings, setup):
@@ -644,6 +749,80 @@ def test_untouched_controller_checkout_passes_the_integrity_check(settings, setu
     executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, _te = _load(run_id, task_id)
     assert run.caps["controller_integrity"]["changed"] == 0 and run.caps["controller_integrity"]["checked_files"] > 0
+    # the DB trust-table window around the process-sandbox run passed; the controller's own writes are journaled
+    assert run.caps["db_trust_window"]["status"] == "PASS", run.caps["db_trust_window"]
+    assert run.caps["db_trust_window"]["rows"] > 0 and run.caps["integrity_hold"] is False
+
+
+def test_worker_writing_the_db_trust_tables_fails_quarantines_and_holds_admission(settings, setup):
+    """W6-005 (a) / W6-029 (a): under the WEAK process sandbox a worker can open the controller DB (same OS user).
+    A trust-table row changed by another process during the run fails + quarantines the run, raises a HIGH
+    alert and holds worker admission (CAN_RUN_WORKER / scheduler / executor) until the owner reconciles."""
+    from aeos.models.audit import AuditEvent, Event
+    from aeos.models.decisions import Decision
+    from aeos.worker_runtime import integrity, sandbox
+
+    make, _ = setup
+    run_id, task_id = make("dbwrite", engine="dbwrite:" + str(settings.layout.db_path))
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, _te = _load(run_id, task_id)
+    assert res["status"] == "FAILED" and run.outcome_code == "SCOPE_VIOLATION" and run.quarantined, res
+    assert any(q["rule"] == "db-trust-table-modified" and q["path"].startswith("db:model_routes:")
+               for q in run.quarantine_reasons), run.quarantine_reasons
+    assert run.caps["db_trust_window"]["status"] == "FAIL" and run.caps["integrity_hold"] is True
+    with session_factory()() as s:
+        assert s.scalar(select(AuditEvent).where(AuditEvent.action == "worker_runtime.db_tamper",
+                                                 AuditEvent.target_id == run_id))
+        alerts = s.scalars(select(Event).where(Event.kind == "worker_runtime.alert")).all()
+        assert {a.payload["code"] for a in alerts} >= {"DB_TRUST_TAMPER", "INTEGRITY_HOLD"}
+        assert all(a.payload["severity"] == "HIGH" for a in alerts)
+        hold = integrity.hold_status(s)
+        assert hold is not None and hold["subject_id"] == run_id
+        sb = sandbox.sandbox_readiness(s, domain="PERSONAL")
+        assert sb["status"] == "BLOCKED" and sb["code"] == "INTEGRITY_HOLD" and hold["id"] in sb["remedies"][0]
+    # the next attempt is never admitted while the hold is active (scheduler admission), and the executor's own
+    # start check refuses it with the hold's code as well
+    from aeos.core.errors import Blocked
+
+    with pytest.raises(Blocked) as refused:
+        make("ok")
+    assert refused.value.code == "ADMISSION_REFUSED" and "integrity hold" in refused.value.message
+    with session_factory()() as s:
+        req = sandbox.task_sandbox_readiness(s, domain="PERSONAL", risk_class="R1", tools_allowed=[],
+                                             egress_allowed=[])
+        assert req["status"] == "BLOCKED" and req["code"] == "INTEGRITY_HOLD"
+    # the owner's reconciliation (a HUMAN decision bound to exactly this hold) lifts it
+    with session_factory()() as s:
+        s.add(Decision(kind="RISK_ACCEPTANCE", actor_user_id="owner", actor_kind="HUMAN",
+                       target_type=integrity.HOLD_TARGET_TYPE, target_id=hold["id"], domain="PERSONAL",
+                       rationale="restored the route row from backup and reviewed the run"))
+        s.commit()
+        assert integrity.hold_status(s) is None
+        assert sandbox.sandbox_readiness(s, domain="PERSONAL")["status"] == "READY"
+
+
+@pytest.mark.parametrize("scenario,expect", [("grantusage", "REVIEW"), ("grantforge", "FAILED")])
+def test_cross_process_broker_usage_is_tolerated_but_a_forged_grant_cap_is_not(settings, setup, scenario, expect):
+    """`aeos work run-once` runs the executor in the CLI process while the server process's broker counts the run's
+    usage on its grant: that bookkeeping is never a foreign write (the run is not failed and no hold is raised). A
+    widened cap on the same grant row is foreign: FAILED + quarantine + hold."""
+    from aeos.worker_runtime import integrity
+
+    make, _ = setup
+    run_id, task_id = make(scenario, engine=f"{scenario}:{settings.layout.db_path}")
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, _te = _load(run_id, task_id)
+    window = run.caps["db_trust_window"]
+    assert res["status"] == expect, (res, window)
+    with session_factory()() as s:
+        hold = integrity.hold_status(s)
+    if expect == "REVIEW":
+        assert window["status"] == "PASS" and window["tolerated_count"] == 1, window
+        assert not run.quarantined and hold is None and run.caps["integrity_hold"] is False
+    else:
+        assert window["status"] == "FAIL" and run.quarantined and hold is not None
+        assert any(q["rule"] == "db-trust-table-modified" and q["path"].startswith("db:capability_grants:")
+                   for q in run.quarantine_reasons), run.quarantine_reasons
 
 
 def test_broker_unavailable_at_prepare_blocks_without_starting(settings, setup, monkeypatch):
@@ -763,3 +942,58 @@ def test_container_sandbox_run_end_to_end_with_scripted_docker(settings, setup, 
     assert docker.containers() == []  # torn down
     with session_factory()() as s:
         assert all(not g.active for g in _grants(s, run_id))
+
+
+def test_runner_command_logs_are_taken_out_of_the_candidate_and_kept_as_evidence(settings, setup, monkeypatch):
+    """W6-117 §42 "simpan log asli": the complete output the AEOS shell runner kept in .aeos/cmdlog/ never enters
+    the candidate diff; it is stored as untrusted (E0) evidence."""
+    stored: dict = {}
+    original = executor._collect_evidence
+
+    def capture(s, run, **kw):
+        stored[kw["name"]] = kw["content"]
+        return original(s, run, **kw)
+
+    monkeypatch.setattr(executor, "_collect_evidence", capture)
+    make, _ = setup
+    run_id, task_id = make("cmdlog")
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, _te = _load(run_id, task_id)
+    assert res["status"] == "REVIEW", res
+    assert [p["path"] for p in run.diff_summary["paths"]] == ["src/feature.py"]
+    assert not (Path(run.workspace_ref) / ".aeos").exists()
+    logs = run.caps["command_logs"]
+    assert logs["files"] == 1 and logs["truncated"] is False and logs["removed_from_candidate"] is True
+    with session_factory()() as s:
+        ev = s.get(EvidenceArtifact, logs["evidence_ref"].split(":", 1)[1])
+        assert ev.kind == "LOG" and ev.trusted is False and ev.evidence_level == "E0"
+    assert stored["worker-command-logs.json"]["logs"]["1-1.log"].count("output line") == 1000  # untruncated original
+
+
+def test_container_run_with_a_granted_shell_allows_only_the_aeos_runner(settings, setup, monkeypatch, tmp_path):
+    """W6-117: under the container sandbox a TaskSpec's bash grant becomes `node /aeos/aeos-run.js <pattern>`
+    permission rules (everything else denied), the runner is placed in the read-only per-run config dir and the
+    prompt tells the worker to use it. (Scripted docker CLI: proves the AEOS side only.)"""
+    from aeos.worker_runtime import container
+    from aeos.worker_runtime.containment import containment_report, record_containment_report
+    from tests.unit.worker_container_support import install_fake_docker
+
+    docker = install_fake_docker(monkeypatch, tmp_path)
+    with session_factory()() as s:
+        rep = containment_report("container")
+        record_containment_report(s, rep, actor="cli:test")
+        s.commit()
+    make, _ = setup
+    run_id, task_id = make("ok", task={"tools_allowed": ["read", "edit", "bash:npm test*"]})
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    assert res["status"] == "REVIEW", res
+    run, _te = _load(run_id, task_id)
+    image = container.image_tag()
+    worker = next(c for c in docker.calls() if c[:1] == ["run"] and image in c and c[c.index(image) + 1:][:1] == ["run"])
+    env = [worker[i + 1] for i, a in enumerate(worker) if a == "-e"]
+    cfg = json.loads(next(e for e in env if e.startswith("OPENCODE_CONFIG_CONTENT=")).split("=", 1)[1])
+    assert cfg["permission"]["bash"] == {"*": "deny", f"{container.SHELL_RUNNER_COMMAND} npm test*": "allow"}
+    runner = Path(run.sandbox_ref) / "config" / container.SHELL_RUNNER_FILE
+    assert runner.read_text(encoding="utf-8") == container.SHELL_RUNNER_JS
+    prompt = (Path(run.sandbox_ref) / "config" / "aeos-task.md").read_text(encoding="utf-8")
+    assert "## Shell" in prompt and container.SHELL_RUNNER_COMMAND in prompt

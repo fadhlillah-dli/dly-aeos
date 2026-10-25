@@ -152,6 +152,72 @@ def test_dropping_an_append_only_trigger_is_a_foreign_write(db, settings):
     assert {"table": tamper.SCHEMA_KEY, "id": f"trigger:{name}", "change": "removed"} in result["foreign"]
 
 
+@pytest.mark.parametrize("forgery,expect", [
+    (None, "PASS"),
+    ("UPDATE capability_grants SET max_tokens = 99999999 WHERE id = 'g-cross'", "FAIL"),  # widened cap
+    ("UPDATE capability_grants SET used_requests = 1 WHERE id = 'g-cross'", "FAIL"),  # usage below its start
+    ("UPDATE capability_grants SET active = 1, revoked_at = NULL, revoked_reason = NULL WHERE id = 'g-old'",
+     "FAIL"),  # a revoked grant re-activated
+    ("UPDATE auth_sessions SET expires_at = '2199-01-01 00:00:00' WHERE id = 's-cross'", "FAIL"),  # prolonged
+])
+def test_worker_window_tolerates_cross_process_bookkeeping_only(db, settings, forgery, expect):
+    """Wave 7: the worker runtime's window (``verification.facade.trust_table_window``) accepts what the server
+    process does for a run when the executor runs elsewhere (``aeos work run-once``): the broker counting usage on
+    the run's grant and revoking it, the server touching an owner session. A forged cap, a usage reset, a
+    re-activation or a prolonged session in the same rows stays foreign; the verifier's own window tolerates
+    nothing."""
+    import sqlite3
+    from datetime import timedelta
+
+    from aeos.core.timeutil import utcnow
+    from aeos.models.routing import CapabilityGrant
+    from aeos.verification import facade as verification
+
+    db.add(CapabilityGrant(id="g-cross", token_hash="h-cross", run_id="r", project_id="p", domain="PERSONAL",
+                           kind="MODEL_PROXY", scope={}, max_tokens=1000, used_requests=5, used_tokens=500,
+                           expires_at=utcnow() + timedelta(hours=1)))
+    db.add(CapabilityGrant(id="g-old", token_hash="h-old", run_id="r0", project_id="p", domain="PERSONAL",
+                           kind="MODEL_PROXY", scope={}, active=False, revoked_at=utcnow(), revoked_reason="expired",
+                           expires_at=utcnow()))
+    db.commit()
+    raw = sqlite3.connect(str(settings.layout.db_path))
+    try:
+        raw.execute("INSERT INTO auth_sessions (id, token_hash, user_id, csrf_token, created_at, last_seen_at, "
+                    "expires_at, user_agent, client_ip) VALUES ('s-cross', 'hs', 'owner', 'c', "
+                    "'2026-01-01 00:00:00', '2026-01-01 00:00:00', '2099-01-01 00:00:00', '', '')")
+        raw.commit()
+        tamper.install()
+        worker_win = verification.trust_table_window(db.get_bind())
+        verifier_win = tamper.Window(db.get_bind())
+        # the server process: broker usage + revocation on the run's grant, session touch (another connection)
+        raw.execute("UPDATE capability_grants SET used_requests = used_requests + 3, used_tokens = used_tokens + 120, "
+                    "active = 0, revoked_at = '2026-10-26 01:00:00', revoked_reason = 'run finished' "
+                    "WHERE id = 'g-cross'")
+        raw.execute("UPDATE auth_sessions SET last_seen_at = '2026-01-01 00:05:00' WHERE id = 's-cross'")
+        if forgery:
+            raw.execute(forgery)
+        raw.commit()
+        result, strict = worker_win.close(), verifier_win.close()
+    finally:
+        raw.execute("DELETE FROM auth_sessions WHERE id = 's-cross'")
+        raw.execute("DELETE FROM capability_grants WHERE id IN ('g-cross', 'g-old')")
+        raw.commit()
+        raw.close()
+    assert result["status"] == expect, result
+    found = {(f["table"], f["id"]) for f in result["foreign"]}
+    if expect == "PASS":
+        assert result["tolerated_count"] == 2 and not found
+        assert {(t["table"], tuple(t["columns"])) for t in result["tolerated"]} == {
+            ("capability_grants", ("active", "revoked_at", "revoked_reason", "used_requests", "used_tokens")),
+            ("auth_sessions", ("last_seen_at",))}
+    else:
+        assert found & {("capability_grants", "g-cross"), ("capability_grants", "g-old"),
+                        ("auth_sessions", "s-cross")}, result
+    assert strict["status"] == "FAIL" and "tolerated" not in strict
+    assert {("capability_grants", "g-cross"), ("auth_sessions", "s-cross")} <= {
+        (f["table"], f["id"]) for f in strict["foreign"]}
+
+
 def _verify(db, world, **kw):
     out = verifier.verify_run(db, world.run.id, actor="tester", **kw)
     db.commit()
@@ -205,6 +271,12 @@ def test_candidate_code_writing_the_trust_db_is_quarantined(db, settings, contro
                                               AuditEvent.target_id == world.run.id)) is not None
     alert = db.scalar(select(Event).where(Event.kind == "verification.alert", Event.entity_id == world.run.id))
     assert alert is not None and alert.payload["severity"] == "HIGH"
+    # wave 7 (W6-005 d): the finding also holds worker admission until the owner reconciles (fail closed)
+    from aeos.worker_runtime import integrity
+
+    hold = integrity.hold_status(db)
+    assert hold is not None and hold["source"] == "verification" and hold["subject_id"] == world.run.id
+    assert any("decisions:candidate-injected" in f["path"] for f in hold["findings"])
 
 
 def test_clean_candidate_run_records_the_tamper_window_as_pass(db, settings, controller, wf):
@@ -218,3 +290,6 @@ def test_clean_candidate_run_records_the_tamper_window_as_pass(db, settings, con
     assert not out.tamper_findings
     data = collector.read_json(db.get(EvidenceArtifact, out.report_evidence_id))
     assert data["tamper"]["findings"] == []
+    from aeos.worker_runtime import integrity
+
+    assert integrity.hold_status(db) is None

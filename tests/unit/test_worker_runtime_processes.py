@@ -123,6 +123,58 @@ def test_windows_job_object_caps_the_process_count(tmp_path):
     assert line.isdigit() and int(line) < 5  # the job refused process creation beyond its cap
 
 
+def test_cpu_rate_is_the_share_of_all_processors():
+    """W6-055: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION.CpuRate is 1/100 percent of ALL processors' cycles."""
+    assert processes.cpu_rate_for(1, 8) == 1250 and processes.cpu_rate_for(2, 4) == 5000
+    assert processes.cpu_rate_for(16, 8) == 10000 and processes.cpu_rate_for(0.0001, 64) == 1
+    assert processes.cpu_rate_for(1, None) == 10000
+    assert processes.ResourceLimits.from_task({"max_cpus": 1}).max_cpus == 1.0
+    assert processes.ResourceLimits.from_task({}).max_cpus is None
+    assert processes.ResourceLimits.from_task({"max_cpus": "x"}).max_cpus is None
+    assert processes.ResourceLimits.from_task({"max_cpus": -2}).max_cpus is None
+
+
+def test_taskspec_resource_caps_are_one_value_for_both_sandboxes():
+    """W6-055: max_processes is carried in every TaskSpec, so the process sandbox and the container enforce the same
+    cap (they used to fall back to different runtime defaults, 64 vs 256)."""
+    from aeos.planning import dag
+    from aeos.worker_runtime import container, facade
+
+    lim = dict(dag.RESOURCE_LIMITS)
+    assert "max_processes" in lim
+    assert processes.ResourceLimits.from_task(lim).max_processes == container.limits_for(lim)["pids"] \
+        == lim["max_processes"]
+    proc = facade.enforced_run_limits(lim, sandbox_kind="process")
+    assert proc["cpus"] == float(lim["max_cpus"])
+    assert proc["cpu_enforced"] is processes.cpu_cap_supported() is (sys.platform == "win32")
+    assert ("CPU-rate hard cap" in proc["enforced_by"]) is (sys.platform == "win32")
+    # without a max_cpus there is nothing to cap: never reported as enforced
+    assert facade.enforced_run_limits({}, sandbox_kind="process")["cpu_enforced"] is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object CPU rate control")
+def test_windows_job_object_hard_caps_cpu(tmp_path):
+    """The kernel holds the CPU-rate hard cap for the worker's job (queried back from the job object)."""
+    dirs = processes.SandboxDirs.create(tmp_path / "sbx")
+    env = processes.build_sandbox_env(dirs, run_id="cpu-cap")
+    mp = processes.spawn("cpu-cap", [sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path, env=env,
+                         limits=processes.ResourceLimits(max_memory_mb=512, max_processes=8, max_cpus=1))
+    try:
+        rate = processes.cpu_rate_for(1, os.cpu_count())
+        assert mp.cpu_rate == rate and mp.job is not None
+        assert processes._win.query_cpu_rate(mp.job) == (
+            processes._win.JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | processes._win.JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, rate)
+    finally:
+        processes.kill_run_processes("cpu-cap")
+    # without max_cpus no CPU cap is claimed
+    mp2 = processes.spawn("cpu-none", [sys.executable, "-c", "pass"], cwd=tmp_path, env=env,
+                          limits=processes.ResourceLimits(max_memory_mb=512, max_processes=8))
+    try:
+        assert mp2.cpu_rate is None
+    finally:
+        processes.kill_run_processes("cpu-none")
+
+
 def test_spawn_rejects_shell_strings(tmp_path):
     import pytest
 

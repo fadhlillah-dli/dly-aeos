@@ -55,9 +55,15 @@ PROCESS_RESIDUAL_RISKS = [
     "process sandbox.",
     "User OS yang sama dengan controller: file yang dapat dibaca user (DB data dir, ~/.ssh asli, keyring OS) "
     "tidak diblokir oleh sistem operasi; hanya izin tool OpenCode (external_directory=deny) yang membatasi.",
-    "Checkout controller (kode yang sedang berjalan, policy/) dan DB data dir dapat ditulis oleh user OS yang sama: "
-    "perubahan checkout controller dideteksi oleh integrity check sebelum/sesudah run (run gagal + karantina), "
-    "penulisan DB tidak terdeteksi.",
+    "Checkout controller (kode yang sedang berjalan, policy/), interpreter, bytecode (__pycache__ dan "
+    "PYTHONPYCACHEPREFIX), file konfigurasi aeos.yaml dan DB data dir dapat ditulis oleh user OS yang sama: "
+    "perubahan dideteksi SESUDAH run (integrity check berkas + jendela tamper tabel kepercayaan DB), run gagal + "
+    "karantina + alert HIGH, bytecode yang tidak sama dengan kompilasi sumbernya dihapus, aeos.yaml dipulihkan, dan "
+    "admission worker ditahan (integrity hold) sampai pemilik merekonsiliasi. Pencegahan hanya oleh sandbox "
+    "container. Penulisan DB oleh proses AEOS lain selama run dilaporkan sebagai asing (fail closed), kecuali "
+    "pembukuan broker/sesi (pemakaian grant bertambah, pencabutan grant/sesi, last_seen_at maju). Tidak terdeteksi: "
+    "penulisan yang dibatalkan sebelum run selesai, penulisan yang hanya berupa pembukuan itu, dan perubahan file "
+    "dependensi yang memulihkan ukuran+mtime.",
     "Penulisan di luar worktree tidak dicegah OS; hanya terdeteksi untuk path di dalam repository dan checkout "
     "controller.",
     "Isolasi bergantung pada env yang dibersihkan dan HOME yang dialihkan, bukan batas keamanan kernel.",
@@ -243,12 +249,36 @@ def _container_remedy(domain: str) -> str:
             "until it reports PASS")
 
 
+def integrity_hold_block(session: Session) -> dict[str, Any] | None:
+    """BLOCKED fields while the host-wide integrity hold is ACTIVE (a controller/config/bytecode/DB tamper finding
+    after a worker run or a verification), else None. Applies to every sandbox kind and domain (fail closed)."""
+    from aeos.worker_runtime import integrity
+
+    hold = integrity.hold_status(session)
+    if hold is None:
+        return None
+    findings = list(hold.get("findings") or [])
+    where = ", ".join(sorted({str(f.get("path") or f.get("table") or "*") for f in findings})[:5])
+    return {"status": "BLOCKED", "kind": None, "code": "INTEGRITY_HOLD",
+            "integrity_hold": {"id": hold.get("id"), "detected_at": hold.get("detected_at"), "source": hold.get("source"),
+                               "subject_id": hold.get("subject_id"), "findings": findings[:20]},
+            "reasons": [f"integrity hold {str(hold.get('id'))[:8]}: the controller, its config/bytecode or the DB trust "
+                        f"tables changed while {hold.get('source')} {str(hold.get('subject_id'))[:8]} ran ({where}); "
+                        "no worker starts until the owner reconciles (master s09 Zone 1, fail closed)"],
+            "remedies": ["Review the findings (aeos worker status), restore the controller checkout (git status / git "
+                         "checkout -- <path>) and data, then record the reconciliation: "
+                         + integrity.reconcile_command(str(hold.get("id")))]}
+
+
 def sandbox_readiness(session: Session, *, domain: str) -> dict[str, Any]:
     """Policy requirement check used by admission and (via the facade) by the Readiness Doctor."""
     caps_all = sandbox_capabilities()
     caps = caps_all["levels"]
     base: dict[str, Any] = {"domain": domain, "checked_at": caps_all["checked_at"], "capabilities": caps,
                             "required": "container", "residual_risks": []}
+    held = integrity_hold_block(session)
+    if held is not None:
+        return {**base, **held}
     container = caps["container"]
     report = _last_containment(session, "container", domain) if container["available"] else None
     problems = container_report_problems(report, domain=domain, caps=caps) if container["available"] else \
@@ -308,7 +338,7 @@ def task_sandbox_readiness(session: Session, *, domain: str, risk_class: str | N
     sb = sandbox_readiness(session, domain=domain)
     out: dict[str, Any] = {**sb, "risk_class": risk_class, "required_for_task": required_boundary(risk_class)}
     if sb["status"] != "READY":
-        return {**out, "code": "SANDBOX_NOT_READY"}
+        return {**out, "code": sb.get("code") or "SANDBOX_NOT_READY"}
     problems: list[tuple[str, str]] = []
     need = out["required_for_task"]
     if need == "vm":
