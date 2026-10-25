@@ -85,9 +85,11 @@ def profile_for(domain: str) -> Profile:
 
 
 def image_tag() -> str:
-    from aeos.worker_runtime.opencode import PINNED_VERSION
+    """``dly-aeos-worker:<opencode pin>``: the owner-approved install-manifest pin when set, else the labelled
+    runtime default (``opencode.resolve_pin``) - never a constant the reviewed manifest cannot change."""
+    from aeos.worker_runtime.opencode import pinned_version
 
-    return f"{IMAGE_REPOSITORY}:{PINNED_VERSION}"
+    return f"{IMAGE_REPOSITORY}:{pinned_version()}"
 
 
 def docker_cmd() -> list[str] | None:
@@ -123,17 +125,46 @@ def _err(proc: subprocess.CompletedProcess[str]) -> str:
 
 
 # ----------------------------------------------------------------------------- image / network / gateway
+OPENCODE_VERSION_LABEL = "aeos.opencode_version"  # set by sandbox/Dockerfile from the OPENCODE_VERSION build arg
+
+
+def image_build_command() -> str:
+    """The build of the worker image for the resolved OpenCode pin: the build arg AND the tag carry the pin (a bare
+    ``docker build -t dly-aeos-worker:<pin>`` would install the Dockerfile's default engine under the pin's tag)."""
+    from aeos.worker_runtime.opencode import pinned_version
+
+    pin = pinned_version()
+    return f"docker build --build-arg OPENCODE_VERSION={pin} -t {IMAGE_REPOSITORY}:{pin} sandbox/"
+
+
 def image_status() -> dict[str, Any]:
     tag = image_tag()
+    pin = tag.rsplit(":", 1)[-1]
     try:
-        proc = run_docker(["image", "inspect", "--format", "{{.Id}}", tag], timeout=30)
+        # the whole Config as JSON: a template on .Config.Labels fails outright when an image has no labels
+        proc = run_docker(["image", "inspect", "--format", "{{.Id}}|{{json .Config}}", tag], timeout=30)
     except ContainerError as exc:
         return {"tag": tag, "present": False, "id": None, "evidence": exc.message}
-    image_id = (proc.stdout or "").strip()
+    image_id, _sep, config_json = (proc.stdout or "").strip().partition("|")
+    image_id = image_id.strip()
+    try:
+        config = json.loads(config_json) if config_json.strip() else {}
+    except ValueError:
+        config = {}
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    label = str((labels if isinstance(labels, dict) else {}).get(OPENCODE_VERSION_LABEL) or "").strip()
     if proc.returncode != 0 or not image_id:
         return {"tag": tag, "present": False, "id": None,
-                "evidence": f"image {tag} not built on this host (docker build -t {tag} sandbox/)"}
-    return {"tag": tag, "present": True, "id": image_id, "evidence": f"image {tag} present"}
+                "evidence": f"image {tag} not built on this host ({image_build_command()})"}
+    if label and label.lstrip("v") != pin:
+        # the tag claims the pin but the image was built with another engine: never run it as the pinned one
+        return {"tag": tag, "present": False, "id": image_id, "opencode_version": label,
+                "evidence": f"image {tag} was built with OpenCode {label}, not the pin {pin}; rebuild it "
+                            f"({image_build_command()})"}
+    return {"tag": tag, "present": True, "id": image_id, "opencode_version": label or None,
+            "evidence": f"image {tag} present" + ("" if label else
+                                                  " (no OpenCode version label: built before the label existed; "
+                                                  "the tag is the only version claim)")}
 
 
 def ensure_network(profile: Profile) -> dict[str, Any]:
@@ -689,7 +720,7 @@ def containment_report(*, domain: str = Domain.PERSONAL.value) -> dict[str, Any]
     image = image_status()
     base.update(image=image["tag"], image_id=image["id"], docker_server=caps.get("server_version"))
     if not image["present"]:
-        return not_proven(image["evidence"], remedy=f"docker build -t {image['tag']} sandbox/")
+        return not_proven(image["evidence"], remedy=image_build_command())
     try:
         ensure_network(profile)
         ensure_gateway(profile, broker_port=int(settings.port), image=image["tag"])

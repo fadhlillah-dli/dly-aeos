@@ -113,12 +113,29 @@ def test_contract_test_passes_for_a_conforming_engine_and_is_recorded(settings, 
     assert rep["overall"] == "PASS", {k: v for k, v in by.items() if v["status"] != "PASS"}
     assert set(contract.CHECKS) == set(by)
     assert "NOT_PROVEN" in rep["scope"]["model_behaviour"]  # a scripted model never proves a real route
+    # §25 admission "schema" (W6-076): the hash is computed from the tool definitions the engine really sent -
+    # the conforming stand-in offers exactly the base tool set, as {"type": "function", "function": {"name"}}
+    from aeos.inventory import facade as inventory
+
+    offered = sorted(opencode.BASE_ALLOW)
+    expected = inventory.tool_schema_hash([{"type": "function", "function": {"name": n}} for n in offered])
+    assert expected and expected.startswith("sha256:")
+    assert by["tool_schema"]["tools"] == offered
+    assert by["tool_schema"]["tool_schema_hash"] == expected, "a regression returning None/another hash fails here"
+    from aeos.inventory.seed import run as seed_inventory
+
+    seed_inventory(db)  # the inventory knows component opencode, so the observation is recorded
+    db.commit()
     ev_id = contract.record_contract_test(db, rep, actor="cli:test")
     db.commit()
     from aeos.models.evidence import EvidenceArtifact
+    from aeos.models.inventory import ComponentObservation
 
     ev = db.get(EvidenceArtifact, ev_id)
     assert ev.kind == "WORKER_CONTRACT_TEST" and ev.trusted and ev.mode == "LIVE" and ev.evidence_level == "E2"
+    obs = db.query(ComponentObservation).filter_by(component_id="opencode", dimension="functional").all()
+    assert len(obs) == 1 and obs[0].status == "VERIFIED" and obs[0].evidence_id == ev_id
+    assert obs[0].detail["tool_schema_hash"] == expected and obs[0].detail["tools"] == offered
     from types import SimpleNamespace
 
     out = worker_contract(SimpleNamespace(session=db))  # the registered check function itself

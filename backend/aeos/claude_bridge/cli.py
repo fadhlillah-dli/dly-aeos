@@ -33,6 +33,12 @@ def status_cmd(as_json: bool = typer.Option(False, "--json", help="Print JSON"))
     _line("auth", f"{a['status']} method={a['authMethod']} provider={a['apiProvider']} plan={a['subscriptionType']}")
     for r in a.get("reasons") or []:
         _line("  reason", r)
+    au = b.get("authenticity") or {}
+    pinned = au.get("approved_signer") or ("UNKNOWN (install-manifest unreadable)"
+                                           if au.get("pin_status") == "UNREADABLE" else "NONE")
+    _line("authenticity", f"{au.get('gate', 'UNKNOWN')} signature={au.get('signature_status', 'NOT_CHECKED')} "
+                          f"pinned={pinned} ({au.get('os', '?')})")
+    _line("  reason", str(au.get("reason") or ""))
     _line("bridge", out["bridge_status"])
     _line("env hygiene", f"{h['status']} {', '.join(h['forbidden_present'])}".strip())
     _line("quota", out["quota"]["state"])

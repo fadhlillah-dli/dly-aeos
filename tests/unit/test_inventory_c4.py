@@ -190,20 +190,40 @@ def test_manifest_records_digest_ports_config_refs_and_compatibility(seeded):
     assert oc["compatibility"]["compatibility"]["os"] == ["windows", "macos", "linux"]
 
 
+#: Probe types that observe DLY AEOS's own code, files or data - nothing installed from a third-party
+#: distribution, so there is no artifact identity to record (they are versioned by the repository itself).
+NOT_INSTALLED_PROBES = frozenset({"platform_module", "repo_file", "data_dir", "git_repo", "none"})
+
+
 def test_every_installable_binary_component_records_its_identity_fields():
     """§07: digest, port, configuration references and compatibility per component - every REQUIRED/OPTIONAL
-    component the bootstrap probes as a binary (git, vscode, docker, ...) states them, nothing guessed."""
+    component the bootstrap probes as an installed artifact (binaries such as git/vscode/docker, PyPI modules such
+    as pytest/ruff/mypy/keyring, npm packages such as vitest/typescript, the OS credential store, the embedded
+    SQLite) states them, nothing guessed (W6-019: the guard used to cover probe type 'binary' only)."""
     from aeos.inventory.manifest import load_manifest
 
     fields = ("approved_digest", "distribution", "signature", "ports", "config_refs", "compatibility")
     missing = {}
+    checked: set[str] = set()
     for c in load_manifest().data["components"]:
-        if (c.get("probe") or {}).get("type") == "binary" and c.get("requirement") in ("REQUIRED", "OPTIONAL"):
+        ptype = (c.get("probe") or {}).get("type") or "none"
+        if ptype not in NOT_INSTALLED_PROBES and c.get("requirement") in ("REQUIRED", "OPTIONAL"):
+            checked.add(ptype)
             gaps = [f for f in fields if f not in c]
             if gaps:
                 missing[c["component_id"]] = gaps
             assert c.get("approved_digest") is None or c.get("approved_pin"), c["component_id"]
     assert not missing, missing
+    assert checked >= {"binary", "python_module", "npm_package", "keyring_backend", "sqlite", "python_runtime",
+                       "python_package"}, checked
+    by_id = {c["component_id"]: c for c in load_manifest().data["components"]}
+    assert by_id["pytest"]["distribution"]["kind"] == "pypi" and "file:requirements.lock" in by_id["pytest"]["config_refs"]
+    assert by_id["vitest"]["distribution"]["kind"] == "npm"
+    assert "file:frontend/package-lock.json" in by_id["typescript"]["config_refs"]
+    assert by_id["os-credential-store"]["distribution"]["kind"] == "os_component"
+    for cid in ("pytest", "ruff", "mypy", "keyring-backend", "vitest", "typescript", "os-credential-store"):
+        assert by_id[cid]["approved_digest"] is None and by_id[cid]["signature"]["result"] == "UNKNOWN", cid
+        assert by_id[cid]["ports"] == [], cid
     by = {c["component_id"]: c for c in load_manifest().data["components"]}
     assert set(by["git"]["compatibility"]["os"]) == {"windows", "macos", "linux"}
     assert "settings:commit_author_email" in by["git"]["config_refs"]

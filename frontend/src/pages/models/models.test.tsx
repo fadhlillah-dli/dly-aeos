@@ -311,4 +311,72 @@ describe("Models & Routes page", () => {
     expect(await within(drawer).findByText("Hanya probe kelayakan (bukan task worker)")).toBeInTheDocument();
     expect(within(drawer).getByText("Uji kelayakan lewat probe broker")).toBeInTheDocument();
   });
+
+  const withStatus = (status: unknown) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        let body: unknown = {};
+        if (url.startsWith("/api/claude/status")) body = status;
+        else if (url === "/api/routes") body = ROUTES;
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+  const authenticity = (over: Record<string, unknown>) => ({
+    gate: "UNVERIFIED", reason: "signature VALID; no publisher identity pinned", approved_signer: null, os: "windows",
+    signature_status: "VALID", observed_signer: "CN=\"Anthropic, PBC\"", owner_step: "Pin penerbit Anthropic untuk windows di install-manifest claude-code signature.approved_signer",
+    remedy: null, ...over,
+  });
+
+  it("shows the binary authenticity gate; an unpinned valid signature is never shown as authentic (§12)", async () => {
+    withStatus({ ...STATUS, binary: { ...STATUS.binary, authenticity: authenticity({}) } });
+    renderPage();
+    const cell = await screen.findByTestId("binary-authenticity");
+    expect(within(cell).getByText("Belum diverifikasi")).toBeInTheDocument();
+    expect(within(cell).getByText(/belum dipin/)).toBeInTheDocument();
+    expect(screen.getByText(/Langkah pemilik: Pin penerbit Anthropic untuk windows/)).toBeInTheDocument();
+    // the owner-facing explanation is Indonesian; the backend reason is shown only as technical detail
+    expect(screen.getByText(/Keaslian belum terverifikasi/)).toBeInTheDocument();
+    expect(screen.getByText("signature VALID; no publisher identity pinned")).toBeInTheDocument();
+  });
+
+  it("an unreadable install-manifest blocks with a manifest remedy, never 'belum dipin' (fail closed)", async () => {
+    const remedy = { operation: "Perbaiki install-manifest/manifest.yaml", commands: ["./aeos seed --only aeos.inventory.seed"], note: "lewat PR" };
+    withStatus({
+      ...STATUS,
+      bridge_status: "BLOCKED",
+      blocked_by: ["signature"],
+      binary: { ...STATUS.binary, authenticity: authenticity({ gate: "BLOCKED", pin_status: "UNREADABLE", owner_step: null, reason: "install-manifest cannot be read/validated (MANIFEST_INVALID)", remedy }) },
+    });
+    renderPage();
+    const cell = await screen.findByTestId("binary-authenticity");
+    expect(within(cell).getByText(/tidak dapat dibaca/)).toBeInTheDocument();
+    expect(within(cell).queryByText(/belum dipin/)).toBeNull();
+    expect(screen.getByText("Langkah perbaikan install-manifest")).toBeInTheDocument();
+    expect(screen.getByText(/pin penerbit tidak diketahui/)).toBeInTheDocument();
+    expect(screen.queryByText(/ketik \/login/)).toBeNull();
+  });
+
+  it("a signature block shows the signature remedy, never the /login remedy", async () => {
+    const remedy = { operation: "Pasang ulang build resmi Claude Code", commands: ["winget install --id Anthropic.ClaudeCode -e"], note: "ubah approved_signer lewat PR" };
+    withStatus({
+      ...STATUS,
+      bridge_status: "BLOCKED",
+      blocked_by: ["signature"],
+      binary: { ...STATUS.binary, authenticity: authenticity({ gate: "BLOCKED", signature_status: "INVALID", reason: "OS reports the code signature INVALID", approved_signer: "Anthropic, PBC", owner_step: null, remedy }) },
+    });
+    renderPage();
+    expect(await screen.findByTestId("signature-remedy")).toBeInTheDocument();
+    expect(screen.getByText("winget install --id Anthropic.ClaudeCode -e")).toBeInTheDocument();
+    expect(screen.queryByText(/ketik \/login/)).toBeNull();
+    expect(screen.getAllByText("Terblokir").length).toBeGreaterThan(0);
+  });
+
+  it("an unsigned binary is DEGRADED in the header, not a pass", async () => {
+    const remedy = { operation: "Pasang ulang", commands: ["brew reinstall --cask claude-code"], note: "x" };
+    withStatus({ ...STATUS, bridge_status: "DEGRADED", binary: { ...STATUS.binary, authenticity: authenticity({ gate: "DEGRADED", signature_status: "UNSIGNED", os: "darwin", remedy }) } });
+    renderPage();
+    expect(await screen.findByTestId("signature-remedy")).toBeInTheDocument();
+    expect(screen.getAllByText("Terbatas").length).toBeGreaterThan(0);
+  });
 });

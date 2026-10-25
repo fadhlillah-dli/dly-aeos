@@ -146,22 +146,109 @@ def record_tool_schema_observation(session: Session, *, component_id: str, schem
                 evidence_id=evidence_id)
 
 
-def approved_signer(component_id: str) -> str | None:
-    """The publisher identity the owner pinned for *component_id* in the reviewed InstallManifest
-    (``signature.approved_signer``); None when nothing is pinned or the manifest cannot be read (read-only)."""
+def _reviewed_manifest() -> tuple[dict[str, Any] | None, str | None]:
+    """(data, None) of the validated reviewed InstallManifest file, or (None, error code) when it cannot be
+    read/validated."""
     from aeos.core.errors import ValidationFailed
     from aeos.inventory.manifest import load_manifest
 
     try:
-        data = load_manifest().data
-    except ValidationFailed:
-        return None
-    for comp in data.get("components") or []:
+        return load_manifest().data, None
+    except (ValidationFailed, OSError) as exc:
+        return None, str(getattr(exc, "code", None) or type(exc).__name__)
+
+
+def _manifest_component(component_id: str) -> dict[str, Any] | None:
+    """The component entry of the reviewed InstallManifest file (validated load), or None when it is absent or
+    the manifest cannot be read/validated (``manifest_pin`` / ``signer_pin`` tell those apart)."""
+    data, _problem = _reviewed_manifest()
+    for comp in (data or {}).get("components") or []:
         if isinstance(comp, dict) and comp.get("component_id") == component_id:
-            sig = comp.get("signature")
-            value = sig.get("approved_signer") if isinstance(sig, dict) else None
-            return str(value).strip() or None if value else None
+            return comp
     return None
+
+
+def host_platform() -> tuple[str, str | None]:
+    """(os, arch) of this host in the pin naming (``windows|darwin|linux``, ``amd64|arm64`` or None when no reviewed
+    artifact exists for the architecture) - the ``<os>_<arch>`` key of a per-platform ``approved_digest`` and the OS
+    key of a per-OS ``signature.approved_signer``."""
+    from aeos.inventory.pins import host_arch, host_os
+
+    return host_os(), host_arch()
+
+
+def select_digest(raw: Any, platform: str | None = None) -> dict[str, Any]:
+    """Select the approved digest for *platform* (default: this host) from a manifest ``approved_digest`` value (one
+    ``sha256:`` for all platforms, or a mapping keyed ``<os>_<arch>``). See ``aeos.inventory.pins.select_digest``."""
+    from aeos.inventory.pins import select_digest as impl
+
+    return impl(raw, platform)
+
+
+def signer_pin(component_id: str, *, os_name: str | None = None) -> dict[str, Any]:
+    """The owner's publisher pin of *component_id* (``signature.approved_signer`` of the reviewed InstallManifest) that
+    applies on this host's OS (or *os_name*): ``{"signer", "status" PINNED|NOT_PINNED|UNREADABLE, "reason"}``.
+
+    UNREADABLE means the manifest could not be read or validated, so whether a pin exists is unknown - callers that
+    gate on the pin fail closed instead of treating it as "not pinned" (read-only)."""
+    from aeos.inventory.pins import select_signer
+
+    data, problem = _reviewed_manifest()
+    if data is None:
+        return {"signer": None, "status": "UNREADABLE",
+                "reason": f"install-manifest cannot be read/validated ({problem}): the publisher pin is unknown"}
+    comp = next((c for c in data.get("components") or []
+                 if isinstance(c, dict) and c.get("component_id") == component_id), None)
+    sig = (comp or {}).get("signature")
+    signer = select_signer(sig.get("approved_signer") if isinstance(sig, dict) else None, os_name)
+    return {"signer": signer, "status": "PINNED" if signer else "NOT_PINNED", "reason": None}
+
+
+def approved_signer(component_id: str, *, os_name: str | None = None) -> str | None:
+    """The publisher identity the owner pinned for *component_id* in the reviewed InstallManifest
+    (``signature.approved_signer``) that applies on this host's OS (or *os_name*): a plain string applies on
+    every OS, a ``{windows, darwin}`` mapping per OS. None when nothing is pinned for this OS or the manifest
+    cannot be read (read-only; a gate uses ``signer_pin`` to tell those two apart)."""
+    return signer_pin(component_id, os_name=os_name)["signer"]
+
+
+def approved_pin(component_id: str, *, session: Session | None = None) -> str | None:
+    """The owner-approved version pin of *component_id* (§07 "pins approved by a human"), normalised (no leading
+    ``v``): the seeded ComponentReference when a *session* is given (what the Doctor compares), else the reviewed
+    InstallManifest file. None when no pin is approved (callers label their built-in default as such)."""
+    from aeos.inventory.pins import normalise_pin
+
+    if session is not None:
+        ref = session.get(ComponentReference, component_id)
+        return normalise_pin(ref.approved_pin) if ref is not None and ref.tombstoned_at is None else None
+    return manifest_pin(component_id)["pin"]
+
+
+def manifest_pin(component_id: str) -> dict[str, str | None]:
+    """``{"pin", "problem"}``: the normalised ``approved_pin`` of *component_id* in the reviewed InstallManifest file
+    (None when not approved), and the manifest's error code when it cannot be read/validated - the pin is then
+    UNKNOWN, never "not approved" (one validated load; read-only)."""
+    from aeos.inventory.pins import normalise_pin
+
+    data, problem = _reviewed_manifest()
+    comp = next((c for c in (data or {}).get("components") or []
+                 if isinstance(c, dict) and c.get("component_id") == component_id), None)
+    return {"pin": normalise_pin((comp or {}).get("approved_pin")), "problem": problem}
+
+
+def approved_digest(component_id: str, *, session: Session | None = None, platform: str | None = None
+                    ) -> dict[str, Any]:
+    """The owner-approved executable digest of *component_id* for this host's ``<os>_<arch>`` (or *platform*):
+    ``{"digest", "status" RECORDED|NOT_RECORDED|INVALID, "platform", "form", "recorded_platforms", "reason"}``.
+    A per-platform mapping without this platform's entry is NOT_RECORDED, never a mismatch."""
+    from aeos.inventory.pins import select_digest
+
+    if session is not None:
+        ref = session.get(ComponentReference, component_id)
+        raw = (ref.details or {}).get("approved_digest") if ref is not None else None
+    else:
+        raw = (_manifest_component(component_id) or {}).get("approved_digest")
+    return select_digest(raw, platform)
 
 
 def snapshot_checkpoint(session: Session, snapshot_id: str, *, domain: str | None) -> dict[str, Any]:

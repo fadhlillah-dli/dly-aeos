@@ -94,16 +94,19 @@ def install_cmd(
             _observe("INSTALL_FAILED", plan["version"], {"error": str(exc)[:200]})
             raise typer.Exit(1) from exc
     _observe("INSTALLED", result["version"],
-             {k: result[k] for k in ("archive_sha256", "binary_sha256", "verification", "digest_status")},
+             {k: result.get(k) for k in ("archive_sha256", "binary_sha256", "verification", "digest_status",
+                                         "digest_platform", "signature")},
              identity=result["binary_digest"])  # the executable digest the inventory drift check compares
     typer.echo(f"Installed OpenBao {result['version']} -> {result['installed']}")
     typer.echo("Signature (GPG/sigstore) NOT verified; SHA256 matched checksums.txt.")
+    target = result.get("digest_platform") or "this platform"
     if result["digest_status"] == "MATCH":
-        typer.echo("Binary digest matched the install-manifest approved_digest.")
+        typer.echo(f"Binary digest matched the install-manifest approved_digest ({target}).")
     else:
         typer.secho(f"Binary digest NOT checked against a reviewed digest ({result['digest_status']}): record "
-                    f"approved_digest {result['binary_digest']} for this pin in install-manifest/manifest.yaml "
-                    "through a reviewed PR.", fg="yellow")
+                    f"approved_digest {result['binary_digest']} for this pin under {target} in "
+                    "install-manifest/manifest.yaml (approved_digest: {" + str(target) + ": sha256:...}) through a "
+                    "reviewed PR.", fg="yellow")
     typer.echo("Next: aeos vault start  then  aeos vault init")
 
 

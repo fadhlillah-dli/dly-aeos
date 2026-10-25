@@ -276,6 +276,10 @@ export interface ComponentDetail {
     lockfile_refs: string[];
     provenance_note: string;
     approved_digest?: string | null;
+    /** §07: the <os>_<arch> the approved digest was selected for (this host) */
+    approved_digest_platform?: string | null;
+    /** platforms the reviewed per-platform mapping records ([] for the one-digest form) */
+    approved_digest_platforms?: string[];
     observed_digest?: string | null;
     digest_status?: string;
     distribution?: Record<string, unknown>;

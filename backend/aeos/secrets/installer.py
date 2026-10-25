@@ -3,7 +3,8 @@
 The plan is shown before anything happens (source, version, asset, checksum file, digest requirement,
 target, privilege, cost, rollback) and an explicit confirmation is required. Integrity: SHA256 of the
 asset must match ``checksums.txt`` of the same release, and - when the owner recorded one for the
-manifest pin - the extracted ``bao`` binary must equal the install-manifest ``approved_digest`` before
+manifest pin and THIS platform (``approved_digest`` is one digest or a mapping keyed ``<os>_<arch>``,
+because the executable differs per OS/arch) - the extracted ``bao`` binary must equal it before
 anything is written. Authenticity (GPG ``.gpgsig`` / sigstore bundle of checksums.txt) is NOT verified
 here — that limitation is printed in the plan and recorded as NOT-PROVEN. Never system-wide, never
 elevated, no package manager, no PATH changes.
@@ -44,12 +45,19 @@ class InstallError(RuntimeError):
 
 
 def platform_target() -> tuple[str, str]:
-    os_name = {"win32": "windows", "darwin": "darwin"}.get(sys.platform, "linux")
-    machine = platform.machine().lower()
-    arch = {"amd64": "amd64", "x86_64": "amd64", "x64": "amd64", "arm64": "arm64", "aarch64": "arm64"}.get(machine)
+    """(os, arch) of this host in the OpenBao release naming; also the ``<os>_<arch>`` key of a per-platform
+    ``approved_digest`` in the install-manifest."""
+    from aeos.inventory import facade as inventory
+
+    os_name, arch = inventory.host_platform()
     if arch is None:
-        raise InstallError(f"unsupported CPU architecture {machine!r}")
+        raise InstallError(f"unsupported CPU architecture {platform.machine().lower()!r}")
     return os_name, arch
+
+
+def platform_key() -> str:
+    os_name, arch = platform_target()
+    return f"{os_name}_{arch}"
 
 
 def asset_name(version: str, os_name: str, arch: str) -> str:
@@ -81,9 +89,6 @@ def _check_host(url: str) -> None:
         raise InstallError(f"refusing download from non-official host {host!r}")
 
 
-_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-
-
 def _manifest_entry(root: Path | None = None) -> dict[str, Any] | None:
     import yaml
 
@@ -112,32 +117,41 @@ def manifest_pin(root: Path | None = None) -> str | None:
 
 
 def manifest_digest(root: Path | None = None) -> str | None:
-    """The owner-approved digest (``sha256:<hex>`` of the ``bao`` executable) that belongs to the manifest pin, or
-    None when the owner has not recorded one. A malformed value is refused rather than ignored (fail closed)."""
+    """The owner-approved digest (``sha256:<hex>`` of the ``bao`` executable of THIS platform) that belongs to the
+    manifest pin, or None when the owner has not recorded one for this platform. ``approved_digest`` is either one
+    digest for every platform or a mapping keyed ``<os>_<arch>`` (``platform_target``), because the release
+    executable differs per OS/arch; a mapping without this platform's entry is None (NOT_RECORDED), never another
+    platform's value. A malformed value is refused rather than ignored (fail closed)."""
+    from aeos.inventory import facade as inventory
+
     comp = _manifest_entry(root)
     raw = (comp or {}).get("approved_digest")
     if not raw:
         return None
-    digest = str(raw).strip().lower()
-    if not _DIGEST.match(digest):
-        raise InstallError(f"install-manifest approved_digest for openbao is not 'sha256:<64 hex>': {raw!r}")
-    return digest
+    sel = inventory.select_digest(raw, platform_key())
+    if sel["status"] == "INVALID":
+        raise InstallError(f"install-manifest approved_digest for openbao is invalid: {sel['reason']}")
+    return sel["digest"]
 
 
 def digest_requirement(version: str, root: Path | None = None) -> dict[str, Any]:
     """§07 "installer dipin ke versi/digest dan diverifikasi": what the install will hold the binary to. The manifest
-    digest applies only to the manifest pin (an explicit other version is the owner's choice and has no digest)."""
+    digest applies only to the manifest pin (an explicit other version is the owner's choice and has no digest)
+    and only to this platform's executable."""
+    target = platform_key()
     pin = manifest_pin(root)
     if pin is None or pin != version.lstrip("v"):
-        return {"approved_digest": None, "digest_status": "NOT_APPLICABLE",
+        return {"approved_digest": None, "digest_status": "NOT_APPLICABLE", "digest_platform": target,
                 "digest_note": "version differs from the manifest approved_pin; no reviewed digest for it"}
     digest = manifest_digest(root)
     if digest is None:
-        return {"approved_digest": None, "digest_status": "NOT_RECORDED",
-                "digest_note": "owner has not recorded approved_digest for this pin in install-manifest/manifest.yaml "
-                               "(reviewed PR); only checksums.txt of the release is checked"}
-    return {"approved_digest": digest, "digest_status": "REQUIRED",
-            "digest_note": "the extracted bao binary must equal the manifest approved_digest before it is installed"}
+        return {"approved_digest": None, "digest_status": "NOT_RECORDED", "digest_platform": target,
+                "digest_note": f"owner has not recorded approved_digest for this pin and platform ({target}) in "
+                               "install-manifest/manifest.yaml (reviewed PR); only checksums.txt of the release is "
+                               "checked"}
+    return {"approved_digest": digest, "digest_status": "REQUIRED", "digest_platform": target,
+            "digest_note": f"the extracted bao binary must equal the manifest approved_digest for {target} before it "
+                           "is installed"}
 
 
 def install_command(root: Path | None = None) -> str:
@@ -265,4 +279,12 @@ def install(settings: Settings, client: httpx.Client, plan: dict[str, Any]) -> d
             "binary_sha256": binary_digest.split(":", 1)[1], "binary_digest": binary_digest,
             "verification": "sha256-checksums" + ("+approved-digest" if approved else ""),
             "digest_status": "MATCH" if approved else plan.get("digest_status") or "NOT_RECORDED",
-            "signature_verified": False}
+            "digest_platform": plan.get("digest_platform"),
+            "signature_verified": False,
+            # §25 "signature/provenance bila tersedia": OpenBao publishes a GPG signature of checksums.txt, but no
+            # OpenPGP verifier and no owner-pinned release-key fingerprint are part of the reviewed toolchain yet
+            "signature": {"method": "gpg", "result": "NOT_VERIFIED",
+                          "reason": "checksums.txt GPG signature not verified: verifying it needs an OpenPGP verifier "
+                                    "(gpg or a library), which is not in the reviewed toolchain (adding one is a "
+                                    "reviewed bootstrap change), and an owner-pinned OpenBao release-key fingerprint; "
+                                    "integrity rests on checksums.txt plus the approved_digest when recorded"}}
