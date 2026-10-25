@@ -204,7 +204,9 @@ def _committing(db: Any, fn: Callable[[], Any]) -> Any:
 
 @router.get("/api/proposals/{proposal_id}")
 def get_proposal(proposal_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
-    return service.proposal_view(db, _load(db, principal, domain, proposal_id), detail=True)
+    view = service.proposal_view(db, _load(db, principal, domain, proposal_id), detail=True)
+    # status dimensions (decisions, inventory observations) are evaluated at read time, like the list
+    return {**view, "source": "change_proposals + decisions", "checked_at": utcnow().isoformat()}
 
 
 @router.post("/api/proposals/{proposal_id}/review")

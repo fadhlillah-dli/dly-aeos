@@ -41,7 +41,9 @@ def list_research(
 
 @router.get("/api/research/{entry_id}")
 def get_research(entry_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
-    return service.entry_view(service.get_entry(db, entry_id, domain=domain.value), detail=True)
+    # the entry keeps its own checked_at (null = never checked upstream); generated_at = when it was read
+    return {**service.entry_view(service.get_entry(db, entry_id, domain=domain.value), detail=True),
+            "source": "research_entries", "generated_at": utcnow().isoformat()}
 
 
 class AddEntryIn(BaseModel):

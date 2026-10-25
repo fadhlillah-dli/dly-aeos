@@ -53,7 +53,8 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         self.claim_headers = {"X-AEOS-Version": __version__, "X-AEOS-Schema-Version": SCHEMA_VERSION,
                               "X-AEOS-Settings-Hash": content_hash(settings.model_dump(mode="json"))}
 
-    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+    def _rejection(self, request: Request) -> Response | None:
+        """The early 421/403 answer for a request outside the loopback/origin allow-lists, else None."""
         host = (request.headers.get("host") or "").lower()
         if host not in self.allowed_hosts:
             return _error(421, "HOST_NOT_ALLOWED", "request host is not an allowed loopback origin")
@@ -65,9 +66,15 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                 referer = request.headers.get("referer")
                 if referer and not any(referer.startswith(o + "/") or referer == o for o in self.allowed_origins):
                     return _error(403, "ORIGIN_NOT_ALLOWED", "cross-origin write rejected")
+        return None
+
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
-        request.state.request_id = request_id
-        response = await call_next(request)
+        # a rejection is an /api answer too: it gets the same hardening and claim headers (version/config)
+        response = self._rejection(request)
+        if response is None:
+            request.state.request_id = request_id
+            response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"

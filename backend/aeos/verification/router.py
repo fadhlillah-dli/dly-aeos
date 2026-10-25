@@ -187,7 +187,8 @@ def get_review(review_id: str, principal: CurrentPrincipal, domain: ActiveDomain
     rec = db.scalar(select(ReviewRecord).where(ReviewRecord.id == review_id, _review_scope(db, principal, domain)))
     if rec is None:
         raise NotFound("review not found")
-    return review.review_view(rec)
+    # an immutable review record: its claims date from created_at; generated_at = when it was read
+    return {**review.review_view(rec), "source": "review_records", "generated_at": utcnow().isoformat()}
 
 
 class ManualResultIn(BaseModel):

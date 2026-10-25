@@ -85,7 +85,8 @@ def get_run(run_id: str, db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
     run = executor.get_run(db, run_id, viewer_domain=_viewer_domain(principal), scoped=True)
     out = _run_out(db, run)
     db.rollback()
-    return out
+    # "mode" stays the run's own mode; the envelope adds where the claim comes from and when it was read
+    return {**out, "source": "eval_runs + eval samples (trusted collector)", "generated_at": utcnow().isoformat()}
 
 
 @router.post("/api/eval/runs/{run_id}/start")
@@ -169,7 +170,8 @@ def plan_comparison(body: ComparisonIn, db: DB, principal: AdminPrincipal) -> di
 def get_comparison(proposal_id: str, db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
     out = service.comparison(db, proposal_id=proposal_id, domain=_viewer_domain(principal), scoped=True)
     db.rollback()
-    return out
+    return {**out, "source": "eval_runs (recorded results bound to the proposal)",
+            "generated_at": utcnow().isoformat(), "mode": "LIVE"}
 
 
 class WeightsIn(BaseModel):

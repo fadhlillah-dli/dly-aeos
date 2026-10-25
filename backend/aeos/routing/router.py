@@ -222,7 +222,9 @@ def get_route(route_key: str, db: DB, principal: CurrentPrincipal) -> dict[str, 
         for q in db.scalars(select(QuotaState).where(QuotaState.provider == r.provider))
     ]
     db.rollback()
-    return view
+    # checked_at = the route's last catalog/pricing check (null = never checked); generated_at = read time
+    return {**view, "source": "model_routes + decisions + quota_states",
+            "checked_at": _iso(r.pricing_checked_at), "generated_at": _iso(utcnow())}
 
 
 class TermsRecordBody(BaseModel):

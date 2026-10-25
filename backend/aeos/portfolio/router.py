@@ -171,7 +171,8 @@ def get_inventory(repository_id: str, principal: CurrentPrincipal, domain: Activ
     _project, repo = _scoped_repo(db, principal, domain, repository_id)
     return {"inventory": repo.inventory or None, "inventory_at": repo.inventory_at.isoformat() if repo.inventory_at
             else None, "commit": repo.inventory_commit, "source": "git ls-tree (read-only)",
-            "checked_at": repo.inventory_at.isoformat() if repo.inventory_at else None, "mode": "LIVE"}
+            "checked_at": repo.inventory_at.isoformat() if repo.inventory_at else None,
+            "generated_at": utcnow().isoformat(), "mode": "LIVE"}  # checked_at null = never inventoried
 
 
 # ---------------------------------------------------------------- integrations
