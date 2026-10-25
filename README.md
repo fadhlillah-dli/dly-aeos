@@ -124,7 +124,7 @@ Status per capability, with evidence level and what is still NOT-PROVEN, is trac
 | M1 Foundation | local auth, domain-first gateway, Control Center, inventory, mock labels | done (see coverage matrix) |
 | M2 Planning & Docs | native Claude bridge, Product 1 renderer, PERSONAL publisher | partial — real publication NOT-PROVEN |
 | M3 Workforce & self-build | sandbox + broker + OpenCode, verifier, live console | partial — container sandbox / OpenCode NOT-PROVEN |
-| M4 Delivery | CI/PR evidence, human-only merge/production enforcement | partial — branch protection NOT_ENFORCEABLE on GitHub Free |
+| M4 Delivery | CI/PR evidence, human-only merge/production enforcement | partial — ruleset on `main` configured (public repo on GitHub Free, ADR-0115); provider bypass test NOT-PROVEN; no deployment target |
 | M5 OFFICE | company-approved adapters/routes, isolated runtime | not started (default deny) |
 | M6 Optimization & Ops | arena/scorecards, SLO/runbook/restore/incident loop | partial (see coverage matrix) |
 
