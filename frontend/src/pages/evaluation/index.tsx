@@ -122,7 +122,13 @@ interface Run {
   created_at: string | null;
   is_baseline?: boolean;
   proposal_id?: string | null;
-  execution?: { status: string; note: string; fixtures?: string };
+  execution?: {
+    status: string;
+    note: string;
+    fixtures?: string;
+    /** §49 M6: how the run's tasks can execute - BROKER (worker route), EVAL_ONLY (ARENA: only tasks bound to this run), NONE */
+    serving?: { path: string; pool: string | null; reasons: string[]; note?: string };
+  };
 }
 
 interface ComparisonSide {
@@ -162,6 +168,22 @@ const EXECUTION_LABEL: Record<string, string> = {
   COLLECTING: "Mengumpulkan sampel",
   RECORDED: "Tercatat kolektor",
 };
+
+/** §49 M6 arena: the controlled execution path of a planned/running run, and why a start would be refused. */
+function ServingNote({ serving }: { serving: NonNullable<NonNullable<Run["execution"]>["serving"]> }) {
+  const blocked = serving.path === "NONE" || serving.reasons.length > 0;
+  const label = blocked
+    ? `Tidak dapat dieksekusi (${serving.pool ?? "rute tidak terdaftar"})`
+    : serving.path === "EVAL_ONLY"
+      ? `Rute ${serving.pool}: hanya task yang terikat run ini`
+      : "Rute worker lewat broker";
+  return (
+    <span className="mt-1 block" aria-label="Jalur eksekusi">
+      <StatusBadge status={blocked ? "BLOCKED" : serving.path === "EVAL_ONLY" ? "PENDING" : "CONFIGURED"} label={label} />
+      {blocked && <span className="block text-xs text-ink-3">{serving.reasons.join("; ")}</span>}
+    </span>
+  );
+}
 
 const entryKey = (e: RankEntry) => e.entry_key ?? e.configuration_hash;
 
@@ -648,6 +670,7 @@ export default function EvaluationPage() {
                             <span title={r.execution.note}>
                               {EXECUTION_LABEL[r.execution.status] ?? r.execution.status}
                               {r.execution.fixtures === "NOT_AVAILABLE_IN_BUILD" && <span className="block text-xs text-ink-3">Fixture held-out belum tersedia</span>}
+                              {r.execution.serving && <ServingNote serving={r.execution.serving} />}
                             </span>
                           ) : (
                             "—"

@@ -257,5 +257,43 @@ non-activatable for broker proxying. AEOS does not pick an option.
 * OpenCode Go and new free models in the S07 catalog (e.g. `flint-40b-free`) are not seeded; there is no OpenCode
   catalog discovery in this build. LongCat & co. stay seeded; `aeos routes refresh` marks them MISSING when
   `opencode models` no longer lists them.
-* EvalRun still cannot execute ARENA/COMPARATOR/LOCAL routes: the route view states `evaluation_path` NOT_WIRED
-  (DESIGN, NOT-PROVEN, §49 M6).
+* EvalRun still cannot execute COMPARATOR/LOCAL routes: the route view states `evaluation_path` NOT_WIRED
+  (DESIGN, NOT-PROVEN, §49 M6). ARENA routes are evaluated only through the eval-only path of the W6-141
+  amendment (ADR-0111; route view `evaluation_path` EVAL_ONLY, results on real routes NOT-PROVEN).
+
+### Amendment 2026-10-25 (wave 7, W6-008 / W6-114 / W6-120): system-change evidence bound to the change
+
+* **Evidence of exactly this change (§41/§43).** `policy.recording.system_change_evidence` (and the facade, additive
+  `change=`) binds every cited EvalRun to the decision's change: `target_hash` equal to the run's
+  `configuration_hash` (or `route_config_hash`), or `target_version` equal to the changed AIConfiguration field
+  (`catalog.SYSTEM_CHANGE_CONFIG_FIELDS`: policy -> `policy_version`, model/supervisor -> `model_id`/`model_version`,
+  route/fallback -> `provider_route`, prompt/instruction -> `prompt_revision`, tool set -> `tools` as a set,
+  harness -> `harness_version`, context strategy/retrieval/memory -> a `context_params` value). Hooks, tool schemas,
+  skills, schemas and agent definitions bind by the configuration hash only. UNKNOWN never binds. A run of another
+  configuration is refused `SYSTEM_CHANGE_EVIDENCE_UNRELATED`; a caller that states no change binds nothing.
+* **Supervisor stage-model pin (rollback of §02).** `planning_baseline/stage_models` needs, for every pinned model
+  id, a cited COMPLETED all-PASS run whose `model_id`/`model_version` is exactly that id (never a hash alone);
+  `planning.configured_stage_models` re-checks this live and ignores a pin whose evaluation is of another model.
+  The pin is recorded from the Decisions page ("Pin model supervisor per tahap") or
+  `aeos policy decide --kind POLICY --stage-model STAGE=ID --eval-run RUN --rollback-target ...`; other system
+  changes use `--target-version/--target-hash --eval-run --rollback-target`.
+* **The stated configuration is the executed one (review, wave 7).** An EvalRun whose AIConfiguration states another
+  `model_id`/`provider` than its registered route - or a `policy_version`/`prompt_revision`/`harness`/
+  `harness_version` other than the one the route is bound to (UNKNOWN states nothing) - never starts
+  (`EVAL_CONFIGURATION_MISMATCH`, `evaluation.executor.configuration_mismatches`; the Evaluation page shows the
+  reason before a start), so no run can carry a value that never ran into a binding. `context_params` are not
+  carried by the route and stay the run's stated configuration. Consequence, stated
+  in the Decisions page, the CLI help and every refused pin (`recording.SUPERVISOR_EVAL_PATH_NOTE`): this build has
+  **no evaluation path for a supervisor (Claude) model** - EvalRuns execute only on broker-served WORKER/ARENA routes
+  and the Claude Max supervisor is never served through the broker (§12) - so a stage-model pin stays refused and
+  planning keeps the baseline alias until a supervisor evaluation path exists (it needs owner-authored planning
+  evaluation fixtures, ADR-0060).
+* **Memory acceptance** binds its evaluation to the record: every collected sample of a cited run must have had
+  exactly this record in its executed worker context (`context_memory_ids`, derived by the evaluation collector from
+  the hash-checked context pack each attempt used); a run's stated `context_params` alone never bind (review, wave 7).
+  The Control Center memory tab accepts the EvalRun ids. Context packs carry ACCEPTED memory only, so no run can
+  evidence a proposed record in this build (`recording.MEMORY_EVAL_PATH_NOTE`, shown in the refusal and the memory
+  tab): that needs the owner-authored memory/retrieval fixture suite (ADR-0060, ADR-0081). Requiring EVALUATED
+  stays an owner decision.
+* **Unchanged (owner decision):** planning/review continue on a re-resolved supervisor version (protected
+  acceptance 1.31); the change is stated as NEEDS_EVALUATION / `supervisor_unevaluated`.

@@ -21,6 +21,8 @@ class RouteDecision:
     eligible: list[str]
     rejected: dict[str, list[str]] = field(default_factory=dict)  # route_key -> reasons
     reason: str = ""
+    # additive (wave 7): the RUNNING EvalRun whose exact route was selected for a TaskSpec bound to one of its slots
+    eval_run_id: str | None = None
 
 
 def eligible_routes(

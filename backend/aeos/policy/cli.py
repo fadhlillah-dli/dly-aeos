@@ -161,16 +161,30 @@ def decide_cmd(
                                       "'approved_worker_routes=route-a,route-b' (quoted: Windows PowerShell splits an "
                                       "unquoted comma); applies only with an ACTIVE company authorisation"),
     target_type: str = typer.Option(None), target_id: str = typer.Option(None),
+    target_version: str = typer.Option(None, help="System change: the new value the evaluation ran with "
+                                                  "(e.g. prompt revision, policy version, route key)"),
+    target_hash: str = typer.Option(None, help="Exact target hash (system change: the EvalRun configuration_hash)"),
+    eval_run: list[str] = typer.Option(None, "--eval-run", help="System change: COMPLETED all-PASS EvalRun id bound "
+                                                                "to this change (repeatable)"),
+    rollback_target: str = typer.Option(None, help="System change: the version/config/decision this replaces"),
+    stage_model: list[str] = typer.Option(None, "--stage-model", help="POLICY supervisor pin STAGE=exact-model-id "
+                                                                      "(repeatable; target planning_baseline/"
+                                                                      "stage_models; needs --eval-run of that model - "
+                                                                      "this build has no supervisor evaluation path, "
+                                                                      "so no such run exists yet)"),
     project: str = typer.Option(None, help="Project id (optional, must be in --domain)"),
 ) -> None:
-    """Record one human decision with the exact target shape its consumer reads (password confirms AUTH)."""
+    """Record one human decision with the exact target shape its consumer reads (password confirms AUTH).
+
+    A POLICY on a system-change target (policy/model/prompt/tools/hooks/memory/fallback/context/supervisor pin) needs
+    --eval-run (bound to the change: --target-version or --target-hash) and --rollback-target (master s41/s43)."""
     from datetime import timedelta
 
     from aeos.core.enums import Domain
     from aeos.core.errors import AeosError
     from aeos.core.timeutil import utcnow
     from aeos.models.portfolio import Project
-    from aeos.policy import recording
+    from aeos.policy import catalog, recording
     from aeos.policy.decisions import decision_view
 
     _ensure_db()
@@ -178,6 +192,26 @@ def decide_cmd(
         dom = Domain(domain.upper())
     except ValueError as exc:
         raise typer.BadParameter("--domain must be PERSONAL or OFFICE") from exc
+    details: dict[str, object] = {}
+    if stage_model:
+        if kind.upper() != "POLICY":
+            raise typer.BadParameter("--stage-model is a POLICY decision")
+        pin_type, pin_id = catalog.STAGE_MODEL_TARGET
+        if (target_type and target_type != pin_type) or (target_id and target_id != pin_id):
+            raise typer.BadParameter(f"--stage-model records the target {pin_type}/{pin_id}")
+        target_type, target_id = pin_type, pin_id
+        models: dict[str, str] = {}
+        for pair in stage_model:
+            stage, sep, model = pair.partition("=")
+            if not sep or not stage.strip() or not model.strip():
+                raise typer.BadParameter(f"--stage-model expects STAGE=model-id, got {pair!r}")
+            models[stage.strip().upper()] = model.strip()
+        details["models"] = models
+    if eval_run or rollback_target:
+        if kind.upper() != "POLICY":
+            raise typer.BadParameter("--eval-run/--rollback-target are system-change evidence of a POLICY decision")
+        details["system_change"] = {"eval_run_ids": [e.strip() for e in eval_run or [] if e.strip()],
+                                    "rollback_target": rollback_target or ""}
     auth_scope = _scope(scope) or {"recorded_via": "aeos policy decide", "kind": kind.upper()}
     overrides = _office_overrides(office_policy)
     password = typer.prompt(f"Password for {as_user} (confirms this human decision)", hide_input=True,
@@ -191,19 +225,26 @@ def decide_cmd(
                     raise typer.BadParameter("project not found in this domain")
             d = recording.record_generic_decision(
                 s, actor_user_id=uid, domain=dom, kind=kind.upper(), rationale=rationale, auth_scope=auth_scope,
-                project_id=project, target_type=target_type, target_id=target_id,
+                project_id=project, target_type=target_type, target_id=target_id, target_version=target_version,
+                target_hash=target_hash,
                 expires_at=(utcnow() + timedelta(days=days)) if days else None, provider=provider, enabled=enable,
                 office_authorization=office_authorization, company_reference=company_reference,
                 allowed_providers=allowed_provider or [], exception=exception, allow_bash=allow_bash,
                 office_policy=overrides or None, approved_targets=list(approved_target or []),
                 approved_data_classes=list(approved_data_class or []),
                 approved_identities=list(approved_identity or []),
+                details=details or None,
             )
             v = decision_view(s, d)
             console.print(f"Recorded {v['kind']} {v['id']} -> {v['target_type']}:{v['target_id']} "
                           f"status={v['status']} expires={v['expires_at'] or '-'}")
+            sc = (d.details or {}).get("system_change") or {}
+            if sc:
+                runs = ", ".join(f"{r.get('id')} ({r.get('binding')})" for r in sc.get("eval_runs") or []) or "-"
+                console.print(f"  system change: {sc.get('class')} evaluation={sc.get('evaluation')} runs={runs} "
+                              f"rollback={sc.get('rollback_target') or '-'}")
     except AeosError as exc:
-        typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
+        typer.secho(f"{exc.code}: {exc.message}".encode("ascii", "replace").decode(), fg="red", err=True)
         raise typer.Exit(1) from exc
 
 

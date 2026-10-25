@@ -159,7 +159,10 @@ def system_change(session: Session, rec: MemoryRecord, eval_run_ids: list[str] |
     """§41/§43 "prompt/memory ... tetap system change dengan eval/decision/rollback": accepted memory reaches model
     prompts (through context packs), so its acceptance records the rollback target - expiring this record, and the
     previously accepted record it supersedes - and the system-change evaluation: EVALUATED with completed,
-    all-gates-PASS evaluation runs, otherwise NOT_EVALUATED (stated, never implied)."""
+    all-gates-PASS evaluation runs bound to exactly this record (every collected sample had the record in its executed
+    worker context, ``context_memory_ids``; a run's stated ``context_params`` alone or any other run is
+    SYSTEM_CHANGE_EVIDENCE_UNRELATED), otherwise NOT_EVALUATED (stated, never implied). Context packs carry ACCEPTED
+    memory only, so no run can evidence a proposed record in this build (``policy.recording.MEMORY_EVAL_PATH_NOTE``)."""
     prov = rec.provenance or {}
     previous = prov.get("supersedes")
     rollback_target = f"memory_record:{previous}" if previous else f"expire memory_record:{rec.id} (no previous record)"
@@ -169,7 +172,9 @@ def system_change(session: Session, rec: MemoryRecord, eval_run_ids: list[str] |
         from aeos.policy import facade as policy
 
         out = policy.system_change_evidence(session, domain=rec.domain, eval_run_ids=list(eval_run_ids),
-                                     rollback_target=rollback_target)
+                                            rollback_target=rollback_target,
+                                            change={"target_type": "memory_record", "target_id": rec.id,
+                                                    "target_version": None, "target_hash": _hash(rec)})
         return {**out, "class": "MEMORY", "rollback": rollback}
     return {"class": "MEMORY", "evaluation": "NOT_EVALUATED", "eval_runs": [], "rollback_target": rollback_target,
             "rollback": rollback,

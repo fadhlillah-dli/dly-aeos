@@ -23,7 +23,7 @@ Nothing here claims a capability works unless a listed test or the Doctor proves
 | M3 Workforce & self-build | sandbox + broker + OpenCode, verifier, live console | PARTIAL | process sandbox WEAK, container containment NOT-PROVEN (Docker absent), OpenCode live NOT-PROVEN |
 | M4 Delivery | CI/PR evidence, human-only merge/production enforcement | PARTIAL | branch protection NOT_ENFORCEABLE on GitHub Free (ADR-0063); no deployment target |
 | M5 Office | Atlassian adapters, Office policy | BLOCKED | company authorisation + MCI content required (§23, §51) |
-| M6 Optimization & Ops | arena/scorecards, SLO/runbook/restore/incident loop | PARTIAL | restore test + incident/retirement records + error budget implemented; eval runs on real routes NOT-PROVEN; arena/comparator/local evaluation is DESIGN / NOT-PROVEN (EvalRun cannot execute those pools; route view `evaluation_path` = NOT_WIRED) - their only execution path is the one-prompt feasibility probe (ADR-0111), which says whether a route answers, not how well |
+| M6 Optimization & Ops | arena/scorecards, SLO/runbook/restore/incident loop | PARTIAL | restore test + incident/retirement records + error budget implemented; ARENA eval-only execution path (eval-scoped broker grant, `tests/unit/test_evaluation_arena_path.py`; route view `evaluation_path` = EVAL_ONLY) and verifier-baseline critical regressions built (ADR-0081/0111 amendments); eval runs on real routes and repeated experiments NOT-PROVEN (owner fixtures, ADR-0060); comparator/local evaluation is DESIGN / NOT-PROVEN (EvalRun cannot execute those pools; route view `evaluation_path` = NOT_WIRED) - their only execution path is the one-prompt feasibility probe (ADR-0111), which says whether a route answers, not how well |
 
 ## Sections
 

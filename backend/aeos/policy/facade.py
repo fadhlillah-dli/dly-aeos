@@ -169,12 +169,17 @@ def decision_record_fields() -> tuple[str, ...]:
 
 
 def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids: Any,
-                           rollback_target: Any) -> dict[str, Any]:
+                           rollback_target: Any, change: dict[str, Any] | None = None) -> dict[str, Any]:
     """§41/§43: validate the evaluation runs (COMPLETED, every gate PASS, this domain or the platform) and the
-    rollback target of a system change; raises ValidationFailed (SYSTEM_CHANGE_EVIDENCE_REQUIRED) otherwise."""
+    rollback target of a system change; raises ValidationFailed (SYSTEM_CHANGE_EVIDENCE_REQUIRED) otherwise.
+
+    ``change`` (additive, 2026-10-25): the change the runs must be evidence of - ``{"target_type", "target_id",
+    "target_version", "target_hash"}`` (+ ``models`` for a stage-model pin). Each run must be bound to it (its
+    configuration hash, or the changed AIConfiguration field carrying the new value); otherwise
+    SYSTEM_CHANGE_EVIDENCE_UNRELATED. Without ``change`` no run can be bound (fail closed)."""
     from aeos.policy.recording import system_change_evidence as impl
 
-    return impl(session, domain=domain, eval_run_ids=eval_run_ids, rollback_target=rollback_target)
+    return impl(session, domain=domain, eval_run_ids=eval_run_ids, rollback_target=rollback_target, change=change)
 
 
 def write_enablement(session: Session, provider: str, *, domain: str) -> dict[str, Any]:

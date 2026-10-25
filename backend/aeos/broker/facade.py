@@ -23,6 +23,11 @@ SERVED_POOLS: tuple[str, ...] = ("WORKER",)
 # Pools whose feasibility the owner can test through the controlled probe (additive, ADR-0111): one synthetic
 # PUBLIC request on a free, TRIAL/APPROVED (hash-bound human decision) PERSONAL route; evidence only.
 PROBE_POOLS: tuple[str, ...] = ("ARENA", "COMPARATOR", "LOCAL", "WORKER")
+# Pools served ONLY to a TaskSpec bound to a RUNNING EvalRun of exactly that route (additive, wave 7, §49 M6 "model
+# arena"): the MODEL_PROXY grant carries the evaluation scope (``scope["eval"]``) and the proxy re-checks it on every
+# request through ``evaluation.facade.eval_serving`` (PERSONAL, TRIAL/APPROVED hash-bound, free, terms-eligible -
+# the probe's checks), so an ARENA route never serves an ordinary task and never a paid request.
+EVAL_POOLS: tuple[str, ...] = ("ARENA",)
 
 # Upstream request shape (additive, ADR-0041 amendment 2026-10-25). The broker speaks the OpenAI chat-completions
 # API only (``<endpoint>/chat/completions``); a route whose provider documents another API for the model

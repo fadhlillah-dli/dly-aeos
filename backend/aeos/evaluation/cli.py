@@ -104,7 +104,7 @@ def _run_action(action: str, run_id: str, as_user: str, **kw) -> None:
                 run = executor.finish_run(s, run_id, actor_user_id=uid, reason=kw["reason"])
                 typer.echo(f"{run.id} -> {run.status} (unexecuted slots recorded as CANCELLED)")
     except AeosError as exc:
-        typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
+        typer.secho(_ascii(f"{exc.code}: {exc.message}"), fg="red", err=True)
         raise typer.Exit(1) from exc
 
 

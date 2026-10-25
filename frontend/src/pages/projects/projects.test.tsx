@@ -409,6 +409,48 @@ describe("MemoryPanel system change (§41/§43)", () => {
     expect(within(box).queryByText("System change dievaluasi")).toBeNull();
     expect(within(box).getByText(/expire memory_record:m1/)).toBeInTheDocument();
   });
+
+  it("lets the owner cite the system-change evaluation runs when accepting memory (W6-120)", async () => {
+    auth.domain = "PERSONAL";
+    const { MemoryPanel, parseIds } = await import("./MemoryPanel");
+    expect(parseIds(" r1, r2  r3 ")).toEqual(["r1", "r2", "r3"]);
+    const proposed = {
+      id: "m2", project_id: "p1", scope: "PROJECT", content: "Laporan memakai UTC", provenance: { source_type: "human_statement" },
+      classification: "INTERNAL", status: "PROPOSED", auth_decision_id: null, expires_at: null, superseded_by: null, created_at: "2026-10-25T00:00:00Z",
+      system_change: null,
+    };
+    const fn = mockFetch((url) => (url === "/api/projects/p1/memory" ? { items: [proposed] } : { memory: proposed }));
+    vi.spyOn(window, "prompt").mockReturnValue("evaluasi memori selesai");
+    const project = { id: "p1", domain: "PERSONAL", data_classification: "INTERNAL" } as unknown as import("./types").ProjectView;
+    wrap(<MemoryPanel project={project} isAdmin={true} />);
+    fireEvent.change(await screen.findByLabelText(/ID EvalRun system-change/), { target: { value: "run-a, run-b" } });
+    // stated, never implied: a proposed record cannot reach a worker's context in this build
+    expect(screen.getByText(/Context pack hanya memuat memori ACCEPTED/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Terima" }));
+    await waitFor(() => expect(fn.mock.calls.some(([u]) => String(u) === "/api/memory/m2/accept")).toBe(true));
+    const call = fn.mock.calls.find(([u]) => String(u) === "/api/memory/m2/accept")!;
+    expect(JSON.parse(String(call[1]!.body))).toEqual({ rationale: "evaluasi memori selesai", eval_run_ids: ["run-a", "run-b"] });
+    vi.restoreAllMocks();
+  });
+
+  it("accepts memory without evaluation runs as before (stated NOT_EVALUATED by the backend)", async () => {
+    auth.domain = "PERSONAL";
+    const { MemoryPanel } = await import("./MemoryPanel");
+    const proposed = {
+      id: "m3", project_id: "p1", scope: "PROJECT", content: "Zona waktu Asia/Jakarta", provenance: { source_type: "human_statement" },
+      classification: "INTERNAL", status: "PROPOSED", auth_decision_id: null, expires_at: null, superseded_by: null, created_at: "2026-10-25T00:00:00Z",
+      system_change: null,
+    };
+    const fn = mockFetch((url) => (url === "/api/projects/p1/memory" ? { items: [proposed] } : { memory: proposed }));
+    vi.spyOn(window, "prompt").mockReturnValue("fakta sudah diterima");
+    const project = { id: "p1", domain: "PERSONAL", data_classification: "INTERNAL" } as unknown as import("./types").ProjectView;
+    wrap(<MemoryPanel project={project} isAdmin={true} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Terima" }));
+    await waitFor(() => expect(fn.mock.calls.some(([u]) => String(u) === "/api/memory/m3/accept")).toBe(true));
+    const call = fn.mock.calls.find(([u]) => String(u) === "/api/memory/m3/accept")!;
+    expect(JSON.parse(String(call[1]!.body))).toEqual({ rationale: "fakta sudah diterima" });
+    vi.restoreAllMocks();
+  });
 });
 
 describe("SearchPanel status honesty", () => {

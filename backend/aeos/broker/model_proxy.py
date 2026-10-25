@@ -403,7 +403,8 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
             _deny(s, grant, "CAP_EXCEEDED", "request cap exhausted")
             raise ProxyError(403, "CAP_EXCEEDED", "request cap for this run is exhausted")
         try:
-            upstream = resolve_upstream(s, models[exposed], domain=grant.domain, project_id=grant.project_id)
+            upstream = resolve_upstream(s, models[exposed], domain=grant.domain, project_id=grant.project_id,
+                                        pools=_eval_pools(s, grant, models[exposed]))
         except ProxyError as exc:
             _deny(s, grant, exc.code, exc.message, commit=False)
             s.commit()
@@ -438,6 +439,22 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
         s.add(req)
         s.commit()
         return Prepared(grant.id, grant.run_id, grant.project_id, grant.domain, exposed, upstream, out, req.id, stream)
+
+
+def _eval_pools(s: Any, grant: CapabilityGrant, route_key: str) -> tuple[str, ...] | None:
+    """The pools this request may be served from. Ordinary grants: ``SERVED_POOLS`` (None = default). A grant issued
+    with an evaluation scope (``grants.EVAL_SCOPE_KEY``) for *route_key* additionally serves that route's eval-only pool
+    - only while its TaskSpec is still bound to the same RUNNING, servable evaluation (re-checked per request; the
+    run stopping, the binding becoming invalid, the route's decision/price/terms changing refuse the next request)."""
+    from aeos.broker.facade import EVAL_POOLS, SERVED_POOLS
+
+    ev = (grant.scope or {}).get(grants.EVAL_SCOPE_KEY)
+    if not isinstance(ev, dict) or ev.get("route_key") != route_key:
+        return None
+    current, problem = grants.eval_scope(s, run_id=grant.run_id, route_key=route_key)
+    if current is None or current.get("eval_run_id") != ev.get("eval_run_id"):
+        raise ProxyError(403, "EVAL_SCOPE_INVALID", problem or "the task is bound to another evaluation now")
+    return tuple(SERVED_POOLS) + tuple(EVAL_POOLS)
 
 
 def _deny(s: Any, grant: CapabilityGrant, code: str, message: str, *, commit: bool = True) -> None:

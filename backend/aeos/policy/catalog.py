@@ -102,11 +102,53 @@ SYSTEM_CHANGE_TARGET_TYPES = frozenset({
 })
 
 
+def normalize_target_type(target_type: str | None) -> str:
+    """Case, ``-``, spaces, dots and slashes -> ``_`` (``Tool-Schema`` == ``tool_schema``)."""
+    return re.sub(r"[^a-z0-9]+", "_", str(target_type or "").strip().lower()).strip("_")
+
+
 def system_change_target(target_type: str | None) -> bool:
     """Whether a decision target is a §41/§43 system change. The spelling is normalised (case, ``-``, spaces, dots,
     slashes -> ``_``) so a variant such as ``Tool-Schema`` never records an unevaluated system change."""
-    norm = re.sub(r"[^a-z0-9]+", "_", str(target_type or "").strip().lower()).strip("_")
-    return norm in SYSTEM_CHANGE_TARGET_TYPES
+    return normalize_target_type(target_type) in SYSTEM_CHANGE_TARGET_TYPES
+
+
+# §41/§43 "evidence of exactly this change": how a cited EvalRun is bound to the change it is evidence of
+# (``recording.system_change_evidence``). Any system change binds by its exact evaluated configuration:
+# ``target_hash`` equal to the run's ``configuration_hash`` (or its ``route_config_hash``). Where the §43
+# AIConfiguration has a field for the changed value, ``target_version`` naming the new value binds a run whose
+# configuration carries exactly that value. A target type without such a field (hooks, tool schemas, skills, agent
+# definitions, schemas) binds by the configuration hash only. A run that is not bound to the change is refused
+# (SYSTEM_CHANGE_EVIDENCE_UNRELATED): an unrelated suite or configuration never counts as evaluation.
+SYSTEM_CHANGE_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
+    "policy": ("policy_version",), "policy_rule": ("policy_version",), "agent_policy": ("policy_version",),
+    "model": ("model_id", "model_version"), "model_id": ("model_id", "model_version"),
+    "supervisor": ("model_id", "model_version"),
+    # route-like changes: target_version = the route key the change adopts (the run evaluated exactly that route)
+    "model_route": ("provider_route",), "route": ("provider_route",), "fallback": ("provider_route",),
+    "fallback_chain": ("provider_route",),
+    "prompt": ("prompt_revision",), "prompt_revision": ("prompt_revision",), "instruction": ("prompt_revision",),
+    "instructions": ("prompt_revision",),
+    # target_version = the full tool set (comma separated), compared as a set
+    "tool_set": ("tools",), "tools": ("tools",),
+    "harness": ("harness_version",),
+    # target_version = a value the evaluated context parameters carry (e.g. {"strategy": "rag-v2"})
+    "context_strategy": ("context_params",), "retrieval": ("context_params",), "memory": ("context_params",),
+    "memory_policy": ("context_params",),
+}
+# Targets bound by their own identity rather than a new value in target_version. Memory acceptance
+# (aeos.knowledge.memory): every collected sample of the run had exactly this record (target_id) in its executed
+# worker context (collector ``context_memory_ids``); stated context parameters alone never bind (review, wave 7).
+IDENTITY_BOUND_TARGETS = frozenset({"memory_record"})
+# §15 supervisor stage-model pin (read by planning.configured_stage_models): every pinned model id
+# (details.models) needs a cited run of exactly that model (configuration model_id/model_version) - never a hash.
+STAGE_MODEL_TARGET: tuple[str, str] = ("planning_baseline", "stage_models")
+
+
+def is_stage_model_pin(target_type: str | None, target_id: str | None) -> bool:
+    norm = normalize_target_type(target_type)
+    return norm == "stage_models" or (norm == STAGE_MODEL_TARGET[0] and str(target_id or "").strip()
+                                      == STAGE_MODEL_TARGET[1])
 # Kinds a human may record through the generic decision endpoint. APPROVAL/REJECTION/REVISION are
 # recorded only through the plan decision endpoint, bound to an exact PlanVersion + hash.
 GENERIC_DECISION_KINDS: tuple[str, ...] = ("EXCEPTION", "RISK_ACCEPTANCE", "WRITE_ENABLEMENT", "POLICY", "BUDGET")

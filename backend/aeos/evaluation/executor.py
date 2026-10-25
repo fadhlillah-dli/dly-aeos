@@ -96,6 +96,20 @@ def start_run(session: Session, run_id: str, *, actor_user_id: str, viewer_domai
     if compute_config_hash(route) != run.route_config_hash:
         raise Conflict("the route configuration changed since the run was planned: plan a new run",
                        code="ROUTE_CONFIG_CHANGED")
+    mismatches = configuration_mismatches(run, route)
+    if mismatches:
+        # §43 "konfigurasi yang dievaluasi persis": the results would be labelled with a model/provider that never
+        # ran - and a system-change decision citing them (bound by the stated configuration) would be evidence of it
+        raise Conflict("the run's AIConfiguration does not describe the route it would execute: "
+                       + "; ".join(mismatches) + " - plan a run that states exactly what the route runs (model_id, "
+                       "provider; policy/prompt/harness as bound on the route, or UNKNOWN)",
+                       code="EVAL_CONFIGURATION_MISMATCH", details={"mismatches": mismatches})
+    serving = serving_view(session, run)
+    if serving["path"] == "NONE" or serving["reasons"]:
+        # §49 M6: an evaluation whose tasks could never execute is refused with its reason instead of collecting
+        # nothing (ARENA: the eval-only path's checks; COMPARATOR/LOCAL/WATCHLIST: no controlled path in this build)
+        raise Conflict(f"this evaluation cannot execute on route {run.route_key} ({serving['pool']}): "
+                       + "; ".join(serving["reasons"]), code="EVAL_ROUTE_NOT_SERVED", details=serving)
     run.status = "RUNNING"
     run.started_at = utcnow()
     run.bindings = []
@@ -105,6 +119,147 @@ def start_run(session: Session, run_id: str, *, actor_user_id: str, viewer_domai
     events.emit(session, source="evaluation", kind="eval.run.started", entity_type="eval_run", entity_id=run.id,
                 domain=run.submitted_domain, payload={"slots": len(slots(session, run))})
     return run
+
+
+# Always compared with the registered route the run executes on.
+CONFIGURATION_ROUTE_FIELDS = ("model_id", "provider")
+# Compared when the run states a value (not UNKNOWN) and the route records one: the route's bound policy version,
+# prompt revision and harness are what its tasks run with (routing refuses a route whose binding drifted from the
+# runtime; the executor refuses a harness version drift), so a different stated value never ran.
+STATED_ROUTE_FIELDS = ("policy_version", "prompt_revision", "harness", "harness_version")
+
+
+def configuration_mismatches(run: EvalRun, route: Any) -> list[str]:
+    """Fields where the run's stated AIConfiguration differs from the registered route it executes on (empty = it
+    describes that route). The collector records samples under the stated configuration, and
+    ``policy.recording.system_change_evidence`` binds a decision to it (a stage-model pin to ``model_id``, a prompt
+    change to ``prompt_revision``, ...), so a run stating a value its route does not run is never started
+    (``EVAL_CONFIGURATION_MISMATCH``)."""
+    cfg = run.configuration if isinstance(run.configuration, dict) else {}
+    out = [f"{k} {cfg.get(k)!r} != route {getattr(route, k)!r}" for k in CONFIGURATION_ROUTE_FIELDS
+           if cfg.get(k) != getattr(route, k)]
+    for k in STATED_ROUTE_FIELDS:
+        stated, actual = cfg.get(k), getattr(route, k, None)
+        if isinstance(stated, str) and stated.strip() and stated != "UNKNOWN" and actual not in (None, "") \
+                and stated != actual:
+            out.append(f"{k} {stated!r} != route {actual!r}")
+    return out
+
+
+def _served_pools() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(pools the broker serves for ordinary tasks, pools it serves only to tasks of a RUNNING evaluation)."""
+    try:
+        from aeos.broker.facade import EVAL_POOLS, SERVED_POOLS
+    except ImportError:  # pragma: no cover - broker is part of the platform; fail closed: nothing eval-only
+        return ("WORKER",), ()
+    return tuple(SERVED_POOLS), tuple(EVAL_POOLS)
+
+
+def eval_only_problems(session: Session, run: EvalRun, route: Any, *, domain: str | None = None,
+                       data_classification: str | None = None) -> list[str]:
+    """Why an eval-only (ARENA) route may not serve this evaluation (empty = it may). The feasibility probe's checks
+    (ADR-0111) applied to a controlled evaluation: PERSONAL only (OFFICE stays default deny, §23); TRIAL/APPROVED on an
+    ACTIVE human decision bound to the route's current configuration hash; free (an eval-only route has no budget
+    path - no silent paid spend, §42); the workload's data classification allowed by the route's terms (§40)."""
+    from aeos.evaluation import definitions as D
+    from aeos.routing.service import is_effectively_free, route_use_problem, terms_eligibility
+
+    problems: list[str] = []
+    if (domain or run.submitted_domain or "PERSONAL") != "PERSONAL" or run.submitted_domain not in (None, "PERSONAL"):
+        problems.append("an eval-only route serves PERSONAL evaluations only; OFFICE stays default deny (§23)")
+    if "PERSONAL" not in (route.eligible_domains or []):
+        problems.append(f"route {route.route_key} is not eligible for PERSONAL")
+    if route.status not in ("TRIAL", "APPROVED"):
+        problems.append(f"route status {route.status}: an eval-only route needs a human TRIAL/APPROVED decision")
+    else:
+        use = route_use_problem(session, route)
+        if use:
+            problems.append(use)
+    if not is_effectively_free(route):
+        problems.append(f"route is not free (is_free={route.is_free}, free_until={route.free_until}): an eval-only "
+                        "route has no budget path")
+    cls = data_classification or D.suite_data_classification(run.suite_key)
+    problems += [f"terms: {r}" for r in terms_eligibility(route, data_classification=cls)]
+    return problems
+
+
+def serving_view(session: Session, run: EvalRun) -> dict[str, Any]:
+    """How the run's tasks can execute (§49 M6 "model arena"): BROKER (ordinary worker route), EVAL_ONLY (an ARENA
+    route, served only to TaskSpecs bound to this RUNNING run through the eval-scoped broker grant) or NONE (no
+    controlled execution path for this pool in this build) - with the reasons a start would be refused."""
+    from aeos.models.routing import ModelRoute
+
+    served, eval_only = _served_pools()
+    route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == run.route_key)) if run.route_key else None
+    if route is None:
+        return {"path": "NONE", "pool": None, "reasons": ["the evaluated route is not registered"]}
+    # a run stating another model/provider than its route never starts (start_run EVAL_CONFIGURATION_MISMATCH)
+    stated = [f"configuration {m}: the run would not evaluate the configuration it states"
+              for m in configuration_mismatches(run, route)]
+    if route.pool in served:
+        return {"path": "BROKER", "pool": route.pool, "reasons": stated}
+    if route.pool in eval_only:
+        return {"path": "EVAL_ONLY", "pool": route.pool, "reasons": stated + eval_only_problems(session, run, route),
+                "note": "Hanya TaskSpec yang terikat ke slot EvalRun RUNNING ini yang dilayani route ini "
+                        "(grant broker ber-scope evaluasi); tanpa fallback, tanpa biaya."}
+    return {"path": "NONE", "pool": route.pool,
+            "reasons": [f"pool {route.pool} has no controlled execution path in this build (served: "
+                        f"{', '.join(served)}; evaluation only: {', '.join(eval_only) or '-'})"]}
+
+
+def eval_binding(session: Session, task_id: str) -> tuple[EvalRun, dict[str, Any]] | None:
+    """The RUNNING evaluation (and slot binding) a TaskSpec fills, if any (a task fills at most one slot)."""
+    for run in session.scalars(select(EvalRun).where(EvalRun.status == "RUNNING")):
+        for b in run.bindings or []:
+            if b.get("task_id") == task_id:
+                return run, b
+    return None
+
+
+def eval_serving(session: Session, *, task: Any, route_key: str | None = None) -> dict[str, Any]:
+    """How a TaskSpec bound to a RUNNING evaluation is served (§43 "konfigurasi yang dievaluasi persis"):
+
+    * ``NOT_BOUND`` - not part of a running evaluation: ordinary routing applies;
+    * ``SERVED`` - runs on exactly the evaluated route (never ranked, never a fallback); for an eval-only (ARENA) route
+      this is the only way it serves anything (eval-scoped grant, ``eval_only_problems`` re-checked per request);
+    * ``REFUSED`` - bound, but the evaluated route cannot serve it now (reasons). Running it elsewhere would only make
+      the sample INVALID, so the caller refuses instead (fail closed)."""
+    from aeos.models.routing import ModelRoute
+
+    found = eval_binding(session, task.id)
+    if found is None:
+        return {"status": "NOT_BOUND"}
+    run, binding = found
+    out: dict[str, Any] = {"eval_run_id": run.id, "slot_id": binding.get("slot_id"), "route_key": run.route_key,
+                           "pool": None}
+    reasons: list[str] = []
+    if binding.get("invalid"):
+        reasons.append(f"the slot binding is invalid: {binding['invalid']}")
+    if route_key is not None and route_key != run.route_key:
+        reasons.append(f"route {route_key} is not the evaluated route {run.route_key}")
+    route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == run.route_key)) if run.route_key else None
+    if route is None:
+        reasons.append(f"the evaluated route {run.route_key} is not registered")
+    else:
+        out["pool"] = route.pool
+        changed = route_changed_since_start(session, run)
+        if changed:
+            reasons.append(changed)
+        served, eval_only = _served_pools()
+        task_pool = str((task.model_route_policy or {}).get("pool") or "WORKER") \
+            if isinstance(task.model_route_policy, dict) else "WORKER"
+        if route.pool in eval_only:
+            if task_pool != "WORKER" and task_pool != route.pool:
+                # a LOCAL-only task never leaves for a remote eval-only route
+                reasons.append(f"the task asks for pool {task_pool}; an eval-only {route.pool} route serves "
+                               "WORKER-pool evaluation tasks only")
+            reasons += eval_only_problems(session, run, route, domain=task.domain,
+                                          data_classification=task.data_classification)
+        elif route.pool not in served:
+            reasons.append(f"pool {route.pool} has no controlled execution path in this build")
+        elif task_pool != route.pool:
+            reasons.append(f"the task asks for pool {task_pool}, the evaluated route is {route.pool}")
+    return {**out, "status": "REFUSED" if reasons else "SERVED", "reasons": reasons}
 
 
 def route_changed_since_start(session: Session, run: EvalRun) -> str | None:
@@ -182,9 +337,72 @@ def _seconds(a: Any, b: Any) -> float | None:
 
 
 # §44 measures no trusted record produces yet (coordination tokens between agents, merge conflicts, adjacent
-# regressions): reported as unknown on every collected sample, never counted as zero.
+# regressions): reported as unknown on every collected sample, never counted as zero. Adjacent regressions in
+# particular: the verifier's baseline check does not split regressed trusted tests into critical/adjacent, so every
+# baseline regression is counted critical (conservative) and the adjacent count stays unknown.
 UNDERIVED_FIELDS = ("coordination_tokens", "merge_conflicts", "adjacent_regressions")
 CONTRADICTED_REPORT = ("FAIL",)
+VERIFIER_ORIGIN = "verifier"
+
+
+def _report_content(ev: Any) -> dict[str, Any]:
+    """The report's full JSON when its stored bytes still match the hash, else its inline summary (as the verifier's
+    own ``report_refs`` reads it)."""
+    try:
+        from aeos.verification import facade as verification
+
+        full = verification.read_json(ev)
+    except (ImportError, AttributeError):  # verification unavailable: only the recorded inline summary
+        full = None
+    if full is not None:
+        return full
+    inline = (ev.inline or {}).get("content")
+    return inline if isinstance(inline, dict) else {}
+
+
+def derive_regressions(session: Session, impl: list[Any]) -> tuple[int | None, dict[str, int | None]]:
+    """§34 "Baseline ditetapkan sebelum perubahan; critical regression tidak ditebus skor agregat" from canonical
+    records only: the independent verifier's baseline check (trusted acceptance tests that pass on the recorded base
+    commit and fail on the head, ``VERIFICATION_REPORT.regressions``) of every verified implementation attempt.
+    A regression of any attempt counts - a later repair does not redeem it - as distinct tests across attempts.
+
+    Returns (count, {attempt: count|None}). The count is None (unknown, never a zero) when no attempt was verified,
+    or when a verified attempt has no trusted report / its baseline check did not run and no attempt proved a
+    regression. A review that did not argue a non-regression dimension is *not* a regression (it is the separate
+    review-coverage measure ``non_regression_unargued``)."""
+    from aeos.models.evidence import EvidenceArtifact
+
+    regressed: set[str] = set()
+    per_attempt: dict[str, int | None] = {}
+    unknown = False
+    verified = 0
+    for r in impl:
+        ev = session.scalar(select(EvidenceArtifact).where(
+            EvidenceArtifact.run_id == r.id, EvidenceArtifact.kind == "VERIFICATION_REPORT",
+            EvidenceArtifact.origin == VERIFIER_ORIGIN, EvidenceArtifact.trusted.is_(True))
+            .order_by(EvidenceArtifact.created_at.desc()).limit(1))
+        if ev is None:
+            if r.verifier_status:  # the run carries a verifier status but no trusted report: not provable
+                unknown = True
+                per_attempt[str(r.attempt)] = None
+            continue
+        verified += 1
+        report = _report_content(ev)
+        baseline = str((((report.get("checks") or {}).get("baseline")) or {}).get("status") or "").upper()
+        tests = sorted({t for t in report.get("regressions") or [] if isinstance(t, str) and t})
+        if tests:
+            regressed.update(tests)
+            per_attempt[str(r.attempt)] = len(tests)
+        elif baseline == "PASS":
+            per_attempt[str(r.attempt)] = 0
+        else:  # baseline NOT_RUN/UNKNOWN (or FAIL without the list): no claim either way
+            unknown = True
+            per_attempt[str(r.attempt)] = None
+    if regressed:
+        return len(regressed), per_attempt
+    if unknown or not verified:
+        return None, per_attempt
+    return 0, per_attempt
 
 
 def derive_tool_failures(session: Session, impl: list[Any]) -> int | None:
@@ -202,6 +420,34 @@ def derive_tool_failures(session: Session, impl: list[Any]) -> int | None:
                        if (ev.payload or {}).get("kind") == "tool_error")
     bad_reports = sum(1 for r in impl if ((r.caps or {}).get("worker_report") or {}).get("schema_errors"))
     return failed_tools + bad_reports
+
+
+def derive_context_memory_ids(session: Session, impl: list[Any]) -> list[str] | None:
+    """Memory record ids that actually reached the task's worker context: the memory items of the task-scoped
+    ContextPack each attempt used (worker_runtime records it in ``caps.context_pack``; the pack must still have the
+    hash it was used with). None when no attempt records its context pack. A system-change evaluation of a memory
+    record binds to this executed context, never to the run's stated ``context_params`` alone."""
+    from aeos.models.research import ContextPack
+
+    ids: set[str] = set()
+    recorded = False
+    for r in impl:
+        info = (r.caps or {}).get("context_pack") if isinstance(r.caps, dict) else None
+        if not isinstance(info, dict):
+            continue
+        recorded = True
+        if not info.get("used") or not info.get("pack_id"):
+            continue
+        pack = session.get(ContextPack, str(info["pack_id"]))
+        if pack is None or pack.task_id != r.task_id or (info.get("pack_hash") and pack.pack_hash != info["pack_hash"]):
+            continue  # not provably the context this attempt received
+        for item in pack.items or []:
+            if not isinstance(item, dict):
+                continue
+            ref = str(item.get("ref") or "")
+            if item.get("kind") == "memory" and ref.startswith("memory:"):
+                ids.add(ref.split(":", 1)[1])
+    return sorted(ids) if recorded else None
 
 
 def derive_false_claims(impl: list[Any]) -> int | None:
@@ -285,6 +531,9 @@ def derive_sample(session: Session, run: EvalRun, binding: dict[str, Any]) -> tu
     prompt_tokens = [int(r.prompt_tokens or 0) for r in requests if r.prompt_tokens is not None]
     false_claims = derive_false_claims(impl)
     tool_failures = derive_tool_failures(session, impl)
+    regressions, regressions_by_attempt = derive_regressions(session, impl)
+    # §34 review coverage (not a regression): non-regression dimensions a high-impact review did not argue
+    unargued = sum(1 for x in reasons if "non-regression" in x.lower()) if acc is not None else None
     first_started = next((r.started_at for r in impl if r.started_at), None)
     finished = next((r.finished_at for r in reversed(impl) if r.finished_at), None)
     sample: dict[str, Any] = {
@@ -305,7 +554,13 @@ def derive_sample(session: Session, run: EvalRun, binding: dict[str, Any]) -> tu
         + sum(1 for r in impl if r.outcome_code == "SCOPE_VIOLATION"),
         "security_violations": sum(1 for r in impl if r.quarantined)
         + sum(1 for x in reasons if "security review" in x.lower()),
-        "critical_regressions": sum(1 for x in reasons if "non-regression" in x.lower()),
+        # §34 critical regressions: the verifier's baseline regressions of the task's verified attempts
+        "critical_regressions": regressions,
+        "regressions_by_attempt": regressions_by_attempt,
+        "non_regression_unargued": unargued,
+        # §41/§43 memory as a system change: the memory records that reached the worker's context (executed, not
+        # stated); None = no attempt recorded its context pack
+        "context_memory_ids": derive_context_memory_ids(session, impl),
         "claude_review_count": sum(1 for r in reviews if r.reviewer_kind == "CLAUDE"),
         "human_interventions": sum(1 for r in reviews if r.reviewer_kind == "HUMAN") + int(bool(te.extra_attempts)),
         "quota_delay_s": None,
@@ -318,7 +573,9 @@ def derive_sample(session: Session, run: EvalRun, binding: dict[str, Any]) -> tu
         # Not produced by any trusted record in this build: stated as unknown, never counted as zero.
         "unknown_fields": [*(["false_claims"] if false_claims is None else []),
                            *([] if prompt_tokens else ["context_tokens"]),
-                           *(["tool_failures"] if tool_failures is None else []), *UNDERIVED_FIELDS],
+                           *(["tool_failures"] if tool_failures is None else []),
+                           *(["critical_regressions"] if regressions is None else []),
+                           *(["non_regression_unargued"] if unargued is None else []), *UNDERIVED_FIELDS],
     }
     if binding.get("quality"):
         sample["quality"] = dict(binding["quality"])
@@ -366,6 +623,14 @@ def collect(session: Session, run_id: str, *, viewer_domain: str | None = None, 
     if grader:
         raise Conflict(f"{grader}: the result is never recorded with changed graders; restore the reviewed "
                        "evaluation code (special review) and plan a new run", code="GRADER_CHANGED")
+    from aeos.models.routing import ModelRoute
+
+    route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == run.route_key)) if run.route_key else None
+    mismatches = configuration_mismatches(run, route) if route is not None else []
+    if mismatches:  # a run started before start_run checked this: its samples would carry a configuration never run
+        raise Conflict("the run's AIConfiguration does not describe the route it executed: " + "; ".join(mismatches)
+                       + " - stop it (aeos eval finish) and plan a run that states exactly what the route runs",
+                       code="EVAL_CONFIGURATION_MISMATCH", details={"mismatches": mismatches})
     all_slots = slots(session, run)
     by_slot = {b["slot_id"]: b for b in run.bindings or []}
     collected: list[dict[str, Any]] = []
