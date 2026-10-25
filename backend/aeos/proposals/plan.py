@@ -5,7 +5,8 @@ operates the result, and - for REPLACE/UPGRADE - the cutover order, retirement p
 recovery and the restore-tested backup. Those *bound* keys are part of the candidate hash, so changing
 them after a decision re-binds every authority (§40 "authority terkait harus dinilai ulang").
 
-Execution progress recorded later (REMOVE closure per item, canary evidence) is kept in the same record
+Execution progress recorded later (REMOVE closure per item, REPLACE/UPGRADE credential revocation per secret
+reference, canary evidence) is kept in the same record
 but outside the hash: it documents what was done under the decision, it does not change what was approved.
 Nothing here installs, activates or decides anything.
 """
@@ -22,7 +23,7 @@ from aeos.models.evidence import EvidenceArtifact
 from aeos.models.research import ChangeProposal, EvalSuite
 
 BOUND_KEYS = ("acceptance", "replacement", "canary", "operations_owner")
-PROGRESS_KEYS = ("removal", "canary_evidence_ids")
+PROGRESS_KEYS = ("removal", "credentials", "canary_evidence_ids")
 CLOSURE_STATUSES = ("OPEN", "CLOSED", "WAIVED")
 MAX_CRITERIA = 20
 
@@ -141,6 +142,25 @@ def _canary(raw: Any) -> dict[str, Any] | None:
     return out
 
 
+def _closure(session: Session, p: ChangeProposal, raw: Any, *, key: str, known: set[str]) -> dict[str, Any]:
+    """Per-item progress (OPEN/CLOSED/WAIVED + note + trusted evidence) for the items of the current plan only."""
+    if not isinstance(raw, dict):
+        raise ValidationFailed(f"{key} must map item ids to {{status, note, evidence_id}}")
+    out = dict((p.owner_plan or {}).get(key) or {})
+    for item_id, rec in raw.items():
+        if item_id not in known:
+            raise ValidationFailed(f"{key} item {item_id!r} is not part of the current plan")
+        if not isinstance(rec, dict) or rec.get("status") not in CLOSURE_STATUSES:
+            raise ValidationFailed(f"{key}[{item_id}].status must be one of {CLOSURE_STATUSES}")
+        entry: dict[str, Any] = {"status": rec["status"], "note": _text(rec.get("note"), 1000, f"{key}.note")}
+        if rec["status"] == "WAIVED" and len(entry["note"]) < 5:
+            raise ValidationFailed(f"{key}[{item_id}]: a WAIVED item needs the owner's reason (note)")
+        if rec.get("evidence_id"):
+            entry["evidence_id"] = _trusted_any(session, p, str(rec["evidence_id"]))
+        out[item_id] = entry
+    return out
+
+
 def _removal(session: Session, p: ChangeProposal, raw: Any) -> dict[str, Any]:
     from aeos.proposals import review as R
 
@@ -150,19 +170,19 @@ def _removal(session: Session, p: ChangeProposal, raw: Any) -> dict[str, Any]:
         raise ValidationFailed("removal must map item ids to {status, note, evidence_id}")
     baseline, _bh, _x = R.compute_baseline(session, p)
     known = {i["id"] for i in (R.removal_plan(p, baseline) or {}).get("items", [])}
-    out = dict((p.owner_plan or {}).get("removal") or {})
-    for item_id, rec in raw.items():
-        if item_id not in known:
-            raise ValidationFailed(f"removal item {item_id!r} is not part of the current removal plan")
-        if not isinstance(rec, dict) or rec.get("status") not in CLOSURE_STATUSES:
-            raise ValidationFailed(f"removal[{item_id}].status must be one of {CLOSURE_STATUSES}")
-        entry: dict[str, Any] = {"status": rec["status"], "note": _text(rec.get("note"), 1000, "removal.note")}
-        if rec["status"] == "WAIVED" and len(entry["note"]) < 5:
-            raise ValidationFailed(f"removal[{item_id}]: a WAIVED item needs the owner's reason (note)")
-        if rec.get("evidence_id"):
-            entry["evidence_id"] = _trusted_any(session, p, str(rec["evidence_id"]))
-        out[item_id] = entry
-    return out
+    return _closure(session, p, raw, key="removal", known=known)
+
+
+def _credentials(session: Session, p: ChangeProposal, raw: Any) -> dict[str, Any]:
+    """§40 W6-201: the owner's record of revoking (CLOSED) or keeping (WAIVED, with the reason) each secret
+    reference of the replaced component - after the consumers moved; AEOS itself revokes nothing."""
+    from aeos.proposals import review as R
+
+    if p.kind not in R.CREDENTIAL_KINDS:
+        raise ValidationFailed("credential revocation progress applies to REPLACE/UPGRADE proposals")
+    baseline, _bh, _x = R.compute_baseline(session, p)
+    known = {i["id"] for i in (R.credential_revocation(p, baseline) or {}).get("items", [])}
+    return _closure(session, p, raw, key="credentials", known=known)
 
 
 def normalise(session: Session, p: ChangeProposal, patch: dict[str, Any]) -> dict[str, Any]:
@@ -173,7 +193,7 @@ def normalise(session: Session, p: ChangeProposal, patch: dict[str, Any]) -> dic
         raise ValidationFailed("unknown plan keys", details={"unknown": unknown,
                                                               "allowed": [*BOUND_KEYS, *PROGRESS_KEYS]})
     plan = dict(p.owner_plan or {})
-    for key in ("acceptance", "replacement", "removal", "canary_evidence_ids"):
+    for key in ("acceptance", "replacement", "removal", "credentials", "canary_evidence_ids"):
         if key in patch and patch[key] is None:
             plan.pop(key, None)
             patch = {k: v for k, v in patch.items() if k != key}
@@ -202,6 +222,8 @@ def normalise(session: Session, p: ChangeProposal, patch: dict[str, Any]) -> dic
             plan.pop("operations_owner", None)
     if "removal" in patch:
         plan["removal"] = _removal(session, p, patch["removal"])
+    if "credentials" in patch:
+        plan["credentials"] = _credentials(session, p, patch["credentials"])
     if "canary_evidence_ids" in patch:
         ids = patch["canary_evidence_ids"]
         if not isinstance(ids, list):
@@ -221,7 +243,7 @@ def update(session: Session, p: ChangeProposal, patch: dict[str, Any], *, actor_
 
     if p.parent_id:
         raise Conflict("the plan belongs to the parent proposal")
-    if p.status in service.OUTCOME_FINAL and set(patch) - {"removal", "canary_evidence_ids"}:
+    if p.status in service.OUTCOME_FINAL and set(patch) - set(PROGRESS_KEYS):
         raise Conflict(f"outcome already recorded ({p.status}); open a new proposal")
     if p.kind == "COMPARE":
         raise Conflict("COMPARE proposals have no trial/implementation plan")

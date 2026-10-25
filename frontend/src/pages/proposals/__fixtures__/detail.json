@@ -422,6 +422,25 @@
       ]
     },
     "removal_plan": null,
+    "credential_revocation": {
+      "items": [
+        {
+          "id": "credential:workers/openrouter",
+          "kind": "credential",
+          "item": "Cabut credential ref workers/openrouter setelah consumer sah dipindahkan: cabut/rotasi di konsol provider, lalu 'aeos secrets delete workers/openrouter --yes'",
+          "secret_ref": "workers/openrouter",
+          "shared_with": [],
+          "status": "OPEN",
+          "note": "",
+          "evidence_id": null
+        }
+      ],
+      "open": [
+        "credential:workers/openrouter"
+      ],
+      "status": "OPEN",
+      "rule": "Progres, bukan gate: catat CLOSED setelah ref dicabut (sesudah cutover, boleh setelah ACCEPTED) atau WAIVED dengan alasan; review dan AEOS tidak pernah mencabut apa pun."
+    },
     "upgrade_delta": null,
     "security_privacy": {
       "status": "UNKNOWN",

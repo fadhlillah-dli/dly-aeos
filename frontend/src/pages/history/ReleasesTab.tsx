@@ -16,6 +16,9 @@ export function UiCorrespondence({ ui }: { ui: ReleaseRow["ui"] }) {
     <span className="inline-flex flex-col gap-0.5">
       <OpsBadge status={corr === "MISMATCH" ? "FAILED" : corr} label={label} />
       {corr !== "VERIFIED" && ui.reason && <span className="text-xs text-ink-3">{ui.reason}</span>}
+      {corr !== "VERIFIED" && ui.unverified_allowed_by && (
+        <span className="text-xs text-ink-3">{`Dipasang atas pilihan pemilik (--allow-unverified-ui, ${ui.unverified_allowed_by})`}</span>
+      )}
     </span>
   );
 }

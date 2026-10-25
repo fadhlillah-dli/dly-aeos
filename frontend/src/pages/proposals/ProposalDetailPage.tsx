@@ -386,6 +386,12 @@ export default function ProposalDetailPage() {
               <RemovalClosure p={p} items={pkg.removal_plan.items} isAdmin={isAdmin} />
             </Card>
           )}
+          {pkg.credential_revocation && pkg.credential_revocation.items.length > 0 && (
+            <Card title="Pencabutan credential komponen lama (progres, bukan gate; tidak mengubah candidate hash)">
+              <p className="text-xs text-ink-3">{pkg.credential_revocation.rule}</p>
+              <RemovalClosure p={p} items={pkg.credential_revocation.items} isAdmin={isAdmin} planKey="credentials" />
+            </Card>
+          )}
           <OwnerPlanCard p={p} isAdmin={isAdmin} />
           <CostSection pkg={pkg} />
           <ClaudeSection pkg={pkg} />

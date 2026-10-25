@@ -95,6 +95,74 @@ def test_release_list_shows_the_ui_correspondence(settings, bundles, personal_cl
     assert api["1.0.0-unverified"]["ui"]["commit_correspondence"] == "UNVERIFIED"
 
 
+def _main_repo(tmp_path: Path) -> Path:
+    r = tmp_path / "main-repo"
+    (r / "backend" / "aeos").mkdir(parents=True)
+    (r / "backend" / "aeos" / "__init__.py").write_text('__version__ = "9.9.9"\nSCHEMA_VERSION = "1"\n', encoding="utf-8")
+    (r / "frontend" / "src").mkdir(parents=True)
+    (r / "frontend" / "src" / "main.ts").write_text("export const v = 1;\n", encoding="utf-8")
+    (r / ".gitignore").write_text("frontend/dist/\n", encoding="utf-8")
+    _git(r.parent, "init", "-q", "-b", "main", str(r))
+    _git(r, "-c", "user.email=t@example.com", "-c", "user.name=t", "add", "-A")
+    _git(r, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "release base")
+    (r / "frontend" / "dist").mkdir()
+    (r / "frontend" / "dist" / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    return r
+
+
+def test_build_refuses_an_unverified_bundle_unless_the_owner_allows_it(settings, personal_client, db, tmp_path):
+    """W6-030 fail closed: a Control Center bundle not proven to come from the release commit (no build record /
+    dirty tree) refuses the build before anything is written; the owner's explicit --allow-unverified-ui pins it
+    with that choice recorded in the provenance and the audit. A VERIFIED bundle builds without the flag."""
+    from sqlalchemy import select
+
+    from aeos.core.errors import Blocked
+    from aeos.models.audit import AuditEvent
+    from tests.acceptance.world import owner_id
+
+    repo = _main_repo(tmp_path)
+    commit = _git(repo, "rev-parse", "HEAD")
+    release.record_acceptance_exception(db, commit=commit, operator_user_id=owner_id(db),
+                                        reason="unit test: no provider CI for this local repository")
+    db.commit()
+    with pytest.raises(Blocked) as exc:
+        release.build_release(settings, repo=repo, session=db)
+    assert exc.value.code == "RELEASE_UI_UNVERIFIED" and "no build record" in str(exc.value)
+    assert not list(settings.layout.released_controller.glob("*.zip"))  # refused before anything was written
+
+    r = CliRunner().invoke(ops_cli.app, ["release", "build", "--repo", str(repo)])
+    assert r.exit_code == 1 and "RELEASE_UI_UNVERIFIED" in r.output and "--allow-unverified-ui" in r.output
+
+    prov = release.build_release(settings, repo=repo, session=db, builder="owner-cli", allow_unverified_ui=True)
+    db.commit()
+    assert prov["ui"]["commit_correspondence"] == "UNVERIFIED" and prov["ui"]["unverified_allowed_by"] == "owner-cli"
+    assert "pinned by owner choice (--allow-unverified-ui, owner-cli)" in ops_cli._ui_line(prov["ui"])
+    listed = next(i for i in release.list_releases(settings)["items"] if i["release_id"] == prov["release_id"])
+    assert listed["ui"]["unverified_allowed_by"] == "owner-cli"
+    audit = db.scalar(select(AuditEvent).where(AuditEvent.action == "ops.release.build"))
+    assert audit.details["ui_commit_correspondence"] == "UNVERIFIED" and audit.details["ui_unverified_allowed"] is True
+
+    (repo / "frontend" / "dist" / "aeos-build.json").write_text(json.dumps(
+        {"schema": 1, "frontend_tree": _git(repo, "rev-parse", "HEAD:frontend"), "clean": True, "head": commit}),
+        encoding="utf-8")
+    assert release.ui_correspondence(repo, commit, repo / "frontend" / "dist")[0] == "VERIFIED"
+
+
+def test_build_with_a_verified_bundle_needs_no_flag(settings, personal_client, db, tmp_path):
+    from tests.acceptance.world import owner_id
+
+    repo = _main_repo(tmp_path)
+    commit = _git(repo, "rev-parse", "HEAD")
+    (repo / "frontend" / "dist" / "aeos-build.json").write_text(json.dumps(
+        {"schema": 1, "frontend_tree": _git(repo, "rev-parse", "HEAD:frontend"), "clean": True, "head": commit}),
+        encoding="utf-8")
+    release.record_acceptance_exception(db, commit=commit, operator_user_id=owner_id(db),
+                                        reason="unit test: no provider CI for this local repository")
+    db.commit()
+    prov = release.build_release(settings, repo=repo, session=db)
+    assert prov["ui"]["commit_correspondence"] == "VERIFIED" and "unverified_allowed_by" not in prov["ui"]
+
+
 def test_old_provenance_without_a_correspondence_is_unverified_not_assumed(settings):
     _write_provenance(settings, "0.9.0-legacy", {"artifact": "x.ui.zip", "sha256": "u" * 64})
     item = release.list_releases(settings)["items"][0]

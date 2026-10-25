@@ -82,6 +82,8 @@ class PlanIn(BaseModel):
     canary: dict[str, Any] | None = None
     operations_owner: str | None = Field(default=None, max_length=128)
     removal: dict[str, Any] | None = None
+    # §40 W6-201 REPLACE/UPGRADE: per secret reference, revoked (CLOSED) or kept (WAIVED + reason); progress only
+    credentials: dict[str, Any] | None = None
     canary_evidence_ids: list[str] | None = Field(default=None, max_length=50)
 
 

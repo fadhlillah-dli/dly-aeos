@@ -35,7 +35,12 @@ SUPER_ADMIN account.
    zip, the pinned UI bundle (`frontend/dist`, run `npm run build` first in a clean checkout of that
    commit) and `<release>.provenance.json` (commit, tree hash, artifact SHA-256, UI SHA-256 and UI
    commit correspondence, schema head, acceptance basis, built_at, builder). The build prints
-   `ui bundle: <sha> (commit correspondence VERIFIED)`, or UNVERIFIED with the reason.
+   `ui bundle: <sha> (commit correspondence VERIFIED)`. A bundle whose correspondence is UNVERIFIED
+   (no `dist/aeos-build.json`, or built from a frontend tree with uncommitted changes) refuses the
+   build with `RELEASE_UI_UNVERIFIED`: rebuild the frontend in a clean checkout of the commit. Only
+   as an explicit owner choice, `--allow-unverified-ui` pins it anyway; that choice is recorded in
+   the provenance (`ui.unverified_allowed_by`) and the audit. A bundle from another tree always
+   refuses (`RELEASE_UI_MISMATCH`).
 3. **Review** `aeos ops release list` (integrity must be OK; `ui=` should be VERIFIED - an
    UNVERIFIED bundle means the approval UI was not proven to come from this commit).
 4. **Promote**: `aeos ops release promote <release_id> --operator <your-username> --reason "..."`
@@ -88,7 +93,8 @@ SUPER_ADMIN account.
 
 * The promoted artifact is a source archive run with the checkout's virtual environment. The UI
   bundle is pinned by hash when the release is built; that it was built from the released commit
-  is VERIFIED only through the Vite build record of a clean frontend tree, otherwise UNVERIFIED.
+  is VERIFIED only through the Vite build record of a clean frontend tree, otherwise UNVERIFIED
+  (refused at build unless the owner passes `--allow-unverified-ui`).
 * No release has been built or promoted on the build host yet (NOT-PROVEN).
 * The smoke test proves the app factory starts, serves `/api/health` and a functional path against
   a migrated copy of the database; it does not prove every feature works (run the test suite / CI).

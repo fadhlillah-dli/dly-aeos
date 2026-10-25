@@ -133,6 +133,8 @@ export interface ReleaseRow {
     commit_correspondence: "VERIFIED" | "UNVERIFIED" | "MISMATCH" | string;
     reason: string | null;
     frontend_tree: string | null;
+    /** set when the owner pinned an UNVERIFIED bundle with --allow-unverified-ui (who built it). */
+    unverified_allowed_by?: string | null;
   } | null;
 }
 

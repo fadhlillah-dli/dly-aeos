@@ -350,7 +350,7 @@ describe("RepositoriesPanel joined repository view (§37)", () => {
               { provider: "github-actions", integration_id: "i-ci", configuration: "CONFIGURED", pipeline_url: "https://github.com/octo/view/actions", pipeline_url_basis: "repository full_name" },
               { provider: "bitbucket-pipelines", integration_id: "i-ci2", configuration: "CONFIGURED", pipeline_url: null, pipeline_url_basis: null },
             ],
-            ci_latest: { evidence_id: "ev-ci", commit: "abcdef1234567890", overall: "PASS", checked_at: new Date().toISOString(), runs: 2, url: "https://github.com/octo/view/actions/runs/42/job/7" },
+            ci_latest: { evidence_id: "ev-ci", commit: "abcdef1234567890", overall: "PASS", checked_at: new Date().toISOString(), runs: 2, url: "https://github.com/octo/view/actions/runs/42/job/7", integrity: "VERIFIED", mode: "DEMO" },
             docs_targets: [
               { provider: "google-drive", root_id: "1AbCdEfGh", integration_id: "i-docs", target_url: "https://drive.google.com/drive/folders/1AbCdEfGh" },
               { provider: "confluence", root_id: "998877", integration_id: "i-conf", target_url: "javascript:alert(1)" },
@@ -387,6 +387,8 @@ describe("RepositoriesPanel joined repository view (§37)", () => {
     expect(within(section).getByText(/tanpa tautan pipeline/)).toBeInTheDocument();
     expect(within(section).getByRole("link", { name: /abcdef123456/ })).toHaveAttribute("href", "https://github.com/octo/view/actions/runs/42/job/7");
     expect(within(within(section).getByTestId("ci-latest")).getByText("Lulus")).toBeInTheDocument();
+    // a DEMO/MOCK record is labelled, never shown as a real provider run
+    expect(within(within(section).getByTestId("ci-latest")).getByText("DEMO (fixture)")).toBeInTheDocument();
     expect(within(section).getByRole("link", { name: /1AbCdEfGh/ })).toHaveAttribute("href", "https://drive.google.com/drive/folders/1AbCdEfGh");
     expect(within(section).queryByRole("link", { name: /998877/ })).toBeNull();
     expect(within(section).getByText("998877")).toBeInTheDocument();

@@ -18,7 +18,7 @@ describe("Releases tab (§09 zones, W6-030)", () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({
       items: [
         { ...row, release_id: "1.0.0-verified", ui: { sha256: "u".repeat(64), commit_correspondence: "VERIFIED", reason: null, frontend_tree: "f".repeat(40) } },
-        { ...row, release_id: "1.0.0-unverified", ui: { sha256: "v".repeat(64), commit_correspondence: "UNVERIFIED", reason: "built from a frontend tree with uncommitted changes", frontend_tree: null } },
+        { ...row, release_id: "1.0.0-unverified", ui: { sha256: "v".repeat(64), commit_correspondence: "UNVERIFIED", reason: "built from a frontend tree with uncommitted changes", frontend_tree: null, unverified_allowed_by: "owner" } },
         { ...row, release_id: "1.0.0-noui", ui: null },
       ],
       active: null, previous: null, history: [], notice: "Promote/rollback hanya lewat CLI lokal.",
@@ -28,6 +28,8 @@ describe("Releases tab (§09 zones, W6-030)", () => {
     expect(await screen.findByText("UI = commit (terverifikasi)")).toBeInTheDocument();
     expect(screen.getByText("UI belum terverifikasi")).toBeInTheDocument();
     expect(screen.getByText("built from a frontend tree with uncommitted changes")).toBeInTheDocument();
+    // the owner's explicit --allow-unverified-ui is shown, never hidden behind the badge
+    expect(screen.getByText("Dipasang atas pilihan pemilik (--allow-unverified-ui, owner)")).toBeInTheDocument();
     expect(screen.getByText("Tanpa bundle UI")).toBeInTheDocument();
     expect(screen.getByText("Bundle UI")).toBeInTheDocument();
   });

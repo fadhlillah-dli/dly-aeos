@@ -243,6 +243,10 @@ def backup_retention(
 def release_build(
     ref: str = typer.Option("HEAD", help="Commit/ref to release (must be on main)"),
     repo: str = typer.Option("", help="Repository path (default: this checkout)"),
+    allow_unverified_ui: bool = typer.Option(
+        False, "--allow-unverified-ui",
+        help="Owner choice: pin a Control Center bundle whose commit correspondence is UNVERIFIED (no build record "
+             "or a dirty frontend tree). Recorded in the provenance and the audit. Default: refuse."),
 ) -> None:
     """Build a release artifact (git archive of a clean, human-merged main commit) with provenance."""
     from pathlib import Path
@@ -254,7 +258,7 @@ def release_build(
     try:
         with session_scope() as s:
             prov = release.build_release(settings, repo=Path(repo) if repo else None, ref=ref,
-                                         builder=_local_actor(), session=s)
+                                         builder=_local_actor(), session=s, allow_unverified_ui=allow_unverified_ui)
     except AeosError as exc:
         _fail(exc)
     _echo(f"Release {prov['release_id']}{' (already built)' if prov.get('already_built') else ''}")
@@ -274,7 +278,10 @@ def _ui_line(ui: dict[str, Any] | None) -> str:
     corr = ui.get("commit_correspondence") or "UNVERIFIED"
     reason = (ui.get("correspondence") or {}).get("reason")
     line = f"{ui.get('sha256') or '-'} (commit correspondence {corr}"
-    return line + (f": {reason})" if reason and corr != "VERIFIED" else ")")
+    line += f": {reason})" if reason and corr != "VERIFIED" else ")"
+    if corr != "VERIFIED" and ui.get("unverified_allowed_by"):
+        line += f" pinned by owner choice (--allow-unverified-ui, {ui['unverified_allowed_by']})"
+    return line
 
 
 @release_app.command("accept")

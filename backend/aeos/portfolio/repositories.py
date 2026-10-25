@@ -654,14 +654,16 @@ def ci_pipeline_link(repo: RepositoryReference, integ: Any) -> tuple[str | None,
 def latest_ci_observation(session: Session, repo: RepositoryReference) -> dict[str, Any] | None:
     """The latest provider-CI observation recorded for this repository (``CI_STATUS`` evidence from the check-runs /
     commit-status API, written when AEOS syncs a pull request): commit, overall result and the first https run
-    link the provider returned. None = nothing recorded yet (never inferred)."""
+    link the provider returned. Only trusted provider-CI evidence counts (the same rule as the delivery CI gate);
+    its data mode is carried so a DEMO/MOCK record is labelled. None = nothing recorded yet (never inferred)."""
     from aeos.models.evidence import EvidenceArtifact
     from aeos.verification import facade as verification
 
     rows = session.scalars(select(EvidenceArtifact).where(EvidenceArtifact.project_id == repo.project_id,
                                                           EvidenceArtifact.kind == "CI_STATUS",
-                                                          EvidenceArtifact.origin == "provider-ci")
-                           .order_by(EvidenceArtifact.created_at.desc()).limit(50))
+                                                          EvidenceArtifact.origin == "provider-ci",
+                                                          EvidenceArtifact.trusted.is_(True))
+                           .order_by(EvidenceArtifact.created_at.desc()).limit(200))
     for ev in rows:
         env = ev.environment or {}
         if env.get("repo") != repo.full_name:
@@ -672,7 +674,7 @@ def latest_ci_observation(session: Session, repo: RepositoryReference) -> dict[s
         return {"evidence_id": ev.id, "commit": env.get("commit"), "overall": content.get("overall") or "UNKNOWN",
                 "checked_at": env.get("checked_at") or (ev.created_at.isoformat() if ev.created_at else None),
                 "runs": len(runs), "url": urls[0] if urls else None,
-                "integrity": "VERIFIED" if content else "UNVERIFIED"}
+                "integrity": "VERIFIED" if content else "UNVERIFIED", "mode": ev.mode or "LIVE"}
     return None
 
 

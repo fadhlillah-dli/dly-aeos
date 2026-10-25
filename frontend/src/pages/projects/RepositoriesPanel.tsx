@@ -104,6 +104,9 @@ export function RepositoryLinks({ repoId }: { repoId: string }) {
                           return <StatusBadge status={status} label={label} />;
                         })()}
                         {d.ci_latest.checked_at && <Freshness at={d.ci_latest.checked_at} />}
+                        {d.ci_latest.mode && d.ci_latest.mode !== "LIVE" && (
+                          <StatusBadge status={d.ci_latest.mode} label={d.ci_latest.mode === "DEMO" ? "DEMO (fixture)" : d.ci_latest.mode} />
+                        )}
                       </span>
                     ) : (
                       <span className="text-xs text-ink-3">Belum ada hasil CI tercatat (disinkronkan saat PR AEOS di-sync)</span>

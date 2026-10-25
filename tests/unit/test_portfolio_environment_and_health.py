@@ -191,6 +191,18 @@ def test_repository_view_links_ci_pipeline_latest_run_and_docs_folder(personal_c
     latest = personal_client.get(f"/api/repositories/{rid}").json()["repository"]["ci_latest"]
     assert latest["commit"] == sha and latest["overall"] == "PASS" and latest["runs"] == 2
     assert latest["url"] == "https://github.com/octo/links/actions/runs/42/job/7"  # https only, never javascript:
+    assert latest["mode"] == "LIVE" and latest["integrity"] == "VERIFIED"
+
+    # a newer CI_STATUS row that is not trusted (the delivery CI gate ignores it too) never becomes "the latest run"
+    from aeos.core.hashing import content_hash
+    from aeos.models.evidence import EvidenceArtifact
+
+    db.add(EvidenceArtifact(project_id=project.id, domain=project.domain, kind="CI_STATUS", origin="provider-ci",
+                            collector_identity="forged", trusted=False, content_hash=content_hash({"overall": "PASS"}),
+                            evidence_level="E0", claim="forged", subject_type="commit", subject_id="c" * 40,
+                            environment={"commit": "c" * 40, "repo": "octo/links"}))
+    db.commit()
+    assert personal_client.get(f"/api/repositories/{rid}").json()["repository"]["ci_latest"]["commit"] == sha
 
 
 def test_ci_link_is_never_guessed_across_hosts():

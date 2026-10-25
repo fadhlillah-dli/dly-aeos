@@ -1474,7 +1474,8 @@ def proposal_view(session: Session, p: ChangeProposal, *, detail: bool = False) 
 
         dups = list(session.scalars(select(ChangeProposal).where(ChangeProposal.duplicate_of == p.id,
                                                                  ChangeProposal.domain == p.domain)))
-        package = dict(p.review_package or {})
+        # progress recorded after the review (REMOVE closure, credential revocation) is shown as it stands now
+        package = R.apply_progress(p, dict(p.review_package or {}))
         if package.get("human_decision"):
             package["human_decision"] = {**package["human_decision"], "allowed_now": R.allowed_actions(p)}
         cp = checkpoint.current(p)

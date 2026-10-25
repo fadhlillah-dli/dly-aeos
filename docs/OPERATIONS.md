@@ -56,7 +56,7 @@ Office archives on company-approved storage only.
 
 | Command | What it does |
 |---|---|
-| `aeos ops release build [--ref HEAD]` | `git archive` of a clean commit reachable from `main` **that is accepted** (trusted provider-CI PASS for that exact commit, or an owner EXCEPTION decision) → zip + provenance (commit, tree hash, artifact SHA-256, schema head, acceptance basis, built_at, builder) + pinned UI bundle (`frontend/dist` zipped with its own SHA-256). The UI's commit correspondence is recorded and printed: VERIFIED when the Vite build record (`dist/aeos-build.json`) names a clean frontend tree equal to `git rev-parse <commit>:frontend`; a bundle from another tree refuses the build (RELEASE_UI_MISMATCH); no record or a dirty frontend tree stays UNVERIFIED (still pinned, shown with its reason) |
+| `aeos ops release build [--ref HEAD]` | `git archive` of a clean commit reachable from `main` **that is accepted** (trusted provider-CI PASS for that exact commit, or an owner EXCEPTION decision) → zip + provenance (commit, tree hash, artifact SHA-256, schema head, acceptance basis, built_at, builder) + pinned UI bundle (`frontend/dist` zipped with its own SHA-256). The UI's commit correspondence is recorded and printed: VERIFIED when the Vite build record (`dist/aeos-build.json`) names a clean frontend tree equal to `git rev-parse <commit>:frontend`; a bundle from another tree refuses the build (RELEASE_UI_MISMATCH); no record or a dirty frontend tree is UNVERIFIED and refuses the build (RELEASE_UI_UNVERIFIED) unless the owner passes `--allow-unverified-ui` (recorded in the provenance and the audit, shown with its reason) |
 | `aeos ops release accept --commit <sha> --operator <admin> --reason "..."` | human-only EXCEPTION decision bound to one exact commit, used when trusted CI PASS is not available |
 | `aeos ops release list` | releases with integrity, ACTIVE/PREVIOUS role and `ui=VERIFIED/UNVERIFIED/NONE` (the recorded UI commit correspondence, with the reason when not VERIFIED; also in the Control Center, History > Releases) |
 | `aeos ops release promote <id> --operator <admin>` | decision (bound to artifact hash, UI hash, runtime-config hash) → compatibility (migration head vs DB) → pre-promote backup + restore test → smoke test in a subprocess on a temp loopback port against a DB copy (health, then functional: temporary admin in the copy, login, explicit PERSONAL, doctor RUNTIME run, capabilities, projects) → live migration only if required (server stopped) → `ACTIVE.json` (previous kept, config hash recorded) |
@@ -304,7 +304,8 @@ invalidates route approvals bound to the old configuration hash (`PROMPT_REVISIO
 * The released controller artifact is a source archive run with the checkout's virtual environment
   (third-party packages are pinned by `requirements.lock`, not bundled). The UI bundle is pinned by
   hash at build time; that it was built from the released commit is VERIFIED only through the Vite
-  build record of its clean source tree, otherwise it stays UNVERIFIED (shown per release). No release
+  build record of its clean source tree; an UNVERIFIED bundle is pinned only by the owner's explicit
+  `--allow-unverified-ui` (shown per release). No release
   has been built or promoted on the build host yet (NOT-PROVEN). Releases built
   before acceptance gating show acceptance UNKNOWN at promotion.
 * Backups are not encrypted by AEOS; encryption at rest/off-machine copies are owner decisions.
