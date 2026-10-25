@@ -52,6 +52,10 @@ git config --global user.email "your-github-noreply@users.noreply.github.com"   
 ./scripts/bootstrap.sh
 ```
 
+`Permission denied` on `./scripts/bootstrap.sh` means the executable bit was lost (ZIP download,
+copy from another disk). Run `sh scripts/bootstrap.sh` instead; it re-runs itself under bash and
+sets the bit on `./aeos` and `./scripts/dev.sh` again.
+
 `node@22` is keg-only in Homebrew; if `node --version` is not found, follow brew's hint
 (`echo 'export PATH="/opt/homebrew/opt/node@22/bin:$PATH"' >> ~/.zprofile`) and open a new terminal.
 

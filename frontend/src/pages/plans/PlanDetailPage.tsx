@@ -92,6 +92,7 @@ export default function PlanDetailPage() {
         source="plans, plan_versions, planning_runs, planning_artifacts, decisions"
         checkedAt={plan.checked_at ?? null}
         evidenceLimit={plan.evidence_limit}
+        relatedDecisionsHref="/decisions?target_type=plan_version"
         mode={mode}
         actions={
           <>

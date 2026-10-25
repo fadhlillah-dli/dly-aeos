@@ -158,6 +158,90 @@ def release_candidate(
         session.close()
 
 
+@app.command("screenshot")
+def screenshot(
+    project_id: str = typer.Argument(..., help="Project UUID (its domain is the project's own, never inferred)"),
+    environment: str = typer.Option(..., "--environment", help="staging | production (registered deployment target)"),
+    commit: str = typer.Option(..., "--commit", help="Git SHA the target must report on its health endpoint"),
+    route: list[str] = typer.Option(..., "--route", help="Same-origin path to capture, e.g. / (repeatable)"),
+    viewport: str = typer.Option("desktop", "--viewport", help="desktop (1440x900) | mobile (390x844)"),
+) -> None:
+    """Capture pages of the running app as trusted SCREENSHOT evidence (section 29).
+
+    Observe-only: one health GET proves the commit first, then one headless browser GET per route. A page
+    showing a credential pattern or personal data is refused and nothing is stored.
+    """
+    from aeos.core.errors import AeosError
+    from aeos.docs_engine.screenshots import capture_screenshots
+    from aeos.models.portfolio import Project
+
+    session = _session()
+    try:
+        project = session.get(Project, project_id)
+        if project is None:
+            _echo(f"project {project_id} not found")
+            raise typer.Exit(2)
+        try:
+            out = capture_screenshots(session, project, environment=environment, commit=commit, routes=route,
+                                      actor="local-operator", actor_type="cli", viewport=viewport)
+            session.commit()
+        except AeosError as exc:
+            session.rollback()
+            _echo(f"screenshot refused: {exc.code}: {exc.message}")
+            remedy = (exc.details or {}).get("remedy")
+            if remedy:
+                _echo(f"  remedy: {remedy}")
+            raise typer.Exit(1) from exc
+        for item in out:
+            _echo(f"{item['route']}: evidence {item['evidence_id']} ({item['environment']}, commit "
+                  f"{item['commit'][:12]}, {item['viewport']})")
+    finally:
+        session.close()
+
+
+@app.command("register-pt-report")
+def register_pt_report_cmd(
+    project_id: str = typer.Argument(..., help="Project UUID (the report's domain is the project's own)"),
+    attachment: str = typer.Option(..., "--attachment", help="Attachment id of the uploaded report "
+                                   "(upload first: aeos intake upload)"),
+    tester: str = typer.Option(..., "--tester", help="Who performed the test (person or vendor)"),
+    performed_on: str = typer.Option(..., "--performed-on", help="Test date, YYYY-MM-DD"),
+    scope: str = typer.Option(..., "--scope", help="What was tested"),
+    method: str = typer.Option("", "--method", help="Method / tools named by the report"),
+    remediation: str = typer.Option("", "--remediation", help="Remediation named by the report"),
+    environment: str = typer.Option("", "--environment", help="Tested environment, e.g. staging"),
+    commit: str = typer.Option(None, "--commit", help="Tested commit SHA, if the report names one"),
+) -> None:
+    """Register an external penetration-test report as PT_REPORT evidence (section 27 04).
+
+    The report itself is the real result; AEOS records its hash, the redacted intake text and the metadata, and
+    states that it did not perform or verify the test.
+    """
+    from aeos.core.errors import AeosError
+    from aeos.docs_engine.pt_reports import register_pt_report
+    from aeos.models.portfolio import Project
+
+    session = _session()
+    try:
+        project = session.get(Project, project_id)
+        if project is None:
+            _echo(f"project {project_id} not found")
+            raise typer.Exit(2)
+        try:
+            out = register_pt_report(session, project, attachment_id=attachment, tester=tester,
+                                     performed_on=performed_on, scope=scope, method=method, remediation=remediation,
+                                     environment=environment, commit=commit, actor="local-operator")
+            session.commit()
+        except AeosError as exc:
+            session.rollback()
+            _echo(f"register-pt-report refused: {exc.code}: {exc.message}")
+            raise typer.Exit(1) from exc
+        _echo(f"PT_REPORT {out['evidence_id']} (attachment {out['attachment_id']}, {out['sha256']}, "
+              f"{out['provenance']})")
+    finally:
+        session.close()
+
+
 @app.command("visuals-status")
 def visuals_status() -> None:
     """Report whether the optional mermaid-cli (mmdc) renderer is available."""

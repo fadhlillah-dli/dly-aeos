@@ -134,6 +134,7 @@ export default function PlansPage() {
         source="plans, plan_versions (record AEOS)"
         checkedAt={q.data?.checked_at ?? null}
         evidenceLimit="Verdict reviewer adalah DATA; hanya keputusan manusia yang terikat versi + hash yang menyetujui."
+        relatedDecisionsHref="/decisions?target_type=plan_version"
         mode={q.data?.mode}
         actions={
           isAdmin ? (

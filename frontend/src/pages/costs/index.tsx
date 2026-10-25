@@ -319,6 +319,7 @@ export default function CostsPage() {
         source={s?.source ?? "usage_ledger, budgets, quota_states"}
         checkedAt={s?.checked_at ?? null}
         evidenceLimit="Angka dari ledger/provider; aktual, estimasi dan UNKNOWN tidak dijumlahkan; langganan Max tidak dikonversi ke dolar"
+        relatedDecisionsHref="/decisions?target_type=budget"
         actions={
           <>
             <select aria-label="Periode" className={inputBase + " w-full sm:w-44"} value={period} onChange={(e) => setPeriod(e.target.value)}>

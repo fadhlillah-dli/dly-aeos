@@ -142,6 +142,7 @@ export default function DagPage() {
         source="task_specs, task_dependencies, task_executions, leases, acceptance_records"
         checkedAt={view?.checked_at ?? null}
         evidenceLimit="State runtime dari scheduler; penerimaan hanya dari AcceptanceRecord. Status issue eksternal tidak membuka dependensi."
+        relatedDecisionsHref="/decisions?target_type=plan_version"
         mode={view?.data_mode && view.data_mode !== "LIVE" ? view.data_mode : view?.mode && view.mode !== "LIVE" ? view.mode : undefined}
       />
       <div className="mb-4 max-w-xl">

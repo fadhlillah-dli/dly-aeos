@@ -64,11 +64,14 @@ def _emit_failure(exc: Exception, settings: Settings) -> None:
 
 def start(settings: Settings) -> None:
     global _thread
+    from aeos.doctor import provider_watch
     from aeos.doctor.capabilities import enable_auto_recheck
 
     # while the server runs, an invalidation (binary/config/route/decision change) triggers a targeted recheck of
-    # the affected non-functional checks after its transaction commits (§08)
+    # the affected checks after its transaction commits (§08), and provider responses that show a permission
+    # change (401/403/scope change) during normal use invalidate the checks of that credential
     enable_auto_recheck(settings)
+    provider_watch.enable()
     if _thread is not None and _thread.is_alive():
         return
     _stop.clear()
@@ -78,8 +81,10 @@ def start(settings: Settings) -> None:
 
 def stop() -> None:
     global _thread
+    from aeos.doctor import provider_watch
     from aeos.doctor.capabilities import disable_auto_recheck
 
+    provider_watch.disable()
     disable_auto_recheck()
     _stop.set()
     if _thread is not None:

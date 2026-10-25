@@ -66,7 +66,8 @@ def _mci_file() -> dict[str, Any]:
 
 def mci_reference() -> dict[str, Any]:
     data = _mci_file()
-    mci = data.get("mci") if isinstance(data.get("mci"), dict) else {}
+    raw = data.get("mci")
+    mci: dict[str, Any] = raw if isinstance(raw, dict) else {}
     declared = str(mci.get("status") or "UNAVAILABLE").upper()
     location = mci.get("location")
     recorded_hash = mci.get("content_hash")

@@ -113,6 +113,7 @@ export default function IntegrationsPage() {
         source={integrations.data?.source ?? "status vault/keyring, uji bridge, QuotaState"}
         checkedAt={integrations.data?.checked_at ?? null}
         evidenceLimit="Kredensial tersimpan = terkonfigurasi, bukan terverifikasi; nilai secret tidak pernah ditampilkan"
+        relatedDecisionsHref="/decisions?target_type=provider_write"
       />
       <Notice tone="info">
         Nilai secret hanya dimasukkan lewat CLI lokal (mis. <Mono>aeos secrets set workers/openrouter</Mono>) dan tidak pernah

@@ -113,6 +113,28 @@ def get_sli(principal: CurrentPrincipal, domain: ActiveDomain, db: DB, settings:
             "error_budget": sli.error_budget(db, domain=domain)}
 
 
+@router.get("/api/ops/sli/{sli_key}/chart")
+def sli_chart(sli_key: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB,
+              limit: int = Query(50, ge=2, le=500)) -> dict[str, Any]:
+    """§29 evidence chart of one SLI from its recorded samples (ops_sli_samples), each point bound to its sample
+    id; the domain's own samples plus platform-scoped ones, never the other domain's."""
+    from sqlalchemy import select as _select
+
+    from aeos.core.errors import NotFound as _NotFound
+    from aeos.docs_engine import facade as docs
+    from aeos.models.operations_ext import OpsSliSample
+
+    if sli_key not in sli.SLI_DEFS:
+        raise _NotFound("unknown SLI")
+    title, unit, _direction = sli.SLI_DEFS[sli_key]
+    rows = list(db.scalars(_select(OpsSliSample).where(
+        OpsSliSample.sli_key == sli_key, OpsSliSample.scope.in_([domain.value, "PLATFORM"]),
+        OpsSliSample.criticality.is_(None)).order_by(OpsSliSample.at.desc()).limit(limit)))
+    points = [{"ref": s.id, "at": s.at.isoformat(), "value": s.value} for s in reversed(rows)]
+    chart = docs.evidence_chart(title=title, unit=unit, source="ops_sli_samples", points=points)
+    return {**chart, "sli_key": sli_key, "checked_at": _now(), "mode": "LIVE"}
+
+
 @router.post("/api/ops/sli/evaluate")
 def evaluate_sli(principal: AdminPrincipal, domain: ActiveDomain, db: DB, settings: SettingsDep) -> dict[str, Any]:
     result = sli.evaluate(db, domain=domain, settings=settings)
@@ -165,7 +187,8 @@ def emergency_last(principal: CurrentPrincipal, db: DB) -> dict[str, Any]:
     except ImportError as exc:
         paused = {"status": "UNKNOWN", "reason": f"workforce module unavailable ({exc.name or exc})"}
     return {"last": emergency.last_emergency(db), "scheduling": paused, "steps": emergency.STEP_DESCRIPTIONS,
-            "checked_at": _now()}
+            "source": "emergency-stop audit records + workforce scheduler pause flag", "checked_at": _now(),
+            "mode": "LIVE"}
 
 
 # ----------------------------------------------------------------------------------------- flags
@@ -268,11 +291,15 @@ def retirement_step(project_id: str, key: str, body: RetirementStepIn, principal
 
 
 @router.get("/api/ops/retention")
-def retention_policy(principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+def retention_policy(principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     from aeos.operations import retention
 
     policy = retention.load_policy()
-    return {"items": [retention.resolve(policy, c, domain.value) for c in retention.DATA_CLASSES],
+    applied = retention.applied_counts(db, policy, domain.value)
+    # audit/evidence lists carry the same per-record marker (``retention``); other classes are rule-only here
+    return {"items": [{**retention.resolve(policy, c, domain.value),
+                       **applied.get(c, {"records": None, "expired_by_policy": None, "evaluated": False})}
+                      for c in retention.DATA_CLASSES],
             "status": policy.get("status"), "legal_hold_blocks_disposal": policy.get("legal_hold_blocks_disposal"),
             "source": "policy/retention.yaml (owner decisions; protected path)", "checked_at": _now(),
             "mode": "LIVE", "notice": "AEOS tidak pernah menghapus data; kedaluwarsa = disposal manual saja."}
@@ -424,6 +451,39 @@ def incident_follow_up(incident_id: str, body: FollowUpIn, principal: AdminPrinc
     _incident_write(db, principal, incident_id)
     result = incident.open_follow_up(db, incident_id, actor_user_id=principal.user.id, domain=domain.value,
                                      component_ids=body.component_ids, title=body.title)
+    db.commit()
+    return result
+
+
+class AlertIncidentIn(BaseModel):
+    owner: str = Field(default="", max_length=200)
+
+
+@router.post("/api/ops/alerts/{alert_id}/incident")
+def incident_from_alert(alert_id: str, body: AlertIncidentIn, principal: AdminPrincipal, domain: ActiveDomain,
+                        db: DB) -> dict[str, Any]:
+    """§05 step 15: an alert opens (at most) one incident for the follow-up process."""
+    from aeos.operations import incident
+
+    inc, created = incident.open_from_alert(db, alert_id, actor=principal.user.id, domain=domain.value,
+                                            owner=body.owner)
+    db.commit()
+    return {**incident.scoped(inc, domain.value, db), "created": created}
+
+
+class EvalCaseIn(BaseModel):
+    title: str = Field(min_length=5, max_length=200)
+    expected: str = Field(min_length=10, max_length=1000)
+
+
+@router.post("/api/ops/incidents/{incident_id}/eval-case")
+def incident_eval_case(incident_id: str, body: EvalCaseIn, principal: AdminPrincipal, domain: ActiveDomain,
+                       db: DB) -> dict[str, Any]:
+    from aeos.operations import incident
+
+    _incident_write(db, principal, incident_id)
+    result = incident.propose_eval_case(db, incident_id, actor_user_id=principal.user.id, domain=domain.value,
+                                        title=body.title, expected=body.expected)
     db.commit()
     return result
 

@@ -108,8 +108,11 @@ def list_evidence(
     if origin:
         q = q.where(EvidenceArtifact.origin == origin.lower())
     rows = db.scalars(q.order_by(EvidenceArtifact.created_at.desc()).limit(limit)).all()
+    from aeos.operations import facade as operations
+
+    retention = operations.RetentionMarkers(db)  # §35: policy/retention.yaml rule per record; nothing is deleted
     return {
-        "items": [evidence_item(r) for r in rows],
+        "items": [{**evidence_item(r), "retention": retention.evidence(r)} for r in rows],
         "source": EVIDENCE_SOURCE,
         "checked_at": utcnow().isoformat(),
         "mode": _mode_of(r.mode for r in rows),
@@ -122,6 +125,9 @@ def list_evidence(
 def get_evidence(evidence_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     ev = _load_evidence(db, principal, domain, evidence_id)
     item = evidence_item(ev)
+    from aeos.operations import facade as operations
+
+    item["retention"] = operations.RetentionMarkers(db).evidence(ev)
     item["inline"] = ev.inline or {}
     data, integrity = collector.read_content(ev)
     item["integrity"] = integrity

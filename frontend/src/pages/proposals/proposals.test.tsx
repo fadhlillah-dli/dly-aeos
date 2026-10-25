@@ -69,7 +69,7 @@ describe("Upgrade Proposals (§39)", () => {
     renderPage(<ProposalsPage />, { path: "/proposals", route: "/proposals?kind=COMPARE&source=DLY%20AEOS%20Biaya%20%26%20Kuota" });
     const sources = (await screen.findByPlaceholderText("https://github.com/owner/repo")) as HTMLTextAreaElement;
     expect(sources.value).toBe("DLY AEOS Biaya & Kuota");
-    expect(screen.getByRole("link", { name: /Keputusan terkait/ })).toHaveAttribute("href", "/decisions");
+    expect(screen.getByRole("link", { name: /Keputusan terkait/ })).toHaveAttribute("href", "/decisions?target_type=change_proposal");
     expect(screen.getByRole("link", { name: /Usulkan koreksi/ }).getAttribute("href")).toContain("/proposals?kind=COMPARE&source=");
     fireEvent.click(screen.getByText("Kirim usulan"));
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.url === "/api/proposals")).toBe(true));

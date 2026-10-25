@@ -62,6 +62,29 @@ def acceptance_valid_for_run(session: Session, task: TaskSpec, base_commit: str 
     return bool(ok), "" if ok else "acceptance record is not ACCEPTED/valid for this base/plan identity"
 
 
+def documentation_blockers(session: Session, task: TaskSpec, version: PlanVersion) -> list[tuple[str, str]]:
+    """§41 readiness criteria: the documentation sections required before implementation (PROJECT_CREATION and
+    the task's FEATURE_APPROVAL PRD/test plan) must be complete; otherwise the task WAITS (fail closed: an
+    unavailable docs engine is a wait too, never a silent pass)."""
+    from aeos.core.errors import AeosError
+    from aeos.docs_engine import facade as docs
+
+    try:
+        pending = docs.stage_blockers(session, version, task_id=task.id, feature_key=task.feature_key)
+    except ImportError as exc:
+        return [("DOCS_READINESS_UNVERIFIED", _unavailable("docs_engine", exc))]
+    except AeosError as exc:
+        return [("DOCS_READINESS_UNVERIFIED", f"{exc.code}: {exc.message}"[:300])]
+    except Exception as exc:  # a readiness check that cannot complete is a wait, never a pass (fail closed)
+        log.warning("documentation readiness check failed: %s", type(exc).__name__)
+        return [("DOCS_READINESS_UNVERIFIED", f"documentation readiness could not be evaluated ({type(exc).__name__})")]
+    if not pending:
+        return []
+    text = "; ".join(f"{p['logical_doc_id']} ({', '.join(p['sections'])})" for p in pending[:6])
+    return [("DOCS_NOT_READY", f"required documentation still pending before implementation (§41): {text}"
+                               + (f" (+{len(pending) - 6} more)" if len(pending) > 6 else ""))]
+
+
 def capability_ready(session: Session, capability: Capability, *, domain: str, project_id: str | None,
                      exclude_checks: tuple[str, ...] = ()) -> tuple[bool, list[str]]:
     from aeos.doctor import facade as doctor

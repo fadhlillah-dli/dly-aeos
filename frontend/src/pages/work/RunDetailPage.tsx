@@ -215,6 +215,7 @@ export default function RunDetailPage() {
         source="WorkerRun, TaskSpec, Lease, event teramati, EvidenceArtifact, ReviewRecord, AcceptanceRecord, Decision"
         checkedAt={r?.checked_at ?? null}
         evidenceLimit="Aksi = event alat yang teramati runtime; narasi AI = ringkasan, bukan bukti. Exit 0 ≠ diterima."
+        relatedDecisionsHref="/decisions?target_type=workforce"
         mode={r?.mode}
       />
       {q.isLoading ? (

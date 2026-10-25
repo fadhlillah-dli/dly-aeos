@@ -31,3 +31,25 @@ def summarize_check_runs(runs: list[dict[str, Any]]) -> str:
                           gates=[str(g) for g in (r.get("gates") or [])])
              for r in runs if isinstance(r, dict)]
     return summarize_runs(views)
+
+
+def deployment_target(session: Session, project: Any, environment: str) -> dict[str, Any] | None:
+    """The observe-only deployment target registered for *project* and *environment* (staging|production):
+    ``{"integration_id", "base_url", "health_path"}``, or None when none is registered (§04 Integration Registry)."""
+    from aeos.delivery.deployment import DEFAULT_HEALTH_PATH, ENVIRONMENTS, target_for
+
+    if environment not in ENVIRONMENTS:
+        return None
+    target = target_for(session, project, environment)
+    if target is None or not target.root_id:
+        return None
+    return {"integration_id": target.id, "base_url": target.root_id.rstrip("/"),
+            "health_path": str((target.config or {}).get("health_path") or DEFAULT_HEALTH_PATH)}
+
+
+def classify_deployment_health(sha: str, http_status: int | None, body: Any) -> tuple[str, str, str | None]:
+    """(PASS|FAIL|NOT_PROVEN, reason, reported commit) of one health response for the expected commit - the same
+    rule the deployment observer and gates G6/G8 use."""
+    from aeos.delivery.deployment import classify
+
+    return classify(sha, http_status, body)

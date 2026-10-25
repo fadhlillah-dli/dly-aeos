@@ -7,8 +7,10 @@ import { AuditTab } from "./AuditTab";
 import { BackupsTab } from "./BackupsTab";
 import { EmergencyTab } from "./EmergencyTab";
 import { ExportTab } from "./ExportTab";
+import { IncidentsTab } from "./IncidentsTab";
 import { OpsTab } from "./OpsTab";
 import { ReleasesTab } from "./ReleasesTab";
+import { RetentionTab } from "./RetentionTab";
 import { RetirementTab } from "./RetirementTab";
 import { ServicesTab } from "./ServicesTab";
 import { DecisionsTab, PublicationsTab, SnapshotsTab } from "./TimelineTabs";
@@ -46,8 +48,10 @@ export default function Page() {
           { id: "snapshots", label: "Snapshot arsitektur", content: <SnapshotsTab /> },
           { id: "publications", label: "Publikasi", content: <PublicationsTab /> },
           { id: "backups", label: "Backup & pemulihan", content: <BackupsTab /> },
+          { id: "retention", label: "Retensi", content: <RetentionTab /> },
           { id: "releases", label: "Rilis controller", content: <ReleasesTab /> },
           { id: "ops", label: "SLI, alert & flag", content: <OpsTab /> },
+          { id: "incidents", label: "Insiden", content: <IncidentsTab /> },
           { id: "services", label: "Layanan & runbook", content: <ServicesTab /> },
           { id: "export", label: "Ekspor", content: <ExportTab /> },
           { id: "retirement", label: "Retirement", content: <RetirementTab /> },

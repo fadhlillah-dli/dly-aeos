@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { get, post, put } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
+import { EvidenceChart, type EvidenceChartData } from "../../components/control_center/EvidenceChart";
 import { OpsBadge } from "../../components/control_center/OpsBadge";
 import { Provenance } from "../../components/control_center/Provenance";
 import { StatusBadge } from "../../components/StatusBadge";
@@ -57,6 +58,18 @@ export function OpsTab() {
     mutationFn: ({ key, value }: { key: string; value: number }) => put(`/api/ops/flags/${key}`, { value, reason: "dashboard" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["ops-flags"] }),
   });
+  // §29 evidence chart: the recorded samples of one SLI (bound to their record ids)
+  const [chartKey, setChartKey] = useState<string | null>(null);
+  const chart = useQuery({
+    queryKey: ["ops-sli-chart", chartKey],
+    queryFn: () => get<EvidenceChartData>(`/api/ops/sli/${chartKey}/chart`),
+    enabled: chartKey !== null,
+  });
+  // §05 step 15: an alert (operations result) opens one incident that feeds the change process.
+  const toIncident = useMutation({
+    mutationFn: (alertId: string) => post<{ id: string; created: boolean }>(`/api/ops/alerts/${alertId}/incident`, {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ops-incidents"] }),
+  });
 
   return (
     <div className="space-y-4">
@@ -83,8 +96,21 @@ export function OpsTab() {
                 { header: "Target", cell: (r) => (r.target ? `${r.target.max != null ? `≤ ${r.target.max}` : ""}${r.target.min != null ? ` ≥ ${r.target.min}` : ""}` : "—") },
                 { header: "Status", cell: (r) => <OpsBadge status={r.status} /> },
                 { header: "Scope", cell: (r) => r.scope },
+                {
+                  header: "Riwayat",
+                  cell: (r) => (
+                    <Button className="text-xs" onClick={() => setChartKey(chartKey === r.key ? null : r.key)}>
+                      {chartKey === r.key ? "Tutup" : "Grafik"}
+                    </Button>
+                  ),
+                },
               ]}
             />
+            {chartKey && (
+              <div className="mt-2 rounded-md border border-line p-2">
+                {chart.isLoading ? <Loading /> : chart.error ? <ErrorBox error={chart.error} /> : chart.data ? <EvidenceChart data={chart.data} /> : null}
+              </div>
+            )}
             <p className="mt-2 text-xs text-ink-3">
               {sli.data?.targets_note} Contoh: <Mono>aeos ops sli target queue_age_seconds --max 1800</Mono>
             </p>
@@ -110,9 +136,29 @@ export function OpsTab() {
               { header: "Status", cell: (r) => <OpsBadge status={r.status} /> },
               { header: "Kejadian", cell: (r) => `${r.occurrences}× · ${relativeTime(r.last_seen_at)}` },
               { header: "Scope", cell: (r) => r.domain ?? "PLATFORM" },
+              {
+                header: "Tindak lanjut",
+                cell: (r) => (
+                  <Button
+                    className="text-xs"
+                    disabled={!isAdmin}
+                    busy={toIncident.isPending && toIncident.variables === r.id}
+                    onClick={() => toIncident.mutate(r.id)}
+                  >
+                    Buka insiden
+                  </Button>
+                ),
+              },
             ]}
           />
         )}
+        {toIncident.data ? (
+          <p className="mt-2 text-xs text-ink-2">
+            Insiden <Mono>{toIncident.data.id.slice(0, 8)}</Mono> {toIncident.data.created ? "dibuka" : "sudah ada"} untuk alert ini — lanjutkan di tab
+            Insiden (analisis, regression/eval case, usulan perubahan).
+          </p>
+        ) : null}
+        {toIncident.error ? <ErrorBox error={toIncident.error} /> : null}
         <Provenance source={alerts.data?.source} checkedAt={alerts.data?.checked_at} />
       </Card>
 
