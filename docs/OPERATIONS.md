@@ -296,8 +296,9 @@ invalidates route approvals bound to the old configuration hash (`PROMPT_REVISIO
 * MCI content is not readable — canonical compliance/READY that depends on it is not claimed.
 * OFFICE use of personal Claude Max, external routes, data classes and trace destinations is not
   authorised.
-* Provider entitlements for human-only merge enforcement (e.g. branch protection on GitHub Free
-  private repositories) are not proven on the real account.
+* Provider enforcement of human-only merge: the platform repository is public on GitHub Free with a
+  ruleset on `main` (ADR-0115), but a real bypass attempt against it has not been run, so enforcement
+  is CONFIGURED, not proven. Private repositories of managed products on GitHub Free stay NOT_ENFORCEABLE.
 * Worker containment, egress control, secret broker, verifier independence, cancel and bypass tests
   must pass on this machine before workers are trusted.
 * The released controller artifact is a source archive run with the checkout's virtual environment

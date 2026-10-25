@@ -107,3 +107,18 @@ def test_revocation_survives_an_edited_adr_file(db, monkeypatch, tmp_path):
     assert res["adrs"]["updated"] == 1 and res["adr_0003_exception"].startswith("revoked by owner")
     rows = list(db.scalars(select(Decision).where(Decision.actor_user_id == "owner:ADR-0003")))
     assert len(rows) == 1 and rows[0].status == "INVALIDATED"
+
+
+def test_every_adr_file_is_listed_in_the_register_index_with_its_status():
+    """docs/decisions/README.md is the human index of the decision register (master §02, §41); ADR-0107
+    was once missing from it. Every ADR file appears exactly once, linked, with the status its file states."""
+    import re
+
+    index = (adrs.decisions_dir() / "README.md").read_text(encoding="utf-8")
+    for p in sorted(adrs.decisions_dir().glob("ADR-*.md")):
+        key = p.name[:8]
+        rows = [line for line in index.splitlines() if line.startswith(f"| [{key}]")]
+        assert len(rows) == 1, f"{key} must be listed exactly once in docs/decisions/README.md"
+        assert f"]({p.name})" in rows[0]
+        status = re.search(r"^\* Status: (\w+)", p.read_text(encoding="utf-8"), flags=re.M)
+        assert status and rows[0].rstrip().endswith(f"| {status.group(1)} |"), f"{key} status differs from its file"
