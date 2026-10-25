@@ -143,8 +143,8 @@ def _mci_pack_mapping_check(target_id: str | None, target_hash: str | None) -> N
         raise ValidationFailed(f"unknown pack {target_id!r}", code="MCI_PACK_UNKNOWN",
                                details={"packs": [p["key"] for p in ref["pack_mappings"]]})
     if not pack["mci_controls"] or pack["evidence_contract_status"] != "DECLARED":
-        raise ValidationFailed(f"pack {target_id} has no MCI controls / complete evidence contract in "
-                               "policy/mci-reference.yaml", code="MCI_PACK_MAPPING_INCOMPLETE")
+        raise ValidationFailed(f"pack {target_id} has no MCI controls / complete evidence contract in the local "
+                               f"{ref['pack_mapping_file']}", code="MCI_PACK_MAPPING_INCOMPLETE")
     if target_hash != pack["binding"]["target_hash"]:
         raise ValidationFailed("target_hash must be the current binding hash of this pack mapping",
                                code="MCI_PACK_HASH_MISMATCH", details={"expected": pack["binding"]["target_hash"]})

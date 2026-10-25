@@ -114,6 +114,27 @@ def test_policy_context_carries_the_verified_mci_status_not_the_declared_one(mon
     assert str(local) not in str(items)  # no host path in the pack
 
 
+def test_an_mci_copy_inside_the_checkout_is_never_policy_context(monkeypatch, tmp_path):
+    """The repository is public and the MCI source is read from this machine only: a copy placed under policy/ by
+    mistake (gitignored policy/canonical/, an MCI_V2_SOURCE_OF_TRUTH* file, a local pack mapping) never enters the
+    policy context or its file-hash snapshot, and the pack names it."""
+    from aeos.knowledge import packs
+    from tests.unit import mci_support as ms
+
+    repo = ms.fake_repo(tmp_path)
+    ms.isolate(monkeypatch, repo)
+    secret = "MCI-CONTENT-MARKER placeholder, not the real document\n"
+    for rel in (f"canonical/{ms.SOURCE_NAME}", "MCI_V2_SOURCE_OF_TRUTH-copy.md", "mci-pack-mapping.yaml"):
+        (repo / "policy" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / "policy" / rel).write_text(secret, encoding="utf-8")
+    items, warnings, _ = _policy_context()
+    assert "MCI-CONTENT-MARKER" not in str(items)
+    assert {i["ref"] for i in items} == {f"policy/{p.name}" for p in (repo / "policy").glob("*.yaml")} - {
+        "policy/mci-pack-mapping.yaml"}
+    assert not any("canonical" in rel or "MCI_V2" in rel or "pack-mapping" in rel for rel in packs.policy_hashes())
+    assert any("never read" in w and f"policy/canonical/{ms.SOURCE_NAME}" in w for w in warnings)
+
+
 def test_canonical_mci_over_the_file_cap_is_split_into_labelled_parts(monkeypatch, tmp_path):
     from aeos.core.hashing import sha256_bytes
     from aeos.knowledge import packs
@@ -145,6 +166,46 @@ def test_canonical_mci_over_the_file_cap_is_split_into_labelled_parts(monkeypatc
     mci_omitted = [o for o in omitted if o["ref"].startswith(ms.SOURCE_REF + "#part-")]
     assert mci_omitted and all(o["mandatory"] is False for o in mci_omitted)
     assert any(i["ref"] == "policy/mci-reference.yaml" for i in items)
+
+
+def test_a_verified_mci_never_pushes_the_mandatory_task_out_of_the_budget(personal_client: AuthedClient, db,
+                                                                           monkeypatch, tmp_path):
+    """Policy context is collected first, but the local MCI source is not mandatory: it takes only the budget left
+    after the mandatory task context, so supplying a VERIFIED MCI can never make a pack fail with BUDGET_TOO_SMALL.
+    What does not fit is named in the warnings (gates relying on it stay NOT-PROVEN)."""
+    from tests.unit import mci_support as ms
+
+    repo = ms.fake_repo(tmp_path, name="controller")
+    local = ms.isolate(monkeypatch, repo)
+    ref = repo / "policy" / "mci-reference.yaml"
+    ref.write_text(ms.verified_reference("sha256:" + "0" * 64), encoding="utf-8")  # same length as the real digest
+    budget = 4000
+    policy_tokens = sum(i["tokens"] for i in _policy_context()[0])
+    line = "Kontrol MCI placeholder - bukan isi MCI asli.\n"
+    room = budget - policy_tokens - 40  # what is left after the policy files: the MCI would fill it completely
+    digest = ms.write_source(local, line * (room * 4 // len(line)))
+    ref.write_text(ms.verified_reference(digest), encoding="utf-8")
+    assert any(i["ref"] == ms.SOURCE_REF for i in _policy_context(budget)[0])  # alone, it fits in the budget
+
+    p = create_project(personal_client, name="MCI budget")
+    plan = Plan(project_id=p["id"], domain="PERSONAL", title="Budget")
+    db.add(plan)
+    db.flush()
+    content = {"tasks": []}
+    pv = PlanVersion(plan_id=plan.id, project_id=p["id"], domain="PERSONAL", version=1, content=content,
+                     manifest_hash=content_hash(content))
+    db.add(pv)
+    db.flush()
+    task = TaskSpec(plan_version_id=pv.id, plan_version_hash=pv.manifest_hash, project_id=p["id"], domain="PERSONAL",
+                    task_key="T1", title="Tighten totals", goal="Make the totals respect discounts and rounding",
+                    acceptance_criteria=["tests pass", "no regression in invoices"], spec_hash="sha256:y")
+    db.add(task)
+    db.commit()
+    pack = _build(personal_client, p["id"], task_id=task.id, token_budget=budget, include=["policy", "task"])
+    refs = [i["ref"] for i in pack["items"]]
+    assert "task:T1" in refs and pack["token_estimate"] <= budget
+    assert ms.SOURCE_REF not in refs
+    assert any(ms.SOURCE_REF in w and "token budget" in w and "NOT-PROVEN" in w for w in pack["warnings"])
 
 
 def test_a_change_of_the_local_mci_source_makes_built_packs_stale(personal_client: AuthedClient, monkeypatch,

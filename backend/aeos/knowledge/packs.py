@@ -21,8 +21,10 @@ A pack is the minimum, provenance-carrying context for one task/role:
 from __future__ import annotations
 
 import fnmatch
+import functools
 import math
 import re
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -171,6 +173,24 @@ class _Collector:
 # ---------------------------------------------------------------- policy context
 
 
+def _local_only_mci(rel: str) -> bool:
+    """Owner-local canonical MCI material (the source, its pack mapping) that a copy in the checkout must never turn
+    into policy context: the repository is public and the source is read from this machine only (.gitignore guards
+    the same names)."""
+    name = rel.rsplit("/", 1)[-1]
+    return rel.split("/", 1)[0].lower() == "canonical" or name.upper().startswith("MCI_V2_SOURCE_OF_TRUTH") \
+        or name.lower() == "mci-pack-mapping.yaml"
+
+
+def misplaced_mci_files() -> list[str]:
+    """``policy/`` paths of canonical MCI material placed in the checkout by mistake (never read; see policy_files)."""
+    root = repo_root() / "policy"
+    if not root.is_dir():
+        return []
+    return [f"policy/{rel}" for rel in (p.relative_to(root).as_posix() for p in sorted(root.rglob("*")) if p.is_file())
+            if _local_only_mci(rel)]
+
+
 def policy_files() -> tuple[Path, list[Path]]:
     root = repo_root() / "policy"
     if not root.is_dir():
@@ -181,6 +201,8 @@ def policy_files() -> tuple[Path, list[Path]]:
             break
         if not p.is_file() or p.suffix.lower() not in POLICY_SUFFIXES:
             continue
+        if _local_only_mci(p.relative_to(root).as_posix()):
+            continue  # an MCI copy in the checkout is never policy context (misplaced_mci_files names it)
         try:
             files.append(ensure_within(root, p))  # a symlink out of policy/ is ignored
         except UnsafePathError:
@@ -286,10 +308,17 @@ def mci_state() -> dict[str, Any]:
     return {k: m[k] for k in ("status", "verification_code", "version", "content_hash")}
 
 
-def _collect_policy(col: _Collector, warnings: list[str]) -> None:
+def _collect_policy(col: _Collector, warnings: list[str], deferred: list[Callable[[], None]] | None = None) -> None:
+    """Policy files (mandatory) and the VERIFIED local MCI source. With *deferred*, the MCI source is queued instead of
+    added: build_pack adds it once the mandatory task context is in, so a large MCI never pushes the task out of the
+    budget (BUDGET_TOO_SMALL); its parts take what is left and every omitted part is named."""
     from aeos.policy import facade as policy
 
     root, files = policy_files()
+    misplaced = misplaced_mci_files()
+    if misplaced:
+        warnings.append(f"canonical MCI material inside the repository checkout is never read (public repository; "
+                        f"keep it in <data dir>/policy/canonical): {', '.join(misplaced[:5])}")
     if not files:
         warnings.append("policy context MISSING: no policy/ files in the trusted controller; nothing reconstructed")
         col.add(kind="policy", ref="policy:missing", content="POLICY CONTEXT MISSING — gates that need it stay BLOCKED.",
@@ -321,7 +350,11 @@ def _collect_policy(col: _Collector, warnings: list[str]) -> None:
     if source is None or not source.is_file():
         return
     if mci["status"] == "VERIFIED":
-        _add_mci_source(col, source, f"mci:{source.name}", mci, warnings)
+        add = functools.partial(_add_mci_source, col, source, f"mci:{source.name}", mci, warnings)
+        if deferred is None:
+            add()
+        else:
+            deferred.append(add)
     else:
         warnings.append(f"local MCI source not included: it is not VERIFIED ({mci['verification_code']})")
 
@@ -760,9 +793,13 @@ def build_pack(
     policy_snapshot = policy_hashes() if "policy" in kinds else {}
     mci_snapshot = mci_state() if "policy" in kinds else None
     col = _Collector(project, budget)
-    for kind in [k for k in SOURCE_ORDER if k in kinds]:  # sources first: they win the budget over summaries
+    order = [k for k in SOURCE_ORDER if k in kinds]
+    # the local MCI source (policy context, not mandatory) is added right after the last mandatory kind
+    last_mandatory = next((k for k in reversed(order) if k in MANDATORY), None)
+    deferred: list[Callable[[], None]] = []
+    for kind in order:  # sources first: they win the budget over summaries
         if kind == "policy":
-            _collect_policy(col, warnings)
+            _collect_policy(col, warnings, deferred)
         elif kind == "task" and task is not None:
             _collect_task(col, task)
         elif kind == "symbol" and reader and repo:
@@ -786,6 +823,12 @@ def build_pack(
         if kind in MANDATORY and any(o["kind"] == kind and o.get("mandatory", True) for o in col.omitted):
             raise ValidationFailed(f"token budget {budget} cannot hold the mandatory {kind} context",
                                    code="BUDGET_TOO_SMALL")
+        if kind == last_mandatory:
+            for add in deferred:
+                add()
+            deferred.clear()
+    for add in deferred:
+        add()
 
     classification = cls.highest(project.data_classification, task.data_classification if task else None,
                                  *[i["classification"] for i in col.items])

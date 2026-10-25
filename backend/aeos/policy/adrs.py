@@ -144,6 +144,7 @@ def load_adrs(session: Session, directory: Path | None = None) -> dict[str, Any]
 # edit of the file makes it STALE (the builder-written status applies again until the owner decides anew).
 
 OWNER_DECISION = "OWNER_DECISION"
+OWNER_DECISION_STALE = "OWNER_DECISION (STALE)"
 FILE_STATUS = "FILE (builder-written)"
 
 
@@ -159,7 +160,11 @@ def owner_decisions(session: Session, adr_keys: list[str] | None = None) -> dict
 
 
 def register_status(row: ArchitectureDecisionRecord, decisions: list[Decision]) -> dict[str, Any]:
-    """Owner-recorded vs builder-written status of one ADR (pure; ``decisions`` newest first)."""
+    """Owner-recorded vs builder-written status of one ADR (pure; ``decisions`` newest first).
+
+    A STALE owner ACCEPTED (the file changed after the owner accepted it) falls back to the file status until the owner
+    decides anew. A STALE owner REJECTED/SUPERSEDED stays in force: whoever can edit the file (the builder, or the
+    delegate of an owner-recorded ADR) can never undo the owner's rejection by rewriting it (fail closed)."""
     from aeos.policy.decisions import effective_status
 
     active = [d for d in decisions if effective_status(d) == "ACTIVE" and d.actor_kind == "HUMAN"]
@@ -169,6 +174,8 @@ def register_status(row: ArchitectureDecisionRecord, decisions: list[Decision]) 
     outcome = str((chosen.details or {}).get("outcome") or "") if chosen is not None else None
     if current is not None:
         state, effective, source = "RECORDED", outcome or row.status, OWNER_DECISION
+    elif stale is not None and outcome and outcome != "ACCEPTED":
+        state, effective, source = "STALE", outcome, OWNER_DECISION_STALE
     elif stale is not None:
         state, effective, source = "STALE", row.status, FILE_STATUS
     else:
@@ -208,12 +215,17 @@ def record_adr_decision(session: Session, *, adr_key: str, outcome: str, actor_u
 
     Refused unless that hash is the loaded content hash AND the file on disk still has it (no decision on content
     nobody reviewed). Only an active SUPER_ADMIN user can hold it (the registry re-checks; ``owner:ADR-*`` actors may
-    record EXCEPTION only). An earlier ACTIVE ADR decision on the same ADR is superseded. Does not commit."""
+    record EXCEPTION only). An earlier ACTIVE ADR decision on the same ADR is superseded. REJECTED/SUPERSEDED on an
+    owner-recorded ADR (``catalog.OWNER_RECORDED_ADRS``) revokes the ACTIVE decisions its ``owner:ADR-NNNN`` actor
+    holds. Does not commit."""
     from aeos.policy import decisions as registry
 
     row = session.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == adr_key))
     if row is None:
         raise NotFound("ADR not found")
+    # ADRs are platform documents and the platform is a PERSONAL project (§09): the actor must be an active
+    # SUPER_ADMIN whose domain scope includes PERSONAL (§20: SUPER_ADMIN is not AUTH over every domain)
+    registry._resolve_actor(session, actor_user_id, domain="PERSONAL", project_id=None, kind="ADR")
     outcome = str(outcome or "").upper()
     if outcome not in catalog.ADR_OUTCOMES:
         raise ValidationFailed(f"outcome must be one of {list(catalog.ADR_OUTCOMES)}", code="ADR_OUTCOME_INVALID")
@@ -247,6 +259,13 @@ def record_adr_decision(session: Session, *, adr_key: str, outcome: str, actor_u
     for old in previous:
         registry.supersede_decision(session, old, new_decision_id=decision.id, reason="new owner ADR decision",
                                     actor_type="user", actor_id=actor_user_id)
+    if outcome != "ACCEPTED" and row.adr_key in catalog.OWNER_RECORDED_ADRS:
+        # an ADR that recorded an owner instruction (owner:ADR-NNNN actor) and that the owner now rejects or
+        # supersedes withdraws what it delegated: a revocation by the owner, never re-recorded by the seed
+        for d in list(session.scalars(select(Decision).where(Decision.actor_user_id == f"owner:{row.adr_key}",
+                                                             Decision.status == "ACTIVE"))):
+            registry.invalidate_decision(session, d, reason=f"revoked: owner recorded {outcome} for {row.adr_key} "
+                                         f"(decision {decision.id})", actor_type="user", actor_id=actor_user_id)
     return decision
 
 

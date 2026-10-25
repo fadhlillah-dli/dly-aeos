@@ -15,11 +15,12 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from typer.testing import CliRunner
 
 from aeos.core.enums import Domain
 from aeos.core.timeutil import utcnow
-from aeos.models.decisions import Decision
+from aeos.models.decisions import ArchitectureDecisionRecord, Decision
 from aeos.policy import adrs
 from tests.conftest import ADMIN_PW, VIEWER_PW, AuthedClient, create_admin, create_viewer
 
@@ -105,6 +106,57 @@ def test_editing_the_adr_file_makes_the_owner_status_stale(personal_client: Auth
     assert counts.get("STALE") == 1
 
 
+def test_an_owner_rejection_is_not_undone_by_editing_the_adr_file(personal_client: AuthedClient, db, adr_dir):
+    """Whoever can edit the file (the builder) cannot turn the owner's REJECTED back into the file's ACCEPTED: the
+    stale rejection stays the effective status until the owner decides anew (fail closed)."""
+    _load(db)
+    key = "ADR-0001"
+    item = _items(personal_client)[key]
+    assert item["file_status"] == "ACCEPTED"
+    assert _decide(personal_client, key, outcome="REJECTED", content_hash=item["content_hash"]).status_code == 201
+    path = next(adr_dir.glob(f"{key}-*.md"))
+    path.write_text(path.read_text(encoding="utf-8") + "\nRewritten after the owner's rejection.\n", encoding="utf-8")
+    _load(db)
+    item = _items(personal_client)[key]
+    assert (item["owner_status_state"], item["owner_status"], item["file_status"]) == ("STALE", "REJECTED", "ACCEPTED")
+    assert (item["effective_status"], item["status_source"]) == ("REJECTED", "OWNER_DECISION (STALE)")
+    # the owner reviews the new content and accepts it: that decision binds the new hash and wins
+    assert _decide(personal_client, key, content_hash=item["content_hash"]).status_code == 201
+    item = _items(personal_client)[key]
+    assert (item["owner_status_state"], item["effective_status"]) == ("RECORDED", "ACCEPTED")
+
+
+def test_adr_memory_follows_the_owner_decision(personal_client: AuthedClient, db, adr_dir):
+    """§24 long-term memory: an ADR becomes platform memory only while ACCEPTED as the owner decides, not as the file
+    says; a decision past expires_at is no memory source either (EXPIRED before the expiry is written back)."""
+    from aeos.models.portfolio import Project
+    from tests.unit.test_portfolio_support import create_project
+
+    _load(db)
+    item = _items(personal_client)["ADR-0001"]
+    assert item["file_status"] == "ACCEPTED"
+    pid = create_project(personal_client, name="DLY AEOS platform")["id"]
+    db.get(Project, pid).is_platform = True
+    db.commit()
+
+    def propose(content: str, source_type: str, source_id: str):
+        return personal_client.post(f"/api/projects/{pid}/memory", json={
+            "content": content, "source_type": source_type, "source_id": source_id})
+
+    assert propose("ADR-0001 berlaku untuk platform", "adr", "ADR-0001").status_code == 200  # file ACCEPTED
+    assert _decide(personal_client, "ADR-0001", outcome="REJECTED", content_hash=item["content_hash"]).status_code == 201
+    r = propose("ADR-0001 tetap berlaku untuk platform", "adr", "ADR-0001")
+    assert r.status_code == 403 and r.json()["error"]["code"] == "MEMORY_SOURCE_NOT_ACCEPTED"
+    assert "REJECTED" in r.json()["error"]["message"]
+    lapsed = Decision(kind="POLICY", actor_user_id="owner", actor_kind="HUMAN", target_type="project_convention",
+                      target_id="lapsed", domain="PERSONAL", status="ACTIVE", rationale="lapsed convention",
+                      expires_at=utcnow() - timedelta(minutes=5))
+    db.add(lapsed)
+    db.commit()
+    r = propose("Konvensi yang sudah lewat masa berlaku", "decision", lapsed.id)
+    assert r.status_code == 403 and "EXPIRED" in r.json()["error"]["message"]
+
+
 def test_adr_decision_paths_are_owner_only_and_exact(client: AuthedClient, personal_client: AuthedClient, db, adr_dir):
     _load(db)
     loaded = _items(personal_client)["ADR-0001"]["content_hash"]
@@ -126,6 +178,28 @@ def test_adr_decision_paths_are_owner_only_and_exact(client: AuthedClient, perso
     denied = _decide(client, "ADR-0002", content_hash=_items(client)["ADR-0002"]["content_hash"])
     assert denied.status_code == 403
     assert not list(db.scalars(Decision.__table__.select().where(Decision.target_id == "ADR-0002")))
+
+
+def test_adr_decisions_need_a_super_admin_scoped_to_the_platform_domain(db, adr_dir):
+    """§20: SUPER_ADMIN is not AUTH over every domain. ADRs are platform (PERSONAL) documents, so an admin scoped to
+    OFFICE only, or an owner-recorded actor, cannot accept, reject or supersede them."""
+    from aeos.core.errors import PolicyDenied
+
+    _load(db)
+    row = db.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == "ADR-0001"))
+    owner = create_admin(db)
+    owner.domain_scope = ["OFFICE"]
+    db.commit()
+    for actor, code in ((owner.id, "DECISION_SCOPE_DENIED"), ("owner:ADR-0003", "DECISION_ACTOR_NOT_AUTHORISED")):
+        with pytest.raises(PolicyDenied) as exc:
+            adrs.record_adr_decision(db, adr_key="ADR-0001", outcome="ACCEPTED", actor_user_id=actor,
+                                     rationale="diterima oleh admin di luar cakupan", content_hash=row.content_hash)
+        assert exc.value.code == code
+    owner.domain_scope = ["PERSONAL"]
+    db.commit()
+    d = adrs.record_adr_decision(db, adr_key="ADR-0001", outcome="ACCEPTED", actor_user_id=owner.id,
+                                 rationale="diterima oleh pemilik platform", content_hash=row.content_hash)
+    assert d.domain is None and d.actor_kind == "HUMAN"
 
 
 def test_cli_adr_decide_needs_the_admin_password(settings, db, adr_dir):

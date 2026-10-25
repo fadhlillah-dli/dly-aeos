@@ -36,6 +36,9 @@ def _record_seed_exception(session: Session) -> str:
     adr = session.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == ADR_0003))
     if adr is None or adr.status != "ACCEPTED" or not adr.content_hash:
         return "skipped (ADR-0003 not loaded/accepted)"
+    owner_status = adr_loader.effective_register_status(session, adr)
+    if owner_status != "ACCEPTED":  # §02: the owner's own ADR decision wins over the file's Status line
+        return f"skipped (owner recorded {owner_status} for ADR-0003)"
     repo = get_settings().platform_repo_slug
     existing = list(session.scalars(
         select(Decision).where(Decision.kind == "EXCEPTION", Decision.actor_user_id == OWNER_ACTOR,

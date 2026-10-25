@@ -887,7 +887,7 @@ def personal_gate(session: Session, plan: Plan, *, actor: str) -> dict[str, Any]
         reasons = [f"pemeriksaan kritis STALE (dicek ulang sebelum bridge dipakai lagi): {', '.join(stale)}"
                    + ("; recheck dijadwalkan, coba lagi sesudahnya" if queued else ""), *reasons]
         remedies = [{"check_id": c, "operation": "Jalankan ulang pemeriksaan Readiness Doctor",
-                     "command": f"aeos doctor --capability {Capability.CAN_PLAN_PERSONAL.value}",
+                     "command": doctor.launcher_command(f"doctor --capability {Capability.CAN_PLAN_PERSONAL.value}"),
                      "executed_by": "MANUSIA (salin dan jalankan sendiri)"} for c in stale] + remedies
     proof = {"capability": Capability.CAN_PLAN_PERSONAL.value, "status": status,
              "label": {"READY": "PROVEN", "DEGRADED": "MANUAL_PACKAGE", "BLOCKED": "BLOCKED"}.get(status, "NOT-PROVEN"),

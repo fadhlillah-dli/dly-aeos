@@ -23,7 +23,7 @@ from aeos.audit import service as audit
 from aeos.core.errors import Blocked, Conflict, NotFound, PolicyDenied, ValidationFailed
 from aeos.core.hashing import content_hash
 from aeos.core.redaction import contains_secret
-from aeos.core.timeutil import ensure_aware, utcnow
+from aeos.core.timeutil import ensure_aware, is_expired, utcnow
 from aeos.events import service as events
 from aeos.identity.service import Principal
 from aeos.intake.scan import UNTRUSTED_INSTRUCTION, scan_text
@@ -58,8 +58,10 @@ def _validate_source(session: Session, project: Project, source_type: str, sourc
         d = session.get(Decision, source_id)
         if d is None or (d.project_id not in (None, project.id)) or (d.domain not in (None, project.domain)):
             raise NotFound("decision not found")
-        if d.status != "ACTIVE":
-            raise PolicyDenied(f"decision is {d.status}; only ACTIVE decisions can become memory",
+        # as consumers judge it (aeos.policy.decisions.effective_status): past expires_at = EXPIRED before the write-back
+        status = "EXPIRED" if d.status == "ACTIVE" and is_expired(d.expires_at) else d.status
+        if status != "ACTIVE":
+            raise PolicyDenied(f"decision is {status}; only ACTIVE decisions can become memory",
                                code="MEMORY_SOURCE_NOT_ACCEPTED")
         return {"source_type": source_type, "source_id": d.id, "source_hash": d.target_hash, "decision_kind": d.kind}
     if source_type == "plan_version":
@@ -77,8 +79,17 @@ def _validate_source(session: Session, project: Project, source_type: str, sourc
             raise NotFound("ADR not found")
         if not project.is_platform:
             raise PolicyDenied("platform ADRs become memory only for the platform project", code="MEMORY_SCOPE_DENIED")
-        if adr.status != "ACCEPTED":
-            raise PolicyDenied(f"ADR is {adr.status}; only ACCEPTED ADRs can become memory",
+        # §02: the owner's recorded ADR decision wins over the (builder-written) file status
+        try:
+            from aeos.policy import facade as policy
+
+            reg = policy.adr_register_status(session, adr.adr_key)
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise Blocked("decision registry (aeos.policy) unavailable: the owner's ADR decision cannot be read",
+                          code="DECISION_REGISTRY_UNAVAILABLE") from exc
+        status = str(reg["effective_status"]) if reg is not None else adr.status
+        if status != "ACCEPTED":
+            raise PolicyDenied(f"ADR is {status}; only ACCEPTED ADRs can become memory",
                                code="MEMORY_SOURCE_NOT_ACCEPTED")
         return {"source_type": source_type, "source_id": adr.adr_key, "source_hash": adr.content_hash}
     if source_type == "acceptance":

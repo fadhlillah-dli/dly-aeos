@@ -85,6 +85,14 @@ def request_recheck(check_ids: list[str]) -> list[str]:
     return ids
 
 
+def launcher_command(args: str) -> str:
+    """Additive: the copyable AEOS launcher command for this OS (``.\\aeos.ps1 <args>`` on Windows, ``./aeos <args>``
+    on macOS), as the Doctor's own remedies print it."""
+    from aeos.doctor.model import aeos_cmd
+
+    return aeos_cmd(args)
+
+
 def check_catalog() -> dict[str, Any]:
     """The registered Readiness Doctor checks (count and group labels) - static catalog, no results."""
     from aeos.doctor.checks import REGISTRY, load_all

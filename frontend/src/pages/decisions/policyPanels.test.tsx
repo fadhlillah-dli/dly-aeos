@@ -140,6 +140,23 @@ describe("ADR register: owner decision vs builder-written status (§02)", () => 
     });
   });
 
+  it("keeps a stale owner rejection in force instead of the rewritten file status", async () => {
+    const rejected = {
+      ...ADRS.items[1],
+      key: "ADR-0004",
+      file_status: "ACCEPTED",
+      status: "ACCEPTED",
+      owner_status: "REJECTED",
+      owner_decision: { ...ADRS.items[1].owner_decision!, outcome: "REJECTED" },
+      effective_status: "REJECTED",
+      status_source: "OWNER_DECISION (STALE)",
+    };
+    renderWith(<AdrList />, { "/api/adrs": { ...ADRS, items: [rejected] } });
+    expect(await screen.findByText(/Pemilik: REJECTED \(tetap berlaku/)).toBeInTheDocument();
+    expect(screen.getByText("File: ACCEPTED", { exact: false })).toBeInTheDocument();
+    expect(screen.queryByText(/Keputusan pemilik usang/)).not.toBeInTheDocument();
+  });
+
   it("offers no decision form to a VIEWER", async () => {
     auth.isAdmin = false;
     try {

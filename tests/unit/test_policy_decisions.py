@@ -297,6 +297,12 @@ def test_mci_source_path_from_aeos_yaml_must_stay_outside_the_repository(monkeyp
     assert snapshot.mci_source_path() is None
     ms.isolate(monkeypatch, repo, override=Path("relative/mci.md"))
     assert snapshot.mci_reference()["verification_code"] == "LOCATION_NOT_LOCAL"
+    # the default Windows and macOS volumes are case-insensitive: another spelling of the checkout is the checkout
+    respelled = repo.parent / repo.name.upper() / "docs" / "mci-v2.md"
+    if respelled.is_file():
+        ms.isolate(monkeypatch, repo, override=respelled)
+        assert snapshot.mci_reference()["verification_code"] == "SOURCE_IN_REPOSITORY"
+        assert snapshot._within_repository(respelled.resolve(), repo.resolve())
 
 
 def test_settings_read_mci_source_path_from_the_config_file(settings, monkeypatch, tmp_path):

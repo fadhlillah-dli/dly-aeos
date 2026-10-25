@@ -6,6 +6,7 @@ CAN_PLAN_PERSONAL gate (§02, §05 step 2, §08)."""
 from __future__ import annotations
 
 import copy
+import sys
 
 import pytest
 from sqlalchemy import select
@@ -384,7 +385,10 @@ def test_a_stale_critical_check_is_rechecked_before_the_bridge_runs_again(db, ow
         service.run_pipeline(db, plan.id, actor=owner.id)
     assert exc.value.code == "PERSONAL_PLANNING_BLOCKED" and bridge.calls == []
     assert queued == [["claude.env"]]
-    assert any("aeos doctor" in str(r.get("command")) for r in exc.value.details["remedies"])
+    # the copyable launcher of this OS (.\aeos.ps1 on Windows, ./aeos on macOS), like the Doctor's own remedies
+    launcher = ".\\aeos.ps1 " if sys.platform == "win32" else "./aeos "
+    assert any(str(r.get("command")) == launcher + "doctor --capability CAN_PLAN_PERSONAL"
+               for r in exc.value.details["remedies"])
     db.refresh(plan)
     proof = plan.checkpoint["bridge_proof"]
     assert plan.state == "NEEDS_DECISION" and proof["label"] == "RECHECK_REQUIRED"

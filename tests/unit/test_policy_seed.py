@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import shutil
 
+import pytest
 from sqlalchemy import select
 
 from aeos.models.decisions import ArchitectureDecisionRecord, Decision, PolicySnapshot
@@ -110,6 +111,41 @@ def test_revocation_survives_an_edited_adr_file(db, monkeypatch, tmp_path):
     assert res["adrs"]["updated"] == 1 and res["adr_0003_exception"].startswith("revoked by owner")
     rows = list(db.scalars(select(Decision).where(Decision.actor_user_id == "owner:ADR-0003")))
     assert len(rows) == 1 and rows[0].status == "INVALIDATED"
+
+
+def test_owner_rejecting_adr0003_withdraws_the_delegation(db, monkeypatch, tmp_path):
+    """§02: the owner's own ADR decision wins over the file's Status line. REJECTED on ADR-0003 revokes what its
+    ``owner:ADR-0003`` actor holds, that actor can record nothing new, and neither the seed nor an edit of the file
+    (the delegate can edit files) brings the delegation back (fail closed)."""
+    from aeos.core.errors import PolicyDenied
+
+    owner = create_admin(db)
+    for p in adrs.decisions_dir().glob("ADR-*.md"):
+        shutil.copy(p, tmp_path / p.name)
+    monkeypatch.setattr(adrs, "decisions_dir", lambda: tmp_path)
+    seed.run(db)
+    d = db.scalar(select(Decision).where(Decision.actor_user_id == "owner:ADR-0003"))
+    adr3 = db.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == "ADR-0003"))
+    assert d.status == "ACTIVE" and adr3.status == "ACCEPTED"
+    adrs.record_adr_decision(db, adr_key="ADR-0003", outcome="REJECTED", actor_user_id=owner.id,
+                             rationale="pemilik menarik delegasi ADR-0003", content_hash=adr3.content_hash)
+    db.commit()
+    db.refresh(d)
+    assert d.status == "INVALIDATED" and d.invalidation_reason.startswith("revoked: owner recorded REJECTED")
+    with pytest.raises(PolicyDenied) as exc:
+        registry.record_decision(db, kind="EXCEPTION", actor_user_id="owner:ADR-0003", target_type="repository",
+                                 target_id="fadhlillah-dli/dly-aeos", allowed_operations=["commit"],
+                                 rationale="re-delegate after the rejection")
+    assert exc.value.code == "DECISION_ACTOR_NOT_HUMAN" and "REJECTED" in exc.value.message
+    path = tmp_path / "ADR-0003-seed-build-authority.md"
+    path.write_text(path.read_text(encoding="utf-8") + "\n<!-- accepted again by the delegate -->\n", encoding="utf-8")
+    res = seed.run(db)
+    db.commit()
+    assert res["adrs"]["updated"] == 1 and res["adr_0003_exception"] == "skipped (owner recorded REJECTED for ADR-0003)"
+    rows = list(db.scalars(select(Decision).where(Decision.actor_user_id == "owner:ADR-0003")))
+    assert [r.status for r in rows] == ["INVALIDATED"]
+    reg = adrs.register_status(adr3, adrs.owner_decisions(db, ["ADR-0003"])["ADR-0003"])
+    assert (reg["owner_status_state"], reg["effective_status"], reg["file_status"]) == ("STALE", "REJECTED", "ACCEPTED")
 
 
 def test_every_adr_file_is_listed_in_the_register_index_with_its_status():

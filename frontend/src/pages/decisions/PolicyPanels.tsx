@@ -261,6 +261,10 @@ function OwnerStatus({ a }: { a: AdrSummary }) {
   if (a.owner_status_state === "RECORDED" && a.owner_status) {
     return <StatusBadge status={a.owner_status} label={`Pemilik: ${a.owner_status}`} />;
   }
+  if (a.owner_status_state === "STALE" && a.owner_status && a.owner_status !== "ACCEPTED") {
+    // an owner rejection/supersession stays in force after a file edit: only the owner can lift it
+    return <StatusBadge status={a.owner_status} label={`Pemilik: ${a.owner_status} (tetap berlaku; file berubah sesudahnya, tinjau ulang)`} />;
+  }
   if (a.owner_status_state === "STALE") {
     return <StatusBadge status="STALE" label={`Keputusan pemilik usang (${a.owner_status ?? "?"}, file berubah)`} />;
   }
