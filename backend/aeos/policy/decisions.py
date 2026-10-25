@@ -200,6 +200,8 @@ def readiness_invalidators(decision: Decision) -> list[str]:
         out.append("config:sandbox")
     if decision.target_type == "secret_store":
         out.append("secret:*")  # the selected secret backend may change (interim keyring exception)
+    if decision.target_type == catalog.TARGET_CLAUDE_EXTRA_USAGE:
+        out.append("config:claude_extra_usage")  # claude.extra_billing reads the owner attestation
     return list(dict.fromkeys(out))
 
 

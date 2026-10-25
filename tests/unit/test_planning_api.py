@@ -265,9 +265,11 @@ def test_office_decision_metadata_never_reaches_personal_views(personal_client, 
     assert r.status_code == 404  # an OFFICE request cannot be resolved from a PERSONAL session
 
 
-def test_policy_read_endpoints(personal_client, db):
+def test_policy_read_endpoints(personal_client, db, monkeypatch, tmp_path):
     from aeos.policy import seed
+    from tests.unit import mci_support
 
+    mci_support.isolate(monkeypatch, mci_support.fake_repo(tmp_path))  # MCI not supplied (not the owner's live file)
     snap = personal_client.get("/api/policy/snapshot").json()
     assert snap["mci_status"] == "UNVERIFIED"
     seed.run(db)

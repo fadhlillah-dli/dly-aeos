@@ -106,6 +106,25 @@ describe("DecisionForm exact target shapes (ADR-0042/0051)", () => {
     });
   });
 
+  it("records the paid extra-usage attestation as a POLICY preset (§12, E0, never VERIFIED)", async () => {
+    const fn = renderForm("PERSONAL");
+    fireEvent.change(screen.getByLabelText("Jenis keputusan"), { target: { value: "POLICY" } });
+    fireEvent.change(screen.getByLabelText("Jenis kebijakan"), { target: { value: "claude_extra_usage_off" } });
+    expect(screen.queryByText("Jenis target")).not.toBeInTheDocument();
+    expect(screen.getByText("claude_extra_usage/PERSONAL")).toBeInTheDocument();
+    expect(screen.getByText(/tidak pernah VERIFIED/)).toBeInTheDocument();
+    expect(screen.getByText("Berlaku sampai (wajib)")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/Scope eksplisit/), { target: { value: "akun=Max pribadi" } });
+    fireEvent.change(screen.getByLabelText(/Berlaku sampai/), { target: { value: "2027-01-31T10:00" } });
+    fireEvent.change(screen.getByLabelText(/Rationale/), { target: { value: "extra usage berbayar dimatikan di claude.ai" } });
+    fireEvent.click(screen.getByRole("button", { name: "Catat keputusan" }));
+    await waitFor(() => expect(fn).toHaveBeenCalled());
+    const body = JSON.parse(String(fn.mock.calls[0][1]!.body));
+    expect(body).toMatchObject({ kind: "POLICY", policy_preset: "claude_extra_usage_off", auth_scope: { akun: "Max pribadi" } });
+    expect(body.target_type).toBeUndefined();
+    expect(body.expires_at).toBeTruthy();
+  });
+
   it("does not offer the PERSONAL-only presets in OFFICE", () => {
     renderForm("OFFICE");
     expect(screen.queryByLabelText("Jenis pengecualian")).not.toBeInTheDocument();

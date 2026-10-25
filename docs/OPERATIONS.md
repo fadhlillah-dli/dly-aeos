@@ -25,8 +25,19 @@ Procedures for specific situations are in [runbooks/](runbooks/README.md).
 | Released controller | `<data>/releases/<version>-<sha12>.zip`, `.provenance.json`, extracted dir, `ACTIVE.json` |
 | Scratch | `<data>/tmp/` (restore tests, smoke tests; removed after use) |
 | Config (non-secret) | `%LOCALAPPDATA%\DLY-AEOS\aeos.yaml` / `~/Library/Application Support/DLY-AEOS/aeos.yaml` (example: `config/aeos.example.yaml`) |
+| Canonical MCI_V2 (owner-supplied) | `<data>/policy/canonical/<file>` (or `mci_source_path` in aeos.yaml) + `<data>/policy/canonical/mci-pack-mapping.yaml`; never in the repository |
 
 Secrets are never in these files: OpenBao + OS credential store only (§26).
+
+The platform repository is public, so MCI content never lives in it (master §06 "MCI tidak dimasukkan
+tanpa hak"). `policy/mci-reference.yaml` keeps the reference only: `status: VERIFIED`, `version`,
+`content_hash` (`sha256:<lowercase hex>` of the exact bytes of the local file) and `location:
+local:<file>`. The source is verified on each machine that has a copy; a machine without it reports
+`SOURCE_MISSING` (UNVERIFIED, fail closed), and a source inside the checkout is never read. The per-pack
+MCI controls and evidence contracts (§34) are derived MCI content too: they go into the local
+`mci-pack-mapping.yaml` (template: `blueprints/mci-pack-mapping.template.yaml`) and a pack is APPROVED
+only with an owner POLICY decision on `mci_pack_mapping/<pack>` bound to the hash shown at `/decisions`.
+Compliance is never claimed (NOT-PROVEN).
 
 ## Backup and restore
 

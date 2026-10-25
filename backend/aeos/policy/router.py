@@ -118,6 +118,13 @@ def decision_shapes(_principal: CurrentPrincipal, domain: ActiveDomain) -> dict[
         "office_authorization": {"target_type": catalog.TARGET_OFFICE_POLICY, "target_id": Domain.OFFICE.value,
                                  "providers": list(catalog.providers_for(Domain.OFFICE)),
                                  "available": domain == Domain.OFFICE},
+        "policy_presets": {name: {"kind": "POLICY", "target_type": p.target_type, "target_id": p.target_id,
+                                  "domains": list(p.domains), "details": {p.detail_key: p.value},
+                                  "consumer": p.consumer, "label": p.label, "expiry_required": True,
+                                  "evidence_level": "E0", "available": domain.value in p.domains}
+                           for name, p in catalog.POLICY_PRESETS.items()},
+        "adr": {"kind": "ADR", "target_type": catalog.TARGET_ADR, "outcomes": list(catalog.ADR_OUTCOMES),
+                "endpoint": catalog.DEDICATED_TARGETS[catalog.TARGET_ADR]},
         "domain": domain.value, "checked_at": _now(),
     }
 
@@ -153,6 +160,8 @@ class DecisionIn(BaseModel):
     # EXCEPTION presets with the exact target shape their consumer reads (catalog.EXCEPTION_PRESETS)
     exception: Literal["secret_store_interim_keyring", "worker_sandbox_process"] | None = None
     allow_bash: bool | None = None
+    # POLICY owner attestations with the exact target shape their consumer reads (catalog.POLICY_PRESETS)
+    policy_preset: Literal["claude_extra_usage_off"] | None = None
     request_id: str | None = None
 
 
@@ -187,7 +196,7 @@ def create_decision(body: DecisionIn, db: DB, principal: AdminPrincipal, domain:
         expires_at=body.expires_at, details=body.details, provider=body.provider, enabled=body.enabled,
         office_authorization=body.office_authorization, company_reference=body.company_reference,
         allowed_providers=body.allowed_providers, office_policy=body.office_policy, exception=body.exception,
-        allow_bash=body.allow_bash,
+        allow_bash=body.allow_bash, policy_preset=body.policy_preset,
     )
     if body.request_id:
         req = db.get(DecisionRequest, body.request_id)
@@ -293,8 +302,11 @@ def refresh_snapshot(db: DB, principal: AdminPrincipal) -> dict[str, Any]:
 
 
 @router.get("/api/policy/mci")
-def get_mci(_principal: CurrentPrincipal) -> dict[str, Any]:
-    return {**snapshot.mci_reference(), "risk_classes": snapshot.risk_classes(), "checked_at": _now()}
+def get_mci(db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
+    # pack-mapping decisions are PERSONAL (platform) decisions: their ids are shown in PERSONAL sessions only
+    show_ids = principal.active_domain == Domain.PERSONAL
+    return {**snapshot.mci_reference(session=db, show_decision_ids=show_ids), "risk_classes": snapshot.risk_classes(),
+            "checked_at": _now()}
 
 
 @router.get("/api/policy/office")
@@ -341,9 +353,36 @@ def get_write_enablement(db: DB, _principal: CurrentPrincipal, domain: ActiveDom
 @router.get("/api/adrs")
 def list_adrs(db: DB, _principal: CurrentPrincipal) -> dict[str, Any]:
     rows = list(db.scalars(select(ArchitectureDecisionRecord).order_by(ArchitectureDecisionRecord.adr_key)))
-    return {"items": [adr_loader.adr_view(r) for r in rows], "source": "docs/decisions (loaded by aeos seed)",
+    owner = adr_loader.owner_decisions(db)
+    items = [adr_loader.adr_view(r, decisions=owner.get(r.adr_key, [])) for r in rows]
+    counts: dict[str, int] = {}
+    for i in items:
+        counts[i["owner_status_state"]] = counts.get(i["owner_status_state"], 0) + 1
+    return {"items": items, "owner_status_counts": counts,
+            "source": "docs/decisions (loaded by aeos seed) + owner ADR decisions",
             "checked_at": _now(), "mode": "LIVE",
             "remedy": None if rows else "aeos seed --only aeos.policy.seed"}
+
+
+class AdrDecisionIn(BaseModel):
+    outcome: Literal["ACCEPTED", "REJECTED", "SUPERSEDED"]
+    rationale: str = Field(min_length=10, max_length=5000)
+    content_hash: str = Field(min_length=10, max_length=80)  # the hash of the ADR content the owner reviewed
+    superseded_by: str | None = Field(default=None, max_length=32)
+
+
+@router.post("/api/adrs/{adr_key}/decision", status_code=201)
+def decide_adr(adr_key: str, body: AdrDecisionIn, db: DB, principal: AdminPrincipal) -> dict[str, Any]:
+    """§02 change control: the owner accepts/rejects/supersedes an ADR (live SUPER_ADMIN session + CSRF). The Decision
+    (kind ADR) binds the ADR's content hash; editing the file afterwards makes the owner status STALE."""
+    d = adr_loader.record_adr_decision(db, adr_key=adr_key, outcome=body.outcome, actor_user_id=principal.user.id,
+                                       rationale=body.rationale, content_hash=body.content_hash,
+                                       superseded_by=body.superseded_by)
+    db.commit()
+    row = db.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == adr_key))
+    assert row is not None
+    return {"adr": adr_loader.adr_view(row, decisions=adr_loader.owner_decisions(db, [adr_key]).get(adr_key, [])),
+            "decision": registry.decision_view(db, d), "checked_at": _now()}
 
 
 @router.get("/api/adrs/{adr_key}")
@@ -351,8 +390,11 @@ def get_adr(adr_key: str, db: DB, principal: CurrentPrincipal) -> dict[str, Any]
     row = db.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == adr_key))
     if row is None:
         raise NotFound("ADR not found")
-    view = adr_loader.adr_view(row, full=True)
-    linked = list(db.scalars(select(Decision).where(Decision.actor_user_id == f"owner:{adr_key}")))
+    view = adr_loader.adr_view(row, full=True,
+                               decisions=adr_loader.owner_decisions(db, [adr_key]).get(adr_key, []))
+    linked = list(db.scalars(select(Decision).where(or_(
+        Decision.actor_user_id == f"owner:{adr_key}",
+        (Decision.target_type == catalog.TARGET_ADR) & (Decision.target_id == adr_key))).order_by(Decision.created_at)))
     active = principal.active_domain
     # ADRs are platform documents (no domain); decisions linked to them stay in their own domain scope.
     visible = [d for d in linked if d.domain is None

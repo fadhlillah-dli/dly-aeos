@@ -28,6 +28,16 @@ export const EXCEPTION_PRESETS: Record<string, { label: string; target: string; 
   },
 };
 
+/** POLICY owner attestations with the exact target shape their consumer reads (PERSONAL only, expiry required). */
+export const POLICY_PRESETS: Record<string, { label: string; target: string; consumer: string; note: string }> = {
+  claude_extra_usage_off: {
+    label: "Atestasi pemilik: extra usage berbayar Claude NONAKTIF di pengaturan akun claude.ai",
+    target: "claude_extra_usage/PERSONAL",
+    consumer: "Doctor claude.extra_billing dan ClaudeNativeBridge",
+    note: "AEOS tidak dapat membaca pengaturan akun ini: ditampilkan sebagai atestasi pemilik (bukti E0, CONFIGURED), tidak pernah VERIFIED. Matikan dulu di claude.ai (Settings → Usage).",
+  },
+};
+
 const OFFICE_KEYS = ["external_worker_allowed", "approved_worker_routes", "claude_max_allowed_for_office_data", "trace_destinations_allowed", "requires_isolated_runtime", "atlassian_deployment"];
 
 /** "k=v; k2=v2" -> {k: "v", k2: "v2"}; JSON objects are accepted as-is. */
@@ -63,6 +73,7 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
   const [allowedProviders, setAllowedProviders] = useState<string[]>([]);
   const [officeOverrides, setOfficeOverrides] = useState("");
   const [preset, setPreset] = useState<string>("");
+  const [policyPreset, setPolicyPreset] = useState<string>("");
   const [allowBash, setAllowBash] = useState(false);
   // §41/§43 system change: a POLICY on a policy/model/tool/hook/prompt/memory/fallback/context target needs
   // COMPLETED all-gates-PASS evaluation runs and the rollback target it replaces (backend SYSTEM_CHANGE_TARGET_TYPES)
@@ -70,6 +81,7 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
   const [scRollback, setScRollback] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
   const usePreset = kind === "EXCEPTION" && domain === "PERSONAL" && !!preset;
+  const usePolicyPreset = kind === "POLICY" && domain === "PERSONAL" && !!policyPreset;
 
   const save = useMutation({
     mutationFn: (body: Record<string, unknown>) => post("/api/decisions", body),
@@ -110,6 +122,8 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
     } else if (usePreset) {
       body.exception = preset;
       if (preset === "worker_sandbox_process") body.allow_bash = allowBash;
+    } else if (usePolicyPreset) {
+      body.policy_preset = policyPreset;
     } else if (kind === "POLICY" && domain === "OFFICE" && (officeAuth || overrides)) {
       body.office_authorization = officeAuth;
       if (officeAuth) {
@@ -129,7 +143,8 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
     save.mutate(body);
   };
 
-  const needsTarget = kind !== "WRITE_ENABLEMENT" && !usePreset && !(kind === "POLICY" && domain === "OFFICE" && officeAuth);
+  const needsTarget = kind !== "WRITE_ENABLEMENT" && !usePreset && !usePolicyPreset && !(kind === "POLICY" && domain === "OFFICE" && officeAuth);
+  const expiryRequired = kind === "EXCEPTION" || kind === "RISK_ACCEPTANCE" || usePolicyPreset;
   return (
     <Card title="Catat keputusan manusia">
       <div className="grid gap-3">
@@ -190,6 +205,26 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
                 <option value="off">Hentikan tulis</option>
               </select>
             </Field>
+          </div>
+        )}
+        {kind === "POLICY" && domain === "PERSONAL" && (
+          <div className="grid gap-3 rounded-md border border-line p-3">
+            <Field label="Jenis kebijakan" hint="Preset memakai target persis yang dibaca modul pemakainya.">
+              <select aria-label="Jenis kebijakan" className={inputClass} value={policyPreset} onChange={(e) => setPolicyPreset(e.target.value)}>
+                <option value="">Lainnya (target manual)</option>
+                {Object.entries(POLICY_PRESETS).map(([k, v]) => (
+                  <option key={k} value={k}>
+                    {v.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {usePolicyPreset && (
+              <Notice tone="warn">
+                Target <strong>{POLICY_PRESETS[policyPreset].target}</strong> (dibaca oleh {POLICY_PRESETS[policyPreset].consumer}). {POLICY_PRESETS[policyPreset].note} Wajib
+                berlaku sampai tanggal tertentu.
+              </Notice>
+            )}
           </div>
         )}
         {kind === "POLICY" && domain === "OFFICE" && (
@@ -258,7 +293,7 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
         <Field label="Scope eksplisit (wajib)" hint="key=value; key2=value2 atau JSON. Contoh: repo=owner/nama; alasan=hotfix">
           <textarea className={inputClass} value={scope} onChange={(e) => setScope(e.target.value)} />
         </Field>
-        <Field label={kind === "EXCEPTION" || kind === "RISK_ACCEPTANCE" ? "Berlaku sampai (wajib)" : "Berlaku sampai (opsional)"}>
+        <Field label={expiryRequired ? "Berlaku sampai (wajib)" : "Berlaku sampai (opsional)"}>
           <input type="datetime-local" className={inputClass} value={expires} onChange={(e) => setExpires(e.target.value)} />
         </Field>
         <Field label="Rationale (wajib, min. 10 karakter)">

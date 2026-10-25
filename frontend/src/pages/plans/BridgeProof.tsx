@@ -55,6 +55,11 @@ const TEXT: Record<string, { status: string; label: string; note: string }> = {
     label: "Perencanaan diblokir sebelum panggilan model",
     note: "CAN_PLAN_PERSONAL BLOCKED: tidak ada panggilan model sampai penyebabnya diperbaiki.",
   },
+  RECHECK_REQUIRED: {
+    status: "STALE",
+    label: "Pemeriksaan kritis usang — cek ulang dulu",
+    note: "Pemeriksaan kritis CAN_PLAN_PERSONAL berubah sejak lulus (STALE): tidak ada panggilan model sampai Readiness Doctor memeriksanya ulang (aeos doctor).",
+  },
 };
 
 export function BridgeProofNotice({ proof }: { proof?: BridgeProof | null }) {

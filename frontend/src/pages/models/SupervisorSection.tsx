@@ -39,7 +39,12 @@ export function SupervisorSection() {
               ["Penyedia API", s.auth.apiProvider ?? "UNKNOWN"],
               ["Akun", s.auth.email ?? "—"],
               ["Kuota Max", <span key="q" className="flex flex-wrap items-center gap-2"><Badge status={s.quota.state} /> <span className="text-xs text-ink-3">{s.quota.note}</span></span>],
-              ["Penggunaan tambahan berbayar", <span key="x" className="text-xs">{s.extra_usage.note}</span>],
+              [
+                "Penggunaan tambahan berbayar",
+                <span key="x" className="flex flex-wrap items-center gap-2 text-xs">
+                  <StatusBadge status={s.extra_usage.state} label={s.extra_usage.state === "CONFIGURED" ? "Atestasi pemilik: nonaktif (E0)" : undefined} /> {s.extra_usage.note}
+                </span>,
+              ],
             ]}
           />
           {[...s.binary.reasons, ...s.auth.reasons].length > 0 && (

@@ -1,15 +1,20 @@
 # Canonical policy reference (master §02, §24, §34, §51 P1).
-# The MCI_V2 source of truth has NOT been provided to this repository. Gates that depend on it
+# The MCI_V2 source of truth has NOT been provided. Gates that depend on it
 # stay BLOCKED / NOT-PROVEN. Do not reconstruct MCI content from memory or model output.
+# The repository is PUBLIC: only this reference is committed. The document stays on the owner's machine:
+# <data dir>/policy/canonical/<file> (location: local:<file>) or aeos.yaml mci_source_path; a source inside
+# the repository is never read. content_hash = sha256:<lowercase hex> of the exact bytes of that file.
 mci:
   name: MCI_V2_SOURCE_OF_TRUTH
   status: UNAVAILABLE        # UNAVAILABLE | REFERENCED | VERIFIED
   version: null
   content_hash: null
-  location: null
+  location: null             # local:MCI_V2_SOURCE_OF_TRUTH.md once supplied
   verified_at: null
   note: "Owner must supply the canonical source; until then alignment is UNVERIFIED."
-packs:                       # §34 packs to be mapped to MCI controls once available
+# §34 packs. Their MCI controls + evidence contracts are derived from MCI_V2, so they live only in the owner's
+# local <data dir>/policy/canonical/mci-pack-mapping.yaml (template: blueprints/mci-pack-mapping.template.yaml).
+packs:
   - ARCH
   - PRODUCT
   - UX/FE

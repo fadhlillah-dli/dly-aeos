@@ -8,6 +8,15 @@ never rewritten. Number ranges per module group: 0001-0009 platform, 0010 doctor
 0050 workforce/broker/runtime, 0060 verification/delivery, 0070 publisher/docs,
 0080 cost/evaluation/proposals/research, 0090 operations/control center.
 
+**Status column = the file's `Status:` line**, written by whoever wrote the file (during the seed build:
+the builder). It is not the owner's acceptance. The owner accepts, rejects or supersedes an ADR as a
+Decision of kind `ADR` on `adr/<ADR-NNNN>`, bound to the content hash of the loaded file and recorded only
+from a live SUPER_ADMIN session: `/decisions` > Register ADR, or
+`aeos policy adr-decide ADR-NNNN --outcome ACCEPTED|REJECTED|SUPERSEDED --as <admin> --rationale "..."`
+(password prompt; `--superseded-by ADR-MMMM` for SUPERSEDED). `aeos policy adrs` and the register show both
+statuses; while the owner decision binds the current content it is the effective status, and an edit of the
+file afterwards makes it STALE (the file status applies again until the owner decides anew).
+
 | ADR | Title | Status |
 |---|---|---|
 | [ADR-0001](ADR-0001-master-architecture-baseline.md) | Master architecture is the platform baseline; MCI alignment UNVERIFIED | ACCEPTED |

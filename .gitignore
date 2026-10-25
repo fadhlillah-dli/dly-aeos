@@ -29,6 +29,13 @@ task-data/
 logs/
 *.log
 
+# Canonical MCI_V2 source and its derived pack mapping: owner-supplied, never committed (the repository is public,
+# master §06 "MCI tidak dimasukkan tanpa hak"). They live in <data dir>/policy/canonical/ or at the aeos.yaml
+# mci_source_path; these patterns only guard against a copy placed in the checkout by mistake.
+policy/canonical/
+MCI_V2_SOURCE_OF_TRUTH*
+mci-pack-mapping.yaml
+
 # Local config & secrets — examples only are tracked
 .env
 .env.*

@@ -41,7 +41,10 @@ def test_seed_is_idempotent_and_records_adr0003_exception(db):
     keys = [r.adr_key for r in db.scalars(select(ArchitectureDecisionRecord).order_by(ArchitectureDecisionRecord.adr_key))]
     assert {"ADR-0001", "ADR-0002", "ADR-0003"} <= set(keys)
     assert first["adrs"]["created"] == len(keys) and first["adr_0003_exception"] == "created"
-    assert first["mci"] == "UNVERIFIED"
+    # the seed reports the verified MCI status (whatever the owner's file says), never a declared one
+    from aeos.policy import snapshot
+
+    assert first["mci"] == snapshot.mci_reference()["status"] and first["mci"] in ("UNVERIFIED", "VERIFIED")
     d = db.scalar(select(Decision).where(Decision.actor_user_id == "owner:ADR-0003"))
     adr3 = db.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == "ADR-0003"))
     assert d.kind == "EXCEPTION" and d.actor_kind == "HUMAN_RECORDED" and d.status == "ACTIVE"

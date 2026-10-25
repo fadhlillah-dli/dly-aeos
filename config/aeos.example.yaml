@@ -10,6 +10,10 @@ session_ttl_hours: 12
 session_idle_minutes: 120
 max_upload_bytes: 26214400
 openbao_addr: http://127.0.0.1:8200
+# Canonical MCI_V2 source (owner-supplied, never committed: the platform repository is public). Default:
+# <data dir>/policy/canonical/<file> named by policy/mci-reference.yaml "location: local:<file>". An absolute
+# path here overrides it; a path inside the repository is refused.
+# mci_source_path: /absolute/path/outside/the/repo/MCI_V2_SOURCE_OF_TRUTH.md
 # claude_binary: /path/to/claude          # default: found on PATH
 # opencode_binary: /path/to/opencode      # default: found on PATH
 platform_repo_slug: fadhlillah-dli/dly-aeos

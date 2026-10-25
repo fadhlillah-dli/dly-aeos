@@ -44,7 +44,11 @@ def _build(client: AuthedClient, pid: str, **body) -> dict:
 
 
 @needs_git
-def test_pack_items_have_provenance_and_hash(personal_client: AuthedClient, tmp_path: Path):
+def test_pack_items_have_provenance_and_hash(personal_client: AuthedClient, tmp_path: Path, monkeypatch):
+    from tests.unit import mci_support
+
+    # the policy context of an isolated controller policy/ (MCI not supplied), not the owner's live file
+    mci_support.isolate(monkeypatch, mci_support.fake_repo(tmp_path, name="controller"))
     p, _rid, repo_dir = _setup(personal_client, tmp_path)
     head = git(repo_dir, "rev-parse", "HEAD")
     pack = _build(personal_client, p["id"], query=["compute_total"], forbidden_paths=["src/secret_*"])
@@ -63,8 +67,101 @@ def test_pack_items_have_provenance_and_hash(personal_client: AuthedClient, tmp_
     assert "supersecretvalue" not in str(pack) and "/etc/passwd" not in str(pack)
     policy = [i for i in pack["items"] if i["kind"] == "policy"]
     assert policy and all(i["trust"] == "POLICY_READ_ONLY" and i["provenance"]["sha256"] for i in policy)
-    assert any("MCI reference status" in w for w in pack["warnings"])
+    assert any("MCI reference status is UNVERIFIED" in w and "NOT_SUPPLIED" in w for w in pack["warnings"])
+    ref = next(i for i in policy if i["ref"] == "policy/mci-reference.yaml")
+    assert ref["provenance"]["mci_status"] == "UNVERIFIED" and ref["provenance"]["mci_compliance"] == "NOT-PROVEN"
     assert pack["request"]["skipped"]["symlinks"] == 1
+
+
+def _policy_context(budget: int = 200_000) -> tuple[list[dict], list[str], list[dict]]:
+    from types import SimpleNamespace
+
+    from aeos.knowledge import packs
+
+    col = packs._Collector(SimpleNamespace(data_classification="INTERNAL"), budget)  # type: ignore[arg-type]
+    warnings: list[str] = []
+    packs._collect_policy(col, warnings)
+    return col.items, warnings, col.omitted
+
+
+def test_policy_context_carries_the_verified_mci_status_not_the_declared_one(monkeypatch, tmp_path):
+    """§24 policy context: the MCI status/version/hash come from the policy module's verification; a declared
+    VERIFIED whose LOCAL file is missing or hash-mismatched reaches the planner as UNVERIFIED, with a warning, and the
+    local source enters the pack only when VERIFIED - under a logical ref, never a host path."""
+    from tests.unit import mci_support as ms
+
+    repo = ms.fake_repo(tmp_path)
+    local = ms.isolate(monkeypatch, repo)
+    digest = ms.write_source(local)
+    ref = repo / "policy" / "mci-reference.yaml"
+    ref.write_text(ms.verified_reference("sha256:" + "0" * 64), encoding="utf-8")  # declared VERIFIED, wrong hash
+    items, warnings, _ = _policy_context()
+    yaml_item = next(i for i in items if i["ref"] == "policy/mci-reference.yaml")
+    assert yaml_item["provenance"]["mci_status"] == "UNVERIFIED"
+    assert yaml_item["provenance"]["mci_declared_status"] == "VERIFIED"
+    assert yaml_item["provenance"]["mci_verification"] == "HASH_MISMATCH"
+    assert any("MCI reference status is UNVERIFIED" in w and "HASH_MISMATCH" in w for w in warnings)
+    assert not any(i["ref"].startswith("mci:") for i in items)  # an unverified local file is not policy context
+    assert any("local MCI source not included" in w for w in warnings)
+
+    ref.write_text(ms.verified_reference(digest), encoding="utf-8")
+    items, warnings, _ = _policy_context()
+    assert not any("MCI reference status" in w for w in warnings)
+    src = next(i for i in items if i["ref"] == ms.SOURCE_REF)
+    assert src["provenance"]["mci_status"] == "VERIFIED" and src["provenance"]["mci_version"] == "test-2"
+    assert src["provenance"]["mci_content_hash"] == digest and src["provenance"]["sha256"] == digest
+    assert src["provenance"]["mci_compliance"] == "NOT-PROVEN" and src["provenance"]["path"] == ms.LOCATION
+    assert str(local) not in str(items)  # no host path in the pack
+
+
+def test_canonical_mci_over_the_file_cap_is_split_into_labelled_parts(monkeypatch, tmp_path):
+    from aeos.core.hashing import sha256_bytes
+    from aeos.knowledge import packs
+    from tests.unit import mci_support as ms
+
+    repo = ms.fake_repo(tmp_path)
+    local = ms.isolate(monkeypatch, repo)
+    line = "Kontrol MCI placeholder baris uji - bukan isi MCI asli.\n"
+    text = line * (packs.MAX_POLICY_BYTES * 2 // len(line) + 10)  # a bit over two parts
+    digest = ms.write_source(local, text)
+    (repo / "policy" / "mci-reference.yaml").write_text(ms.verified_reference(digest), encoding="utf-8")
+    items, warnings, _ = _policy_context()
+    parts = [i for i in items if i["ref"].startswith(ms.SOURCE_REF + "#part-")]
+    assert [i["ref"] for i in parts] == [f"{ms.SOURCE_REF}#part-{n}-of-3" for n in (1, 2, 3)]
+    assert "".join(i["content"] for i in parts) == text  # nothing dropped, nothing reordered
+    data = text.encode("utf-8")
+    assert all(i["provenance"]["part"]["bytes"] <= packs.MAX_POLICY_BYTES for i in parts)
+    assert parts[0]["provenance"]["part"]["lines"][0] == 1
+    assert parts[-1]["provenance"]["part"]["lines"][1] == text.count("\n")
+    assert all(i["provenance"]["sha256"] == digest and i["provenance"]["mci_status"] == "VERIFIED" for i in parts)
+    assert parts[0]["provenance"]["part"]["sha256"] == "sha256:" + sha256_bytes(
+        data[: parts[0]["provenance"]["part"]["bytes"]])
+    assert any("split into 3 labelled parts" in w for w in warnings)
+    assert not any("skipped" in w for w in warnings)
+    # a budget that cannot hold every part: the pack says which parts are missing and that gates stay NOT-PROVEN;
+    # the omitted parts are not mandatory (the reference itself is), so the pack is still built
+    items, warnings, omitted = _policy_context(budget=30_000)
+    assert any("only partly in this pack" in w and "NOT-PROVEN" in w for w in warnings)
+    mci_omitted = [o for o in omitted if o["ref"].startswith(ms.SOURCE_REF + "#part-")]
+    assert mci_omitted and all(o["mandatory"] is False for o in mci_omitted)
+    assert any(i["ref"] == "policy/mci-reference.yaml" for i in items)
+
+
+def test_a_change_of_the_local_mci_source_makes_built_packs_stale(personal_client: AuthedClient, monkeypatch,
+                                                                    tmp_path):
+    """The pack records the verified MCI reference it was built on: the owner supplying (or replacing) the local
+    source after the build makes the pack STALE (§24 freshness)."""
+    from tests.unit import mci_support as ms
+
+    repo = ms.fake_repo(tmp_path, name="controller")
+    local = ms.isolate(monkeypatch, repo)
+    p = create_project(personal_client, name="MCI fresh")
+    pack = _build(personal_client, p["id"])
+    assert personal_client.get(f"/api/context-packs/{pack['id']}").json()["context_pack"]["freshness"] == "CURRENT"
+    digest = ms.write_source(local)
+    (repo / "policy" / "mci-reference.yaml").write_text(ms.verified_reference(digest), encoding="utf-8")
+    got = personal_client.get(f"/api/context-packs/{pack['id']}").json()["context_pack"]
+    assert got["freshness"] == "STALE" and "canonical MCI reference changed" in got["stale_reason"]
 
 
 @needs_git

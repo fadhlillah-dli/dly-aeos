@@ -7,6 +7,7 @@ PolicySnapshot, MCI reference and OFFICE defaults (§02, §20, §23, §51 P1).
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -174,20 +175,239 @@ def test_policy_snapshot_hash_tracks_policy_decisions(db, owner):
     assert s3.content["decisions"] == [] and s3.content_hash != s2.content_hash
 
 
-def test_mci_reference_is_unverified_and_never_compliant():
+def test_live_mci_reference_never_claims_compliance(settings):
+    """Against the owner's live reference only what holds in EVERY state (not supplied, or supplied and VERIFIED);
+    the ``settings`` fixture keeps the local source lookup in this test's own data dir and config."""
     mci = snapshot.mci_reference()
-    assert mci["declared_status"] == "UNAVAILABLE" and mci["status"] == "UNVERIFIED"
-    assert mci["compliance"] == "NOT-PROVEN" and "ARCH" in mci["packs"]
+    assert mci["compliance"] == "NOT-PROVEN" and mci["packs_mapping_status"] == "UNVERIFIED"
+    assert mci["packs_missing"] == [] and set(snapshot.MASTER_PACKS) <= set(mci["packs"])
+    assert all(p["mapping_status"] == "UNVERIFIED" for p in mci["pack_mappings"])  # no decision without a session
+    assert mci["status"] in ("UNVERIFIED", "VERIFIED") and (mci["status"] == "VERIFIED") == (
+        mci["verification_code"] == "HASH_MATCH")
+    assert mci["source_placement"] == "LOCAL_ONLY"
     classes = snapshot.risk_classes()
     assert [c["key"] for c in classes] == ["R0", "R1", "R2", "R3", "R4"]
     assert all(c["thresholds"] is None and c["threshold_status"] == "UNVERIFIED" for c in classes)
 
 
-def test_mci_declared_verified_without_matching_file_stays_unverified(monkeypatch, tmp_path):
+def test_the_public_repository_never_holds_mci_content():
+    """Owner (2026-10-26, repository PUBLIC): the committed reference names a machine-local location only, its pack
+    slots carry no MCI controls or evidence contracts, the checkout ignores any MCI copy placed in it by mistake, and
+    the mapping template in blueprints/ is empty."""
+    import subprocess
+
+    import yaml
+
+    from aeos.core.paths import repo_root
+
+    root = repo_root()
+    data = yaml.safe_load((root / "policy" / "mci-reference.yaml").read_text(encoding="utf-8"))
+    location = data["mci"].get("location")
+    assert location is None or str(location).startswith("local:")
+    assert all(isinstance(p, str) or not snapshot._has_mapping_content(p) for p in data["packs"])
+    ignore = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert {"policy/canonical/", "MCI_V2_SOURCE_OF_TRUTH*", "mci-pack-mapping.yaml"} <= set(ignore)
+    tpl = yaml.safe_load((root / "blueprints" / "mci-pack-mapping.template.yaml").read_text(encoding="utf-8"))
+    assert [p["key"] for p in tpl["packs"]] == list(snapshot.MASTER_PACKS)
+    assert not any(snapshot._has_mapping_content(p) for p in tpl["packs"])
+    assert all(p["mapping_status"] == "UNVERIFIED" for p in tpl["packs"])
+    if (root / ".git").exists():
+        try:
+            tracked = subprocess.run(["git", "-C", str(root), "ls-files", "policy/canonical", "*MCI_V2_SOURCE*"],
+                                     capture_output=True, text=True, timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        if tracked.returncode == 0:
+            assert tracked.stdout.strip() == ""
+
+
+def test_unavailable_mci_reference_is_unverified(monkeypatch, tmp_path):
+    from tests.unit import mci_support
+
+    mci_support.isolate(monkeypatch, mci_support.fake_repo(tmp_path))
+    mci = snapshot.mci_reference()
+    assert (mci["declared_status"], mci["status"], mci["verification_code"]) == ("UNAVAILABLE", "UNVERIFIED",
+                                                                                  "NOT_SUPPLIED")
+    assert mci["compliance"] == "NOT-PROVEN" and "ARCH" in mci["packs"]
+
+
+def test_mci_declared_verified_without_matching_file_stays_unverified(settings, monkeypatch, tmp_path):
     (tmp_path / "mci-reference.yaml").write_text(
-        "mci:\n  status: VERIFIED\n  location: policy/missing.md\n  content_hash: sha256:00\n", encoding="utf-8")
+        "mci:\n  status: VERIFIED\n  location: local:missing.md\n  content_hash: sha256:00\n", encoding="utf-8")
     monkeypatch.setattr(snapshot, "policy_dir", lambda: tmp_path)
     assert snapshot.mci_reference()["status"] == "UNVERIFIED"
+
+
+def test_mci_verification_codes(monkeypatch, tmp_path):
+    from tests.unit import mci_support as ms
+
+    repo = ms.fake_repo(tmp_path)
+    local = ms.isolate(monkeypatch, repo)
+    digest = ms.write_source(local)
+    ref = repo / "policy" / "mci-reference.yaml"
+
+    def code(text: str) -> tuple[str, str]:
+        ref.write_text(text, encoding="utf-8")
+        m = snapshot.mci_reference()
+        assert m["compliance"] == "NOT-PROVEN" and m["source_placement"] == "LOCAL_ONLY"
+        return m["status"], m["verification_code"]
+
+    assert code(ms.verified_reference(digest)) == ("VERIFIED", "HASH_MATCH")
+    assert snapshot.mci_reference()["source_location"] == ms.LOCATION  # logical, never a host path
+    # the same digest as Get-FileHash prints it (upper case, no prefix) is the same digest
+    assert code(ms.verified_reference(digest[7:].upper())) == ("VERIFIED", "HASH_MATCH")
+    assert code(ms.verified_reference("sha256:" + "0" * 64)) == ("UNVERIFIED", "HASH_MISMATCH")
+    assert code(ms.verified_reference(digest, location="local:missing.md")) == ("UNVERIFIED", "SOURCE_MISSING")
+    assert code(ms.verified_reference(digest, location="local:../escape.md")) == ("UNVERIFIED",
+                                                                                "LOCATION_OUTSIDE_LOCAL_DIR")
+    assert code("mci:\n  status: VERIFIED\n") == ("UNVERIFIED", "INCOMPLETE_REFERENCE")
+    assert code("mci:\n  status: REFERENCED\n  location: local:MCI_V2_SOURCE_OF_TRUTH.md\n") == (
+        "UNVERIFIED", "REFERENCED_NOT_VERIFIED")
+    assert code("mci:\n  status: COMPLIANT\n") == ("UNVERIFIED", "UNKNOWN_DECLARED_STATUS")
+    # the repository is public: a repository path is never a source, even with a matching hash
+    in_repo = repo / "policy" / "canonical" / ms.SOURCE_NAME
+    in_repo.parent.mkdir(parents=True)
+    in_repo.write_bytes((local / ms.SOURCE_NAME).read_bytes())
+    for location in ("policy/canonical/MCI_V2_SOURCE_OF_TRUTH.md", str(in_repo)):
+        assert code(ms.verified_reference(digest, location=location)) == ("UNVERIFIED", "LOCATION_NOT_LOCAL")
+    # editing the source after it was hashed is a mismatch (fail closed)
+    ref.write_text(ms.verified_reference(digest), encoding="utf-8")
+    ms.write_source(local, "# edited\n")
+    assert snapshot.mci_reference()["verification_code"] == "HASH_MISMATCH"
+
+
+def test_mci_source_path_from_aeos_yaml_must_stay_outside_the_repository(monkeypatch, tmp_path):
+    """aeos.yaml ``mci_source_path`` (an absolute local path) overrides the default local directory; a path that
+    resolves into the repository is refused (SOURCE_IN_REPOSITORY), a relative one is not local (fail closed)."""
+    from tests.unit import mci_support as ms
+
+    repo = ms.fake_repo(tmp_path)
+    elsewhere = tmp_path / "secure-store"
+    digest = ms.write_source(elsewhere, name="mci-v2.md")
+    ref = repo / "policy" / "mci-reference.yaml"
+    ref.write_text(ms.verified_reference(digest, location="null"), encoding="utf-8")
+    ms.isolate(monkeypatch, repo, override=elsewhere / "mci-v2.md")
+    m = snapshot.mci_reference()
+    assert (m["status"], m["source_location"]) == ("VERIFIED", "aeos.yaml mci_source_path")
+    inside = repo / "docs" / "mci-v2.md"
+    inside.parent.mkdir(parents=True)
+    inside.write_bytes((elsewhere / "mci-v2.md").read_bytes())
+    ms.isolate(monkeypatch, repo, override=inside)
+    assert snapshot.mci_reference()["verification_code"] == "SOURCE_IN_REPOSITORY"
+    assert snapshot.mci_source_path() is None
+    ms.isolate(monkeypatch, repo, override=Path("relative/mci.md"))
+    assert snapshot.mci_reference()["verification_code"] == "LOCATION_NOT_LOCAL"
+
+
+def test_settings_read_mci_source_path_from_the_config_file(settings, monkeypatch, tmp_path):
+    from aeos.core import config as config_mod
+
+    cfg = tmp_path / "aeos-local.yaml"
+    cfg.write_text(f"mci_source_path: '{(tmp_path / 'store' / 'mci.md').as_posix()}'\n", encoding="utf-8")
+    monkeypatch.setenv("AEOS_CONFIG", str(cfg))
+    config_mod.reset_settings_cache()
+    try:
+        s = config_mod.get_settings()
+        assert s.mci_source_path == tmp_path / "store" / "mci.md"
+        assert snapshot.mci_source_settings(s) == (s.layout.canonical_policy, tmp_path / "store" / "mci.md")
+        assert s.layout.canonical_policy == s.data_dir / "policy" / "canonical"
+    finally:
+        monkeypatch.setenv("AEOS_CONFIG", str(tmp_path / "no-config.yaml"))
+        config_mod.reset_settings_cache()
+
+
+COMPLETE_MAPPING = ("packs:\n  - key: ARCH\n    mci_controls: [CTRL-1]\n    mapping_status: UNVERIFIED\n"
+                    "    evidence_contract: {claim_types: [design], required_evidence_kinds: [review], min_level: E1,"
+                    " trusted_origins: [verifier], freshness: P30D}\n  - key: QA\n")
+
+
+def _approve_pack(db, owner, pack: str, target_hash: str, *, domain: str = "PERSONAL"):
+    from aeos.core.enums import Domain
+    from aeos.policy import recording
+
+    return recording.record_generic_decision(
+        db, actor_user_id=owner.id, domain=Domain(domain), kind="POLICY", rationale="pemetaan pack disetujui pemilik",
+        auth_scope={"pack": pack}, target_type="mci_pack_mapping", target_id=pack, target_hash=target_hash)
+
+
+def test_pack_mapping_needs_verified_mci_and_a_bound_owner_decision(monkeypatch, tmp_path, db, owner):
+    """§34: per-pack MCI-control slot + evidence contract (from the owner's LOCAL mapping file); above UNVERIFIED only
+    with a VERIFIED MCI source and a human POLICY decision bound to the exact mapping + MCI hash. Compliance stays
+    NOT-PROVEN."""
+    from tests.unit import mci_support as ms
+
+    repo = ms.fake_repo(tmp_path)
+    local = ms.isolate(monkeypatch, repo)
+    digest = ms.write_source(local)
+    ms.write_mapping(local, COMPLETE_MAPPING)
+    ref = repo / "policy" / "mci-reference.yaml"
+    ref.write_text(ms.verified_reference("sha256:" + "1" * 64), encoding="utf-8")
+    m = snapshot.mci_reference(session=db)
+    assert m["pack_mapping_state"] == "PRESENT"
+    arch = next(p for p in m["pack_mappings"] if p["key"] == "ARCH")
+    assert arch["mapping_status"] == "UNVERIFIED" and "not VERIFIED" in arch["note"]
+    with pytest.raises(ValidationFailed) as exc:
+        _approve_pack(db, owner, "ARCH", arch["binding"]["target_hash"])
+    assert exc.value.code == "MCI_NOT_VERIFIED"
+
+    ref.write_text(ms.verified_reference(digest), encoding="utf-8")
+    m = snapshot.mci_reference(session=db)
+    arch = next(p for p in m["pack_mappings"] if p["key"] == "ARCH")
+    qa = next(p for p in m["pack_mappings"] if p["key"] == "QA")
+    assert arch["mapping_status"] == "UNVERIFIED" and arch["evidence_contract_status"] == "DECLARED"
+    assert arch["mapping_source"] == "LOCAL" and arch["mci_controls"] == ["CTRL-1"]
+    assert qa["evidence_contract_status"] == "UNDECIDED" and qa["mci_controls"] == []
+    for bad, code in (({"target_hash": "sha256:" + "2" * 64}, "MCI_PACK_HASH_MISMATCH"),
+                      ({"domain": "OFFICE"}, "MCI_PACK_DOMAIN_DENIED")):
+        with pytest.raises(ValidationFailed) as exc:
+            _approve_pack(db, owner, "ARCH", bad.get("target_hash", arch["binding"]["target_hash"]),
+                          domain=bad.get("domain", "PERSONAL"))
+        assert exc.value.code == code
+    with pytest.raises(ValidationFailed) as exc:
+        _approve_pack(db, owner, "QA", qa["binding"]["target_hash"])
+    assert exc.value.code == "MCI_PACK_MAPPING_INCOMPLETE"
+
+    d = _approve_pack(db, owner, "ARCH", arch["binding"]["target_hash"])
+    m = snapshot.mci_reference(session=db)
+    arch = next(p for p in m["pack_mappings"] if p["key"] == "ARCH")
+    assert arch["mapping_status"] == "APPROVED" and arch["decision_id"] == d.id
+    assert m["packs_mapping_status"] == "PARTIAL" and m["compliance"] == "NOT-PROVEN"
+    assert snapshot.mci_reference()["packs_mapping_status"] == "UNVERIFIED"  # without the database: not evaluated
+    assert snapshot.mci_reference(session=db, show_decision_ids=False)["pack_mappings"][0]["decision_id"] is None
+
+    # the owner edits the mapping: the decision binds the old one -> back to UNVERIFIED (STALE note)
+    ms.write_mapping(local, COMPLETE_MAPPING.replace("CTRL-1", "CTRL-9"))
+    arch = next(p for p in snapshot.mci_reference(session=db)["pack_mappings"] if p["key"] == "ARCH")
+    assert arch["mapping_status"] == "UNVERIFIED" and "STALE" in arch["note"]
+    # ... and a source that stops verifying withdraws every approval
+    ms.write_mapping(local, COMPLETE_MAPPING)
+    assert snapshot.mci_reference(session=db)["packs_mapping_status"] == "PARTIAL"
+    ms.write_source(local, "# replaced\n")
+    assert snapshot.mci_reference(session=db)["packs_mapping_status"] == "UNVERIFIED"
+
+
+def test_mapping_content_in_the_committed_reference_is_ignored(monkeypatch, tmp_path, db):
+    """Controls/evidence contracts derived from MCI_V2 never come from the public repository: a mapping written into
+    the committed reference is ignored (and said so), so it can never be approved from there."""
+    from tests.unit import mci_support as ms
+
+    repo = ms.fake_repo(tmp_path)
+    local = ms.isolate(monkeypatch, repo)
+    digest = ms.write_source(local)
+    (repo / "policy" / "mci-reference.yaml").write_text(ms.verified_reference(digest, packs=COMPLETE_MAPPING),
+                                                         encoding="utf-8")
+    m = snapshot.mci_reference(session=db)
+    arch = next(p for p in m["pack_mappings"] if p["key"] == "ARCH")
+    assert m["status"] == "VERIFIED" and m["pack_mapping_state"] == "ABSENT"
+    assert arch["mci_controls"] == [] and arch["evidence_contract_status"] == "UNDECIDED"
+    assert arch["committed_mapping_ignored"] is True and "ignored (public repository)" in arch["note"]
+    # the blueprint template, copied as the local mapping, maps nothing (no invented content)
+    from aeos.core.paths import repo_root
+
+    ms.write_mapping(local, (repo_root() / "blueprints" / "mci-pack-mapping.template.yaml").read_text(encoding="utf-8"))
+    m = snapshot.mci_reference(session=db)
+    assert m["pack_mapping_state"] == "PRESENT" and m["packs_mapping_status"] == "UNVERIFIED"
+    assert all(p["evidence_contract_status"] == "UNDECIDED" for p in m["pack_mappings"])
 
 
 def test_office_policy_default_deny_and_authorised_overrides(db, owner, monkeypatch):

@@ -82,10 +82,16 @@ TARGET_OFFICE_ROUTE = "office_route"
 # eligibility only through the owner's adoption decision on role_adoption/<role_key>, bound to the role revision
 # and the exact EvalRun, carrying the DecisionRecord (workforce checks the evaluation before recording it).
 TARGET_ROLE_ADOPTION = "role_adoption"
+# §02 change control: the owner accepts/rejects/supersedes an ADR as a Decision of kind ADR on adr/<ADR-NNNN>,
+# bound to the content hash of the loaded ADR file, recorded only from a live SUPER_ADMIN session (decisions page
+# or ``aeos policy adr-decide`` with the password). A later edit of the file makes that owner status STALE.
+TARGET_ADR = "adr"
+ADR_OUTCOMES: tuple[str, ...] = ("ACCEPTED", "REJECTED", "SUPERSEDED")
 DEDICATED_TARGETS: dict[str, str] = {
     TARGET_OFFICE_ROUTE: "POST /api/policy/office/routes",
     TARGET_WORKFORCE: "POST /api/workforce/concurrency",
     TARGET_ROLE_ADOPTION: "POST /api/workforce/roles/{role_key}/adopt",
+    TARGET_ADR: "POST /api/adrs/{adr_key}/decision",
 }
 # §41/§43 "Perubahan policy, model, tool schema, hooks, prompt/memory, fallback, context strategy tetap system
 # change dengan eval/decision/rollback": a generic POLICY decision on one of these targets changes how agents/models
@@ -197,6 +203,46 @@ EXCEPTION_DETAIL_KEYS = frozenset({"secret_store_interim_keyring", "allow_proces
 
 def exception_preset_for_target(target_type: str | None, target_id: str | None) -> str | None:
     for name, spec in EXCEPTION_PRESETS.items():
+        if spec.target_type == target_type and spec.target_id == target_id:
+            return name
+    return None
+
+
+# ---- owner attestations read by other modules (POLICY decisions with an exact target shape) -----------------
+#
+# §12 "Menonaktifkan penggunaan tambahan berbayar sesuai pengaturan resmi": AEOS cannot read the claude.ai account
+# setting (no official API). The owner turns paid extra usage off in claude.ai and records it here; the Doctor
+# check claude.extra_billing and the ClaudeNativeBridge view then show it as an owner attestation (evidence E0,
+# CONFIGURED - never VERIFIED). The attestation needs an explicit expiry chosen by the owner (no default).
+
+TARGET_CLAUDE_EXTRA_USAGE = "claude_extra_usage"
+# §34 pack -> MCI control mapping approval (aeos.policy.snapshot.mci_reference, aeos.policy.recording)
+TARGET_MCI_PACK_MAPPING = "mci_pack_mapping"
+
+
+@dataclass(frozen=True)
+class PolicyPreset:
+    target_type: str
+    target_id: str
+    domains: tuple[str, ...]
+    detail_key: str  # boolean detail the consumer reads
+    value: bool  # the value this preset records
+    consumer: str = ""
+    label: str = ""
+
+
+POLICY_PRESETS: dict[str, PolicyPreset] = {
+    "claude_extra_usage_off": PolicyPreset(
+        TARGET_CLAUDE_EXTRA_USAGE, Domain.PERSONAL.value, (Domain.PERSONAL.value,), "extra_usage_disabled", True,
+        consumer="aeos.doctor.checks.claude.claude_extra_billing, aeos.claude_bridge.bridge.status",
+        label="Atestasi pemilik: extra usage berbayar Claude NONAKTIF di pengaturan akun claude.ai"),
+}
+# Detail keys whose meaning a consumer reads; they are accepted only on their preset target.
+POLICY_PRESET_DETAIL_KEYS = frozenset(p.detail_key for p in POLICY_PRESETS.values())
+
+
+def policy_preset_for_target(target_type: str | None, target_id: str | None) -> str | None:
+    for name, spec in POLICY_PRESETS.items():
         if spec.target_type == target_type and spec.target_id == target_id:
             return name
     return None

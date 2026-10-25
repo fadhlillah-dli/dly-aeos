@@ -71,6 +71,20 @@ def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
     return impl(session, invalidator=invalidator, reason=reason)
 
 
+def request_recheck(check_ids: list[str]) -> list[str]:
+    """Additive (§08 "memicu recheck sebelum capability tersebut digunakan kembali"): queue a background recheck of
+    the given checks that may be re-run implicitly (local non-functional checks and the zero-cost remote identity
+    probes; never quota-bearing ones). Returns the ids queued - empty when no server recheck worker runs (CLI)."""
+    from aeos.doctor import capabilities as caps
+
+    if not caps.auto_recheck_enabled():
+        return []
+    ids = [*caps.recheckable(list(check_ids)), *caps.remote_recheckable(list(check_ids))]
+    if ids:
+        caps.request_recheck(ids)
+    return ids
+
+
 def check_catalog() -> dict[str, Any]:
     """The registered Readiness Doctor checks (count and group labels) - static catalog, no results."""
     from aeos.doctor.checks import REGISTRY, load_all

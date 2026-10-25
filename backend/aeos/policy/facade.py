@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from aeos.core.config import Settings
 from aeos.models.decisions import Decision
 
 
@@ -155,6 +157,79 @@ def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids
     from aeos.policy.recording import system_change_evidence as impl
 
     return impl(session, domain=domain, eval_run_ids=eval_run_ids, rollback_target=rollback_target)
+
+
+def mci_reference(*, repo: Path | None = None, session: Session | None = None,
+                  show_decision_ids: bool = True, settings: Settings | None = None) -> dict[str, Any]:
+    """Additive: the MCI_V2 reference exactly as the policy module verifies it (§02, §24, §34): ``status`` is VERIFIED
+    only for a declared VERIFIED reference whose LOCAL source (``<data dir>/policy/canonical/`` or aeos.yaml
+    ``mci_source_path``; never inside the public repository) matches the recorded sha256; ``verification_code`` says
+    why not (NOT_SUPPLIED, REFERENCED_NOT_VERIFIED, UNKNOWN_DECLARED_STATUS, INCOMPLETE_REFERENCE,
+    LOCATION_NOT_LOCAL, LOCATION_OUTSIDE_LOCAL_DIR, SOURCE_IN_REPOSITORY, SOURCE_MISSING, HASH_MISMATCH);
+    ``compliance`` is always NOT-PROVEN. ``repo`` reads ``<repo>/policy`` instead of the controller's own checkout;
+    ``settings`` selects the data dir / aeos.yaml (default: the controller's); ``session`` evaluates the owner's
+    per-pack mapping decisions (UNVERIFIED without it)."""
+    from aeos.policy.snapshot import mci_reference as impl
+
+    return impl(repo=repo, session=session, show_decision_ids=show_decision_ids, settings=settings)
+
+
+def mci_source_path(*, repo: Path | None = None, settings: Settings | None = None) -> Path | None:
+    """Additive: the declared MCI source file on this machine, or None (nothing declared, or the location is refused:
+    not ``local:<file>``, escaping the local directory, or inside the repository)."""
+    from aeos.policy.snapshot import mci_source_path as impl
+
+    return impl(repo, settings)
+
+
+def decision_effective_status(session: Session, decision_id: str) -> str | None:
+    """Additive: ACTIVE / EXPIRED / INVALIDATED / SUPERSEDED of a decision as consumers must judge it - a decision past
+    its ``expires_at`` is EXPIRED even before the expiry is written back. None when the decision does not exist."""
+    from aeos.policy.decisions import effective_status
+
+    d = session.get(Decision, decision_id)
+    return effective_status(d) if d is not None else None
+
+
+def adr_register_status(session: Session, adr_key: str) -> dict[str, Any] | None:
+    """Additive (§02 change control): the ADR's builder-written file status vs the owner's recorded ADR decision
+    (``effective_status``, ``status_source``, ``owner_status``, ``owner_status_state`` RECORDED|STALE|NOT_RECORDED).
+    None when the ADR is not loaded."""
+    from sqlalchemy import select
+
+    from aeos.models.decisions import ArchitectureDecisionRecord
+    from aeos.policy import adrs
+
+    row = session.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == adr_key))
+    if row is None:
+        return None
+    return adrs.register_status(row, adrs.owner_decisions(session, [adr_key]).get(adr_key, []))
+
+
+def claude_extra_usage_attestation(session: Session | None) -> dict[str, Any]:
+    """Additive (§12): the owner's attestation of the claude.ai paid extra-usage setting, which AEOS cannot read.
+
+    ``state`` is ATTESTED_OFF / ATTESTED_ON from the newest ACTIVE, unexpired human POLICY decision on
+    ``claude_extra_usage/PERSONAL`` (preset ``claude_extra_usage_off``), else UNKNOWN. Evidence level E0 (a claim):
+    a consumer shows it as CONFIGURED at most, never VERIFIED."""
+    from aeos.policy import catalog
+    from aeos.policy.decisions import find_active_decision
+
+    spec = catalog.POLICY_PRESETS["claude_extra_usage_off"]
+    base: dict[str, Any] = {"state": "UNKNOWN", "decision_id": None, "expires_at": None, "recorded_at": None,
+                            "evidence_level": "E0", "target": f"{spec.target_type}/{spec.target_id}",
+                            "preset": "claude_extra_usage_off"}
+    if session is None:
+        return {**base, "reason": "no database: the owner attestation cannot be read"}
+    d = find_active_decision(session, kind="POLICY", target_type=spec.target_type, target_id=spec.target_id)
+    if d is None or d.actor_kind != "HUMAN" or d.domain != spec.domains[0]:
+        return {**base, "reason": "no ACTIVE owner attestation recorded"}
+    value = (d.details or {}).get(spec.detail_key)
+    if not isinstance(value, bool):
+        return {**base, "reason": "attestation without a boolean extra_usage_disabled (ignored, fail closed)"}
+    return {**base, "state": "ATTESTED_OFF" if value else "ATTESTED_ON", "decision_id": d.id,
+            "expires_at": d.expires_at.isoformat() if d.expires_at else None,
+            "recorded_at": d.created_at.isoformat() if d.created_at else None, "reason": "owner attestation (E0)"}
 
 
 def write_enablement(session: Session, provider: str, *, domain: str) -> dict[str, Any]:

@@ -45,7 +45,8 @@ export interface ClaudeStatus {
   models: { route_key: string; alias: string | null; model_id: string; resolved_version: string; resolved_observed_at: string | null; status: string; mode: string }[];
   last_capability_test: CapabilityTestView | null;
   quota: { state: string; scope?: string; source: string; observed_at: string | null; resets_at: string | null; note: string };
-  extra_usage: { state: string; note: string };
+  /** §12: CLI does not report it; CONFIGURED only from the owner attestation (E0), never VERIFIED */
+  extra_usage: { state: string; note: string; attestation?: string; evidence_level?: string; decision_id?: string | null; expires_at?: string | null };
   checked_at: string;
   source: string;
   mode: string;
