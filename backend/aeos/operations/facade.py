@@ -87,6 +87,34 @@ def project_incidents(session: Session, project: Project) -> list[dict[str, Any]
     return impl(session, project)
 
 
+def post_release_failure(session: Session, *, project: Project, commit: str, target: str, observation_id: str,
+                         evidence_ids: list[str], failure_conditions: list[str], rollback_on: list[str],
+                         actor: str) -> dict[str, Any]:
+    """Additive (§31 G8, §40): a FAIL production observation raises the deduplicated ``post_release_failure``
+    alert, opens/links its incident with a HUMAN rollback recommendation and files one decision request
+    (rollback / forward-fix / accept). AEOS never deploys or rolls back. Does not commit."""
+    from aeos.operations.post_release import record_failure
+
+    return record_failure(session, project=project, commit=commit, target=target, observation_id=observation_id,
+                          evidence_ids=evidence_ids, failure_conditions=failure_conditions, rollback_on=rollback_on,
+                          actor=actor)
+
+
+def post_release_recovered(session: Session, *, project: Project, commit: str, observation_id: str,
+                           actor: str) -> dict[str, Any] | None:
+    """Additive: a later PASS observation of the same commit resolves the alert (incident/decision stay human)."""
+    from aeos.operations.post_release import record_recovered
+
+    return record_recovered(session, project=project, commit=commit, observation_id=observation_id, actor=actor)
+
+
+def post_release_status(session: Session, project: Project, commit: str | None) -> dict[str, Any] | None:
+    """Additive, read-only: alert / incident / decision request of a post-release failure of *commit*."""
+    from aeos.operations.post_release import status_for
+
+    return status_for(session, project, commit)
+
+
 def require_retirement_decision(session: Session, settings: Settings, project: Project) -> Decision:
     """Refuse lifecycle RETIRED unless the owner's retirement decision binds the current checklist (§33)."""
     from aeos.operations.retirement import require_retirement_decision as impl

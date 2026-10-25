@@ -130,12 +130,21 @@ def _validate_credential_ref(ref: Any, project: Project) -> str | None:
     return value
 
 
-def _validate_config(config: Any) -> dict[str, Any]:
+def _validate_config(config: Any, provider: str | None = None) -> dict[str, Any]:
     if config in (None, {}):
         return {}
     if not isinstance(config, dict):
         raise ValidationFailed("config must be an object", code="INVALID_CONFIG")
     out: dict[str, Any] = {}
+    if provider == pv.DEPLOYMENT_TARGET:
+        # observe-only target settings (health_path, smoke/critical-flow + SLI checks, rollback criteria) are owned
+        # and validated by aeos.delivery - e.g. a health_path such as '@other.host/health' is refused here, so the
+        # observer and the screenshot collector only ever see a checked target.
+        from aeos.delivery import facade as delivery
+
+        own = {k: v for k, v in config.items() if k in delivery.DEPLOYMENT_TARGET_CONFIG_KEYS}
+        out.update(delivery.validate_deployment_target_config(own))
+        config = {k: v for k, v in config.items() if k not in own}
     for k, v in config.items():
         if isinstance(k, str) and k.startswith("_"):
             # reserved for controller-written proof (``_verification``): never settable through the API
@@ -432,7 +441,7 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
     tenant = _validate_id(body.get("tenant_id"), field="tenant_id", pattern=_TENANT)
     root = _validate_id(body.get("root_id"), field="root_id", pattern=_ROOT_PATTERNS.get(provider))
     cred_ref = _validate_credential_ref(body.get("credential_ref"), project)
-    config = _validate_config(_config_without_refs(body.get("config"), provider))
+    config = _validate_config(_config_without_refs(body.get("config"), provider), provider)
     config.update(_config_refs(body.get("config"), provider, project))
     if provider not in ATLASSIAN_PROVIDERS and ({"deployment", "space_id", "base_url"} & set(config)):
         raise ValidationFailed("deployment/space_id/base_url apply to Confluence/Jira only", code="INVALID_CONFIG")
@@ -459,6 +468,16 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
     before = {"tenant_id": integ.tenant_id, "root_id": integ.root_id, "credential_ref": integ.credential_ref}
     was_enabled = (integ.config or {}).get("enabled") is True
     proof = (integ.config or {}).get(PROOF_KEY)
+    if provider == pv.DEPLOYMENT_TARGET and not created:
+        # health_path and the check keys are also managed by PUT /api/delivery/targets/{id}/checks; a generic form
+        # whose config does not name them keeps them (an explicit value, e.g. smoke_checks: [] or health_path: "",
+        # replaces them)
+        from aeos.delivery import facade as delivery
+
+        raw = body.get("config")
+        sent = set(raw) if isinstance(raw, dict) else set()
+        config = {**{k: v for k, v in (integ.config or {}).items()
+                     if k in delivery.DEPLOYMENT_TARGET_CHECK_KEYS and k not in sent}, **config}
     integ.tenant_id = tenant
     integ.root_id = root
     integ.credential_ref = cred_ref

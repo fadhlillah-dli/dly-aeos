@@ -251,10 +251,62 @@ def test_production_claim_without_production_evidence_is_never_pass_production(
     assert runbooks, "incident/rollback runbooks exist for the human-authorised response"
 
 
+def test_post_deploy_failure_triggers_incident_and_rollback(personal_client: AuthedClient, app):
+    """1.35 "jalankan incident/rollback sesuai otorisasi" against a registered production target whose HTTP side is
+    faked at the network boundary (respx): the deploy "succeeded" (the target serves the commit) but the main
+    function fails. The observation is FAIL; AEOS raises the post_release_failure alert, opens the incident with
+    the owner's rollback criteria applied and files a decision request in the one queue. AEOS itself only GETs:
+    there is no deploy or rollback route - the rollback is the human's, per authorisation (§40)."""
+    import re
+
+    import httpx
+    import respx
+
+    sha = "d" * 40
+    base = "https://toko.example.org"
+    project = personal_client.post("/api/projects", json={"domain": "PERSONAL", "name": "Toko Contoh",
+                                                          "idea": "Toko online contoh"}).json()["project"]
+    r = personal_client.put(f"/api/projects/{project['id']}/integrations", json={
+        "provider": "deployment-target", "purpose": "production", "root_id": base})
+    assert r.status_code == 200, r.text
+    integration = r.json()["integration"]
+    r = personal_client.put(f"/api/delivery/targets/{integration['id']}/checks", json={
+        "smoke_checks": [{"name": "checkout", "path": "/api/checkout", "kind": "critical_flow"}],
+        "rollback_on": ["critical_flow_fail"]})
+    assert r.status_code == 200, r.text
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.get(f"{base}/health").mock(return_value=httpx.Response(200, json={"status": "ok", "commit": sha}))
+        mock.get(f"{base}/api/checkout").mock(return_value=httpx.Response(500, json={"error": "payment down"}))
+        r = personal_client.post("/api/delivery/targets/observe",
+                                 json={"project_id": project["id"], "environment": "production", "sha": sha})
+        assert r.status_code == 200, r.text
+        assert [c.request.method for c in mock.calls] == ["GET", "GET"], "observe-only"
+    obs = r.json()
+    assert obs["status"] == "FAIL" and obs["failure_conditions"] == ["critical_flow_fail"]
+    post = obs["post_release"]
+    assert post["recommendation"]["status"] == "ROLLBACK_RECOMMENDED"
+    assert post["recommendation"]["executed_by"] == "HUMAN" and post["recommendation"]["aeos_action"] == "none"
+    alerts = personal_client.get("/api/ops/alerts").json()["items"]
+    alert = next(a for a in alerts if a["id"] == post["alert_id"])
+    assert alert["kind"] == "post_release_failure" and alert["severity"] == "HIGH"
+    assert alert["project_id"] == project["id"] and alert["status"] == "OPEN"
+    incidents = personal_client.get("/api/ops/incidents").json()["items"]
+    incident = next(i for i in incidents if i["id"] == post["incident_id"])
+    assert incident["source"] == "alert" and incident["source_ref"] == alert["id"] and incident["owner"]
+    timeline = " ".join(e["note"] for e in incident["timeline"])
+    assert "ROLLBACK_RECOMMENDED" in timeline and obs["evidence_id"] in incident["evidence_ids"]
+    queue = personal_client.get("/api/decisions/queue").json()["items"]
+    request = next(i for i in queue if i["kind"] == "DECISION_REQUEST" and i["target"]["id"] == post["decision_request_id"])
+    assert request["project_id"] == project["id"]
+    assert not [p for p in app.openapi()["paths"] if re.search(r"\b(deploy|rollback)\b", p.lower())
+                and p.startswith("/api/delivery")], "AEOS has no deploy or rollback operation for product targets"
+
+
 @pytest.mark.integration
-def test_post_deploy_failure_triggers_incident_and_rollback():
-    pytest.skip("BLOCKED-no-deployment-target: G8 post-release observation and an authorised rollback need a real "
-                "deployment target; none exists for local-first DLY AEOS (master §31, §33)")
+def test_post_deploy_failure_on_a_live_target():
+    pytest.skip("BLOCKED-no-deployment-target: the trigger path is proven above against a faked target; a live "
+                "post-release failure and the owner's authorised rollback need a real registered production target "
+                "(master §31, §33): aeos delivery observe-target <project_id> --environment production --sha <commit>")
 
 
 # ---------------------------------------------------------------------------------------------- review seam

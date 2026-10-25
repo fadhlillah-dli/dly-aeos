@@ -151,6 +151,9 @@ class ProviderCapabilities:
     # this plan/visibility cannot enforce it, e.g. GitHub "Upgrade to GitHub Pro") | NOT_OBSERVED (not visible
     # without an enforcing rule - never claimed; Bitbucket "enforce merge checks" is Premium) | UNKNOWN.
     entitlement: str = "UNKNOWN"
+    # The provider-side bypass test this capability is bound to (apply_enforcement_evidence): evidence id, ruleset
+    # id/updated_at and when the provider recorded the refusal. Empty = never observed (enforcement NOT-PROVEN).
+    enforcement_test: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -229,7 +232,10 @@ def _rulesets_check(resp: httpx.Response, *, private: bool | None, plan: str | N
         active = [r for r in rows if isinstance(r, dict) and r.get("enforcement") == "active"]
         evaluate = [r for r in rows if isinstance(r, dict) and r.get("enforcement") == "evaluate"]
         detail = {"total": len(rows), "active": [r.get("name") for r in active],
-                  "evaluate_only": [r.get("name") for r in evaluate]}
+                  "evaluate_only": [r.get("name") for r in evaluate],
+                  # exact identities an enforcement test binds to (a changed ruleset resets the proof)
+                  "active_rulesets": [{"id": r.get("id"), "name": r.get("name"), "updated_at": r.get("updated_at")}
+                                      for r in active]}
         if active:
             return CapabilityCheck("rulesets", "CONFIGURED", f"{len(active)} ruleset aktif", code, detail)
         return CapabilityCheck("rulesets", "NOT_CONFIGURED",
@@ -273,7 +279,10 @@ def _branch_rules_check(resp: httpx.Response) -> CapabilityCheck:
                         iid = c.get("integration_id")
                         apps[str(c["context"])] = iid if isinstance(iid, int) and iid > 0 else None
         detail = {"rule_types": types, "required_status_checks": sorted(set(contexts)),
-                  "required_status_check_apps": dict(sorted(apps.items()))}
+                  "required_status_check_apps": dict(sorted(apps.items())),
+                  # which rulesets apply to this branch (a probe-branch refusal proves a ruleset that applies here)
+                  "ruleset_ids": sorted({r["ruleset_id"] for r in rows
+                                         if isinstance(r, dict) and isinstance(r.get("ruleset_id"), int)})}
         status = "CONFIGURED" if types else "NOT_CONFIGURED"
         return CapabilityCheck("branch_rules", status, f"{len(types)} jenis aturan berlaku pada branch", code, detail)
     return CapabilityCheck("branch_rules", "UNKNOWN", f"Tidak dapat membaca aturan branch (HTTP {code})", code)
@@ -693,3 +702,345 @@ def record_capability_evidence(session: Session, project: Project, caps: Provide
         project_id=project.id, domain=project.domain,
         environment={"repo": caps.repo, "branch": caps.branch, "provider": provider, "checked_at": caps.checked_at},
     )
+
+
+# ---------------------------------------------------------------------------- build once: artifact digests (§31)
+
+ARTIFACT_KIND = "ARTIFACT_DIGEST"
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+ATTESTATION_NOTE = ("Attestation hadir di provider; tanda tangan/penanda tangan TIDAK diverifikasi AEOS (pin penanda "
+                    "tangan adalah keputusan pemilik) - bukan bukti provenance terverifikasi.")
+
+
+@dataclass
+class ArtifactDigests:
+    """Provider-CI artifacts built for one commit (GitHub Actions run artifacts with their ``digest``)."""
+
+    repo: str
+    sha: str
+    status: str  # RECORDED | NO_ARTIFACTS | UNKNOWN
+    runs: list[dict[str, Any]] = field(default_factory=list)
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    checked_at: str = ""
+    error: str | None = None
+    truncated: bool = False
+    source: str = "GitHub Actions runs/artifacts/attestations API (GET only)"
+    note: str = ATTESTATION_NOTE
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @property
+    def eligible_digests(self) -> list[str]:
+        return sorted({a["digest"] for a in self.artifacts if a.get("eligible") and a.get("digest")})
+
+
+def fetch_artifact_digests(repo: str, sha: str, *, token: str | None, client: httpx.Client | None = None,
+                           max_runs: int = 30) -> ArtifactDigests:
+    """Read-only: the workflow runs of *sha*, their artifacts' digests and whether the provider holds an
+    attestation for each digest. Only a completed, successful run on exactly this commit makes a digest eligible
+    for promotion (build once after the gates, §31); expired artifacts are listed but never eligible."""
+    validate_repo(repo)
+    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", sha or ""):
+        raise ValidationFailed("full commit sha required", code="SHA_INVALID")
+    out = ArtifactDigests(repo=repo, sha=sha.lower(), status="UNKNOWN", checked_at=utcnow().isoformat())
+    if not token:
+        out.error = "GitHub credential unavailable"
+        return out
+    gh = GitHubReader(token, client=client)
+    try:
+        r = gh.get(f"/repos/{repo}/actions/runs", params={"head_sha": sha, "per_page": 100})
+        if r.status_code != 200:
+            out.error = f"HTTP {r.status_code}: {_message(r)}"
+            return out
+        body = r.json() if isinstance(r.json(), dict) else {}
+        runs = [x for x in body.get("workflow_runs") or [] if isinstance(x, dict)
+                and str(x.get("head_sha") or "").lower() == sha.lower()]
+        out.truncated = int(body.get("total_count") or 0) > len(body.get("workflow_runs") or []) or len(runs) > max_runs
+        for run in runs[:max_runs]:
+            ok = run.get("status") == "completed" and run.get("conclusion") == "success"
+            out.runs.append({"id": run.get("id"), "name": run.get("name"), "event": run.get("event"),
+                             "status": run.get("status"), "conclusion": run.get("conclusion"),
+                             "run_attempt": run.get("run_attempt"), "url": run.get("html_url")})
+            a = gh.get(f"/repos/{repo}/actions/runs/{int(run['id'])}/artifacts", params={"per_page": 100})
+            if a.status_code != 200:
+                out.error = f"artifacts of run {run.get('id')}: HTTP {a.status_code}: {_message(a)}"
+                return out
+            for art in (a.json() or {}).get("artifacts") or []:
+                if not isinstance(art, dict):
+                    continue
+                digest = str(art.get("digest") or "").strip().lower() or None
+                if digest and not _DIGEST_RE.match(digest):
+                    digest = None
+                out.artifacts.append({"id": art.get("id"), "name": art.get("name"), "run_id": run.get("id"),
+                                      "digest": digest, "size_in_bytes": art.get("size_in_bytes"),
+                                      "expired": bool(art.get("expired")), "created_at": art.get("created_at"),
+                                      "eligible": bool(ok and digest and not art.get("expired")),
+                                      "attestation": _attestation(gh, repo, digest)})
+    except httpx.HTTPError as exc:
+        out.error = f"unreachable: {type(exc).__name__}"
+        return out
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:  # malformed provider answer: never evidence
+        out.error = f"unreadable provider response: {type(exc).__name__}"
+        out.artifacts = []
+        return out
+    finally:
+        gh.close()
+    out.status = "RECORDED" if out.eligible_digests else "NO_ARTIFACTS"
+    return out
+
+
+def _attestation(gh: GitHubReader, repo: str, digest: str | None) -> dict[str, Any]:
+    if not digest:
+        return {"status": "NOT_APPLICABLE", "count": 0}
+    r = gh.get(f"/repos/{repo}/attestations/{digest}")
+    if r.status_code == 200:
+        rows = (r.json() or {}).get("attestations") or []
+        return {"status": "PRESENT_UNVERIFIED" if rows else "ABSENT", "count": len(rows),
+                "signature_verified": False}
+    if r.status_code == 404:
+        return {"status": "ABSENT", "count": 0}
+    return {"status": "UNKNOWN", "count": 0, "http_status": r.status_code}
+
+
+def record_artifact_evidence(session: Session, project: Project, result: ArtifactDigests) -> EvidenceArtifact | None:
+    """Provider-CI artifact digests of one commit -> ``provider-ci`` ARTIFACT_DIGEST evidence. A failed read is
+    never recorded (it would look like "no artifact")."""
+    if result.error:
+        return None
+    from aeos.verification import facade as verification
+
+    return verification.collect_evidence(
+        session, kind=ARTIFACT_KIND, origin="provider-ci", collector_identity=f"github-actions-artifacts:{result.repo}"[:128],
+        claim=f"GitHub Actions artifacts of {result.sha[:12]}: {result.status} "
+              f"({len(result.eligible_digests)} eligible digest(s))",
+        content=result.to_dict(), evidence_level="E1", subject_type="commit", subject_id=result.sha,
+        project_id=project.id, domain=project.domain,
+        environment={"commit": result.sha, "repo": result.repo, "provider": "github", "checked_at": result.checked_at},
+    )
+
+
+def recorded_artifact_digests(session: Session, project_id: str, sha: str) -> tuple[set[str], str | None]:
+    """Eligible digests of the newest trusted ARTIFACT_DIGEST evidence of the commit (empty when none)."""
+    from sqlalchemy import select
+
+    from aeos.verification import facade as verification
+
+    ev = session.scalar(select(EvidenceArtifact).where(
+        EvidenceArtifact.project_id == project_id, EvidenceArtifact.kind == ARTIFACT_KIND,
+        EvidenceArtifact.origin == "provider-ci", EvidenceArtifact.trusted.is_(True),
+        EvidenceArtifact.subject_type == "commit", EvidenceArtifact.subject_id == (sha or "").lower())
+        .order_by(EvidenceArtifact.created_at.desc()).limit(1))
+    if ev is None:
+        return set(), None
+    data = verification.read_json(ev) or {}
+    digests = {str(a.get("digest")) for a in data.get("artifacts") or []
+               if isinstance(a, dict) and a.get("eligible") and a.get("digest")}
+    return digests, ev.id
+
+
+# ---------------------------------------------------------------------------- provider enforcement test (§31, M4)
+
+ENFORCEMENT_KIND = "PROVIDER_ENFORCEMENT_TEST"
+ENFORCEMENT_COLLECTOR = "github-rule-suites"  # the one collector whose record can make enforcement VERIFIED
+RULE_SUITES_PERMISSION = ("token needs repository 'Administration: read' (fine-grained) or 'repo' (classic) to read "
+                          "rule suites (Insights -> Rule insights)")
+
+
+@dataclass
+class EnforcementObservation:
+    """What GitHub's ruleset evaluation history shows for one branch: a refused push/merge by an actor without
+    bypass, evaluated by an ACTIVE ruleset, is the provider-side proof that human-only merge is enforced."""
+
+    repo: str
+    branch: str
+    status: str  # OBSERVED | NOT_OBSERVED | UNKNOWN
+    checked_at: str
+    time_period: str
+    refusals: list[dict[str, Any]] = field(default_factory=list)
+    rulesets: list[dict[str, Any]] = field(default_factory=list)
+    error: str | None = None
+    source: str = "GitHub rule suites API (GET only; ruleset evaluation history)"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def enforcement_refusals(suites: list[dict[str, Any]], details: dict[Any, dict[str, Any]],
+                         active_rulesets: list[dict[str, Any]], *, ref: str) -> list[dict[str, Any]]:
+    """Decision logic (pure): refused rule suites of *ref* whose failing evaluation came from an ACTIVE ruleset
+    that is still active now. ``result == "bypass"`` (a bypass actor) or an ``evaluate``-mode ruleset never
+    counts; neither does a suite of another ref."""
+    active = {r.get("id"): r for r in active_rulesets if r.get("id") is not None}
+    out: list[dict[str, Any]] = []
+    for suite in suites:
+        if not isinstance(suite, dict) or suite.get("ref") != ref:
+            continue
+        if suite.get("result") != "fail" or suite.get("evaluation_result") not in ("fail", None):
+            continue
+        detail = details.get(suite.get("id")) or {}
+        hits = []
+        for ev in detail.get("rule_evaluations") or []:
+            src = (ev or {}).get("rule_source") or {}
+            if (src.get("type") == "ruleset" and ev.get("enforcement") == "active" and ev.get("result") == "fail"
+                    and src.get("id") in active):
+                hits.append({"ruleset_id": src.get("id"), "ruleset_name": src.get("name"),
+                             "ruleset_updated_at": active[src.get("id")].get("updated_at"),
+                             "rule_type": ev.get("rule_type")})
+        if hits:
+            out.append({"rule_suite_id": suite.get("id"), "actor_name": suite.get("actor_name"),
+                        "pushed_at": suite.get("pushed_at"), "after_sha": suite.get("after_sha"), "ref": ref,
+                        "rulesets": hits})
+    return out
+
+
+def fetch_enforcement_observation(repo: str, branch: str, *, token: str | None, client: httpx.Client | None = None,
+                                  time_period: str = "week") -> EnforcementObservation:
+    """Read-only: active rulesets of the repository and the refused rule suites of ``refs/heads/<branch>``."""
+    validate_repo(repo)
+    if not branch or not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", branch) or ".." in branch:
+        raise ValidationFailed("branch name required", code="BRANCH_INVALID")
+    if time_period not in ("hour", "day", "week", "month"):
+        raise ValidationFailed("time_period must be hour, day, week or month", code="TIME_PERIOD_INVALID")
+    obs = EnforcementObservation(repo=repo, branch=branch, status="UNKNOWN", checked_at=utcnow().isoformat(),
+                                 time_period=time_period)
+    if not token:
+        obs.error = "GitHub credential unavailable"
+        return obs
+    ref = f"refs/heads/{branch}"
+    gh = GitHubReader(token, client=client)
+    try:
+        rs = gh.get(f"/repos/{repo}/rulesets", params={"includes_parents": "true"})
+        if rs.status_code != 200:
+            obs.error = f"rulesets: HTTP {rs.status_code}: {_message(rs)}"
+            return obs
+        obs.rulesets = [{"id": r.get("id"), "name": r.get("name"), "enforcement": r.get("enforcement"),
+                         "updated_at": r.get("updated_at")} for r in rs.json() or [] if isinstance(r, dict)]
+        active = [r for r in obs.rulesets if r.get("enforcement") == "active"]
+        r = gh.get(f"/repos/{repo}/rulesets/rule-suites", params={
+            "ref": ref, "time_period": time_period, "rule_suite_result": "fail", "per_page": 100})
+        if r.status_code != 200:
+            obs.error = f"rule suites: HTTP {r.status_code}: {_message(r)}" + (
+                f" ({RULE_SUITES_PERMISSION})" if r.status_code in (403, 404) else "")
+            return obs
+        suites = [s for s in r.json() or [] if isinstance(s, dict)]
+        details: dict[Any, dict[str, Any]] = {}
+        for s in suites[:20]:
+            d = gh.get(f"/repos/{repo}/rulesets/rule-suites/{int(s['id'])}")
+            if d.status_code == 200 and isinstance(d.json(), dict):
+                details[s["id"]] = d.json()
+        obs.refusals = enforcement_refusals(suites, details, active, ref=ref)
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        obs.error = f"unreadable: {type(exc).__name__}"
+        return obs
+    finally:
+        gh.close()
+    obs.status = "OBSERVED" if obs.refusals else "NOT_OBSERVED"
+    return obs
+
+
+def record_enforcement_evidence(session: Session, project: Project,
+                                obs: EnforcementObservation) -> EvidenceArtifact | None:
+    """Trusted PROVIDER_ENFORCEMENT_TEST evidence — only when the provider itself recorded a refusal by an
+    active ruleset (nothing is recorded for NOT_OBSERVED/UNKNOWN: absence is not proof)."""
+    if obs.status != "OBSERVED":
+        return None
+    from aeos.verification import facade as verification
+
+    newest = max(obs.refusals, key=lambda x: str(x.get("pushed_at") or ""))
+    rulesets = sorted({(h["ruleset_id"], str(h.get("ruleset_updated_at") or "")) for x in obs.refusals
+                       for h in x["rulesets"]})
+    return verification.collect_evidence(
+        session, kind=ENFORCEMENT_KIND, origin="collector", collector_identity=ENFORCEMENT_COLLECTOR,
+        claim=f"GitHub refused {len(obs.refusals)} attempt(s) to change {obs.repo}@{obs.branch} by an active "
+              f"ruleset (newest {newest.get('pushed_at')})",
+        content=obs.to_dict(), evidence_level="E1", subject_type="repository", subject_id=obs.repo,
+        project_id=project.id, domain=project.domain,
+        environment={"repo": obs.repo, "branch": obs.branch, "provider": "github", "checked_at": obs.checked_at,
+                     "observed_at": newest.get("pushed_at"),
+                     "rulesets": [{"id": i, "updated_at": u or None} for i, u in rulesets]},
+    )
+
+
+def record_owner_attestation(session: Session, project: Project, *, repo: str, branch: str, statement: str,
+                             actor_user_id: str) -> EvidenceArtifact:
+    """Fallback when the provider history cannot be read: the owner's own statement that a bypass attempt was
+    refused. Stored as an untrusted HUMAN claim (E0) — it can show CLAIMED, never VERIFIED."""
+    validate_repo(repo)
+    text = (statement or "").strip()
+    if len(text) < 10:
+        raise ValidationFailed("describe the bypass attempt and the provider's refusal (min 10 characters)",
+                               code="ATTESTATION_TOO_SHORT")
+    from aeos.audit import service as audit
+    from aeos.verification import facade as verification
+
+    ev = verification.collect_evidence(
+        session, kind=ENFORCEMENT_KIND, origin="human", collector_identity=f"owner-attestation:{actor_user_id}"[:128],
+        claim=redact_text(f"owner attests a refused bypass attempt on {repo}@{branch}: {text}")[:400],
+        content={"repo": repo, "branch": branch, "statement": text, "attested_by": actor_user_id,
+                 "attested_at": utcnow().isoformat(), "label": "HUMAN_RECORDED claim (not a provider observation)"},
+        evidence_level="E0", subject_type="repository", subject_id=repo, project_id=project.id, domain=project.domain,
+        environment={"repo": repo, "branch": branch, "provider": "github"},
+    )
+    audit.record(session, actor_type="user", actor_id=actor_user_id, action="delivery.enforcement.attest",
+                 target_type="repository", target_id=repo, project_id=project.id, domain=project.domain,
+                 details={"evidence_id": ev.id, "branch": branch, "trusted": False})
+    return ev
+
+
+def apply_enforcement_evidence(session: Session, caps: ProviderCapabilities) -> ProviderCapabilities:
+    """Bind ``enforcement_tested`` to recorded evidence for exactly this repository and branch: VERIFIED only
+    while every ruleset the provider refusal came from is still ACTIVE with the same ``updated_at``; STALE when a
+    ruleset changed or disappeared since; CLAIMED for an owner attestation only; NOT-PROVEN otherwise.
+
+    A refusal observed on a dedicated probe branch (the opt-in live bypass test never touches main) counts for
+    this branch only when every refusing ruleset also applies to this branch (GitHub ``rules/branches``)."""
+    from sqlalchemy import select
+
+    if caps.provider != "GITHUB" or not caps.branch:
+        return caps
+    rows = list(session.scalars(select(EvidenceArtifact).where(
+        EvidenceArtifact.kind == ENFORCEMENT_KIND, EvidenceArtifact.subject_type == "repository",
+        EvidenceArtifact.subject_id == caps.repo).order_by(EvidenceArtifact.created_at.desc())))
+    branch_rules = next((c for c in caps.checks if c.key == "branch_rules"), None)
+    applying = set(branch_rules.detail.get("ruleset_ids") or []) if branch_rules else set()
+
+    def covers(row: EvidenceArtifact) -> bool:
+        env = row.environment or {}
+        if env.get("branch") == caps.branch:
+            return True
+        bound = [r.get("id") for r in env.get("rulesets") or [] if isinstance(r, dict)]
+        return row.trusted and bool(bound) and set(bound) <= applying
+
+    rows = [r for r in rows if covers(r)]
+    trusted = next((r for r in rows if r.trusted and r.origin == "collector"
+                    and r.collector_identity == ENFORCEMENT_COLLECTOR), None)
+    rules = next((c for c in caps.checks if c.key == "rulesets"), None)
+    current = {r.get("id"): r for r in (rules.detail.get("active_rulesets") or [])} if rules else {}
+    if trusted is not None:
+        bound = [r for r in (trusted.environment or {}).get("rulesets") or [] if isinstance(r, dict)]
+        caps.enforcement_test = {"evidence_id": trusted.id, "rulesets": bound,
+                                 "observed_on_branch": (trusted.environment or {}).get("branch"),
+                                 "observed_at": (trusted.environment or {}).get("observed_at"),
+                                 "recorded_at": trusted.created_at.isoformat() if trusted.created_at else None}
+        if rules is None or rules.status not in ("CONFIGURED", "NOT_CONFIGURED", "NOT_ENFORCEABLE"):
+            # the current ruleset state could not be read: the binding cannot be confirmed (never VERIFIED)
+            caps.enforcement_test["reason"] = "current ruleset state could not be read; the refusal cannot be bound"
+            return caps
+        # fail closed: a ruleset whose updated_at was not recorded (or is not reported now) cannot be shown unchanged
+        intact = bool(bound) and all(
+            b.get("id") in current and bool(b.get("updated_at"))
+            and str(current[b["id"]].get("updated_at") or "") == str(b["updated_at"]) for b in bound)
+        if intact:
+            caps.enforcement_tested = "VERIFIED"
+            caps.residual_risks = [r for r in caps.residual_risks if r != ENFORCEMENT_UNTESTED]
+            return caps
+        caps.enforcement_tested = "STALE"
+        caps.enforcement_test["reason"] = "ruleset changed or is no longer active since the refusal was observed"
+        return caps
+    claim = next((r for r in rows if not r.trusted), None)
+    if claim is not None:
+        caps.enforcement_tested = "CLAIMED"
+        caps.enforcement_test = {"evidence_id": claim.id, "label": "owner attestation (HUMAN_RECORDED claim)",
+                                 "recorded_at": claim.created_at.isoformat() if claim.created_at else None}
+    return caps

@@ -192,9 +192,45 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   is shown NOT_PROVEN; a merge by any other account is FAIL.
 * **Staging / production targets (G6/G8):** register a PERSONAL integration with
   `provider=deployment-target`, `purpose=staging|production`, `root_id=https://<base url>` (optional
-  `config.health_path`, default `/health`). AEOS never deploys; `aeos delivery observe-target
-  <project> --environment staging --sha <commit>` performs one GET and records a RUNTIME_OBSERVATION
-  that is PASS only when the target reports the exact commit and healthy.
+  `config.health_path`, default `/health`; an absolute path only - `@host/...`, `//host/...`, query or
+  fragment are refused). AEOS never deploys, releases or rolls back; `aeos delivery observe-target
+  <project> --environment staging --sha <commit>` performs read-only GETs and records one aggregate
+  RUNTIME_OBSERVATION that is PASS only when the target reports the exact commit and healthy and every
+  owner check passed. DLY AEOS' own `/api/health` (set `health_path=/api/health`, e.g. Windows
+  `.\aeos.ps1 delivery target-checks <project> --environment production --health-path /api/health`, macOS
+  `./aeos delivery target-checks ...`) proves its commit only while `controller` runs the ACTIVE clean release.
+  * **Checks (owner values, never defaults):** `PUT /api/delivery/targets/{integration_id}/checks` or
+    `aeos delivery target-checks <project> --environment <env> --file checks.json` with
+    `smoke_checks` (`name`, `path`, `expect_status` (default 200), `json_keys`, `kind` `smoke|critical_flow`;
+    each one recorded as SMOKE_TEST evidence), `sli_checks` (`name`, `path`, `json_key`, `max`/`min` owner
+    thresholds - without one an SLI is `NO_TARGET`, report only), `rollback_on` (any of `health_fail`,
+    `smoke_fail`, `critical_flow_fail`, `sli_breach`, `artifact_digest_mismatch`; without it the rollback
+    recommendation is `UNDECIDED`) and `require_artifact_digest` (true/false); `health_path` can be set the
+    same way. A generic integration save whose config does not name these keys keeps them (an explicit value,
+    even empty, replaces them); changing them makes earlier observations STALE.
+  * **Staging gate (§08):** a staging observation and a staging screenshot run only while
+    `CAN_VALIDATE_STAGING` is READY for the project (verifier, restore test, and per project an
+    observable `deployment-target`; a `local-target` is recorded but not observable). Refusals are audited.
+  * **Owner decisions (POST /api/decisions kind POLICY, or `aeos policy decide`):**
+    `target_type=staging_environment`, `target_id=<project id>`, `auth_scope={"staging": "AUTHORISED",
+    "target": "<exact base url>"}` authorises the (human) staging deploys to that target - G6 PASS needs it;
+    `auth_scope={"staging": "NONE"}` (or `production_environment` + `{"production": "NONE"}`) states the
+    project has no such environment - the only way G6/G8 become NOT_APPLICABLE.
+  * **Post-release failure (G8):** a FAIL production observation raises the HIGH alert
+    `post_release_failure`, opens/links an incident with the rollback recommendation and files a decision
+    request (rollback / forward-fix / accept) - see [post-release-failure](runbooks/post-release-failure.md).
+  * **Build once (§31):** `aeos delivery artifacts <project> --sha <merge commit>` records the provider CI
+    artifact digests (ARTIFACT_DIGEST evidence; attestation presence shown, signature not verified); a target
+    that reports `artifact_digest`/`digest` is compared with it. The gate response's `promotion` is PASS
+    only with G5 and G7 PASS and every registered target serving the recorded digest.
+* **Provider enforcement test (M4):** after your own bypass attempt (or the opt-in live test
+  `tests/acceptance/test_delivery.py::test_provider_enforces_human_only_merge_on_the_real_repository`
+  with `DLY_AEOS_LIVE_BYPASS_REPO`, `DLY_AEOS_LIVE_BYPASS_BRANCH=aeos-probe/<name>`,
+  `DLY_AEOS_LIVE_BYPASS_TOKEN_REF`), `aeos delivery enforcement --repo <owner/name> --branch <branch>` reads
+  GitHub's rule suites (token needs `Administration: read`) and records PROVIDER_ENFORCEMENT_TEST evidence only
+  for a change refused by an ACTIVE ruleset; `aeos delivery capabilities --record` then shows enforcement
+  VERIFIED for that ruleset until it changes (STALE). `--attest "<what was refused>"` stores an untrusted
+  owner claim (CLAIMED, never VERIFIED).
 * **Pipeline reference (§31):** set `config.gate_G1 ... gate_G5` on the project's `ci` integration
   to exact CI job names (template: `blueprints/pipeline-reference.yaml`); otherwise CI jobs are
   classified by name heuristics and the evidence says `NAME_HEURISTIC`.

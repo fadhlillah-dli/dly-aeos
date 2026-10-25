@@ -354,9 +354,18 @@ def known_route_paths(project: Project) -> set[str] | None:
 
 def deployment_environments(session: Session, project: Project) -> list[str]:
     """Environments of this project with a registered (observe-only) deployment target."""
+    from aeos.core.errors import ValidationFailed
     from aeos.delivery import facade as delivery
 
-    return [env for env in ("staging", "production") if delivery.deployment_target(session, project, env)]
+    out = []
+    for env in ("staging", "production"):
+        try:
+            registered = delivery.deployment_target(session, project, env) is not None
+        except ValidationFailed:  # registered, but its stored health_path is refused (never observed/captured)
+            registered = True
+        if registered:
+            out.append(env)
+    return out
 
 
 def render_version(session: Session, settings: Settings, version: PlanVersion, *, persist: bool,
