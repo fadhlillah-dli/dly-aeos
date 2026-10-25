@@ -140,10 +140,17 @@ def worker_agent_definition(ctx: CheckContext) -> Outcome:
     if not a.enabled:
         return Outcome("MISSING", f"Agent {IMPLEMENTER_AGENT} nonaktif (default katalog); scheduler tidak akan "
                        "menjalankan worker.", evidence=evidence, error_code="AGENT_DISABLED", remedy=Remedy(
-                           operation="Aktifkan agent di Workforce Console (Agen -> opencode-implementer -> Aktifkan) "
-                           "setelah OpenCode, sandbox dan route siap; endpoint menolak bila prasyarat belum READY",
+                           operation="Aktifkan agent di Control Center (Organisasi & Peran -> Definisi agent -> "
+                           f"{IMPLEMENTER_AGENT} -> Aktifkan) atau lewat CLI, setelah OpenCode (atau image worker "
+                           "untuk sandbox container), sandbox dan route siap; aksi ditolak dengan daftar prasyarat "
+                           "(AGENT_PREREQUISITES) bila belum READY. Pemeriksaan ini dijalankan ulang otomatis saat "
+                           "agent diaktifkan.",
+                           command=aeos_cmd(f"work agent-enable {IMPLEMENTER_AGENT} --as <SUPER_ADMIN> "
+                                            "--domain <PERSONAL|OFFICE> --reason <teks>"),
                            target=f"AgentDefinition {IMPLEMENTER_AGENT}", privilege="SUPER_ADMIN",
-                           rollback="nonaktifkan agent", evidence_to_collect="worker.agent_definition CONFIGURED"))
+                           rollback=f"nonaktifkan agent (Organisasi & Peran -> Nonaktifkan, atau "
+                                    f"{aeos_cmd(f'work agent-disable {IMPLEMENTER_AGENT} --reason <teks>')})",
+                           evidence_to_collect="worker.agent_definition CONFIGURED"))
     return Outcome("CONFIGURED", f"Agent {IMPLEMENTER_AGENT} aktif ({a.enabled_reason or 'tanpa alasan tercatat'}); "
                    "aktif bukan bukti sedang dipakai.", evidence=evidence, target_identity=f"agent:{IMPLEMENTER_AGENT}")
 

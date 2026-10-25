@@ -90,6 +90,11 @@ export interface WorkforceSummary {
     paused_by: string | null;
     concurrency_cap: number;
     cap_decision_id: string | null;
+    /** §19/§51 P2: where the cap comes from and the owner's resource budget (UNKNOWN while not set). */
+    cap_source?: string;
+    cap_reason?: string;
+    budget_max_parallel_workers?: number | null;
+    budget_note?: string;
     controller_id: string;
     loop_running: boolean;
   };
@@ -206,6 +211,54 @@ export interface RoleCard {
   failure_modes?: string[];
   evaluation_cases?: { suite_key: string; task_class?: string; case_ids: string[] }[];
   practice_sources?: string[];
+  /** §44/§46 executor roles: the current evaluation of this revision and the owner's adoption of it. */
+  evaluation?: { status: string; run_id: string | null; suite_key?: string | null; basis: string };
+  adoption?: { decision_id: string | null; eval_run_id: string | null; scope: Record<string, string[]> | null; current: boolean };
+  adoptable?: boolean;
+}
+
+export interface AgentPrerequisites {
+  agent_key: string;
+  harness: string;
+  enabled: boolean;
+  ready: boolean;
+  reasons: string[];
+  sandbox: { status: string | null; kind: string | null } | null;
+  excluded_check: string;
+  checked_at: string;
+  source: string;
+}
+
+export interface ConcurrencyDetail {
+  cap: number;
+  decision_id: string | null;
+  source: string;
+  reason: string;
+  policy_cap: number;
+  budget_max_parallel_workers: number | null;
+  budget_note: string;
+  budget_limited: boolean;
+}
+
+export interface ExperimentRow {
+  eval_run_id: string;
+  topology: string | null;
+  status: string;
+  grant_decision_id: string | null;
+  /** the grant applies right now (run RUNNING, decision ACTIVE, unexpired and bound to this start) */
+  grant_active?: boolean;
+  grantable: boolean;
+  problems: string[];
+  bound_tasks: number;
+  parallel_execution: { status: string; problems: string[]; cap2_runs: number; overlaps: { runs: string[]; overlap_s: number }[] };
+}
+
+export interface ConcurrencyState {
+  items: ExperimentRow[];
+  concurrency: ConcurrencyDetail;
+  source: string;
+  checked_at: string;
+  mode: string;
 }
 
 export interface RoleGroup {
@@ -232,4 +285,7 @@ export interface AgentDef {
   owner: string;
   active_runs: number;
   availability: string;
+  /** the stored owner toggle (``enabled`` follows the owning module's gate for reviewer/verifier agents) */
+  enabled_flag?: boolean;
+  enabled_source?: string;
 }

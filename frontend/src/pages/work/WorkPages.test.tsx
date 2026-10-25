@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { vi } from "vitest";
@@ -17,6 +18,7 @@ vi.mock("../../api/client", () => ({
   ApiError: class extends Error {},
 }));
 
+import { post } from "../../api/client";
 import WorkPage from "./index";
 import RunDetailPage from "./RunDetailPage";
 import OrganizationPage from "../organization/index";
@@ -91,6 +93,34 @@ describe("Live Work page", () => {
   beforeEach(() => {
     responses["/api/runs"] = { items: [row], source: "x", checked_at: new Date().toISOString(), mode: "DEMO" };
     responses["/api/workforce/summary"] = summary;
+    responses["/api/workforce/concurrency"] = {
+      items: [],
+      concurrency: { cap: 1, decision_id: null, source: "PILOT_DEFAULT", reason: "pilot default", policy_cap: 1, budget_max_parallel_workers: null, budget_note: "not set", budget_limited: false },
+      source: "x", checked_at: new Date().toISOString(), mode: "LIVE",
+    };
+  });
+
+  it("lets the owner switch the scheduler loop on from the Console (W6-137)", async () => {
+    auth.isAdmin = true;
+    try {
+      const user = userEvent.setup({ delay: null });
+      wrap(<WorkPage />);
+      await user.click(await screen.findByRole("button", { name: /Aktifkan loop scheduler/ }));
+      expect(screen.getByText(/tidak memulai run apa pun dengan sendirinya/)).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Konfirmasi" }));
+      await waitFor(() => expect(vi.mocked(post)).toHaveBeenCalledWith("/api/workforce/scheduler", { enabled: true, reason: "" }));
+      expect(await screen.findByText("Batas efektif: 1 worker")).toBeInTheDocument();
+    } finally {
+      auth.isAdmin = false;
+    }
+  });
+
+  it("disables the loop toggle for VIEWER and points the empty state to the Console controls", async () => {
+    responses["/api/runs"] = { items: [], source: "x", checked_at: new Date().toISOString(), mode: "LIVE" };
+    wrap(<WorkPage />);
+    expect(await screen.findByRole("button", { name: /Aktifkan loop scheduler/ })).toBeDisabled();
+    expect(screen.getByText(/aeos work execute/)).toBeInTheDocument();
+    expect(screen.queryByText(/POST \/api\/plans/)).not.toBeInTheDocument();
   });
 
   it("labels DEMO rows, shows stale heartbeat and separate statuses", async () => {
@@ -286,6 +316,8 @@ describe("Organization page", () => {
     // §17: ownership (accountable human) and assignment are projected, never a permission
     expect(screen.getByText(/Pemilik \(manusia yang bertanggung jawab\): owner/)).toBeInTheDocument();
     expect(screen.getByTestId("assigned-frontend-engineer")).toHaveTextContent("0 task aktif");
+    // W6-137: the owner control exists on the agent card (VIEWER: disabled; the backend still enforces RBAC)
+    expect(screen.getByRole("button", { name: /^Aktifkan$/ })).toBeDisabled();
   });
 
   it("shows the competence definition (inputs, failure modes, eval cases) and an imported pack as a candidate", async () => {

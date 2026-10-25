@@ -91,6 +91,12 @@ def _run_action(action: str, run_id: str, as_user: str, **kw) -> None:
             if action == "start":
                 run = executor.start_run(s, run_id, actor_user_id=uid)
                 typer.echo(f"{run.id} RUNNING, slots: {', '.join(x['slot_id'] for x in executor.slots(s, run))}")
+            elif action == "bind" and kw.get("append"):
+                from aeos.evaluation import topology
+
+                run = topology.bind_additional_task(s, run_id, slot_id=kw["slot_id"], task_id=kw["task_id"],
+                                                    actor_user_id=uid)
+                typer.echo(f"{run.id}: slot {kw['slot_id']} += task {kw['task_id']} (ordered task set)")
             elif action == "bind":
                 run = executor.bind_task(s, run_id, slot_id=kw["slot_id"], task_id=kw["task_id"], actor_user_id=uid)
                 typer.echo(f"{run.id}: slot {kw['slot_id']} -> task {kw['task_id']}")
@@ -119,9 +125,12 @@ def start_cmd(run_id: str = typer.Argument(...), as_user: str = AS_OPTION) -> No
 
 @app.command("bind")
 def bind_cmd(run_id: str = typer.Argument(...), slot_id: str = typer.Argument(...), task_id: str = typer.Argument(...),
-             as_user: str = AS_OPTION) -> None:
+             as_user: str = AS_OPTION,
+             append: bool = typer.Option(False, "--append", help="Add one more task to an already bound slot "
+                                                                 "(topology B/C/D: ordered task set, one sample)")
+             ) -> None:
     """Bind a TaskSpec executed through the workforce to one case slot of a RUNNING run."""
-    _run_action("bind", run_id, as_user, slot_id=slot_id, task_id=task_id)
+    _run_action("bind", run_id, as_user, slot_id=slot_id, task_id=task_id, append=append)
 
 
 @app.command("collect")

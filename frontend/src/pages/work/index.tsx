@@ -1,10 +1,11 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Ban, Pause, Play, Radio, ShieldAlert } from "lucide-react";
+import { AlertTriangle, Ban, Pause, Play, Power, PowerOff, Radio, ShieldAlert } from "lucide-react";
 import { Link } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Card, EmptyState, ErrorBox, Freshness, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
+import { ConcurrencyPanel } from "../../components/workforce/ConcurrencyPanel";
 import { ConfirmAction } from "../../components/workforce/ConfirmAction";
 import { ExecState, ModeBadge, SeparateStatuses, costText, shortId } from "../../components/workforce/status";
 import type { RunList, RunRow, WorkforceSummary } from "../../components/workforce/types";
@@ -47,6 +48,12 @@ function SummaryCards({ s }: { s: WorkforceSummary }) {
           {s.scheduler.cap_decision_id ? " (dengan keputusan pemilik)" : " (default pilot)"}
           {s.scheduler.paused && s.scheduler.paused_reason ? ` · alasan jeda: ${s.scheduler.paused_reason}` : ""}
         </p>
+        {s.scheduler.cap_reason && <p className="mt-1 text-xs text-ink-3">{s.scheduler.cap_reason}</p>}
+        {!s.scheduler.enabled && (
+          <p className="mt-1 text-xs text-ink-3">
+            Loop nonaktif: task READY tidak di-admit otomatis (sekali jalan: <Mono>aeos work run-once</Mono>).
+          </p>
+        )}
       </Card>
       <Card title="Task per state (LIVE)">
         <ul className="flex flex-wrap gap-1.5">
@@ -110,6 +117,7 @@ export default function WorkPage() {
   const rows = runs.data?.items ?? [];
   const hasDemo = rows.some((r) => r.mode !== "LIVE");
   const paused = summary.data?.scheduler.paused ?? false;
+  const loopEnabled = summary.data?.scheduler.enabled ?? false;
 
   return (
     <div className="space-y-5">
@@ -123,6 +131,30 @@ export default function WorkPage() {
         mode={runs.data?.mode}
         actions={
           <div className="flex flex-wrap items-start gap-2">
+            {summary.data &&
+              (loopEnabled ? (
+                <ConfirmAction
+                  label="Nonaktifkan loop scheduler"
+                  confirmText="Loop latar tidak lagi meng-admit task READY. Run yang berjalan tidak dihentikan (gunakan Batalkan)."
+                  isAdmin={isAdmin}
+                  icon={<PowerOff className="h-4 w-4" aria-hidden />}
+                  onConfirm={async (reason) => {
+                    await post("/api/workforce/scheduler", { enabled: false, reason });
+                    refresh();
+                  }}
+                />
+              ) : (
+                <ConfirmAction
+                  label="Aktifkan loop scheduler"
+                  confirmText="Loop latar akan meng-admit task READY melalui admission (rencana disetujui, CAN_RUN_WORKER, route, sandbox, budget, verifier). Mengaktifkan loop tidak memulai run apa pun dengan sendirinya."
+                  isAdmin={isAdmin}
+                  icon={<Power className="h-4 w-4" aria-hidden />}
+                  onConfirm={async (reason) => {
+                    await post("/api/workforce/scheduler", { enabled: true, reason });
+                    refresh();
+                  }}
+                />
+              ))}
             {paused ? (
               <ConfirmAction
                 label="Lanjutkan penjadwalan"
@@ -169,6 +201,8 @@ export default function WorkPage() {
 
       {summary.isLoading ? <Loading /> : summary.error ? <ErrorBox error={summary.error} /> : summary.data && <SummaryCards s={summary.data} />}
 
+      <ConcurrencyPanel domain={domain} isAdmin={isAdmin} />
+
       {summary.data && summary.data.blockers.length > 0 && (
         <Card title={`Task menunggu / terblokir (${summary.data.blockers.length})`}>
           <ul className="space-y-1.5 text-sm">
@@ -205,8 +239,9 @@ export default function WorkPage() {
           <ErrorBox error={runs.error} />
         ) : rows.length === 0 ? (
           <EmptyState title="Belum ada run pada domain ini">
-            Run dibuat scheduler setelah rencana DISETUJUI dijalankan (<Mono>POST /api/plans/&lt;id&gt;/execute</Mono>), CAN_RUN_WORKER siap
-            dan route worker disetujui. Untuk pratinjau tampilan: <Mono>aeos work demo-fixtures</Mono>.
+            Run dibuat scheduler setelah rencana DISETUJUI dijalankan (halaman Rencana → <b>Jalankan rencana</b>, atau{" "}
+            <Mono>aeos work execute &lt;plan_id&gt; --as &lt;admin&gt; --domain &lt;domain&gt;</Mono>), agent pelaksana diaktifkan (Organisasi &amp; Peran
+            → <b>Aktifkan</b>), CAN_RUN_WORKER siap dan route worker disetujui. Untuk pratinjau tampilan: <Mono>aeos work demo-fixtures</Mono>.
           </EmptyState>
         ) : (
           <Table

@@ -8,6 +8,7 @@ import { DecisionStatusBadge } from "../../components/planning/DecisionStatusBad
 import { PlanStateBadge } from "../../components/planning/PlanStateBadge";
 import type { PlanDetail, VersionView } from "../../components/planning/types";
 import { StatusBadge } from "../../components/StatusBadge";
+import { ExecutePlanAction } from "../../components/workforce/ExecutePlanAction";
 import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, Loading, Mono, Notice, PageHeader, Table, Tabs } from "../../components/ui";
 import { useEventStream } from "../../lib/events";
 import { relativeTime, shortHash } from "../../lib/format";
@@ -110,6 +111,8 @@ export default function PlanDetailPage() {
         }
       />
       <ErrorBox error={run.error} />
+      {/* §07 step 9: an APPROVED version is executed by the owner (queues its TaskSpecs; admission does the rest) */}
+      {!mode && <ExecutePlanAction planId={plan.id} approved={Boolean(plan.approved_version)} isAdmin={isAdmin} />}
       {mode && <Notice tone="mock">Versi ini berasal dari output {mode}; bukan hasil model nyata dan tidak dihitung sebagai bukti.</Notice>}
 
       <Card>

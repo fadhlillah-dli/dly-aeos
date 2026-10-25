@@ -99,10 +99,20 @@ def start_run(run_id: str, db: DB, principal: AdminPrincipal) -> dict[str, Any]:
 class BindIn(BaseModel):
     slot_id: str = Field(min_length=3, max_length=128)
     task_id: str = Field(min_length=1, max_length=36)
+    # §44 B/C/D: append one more TaskSpec to an already bound slot (an ordered task set aggregated as one sample)
+    append: bool = False
 
 
 @router.post("/api/eval/runs/{run_id}/bind")
 def bind_task(run_id: str, body: BindIn, db: DB, principal: AdminPrincipal) -> dict[str, Any]:
+    if body.append:
+        from aeos.evaluation import topology
+
+        run = topology.bind_additional_task(db, run_id, slot_id=body.slot_id, task_id=body.task_id,
+                                            actor_user_id=principal.user.id, viewer_domain=_viewer_domain(principal),
+                                            scoped=True)
+        db.commit()
+        return _run_out(db, run)
     run = executor.bind_task(db, run_id, slot_id=body.slot_id, task_id=body.task_id, actor_user_id=principal.user.id,
                              viewer_domain=_viewer_domain(principal), scoped=True)
     db.commit()

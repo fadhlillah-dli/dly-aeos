@@ -111,7 +111,7 @@ class WorkerRun(IdMixin, TimestampMixin, Base):
     project_id: Mapped[str] = mapped_column(String(36), nullable=False)
     domain: Mapped[str] = mapped_column(String(16), nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, default=1)
-    run_type: Mapped[str] = mapped_column(String(32), default="IMPLEMENTATION")  # IMPLEMENTATION|VERIFICATION|REVIEW|TRIAL
+    run_type: Mapped[str] = mapped_column(String(32), default="IMPLEMENTATION")  # IMPLEMENTATION|INVESTIGATION|VERIFICATION|REVIEW|TRIAL
     agent_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     role_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     execution_status: Mapped[str] = mapped_column(String(16), default="QUEUED", nullable=False)

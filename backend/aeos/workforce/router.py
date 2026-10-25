@@ -14,12 +14,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, load_project
-from aeos.core.enums import Capability
 from aeos.core.errors import Blocked, NotFound
 from aeos.core.timeutil import utcnow
 from aeos.identity.service import Principal
 from aeos.models.planning import Plan
-from aeos.models.workforce import AgentDefinition, TaskExecution, WorkerRun
+from aeos.models.workforce import TaskExecution, WorkerRun
 from aeos.workforce import scheduler, views
 
 router = APIRouter(tags=["workforce"])
@@ -73,64 +72,39 @@ class AgentToggle(BaseModel):
     reason: str = Field(default="", max_length=500)
 
 
+@router.get("/api/workforce/agents/{agent_key}/prerequisites")
+def agent_prerequisites(agent_key: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
+    """What still blocks enabling the agent in this domain (read-only; the same rule the enable action applies)."""
+    from aeos.workforce import agents
+
+    out = agents.prerequisites(db, agents.get_agent(db, agent_key), domain=domain.value)
+    db.rollback()
+    return {**out, "checked_at": utcnow().isoformat(), "source": "sandbox probe + routing + Doctor CAN_RUN_WORKER",
+            "mode": "LIVE"}
+
+
 @router.post("/api/workforce/agents/{agent_key}/enable")
 def enable_agent(agent_key: str, body: AgentToggle, principal: AdminPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     """Enable an implementation agent only when its prerequisites are really READY (no fake activity)."""
-    from aeos.audit import service as audit
-    from aeos.worker_runtime.opencode import opencode_status
-    from aeos.worker_runtime.sandbox import sandbox_readiness
-    from aeos.workforce import integrations as ext
+    from aeos.workforce import agents
 
-    agent = db.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == agent_key))
-    if agent is None:
-        raise NotFound("agent not found")
-    reasons: list[str] = []
-    if agent.harness == "opencode":
-        st = opencode_status()
-        if st["status"] != "INSTALLED":
-            reasons.append(f"OpenCode {st['status']}: {st['evidence']}")
-        sb = sandbox_readiness(db, domain=domain.value)
-        if sb["status"] != "READY":
-            reasons += sb["reasons"]
-        from aeos.routing import facade as routing
-
-        try:
-            rd = routing.eligible_routes(db, domain=domain.value, data_classification="INTERNAL")
-            if not rd.eligible:
-                reasons.append("no APPROVED worker route is eligible for this domain")
-        except ImportError:
-            reasons.append("routing module unavailable; failing closed")
-        # Every CAN_RUN_WORKER prerequisite except this agent itself (the gate also requires the agent to be
-        # enabled; asking for the full gate here would make enabling impossible).
-        ok, cap_reasons = ext.capability_ready(db, Capability.CAN_RUN_WORKER, domain=domain.value, project_id=None,
-                                               exclude_checks=("worker.agent_definition",))
-        if not ok:
-            reasons += cap_reasons
-    else:
-        reasons.append(f"{agent.harness} agents are enabled by their owning module, not here")
-    if reasons:
-        raise Blocked("agent cannot be enabled yet", code="AGENT_PREREQUISITES", details={"reasons": reasons})
-    agent.enabled = True
-    agent.enabled_reason = f"enabled by owner: {body.reason}"[:500]
-    audit.record(db, actor_type="user", actor_id=_actor(principal), action="workforce.agent.enable",
-                 target_type="agent_definition", target_id=agent_key, domain=domain.value, reason=body.reason)
+    try:
+        out = agents.enable_agent(db, agent_key, domain=domain.value, actor=_actor(principal), actor_type="user",
+                                  reason=body.reason)
+    except Blocked:
+        db.commit()  # the DENIED audit row is kept
+        raise
     db.commit()
-    return {"agent_key": agent_key, "enabled": True}
+    return out
 
 
 @router.post("/api/workforce/agents/{agent_key}/disable")
 def disable_agent(agent_key: str, body: AgentToggle, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
-    from aeos.audit import service as audit
+    from aeos.workforce import agents
 
-    agent = db.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == agent_key))
-    if agent is None:
-        raise NotFound("agent not found")
-    agent.enabled = False
-    agent.enabled_reason = f"disabled by owner: {body.reason}"[:500]
-    audit.record(db, actor_type="user", actor_id=_actor(principal), action="workforce.agent.disable",
-                 target_type="agent_definition", target_id=agent_key, reason=body.reason)
+    out = agents.disable_agent(db, agent_key, actor=_actor(principal), actor_type="user", reason=body.reason)
     db.commit()
-    return {"agent_key": agent_key, "enabled": False}
+    return out
 
 
 @router.get("/api/runs")
@@ -197,11 +171,12 @@ def resume(body: Reason, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
 
 class Enable(BaseModel):
     enabled: bool
+    reason: str = Field(default="", max_length=500)
 
 
 @router.post("/api/workforce/scheduler")
 def set_scheduler(body: Enable, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
-    scheduler.set_scheduler_enabled(db, body.enabled, actor=_actor(principal))
+    scheduler.set_scheduler_enabled(db, body.enabled, actor=_actor(principal), reason=body.reason)
     db.commit()
     return {"enabled": body.enabled}
 
@@ -227,8 +202,47 @@ def set_concurrency(body: ConcurrencyIn, principal: AdminPrincipal, db: DB) -> d
                                     decision_record=body.decision_record,
                                     baseline_eval_run_id=body.baseline_eval_run_id)
     db.commit()
-    cap, decision_id = scheduler.concurrency_cap(db)
-    return {**out, "effective_cap": cap, "cap_decision_id": decision_id}
+    detail = scheduler.concurrency_detail(db)
+    return {**out, "effective_cap": detail["cap"], "cap_decision_id": detail["decision_id"],
+            "cap_reason": detail["reason"], "budget_note": detail["budget_note"]}
+
+
+@router.get("/api/workforce/concurrency")
+def concurrency_state(principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
+    """The effective cap, its source (pilot / owner decision / resource budget) and the bounded-parallel experiments
+    (RUNNING topology-C EvalRuns of this domain) with their grant and measured two-worker execution."""
+    from aeos.models.research import EvalRun
+    from aeos.workforce import experiments
+
+    detail = scheduler.concurrency_detail(db)
+    runs = [r for r in db.scalars(select(EvalRun).where(EvalRun.topology == experiments.PARALLEL_TOPOLOGY,
+                                                        EvalRun.status.in_(["RUNNING", "COMPLETED"])))
+            if experiments.run_domain(r) == domain.value]
+    return {"items": [experiments.experiment_view(db, r) for r in runs[:50]], "concurrency": detail,
+            "source": "SystemSetting workforce.concurrency + Decision rows + doctor.resource_budget + WorkerRun records",
+            "checked_at": utcnow().isoformat(), "mode": "LIVE"}
+
+
+class ExperimentGrantIn(BaseModel):
+    eval_run_id: str = Field(min_length=1, max_length=64)
+    rationale: str = Field(min_length=10, max_length=2000)
+    # like every EXCEPTION: an explicit expiry chosen by the owner (no default)
+    days: int = Field(ge=1, le=30)
+
+
+@router.post("/api/workforce/concurrency/experiment", status_code=201)
+def grant_concurrency_experiment(body: ExperimentGrantIn, principal: AdminPrincipal, domain: ActiveDomain,
+                                 db: DB) -> dict[str, Any]:
+    """Owner action (§19 "Dua worker aktif adalah langkah eksperimen berikutnya", §44 topology C): two workers only for
+    the TaskSpecs bound to ONE RUNNING topology-C EvalRun of the active domain, as a human EXCEPTION bound to that
+    run (another domain's run is not found)."""
+    from aeos.workforce import experiments
+
+    out = experiments.grant_experiment(db, eval_run_id=body.eval_run_id, actor=_actor(principal),
+                                       actor_user_id=principal.user.id, rationale=body.rationale, days=body.days,
+                                       domain=domain.value)
+    db.commit()
+    return out
 
 
 class RoleEvalThresholdIn(BaseModel):
@@ -322,12 +336,47 @@ def reassign(task_id: str, body: Reassign, principal: AdminPrincipal, domain: Ac
 
 
 @router.post("/api/plans/{plan_id}/execute")
-def execute_plan(plan_id: str, principal: AdminPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
+def execute_plan(plan_id: str, principal: AdminPrincipal, domain: ActiveDomain, db: DB,
+                 body: Reason | None = None) -> dict[str, Any]:
+    """Owner action: queue the approved version's TaskSpecs (Plans/:id "Jalankan rencana", ``aeos work execute``)."""
     plan = db.get(Plan, plan_id)
     if plan is None:
         raise NotFound("plan not found")
     load_project(db, principal, plan.project_id, domain=domain)
-    out = scheduler.execute_plan(db, plan_id, actor=_actor(principal), user_id=principal.user.id)
+    out = scheduler.execute_plan(db, plan_id, actor=_actor(principal), user_id=principal.user.id,
+                                 reason=body.reason if body is not None else "")
+    db.commit()
+    return out
+
+
+@router.get("/api/tasks/{task_id}/investigation")
+def investigation_view(task_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
+    """§19 read-only investigation: the per-hypothesis reports side by side (untrusted DATA) for the integrator."""
+    from aeos.models.planning import TaskSpec
+    from aeos.workforce import investigation
+
+    _visible_task(db, principal, domain, task_id)
+    task = db.get(TaskSpec, task_id)
+    if task is None:
+        raise NotFound("task not found")
+    return {**investigation.comparison(db, task), "checked_at": utcnow().isoformat(), "mode": "LIVE",
+            "source": "WorkerRun INVESTIGATION records (runtime-checked evidence refs; reports are untrusted DATA)"}
+
+
+class InvestigationChoiceIn(BaseModel):
+    hypothesis_key: str = Field(min_length=1, max_length=32)
+    rationale: str = Field(min_length=10, max_length=2000)
+
+
+@router.post("/api/tasks/{task_id}/investigation/choose")
+def investigation_choose(task_id: str, body: InvestigationChoiceIn, principal: AdminPrincipal, domain: ActiveDomain,
+                         db: DB) -> dict[str, Any]:
+    """The integrator (human owner) records the chosen evidenced fix; the plan's repair TaskSpec then carries it."""
+    from aeos.workforce import investigation
+
+    _visible_task(db, principal, domain, task_id)
+    out = investigation.choose_fix(db, task_id, hypothesis_key=body.hypothesis_key, actor=_actor(principal),
+                                   actor_user_id=principal.user.id, rationale=body.rationale)
     db.commit()
     return out
 
