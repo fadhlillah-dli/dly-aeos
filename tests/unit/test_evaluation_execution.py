@@ -48,7 +48,9 @@ def ev(db, monkeypatch):
 
 def cfg(model="opencode/deepseek-v4.1-flash-free", route=ROUTE, provider="opencode-zen", **kw):
     base = {"model_id": model, "model_version": "UNKNOWN", "provider": provider, "provider_route": route,
-            "harness": "opencode", "harness_version": "1.19.3", "prompt_revision": "wp-1", "tools": ["fs.read"],
+            # prompt_revision UNKNOWN: a stated revision must be the one the route is bound to (start_run refuses
+            # EVAL_CONFIGURATION_MISMATCH otherwise); these runs state none
+            "harness": "opencode", "harness_version": "1.19.3", "prompt_revision": "UNKNOWN", "tools": ["fs.read"],
             "policy_version": "pol-1", "context_params": {}}
     return base | kw
 
@@ -276,6 +278,33 @@ def test_collector_derives_critical_regressions_from_the_verifier_baseline(ev):
     assert state == "READY" and sample["critical_regressions"] is None
 
 
+def test_collector_records_the_memory_that_reached_the_worker_context(ev):
+    """Review fix (W6-120): a memory acceptance was bound to an evaluation by the run's *stated* context_params, which
+    nothing executes. The collector now records, per sample, the memory records that were in the context pack each
+    attempt actually used (``caps.context_pack``, hash-checked); the system-change binding reads only that."""
+    from aeos.models.research import ContextPack
+
+    db = ev
+    run, specs = _running(db, 3)
+    for s, spec in zip(executor.slots(db, run)[:3], specs, strict=True):
+        executor.bind_task(db, run.id, slot_id=s["slot_id"], task_id=spec.id, actor_user_id="owner")
+    for spec in specs:
+        _executed(db, spec, state="DONE", accepted="ACCEPTED", verifier="PASS")
+    w0, w1 = (db.scalar(select(WorkerRun).where(WorkerRun.task_id == spec.id)) for spec in specs[:2])
+    pack = ContextPack(project_id=specs[0].project_id, domain="PERSONAL", task_id=specs[0].id, pack_hash="sha256:p1",
+                       items=[{"kind": "memory", "ref": "memory:mem-1"}, {"kind": "file", "ref": "file:src/a.py"}])
+    db.add(pack)
+    db.flush()
+    w0.caps = {"context_pack": {"pack_id": pack.id, "pack_hash": "sha256:p1", "used": True, "items": 2}}
+    w1.caps = {"context_pack": {"used": False, "reason": "no task-scoped context pack (TaskSpec context only)"}}
+    db.flush()
+    samples = [executor.derive_sample(db, run, b)[1] for b in run.bindings]
+    assert [s["context_memory_ids"] for s in samples] == [["mem-1"], [], None]  # None: no context pack recorded
+    pack.pack_hash = "sha256:rebuilt"  # not provably the context the attempt received any more
+    db.flush()
+    assert executor.derive_sample(db, run, run.bindings[0])[1]["context_memory_ids"] == []
+
+
 def test_collector_never_records_a_run_whose_graders_changed_during_it(ev, monkeypatch):
     """§21 "worker tidak mengubah grader/held-out tests" (re-audit): verifier-executed candidate code could change the
     controller's evaluation code undetected. The run carries the evaluation-code fingerprint it was planned with; a
@@ -397,6 +426,42 @@ def test_start_and_bind_guards(ev):
         executor.bind_task(db, run.id, slot_id="nope#1", task_id=office[0].id, actor_user_id="owner")
     assert service.run_view(run)["execution"]["status"] == "COLLECTING"
     assert service.run_view(plan(db))["execution"]["fixtures"] == "NOT_AVAILABLE_IN_BUILD"
+
+
+def test_a_run_stating_another_model_than_its_route_never_starts(ev):
+    """Review fix (W6-008/W6-114): system-change evidence binds a decision to the run's *stated* configuration (a
+    stage-model pin to ``model_id``). The route binding only reported a model/provider mismatch, so a run stating
+    ``claude-opus-4-8`` on a worker route could be started, collected COMPLETED and cited as an evaluation of a model
+    that never ran."""
+    db = ev
+    mislabelled = plan(db, cfg(model="claude-opus-4-8"))
+    serving = service.run_view(mislabelled, db)["execution"]["serving"]
+    assert serving["path"] == "BROKER" and any("model_id 'claude-opus-4-8'" in r for r in serving["reasons"])
+    with pytest.raises(Conflict) as ei:
+        executor.start_run(db, mislabelled.id, actor_user_id="owner")
+    assert ei.value.code == "EVAL_CONFIGURATION_MISMATCH" and mislabelled.status == "PLANNED"
+    with pytest.raises(Conflict) as ei:
+        executor.start_run(db, plan(db, cfg(provider="openrouter")).id, actor_user_id="owner")
+    assert ei.value.code == "EVAL_CONFIGURATION_MISMATCH"
+    # a prompt revision the route is not bound to never ran either (a prompt-change decision would bind to it)
+    route = db.scalar(select(ModelRoute).where(ModelRoute.route_key == ROUTE))
+    route.prompt_revision = "wp-7"
+    db.flush()
+    with pytest.raises(Conflict) as ei:
+        executor.start_run(db, plan(db, cfg(prompt_revision="wp-9")).id, actor_user_id="owner")
+    assert ei.value.code == "EVAL_CONFIGURATION_MISMATCH" and "prompt_revision 'wp-9'" in ei.value.message
+    assert executor.start_run(db, plan(db, cfg(prompt_revision="UNKNOWN")).id, actor_user_id="owner").status == \
+        "RUNNING"  # UNKNOWN states nothing (and binds nothing)
+    exact = plan(db, cfg(prompt_revision="wp-7"))
+    assert service.run_view(exact, db)["execution"]["serving"]["reasons"] == []
+    assert executor.start_run(db, exact.id, actor_user_id="owner").status == "RUNNING"
+    # a run started before this check existed is never recorded with a configuration that did not run
+    legacy = plan(db, cfg(prompt_revision="wp-1"))
+    legacy.status, legacy.started_at = "RUNNING", utcnow()
+    db.flush()
+    with pytest.raises(Conflict) as ei:
+        executor.collect(db, legacy.id)
+    assert ei.value.code == "EVAL_CONFIGURATION_MISMATCH"
 
 
 # ------------------------------------------------------------------------------------------- leaderboard

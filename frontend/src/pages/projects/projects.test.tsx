@@ -424,6 +424,8 @@ describe("MemoryPanel system change (§41/§43)", () => {
     const project = { id: "p1", domain: "PERSONAL", data_classification: "INTERNAL" } as unknown as import("./types").ProjectView;
     wrap(<MemoryPanel project={project} isAdmin={true} />);
     fireEvent.change(await screen.findByLabelText(/ID EvalRun system-change/), { target: { value: "run-a, run-b" } });
+    // stated, never implied: a proposed record cannot reach a worker's context in this build
+    expect(screen.getByText(/Context pack hanya memuat memori ACCEPTED/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Terima" }));
     await waitFor(() => expect(fn.mock.calls.some(([u]) => String(u) === "/api/memory/m2/accept")).toBe(true));
     const call = fn.mock.calls.find(([u]) => String(u) === "/api/memory/m2/accept")!;

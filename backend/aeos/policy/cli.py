@@ -119,7 +119,9 @@ def decide_cmd(
     rollback_target: str = typer.Option(None, help="System change: the version/config/decision this replaces"),
     stage_model: list[str] = typer.Option(None, "--stage-model", help="POLICY supervisor pin STAGE=exact-model-id "
                                                                       "(repeatable; target planning_baseline/"
-                                                                      "stage_models; needs --eval-run of that model)"),
+                                                                      "stage_models; needs --eval-run of that model - "
+                                                                      "this build has no supervisor evaluation path, "
+                                                                      "so no such run exists yet)"),
     project: str = typer.Option(None, help="Project id (optional, must be in --domain)"),
 ) -> None:
     """Record one human decision with the exact target shape its consumer reads (password confirms AUTH).

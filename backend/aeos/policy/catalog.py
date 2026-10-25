@@ -135,10 +135,10 @@ SYSTEM_CHANGE_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
     # target_version = a value the evaluated context parameters carry (e.g. {"strategy": "rag-v2"})
     "context_strategy": ("context_params",), "retrieval": ("context_params",), "memory": ("context_params",),
     "memory_policy": ("context_params",),
-    # memory acceptance (aeos.knowledge.memory): the evaluated context parameters name the record (id or hash)
-    "memory_record": ("context_params",),
 }
-# Targets bound by their own identity (target_id / target_hash) rather than a new value in target_version.
+# Targets bound by their own identity rather than a new value in target_version. Memory acceptance
+# (aeos.knowledge.memory): every collected sample of the run had exactly this record (target_id) in its executed
+# worker context (collector ``context_memory_ids``); stated context parameters alone never bind (review, wave 7).
 IDENTITY_BOUND_TARGETS = frozenset({"memory_record"})
 # §15 supervisor stage-model pin (read by planning.configured_stage_models): every pinned model id
 # (details.models) needs a cited run of exactly that model (configuration model_id/model_version) - never a hash.

@@ -108,6 +108,11 @@ from an evaluation result.
   `EXCLUDED_REGRESSION_NOT_PROVEN` - never ranked as regression-free. The acceptance reasons
   "non-regression <key> is missing" (a review that did not argue a dimension) are a separate review-coverage
   measure, `non_regression_unargued` (`oversight`), never a regression.
+* **Executed configuration, not stated (review, wave 7).** `start_run` refuses a run whose AIConfiguration states a
+  `model_id`/`provider` other than its route's, or a policy version/prompt revision/harness other than the one the
+  route is bound to (`EVAL_CONFIGURATION_MISMATCH`; UNKNOWN states nothing). Each collected sample records
+  `context_memory_ids`: the memory records in the hash-checked context pack each attempt actually used (None when
+  no attempt recorded one) - the only evidence a memory acceptance binds to (ADR-0041 amendment).
 * **Still not produced (stated UNKNOWN):** `adjacent_regressions` (the baseline check does not split regressed
   tests into critical/adjacent, so every one counts critical), `merge_conflicts` (no record observes PR
   mergeability) and `coordination_tokens` (the supervisor bridge's usage ledger is not linked to a task).

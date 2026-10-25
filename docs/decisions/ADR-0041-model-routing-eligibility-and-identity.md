@@ -187,7 +187,23 @@ context 262144, tools, `expiration_date` 2026-10-31; 16 `:free` models in total)
   The pin is recorded from the Decisions page ("Pin model supervisor per tahap") or
   `aeos policy decide --kind POLICY --stage-model STAGE=ID --eval-run RUN --rollback-target ...`; other system
   changes use `--target-version/--target-hash --eval-run --rollback-target`.
-* **Memory acceptance** binds its evaluation to the record (a `context_params` value naming the record id or its
-  content hash); the Control Center memory tab accepts the EvalRun ids. Requiring EVALUATED stays an owner decision.
+* **The stated configuration is the executed one (review, wave 7).** An EvalRun whose AIConfiguration states another
+  `model_id`/`provider` than its registered route - or a `policy_version`/`prompt_revision`/`harness`/
+  `harness_version` other than the one the route is bound to (UNKNOWN states nothing) - never starts
+  (`EVAL_CONFIGURATION_MISMATCH`, `evaluation.executor.configuration_mismatches`; the Evaluation page shows the
+  reason before a start), so no run can carry a value that never ran into a binding. `context_params` are not
+  carried by the route and stay the run's stated configuration. Consequence, stated
+  in the Decisions page, the CLI help and every refused pin (`recording.SUPERVISOR_EVAL_PATH_NOTE`): this build has
+  **no evaluation path for a supervisor (Claude) model** - EvalRuns execute only on broker-served WORKER/ARENA routes
+  and the Claude Max supervisor is never served through the broker (§12) - so a stage-model pin stays refused and
+  planning keeps the baseline alias until a supervisor evaluation path exists (it needs owner-authored planning
+  evaluation fixtures, ADR-0060).
+* **Memory acceptance** binds its evaluation to the record: every collected sample of a cited run must have had
+  exactly this record in its executed worker context (`context_memory_ids`, derived by the evaluation collector from
+  the hash-checked context pack each attempt used); a run's stated `context_params` alone never bind (review, wave 7).
+  The Control Center memory tab accepts the EvalRun ids. Context packs carry ACCEPTED memory only, so no run can
+  evidence a proposed record in this build (`recording.MEMORY_EVAL_PATH_NOTE`, shown in the refusal and the memory
+  tab): that needs the owner-authored memory/retrieval fixture suite (ADR-0060, ADR-0081). Requiring EVALUATED
+  stays an owner decision.
 * **Unchanged (owner decision):** planning/review continue on a re-resolved supervisor version (protected
   acceptance 1.31); the change is stated as NEEDS_EVALUATION / `supervisor_unevaluated`.

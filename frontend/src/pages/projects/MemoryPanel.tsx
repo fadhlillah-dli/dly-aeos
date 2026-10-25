@@ -25,7 +25,8 @@ export function parseIds(text: string): string[] {
 
 function MemoryRow({ m, isAdmin, onChanged }: { m: MemoryView; isAdmin: boolean; onChanged: () => void }) {
   // §41/§43: accepting memory is a system change; the owner may cite the evaluation runs that are evidence of
-  // exactly this record (backend: COMPLETED, every gate PASS, context_params naming the record) - else NOT_EVALUATED
+  // exactly this record (backend: COMPLETED, every gate PASS, every collected sample had the record in its executed
+  // worker context) - else NOT_EVALUATED. Context packs carry ACCEPTED memory only: no run can evidence it yet.
   const [evalRuns, setEvalRuns] = useState("");
   const act = useMutation({
     mutationFn: ({ action, rationale }: { action: "accept" | "reject" | "expire"; rationale: string }) => {
@@ -93,7 +94,7 @@ function MemoryRow({ m, isAdmin, onChanged }: { m: MemoryView; isAdmin: boolean;
         <div className="mt-2 max-w-xl">
           <Field
             label="ID EvalRun system-change (opsional)"
-            hint="Kosongkan bila belum dievaluasi: penerimaan tercatat 'belum dievaluasi'. EvalRun harus COMPLETED dengan semua gate PASS dan context_params-nya memuat ID atau hash memori ini."
+            hint="Kosongkan bila belum dievaluasi: penerimaan tercatat 'belum dievaluasi'. EvalRun harus COMPLETED dengan semua gate PASS dan setiap sampelnya benar-benar membawa memori ini di konteks worker (bukan sekadar disebut di context_params). Context pack hanya memuat memori ACCEPTED, jadi build ini belum bisa mengevaluasi memori yang diusulkan: perlu suite fixture memori/retrieval dari pemilik."
           >
             <input className={inputClass} value={evalRuns} onChange={(e) => setEvalRuns(e.target.value)} placeholder="uuid EvalRun, pisahkan koma" />
           </Field>

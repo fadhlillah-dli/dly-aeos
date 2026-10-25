@@ -124,12 +124,11 @@ def route_binding(session: Session, run: EvalRun) -> dict[str, Any]:
         return {"status": "NOT_REGISTERED", "route_key": run.route_key,
                 "reasons": ["route not in the model registry: terms/provider eligibility not assessed"],
                 "mismatches": [], "route_config_current": None}
+    from aeos.evaluation.executor import configuration_mismatches
     from aeos.routing.service import compute_config_hash, terms_eligibility
 
     current = compute_config_hash(route)
-    cfg = run.configuration or {}
-    mismatches = [f"{k} {cfg.get(k)!r} != route {getattr(route, k)!r}" for k in ("model_id", "provider")
-                  if cfg.get(k) != getattr(route, k)]
+    mismatches = configuration_mismatches(run, route)
     reasons = terms_eligibility(route, data_classification=D.suite_data_classification(run.suite_key))
     # a run planned before the route binding existed has no recorded route hash: UNKNOWN, not "current"
     config_current = None if run.route_config_hash is None else run.route_config_hash == current

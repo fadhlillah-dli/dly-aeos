@@ -159,9 +159,10 @@ def system_change(session: Session, rec: MemoryRecord, eval_run_ids: list[str] |
     """§41/§43 "prompt/memory ... tetap system change dengan eval/decision/rollback": accepted memory reaches model
     prompts (through context packs), so its acceptance records the rollback target - expiring this record, and the
     previously accepted record it supersedes - and the system-change evaluation: EVALUATED with completed,
-    all-gates-PASS evaluation runs bound to exactly this record (the evaluated configuration's ``context_params`` name
-    the record id or its content hash; any other run is SYSTEM_CHANGE_EVIDENCE_UNRELATED), otherwise NOT_EVALUATED
-    (stated, never implied)."""
+    all-gates-PASS evaluation runs bound to exactly this record (every collected sample had the record in its executed
+    worker context, ``context_memory_ids``; a run's stated ``context_params`` alone or any other run is
+    SYSTEM_CHANGE_EVIDENCE_UNRELATED), otherwise NOT_EVALUATED (stated, never implied). Context packs carry ACCEPTED
+    memory only, so no run can evidence a proposed record in this build (``policy.recording.MEMORY_EVAL_PATH_NOTE``)."""
     prov = rec.provenance or {}
     previous = prov.get("supersedes")
     rollback_target = f"memory_record:{previous}" if previous else f"expire memory_record:{rec.id} (no previous record)"

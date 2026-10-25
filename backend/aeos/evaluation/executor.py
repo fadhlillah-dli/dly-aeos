@@ -96,6 +96,14 @@ def start_run(session: Session, run_id: str, *, actor_user_id: str, viewer_domai
     if compute_config_hash(route) != run.route_config_hash:
         raise Conflict("the route configuration changed since the run was planned: plan a new run",
                        code="ROUTE_CONFIG_CHANGED")
+    mismatches = configuration_mismatches(run, route)
+    if mismatches:
+        # §43 "konfigurasi yang dievaluasi persis": the results would be labelled with a model/provider that never
+        # ran - and a system-change decision citing them (bound by the stated configuration) would be evidence of it
+        raise Conflict("the run's AIConfiguration does not describe the route it would execute: "
+                       + "; ".join(mismatches) + " - plan a run that states exactly what the route runs (model_id, "
+                       "provider; policy/prompt/harness as bound on the route, or UNKNOWN)",
+                       code="EVAL_CONFIGURATION_MISMATCH", details={"mismatches": mismatches})
     serving = serving_view(session, run)
     if serving["path"] == "NONE" or serving["reasons"]:
         # §49 M6: an evaluation whose tasks could never execute is refused with its reason instead of collecting
@@ -111,6 +119,31 @@ def start_run(session: Session, run_id: str, *, actor_user_id: str, viewer_domai
     events.emit(session, source="evaluation", kind="eval.run.started", entity_type="eval_run", entity_id=run.id,
                 domain=run.submitted_domain, payload={"slots": len(slots(session, run))})
     return run
+
+
+# Always compared with the registered route the run executes on.
+CONFIGURATION_ROUTE_FIELDS = ("model_id", "provider")
+# Compared when the run states a value (not UNKNOWN) and the route records one: the route's bound policy version,
+# prompt revision and harness are what its tasks run with (routing refuses a route whose binding drifted from the
+# runtime; the executor refuses a harness version drift), so a different stated value never ran.
+STATED_ROUTE_FIELDS = ("policy_version", "prompt_revision", "harness", "harness_version")
+
+
+def configuration_mismatches(run: EvalRun, route: Any) -> list[str]:
+    """Fields where the run's stated AIConfiguration differs from the registered route it executes on (empty = it
+    describes that route). The collector records samples under the stated configuration, and
+    ``policy.recording.system_change_evidence`` binds a decision to it (a stage-model pin to ``model_id``, a prompt
+    change to ``prompt_revision``, ...), so a run stating a value its route does not run is never started
+    (``EVAL_CONFIGURATION_MISMATCH``)."""
+    cfg = run.configuration if isinstance(run.configuration, dict) else {}
+    out = [f"{k} {cfg.get(k)!r} != route {getattr(route, k)!r}" for k in CONFIGURATION_ROUTE_FIELDS
+           if cfg.get(k) != getattr(route, k)]
+    for k in STATED_ROUTE_FIELDS:
+        stated, actual = cfg.get(k), getattr(route, k, None)
+        if isinstance(stated, str) and stated.strip() and stated != "UNKNOWN" and actual not in (None, "") \
+                and stated != actual:
+            out.append(f"{k} {stated!r} != route {actual!r}")
+    return out
 
 
 def _served_pools() -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -160,10 +193,13 @@ def serving_view(session: Session, run: EvalRun) -> dict[str, Any]:
     route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == run.route_key)) if run.route_key else None
     if route is None:
         return {"path": "NONE", "pool": None, "reasons": ["the evaluated route is not registered"]}
+    # a run stating another model/provider than its route never starts (start_run EVAL_CONFIGURATION_MISMATCH)
+    stated = [f"configuration {m}: the run would not evaluate the configuration it states"
+              for m in configuration_mismatches(run, route)]
     if route.pool in served:
-        return {"path": "BROKER", "pool": route.pool, "reasons": []}
+        return {"path": "BROKER", "pool": route.pool, "reasons": stated}
     if route.pool in eval_only:
-        return {"path": "EVAL_ONLY", "pool": route.pool, "reasons": eval_only_problems(session, run, route),
+        return {"path": "EVAL_ONLY", "pool": route.pool, "reasons": stated + eval_only_problems(session, run, route),
                 "note": "Hanya TaskSpec yang terikat ke slot EvalRun RUNNING ini yang dilayani route ini "
                         "(grant broker ber-scope evaluasi); tanpa fallback, tanpa biaya."}
     return {"path": "NONE", "pool": route.pool,
@@ -386,6 +422,34 @@ def derive_tool_failures(session: Session, impl: list[Any]) -> int | None:
     return failed_tools + bad_reports
 
 
+def derive_context_memory_ids(session: Session, impl: list[Any]) -> list[str] | None:
+    """Memory record ids that actually reached the task's worker context: the memory items of the task-scoped
+    ContextPack each attempt used (worker_runtime records it in ``caps.context_pack``; the pack must still have the
+    hash it was used with). None when no attempt records its context pack. A system-change evaluation of a memory
+    record binds to this executed context, never to the run's stated ``context_params`` alone."""
+    from aeos.models.research import ContextPack
+
+    ids: set[str] = set()
+    recorded = False
+    for r in impl:
+        info = (r.caps or {}).get("context_pack") if isinstance(r.caps, dict) else None
+        if not isinstance(info, dict):
+            continue
+        recorded = True
+        if not info.get("used") or not info.get("pack_id"):
+            continue
+        pack = session.get(ContextPack, str(info["pack_id"]))
+        if pack is None or pack.task_id != r.task_id or (info.get("pack_hash") and pack.pack_hash != info["pack_hash"]):
+            continue  # not provably the context this attempt received
+        for item in pack.items or []:
+            if not isinstance(item, dict):
+                continue
+            ref = str(item.get("ref") or "")
+            if item.get("kind") == "memory" and ref.startswith("memory:"):
+                ids.add(ref.split(":", 1)[1])
+    return sorted(ids) if recorded else None
+
+
 def derive_false_claims(impl: list[Any]) -> int | None:
     """§43 "false evidence/claim" from canonical records only: an attempt whose worker report says COMPLETED while
     the independent verifier FAILED it, acceptance REJECTED it or the runtime quarantined it for scope, plus every
@@ -494,6 +558,9 @@ def derive_sample(session: Session, run: EvalRun, binding: dict[str, Any]) -> tu
         "critical_regressions": regressions,
         "regressions_by_attempt": regressions_by_attempt,
         "non_regression_unargued": unargued,
+        # §41/§43 memory as a system change: the memory records that reached the worker's context (executed, not
+        # stated); None = no attempt recorded its context pack
+        "context_memory_ids": derive_context_memory_ids(session, impl),
         "claude_review_count": sum(1 for r in reviews if r.reviewer_kind == "CLAUDE"),
         "human_interventions": sum(1 for r in reviews if r.reviewer_kind == "HUMAN") + int(bool(te.extra_attempts)),
         "quota_delay_s": None,
@@ -556,6 +623,14 @@ def collect(session: Session, run_id: str, *, viewer_domain: str | None = None, 
     if grader:
         raise Conflict(f"{grader}: the result is never recorded with changed graders; restore the reviewed "
                        "evaluation code (special review) and plan a new run", code="GRADER_CHANGED")
+    from aeos.models.routing import ModelRoute
+
+    route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == run.route_key)) if run.route_key else None
+    mismatches = configuration_mismatches(run, route) if route is not None else []
+    if mismatches:  # a run started before start_run checked this: its samples would carry a configuration never run
+        raise Conflict("the run's AIConfiguration does not describe the route it executed: " + "; ".join(mismatches)
+                       + " - stop it (aeos eval finish) and plan a run that states exactly what the route runs",
+                       code="EVAL_CONFIGURATION_MISMATCH", details={"mismatches": mismatches})
     all_slots = slots(session, run)
     by_slot = {b["slot_id"]: b for b in run.bindings or []}
     collected: list[dict[str, Any]] = []

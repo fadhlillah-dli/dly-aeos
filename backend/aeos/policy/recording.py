@@ -97,6 +97,17 @@ def _exception_shape(domain: Domain, *, exception: str | None, target_type: str 
 
 # Values that never bind evidence to a change (an UNKNOWN model/prompt matches nothing, §34).
 _UNBOUND_VALUES = frozenset({"", "unknown", "none", "null", "n/a", "-"})
+# Why a supervisor stage-model pin cannot be evidenced in this build (shown with every refused pin).
+SUPERVISOR_EVAL_PATH_NOTE = (
+    "this build has no evaluation path for a supervisor (Claude) model: EvalRuns execute only on broker-served "
+    "WORKER/ARENA routes and a run must state exactly its route's model_id (EVAL_CONFIGURATION_MISMATCH), while the "
+    "Claude Max supervisor is never served through the broker (master s12) - a stage-model pin stays refused until a "
+    "supervisor evaluation path exists; planning keeps the baseline alias")
+# Why a memory acceptance cannot be evidenced in this build (shown with every refused memory evaluation).
+MEMORY_EVAL_PATH_NOTE = (
+    "context packs carry ACCEPTED memory only, so a proposed record cannot reach a worker's context in this build: "
+    "evaluating a memory acceptance needs the owner-authored memory/retrieval fixture suite (ADR-0060, ADR-0081); "
+    "until then the acceptance is recorded NOT_EVALUATED (stated)")
 
 
 def _norm(value: Any) -> str:
@@ -143,8 +154,30 @@ def _pinned(change: dict[str, Any]) -> set[str] | None:
     return {_norm(m) for m in (change.get("models") or {}).values()} - _UNBOUND_VALUES
 
 
+def _bind_memory(run: Any, change: dict[str, Any]) -> tuple[str | None, str]:
+    """A memory acceptance (§41/§43 "prompt/memory ... system change") is evidenced only by a run whose executed tasks
+    had exactly this record in their worker context: every collected sample's ``context_memory_ids`` (derived by the
+    evaluation collector from the context pack each attempt used) names it. The run's stated ``context_params`` alone
+    never bind - they describe an intention, not what reached the model."""
+    record = _norm(change.get("target_id"))
+    if record in _UNBOUND_VALUES:
+        return None, "the change names no memory record"
+    samples = [s for s in (run.samples or []) if isinstance(s, dict) and isinstance(s.get("context_memory_ids"), list)]
+    if not samples:
+        return None, ("no collected sample records which memory reached its tasks' context (collector "
+                      "context_memory_ids); a stated context_params value is not evidence - " + MEMORY_EVAL_PATH_NOTE)
+    missing = [str(s.get("sample_id") or s.get("task_id")) for s in samples
+               if record not in {_norm(i) for i in s["context_memory_ids"]}]
+    if missing:
+        return None, (f"memory record {change.get('target_id')} did not reach the worker context of sample(s) "
+                      f"{missing[:5]} - " + MEMORY_EVAL_PATH_NOTE)
+    return f"context_memory_ids={record}", ""
+
+
 def _bind(run: Any, change: dict[str, Any]) -> tuple[str | None, str]:
     """(how *run* is bound to *change*, or None + why not). See ``catalog.SYSTEM_CHANGE_CONFIG_FIELDS``."""
+    if catalog.normalize_target_type(change.get("target_type")) in catalog.IDENTITY_BOUND_TARGETS:
+        return _bind_memory(run, change)
     cfg = run.configuration if isinstance(run.configuration, dict) else {}
     pinned = _pinned(change)
     if pinned is not None:  # stage-model pin: only a run of exactly a pinned model is evidence of it
@@ -162,10 +195,7 @@ def _bind(run: Any, change: dict[str, Any]) -> tuple[str | None, str]:
     if not fields:
         return None, (f"{ttype or 'the target'} has no AIConfiguration field: bind it with target_hash = the run's "
                       f"configuration_hash ({run.configuration_hash})")
-    wanted = [_norm(change.get("target_version"))]
-    if ttype in catalog.IDENTITY_BOUND_TARGETS:
-        wanted += [_norm(change.get("target_id")), want_hash]
-    wanted = [w for w in dict.fromkeys(wanted) if w not in _UNBOUND_VALUES]
+    wanted = [w for w in [_norm(change.get("target_version"))] if w not in _UNBOUND_VALUES]
     if not wanted:
         return None, (f"the decision names no new value: target_version = the new {'/'.join(fields)} (or "
                       f"target_hash = the run's configuration_hash {run.configuration_hash})")
@@ -228,6 +258,10 @@ def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids
             covered = {r["binding"].split("=", 1)[1] for r in runs}
             unrelated += [f"pinned model {m} has no passing evaluation run of exactly that model"
                           for m in sorted(pinned - covered)]
+            if pinned - covered:
+                # stated, not implied (§02): a run's model is the model its route executes (evaluation start refuses
+                # a mismatch), and no broker-served route runs a supervisor model (§12)
+                unrelated.append(SUPERVISOR_EVAL_PATH_NOTE)
             if not pinned:
                 unrelated.append("a stage-model pin names its models (details.models {STAGE: model id})")
     if unrelated:

@@ -31,11 +31,12 @@ def _owner(db) -> str:
     return db.scalar(select(User).where(User.username == "owner")).id
 
 
-def _run(db, *, status="COMPLETED", gates=None, domain=None, suite="eval.small-bugfix", **cfg) -> EvalRun:
+def _run(db, *, status="COMPLETED", gates=None, domain=None, suite="eval.small-bugfix", samples=None,
+         **cfg) -> EvalRun:
     run = EvalRun(suite_key=suite, configuration=CFG | cfg, configuration_hash="sha256:c-" + "-".join(
                       f"{k}={v}" for k, v in sorted(cfg.items())),
                   status=status, gate_results={"security": "PASS", "authority": "PASS"} if gates is None else gates,
-                  mode="LIVE", submitted_domain=domain)
+                  mode="LIVE", submitted_domain=domain, samples=samples or [])
     db.add(run)
     db.flush()
     return run
@@ -163,6 +164,8 @@ def test_stage_model_pin_needs_an_evaluation_of_exactly_each_pinned_model(person
                                       **_sc(other_model.id, rollback="alias baseline (opus)")})
     assert exc.value.code == "SYSTEM_CHANGE_EVIDENCE_UNRELATED"
     assert "claude-opus-4-8" in exc.value.message
+    # the refusal states why such a run cannot exist yet (evidence honesty): no supervisor evaluation path
+    assert recording.SUPERVISOR_EVAL_PATH_NOTE in exc.value.details["problems"]
     opus = _run(db, domain="PERSONAL", model_id="claude-opus-4-8")
     with pytest.raises(ValidationFailed) as exc:  # two pinned models, only one evaluated
         _policy(db, **stage, details={"models": {"PRIMARY_PLANNING": "claude-opus-4-8",
@@ -230,12 +233,24 @@ def test_memory_acceptance_records_rollback_and_evaluation_status(personal_clien
     db.commit()
     bad = personal_client.post(f"/api/memory/{second['id']}/accept", json={"eval_run_ids": [unrelated.id]})
     assert bad.status_code == 422 and bad.json()["error"]["code"] == "SYSTEM_CHANGE_EVIDENCE_UNRELATED"
-    ok = _run(db, domain="PERSONAL", context_params={"memory_record_ids": [second["id"]]})
+    # review fix: a run that only *states* the record in its context_params never had it in a worker's context
+    stated = _run(db, domain="PERSONAL", context_params={"memory_record_ids": [second["id"]]})
+    elsewhere = _run(db, domain="PERSONAL", samples=[
+        {"sample_id": "c1#1", "status": "ACCEPTED", "context_memory_ids": [second["id"]]},
+        {"sample_id": "c2#1", "status": "ACCEPTED", "context_memory_ids": [first["id"]]}])
+    db.commit()
+    for run in (stated, elsewhere):
+        bad = personal_client.post(f"/api/memory/{second['id']}/accept", json={"eval_run_ids": [run.id]})
+        assert bad.status_code == 422 and bad.json()["error"]["code"] == "SYSTEM_CHANGE_EVIDENCE_UNRELATED"
+        assert recording.MEMORY_EVAL_PATH_NOTE in bad.json()["error"]["message"]
+    # evidenced: every collected sample had exactly this record in its executed worker context
+    ok = _run(db, domain="PERSONAL", samples=[
+        {"sample_id": f"c{i}#1", "status": "ACCEPTED", "context_memory_ids": [second["id"], "other"]} for i in (1, 2)])
     db.commit()
     acc2 = personal_client.post(f"/api/memory/{second['id']}/accept", json={"eval_run_ids": [ok.id]}).json()["memory"]
     sc2 = acc2["system_change"]
     assert sc2["evaluation"] == "EVALUATED" and sc2["rollback"]["previous_memory_id"] == first["id"]
-    assert sc2["eval_runs"][0]["binding"] == f"context_params={second['id']}"
+    assert sc2["eval_runs"][0]["binding"] == f"context_memory_ids={second['id'].lower()}"
     assert sc2["rollback_target"] == f"memory_record:{first['id']}"
     pack = personal_client.post(f"/api/projects/{p['id']}/context-packs",
                                 json={"include": ["memory"], "query": ["UTC"]}).json()["context_pack"]

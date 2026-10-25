@@ -126,9 +126,13 @@ describe("DecisionForm exact target shapes (ADR-0042/0051)", () => {
   it("records a supervisor stage-model pin on the exact consumer target with its models and evaluation (§15)", async () => {
     const fn = renderForm("PERSONAL");
     fireEvent.change(screen.getByLabelText("Jenis keputusan"), { target: { value: "POLICY" } });
+    // a hash typed before switching to the pin is hidden with its field and never sent (a pin binds by its models)
+    fireEvent.change(screen.getByLabelText("Hash target (opsional)"), { target: { value: "sha256:stale" } });
     fireEvent.click(screen.getByLabelText(/Pin model supervisor per tahap/));
     expect(screen.queryByLabelText("Jenis target")).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/Nilai baru yang dievaluasi/)).not.toBeInTheDocument();
+    // stated, never implied: no supervisor evaluation path exists in this build, so the pin is refused for now
+    expect(screen.getByText(/belum punya jalur evaluasi untuk model supervisor/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("PRIMARY_PLANNING (opus)"), { target: { value: "claude-opus-4-8" } });
     fireEvent.change(screen.getByLabelText(/ID EvalRun bukti/), { target: { value: "run-opus" } });
     fireEvent.change(screen.getByLabelText(/Target rollback/), { target: { value: "alias baseline (opus)" } });
@@ -144,6 +148,7 @@ describe("DecisionForm exact target shapes (ADR-0042/0051)", () => {
       details: { models: { PRIMARY_PLANNING: "claude-opus-4-8" }, system_change: { eval_run_ids: ["run-opus"], rollback_target: "alias baseline (opus)" } },
     });
     expect(body.target_version).toBeUndefined();
+    expect(body.target_hash).toBeUndefined();
   });
 
   it("refuses an empty stage-model pin locally", async () => {

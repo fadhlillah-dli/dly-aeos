@@ -136,7 +136,9 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
       const pin = kind === "POLICY" && stagePin;
       body.target_type = pin ? STAGE_MODEL_TARGET.type : targetType;
       body.target_id = pin ? STAGE_MODEL_TARGET.id : targetId;
-      if (targetHash.trim()) body.target_hash = targetHash.trim();
+      // a pin is bound by its models, never by a hash: a hash typed before switching to the pin (its field is hidden
+      // then) is not sent as the decision's target hash
+      if (!pin && targetHash.trim()) body.target_hash = targetHash.trim();
       if (kind === "POLICY" && !pin && targetVersion.trim()) body.target_version = targetVersion.trim();
       const evalRunIds = scEvalRuns.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
       const details: Record<string, unknown> = {};
@@ -281,6 +283,12 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
               Hanya ID model persis dari keluarga tahapnya. Setiap model yang di-pin wajib punya EvalRun COMPLETED (semua gate PASS) dengan model_id persis sama;
               tahap yang dikosongkan tetap memakai alias baseline. Target rollback: alias baseline atau pin sebelumnya.
             </p>
+            <Notice tone="warn">
+              Build ini belum punya jalur evaluasi untuk model supervisor (Claude): EvalRun hanya berjalan di rute WORKER/ARENA lewat broker dan harus
+              menyatakan model_id persis rutenya, sedangkan Claude Max tidak pernah dilayani broker. Karena itu EvalRun model supervisor belum
+              bisa ada dan pin tahap ditolak (SYSTEM_CHANGE_EVIDENCE_UNRELATED) sampai jalur evaluasi supervisor tersedia; perencanaan tetap memakai
+              alias baseline.
+            </Notice>
             {PLANNING_STAGES.map((st) => (
               <Field key={st.stage} label={`${st.stage} (${st.family})`}>
                 <input
