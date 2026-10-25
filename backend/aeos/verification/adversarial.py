@@ -18,6 +18,7 @@ implying adversarial coverage. A probe that fails is a FAIL; a probe that could 
 
 from __future__ import annotations
 
+import ast
 import shutil
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,13 @@ def covered_categories(categories: dict[str, list[str]]) -> list[str]:
 
 def platform_layout(snapshot: Path) -> bool:
     return (snapshot / "backend" / "aeos" / "api" / "app.py").is_file()
+
+
+def probe_test_names(probe: str) -> list[str]:
+    """The test functions a verifier-owned probe module defines (from its trusted source, syntax tree only)."""
+    tree = ast.parse(pack_text(f"{probe}.py"))
+    return sorted(n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and n.name.startswith("test_"))
 
 
 def install_probes(trusted_copy: Path, probes: list[str]) -> list[Path]:
@@ -137,6 +145,13 @@ def run(ctx: StepContext) -> StepResult | None:
                 if report.skipped or report.passed == 0:
                     blocking.append(f"adversarial probes did not all run ({report.passed} passed, "
                                     f"{report.skipped} skipped)")
+                elif res.returncode not in (0, 1):  # interrupted / internal / usage error: report may be partial
+                    blocking.append(f"adversarial probes ended with pytest exit {res.returncode}; the report may "
+                                    "be incomplete")
+                ran = {c.key.rsplit("::", 1)[-1].split("[", 1)[0] for c in report.cases}
+                absent_probes = sorted(n for p in probes for n in probe_test_names(p) if n not in ran)
+                if absent_probes:  # every verifier-authored case must be in the report (none deselected/lost)
+                    blocking.append(f"adversarial probe(s) missing from the report: {', '.join(absent_probes[:5])}")
             evidence.append(StepEvidence(
                 "TEST_REPORT", f"Verifier-owned adversarial probes ({', '.join(probes)}) against the candidate: "
                                f"{'FAIL' if reasons else 'PASS' if not blocking else 'NOT_PROVEN'}",

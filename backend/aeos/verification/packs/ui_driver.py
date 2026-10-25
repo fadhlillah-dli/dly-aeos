@@ -1,15 +1,25 @@
 """UI state + accessibility smoke of a built frontend bundle (§16 UX/UI Designer and Frontend Engineer
 "browser test, visual evidence, a11y", §31 G3 "Browser/UI/a11y"; W6-043/W6-044).
 
-Run by the verifier through its runner as ``python -c <this file> <dist dir> <out dir> <browsers path or ->``.
-It serves the candidate's built bundle from a loopback-only static server, opens it in headless Chromium
-(Playwright from the controller environment; outbound traffic goes to a dead proxy, loopback only) and renders
-each UI state by answering the bundle's ``/api`` requests itself:
+Run by the verifier through its runner as ``python -c <this file> <dist dir> <out dir> <browsers path or ->
+[<options json or ->]``. It serves the candidate's built bundle from a loopback-only static server, opens it in
+headless Chromium (Playwright from the controller environment; outbound traffic goes to a dead proxy, loopback
+only) and renders each UI state by answering the bundle's ``/api`` requests itself:
 
 * ``loading``         - API requests are held (never answered before the screenshot);
 * ``error``           - every API request answers 500 with the standard error envelope;
 * ``unauthenticated`` - every API request answers 401 (session missing);
-* ``empty``           - every API request answers 200 with an empty list envelope (``mode: MOCK``).
+* ``empty``           - every API request answers 200 with an empty list envelope (``mode: MOCK``), or - with the
+  ``live_app`` option (DLY AEOS layout) - is answered by the candidate's own app on an empty, throwaway database
+  with a signed-in throwaway admin, so every endpoint has its real shape and no data.
+
+Options (JSON object): ``fixtures`` ``{"<GET path>": <body>}`` answers those exact paths with 200 in every state
+except ``unauthenticated`` (e.g. the session endpoint, so loading/error render for a signed-in user instead of the
+login screen); ``live_app`` ``"aeos"`` enables the live empty state (the driver then runs candidate code: it is
+executed through the verifier runner, inside the tamper window, with the candidate backend on ``PYTHONPATH``).
+
+A render that raises an uncaught script error is recorded with its state (``page_errors``) and who answered the
+API (``answered_by``); the verifier never reads such a render as evidence of that state.
 
 Per state and viewport (desktop 1280x800, mobile 390x844) it writes a full-page PNG and runs the verifier's
 accessibility probe: a fixed subset of WCAG 2.x checks (document language, title, image alternatives,
@@ -23,11 +33,13 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import secrets
 import sys
 import threading
 from functools import partial
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 STATES = ("loading", "error", "unauthenticated", "empty")
 VIEWPORTS = {"desktop": {"width": 1280, "height": 800}, "mobile": {"width": 390, "height": 844}}
@@ -35,6 +47,7 @@ DEAD_PROXY = "http://127.0.0.1:9"
 SETTLE_MS = 1500
 RULES = ("html-has-lang 3.1.1", "document-title 2.4.2", "image-alt 1.1.1", "control-name 4.1.2",
          "form-label 1.3.1/4.1.2", "duplicate-id-referenced 4.1.2", "tabindex-positive 2.4.3", "reflow 1.4.10")
+LIVE_USER = "verifier-ui"
 
 A11Y_PROBE = r"""
 () => {
@@ -134,7 +147,64 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         return
 
 
-def _respond(state: str, held: list[Any], route: Any) -> None:
+class _LiveApp:
+    """The candidate's own DLY AEOS app on an empty throwaway database, signed in as a throwaway admin."""
+
+    def __init__(self, data_dir: Path):
+        data_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["AEOS_DATA_DIR"] = str(data_dir)
+        from fastapi.testclient import TestClient
+
+        from aeos.api.app import create_app
+        from aeos.core import config as config_mod
+        from aeos.core.db import create_all, init_engine, session_factory
+        from aeos.identity import service as identity
+
+        config_mod.reset_settings_cache()
+        settings = config_mod.get_settings()
+        self.engine = init_engine(settings)
+        create_all(self.engine)
+        password = secrets.token_urlsafe(24)  # throwaway: lives only in this process and the throwaway DB
+        with session_factory()() as s:
+            identity.bootstrap_admin(s, username=LIVE_USER, password=password)
+            s.commit()
+        self.client = TestClient(create_app(settings, testing=True, init_db=False))
+        self.client.__enter__()
+        r = self.client.post("/api/auth/login", json={"username": LIVE_USER, "password": password})
+        if r.status_code != 200:
+            raise RuntimeError(f"live app login answered {r.status_code}")
+        self.csrf = str(r.json().get("csrf_token") or "")
+        self.client.post("/api/session/context", json={"domain": "PERSONAL"}, headers={"X-CSRF-Token": self.csrf})
+
+    def fulfill(self, route: Any) -> None:
+        req = route.request
+        if "text/event-stream" in (req.headers.get("accept") or ""):
+            route.fulfill(status=204, body="")  # the event stream never completes through a test client
+            return
+        parts = urlsplit(req.url)
+        target = parts.path + (f"?{parts.query}" if parts.query else "")
+        headers = {"X-CSRF-Token": self.csrf}
+        if req.headers.get("content-type"):
+            headers["Content-Type"] = req.headers["content-type"]
+        resp = self.client.request(req.method, target, content=req.post_data_buffer, headers=headers)
+        route.fulfill(status=resp.status_code, content_type=resp.headers.get("content-type", "application/json"),
+                      body=resp.content)
+
+    def close(self) -> None:
+        try:
+            self.client.__exit__(None, None, None)
+        finally:
+            self.engine.dispose()
+
+
+def _respond(state: str, held: list[Any], fixtures: dict[str, Any], live: _LiveApp | None, route: Any) -> None:
+    if state == "empty" and live is not None:
+        live.fulfill(route)
+        return
+    path = urlsplit(route.request.url).path
+    if state != "unauthenticated" and route.request.method == "GET" and path in fixtures:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(fixtures[path]))
+        return
     if state == "loading":
         held.append(route)
         return
@@ -152,8 +222,21 @@ def _respond(state: str, held: list[Any], route: Any) -> None:
                                        "mode": "MOCK"}))
 
 
+def _options(argv: list[str]) -> dict[str, Any]:
+    if len(argv) <= 4 or argv[4] in ("", "-"):
+        return {}
+    try:
+        data = json.loads(argv[4])
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def main(argv: list[str], out: dict[str, Any]) -> None:
     dist, out_dir, browsers = Path(argv[1]), Path(argv[2]), argv[3] if len(argv) > 3 else "-"
+    options = _options(argv)
+    raw_fixtures = options.get("fixtures")
+    fixtures: dict[str, Any] = raw_fixtures if isinstance(raw_fixtures, dict) else {}
     if browsers and browsers != "-":
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browsers
     if not (dist / "index.html").is_file():
@@ -165,6 +248,13 @@ def main(argv: list[str], out: dict[str, Any]) -> None:
         out.update(status="NOT_RUN", reason="playwright is not installed in the verifier environment")
         return
     out_dir.mkdir(parents=True, exist_ok=True)
+    live: _LiveApp | None = None
+    if options.get("live_app") == "aeos":
+        try:
+            live = _LiveApp(out_dir / "live-data")
+            out["live_app"] = "candidate app, empty database, throwaway admin session"
+        except Exception as exc:  # the empty state then uses the generic answers (stated)
+            out["live_app_error"] = type(exc).__name__ + ": " + str(exc)[:300]
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), partial(_Handler, directory=str(dist)))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -181,6 +271,8 @@ def main(argv: list[str], out: dict[str, Any]) -> None:
             out["browser"] = "chromium " + str(browser.version)
             try:
                 for state in STATES:
+                    answered_by = ("candidate-app" if state == "empty" and live is not None else
+                                   "verifier-fixtures" if fixtures and state != "unauthenticated" else "verifier")
                     for vp_name, vp in VIEWPORTS.items():
                         held: list[Any] = []
                         page: Any = browser.new_page(viewport=vp)  # type: ignore[arg-type]
@@ -189,7 +281,7 @@ def main(argv: list[str], out: dict[str, Any]) -> None:
                         page.on("pageerror", lambda e, sink=page_errors: sink.append(str(e)[:300]))
                         page.on("console", lambda m, sink=console_errors: sink.append(m.text[:300])
                                 if m.type == "error" else None)
-                        page.route("**/api/**", partial(_respond, state, held))
+                        page.route("**/api/**", partial(_respond, state, held, fixtures, live))
                         page.goto(base + "/", wait_until="load", timeout=30_000)
                         page.wait_for_timeout(SETTLE_MS)
                         shot = f"{state}-{vp_name}.png"
@@ -202,7 +294,8 @@ def main(argv: list[str], out: dict[str, Any]) -> None:
                                                    "detail": f"horizontal overflow of {overflow}px at 390px"})
                         results.append({"state": state, "viewport": vp_name, "screenshot": shot,
                                         "title": page.title()[:200], "violations": violations[:100],
-                                        "page_errors": page_errors[:20], "console_errors": len(console_errors)})
+                                        "page_errors": page_errors[:20], "console_errors": len(console_errors),
+                                        "answered_by": answered_by})
                         for route in held:
                             try:
                                 route.abort()
@@ -214,7 +307,9 @@ def main(argv: list[str], out: dict[str, Any]) -> None:
     finally:
         server.shutdown()
         server.server_close()
-    out.update(status="RAN", base_path="/", states=results, rules=list(RULES),
+        if live is not None:
+            live.close()
+    out.update(status="RAN", base_path="/", states=results, rules=list(RULES), fixtures=sorted(fixtures),
                violations=sum(len(r["violations"]) for r in results))
 
 

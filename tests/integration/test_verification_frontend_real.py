@@ -68,6 +68,8 @@ def test_frontend_step_on_the_platform_frontend(tmp_path: Path):
     snapshot = tmp_path / "s"
     src = REPO / "frontend"
     shutil.copytree(src, snapshot / "frontend", ignore=shutil.ignore_patterns("node_modules", "dist"))
+    # the DLY AEOS layout: the empty state is answered by the candidate's own app on an empty database
+    shutil.copytree(REPO / "backend", snapshot / "backend", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     workdir = runner.new_workdir()
     try:
         ctx = StepContext(runner=runner.ProcessRunner(workdir=workdir), snapshot=snapshot, workdir=workdir,
@@ -80,3 +82,6 @@ def test_frontend_step_on_the_platform_frontend(tmp_path: Path):
         pytest.skip(f"npm ci could not reach the registry here: {fe.summary[:200]}")
     assert fe.status == "PASS", (fe.summary, fe.details)
     assert results["ui_a11y"].status == "PASS", results["ui_a11y"].details
+    report = results["ui_a11y"].evidence[0].content
+    assert isinstance(report, dict) and report["live_app"] and not report["unproven_states"]
+    assert {s["answered_by"] for s in report["states"] if s["state"] == "empty"} == {"candidate-app"}

@@ -40,7 +40,22 @@ STEP_TIMEOUT = 900.0
 UI_TIMEOUT = 600.0
 EXCLUDED_NAMES = frozenset({"node_modules", "dist", "build", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs",
                             ".git", "coverage"})
+# build output is excluded at the package root only (a source folder named build/dist deeper down is source);
+# installed packages, VCS data and npm/yarn/pnpm config (registry/auth redirection) are excluded at every depth
+ROOT_ONLY_EXCLUDED = frozenset({"dist", "build", "coverage"})
 TRUSTED_CONFIG_NAME = "aeos-verifier.vitest.config.mts"
+# DLY AEOS layout: the session the bundle reads first (frontend/src/auth/AuthContext.tsx ``SessionView``), answered
+# by the UI driver in the loading/error states so they render for a signed-in user instead of the login screen
+# (synthetic verifier data, MOCK, no credential); the empty state is answered by the candidate's own app on an
+# empty throwaway database (``live_app``), so every endpoint has its real shape.
+PLATFORM_UI_FIXTURES: dict[str, Any] = {
+    "/api/auth/session": {
+        "user": {"id": "verifier-ui", "username": "verifier-ui", "display_name": "Verifier UI (MOCK)",
+                 "role": "SUPER_ADMIN", "must_change_password": False},
+        "csrf_token": "verifier-ui-state", "expires_at": "2099-01-01T00:00:00Z", "allowed_domains": ["PERSONAL"],
+        "context": {"domain": "PERSONAL", "project_id": None}, "mode": "MOCK",
+    },
+}
 CANDIDATE_CONFIGS = ("vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vitest.config.mjs",
                      "vite.config.ts", "vite.config.mts", "vite.config.js", "vite.config.mjs")
 TRUSTED_VITEST_CONFIG = """// Verifier-owned vitest configuration (DLY AEOS independent verifier, section 31 G3).
@@ -122,8 +137,11 @@ def _materialise(src: Path, dest: Path) -> int:
     if dest.exists():
         shutil.rmtree(dest)
 
-    def ignore(_dir: str, names: list[str]) -> set[str]:
-        return {n for n in names if n in EXCLUDED_NAMES}
+    root = os.path.normcase(os.path.abspath(src))
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        at_root = os.path.normcase(os.path.abspath(directory)) == root
+        return {n for n in names if n in EXCLUDED_NAMES and (at_root or n not in ROOT_ONLY_EXCLUDED)}
 
     shutil.copytree(src, dest, ignore=ignore)
     return sum(1 for p in dest.rglob("*") if p.is_file())
@@ -137,6 +155,9 @@ def _env(rn: Any, fe: Path, *, egress: bool) -> dict[str, str]:
         cfg.parent.mkdir(parents=True, exist_ok=True)
         if not cfg.is_file():
             cfg.write_text("", encoding="utf-8")
+    # one spelling only: Windows environment names are case-insensitive, so NPM_CONFIG_USERCONFIG (the child
+    # default) next to npm_config_userconfig would leave the effective config file to the block order
+    env.pop("NPM_CONFIG_USERCONFIG", None)
     env.update({"npm_config_userconfig": str(user_cfg), "npm_config_globalconfig": str(global_cfg),
                 "npm_config_cache": str(home / ".npm-cache"), "npm_config_update_notifier": "false",
                 "npm_config_fund": "false", "npm_config_audit": "false", "CI": "1", "NO_COLOR": "1",
@@ -224,10 +245,13 @@ def run_package_tests(rn: Any, package_dir: Path, workdir: Path) -> dict[str, An
     return {"status": st, "summary": summary, "install": inst, "files": files, **info}
 
 
-def run_ui(rn: Any, dist: Path, out_dir: Path, timeout: float = UI_TIMEOUT) -> dict[str, Any]:
-    """The UI state/a11y driver against a built bundle, through the runner (process runner only)."""
-    res = rn.python(["-c", pack_text("ui_driver.py"), str(dist), str(out_dir), browsers_path()],
-                    pythonpath=out_dir.parent, autoload=False, timeout=timeout)
+def run_ui(rn: Any, dist: Path, out_dir: Path, timeout: float = UI_TIMEOUT, *,
+           options: dict[str, Any] | None = None, backend: Path | None = None) -> dict[str, Any]:
+    """The UI state/a11y driver against a built bundle, through the runner (process runner only). With
+    ``options["live_app"]`` the driver imports the candidate backend (*backend* on ``PYTHONPATH``)."""
+    res = rn.python(["-c", pack_text("ui_driver.py"), str(dist), str(out_dir), browsers_path(),
+                     json.dumps(options) if options else "-"],
+                    pythonpath=backend if backend is not None else out_dir.parent, autoload=False, timeout=timeout)
     data = last_json_line(res.stdout)
     if not data:
         data = {"status": "ERROR", "reason": f"ui driver produced no report (exit {res.returncode}): {res.tail(400)}"}
@@ -236,40 +260,71 @@ def run_ui(rn: Any, dist: Path, out_dir: Path, timeout: float = UI_TIMEOUT) -> d
     return data
 
 
+# A render that raised an uncaught script error is never evidence of its state. Under the standard error/401
+# envelopes, or with the candidate's own app answering the empty state, the crash is the UI's (a FAIL); under the
+# verifier's generic answers (loading, generic empty list envelope) it may be the driver's, so that state is
+# NOT-PROVEN instead of passing silently.
+UI_DEFECT_STATES = frozenset({"error", "unauthenticated"})
+
+
 def ui_result(ui: dict[str, Any], out_dir: Path) -> StepResult:
     states = list(ui.get("states") or [])
     evidence: list[StepEvidence] = []
     if ui.get("status") != "RAN" or not states:
         msg = f"UI states/a11y not rendered: {ui.get('reason') or ui.get('status')}"
         return StepResult("ui_a11y", "NOT_RUN", msg, {"ui": ui}, not_proven=[msg])
+    violations = [{"state": s["state"], "viewport": s["viewport"], **v} for s in states for v in s.get("violations")
+                  or []]
+    unproven: list[str] = []
+    for s in states:
+        errors = list(s.get("page_errors") or [])
+        if not errors:
+            continue
+        if s.get("state") in UI_DEFECT_STATES or s.get("answered_by") == "candidate-app":
+            violations.append({"state": s["state"], "viewport": s["viewport"], "rule": "uncaught-script-error",
+                               "wcag": "-", "target": "page", "detail": str(errors[0])[:120]})
+        else:
+            unproven.append(f"{s.get('state')}/{s.get('viewport')}")
     for s in states:
         shot = out_dir / str(s.get("screenshot") or "")
         if shot.is_file() and shot.suffix == ".png":
+            crashed = " - the render raised an uncaught script error" if s.get("page_errors") else ""
             evidence.append(StepEvidence("SCREENSHOT", f"UI state '{s.get('state')}' ({s.get('viewport')}) of the "
-                                                       "candidate bundle (API answered by the verifier)",
+                                                       f"candidate bundle (API answered by "
+                                                       f"{s.get('answered_by') or 'the verifier'}){crashed}",
                                          shot.read_bytes(), "E2", None,
-                                         {"ui_state": s.get("state"), "viewport": s.get("viewport")}))
-    violations = [{"state": s["state"], "viewport": s["viewport"], **v} for s in states for v in s.get("violations")
-                  or []]
-    status = "FAIL" if violations else "PASS"
+                                         {"ui_state": s.get("state"), "viewport": s.get("viewport"),
+                                          "answered_by": s.get("answered_by"),
+                                          "render_error": bool(s.get("page_errors"))}))
+    status = "FAIL" if violations else ("NOT_PROVEN" if unproven else "PASS")
+    stated: list[str] = []
+    if ui.get("live_app_error"):
+        stated.append(f"UI empty state: the candidate app could not answer it ({str(ui['live_app_error'])[:160]}); "
+                      "the verifier's generic answers were used")
     content = {"suite": "ui-a11y", "status": status, "probe": "verifier a11y probe (WCAG subset; not axe-core)",
                "rules": ui.get("rules"), "browser": ui.get("browser"), "states": states,
-               "violations": violations[:200],
+               "violations": violations[:200], "unproven_states": unproven, "live_app": ui.get("live_app"),
+               "live_app_error": ui.get("live_app_error"),
                "not_covered": ["colour contrast", "focus order / keyboard traps", "screen-reader announcements",
                                "routes other than the bundle entry '/'"]}
     evidence.insert(0, StepEvidence("TEST_REPORT", f"UI states + accessibility probe of the candidate bundle: {status} "
-                                                   f"({len(states)} state renders, {len(violations)} violation(s))",
+                                                   f"({len(states)} state renders, {len(violations)} violation(s), "
+                                                   f"{len(unproven)} render(s) not proven)",
                                     content, "E2", "ui_a11y"))
     details = {"states": [f"{s['state']}/{s['viewport']}" for s in states], "violations": violations[:20],
-               "screenshots": len(evidence) - 1}
+               "unproven_states": unproven, "screenshots": len(evidence) - 1}
     if violations:
         rules = sorted({str(v.get("rule")) for v in violations})
         msg = f"accessibility probe: {len(violations)} violation(s) ({', '.join(rules[:5])})"
-        return StepResult("ui_a11y", "FAIL", msg, details, evidence, reasons=[msg])
-    return StepResult("ui_a11y", "PASS", f"{len(states)} UI state render(s) captured; accessibility probe found no "
-                                         "violation (WCAG subset)", details, evidence,
+        return StepResult("ui_a11y", "FAIL", msg, details, evidence, reasons=[msg], not_proven=stated)
+    if unproven:
+        msg = (f"UI state render(s) {', '.join(unproven[:4])} raised an uncaught script error under the verifier's "
+               "generic API answers: not evidence of those states; UI states/a11y NOT-PROVEN")
+        return StepResult("ui_a11y", "NOT_PROVEN", msg, details, evidence, not_proven=[msg, *stated])
+    return StepResult("ui_a11y", "PASS", f"{len(states)} UI state render(s) captured without script errors; "
+                                         "accessibility probe found no violation (WCAG subset)", details, evidence,
                       not_proven=["UI accessibility beyond the verifier probe (contrast, focus order, screen readers) "
-                                  "NOT-PROVEN"])
+                                  "NOT-PROVEN", *stated])
 
 
 def run(ctx: StepContext) -> list[StepResult]:
@@ -318,7 +373,10 @@ def run(ctx: StepContext) -> list[StepResult]:
         steps["build"] = {"status": st, "summary": summary, **info}
         dist = fe / "dist"
         if st == "PASS" and (dist / "index.html").is_file():
-            ui = run_ui(ctx.runner, dist, reports / "ui")
+            platform = (ctx.snapshot / "backend" / "aeos" / "api" / "app.py").is_file() and root == "frontend"
+            ui = (run_ui(ctx.runner, dist, reports / "ui", backend=ctx.snapshot / "backend",
+                         options={"fixtures": PLATFORM_UI_FIXTURES, "live_app": "aeos"})
+                  if platform else run_ui(ctx.runner, dist, reports / "ui"))
             results.append(ui_result(ui, reports / "ui"))
         else:
             msg = "UI states/a11y not rendered: no built bundle (dist/index.html)"

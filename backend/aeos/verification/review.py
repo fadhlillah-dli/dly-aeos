@@ -399,10 +399,14 @@ def ui_evidence_section(evidence: list[EvidenceArtifact], full_report: dict[str,
         "frontend_tests": checks.get("frontend_tests"),
         "ui_a11y": checks.get("ui_a11y"),
         "ui_report_evidence_id": report.id if report is not None else None,
-        "states": [{k: s.get(k) for k in ("state", "viewport", "title", "violations", "page_errors")}
+        "states": [{k: s.get(k) for k in ("state", "viewport", "title", "violations", "page_errors", "answered_by")}
                    for s in (data or {}).get("states") or []][:16],
+        # a render with an uncaught script error is not evidence of its state (render_error, see ui_a11y)
+        "unproven_states": (data or {}).get("unproven_states") or [],
         "screenshots": [{"evidence_id": e.id, "state": (e.environment or {}).get("ui_state"),
-                         "viewport": (e.environment or {}).get("viewport")} for e in evidence if e.kind == "SCREENSHOT"],
+                         "viewport": (e.environment or {}).get("viewport"),
+                         **({"render_error": True} if (e.environment or {}).get("render_error") else {})}
+                        for e in evidence if e.kind == "SCREENSHOT"],
         "probe": (data or {}).get("probe"),
         "not_covered": (data or {}).get("not_covered"),
     }

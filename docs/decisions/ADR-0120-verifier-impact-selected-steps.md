@@ -44,12 +44,16 @@ split was documentation only, and an existing project's inventory never had a te
    candidate lockfile (project npm config not materialised), vitest with a verifier-owned config, `tsc -b
    --noEmit`, `vite build`, then per-state renders (loading/error/unauthenticated/empty x desktop/mobile) in
    headless Chromium with screenshots and a verifier a11y probe (WCAG subset; **not axe-core** - contrast, focus
-   order and screen readers stay NOT-PROVEN). The A11Y review package gets a `ui_evidence` section. axe-core is not
+   order and screen readers stay NOT-PROVEN). For the DLY AEOS layout the loading/error states render for a
+   synthetic signed-in session and the empty state is answered by the candidate's own app on an empty throwaway
+   database (real response shapes). A render with an uncaught script error is never evidence of its state (FAIL
+   under the error/401 envelopes or the candidate app, NOT-PROVEN under generic answers). The A11Y review package
+   gets a `ui_evidence` section. axe-core is not
    added: it would change the frontend lockfile, which is the owner's/frontend cluster's decision.
 8. **DB/Data Engineer**: the migration driver (`packs/migration_roundtrip.py`) seeds, backs up, restores and
    compares, and rolls back one revision with data present; `db_credentials` checks the owner-named
-   `migration_credential_ref` / `runtime_credential_ref` on deployment targets and scans runtime config for the
-   migration reference (NOT_APPLICABLE without a deployment target, never an invented value).
+   `migration_credential_ref` / `runtime_credential_ref` on deployment targets (settable through the integration
+   API, validated like `credential_ref`) and scans runtime config for the migration reference (NOT_APPLICABLE without a deployment target, never an invented value).
 9. **Role evidence that names a verifier check is machine-checked at acceptance** (`(ui_a11y)`,
    `(negative_tests)`, `(migration_rollback)`, `(db_credentials)` in `planning.dag.ROLE_EVIDENCE`); the UX/UI line is
    no longer satisfied by any SUPPORTED claim.

@@ -486,6 +486,7 @@ class _Verifier:
         self.trusted_cases: dict[str, str] = {}
         self.impact_summary: dict[str, dict[str, Any]] = {}
         self._base_dir: Path | None = None
+        self._base_failed = False
 
     # ------------------------------------------------------------------ orchestration
 
@@ -1283,15 +1284,16 @@ class _Verifier:
         """The recorded base commit materialised once (reused when the trusted collection already did it)."""
         if self._base_dir is not None:
             return self._base_dir
+        if self._base_failed or self.git is None:
+            return None  # a failed (possibly partial) export is never reused as the base
         existing = workdir / "bs"
         if existing.is_dir():
             self._base_dir = existing
             return existing
-        if self.git is None:
-            return None
         try:
             self._base_dir = self._export_base(self.git, workdir)
         except _Blocked:
+            self._base_failed = True
             return None
         return self._base_dir
 
@@ -1378,7 +1380,8 @@ class _Verifier:
         if "integration" in suites and "integration_tests" not in out.checks:
             out.not_proven.append("integration-marked tests (real tools) are not run by the verifier; only tests "
                                   f"selectable with '{MARK_EXPR}' ran (opt in with TaskSpec "
-                                  "verifier_policy.integration_tests: run|required)")
+                                  "verifier_policy.integration_tests: run|required; the planner's TaskSpec contract "
+                                  "v1 cannot carry this opt-in yet, so planner-compiled tasks never run them)")
         # Negative / permission tests for API and auth changes (TaskSpec verifier_policy.negative_tests_required):
         # executed in _run_impact_steps; when the candidate could not be run at all nothing was proven.
         risky = sorted({p for c in ("api", "auth") for p in categories.get(c, [])})

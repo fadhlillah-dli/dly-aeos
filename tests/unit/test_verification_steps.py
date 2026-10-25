@@ -296,6 +296,39 @@ def test_credential_split_check(db, settings, tmp_path: Path):
                                        project=world.project)) is None
 
 
+def test_the_owner_can_name_both_credential_references_of_a_deployment_target(personal_client, db, tmp_path: Path):
+    """W6-046: the references the db_credentials check compares are settable through the integration API
+    (validated like credential_ref: secret-store syntax, domain namespace, never a value) - the generic config
+    rule refuses every key containing 'credential', which made the split unprovable for a real target."""
+    from aeos.models.portfolio import Project
+    from tests.unit.test_portfolio_support import create_project
+
+    p = create_project(personal_client, name="Split App")
+    url = f"/api/projects/{p['id']}/integrations"
+    base = {"provider": "deployment-target", "purpose": "staging", "root_id": "https://staging.example.invalid",
+            "credential_ref": "personal/split-runtime"}
+    r = personal_client.put(url, json={**base, "config": {"migration_credential_ref": "personal/split-migrate"}})
+    assert r.status_code == 200, r.text
+    assert r.json()["integration"]["config"]["migration_credential_ref"] == "personal/split-migrate"
+    # a value instead of a reference, another domain's namespace, or another provider: refused
+    leaked = personal_client.put(url, json={**base, "config": {"migration_credential_ref": "ghp_" + "a" * 36}})
+    assert leaked.status_code == 422, leaked.text
+    office_ns = personal_client.put(url, json={**base, "config": {"runtime_credential_ref": "office/db"}})
+    assert office_ns.status_code == 422 and office_ns.json()["error"]["code"] == "CREDENTIAL_NAMESPACE_MISMATCH"
+    other = personal_client.put(url, json={"provider": "github-issues", "purpose": "issues", "root_id": "octo/split",
+                                           "config": {"migration_credential_ref": "personal/split-migrate"}})
+    assert other.status_code == 422 and other.json()["error"]["code"] == "SECRET_IN_FIELD"
+    db.expire_all()
+    project = db.get(Project, p["id"])
+    snap = tmp_path / "s"
+    snap.mkdir()
+    res = db_evidence.run(StepContext(runner=None, snapshot=snap, workdir=tmp_path, categories={"migration": ["m.py"]},
+                                      session=db, project=project))
+    assert res is not None and res.status == "PASS", res
+    assert res.details["targets"][0]["migration_ref"] == "personal/split-migrate"
+    assert res.details["targets"][0]["runtime_ref"] == "personal/split-runtime"
+
+
 # ------------------------------------------------------------------------------------------- lockfiles
 
 
@@ -338,3 +371,96 @@ def test_a11y_review_package_carries_the_ui_evidence(db, settings):
     assert review.ui_evidence_section([], {"checks": {"ruff": {}}}) is None
     assert "ui_evidence" in review.FOCUS["A11Y"]
     assert json.dumps(section)  # serialisable into the package
+
+
+# ------------------------------------------------------------------------------------------- adversarial pack
+
+
+class _JUnitRunner:
+    """Writes a scripted junit report for the probe run (no candidate code runs)."""
+
+    def __init__(self, cases: list[tuple[str, str]], returncode: int = 0):
+        self.cases, self.returncode = cases, returncode
+
+    def python(self, args, *, pythonpath, autoload, timeout):
+        from aeos.verification.procs import ProcResult
+
+        junit = Path(args[args.index("--junitxml") + 1])
+        rows = "".join(
+            f'<testcase classname="tests.aeos_verifier_pack.test_probe_api_boundary" name="{n}">'
+            + ('<failure message="x"/>' if o == "failed" else "") + "</testcase>" for n, o in self.cases)
+        junit.write_text(f'<testsuites><testsuite name="pytest" tests="{len(self.cases)}">{rows}</testsuite>'
+                         "</testsuites>", encoding="utf-8")
+        return ProcResult(args=args, returncode=self.returncode, stdout="", stderr="", timed_out=False, duration_s=0.1)
+
+
+def _probe_ctx(tmp_path: Path, rn) -> StepContext:
+    snap, tr = tmp_path / "s", tmp_path / "tr"
+    (snap / "backend" / "aeos" / "api").mkdir(parents=True)
+    (snap / "backend" / "aeos" / "api" / "app.py").write_text("", encoding="utf-8")
+    (tr / "tests").mkdir(parents=True)
+    (tr / "tests" / "conftest.py").write_text("", encoding="utf-8")
+    ini = tmp_path / "pytest.ini"
+    ini.write_text("[pytest]\n", encoding="utf-8")
+    return StepContext(runner=rn, snapshot=snap, workdir=tmp_path, categories={"auth": ["backend/aeos/identity/x.py"]},
+                       suite_kind="CONTROLLER", is_platform=True, ini=ini, trusted_copy=tr)
+
+
+def test_every_verifier_probe_must_be_in_the_report(tmp_path: Path):
+    """W6-063: a probe the candidate made disappear (deselected, lost) or an abnormal pytest exit never reads as
+    the pack passing; the probe set comes from the trusted pack source."""
+    from aeos.verification import adversarial
+
+    names = adversarial.probe_test_names("probe_api_boundary")
+    assert "test_every_operation_refuses_an_unauthenticated_request" in names and len(names) >= 7
+    full = [(n, "passed") for n in names]
+    ok = adversarial.run(_probe_ctx(tmp_path / "a", _JUnitRunner(full)))
+    assert ok is not None and ok.status == "PASS", ok
+    partial = adversarial.run(_probe_ctx(tmp_path / "b", _JUnitRunner(full[1:])))
+    assert partial is not None and partial.status == "NOT_PROVEN" and partial.blocking, partial
+    assert names[0] in partial.summary
+    crashed = adversarial.run(_probe_ctx(tmp_path / "c", _JUnitRunner(full, returncode=3)))
+    assert crashed is not None and crashed.status == "NOT_PROVEN" and "exit 3" in crashed.summary
+
+
+def test_frontend_materialisation_keeps_source_folders_named_like_build_output(tmp_path: Path):
+    """W6-044: build output is left out at the package root only; npm config and installed packages everywhere."""
+    from aeos.verification import frontend
+
+    src = tmp_path / "pkg"
+    for rel in ("src/build/steps.ts", "src/dist/x.ts", "dist/index.html", "coverage/x.json", "node_modules/a/i.js",
+                "src/node_modules/b/i.js", ".npmrc", "src/.npmrc", "package.json"):
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text("x", encoding="utf-8")
+    dest = tmp_path / "fe"
+    frontend._materialise(src, dest)
+    kept = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
+    assert kept == ["package.json", "src/build/steps.ts", "src/dist/x.ts"], kept
+
+
+def test_a_ui_render_with_an_uncaught_script_error_is_never_evidence_of_its_state(tmp_path: Path):
+    """W6-043: a blank page after a crash used to count as a clean render (0 violations -> ui_a11y PASS). A crash
+    under the standard error/401 envelopes or the candidate's own empty app is the UI's defect (FAIL); under the
+    verifier's generic answers the state is NOT-PROVEN, never PASS."""
+    from aeos.verification import frontend
+
+    def ui(states):
+        for s in states:
+            (tmp_path / s["screenshot"]).write_bytes(b"\x89PNG\r\n\x1a\n")
+        return {"status": "RAN", "states": states, "rules": [], "browser": "fake"}
+
+    def state(name, errors=(), answered_by="verifier"):
+        return {"state": name, "viewport": "desktop", "screenshot": f"{name}.png", "title": "t", "violations": [],
+                "page_errors": list(errors), "console_errors": 0, "answered_by": answered_by}
+
+    clean = frontend.ui_result(ui([state("loading"), state("error"), state("empty", answered_by="candidate-app")]),
+                               tmp_path)
+    assert clean.status == "PASS", clean
+    generic_empty = frontend.ui_result(ui([state("loading"), state("empty", ["TypeError: x is undefined"])]),
+                                       tmp_path)
+    assert generic_empty.status == "NOT_PROVEN" and "empty/desktop" in generic_empty.summary
+    shot = [e for e in generic_empty.evidence if e.kind == "SCREENSHOT" and e.env_extra["ui_state"] == "empty"][0]
+    assert shot.env_extra["render_error"] is True and "uncaught script error" in shot.claim
+    for crash in (state("error", ["TypeError: boom"]), state("empty", ["TypeError: boom"], "candidate-app")):
+        res = frontend.ui_result(ui([state("loading"), crash]), tmp_path)
+        assert res.status == "FAIL" and "uncaught-script-error" in res.summary and res.reasons, res

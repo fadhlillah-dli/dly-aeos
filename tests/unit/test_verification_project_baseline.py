@@ -95,3 +95,12 @@ def test_project_baseline_api(personal_client: AuthedClient, db, tmp_path: Path)
     assert r.json()["status"] == "FAIL" and r.json()["evidence_id"]
     got = personal_client.get(f"/api/projects/{p['id']}/test-baseline").json()
     assert got["evidence_id"] == r.json()["evidence_id"] and got["checked_at"]
+    # the verifier's own per-run TEST_REPORTs (several per verification) never push the baseline out of view
+    for i in range(210):
+        collector.collect_evidence(db, kind="TEST_REPORT", origin="verifier", collector_identity="aeos-verifier/test",
+                                   claim=f"run report {i}", content={"suite": "trusted-acceptance"},
+                                   evidence_level="E2", project_id=p["id"], subject_type="run", subject_id=f"run-{i}",
+                                   environment={"project_baseline_commit": got["commit"]})
+    db.commit()
+    later = personal_client.get(f"/api/projects/{p['id']}/test-baseline").json()
+    assert later["evidence_id"] == r.json()["evidence_id"] and later["status"] == "FAIL", later

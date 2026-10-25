@@ -338,7 +338,7 @@ def _frontend_world(db, settings, tmp_path, monkeypatch, *, scenario: dict, viol
     monkeypatch.setattr(frontend, "node_tools", lambda: ([sys.executable, str(fake)], Path("npm-cli.js"), ""))
     calls: list[Path] = []
 
-    def fake_ui(rn, dist, out_dir, timeout=600.0):
+    def fake_ui(rn, dist, out_dir, timeout=600.0, **_kw):
         calls.append(dist)
         out_dir.mkdir(parents=True, exist_ok=True)
         states = []

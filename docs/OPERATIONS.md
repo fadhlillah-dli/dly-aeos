@@ -211,8 +211,9 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   present** (a downgrade that only breaks on populated tables fails, leg `data_rollback`).
 * **Migration/runtime credential split (`db_credentials`, §16 DB/Data Engineer):** name both references
   on each `deployment-target` integration: `config.migration_credential_ref` and
-  `config.runtime_credential_ref` (default: the integration's `credential_ref`). References only, never
-  values. The verifier FAILs when both are the same reference, when an entry looks like a secret value,
+  `config.runtime_credential_ref` (default: the integration's `credential_ref`), set through
+  `PUT /api/projects/{id}/integrations` and validated like `credential_ref` (secret-store reference in the
+  project's domain namespace). References only, never values. The verifier FAILs when both are the same reference, when an entry looks like a secret value,
   or when a runtime configuration file of the candidate (env files, `config/`, settings, compose/k8s/helm)
   names the migration reference. With no deployment target the check is NOT_APPLICABLE (local runtime);
   a target that names only one reference is NOT_PROVEN until you add the other.
@@ -238,7 +239,11 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   `package-lock.json` (project `.npmrc` is not used), vitest with the verifier's own config, `tsc -b
   --noEmit` and `vite build`, then renders the built bundle in headless Chromium per UI state (loading,
   error, unauthenticated, empty; desktop and mobile) with screenshots and the verifier's accessibility
-  probe (a WCAG subset, not axe-core). Needs node/npm and Playwright's Chromium on the host and the
+  probe (a WCAG subset, not axe-core). For the DLY AEOS layout the loading/error states render for a
+  signed-in (synthetic, MOCK) session and the empty state is answered by the candidate's own app on an
+  empty throwaway database, so every endpoint has its real shape. A render that raises an uncaught script
+  error is never evidence of its state: under the error/401 envelopes or the candidate's own app it FAILs
+  `ui_a11y`, under the verifier's generic answers that state is NOT-PROVEN. Needs node/npm and Playwright's Chromium on the host and the
   process runner; otherwise `frontend_tests` stays a visible, non-blocking NOT-PROVEN (G3 provider CI).
 * **Project test baseline (§05 step 6):** `aeos verify project-baseline <project id>` (or
   `POST /api/projects/{id}/test-baseline`) runs the repository's own tests at the inventoried commit

@@ -295,7 +295,8 @@ def run_contract_diff(ctx: StepContext) -> StepResult | None:
         if approved:
             msg += "stated (TaskSpec verifier_policy.contract_breaking=approved)"
             return StepResult("contract_diff", "NOT_PROVEN", msg, details, [ev], not_proven=[msg, *stated])
-        msg += "blocking until the approved TaskSpec sets verifier_policy.contract_breaking=approved"
+        msg += ("blocking until the approved TaskSpec sets verifier_policy.contract_breaking=approved (the planner's "
+                "TaskSpec contract v1 cannot carry that approval yet: a planner-compiled task stays blocked)")
         return StepResult("contract_diff", "NOT_PROVEN", msg, details, [ev], not_proven=[msg, *stated], blocking=[msg])
     if not analysed:
         msg = stated[0] if stated else (

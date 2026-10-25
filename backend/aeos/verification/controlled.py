@@ -204,9 +204,9 @@ def run_negative_tests(ctx: StepContext, risky: list[str]) -> StepResult:
         bad = [r["test"] for r in rows if r["outcome"] == "failed"]
         msg = f"{failed} added negative/refusal test(s) failed against the head ({', '.join(bad[:5])})"
         return StepResult("negative_tests", "FAIL", msg, details, [ev], reasons=[msg])
-    if missing or report is None:
+    if missing or report is None or res.returncode not in (0, 1):
         msg = (f"{missing} added negative/refusal test(s) were not executed or skipped "
-               f"({parse_error or 'see report'}); refusal coverage NOT-PROVEN")
+               f"({parse_error or f'pytest exit {res.returncode}, see report'}); refusal coverage NOT-PROVEN")
         return StepResult("negative_tests", "NOT_PROVEN", msg, details, [ev], not_proven=[msg], blocking=[msg])
     return StepResult("negative_tests", "PASS",
                       f"{passed} added negative/refusal test(s) executed and passed against the head (authored with "
@@ -263,6 +263,8 @@ def run_integration_tests(ctx: StepContext, suites: list[str]) -> StepResult | N
             if res.returncode != 5:  # 5 = nothing selected
                 skip_reasons.append(f"{label}: no readable report ({parse_error})")
             continue
+        if res.returncode not in (0, 1, 5):  # interrupted / internal / usage error: the report may be partial
+            skip_reasons.append(f"{label}: pytest ended with exit {res.returncode}; the report may be incomplete")
         passed += report.passed
         failed += report.failures + report.errors
         skipped += report.skipped

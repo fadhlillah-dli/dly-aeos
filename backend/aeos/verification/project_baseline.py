@@ -40,6 +40,7 @@ from aeos.verification.steps import parse_report
 
 ORIGIN = "verifier"
 SUITE = "project-baseline"
+IDENTITY = "aeos-verifier/project-baseline"
 DEFAULT_TIMEOUT = 1800.0
 MAX_TIMEOUT = 7200.0
 MIN_TIMEOUT = 60.0
@@ -123,9 +124,12 @@ def baseline_summary(session: Session, project_id: str, commit: str | None) -> d
     """The latest trusted project baseline for *commit* (for ``inventory.tests.baseline``), else NOT_RUN."""
     if not commit:
         return {"status": "NOT_RUN", "commit": None, "reason": "inventory has no commit"}
+    # only the baseline's own reports: the verifier's per-run TEST_REPORTs (several per verification) must never
+    # push an existing baseline out of the window
     rows = session.scalars(select(EvidenceArtifact).where(
         EvidenceArtifact.project_id == project_id, EvidenceArtifact.kind == "TEST_REPORT",
-        EvidenceArtifact.origin == ORIGIN, EvidenceArtifact.trusted.is_(True))
+        EvidenceArtifact.origin == ORIGIN, EvidenceArtifact.trusted.is_(True),
+        EvidenceArtifact.collector_identity == IDENTITY, EvidenceArtifact.subject_type == "repository")
         .order_by(EvidenceArtifact.created_at.desc()).limit(200))
     for ev in rows:
         env = ev.environment or {}
@@ -288,7 +292,7 @@ def run_project_baseline(session: Session, project_id: str, *, actor: str, actor
     claim = (f"Project test baseline of {repo.full_name} at {sha[:12]}: {status} "
              f"({py.get('passed', 0)} passed, {py.get('failed', 0)} failed, {py.get('skipped', 0)} skipped)")
     ev = collector.collect_evidence(
-        session, kind="TEST_REPORT", origin=ORIGIN, collector_identity="aeos-verifier/project-baseline", claim=claim,
+        session, kind="TEST_REPORT", origin=ORIGIN, collector_identity=IDENTITY, claim=claim,
         content=content, evidence_level=level, subject_type="repository", subject_id=repo.id, project_id=project.id,
         domain=project.domain, environment={"project_baseline_commit": sha, "repository_id": repo.id,
                                             "suite_identity_hash": (content.get("suite_identity") or {}).get(
