@@ -40,6 +40,97 @@ def policy_mci(ctx: CheckContext) -> Outcome:
                    evidence=evidence, component_version=str(mci.get("version") or "") or None)
 
 
+MASTER_TARGET_TYPE = "master_architecture"  # Decision.target_type of a direct approval of the master's sha256
+
+
+def _master_rel() -> str:
+    from aeos.inventory.manifest import MASTER_REL
+
+    return MASTER_REL
+
+
+def _approved_master_binding(session: Any, sha: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """(binding of *sha*, newest approved snapshot) - the binding is the newest human-approved
+    ArchitectureSnapshot whose master reference is *sha*, else an ACTIVE human APPROVAL/POLICY Decision on
+    ``master_architecture`` bound to *sha*. Platform/PERSONAL-scoped snapshots only (an OFFICE snapshot's label
+    never reaches this platform row)."""
+    from aeos.core.timeutil import ensure_aware, utcnow
+    from aeos.models.decisions import ArchitectureSnapshot, Decision
+
+    def approval(snap: ArchitectureSnapshot) -> Decision | None:
+        d = session.scalar(select(Decision).where(
+            Decision.kind == "APPROVAL", Decision.target_type == "architecture_snapshot",
+            Decision.target_id == snap.id, Decision.status == "ACTIVE", Decision.target_hash == snap.snapshot_hash,
+            Decision.actor_kind.in_(("HUMAN", "HUMAN_RECORDED"))).order_by(Decision.created_at.desc()).limit(1))
+        return d
+
+    newest: dict[str, Any] | None = None
+    for snap in session.scalars(select(ArchitectureSnapshot).order_by(ArchitectureSnapshot.created_at.desc())):
+        refs = snap.refs or {}
+        if (refs.get("scope") or {}).get("domain") not in (None, "PERSONAL"):
+            continue
+        d = approval(snap)
+        if d is None:
+            continue
+        info = {"via": "architecture_snapshot", "snapshot_id": snap.id, "label": snap.label,
+                "snapshot_master_sha256": (refs.get("master") or {}).get("sha256"), "decision_id": d.id,
+                "approved_at": d.created_at.isoformat() if d.created_at else None}
+        newest = newest or info
+        if info["snapshot_master_sha256"] == sha:
+            return info, newest
+    now = utcnow()
+    for d in session.scalars(select(Decision).where(
+            Decision.kind.in_(("APPROVAL", "POLICY")), Decision.target_type == MASTER_TARGET_TYPE,
+            Decision.status == "ACTIVE", Decision.target_hash == sha,
+            Decision.actor_kind.in_(("HUMAN", "HUMAN_RECORDED"))).order_by(Decision.created_at.desc())):
+        exp = ensure_aware(d.expires_at) if d.expires_at else None
+        if exp is not None and exp <= now:
+            continue
+        return {"via": "decision", "decision_id": d.id,
+                "approved_at": d.created_at.isoformat() if d.created_at else None}, newest
+    return None, newest
+
+
+@check("policy.master_approval", "CANONICAL_POLICY", "Master arsitektur terikat persetujuan tercatat",
+       component_id="policy-decision-registry", needs_db=True, ttl_seconds=3600, ok={"VERIFIED"},
+       invalidators=("config:policy", "config:master"), fingerprint=file_fingerprint(
+           "docs/architecture/DLY_AEOS_Master_Architecture_Final.md"),
+       description="U-23: nama master tetap dan perubahan berikutnya harus punya persetujuan yang dapat ditelusuri. "
+                   "Membandingkan sha256 file master dengan snapshot arsitektur terbaru yang disetujui manusia (atau "
+                   "Decision APPROVAL/POLICY pada master_architecture dengan hash yang sama).")
+def policy_master_approval(ctx: CheckContext) -> Outcome:
+    from aeos.core.hashing import file_sha256
+
+    assert ctx.session is not None
+    rel = _master_rel()
+    path = ctx.repo / rel
+    if not path.is_file():
+        return Outcome("MISSING", f"File master {rel} tidak ada; arsitektur kanonik tidak dapat dibaca.",
+                       error_code="MASTER_MISSING", severity="HIGH")
+    sha = file_sha256(path)
+    binding, newest = _approved_master_binding(ctx.session, sha)
+    evidence: dict[str, Any] = {"path": rel, "sha256": sha, "binding": binding, "newest_approved_snapshot": newest}
+    remedy = Remedy(operation="Pemilik meninjau isi master saat ini, lalu membuat snapshot arsitektur dan "
+                              "menyetujuinya (keputusan manusia terikat hash snapshot, yang memuat sha256 master)",
+                    target="http://127.0.0.1:8787/system-map (panel snapshot: Buat snapshot, lalu Setujui)",
+                    privilege="pemilik (SUPER_ADMIN)",
+                    evidence_to_collect="policy.master_approval VERIFIED (sha256 master = snapshot yang disetujui)")
+    if binding is not None:
+        via = (f"snapshot '{binding.get('label')}' yang disetujui" if binding["via"] == "architecture_snapshot"
+               else f"Decision {str(binding.get('decision_id'))[:8]} pada master_architecture")
+        return Outcome("VERIFIED", f"sha256 master {sha[:19]} terikat {via}; perubahan master dapat ditelusuri ke "
+                       "persetujuan manusia.", evidence=evidence)
+    if newest is not None:
+        return Outcome("UNKNOWN", f"Master berubah sejak snapshot terakhir yang disetujui ('{newest.get('label')}'): "
+                       f"sha256 sekarang {sha[:19]}, snapshot memuat "
+                       f"{str(newest.get('snapshot_master_sha256') or 'tanpa master')[:19]}. Persetujuan perubahan "
+                       "NOT-PROVEN (hanya riwayat git).", evidence=evidence,
+                       error_code="MASTER_CHANGED_SINCE_APPROVAL", severity="MEDIUM", remedy=remedy)
+    return Outcome("UNKNOWN", f"Belum ada snapshot arsitektur yang disetujui untuk sha256 master {sha[:19]}; "
+                   "persetujuan isi master NOT-PROVEN (hanya riwayat git).", evidence=evidence,
+                   error_code="MASTER_APPROVAL_MISSING", severity="MEDIUM", remedy=remedy)
+
+
 @check("policy.office_defaults", "CANONICAL_POLICY", "OFFICE default deny berlaku",
        component_id="policy-decision-registry", ttl_seconds=3600, invalidators=("config:office_policy",),
        severity_fail="CRITICAL", fingerprint=file_fingerprint("policy/office-defaults.yaml"))
