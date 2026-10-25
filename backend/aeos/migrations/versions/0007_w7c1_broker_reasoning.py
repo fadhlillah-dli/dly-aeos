@@ -10,8 +10,8 @@ the corrected OpenCode Zen / Gemini request shape of untouched seeded CANDIDATE 
 (``aeos.routing.seed.run``, which recomputes their config hash), and the broker refuses a superseded seed endpoint
 (``ROUTE_ENDPOINT_SUPERSEDED``) until then, so no activated configuration is ever rewritten by a migration.
 
-Revision ID: 0006_w7c1_broker_reasoning
-Revises: 0005_c8_platform_misc
+Revision ID: 0007_w7c1_broker_reasoning
+Revises: 0006_w7g_candidate_digest
 Create Date: 2026-10-25 12:00:00
 """
 from __future__ import annotations
@@ -19,8 +19,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0006_w7c1_broker_reasoning"
-down_revision = "0005_c8_platform_misc"
+revision = "0007_w7c1_broker_reasoning"
+down_revision = "0006_w7g_candidate_digest"
 branch_labels = None
 depends_on = None
 
