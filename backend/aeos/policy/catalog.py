@@ -81,6 +81,15 @@ DEDICATED_TARGETS: dict[str, str] = {
     TARGET_OFFICE_ROUTE: "POST /api/policy/office/routes",
     TARGET_WORKFORCE: "POST /api/workforce/concurrency",
 }
+# §41/§43 "Perubahan policy, model, tool schema, hooks, prompt/memory, fallback, context strategy tetap system
+# change dengan eval/decision/rollback": a generic POLICY decision on one of these targets changes how agents/models
+# behave, so it is recorded only with completed, all-gates-PASS evaluation runs (evidence of exactly this change)
+# and the rollback target it replaces. Model routes have their own activation path (config-hash-bound evidence).
+SYSTEM_CHANGE_TARGET_TYPES = frozenset({
+    "policy", "policy_rule", "agent_policy", "model", "model_id", "model_route", "route", "tool_schema", "tool_set",
+    "tools", "hook", "hooks", "prompt", "prompt_revision", "memory", "memory_policy", "fallback", "fallback_chain",
+    "context_strategy", "retrieval", "harness",
+})
 # Kinds a human may record through the generic decision endpoint. APPROVAL/REJECTION/REVISION are
 # recorded only through the plan decision endpoint, bound to an exact PlanVersion + hash.
 GENERIC_DECISION_KINDS: tuple[str, ...] = ("EXCEPTION", "RISK_ACCEPTANCE", "WRITE_ENABLEMENT", "POLICY", "BUDGET")

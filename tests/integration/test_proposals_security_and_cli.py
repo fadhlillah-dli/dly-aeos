@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from aeos.core.enums import Domain
 from aeos.cost import facade as cost
+from aeos.evaluation import definitions as eval_defs
 from aeos.evaluation import service as evals
 from aeos.proposals import service as proposals
 from aeos.research import service as research
@@ -87,7 +88,7 @@ def test_cli_read_only_commands_are_ascii_and_domain_explicit(db):
     assert "(no URL - identity UNVERIFIED)" in out.output
 
     out = _cli("eval", "suites")
-    assert out.exit_code == 0 and out.output.count("eval.") == 8
+    assert out.exit_code == 0 and out.output.count("eval.") == len(eval_defs.SUITES) == 28  # one per role (§46)
     out = _cli("eval", "experiments")
     assert out.exit_code == 0 and len(out.output.strip().splitlines()) == 4
     out = _cli("eval", "leaderboard", "--role", "feature-implementer")

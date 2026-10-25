@@ -91,6 +91,10 @@ def activate_cmd(
                                               "fs.write:allowed_paths, tests.run)"),
     eval_run: list[str] = typer.Option(None, help="COMPLETED EvalRun id proving this configuration (APPROVED only; "
                                                   "repeatable)"),
+    option: list[str] = typer.Option(None, help="DecisionRecord: an option you weighed (APPROVED; repeatable)"),
+    goal: str = typer.Option(None, help="DecisionRecord: the goal of adopting this route (APPROVED)"),
+    tradeoff: str = typer.Option(None, help="DecisionRecord: cost/quality trade-off (APPROVED)"),
+    invalidate_if: str = typer.Option(None, help="DecisionRecord: when this decision stops applying (APPROVED)"),
     training: bool = typer.Option(None, "--inputs-used-for-training/--no-inputs-used-for-training",
                                   help="Your reading of the provider terms when they are UNKNOWN (with --trial-only/"
                                        "--no-trial-only and --terms-note; needs --terms-reviewed)"),
@@ -125,7 +129,9 @@ def activate_cmd(
                 expected_config_hash=expected_hash, allowed_data_classes=data_class or None,
                 budget_decision_id=budget_decision, expires_in_days=days, terms_reviewed=terms_reviewed,
                 terms_note=terms_note, terms_record=terms_record, region=region, tool_set=tool or None,
-                eval_run_ids=eval_run or None)
+                eval_run_ids=eval_run or None,
+                decision_record={"options": list(option or []), "goal": goal, "cost_quality_tradeoff": tradeoff,
+                                 "invalidate_if": invalidate_if})
             audit.record(s, actor_type="cli", actor_id=uid, action="route.activate", target_type="model_route",
                          target_id=route.route_key, details={"mode": mode, "decision_id": decision.id})
             typer.echo(f"{route.route_key} -> {route.status} (decision {decision.id}, hash {route.config_hash})")

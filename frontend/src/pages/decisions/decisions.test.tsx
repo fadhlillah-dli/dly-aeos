@@ -87,6 +87,25 @@ describe("DecisionForm exact target shapes (ADR-0042/0051)", () => {
     expect(body.target_type).toBeUndefined();
   });
 
+  it("sends the system-change evaluation and rollback target with a POLICY decision (§41/§43)", async () => {
+    const fn = renderForm("PERSONAL");
+    fireEvent.change(screen.getByLabelText("Jenis keputusan"), { target: { value: "POLICY" } });
+    fireEvent.change(screen.getByLabelText("Jenis target"), { target: { value: "fallback_chain" } });
+    fireEvent.change(screen.getByLabelText("ID target persis"), { target: { value: "worker" } });
+    fireEvent.change(screen.getByLabelText(/ID EvalRun bukti/), { target: { value: "run-1, run-2" } });
+    fireEvent.change(screen.getByLabelText(/Target rollback/), { target: { value: "fallback chain v1" } });
+    fireEvent.change(screen.getByLabelText(/Scope eksplisit/), { target: { value: "pool=WORKER" } });
+    fireEvent.change(screen.getByLabelText(/Rationale/), { target: { value: "fallback chain baru setelah evaluasi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Catat keputusan" }));
+    await waitFor(() => expect(fn).toHaveBeenCalled());
+    const body = JSON.parse(String(fn.mock.calls[0][1]!.body));
+    expect(body).toMatchObject({
+      kind: "POLICY",
+      target_type: "fallback_chain",
+      details: { system_change: { eval_run_ids: ["run-1", "run-2"], rollback_target: "fallback chain v1" } },
+    });
+  });
+
   it("does not offer the PERSONAL-only presets in OFFICE", () => {
     renderForm("OFFICE");
     expect(screen.queryByLabelText("Jenis pengecualian")).not.toBeInTheDocument();

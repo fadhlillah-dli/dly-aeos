@@ -321,6 +321,55 @@ describe("ProjectDetailPage read-only lifecycle", () => {
   });
 });
 
+describe("RepositoriesPanel joined repository view (§37)", () => {
+  it("renders PR/CI links, docs targets and capability from GET /api/repositories/{id}", async () => {
+    auth.domain = "PERSONAL";
+    const { RepositoriesPanel } = await import("./RepositoriesPanel");
+    const fn = mockFetch((url) => {
+      if (url === "/api/repositories/r1")
+        return {
+          repository: {
+            id: "r1",
+            full_name: "octo/view",
+            provider: "GITHUB",
+            role: "project",
+            verification_status: "VERIFIED",
+            base_branch: "main",
+            pull_requests: [{ number: 7, url: "https://github.com/octo/view/pull/7", state: "OPEN", head_ref: "aeos/t1", base_ref: "main", last_synced_at: null }],
+            ci: [{ provider: "github-actions", integration_id: "i-ci", configuration: "CONFIGURED" }],
+            docs_targets: [{ provider: "google-drive", root_id: "1AbCdEfGh", integration_id: "i-docs" }],
+            capability: {
+              write_enablement: [
+                { integration_id: "i-docs", provider: "google-drive", purpose: "docs", decision_id: "d1", status: "ENABLED" },
+                { integration_id: "i-ci", provider: "github-actions", purpose: "ci", decision_id: null, status: "NOT_ENABLED" },
+              ],
+              merge: "HUMAN_ONLY (AEOS never merges)",
+            },
+          },
+        };
+      return {};
+    });
+    const project = {
+      id: "p1",
+      domain: "PERSONAL",
+      project_kind: "NEW",
+      repositories: [
+        { id: "r1", full_name: "octo/view", provider: "GITHUB", role: "project", verification_status: "VERIFIED", local_status: "NOT_CHECKED", dirty: null },
+      ],
+    } as unknown as import("./types").ProjectView;
+    wrap(<RepositoriesPanel project={project} isAdmin={false} />);
+    await userEvent.click(screen.getByRole("button", { name: /PR, CI, dokumen/ }));
+    const section = await screen.findByRole("region", { name: /Tautan repository octo\/view/ });
+    expect(within(section).getByRole("link", { name: /#7/ })).toHaveAttribute("href", "https://github.com/octo/view/pull/7");
+    expect(within(section).getByText("Terbuka")).toBeInTheDocument();
+    expect(within(section).getByText("1AbCdEfGh")).toBeInTheDocument();
+    expect(within(section).getByText("Diizinkan (keputusan)")).toBeInTheDocument();
+    expect(within(section).getByText("Belum diizinkan")).toBeInTheDocument();
+    expect(within(section).getByText(/HUMAN_ONLY/)).toBeInTheDocument();
+    expect(fn.mock.calls.some(([u]) => String(u) === "/api/repositories/r1")).toBe(true);
+  });
+});
+
 describe("SearchPanel status honesty", () => {
   it("renders module statuses through the honest mapping (a CLEAN scan is not a pass)", async () => {
     auth.domain = "PERSONAL";

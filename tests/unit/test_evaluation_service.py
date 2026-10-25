@@ -51,9 +51,9 @@ def _run(db, config, *, accepted, total, gates=None, suite="eval.small-bugfix", 
 
 def test_seed_creates_protected_held_out_suites_without_results(db):
     out = _seed(db)
-    assert out["created"] == 8 and out["results_seeded"] == 0
+    assert out["created"] == len(D.SUITES) == 28 and out["results_seeded"] == 0
     classes = {s.task_class for s in db.scalars(select(EvalSuite))}
-    assert classes == {"small-bugfix", "feature-fe-api", "shared-schema-auth-change", "independent-readonly-reviews",
+    assert classes >= {"small-bugfix", "feature-fe-api", "shared-schema-auth-change", "independent-readonly-reviews",
                        "docs-only-change", "provider-quota-interruption", "self-build-controller-change",
                        "crash-recovery"}
     for s in db.scalars(select(EvalSuite)):
@@ -62,7 +62,7 @@ def test_seed_creates_protected_held_out_suites_without_results(db):
     assert db.scalar(select(func.count()).select_from(EvalRun)) == 0
     assert all(v["integrity"] == "OK" for v in service.list_suites(db))
     again = _seed(db)
-    assert again["created"] == 0 and again["unchanged"] == 8
+    assert again["created"] == 0 and again["unchanged"] == len(D.SUITES)
 
 
 def test_seed_never_overwrites_a_changed_protected_suite(db):
@@ -214,3 +214,26 @@ def test_results_never_change_routes(db):
     assert route.status == "CANDIDATE" and route.eval_results == {}
     snap = service.scorecard_snapshot(db, role="feature-implementer")
     assert snap["scorecard_hash"].startswith("sha256:") and snap["status"] == "HAS_RESULTS"
+
+
+def test_scorecard_states_the_adoption_decision_path(db):
+    """§44 (re-audit): the scorecard path could only open a COMPARE proposal and never end in an adoption decision.
+    It now names, per suite, the owner decision that adopts the top configuration (APPROVED route activation with
+    the EvalRuns and the DecisionRecord) - and adopts nothing itself."""
+    from aeos.policy.catalog import DECISION_RECORD_FIELDS
+
+    _seed(db)
+    assert service.scorecard_snapshot(db, role="feature-implementer")["adoption"] == []  # nothing ranked yet
+    entry = {"rank": 1, "configuration_hash": "sha256:c1", "run_ids": ["run-1", "run-2"],
+             "route_binding": {"route_key": "r-top", "status": "ELIGIBLE", "route_config_current": True}}
+    stale = {**entry, "configuration_hash": "sha256:c2",
+             "route_binding": {"route_key": "r-old", "status": "ELIGIBLE", "route_config_current": False}}
+    board = {"suites": [{"suite_key": "eval.small-bugfix", "ranking": [entry, {**entry, "rank": 2}]},
+                        {"suite_key": "eval.feature-fe-api", "ranking": [stale]}]}
+    paths = service.adoption_paths(board)
+    assert [p["suite_key"] for p in paths] == ["eval.small-bugfix", "eval.feature-fe-api"]  # top entries only
+    top = paths[0]
+    assert top["route_key"] == "r-top" and top["eval_run_ids"] == ["run-1", "run-2"]
+    assert top["decision"] == "ROUTE_ACTIVATION (APPROVED)" and top["path"] == "POST /api/routes/r-top/activate"
+    assert top["decision_record_fields"] == list(DECISION_RECORD_FIELDS) and top["status"] == "READY_FOR_OWNER_DECISION"
+    assert paths[1]["status"] == "NOT_ADOPTABLE" and "re-evaluate" in paths[1]["reason"]

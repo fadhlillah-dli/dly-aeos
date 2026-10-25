@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 from aeos.core.enums import DataClassification, Domain
 from aeos.core.errors import Blocked, Conflict, NotFound, ValidationFailed
 from aeos.core.hashing import content_hash
-from aeos.core.redaction import redact_text
+from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.cost import QuotaState
 from aeos.models.decisions import Decision
@@ -844,6 +844,110 @@ def observe_supervisor_resolution(session: Session, *, route_key: str, requested
     return False
 
 
+def eval_summary(r: ModelRoute) -> dict[str, Any]:
+    """Evaluation state of the route's CURRENT configuration: DIUJI (results bound to this config hash),
+    BELUM_DIUJI, or NEEDS_EVALUATION (the configuration changed and the old results are not inherited)."""
+    roles: dict[str, Any] = {}
+    stale: list[str] = []
+    for role, entry in (r.eval_results or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("config_hash") != r.config_hash:
+            stale.append(role)
+            continue
+        roles[role] = {k: entry.get(k) for k in ("score", "score_basis", "runs", "accepted", "suite", "at",
+                                                  "sample_size", "ci95", "run_ids", "decision_id")}
+    state = "DIUJI" if roles else "BELUM_DIUJI"
+    note = "Hasil konfigurasi lama tidak diwariskan." if stale else ""
+    if not roles and (stale or (r.pool == "SUPERVISOR" and r.config_changed_at is not None)):
+        # §02 "a version change is never silent and needs evaluation": the changed configuration is untested.
+        state = "NEEDS_EVALUATION"
+        note = ("Konfigurasi berubah (mis. alias kini me-resolve ke versi model lain); hasil lama tidak diwariskan "
+                "dan konfigurasi baru belum dievaluasi.")
+        if r.pool == "SUPERVISOR":
+            note += (" Planning tetap memakai versi baru (uji penerimaan 1.31 menetapkan perilaku ini); evaluasi "
+                     "baseline planning untuk versi ini belum tercatat - keputusan pemilik diperlukan.")
+    return {"state": state, "roles": roles, "stale_roles": stale, "note": note}
+
+
+def supervisor_configuration(session: Session, model: str) -> dict[str, Any] | None:
+    """§02 "a version change is never silent": the supervisor route configuration a planning/review call ran on and
+    its evaluation state, recorded on that call so the plan reviewer sees a NEEDS_EVALUATION configuration (this
+    build keeps planning on the new version - trusted acceptance 1.31 - so the owner's decision is the gate)."""
+    route = supervisor_route_for(session, model)
+    if route is None:
+        return None
+    summary = eval_summary(route)
+    return {"route_key": route.route_key, "config_hash": route.config_hash, "resolved_version": route.resolved_version,
+            "harness_version": route.harness_version, "evaluation": summary["state"],
+            "config_changed_at": route.config_changed_at.isoformat() if route.config_changed_at else None,
+            "note": summary["note"] or None}
+
+
+SUPERVISOR_MODE_DEFAULT = "CLI_DEFAULT"  # no --effort / thinking flag passed: the Claude Code default applies
+
+
+def supervisor_route_for(session: Session, model: str) -> ModelRoute | None:
+    """The SUPERVISOR route a bridge call with *model* (alias or pinned id) ran on."""
+    m = (model or "").strip().lower()
+    if not m:
+        return None
+    routes = list(session.scalars(select(ModelRoute).where(ModelRoute.pool == "SUPERVISOR")))
+    for r in routes:
+        if m in {str(x).lower() for x in (r.alias, r.model_id, r.resolved_version, r.route_key) if x}:
+            return r
+    return next((r for r in routes if r.alias and r.alias.lower() in m.split("-")), None)
+
+
+def mode_thinking(route: ModelRoute) -> dict[str, Any]:
+    """§23 "mode/thinking params" as the route's configuration identity carries it (stated, never guessed)."""
+    mp = route.mode_params or {}
+    if route.pool == "SUPERVISOR":
+        return {"effort": mp.get("effort") or "UNKNOWN", "thinking": mp.get("thinking") or "UNKNOWN",
+                "bound_in": ["mode_params"],
+                "note": "Bridge memakai default Claude Code bila tidak ada --effort; perubahan = konfigurasi baru"}
+    if route.harness == "opencode":
+        return {"reasoning": mp.get("reasoning") or "HARNESS_DEFAULT", "bound_in": ["harness_version", "context_strategy"],
+                "note": "Konfigurasi OpenCode tidak menetapkan opsi reasoning/variant; default harness dipin oleh "
+                        "harness_version dan context_strategy"}
+    keys = {k: v for k, v in mp.items() if k in ("effort", "thinking", "reasoning", "quantization", "backend")}
+    return {**keys, "bound_in": ["mode_params"]} if keys else {"status": "UNKNOWN", "bound_in": []}
+
+
+def observe_supervisor_call(session: Session, *, model: str, engine_version: str | None,
+                            effort: str | None = None) -> dict[str, Any]:
+    """§23 "ModelRoute menyimpan ... mode/thinking params, harness version" for the native supervisor routes: the
+    Claude Code version a planning/review call ran with is the route's ``harness_version`` and the effort/thinking
+    setting it passed (``CLI_DEFAULT`` when none) is ``mode_params.effort``. Both are part of the configuration
+    identity: a later change (a Claude Code upgrade, a caller passing an effort level) is a new configuration -
+    approvals bound to the old hash stop matching, readiness goes STALE, eval results are not inherited. The first
+    observation binds without invalidating (nothing was bound to an earlier value), like the resolved model."""
+    route = supervisor_route_for(session, model)
+    if route is None:
+        return {"route_key": None, "changed": False}
+    if route.config_hash is None:
+        route.config_hash = compute_config_hash(route)
+    reasons: list[str] = []  # changes of a value that was already bound (a first binding is not a change)
+    version = (engine_version or "").strip()[:64] or None
+    if version and route.harness_version != version:
+        if route.harness_version:
+            reasons.append(f"harness claude-code {route.harness_version} -> {version}")
+        route.harness_version = version
+    mode = dict(route.mode_params or {})
+    wanted = (effort or SUPERVISOR_MODE_DEFAULT).strip()[:32]
+    if mode.get("effort") != wanted:
+        if mode.get("effort"):
+            reasons.append(f"effort {mode.get('effort')} -> {wanted}")
+        route.mode_params = {**mode, "effort": wanted, "thinking": mode.get("thinking") or SUPERVISOR_MODE_DEFAULT}
+    if not reasons:
+        route.config_hash = compute_config_hash(route)  # first binding: no earlier identity was bound to it
+        return {"route_key": route.route_key, "changed": False}
+    changed = refresh_config_hash(session, route, reason="; ".join(reasons))
+    if changed:
+        route.notes = (route.notes + "\n" if route.notes else "") + f"{utcnow().date().isoformat()}: " + "; ".join(reasons)
+    return {"route_key": route.route_key, "changed": changed, "reasons": reasons}
+
+
 # ------------------------------------------------------------------------------ activation
 
 
@@ -948,7 +1052,7 @@ def activate_route(
     expected_config_hash: str, allowed_data_classes: list[str] | None = None, budget_decision_id: str | None = None,
     expires_in_days: int | None = None, terms_reviewed: bool = False, terms_note: str = "",
     terms_record: dict[str, Any] | None = None, region: str | None = None, tool_set: list[str] | None = None,
-    eval_run_ids: list[str] | None = None,
+    eval_run_ids: list[str] | None = None, decision_record: dict[str, Any] | None = None,
 ) -> tuple[ModelRoute, Decision]:
     """Human activation: records a ROUTE_ACTIVATION (APPROVED) or TRIAL decision bound to the exact
     route config hash. Never touches OFFICE.
@@ -964,7 +1068,9 @@ def activate_route(
     * APPROVED (production) additionally needs ``eval_run_ids``: COMPLETED, gate-passing EvalRuns made on
       exactly this configuration (§23 "telah diuji", §43). Their per-role result is written to
       ``eval_results`` by this decision — the only writer — and a rollback target is recorded. TRIAL needs no
-      evaluation (it is time-limited)."""
+      evaluation (it is time-limited).
+    * APPROVED adopts a routing result, so it carries the §44 DecisionRecord (options, goal, evidence,
+      cost/quality trade-off, invalidation condition; ``policy.catalog.DECISION_RECORD_FIELDS``)."""
     if mode not in {"APPROVED", "TRIAL"}:
         raise ValidationFailed("mode must be APPROVED or TRIAL")
     if len((rationale or "").strip()) < 10:
@@ -1052,6 +1158,21 @@ def activate_route(
                 "activate it as TRIAL (binds the runtime), evaluate that configuration, then approve",
                 code="TEST_EVIDENCE_REQUIRED",
                 details={"problems": evidence["problems"], "config_hash_to_evaluate": to_evaluate})
+    from aeos.policy import facade as policy
+
+    record_fields = policy.decision_record_fields()
+    record = {k: redact(v) for k, v in (decision_record or {}).items()
+              if k in record_fields and v not in (None, "", [], {})}
+    if mode == "APPROVED":
+        # §44 "Hasil routing/role/mode menjadi DecisionRecord": adopting the evaluated route records the options
+        # weighed, the goal, the evidence, the cost/quality trade-off and when the decision stops applying.
+        record.setdefault("evidence_ids", sorted({rid for r in evidence["roles"].values() for rid in r["run_ids"]}))
+        missing = [k for k in record_fields if not record.get(k)]
+        if missing:
+            for f, v in saved.items():
+                setattr(route, f, v)
+            raise ValidationFailed(f"decision record incomplete: {missing}", code="DECISION_RECORD_INCOMPLETE",
+                                   details={"required": list(record_fields)})
     rollback = rollback_target(session, route, new_hash=route.config_hash)
     terms_review = ({"checked_by": actor_user_id, "checked_at": now.isoformat(), "data_classes": classes,
                      "note": redact_text(terms_note or "")[:500], "terms_record": bool(terms_record)}
@@ -1073,7 +1194,8 @@ def activate_route(
                      "runtime_binding": {f: getattr(route, f) for f in (*binding_fields(route), "harness_version")},
                      "tool_set": route.tool_set, "region": route.region,
                      "eval_run_ids": sorted({rid for r in evidence["roles"].values() for rid in r["run_ids"]}),
-                     "eval_results": evidence["roles"], "config_snapshot": route_config(route)},
+                     "eval_results": evidence["roles"], "config_snapshot": route_config(route),
+                     "decision_record": record or None},
         )
     except (ImportError, ModuleNotFoundError) as exc:
         for f, v in saved.items():

@@ -151,6 +151,23 @@ RECORD = {"options": ["1 worker", "2 workers"], "goal": "throughput independent 
           "cost_quality_tradeoff": "2x slots, same review", "invalidate_if": "any gate FAIL"}
 
 
+def _metrics(*, rate=0.8, latency=600.0, queue=120.0, critical=0, security=0, scope=1.0):
+    return {"outcome": {"accepted": 4, "final_acceptance_rate": rate, "critical_regressions": critical},
+            "contract": {"security_violations": security, "scope_adherence_rate": scope},
+            "performance": {"latency_p50_s": latency, "queue_wait_p50_s": queue}}
+
+
+def _topology_runs(db, *, candidate_metrics=None, baseline_metrics=None, baseline_conditions="sha256:cond"):
+    """A sequential baseline (A) and a bounded-parallel run (C) of the same suite/configuration/conditions."""
+    base = _eval_run(db)
+    base.topology, base.conditions_hash, base.metrics = "A", baseline_conditions, baseline_metrics or _metrics()
+    cand = _eval_run(db)
+    cand.topology, cand.conditions_hash = "C", "sha256:cond"
+    cand.metrics = candidate_metrics or _metrics(latency=360.0, queue=30.0)  # same acceptance, faster
+    db.flush()
+    return cand, base
+
+
 def test_owner_sets_two_workers_only_with_passing_evaluation_and_record(db, fakes, monkeypatch):
     from aeos.workforce import integrations as ext
 
@@ -165,16 +182,24 @@ def test_owner_sets_two_workers_only_with_passing_evaluation_and_record(db, fake
     with pytest.raises(Blocked):
         scheduler.set_concurrency(db, max_active=2, actor="user:o", actor_user_id=owner, rationale="uji dua worker",
                                   eval_run_id=failing.id, decision_record=RECORD)
-    ok = _eval_run(db)
+    ok, baseline = _topology_runs(db)
     with pytest.raises(ValidationFailed) as exc:
         scheduler.set_concurrency(db, max_active=2, actor="user:o", actor_user_id=owner, rationale="uji dua worker",
-                                  eval_run_id=ok.id, decision_record={"goal": "x"})
+                                  eval_run_id=ok.id, baseline_eval_run_id=baseline.id, decision_record={"goal": "x"},
+                                  scope={"risk_classes": ["R1"]})
     assert exc.value.code == "DECISION_RECORD_INCOMPLETE"
+    with pytest.raises(ValidationFailed) as exc:  # §44 never "every project/role at once"
+        scheduler.set_concurrency(db, max_active=2, actor="user:o", actor_user_id=owner, rationale="uji dua worker",
+                                  eval_run_id=ok.id, baseline_eval_run_id=baseline.id, decision_record=RECORD)
+    assert exc.value.code == "CONCURRENCY_SCOPE_REQUIRED"
     out = scheduler.set_concurrency(db, max_active=2, actor="user:o", actor_user_id=owner, rationale="uji dua worker",
-                                    eval_run_id=ok.id, decision_record=RECORD,
+                                    eval_run_id=ok.id, baseline_eval_run_id=baseline.id, decision_record=RECORD,
                                     scope={"risk_classes": ["R1"], "bogus": ["x"]})
     assert seen["kind"] == "POLICY" and (seen["target_type"], seen["target_id"]) == ("workforce", "concurrency")
     assert seen["details"]["rollback"]["previous_max_active"] == 1 and seen["details"]["eval_run_id"] == ok.id
+    assert seen["details"]["baseline_eval_run_id"] == baseline.id
+    assert set(seen["details"]["benefit"]["gains"]) == {"latency_p50_s", "queue_wait_p50_s"}
+    assert seen["details"]["decision_record"]["evidence_ids"] == [ok.id, baseline.id]
     assert out["scope"] == {"risk_classes": ["R1"]}
     assert scheduler.concurrency_cap(db)[0] == 2
     # §44: the mode is adopted per task class only
@@ -192,14 +217,37 @@ def _decision(db, **kw):
     return d
 
 
+@pytest.mark.parametrize("problem, candidate, baseline, conditions", [
+    ("no baseline", None, None, "sha256:cond"),
+    ("worse acceptance", _metrics(rate=0.6, latency=100.0), None, "sha256:cond"),
+    ("more critical regressions", _metrics(critical=1, latency=100.0), None, "sha256:cond"),
+    ("no gain", _metrics(), None, "sha256:cond"),
+    ("unmeasured", {"performance": {"latency_p50_s": 100.0}}, None, "sha256:cond"),
+    ("other conditions", None, None, "sha256:other"),
+])
+def test_two_workers_need_a_measured_benefit_over_the_sequential_baseline(db, fakes, problem, candidate, baseline,
+                                                                         conditions):
+    """§44 (re-audit): any single gate-passing EvalRun used to be accepted; the bounded-parallel topology must be
+    shown better than the sequential baseline on the same configuration for that task class."""
+    cand, base = _topology_runs(db, candidate_metrics=candidate, baseline_metrics=baseline,
+                                baseline_conditions=conditions)
+    with pytest.raises(Blocked) as exc:
+        scheduler.set_concurrency(db, max_active=2, actor="user:o", actor_user_id="owner-1", rationale="uji dua worker",
+                                  eval_run_id=cand.id, decision_record=RECORD, scope={"risk_classes": ["R1"]},
+                                  baseline_eval_run_id=None if problem == "no baseline" else base.id)
+    assert exc.value.code == "CONCURRENCY_BENEFIT_NOT_PROVEN", problem
+    assert scheduler.concurrency_cap(db) == (1, None)
+
+
 def test_concurrency_endpoint_requires_super_admin_and_evidence(personal_client, db):
     r = personal_client.post("/api/workforce/concurrency", json={"max_active": 2, "rationale": "uji dua worker",
                                                                   "decision_record": RECORD})
     assert r.status_code in (403, 409) and r.json()["error"]["code"] == "CONCURRENCY_EVIDENCE_MISSING"
-    ok = _eval_run(db)
+    ok, baseline = _topology_runs(db)
     db.commit()
     r = personal_client.post("/api/workforce/concurrency", json={
-        "max_active": 2, "rationale": "uji dua worker", "eval_run_id": ok.id, "decision_record": RECORD})
+        "max_active": 2, "rationale": "uji dua worker", "eval_run_id": ok.id, "decision_record": RECORD,
+        "baseline_eval_run_id": baseline.id, "scope": {"risk_classes": ["R1", "R2"]}})
     assert r.status_code == 200, r.text
     assert r.json()["effective_cap"] == 2
     d = db.get(Decision, r.json()["decision_id"])
@@ -210,9 +258,9 @@ def test_concurrency_endpoint_requires_super_admin_and_evidence(personal_client,
 def test_host_without_free_memory_waits_and_compute_is_reserved(db, fakes, monkeypatch):
     import psutil
 
-    _p, _pv, specs = _env(db, fakes, [{"task_key": "a", "limits": {"memory_mb": 2048}}])
-    # a 2 GB host: the worker share (1 GB) cannot hold a 2 GB reservation
-    monkeypatch.setattr(psutil, "virtual_memory", lambda: types.SimpleNamespace(total=2 * 1024 ** 3,
+    _p, _pv, specs = _env(db, fakes, [{"task_key": "a", "limits": {"max_memory_mb": 2048, "max_cpus": 2}}])
+    # a 3 GB host: after the 2 GB host reserve, 1 GB is left for workers - not enough for a 2 GB run
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: types.SimpleNamespace(total=3 * 1024 ** 3,
                                                                                 available=1024 ** 3))
     adm = scheduler.admission_check(db, specs[0].id)
     assert "RESOURCE_INSUFFICIENT" in _codes(adm) and adm.answers["compute"]["status"] == "INSUFFICIENT"
@@ -220,16 +268,46 @@ def test_host_without_free_memory_waits_and_compute_is_reserved(db, fakes, monke
     # 64 GB host with little free memory still admits (and the observation is recorded as a warning)
     monkeypatch.setattr(psutil, "virtual_memory", lambda: types.SimpleNamespace(total=64 * 1024 ** 3,
                                                                                 available=256 * 1024 ** 2))
+    monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: 4)
     adm = scheduler.admission_check(db, specs[0].id)
     assert adm.admitted and "below this run's reservation" in adm.answers["compute"]["warning"]
     run = scheduler.acquire_lease(db, specs[0].id, actor="t", admission=adm)
-    assert run.caps["compute"] == {"memory_mb": 2048, "status": "OK", "enforced": False}
-    assert scheduler._reserved_compute_mb(db, exclude_task=None) == 2048
+    assert run.caps["compute"] == {"memory_mb": 2048, "cpus": 2.0, "status": "OK", "enforced": True,
+                                   "memory_enforced": True, "cpu_enforced": False, "sandbox_kind": "process"}
+    assert scheduler._reserved_compute(db, exclude_task=None) == (2048, 2.0)
     # LEASED and RUNNING runs keep their reservation: a host whose remaining budget is too small waits
     monkeypatch.setattr(psutil, "virtual_memory", lambda: types.SimpleNamespace(total=6 * 1024 ** 3,
                                                                                 available=4 * 1024 ** 3))
-    other = scheduler.compute_check(db, types.SimpleNamespace(id="other", limits={"memory_mb": 2048}), active=1, cap=2)
-    assert other["status"] == "INSUFFICIENT" and other["reserved_mb"] == 2048 and other["worker_budget_mb"] == 3072
+    other = scheduler.compute_check(db, types.SimpleNamespace(id="other", limits={"max_memory_mb": 3072}),
+                                    active=1, cap=2)
+    assert other["status"] == "INSUFFICIENT" and other["reserved_mb"] == 2048 and other["worker_budget_mb"] == 4096
+    # ... and CPUs are reserved too: 2 reserved + 3 requested exceed a 4-CPU host even when memory fits
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: types.SimpleNamespace(total=64 * 1024 ** 3,
+                                                                                available=32 * 1024 ** 3))
+    cpu = scheduler.compute_check(db, types.SimpleNamespace(id="other", limits={"max_memory_mb": 1024, "max_cpus": 3}),
+                                  active=1, cap=2)
+    assert cpu["status"] == "INSUFFICIENT" and cpu["reserved_cpus"] == 2.0 and "CPU" in cpu["reason"]
+
+
+def test_reserved_compute_is_exactly_the_cap_the_runtime_enforces(db, fakes):
+    """§19/§21/§22 (re-audit): admission used to reserve a nominal 512 MB while the runtime let the run grow to its
+    4096 MB cap - two admitted workers could use ~8x the reservation. The reservation is now the enforced cap."""
+    from aeos.planning import dag
+    from aeos.worker_runtime import container, processes
+
+    for limits in ({}, {"max_memory_mb": 1536}, dict(dag.RESOURCE_LIMITS)):
+        task = types.SimpleNamespace(id="t", limits=limits)
+        proc = scheduler.run_compute_limits(task, sandbox_kind="process")
+        assert proc["memory_mb"] == processes.ResourceLimits.from_task(limits).max_memory_mb  # the watchdog's RSS cap
+        box = scheduler.run_compute_limits(task, sandbox_kind="container")
+        assert f"{box['memory_mb']}m" == container.limits_for(limits)["memory"]  # docker --memory
+        assert box["cpus"] == float(container.limits_for(limits)["cpus"]) and box["cpu_enforced"] is True
+    # the compiler writes the runtime cap into every TaskSpec (fixed by the control plane, not by model output)
+    assert dag.RESOURCE_LIMITS["max_memory_mb"] == processes.DEFAULT_MAX_MEMORY_MB
+    _p, _pv, specs = _env(db, fakes, [{"task_key": "a"}])
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert adm.admitted, adm.reasons
+    assert adm.answers["compute"]["memory_mb"] == processes.DEFAULT_MAX_MEMORY_MB != 512
 
 
 def test_context_larger_than_the_route_window_is_refused(db, fakes):
@@ -243,6 +321,34 @@ def test_context_larger_than_the_route_window_is_refused(db, fakes):
     db.flush()
     adm = scheduler.admission_check(db, specs[0].id)
     assert adm.admitted and adm.answers["context"]["status"] == "FITS"
+
+
+def test_context_estimate_counts_the_attachments_and_context_pack_the_worker_receives(db, fakes, monkeypatch):
+    """§19 "berapa konteks yang harus disalin" (re-audit): the estimate used to leave out the resolved
+    input-artifact content and the ContextPack (up to ~300k characters), so admission could report FITS for a
+    prompt larger than the route window."""
+    from aeos.worker_runtime import executor
+
+    big = [{"kind": "attachment", "ref": f"attachment:a{i}", "name": f"brief{i}.md",
+            "content": "x" * executor.MAX_ATTACHMENT_CHARS} for i in range(4)]  # 80k chars, within the runtime caps
+    _p, _pv, specs = _env(db, fakes, [{"task_key": "a", "limits": {"max_output_tokens": 1000}}])
+    route = db.scalar(select(scheduler.ModelRoute))
+    route.context_window = 20_000
+    db.flush()
+    te = scheduler.get_te(db, specs[0].id)
+    base = scheduler.context_estimate(db, specs[0], te, route)
+    assert base["status"] == "FITS" and base["attachments"] == 0
+    monkeypatch.setattr(executor, "resolve_artifacts", lambda s, t: big)  # what the runtime copies into the prompt
+    with_data = scheduler.context_estimate(db, specs[0], te, route)
+    assert with_data["status"] == "TOO_LARGE" and with_data["attachments"] == 4
+    assert with_data["prompt_tokens"] >= base["prompt_tokens"] + 80_000 // scheduler.CHARS_PER_TOKEN
+    monkeypatch.setattr(executor, "resolve_artifacts", lambda s, t: [])
+    pack = {"id": "cp1", "hash": "sha256:p", "items": [{"kind": "doc", "ref": "d", "trust": "T", "content": "y" * 90_000}]}
+    monkeypatch.setattr(executor, "_context_pack", lambda s, t, b: (pack, {"pack_id": "cp1", "used": True}))
+    with_pack = scheduler.context_estimate(db, specs[0], te, route)
+    assert with_pack["status"] == "TOO_LARGE" and with_pack["context_pack_used"] is True
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert "CONTEXT_TOO_LARGE" in _codes(adm)
 
 
 def test_admission_records_verifier_and_reviewer_path(db, fakes):
@@ -287,6 +393,33 @@ def test_default_threshold_r4_keeps_the_pilot_flow(db, fakes):
     _p, _pv, specs = _env(db, fakes, [{"task_key": "a"}])
     elig = scheduler.admission_check(db, specs[0].id).answers["role_eligibility"]
     assert elig["required"] is False and elig["threshold"] == "R4" and elig["status"] == "NOT_EVALUATED"
+    # §46 (re-audit): below the threshold the admission states that eligibility does NOT come from an evaluation
+    assert elig["eligibility_basis"] == "PILOT_THRESHOLD_UNEVALUATED" and "BUKAN dari hasil evaluasi" in elig["note"]
+
+
+def test_owner_tightens_the_role_evaluation_threshold(personal_client, db, fakes):
+    """§46 (re-audit): eligibility from evaluation results applied only from R4 and the owner had no way to require it
+    for lower risk classes. The owner sets the threshold; admission then waits for a PASS evaluation."""
+    _p, _pv, specs = _env(db, fakes, [{"task_key": "a"}])
+    db.commit()
+    bad = personal_client.post("/api/workforce/role-eval-threshold", json={"risk_class": "R9", "rationale": "ketat"})
+    assert bad.status_code == 422
+    r = personal_client.post("/api/workforce/role-eval-threshold",
+                             json={"risk_class": "R0", "rationale": "semua role wajib dievaluasi"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"previous": "R4", "threshold": "R0"}
+    db.expire_all()
+    adm = scheduler.admission_check(db, specs[0].id)
+    elig = adm.answers["role_eligibility"]
+    assert "ROLE_NOT_EVALUATED" in _codes(adm) and elig["eligibility_basis"] == "NOT_ELIGIBLE"
+    rev = roles.role_revision(db, "feature-implementer")
+    _eval_run(db, role_key="feature-implementer", configuration={"role_revision_hash": rev})
+    roles.refresh_role_eval_status(db, "feature-implementer")
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert adm.admitted and adm.answers["role_eligibility"]["eligibility_basis"] == "EVALUATION_RESULT"
+    from aeos.models.audit import AuditEvent
+
+    assert db.scalar(select(AuditEvent).where(AuditEvent.action == "workforce.role_eval_threshold")) is not None
 
 
 # ----------------------------------------------------------------------------- §17/§46 RoleSkillPack contract
@@ -297,11 +430,16 @@ def test_every_executor_role_has_a_full_competence_definition(db):
         assert row.inputs and row.outputs and row.example_outputs and row.failure_modes, spec["role_key"]
         assert row.allowed_scope["write"] == "TaskSpec.allowed_paths only", spec["role_key"]
         assert len(row.practice_sources) >= 3 and "reference only" in row.practice_sources[-1]
+        # §46 (re-audit): named, verifiable practice sources (publication + canonical URL), not generic labels
+        assert "https://" in row.practice_sources[-1], spec["role_key"]
+        # §46 (re-audit): every executor RoleSkillPack carries protected acceptance/evaluation cases
+        assert row.evaluation_cases and all(c["case_ids"] for c in row.evaluation_cases), spec["role_key"]
     impl = db.scalar(select(RoleSkillPack).where(RoleSkillPack.role_key == "feature-implementer"))
     assert {c["suite_key"] for c in impl.evaluation_cases} >= {"eval.small-bugfix", "eval.feature-fe-api"}
-    assert all(c["case_ids"] for c in impl.evaluation_cases)
     analyst = db.scalar(select(RoleSkillPack).where(RoleSkillPack.role_key == "product-analyst"))
-    assert analyst.evaluation_cases == [] and analyst.eval_status == "NOT_EVALUATED"  # honest: no suite yet
+    # cases exist, but no evaluation has run: still NOT_EVALUATED (never PASS by default)
+    assert [c["suite_key"] for c in analyst.evaluation_cases] == ["eval.product-requirements"]
+    assert analyst.eval_status == "NOT_EVALUATED"
 
 
 def test_worker_prompt_carries_the_role_contract(db):
@@ -342,6 +480,36 @@ def test_agent_outside_its_domain_scope_is_hidden_and_refused(db, fakes):
     assert "opencode-implementer" not in {a["agent_key"] for a in views.agents_view(db, domain="PERSONAL")}
     assert "opencode-implementer" in {a["agent_key"] for a in views.agents_view(db, domain="OFFICE")}
     assert "AGENT_OUT_OF_SCOPE" in _codes(scheduler.admission_check(db, specs[0].id))
+
+
+def test_agent_definition_tools_and_route_policy_configure_admission(db, fakes):
+    """§17 (re-audit): AgentDefinition.tools and route_policy used to be display-only; the runtime tool grant, the
+    TaskSpec's bash/webfetch requests and the selected route are now checked against them."""
+    from aeos.worker_runtime.opencode import BASE_ALLOW
+
+    _p, _pv, specs = _env(db, fakes, [{"task_key": "a"}, {"task_key": "b", "tools_allowed": ["fs.read", "bash"]}])
+    agent = db.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == "opencode-implementer"))
+    assert set(BASE_ALLOW) <= set(agent.tools)  # the seeded envelope covers what every worker run receives
+    assert scheduler.admission_check(db, specs[0].id).admitted
+    assert "AGENT_TOOL_NOT_ALLOWED" not in _codes(scheduler.admission_check(db, specs[1].id))  # deny unless TaskSpec
+    agent.tools = [t for t in agent.tools if t != "edit"]
+    db.flush()
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert not adm.admitted and "AGENT_TOOLS_INSUFFICIENT" in _codes(adm)
+    agent.tools = list(catalog.DEFAULT_IMPLEMENTER_TOOLS)
+    agent.limits = {**agent.limits, "bash": "deny"}
+    db.flush()
+    assert "AGENT_TOOL_NOT_ALLOWED" in _codes(scheduler.admission_check(db, specs[1].id))
+    assert scheduler.admission_check(db, specs[0].id).admitted
+    agent.route_policy = {**agent.route_policy, "pool": "LOCAL"}
+    db.flush()
+    assert "AGENT_ROUTE_POLICY" in _codes(scheduler.admission_check(db, specs[0].id))
+    agent.route_policy = {**agent.route_policy, "pool": "WORKER", "allowed_routes": ["worker.other-route"]}
+    db.flush()
+    assert "AGENT_ROUTE_POLICY" in _codes(scheduler.admission_check(db, specs[0].id))
+    agent.route_policy = {**agent.route_policy, "allowed_routes": ["worker.test-free"]}
+    db.flush()
+    assert scheduler.admission_check(db, specs[0].id).admitted
 
 
 def test_reviewer_and_verifier_availability_follow_their_real_gates(db, fakes):

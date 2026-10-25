@@ -144,18 +144,41 @@ def propose(
 
 
 def _record_decision(session: Session, principal: Principal, rec: MemoryRecord, *, kind: str, operation: str,
-                     rationale: str) -> Decision:
+                     rationale: str, extra: dict[str, Any] | None = None) -> Decision:
     from aeos.policy import facade as policy
 
     return policy.record_decision(
         session, kind=kind, actor_user_id=principal.user.id, target_type="memory_record", target_id=rec.id,
         target_hash=_hash(rec), allowed_operations=[operation], auth_scope={"project_id": rec.project_id},
         project_id=rec.project_id, domain=rec.domain, rationale=rationale,
-        details={"scope": rec.scope, "classification": rec.classification},
+        details={"scope": rec.scope, "classification": rec.classification, **(extra or {})},
     )
 
 
-def accept(session: Session, principal: Principal, project: Project, rec: MemoryRecord, *, rationale: str = "") -> MemoryRecord:
+def system_change(session: Session, rec: MemoryRecord, eval_run_ids: list[str] | None) -> dict[str, Any]:
+    """§41/§43 "prompt/memory ... tetap system change dengan eval/decision/rollback": accepted memory reaches model
+    prompts (through context packs), so its acceptance records the rollback target - expiring this record, and the
+    previously accepted record it supersedes - and the system-change evaluation: EVALUATED with completed,
+    all-gates-PASS evaluation runs, otherwise NOT_EVALUATED (stated, never implied)."""
+    prov = rec.provenance or {}
+    previous = prov.get("supersedes")
+    rollback_target = f"memory_record:{previous}" if previous else f"expire memory_record:{rec.id} (no previous record)"
+    rollback = {"how": f"POST /api/memory/{rec.id}/expire", "previous_memory_id": previous,
+                "rollback_target": rollback_target}
+    if eval_run_ids:
+        from aeos.policy import facade as policy
+
+        out = policy.system_change_evidence(session, domain=rec.domain, eval_run_ids=list(eval_run_ids),
+                                     rollback_target=rollback_target)
+        return {**out, "class": "MEMORY", "rollback": rollback}
+    return {"class": "MEMORY", "evaluation": "NOT_EVALUATED", "eval_runs": [], "rollback_target": rollback_target,
+            "rollback": rollback,
+            "note": "Diterima tanpa evaluasi system-change; memori masuk context pack sebagai DATA SUBORDINATE "
+                    "dan dapat di-rollback (expire)."}
+
+
+def accept(session: Session, principal: Principal, project: Project, rec: MemoryRecord, *, rationale: str = "",
+           eval_run_ids: list[str] | None = None) -> MemoryRecord:
     if rec.status != "PROPOSED":
         raise Conflict(f"memory is {rec.status}; only PROPOSED memory can be accepted", code="INVALID_TRANSITION")
     require_writable(project)  # reject/expire stay possible: they never grant anything
@@ -166,14 +189,16 @@ def accept(session: Session, principal: Principal, project: Project, rec: Memory
     _validate_source(session, project, str(prov.get("source_type")), prov.get("source_id"))  # still accepted?
     if rec.expires_at is not None and ensure_aware(rec.expires_at) <= utcnow():  # type: ignore[operator]
         raise Conflict("memory proposal already expired", code="MEMORY_EXPIRED")
+    change = system_change(session, rec, eval_run_ids)
     try:
         decision = _record_decision(session, principal, rec, kind="APPROVAL", operation="memory.accept",
-                                    rationale=rationale or "accept memory record")
+                                    rationale=rationale or "accept memory record", extra={"system_change": change})
     except (ImportError, ModuleNotFoundError) as exc:
         raise Blocked("decision registry (aeos.policy) unavailable: memory cannot be accepted without a recorded "
                       "human decision", code="DECISION_REGISTRY_UNAVAILABLE") from exc
     rec.status = "ACCEPTED"
     rec.auth_decision_id = decision.id
+    rec.provenance = {**prov, "system_change": change}
     superseded = None
     if prov.get("supersedes"):
         old = session.get(MemoryRecord, prov["supersedes"])
@@ -275,6 +300,8 @@ def memory_view(rec: MemoryRecord) -> dict[str, Any]:
         "auth_decision_id": rec.auth_decision_id,
         "expires_at": rec.expires_at.isoformat() if rec.expires_at else None,
         "superseded_by": rec.superseded_by,
+        # §41/§43 system change: evaluation status + rollback target of the acceptance (None while PROPOSED)
+        "system_change": (rec.provenance or {}).get("system_change"),
         "created_at": rec.created_at.isoformat(),
         "updated_at": rec.updated_at.isoformat(),
         "trust": "MEMORY_DATA (never policy)",

@@ -155,7 +155,10 @@ def test_m3_chain_proposal_taskspec_evidence_decision_inventory_doc_delta(person
     assert out["status"] == "ACCEPTED" and cur["acceptance"]["unmet"] == []
     fin = cur["finalization"]
     assert fin["adr"] == {"status": "LINKED", "keys": ["ADR-9100"]}
-    assert fin["inventory"]["status"] in ("DONE", "PARTIAL", "PENDING") and "docs" in cur["inventory_docs_update"]
+    # no install manifest is loaded here: the reconcile is PENDING (with its remedy), never reported DONE, and the
+    # docs delta stays PENDING until a linked publication is PUBLISHED (DONE path: test_proposals_service finalize)
+    assert fin["inventory"]["status"] == "PENDING" and "aeos inventory reconcile" in fin["inventory"]["reason"]
+    assert cur["inventory_docs_update"] == "PENDING: inventory, docs"
     assert out["delivery_dimensions"]["ACTIVE"]["status"] == "ENABLED_IN_CONFIG"
     db.expire_all()
     oc = db.scalar(select(ResearchEntry).where(ResearchEntry.entry_key == "tool:opencode"))

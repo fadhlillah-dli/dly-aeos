@@ -138,3 +138,20 @@ def request_decision(
     from aeos.policy.requests import create_request as impl
 
     return impl(**kwargs).id
+
+
+def decision_record_fields() -> tuple[str, ...]:
+    """§44 DecisionRecord fields a routing/role/mode adoption decision carries (options, goal, evidence, cost/quality
+    trade-off, invalidation condition)."""
+    from aeos.policy.catalog import DECISION_RECORD_FIELDS
+
+    return tuple(DECISION_RECORD_FIELDS)
+
+
+def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids: Any,
+                           rollback_target: Any) -> dict[str, Any]:
+    """§41/§43: validate the evaluation runs (COMPLETED, every gate PASS, this domain or the platform) and the
+    rollback target of a system change; raises ValidationFailed (SYSTEM_CHANGE_EVIDENCE_REQUIRED) otherwise."""
+    from aeos.policy.recording import system_change_evidence as impl
+
+    return impl(session, domain=domain, eval_run_ids=eval_run_ids, rollback_target=rollback_target)

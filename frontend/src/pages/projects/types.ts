@@ -66,6 +66,27 @@ export interface RepositoryView {
   inventory_at?: string | null;
 }
 
+/** §37 joined user-repository view (GET /api/repositories/{id}): PR/CI links, docs targets and capability. */
+export interface RepositoryDetail extends RepositoryView {
+  base_branch?: string | null;
+  pull_requests: {
+    number: number;
+    url: string;
+    state: string;
+    head_ref?: string | null;
+    base_ref?: string | null;
+    merged?: boolean | null;
+    sync_status?: string | null;
+    last_synced_at?: string | null;
+  }[];
+  ci: { provider: string; integration_id: string; configuration: string }[];
+  docs_targets: { provider: string; root_id: string | null; integration_id: string }[];
+  capability: {
+    write_enablement: { integration_id: string; provider: string; purpose: string; decision_id: string | null; status: string }[];
+    merge: string;
+  };
+}
+
 export interface Remedy {
   issue: string;
   command: string;
@@ -123,6 +144,8 @@ export interface ProjectView {
   repositories: RepositoryView[];
   integrations: IntegrationView[];
   integration_state: { docs: string; issues: string };
+  /** §01 environment per domain: PERSONAL targets, or NOT_AVAILABLE for OFFICE (M5, company authorisation). */
+  environment?: { status: string; targets: { provider: string; purpose: string; root_id: string | null }[]; reason: string | null };
   links: { plans: string; publications: string; dag: string; detail: string };
   description?: string;
   idea?: string;

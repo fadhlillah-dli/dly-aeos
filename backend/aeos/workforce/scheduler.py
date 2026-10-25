@@ -207,13 +207,80 @@ def concurrency_cap(session: Session, task: TaskSpec | None = None) -> tuple[int
     return (min(wanted, allowed), d.id) if allowed >= 2 else (1, None)
 
 
+BASELINE_TOPOLOGY = "A"  # §44 sequential baseline
+PARALLEL_TOPOLOGY = "C"  # §44 bounded parallel (two active workers)
+
+
+def _metric(run: Any, dim: str, key: str) -> float | None:
+    v = ((run.metrics or {}).get(dim) or {}).get(key)
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def topology_benefit(candidate: Any, baseline: Any) -> dict[str, Any]:
+    """§44 "Mode baru dipromosikan hanya untuk kelas tugas yang terbukti bermanfaat vs baseline": the bounded-parallel
+    run (topology C) is compared with the sequential baseline (topology A) on the SAME suite, the SAME fixed
+    model/tool configuration and the SAME conditions. It must be no worse on outcome, safety and contract and
+    strictly better on accepted outcomes or latency/queue wait. Missing metrics are UNKNOWN, never a benefit."""
+    problems: list[str] = []
+    if baseline is None:
+        return {"status": "NO_BASELINE", "problems": ["no sequential baseline evaluation run (topology A) given"]}
+    if candidate.topology != PARALLEL_TOPOLOGY:
+        problems.append(f"the evaluation run must test topology {PARALLEL_TOPOLOGY} (bounded parallel), "
+                        f"not {candidate.topology or 'none'}")
+    if baseline.topology != BASELINE_TOPOLOGY:
+        problems.append(f"the baseline run must be topology {BASELINE_TOPOLOGY} (sequential), "
+                        f"not {baseline.topology or 'none'}")
+    if baseline.status != "COMPLETED":
+        problems.append(f"the baseline run is {baseline.status}, not COMPLETED")
+    if baseline.suite_key != candidate.suite_key:
+        problems.append("baseline and candidate ran different suites")
+    if baseline.configuration_hash != candidate.configuration_hash:
+        problems.append("baseline and candidate used different model/tool configurations (§44 fixed configuration)")
+    if not baseline.conditions_hash or baseline.conditions_hash != candidate.conditions_hash:
+        problems.append("baseline and candidate did not run under the same recorded conditions")
+    if (baseline.submitted_domain or None) != (candidate.submitted_domain or None):
+        problems.append("baseline and candidate were planned in different domains")
+    if problems:
+        return {"status": "NOT_COMPARABLE", "problems": problems}
+    rows = {
+        "final_acceptance_rate": ("outcome", "final_acceptance_rate", "higher"),
+        "critical_regressions": ("outcome", "critical_regressions", "lower"),
+        "security_violations": ("contract", "security_violations", "lower"),
+        "scope_adherence_rate": ("contract", "scope_adherence_rate", "higher"),
+        "latency_p50_s": ("performance", "latency_p50_s", "lower"),
+        "queue_wait_p50_s": ("performance", "queue_wait_p50_s", "lower"),
+    }
+    compared: dict[str, dict[str, Any]] = {}
+    for name, (dim, key, better) in rows.items():
+        b, c = _metric(baseline, dim, key), _metric(candidate, dim, key)
+        verdict = "UNKNOWN" if b is None or c is None else (
+            "BETTER" if (c > b if better == "higher" else c < b) else "EQUAL" if c == b else "WORSE")
+        compared[name] = {"baseline": b, "candidate": c, "better_is": better, "verdict": verdict}
+    guards = ("final_acceptance_rate", "critical_regressions", "security_violations", "scope_adherence_rate")
+    worse = [k for k in guards if compared[k]["verdict"] == "WORSE"]
+    unknown = [k for k in guards if compared[k]["verdict"] == "UNKNOWN"]
+    gains = [k for k in ("final_acceptance_rate", "latency_p50_s", "queue_wait_p50_s")
+             if compared[k]["verdict"] == "BETTER"]
+    if worse:
+        problems.append(f"worse than the sequential baseline on {', '.join(worse)}")
+    if unknown:
+        problems.append(f"not measured on both runs: {', '.join(unknown)} (UNKNOWN is not a benefit)")
+    if not gains:
+        problems.append("no measured benefit over the baseline (accepted outcomes or latency/queue wait)")
+    return {"status": "BENEFIT" if not problems else "NO_BENEFIT", "problems": problems, "gains": gains,
+            "compared": compared, "baseline_eval_run_id": baseline.id, "eval_run_id": candidate.id}
+
+
 def set_concurrency(session: Session, *, max_active: int, actor: str, actor_user_id: str, rationale: str,
                     eval_run_id: str | None = None, scope: dict[str, Any] | None = None,
-                    decision_record: dict[str, Any] | None = None) -> dict[str, Any]:
+                    decision_record: dict[str, Any] | None = None,
+                    baseline_eval_run_id: str | None = None) -> dict[str, Any]:
     """Owner action (§19 "Dua worker aktif adalah langkah eksperimen berikutnya"): 2 workers need a human POLICY
-    decision on workforce/concurrency that references a COMPLETED evaluation run with all gates PASS
-    (integration evidence), states the task-class scope and the rollback (previous mode), and carries the §44
-    DecisionRecord fields. ``max_active=1`` returns to the pilot mode (no decision needed)."""
+    decision on workforce/concurrency that references a COMPLETED bounded-parallel evaluation run (topology C) with
+    all gates PASS (integration evidence) that shows a measured benefit over the sequential baseline run (topology
+    A) of the same suite/configuration/conditions (§44), states the task-class scope and the rollback (previous
+    mode), and carries the §44 DecisionRecord fields. ``max_active=1`` returns to the pilot mode (no decision
+    needed)."""
     if max_active not in (1, 2):
         raise ValidationFailed("max_active must be 1 or 2 (pilot cap)")
     previous, _ = concurrency_cap(session)
@@ -234,20 +301,33 @@ def set_concurrency(session: Session, *, max_active: int, actor: str, actor_user
         raise Blocked("two workers need integration evidence: a COMPLETED evaluation run with every gate PASS",
                       code="CONCURRENCY_EVIDENCE_MISSING",
                       details={"eval_run_id": eval_run_id, "status": run.status if run else None, "gates": gates})
+    baseline = session.get(EvalRun, baseline_eval_run_id) if baseline_eval_run_id else None
+    benefit = topology_benefit(run, baseline)
+    if benefit["status"] != "BENEFIT":
+        raise Blocked("two workers are adopted only for a task class where the bounded-parallel topology (C) is "
+                      "proven better than the sequential baseline (A) on the same configuration: "
+                      + "; ".join(benefit["problems"]), code="CONCURRENCY_BENEFIT_NOT_PROVEN", details=benefit)
     record = dict(decision_record or {})
-    record.setdefault("evidence_ids", [run.id])
+    record.setdefault("evidence_ids", [run.id, baseline.id] if baseline is not None else [run.id])
     missing = [k for k in policy_catalog.DECISION_RECORD_FIELDS if not record.get(k)]
     if missing:
         raise ValidationFailed(f"decision record incomplete: {missing}", code="DECISION_RECORD_INCOMPLETE",
                                details={"required": list(policy_catalog.DECISION_RECORD_FIELDS)})
     clean_scope = {k: [str(x) for x in v] for k, v in (scope or {}).items()
-                   if k in ("project_ids", "role_keys", "risk_classes", "domains") and isinstance(v, list)}
+                   if k in ("project_ids", "role_keys", "risk_classes", "domains") and isinstance(v, list) and v}
+    if not clean_scope:
+        # §44 "tidak otomatis diperluas ke semua proyek/peran": the mode is adopted for the task class it was proven
+        # on, never for every project/role at once
+        raise ValidationFailed("two workers need a task-class scope (project_ids, role_keys, risk_classes or domains)",
+                               code="CONCURRENCY_SCOPE_REQUIRED")
     d = ext.record_decision(
         session, kind="POLICY", actor_user_id=actor_user_id, target_type=policy_catalog.TARGET_WORKFORCE,
         target_id=policy_catalog.TARGET_ID_CONCURRENCY, target_hash=content_hash({"max_active": 2, "scope": clean_scope}),
         allowed_operations=["run_two_workers"], auth_scope={"scope": clean_scope or "all task classes"},
         rationale=rationale,
         details={"max_active_workers": 2, "eval_run_id": run.id, "suite_key": run.suite_key, "scope": clean_scope,
+                 "baseline_eval_run_id": benefit["baseline_eval_run_id"],
+                 "benefit": {"gains": benefit["gains"], "compared": benefit["compared"]},
                  "rollback": {"previous_max_active": previous, "how": "set concurrency 1 (no decision needed)"},
                  "decision_record": record})
     _set_setting(session, KEY_CONCURRENCY, {"max_active": 2, "decision_id": d.id, "by": actor,
@@ -782,8 +862,6 @@ def _cost_estimate(task: TaskSpec, route: ModelRoute) -> tuple[float | None, int
 KEY_ROLE_EVAL_FROM = "workforce.role_eval_required_from"  # risk class from which a PASS role evaluation is needed
 DEFAULT_ROLE_EVAL_FROM = "R4"
 RISK_ORDER = ("R0", "R1", "R2", "R3", "R4")
-KEY_RUN_MEMORY_MB = "workforce.run_memory_mb"
-DEFAULT_RUN_MEMORY_MB = 512
 CHARS_PER_TOKEN = 4
 ROLE_EVAL_TARGET_TYPE = "role_evaluation"
 
@@ -806,74 +884,161 @@ def role_eligibility(session: Session, task: TaskSpec) -> dict[str, Any]:
         exc = ext.active_exception_decision(session, target_type=ROLE_EVAL_TARGET_TYPE, target_id=task.role_key,
                                             target_hash=revision)
         out["exception_decision_id"] = exc.id if exc else None
+    # §46 stated, never implied: what this admission's role eligibility actually rests on
+    if evaluation["status"] == "PASS":
+        out["eligibility_basis"] = "EVALUATION_RESULT"
+    elif out.get("exception_decision_id"):
+        out["eligibility_basis"] = "OWNER_EXCEPTION"
+    elif required:
+        out["eligibility_basis"] = "NOT_ELIGIBLE"
+    else:
+        out["eligibility_basis"] = "PILOT_THRESHOLD_UNEVALUATED"
+        out["note"] = (f"Role {task.role_key} belum dievaluasi ({evaluation['status']}); risiko {risk} di bawah ambang "
+                       f"{threshold}, jadi diizinkan oleh mode pilot - BUKAN dari hasil evaluasi. Fixture/grader kasus "
+                       "suite role disusun pemilik (ADR-0060); ambang dapat diperketat lewat "
+                       "POST /api/workforce/role-eval-threshold.")
     return out
 
 
+def set_role_eval_threshold(session: Session, *, risk_class: str, actor: str, rationale: str) -> dict[str, Any]:
+    """Owner action (§46 "eligible dari hasil evaluasi"): from which risk class a PASS role evaluation (or an owner
+    EXCEPTION) is required at admission. R4 is the pilot default (the loosest); a lower class only tightens
+    admission, so no decision is needed - the change is audited and emitted like the other scheduler settings."""
+    if risk_class not in RISK_ORDER:
+        raise ValidationFailed(f"risk_class must be one of {list(RISK_ORDER)}", code="INVALID_RISK_CLASS")
+    if len((rationale or "").strip()) < 5:
+        raise ValidationFailed("rationale is required", code="RATIONALE_REQUIRED")
+    previous = str(_setting(session, KEY_ROLE_EVAL_FROM, DEFAULT_ROLE_EVAL_FROM) or DEFAULT_ROLE_EVAL_FROM)
+    _set_setting(session, KEY_ROLE_EVAL_FROM, risk_class)
+    _audit(session, actor, "workforce.role_eval_threshold", target_type="scheduler", target_id=KEY_ROLE_EVAL_FROM,
+           project_id=None, domain=None, reason=redact_text(rationale)[:500],
+           details={"previous": previous, "threshold": risk_class})
+    events.emit(session, source="controller", kind="scheduler.role_eval_threshold_changed", entity_type="scheduler",
+                entity_id="scheduler", payload={"previous": previous, "threshold": risk_class})
+    return {"previous": previous, "threshold": risk_class}
+
+
+def _prompt_context(session: Session, task: TaskSpec, te: TaskExecution) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """The ContextPack the runtime would hand this worker (a CURRENT task-scoped pack for the pinned base commit).
+    Before the base commit is pinned (first attempt) the CURRENT pack counts as copied: an upper bound."""
+    from aeos.worker_runtime import executor
+
+    base = te.base_commit or task.base_commit
+    pack, info = executor._context_pack(session, task, base or "")
+    if pack is None and not base and info.get("freshness") == "CURRENT" and info.get("base_commit"):
+        pack, info = executor._context_pack(session, task, str(info["base_commit"]))
+    return pack, info
+
+
 def context_estimate(session: Session, task: TaskSpec, te: TaskExecution, route: ModelRoute | None) -> dict[str, Any]:
-    """§19 "berapa konteks yang harus disalin": the worker prompt is built from the TaskSpec (+ repair findings)
-    and estimated at ~4 characters per token, plus the output cap, against the route's context window."""
+    """§19 "berapa konteks yang harus disalin": exactly the prompt the runtime copies into the sandbox - TaskSpec,
+    role contract, protected paths, repair findings, the resolved input-artifact content and the CURRENT task
+    ContextPack (both within the runtime's own character caps) - estimated at ~4 characters per token, plus the
+    output cap, against the route's context window."""
     try:
-        from aeos.worker_runtime.executor import build_prompt
+        from aeos.models.portfolio import Project
+        from aeos.worker_runtime import executor
+        from aeos.worker_runtime.scope import GENERIC_PROTECTED_PATHS, platform_protected_paths
         from aeos.workforce import roles
 
-        chars = len(build_prompt(task, findings=list(te.pending_findings or []), protected=(), branch="aeos/estimate",
-                                 role_contract=roles.role_contract(session, task.role_key)))
+        project = session.get(Project, task.project_id)
+        protected = (platform_protected_paths() if project is not None and project.is_platform
+                     else GENERIC_PROTECTED_PATHS)
+        artifacts = executor.resolve_artifacts(session, task)
+        pack, pack_info = _prompt_context(session, task, te)
+        prompt = executor.build_prompt(task, findings=list(te.pending_findings or []), protected=tuple(protected),
+                                       branch="aeos/estimate", context_pack=pack, artifacts=artifacts,
+                                       role_contract=roles.role_contract(session, task.role_key))
     except Exception:
         return {"status": "UNKNOWN", "reason": "prompt estimate unavailable"}
+    chars = len(prompt)
     prompt_tokens = chars // CHARS_PER_TOKEN + 1
     output_cap = int((task.limits or {}).get("max_output_tokens", 8192) or 8192)
     minimum = int((task.model_route_policy or {}).get("min_context_tokens") or 0)
     window = route.context_window if route is not None else None
     needed = max(prompt_tokens + output_cap, minimum)
+    copied = {"prompt_chars": chars, "attachments": len(artifacts), "context_pack_id": pack_info.get("pack_id"),
+              "context_pack_used": bool(pack_info.get("used"))}
     if not window:
         return {"status": "UNKNOWN", "prompt_tokens": prompt_tokens, "output_cap": output_cap, "needed": needed,
-                "context_window": None, "reason": "route context window UNKNOWN"}
+                "context_window": None, "reason": "route context window UNKNOWN", **copied}
     return {"status": "FITS" if needed <= window else "TOO_LARGE", "prompt_tokens": prompt_tokens,
-            "output_cap": output_cap, "min_context_tokens": minimum, "needed": needed, "context_window": window}
+            "output_cap": output_cap, "min_context_tokens": minimum, "needed": needed, "context_window": window,
+            **copied}
 
 
-WORKER_MEMORY_SHARE = 0.5  # share of the host's physical memory the scheduler may reserve for worker runs
+# §22 host capacity for worker runs: physical memory minus a fixed host reserve for the OS, the controller and the
+# supervisor (at least HOST_RESERVE_MIN_MB or HOST_RESERVE_SHARE of the host, whichever is larger).
+HOST_RESERVE_MIN_MB = 2048
+HOST_RESERVE_SHARE = 0.25
+
+
+def run_compute_limits(task: Any, *, sandbox_kind: str | None) -> dict[str, Any]:
+    """The per-run compute the runtime ENFORCES for this TaskSpec - the same values admission reserves (§19, §22):
+    memory = ``processes.ResourceLimits.from_task`` (the process watchdog's RSS cap and the Windows job backstop,
+    or docker ``--memory`` in the container sandbox); CPUs = ``limits.max_cpus`` (docker ``--cpus`` in the container
+    sandbox; the process sandbox has no CPU cap, so there the CPU count is a reservation only)."""
+    from aeos.worker_runtime import facade as runtime
+
+    enforced = runtime.enforced_run_limits(getattr(task, "limits", None) or {}, sandbox_kind=sandbox_kind)
+    memory_mb, cpus = enforced["memory_mb"], float(enforced["cpus"])
+    return {"memory_mb": int(memory_mb), "cpus": max(cpus, 0.1), "sandbox_kind": sandbox_kind or "process",
+            "memory_enforced": True, "cpu_enforced": bool(enforced["cpu_enforced"]),
+            "enforced_by": ("docker --memory/--cpus" if sandbox_kind == "container"
+                            else "runtime watchdog RSS cap (+ Windows job memory limit); no CPU cap")}
+
+
+def _reserved_compute(session: Session, *, exclude_task: str | None) -> tuple[int, float]:
+    """Memory (MB) and CPUs reserved by runs that hold a slot (LEASED or RUNNING)."""
+    rows = session.scalars(select(WorkerRun).where(WorkerRun.execution_status.in_([S.LEASED.value, S.RUNNING.value]),
+                                                   WorkerRun.mode == DataMode.LIVE.value))
+    mem, cpu = 0, 0.0
+    for r in rows:
+        if r.task_id == exclude_task:
+            continue
+        c = (r.caps or {}).get("compute") or {}
+        mem += int(c.get("memory_mb") or 0)
+        cpu += float(c.get("cpus") or 0)
+    return mem, cpu
 
 
 def _reserved_compute_mb(session: Session, *, exclude_task: str | None) -> int:
-    """Memory reserved by runs that hold a slot (LEASED or RUNNING)."""
-    rows = session.scalars(select(WorkerRun).where(WorkerRun.execution_status.in_([S.LEASED.value, S.RUNNING.value]),
-                                                   WorkerRun.mode == DataMode.LIVE.value))
-    return sum(int(((r.caps or {}).get("compute") or {}).get("memory_mb") or 0) for r in rows
-               if r.task_id != exclude_task)
+    return _reserved_compute(session, exclude_task=exclude_task)[0]
 
 
-def compute_check(session: Session, task: TaskSpec, *, active: int, cap: int) -> dict[str, Any]:
-    """§19 "batas resource/biaya" + §22 "mencadangkan compute": per-run memory (TaskSpec.limits.memory_mb or the
-    ``workforce.run_memory_mb`` setting) is reserved against a fixed worker share of the host's physical memory
-    (``WORKER_MEMORY_SHARE``) minus what LEASED/RUNNING runs already reserved — a deterministic capacity, not the
-    momentary free memory of other processes (that is recorded as an observation and a warning). A second worker
-    also needs a second CPU. The process sandbox cannot enforce the limit (WEAK)."""
+def compute_check(session: Session, task: Any, *, active: int, cap: int, sandbox_kind: str | None = None
+                  ) -> dict[str, Any]:
+    """§19 "batas resource/biaya" + §22 "mencadangkan compute": the memory and CPUs the runtime enforces for this run
+    (``run_compute_limits``) are reserved against the host capacity (physical memory minus the host reserve; the
+    logical CPU count) minus what LEASED/RUNNING runs already reserved - a deterministic capacity, not the momentary
+    free memory of other processes (that is recorded as an observation and a warning). Admission therefore never
+    reserves less than a run may consume before the runtime stops it."""
     import psutil
 
-    try:
-        need_mb = int((task.limits or {}).get("memory_mb") or _setting(session, KEY_RUN_MEMORY_MB, DEFAULT_RUN_MEMORY_MB))
-    except (TypeError, ValueError):
-        need_mb = DEFAULT_RUN_MEMORY_MB
+    lim = run_compute_limits(task, sandbox_kind=sandbox_kind)
+    need_mb = lim["memory_mb"]
     try:
         vm = psutil.virtual_memory()
         total_mb = int(vm.total // (1024 * 1024))
         available_mb = int(getattr(vm, "available", 0) // (1024 * 1024))
         cpus = int(psutil.cpu_count(logical=True) or 1)
     except Exception:
-        return {"status": "UNKNOWN", "memory_mb": need_mb, "reason": "host resource probe failed"}
-    budget = int(total_mb * WORKER_MEMORY_SHARE)
-    reserved = _reserved_compute_mb(session, exclude_task=task.id)
+        return {"status": "UNKNOWN", **lim, "reason": "host resource probe failed"}
+    budget = max(0, total_mb - max(HOST_RESERVE_MIN_MB, int(total_mb * HOST_RESERVE_SHARE)))
+    reserved, reserved_cpus = _reserved_compute(session, exclude_task=task.id)
+    need_cpus = min(lim["cpus"], float(cpus))  # a run asking more CPUs than the host has gets all of them
     out: dict[str, Any] = {
-        "memory_mb": need_mb, "worker_budget_mb": budget, "reserved_mb": reserved, "available_mb_observed": available_mb,
-        "cpus": cpus, "enforced": False, "note": "process sandbox: limit reserved by admission, not enforced by the OS"}
+        **lim, "cpus": need_cpus, "worker_budget_mb": budget, "reserved_mb": reserved, "reserved_cpus": reserved_cpus,
+        "available_mb_observed": available_mb, "host_cpus": cpus, "enforced": True,
+        "note": "reserved = the cap the runtime enforces for this run"}
     if available_mb < need_mb:
         out["warning"] = f"host free memory {available_mb} MB is below this run's reservation ({need_mb} MB) right now"
     if budget - reserved < need_mb:
         return {**out, "status": "INSUFFICIENT", "reason": f"{budget - reserved} MB of the worker memory budget left "
                                                            f"after reservations, {need_mb} MB needed"}
-    if cap >= 2 and active + 1 > cpus:
-        return {**out, "status": "INSUFFICIENT", "reason": f"{active + 1} workers need {active + 1} CPUs, host has {cpus}"}
+    if reserved_cpus + need_cpus > cpus:
+        return {**out, "status": "INSUFFICIENT", "reason": f"{reserved_cpus:g} CPU(s) reserved by active runs + "
+                                                           f"{need_cpus:g} needed exceed the host's {cpus}"}
     return {**out, "status": "OK"}
 
 
@@ -915,6 +1080,49 @@ def _agent_scope_problem(agent: AgentDefinition | None, task: TaskSpec) -> str |
     if isinstance(projects, list) and task.project_id not in projects:
         return f"agent {agent.agent_key} is not allowed for this project"
     return None
+
+
+def _agent_permits(agent: AgentDefinition, tool: str) -> bool:
+    """bash/webfetch: allowed by the agent's tool list, or by a limit that defers to the TaskSpec
+    (``deny unless TaskSpec...``). Anything else (absent or ``deny``) never permits it."""
+    if tool in (agent.tools or []):
+        return True
+    rule = str((agent.limits or {}).get(tool) or "deny").strip().lower()
+    return rule.startswith("deny unless taskspec") or rule == "allow"
+
+
+def agent_configuration_problems(agent: AgentDefinition | None, task: TaskSpec,
+                                 route: ModelRoute | None) -> list[tuple[str, str]]:
+    """§17 "AgentDefinition: konfigurasi worker (role, harness, route policy, tools, limits, owner)": the definition
+    CONFIGURES the run rather than only describing it - the runtime's tool grant and the TaskSpec's bash/webfetch
+    requests must lie inside the agent's tools/limits, and the selected route must satisfy the agent's
+    route_policy (pool, optional allowed_routes). A run outside the definition is never admitted."""
+    if agent is None:
+        return []
+    problems: list[tuple[str, str]] = []
+    from aeos.worker_runtime.opencode import BASE_ALLOW
+
+    missing = sorted(set(BASE_ALLOW) - set(agent.tools or []))
+    if missing:
+        problems.append(("AGENT_TOOLS_INSUFFICIENT", f"agent {agent.agent_key} does not allow the runtime tools "
+                                                     f"{missing} every worker run receives"))
+    asked = [str(t) for t in task.tools_allowed or []]
+    for tool, wanted in (("bash", any(t == "bash" or t.startswith("bash:") for t in asked)),
+                         ("webfetch", "webfetch" in asked)):
+        if wanted and not _agent_permits(agent, tool):
+            problems.append(("AGENT_TOOL_NOT_ALLOWED", f"TaskSpec asks for {tool} but agent {agent.agent_key} "
+                                                       f"does not permit it"))
+    if route is not None:
+        policy = agent.route_policy or {}
+        pool = policy.get("pool")
+        if pool and route.pool != pool:
+            problems.append(("AGENT_ROUTE_POLICY", f"route {route.route_key} is in pool {route.pool}; agent "
+                                                   f"{agent.agent_key} runs only on {pool} routes"))
+        allowed = policy.get("allowed_routes")
+        if isinstance(allowed, list) and allowed and route.route_key not in allowed:
+            problems.append(("AGENT_ROUTE_POLICY", f"route {route.route_key} is not in agent {agent.agent_key}'s "
+                                                   "allowed_routes"))
+    return problems
 
 
 def admission_check(session: Session, task_id: str) -> Admission:
@@ -1004,7 +1212,7 @@ def admission_check(session: Session, task_id: str) -> Admission:
     active = active_executions(session, exclude_task=task.id)
     if len(active) >= cap:
         adm.waits.append(("CONCURRENCY_CAP", f"{len(active)} active implementation worker(s); cap {cap}"))
-    compute = compute_check(session, task, active=len(active), cap=cap)
+    compute = compute_check(session, task, active=len(active), cap=cap, sandbox_kind=sb.get("kind"))
     adm.answers["compute"] = compute
     if compute["status"] == "INSUFFICIENT":
         adm.waits.append(("RESOURCE_INSUFFICIENT", compute["reason"]))
@@ -1032,6 +1240,10 @@ def admission_check(session: Session, task_id: str) -> Admission:
             # a registered suite that no longer verifies would end every attempt BLOCKED after spending budget
             adm.waits.append(("VERIFIER_UNAVAILABLE", f"trusted suite {vp['suite']['code']}: {vp['suite'].get('reason')}"))
     route, rreasons = ext.select_route(session, task)
+    implementer = agent if agent is not None and agent.harness == "opencode" and \
+        agent.agent_key not in REVIEWER_AGENT_KEYS else None
+    for code, why in agent_configuration_problems(implementer, task, route):
+        adm.blocks.append((code, why))
     if route is None:
         adm.waits.append(("ROUTE_INELIGIBLE", "; ".join(rreasons)))
     else:
@@ -1141,7 +1353,8 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
               "concurrency_cap": adm.cap,
               # §22 compute reserved with the slot and the cost (released when the run is no longer LEASED)
               "compute": {k: v for k, v in (adm.answers.get("compute") or {}).items()
-                          if k in ("memory_mb", "status", "enforced")},
+                          if k in ("memory_mb", "cpus", "status", "enforced", "memory_enforced", "cpu_enforced",
+                                   "sandbox_kind")},
               "context_estimate": adm.answers.get("context"),
               "verifier_path": adm.answers.get("verifier"),
               "role_eligibility": adm.answers.get("role_eligibility")},
