@@ -29,7 +29,6 @@ import importlib.metadata
 import importlib.util
 import json
 import logging
-import re
 import shutil
 import sys
 import threading
@@ -53,7 +52,21 @@ from aeos.models.evidence import EvidenceArtifact
 from aeos.models.planning import TaskSpec
 from aeos.models.portfolio import Project
 from aeos.models.workforce import WorkerRun
-from aeos.verification import collector, runner, scope, suite, tamper
+from aeos.verification import (
+    adversarial,
+    collector,
+    contracts,
+    controlled,
+    db_evidence,
+    envs,
+    frontend,
+    runner,
+    scope,
+    steps,
+    suite,
+    tamper,
+)
+from aeos.verification import impact as impact_map
 from aeos.verification.integration import call
 from aeos.verification.junit import JUnitParseError, JUnitReport, nodeid_to_key, parse_junit
 from aeos.verification.procs import (
@@ -73,8 +86,14 @@ log = logging.getLogger("aeos.verification.verifier")
 # v3: isolated runner selection (container when proven, else WEAK with the hardened environment), controller
 # checkout/interpreter + DB trust-table/schema tamper window around candidate code and the migration round-trip
 # (impact adds steps the verifier runs itself; it does not yet widen the trusted test selection, §22/§31 - stated
-# as NOT-PROVEN, not claimed). A new version makes earlier acceptance STALE.
-VERIFIER_VERSION = "3"
+# as NOT-PROVEN, not claimed).
+# v4 (wave 7 E1): impact -> executed checks (aeos.verification.impact): AST-detected negative tests executed,
+# verifier-owned adversarial probes + trusted modules per category, contract diff (facades/OpenAPI) + contract tests,
+# opt-in integration-marked tests, per-candidate dependency environment from the candidate lockfile, frontend step
+# (npm ci --ignore-scripts, vitest with the verifier's config, type check, build) + UI states/a11y probe, seeded
+# backup/restore + rollback-with-data in the migration round-trip, migration/runtime credential split.
+# A new version makes earlier acceptance STALE.
+VERIFIER_VERSION = "4"
 ORIGIN = "verifier"
 MARK_EXPR = "not integration and not network"
 PASSING = "PASS"
@@ -92,13 +111,8 @@ MAX_PROTECTED_IDS = 2000
 VERIFIER_ISOLATION = runner.ISOLATION_WEAK
 VERIFIER_ISOLATION_NOTE = runner.PROCESS_NOTE
 RESIDUAL_RISKS = runner.PROCESS_RESIDUAL_RISKS
-# Added test lines that assert a refusal/error path (§16 negative tests, §22 adversarial cases).
-_NEGATIVE_ASSERTION = re.compile(
-    r"pytest\.raises|assertRaises|status_code\s*(?:==|in|!=)\s*[\(\[{]?\s*4\d\d|\b40[0-9]\b|\b42[29]\b|toThrow|"
-    r"\.rejects\b|\.not\.|\bassert\s+not\b|\bis\s+False\b|==\s*False\b|DENIED|Forbidden|Unauthorized|"
-    r"PolicyDenied|Blocked|ValidationFailed|NotFound|Conflict"
-)
-_TEST_FILE_PATTERNS = ("tests/**", "**/test_*.py", "**/*_test.py", "**/*.test.*", "**/*.spec.*", "**/__tests__/**")
+# Negative/refusal tests are detected in the syntax tree and executed (aeos.verification.controlled, wave 7): the
+# former regex over added lines (comments included) is gone.
 _PY_DEPENDENCY_FILES = ("requirements.lock", "requirements", "pyproject.toml", "poetry.lock", "uv.lock",
                         "Pipfile.lock")
 # verifier_policy.suites -> candidate test directories the verifier runs (the trusted acceptance suite always runs)
@@ -138,46 +152,14 @@ _PREFLIGHT = (
 )
 
 
-# Candidate-code driver: run the candidate's own Alembic history forward, back to base and forward again on a
-# throwaway SQLite DB, then reopen it (restore). Printed as a single JSON line. Runs under the verifier runner
-# (and inside the tamper window) because it imports and executes the candidate's migration/env code.
-_MIGRATION_ROUNDTRIP = (
-    "import json, os, sqlite3, sys\n"
-    "mig_dir, db_path = sys.argv[1], sys.argv[2]\n"
-    "os.environ['AEOS_CONFIG'] = db_path + '.noconfig'\n"
-    "out = {'ok': False}\n"
-    "try:\n"
-    "    from alembic import command\n"
-    "    from alembic.config import Config\n"
-    "    from alembic.script import ScriptDirectory\n"
-    "    url = 'sqlite:///' + db_path.replace(os.sep, '/')\n"
-    "    cfg = Config()\n"
-    "    cfg.set_main_option('script_location', mig_dir)\n"
-    "    cfg.set_main_option('sqlalchemy.url', url)\n"
-    "    heads = ScriptDirectory.from_config(cfg).get_heads()\n"
-    "    out['heads'] = list(heads)\n"
-    "    if len(heads) != 1:\n"
-    "        out['error'] = 'history does not have exactly one head: ' + repr(heads)\n"
-    "        print(json.dumps(out)); sys.exit(0)\n"
-    "    out['head'] = heads[0]\n"
-    "    command.upgrade(cfg, 'head')\n"
-    "    command.downgrade(cfg, 'base')\n"
-    "    command.upgrade(cfg, 'head')\n"
-    "    conn = sqlite3.connect(db_path)\n"  # restore: the migrated DB reopens and carries the head revision
-    "    try:\n"
-    "        rev = conn.execute('select version_num from alembic_version').fetchone()\n"
-    "        tables = [r[0] for r in conn.execute(\"select name from sqlite_master where type='table'\")]\n"
-    "    finally:\n"
-    "        conn.close()\n"
-    "    out['restored_revision'] = rev[0] if rev else None\n"
-    "    out['tables'] = len([t for t in tables if t != 'alembic_version' and not t.startswith('sqlite_')])\n"
-    "    out['ok'] = out['restored_revision'] == heads[0] and out['tables'] > 0\n"
-    "    if not out['ok']:\n"
-    "        out['error'] = 'restored revision ' + repr(out['restored_revision']) + ' != head'\n"
-    "except Exception as e:\n"
-    "    out['error'] = type(e).__name__ + ': ' + str(e)[:300]\n"
-    "print(json.dumps(out))\n"
-)
+# Candidate-code driver for schema migrations (``packs/migration_roundtrip.py``): upgrade -> downgrade(base) ->
+# upgrade on a throwaway SQLite DB, seeded backup -> delete -> restore -> compare, and one-revision rollback with the
+# seeded data present. Runs under the verifier runner (inside the tamper window): it executes the candidate's
+# migration/env code.
+MIGRATION_DRIVER = "migration_roundtrip.py"
+# pytest basetemps of the run's steps (trusted suite, candidate tests, baseline, negative tests, integration trusted/
+# candidate, adversarial probes, per-candidate environment); removed with the run dir.
+BASETEMP_NAMES = ("b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8")
 
 
 def top_level_modules(backend: Path) -> list[str]:
@@ -234,7 +216,8 @@ def compute_config_hash(*, suite_hash: str, trusted_root: Path, task_spec_hash: 
         "python": ".".join(str(x) for x in sys.version_info[:3]),
         "mark_expr": MARK_EXPR,
         "policy": {k: policy[k] for k in sorted(policy) if k in
-                   ("candidate_tests", "ruff", "suite_timeout_seconds", "unit_timeout_seconds")},
+                   ("candidate_tests", "ruff", "suite_timeout_seconds", "unit_timeout_seconds", "integration_tests",
+                    "contract_breaking", "isolated_dependencies", "negative_tests_required", "migration_roundtrip")},
     })
 
 
@@ -346,7 +329,7 @@ class _Blocked(Exception):
 class _PendingEvidence:
     kind: str
     claim: str
-    content: dict[str, Any] | str | None
+    content: dict[str, Any] | str | bytes | None
     level: str
     check: str | None = None
     env_extra: dict[str, Any] = field(default_factory=dict)
@@ -493,6 +476,16 @@ class _Verifier:
         self.tamper_findings: list[dict[str, str]] = []
         self.tamper_checks: dict[str, Any] = {}
         self.migration_roundtrip: dict[str, Any] | None = None
+        # wave 7 E1: inputs of the impact-selected steps (set in run())
+        self.git: GitReader | None = None
+        self.suite_kind = "CONTROLLER"
+        self.code_root: Path | None = None
+        self.trusted_copy: Path | None = None
+        self.ini: Path | None = None
+        self.expected: list[str] = []
+        self.trusted_cases: dict[str, str] = {}
+        self.impact_summary: dict[str, dict[str, Any]] = {}
+        self._base_dir: Path | None = None
 
     # ------------------------------------------------------------------ orchestration
 
@@ -543,6 +536,7 @@ class _Verifier:
             policy = dict(task.verifier_policy or {})
             limits = VerifierLimits.from_policy(policy)
             git = self._git(candidate, limits)
+            self.git, self.suite_kind = git, trusted_suite.kind
             self._resolve_commits(git, run, task)
             diff = self._diff_and_scope(git, task, project)
             self.diff_text = diff
@@ -567,6 +561,7 @@ class _Verifier:
             # Trusted *code* for collecting the expected test ids: the controller checkout for the
             # platform, the human-reviewed base commit of the project otherwise (never the candidate head).
             code_root = trusted_root if trusted_suite.kind == "CONTROLLER" else self._export_base(git, workdir)
+            self.code_root = code_root
             if snap_ok:
                 snap_ok = self._check_shadowing(snapshot, code_root)
             if snap_ok:
@@ -576,12 +571,14 @@ class _Verifier:
                     raise _Blocked("TRUSTED_SUITE_COPY_MISMATCH", "trusted suite copy does not match its hash")
                 ini = workdir / "pytest.ini"
                 ini.write_text(PYTEST_INI, encoding="utf-8")
+                self.trusted_copy, self.ini = trusted_copy, ini
                 # §09 Zone 1 / §21: candidate code is about to run; fingerprint the controller checkout +
                 # interpreter and the DB trust tables now, compare after the last candidate step.
                 self._guard_open()
                 try:
                     self._preflight(snapshot, workdir, limits)
                     expected = self._collect_expected(code_root, trusted_copy, ini, workdir, limits)
+                    self.expected = expected
                     trusted_ran = True
                     self._run_trusted_suite(snapshot, trusted_copy, ini, workdir, limits, expected)
                     self._check_suite_integrity(copied, trusted_root)
@@ -592,7 +589,7 @@ class _Verifier:
                         self._run_candidate_tests(snapshot, ini, workdir, limits, suites=self._suites(policy))
                     else:
                         self._check("candidate_tests", "NOT_RUN", "disabled by TaskSpec verifier_policy")
-                    self._run_impact_steps(snapshot, workdir, limits)
+                    self._run_impact_steps(snapshot, workdir, limits, policy)
                 finally:
                     self._guard_close()
                 if policy.get("ruff", True):
@@ -612,7 +609,7 @@ class _Verifier:
         finally:
             if workdir is not None:
                 shutil.rmtree(workdir, ignore_errors=True)
-                for name in ("b1", "b2", "b3"):
+                for name in BASETEMP_NAMES:
                     short = _short_basetemp(workdir, name)
                     if short is not None:
                         shutil.rmtree(short, ignore_errors=True)
@@ -920,6 +917,8 @@ class _Verifier:
         res = self._runner().python(args, pythonpath=snapshot / "backend", autoload=False,
                                     timeout=limits.suite_timeout)
         report, parse_error = self._parse(junit_path)
+        if report is not None:  # per-test outcomes for the impact-selected trusted modules (adversarial/contract)
+            self.trusted_cases = {c.key: c.outcome for c in report.cases}
         problems: list[str] = []
         not_proven: list[str] = []
         if res.timed_out:
@@ -1235,12 +1234,90 @@ class _Verifier:
 
     # ------------------------------------------------------------------ impact-driven checks (§16, §22, §31)
 
-    def _run_impact_steps(self, snapshot: Path, workdir: Path, limits: VerifierLimits) -> None:
+    def _run_impact_steps(self, snapshot: Path, workdir: Path, limits: VerifierLimits,
+                          policy: dict[str, Any] | None = None) -> None:
         """Steps the impact of the change adds to what the verifier itself executes (candidate code, so they run
-        inside the tamper window and through the runner): a schema-migration upgrade/downgrade/upgrade round-trip."""
+        inside the tamper window and through the runner): the schema-migration round-trip, the change's negative
+        tests, opt-in integration-marked tests, the trusted adversarial pack, the contract diff and contract tests,
+        the migration/runtime credential split, the per-candidate dependency environment and the frontend step
+        (``aeos.verification.impact`` maps each category to these checks)."""
+        policy = policy or {}
         categories: dict[str, list[str]] = getattr(self, "categories", {}) or {}
         if categories.get("migration"):
             self._run_migration_roundtrip(snapshot, workdir, limits)
+        ctx = self._step_context(snapshot, workdir, limits, policy)
+        risky = sorted({p for c in ("api", "auth") for p in categories.get(c, [])})
+        if policy.get("negative_tests_required") and risky:
+            self._step("negative_tests", lambda: controlled.run_negative_tests(ctx, risky))
+        self._step("integration_tests", lambda: controlled.run_integration_tests(ctx, self._suites(policy)))
+        self._step("adversarial_pack", lambda: adversarial.run(ctx))
+        self._step("contract_diff", lambda: contracts.run_contract_diff(ctx))
+        self._step("contract_tests", lambda: contracts.run_contract_tests(ctx))
+        self._step("db_credentials", lambda: db_evidence.run(ctx))
+        if categories.get("dependency"):
+            pins_changed = self._python_pins_changed(categories["dependency"])
+            self._step("dependency_env", lambda: envs.run(ctx, pins_changed))
+        if categories.get("frontend"):
+            try:
+                results = frontend.run(ctx)
+            except (_Blocked, runner.RunnerError):
+                raise
+            except Exception as exc:  # a step bug never passes silently: stated, blocking
+                results = [self._step_error("frontend_tests", exc)]
+            for res in results:
+                self._apply_step(res)
+
+    def _step_context(self, snapshot: Path, workdir: Path, limits: VerifierLimits,
+                      policy: dict[str, Any]) -> steps.StepContext:
+        task = self.task
+        return steps.StepContext(
+            runner=self._runner(), snapshot=snapshot, workdir=workdir, diff_text=self.diff_text,
+            changed=list(self.out.changed_files), categories=dict(getattr(self, "categories", {}) or {}),
+            policy=dict(policy), timeout=limits.unit_timeout, suite_kind=self.suite_kind,
+            is_platform=bool(self.project.is_platform), role=str(getattr(task, "role_key", "") or ""),
+            ini=self.ini, trusted_copy=self.trusted_copy, expected=list(self.expected),
+            trusted_cases=dict(self.trusted_cases), base_tree=lambda: self._base_tree(workdir),
+            basetemp=lambda name: self._basetemp(workdir, name), session=self.session, project=self.project)
+
+    def _base_tree(self, workdir: Path) -> Path | None:
+        """The recorded base commit materialised once (reused when the trusted collection already did it)."""
+        if self._base_dir is not None:
+            return self._base_dir
+        existing = workdir / "bs"
+        if existing.is_dir():
+            self._base_dir = existing
+            return existing
+        if self.git is None:
+            return None
+        try:
+            self._base_dir = self._export_base(self.git, workdir)
+        except _Blocked:
+            return None
+        return self._base_dir
+
+    def _step(self, name: str, fn: Any) -> None:
+        try:
+            res = fn()
+        except (_Blocked, runner.RunnerError):
+            raise
+        except Exception as exc:  # a step bug never passes silently: stated, blocking
+            res = self._step_error(name, exc)
+        self._apply_step(res)
+
+    def _step_error(self, name: str, exc: Exception) -> steps.StepResult:
+        log.exception("verifier step %s failed", name)
+        msg = f"verifier step {name} failed internally ({type(exc).__name__}); its check is NOT-PROVEN"
+        return steps.StepResult(name, "UNKNOWN", msg, not_proven=[msg], blocking=[msg])
+
+    def _apply_step(self, res: steps.StepResult | None) -> None:
+        if res is None:
+            return
+        self._check(res.check, res.status, res.summary, details=res.details)
+        self.out.reasons.extend(res.reasons)
+        self.out.not_proven.extend(res.not_proven)
+        self.blocking_not_proven.extend(res.blocking)
+        for ev in res.evidence:
+            self.pending.append(_PendingEvidence(ev.kind, ev.claim, ev.content, ev.level, ev.check, dict(ev.env_extra)))
 
     @staticmethod
     def _find_alembic_dir(snapshot: Path) -> Path | None:
@@ -1259,8 +1336,10 @@ class _Verifier:
 
     def _run_migration_roundtrip(self, snapshot: Path, workdir: Path, limits: VerifierLimits) -> None:
         """§16/§31 "migration/rollback/restore tests": run the candidate's Alembic history forward, back to base
-        and forward again on a throwaway SQLite DB, then reopen it (restore). Proven PASS/FAIL when the candidate
-        has an Alembic migrations tree and alembic is available; otherwise NOT_PROVEN with the reason."""
+        and forward again on a throwaway SQLite DB, seed it, back it up, delete and restore it and compare the
+        seeded rows, then roll one revision back and forward with the data present (``packs/migration_roundtrip``).
+        Proven PASS/FAIL when the candidate has an Alembic migrations tree and alembic is available; otherwise
+        NOT_PROVEN with the reason."""
         mig_dir = self._find_alembic_dir(snapshot)
         if mig_dir is None:
             self.migration_roundtrip = {"status": "NOT_PROVEN",
@@ -1272,13 +1351,10 @@ class _Verifier:
         # (its root filesystem and the rest of the run dir are read-only)
         reports = workdir / "r"
         reports.mkdir(parents=True, exist_ok=True)
-        args = ["-c", _MIGRATION_ROUNDTRIP, rn.to_container(str(mig_dir)), rn.to_container(str(reports / "mig.sqlite3"))]
+        args = ["-c", steps.pack_text(MIGRATION_DRIVER), rn.to_container(str(mig_dir)),
+                rn.to_container(str(reports / "mig.sqlite3"))]
         res = rn.python(args, pythonpath=snapshot / "backend", autoload=False, timeout=limits.unit_timeout)
-        data: dict[str, Any] = {}
-        try:
-            data = json.loads((res.stdout or "").strip().splitlines()[-1])
-        except (ValueError, IndexError):
-            data = {}
+        data = steps.last_json_line(res.stdout)
         ok = bool(data.get("ok")) and not res.timed_out and res.returncode == 0
         if res.timed_out:
             self.migration_roundtrip = {"status": "FAIL", "reason": "migration round-trip timed out"}
@@ -1299,34 +1375,41 @@ class _Verifier:
         out = self.out
         categories: dict[str, list[str]] = getattr(self, "categories", {}) or {}
         suites = self._suites(policy)
-        if "integration" in suites:
+        if "integration" in suites and "integration_tests" not in out.checks:
             out.not_proven.append("integration-marked tests (real tools) are not run by the verifier; only tests "
-                                  f"selectable with '{MARK_EXPR}' ran")
-        # Negative / permission tests for API and auth changes (TaskSpec verifier_policy.negative_tests_required).
+                                  f"selectable with '{MARK_EXPR}' ran (opt in with TaskSpec "
+                                  "verifier_policy.integration_tests: run|required)")
+        # Negative / permission tests for API and auth changes (TaskSpec verifier_policy.negative_tests_required):
+        # executed in _run_impact_steps; when the candidate could not be run at all nothing was proven.
         risky = sorted({p for c in ("api", "auth") for p in categories.get(c, [])})
-        if policy.get("negative_tests_required") and risky:
-            negatives = [a for a in scope.added_lines(self.diff_text)
-                         if scope.first_match(a.path, _TEST_FILE_PATTERNS) and _NEGATIVE_ASSERTION.search(a.text)]
-            if negatives:
-                self._check("negative_tests", "PASS",
-                            f"{len(negatives)} negative/refusal assertion(s) added in changed tests (authored with "
-                            "the candidate: lower trust)", details={"tests": sorted({a.path for a in negatives})[:20]})
-            else:
-                msg = ("negative tests required for the changed API/auth surface (" + ", ".join(risky[:5]) +
-                       "): no added test asserts a refusal/error path")
-                self._check("negative_tests", "NOT_PROVEN", msg)
-                out.not_proven.append(msg)
-                self.blocking_not_proven.append(msg)
+        if policy.get("negative_tests_required") and risky and "negative_tests" not in out.checks:
+            msg = ("negative tests required for the changed API/auth surface (" + ", ".join(risky[:5]) +
+                   "): the verifier could not execute the candidate's tests")
+            self._check("negative_tests", "NOT_PROVEN", msg)
+            out.not_proven.append(msg)
+            self.blocking_not_proven.append(msg)
         # Schema/data migrations: the verifier runs an upgrade/downgrade/restore round-trip itself (§16/§31).
         if categories.get("migration"):
             rt = getattr(self, "migration_roundtrip", None)
             label = ", ".join(categories["migration"][:5])
             if rt and rt.get("status") == "PASS":
+                seeded = rt.get("seeded_tables")
                 self._check("migration_rollback", "PASS",
-                            f"migration changed ({label}): upgrade->downgrade(base)->upgrade round-trip and reopen "
-                            f"passed (head {str(rt.get('head') or '')[:16]}, {rt.get('tables', '?')} tables)")
+                            f"migration changed ({label}): upgrade->downgrade(base)->upgrade round-trip passed (head "
+                            f"{str(rt.get('head') or '')[:16]}, {rt.get('tables', '?')} tables); {seeded} seeded "
+                            f"table(s) backed up, restored and compared; rollback to "
+                            f"{str(rt.get('data_rollback_target') or '?')[:24]} and forward with data passed",
+                            details={k: rt.get(k) for k in ("head", "tables", "seeded_tables", "seed_refused_tables",
+                                                             "restore_ok", "data_rollback_ok",
+                                                             "data_rollback_target")})
+                if not seeded:
+                    out.not_proven.append(f"migration changed ({label}): no table accepted a generated seed row, so "
+                                          "the restore of populated data is NOT-PROVEN")
             elif rt and rt.get("status") == "FAIL":
-                msg = f"migration changed ({label}): upgrade/downgrade/restore round-trip FAILED: {rt.get('reason') or rt.get('error') or ''}"
+                leg = rt.get("leg")
+                msg = (f"migration changed ({label}): upgrade/downgrade/restore round-trip FAILED"
+                       + (f" in leg '{leg}'" if leg and leg != "done" else "") +
+                       f": {rt.get('reason') or rt.get('error') or ''}")
                 self._check("migration_rollback", "FAIL", msg)
                 out.reasons.append(msg)
             else:
@@ -1342,23 +1425,33 @@ class _Verifier:
                 out.not_proven.append(msg)
                 if not optional:
                     self.blocking_not_proven.append(msg)
-        # Frontend: the verifier runs Python tests only; product tests come from provider CI (gate G3).
-        if categories.get("frontend"):
-            msg = ("frontend changed: unit/browser/visual/a11y tests are not run by the verifier (Python only); "
-                   "G3 needs the provider CI frontend job")
+        # Frontend: executed by the frontend step; a candidate that could not be materialised proves nothing.
+        if categories.get("frontend") and "frontend_tests" not in out.checks:
+            msg = ("frontend changed: the verifier could not run the frontend step (no candidate snapshot); "
+                   "unit/browser/visual/a11y tests NOT-PROVEN, G3 needs the provider CI frontend job")
             self._check("frontend_tests", "NOT_PROVEN", msg)
             out.not_proven.append(msg)
         # Dependencies: diff evidence (§16 Supply-chain) and Zone 2 honesty (§09).
         if categories.get("dependency"):
             self._dependency_diff(categories["dependency"])
+        # §31: which checks each impact category added, and whether they executed (report section impact_checks)
+        self.impact_summary = impact_map.summarize(categories, out.checks)
+        idle = sorted(c for c, e in self.impact_summary.items() if not e["executed"])
+        if idle:
+            out.not_proven.append(f"impact categories without an executed verifier check: {', '.join(idle)} "
+                                  "(see impact_checks on the report)")
+
+    def _python_pins_changed(self, paths: list[str]) -> bool:
+        changes = scope.dependency_changes(self.diff_text, paths)
+        return any(
+            (c["pins_added"] or c["pins_removed"]) for p, c in changes.items()
+            if any(p == f or p.endswith("/" + f) or p.rsplit("/", 1)[-1].startswith(f) for f in _PY_DEPENDENCY_FILES))
 
     def _dependency_diff(self, paths: list[str]) -> None:
         out = self.out
         changes = scope.dependency_changes(self.diff_text, paths)
         packages = scope.summarize_dependency_changes(changes)
-        python_pins_changed = any(
-            (c["pins_added"] or c["pins_removed"]) for p, c in changes.items()
-            if any(p == f or p.endswith("/" + f) or p.rsplit("/", 1)[-1].startswith(f) for f in _PY_DEPENDENCY_FILES))
+        python_pins_changed = self._python_pins_changed(paths)
         status = "NOT_PROVEN"
         msg = (f"dependency manifests changed ({', '.join(paths[:5])}): {len(packages['added'])} added, "
                f"{len(packages['removed'])} removed, {len(packages['upgraded'])} upgraded; licences UNKNOWN "
@@ -1371,12 +1464,16 @@ class _Verifier:
              "license_note": "licence/SBOM/provenance of changed packages is not verified by the verifier",
              "controller_dependency_set_hash": self.env_identity.get("dependency_set_hash"),
              "auto_upgrade": False}, "E1", "dependency_diff"))
-        if python_pins_changed:
+        env_check = out.checks.get("dependency_env")
+        if python_pins_changed and (env_check is None or env_check.status not in ("PASS", "FAIL")):
+            # §09 Zone 2: proven only by the trusted suite in the per-candidate environment (dependency_env PASS);
+            # a FAIL there is already a failure reason.
+            why = f" ({env_check.summary})" if env_check is not None else ""
             msg = ("candidate changes the Python dependency set; the trusted suite ran with the controller's "
                    f"installed dependencies ({self.env_identity.get('dependency_set_hash')}), so the change is "
-                   "not verified in an isolated dependency environment (§09 Zone 2)")
-            out.not_proven.append(msg)
-            self.blocking_not_proven.append(msg)
+                   f"not verified in an isolated dependency environment (§09 Zone 2){why}")
+            out.not_proven.append(msg[:600])
+            self.blocking_not_proven.append(msg[:600])
 
     # ------------------------------------------------------------------ decision & persistence
 
@@ -1433,6 +1530,8 @@ class _Verifier:
             "tamper": {"findings": self.tamper_findings[:50], **self.tamper_checks} if self.tamper_checks else {},
             "dependency_set_hash": self.env_identity.get("dependency_set_hash"),
             "impact_categories": sorted(getattr(self, "categories", {}) or {}),
+            # §31 "test scope follows impact": per category, the checks it selected and which ones executed
+            "impact_checks": self.impact_summary,
             "regressions": list(getattr(self, "regressions", []))[:50],
             "preexisting_failures": list(getattr(self, "preexisting", []))[:50],
             "blocked_code": out.blocked_code,

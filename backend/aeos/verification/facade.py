@@ -54,6 +54,14 @@ def acceptance_is_valid(
     return impl(session, task_id, base_commit=base_commit, config_hash=config_hash, plan_version_hash=plan_version_hash)
 
 
+def project_test_baseline(session: Session, project_id: str, commit: str | None) -> dict[str, Any]:
+    """§05 step 6: the latest trusted project test baseline at *commit* (status, evidence id, suite identity,
+    passed/failed/skipped, failing sample), else ``{"status": "NOT_RUN", "reason": ...}`` (additive, wave 7)."""
+    from aeos.verification.project_baseline import baseline_summary as impl
+
+    return impl(session, project_id, commit)
+
+
 def verifier_runner_status(session: Session, *, domain: str) -> dict[str, Any]:
     """Which runner the verifier executes candidate code in for *domain* now (§20 "isolated runner"):
     ``isolation`` CONTAINER on a host with a proven container boundary + the verifier image, else WEAK, with the

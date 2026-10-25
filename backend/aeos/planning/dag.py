@@ -59,14 +59,25 @@ DEFAULT_EVIDENCE = [
 ]
 # §16 role-specific evidence the reviewer asks for (added to the TaskSpec, never removable by the planner):
 # Integration Engineer "contract test provider; target/tenant dan idempotency wajib", UX/UI Designer "desain
-# diverifikasi terhadap AC dan pengguna yang dituju" (states + accessibility).
+# diverifikasi terhadap AC dan pengguna yang dituju" (states + accessibility), Backend/API Engineer "tes negatif",
+# DB/Data Engineer "uji migration/rollback/restore; credential migration dipisah runtime". A line that names a
+# verifier check in parentheses is decided by that check on the verified report (acceptance.evidence_requirements_
+# status, wave 7); the others are reviewer-attested.
 ROLE_EVIDENCE: dict[str, list[str]] = {
     "integration-engineer": [
         "provider contract test of the adapter in the trusted suite",
         "test asserting the explicit target/tenant binding and the idempotency key (no global credential)",
     ],
     "ux-ui-designer": [
-        "loading/error/empty state coverage and an accessibility check mapped to the acceptance criteria",
+        "loading/error/empty state renders and an accessibility probe of the built UI by the verifier (ui_a11y)",
+    ],
+    "backend-api-engineer": [
+        "refusal/negative tests of the changed API surface executed by the verifier (negative_tests)",
+    ],
+    "db-data-engineer": [
+        "migration upgrade/downgrade, seeded backup/restore and rollback with data run by the verifier "
+        "(migration_rollback)",
+        "migration credential reference separate from the runtime credential reference (db_credentials)",
     ],
 }
 CLASS_ORDER = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"]

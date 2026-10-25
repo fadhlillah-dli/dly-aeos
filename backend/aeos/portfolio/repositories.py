@@ -688,6 +688,14 @@ def inventory_for_repository(session: Session, principal: Principal | None, proj
     result = inventory_repository(path, commit=commit)
     result["repository"] = {"id": repo.id, "provider": repo.provider, "full_name": repo.full_name,
                             "verification_status": repo.verification_status}
+    # §05 step 6 "baseline tes": the verifier's project baseline at exactly this commit (or NOT_RUN with the reason);
+    # attached after inventory_hash, which covers commit content only.
+    try:
+        from aeos.verification import facade as verification
+
+        result["tests"]["baseline"] = verification.project_test_baseline(session, project.id, result["commit"])
+    except ImportError:  # pragma: no cover - verification is part of every build
+        pass
     repo.inventory = result
     repo.inventory_commit = result["commit"]
     repo.inventory_at = utcnow()

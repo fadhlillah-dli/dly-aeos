@@ -18,6 +18,7 @@ remains a human action.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -110,6 +111,61 @@ def _verdict_problems(rec: ReviewRecord, label: str, *, artifact_hash: str, docs
     return out
 
 
+# §16 role evidence that names a verifier check is decided by that check on the verified report (wave 7, W6-043/046):
+# "(ui_a11y)" etc. in the requirement text, or the UX/UI Designer's state/accessibility line of TaskSpecs compiled
+# before the check existed. PASS -> MET; NOT_APPLICABLE only where the check says so itself (no deployment target
+# registered) or the change has no such impact (no migration changed); a UI requirement without UI code stays
+# REVIEWER_ATTESTED; anything else (absent, NOT_RUN, NOT_PROVEN, FAIL, no trusted report) is UNMET.
+VERIFIER_CHECK_REQUIREMENTS = ("ui_a11y", "frontend_tests", "migration_rollback", "db_credentials", "contract_diff",
+                               "negative_tests", "adversarial_pack", "integration_tests", "dependency_env")
+_CHECK_REF = re.compile(r"\((" + "|".join(VERIFIER_CHECK_REQUIREMENTS) + r")\)")
+# checks whose absence on a report means "the change had no such impact" (decided from impact_categories)
+_IMPACT_OF_CHECK: dict[str, tuple[str, ...]] = {
+    "migration_rollback": ("migration",), "ui_a11y": ("frontend",), "frontend_tests": ("frontend",),
+    "negative_tests": ("api", "auth"), "contract_diff": ("api", "contract"),
+}
+
+
+def verifier_check_requirement(text: str) -> str | None:
+    """The verifier check an evidence requirement names, if any."""
+    m = _CHECK_REF.search(text)
+    if m:
+        return m.group(1)
+    low = text.lower()
+    if ("accessibility" in low or "a11y" in low) and ("state" in low or "loading" in low):
+        return "ui_a11y"  # §16 UX/UI Designer line compiled before it named the check
+    return None
+
+
+def _verifier_check_status(session: Session, report: Any, text: str, check: str) -> dict[str, str]:
+    from aeos.verification import collector as _collector
+
+    if report is None or not report.trusted or report.origin != "verifier":
+        return {"requirement": text, "status": "UNMET", "evidence": "",
+                "detail": f"no trusted verifier report carrying the {check} check"}
+    data = _collector.read_json(report) or {}
+    entry = (data.get("checks") or {}).get(check) or {}
+    status = str(entry.get("status") or "")
+    evidence = str(entry.get("evidence_id") or report.id)
+    if status == "PASS":
+        return {"requirement": text, "status": "MET", "evidence": evidence,
+                "detail": f"verifier check {check} PASS: {str(entry.get('summary') or '')[:200]}"}
+    impact = _IMPACT_OF_CHECK.get(check)
+    if not status and impact and not set(impact) & set(data.get("impact_categories") or []):
+        if impact == ("frontend",):  # nothing rendered: a design without UI code is the A11Y reviewer's call
+            return {"requirement": text, "status": "REVIEWER_ATTESTED", "evidence": report.id,
+                    "detail": "no UI code changed, so the verifier rendered nothing; checked by the A11Y reviewer, "
+                              "not by code"}
+        return {"requirement": text, "status": "NOT_APPLICABLE", "evidence": report.id,
+                "detail": f"the verified change has no {'/'.join(impact)} impact"}
+    if status == "NOT_APPLICABLE":
+        return {"requirement": text, "status": "NOT_APPLICABLE", "evidence": evidence,
+                "detail": f"verifier check {check}: {str(entry.get('summary') or '')[:200]}"}
+    return {"requirement": text, "status": "UNMET", "evidence": evidence if status else report.id,
+            "detail": f"verifier check {check} is {status or 'absent'}"
+                      + (f": {str(entry.get('summary') or '')[:200]}" if status else "")}
+
+
 def evidence_requirements_status(session: Session, task: TaskSpec, report: Any,
                                  review: ReviewRecord | None) -> list[dict[str, str]]:
     """§21 TaskSpec "evidence requirements": which requirement is met by which evidence.
@@ -127,7 +183,10 @@ def evidence_requirements_status(session: Session, task: TaskSpec, report: Any,
         low = text.lower()
         if text.strip().upper() in STATIC_EVIDENCE_MARKERS:
             continue  # decided by static_allowed()
-        if "verifier" in low and ("report" in low or "test" in low):
+        check = verifier_check_requirement(text)
+        if check is not None:
+            out.append(_verifier_check_status(session, report, text, check))
+        elif "verifier" in low and ("report" in low or "test" in low):
             ok = bool(report is not None and report.trusted and report.origin == "verifier")
             out.append({"requirement": text, "status": "MET" if ok else "UNMET",
                         "evidence": report.id if report is not None else "",

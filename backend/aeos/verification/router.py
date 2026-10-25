@@ -339,6 +339,45 @@ def trusted_suite_status(project_id: str, principal: CurrentPrincipal, domain: A
             "source": "owner POLICY decision (trusted_suite) + controller data dir copy"}
 
 
+# ---------------------------------------------------------------------------- project test baseline (§05 step 6)
+
+
+class BaselineRunIn(BaseModel):
+    timeout_seconds: float | None = Field(default=None, ge=60, le=7200)
+
+
+@router.post("/api/projects/{project_id}/test-baseline")
+def run_test_baseline(project_id: str, principal: AdminPrincipal, domain: ActiveDomain, db: DB,
+                      body: BaselineRunIn | None = None) -> dict[str, Any]:
+    """Run the project's existing tests at its inventoried commit through the verifier runner + tamper window and
+    record the TEST_REPORT baseline that the inventory/planning cite (W6-013). Synchronous, like /verify."""
+    from aeos.verification import project_baseline
+
+    project = load_project(db, principal, project_id, domain=domain)
+    try:
+        out = project_baseline.run_project_baseline(db, project.id, actor=principal.user.id, principal=principal,
+                                                    timeout_seconds=(body or BaselineRunIn()).timeout_seconds)
+    except AeosError as exc:
+        audit_denied(db, principal, "verification.project_baseline", exc, target_type="project",
+                     target_id=project.id, project_id=project.id, domain=project.domain)
+        raise
+    db.commit()
+    return out
+
+
+@router.get("/api/projects/{project_id}/test-baseline")
+def test_baseline_status(project_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
+    from aeos.portfolio import facade as portfolio
+    from aeos.verification import project_baseline
+
+    project = load_project(db, principal, project_id, domain=domain)
+    repo = portfolio.primary_repository(db, project.id)
+    commit = repo.inventory_commit if repo is not None else None
+    out = project_baseline.baseline_summary(db, project.id, commit)
+    return {**out, "project_id": project.id, "checked_at": out.get("checked_at"), "generated_at": utcnow().isoformat(),
+            "mode": "LIVE", "source": "evidence_artifacts (verifier TEST_REPORT, project baseline)"}
+
+
 # ---------------------------------------------------------------------------- acceptance
 
 

@@ -285,7 +285,8 @@ def inventory_repository(path: Path | str, *, commit: str | None = None, max_fil
     ]
     gaps = [
         "Dependency contents/SBOM and transitive packages not resolved (manifest/lockfile presence only).",
-        "Tests were not executed; baseline results come only from the trusted verifier.",
+        "The inventory itself executes no tests; the project test baseline at this commit is run separately by the "
+        "verifier (tests.baseline names its evidence, or NOT_RUN).",
         "Untracked or uncommitted working-tree files are not part of this commit inventory.",
     ]
     if truncated:
@@ -315,7 +316,8 @@ def inventory_repository(path: Path | str, *, commit: str | None = None, max_fil
             "directories": sorted(test_dirs)[:SAMPLE_LIMIT],
             "files_sample": test_files,
             "frameworks": sorted(frameworks),
-            "baseline": {"status": "NOT_RUN", "reason": "inventory is read-only; tests run only in the trusted verifier"},
+            "baseline": {"status": "NOT_RUN", "reason": "inventory is read-only; the project test baseline at this "
+                                                         "commit is run by the verifier (aeos verify project-baseline)"},
         },
         "ci": {k: v for k, v in sorted(ci.items())},
         "deployment": {k: v for k, v in sorted(deploy.items())},

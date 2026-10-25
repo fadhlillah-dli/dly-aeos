@@ -183,8 +183,11 @@ FOCUS = {
                  "handling and redaction, capability/egress boundaries, supply chain, injection, fail-closed paths. "
                  "You do not accept residual risk on behalf of the owner and do not self-repair."),
     "A11Y": ("Focus (Accessibility / UX Reviewer): UI states, keyboard and screen-reader access, labels, contrast, "
-             "status shown as text + icon + colour, responsive layout, Indonesian copy. Without browser/a11y test "
-             "evidence in the package, answer NOT-PROVEN and list it under requested_verification."),
+             "status shown as text + icon + colour, responsive layout, Indonesian copy. The package's ui_evidence "
+             "lists the verifier's frontend step, its rendered UI states (screenshot evidence ids) and its a11y "
+             "probe findings (a WCAG subset, not a full audit: contrast, focus order and screen readers are not "
+             "covered). Without browser/a11y test evidence in the package, answer NOT-PROVEN and list it under "
+             "requested_verification."),
     "PRIVACY": ("Focus (Privacy / Data Reviewer): data classification, personal-data minimisation and redaction, "
                 "retention, domain separation (OFFICE data never in PERSONAL views), schema/migration safety, "
                 "quality/eval evidence for data or AI features. You do not accept residual risk for the owner."),
@@ -377,7 +380,32 @@ def build_checkpoint_package(session: Session, run: WorkerRun, task: TaskSpec, r
     role = role_section(session, task)
     if role is not None:
         package["role_contract"] = role
+    ui = ui_evidence_section(evidence, full_report)
+    if ui is not None:
+        package["ui_evidence"] = ui
     return redact(package)
+
+
+def ui_evidence_section(evidence: list[EvidenceArtifact], full_report: dict[str, Any]) -> dict[str, Any] | None:
+    """§16/§17 A11Y review input (W6-043/044): the verifier's frontend step and rendered UI states - per-state
+    screenshot evidence ids and the a11y probe's findings - so the reviewer cites evidence instead of guessing."""
+    checks = full_report.get("checks") or {}
+    if "frontend_tests" not in checks and "ui_a11y" not in checks:
+        return None
+    report = next((e for e in evidence if e.kind == "TEST_REPORT" and (checks.get("ui_a11y") or {}).get("evidence_id")
+                   == e.id), None)
+    data = _read_json(report) if report is not None else None
+    return {
+        "frontend_tests": checks.get("frontend_tests"),
+        "ui_a11y": checks.get("ui_a11y"),
+        "ui_report_evidence_id": report.id if report is not None else None,
+        "states": [{k: s.get(k) for k in ("state", "viewport", "title", "violations", "page_errors")}
+                   for s in (data or {}).get("states") or []][:16],
+        "screenshots": [{"evidence_id": e.id, "state": (e.environment or {}).get("ui_state"),
+                         "viewport": (e.environment or {}).get("viewport")} for e in evidence if e.kind == "SCREENSHOT"],
+        "probe": (data or {}).get("probe"),
+        "not_covered": (data or {}).get("not_covered"),
+    }
 
 
 # ---------------------------------------------------------------------------- verdict rules

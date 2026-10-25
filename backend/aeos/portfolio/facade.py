@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -33,6 +36,37 @@ def inventory_for_project(session: Session, project_id: str, *, commit: str | No
     from aeos.portfolio.inventory import inventory_for_project as impl
 
     return impl(session, project_id, commit=commit)
+
+
+def primary_repository(session: Session, project_id: str) -> RepositoryReference | None:
+    """The project's primary repository (platform repository first, then one with a local checkout)."""
+    from aeos.portfolio.repositories import primary_repository as impl
+
+    return impl(session, project_id)
+
+
+def repository_checkout(session: Session, project_id: str, *, principal: Any = None,
+                        action: str) -> tuple[Project, RepositoryReference, Path]:
+    """Project, primary repository and its registered local checkout for an operation that reads repository
+    content (additive, wave 7: the verifier's project test baseline). Applies the same checks as the inventory:
+    the project is writable, a repository and a local checkout are registered (``Blocked``), and the checkout does
+    not cross the domain boundary (``PolicyDenied``). Never guesses a path."""
+    from aeos.core.errors import Blocked, NotFound
+    from aeos.portfolio import repositories
+    from aeos.portfolio.service import require_writable
+
+    project = session.get(Project, project_id)
+    if project is None:
+        raise NotFound("project not found")
+    require_writable(project)
+    repo = repositories.primary_repository(session, project.id)
+    if repo is None:
+        raise Blocked("no repository is registered for this project", code="REPOSITORY_MISSING")
+    path = repositories.resolve_local_path(repo)
+    if path is None:
+        raise Blocked("no local checkout is registered for this repository", code="LOCAL_CHECKOUT_MISSING")
+    repositories.require_checkout_in_domain(session, principal, project, repo, path, action=action)
+    return project, repo, path
 
 
 def publication_targets(session: Session, project_id: str) -> list[dict]:

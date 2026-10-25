@@ -1,0 +1,82 @@
+"""W6-043/W6-044 with the real tools: the verifier's UI driver in headless Chromium and the frontend step (npm ci
+--ignore-scripts, vitest with the verifier's config, tsc, vite build, UI states) on the platform's own frontend.
+
+Marked ``integration`` (Chromium/node on the host); the full frontend step is also ``network`` (npm ci fetches the
+lockfile's packages). Both skip cleanly when the tool is absent.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import shutil
+from pathlib import Path
+
+import pytest
+
+from aeos.verification import frontend, runner
+from aeos.verification.steps import StepContext
+
+pytestmark = pytest.mark.integration
+REPO = Path(__file__).resolve().parents[2]
+
+GOOD = ("<!doctype html><html lang='id'><head><title>Contoh</title></head><body><main><h1>Masuk</h1>"
+        "<label for='u'>Username</label><input id='u'><button>Masuk</button>"
+        "<img src='data:image/gif;base64,R0lGODlhAQABAAAAACw=' alt='logo'></main></body></html>")
+BAD = ("<!doctype html><html><head></head><body><img src='data:image/gif;base64,R0lGODlhAQABAAAAACw='>"
+       "<button></button><input type='text'><div style='width:2000px'>wide</div></body></html>")
+
+
+def _chromium() -> None:
+    if importlib.util.find_spec("playwright") is None:
+        pytest.skip("playwright is not installed")
+    if not Path(frontend.browsers_path()).is_dir():
+        pytest.skip("Playwright browsers are not installed (python -m playwright install chromium)")
+
+
+def test_ui_driver_renders_states_and_finds_a11y_violations(tmp_path: Path):
+    _chromium()
+    results = {}
+    for name, html in (("good", GOOD), ("bad", BAD)):
+        dist = tmp_path / name / "dist"
+        dist.mkdir(parents=True)
+        (dist / "index.html").write_text(html, encoding="utf-8")
+        workdir = runner.new_workdir()
+        try:
+            rn = runner.ProcessRunner(workdir=workdir)
+            ui = frontend.run_ui(rn, dist, workdir / "r" / "ui")
+            res = frontend.ui_result(ui, workdir / "r" / "ui")
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+        if ui.get("status") == "NOT_RUN" and "chromium" in str(ui.get("reason")):
+            pytest.skip(str(ui.get("reason")))
+        results[name] = res
+    good, bad = results["good"], results["bad"]
+    assert good.status == "PASS", good.details
+    assert len([e for e in good.evidence if e.kind == "SCREENSHOT"]) == 8  # 4 states x 2 viewports
+    assert bad.status == "FAIL" and bad.reasons
+    report = bad.evidence[0].content
+    assert isinstance(report, dict)
+    found = {v["rule"] for v in report["violations"]}
+    assert {"html-has-lang", "document-title", "image-alt", "control-name", "form-label", "reflow"} <= found
+
+
+@pytest.mark.network
+def test_frontend_step_on_the_platform_frontend(tmp_path: Path):
+    _chromium()
+    if shutil.which("node") is None:
+        pytest.skip("node is not installed")
+    snapshot = tmp_path / "s"
+    src = REPO / "frontend"
+    shutil.copytree(src, snapshot / "frontend", ignore=shutil.ignore_patterns("node_modules", "dist"))
+    workdir = runner.new_workdir()
+    try:
+        ctx = StepContext(runner=runner.ProcessRunner(workdir=workdir), snapshot=snapshot, workdir=workdir,
+                          changed=["frontend/src/App.tsx"], categories={"frontend": ["frontend/src/App.tsx"]})
+        results = {r.check: r for r in frontend.run(ctx)}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    fe = results["frontend_tests"]
+    if fe.status == "NOT_PROVEN" and "npm ci" in fe.summary:
+        pytest.skip(f"npm ci could not reach the registry here: {fe.summary[:200]}")
+    assert fe.status == "PASS", (fe.summary, fe.details)
+    assert results["ui_a11y"].status == "PASS", results["ui_a11y"].details
