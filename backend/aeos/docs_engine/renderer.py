@@ -280,8 +280,9 @@ class RunbookSource:
                                                                  for n in names)), "")
 
     def slice(self) -> dict[str, Any]:
-        return {"key": self.key, "title": self.title, "path": self.path, "commit": self.commit,
-                "sections": [list(s) for s in self.sections]}
+        # the commit is named in the body, not part of the input: an unchanged runbook at a newer commit of the
+        # repository does not re-render (nor become a new revision to publish) on every commit
+        return {"key": self.key, "title": self.title, "path": self.path, "sections": [list(s) for s in self.sections]}
 
 
 @dataclass
@@ -620,8 +621,16 @@ def _visual_block(v: VisualArtifact) -> str:
     return _join(head, check, img, f"```mermaid\n{v.source.strip()}\n```")
 
 
+def _stable_notes(v: VisualArtifact) -> list[str]:
+    """Verification notes without the commit the references were read at: the same facts at a newer commit of the
+    repository are the same input (no re-render and no "material" checkpoint delta for every unrelated commit); the
+    rendered body still names the commit it was built from."""
+    sha = (v.reference_commit or "")[:12]
+    return [n.replace(sha, "<commit>") for n in v.verification_notes] if sha else list(v.verification_notes)
+
+
 def _visual_slice(ctx: _Ctx) -> list[Any]:
-    return [(x.key, x.kind, x.source_hash, x.status, x.verification_status, list(x.verification_notes),
+    return [(x.key, x.kind, x.source_hash, x.status, x.verification_status, _stable_notes(x),
              x.verification_source) for x in ctx.visuals]
 
 

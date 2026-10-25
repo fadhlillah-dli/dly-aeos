@@ -12,6 +12,8 @@ narasi & visual terpadu; Claude memeriksa paket perubahan material".
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from aeos.claude_bridge import bridge
@@ -292,9 +294,10 @@ def test_the_owner_adds_the_writer_draft_to_a_new_plan_version_that_still_needs_
     assert v2.version == 2 and v2.source == "HUMAN_EDIT" and v2.parent_version_id == v1.id
     assert db.get(Plan, plan.id).state == "READY_FOR_HUMAN_REVIEW", "a new hash needs a new owner decision"
     task = next(t for t in v2.content["tasks"] if t["key"] == "DOC-MILE-M1")
-    assert task["role_key"] == "technical-writer" and task["allowed_paths"] == [] and task["input_artifacts"] == [label]
-    resolved = dag.resolve_input_artifacts([label], dag.artifact_index(db, v2))
-    assert resolved[0]["resolved"] and resolved[0]["sha256"] == rev.content_hash
+    exact = f"doc_checkpoint:{rev.id}"
+    assert task["role_key"] == "technical-writer" and task["allowed_paths"] == [] and task["input_artifacts"] == [exact]
+    resolved = dag.resolve_input_artifacts([exact, label], dag.artifact_index(db, v2))
+    assert all(x["resolved"] and x["sha256"] == rev.content_hash for x in resolved)
     assert resolved[0]["content"]["changed_documents"][0]["sections"] == ["Context"]
     with pytest.raises(Conflict) as again:
         checkpoints.plan_writer_task(db, rev.id, project, actor_user_id="owner", rationale="lagi dong")
@@ -302,6 +305,11 @@ def test_the_owner_adds_the_writer_draft_to_a_new_plan_version_that_still_needs_
     listed = checkpoints.list_checkpoints(db, project.id, with_planning=True)
     assert listed[0]["writer_task_planned"]["plan_version_id"] == v2.id
     plain, _ = _checkpoint_row(db, project, v1, material=False)
+    plain.created_at = rev.created_at + timedelta(seconds=5)
+    db.commit()
+    # a newer package of the same milestone: the generic label follows it, the approved task keeps ITS package
+    newer = dag.resolve_input_artifacts([exact, label], dag.artifact_index(db, v2))
+    assert newer[0]["sha256"] == rev.content_hash and newer[1]["sha256"] == plain.content_hash
     with pytest.raises(Conflict) as not_material:
         checkpoints.plan_writer_task(db, plain.id, project, actor_user_id="owner", rationale="tidak material")
     assert not_material.value.code == "PACKAGE_NOT_MATERIAL"

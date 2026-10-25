@@ -610,8 +610,11 @@ def _contract_paths(content: Any) -> tuple[str, ...]:
     for c in (content or {}).get("interface_contracts") or [] if isinstance(content, dict) else []:
         if isinstance(c, dict):
             for p in c.get("contract_paths") or []:
-                s = str(p).strip().replace("\\", "/").lstrip("./")
-                if s and ".." not in PurePosixPath(s).parts and not s.startswith("/"):
+                s = str(p).strip().replace("\\", "/")
+                while s.startswith("./"):  # only a leading "./" (".github/...", ".api/..." keep their dot)
+                    s = s[2:]
+                # repository-relative only: never "..", an absolute path or a drive ("C:/...")
+                if s and ".." not in PurePosixPath(s).parts and not s.startswith("/") and ":" not in s.split("/")[0]:
                     out.append(s)
     return tuple(sorted(set(out))[:50])
 
@@ -722,7 +725,7 @@ def _platform(session: Session, project: Project) -> ProjectReferences:
         facts = read_checkout(top, sha)
         where = f"repository platform @ {_short(sha)}"
         _apply_facts(vr, facts, where, product=False)
-        out.runbooks, out.commit, vr.source = list(facts.runbooks), sha, where
+        out.runbooks, out.commit, vr.source, vr.commit = list(facts.runbooks), sha, where, sha
     except (AeosError, OSError, ValueError) as exc:
         reason = f"Repository platform tidak dapat dibaca pada commit tercatat ({type(exc).__name__})."
         vr.missing.setdefault("ci_jobs", reason)
@@ -765,7 +768,11 @@ def _product(session: Session, project: Project, content: Any) -> ProjectReferen
         # domain checks before any content read (fail closed: a refused checkout is never read)
         repo, path = portfolio.project_checkout(session, project, action="docs.references.read")
     except AeosError as exc:
-        return none(redact_text(f"Checkout tidak dibaca ({exc.code}): {exc.message}")[:300])
+        # the code only: a refusal names the other domain's provider host, a git error can name a local path; neither
+        # belongs in this domain's documents (§37, §50)
+        log.info("checkout of project %s not read for diagram references: %s", project.id, exc.code)
+        return none(f"Checkout tidak dibaca ({exc.code}): pemeriksaan domain/akses checkout menolak pembacaan; "
+                    "diagram tidak dibandingkan dengan kontraknya.")
     if repo is None:
         return none("Proyek ini belum punya repository terdaftar; diagram tidak dapat dibandingkan dengan kontraknya.")
     if path is None:
@@ -779,12 +786,14 @@ def _product(session: Session, project: Project, content: Any) -> ProjectReferen
                         "perubahan yang diterima); kontraknya tidak dibaca dari working tree.")
         facts = read_checkout(top, sha, extra_paths=_contract_paths(content))
     except AeosError as exc:
-        return none(redact_text(f"Checkout {repo.full_name} tidak dibaca ({exc.code}): {exc.message}")[:300])
+        log.info("checkout of project %s not readable at its known commit: %s", project.id, exc.code)
+        return none(redact_text(f"Checkout {repo.full_name} tidak dapat dibaca pada commit tercatat ({exc.code}); "
+                                "diagram tidak dibandingkan dengan kontraknya.")[:300])
     except (OSError, ValueError) as exc:
         return none(f"Checkout {repo.full_name} tidak dapat dibaca ({type(exc).__name__}).")
     identity = "" if repo.verification_status == "VERIFIED" else ", identitas repository belum VERIFIED"
     where = redact_text(f"checkout {repo.full_name} @ {_short(sha)} ({how}{identity})")
-    vr = VisualReferences(source=where)
+    vr = VisualReferences(source=where, commit=sha)
     _apply_facts(vr, facts, where, product=True)
     if facts.truncated:
         vr.source += "; daftar file terpotong"

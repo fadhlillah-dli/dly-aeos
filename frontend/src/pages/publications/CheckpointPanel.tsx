@@ -92,7 +92,7 @@ export function CheckpointPanel({ projectId }: { projectId: string }) {
               rowKey={(s) => s.id}
               columns={[
                 { header: "Snapshot arsitektur", cell: (s) => <span>{s.label || "—"} <Mono>{shortId(s.id)}</Mono></span> },
-                { header: "Approval manusia", cell: (s) => <StatusBadge status={s.approved ? "APPROVED" : "NOT_APPROVED"} label={s.approved ? "Disetujui (hash terikat)" : "Belum disetujui"} /> },
+                { header: "Approval manusia", cell: (s) => <StatusBadge status={s.approved ? "APPROVED" : "PENDING"} label={s.approved ? "Disetujui (hash terikat)" : "Belum disetujui"} /> },
                 {
                   header: "Checkpoint",
                   cell: (s) => (s.checkpoint_id
@@ -196,8 +196,8 @@ function PackageCard({ cp, projectId, isAdmin, onChanged }: { cp: CheckpointView
             </ul>
           )}
         </div>
-        <p>Diagram berubah: {cp.diagram_delta.length ? cp.diagram_delta.map((d) => <Mono key={d}>{d}</Mono>) : "—"}</p>
-        {cp.contract_deltas.length > 0 && <p>Delta kontrak: {cp.contract_deltas.map((d) => <Mono key={d}>{d}</Mono>)}</p>}
+        <p className="flex flex-wrap items-center gap-1">Diagram berubah: {cp.diagram_delta.length ? cp.diagram_delta.map((d) => <Mono key={d}>{d}</Mono>) : "—"}</p>
+        {cp.contract_deltas.length > 0 && <p className="flex flex-wrap items-center gap-1">Delta kontrak: {cp.contract_deltas.map((d) => <Mono key={d}>{d}</Mono>)}</p>}
         {cp.architecture_delta?.nodes && (
           <p>Delta arsitektur: +{cp.architecture_delta.nodes.added.length} / −{cp.architecture_delta.nodes.removed.length} / ~{cp.architecture_delta.nodes.changed.length} node</p>
         )}

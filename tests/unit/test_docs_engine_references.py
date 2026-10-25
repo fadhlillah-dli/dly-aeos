@@ -6,6 +6,7 @@ wiring itself is protected (W6-047, W6-094..W6-098)."""
 from __future__ import annotations
 
 import copy
+import json
 import re
 
 import pytest
@@ -186,18 +187,89 @@ def test_product_references_never_come_from_the_working_tree_or_an_unknown_commi
 
 
 @needs_git
+def test_the_plans_contract_paths_name_openapi_files_the_inventory_does_not_classify(settings, db, monkeypatch,
+                                                                                     tmp_path):
+    """W6-047: ``interface_contracts[].contract_paths`` of the approved plan are read at the known commit too (here
+    OpenAPI documents the inventory does not label openapi, one under a dot directory); a path that leaves the
+    repository root (even when its tail exists in the repository) or a sensitive file name is never read."""
+    install_fakes(monkeypatch)
+
+    def spec(path: str) -> str:
+        return json.dumps({"openapi": "3.0.0", "info": {"title": "x", "version": "1"}, "paths": {path: {}}})
+
+    repo = make_repo(tmp_path / "kontrak", {"contracts/api.json": spec("/sync/{id}"), ".api/extra.json": spec("/extra"),
+                                            "x/outside.json": spec("/outside"), ".env": spec("/leak")})
+    project = make_project(db, key="kontrak")
+    db.add(RepositoryReference(project_id=project.id, provider="GITHUB", full_name="owner/kontrak",
+                               url="https://github.com/owner/kontrak", local_path_ref=str(repo),
+                               inventory_commit=git(repo, "rev-parse", "HEAD")))
+    db.commit()
+    content = sample()
+    content["architecture"]["diagrams"] = [
+        _diagram("ok", "sequence", "sequenceDiagram\n  a->>b: PUT /sync/9\n  b->>a: GET /extra"),
+        _diagram("outside", "sequence", "sequenceDiagram\n  a->>b: GET /outside"),
+        _diagram("leak", "sequence", "sequenceDiagram\n  a->>b: GET /leak")]
+    world = {"settings": settings, "db": db}
+    _plan, world["version"] = make_plan(db, project, copy.deepcopy(content), tasks=TASKS)
+    assert _visuals(world)["ok"].verification_status == "UNVERIFIED", "not an OpenAPI file by its name alone"
+    content["interface_contracts"] = [{
+        "key": "C1", "title": "Sync API", "kind": "api", "feature_keys": [], "provider_task_key": "T1",
+        "consumer_task_keys": [], "definition": "PUT /sync/{id}", "compatibility": "",
+        "contract_paths": ["contracts/api.json", "./.api/extra.json", "../x/outside.json", "C:/x/outside.json", ".env"]}]
+    _plan, world["version"] = make_plan(db, project, content, tasks=TASKS)
+    v = _visuals(world)
+    assert v["ok"].verification_status == "CONSISTENT", v["ok"].verification_notes
+    assert "contracts/api.json" in v["ok"].verification_notes[0] and ".api/extra.json" in v["ok"].verification_notes[0]
+    assert v["outside"].verification_status == "MISMATCH", "a path that leaves the root is refused, not normalised"
+    assert v["leak"].verification_status == "MISMATCH", "a sensitive file is never a contract source"
+
+
+@needs_git
+def test_an_unrelated_commit_does_not_re_render_the_documents_that_cite_it(product):
+    """§41 "hash/diff menentukan bagian dokumentasi yang berubah": the commit the references were read at is named
+    in the body, but the same facts at a newer commit are the same input, so the narrative and the runbooks are not
+    re-rendered (nor a material checkpoint delta / new revision to publish) for every commit of the repository."""
+    db, repo = product["db"], product["repo"]
+
+    def docs():
+        result, _d, _s = service.render_version(db, product["settings"], product["version"], persist=False,
+                                                render_visuals=False)
+        ids = result.by_id()
+        return ids["03-architecture-overview"], ids["08-runbooks/runbook-restart"]
+
+    overview, runbook = docs()
+    assert product["sha"][:12] in (overview.body_markdown or "") and product["sha"][:12] in (runbook.body_markdown or "")
+    unrelated = commit_file(repo, "README.md", "# Contoh\n", "readme")
+    ref = db.query(RepositoryReference).filter_by(full_name="owner/contoh-app").one()
+    ref.inventory_commit = unrelated
+    db.commit()
+    overview2, runbook2 = docs()
+    assert unrelated[:12] in (overview2.body_markdown or ""), "the body names the commit it was built from"
+    assert overview2.input_hash == overview.input_hash and runbook2.input_hash == runbook.input_hash
+    changed = commit_file(repo, "docs/runbooks/restart.md", RUNBOOK.replace("systemctl", "service"), "runbook")
+    ref.inventory_commit = changed
+    db.commit()
+    overview3, runbook3 = docs()
+    assert runbook3.input_hash != runbook.input_hash and "service restart contoh-api" in (runbook3.body_markdown or "")
+    assert overview3.input_hash == overview.input_hash, "the diagram facts did not change"
+
+
+@needs_git
 def test_a_checkout_that_crosses_the_domain_boundary_is_not_read(product, monkeypatch):
     from aeos.core.errors import PolicyDenied
     from aeos.portfolio import repositories
 
-    def refuse(*_a, **_k):
-        raise PolicyDenied("the local checkout overlaps a checkout registered in another domain",
-                           code="CHECKOUT_CROSS_DOMAIN")
+    def refuse(*_a, **_k):  # the real refusal names the other domain's provider host (origin_domain_conflict)
+        raise PolicyDenied("the checkout's origin is hosted on bitbucket.zz-tenant-host.example (OFFICE code provider)",
+                           code="CHECKOUT_OTHER_DOMAIN_ORIGIN")
 
     monkeypatch.setattr(repositories, "require_checkout_in_domain", refuse)
-    v = _visuals(product)
+    result, _d, _s = service.render_version(product["db"], product["settings"], product["version"], persist=False,
+                                            render_visuals=False)
+    v = {x.key: x for x in result.visuals}
     assert v["comp-bad"].verification_status == "UNVERIFIED"
-    assert any("CHECKOUT_CROSS_DOMAIN" in n for n in v["comp-bad"].verification_notes)
+    assert any("CHECKOUT_OTHER_DOMAIN_ORIGIN" in n for n in v["comp-bad"].verification_notes)
+    assert all("zz-tenant-host" not in (d.body_markdown or "") for d in result.documents), "no other-domain host"
 
 
 @needs_git

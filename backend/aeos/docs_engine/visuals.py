@@ -144,6 +144,9 @@ class VisualArtifact:
     verification_source: str = ""
     verification_status: str = "UNVERIFIED"  # UNVERIFIED | CONSISTENT | MISMATCH | VERIFIED (sequence + tests)
     verification_notes: list[str] = field(default_factory=list)
+    # the commit the references were read at (named in the notes); not an input on its own: the same facts at a
+    # newer commit of the repository are the same check (renderer._visual_slice)
+    reference_commit: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -321,6 +324,7 @@ class VisualReferences:
     Names are kept as read; comparisons normalise both sides with :func:`norm_label`."""
 
     source: str = ""  # where the references were read (commit), for the record
+    commit: str | None = None  # the repository commit the checkout references were read at
     component_source: str = "InstallManifest/inventory"
     schema_source: str = "schema yang dirujuk"
     ci_source: str = "pipeline CI"
@@ -695,6 +699,7 @@ def verify_visuals(visuals: list[VisualArtifact], *, trust_boundaries: list[str]
     data_names = [d for d in (data_items or []) if d.strip()]
     envs = [e for e in (deployment_environments or []) if e.strip()]
     for v in visuals:
+        v.reference_commit = refs.commit or ""
         if v.kind in ("context", "component"):
             _check_components(v, refs)
         elif v.kind == "sequence":

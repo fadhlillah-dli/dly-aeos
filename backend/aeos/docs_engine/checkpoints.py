@@ -339,10 +339,18 @@ def checkpoint_candidates(session: Session, project: Project) -> dict[str, Any]:
     return out
 
 
+def package_label(rev: DocumentRevision) -> str:
+    """The input-artifact label of exactly this recorded package (``doc_checkpoint:<revision id>``). A recorded
+    revision is immutable, so the label always resolves to the same package hash; the generic
+    ``documentation_checkpoint:<project>:<kind>:<ref>`` label resolves to the NEWEST package of that checkpoint."""
+    return f"doc_checkpoint:{rev.id}"
+
+
 def writer_task_spec(rev: DocumentRevision, project: Project) -> dict[str, Any]:
     """The Tech Writer / Diagram Author draft as a complete plan TASK (planning schema). Write scope stays EMPTY:
     which paths the writer may change is the owner's decision in the plan version, and the scheduler never runs a
-    TaskSpec without allowed paths."""
+    TaskSpec without allowed paths. Its input is THIS package (``package_label``): the owner approves the plan
+    version that names it, so a checkpoint recorded later for the same milestone/snapshot never replaces it."""
     d = rev.details or {}
     w = d.get("writer_task") or {}
     sections = [f"{c.get('document')}: {', '.join(c.get('sections') or []) or '-'}" for c in w.get("changed_sections")
@@ -350,7 +358,7 @@ def writer_task_spec(rev: DocumentRevision, project: Project) -> dict[str, Any]:
     return {
         "key": str(w.get("key") or "DOC-CHECKPOINT")[:64], "feature_key": "", "title": str(w.get("title") or ""),
         "goal": str(w.get("goal") or ""), "role_key": str(w.get("role_key") or "technical-writer"),
-        "input_artifacts": [str(x) for x in w.get("input_artifacts") or []],
+        "input_artifacts": [package_label(rev)],
         "expected_outputs": [*[str(x) for x in w.get("expected_outputs") or []],
                              *[f"bagian berubah: {s}" for s in sections[:20]],
                              *[f"diagram berubah: {k}" for k in (w.get("diagrams") or [])[:20]]],
@@ -369,10 +377,11 @@ def writer_task_spec(rev: DocumentRevision, project: Project) -> dict[str, Any]:
 
 
 def _writer_planned(session: Session, rev: DocumentRevision) -> dict[str, Any] | None:
-    """The newest plan version that already carries this checkpoint's writer task (by input-artifact label)."""
+    """The newest plan version that already carries this checkpoint's writer task (by input-artifact label: this
+    package's own label, or the generic checkpoint label a planner may have used)."""
     version = session.get(PlanVersion, rev.plan_version_id) if rev.plan_version_id else None
-    labels = set(((rev.details or {}).get("writer_task") or {}).get("input_artifacts") or [])
-    if version is None or not labels:
+    labels = {package_label(rev), *(((rev.details or {}).get("writer_task") or {}).get("input_artifacts") or [])}
+    if version is None:
         return None
     for v in session.scalars(select(PlanVersion).where(PlanVersion.plan_id == version.plan_id)
                              .order_by(PlanVersion.version.desc())):
@@ -425,9 +434,10 @@ def plan_writer_task(session: Session, revision_id: str, project: Project, *, ac
 
 
 def checkpoint_artifacts(session: Session, project_id: str) -> list[tuple[str, dict[str, Any]]]:
-    """Input artifacts a planner may name: ``documentation_checkpoint:<project>:<kind>:<ref>`` -> the recorded package
-    (hash-bound DATA, newest first). The compiled TaskSpec carries the content, so the writer reads exactly what
-    was recorded."""
+    """Input artifacts a plan task may name, newest first: ``doc_checkpoint:<revision id>`` -> exactly that recorded
+    package, and ``documentation_checkpoint:<project>:<kind>:<ref>`` -> the newest package of that checkpoint (the
+    index keeps the first hit). Hash-bound DATA: the compiled TaskSpec carries the content, so the writer reads
+    exactly what was recorded."""
     out: list[tuple[str, dict[str, Any]]] = []
     for rev in session.scalars(select(DocumentRevision).where(
             DocumentRevision.project_id == project_id, DocumentRevision.kind == CHECKPOINT_KIND)
@@ -442,6 +452,6 @@ def checkpoint_artifacts(session: Session, project_id: str) -> list[tuple[str, d
         content["writer_task"] = {k: writer.get(k) for k in ("goal", "changed_sections", "diagrams")}
         entry = {"ref": f"doc_checkpoint:{rev.id}", "kind": "documentation_checkpoint", "sha256": rev.content_hash,
                  "name": f"Documentation checkpoint {view.get('kind')} {view.get('ref')}", "content": content}
-        for label in writer.get("input_artifacts") or []:
+        for label in [package_label(rev), *(writer.get("input_artifacts") or [])]:
             out.append((str(label), entry))
     return out

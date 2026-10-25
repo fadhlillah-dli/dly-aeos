@@ -23,7 +23,9 @@ needed a raw API call while its Tech Writer draft never became work.
    tree): OpenAPI paths, `schema.prisma` / SQL / Alembic migrations, compose/package/chart/Kubernetes names, CI
    jobs/stages/triggers, IaC kinds, the plan's `interface_contracts[].contract_paths` and `docs/runbooks`.
    Sensitive file names are never read; no checkout / no recorded commit / a refused domain check = UNVERIFIED with
-   the reason.
+   the reason. The commit is named in the rendered body but is not a render input on its own: the same facts (and
+   the same runbook text) at a newer commit do not re-render a document, so an unrelated commit never creates new
+   revisions to publish or a "material" checkpoint delta.
 2. **Stricter checks.** Component links must be registered relations (platform); ERD relationship lines must be
    backed by a foreign key, a junction table or an `<entity>_id` column; cicd/deployment nodes must be pipeline
    jobs/stages, registered environments or detected IaC/deploy references. Anything else is MISMATCH. A sequence
@@ -41,9 +43,11 @@ needed a raw API call while its Tech Writer draft never became work.
    Dokumen & Publikasi > Checkpoint tab: offers for fully accepted milestones / approved snapshots (never an
    automatic record), the immutable packages, "Minta review Claude" (advisory) and "Tambahkan ke versi rencana
    berikutnya": the writer draft becomes a task of a NEW human-edit plan version with an EMPTY write scope (the
-   owner sets it before approving). The task compiler resolves `documentation_checkpoint:<project>:<kind>:<ref>`
-   to the recorded, hash-bound package. `aeos docs checkpoints <project_id>` lists the same offers and packages
-   read-only.
+   owner sets it before approving). That task names exactly the chosen package (`doc_checkpoint:<revision id>`, an
+   immutable revision), so a package recorded later for the same milestone/snapshot never replaces what the owner
+   approved; the generic `documentation_checkpoint:<project>:<kind>:<ref>` label a planner may use resolves to the
+   newest recorded package. Both resolve in the task compiler to the hash-bound package content.
+   `aeos docs checkpoints <project_id>` lists the same offers and packages read-only.
 7. **The accepted writer output reaches the narrative.** Once that TaskSpec (its checkpoint input resolved, never
    an unresolved label) is ACCEPTED, its change record becomes part of the input of `03-architecture-overview`:
    the next render names the change record, PR, merge commit and package. The plan's own prose and diagram
