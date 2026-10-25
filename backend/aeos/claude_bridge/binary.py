@@ -162,10 +162,79 @@ def publisher_signature(path: Path | None, *, fingerprint_value: str | None = No
                       "reason": "no OS code-signature check on this platform"}
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         result = {"method": None, "signer": None, "status": "UNKNOWN", "reason": type(exc).__name__}
-    result["publisher_pin"] = "NONE (install-manifest has no approved pin; authenticity UNVERIFIED)"
+    pin = approved_publisher()
+    result["publisher_pin"] = (f"{pin} (owner-pinned in the install-manifest; see the authenticity gate)" if pin else
+                               "NONE (install-manifest has no approved pin; authenticity UNVERIFIED)")
     if run is None:
         _SIG_CACHE[key] = result
     return result
+
+
+def invocation_signature(path: Path | None, fingerprint_value: str | None) -> dict[str, Any]:
+    """The OS signature report that gates a native invocation: checked once per binary fingerprint per process
+    (``publisher_signature`` caches it), so a swapped binary is checked again before it is used."""
+    return publisher_signature(path, fingerprint_value=fingerprint_value)
+
+
+def approved_publisher() -> str | None:
+    """Owner-pinned Claude Code publisher identity from the reviewed InstallManifest (None = not pinned)."""
+    try:
+        from aeos.inventory import facade as inventory
+
+        return inventory.approved_signer("claude-code")
+    except ImportError:
+        return None
+
+
+# One RDN of an X.500 subject as Windows prints it: ``KEY=value`` or ``KEY="value, with commas"``; an unquoted value
+# runs up to the next ``, KEY=`` (so ``CN=Anthropic, PBC, O=...`` reads CN as ``Anthropic, PBC``).
+_RDN = re.compile(r'([A-Za-z][A-Za-z0-9.]*)=("(?:[^"]|"")*"|.*?)(?=,\s*[A-Za-z][A-Za-z0-9.]*=|$)')
+
+
+def _norm_identity(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def signer_matches(observed: str | None, approved: str | None) -> bool:
+    """Exact publisher-identity match, never a substring: the pin equals the whole observed signer (Authenticode
+    subject / macOS TeamIdentifier), one whole ``KEY=value`` component of the subject, or the exact CN / O value.
+    A certificate for "Anthropic, PBC Labs" therefore never satisfies the pin "Anthropic, PBC"."""
+    obs, want = _norm_identity(observed or ""), _norm_identity(approved or "")
+    if not obs or not want:
+        return False
+    if obs == want:
+        return True
+    for key, raw in _RDN.findall(observed or ""):
+        value = raw[1:-1].replace('""', '"') if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"') else raw
+        k = key.upper()
+        if want == _norm_identity(f"{k}={value}") or (k in ("CN", "O") and want == _norm_identity(value)):
+            return True
+    return False
+
+
+def signature_gate(sig: dict[str, Any] | None, approved_signer: str | None) -> tuple[str, str]:
+    """What the observed OS code signature means for the bridge (§12 "unmodified official binary").
+
+    * ``BLOCKED``: the OS reports the signature INVALID (e.g. Authenticode HashMismatch / NotTrusted, codesign
+      verify failure), or the owner pinned a publisher identity and the observed signer is not exactly it
+      (``signer_matches``: whole subject, whole RDN or exact CN/O value - never a substring);
+    * ``DEGRADED``: the binary is not signed (reported, never treated as the official build);
+    * ``OK``: VALID and the observed signer matches the owner-pinned identity;
+    * ``UNVERIFIED``: VALID without a pinned identity, or no check ran / UNKNOWN (never shown as authentic)."""
+    status = str((sig or {}).get("status") or "NOT_CHECKED")
+    signer = str((sig or {}).get("signer") or "")
+    if status == "INVALID":
+        return "BLOCKED", "OS reports the code signature of the claude binary INVALID (modified or untrusted build)"
+    if approved_signer and status == "VALID" and not signer_matches(signer, approved_signer):
+        return "BLOCKED", (f"observed signer {signer or 'unknown'!r} is not the owner-pinned publisher "
+                           f"{approved_signer!r} (install-manifest claude-code signature.approved_signer)")
+    if status == "UNSIGNED":
+        return "DEGRADED", "the claude binary is not code-signed; it cannot be shown to be the official build"
+    if status == "VALID" and approved_signer:
+        return "OK", f"signature VALID and signer matches the pinned publisher {approved_signer!r}"
+    if status == "VALID":
+        return "UNVERIFIED", "signature VALID; no publisher identity pinned in the install-manifest (owner step)"
+    return "UNVERIFIED", f"code signature {status}: authenticity not established"
 
 
 _fp_cache: dict[tuple[str, int, int], str] = {}

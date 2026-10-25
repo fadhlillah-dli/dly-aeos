@@ -363,7 +363,7 @@ def evaluate(capability: Capability, rows: dict[str, dict[str, Any]], *, now: da
             spec = REGISTRY.get(cid)
             row = rows.get(cid)
             eff, why = effective_status(row, now, fps.get(cid))
-            ok_set = rule.required_ok.get(cid) if tier == "required" and cid in rule.required_ok else (
+            ok_set: frozenset[str] = rule.required_ok[cid] if tier == "required" and cid in rule.required_ok else (
                 spec.ok_statuses if spec else frozenset({"VERIFIED"}))
             ok = eff in ok_set
             title = spec.title if spec else cid
@@ -427,8 +427,7 @@ def evaluate(capability: Capability, rows: dict[str, dict[str, Any]], *, now: da
     reasons = [*blocked, *unknown, *degraded, *notes]
     if status == "READY" and gate_reason:
         reasons.insert(0, gate_reason)
-    seen: set[str] = set()
-    risks = [r for r in risks if not (r in seen or seen.add(r))]
+    risks = list(dict.fromkeys(risks))
     return CapabilityState(capability=capability, status=status, reasons=reasons, checks=checks, remedies=remedies,
                            residual_risks=risks)
 
@@ -634,41 +633,70 @@ def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
 # ---------------------------------------------------------------- targeted recheck after invalidation (§08)
 #
 # "Perubahan ... membuat pemeriksaan terdampak STALE dan memicu recheck sebelum capability tersebut digunakan
-# kembali": while the server runs (enabled by the doctor lifecycle hook), the non-functional, loopback-only
-# checks an invalidation marked STALE are re-run in the background right after the invalidating transaction
-# commits. Until that recheck lands the gate stays UNKNOWN (fail closed). Functional/network checks (Max
-# quota, remote APIs) are never re-run implicitly; they keep waiting for an explicit --functional run.
+# kembali": while the server runs (enabled by the doctor lifecycle hook), the checks an invalidation marked STALE
+# are re-run in the background right after the invalidating transaction commits: non-functional, loopback-only
+# checks as they are, and the read-only, zero-cost remote identity probes (REMOTE_RECHECK: one GET each, no
+# quota, no write) functionally. Until that recheck lands the gate stays UNKNOWN (fail closed). Checks that cost
+# quota or run heavy self-tests (Claude capability test, containment) are never re-run implicitly; they keep
+# waiting for an explicit --functional run (the gate stays UNKNOWN/STALE meanwhile).
 
-_recheck = {"enabled": False, "settings": None, "pending": set(), "thread": None}
+REMOTE_RECHECK: frozenset[str] = frozenset({
+    "adapter.github_token", "adapter.project_repo", "adapter.project_drive_root", "adapter.project_office_targets",
+    "delivery.branch_protection",
+})
+
+class _RecheckState:
+    """Process-wide recheck state; every field is read/written under ``_recheck_lock``."""
+
+    def __init__(self) -> None:
+        self.enabled = False
+        self.settings: Any = None
+        self.pending: set[str] = set()
+        self.thread: threading.Thread | None = None
+
+
+_recheck = _RecheckState()
 _recheck_lock = threading.Lock()
 RECHECK_DELAY_SECONDS = 1.0
 
 
 def enable_auto_recheck(settings: Any) -> None:
     with _recheck_lock:
-        _recheck.update(enabled=True, settings=settings)
+        _recheck.enabled = True
+        _recheck.settings = settings
 
 
 def disable_auto_recheck() -> None:
     with _recheck_lock:
-        _recheck.update(enabled=False, settings=None)
-        _recheck["pending"] = set()
+        _recheck.enabled = False
+        _recheck.settings = None
+        _recheck.pending = set()
 
 
 def auto_recheck_enabled() -> bool:
-    return bool(_recheck["enabled"])
+    return _recheck.enabled
 
 
 def recheckable(check_ids: list[str]) -> list[str]:
+    """Checks re-run as they are (non-functional, loopback-only), excluding the remote identity probes."""
     from aeos.doctor.checks import REGISTRY, load_all
 
     load_all()
-    return [c for c in check_ids if c in REGISTRY and not REGISTRY[c].functional and not REGISTRY[c].network]
+    return [c for c in check_ids if c in REGISTRY and not REGISTRY[c].functional and not REGISTRY[c].network
+            and c not in REMOTE_RECHECK]
+
+
+def remote_recheckable(check_ids: list[str]) -> list[str]:
+    """Read-only, zero-cost remote probes re-run functionally after an invalidation."""
+    from aeos.doctor.checks import REGISTRY, load_all
+
+    load_all()
+    return [c for c in check_ids if c in REGISTRY and c in REMOTE_RECHECK and not REGISTRY[c].functional]
 
 
 def _schedule_recheck(session: Session, stale_ids: list[str]) -> None:
     skip = session.info.get("aeos_doctor_recheck_skip") or set()  # checks the current Doctor run records itself
-    ids = [c for c in recheckable(stale_ids) if c not in skip]
+    ids = [c for c in [*recheckable(stale_ids), *remote_recheckable(stale_ids)] if c not in skip]
     if not ids or not auto_recheck_enabled():
         return
     from sqlalchemy import event
@@ -688,14 +716,14 @@ def _schedule_recheck(session: Session, stale_ids: list[str]) -> None:
 def request_recheck(check_ids: list[str]) -> None:
     """Queue a background recheck of *check_ids* (debounced; one worker thread at a time)."""
     with _recheck_lock:
-        if not _recheck["enabled"]:
+        if not _recheck.enabled:
             return
-        _recheck["pending"] |= set(check_ids)
-        t = _recheck["thread"]
+        _recheck.pending |= set(check_ids)
+        t = _recheck.thread
         if t is not None and t.is_alive():
             return
         t = threading.Thread(target=_recheck_worker, name="aeos-doctor-recheck", daemon=True)
-        _recheck["thread"] = t
+        _recheck.thread = t
         t.start()
 
 
@@ -707,17 +735,22 @@ def _recheck_worker() -> None:
     while True:
         time.sleep(RECHECK_DELAY_SECONDS)
         with _recheck_lock:
-            ids = sorted(_recheck["pending"])
-            _recheck["pending"] = set()
-            settings = _recheck["settings"]
-            if not ids or not _recheck["enabled"] or settings is None:
-                _recheck["thread"] = None
+            ids = sorted(_recheck.pending)
+            _recheck.pending = set()
+            settings = _recheck.settings
+            if not ids or not _recheck.enabled or settings is None:
+                _recheck.thread = None
                 return
         try:
             from aeos.core.db import session_scope
             from aeos.doctor.runner import run_doctor
 
-            with session_scope() as s:
-                run_doctor(settings, s, checks=ids, functional=False, actor="system", trigger="recheck")
+            local, remote = recheckable(ids), remote_recheckable(ids)
+            if local:
+                with session_scope() as s:
+                    run_doctor(settings, s, checks=local, functional=False, actor="system", trigger="recheck")
+            if remote:
+                with session_scope() as s:
+                    run_doctor(settings, s, checks=remote, functional=True, actor="system", trigger="recheck")
         except Exception:  # visible as the still-STALE result; never fatal
             log.exception("targeted doctor recheck failed")

@@ -19,14 +19,15 @@ router = APIRouter(tags=["worker_runtime"])
 
 @router.get("/api/worker-runtime/sandbox")
 def sandbox(principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
-    return sandbox_readiness(db, domain=domain.value)
+    return {"source": "sandbox probes + recorded containment reports on this host",
+            **sandbox_readiness(db, domain=domain.value)}
 
 
 @router.get("/api/worker-runtime/engine")
 def engine(principal: CurrentPrincipal) -> dict[str, Any]:
     from aeos.worker_runtime.opencode import opencode_status
 
-    return opencode_status()
+    return {"source": "OpenCode binary probe on this host", **opencode_status()}
 
 
 @router.get("/api/worker-runtime/containment")

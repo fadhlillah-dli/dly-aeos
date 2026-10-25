@@ -153,6 +153,7 @@ export default function SystemMapPage() {
         source={data?.lens_source}
         checkedAt={data?.checked_at ?? null}
         evidenceLimit="Relasi menunjukkan kemungkinan hubungan sesuai scope, bukan izin aktif; yang tidak diinstrumentasi = UNKNOWN"
+        relatedDecisionsHref="/decisions?target_type=architecture_snapshot"
         mode={data?.mode}
       />
       <div className="mb-3 flex flex-wrap items-center gap-2">

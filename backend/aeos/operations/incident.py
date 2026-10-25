@@ -385,6 +385,56 @@ def open_follow_up(session: Session, incident_id: str, *, actor_user_id: str, do
     return {"incident_id": inc.id, "proposal_id": proposal.id, "proposal_status": proposal.status}
 
 
+def open_from_alert(session: Session, alert_id: str, *, actor: str, domain: str | None,
+                    owner: str = "") -> tuple[OpsIncident, bool]:
+    """§05 step 15 / §33: an operations result (an alert) opens an incident, which then feeds the lawful change
+    process (follow-up proposal, regression/eval case). One incident per alert: (incident, created)."""
+    from aeos.models.operations_ext import OpsAlert
+    from aeos.operations._util import iso
+
+    alert = session.get(OpsAlert, alert_id)
+    if alert is None or (alert.domain is not None and alert.domain != domain):
+        raise NotFound("alert not found")
+    existing = session.scalar(select(OpsIncident).where(OpsIncident.source == "alert",
+                                                        OpsIncident.source_ref == alert.id))
+    if existing is not None:
+        return existing, False
+    inc = open_incident(
+        session, title=f"Alert: {alert.title}", actor=actor, owner=owner, source="alert", source_ref=alert.id,
+        domain=alert.domain, project_id=alert.project_id,
+        note=f"{alert.severity} {alert.kind}: {alert.title} ({alert.occurrences}x, pertama {iso(alert.first_seen_at)})")
+    return inc, True
+
+
+def propose_eval_case(session: Session, incident_id: str, *, actor_user_id: str, domain: str, title: str,
+                      expected: str) -> dict[str, Any]:
+    """§16/§33 "menambah regression/eval case": file a CANDIDATE eval case from this incident's failure (its
+    alert, else its first visible evidence) for human review; the incident records it as a follow-up."""
+    from aeos.evaluation import facade as evaluation
+
+    inc = _get(session, incident_id)
+    if inc.source == "alert" and inc.source_ref:
+        source_type, source_id = "alert", inc.source_ref
+    else:
+        visible = sorted(visible_evidence(session, inc, domain) & set(inc.evidence_ids or []))
+        if not visible:
+            raise ValidationFailed("the incident has no alert or evidence to derive an eval case from; add evidence "
+                                   "to its timeline first", code="EVAL_CASE_NO_SOURCE")
+        source_type, source_id = "evidence", visible[0]
+    cand = evaluation.propose_case_from_failure(session, source_type=source_type, source_id=source_id,
+                                                actor_user_id=actor_user_id, title=title, expected=expected,
+                                                viewer_domain=domain)
+    inc.follow_ups = [*(inc.follow_ups or []), {"kind": "eval_case_candidate", "id": cand.id, "domain": domain,
+                                                 "status": cand.status, "at": utcnow().isoformat()}]
+    _touch(inc, {**_entry(actor_user_id, "follow_up", f"eval case candidate {cand.id} filed for review"),
+                 "domain": domain})
+    session.flush()
+    audit.record(session, actor_type="user", actor_id=actor_user_id, action="ops.incident.eval_case",
+                 target_type="incident", target_id=inc.id, domain=domain,
+                 details={"candidate_id": cand.id, "source_type": source_type, "source_id": source_id})
+    return {"incident_id": inc.id, "candidate_id": cand.id, "candidate_status": cand.status}
+
+
 def list_incidents(session: Session, *, domain: str | None, status: str | None = None,
                    limit: int = 100) -> list[dict[str, Any]]:
     q = select(OpsIncident).order_by(OpsIncident.created_at.desc()).limit(min(limit, 500))
@@ -393,6 +443,25 @@ def list_incidents(session: Session, *, domain: str | None, status: str | None =
     rows = list(session.scalars(q))
     # platform-wide incidents (domain None) are listed for every domain; domain incidents only for theirs
     return [scoped(i, domain, session) for i in rows if i.domain is None or i.domain == domain]
+
+
+def incidents_for_project(session: Session, project: Any) -> list[dict[str, Any]]:
+    """Scoped views (project domain) of the incidents that concern *project*, oldest first: incidents recorded
+    for it; platform-wide incidents (emergency stop) whose blast radius derived from records names it; and, for
+    the platform project (DLY AEOS documents itself), every platform-wide incident. Read-only."""
+    out = []
+    for inc in session.scalars(select(OpsIncident).order_by(OpsIncident.created_at, OpsIncident.id)):
+        if inc.domain is not None and inc.domain != project.domain:
+            continue
+        if inc.project_id is not None:
+            if inc.project_id != project.id:
+                continue
+        else:
+            affected = ((inc.derived_blast_radius or {}).get(project.domain) or {}).get("projects") or []
+            if not (getattr(project, "is_platform", False) or project.id in affected):
+                continue
+        out.append(scoped(inc, project.domain, session))
+    return out
 
 
 def get_incident(session: Session, incident_id: str, *, domain: str | None) -> dict[str, Any]:

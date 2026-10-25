@@ -22,6 +22,27 @@ from aeos.operations._util import iso
 
 SEVERITIES = ("INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL")
 
+# The alert rules this controller raises (kind -> severity, condition). One source for the producers (sli,
+# emergency, release) and for the Operations documents of the platform project (§27 08. Alerts).
+ALERT_RULES: dict[str, dict[str, str]] = {
+    "stale_leases": {"severity": "HIGH", "condition": "lease kedaluwarsa/tanpa heartbeat masih ACTIVE (per domain)"},
+    "sync_conflict": {"severity": "MEDIUM", "condition": "konflik revisi pada sinkronisasi eksternal (per domain)"},
+    "integration_failure": {"severity": "MEDIUM", "condition": "integrasi eksternal gagal/kedaluwarsa (per domain)"},
+    "restore_untested": {"severity": "MEDIUM", "condition": "belum ada backup yang lolos restore test (platform)"},
+    "sli_breach": {"severity": "MEDIUM", "condition": "SLI di luar target yang ditetapkan pemilik"},
+    "error_budget_exhausted": {"severity": "HIGH", "condition": "error budget SLI habis dalam jendela pengukuran"},
+    "release_failure": {"severity": "HIGH", "condition": "build/promote/rollback rilis controller gagal"},
+    "emergency_stop": {"severity": "CRITICAL", "condition": "emergency stop dijalankan operator"},
+}
+NOTIFICATION = ("Event alert.raised / alert.resolved ke Control Center (stream SSE, Riwayat → SLI, alert & flag) "
+                "dan GET /api/ops/alerts; tidak ada kanal eksternal (email/chat) yang dikonfigurasi.")
+ESCALATION = ("Alert → insiden (POST /api/ops/alerts/{id}/incident) dengan owner manusia → bila perlu emergency stop "
+              "(runbook incident-containment) → usulan perubahan / eval case untuk review manusia.")
+
+
+def rule_severity(kind: str) -> str:
+    return ALERT_RULES.get(kind, {}).get("severity", "MEDIUM")
+
 
 def alert_view(a: OpsAlert) -> dict[str, Any]:
     return {

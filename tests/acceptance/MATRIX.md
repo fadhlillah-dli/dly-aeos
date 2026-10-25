@@ -104,8 +104,8 @@ are now PASS (see "Fixed by the wave-2 seams").
 | 2.10 | Dashboard Personal mencoba run/evidence Office | `test_workforce.py::test_personal_dashboard_cannot_reach_office_runs_or_evidence`; `test_domain_scope.py::test_personal_session_cannot_see_office_records` | PASS | E2 |
 | 2.11 | Fixture roster/run ditampilkan saat belum ada runtime | `test_workforce.py::test_demo_roster_and_runs_are_labelled_and_never_counted` | PASS | E2 |
 | 2.12 | Role/model/mode diganti | `test_workforce.py::test_role_model_change_is_versioned_and_history_is_unchanged` | PASS | E2 |
-| 2.13 | Candidate skill meminta auto-update policy | `test_self_build.py::test_candidate_changing_active_policy_or_verifier_is_quarantined_until_human_review` | PASS | E2 |
-| 2.14 | Controller membangun versi AEOS baru | `test_self_build.py::test_candidate_rewriting_grader_or_pipeline_cannot_fake_its_pass` | PASS | E2 |
+| 2.13 | Candidate skill meminta auto-update policy | `test_self_build.py::test_candidate_changing_active_policy_or_verifier_is_quarantined_until_human_review` (indirect: a candidate that changes active policy is quarantined). Direct proof of the row, outside the trusted suite: `tests/unit/test_workforce_skill_import.py::test_pack_requesting_auto_update_or_hooks_is_refused` (a skill pack requesting auto-update or hooks is refused at import) | PASS | E2 |
+| 2.14 | Controller membangun versi AEOS baru | `test_self_build.py::test_candidate_rewriting_grader_or_pipeline_cannot_fake_its_pass` (indirect: the candidate cannot fake its own pass). Direct proof of the row, outside the trusted suite: `tests/unit/test_verification_scope.py::test_capability_audit_dashboard_and_master_paths_are_protected` (capability/audit/dashboard/master paths of a self-build candidate are protected) | PASS | E2 |
 
 ## Table 3 — Transparansi tools/repo dan perubahan arsitektur
 

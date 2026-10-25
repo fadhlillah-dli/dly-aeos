@@ -447,6 +447,8 @@ def list_components(
                      "manifest_version": rec.manifest_version} if rec else None,
         "source": "InstallManifest (DESIGN) + observasi bertanggal + Decision registry + run/ledger records",
         "checked_at": _iso(last.finished_at) if last else None,
+        # observation freshness (fresh/stale) is judged at this instant; checked_at null = never reconciled
+        "generated_at": _iso(now),
         "mode": "LIVE" if any_obs else "DESIGN",
         "domain": domain,
     }
@@ -546,6 +548,7 @@ def coverage(session: Session, *, domain: str | None, compact: bool = False,
         result["last_run"] = run_view(last)
         result["source"] = "ReconciliationRun + ComponentObservation"
         result["checked_at"] = result["last_reconciled_at"]
+        result["generated_at"] = _iso(utcnow())  # checked_at null = never reconciled
         result["mode"] = "LIVE" if full else "DESIGN"
     return result
 
@@ -629,7 +632,8 @@ def component_relations(session: Session, component_id: str, *, domain: str | No
         raise NotFound("component not found")
     now = utcnow()
     checks = checks_by_component(session, domain)
-    outgoing, incoming = [], []
+    outgoing: list[dict[str, Any]] = []
+    incoming: list[dict[str, Any]] = []
     q = select(ComponentRelation).where(
         (ComponentRelation.source_id == component_id) | (ComponentRelation.target_id == component_id)
     )
@@ -1401,7 +1405,7 @@ def system_map(session: Session, *, lens: str, domain: str | None, category: str
         "filters": {"project_id": project_id, "environment": environment, "category": category,
                     "environments": sorted({(c.scope or {}).get("environment", "local") for c in all_comps.values()})},
         "source": LENS_SOURCES[lens], "checked_at": _iso(last.finished_at) if last else None,
-        "mode": "DESIGN" if lens == "DESIGN" else "LIVE", "domain": domain,
+        "generated_at": _iso(utcnow()), "mode": "DESIGN" if lens == "DESIGN" else "LIVE", "domain": domain,
         "note": "Peta logis ini adalah projection; koneksi ke node menunjukkan kemungkinan hubungan sesuai scope, "
                 "bukan izin aktif (§36).",
     }
@@ -1441,7 +1445,7 @@ def blast_radius(session: Session, component_id: str, *, domain: str | None, dir
         # A depends on B (A -> B): a change in B affects A (dependents walk edges backwards).
         key = e.target_id if direction == "dependents" else e.source_id
         adj.setdefault(key, []).append(e)
-    seen = {component_id: (0, [component_id], [])}
+    seen: dict[str, tuple[int, list[str], list[str]]] = {component_id: (0, [component_id], [])}
     queue: deque[str] = deque([component_id])
     while queue:
         cur = queue.popleft()
@@ -1454,7 +1458,7 @@ def blast_radius(session: Session, component_id: str, *, domain: str | None, dir
                 continue
             seen[nxt] = (depth + 1, [*path, nxt], [*via, e.relation])
             queue.append(nxt)
-    items = []
+    items: list[dict[str, Any]] = []
     for cid, (depth, path, via) in seen.items():
         if cid == component_id:
             continue
@@ -1561,5 +1565,5 @@ def drift_list(session: Session, *, domain: str | None, include_resolved: bool =
             "severity_policy": {"source": policy.get("source"), "severity": policy["severity"],
                                 "warnings": policy.get("warnings") or []},
             "source": "DriftFinding (projection rekonsiliasi)", "checked_at": _iso(last.finished_at) if last else None,
-            "mode": "LIVE" if last else "DESIGN",
+            "generated_at": _iso(utcnow()), "mode": "LIVE" if last else "DESIGN",
             "note": "Drift bukan otomatis insiden keamanan; severity mengikuti policy dan bukti (§36)."}

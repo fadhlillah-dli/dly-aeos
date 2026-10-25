@@ -316,6 +316,7 @@ export default function ReadinessPage() {
         source={checks.data?.source}
         checkedAt={checks.data?.checked_at ?? null}
         evidenceLimit="CONNECTED ≠ VERIFIED; VERIFIED hanya untuk skenario yang disebut; UNKNOWN tidak dianggap lulus"
+        relatedDecisionsHref="/decisions?target_type=secret_exposure"
         actions={isAdmin ? <RunControls groups={checks.data?.groups ?? []} /> : <span className="text-xs text-ink-3">VIEWER: hanya baca</span>}
       />
       {!lastRun && (

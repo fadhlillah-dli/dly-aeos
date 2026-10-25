@@ -262,8 +262,8 @@ def compute_drift(session: Session, *, evaluated: set[str] | None = None,
         ))
     for rel in session.scalars(select(ComponentRelation).where(ComponentRelation.tombstoned_at.is_(None))):
         for end in (rel.source_id, rel.target_id):
-            comp = comps.get(end)
-            if comp is None or comp.tombstoned_at is not None:
+            end_comp = comps.get(end)
+            if end_comp is None or end_comp.tombstoned_at is not None:
                 items.append(DriftItem(
                     rel.source_id, "obsolete-reference", severity(policy, "obsolete-reference", "default"),
                     f"Relasi {rel.relation} ({rel.lens}) masih merujuk komponen '{end}' yang sudah tidak terdaftar",
@@ -272,16 +272,16 @@ def compute_drift(session: Session, *, evaluated: set[str] | None = None,
                     lens_from=rel.lens, lens_to="DESIGN", domain_scope=domain_scope(comps.get(rel.source_id)),
                 ))
     for (cid, _dim), obs in latest.items():
-        comp = comps.get(cid)
-        if comp is None or comp.tombstoned_at is None or is_stale(obs, now):
+        tomb = comps.get(cid)
+        if tomb is None or tomb.tombstoned_at is None or is_stale(obs, now):
             continue
-        if obs.observed_at >= comp.tombstoned_at:
+        if obs.observed_at >= tomb.tombstoned_at:
             items.append(DriftItem(
                 cid, "obsolete-reference", severity(policy, "obsolete-reference", "default"),
                 "Komponen sudah dihapus dari manifest (tombstone) tetapi masih teramati",
                 key=f"observation:{obs.dimension}", detail={"observation_id": obs.id, "tombstoned_at":
-                                                            comp.tombstoned_at.isoformat()},
-                lens_from="OBSERVED", lens_to="DESIGN", domain_scope=domain_scope(comp),
+                                                            tomb.tombstoned_at.isoformat()},
+                lens_from="OBSERVED", lens_to="DESIGN", domain_scope=domain_scope(tomb),
             ))
     return items
 

@@ -79,8 +79,10 @@ def fetch_openrouter_models(client: httpx.Client) -> list[dict[str, Any]]:
 
 
 def _apply_openrouter(route: ModelRoute, m: dict[str, Any], now: datetime) -> None:
-    pricing = m.get("pricing") if isinstance(m.get("pricing"), dict) else {}
-    keep = {k: pricing.get(k) for k in ("prompt", "completion", "request", "image", "input_cache_read") if k in pricing}
+    raw_pricing = m.get("pricing")
+    pricing: dict[str, Any] = raw_pricing if isinstance(raw_pricing, dict) else {}
+    keep: dict[str, Any] = {k: pricing.get(k) for k in ("prompt", "completion", "request", "image", "input_cache_read")
+                            if k in pricing}
     route.pricing = {**keep, "basis": "OpenRouter catalog", "unit": "USD per token"}
     route.pricing_checked_at = now
     prompt, completion = pricing.get("prompt"), pricing.get("completion")
@@ -94,7 +96,8 @@ def _apply_openrouter(route: ModelRoute, m: dict[str, Any], now: datetime) -> No
     if expiry is not None:
         route.free_until = expiry if route.is_free == "YES" else route.free_until
         route.expires_note = f"catalog expiration_date {m.get('expiration_date')}"
-    top = m.get("top_provider") if isinstance(m.get("top_provider"), dict) else {}
+    raw_top = m.get("top_provider")
+    top: dict[str, Any] = raw_top if isinstance(raw_top, dict) else {}
     terms = dict(route.data_terms or {})
     # Not a data-terms review: the catalog only exposes moderation; terms_checked_at is unchanged.
     terms["catalog"] = {"checked_at": now.isoformat(), "is_moderated": top.get("is_moderated")}
@@ -292,7 +295,8 @@ def refresh_opencode_catalog(session: Session, settings: Settings) -> dict[str, 
         return {"status": "FAILED", "checked_at": now.isoformat(),
                 "reason": f"opencode models exit {proc.returncode}: {redact_text(proc.stderr)[:200]}"}
     listed = parse_opencode_models(proc.stdout)
-    present, missing = [], []
+    present: list[str] = []
+    missing: list[str] = []
     for route in session.scalars(select(ModelRoute).where(ModelRoute.provider == "opencode-zen")):
         route.availability = "AVAILABLE" if route.model_id in listed else "MISSING"
         route.availability_checked_at = now

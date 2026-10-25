@@ -80,8 +80,12 @@ quarantined as well.
 * Every privileged/external action → `aeos.audit.service.record(...)`; every state change the
   dashboard shows → `aeos.events.service.emit(...)`.
 * API errors: raise `aeos.core.errors.*`; envelope `{"error": {"code", "message", "details"}}`.
-* List endpoints return `{"items": [...], "source": "...", "checked_at": ..., "mode": ...}` where
-  freshness applies.
+* List endpoints return `{"items": [...], "source": "...", "checked_at": ..., "mode": ...}`; claim
+  objects (status/summary) carry the same `source` + `checked_at`. When nothing was ever checked,
+  `checked_at` is null and `generated_at` states when the store was read. Every `/api` response carries
+  `X-AEOS-Version`, `X-AEOS-Schema-Version` and `X-AEOS-Settings-Hash` (version/config of the claim);
+  evidence stays per claim (`evidence_ids`/`evidence_level` on the record, never a page-wide level).
+  `tests/unit/test_api_envelope_contract.py` enforces this.
 * Cross-platform: `pathlib`, no shell=True, no POSIX-only calls without a Windows path (and vice
   versa); `psutil` for process trees. CI runs Windows, macOS and Linux.
 * Tests: `pytest` (`tests/`), isolated data dir via fixtures in `tests/conftest.py`. Tests that

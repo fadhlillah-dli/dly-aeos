@@ -78,6 +78,13 @@ def test_mypy_baseline_only_shrinks():
         "aeos.workforce.demo", "aeos.workforce.loop", "aeos.workforce.scheduler",
     }
     assert exempt <= baseline_2026_10_19, sorted(exempt - baseline_2026_10_19)
+    # fixed modules never return to the exemption (cleaned 2026-10-19 by K4)
+    fixed = {m for m in baseline_2026_10_19 if m.startswith(("aeos.docs_engine.", "aeos.doctor.", "aeos.inventory."))}
+    fixed |= {"aeos.policy.decisions", "aeos.policy.router", "aeos.policy.snapshot", "aeos.publisher.targets",
+              "aeos.routing.catalog", "aeos.routing.service", "aeos.worker_runtime.processes",
+              "aeos.workforce.demo", "aeos.workforce.loop"}
+    assert len(fixed) == 20 and fixed <= baseline_2026_10_19 and not (exempt & fixed), sorted(exempt & fixed)
+    assert len(exempt) <= 13
 
 
 def test_pii_scan_flags_personal_data_and_tenant_hosts_in_templates():

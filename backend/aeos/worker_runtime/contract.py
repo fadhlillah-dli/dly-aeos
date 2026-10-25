@@ -85,7 +85,8 @@ class _Script:
                     script.requests.append({"path": self.path, "auth": self.headers.get("authorization"),
                                             "model": body.get("model"), "stream": body.get("stream"),
                                             "max_tokens": body.get("max_tokens", body.get("max_completion_tokens")),
-                                            "tools": tools, "raw": raw.decode("utf-8", "replace")})
+                                            "tools": tools, "raw": raw.decode("utf-8", "replace"),
+                                            "tool_defs": [t for t in body.get("tools") or [] if isinstance(t, dict)]})
                     n = len(script.requests)
                 if script.hang:
                     time.sleep(120)
@@ -222,8 +223,13 @@ def _phase_run(binary: str, root: Path, repo: Path, outside: Path, marker: str) 
                           f"max_tokens sent: {caps[:5]} (cap {OUTPUT_CAP})"))
         offered = sorted({t for r in reqs for t in r["tools"] if t})
         unexpected = [t for t in offered if t not in ALLOWED_TOOL_NAMES]
-        results.append(_r("tool_schema", bool(offered) and not unexpected and "read" in offered
-                          and bool({"write", "edit"} & set(offered)), f"tools offered: {offered}"))
+        from aeos.inventory import facade as inventory
+
+        # §25 admission "schema": the hash of the tool definitions the engine really offered the model
+        schema_hash = inventory.tool_schema_hash([d for r in reqs for d in r.get("tool_defs") or []])
+        results.append({**_r("tool_schema", bool(offered) and not unexpected and "read" in offered
+                             and bool({"write", "edit"} & set(offered)), f"tools offered: {offered}"),
+                        "tool_schema_hash": schema_hash, "tools": offered})
         widened = [t for t in offered if t in DENIED_TOOL_NAMES or HOSTILE_MCP in t]
         results.append(_r("project_config_ignored", not widened,
                           "repository opencode.json (bash/webfetch/MCP) did not widen the tool set" if not widened
@@ -320,4 +326,18 @@ def record_contract_test(session: Any, report: dict[str, Any], *, actor: str) ->
                  action="worker_runtime.contract_test.run", target_type="engine", target_id="opencode",
                  result="SUCCESS" if report.get("overall") == "PASS" else "FAILURE",
                  details={"overall": report.get("overall"), "summary": report.get("summary"), "evidence_id": ev.id})
+    schema = next((r for r in report.get("results") or [] if r.get("check") == "tool_schema"
+                   and r.get("tool_schema_hash")), None)
+    if schema is not None:
+        from aeos.core.errors import ValidationFailed
+        from aeos.inventory import facade as inventory
+
+        status = {"PASS": "VERIFIED", "FAIL": "FAILED"}.get(str(report.get("overall")), "NOT_TESTED")
+        try:
+            inventory.record_tool_schema_observation(
+                session, component_id="opencode", schema_hash=schema["tool_schema_hash"],
+                observer="aeos.worker_runtime.contract", status=status, evidence_id=ev.id,
+                tools=schema.get("tools") or [])
+        except ValidationFailed:  # inventory not seeded: the evidence above still records the hash
+            pass
     return ev.id

@@ -146,6 +146,8 @@ def checks_view(session: Session, *, domain: str | None, group: str | None = Non
         "last_failure": last_failure(session, last),
         "source": "Readiness Doctor: probe kode tanpa LLM (CheckResult)",
         "checked_at": last.finished_at.isoformat() if last and last.finished_at else None,
+        # effective_status (STALE/EXPIRED) is evaluated at this instant; checked_at null = no run yet
+        "generated_at": now.isoformat(),
         "mode": "LIVE",
         "domain": domain,
         "status_legend": {
@@ -172,19 +174,22 @@ def capabilities_view(session: Session, *, domain: str | None, project_id: str |
         it["remedies"] = [r for r in it["remedies"] if r.get("check_id") not in hidden]
         # Residual risks quote check evidence too (e.g. PERSONAL branch protection): keep only those of the
         # checks this session may see.
-        seen: set[str] = set()
-        it["residual_risks"] = [r for c in it["checks"] for r in (c.get("residual_risks") or [])
-                                if not (r in seen or seen.add(r))]
+        it["residual_risks"] = list(dict.fromkeys(r for c in it["checks"] for r in (c.get("residual_risks") or [])))
         if len(it["checks"]) < before:
             it["reasons"].append("catatan: pemeriksaan ber-scope domain lain tidak ditampilkan; pilih domain "
                                  "PERSONAL/OFFICE untuk melihat detailnya")
+    from aeos.doctor import provider_watch
+
     last = latest_run(session)
     return {
         "items": items,
         "human_only": [{"label": h, "status": "HUMAN_ONLY",
                         "note": "Keputusan manusia; bukan capability worker (§08, U-09)."} for h in HUMAN_ONLY],
+        # §08 STALE-on-permission-change: which provider calls are observed per call, and which are not yet
+        "permission_watch": provider_watch.status(),
         "source": "Capability gates dari CheckResult terbaru (§08)",
         "checked_at": last.finished_at.isoformat() if last and last.finished_at else None,
+        "generated_at": utcnow().isoformat(),  # gates evaluated now; checked_at null = no Doctor run yet
         "mode": "LIVE",
         "domain": domain,
     }

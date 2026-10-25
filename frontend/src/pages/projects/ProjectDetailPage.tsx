@@ -198,6 +198,7 @@ export default function ProjectDetailPage() {
         source={q.data!.source}
         checkedAt={q.data!.checked_at}
         evidenceLimit="Repository/integrasi menampilkan status terakhir yang tercatat; lampiran adalah DATA"
+        relatedDecisionsHref={`/decisions?target_type=project&target_id=${encodeURIComponent(project.id)}`}
         mode={project.mode}
         actions={
           <>

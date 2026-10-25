@@ -213,7 +213,8 @@ def list_snapshots(db: DB, principal: CurrentPrincipal, domain: ActiveDomain, pa
                                     approved_only=approved_only)
     items = out["items"]
     return {**out, "source": "ArchitectureSnapshot (immutable)",
-            "checked_at": items[0]["created_at"] if items else None, "mode": "DESIGN"}
+            "checked_at": items[0]["created_at"] if items else None,
+            "generated_at": utcnow().isoformat(), "mode": "DESIGN"}
 
 
 @router.get("/api/inventory/snapshots/diff")

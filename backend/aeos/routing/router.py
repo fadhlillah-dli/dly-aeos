@@ -152,6 +152,7 @@ def list_routes(db: DB, principal: CurrentPrincipal, pool: str | None = None, st
         "items": items,
         "source": "model_routes (seed DESIGN dari master §23 + katalog E1 + observasi bridge)",
         "checked_at": _iso(last.created_at) if last else (_iso(max(checks)) if checks else None),
+        "generated_at": _iso(utcnow()),  # when this registry view was read (checked_at null = never refreshed)
         "catalog_refresh": ({"at": _iso(last.created_at), "status": last.status, "results": last.results}
                             if last else None),
         # DESIGN as long as any seeded design row is listed: a few catalog-discovered LIVE rows never

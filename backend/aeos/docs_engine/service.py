@@ -94,9 +94,12 @@ def visuals_dir(settings: Settings, project: Project) -> Path:
 
 
 # Trusted, project-scoped evidence kinds that §28 timings depend on (referenced by id, never copied as status).
-SIGNAL_EVIDENCE_KINDS = ("PRODUCTION_VALIDATION", "RESTORE_TEST", "SCREENSHOT", *r.VA_EVIDENCE_KINDS,
-                         *r.PT_EVIDENCE_KINDS)
-_SUMMARY_KEYS = ("scope", "method", "tools", "remediation", "target", "environment")
+# RUNTIME_OBSERVATION: the deployment observer's read-only check of the registered production/staging target
+# (delivery.deployment.observe) - the production-validation signal of the 08 Operations documents.
+SIGNAL_EVIDENCE_KINDS = ("PRODUCTION_VALIDATION", "RUNTIME_OBSERVATION", "RESTORE_TEST", "SCREENSHOT",
+                         *r.VA_EVIDENCE_KINDS, *r.PT_EVIDENCE_KINDS)
+_SUMMARY_KEYS = ("scope", "method", "tools", "remediation", "target", "environment", "status", "observed_at",
+                 "expected_commit", "reported_commit", "route", "viewport", "provenance", "tester", "performed_on")
 
 
 def evidence_refs(session: Session, project: Project) -> list[r.EvidenceRef]:
@@ -107,14 +110,102 @@ def evidence_refs(session: Session, project: Project) -> list[r.EvidenceRef]:
     out = []
     for ev in rows:
         inline = ev.inline if isinstance(ev.inline, dict) else {}
+        # small JSON evidence keeps its (redacted) content inline, a larger one its scalar summary; top-level
+        # inline keys win
+        content, summ = inline.get("content"), inline.get("summary")
+        body: dict[str, Any] = {**(summ if isinstance(summ, dict) else {}),
+                                **(content if isinstance(content, dict) else {}), **inline}
         env = ev.environment if isinstance(ev.environment, dict) else {}
-        summary = tuple((k, redact_text(str(inline[k]))[:500]) for k in _SUMMARY_KEYS
-                        if isinstance(inline.get(k), (str, int, float)) and str(inline[k]).strip())
+        summary = tuple((k, redact_text(str(body[k]))[:500]) for k in _SUMMARY_KEYS
+                        if isinstance(body.get(k), (str, int, float)) and str(body[k]).strip())
+        environment = env.get("name") or env.get("environment") or env.get("deployment_environment") or ""
         out.append(r.EvidenceRef(id=ev.id, kind=ev.kind, claim=redact_text(ev.claim or "")[:200], origin=ev.origin,
                                  evidence_level=ev.evidence_level, commit=str(env.get("commit") or "") or None,
-                                 environment=str(env.get("name") or env.get("environment") or "") or None,
+                                 environment=str(environment) or None,
                                  created_at=ev.created_at.isoformat() if ev.created_at else None, summary=summary))
     return out
+
+
+def repo_runbooks(project: Project) -> list[r.RunbookSource]:
+    """The reviewed runbooks of the project's own repository: for the platform project ``docs/runbooks/*.md``
+    (Trigger / Authority / Steps / Verification / rollback sections). Product repositories are not read here."""
+    if not project.is_platform:
+        return []
+    from aeos.core.paths import repo_root
+
+    out = []
+    for path in sorted((repo_root() / "docs" / "runbooks").glob("*.md")):
+        if path.stem.lower() == "readme":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        title = path.stem
+        sections: list[tuple[str, str]] = []
+        head: str | None = None
+        buf: list[str] = []
+        for line in text.splitlines():
+            if line.startswith("# ") and title == path.stem:
+                title = line[2:].strip().removeprefix("Runbook:").strip()
+            elif line.startswith("## "):
+                if head is not None:
+                    sections.append((head, "\n".join(buf).strip()))
+                head, buf = line[3:].strip().lower(), []
+            elif head is not None:
+                buf.append(line)
+        if head is not None:
+            sections.append((head, "\n".join(buf).strip()))
+        out.append(r.RunbookSource(key=path.stem, title=title, path=f"docs/runbooks/{path.name}",
+                                   sections=tuple((h, redact_text(b)) for h, b in sections if b)))
+    return out
+
+
+def _incident_info(v: dict[str, Any]) -> r.IncidentInfo:
+    def strs(key: str) -> tuple[str, ...]:
+        return tuple(str(x) for x in v.get(key) or [] if str(x).strip())
+
+    timeline = tuple((str(e.get("at") or ""), str(e.get("kind") or ""), redact_text(str(e.get("note") or ""))[:500],
+                      tuple(str(x) for x in e.get("evidence_ids") or []))
+                     for e in v.get("timeline") or [] if isinstance(e, dict))
+    def radius(d: str, br: dict[str, Any]) -> str:
+        caps = ", ".join(br.get("revoked_capability_kinds") or []) or "-"
+        comps = ", ".join(br.get("components") or []) or "-"
+        return (f"{d}: proyek {len(br.get('projects') or [])}, run {len(br.get('runs') or [])}, side effect "
+                f"{len(br.get('side_effect_targets') or [])}, capability {caps}, komponen {comps}")
+
+    derived = tuple(radius(d, br) for d, br in sorted((v.get("derived_blast_radius") or {}).items())
+                    if isinstance(br, dict) and br)
+    follow = [f for f in v.get("follow_ups") or [] if isinstance(f, dict)]
+    return r.IncidentInfo(
+        id=str(v["id"]), title=str(v.get("title") or ""), status=str(v.get("status") or ""),
+        owner=str(v.get("owner") or ""), source=str(v.get("source") or ""), source_ref=v.get("source_ref"),
+        created_at=v.get("created_at"), resolved_at=v.get("resolved_at"), impact=str(v.get("impact") or ""),
+        declared_blast_radius=str(v.get("declared_blast_radius") or ""), derived_blast_radius=derived,
+        timeline=timeline, hypotheses=strs("hypotheses"), root_cause=str(v.get("root_cause") or ""),
+        root_cause_evidence=strs("root_cause_evidence_refs"), root_cause_ref=v.get("root_cause_ref"),
+        corrective_actions=tuple(str(a.get("description") or "") + (f" ({a['ref']})" if a.get("ref") else "")
+                                 for a in v.get("corrective_actions") or [] if isinstance(a, dict)),
+        regression_tests=strs("regression_test_ids"), eval_cases=strs("eval_case_refs"),
+        follow_ups=tuple(f"{f.get('kind')} `{f.get('id')}`" for f in follow),
+        follow_up_ids=tuple(str(f.get("id")) for f in follow if f.get("id")),
+        evidence_ids=strs("evidence_ids"), resolution_missing=strs("resolution_requirements"))
+
+
+def platform_ops_facts(project: Project) -> dict[str, str]:
+    """For the platform project only: the 08 Operations facts of this controller (operations facade)."""
+    if not project.is_platform:
+        return {}
+    from aeos.operations import facade as operations
+
+    return operations.platform_operations_facts(project.domain)
+
+
+def incident_infos(session: Session, project: Project) -> list[r.IncidentInfo]:
+    """The incidents that concern this project (AEOS Operations records), already scoped to its domain."""
+    from aeos.operations import facade as operations
+
+    return [_incident_info(v) for v in operations.project_incidents(session, project)]
 
 
 def _changed_files(session: Session, acc: AcceptanceRecord | None) -> list[str]:
@@ -138,8 +229,9 @@ def change_infos(session: Session, project: Project) -> list[r.ChangeInfo]:
 
     Delivery is a hard dependency here (it owns the rollback/contract rules): an import failure surfaces instead of
     silently rendering empty rollback notes and "no contract delta" (fail closed, never a quiet pass)."""
-    from aeos.delivery.governance import CONTRACT_PATHS
+    from aeos.delivery.governance import OWNER_DECISION_KINDS, change_deltas
     from aeos.delivery.pr_bundle import _rollback_notes as rollback_notes
+    from aeos.models.decisions import Decision
 
     out: list[r.ChangeInfo] = []
     prs = session.scalars(select(PullRequestRecord).where(PullRequestRecord.project_id == project.id,
@@ -151,6 +243,14 @@ def change_infos(session: Session, project: Project) -> list[r.ChangeInfo]:
             continue
         acc = session.get(AcceptanceRecord, pr.acceptance_id) if pr.acceptance_id else None
         changed = _changed_files(session, acc)
+        # §28/§32 deltas with the same categories the verifier uses (AEOS *and* product layouts: openapi, proto,
+        # graphql, schema/**, lockfiles); unknown changed set -> no delta claimed
+        deltas = change_deltas(changed) if changed else {"contracts": [], "dependencies": []}
+        pv = session.get(PlanVersion, task.plan_version_id) if task.plan_version_id else None
+        targets = [t for t in (task.id, task.plan_version_id, pv.plan_id if pv else None) if t]
+        decisions = session.scalars(select(Decision).where(
+            Decision.project_id == project.id, Decision.target_id.in_(targets), Decision.status == "ACTIVE",
+            Decision.actor_kind == "HUMAN", Decision.kind.in_(OWNER_DECISION_KINDS)))
         out.append(r.ChangeInfo(
             task_id=task.id, task_key=task.task_key, title=task.title, goal=task.goal or "",
             feature_key=task.feature_key, risk_class=getattr(task, "risk_class", "") or "",
@@ -165,7 +265,8 @@ def change_infos(session: Session, project: Project) -> list[r.ChangeInfo]:
             bundle_evidence_id=pr.bundle_evidence_id,
             # unknown changed set ([]) -> no notes: "no migration changed" would be a claim without evidence
             rollback_notes=tuple(rollback_notes(changed)) if changed else (),
-            contract_deltas=tuple(p for p in changed if any(c in p for c in CONTRACT_PATHS)),
+            contract_deltas=tuple(deltas["contracts"]), dependency_deltas=tuple(deltas["dependencies"]),
+            decision_refs=tuple(sorted(f"{d.kind}:{d.id}" for d in decisions)),
         ))
     return out
 
@@ -195,7 +296,9 @@ def render_signals(session: Session, settings: Settings, project: Project) -> r.
 
         retirement = retirement_mod.checklist(session, settings, project)
     return r.RenderSignals(evidence=evidence_refs(session, project), changes=change_infos(session, project),
-                           improvements=improvement_infos(session, project), retirement=retirement)
+                           improvements=improvement_infos(session, project), retirement=retirement,
+                           incidents=incident_infos(session, project), runbooks=repo_runbooks(project),
+                           platform_ops=platform_ops_facts(project))
 
 
 def known_schema_names(project: Project) -> set[str] | None:
@@ -210,6 +313,52 @@ def known_schema_names(project: Project) -> set[str] | None:
     return names
 
 
+def known_schema_columns(project: Project) -> dict[str, set[str]] | None:
+    """Columns per table (and per mapped class name) of the platform schema at the running commit."""
+    if not project.is_platform:
+        return None
+    from aeos.core.db import Base
+
+    out: dict[str, set[str]] = {name: {c.name for c in t.columns} for name, t in Base.metadata.tables.items()}
+    for m in Base.registry.mappers:
+        out.setdefault(m.class_.__name__, set()).update(c.name for c in m.columns)
+    return out
+
+
+def known_component_names(session: Session, project: Project) -> set[str] | None:
+    """What a context/component diagram of this project must name: for the platform project the registered
+    InstallManifest/inventory components (ids, names, friendly names); other projects → None (UNVERIFIED)."""
+    if not project.is_platform:
+        return None
+    from aeos.models.inventory import ComponentReference
+
+    rows = session.execute(select(ComponentReference.component_id, ComponentReference.name,
+                                  ComponentReference.friendly_name).where(ComponentReference.tombstoned_at.is_(None)))
+    return {str(x) for row in rows for x in row if x} or None
+
+
+def known_route_paths(project: Project) -> set[str] | None:
+    """API paths a sequence diagram may use: the platform's route contract (contracts/api/routes.json)."""
+    if not project.is_platform:
+        return None
+    import json
+
+    from aeos.core.paths import repo_root
+
+    try:
+        routes = json.loads((repo_root() / "contracts" / "api" / "routes.json").read_text(encoding="utf-8"))["routes"]
+    except (OSError, ValueError, KeyError):
+        return None
+    return {str(r).split(" ", 1)[1] for r in routes if " " in str(r)} or None
+
+
+def deployment_environments(session: Session, project: Project) -> list[str]:
+    """Environments of this project with a registered (observe-only) deployment target."""
+    from aeos.delivery import facade as delivery
+
+    return [env for env in ("staging", "production") if delivery.deployment_target(session, project, env)]
+
+
 def render_version(session: Session, settings: Settings, version: PlanVersion, *, persist: bool,
                    render_visuals: bool = True, decision_id: str | None = None,
                    mmdc: vis.MmdcInfo | None = None) -> tuple[r.RenderResult, r.DeltaReport | None, ApprovalState]:
@@ -222,8 +371,12 @@ def render_version(session: Session, settings: Settings, version: PlanVersion, *
     visuals = vis.render_visuals(view.diagrams, visuals_dir(settings, project), enabled=render_visuals, mmdc=mmdc)
     threat_model = view.security.get("threat_model")
     tm = threat_model if isinstance(threat_model, dict) else {}
+    data_items = [str(x.get("data_type") or "") for x in (view.data.get("items") or []) if isinstance(x, dict)]
     vis.verify_visuals(visuals, trust_boundaries=[str(x) for x in (tm.get("trust_boundaries") or [])],
-                       known_tables=known_schema_names(project))
+                       known_tables=known_schema_names(project), known_columns=known_schema_columns(project),
+                       known_components=known_component_names(session, project),
+                       known_routes=known_route_paths(project), data_items=data_items,
+                       deployment_environments=deployment_environments(session, project))
     previous = r.previous_input_hashes(session, project.id) if (persist and state.approved) else {}
     result = r.render_document_set(
         project=project_identity(session, project),
@@ -235,6 +388,62 @@ def render_version(session: Session, settings: Settings, version: PlanVersion, *
     )
     delta = r.sync_document_records(session, result, domain=project.domain) if (persist and state.approved) else None
     return result, delta, state
+
+
+# §41 "Kriteria kesiapan menentukan apakah bagian dokumentasi wajib lengkap sebelum tahap berikutnya": the
+# PROJECT_CREATION and FEATURE_APPROVAL required sections (product1.REQUIRED_SECTIONS) come from the approved plan
+# content only, so their readiness is a pure function of the immutable PlanVersion (cached per version + hash).
+_STAGE_CACHE: dict[tuple[str, str, str], dict[str, list[dict[str, Any]]]] = {}
+_STAGE_CACHE_MAX = 64
+PRE_IMPLEMENTATION_STAGES = (p1.Timing.PROJECT_CREATION, p1.Timing.FEATURE_APPROVAL)
+
+
+def _stage_pending(session: Session, version: PlanVersion) -> dict[str, list[dict[str, Any]]]:
+    key = (version.id, version.manifest_hash or "", r.RENDERER_VERSION)
+    hit = _STAGE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    project = session.get(Project, version.project_id)
+    if project is None:
+        raise NotFound("project not found")
+    result = r.render_document_set(
+        project=project_identity(session, project),
+        version=r.VersionIdentity(id=version.id, plan_id=version.plan_id, version=version.version,
+                                  manifest_hash=version.manifest_hash, approved=True,
+                                  created_at=version.created_at),
+        content=version.content, tasks=task_infos(session, version.id),
+        visuals=vis.source_only(build_view(version.content).diagrams), signals=r.RenderSignals())
+    out: dict[str, list[dict[str, Any]]] = {}
+    for stage in PRE_IMPLEMENTATION_STAGES:
+        docs = {d.logical_doc_id: d for d in result.documents}
+        items = p1.required_pending(result.documents, stage)
+        for it in items:  # who the pending document is about (feature keys / task ids), for per-task gating
+            links = docs[it["logical_doc_id"]].links or {}
+            it["features"] = sorted({feature_slug(x) for x in links.get("requirement") or [] if "/" not in str(x)})
+            it["task_ids"] = [str(x) for x in links.get("task_ids") or []]
+        out[stage.value] = items
+    if len(_STAGE_CACHE) >= _STAGE_CACHE_MAX:
+        _STAGE_CACHE.clear()
+    _STAGE_CACHE[key] = out
+    return out
+
+
+def stage_blockers(session: Session, version: PlanVersion, *, task_id: str | None = None,
+                   feature_key: str | None = None) -> list[dict[str, Any]]:
+    """Required documentation still pending before implementation of *task_id* / *feature_key* starts: every
+    PROJECT_CREATION required section, and the FEATURE_APPROVAL ones (PRD, test plan) of that feature/task.
+
+    Applies to Product 1 plans (``product_home`` plus at least one feature); content without them (fixtures,
+    task-only DAGs) has no Product 1 documents to be ready. Never invents a section; only reports pending ones."""
+    content = version.content if isinstance(version.content, dict) else {}
+    if not isinstance(content.get("product_home"), dict) or not content.get("features"):
+        return []
+    pending = _stage_pending(session, version)
+    out = [{**it, "stage": p1.Timing.PROJECT_CREATION.value} for it in pending[p1.Timing.PROJECT_CREATION.value]]
+    for it in pending[p1.Timing.FEATURE_APPROVAL.value]:
+        if (feature_key and feature_slug(feature_key) in it["features"]) or (task_id and task_id in it["task_ids"]):
+            out.append({**it, "stage": p1.Timing.FEATURE_APPROVAL.value})
+    return out
 
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")

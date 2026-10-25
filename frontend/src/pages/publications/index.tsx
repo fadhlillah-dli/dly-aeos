@@ -43,6 +43,7 @@ export default function PublicationsPage() {
       source={domain === "OFFICE" ? "AEOS DocumentRecord + outbox → Confluence / Jira" : "AEOS DocumentRecord + outbox → Google Drive/Docs / GitHub Issues"}
       checkedAt={docs.data?.checked_at ?? null}
       evidenceLimit="Terpublikasi ≠ diimplementasikan/terverifikasi; status issue adalah proyeksi; CONFIGURED bukan VERIFIED"
+      relatedDecisionsHref="/decisions?target_type=publication"
       mode={docs.data?.mode}
       actions={
         <span className="flex flex-wrap items-center gap-2 text-xs text-ink-3">

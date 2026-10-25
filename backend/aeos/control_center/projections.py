@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from aeos.core.enums import Domain
 from aeos.core.redaction import redact
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.audit import AuditEvent, Event
 from aeos.models.decisions import ArchitectureDecisionRecord, ArchitectureSnapshot, Decision
 from aeos.models.identity import User
@@ -259,11 +259,15 @@ def audit_timeline(session: Session, principal: Principal, domain: Domain, *, ac
     rows = list(session.scalars(q))
     more = len(rows) > limit
     rows = rows[:limit]
+    from aeos.operations import facade as operations
+
+    retention = operations.RetentionMarkers(session)  # §35: the policy rule of each record, never a deletion
     return {
         "items": [{"seq": r.seq, "at": r.at.isoformat(), "actor_type": r.actor_type, "actor_id": r.actor_id,
                    "action": r.action, "target_type": r.target_type, "target_id": r.target_id,
                    "project_id": r.project_id, "domain": r.domain, "result": r.result, "reason": redact(r.reason or ""),
-                   "details": redact(r.details or {})} for r in rows],
+                   "details": redact(r.details or {}), "retention": retention.audit(r)} for r in rows],
+        "retention_source": "policy/retention.yaml (owner decisions; protected path)",
         "next_before": rows[-1].seq if more and rows else None,
         "source": "audit_events (append-only local table; not a WORM guarantee - §34)",
         "checked_at": utcnow().isoformat(),
