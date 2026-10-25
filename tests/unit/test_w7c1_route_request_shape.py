@@ -230,7 +230,15 @@ def test_the_route_view_states_the_request_shape_restriction_and_evaluation_path
     assert view["upstream_request"]["url"] == ZEN_CHAT and view["upstream_request"]["model"] == "mimo-v2.6-flash-free"
     assert view["upstream_request"]["status"] == "READY_SHAPE" and "E1" in view["upstream_request"]["note"]
     assert view["client_restriction"]["status"] == "OWNER_DECISION_REQUIRED"
-    assert view["evaluation_path"]["status"] == "NOT_WIRED" and "NOT-PROVEN" in view["evaluation_path"]["note"]
+    # MIMO is an ARENA route: evaluated only through the eval-only path (cluster C2, ADR-0111 W6-141); a COMPARATOR
+    # route has no evaluation path in this build
+    assert view["evaluation_path"]["status"] == "EVAL_ONLY" and "NOT-PROVEN" in view["evaluation_path"]["note"]
+    assert "jalur khusus evaluasi" in view["execution_path"]["note"]
+    comparator = db.scalars(select(ModelRoute).where(ModelRoute.pool == "COMPARATOR")).first()
+    assert comparator is not None
+    cview = route_view(db, comparator, p)
+    assert cview["evaluation_path"]["status"] == "NOT_WIRED" and "NOT-PROVEN" in cview["evaluation_path"]["note"]
+    assert "belum tersambung" in cview["execution_path"]["note"]
     assert route_view(db, service.get_route(db, QWEN), p)["upstream_request"]["status"] == "REFUSED"
     assert route_view(db, service.get_route(db, DS), p)["evaluation_path"]["status"] == "EVAL_RUN"
     assert route_view(db, service.get_route(db, "claude-native/opus"), p)["upstream_request"] is None

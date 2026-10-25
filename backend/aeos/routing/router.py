@@ -75,27 +75,32 @@ def _runtime_view(r: ModelRoute, runtime: dict[str, Any]) -> dict[str, Any]:
             "drift": drift}
 
 
+def _broker_pools() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(probe pools, eval-only pools) of the broker contract; both empty when the broker is unavailable."""
+    try:
+        from aeos.broker import facade as broker_facade
+
+        return tuple(broker_facade.PROBE_POOLS), tuple(broker_facade.EVAL_POOLS)
+    except ImportError:  # broker unavailable: nothing can execute
+        return (), ()
+
+
 def _execution_path(r: ModelRoute) -> dict[str, Any]:
     if r.pool == "SUPERVISOR":
         return {"status": "NATIVE_BRIDGE", "note": "Hanya lewat binary claude resmi (planning/review)."}
     if r.pool in service.WORKER_EXECUTED_POOLS:
         return {"status": "WORKER_RUNTIME", "note": "Dijalankan worker runtime lewat broker."}
-    probe_pools: tuple[str, ...] = ()
-    try:
-        from aeos.broker import facade as broker_facade
-
-        probe_pools = broker_facade.PROBE_POOLS
-    except ImportError:  # broker unavailable: nothing can execute
-        pass
+    probe_pools, eval_pools = _broker_pools()
     if r.pool in probe_pools:
         local = (" Route LOKAL: pemilik dulu menetapkan endpoint loopback server lokalnya (aeos routes set-endpoint "
                  "atau POST /api/routes/<key>/endpoint); itu konfigurasi baru dan perlu TRIAL baru."
                  if r.pool == "LOCAL" else "")
+        evalrun = ("EvalRun hanya lewat jalur khusus evaluasi (lihat Jalur evaluasi)." if r.pool in eval_pools
+                   else "EvalRun ke pool ini belum tersambung.")
         return {"status": "FEASIBILITY_PROBE_ONLY",
                 "note": f"Pool {r.pool}: tidak melayani task worker. Uji kelayakan lewat probe broker (satu prompt "
                         "sintetis PUBLIC, route gratis berstatus TRIAL/APPROVED oleh pemilik): POST /api/broker/routes/"
-                        f"{r.route_key}/feasibility atau aeos broker probe-route (ADR-0111). EvalRun ke pool ini "
-                        f"belum tersambung.{local}"}
+                        f"{r.route_key}/feasibility atau aeos broker probe-route (ADR-0111). {evalrun}{local}"}
     return {"status": "NOT_WIRED",
             "note": f"Pool {r.pool}: broker tidak melayani route ini (bukan task worker, bukan probe kelayakan)."}
 
@@ -106,6 +111,13 @@ def _evaluation_path(r: ModelRoute) -> dict[str, Any]:
         return {"status": "PLANNING_BASELINE", "note": "Dievaluasi sebagai baseline perencanaan (bukan EvalRun pekerja)."}
     if r.pool in service.WORKER_EXECUTED_POOLS:
         return {"status": "EVAL_RUN", "note": "EvalRun memakai task pekerja yang dieksekusi dan diverifikasi lewat rute ini."}
+    if r.pool in _broker_pools()[1]:
+        # ADR-0111 amendment W6-141: an ARENA route serves only TaskSpecs bound to a RUNNING EvalRun of exactly it
+        return {"status": "EVAL_ONLY",
+                "note": f"Pool {r.pool}: EvalRun lewat jalur khusus evaluasi saja - hanya task yang terikat EvalRun "
+                        "RUNNING untuk rute ini (grant broker ber-scope evaluasi; PERSONAL, gratis, TRIAL/APPROVED oleh "
+                        "pemilik), tidak pernah task biasa. Hasil pada rute nyata dan scorecard perbandingan arena (M6) "
+                        "NOT-PROVEN sampai dijalankan."}
     return {"status": "NOT_WIRED",
             "note": f"Pool {r.pool}: EvalRun/scorecard arena belum tersambung (DESIGN, NOT-PROVEN). Probe kelayakan "
                     "hanya menjawab 'apakah rute merespons', bukan kualitas; tidak ada perbandingan scorecard (M6)."}

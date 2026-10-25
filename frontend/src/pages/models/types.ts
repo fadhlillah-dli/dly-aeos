@@ -147,7 +147,7 @@ export interface RouteItem {
   reviewed_tool_set?: string[] | null;
   runtime_binding?: RuntimeBinding;
   execution_path?: { status: string; note: string };
-  /** which evaluation can produce results for this route (NOT_WIRED for arena/comparator/local: DESIGN, NOT-PROVEN) */
+  /** which evaluation can produce results for this route (EVAL_ONLY for arena: eval-bound tasks only; NOT_WIRED for comparator/local: DESIGN, NOT-PROVEN) */
   evaluation_path?: { status: string; note: string };
   /** the exact upstream request the broker would build (E1 documentation shape until a probe records E3) */
   upstream_request?: UpstreamRequest | null;
