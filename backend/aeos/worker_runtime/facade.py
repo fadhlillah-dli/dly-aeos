@@ -66,3 +66,49 @@ def enforced_run_limits(limits: dict[str, Any] | None, *, sandbox_kind: str | No
         cpus = 1.0
     return {"memory_mb": int(processes.ResourceLimits.from_task(lim).max_memory_mb), "cpus": cpus,
             "cpu_enforced": False}
+
+
+# --- verifier runner (§20 "Verifier ENF ... isolated runner"; additive 2026-10-19, K2) -----------------------
+def verifier_sandbox(session: Any, *, domain: str) -> dict[str, Any]:
+    """READY when the verifier may execute candidate code in the container runner (fresh PASS container
+    containment report for this host/image/domain + the pinned verifier image), else UNAVAILABLE + reasons."""
+    from aeos.worker_runtime.container import verifier_readiness as impl
+
+    return impl(session, domain=domain)
+
+
+def verifier_container_argv(*, domain: str, verify_id: str, mounts: list[tuple[str, str, bool]],
+                            env: dict[str, str], inner_argv: list[str], workdir: str = "/tmp",  # noqa: S108
+                            image: str | None = None, user: str | None = None) -> list[str]:
+    """Hardened ``docker run`` argv for one verifier step (``--network none``, read-only, non-root, no caps)."""
+    from aeos.worker_runtime.container import verifier_argv as impl
+
+    return impl(domain=domain, verify_id=verify_id, mounts=mounts, env=env, inner_argv=inner_argv, workdir=workdir,
+                image=image, user=user)
+
+
+def verifier_container_teardown(verify_id: str) -> dict[str, Any]:
+    from aeos.worker_runtime.container import teardown_verifier as impl
+
+    return impl(verify_id)
+
+
+def docker_cli_env() -> dict[str, str]:
+    """Environment for the docker CLI process itself (controller env minus anything secret-looking)."""
+    from aeos.worker_runtime.container import docker_cli_env as impl
+
+    return impl()
+
+
+def controller_integrity_snapshot() -> dict[str, Any]:
+    """Fingerprint of the running controller checkout + interpreter site-packages (§09 Zone 1)."""
+    from aeos.worker_runtime.integrity import snapshot as impl
+
+    return impl()
+
+
+def controller_integrity_compare(before: dict[str, Any] | None) -> list[dict[str, str]]:
+    """Controller files changed/added/removed since ``before`` (empty = untouched)."""
+    from aeos.worker_runtime.integrity import compare as impl
+
+    return impl(before)

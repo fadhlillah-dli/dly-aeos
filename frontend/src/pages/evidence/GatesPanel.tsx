@@ -37,7 +37,7 @@ export function SeparateFields({ s }: { s: SeparateStatus }) {
           "Verifier",
           <span key="v" className="flex flex-wrap items-center gap-2">
             <Status status={s.verifier.status} label={s.verifier.status ? undefined : "Belum diverifikasi"} />
-            {/* §20: the runner is process-level only; never presented as an isolated sandbox */}
+            {/* §20: WEAK (process runner) is never presented as an isolated sandbox; CONTAINER only when proven */}
             {s.verifier.isolation && <Status status={s.verifier.isolation} />}
           </span>,
         ],
