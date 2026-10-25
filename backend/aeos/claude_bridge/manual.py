@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from aeos.claude_bridge.facade import ClaudeRequest, ClaudeResult
+from aeos.claude_bridge.parsing import cli_schema as _cli_schema
 from aeos.claude_bridge.parsing import parse_output, redact_strings, schema_errors
 from aeos.claude_bridge.workspace import WorkspaceError, copy_context, remove_tree
 from aeos.core.config import get_settings
@@ -136,7 +137,7 @@ def write_manual_package(request: ClaudeRequest, *, package_id: str) -> Path:
     meta = {
         "package_id": package_id, "purpose": request.purpose, "role": request.role, "model_requested": request.model,
         "project_id": request.project_id, "domain": request.domain, "created_at": utcnow().isoformat(),
-        "prompt_sha256": sha256_text(request.prompt), "schema_hash": content_hash(request.json_schema),
+        "prompt_sha256": sha256_text(request.prompt), "schema_hash": content_hash(_cli_schema(request.json_schema)),
         "allowed_tools": list(request.allowed_tools), "effort": request.effort, "context_files": manifest,
         "expected_result": RESULT_FILE, "mode": "MANUAL_FALLBACK",
     }
@@ -145,7 +146,7 @@ def write_manual_package(request: ClaudeRequest, *, package_id: str) -> Path:
 
 
 def _fill_package(pkg: Path, request: ClaudeRequest) -> list[dict[str, Any]]:
-    schema_json = json.dumps(request.json_schema, separators=(",", ":"), ensure_ascii=False)
+    schema_json = json.dumps(_cli_schema(request.json_schema), separators=(",", ":"), ensure_ascii=False)
     (pkg / "PROMPT.md").write_text(request.prompt, encoding="utf-8")
     (pkg / "schema.json").write_text(schema_json, encoding="utf-8")
     try:

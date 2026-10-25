@@ -31,6 +31,7 @@ from aeos.claude_bridge.env import assert_clean, child_env, parent_hygiene
 from aeos.claude_bridge.facade import ClaudeRequest, ClaudeResult
 from aeos.claude_bridge.parsing import (
     ALLOWED_REQUEST_FAMILIES,
+    cli_schema,
     family_of,
     is_pinned_id,
     parse_output,
@@ -293,11 +294,12 @@ def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) 
     problem = preflight(request)
     if problem:
         return _fail(request, *problem)
-    schema_json = json.dumps(request.json_schema, separators=(",", ":"), ensure_ascii=False)
+    schema_json = json.dumps(cli_schema(request.json_schema), separators=(",", ":"), ensure_ascii=False)
     probe_argv = build_argv("claude", schema_json=schema_json, model=request.model,
                             tools=list(request.allowed_tools), effort=request.effort)
     if cmdline_length(probe_argv) > MAX_CMDLINE_CHARS - 512:  # 512: room for the absolute binary path
-        schema_json = json.dumps(_strip_annotations(request.json_schema), separators=(",", ":"), ensure_ascii=False)
+        schema_json = json.dumps(_strip_annotations(cli_schema(request.json_schema)), separators=(",", ":"),
+                                 ensure_ascii=False)
         probe_argv = build_argv("claude", schema_json=schema_json, model=request.model,
                                 tools=list(request.allowed_tools), effort=request.effort)
         if cmdline_length(probe_argv) > MAX_CMDLINE_CHARS - 512:

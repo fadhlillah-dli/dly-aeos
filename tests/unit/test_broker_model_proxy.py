@@ -297,7 +297,7 @@ def test_expired_trial_decision_refuses_the_next_request(real_routing, db):
     route.status = "TRIAL"
     db.add(Decision(kind="TRIAL", actor_user_id="owner", actor_kind="HUMAN", target_type="model_route",
                     target_id="worker.free-a", target_hash=route.config_hash, domain="PERSONAL", rationale="trial",
-                    expires_at=utcnow() + timedelta(seconds=1)))
+                    expires_at=utcnow() + timedelta(hours=1)))  # expiry is forced explicitly below
     db.commit()
     with respx.mock(assert_all_mocked=True) as mock:
         mock.post(UPSTREAM).mock(return_value=httpx.Response(200, json=_ok_json()))
