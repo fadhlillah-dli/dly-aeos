@@ -23,11 +23,13 @@ belum tersedia, pekerjaan tersebut BLOCKED").
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -335,6 +337,15 @@ def task_sandbox_readiness(session: Session, *, domain: str, risk_class: str | N
     return {**out, "code": None}
 
 
+def container_name(run_id: str) -> str:
+    """Docker name for one launch of a run: the whole run id (sanitised to the docker name alphabet) plus a
+    random suffix. Truncating the id let two runs sharing a prefix (e.g. the containment probe and cancel
+    runs) collide on the name and refuse to start; the suffix also covers a retry while the previous
+    container of the same run is still being removed. Teardown and reaping go by the aeos.run_id label."""
+    safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", run_id).strip("-.") or "run"
+    return f"aeos-run-{safe[:40]}-{uuid.uuid4().hex[:8]}"
+
+
 def container_command(
     *, image: str, run_id: str, worktree: str, config_dir: str, inner_argv: list[str], env: dict[str, str],
     network: str = "aeos-worker", memory: str = "2g", cpus: str = "2", pids: int = 256,
@@ -347,7 +358,7 @@ def container_command(
     agent, data dir or a credential store."""
     cli = list(docker) if docker else [shutil.which("docker") or "docker"]
     argv = [
-        *cli, "run", "--rm", "-i", "--name", f"aeos-run-{run_id[:12]}",
+        *cli, "run", "--rm", "-i", "--name", container_name(run_id),
         "--user", user, "--read-only", "--tmpfs", "/tmp:rw,size=256m",  # noqa: S108 - container-internal tmpfs
         "--tmpfs", f"/home/worker:rw,size=256m,uid={user.split(':')[0]},gid={user.split(':')[-1]}",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", str(pids),
