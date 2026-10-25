@@ -433,7 +433,7 @@ def _windows_still_active(pid: int) -> bool:
     process_query_limited_information = 0x1000
     handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
     if not handle:
-        err = ctypes.get_last_error()
+        err = ctypes.get_last_error()  # type: ignore[attr-defined]
         return err != 87  # ERROR_INVALID_PARAMETER: no such process
     try:
         code = wintypes.DWORD()
