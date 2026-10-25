@@ -1,8 +1,11 @@
 /**
  * §41 "Setiap halaman menyediakan 'Sumber data', 'Diperiksa pada', 'Batas bukti', 'Keputusan terkait',
- * 'Usulkan koreksi'". PageHeader renders all five labels from these props (decisions/relatedDecisions.test.tsx);
- * this test checks every page's main header passes them, and that 'Keputusan terkait' opens the decisions about
- * this page's records (a filtered register link) - only register-wide pages link to the whole register.
+ * 'Usulkan koreksi'". PageHeader renders all five labels from these props (render test:
+ * components/PageHeader.test.tsx; decisions/relatedDecisions.test.tsx covers the 'Keputusan terkait' link and the
+ * register filter; the browser smoke tests/e2e/test_ui_smoke.py checks the provenance block on every route).
+ * This static test checks every page's main header passes them, and that 'Keputusan terkait' opens a filtered
+ * register link (only register-wide pages link to the whole register). Limit: it does not check that the
+ * target_type in that link is the type of the page's own records - any target_type passes.
  */
 const sources = import.meta.glob("./**/*.tsx", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
