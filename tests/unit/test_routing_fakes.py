@@ -18,6 +18,29 @@ from sqlalchemy import select
 from aeos.core.timeutil import utcnow
 from aeos.models.decisions import Decision
 
+# ADR-0041 amendment 2026-10-25: a seeded free OpenCode Zen route carries the S07 client restriction ("free-tier chat
+# models require OpenCode") and is activated only with the owner's explicit client-terms decision.
+OWNER_CLIENT_TERMS = {"accepted": True, "note": "read the S07 client rule; owner accepts broker proxying for this pilot"}
+
+
+def client_terms_for(route: Any) -> dict[str, Any] | None:
+    """What the owner passes at activation when *route* carries an undecided provider client restriction."""
+    from aeos.routing import service
+
+    cr = service.client_restriction(route)
+    return dict(OWNER_CLIENT_TERMS) if cr and cr.get("owner_decision") != service.CLIENT_TERMS_ACCEPTED else None
+
+
+def accept_client_terms(route: Any) -> None:
+    """For helpers that record a decision directly (not through activate_route): the data terms an owner client-terms
+    decision leaves on the route. Call before computing the hash the decision binds to."""
+    from aeos.routing import service
+
+    cr = service.client_restriction(route)
+    if cr and cr.get("owner_decision") != service.CLIENT_TERMS_ACCEPTED:
+        route.data_terms = {**(route.data_terms or {}), "client_restriction": {
+            **cr, "owner_decision": service.CLIENT_TERMS_ACCEPTED, "owner_note": OWNER_CLIENT_TERMS["note"]}}
+
 
 class FakeRegistry:
     def __init__(self) -> None:

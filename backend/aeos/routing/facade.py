@@ -68,6 +68,15 @@ def route_use_problem(session: Session, route: ModelRoute) -> str | None:
     return impl(session, route)
 
 
+def client_restriction_problem(route: ModelRoute) -> str | None:
+    """Why the broker may not call *route* as its own HTTP client (None = no provider client restriction, or the owner
+    recorded a decision for it at activation; additive, ADR-0041 amendment 2026-10-25). Part of
+    ``route_use_problem``; the broker also checks it first to report ``CLIENT_TERMS_RESTRICTED``."""
+    from aeos.routing.service import client_restriction_problem as impl
+
+    return impl(route)
+
+
 def note_rate_limited(
     session: Session, *, provider: str, scope: str = "free-daily", retry_after_seconds: int | None = None,
     source: str = "observed-429",
@@ -80,8 +89,9 @@ def note_rate_limited(
 
 def observe_supervisor_call(session: Session, *, model: str, engine_version: str | None,
                             effort: str | None = None) -> dict[str, object]:
-    """§23: bind the Claude Code version and effort/thinking setting of a planning/review call to the supervisor
-    route's configuration identity (a later change is a new configuration, never silent)."""
+    """§23: bind the Claude Code version, the effort/thinking setting, the planning prompt revision, the policy version
+    and the planning context strategy of a planning/review call to the supervisor route's configuration identity (a
+    later change is a new configuration, never silent)."""
     from aeos.routing.service import observe_supervisor_call as impl
 
     return impl(session, model=model, engine_version=engine_version, effort=effort)

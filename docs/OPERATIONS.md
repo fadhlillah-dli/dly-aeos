@@ -256,6 +256,21 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
 * **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111):** activate the free route as TRIAL (owner decision),
   then `aeos broker probe-route <route_key>` / `POST /api/broker/routes/<key>/feasibility` sends one synthetic
   PUBLIC prompt and records PROBE evidence; the route never serves worker tasks and its status is unchanged.
+  The probe sends the route's own request shape (`<endpoint>/chat/completions`, bare upstream model id; ADR-0041
+  amendment 2026-10-25): OpenCode Zen `https://opencode.ai/inference/openai/v1`, Gemini
+  `https://generativelanguage.googleapis.com/v1beta/openai`. After upgrading, run `aeos seed` once: it corrects
+  untouched seeded CANDIDATE routes (new config hash); a route activated on the superseded endpoint is listed in
+  `request_shape_pending` and refused by the broker (`ROUTE_ENDPOINT_SUPERSEDED`) until re-reviewed.
+* **Free OpenCode Zen routes (S07 client rule):** S07 says "Free-tier chat models require OpenCode; use paid models
+  or Go from other clients". The broker is its own client, so a free Zen route is not activated or proxied until
+  you decide: `aeos routes activate <key> ... --accept-client-terms --client-terms-note "<what you read>"` (recorded
+  on the decision and in the config hash; whether the provider accepts the call stays NOT-PROVEN until a probe),
+  or use OpenCode Go / a paid route with a BUDGET decision instead. `aeos routes list` flags undecided routes with
+  `client-terms=OWNER_DECISION_REQUIRED`.
+* **LOCAL route endpoint:** start an OpenAI-compatible server on this host, then `aeos routes set-endpoint
+  local/qwen3.8-flash-next --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "..." [--model <served
+  name>] [--quantization ...] [--backend ...] [--hardware ...]` (or the Models page form). Loopback `http` only;
+  it is a new configuration, so activate a new TRIAL, then probe. A loopback LOCAL route needs no BUDGET decision.
 
 ## Worker runtime (sandbox, engine contract, attribution)
 

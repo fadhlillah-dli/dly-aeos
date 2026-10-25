@@ -9,6 +9,14 @@ Seeding never activates a route, never claims installation and never fills ``res
 (UNKNOWN until the bridge/runtime observes it). Worker routes carry NO ``terms_checked_at``: reading the
 provider statement for the master research is not an owner terms review (§23, §45, §51 P2) — the
 reading date stays in ``data_terms.read_for_research`` and the owner confirms the terms at activation.
+
+Request shape (ADR-0041 amendment 2026-10-25, E1 documentation reading, not exercised live): S07 documents the Zen
+OpenAI-compatible endpoint ``https://opencode.ai/inference/openai/v1/chat/completions`` with the BARE model id
+(``opencode/<id>`` is the OpenCode config format, kept as ``model_id`` because ``opencode models`` lists it so);
+the bare id is ``mode_params.upstream_model`` and the documented API family ``mode_params.upstream_api``. The Gemini
+API documents its OpenAI-compatible base ``https://generativelanguage.googleapis.com/v1beta/openai``. S07 also
+states "Free-tier chat models require OpenCode; use paid models or Go from other clients": every free Zen route
+carries that in ``data_terms.client_restriction`` and stays non-activatable/non-proxied until the owner decides.
 """
 
 from __future__ import annotations
@@ -19,11 +27,31 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from aeos.broker.facade import SUPERSEDED_ENDPOINTS, UPSTREAM_API_CHAT
 from aeos.models.routing import ModelRoute
 from aeos.routing.service import REVIEWED_WORKER_TOOLS, compute_config_hash
 
 RESEARCH_DATE = datetime(2026, 10, 18, tzinfo=UTC)
 READ_FOR_RESEARCH = "2026-10-18 (master research reading; not an owner terms review)"
+SHAPE_READ = "2026-10-25"  # S07 Zen endpoints table + console models page, Gemini OpenAI-compatibility page (E1)
+ZEN_OPENAI_BASE = "https://opencode.ai/inference/openai/v1"  # + /chat/completions or /responses (S07)
+ZEN_ANTHROPIC_BASE = "https://opencode.ai/inference/anthropic/v1"  # + /messages (S07)
+GEMINI_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"  # + /chat/completions (S09 docs)
+# S07 endpoint family per seeded model that is not served on the chat-completions endpoint (the broker refuses them)
+ZEN_RESPONSES_MODELS = frozenset({"gpt-5.3-codex", "grok-build-0.1", "muse-spark-1.3"})
+ZEN_MESSAGES_MODELS = frozenset({"qwen3.8-flash"})
+# seeded Zen models the S07 catalog no longer lists (read 2026-10-25); `aeos routes refresh` marks them MISSING
+ZEN_NOT_LISTED = frozenset({"longcat-2.5-preview-free", "space-bunny-free", "ll-alpha-free", "exo-free"})
+# §23 "mode/thinking params" of worker-runtime routes: the broker sends no reasoning level (a worker-sent
+# reasoning_effort is dropped and recorded), so the provider default applies; a stated level is a new configuration
+WORKER_REASONING = "PROVIDER_DEFAULT"
+ZEN_CLIENT_RESTRICTION = {
+    "statement": "Free-tier chat models require OpenCode; use paid models or Go from other clients.",
+    "source": f"S07 (https://opencode.ai/docs/zen/ and https://opencode.ai/v2/docs/console/models/, read {SHAPE_READ})",
+    "applies_to": "broker-proxied calls: the AEOS broker calls the upstream as its own HTTP client, not OpenCode",
+    "claim_level": "E1 provider statement - whether the free route refuses a broker call is NOT-PROVEN (no live call)",
+    "owner_decision": "UNDECIDED",
+}
 WORKER_TOOL_SET = list(REVIEWED_WORKER_TOOLS)  # candidate tool set the owner reviews at activation
 LOCAL_BUILD_PARAMS = {"quantization": "UNKNOWN", "inference_backend": "UNKNOWN", "hardware": "UNKNOWN"}
 P = "PUBLIC"
@@ -60,20 +88,39 @@ ZEN_CREDENTIAL_REF = "workers/opencode-zen"
 SUPERVISOR_MODE_PARAMS = {"effort": "CLI_DEFAULT", "thinking": "CLI_DEFAULT"}
 
 
+def _zen_shape(model: str) -> tuple[str, str]:
+    """(endpoint base, upstream API) S07 documents for *model*."""
+    if model in ZEN_MESSAGES_MODELS:
+        return ZEN_ANTHROPIC_BASE, "anthropic.messages"
+    if model in ZEN_RESPONSES_MODELS:
+        return ZEN_OPENAI_BASE, "openai.responses"
+    return ZEN_OPENAI_BASE, UPSTREAM_API_CHAT
+
+
 def _zen(model: str, display: str, *, pool: str, terms: dict[str, Any], classes: list[str], priority: int,
          identity: str = "PROVIDER_CLAIMED", notes: str = "", fallback: list[str] | None = None,
          paid: dict[str, Any] | None = None) -> dict[str, Any]:
+    endpoint, api = _zen_shape(model)
+    data_terms: dict[str, Any] = {**terms, "read_for_research": READ_FOR_RESEARCH}
+    if not paid:
+        data_terms["client_restriction"] = dict(ZEN_CLIENT_RESTRICTION)
+    if model in ZEN_NOT_LISTED:
+        notes = (notes + " " if notes else "") + (f"Not listed in the S07 model catalog read {SHAPE_READ} (E1): the next "
+                                                  "`aeos routes refresh` marks it MISSING if `opencode models` agrees.")
     return {
         "route_key": f"opencode-zen/{model}", "pool": pool, "provider": "opencode-zen",
-        "endpoint": "https://opencode.ai/zen", "model_id": f"opencode/{model}", "display_name": display,
+        "endpoint": endpoint, "model_id": f"opencode/{model}", "display_name": display,
         "harness": "opencode", "tool_set": list(WORKER_TOOL_SET), "is_free": "NO" if paid else "YES",
-        "pricing": paid or ZEN_FREE_PRICING, "data_terms": {**terms, "read_for_research": READ_FOR_RESEARCH},
+        "pricing": paid or ZEN_FREE_PRICING, "data_terms": data_terms,
         "eligible_domains": ["PERSONAL"],
         "allowed_data_classes": classes, "supports_tools": "YES" if pool in {"WORKER", "ARENA"} and not paid else "UNKNOWN",
         "identity_status": identity, "priority": priority, "fallback_chain": fallback or [],
         "expires_note": None if paid else "free for a limited time per S07 (no end date published)",
         "source_refs": ["S07", "S08"], "notes": notes, "pricing_checked_at": RESEARCH_DATE,
-        "terms_checked_at": None, "mode_params": {"credential_ref": ZEN_CREDENTIAL_REF},
+        "terms_checked_at": None,
+        # model_id keeps the OpenCode catalog id; the API takes the bare id (S07) - both are part of the identity
+        "mode_params": {"credential_ref": ZEN_CREDENTIAL_REF, "upstream_model": model, "upstream_api": api,
+                        "reasoning": WORKER_REASONING},
         "prompt_revision": _worker_prompt_revision(),
     }
 
@@ -129,7 +176,8 @@ def seed_routes() -> list[dict[str, Any]]:
         # ---- COMPARATOR ----
         {
             "route_key": "gemini/gemini-3.8-flash-free-tier", "pool": "COMPARATOR", "provider": "gemini",
-            "endpoint": "https://generativelanguage.googleapis.com", "model_id": "gemini-3.8-flash",
+            # the OpenAI-compatible base the Gemini API documents (read 2026-10-25, E1; not exercised live)
+            "endpoint": GEMINI_OPENAI_BASE, "model_id": "gemini-3.8-flash",
             "display_name": "Gemini 3.8 Flash (Free Tier)", "harness": None, "is_free": "YES",
             "pricing": {"input_per_mtok": 0, "output_per_mtok": 0, "basis": "Free Tier (S09)"},
             "data_terms": {"retention": "per Gemini API terms (S09)",
@@ -139,7 +187,7 @@ def seed_routes() -> list[dict[str, Any]]:
             "eligible_domains": ["PERSONAL"], "allowed_data_classes": [P], "supports_tools": "UNKNOWN",
             "priority": 10, "source_refs": ["S09"], "notes": "Comparator only; input limited by the free-tier data terms.",
             "pricing_checked_at": RESEARCH_DATE, "terms_checked_at": None,
-            "mode_params": {"credential_ref": "workers/gemini"},
+            "mode_params": {"credential_ref": "workers/gemini", "upstream_api": UPSTREAM_API_CHAT},
         },
         # ---- ARENA (feasibility of route and data) ----
         _zen("longcat-2.5-preview-free", "LongCat 2.5 Preview Free", pool="ARENA", terms=ZERO_RETENTION,
@@ -167,6 +215,7 @@ def seed_routes() -> list[dict[str, Any]]:
             "notes": "Time-limited free route; after the date it is treated as paid (budget decision required).",
             "pricing_checked_at": RESEARCH_DATE, "terms_checked_at": None,
             "prompt_revision": _worker_prompt_revision(),
+            "mode_params": {"reasoning": WORKER_REASONING},
         },
         # ---- ARENA, identity not opened (never default, never sensitive data) ----
         _zen("space-bunny-free", "Space Bunny Free", pool="ARENA", terms=ZERO_RETENTION, classes=[P], priority=900,
@@ -218,6 +267,27 @@ def seed_routes() -> list[dict[str, Any]]:
 
 
 _NON_CONFIG_UPDATABLE = ("display_name", "notes", "source_refs", "expires_note")
+# mode_params keys a seed spec states and an untouched CANDIDATE row gets backfilled when it predates them
+_BACKFILLED_MODE_PARAMS = ("credential_ref", "upstream_model", "upstream_api", "reasoning", *LOCAL_BUILD_PARAMS)
+
+
+def _correct_request_shape(row: ModelRoute, spec: dict[str, Any], mode_params: dict[str, Any]) -> bool:
+    """ADR-0041 amendment 2026-10-25 on an untouched CANDIDATE seed row: a superseded seed endpoint becomes the documented
+    one, missing request-shape keys and the provider client restriction are stated. Returns True when changed."""
+    changed = False
+    endpoint = (row.endpoint or "").rstrip("/")
+    if endpoint in SUPERSEDED_ENDPOINTS and spec.get("endpoint") and row.endpoint != spec["endpoint"]:
+        row.endpoint = spec["endpoint"]
+        changed = True
+    missing = {k: v for k, v in mode_params.items() if k in _BACKFILLED_MODE_PARAMS and k not in (row.mode_params or {})}
+    if missing:
+        row.mode_params = {**(row.mode_params or {}), **missing}
+        changed = True
+    restriction = (spec.get("data_terms") or {}).get("client_restriction")
+    if restriction and "client_restriction" not in (row.data_terms or {}):
+        row.data_terms = {**(row.data_terms or {}), "client_restriction": dict(restriction)}
+        changed = True
+    return changed
 
 
 def run(session: Session) -> dict[str, Any]:
@@ -227,8 +297,15 @@ def run(session: Session) -> dict[str, Any]:
     ``mode_params.credential_ref`` gets it backfilled. That is a configuration change, but a CANDIDATE
     row carries no approval, so nothing is invalidated; the config hash is recomputed. The same applies to
     the C5 amendment: the placeholder tool set becomes the reviewable candidate tool set, the local build
-    parameters are stated, and a seeded research date is no longer kept as a terms check."""
+    parameters are stated, and a seeded research date is no longer kept as a terms check - and to the
+    2026-10-25 amendment: the superseded Zen/Gemini endpoints become the documented ones, the bare upstream model
+    id / API / reasoning marker are stated and the S07 client restriction is recorded. A row that is NOT an untouched
+    CANDIDATE (the owner activated, disabled or edited it) is never rewritten: rewriting it would silently void the
+    owner's decision. It is listed in ``request_shape_pending`` and the broker refuses its superseded endpoint
+    (``ROUTE_ENDPOINT_SUPERSEDED``) until the owner re-reviews it."""
     created = updated = existing = backfilled = terms_reset = 0
+    corrected: list[str] = []
+    pending: list[str] = []
     for spec in seed_routes():
         spec = dict(spec)
         mode_params = dict(spec.pop("mode_params", None) or {})
@@ -243,6 +320,8 @@ def run(session: Session) -> dict[str, Any]:
             created += 1
             continue
         existing += 1
+        if row.origin == "SEED" and row.status != "CANDIDATE" and (row.endpoint or "").rstrip("/") in SUPERSEDED_ENDPOINTS:
+            pending.append(row.route_key)
         if row.origin == "SEED" and row.status == "CANDIDATE":
             changed = False
             for f in _NON_CONFIG_UPDATABLE:
@@ -255,10 +334,8 @@ def run(session: Session) -> dict[str, Any]:
             if ref and not (row.mode_params or {}).get("credential_ref"):
                 row.mode_params = {**(row.mode_params or {}), "credential_ref": ref}
                 config_changed = True
-            missing_build = {k: v for k, v in mode_params.items() if k in LOCAL_BUILD_PARAMS
-                             and k not in (row.mode_params or {})}
-            if missing_build:
-                row.mode_params = {**(row.mode_params or {}), **missing_build}
+            if _correct_request_shape(row, spec, mode_params):
+                corrected.append(row.route_key)
                 config_changed = True
             if set(row.tool_set or []) == {"opencode-default"} and spec.get("tool_set"):
                 row.tool_set = list(spec["tool_set"])
@@ -278,5 +355,6 @@ def run(session: Session) -> dict[str, Any]:
                 terms_reset += 1
     session.flush()
     return {"created": created, "existing": existing, "updated_descriptive": updated,
-            "credential_ref_backfilled": backfilled, "seeded_terms_check_reset": terms_reset, "mode": "DESIGN",
+            "credential_ref_backfilled": backfilled, "seeded_terms_check_reset": terms_reset,
+            "request_shape_corrected": corrected, "request_shape_pending": pending, "mode": "DESIGN",
             "approved": 0}

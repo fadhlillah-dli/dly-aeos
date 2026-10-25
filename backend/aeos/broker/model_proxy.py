@@ -7,6 +7,11 @@ is not a browser API and must never be reachable through ambient cookie auth).
 Guarantees:
 * the worker only names models from its grant scope; the broker maps them to the route's exact
   upstream model id and strips any field that could make the upstream pick another model;
+* the request shape is the route's own configuration (ADR-0041 amendment 2026-10-25): ``<endpoint>/chat/completions``
+  with the bare upstream model id (``mode_params.upstream_model``; for OpenCode Zen the catalog id without its
+  ``opencode/`` config prefix), the provider's credential only towards the provider's own host, a superseded seed
+  endpoint or a non-chat-completions API refused; the reasoning level is the route's (``mode_params.reasoning``),
+  never the worker's - a worker-sent ``reasoning_effort`` is dropped and recorded on the BrokerRequest;
 * request/token/cost caps and expiry are enforced before forwarding; ``max_tokens`` is clamped;
 * upstream 429 -> 429 + ``Retry-After`` to the worker, QuotaState recorded, and NO fallback to any
   other (paid or unapproved) model (§42, §50 "Free quota habis / 429");
@@ -54,12 +59,15 @@ MAX_BODY_BYTES = 8 * 1024 * 1024
 DEFAULT_RETRY_AFTER = 60
 UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=10.0)
 # Fields forwarded upstream. Anything else (models[], route, provider, transforms, plugins, user,
-# ...) is dropped so the worker cannot request routing to another model.
+# ...) is dropped so the worker cannot request routing to another model. ``reasoning_effort`` is NOT forwarded
+# from the worker: it is a route configuration value (``mode_params.reasoning``, §23 "mode/thinking params").
 ALLOWED_FIELDS = frozenset({
     "messages", "max_tokens", "max_completion_tokens", "temperature", "top_p", "stream", "stream_options",
     "tools", "tool_choice", "response_format", "stop", "seed", "presence_penalty", "frequency_penalty",
-    "parallel_tool_calls", "reasoning_effort",
+    "parallel_tool_calls",
 })
+REASONING_NOT_SENT = "NOT_SENT"  # BrokerRequest.reasoning_effort when nothing was sent (provider default)
+ZEN_CONFIG_PREFIX = "opencode/"  # OpenCode config/catalog format; the Zen API takes the bare model id (S07)
 
 
 class ProxyError(Exception):
@@ -86,8 +94,14 @@ class Upstream:
     api_key: str | None
     provider: str
     route_key: str
-    model_id: str
+    model_id: str  # the upstream (API) model id sent in the request body
     is_openrouter: bool
+    reasoning_effort: str | None = None  # set by the route's configuration, None = not sent (provider default)
+    catalog_model_id: str | None = None  # ModelRoute.model_id (e.g. ``opencode/<id>``) when it differs
+
+    @property
+    def url(self) -> str:
+        return f"{self.base_url}/chat/completions"
 
 
 @dataclass
@@ -178,6 +192,91 @@ def route_authorisation_problem(session: Any, route: ModelRoute) -> str | None:
         return "routing module unavailable: route approval cannot be checked"
 
 
+def client_restriction_problem(session: Any, route: ModelRoute) -> str | None:
+    """A provider rule on which *client* may call the route (S07: "Free-tier chat models require OpenCode"), not
+    decided by the owner: the broker is its own HTTP client, so it never proxies such a route silently."""
+    try:
+        from aeos.routing import facade as routing
+
+        return routing.client_restriction_problem(route)
+    except (ImportError, AttributeError):  # routing unavailable: the restriction cannot be checked -> fail closed
+        return "routing module unavailable: the provider client restriction cannot be checked"
+
+
+def upstream_model_id(route: ModelRoute) -> str:
+    """The model id sent upstream: ``mode_params.upstream_model`` when the route states it, else the route's model
+    id - for OpenCode Zen without the ``opencode/`` OpenCode-config prefix (S07: API requests use the bare id)."""
+    explicit = (route.mode_params or {}).get("upstream_model")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    model = route.model_id or ""
+    if route.provider == "opencode-zen" and model.startswith(ZEN_CONFIG_PREFIX):
+        return model[len(ZEN_CONFIG_PREFIX):]
+    return model
+
+
+def route_reasoning_effort(route: ModelRoute) -> tuple[str | None, str | None]:
+    """(level the broker sends as ``reasoning_effort``, problem). The route's ``mode_params.reasoning`` is the only
+    source: a default marker (or nothing) sends no level, so the provider's default applies; an unknown value is
+    refused rather than forwarded."""
+    from aeos.broker.facade import REASONING_DEFAULT_MARKERS, REASONING_LEVELS
+
+    value = (route.mode_params or {}).get("reasoning")
+    if value is None or value in REASONING_DEFAULT_MARKERS:
+        return None, None
+    if isinstance(value, str) and value in REASONING_LEVELS:
+        return value, None
+    return None, (f"mode_params.reasoning {str(value)[:32]!r} is neither a reasoning level "
+                  f"({', '.join(REASONING_LEVELS)}) nor a default marker ({', '.join(REASONING_DEFAULT_MARKERS)})")
+
+
+def request_shape(route: ModelRoute) -> dict[str, Any]:
+    """The upstream request the broker would build for *route* (no secret, no DB), with the refusal code/reason
+    when it would not build one. The route view shows the same verdict the boundary applies."""
+    from aeos.broker.facade import PROVIDER_ENDPOINT_HOSTS, SUPERSEDED_ENDPOINTS, UPSTREAM_API_CHAT
+
+    mp = route.mode_params or {}
+    api = str(mp.get("upstream_api") or UPSTREAM_API_CHAT)
+    if route.provider == "openrouter":
+        base = (route.endpoint or OPENROUTER_BASE).rstrip("/")
+    else:
+        base = (route.endpoint or "").rstrip("/")
+    effort, effort_problem = route_reasoning_effort(route)
+    out: dict[str, Any] = {"url": f"{base}/chat/completions" if base else None, "model": upstream_model_id(route),
+                           "catalog_model_id": route.model_id, "api": api,
+                           "reasoning_effort": effort or REASONING_NOT_SENT, "code": None, "problem": None}
+
+    def refuse(code: str, problem: str) -> dict[str, Any]:
+        return {**out, "code": code, "problem": problem}
+
+    if api != UPSTREAM_API_CHAT:
+        return refuse("ROUTE_API_UNSUPPORTED", f"the provider documents the {api} API for this model; the broker "
+                                                f"speaks {UPSTREAM_API_CHAT} only")
+    u = urlparse(base)
+    if route.provider == "openrouter":
+        if not base.startswith("https://openrouter.ai/"):
+            return refuse("ROUTE_ENDPOINT", "openrouter route endpoint must be https://openrouter.ai/...")
+    else:
+        if base in SUPERSEDED_ENDPOINTS:
+            return refuse("ROUTE_ENDPOINT_SUPERSEDED",
+                          f"endpoint {base} is a superseded seed value; the provider documents "
+                          f"{SUPERSEDED_ENDPOINTS[base]} (E1, ADR-0041 amendment 2026-10-25): run `aeos seed` "
+                          "(untouched CANDIDATE rows are corrected) and activate the corrected configuration")
+        if not base or not (u.scheme == "https" or _is_loopback_http(base)) or u.username or u.password:
+            return refuse("ROUTE_ENDPOINT", "route endpoint must be https (or loopback http) without credentials")
+        hosts = PROVIDER_ENDPOINT_HOSTS.get(route.provider)
+        if hosts and (u.scheme != "https" or u.hostname not in hosts):
+            return refuse("ROUTE_ENDPOINT", f"the {route.provider} credential is only sent to https://"
+                                            f"{' / https://'.join(hosts)}")
+        if route.provider == "local" and not _is_loopback_http(base):
+            return refuse("ROUTE_ENDPOINT", "a local route is served from this host only (loopback http)")
+    if not out["model"]:
+        return refuse("ROUTE_MODEL_MISSING", "route has no upstream model id")
+    if effort_problem:
+        return refuse("ROUTE_MODE_PARAMS", effort_problem)
+    return out
+
+
 def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: str | None = None,
                      pools: tuple[str, ...] | None = None) -> Upstream:
     """``pools`` (additive, ADR-0111): the pools this caller may serve. The worker proxy uses the default
@@ -200,15 +299,21 @@ def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: s
         raise ProxyError(403, "ROUTE_NOT_APPROVED", f"route status {route.status}")
     if domain not in (route.eligible_domains or []):
         raise ProxyError(403, "ROUTE_DOMAIN", "route not eligible for this domain")
+    restriction = client_restriction_problem(session, route)
+    if restriction:
+        raise ProxyError(403, "CLIENT_TERMS_RESTRICTED", restriction)
     problem = route_authorisation_problem(session, route)
     if problem:
         raise ProxyError(403, "ROUTE_APPROVAL_INVALID", problem)
+    shape = request_shape(route)
+    if shape["code"]:
+        raise ProxyError(403, shape["code"], shape["problem"])
+    effort = shape["reasoning_effort"] if shape["reasoning_effort"] != REASONING_NOT_SENT else None
+    catalog_id = route.model_id if route.model_id != shape["model"] else None
     cred_ref = (route.mode_params or {}).get("credential_ref")
     purpose = f"model proxy route {route_key}"
     if route.provider == "openrouter":
         base = route.endpoint or OPENROUTER_BASE
-        if not base.startswith("https://openrouter.ai/"):
-            raise ProxyError(403, "ROUTE_ENDPOINT", "openrouter route endpoint must be https://openrouter.ai/...")
         refs = [cred_ref] if cred_ref else (["workers/openrouter", "personal/openrouter"]
                                             if domain == "PERSONAL" else [])
         for ref in refs:
@@ -223,11 +328,8 @@ def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: s
         if not key:
             raise ProxyError(503, "UPSTREAM_CREDENTIAL_MISSING",
                              "upstream credential not configured (aeos secrets set workers/openrouter)")
-        return Upstream(base.rstrip("/"), key, "openrouter", route_key, route.model_id, True)
+        return Upstream(base.rstrip("/"), key, "openrouter", route_key, shape["model"], True, effort, catalog_id)
     base = route.endpoint or ""
-    u = urlparse(base)
-    if not base or not (u.scheme == "https" or _is_loopback_http(base)) or u.username or u.password:
-        raise ProxyError(403, "ROUTE_ENDPOINT", "route endpoint must be https (or loopback http) without credentials")
     key = None
     if cred_ref:
         _check_credential_domain(domain, cred_ref, project_id)
@@ -237,7 +339,7 @@ def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: s
             raise ProxyError(503, "UPSTREAM_CREDENTIAL_MISSING", exc.message) from exc
     elif not _is_loopback_http(base):
         raise ProxyError(503, "UPSTREAM_CREDENTIAL_MISSING", "route has no credential_ref")
-    return Upstream(base.rstrip("/"), key, route.provider, route_key, route.model_id, False)
+    return Upstream(base.rstrip("/"), key, route.provider, route_key, shape["model"], False, effort, catalog_id)
 
 
 def _check_auth_headers(headers: dict[str, str], cookies: dict[str, str]) -> str:
@@ -289,6 +391,12 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
         out = {k: v for k, v in body.items() if k in ALLOWED_FIELDS}
         out["model"] = upstream.model_id
         out["n"] = 1
+        # §23 "mode/thinking params": the reasoning level is the route's configuration. A level the worker sent is
+        # dropped (never forwarded silently) and recorded; the route's own level, if it states one, is sent.
+        worker_effort = body.get("reasoning_effort")
+        requested_label = None if worker_effort is None else str(worker_effort)[:32]
+        if upstream.reasoning_effort:
+            out["reasoning_effort"] = upstream.reasoning_effort
         per_req = (grant.scope or {}).get("per_request_output_cap")
         caps = [int(c) for c in (per_req, rem["tokens"]) if c is not None]
         requested = out.get("max_tokens") or out.get("max_completion_tokens")
@@ -305,7 +413,9 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
             out["usage"] = {"include": True}
         req = BrokerRequest(grant_id=grant.id, run_id=grant.run_id, project_id=grant.project_id, domain=grant.domain,
                             route_key=upstream.route_key, provider=upstream.provider, exposed_model=exposed,
-                            upstream_model=upstream.model_id, stream=stream, outcome="PENDING")
+                            upstream_model=upstream.model_id, stream=stream, outcome="PENDING",
+                            reasoning_effort=upstream.reasoning_effort or REASONING_NOT_SENT,
+                            reasoning_requested=requested_label)
         s.add(req)
         s.commit()
         return Prepared(grant.id, grant.run_id, grant.project_id, grant.domain, exposed, upstream, out, req.id, stream)
@@ -373,7 +483,9 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
                     run_id=p.run_id, project_id=p.project_id, domain=p.domain, mode=run.mode if run else "LIVE",
                     payload={"route_key": p.upstream.route_key, "outcome": outcome, "status": status,
                              "prompt_tokens": prompt, "completion_tokens": completion,
-                             "cost_usd": cost if cost is not None else "UNKNOWN", "latency_ms": latency_ms})
+                             "cost_usd": cost if cost is not None else "UNKNOWN", "latency_ms": latency_ms,
+                             "reasoning_effort": req.reasoning_effort if req is not None else None,
+                             "reasoning_requested_dropped": req.reasoning_requested if req is not None else None})
         audit.record(s, actor_type="worker", actor_id=f"run:{p.run_id}", action="broker.model_proxy.call",
                      result="SUCCESS" if outcome == "OK" else "FAILED", target_type="model_route",
                      target_id=p.upstream.route_key, project_id=p.project_id, domain=p.domain,
@@ -522,7 +634,7 @@ async def chat_completions(request: Request) -> Response:
                                     dict(request.cookies), body)
     except ProxyError as exc:
         return _error(exc.status, exc.code, exc.message, retry_after=exc.retry_after)
-    url = f"{p.upstream.base_url}/chat/completions"
+    url = p.upstream.url
     started = time.monotonic()
     client = httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT, follow_redirects=False, trust_env=False)
     try:

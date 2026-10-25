@@ -71,6 +71,12 @@ POLICY_KEYS_CONSUMED = frozenset({"pool", "requires_tools", "needs_tools", "min_
                                   "routes", "primary"})
 POLICY_KEYS_ENFORCED = {"eligible_routes_only": True, "paid_fallback": False, "supervisor_downgrade": False}
 POLICY_KEYS_INFORMATIONAL = frozenset({"notes", "office_external_allowed"})
+# ADR-0041 amendment 2026-10-25: a provider rule on WHICH CLIENT may call a route (S07: "Free-tier chat models require
+# OpenCode; use paid models or Go from other clients") lives in ``data_terms.client_restriction``. The broker is its
+# own HTTP client, so such a route is neither activated nor proxied until the owner records a decision for it.
+CLIENT_TERMS_ACCEPTED = "OWNER_ACCEPTED_BROKER_CLIENT"
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+LOCAL_BUILD_KEYS = ("quantization", "inference_backend", "hardware")  # §23: a LOCAL build is its own configuration
 
 # Fields that make up the AIConfiguration identity (§43). Status/timestamps/eval are excluded so
 # that refreshing a catalog without any change keeps the identity (and approvals) stable.
@@ -114,9 +120,12 @@ def compute_config_hash(route: ModelRoute) -> str:
     return content_hash(route_config(route))
 
 
-def refresh_config_hash(session: Session, route: ModelRoute, *, reason: str) -> bool:
+def refresh_config_hash(session: Session, route: ModelRoute, *, reason: str, readiness: bool = True) -> bool:
     """Recompute the identity. Returns True when a previously known identity changed: approvals
-    bound to the old hash stop matching, eval baselines are not inherited, Doctor checks go STALE."""
+    bound to the old hash stop matching, eval baselines are not inherited, Doctor checks go STALE.
+
+    ``readiness=False`` (supervisor prompt/policy/context binding only): the change does not touch the bridge, so the
+    bridge capability proof is not invalidated; the configuration change itself is recorded the same way."""
     new = compute_config_hash(route)
     old = route.config_hash
     if old == new:
@@ -132,7 +141,8 @@ def refresh_config_hash(session: Session, route: ModelRoute, *, reason: str) -> 
                              reason=f"route configuration changed: {reason}")
     except (ImportError, ModuleNotFoundError):
         pass  # hash binding already makes old approvals ineffective
-    notify_readiness(session, route.route_key, reason=reason, pool=route.pool)
+    if readiness:
+        notify_readiness(session, route.route_key, reason=reason, pool=route.pool)
     # §47/§43 "re-evaluated when the model changes": roles that had a passing evaluation of the previous
     # configuration now need a new one; the result is never inherited (eval_score checks the hash).
     tested_roles = sorted(role for role, e in (route.eval_results or {}).items()
@@ -251,7 +261,10 @@ def route_use_problem(session: Session, route: ModelRoute) -> str | None:
     if decision is None:
         return (f"route {route.status} has no ACTIVE human {kind} decision bound to its current configuration "
                 "(configuration changed, approval expired or revoked)")
-    if not is_effectively_free(route):
+    restriction = client_restriction_problem(route)
+    if restriction:
+        return restriction
+    if needs_budget(route):
         ok, why = budget_decision_valid(session, (decision.details or {}).get("budget_decision_id"), route)
         if not ok:
             label = "free period ended" if route.is_free == "YES" else f"is_free={route.is_free}"
@@ -264,6 +277,54 @@ def is_effectively_free(route: ModelRoute, now: datetime | None = None) -> bool:
         return False
     until = ensure_aware(route.free_until)
     return until is None or until > (now or utcnow())
+
+
+def is_local_loopback(route: ModelRoute) -> bool:
+    """A LOCAL route served by this host (provider ``local``, owner-set ``http://`` loopback endpoint, no credential):
+    a call never leaves the machine and never spends money through the broker (§23 LOCAL; the probe's rule)."""
+    if route.pool != "LOCAL" or route.provider != "local":
+        return False
+    u = urlparse(route.endpoint or "")
+    return u.scheme == "http" and u.hostname in LOOPBACK_HOSTS
+
+
+def needs_budget(route: ModelRoute, now: datetime | None = None) -> bool:
+    """Whether using *route* needs an ACTIVE BUDGET decision: anything not effectively free, except a loopback
+    LOCAL route (local compute is the owner's own hardware, not a paid upstream)."""
+    return not is_effectively_free(route, now) and not is_local_loopback(route)
+
+
+def client_restriction(route: ModelRoute) -> dict[str, Any] | None:
+    cr = (route.data_terms or {}).get("client_restriction")
+    return cr if isinstance(cr, dict) and cr else None
+
+
+def client_restriction_problem(route: ModelRoute) -> str | None:
+    """Why the broker may not call *route* as its own client (None = no restriction, or the owner decided).
+
+    The decision lives in ``data_terms.client_restriction.owner_decision`` - part of the configuration identity, so it
+    is effective only with the human activation decision bound to that hash (never by editing the row)."""
+    cr = client_restriction(route)
+    if cr is None or cr.get("owner_decision") == CLIENT_TERMS_ACCEPTED:
+        return None
+    return (f"provider client restriction ({cr.get('source') or 'provider terms'}): "
+            f"{cr.get('statement') or 'the provider restricts which client may call this route'} The AEOS broker "
+            "calls the upstream as its own HTTP client, not OpenCode: no owner decision is recorded for this route "
+            "(options: OpenCode Go, a paid route with a BUDGET decision, or an explicit client-terms decision at "
+            "activation; ADR-0041 amendment 2026-10-25)")
+
+
+def request_shape_rejections(route: ModelRoute) -> list[str]:
+    """The broker's verdict on the upstream request it would build (superseded seed endpoint, provider host pin,
+    unsupported API, invalid reasoning level): a route the broker refuses is never selected (ADR-0041)."""
+    if route.provider == "claude-native" or route.pool == "SUPERVISOR":
+        return []
+    try:
+        from aeos.broker.facade import upstream_request_shape
+    except (ImportError, ModuleNotFoundError):
+        return ["broker unavailable: the upstream request shape cannot be checked (fail closed)"]
+    shape = upstream_request_shape(route)
+    return [f"{shape['code']}: {shape['problem']}"] if shape.get("code") else []
 
 
 def _office_policy(session: Session) -> tuple[dict[str, Any] | None, str]:
@@ -589,6 +650,10 @@ def route_rejections(
                        f"({remedy})")
     reasons += region_rejections(route, domain=domain, office=office)
     reasons += credential_rejections(route, domain=domain)
+    reasons += request_shape_rejections(route)
+    restriction = client_restriction_problem(route)
+    if restriction:
+        reasons.append(restriction)
     q = quota_exhausted(session, route)
     if q is not None:
         resets = q.resets_at.isoformat() if q.resets_at else "UNKNOWN"
@@ -598,7 +663,7 @@ def route_rejections(
         reasons.append("pricing/terms never checked")
     elif any(now - t > TERMS_MAX_AGE for t in checked if t is not None):
         reasons.append("pricing/terms older than 30 days: refresh the catalog or re-review terms")
-    if not is_effectively_free(route):
+    if needs_budget(route):
         act = find_route_decision(session, kind="ROUTE_ACTIVATION", route=route) or find_route_decision(
             session, kind="TRIAL", route=route)
         budget_id = ((act.details or {}).get("budget_decision_id") if act else None)
@@ -907,21 +972,47 @@ def mode_thinking(route: ModelRoute) -> dict[str, Any]:
                 "bound_in": ["mode_params"],
                 "note": "Bridge memakai default Claude Code bila tidak ada --effort; perubahan = konfigurasi baru"}
     if route.harness == "opencode":
-        return {"reasoning": mp.get("reasoning") or "HARNESS_DEFAULT", "bound_in": ["harness_version", "context_strategy"],
-                "note": "Konfigurasi OpenCode tidak menetapkan opsi reasoning/variant; default harness dipin oleh "
-                        "harness_version dan context_strategy"}
+        # ADR-0041 amendment 2026-10-25: the broker sets the route's level and never forwards the worker's
+        return {"reasoning": mp.get("reasoning") or "PROVIDER_DEFAULT",
+                "bound_in": ["mode_params", "harness_version", "context_strategy"],
+                "note": "Level reasoning ditetapkan rute (mode_params.reasoning), bukan pekerja: broker membuang "
+                        "reasoning_effort kiriman pekerja dan mencatatnya di BrokerRequest. PROVIDER_DEFAULT = broker "
+                        "tidak mengirim level apa pun, default provider berlaku; mengubahnya = konfigurasi baru."}
     keys = {k: v for k, v in mp.items() if k in ("effort", "thinking", "reasoning", "quantization", "backend")}
     return {**keys, "bound_in": ["mode_params"]} if keys else {"status": "UNKNOWN", "bound_in": []}
 
 
+def current_supervisor_runtime() -> dict[str, str | None]:
+    """§23 "prompt revision, policy version, context strategy" of the native supervisor routes: the planning prompt
+    revision (``planning.facade.supervisor_prompt_runtime``), the canonical policy version and a fingerprint of how
+    planning context is assembled. None = cannot be determined (never bound)."""
+    out: dict[str, str | None] = {"prompt_revision": None, "policy_version": current_policy_version(),
+                                  "context_strategy": None}
+    try:
+        from aeos.planning.facade import supervisor_prompt_runtime
+
+        planning = supervisor_prompt_runtime()
+    except (ImportError, ModuleNotFoundError, AttributeError):
+        return out
+    revision = planning.get("prompt_revision")
+    out["prompt_revision"] = str(revision)[:64] if revision else None
+    context = planning.get("context")
+    if isinstance(context, dict) and context:
+        out["context_strategy"] = "planning-fenced-data:" + content_hash(context)[7:19]
+    return out
+
+
 def observe_supervisor_call(session: Session, *, model: str, engine_version: str | None,
                             effort: str | None = None) -> dict[str, Any]:
-    """§23 "ModelRoute menyimpan ... mode/thinking params, harness version" for the native supervisor routes: the
-    Claude Code version a planning/review call ran with is the route's ``harness_version`` and the effort/thinking
-    setting it passed (``CLI_DEFAULT`` when none) is ``mode_params.effort``. Both are part of the configuration
-    identity: a later change (a Claude Code upgrade, a caller passing an effort level) is a new configuration -
-    approvals bound to the old hash stop matching, readiness goes STALE, eval results are not inherited. The first
-    observation binds without invalidating (nothing was bound to an earlier value), like the resolved model."""
+    """§23 "ModelRoute menyimpan ... mode/thinking params, harness version, prompt revision, policy version, context
+    strategy" for the native supervisor routes: the Claude Code version a planning/review call ran with is the route's
+    ``harness_version``, the effort/thinking setting it passed (``CLI_DEFAULT`` when none) is ``mode_params.effort``,
+    and the planning prompt revision, policy version and planning context strategy in force are ``prompt_revision``,
+    ``policy_version`` and ``context_strategy`` (``current_supervisor_runtime``). All are part of the configuration
+    identity: a later change (a Claude Code upgrade, a caller passing an effort level, a prompt or policy change) is a
+    new configuration - approvals bound to the old hash stop matching, readiness goes STALE, eval results are not
+    inherited (NEEDS_EVALUATION). The first observation binds without invalidating (nothing was bound to an earlier
+    value), like the resolved model; a value that cannot be determined is never bound."""
     route = supervisor_route_for(session, model)
     if route is None:
         return {"route_key": None, "changed": False}
@@ -939,10 +1030,19 @@ def observe_supervisor_call(session: Session, *, model: str, engine_version: str
         if mode.get("effort"):
             reasons.append(f"effort {mode.get('effort')} -> {wanted}")
         route.mode_params = {**mode, "effort": wanted, "thinking": mode.get("thinking") or SUPERVISOR_MODE_DEFAULT}
+    bridge_changed = bool(reasons)  # engine/effort: what the bridge capability proof was made with
+    for field_name, value in current_supervisor_runtime().items():
+        bound = getattr(route, field_name)
+        if value and bound != value:
+            if bound:
+                reasons.append(f"{field_name} {bound} -> {value}")
+            setattr(route, field_name, value)
     if not reasons:
         route.config_hash = compute_config_hash(route)  # first binding: no earlier identity was bound to it
         return {"route_key": route.route_key, "changed": False}
-    changed = refresh_config_hash(session, route, reason="; ".join(reasons))
+    # a prompt/policy/context change is a new configuration (NEEDS_EVALUATION) but does not touch the bridge, so the
+    # bridge capability proof (model:route:SUPERVISOR) stays valid - reviews are not pushed to the manual fallback
+    changed = refresh_config_hash(session, route, reason="; ".join(reasons), readiness=bridge_changed)
     if changed:
         route.notes = (route.notes + "\n" if route.notes else "") + f"{utcnow().date().isoformat()}: " + "; ".join(reasons)
     return {"route_key": route.route_key, "changed": changed, "reasons": reasons}
@@ -1003,6 +1103,45 @@ def _validated_region(region: str | None, route: ModelRoute, terms: dict[str, An
     return code
 
 
+def _validated_client_terms(client_terms: dict[str, Any] | None, route: ModelRoute) -> dict[str, Any] | None:
+    """The owner's decision on a provider client restriction (ADR-0041 amendment 2026-10-25) to write into the data
+    terms, or None when the route has none or the owner already decided it in the configuration being re-activated
+    (that decision stays as recorded). Without it a restricted route is not activated (fail closed)."""
+    cr = client_restriction(route)
+    if cr is None:
+        if client_terms:
+            raise ValidationFailed("client_terms answers a provider client restriction; this route has none to decide",
+                                   code="CLIENT_TERMS_NOT_APPLICABLE")
+        return None
+    if cr.get("owner_decision") == CLIENT_TERMS_ACCEPTED:
+        return None  # already part of the reviewed configuration (and of the hash the new decision binds to)
+    if not client_terms:
+        raise ValidationFailed(
+            f"{client_restriction_problem(route)}. Record your decision explicitly (client_terms: accepted + "
+            "what you read/confirmed) or use another route", code="CLIENT_TERMS_DECISION_REQUIRED",
+            details={"client_restriction": {k: cr.get(k) for k in ("statement", "source", "applies_to")}})
+    unknown = sorted(set(client_terms) - {"accepted", "note"})
+    if unknown:
+        raise ValidationFailed("client_terms accepts accepted and note only", details={"unknown": unknown})
+    if client_terms.get("accepted") is not True:
+        raise ValidationFailed("client_terms.accepted must be true to activate a client-restricted route; otherwise "
+                               "keep it inactive and use OpenCode Go or a paid route with a BUDGET decision",
+                               code="CLIENT_TERMS_DECISION_REQUIRED")
+    note = str(client_terms.get("note") or "").strip()
+    if len(note) < 10:
+        raise ValidationFailed("client_terms.note must say what you read/confirmed (min 10 characters)")
+    return {**cr, "owner_decision": CLIENT_TERMS_ACCEPTED, "owner_note": redact_text(note)[:500]}
+
+
+def _client_terms_record(route: ModelRoute, *, recorded_now: bool) -> dict[str, Any] | None:
+    """The client-restriction decision the activation is bound to (stored on the immutable decision details)."""
+    cr = client_restriction(route)
+    if cr is None:
+        return None
+    return {"decision": cr.get("owner_decision"), "note": cr.get("owner_note"), "statement": cr.get("statement"),
+            "source": cr.get("source"), "recorded_by_this_activation": recorded_now}
+
+
 def _validated_tool_set(tool_set: list[str] | None, route: ModelRoute) -> list[str]:
     if tool_set is None:
         return reviewed_tool_set(route) or list(REVIEWED_WORKER_TOOLS)
@@ -1053,6 +1192,7 @@ def activate_route(
     expires_in_days: int | None = None, terms_reviewed: bool = False, terms_note: str = "",
     terms_record: dict[str, Any] | None = None, region: str | None = None, tool_set: list[str] | None = None,
     eval_run_ids: list[str] | None = None, decision_record: dict[str, Any] | None = None,
+    client_terms: dict[str, Any] | None = None,
 ) -> tuple[ModelRoute, Decision]:
     """Human activation: records a ROUTE_ACTIVATION (APPROVED) or TRIAL decision bound to the exact
     route config hash. Never touches OFFICE.
@@ -1070,7 +1210,12 @@ def activate_route(
       ``eval_results`` by this decision — the only writer — and a rollback target is recorded. TRIAL needs no
       evaluation (it is time-limited).
     * APPROVED adopts a routing result, so it carries the §44 DecisionRecord (options, goal, evidence,
-      cost/quality trade-off, invalidation condition; ``policy.catalog.DECISION_RECORD_FIELDS``)."""
+      cost/quality trade-off, invalidation condition; ``policy.catalog.DECISION_RECORD_FIELDS``).
+    * A provider client restriction (``data_terms.client_restriction``, e.g. S07 free-tier models require the
+      OpenCode client) needs the owner's explicit ``client_terms`` decision; it is written into the data terms (so
+      the decision binds to it) and onto the decision. Without it: ``CLIENT_TERMS_DECISION_REQUIRED``.
+    * The broker must be able to build the request (``broker.facade.upstream_request_shape``): a superseded seed
+      endpoint, an unsupported API or a LOCAL route without its loopback endpoint is refused before any decision."""
     if mode not in {"APPROVED", "TRIAL"}:
         raise ValidationFailed("mode must be APPROVED or TRIAL")
     if len((rationale or "").strip()) < 10:
@@ -1123,10 +1268,19 @@ def activate_route(
         days = expires_in_days
         if days is not None and not 1 <= days <= APPROVAL_MAX_DAYS:
             raise ValidationFailed(f"approval expiry must be 1..{APPROVAL_MAX_DAYS} days")
-    if not is_effectively_free(route):
+    shape_problems = request_shape_rejections(route)
+    if shape_problems:
+        local_hint = (" - set the loopback endpoint of the local server first (aeos routes set-endpoint)"
+                      if route.pool == "LOCAL" and not route.endpoint else "")
+        raise ValidationFailed(f"the broker cannot build the upstream request for this route: {shape_problems[0]}"
+                               f"{local_hint}", code="ROUTE_REQUEST_SHAPE_REFUSED", details={"problems": shape_problems})
+    if needs_budget(route):
         ok, why = budget_decision_valid(session, budget_decision_id, route)
         if not ok:
             raise ValidationFailed(f"paid route: {why}", code="BUDGET_DECISION_REQUIRED")
+    client_decision = _validated_client_terms(client_terms, route)
+    if client_decision is not None:
+        terms["client_restriction"] = client_decision
     runtime = runtime_context()
     unknown_runtime = [f for f in binding_fields(route) if runtime.get(f) is None]
     if unknown_runtime:
@@ -1194,6 +1348,7 @@ def activate_route(
                      "previous_config_hash": saved["config_hash"], "rollback_target": rollback,
                      "runtime_binding": {f: getattr(route, f) for f in (*binding_fields(route), "harness_version")},
                      "tool_set": route.tool_set, "region": route.region,
+                     "client_terms": _client_terms_record(route, recorded_now=client_decision is not None),
                      "eval_run_ids": sorted({rid for r in evidence["roles"].values() for rid in r["run_ids"]}),
                      "eval_results": evidence["roles"], "config_snapshot": route_config(route),
                      "decision_record": record or None},
@@ -1213,6 +1368,69 @@ def activate_route(
     session.flush()
     notify_readiness(session, route.route_key, reason=f"status {previous_status} -> {mode}", pool=route.pool)
     return route, decision
+
+
+def validated_local_endpoint(endpoint: str) -> str:
+    """An owner-set LOCAL endpoint: ``http://`` on a loopback host with an explicit port (the OpenAI-compatible base,
+    e.g. ``http://127.0.0.1:8080/v1``; the broker appends ``/chat/completions``). Never another host (§06)."""
+    raw = str(endpoint or "").strip()
+    u = urlparse(raw)
+    if u.scheme != "http" or u.hostname not in LOOPBACK_HOSTS:
+        raise ValidationFailed("a LOCAL endpoint must be http on a loopback host (127.0.0.1, localhost or [::1]), "
+                               "e.g. http://127.0.0.1:8080/v1", code="ENDPOINT_NOT_LOOPBACK")
+    try:
+        port = u.port
+    except ValueError as exc:
+        raise ValidationFailed("the LOCAL endpoint port is invalid", code="ENDPOINT_INVALID") from exc
+    if port is None or u.username or u.password or u.query or u.fragment or u.params or len(raw) > 512:
+        raise ValidationFailed("the LOCAL endpoint needs an explicit port and no credentials, query or fragment",
+                               code="ENDPOINT_INVALID")
+    return raw.rstrip("/")
+
+
+def _short_value(value: Any, name: str, *, limit: int, spaces: bool = False) -> str:
+    text = " ".join(str(value or "").split()) if spaces else str(value or "").strip()
+    if not text or len(text) > limit or (not spaces and any(c.isspace() for c in text)) or not text.isprintable():
+        raise ValidationFailed(f"{name} must be 1..{limit} printable characters"
+                               f"{'' if spaces else ' without whitespace'}")
+    return redact_text(text)
+
+
+def set_local_endpoint(
+    session: Session, route_key: str, *, endpoint: str, rationale: str, upstream_model: str | None = None,
+    build: dict[str, str] | None = None,
+) -> tuple[ModelRoute, dict[str, Any]]:
+    """Owner path (ADR-0111 amendment 2026-10-25): point a LOCAL route at the OpenAI-compatible server the owner runs
+    on this host. Endpoint, served model name and build parameters are part of the configuration identity, so a change
+    is a new configuration: decisions bound to the old hash stop matching (a new TRIAL is needed), eval results are
+    not inherited and readiness goes STALE. Caller authenticates the human, audits and commits."""
+    if len((rationale or "").strip()) < 10:
+        raise ValidationFailed("rationale is required (min 10 characters)")
+    route = get_route(session, route_key)
+    if route.pool != "LOCAL" or route.provider != "local":
+        raise ValidationFailed("only LOCAL routes (provider local) take an owner-set loopback endpoint",
+                               code="ROUTE_NOT_LOCAL")
+    if route.mode in {"MOCK", "DEMO"}:
+        raise ValidationFailed("fixture routes cannot be configured")
+    base = validated_local_endpoint(endpoint)
+    mode_params = dict(route.mode_params or {})
+    if upstream_model is not None and str(upstream_model).strip():
+        mode_params["upstream_model"] = _short_value(upstream_model, "upstream_model", limit=160)
+    for key, value in (build or {}).items():
+        if key not in LOCAL_BUILD_KEYS:
+            raise ValidationFailed(f"build parameters are {list(LOCAL_BUILD_KEYS)}", details={"unknown": key})
+        if value is not None and str(value).strip():
+            mode_params[key] = _short_value(value, key, limit=64, spaces=True)
+    if route.config_hash is None:
+        route.config_hash = compute_config_hash(route)
+    previous = {"endpoint": route.endpoint, "config_hash": route.config_hash, "status": route.status}
+    route.endpoint = base
+    route.mode_params = mode_params
+    changed = refresh_config_hash(session, route, reason=f"owner set LOCAL endpoint {previous['endpoint'] or 'none'} "
+                                                          f"-> {base}: {redact_text(rationale.strip())[:120]}")
+    session.flush()
+    return route, {"previous": previous, "config_changed": changed, "config_hash": route.config_hash,
+                   "needs_new_trial": changed and previous["status"] in {"APPROVED", "TRIAL"}}
 
 
 def disable_route(session: Session, route_key: str, *, reason: str) -> ModelRoute:

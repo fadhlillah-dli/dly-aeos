@@ -41,6 +41,11 @@ class BrokerRequest(IdMixin, TimestampMixin, Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     retry_after_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_summary: Mapped[str] = mapped_column(Text, default="")  # always redacted
+    # §23 "mode/thinking params" (ADR-0041 amendment 2026-10-25): the reasoning level the broker sent upstream
+    # (the route's mode_params.reasoning; NOT_SENT = provider default) and the level the worker asked for, which
+    # is never forwarded. None on rows recorded before the column existed (UNKNOWN).
+    reasoning_effort: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reasoning_requested: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class BrokerSideEffect(IdMixin, TimestampMixin, Base):

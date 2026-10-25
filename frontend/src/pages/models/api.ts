@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { get, post } from "../../api/client";
-import type { ActivatePayload, CapabilityTestView, ClaudeStatus, RouteDetail, RouteList } from "./types";
+import type { ActivatePayload, CapabilityTestView, ClaudeStatus, EndpointPayload, RouteDetail, RouteList } from "./types";
 
 const enc = (key: string) => key.split("/").map(encodeURIComponent).join("/");
 
@@ -43,6 +43,19 @@ export function useActivateRoute(key: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: ActivatePayload) => post<{ decision_id: string; decision_kind: string }>(`/api/routes/${enc(key)}/activate`, body as unknown as Record<string, unknown>),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["routes"] });
+      qc.invalidateQueries({ queryKey: ["route", key] });
+    },
+  });
+}
+
+/** LOCAL route: the owner sets the loopback endpoint of their local server (a new configuration -> new TRIAL). */
+export function useSetRouteEndpoint(key: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: EndpointPayload) =>
+      post<{ config_changed: boolean; needs_new_trial: boolean }>(`/api/routes/${enc(key)}/endpoint`, body as unknown as Record<string, unknown>),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["routes"] });
       qc.invalidateQueries({ queryKey: ["route", key] });

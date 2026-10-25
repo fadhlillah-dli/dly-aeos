@@ -122,6 +122,44 @@ export interface RouteItem {
   reviewed_tool_set?: string[] | null;
   runtime_binding?: RuntimeBinding;
   execution_path?: { status: string; note: string };
+  /** which evaluation can produce results for this route (NOT_WIRED for arena/comparator/local: DESIGN, NOT-PROVEN) */
+  evaluation_path?: { status: string; note: string };
+  /** the exact upstream request the broker would build (E1 documentation shape until a probe records E3) */
+  upstream_request?: UpstreamRequest | null;
+  /** provider rule on which client may call the route (S07: free-tier Zen models require OpenCode) */
+  client_restriction?: ClientRestriction | null;
+  /** false for a free route or a loopback LOCAL route (no BUDGET decision needed) */
+  budget_required?: boolean;
+}
+
+export interface UpstreamRequest {
+  url?: string | null;
+  model?: string;
+  catalog_model_id?: string;
+  api?: string;
+  reasoning_effort?: string;
+  code?: string | null;
+  problem?: string | null;
+  status: "READY_SHAPE" | "REFUSED" | "UNKNOWN" | string;
+  note: string;
+}
+
+export interface ClientRestriction {
+  status: "OWNER_DECISION_REQUIRED" | "OWNER_ACCEPTED" | string;
+  statement: string | null;
+  source: string | null;
+  applies_to: string | null;
+  owner_note: string | null;
+  note: string;
+}
+
+export interface EndpointPayload {
+  endpoint: string;
+  rationale: string;
+  upstream_model?: string | null;
+  quantization?: string | null;
+  inference_backend?: string | null;
+  hardware?: string | null;
 }
 
 export interface RouteDetail extends RouteItem {
@@ -167,6 +205,8 @@ export interface ActivatePayload {
   eval_run_ids?: string[] | null;
   /** APPROVED only: §44 DecisionRecord of adopting the evaluated route (evidence_ids default to eval_run_ids) */
   decision_record?: { options: string[]; goal: string; cost_quality_tradeoff: string; invalidate_if: string } | null;
+  /** the owner's decision on a provider client restriction (required while it is OWNER_DECISION_REQUIRED) */
+  client_terms?: { accepted: boolean; note: string } | null;
 }
 
 export const DATA_CLASSES = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"] as const;
