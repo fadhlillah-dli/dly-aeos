@@ -67,6 +67,33 @@ def test_signature_gate_blocks_invalid_or_foreign_signers_and_never_claims_authe
     assert binmod.signature_gate(sig, pinned)[0] == gate
 
 
+QUOTED = 'CN="Anthropic, PBC", O="Anthropic, PBC", L=San Francisco, S=California, C=US'
+# The subject Get-AuthenticodeSignature reports for the winget-installed claude.exe (observed 2026-10-25).
+REAL_WINDOWS = ('CN="Anthropic, PBC", O="Anthropic, PBC", L=San Francisco, S=California, C=US, SERIALNUMBER=4860621, '
+                'OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=Delaware, '
+                'OID.1.3.6.1.4.1.311.60.2.1.3=US')
+
+
+@pytest.mark.parametrize(("signer", "pinned", "gate"), [
+    # a pin is an exact identity, never a substring of the observed subject
+    ("CN=Anthropic, PBC Labs, O=Anthropic, PBC Labs, C=US", "Anthropic, PBC", "BLOCKED"),
+    ("CN=Not Anthropic, PBC, O=Evil Inc, C=US", "Anthropic, PBC", "BLOCKED"),
+    (ANTHROPIC, "Anthropic", "BLOCKED"),
+    ("Q6L2SF6YDWX", "Q6L2SF6YDW", "BLOCKED"),  # macOS TeamIdentifier: exact
+    # the exact CN / O value, a whole RDN or the whole subject match (quoted or unquoted DN form)
+    (QUOTED, "Anthropic, PBC", "OK"),
+    (QUOTED, "O=Anthropic, PBC", "OK"),
+    (REAL_WINDOWS, "Anthropic, PBC", "OK"),
+    (REAL_WINDOWS, "SERIALNUMBER=4860621", "OK"),
+    (REAL_WINDOWS, "4860621", "BLOCKED"),  # a bare non-CN/O value is not an identity
+    (ANTHROPIC, "o=anthropic,  pbc", "OK"),
+    (ANTHROPIC, ANTHROPIC, "OK"),
+    ("Q6L2SF6YDW", "Q6L2SF6YDW", "OK"),
+])
+def test_the_pinned_publisher_must_match_exactly_never_as_a_substring(signer, pinned, gate):
+    assert binmod.signature_gate({"status": "VALID", "signer": signer}, pinned)[0] == gate
+
+
 def test_an_invalid_signature_refuses_the_native_call(settings, monkeypatch):
     from aeos.claude_bridge import bridge
     from aeos.claude_bridge.facade import ClaudeRequest
@@ -115,3 +142,9 @@ def test_a_pinned_publisher_in_the_manifest_reaches_the_gate(monkeypatch):
     monkeypatch.setattr(manifest, "load_manifest", lambda *a, **k: SimpleNamespace(data=data))
     assert binmod.approved_publisher() == "Anthropic, PBC"
     assert binmod.signature_gate({"status": "VALID", "signer": "CN=Other"}, binmod.approved_publisher())[0] == "BLOCKED"
+    # the OS report names the real pin instead of claiming that none exists
+
+    def run(argv, timeout=30):
+        return (1, "", "")
+
+    assert binmod.publisher_signature(Path("claude"), run=run)["publisher_pin"].startswith("Anthropic, PBC")

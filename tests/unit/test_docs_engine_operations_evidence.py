@@ -115,6 +115,25 @@ def test_untrusted_or_other_domain_production_evidence_never_validates(world):
     assert _render(world)["08-operational-overview"].status == "DRAFT"
 
 
+@pytest.mark.parametrize(("status", "approved"), [("FAIL", False), ("NOT_PROVEN", False), ("PASS", True),
+                                                  (None, True)])
+def test_a_recorded_failed_production_validation_never_approves_the_operations_documents(world, status, approved):
+    """§28 "status hanya berdasarkan evidence": a PRODUCTION_VALIDATION artefact approves only when its own result
+    is PASS (or states none); one that records FAIL / NOT_PROVEN keeps the documents DRAFT."""
+    db, project = world["db"], world["project"]
+    content = {"scope": "post-release checks", **({"status": status} if status else {})}
+    ev = EvidenceArtifact(project_id=project.id, domain=project.domain, kind="PRODUCTION_VALIDATION",
+                          origin="collector", collector_identity="production-validation", trusted=True,
+                          content_hash="sha256:pv", claim="post-release validation", inline={"content": content},
+                          environment={"commit": HEAD, "name": "production"})
+    db.add(ev)
+    db.commit()
+    doc = _render(world)["08-operational-overview"]
+    assert (doc.status == "APPROVED") is approved, (status, doc.status, doc.status_reason)
+    if not approved:
+        assert ev.id in doc.status_reason and status in doc.status_reason
+
+
 def _trusted_evidence(db, project) -> str:
     ev = EvidenceArtifact(project_id=project.id, domain=project.domain, kind="LOG", origin="collector",
                           collector_identity="log-collector", trusted=True, content_hash="sha256:log",

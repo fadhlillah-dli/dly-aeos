@@ -178,11 +178,15 @@ def capabilities_view(session: Session, *, domain: str | None, project_id: str |
         if len(it["checks"]) < before:
             it["reasons"].append("catatan: pemeriksaan ber-scope domain lain tidak ditampilkan; pilih domain "
                                  "PERSONAL/OFFICE untuk melihat detailnya")
+    from aeos.doctor import provider_watch
+
     last = latest_run(session)
     return {
         "items": items,
         "human_only": [{"label": h, "status": "HUMAN_ONLY",
                         "note": "Keputusan manusia; bukan capability worker (§08, U-09)."} for h in HUMAN_ONLY],
+        # §08 STALE-on-permission-change: which provider calls are observed per call, and which are not yet
+        "permission_watch": provider_watch.status(),
         "source": "Capability gates dari CheckResult terbaru (§08)",
         "checked_at": last.finished_at.isoformat() if last and last.finished_at else None,
         "generated_at": utcnow().isoformat(),  # gates evaluated now; checked_at null = no Doctor run yet

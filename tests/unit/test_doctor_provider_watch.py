@@ -163,3 +163,14 @@ def test_stale_github_rows_queue_a_functional_recheck(settings, db, monkeypatch)
         caps.disable_auto_recheck()
     flat = {c for ids in queued for c in ids}
     assert {"adapter.github_token", "adapter.project_repo"} <= flat
+
+
+def test_the_capability_view_states_which_provider_calls_are_watched_and_which_are_not(personal_client):
+    """Evidence honesty: per-call observation covers the publisher only; delivery/broker GitHub calls are named as
+    not observed (a permission change they see waits for the next functional run or TTL expiry)."""
+    body = personal_client.get("/api/doctor/capabilities").json()
+    pw = body["permission_watch"]
+    assert any("publisher" in c for c in pw["observed_calls"])
+    assert any("delivery" in c for c in pw["not_observed_calls"]) and any("broker" in c for c in
+                                                                           pw["not_observed_calls"])
+    assert "personal/github" in pw["watched"]

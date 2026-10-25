@@ -75,7 +75,7 @@
         "verified_at": {"$ref": "#/$defs/nullable_text"},
         "result": {"enum": ["VERIFIED", "NOT_VERIFIED", "UNAVAILABLE", "UNKNOWN"]},
         "approved_signer": {
-          "$comment": "Owner-pinned publisher identity (Authenticode signer subject substring / macOS TeamIdentifier). null = not pinned: a valid signature is reported but authenticity stays UNVERIFIED; a different observed signer BLOCKS the component (§12, §25).",
+          "$comment": "Owner-pinned publisher identity, matched exactly (never as a substring): the whole Authenticode signer subject, one whole RDN such as O=Anthropic, PBC, the exact CN/O value, or the macOS TeamIdentifier. null = not pinned: a valid signature is reported but authenticity stays UNVERIFIED; a different observed signer BLOCKS the component (§12, §25).",
           "$ref": "#/$defs/nullable_text"
         },
         "note": {"$ref": "#/$defs/nullable_text"}
