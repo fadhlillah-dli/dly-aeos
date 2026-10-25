@@ -255,16 +255,37 @@ SERVICE_ROLES: list[dict[str, Any]] = [
 # ----------------------------------------------------------------------------- §17/§46 competence details
 # inputs (what the role consumes), example outputs (shape of a good result) and failure modes (what the
 # reviewer/verifier looks for) per role. Practice sources beyond the master are references only; nothing is
-# imported or auto-updated from them (§45).
+# imported or auto-updated from them (§45). §46 "sumber praktik yang sah": each one is a NAMED, verifiable
+# publication (title, publisher/edition, canonical URL) - never a generic label. The links are stated here, not
+# checked live by the platform.
 EXTERNAL_PRACTICE = {
-    "product-ux": "Practice reference: product discovery / UX research literature (reference only, §45)",
-    "architecture-delivery": "Practice reference: RFC/ADR and design review practice (reference only, §45)",
-    "fe-api-data": "Practice reference: OWASP ASVS, API contract testing practice (reference only, §45)",
-    "security-privacy": "Practice reference: OWASP ASVS/SAMM, NIST SSDF, GDPR DPIA guidance (reference only, §45)",
-    "platform-sre": "Practice reference: Google SRE book, NIST SSDF (reference only, §45)",
-    "qa-verification": "Practice reference: ISTQB test design techniques (reference only, §45)",
-    "docs-release": "Practice reference: Diataxis documentation, release management practice (reference only, §45)",
-    "research-eval-cost": "Practice reference: FinOps framework, ML evaluation methodology (reference only, §45)",
+    "product-ux": "Practice reference (reference only, §45): Nielsen Norman Group, '10 Usability Heuristics for User "
+                  "Interface Design' (https://www.nngroup.com/articles/ten-usability-heuristics/); W3C, 'Web Content "
+                  "Accessibility Guidelines (WCAG) 2.2' (https://www.w3.org/TR/WCAG22/)",
+    "architecture-delivery": "Practice reference (reference only, §45): Michael Nygard, 'Documenting Architecture "
+                             "Decisions' (2011, https://cognitect.com/blog/2011/11/15/documenting-architecture-"
+                             "decisions); ISO/IEC/IEEE 42010:2022 'Architecture description'; DORA, 'DORA metrics' "
+                             "(https://dora.dev/)",
+    "fe-api-data": "Practice reference (reference only, §45): OWASP 'Application Security Verification Standard 4.0.3' "
+                   "(https://owasp.org/www-project-application-security-verification-standard/); OpenAPI Initiative, "
+                   "'OpenAPI Specification 3.1.0' (https://spec.openapis.org/oas/v3.1.0); OWASP 'API Security Top 10 "
+                   "2023' (https://owasp.org/API-Security/)",
+    "security-privacy": "Practice reference (reference only, §45): NIST SP 800-218 'Secure Software Development "
+                        "Framework (SSDF) 1.1' (https://csrc.nist.gov/pubs/sp/800/218/final); OWASP 'SAMM v2' "
+                        "(https://owaspsamm.org/); Article 29 WP / EDPB 'Guidelines on DPIA' WP248 rev.01; SLSA "
+                        "'Specification v1.0' (https://slsa.dev/spec/v1.0/)",
+    "platform-sre": "Practice reference (reference only, §45): Beyer et al., 'Site Reliability Engineering' "
+                    "(O'Reilly 2016, https://sre.google/sre-book/table-of-contents/); NIST SP 800-218 SSDF 1.1 "
+                    "(https://csrc.nist.gov/pubs/sp/800/218/final)",
+    "qa-verification": "Practice reference (reference only, §45): ISTQB 'Certified Tester Foundation Level Syllabus "
+                       "v4.0' (2023, https://www.istqb.org/); ISO/IEC/IEEE 29119-4:2021 'Test techniques'",
+    "docs-release": "Practice reference (reference only, §45): Daniele Procida, 'Diataxis' (https://diataxis.fr/); "
+                    "'Semantic Versioning 2.0.0' (https://semver.org/); 'Keep a Changelog 1.1.0' "
+                    "(https://keepachangelog.com/en/1.1.0/)",
+    "research-eval-cost": "Practice reference (reference only, §45): FinOps Foundation, 'FinOps Framework' "
+                          "(https://www.finops.org/framework/); Liang et al., 'Holistic Evaluation of Language Models' "
+                          "(arXiv:2211.09110, https://arxiv.org/abs/2211.09110); NIST AI 100-1 'AI Risk Management "
+                          "Framework 1.0' (https://www.nist.gov/itl/ai-risk-management-framework)",
 }
 _D = tuple[list[str], list[str], list[str]]  # inputs, example outputs, failure modes
 ROLE_DETAILS: dict[str, _D] = {
@@ -385,7 +406,10 @@ EXECUTOR_ROLE_KEYS = frozenset(r["role_key"] for r in EXECUTOR_ROLES)
 ALL_ROLES: list[dict[str, Any]] = [*PLANNING_ROLES, *EXECUTOR_ROLES, *SERVICE_ROLES]
 
 # ----------------------------------------------------------------------------- AgentDefinitions (§17)
-DEFAULT_IMPLEMENTER_TOOLS = ["read", "glob", "grep", "edit", "write", "todowrite"]
+# §17 AgentDefinition.tools is the agent's tool envelope, enforced at admission: it must cover every tool the
+# runtime grants a worker (aeos.worker_runtime.opencode.BASE_ALLOW); bash/webfetch additionally need the agent's
+# limits to permit what the TaskSpec asks for.
+DEFAULT_IMPLEMENTER_TOOLS = ["read", "glob", "grep", "list", "edit", "write", "todowrite"]
 
 AGENT_DEFINITIONS: list[dict[str, Any]] = [
     {

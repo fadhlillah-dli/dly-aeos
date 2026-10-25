@@ -181,6 +181,48 @@ def _seconds(a: Any, b: Any) -> float | None:
     return max(0.0, (b - a).total_seconds())  # type: ignore[operator]
 
 
+# §44 measures no trusted record produces yet (coordination tokens between agents, merge conflicts, adjacent
+# regressions): reported as unknown on every collected sample, never counted as zero.
+UNDERIVED_FIELDS = ("coordination_tokens", "merge_conflicts", "adjacent_regressions")
+CONTRADICTED_REPORT = ("FAIL",)
+
+
+def derive_tool_failures(session: Session, impl: list[Any]) -> int | None:
+    """§43 Reliability "tool/schema failures" from canonical records only: every tool call the runner observed failing
+    or being refused (``run.action`` events of kind ``tool_error``, written by the runner identity, not by the worker)
+    plus every worker report that failed its schema. None (unknown) when the task never had an implementation run."""
+    if not impl:
+        return None
+    from aeos.models.audit import Event
+
+    ids = [r.id for r in impl]
+    failed_tools = sum(1 for ev in session.scalars(select(Event).where(Event.source == "runner",
+                                                                       Event.kind == "run.action",
+                                                                       Event.run_id.in_(ids)))
+                       if (ev.payload or {}).get("kind") == "tool_error")
+    bad_reports = sum(1 for r in impl if ((r.caps or {}).get("worker_report") or {}).get("schema_errors"))
+    return failed_tools + bad_reports
+
+
+def derive_false_claims(impl: list[Any]) -> int | None:
+    """§43 "false evidence/claim" from canonical records only: an attempt whose worker report says COMPLETED while
+    the independent verifier FAILED it, acceptance REJECTED it or the runtime quarantined it for scope, plus every
+    task/run/plan reference the report claimed that is not the run's own. None (unknown) when a COMPLETED claim was
+    never checked by the verifier - an unchecked claim is neither true nor false."""
+    count = 0
+    for r in impl:
+        report = (r.caps or {}).get("worker_report") or {}
+        count += len(report.get("ref_mismatches") or [])
+        if report.get("status") != "COMPLETED":
+            continue
+        if r.verifier_status in CONTRADICTED_REPORT or r.acceptance_status == "REJECTED" or r.quarantined \
+                or r.outcome_code == "SCOPE_VIOLATION":
+            count += 1
+        elif r.verifier_status != "PASS":
+            return None
+    return count
+
+
 def derive_sample(session: Session, run: EvalRun, binding: dict[str, Any]) -> tuple[str, dict[str, Any] | None, str]:
     """(PENDING|READY|INVALID, sample, reason) for one bound slot, from canonical records only."""
     from aeos.models.broker_ext import BrokerRequest
@@ -240,6 +282,9 @@ def derive_sample(session: Session, run: EvalRun, binding: dict[str, Any]) -> tu
     reasons = [str(x) for x in (acc.reasons or [])] if acc is not None else []
     tokens = [(r.prompt_tokens or 0) + (r.completion_tokens or 0) for r in requests
               if r.prompt_tokens is not None or r.completion_tokens is not None]
+    prompt_tokens = [int(r.prompt_tokens or 0) for r in requests if r.prompt_tokens is not None]
+    false_claims = derive_false_claims(impl)
+    tool_failures = derive_tool_failures(session, impl)
     first_started = next((r.started_at for r in impl if r.started_at), None)
     finished = next((r.finished_at for r in reversed(impl) if r.finished_at), None)
     sample: dict[str, Any] = {
@@ -264,7 +309,16 @@ def derive_sample(session: Session, run: EvalRun, binding: dict[str, Any]) -> tu
         "claude_review_count": sum(1 for r in reviews if r.reviewer_kind == "CLAUDE"),
         "human_interventions": sum(1 for r in reviews if r.reviewer_kind == "HUMAN") + int(bool(te.extra_attempts)),
         "quota_delay_s": None,
-        "unknown_fields": ["false_claims", "tool_failures", "context_tokens", "coordination_tokens", "merge_conflicts"],
+        # §43 Contract "false evidence/claim": the worker's own report contradicted by the trusted records
+        "false_claims": false_claims,
+        # §44 "context tokens": what was sent to the model (prompt side of the broker-metered requests)
+        "context_tokens": sum(prompt_tokens) if prompt_tokens else None,
+        # §43 Reliability "tool/schema failures": runner-observed tool errors + invalid worker reports
+        "tool_failures": tool_failures,
+        # Not produced by any trusted record in this build: stated as unknown, never counted as zero.
+        "unknown_fields": [*(["false_claims"] if false_claims is None else []),
+                           *([] if prompt_tokens else ["context_tokens"]),
+                           *(["tool_failures"] if tool_failures is None else []), *UNDERIVED_FIELDS],
     }
     if binding.get("quality"):
         sample["quality"] = dict(binding["quality"])
@@ -283,6 +337,20 @@ def derive_gates(samples: list[dict[str, Any]]) -> dict[str, str]:
     return {"security": security, "authority": authority, "evidence": evidence}
 
 
+def grader_changed(run: EvalRun) -> str | None:
+    """Why the controller's evaluation code (graders, suites, collector) differs from the code the run was planned
+    with (None = unchanged). A run planned without a fingerprint is UNKNOWN and refused (fail closed)."""
+    from aeos.evaluation.service import grader_fingerprint
+
+    planned = (run.environment or {}).get("grader_fingerprint")
+    if not planned or planned == "UNKNOWN":
+        return "the evaluation code fingerprint of this run is unknown"
+    now = grader_fingerprint()
+    if now != planned:
+        return f"the controller's evaluation code changed since the run was planned ({planned[7:19]} -> {now[7:19]})"
+    return None
+
+
 def collect(session: Session, run_id: str, *, viewer_domain: str | None = None, scoped: bool = False) -> dict[str, Any]:
     """Collect every bound slot; record the run when all slots have a terminal, valid sample."""
     from aeos.evaluation.service import record_result
@@ -294,6 +362,10 @@ def collect(session: Session, run_id: str, *, viewer_domain: str | None = None, 
     if changed:
         raise Conflict(f"{changed}: the samples would mix configurations; stop it (aeos eval finish) and plan a new "
                        "run on the current configuration", code="ROUTE_CONFIG_CHANGED")
+    grader = grader_changed(run)
+    if grader:
+        raise Conflict(f"{grader}: the result is never recorded with changed graders; restore the reviewed "
+                       "evaluation code (special review) and plan a new run", code="GRADER_CHANGED")
     all_slots = slots(session, run)
     by_slot = {b["slot_id"]: b for b in run.bindings or []}
     collected: list[dict[str, Any]] = []

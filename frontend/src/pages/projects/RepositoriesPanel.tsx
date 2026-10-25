@@ -1,16 +1,130 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, GitBranch, ScanSearch, ShieldCheck } from "lucide-react";
 import { useState } from "react";
-import { post } from "../../api/client";
+import { get, post } from "../../api/client";
+import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputClass, KeyValue, Mono } from "../../components/ui";
 import { shortHash } from "../../lib/format";
 import { ModuleBadge } from "./badges";
 import { InventoryFacts } from "./InventoryFacts";
-import { CODE_PROVIDER, type ProjectView, type RepositoryView } from "./types";
+import { CODE_PROVIDER, type ProjectView, type RepositoryDetail, type RepositoryView } from "./types";
+
+const PR_STATE: Record<string, [string, string]> = {
+  OPEN: ["PENDING", "Terbuka"],
+  MERGED: ["SUCCEEDED", "Di-merge (manusia)"],
+  CLOSED: ["CANCELLED", "Ditutup"],
+};
+
+/** §37 user repository: base branch, PR/CI links, docs targets and capability, joined by the backend. */
+export function RepositoryLinks({ repoId }: { repoId: string }) {
+  const q = useQuery({
+    queryKey: ["repository", repoId],
+    queryFn: () => get<{ repository: RepositoryDetail; checked_at?: string }>(`/api/repositories/${repoId}`),
+  });
+  if (q.isLoading) return <p className="text-xs text-ink-3">Memuat PR/CI/dokumen…</p>;
+  if (q.error) return <ErrorBox error={q.error} />;
+  const d = q.data?.repository;
+  if (!d) return null;
+  const none = (text: string) => <span className="text-ink-3">{text}</span>;
+  return (
+    <section aria-label={`Tautan repository ${d.full_name}`}>
+      <KeyValue
+        items={[
+          ["Base branch", d.base_branch ? <Mono>{d.base_branch}</Mono> : "UNKNOWN (belum diverifikasi)"],
+          [
+            "Pull request",
+            d.pull_requests.length === 0
+              ? none("Belum ada PR tercatat oleh AEOS")
+              : (
+                  <ul className="space-y-1">
+                    {d.pull_requests.map((pr) => {
+                      const [status, label] = PR_STATE[pr.state] ?? ["UNKNOWN", pr.state || "UNKNOWN"];
+                      return (
+                        <li key={pr.number} className="flex flex-wrap items-center gap-2">
+                          {/* provider-supplied URL: rendered as a link only when it is https (never javascript:/data:) */}
+                          {/^https:\/\//i.test(pr.url ?? "") ? (
+                            <a href={pr.url} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-accent hover:underline">
+                              #{pr.number} <ExternalLink className="h-3 w-3" aria-hidden />
+                            </a>
+                          ) : (
+                            <span>#{pr.number}</span>
+                          )}
+                          <StatusBadge status={status} label={label} />
+                          {pr.head_ref && (
+                            <span className="text-xs text-ink-3">
+                              <Mono>{pr.head_ref}</Mono> → <Mono>{pr.base_ref ?? "?"}</Mono>
+                            </span>
+                          )}
+                          {pr.last_synced_at ? <Freshness at={pr.last_synced_at} /> : <span className="text-xs text-ink-3">belum disinkronkan</span>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ),
+          ],
+          [
+            "CI",
+            d.ci.length === 0
+              ? none("Belum ada integrasi CI")
+              : (
+                  <span className="flex flex-wrap gap-2">
+                    {d.ci.map((c) => (
+                      <span key={c.integration_id} className="inline-flex items-center gap-1">
+                        {c.provider} <ModuleBadge kind="config" value={c.configuration} />
+                      </span>
+                    ))}
+                  </span>
+                ),
+          ],
+          [
+            "Target dokumen",
+            d.docs_targets.length === 0
+              ? none("Belum ada folder/halaman dokumen")
+              : (
+                  <span className="flex flex-wrap gap-2">
+                    {d.docs_targets.map((t) => (
+                      <span key={t.integration_id}>
+                        {t.provider} · <Mono>{t.root_id ?? "UNKNOWN"}</Mono>
+                      </span>
+                    ))}
+                  </span>
+                ),
+          ],
+          [
+            "Capability tulis",
+            d.capability.write_enablement.length === 0
+              ? none("Tidak ada integrasi; tidak ada izin tulis")
+              : (
+                  <span className="flex flex-wrap gap-2">
+                    {d.capability.write_enablement.map((w) => {
+                      // §26 per provider (flag + ACTIVE human decision), exactly as the write interlock checks it
+                      const [status, label] =
+                        w.status === "ENABLED"
+                          ? ["ENABLED", "Diizinkan (keputusan, per provider)"]
+                          : w.status === "NOT_APPLICABLE"
+                            ? ["NOT_APPLICABLE", "Bukan provider tulis"]
+                            : ["DISABLED", "Belum diizinkan"];
+                      return (
+                        <span key={w.integration_id} className="inline-flex items-center gap-1">
+                          {w.provider}/{w.purpose}
+                          <StatusBadge status={status} label={label} />
+                        </span>
+                      );
+                    })}
+                  </span>
+                ),
+          ],
+          ["Merge", d.capability.merge],
+        ]}
+      />
+    </section>
+  );
+}
 
 function RepoCard({ repo, isAdmin, onChanged }: { repo: RepositoryView; isAdmin: boolean; onChanged: () => void }) {
   const [localPath, setLocalPath] = useState("");
   const [showInv, setShowInv] = useState(false);
+  const [showLinks, setShowLinks] = useState(false);
   const verify = useMutation({ mutationFn: () => post(`/api/repositories/${repo.id}/verify`), onSuccess: onChanged });
   const inventory = useMutation({
     mutationFn: () => post(`/api/repositories/${repo.id}/inventory`, {}),
@@ -102,7 +216,15 @@ function RepoCard({ repo, isAdmin, onChanged }: { repo: RepositoryView; isAdmin:
             {showInv ? "Sembunyikan fakta" : "Lihat fakta inventaris"}
           </Button>
         )}
+        <Button variant="ghost" onClick={() => setShowLinks(!showLinks)} aria-expanded={showLinks}>
+          {showLinks ? "Sembunyikan PR/CI/dokumen" : "PR, CI, dokumen & capability"}
+        </Button>
       </div>
+      {showLinks && (
+        <div className="mt-3">
+          <RepositoryLinks repoId={repo.id} />
+        </div>
+      )}
       {isAdmin && repo.role !== "platform" && (
         <form
           className="mt-3 flex flex-wrap items-end gap-2"

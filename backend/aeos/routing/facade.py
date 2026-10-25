@@ -76,3 +76,19 @@ def note_rate_limited(
     from aeos.routing.service import note_rate_limited as impl
 
     impl(session, provider=provider, scope=scope, retry_after_seconds=retry_after_seconds, source=source)
+
+
+def observe_supervisor_call(session: Session, *, model: str, engine_version: str | None,
+                            effort: str | None = None) -> dict[str, object]:
+    """§23: bind the Claude Code version and effort/thinking setting of a planning/review call to the supervisor
+    route's configuration identity (a later change is a new configuration, never silent)."""
+    from aeos.routing.service import observe_supervisor_call as impl
+
+    return impl(session, model=model, engine_version=engine_version, effort=effort)
+
+
+def supervisor_configuration(session: Session, model: str) -> dict[str, object] | None:
+    """§02: the supervisor route configuration a call ran on and its evaluation state (NEEDS_EVALUATION etc.)."""
+    from aeos.routing.service import supervisor_configuration as impl
+
+    return impl(session, model)

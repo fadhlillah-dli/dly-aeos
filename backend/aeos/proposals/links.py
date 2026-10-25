@@ -88,9 +88,11 @@ def validate(session: Session, p: ChangeProposal, kind: str, ids: list[str], *,
                 raise ValidationFailed(f"ADR {i} not found or not ACCEPTED/PROPOSED")
             out.append(adr.adr_key)
         elif kind == "observation_ids":
+            from aeos.proposals import review as R
+
             o = session.get(ComponentObservation, i)
             targets = set(p.existing_component_ids or []) | set(p.candidate_component_ids or [])
-            if o is None or o.component_id not in targets:
+            if o is None or o.component_id not in targets or not R.observation_in_domain(o, p.domain):
                 raise ValidationFailed(f"observation {i} is not about a component of this proposal")
             out.append(o.id)
         else:
@@ -189,9 +191,11 @@ def _reconcile(session: Session, p: ChangeProposal, component_ids: list[str]) ->
 def finalize(session: Session, p: ChangeProposal, entry: dict[str, Any]) -> dict[str, Any]:
     """§40 Finalization: inventory reconciled, docs/ADR linked, ownership and rollback history connected."""
     from aeos.inventory import facade as inventory
+    from aeos.proposals import review as R
 
     targets = sorted({*(p.existing_component_ids or []), *(p.candidate_component_ids or [])})
-    registered = [c for c in targets if inventory.get_component(session, c) is not None]
+    # only this domain's components are reconciled/owned by this proposal (§23)
+    registered = [c for c in targets if R.component_in_domain(inventory.get_component(session, c), p.domain)]
     inv = _reconcile(session, p, registered) if registered else {
         "status": "PENDING", "runs": [], "reason": "tidak ada komponen terdampak yang terdaftar di inventaris"}
     adr_keys = list((p.links or {}).get("adr_keys") or [])

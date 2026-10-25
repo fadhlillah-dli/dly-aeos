@@ -101,11 +101,12 @@ def test_shared_memory_respects_principal_project_scope(admin_client: AuthedClie
 
 
 def test_pack_metadata_is_project_scoped(personal_client: AuthedClient, db):
-    """Metadata context comes from this project's records plus global ones only (no sibling projects)."""
+    """Metadata context comes from this project's records plus global ones only (no sibling projects). Both plans
+    are approved: only accepted records are project context (§24, test_knowledge_precedence)."""
     a = create_project(personal_client, name="Meta A")
     b = create_project(personal_client, name="Meta B")
-    db.add_all([Plan(project_id=a["id"], domain="PERSONAL", title="Orion rollout for A"),
-                Plan(project_id=b["id"], domain="PERSONAL", title="Orion rollout for B")])
+    db.add_all([Plan(project_id=a["id"], domain="PERSONAL", title="Orion rollout for A", state="APPROVED"),
+                Plan(project_id=b["id"], domain="PERSONAL", title="Orion rollout for B", state="APPROVED")])
     db.commit()
     pack = _build(personal_client, a["id"], include=["metadata"], query=["orion"])
     titles = [i["title"] for i in pack["items"] if i["kind"] == "metadata"]

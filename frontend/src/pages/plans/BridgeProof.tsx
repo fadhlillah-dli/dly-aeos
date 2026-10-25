@@ -7,6 +7,31 @@ export interface BridgeProof {
   label?: string;
   reasons?: string[];
   checked_at?: string;
+  /** "OPEN" when UNKNOWN still executes in this build: whether it may is the owner's decision (§02 Istilah) */
+  owner_decision?: string;
+  note?: string;
+}
+
+/** §02/§23 per stage: the supervisor route configuration a stage ran on that has not been evaluated. */
+export type SupervisorUnevaluated = Record<
+  string,
+  { route_key: string; config_hash?: string | null; resolved_version?: string | null; harness_version?: string | null; note?: string | null }
+>;
+
+export function SupervisorConfigNotice({ unevaluated }: { unevaluated?: SupervisorUnevaluated | null }) {
+  const entries = Object.entries(unevaluated ?? {});
+  if (entries.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs" aria-label="Konfigurasi supervisor belum dievaluasi">
+      <StatusBadge status="STALE" label="Konfigurasi supervisor belum dievaluasi" />
+      <span className="text-ink-3">
+        {entries
+          .map(([stage, e]) => `${stage}: ${e.route_key}${e.resolved_version ? ` (${e.resolved_version})` : ""}${e.harness_version ? ` · Claude Code ${e.harness_version}` : ""}`)
+          .join("; ")}
+        . Versi berubah dan belum dievaluasi; rencana tetap berjalan pada versi baru — keputusan pemilik diperlukan.
+      </span>
+    </div>
+  );
 }
 
 const TEXT: Record<string, { status: string; label: string; note: string }> = {
@@ -40,6 +65,7 @@ export function BridgeProofNotice({ proof }: { proof?: BridgeProof | null }) {
       <StatusBadge status={t.status} label={t.label} />
       <span className="text-ink-3">{t.note}</span>
       {(proof.reasons ?? []).length > 0 && <span className="text-ink-3">Alasan: {(proof.reasons ?? []).slice(0, 3).join("; ")}</span>}
+      {proof.owner_decision === "OPEN" && <StatusBadge status="NEEDS_DECISION" label="Keputusan pemilik terbuka: UNKNOWN tetap dieksekusi" />}
     </div>
   );
 }

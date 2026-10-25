@@ -242,10 +242,17 @@ def test_approved_activation_with_recorded_evaluation_over_the_api(personal_clie
                              samples=[{"sample_id": f"s{i}", "status": "ACCEPTED", "first_pass": True} for i in range(8)],
                              gate_results={"security": "PASS", "authority": "PASS", "evidence": "PASS"})
     db.commit()
-    r = personal_client.post(f"/api/routes/{DS}/activate", json={
-        "mode": "APPROVED", "rationale": "tested on the held-out suite", "expected_config_hash": h,
-        "eval_run_ids": [run.json()["id"]]})
+    body = {"mode": "APPROVED", "rationale": "tested on the held-out suite", "expected_config_hash": h,
+            "eval_run_ids": [run.json()["id"]]}
+    r = personal_client.post(f"/api/routes/{DS}/activate", json=body)  # §44: adoption needs the DecisionRecord
+    assert r.status_code == 422 and r.json()["error"]["code"] == "DECISION_RECORD_INCOMPLETE"
+    r = personal_client.post(f"/api/routes/{DS}/activate", json={**body, "decision_record": {
+        "options": ["tetap TRIAL", "APPROVED"], "goal": "rute pekerja produksi untuk slice kecil",
+        "cost_quality_tradeoff": "gratis; acceptance 8/8 pada suite", "invalidate_if": "konfigurasi berubah"}})
     assert r.status_code == 200, r.text
+    from aeos.models.decisions import Decision
+
+    assert db.get(Decision, r.json()["decision_id"]).details["decision_record"]["evidence_ids"] == [run.json()["id"]]
     view = r.json()["route"]
     assert view["status"] == "APPROVED" and view["eval_summary"]["state"] == "DIUJI"
     assert view["eval_summary"]["roles"]["feature-implementer"]["run_ids"] == [run.json()["id"]]

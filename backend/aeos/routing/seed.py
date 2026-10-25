@@ -55,6 +55,9 @@ ZEN_FREE_PRICING = {"input_per_mtok": 0, "output_per_mtok": 0, "currency": "USD"
 # Non-OpenRouter OpenAI-compatible upstreams name their broker credential explicitly (§26: the key lives
 # in the secrets store under the worker-model namespace; the broker enforces the domain namespace rule).
 ZEN_CREDENTIAL_REF = "workers/opencode-zen"
+# §23 "mode/thinking params" of the native supervisor routes: the bridge passes no --effort/thinking flag, so the
+# Claude Code default applies; stated explicitly so that a caller passing a level is a configuration change.
+SUPERVISOR_MODE_PARAMS = {"effort": "CLI_DEFAULT", "thinking": "CLI_DEFAULT"}
 
 
 def _zen(model: str, display: str, *, pool: str, terms: dict[str, Any], classes: list[str], priority: int,
@@ -95,6 +98,7 @@ def seed_routes() -> list[dict[str, Any]]:
             "pricing": {"basis": "SUBSCRIPTION (Claude Max) - never converted to dollars (S02, §42)"},
             "data_terms": {"basis": "owner's own consumer account terms (S04)", "office_allowed": False},
             "eligible_domains": ["PERSONAL"], "allowed_data_classes": [P, I, C], "supports_tools": "YES",
+            "mode_params": dict(SUPERVISOR_MODE_PARAMS),
             "priority": 10, "source_refs": ["S01", "S02", "S03", "S05"],
             "notes": "Fable weekly limit is part of the total Max weekly limit (S02); when exhausted the queue waits. "
                      "2026-10-18 probe: `--model fable` answered via claude-opus-4-8 (fable 0 output tokens, "
@@ -108,6 +112,7 @@ def seed_routes() -> list[dict[str, Any]]:
             "pricing": {"basis": "SUBSCRIPTION (Claude Max) - never converted to dollars (§42)"},
             "data_terms": {"basis": "owner's own consumer account terms (S04)", "office_allowed": False},
             "eligible_domains": ["PERSONAL"], "allowed_data_classes": [P, I, C], "supports_tools": "YES",
+            "mode_params": dict(SUPERVISOR_MODE_PARAMS),
             "priority": 20, "source_refs": ["S01", "S03", "S05"],
             "notes": "Planning baseline primary/synthesis. The alias resolves to the latest Opus; the resolved id is "
                      "recorded by the bridge and an alias change is a new configuration.",

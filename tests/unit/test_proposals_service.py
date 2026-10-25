@@ -372,8 +372,10 @@ def test_accepted_outcome_and_timeline_before_after(db, policy):
     assert dims["ARCHITECTURE_SOURCE_UPDATED"]["status"] == "YES"
     cur = p.outcome["current"]
     assert cur["acceptance"]["unmet"] == [] and cur["acceptance"]["criteria"][0]["status"] == "PASS"
-    assert cur["finalization"]["inventory"]["status"] in ("DONE", "PARTIAL", "PENDING")
-    assert cur["inventory_docs_update"].startswith("PENDING: ") and "ADR" in cur["inventory_docs_update"]
+    # no install manifest is loaded in this test: the reconcile is PENDING with its remedy (never DONE by default)
+    assert cur["finalization"]["inventory"]["status"] == "PENDING"
+    assert "aeos inventory reconcile" in cur["finalization"]["inventory"]["reason"]
+    assert cur["inventory_docs_update"] == "PENDING: inventory, ADR, docs"
     tl = service.timeline(db, p)
     assert tl["before_after"]["after"]["accepted_configuration"]["approved_pin"] == "1.4.0"
     assert tl["before_after"]["snapshots"]["after"]["snapshot_hash"] == "sha256:a"
@@ -381,6 +383,57 @@ def test_accepted_outcome_and_timeline_before_after(db, policy):
     assert kinds == ["TRIAL", "PROMOTION"]
     oc = db.scalar(select(ResearchEntry).where(ResearchEntry.entry_key == "tool:opencode"))
     assert oc.lifecycle == "ENABLED" and oc.test_results[-1]["outcome"] == "ACCEPTED"
+
+
+def test_finalization_reaches_done_only_from_a_completed_reconcile_and_a_published_doc(db, monkeypatch):
+    """§49 M3 "... -> inventory/doc delta" (re-audit): no test showed the post-ACCEPTED reconcile reaching DONE or a
+    doc delta beyond an ADR link, so a regression leaving them PENDING forever would pass. The finalization state is
+    computed from what actually ran: reconcile runs of the affected components and linked publications."""
+    from aeos.inventory import manifest as inv_manifest
+    from aeos.inventory import reconcile as inv_reconcile
+    from aeos.models.publishing import Publication
+    from aeos.proposals import links
+
+    component(db)
+    p = create(db, kind="UPGRADE", candidate_pin="1.4.0")
+    p.links = {"adr_keys": ["ADR-9100"]}
+    db.commit()
+    # 1. no manifest loaded -> PENDING with the remedy
+    monkeypatch.setattr(inv_manifest, "current_manifest", lambda s: None)
+    entry: dict = {}
+    fin = links.finalize(db, p, entry)
+    assert fin["inventory"]["status"] == "PENDING" and entry["inventory_docs_update"] == "PENDING: inventory, docs"
+    # 2. the reconcile of every affected component completed + a PUBLISHED linked publication -> DONE
+    monkeypatch.setattr(inv_manifest, "current_manifest", lambda s: object())
+    calls: list[str] = []
+
+    def fake_reconcile(session, settings, *, component_id, actor, trigger):
+        calls.append(component_id)
+        return types.SimpleNamespace(id=f"run-{component_id}", status="COMPLETED",
+                                     component_status={component_id: {"status": "OBSERVED"}})
+
+    monkeypatch.setattr(inv_reconcile, "reconcile", fake_reconcile)
+    pub = Publication(project_id="p", domain="PERSONAL", plan_version_id="pv", approved_hash="sha256:h",
+                      decision_id="d", status="PUBLISHED")
+    db.add(pub)
+    db.flush()
+    p.links = {**p.links, "publication_ids": [pub.id]}
+    entry = {}
+    fin = links.finalize(db, p, entry)
+    assert calls == ["opencode"] and fin["inventory"]["status"] == "DONE"
+    assert fin["inventory"]["runs"][0] == {"component_id": "opencode", "run_id": "run-opencode", "status": "COMPLETED",
+                                           "component": "OBSERVED"}
+    assert fin["docs"]["status"] == "PUBLISHED" and fin["adr"]["status"] == "LINKED"
+    assert entry["inventory_docs_update"] == "DONE"
+    # 3. a failed reconcile or a conflicting publication is never DONE
+    monkeypatch.setattr(inv_reconcile, "reconcile", lambda *a, **k: types.SimpleNamespace(
+        id="r", status="FAILED", component_status={}))
+    pub.status = "CONFLICT"
+    db.flush()
+    entry = {}
+    fin = links.finalize(db, p, entry)
+    assert fin["inventory"]["status"] == "PARTIAL" and fin["docs"]["status"] == "CONFLICT"
+    assert entry["inventory_docs_update"] == "PENDING: inventory, docs"
 
 
 def test_partial_outcome_requires_failed_parts(db, policy):

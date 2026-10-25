@@ -111,11 +111,16 @@ def _scoped_memory(db: Any, principal: Any, domain: Any, memory_id: str) -> tupl
     return project, rec
 
 
+class MemoryAcceptIn(DecisionIn):
+    # §41/§43 system-change evaluation of this memory (COMPLETED runs, every gate PASS); empty = NOT_EVALUATED
+    eval_run_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
 @router.post("/api/memory/{memory_id}/accept")
-def accept_memory(memory_id: str, body: DecisionIn, principal: AdminPrincipal, domain: ActiveDomain,
+def accept_memory(memory_id: str, body: MemoryAcceptIn, principal: AdminPrincipal, domain: ActiveDomain,
                   db: DB) -> dict[str, Any]:
     project, rec = _scoped_memory(db, principal, domain, memory_id)
-    memory_mod.accept(db, principal, project, rec, rationale=body.rationale)
+    memory_mod.accept(db, principal, project, rec, rationale=body.rationale, eval_run_ids=body.eval_run_ids)
     db.commit()
     return {"memory": memory_mod.memory_view(rec)}
 

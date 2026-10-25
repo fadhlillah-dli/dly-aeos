@@ -63,6 +63,60 @@ def test_approved_project_documents_are_context_and_drafts_are_not(personal_clie
     assert "Invoice export" in str(docs) and "DRAFT-ONLY-IDEA" not in str(pack["items"])
 
 
+def _document(db, pid: str, pv: PlanVersion, *, logical: str, status: str, body: str) -> None:
+    from aeos.models.publishing import DocumentRecord, DocumentRevision
+
+    doc = DocumentRecord(project_id=pid, domain="PERSONAL", logical_doc_id=logical, node="01", title=f"Doc {logical}",
+                         status=status, source_plan_version_id=pv.id)
+    db.add(doc)
+    db.flush()
+    db.add(DocumentRevision(document_id=doc.id, project_id=pid, domain="PERSONAL", logical_doc_id=logical,
+                            kind="RENDERED", status="CURRENT", plan_version_id=pv.id, content_hash=content_hash(body),
+                            body_markdown=body))
+    db.commit()
+
+
+def test_accepted_product_documents_are_project_context_and_drafts_are_not(personal_client: AuthedClient, db):
+    """§24 (re-audit): the accepted Product 1 DocumentRecord branch of the project-doc collector had no test."""
+    p = create_project(personal_client, name="Docs Product1")
+    approved = _plan(db, p["id"], approved=True, title="Approved plan", content={"prd": "Ekspor faktur"})
+    draft_pv = _plan(db, p["id"], approved=False, title="Draft plan", content={"prd": "x"})
+    _document(db, p["id"], approved, logical="01-prd", status="APPROVED", body="# PRD ACCEPTED-DOC-BODY")
+    _document(db, p["id"], approved, logical="02-rfc", status="PUBLISHED", body="# RFC PUBLISHED-DOC-BODY")
+    _document(db, p["id"], approved, logical="03-tdd", status="DRAFT", body="# TDD DRAFT-DOC-BODY")
+    _document(db, p["id"], draft_pv, logical="04-x", status="APPROVED", body="# UNAPPROVED-VERSION-BODY")
+    pack = _build(personal_client, p["id"], role_key="docs-writer")
+    docs = {i["ref"]: i for i in pack["items"] if i["kind"] == "project_doc" and i["ref"].startswith("document:")}
+    assert set(docs) == {"document:01-prd", "document:02-rfc"}
+    assert docs["document:01-prd"]["provenance"]["plan_version_id"] == approved.id
+    assert docs["document:02-rfc"]["provenance"]["status"] == "PUBLISHED"
+    text = str(pack["items"])
+    assert "DRAFT-DOC-BODY" not in text and "UNAPPROVED-VERSION-BODY" not in text
+
+
+@pytest.mark.parametrize("role", ["default", "planner", "reviewer", "security-reviewer", "docs-writer"])
+def test_metadata_context_never_carries_draft_or_revoked_records(personal_client: AuthedClient, db, role):
+    """§24 (re-audit): the metadata collector added draft/superseded records (labelled SUBORDINATE) to the packs of
+    the default, planner, reviewer, security-reviewer and docs-writer roles. Only accepted records are context."""
+    from aeos.models.decisions import Decision
+
+    p = create_project(personal_client, name=f"Meta {role}")
+    _plan(db, p["id"], approved=False, title="Draft zebraplan DRAFTMARK", content={"prd": "x"})
+    _plan(db, p["id"], approved=True, title="Approved zebraplan OKMARK", content={"prd": "y"})
+    for status in ("ACTIVE", "INVALIDATED"):
+        db.add(Decision(kind="POLICY", actor_user_id="owner", actor_kind="HUMAN", target_type="project_convention",
+                        target_id=f"zebraplan-{status}", project_id=p["id"], domain="PERSONAL", status=status,
+                        rationale=f"zebraplan decision {status}"))
+    db.commit()
+    pack = _build(personal_client, p["id"], role_key=role, query=["zebraplan"])
+    meta = [i for i in pack["items"] if i["kind"] == "metadata"]
+    titles = str([i["title"] for i in meta])
+    assert "OKMARK" in titles and "DRAFTMARK" not in str(pack["items"])
+    assert "zebraplan-ACTIVE" in str(meta) and "zebraplan-INVALIDATED" not in str(pack["items"])
+    assert all(packs.metadata_accepted({"kind": (i["provenance"]["record_kind"]), "status": i["provenance"]["status"]})
+               for i in meta)
+
+
 @needs_git
 def test_source_outranks_memory_summary(personal_client: AuthedClient, db, tmp_path: Path):
     repo_dir = make_repo(tmp_path / "src", {"src/limits.py": "MAX_RETRIES = 5  # retry_limit\n"},

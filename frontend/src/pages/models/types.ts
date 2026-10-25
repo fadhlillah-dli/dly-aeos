@@ -165,6 +165,8 @@ export interface ActivatePayload {
   terms_record?: { may_use_inputs_for_training: boolean; trial_only_no_confidential: boolean; note: string } | null;
   /** APPROVED only: COMPLETED, gate-passing EvalRuns of exactly this configuration (§23 "telah diuji") */
   eval_run_ids?: string[] | null;
+  /** APPROVED only: §44 DecisionRecord of adopting the evaluated route (evidence_ids default to eval_run_ids) */
+  decision_record?: { options: string[]; goal: string; cost_quality_tradeoff: string; invalidate_if: string } | null;
 }
 
 export const DATA_CLASSES = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"] as const;

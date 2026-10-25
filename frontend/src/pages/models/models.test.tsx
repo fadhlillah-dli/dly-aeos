@@ -197,11 +197,20 @@ describe("Models & Routes page", () => {
     const submit = within(dialog).getByRole("button", { name: /Catat keputusan ROUTE_ACTIVATION/ });
     expect(submit).toBeDisabled();
     fireEvent.change(within(dialog).getByPlaceholderText("uuid EvalRun"), { target: { value: "run-1, run-2" } });
+    expect(submit).toBeDisabled(); // §44: adopting a routing result also needs the DecisionRecord
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Opsi yang dipertimbangkan/ }), { target: { value: "tetap TRIAL\nAPPROVED" } });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Tujuan/ }), { target: { value: "rute produksi slice kecil" } });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Trade-off/ }), { target: { value: "gratis; lulus suite" } });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Batal berlaku bila/ }), { target: { value: "konfigurasi berubah" } });
     expect(submit).not.toBeDisabled();
     fireEvent.click(submit);
     await waitFor(() => expect(calls.some((c) => c.url.endsWith("/activate") && c.method === "POST")).toBe(true));
     const sent = JSON.parse(calls.find((c) => c.url.endsWith("/activate"))!.body!);
-    expect(sent).toMatchObject({ mode: "APPROVED", eval_run_ids: ["run-1", "run-2"] });
+    expect(sent).toMatchObject({
+      mode: "APPROVED",
+      eval_run_ids: ["run-1", "run-2"],
+      decision_record: { options: ["tetap TRIAL", "APPROVED"], goal: "rute produksi slice kecil", invalidate_if: "konfigurasi berubah" },
+    });
   });
 
   it("UNKNOWN data terms allow PUBLIC only until the owner records their own reading (§23)", async () => {

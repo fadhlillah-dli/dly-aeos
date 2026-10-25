@@ -37,6 +37,13 @@ afterEach(() => {
 });
 
 describe("module status mapping (§34/§35 evidence honesty)", () => {
+  it("states the OFFICE environment as not yet available (M5), never as not applicable", () => {
+    const [status, label] = mapStatus("config", "NOT_AVAILABLE");
+    expect(status).not.toBe("NOT_APPLICABLE");
+    expect(statusSpec(status).tone).not.toBe("ok");
+    expect(label).toMatch(/Belum tersedia/);
+  });
+
   it("never renders unverified / unscanned / flagged as a pass tone", () => {
     for (const [kind, value] of [
       ["verify", "UNVERIFIED"],
@@ -318,6 +325,89 @@ describe("ProjectDetailPage read-only lifecycle", () => {
     expect(await screen.findByText(/diarsipkan dan hanya-baca/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Ubah" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Aktifkan" })).toBeInTheDocument();
+  });
+});
+
+describe("RepositoriesPanel joined repository view (§37)", () => {
+  it("renders PR/CI links, docs targets and capability from GET /api/repositories/{id}", async () => {
+    auth.domain = "PERSONAL";
+    const { RepositoriesPanel } = await import("./RepositoriesPanel");
+    const fn = mockFetch((url) => {
+      if (url === "/api/repositories/r1")
+        return {
+          repository: {
+            id: "r1",
+            full_name: "octo/view",
+            provider: "GITHUB",
+            role: "project",
+            verification_status: "VERIFIED",
+            base_branch: "main",
+            pull_requests: [
+              { number: 7, url: "https://github.com/octo/view/pull/7", state: "OPEN", head_ref: "aeos/t1", base_ref: "main", last_synced_at: null },
+              { number: 8, url: "javascript:alert(1)", state: "CLOSED", head_ref: null, base_ref: null, last_synced_at: null },
+            ],
+            ci: [{ provider: "github-actions", integration_id: "i-ci", configuration: "CONFIGURED" }],
+            docs_targets: [{ provider: "google-drive", root_id: "1AbCdEfGh", integration_id: "i-docs" }],
+            capability: {
+              write_enablement: [
+                { integration_id: "i-docs", provider: "google-drive", purpose: "docs", decision_id: "d1", status: "ENABLED" },
+                { integration_id: "i-ci", provider: "github-actions", purpose: "ci", decision_id: null, status: "NOT_APPLICABLE" },
+                { integration_id: "i-iss", provider: "github-issues", purpose: "issues", decision_id: null, status: "NOT_ENABLED" },
+              ],
+              merge: "HUMAN_ONLY (AEOS never merges)",
+            },
+          },
+        };
+      return {};
+    });
+    const project = {
+      id: "p1",
+      domain: "PERSONAL",
+      project_kind: "NEW",
+      repositories: [
+        { id: "r1", full_name: "octo/view", provider: "GITHUB", role: "project", verification_status: "VERIFIED", local_status: "NOT_CHECKED", dirty: null },
+      ],
+    } as unknown as import("./types").ProjectView;
+    wrap(<RepositoriesPanel project={project} isAdmin={false} />);
+    await userEvent.click(screen.getByRole("button", { name: /PR, CI, dokumen/ }));
+    const section = await screen.findByRole("region", { name: /Tautan repository octo\/view/ });
+    expect(within(section).getByRole("link", { name: /#7/ })).toHaveAttribute("href", "https://github.com/octo/view/pull/7");
+    expect(within(section).getByText("Terbuka")).toBeInTheDocument();
+    expect(within(section).getByText("1AbCdEfGh")).toBeInTheDocument();
+    // a non-https provider URL is never rendered as a link
+    expect(within(section).queryByRole("link", { name: /#8/ })).toBeNull();
+    expect(within(section).getByText("#8")).toBeInTheDocument();
+    expect(within(section).getByText("Diizinkan (keputusan, per provider)")).toBeInTheDocument();
+    expect(within(section).getByText("Bukan provider tulis")).toBeInTheDocument();
+    expect(within(section).getByText("Belum diizinkan")).toBeInTheDocument();
+    expect(within(section).getByText(/HUMAN_ONLY/)).toBeInTheDocument();
+    expect(fn.mock.calls.some(([u]) => String(u) === "/api/repositories/r1")).toBe(true);
+  });
+});
+
+describe("MemoryPanel system change (§41/§43)", () => {
+  it("states that accepted memory was not evaluated as a system change and names its rollback target", async () => {
+    auth.domain = "PERSONAL";
+    const { MemoryPanel } = await import("./MemoryPanel");
+    mockFetch((url) =>
+      url === "/api/projects/p1/memory"
+        ? {
+            items: [
+              {
+                id: "m1", project_id: "p1", scope: "PROJECT", content: "Zona waktu Asia/Jakarta", provenance: { source_type: "human_statement" },
+                classification: "INTERNAL", status: "ACCEPTED", auth_decision_id: "d1", expires_at: null, superseded_by: null, created_at: "2026-10-25T00:00:00Z",
+                system_change: { evaluation: "NOT_EVALUATED", rollback_target: "expire memory_record:m1 (no previous record)" },
+              },
+            ],
+          }
+        : {},
+    );
+    const project = { id: "p1", domain: "PERSONAL" } as unknown as import("./types").ProjectView;
+    wrap(<MemoryPanel project={project} isAdmin={false} />);
+    const box = await screen.findByLabelText("System change memori");
+    expect(within(box).getByText("System change belum dievaluasi")).toBeInTheDocument();
+    expect(within(box).queryByText("System change dievaluasi")).toBeNull();
+    expect(within(box).getByText(/expire memory_record:m1/)).toBeInTheDocument();
   });
 });
 
