@@ -21,7 +21,7 @@ from aeos.core.enums import Domain, Role
 from aeos.core.errors import AeosError, NotFound, ValidationFailed
 from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.evidence import AcceptanceRecord, EvidenceArtifact, ReviewRecord
 from aeos.models.planning import TaskSpec
 from aeos.models.portfolio import Project

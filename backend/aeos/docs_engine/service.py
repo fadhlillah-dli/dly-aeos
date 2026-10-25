@@ -213,12 +213,12 @@ def _changed_files(session: Session, acc: AcceptanceRecord | None) -> list[str]:
     if acc is None or not acc.verification_evidence_id:
         return []
     try:
-        from aeos.verification import collector
+        from aeos.verification import facade as verification
         from aeos.verification.verifier import related_evidence
 
         report = session.get(EvidenceArtifact, acc.verification_evidence_id)
         scope = related_evidence(session, report, "SCOPE_CHECK")
-        return [str(p) for p in ((collector.read_json(scope) or {}).get("changed_files") or [])][:200]
+        return [str(p) for p in ((verification.read_json(scope) or {}).get("changed_files") or [])][:200]
     except Exception:  # evidence unreadable: the change record says documentation pending, never guesses
         log.warning("changed files of acceptance %s unavailable", acc.id)
         return []

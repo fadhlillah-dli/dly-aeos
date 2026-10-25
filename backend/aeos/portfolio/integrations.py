@@ -21,7 +21,7 @@ from aeos.core.errors import AeosError, ValidationFailed
 from aeos.core.redaction import contains_secret
 from aeos.core.timeutil import utcnow
 from aeos.events import service as events
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.portfolio import Project, ProjectIntegration
 from aeos.portfolio import providers as pv
 from aeos.portfolio.service import deny, require_writable

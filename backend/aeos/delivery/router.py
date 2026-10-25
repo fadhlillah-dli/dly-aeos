@@ -15,12 +15,12 @@ from aeos.core.enums import Domain
 from aeos.core.errors import AeosError, NotFound
 from aeos.core.timeutil import utcnow
 from aeos.delivery import bitbucket, gates, governance, pr_bundle, provider, sync
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.delivery_ext import PullRequestRecord
 from aeos.models.evidence import EvidenceArtifact
 from aeos.models.planning import TaskSpec
 from aeos.models.portfolio import Project, RepositoryReference
-from aeos.verification import collector
+from aeos.verification import facade as verification
 from aeos.verification.router import audit_denied, visible_project_ids
 
 router = APIRouter(tags=["delivery"])
@@ -201,7 +201,7 @@ def governance_status(principal: CurrentPrincipal, domain: ActiveDomain, db: DB,
     ev = db.scalar(select(EvidenceArtifact).where(EvidenceArtifact.task_id == task.id,
                                                   EvidenceArtifact.kind == "GOVERNANCE_HANDOFF")
                    .order_by(EvidenceArtifact.created_at.desc()).limit(1))
-    content = collector.read_json(ev) if ev else None
+    content = verification.read_json(ev) if ev else None
     return {"task_id": task.id, "adapter": governance.configured_adapter().name,
             "contract_version": governance.CONTRACT_VERSION, "latest": content,
             "evidence_id": ev.id if ev else None, "checked_at": ev.created_at.isoformat() if ev else None,

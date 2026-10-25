@@ -14,7 +14,7 @@ from aeos.core.enums import Domain
 from aeos.core.errors import NotFound
 from aeos.core.hashing import content_hash
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.decisions import ArchitectureDecisionRecord, Decision
 from aeos.models.policy_ext import DecisionRequest
 from aeos.policy import adrs as adr_loader

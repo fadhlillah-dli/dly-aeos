@@ -21,7 +21,7 @@ from aeos.core.ids import slugify
 from aeos.core.paths import safe_segment
 from aeos.core.redaction import redact_text
 from aeos.events import service as events
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.intake.scan import scan_text
 from aeos.models.portfolio import Project, ProjectIntegration, RepositoryReference
 from aeos.portfolio import classification as cls

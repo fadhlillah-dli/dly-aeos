@@ -447,8 +447,7 @@ def cost_summary(session: Session, *, domain: str, project_ids: list[str] | None
 
 
 def summary(session: Session, *, domain: str, project_ids: list[str] | None, loop_running: bool) -> dict[str, Any]:
-    from aeos.worker_runtime.opencode import opencode_status
-    from aeos.worker_runtime.sandbox import sandbox_readiness
+    from aeos.worker_runtime.facade import opencode_status, sandbox_readiness
 
     cap, cap_decision = scheduler.concurrency_cap(session)
     pause = scheduler.pause_info(session)

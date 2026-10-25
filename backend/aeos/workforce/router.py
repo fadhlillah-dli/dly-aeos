@@ -17,7 +17,7 @@ from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, lo
 from aeos.core.enums import Capability
 from aeos.core.errors import Blocked, NotFound
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.planning import Plan
 from aeos.models.workforce import AgentDefinition, TaskExecution, WorkerRun
 from aeos.workforce import scheduler, views
@@ -78,8 +78,7 @@ class AgentToggle(BaseModel):
 def enable_agent(agent_key: str, body: AgentToggle, principal: AdminPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     """Enable an implementation agent only when its prerequisites are really READY (no fake activity)."""
     from aeos.audit import service as audit
-    from aeos.worker_runtime.opencode import opencode_status
-    from aeos.worker_runtime.sandbox import sandbox_readiness
+    from aeos.worker_runtime.facade import opencode_status, sandbox_readiness
     from aeos.workforce import integrations as ext
 
     agent = db.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == agent_key))

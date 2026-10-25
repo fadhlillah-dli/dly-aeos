@@ -25,7 +25,7 @@ from aeos.core.hashing import content_hash
 from aeos.core.redaction import contains_secret
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.events import service as events
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.intake.scan import UNTRUSTED_INSTRUCTION, scan_text
 from aeos.models.decisions import ArchitectureDecisionRecord, Decision
 from aeos.models.evidence import AcceptanceRecord

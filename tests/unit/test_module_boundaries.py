@@ -71,9 +71,83 @@ def test_baseline_only_lists_crossings_that_still_exist():
     assert not stale, f"remove fixed crossings from the baseline (scripts/module_boundaries.py --update): {stale}"
 
 
-# 2026-10-19 (K4): 137 -> 132 after identity got a facade. Lower this number when crossings are removed; raising
-# it means a reviewed change ADDS internal crossings, which this ratchet exists to prevent.
-MAX_CROSSINGS = 132
+# 2026-10-19 (K4): 137 -> 132 after identity got a facade. 2026-10-26 (W6-037): 132 -> 111 after the consumers of
+# names the facades already export (identity Principal/verify_password/bootstrap_complete, docs_engine for the
+# publisher, policy office_policy, knowledge, verification read_json, proposals create_proposal) were moved onto the
+# facades. Lower this number when crossings are removed; raising it means a reviewed change ADDS internal
+# crossings, which this ratchet exists to prevent.
+MAX_CROSSINGS = 111
+
+# A module alias used only for names its facade exports, kept on the internal module for a stated reason.
+FACADE_ALIAS_EXCEPTIONS = {
+    # the facade's opencode_status() probes the configured binary only; the catalog observes an explicit binary
+    "routing/catalog.py: worker_runtime.opencode",
+}
+
+
+def _facade_exports(module: str) -> set[str]:
+    """Names aeos.<module>.facade offers: its __all__, else what it defines itself (not what it merely imports)."""
+    import ast
+
+    path = ROOT / "backend" / "aeos" / module / "facade.py"
+    if not path.is_file():
+        return set()
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    defined: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets):
+            return {e.value for e in node.value.elts if isinstance(e, ast.Constant)}  # type: ignore[attr-defined]
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            defined.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            defined |= {t.id for t in targets if isinstance(t, ast.Name)}
+    return {n for n in defined if not n.startswith("_")}
+
+
+def test_no_crossing_imports_what_the_target_facade_already_exports():
+    """W6-037: a facade only makes a module a contract boundary when its consumers use it. Importing a name from
+    another module's internals that its facade exports (or importing an internal module only for such names) is
+    a crossing that must go through the facade instead."""
+    import ast
+
+    mb = _script()
+    pkg = mb.PKG
+    exports: dict[str, set[str]] = {}
+    found: list[str] = []
+    for path in sorted(pkg.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(pkg).as_posix()
+        src = rel.split("/")[0].removesuffix(".py")
+        if src in mb.SHARED:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases: dict[str, tuple[str, str]] = {}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.ImportFrom) and node.module and node.level == 0):
+                continue
+            parts = node.module.split(".")
+            if parts[0] != "aeos" or len(parts) < 2 or parts[1] in (src, *mb.SHARED):
+                continue
+            target = parts[1]
+            ex = exports.setdefault(target, _facade_exports(target))
+            if len(parts) >= 3 and parts[2] != "facade":
+                hit = sorted(a.name for a in node.names if a.name in ex)
+                if hit:
+                    found.append(f"{rel}:{node.lineno} from {node.module} import {', '.join(hit)}")
+            elif len(parts) == 2:
+                for a in node.names:
+                    if a.name != "facade" and (pkg / target / f"{a.name}.py").is_file():
+                        aliases[a.asname or a.name] = (target, a.name)
+        used: dict[str, set[str]] = {k: set() for k in aliases}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in used:
+                used[node.value.id].add(node.attr)
+        for alias, (target, sub) in aliases.items():
+            if used[alias] and used[alias] <= exports[target] and f"{rel}: {target}.{sub}" not in FACADE_ALIAS_EXCEPTIONS:
+                found.append(f"{rel}: aeos.{target}.{sub} used only for facade names {sorted(used[alias])}")
+    assert not found, "use aeos.<module>.facade for these names:\n" + "\n".join(found)
 
 
 def test_the_crossing_baseline_never_grows():

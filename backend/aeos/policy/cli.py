@@ -74,7 +74,7 @@ def _admin_user_id(session, username: str, password: str) -> str:
 
     A username alone is not enough - any local process (an agent with a shell included) could name the owner."""
     from aeos.core.enums import Role
-    from aeos.identity.passwords import verify_password
+    from aeos.identity.facade import verify_password
     from aeos.models.identity import User
 
     user = session.scalars(select(User).where(User.username == username)).first()

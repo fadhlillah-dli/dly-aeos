@@ -33,7 +33,7 @@ from aeos.core.paths import repo_root
 from aeos.core.redaction import redact_text
 from aeos.core.timeutil import utcnow
 from aeos.events import service as events
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.portfolio import Project, RepositoryReference
 from aeos.portfolio import gitread
 from aeos.portfolio.service import deny, require_writable
@@ -335,7 +335,7 @@ def observe_local(session: Session, repo: RepositoryReference, *, path: Path | N
     repo.details = {**(repo.details or {}), "local": local}
     if previous_head and head and previous_head != head:
         try:
-            from aeos.knowledge.packs import mark_stale_for_repository
+            from aeos.knowledge.facade import mark_stale_for_repository
 
             mark_stale_for_repository(session, repo.id, head, reason=f"repository head moved {previous_head[:12]} -> {head[:12]}")
         except ImportError:  # pragma: no cover - knowledge module always present in this build

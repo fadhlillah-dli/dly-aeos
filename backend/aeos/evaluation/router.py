@@ -268,7 +268,7 @@ class ScorecardIn(BaseModel):
 @router.post("/api/eval/scorecard")
 def scorecard(body: ScorecardIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
     """Open a decision request (COMPARE proposal) from the current scorecard. Never changes a route."""
-    from aeos.proposals import service as proposals
+    from aeos.proposals import facade as proposals
 
     snap = service.scorecard_snapshot(db, role=body.role, domain=domain.value, scoped=True)
     summary = json.dumps(snap, ensure_ascii=False, sort_keys=True)[:6000]

@@ -124,7 +124,8 @@ def route_binding(session: Session, run: EvalRun) -> dict[str, Any]:
         return {"status": "NOT_REGISTERED", "route_key": run.route_key,
                 "reasons": ["route not in the model registry: terms/provider eligibility not assessed"],
                 "mismatches": [], "route_config_current": None}
-    from aeos.routing.service import compute_config_hash, terms_eligibility
+    from aeos.routing.facade import terms_eligibility
+    from aeos.routing.service import compute_config_hash
 
     current = compute_config_hash(route)
     cfg = run.configuration or {}

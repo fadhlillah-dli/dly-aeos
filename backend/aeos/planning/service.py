@@ -250,7 +250,8 @@ def _integration_caps(session: Session, project: Project) -> dict[str, Any]:
 
 def build_context(session: Session, *, project: Project, domain: str, prompt: str, attachment_ids: list[str],
                   actor_user_id: str) -> PlanningContext:
-    from aeos.policy import office, snapshot
+    from aeos.policy import snapshot
+    from aeos.policy.facade import office_policy
 
     inputs = _attachment_inputs(session, project, domain, attachment_ids)
     repo = _repo_inventory(session, project)
@@ -297,7 +298,7 @@ def build_context(session: Session, *, project: Project, domain: str, prompt: st
     if len((prompt or "").strip()) < 30:
         questions.append({"question": "Apa hasil yang diharapkan dan batas scope-nya? Prompt terlalu singkat.",
                           "category": "scope", "blocking": False})
-    if domain == Domain.OFFICE.value and not office.office_policy(session)["office_authorization"]:
+    if domain == Domain.OFFICE.value and not office_policy(session)["office_authorization"]:
         questions.append({"question": "Apakah ada otorisasi perusahaan untuk mengirim data OFFICE ke Claude Max dan "
                                       "target Confluence/Jira/Bitbucket?", "category": "legal", "blocking": True})
     constraints: list[dict[str, Any]] = [{"kind": "POLICY", "statement": s} for s in prompts.FIXED_POLICY]
@@ -773,7 +774,7 @@ def publication_targets(session: Session, project_id: str) -> list[dict[str, Any
 
 def get_approved_version(session: Session, plan_id: str) -> PlanVersion | None:
     """The exact version bound by the ACTIVE approval decision — never "latest" (§50)."""
-    from aeos.policy.decisions import find_active_decision
+    from aeos.policy.facade import find_active_decision
 
     plan = session.get(Plan, plan_id)
     if plan is None or not plan.approved_version_id:
@@ -792,7 +793,7 @@ def get_approved_version(session: Session, plan_id: str) -> PlanVersion | None:
 
 def on_approval_inactive(session: Session, decision: Decision) -> None:
     """Hook from the decision registry when an APPROVAL stops being ACTIVE (revoked/expired)."""
-    from aeos.policy.decisions import find_active_decision
+    from aeos.policy.facade import find_active_decision
 
     version = session.get(PlanVersion, decision.target_id)
     if version is None:
@@ -814,7 +815,7 @@ def on_approval_inactive(session: Session, decision: Decision) -> None:
 def office_gate(session: Session, plan: Plan, *, actor: str) -> None:
     if plan.domain != Domain.OFFICE.value:
         return
-    from aeos.policy.office import office_policy
+    from aeos.policy.facade import office_policy
 
     reasons: list[str] = []
     try:

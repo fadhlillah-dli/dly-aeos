@@ -15,7 +15,7 @@ from aeos.core.enums import Domain
 from aeos.core.errors import Forbidden, ValidationFailed
 from aeos.core.timeutil import utcnow
 from aeos.events.service import emit
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.cost import QuotaState, UsageLedgerEntry
 from aeos.models.decisions import Decision
 from aeos.models.routing import ModelRoute

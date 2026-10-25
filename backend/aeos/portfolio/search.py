@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from aeos.core.enums import Domain
 from aeos.core.errors import ValidationFailed
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.decisions import ArchitectureDecisionRecord, Decision
 from aeos.models.inventory import ComponentReference
 from aeos.models.planning import Plan, TaskSpec

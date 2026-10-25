@@ -185,7 +185,7 @@ def _authority_reasons(session: Session, intent: WriteIntent, reasons: list[str]
 
 
 def check_external_write(session: Session, intent: WriteIntent) -> InterlockResult:
-    from aeos.identity.service import bootstrap_complete
+    from aeos.identity.facade import bootstrap_complete
 
     reasons: list[str] = []
     if not bootstrap_complete(session):

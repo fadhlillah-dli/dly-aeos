@@ -38,7 +38,7 @@ from aeos.core.paths import UnsafePathError, ensure_within, repo_root
 from aeos.core.redaction import redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.events import service as events
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.knowledge import memory as memory_mod
 from aeos.models.evidence import EvidenceArtifact
 from aeos.models.knowledge_ext import ContextPackMeta

@@ -39,7 +39,8 @@ from aeos.models.research import ChangeProposal, ResearchEntry
 from aeos.proposals import review as R
 from aeos.proposals.trial import TRIAL_OPERATIONS
 from aeos.research import service as research
-from aeos.research.identity import IdentityError, canonical_identity
+from aeos.research.facade import canonical_identity
+from aeos.research.identity import IdentityError
 
 KINDS = ("ADD", "REPLACE", "UPGRADE", "REMOVE", "COMPARE")
 ACTIONS = ("TRIAL_APPROVE", "PROMOTE", "KEEP", "REJECT", "DEFER", "REQUEST_MORE_EVIDENCE", "REFERENCE_ONLY")

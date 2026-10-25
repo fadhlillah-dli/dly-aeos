@@ -13,7 +13,7 @@ from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, lo
 from aeos.core.enums import Domain
 from aeos.core.errors import Conflict, NotFound
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.planning import Plan, PlanVersion
 from aeos.planning import dag, runner, service
 
