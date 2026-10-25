@@ -272,8 +272,12 @@ def test_host_without_free_memory_waits_and_compute_is_reserved(db, fakes, monke
     adm = scheduler.admission_check(db, specs[0].id)
     assert adm.admitted and "below this run's reservation" in adm.answers["compute"]["warning"]
     run = scheduler.acquire_lease(db, specs[0].id, actor="t", admission=adm)
+    from aeos.worker_runtime import processes
+
+    # wave 7 (W6-055): the process sandbox caps CPU on Windows (Job Object hard cap); elsewhere a reservation only
     assert run.caps["compute"] == {"memory_mb": 2048, "cpus": 2.0, "status": "OK", "enforced": True,
-                                   "memory_enforced": True, "cpu_enforced": False, "sandbox_kind": "process"}
+                                   "memory_enforced": True, "cpu_enforced": processes.cpu_cap_supported(),
+                                   "sandbox_kind": "process"}
     assert scheduler._reserved_compute(db, exclude_task=None) == (2048, 2.0)
     # LEASED and RUNNING runs keep their reservation: a host whose remaining budget is too small waits
     monkeypatch.setattr(psutil, "virtual_memory", lambda: types.SimpleNamespace(total=6 * 1024 ** 3,

@@ -1079,15 +1079,16 @@ def run_compute_limits(task: Any, *, sandbox_kind: str | None) -> dict[str, Any]
     """The per-run compute the runtime ENFORCES for this TaskSpec - the same values admission reserves (§19, §22):
     memory = ``processes.ResourceLimits.from_task`` (the process watchdog's RSS cap and the Windows job backstop,
     or docker ``--memory`` in the container sandbox); CPUs = ``limits.max_cpus`` (docker ``--cpus`` in the container
-    sandbox; the process sandbox has no CPU cap, so there the CPU count is a reservation only)."""
+    sandbox, the Windows Job Object CPU-rate hard cap in the process sandbox on Windows; on macOS/Linux the process
+    sandbox has no CPU cap, so there the CPU count is a reservation only - ``cpu_enforced`` says which)."""
     from aeos.worker_runtime import facade as runtime
 
     enforced = runtime.enforced_run_limits(getattr(task, "limits", None) or {}, sandbox_kind=sandbox_kind)
     memory_mb, cpus = enforced["memory_mb"], float(enforced["cpus"])
     return {"memory_mb": int(memory_mb), "cpus": max(cpus, 0.1), "sandbox_kind": sandbox_kind or "process",
             "memory_enforced": True, "cpu_enforced": bool(enforced["cpu_enforced"]),
-            "enforced_by": ("docker --memory/--cpus" if sandbox_kind == "container"
-                            else "runtime watchdog RSS cap (+ Windows job memory limit); no CPU cap")}
+            "enforced_by": enforced.get("enforced_by") or ("docker --memory/--cpus" if sandbox_kind == "container"
+                                                           else "runtime watchdog RSS cap; no CPU cap")}
 
 
 def _reserved_compute(session: Session, *, exclude_task: str | None) -> tuple[int, float]:

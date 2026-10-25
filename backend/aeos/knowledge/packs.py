@@ -556,12 +556,36 @@ def _collect_research(col: _Collector, session: Session, terms: list[str]) -> No
 # ---------------------------------------------------------------- build
 
 
+def _collect_task_artifacts(col: _Collector, task: TaskSpec, artifacts: list[dict[str, Any]]) -> None:
+    """§21 TaskSpec input artifacts (hash-bound attachments delivered by the planning context) as UNTRUSTED DATA
+    items under the pack's token budget (wave 7, W6-071): right after the TaskSpec, before any summary."""
+    for i, art in enumerate(artifacts[:CAPS["attachment"]]):
+        name = str(art.get("name") or art.get("ref") or f"artifact-{i}")[:200]
+        content = art.get("content")
+        if content is None:
+            content = {k: v for k, v in art.items() if k != "content"}
+        if not isinstance(content, str):
+            import json
+
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        col.add(kind="attachment", ref=f"task-artifact:{art.get('ref') or name}", content=content,
+                trust="UNTRUSTED_DATA", classification=task.data_classification, title=name, truncatable=True,
+                provenance={"source": TASK_ARTIFACT_SOURCE, "task_spec_id": task.id, "ref": art.get("ref"),
+                            "sha256": art.get("sha256"), "kind": art.get("kind")})
+
+
+TASK_ARTIFACT_SOURCE = "TaskSpec input_artifacts (hash-bound; untrusted DATA)"
+
+
 def build_pack(
     session: Session, principal: Principal, project: Project, *, task_id: str | None = None,
     role_key: str | None = None, repository_id: str | None = None, base_commit: str | None = None,
     query: Any = None, paths: Any = None, forbidden_paths: Any = None, token_budget: int | None = None,
-    include: Any = None, ttl_hours: int | None = None,
+    include: Any = None, ttl_hours: int | None = None, task_artifacts: list[dict[str, Any]] | None = None,
+    system_actor: str | None = None,
 ) -> tuple[ContextPack, ContextPackMeta]:
+    """``task_artifacts`` / ``system_actor`` (additive, wave 7): the TaskSpec's delivered input artifacts as DATA
+    items, and a system builder (the worker runtime at run start) recorded as actor_type ``system``."""
     from aeos.portfolio.service import require_writable
 
     require_writable(project)
@@ -633,6 +657,8 @@ def build_pack(
             _collect_policy(col, warnings)
         elif kind == "task" and task is not None:
             _collect_task(col, task)
+            if task_artifacts:
+                _collect_task_artifacts(col, task, task_artifacts)
         elif kind == "symbol" and reader and repo:
             _collect_symbols(col, reader, terms, repo.full_name)
         elif kind == "repo_file" and reader and repo and path_patterns:
@@ -693,7 +719,8 @@ def build_pack(
     session.add(meta)
     session.flush()
     superseded = _supersede_older(session, pack, meta)
-    audit.record(session, actor_type="user", actor_id=principal.user.id, action="knowledge.context_pack.build",
+    audit.record(session, actor_type="system" if system_actor else "user", actor_id=system_actor or principal.user.id,
+                 action="knowledge.context_pack.build",
                  target_type="context_pack", target_id=pack.id, project_id=project.id, domain=project.domain,
                  details={"role": role, "task_id": pack.task_id, "base_commit": resolved_commit, "items": len(col.items),
                           "tokens": col.used, "budget": budget, "omitted": len(col.omitted), "hash": pack.pack_hash,
@@ -896,3 +923,48 @@ def use_pack(session: Session, pack_id: str, *, project_id: str, consumer: str, 
                  details={"consumer": consumer, "pack_hash": pack.pack_hash, "task_id": pack.task_id})
     return {"context_pack_id": pack.id, "pack_hash": pack.pack_hash, "items": list(pack.items or []),
             "token_budget": pack.token_budget, "base_commit": pack.base_commit}
+
+
+# ---------------------------------------------------------------- task-scoped pack at run start (wave 7, W6-071)
+SYSTEM_PACK_ACTOR = "worker_runtime.executor"
+_ROLE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+
+def task_principal(task: TaskSpec, actor: str = SYSTEM_PACK_ACTOR) -> Principal:
+    """A non-persisted, read-only principal bound to exactly one TaskSpec (§13 ContextPack AUTH basis TASK_SPEC):
+    its project and domain only, role VIEWER (it reads context; it never decides). Never added to the session."""
+    from aeos.core.enums import Role
+    from aeos.models.identity import AuthSession, User
+
+    now = utcnow()
+    user = User(id=actor, username=actor, password_hash="!", role=Role.VIEWER.value, is_active=False,
+                project_scope=[task.project_id], domain_scope=[task.domain])
+    auth = AuthSession(token_hash=f"system:{actor}", user_id=actor, csrf_token="", created_at=now, last_seen_at=now,
+                       expires_at=now, selected_domain=task.domain)
+    return Principal(user=user, session=auth, role=Role.VIEWER, allowed_domains=[Domain(task.domain)],
+                     allowed_project_ids=[task.project_id])
+
+
+def build_task_pack(session: Session, task_id: str, *, base_commit: str | None,
+                    artifacts: list[dict[str, Any]] | None = None, actor: str = SYSTEM_PACK_ACTOR,
+                    token_budget: int | None = None) -> tuple[ContextPack, ContextPackMeta]:
+    """The minimum task-scoped pack a worker run receives when no CURRENT one exists (§24): the TaskSpec's role
+    profile, the files of its allowed paths at exactly *base_commit*, the trusted policy files, accepted project
+    documents and the TaskSpec's delivered input artifacts as DATA - all under the pack's token budget. Built by
+    the runtime (actor_type system) under a principal bound to the TaskSpec. Does not commit."""
+    task = session.get(TaskSpec, task_id)
+    if task is None:
+        raise NotFound("task not found")
+    project = session.get(Project, task.project_id)
+    if project is None or project.domain != task.domain:
+        raise NotFound("project not found")
+    role = task.role_key if task.role_key and _ROLE_RE.match(task.role_key) else "default"
+    paths: list[str] = []
+    for p in task.allowed_paths or []:
+        try:
+            paths.append(_validate_glob(p))
+        except ValidationFailed:
+            continue
+    return build_pack(session, task_principal(task, actor), project, task_id=task.id, role_key=role,
+                      base_commit=base_commit, paths=paths[:50], token_budget=token_budget,
+                      task_artifacts=list(artifacts or []), system_actor=actor)

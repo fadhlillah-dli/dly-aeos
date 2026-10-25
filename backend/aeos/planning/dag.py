@@ -45,8 +45,13 @@ MAX_ATTEMPTS_CAP = 2  # §21 pilot cap: at most two implementation attempts per 
 # Fixed by the control plane (never taken from model output); raising them is a recorded human decision.
 RUN_MEMORY_MB = 4096
 RUN_CPUS = 1
+# wave 7 (W6-055): the process-count cap is carried in the TaskSpec too, so both sandboxes enforce the SAME value
+# (before, the runtime defaults differed: 64 in the process sandbox, 256 in the container). 256 is the container's
+# proven --pids-limit (it counts processes AND threads there); in the process sandbox it caps live processes
+# (Windows Job Object ActiveProcessLimit + the cross-platform watchdog).
+RUN_MAX_PROCESSES = 256
 RESOURCE_LIMITS = {"max_active_workers": 1, "nested_fan_out": False, "max_memory_mb": RUN_MEMORY_MB,
-                   "max_cpus": RUN_CPUS}
+                   "max_cpus": RUN_CPUS, "max_processes": RUN_MAX_PROCESSES}
 DEFAULT_TOOLS = ["fs.read", "fs.write:allowed_paths", "tests.run"]
 DEFAULT_STOP_CONDITIONS = [
     "quota exhausted", "deadline/timeout reached", "lease lost", "policy changed", "scope violated (write outside "

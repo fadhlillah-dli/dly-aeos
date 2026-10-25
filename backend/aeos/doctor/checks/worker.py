@@ -174,7 +174,7 @@ def worker_contract(ctx: CheckContext) -> Outcome:
     evidence: dict[str, Any] = {
         "evidence_id": ev.id, "level": ev.evidence_level, "claim": ev.claim[:200], "overall": overall,
         "residual_risks": ["Perilaku tool/schema model pada route nyata NOT-PROVEN (uji memakai model loopback "
-                           "terskrip); dibuktikan per run oleh verifier independen"]}
+                           "terskrip); dibuktikan per route oleh worker.route_behaviour (evaluasi/run terverifikasi)"]}
     if overall == "FAIL":
         return Outcome("FAILED", f"Uji kontrak worker {ev.id[:8]} GAGAL ({ev.created_at.isoformat()}).",
                        evidence=evidence, error_code="WORKER_CONTRACT_FAILED", remedy=remedy)
@@ -198,3 +198,183 @@ def worker_contract(ctx: CheckContext) -> Outcome:
                        error_code="WORKER_CONTRACT_STALE", remedy=remedy)
     return Outcome("VERIFIED", f"Uji kontrak engine worker {ev.id[:8]} lulus ({ev.created_at.isoformat()}); perilaku "
                    "model route nyata tetap NOT-PROVEN.", evidence=evidence)
+
+
+# ----------------------------------------------------------------------------- §08 model tool/schema behaviour
+# W6-021: a real route's tool/schema behaviour is proven only by trusted records of runs on that route: the §43
+# reliability measure ``tool_schema_failures`` of a COMPLETED evaluation by a trusted collector on exactly the
+# route's current configuration, and independently verified worker runs (runner-observed tool errors). The
+# failure-rate threshold is the OWNER's (POLICY decision, target worker_route_behaviour:tool_schema_failures,
+# details.max_failure_rate 0..1): without it a measured failure count is reported, never judged (UNKNOWN).
+ROUTE_BEHAVIOUR_TARGET = ("worker_route_behaviour", "tool_schema_failures")
+WORKER_ROUTE_STATUSES = ("APPROVED", "TRIAL")
+TRUSTED_EVAL_SOURCES = frozenset({"verifier", "collector"})
+_RANK = {"FAILED": 4, "UNKNOWN": 3, "STALE": 2, "VERIFIED": 1}
+
+
+def _worker_routes(session: Any) -> list[Any]:
+    from aeos.models.routing import ModelRoute
+
+    rows = session.scalars(select(ModelRoute).where(ModelRoute.pool == "WORKER",
+                                                    ModelRoute.status.in_(WORKER_ROUTE_STATUSES))
+                           .order_by(ModelRoute.route_key))
+    # platform view: a route eligible ONLY for OFFICE is never quoted here (§35)
+    return [r for r in rows if not (r.eligible_domains and set(r.eligible_domains) <= {"OFFICE"})]
+
+
+def _threshold(session: Any) -> tuple[float | None, str | None]:
+    """(max failure rate, decision id) of the owner's POLICY decision, or (None, None) while UNDECIDED."""
+    try:
+        from aeos.policy import facade as policy
+
+        d = policy.find_active_decision(session, kind="POLICY", target_type=ROUTE_BEHAVIOUR_TARGET[0],
+                                        target_id=ROUTE_BEHAVIOUR_TARGET[1])
+    except (ImportError, ModuleNotFoundError):
+        return None, None
+    if d is None or d.actor_kind != "HUMAN":
+        return None, None
+    raw: Any = (d.details or {}).get("max_failure_rate")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None, d.id  # an unreadable value is UNDECIDED, never a default
+    try:
+        value = float(raw)
+    except ValueError:
+        return None, d.id
+    return (value, d.id) if 0.0 <= value <= 1.0 else (None, d.id)
+
+
+def _route_behaviour_fp(ctx: CheckContext) -> dict[str, Any] | None:
+    """STALE as soon as a worker route's status/config/harness, its evaluations or the owner threshold change."""
+    if ctx.session is None:
+        return None
+    from sqlalchemy import func
+
+    from aeos.models.research import EvalRun
+
+    routes = _worker_routes(ctx.session)
+    keys = [r.route_key for r in routes]
+    evals = ctx.session.scalar(select(func.count()).select_from(EvalRun).where(EvalRun.route_key.in_(keys))) if keys \
+        else 0
+    _t, decision = _threshold(ctx.session)
+    return {"routes": [[r.route_key, r.status, r.config_hash, r.harness_version] for r in routes], "evals": evals,
+            "threshold_decision": decision}
+
+
+def _verified_runs(session: Any, route: Any) -> dict[str, Any]:
+    """Independently verified worker runs on the route (verifier PASS) and the tool errors the runner observed in
+    them (``run.action`` events of kind ``tool_error`` written by the runner identity, never by the worker)."""
+    from aeos.models.audit import Event
+    from aeos.models.workforce import WorkerRun
+
+    runs = list(session.scalars(select(WorkerRun).where(WorkerRun.model_route_key == route.route_key,
+                                                        WorkerRun.verifier_status == "PASS",
+                                                        or_(WorkerRun.domain.is_(None), WorkerRun.domain != "OFFICE"))
+                                .order_by(WorkerRun.created_at.desc()).limit(200)))
+    if route.harness_version:
+        runs = [r for r in runs if r.engine_version == route.harness_version]
+    ids = [r.id for r in runs]
+    errors = 0
+    if ids:
+        errors = sum(1 for ev in session.scalars(select(Event).where(Event.source == "runner", Event.kind == "run.action",
+                                                                     Event.run_id.in_(ids)))
+                     if (ev.payload or {}).get("kind") == "tool_error")
+    return {"verified_runs": len(ids), "tool_errors": errors}
+
+
+def _route_verdict(session: Any, route: Any, *, threshold: float | None, installed: str | None) -> dict[str, Any]:
+    from aeos.models.research import EvalRun
+
+    out: dict[str, Any] = {"route_key": route.route_key, "route_status": route.status,
+                           "config_hash": route.config_hash, "harness_version": route.harness_version,
+                           **_verified_runs(session, route)}
+    evals = [e for e in session.scalars(select(EvalRun).where(EvalRun.route_key == route.route_key,
+                                                              EvalRun.status == "COMPLETED")
+                                        .order_by(EvalRun.created_at.desc()).limit(50))
+             if e.result_source in TRUSTED_EVAL_SOURCES and (e.mode or "LIVE") == "LIVE"
+             and e.submitted_domain != "OFFICE"]
+    current = [e for e in evals if route.config_hash and e.route_config_hash == route.config_hash]
+    if not evals:
+        return {**out, "verdict": "UNKNOWN", "why": "belum ada evaluasi tepercaya (COMPLETED, verifier/collector, LIVE) "
+                "pada route ini; tool/schema NOT-PROVEN"}
+    if not current:
+        return {**out, "verdict": "STALE", "eval_run_id": evals[0].id,
+                "why": f"evaluasi terakhir dibuat pada konfigurasi {str(evals[0].route_config_hash)[:19]}, route sekarang "
+                       f"{str(route.config_hash)[:19]}: bukti tidak berlaku"}
+    ev = current[0]
+    recorded = str((ev.configuration or {}).get("harness_version") or "") or None
+    out.update(eval_run_id=ev.id, sample_size=ev.sample_size, recorded_engine_version=recorded)
+    if (route.harness_version and recorded and recorded != route.harness_version) or \
+            (installed and recorded and recorded != installed):
+        return {**out, "verdict": "STALE", "why": f"evaluasi dibuat dengan OpenCode {recorded}; route/engine sekarang "
+                f"{route.harness_version or '-'} / terpasang {installed or 'UNKNOWN'}"}
+    failures = ((ev.metrics or {}).get("reliability") or {}).get("tool_schema_failures")
+    n = int(ev.sample_size or 0)
+    if failures is None or n <= 0:
+        return {**out, "verdict": "UNKNOWN", "why": "evaluasi tidak mencatat tool_schema_failures (UNKNOWN, bukan nol)"}
+    out.update(tool_schema_failures=int(failures), failure_rate=round(int(failures) / n, 4))
+    if int(failures) == 0:
+        return {**out, "verdict": "VERIFIED", "why": f"0 kegagalan tool/schema dari {n} sampel"}
+    if threshold is None:
+        return {**out, "verdict": "UNKNOWN", "why": f"{failures} kegagalan tool/schema dari {n} sampel; ambang batas "
+                "pemilik UNDECIDED (dilaporkan, tidak dinilai)"}
+    if int(failures) / n > threshold:
+        return {**out, "verdict": "FAILED", "why": f"{failures}/{n} kegagalan tool/schema melebihi ambang pemilik "
+                f"{threshold}"}
+    return {**out, "verdict": "VERIFIED", "why": f"{failures}/{n} kegagalan tool/schema dalam ambang pemilik {threshold}"}
+
+
+@check("worker.route_behaviour", "WORKER", "Perilaku tool/schema route worker nyata", component_id="opencode",
+       needs_db=True, ttl_seconds=3600, invalidators=("model:route", "config:routes", "binary:opencode"),
+       fingerprint=_route_behaviour_fp, severity_fail="HIGH",
+       description="Ukuran reliability tool_schema_failures (evaluasi tepercaya pada konfigurasi route saat ini) dan "
+                   "run worker yang lulus verifier independen, per route worker APPROVED/TRIAL.")
+def worker_route_behaviour(ctx: CheckContext) -> Outcome:
+    assert ctx.session is not None
+    routes = _worker_routes(ctx.session)
+    threshold, decision = _threshold(ctx.session)
+    try:
+        from aeos.worker_runtime import facade as worker
+
+        st = worker.opencode_status()
+        installed = str(st.get("version") or "") if str(st.get("status") or "").upper() == "INSTALLED" else None
+    except Exception:  # engine probe unavailable: the engine binding is simply not checked against it
+        installed = None
+    evidence: dict[str, Any] = {
+        "threshold": {"max_failure_rate": threshold, "decision_id": decision,
+                      "status": "DECIDED" if threshold is not None else "UNDECIDED",
+                      "target": ":".join(ROUTE_BEHAVIOUR_TARGET)},
+        "installed_engine_version": installed,
+        "residual_risks": ["Perilaku tool/schema dibuktikan hanya oleh evaluasi/run nyata pada route itu; output worker "
+                           "tetap REVIEW sampai verifier independen lulus"]}
+    remedy = Remedy(operation="Aktifkan satu route worker lewat keputusan manusia, jalankan satu tugas terbatas dari "
+                    "Control Center (/work) dan evaluasi terlindungi route itu agar ada bukti verifier/evaluasi",
+                    command=aeos_cmd("routes activate <route_key>"), privilege="SUPER_ADMIN", cost="kuota route",
+                    evidence_to_collect="worker.route_behaviour VERIFIED")
+    if not routes:
+        return Outcome("UNKNOWN", "Belum ada route worker APPROVED/TRIAL; perilaku tool/schema model NOT-PROVEN.",
+                       evidence={**evidence, "routes": []}, error_code="NO_WORKER_ROUTE", remedy=remedy)
+    verdicts = [_route_verdict(ctx.session, r, threshold=threshold, installed=installed) for r in routes]
+    evidence["routes"] = verdicts
+    worst = max(verdicts, key=lambda v: _RANK[v["verdict"]])["verdict"]
+    lines = "; ".join(f"{v['route_key']}: {v['verdict']} ({v['why']})" for v in verdicts)[:900]
+    if worst == "FAILED":
+        return Outcome("FAILED", f"Route worker melebihi ambang kegagalan tool/schema pemilik - {lines}",
+                       evidence=evidence, error_code="ROUTE_TOOL_SCHEMA_FAILURES", severity="HIGH", remedy=Remedy(
+                           operation="Tinjau run/evaluasi yang gagal; nonaktifkan atau uji ulang route tersebut",
+                           command=aeos_cmd("routes disable <route_key>"), privilege="SUPER_ADMIN",
+                           evidence_to_collect="worker.route_behaviour VERIFIED"))
+    if worst == "UNKNOWN":
+        undecided = any("UNDECIDED" in v["why"] for v in verdicts)
+        return Outcome("UNKNOWN", f"Perilaku tool/schema route worker NOT-PROVEN - {lines}", evidence=evidence,
+                       error_code="ROUTE_BEHAVIOUR_THRESHOLD_UNDECIDED" if undecided else "ROUTE_BEHAVIOUR_NOT_PROVEN",
+                       remedy=Remedy(
+                           operation="Pemilik menetapkan ambang: keputusan POLICY target_type "
+                                     f"{ROUTE_BEHAVIOUR_TARGET[0]}, target_id {ROUTE_BEHAVIOUR_TARGET[1]}, "
+                                     "details.max_failure_rate (0..1) lewat POST /api/decisions (Control Center)",
+                           privilege="SUPER_ADMIN", evidence_to_collect="worker.route_behaviour")
+                       if undecided else remedy)
+    if worst == "STALE":
+        return Outcome("STALE", f"Bukti perilaku tool/schema tidak berlaku untuk konfigurasi/engine sekarang - {lines}",
+                       evidence=evidence, error_code="ROUTE_BEHAVIOUR_STALE", remedy=remedy)
+    return Outcome("VERIFIED", f"Perilaku tool/schema route worker terbukti oleh evaluasi tepercaya - {lines}",
+                   evidence=evidence)

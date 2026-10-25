@@ -114,7 +114,6 @@
     "verification -> delivery.gates",
     "verification -> identity.service",
     "verification -> policy.decisions",
-    "worker_runtime -> knowledge.packs",
     "worker_runtime -> policy.requests",
     "worker_runtime -> routing.service",
     "worker_runtime -> workforce.integrations",

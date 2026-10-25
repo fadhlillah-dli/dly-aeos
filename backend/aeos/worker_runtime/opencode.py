@@ -168,16 +168,22 @@ def opencode_status(configured: str | None = None, *, refresh: bool = False) -> 
     return value
 
 
-def _bash_rules(tools_allowed: list[str]) -> str | dict[str, str]:
+def _bash_rules(tools_allowed: list[str], *, runner: str | None = None) -> str | dict[str, str]:
     """``bash`` stays denied unless the TaskSpec allows it; ``bash:<pattern>`` entries allow only
-    matching commands (last matching rule wins in OpenCode, so the catch-all comes first)."""
+    matching commands (last matching rule wins in OpenCode, so the catch-all comes first). With a ``runner``
+    (the AEOS shell runner, container sandbox, §42) every allowed command must be run THROUGH it:
+    ``<runner> <pattern>`` instead of ``<pattern>``."""
     patterns = [t.split(":", 1)[1].strip() for t in tools_allowed if t.startswith("bash:") and t.split(":", 1)[1].strip()]
-    if patterns:
-        rules: dict[str, str] = {"*": "deny"}
-        for p in patterns:
-            rules[p] = "allow"
-        return rules
-    return "allow" if "bash" in tools_allowed else "deny"
+    if not patterns and "bash" in tools_allowed:
+        if not runner:
+            return "allow"
+        patterns = ["*"]
+    if not patterns:
+        return "deny"
+    rules: dict[str, str] = {"*": "deny"}
+    for p in patterns:
+        rules[f"{runner} {p}" if runner else p] = "allow"
+    return rules
 
 
 def _webfetch_rule(tools_allowed: list[str], egress_allowed: list[str]) -> str:
@@ -188,8 +194,9 @@ def _webfetch_rule(tools_allowed: list[str], egress_allowed: list[str]) -> str:
 
 def build_config(
     *, broker_base_url: str, token: str, model: str, tools_allowed: list[str], egress_allowed: list[str],
-    max_output_tokens: int | None = None, context_limit: int | None = None,
+    max_output_tokens: int | None = None, context_limit: int | None = None, shell_runner: str | None = None,
 ) -> dict[str, Any]:
+    """``shell_runner`` (additive, wave 7): granted shell commands are allowed only through the AEOS runner."""
     if not _MODEL_ID.match(model):
         raise ValueError(f"unsafe model id {model!r}")
     model_entry: dict[str, Any] = {"name": model}
@@ -201,7 +208,7 @@ def build_config(
     permission: dict[str, Any] = {"*": "deny"}
     for t in BASE_ALLOW:
         permission[t] = "allow"
-    permission["bash"] = _bash_rules(tools_allowed)
+    permission["bash"] = _bash_rules(tools_allowed, runner=shell_runner)
     permission["webfetch"] = _webfetch_rule(tools_allowed, egress_allowed)
     for t in ALWAYS_DENY:
         permission[t] = "deny"

@@ -22,12 +22,27 @@ def status(domain: str = typer.Option("PERSONAL", help="PERSONAL or OFFICE")) ->
     """Show sandbox levels, the policy requirement and the OpenCode engine status."""
     from aeos.cli import ensure_database
     from aeos.core.db import session_scope
+    from aeos.worker_runtime.integrity import hold_view
     from aeos.worker_runtime.opencode import opencode_status
     from aeos.worker_runtime.sandbox import sandbox_readiness
 
     ensure_database()
     with session_scope() as s:
         sb = sandbox_readiness(s, domain=domain.upper())
+        hold = hold_view(s, domain=domain.upper())
+    if hold["status"] == "ACTIVE":
+        h = hold["hold"]
+        subject = h.get("subject_id") or "(a run in the other domain)"
+        _out(f"integrity hold: ACTIVE id={h.get('id')} detected={h.get('detected_at')} source={h.get('source')} "
+             f"subject={subject} - no worker is admitted in any domain until the owner reconciles")
+        for f in (h.get("findings") or [])[:20]:
+            _out(f"  finding: {f.get('kind', '')} {f.get('path', '')} {f.get('change', '')} {f.get('detail', '')}")
+        if h.get("other_domain_findings"):
+            _out(f"  {h['other_domain_findings']} finding(s) of the other domain: review them with "
+                 "`aeos worker status --domain <that domain>`")
+        _out(f"  reconcile after review: {hold.get('remedy')}")
+    else:
+        _out("integrity hold: CLEAR")
     for kind, lvl in sb["capabilities"].items():
         strength = lvl["strength"]
         if kind == "container" and sb.get("kind") == "container":

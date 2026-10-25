@@ -71,9 +71,10 @@ def test_baseline_only_lists_crossings_that_still_exist():
     assert not stale, f"remove fixed crossings from the baseline (scripts/module_boundaries.py --update): {stale}"
 
 
-# 2026-10-19 (K4): 137 -> 132 after identity got a facade. Lower this number when crossings are removed; raising
-# it means a reviewed change ADDS internal crossings, which this ratchet exists to prevent.
-MAX_CROSSINGS = 132
+# 2026-10-19 (K4): 137 -> 132 after identity got a facade; wave 7: 131 (worker runtime takes context packs only
+# through knowledge.facade). Lower this number when crossings are removed; raising it means a reviewed change ADDS
+# internal crossings, which this ratchet exists to prevent.
+MAX_CROSSINGS = 131
 
 
 def test_the_crossing_baseline_never_grows():
