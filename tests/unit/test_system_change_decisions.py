@@ -59,6 +59,40 @@ def test_policy_on_a_system_change_target_needs_evaluation_and_rollback(personal
     assert sc["rollback_target"] == "prompt rev r41"
 
 
+@pytest.mark.parametrize("target_type", ["Prompt", "tool-schema", "Context Strategy", "planning_baseline"])
+def test_spelling_variants_and_stage_model_pins_are_system_changes(personal_client: AuthedClient, db, target_type):
+    """Review fix: the system-change set was matched verbatim, so ``Tool-Schema`` bypassed the gate, and the one
+    generic POLICY a consumer reads as a model change (planning_baseline/stage_models, §15) was recorded as
+    NOT_A_SYSTEM_CHANGE without a rollback target."""
+    with pytest.raises(ValidationFailed) as exc:
+        _policy(db, target_type=target_type, target_id="stage_models")
+    assert exc.value.code == "SYSTEM_CHANGE_EVIDENCE_REQUIRED"
+
+
+def test_stage_model_pin_is_recorded_with_its_evaluation_and_rollback(personal_client: AuthedClient, db):
+    from aeos.planning import service as planning
+
+    ok = _run(db, domain="PERSONAL")
+    bad = _run(db, gates={"security": "FAIL"}, domain="PERSONAL")
+    models = {"details": {"models": {"PRIMARY_PLANNING": "claude-opus-4-8"}}}
+    with pytest.raises(ValidationFailed):  # the consumer's eval_run_id is validated, not only read later
+        _policy(db, target_type="planning_baseline", target_id="stage_models",
+                details={**models["details"], "eval_run_id": bad.id,
+                         "system_change": {"rollback_target": "alias baseline (opus)"}})
+    with pytest.raises(ValidationFailed) as exc:  # evaluated, but no rollback target
+        _policy(db, target_type="planning_baseline", target_id="stage_models",
+                details={**models["details"], "eval_run_id": ok.id})
+    assert "rollback target" in exc.value.message
+    d = _policy(db, target_type="planning_baseline", target_id="stage_models",
+                details={**models["details"], "eval_run_id": ok.id,
+                         "system_change": {"rollback_target": "alias baseline (opus)"}})
+    sc = d.details["system_change"]
+    assert sc["evaluation"] == "EVALUATED" and [r["id"] for r in sc["eval_runs"]] == [ok.id]
+    db.flush()
+    pinned, note = planning.configured_stage_models(db)
+    assert note["decision_id"] == d.id and note["eval_run_id"] == ok.id
+
+
 def test_governance_policy_is_stated_as_not_a_system_change(personal_client: AuthedClient, db):
     d = _policy(db, target_type="project_convention", target_id="p1")
     assert d.details["system_change"]["class"] == "NOT_A_SYSTEM_CHANGE"

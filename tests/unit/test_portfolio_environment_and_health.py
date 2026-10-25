@@ -107,16 +107,31 @@ def test_repository_view_joins_prs_ci_docs_and_capability(personal_client, db, s
     db.add(PullRequestRecord(project_id=p["id"], domain="PERSONAL", task_id="t", run_id="r", acceptance_id="a",
                              repo_full_name="octo/view", number=7, url="https://github.com/octo/view/pull/7",
                              head_ref="aeos/t1", base_ref="main", bundle_hash="sha256:x", state="OPEN"))
+    # a decision shaped like no real recorder writes it (target = an integration id) enables nothing (review fix:
+    # the view used to read exactly this shape, so a real per-provider enablement never showed as ENABLED)
     db.add(Decision(kind="WRITE_ENABLEMENT", actor_user_id="u", target_type="integration", target_id=docs["id"],
-                    status="ACTIVE", allowed_operations=[], auth_scope={}, details={}))
+                    status="ACTIVE", allowed_operations=[], auth_scope={}, details={"enabled": True}))
     db.commit()
     view = personal_client.get(f"/api/repositories/{rid}").json()["repository"]
     assert view["base_branch"] == "main"
     assert view["pull_requests"][0]["url"].endswith("/pull/7") and view["pull_requests"][0]["state"] == "OPEN"
     assert view["ci"][0]["provider"] == "github-actions"
     assert view["docs_targets"][0]["root_id"] == "1AbCdEfGhIjKlMnOpQrStUvWxYz012345"
-    caps = {c["provider"]: c["status"] for c in view["capability"]["write_enablement"]}
-    assert caps["google-drive"] == "ENABLED" and caps["github-actions"] == "NOT_ENABLED"
+    caps = {c["provider"]: c for c in view["capability"]["write_enablement"]}
+    assert caps["google-drive"]["status"] == "NOT_ENABLED" and caps["google-drive"]["decision_id"] is None
+    assert caps["github-actions"]["status"] == "NOT_APPLICABLE"  # not a write provider of PERSONAL
+    # §26 the human WRITE_ENABLEMENT decision the interlock reads (flag + ACTIVE decision on provider_write/<p>)
+    r = personal_client.post("/api/decisions", json={"kind": "WRITE_ENABLEMENT", "provider": "google-drive",
+                                                     "enabled": True, "auth_scope": {"scope": "owner"},
+                                                     "rationale": "pemilik mengizinkan tulis Drive"})
+    assert r.status_code == 201, r.text
+    view = personal_client.get(f"/api/repositories/{rid}").json()["repository"]
+    caps = {c["provider"]: c for c in view["capability"]["write_enablement"]}
+    assert caps["google-drive"]["status"] == "ENABLED" and caps["google-drive"]["decision_id"] == r.json()["id"]
+    assert caps["google-drive"]["scope"].startswith("provider")
+    personal_client.post(f"/api/decisions/{r.json()['id']}/revoke", json={"reason": "cabut izin tulis Drive"})
+    view = personal_client.get(f"/api/repositories/{rid}").json()["repository"]
+    assert {c["provider"]: c["status"] for c in view["capability"]["write_enablement"]}["google-drive"] == "NOT_ENABLED"
     assert view["capability"]["merge"].startswith("HUMAN_ONLY")
 
 

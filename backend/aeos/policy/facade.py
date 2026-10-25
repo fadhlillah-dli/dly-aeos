@@ -155,3 +155,19 @@ def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids
     from aeos.policy.recording import system_change_evidence as impl
 
     return impl(session, domain=domain, eval_run_ids=eval_run_ids, rollback_target=rollback_target)
+
+
+def write_enablement(session: Session, provider: str, *, domain: str) -> dict[str, Any]:
+    """§26 external write enablement of *provider* exactly as the interlock evaluates it: effective only with the
+    ``write_enabled.<provider>`` flag AND an ACTIVE human WRITE_ENABLEMENT decision on ``provider_write/<provider>``
+    (per provider, for every target of it). A provider that is not a write provider of *domain* is NOT_APPLICABLE."""
+    from aeos.policy import catalog, enablement
+
+    canonical = catalog.normalize_provider(provider)
+    if canonical not in catalog.providers_for(domain):
+        return {"provider": canonical, "status": "NOT_APPLICABLE", "decision_id": None, "flag": False,
+                "scope": "provider"}
+    decision = enablement.active_enablement_decision(session, canonical)
+    flag = enablement.flag(session, canonical)
+    return {"provider": canonical, "status": "ENABLED" if flag and decision is not None else "NOT_ENABLED",
+            "decision_id": decision.id if decision is not None else None, "flag": flag, "scope": "provider"}

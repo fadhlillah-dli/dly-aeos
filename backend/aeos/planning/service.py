@@ -1126,6 +1126,9 @@ def _run_stage(session: Session, plan: Plan, spec: StageSpec, *, actor: str) -> 
                          "model_family": spec.family, "schema": spec.schema,
                          "schema_hash": content_hash(request.json_schema), "prompt_revision": prompts.PROMPT_REVISION,
                          "allowed_tools": [], "timeout_seconds": request.timeout_seconds,
+                         # §23 mode/thinking: the effort the bridge is asked to pass (None = Claude Code default);
+                         # bound to the supervisor route identity when the stage completes
+                         "effort": request.effort,
                          "policy_snapshot": (plan.policy_baseline or {}).get("policy_snapshot"),
                          "bridge_proof": ((cp.get("bridge_proof") or {}).get("label") or
                                           ("OFFICE_GATE" if plan.domain == Domain.OFFICE.value else "NOT-PROVEN")),

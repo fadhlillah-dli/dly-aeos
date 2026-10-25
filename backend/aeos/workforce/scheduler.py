@@ -880,15 +880,29 @@ def role_eligibility(session: Session, task: TaskSpec) -> dict[str, Any]:
         "status": "NOT_EVALUATED", "basis": "role is not a catalog executor"}
     out = {"required": required, "threshold": threshold, "risk_class": risk, "role_key": task.role_key,
            "role_revision_hash": revision, "status": evaluation["status"], "basis": evaluation.get("basis", "")}
-    if required and evaluation["status"] != "PASS" and revision:
+    adopted = False
+    if evaluation["status"] == "PASS" and revision:
+        # §44: the PASS result counts only once the owner adopted it (DecisionRecord bound to revision + EvalRun)
+        decision, problem = role_adoption(session, task, revision=revision, run_id=evaluation.get("run_id"))
+        adopted = decision is not None
+        out["adoption_decision_id"] = decision.id if decision is not None else None
+        if problem:
+            out["adoption_problem"] = problem
+    if required and not adopted and revision:
         exc = ext.active_exception_decision(session, target_type=ROLE_EVAL_TARGET_TYPE, target_id=task.role_key,
                                             target_hash=revision)
         out["exception_decision_id"] = exc.id if exc else None
+    out["eligible"] = bool(adopted or out.get("exception_decision_id") or not required)
     # §46 stated, never implied: what this admission's role eligibility actually rests on
-    if evaluation["status"] == "PASS":
+    if adopted:
         out["eligibility_basis"] = "EVALUATION_RESULT"
     elif out.get("exception_decision_id"):
         out["eligibility_basis"] = "OWNER_EXCEPTION"
+    elif evaluation["status"] == "PASS":
+        out["eligibility_basis"] = "EVALUATION_RESULT_NOT_ADOPTED" if required else "PILOT_THRESHOLD_PASS_NOT_ADOPTED"
+        out["note"] = (f"Role {task.role_key} lulus evaluasi (EvalRun {evaluation.get('run_id')}), tetapi hasilnya belum "
+                       "diadopsi pemilik (DecisionRecord §44): POST /api/workforce/roles/"
+                       f"{task.role_key}/adopt.")
     elif required:
         out["eligibility_basis"] = "NOT_ELIGIBLE"
     else:
@@ -898,6 +912,93 @@ def role_eligibility(session: Session, task: TaskSpec) -> dict[str, Any]:
                        "suite role disusun pemilik (ADR-0060); ambang dapat diperketat lewat "
                        "POST /api/workforce/role-eval-threshold.")
     return out
+
+
+ROLE_SCOPE_KEYS = ("project_ids", "risk_classes", "domains")
+
+
+def _role_scope_problem(scope: dict[str, Any], task: TaskSpec) -> str | None:
+    """Why *task* lies outside an adoption's recorded scope (None = inside; an empty scope = every task of the
+    role)."""
+    for key, value in (("project_ids", task.project_id), ("risk_classes", task.risk_class), ("domains", task.domain)):
+        allowed = scope.get(key)
+        if isinstance(allowed, list) and allowed and value not in allowed:
+            return f"{key} {value} is outside the adoption scope {allowed}"
+    return None
+
+
+def role_adoption(session: Session, task: TaskSpec, *, revision: str, run_id: str | None
+                  ) -> tuple[Decision | None, str | None]:
+    """(decision, problem): the owner's ACTIVE adoption of the role result this admission relies on - a human POLICY
+    decision on role_adoption/<role_key> bound to the role revision hash that references exactly the PASS EvalRun
+    and covers this task's scope (§44 owner AUTH, scope, version, invalidation)."""
+    from aeos.policy import catalog as policy_catalog
+    from aeos.policy import facade as policy
+
+    d = policy.find_active_decision(session, kind="POLICY", target_type=policy_catalog.TARGET_ROLE_ADOPTION,
+                                    target_id=task.role_key, target_hash=revision)
+    if d is None:
+        return None, "no ACTIVE owner adoption decision for this role revision"
+    if (d.actor_kind or "HUMAN") != "HUMAN":
+        return None, "the adoption decision was not made by a human"
+    details = d.details or {}
+    if details.get("eval_run_id") != run_id:
+        return None, (f"the adoption references EvalRun {details.get('eval_run_id')}, the current result is {run_id} "
+                      "(re-adopt the current result)")
+    problem = _role_scope_problem(details.get("scope") or {}, task)
+    if problem:
+        return None, problem
+    return d, None
+
+
+def adopt_role_result(session: Session, *, role_key: str, eval_run_id: str, actor: str, actor_user_id: str,
+                      rationale: str, decision_record: dict[str, Any] | None = None,
+                      scope: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Owner action (§44 "Hasil routing/role/mode menjadi DecisionRecord", §46 eligible from evaluation results): adopt
+    the PASS evaluation of the role's CURRENT revision as its admission eligibility. Refused unless the named EvalRun
+    is the role's current PASS result; records a human POLICY decision bound to the revision hash with the
+    DecisionRecord (options, goal, evidence, cost/quality trade-off, invalidation), the scope and the rollback
+    (revoking it returns the role to the threshold/EXCEPTION rule). A changed role revision or a newer result ends
+    the adoption (the decision no longer matches)."""
+    from aeos.policy import catalog as policy_catalog
+    from aeos.workforce import roles
+
+    if len((rationale or "").strip()) < 5:
+        raise ValidationFailed("rationale is required", code="RATIONALE_REQUIRED")
+    revision = roles.role_revision(session, role_key)
+    if not revision:
+        raise NotFound(f"role {role_key} is not a catalog executor role", code="ROLE_UNKNOWN")
+    evaluation = roles.role_evaluation(session, role_key, revision)
+    if evaluation["status"] != "PASS" or evaluation.get("run_id") != eval_run_id:
+        raise Blocked(f"role {role_key} result to adopt must be its current PASS evaluation of revision "
+                      f"{revision[:19]}: {evaluation['status']} ({evaluation.get('basis')})",
+                      code="ROLE_RESULT_NOT_ADOPTABLE",
+                      details={"evaluation": evaluation, "eval_run_id": eval_run_id})
+    record = dict(decision_record or {})
+    record.setdefault("evidence_ids", [eval_run_id])
+    missing = [k for k in policy_catalog.DECISION_RECORD_FIELDS if not record.get(k)]
+    if missing:
+        raise ValidationFailed(f"decision record incomplete: {missing}", code="DECISION_RECORD_INCOMPLETE",
+                               details={"required": list(policy_catalog.DECISION_RECORD_FIELDS)})
+    clean_scope = {k: [str(x) for x in v] for k, v in (scope or {}).items()
+                   if k in ROLE_SCOPE_KEYS and isinstance(v, list) and v}
+    d = ext.record_decision(
+        session, kind="POLICY", actor_user_id=actor_user_id, target_type=policy_catalog.TARGET_ROLE_ADOPTION,
+        target_id=role_key, target_hash=revision, allowed_operations=["admit_role"],
+        auth_scope={"role_key": role_key, "scope": clean_scope or "every task of this role"},
+        rationale=redact_text(rationale)[:2000],
+        details={"eval_run_id": eval_run_id, "suite_key": evaluation.get("suite_key"), "role_revision_hash": revision,
+                 "scope": clean_scope, "decision_record": redact(record),
+                 "rollback": {"how": "revoke this decision: admission falls back to the role-evaluation threshold / "
+                                     "owner EXCEPTION rule", "previous": "not adopted"}})
+    _audit(session, actor, "workforce.role_result.adopt", target_type="role_adoption", target_id=role_key,
+           project_id=None, domain=None, reason=redact_text(rationale)[:500],
+           details={"decision_id": d.id, "eval_run_id": eval_run_id, "role_revision_hash": revision,
+                    "scope": clean_scope})
+    events.emit(session, source="controller", kind="scheduler.role_result_adopted", entity_type="role",
+                entity_id=role_key, payload={"decision_id": d.id, "eval_run_id": eval_run_id})
+    return {"role_key": role_key, "decision_id": d.id, "eval_run_id": eval_run_id, "role_revision_hash": revision,
+            "scope": clean_scope}
 
 
 def set_role_eval_threshold(session: Session, *, risk_class: str, actor: str, rationale: str) -> dict[str, Any]:
@@ -1155,10 +1256,18 @@ def admission_check(session: Session, task_id: str) -> Admission:
     else:
         elig = role_eligibility(session, task)
         adm.answers["role_eligibility"] = elig
-        if elig["required"] and elig["status"] != "PASS" and not elig.get("exception_decision_id"):
-            adm.waits.append(("ROLE_NOT_EVALUATED", f"risk {elig['risk_class']} >= {elig['threshold']}: role "
-                              f"{task.role_key} needs a PASS evaluation of revision {str(elig['role_revision_hash'])[:19]} "
-                              f"({elig['status']}: {elig['basis']}) or an owner EXCEPTION"))
+        if not elig["eligible"]:
+            if elig["status"] == "PASS":
+                # §44: a PASS result is eligibility only after the owner's adoption decision (DecisionRecord)
+                adm.waits.append(("ROLE_RESULT_NOT_ADOPTED", f"risk {elig['risk_class']} >= {elig['threshold']}: "
+                                  f"role {task.role_key} passed its evaluation but the result is not adopted "
+                                  f"({elig.get('adoption_problem')}); owner: POST /api/workforce/roles/"
+                                  f"{task.role_key}/adopt"))
+            else:
+                adm.waits.append(("ROLE_NOT_EVALUATED", f"risk {elig['risk_class']} >= {elig['threshold']}: role "
+                                  f"{task.role_key} needs an adopted PASS evaluation of revision "
+                                  f"{str(elig['role_revision_hash'])[:19]} ({elig['status']}: {elig['basis']}) or an "
+                                  "owner EXCEPTION"))
     if scheduling_paused(session):
         adm.waits.append(("SCHEDULING_PAUSED", "scheduling is paused by the owner"))
     approved, why = ext.approved_version(session, te.plan_id)

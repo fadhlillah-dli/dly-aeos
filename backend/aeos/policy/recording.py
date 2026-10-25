@@ -210,11 +210,15 @@ def record_generic_decision(
         else:
             target_type, target_id = _require_target(kind, target_type, target_id)
         given = details.pop("system_change", None)
-        if target_type in catalog.SYSTEM_CHANGE_TARGET_TYPES:
+        if catalog.system_change_target(target_type):
             sc = given if isinstance(given, dict) else {}
+            ids = list(sc.get("eval_run_ids") or []) if isinstance(sc.get("eval_run_ids"), list) else []
+            if details.get("eval_run_id"):
+                # a consumer that reads details.eval_run_id (planning_baseline/stage_models) is held to the same
+                # validated run: it is part of the system-change evidence, never a second unchecked reference
+                ids.append(str(details["eval_run_id"]))
             details["system_change"] = system_change_evidence(
-                session, domain=domain.value, eval_run_ids=sc.get("eval_run_ids"),
-                rollback_target=sc.get("rollback_target"))
+                session, domain=domain.value, eval_run_ids=ids, rollback_target=sc.get("rollback_target"))
         else:
             # governance/convention policy: not an agent/model configuration change; stated, never implied evaluated
             details["system_change"] = {"class": "NOT_A_SYSTEM_CHANGE", "evaluation": "NOT_APPLICABLE",

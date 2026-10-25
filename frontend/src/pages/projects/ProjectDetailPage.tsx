@@ -238,7 +238,7 @@ export default function ProjectDetailPage() {
           {project.environment && (
             <>
               {" "}
-              · Environment: <ModuleBadge kind="config" value={project.environment.status === "NOT_AVAILABLE" ? "NOT_APPLICABLE" : project.environment.status} />
+              · Environment: <ModuleBadge kind="config" value={project.environment.status} />
             </>
           )}
         </span>
