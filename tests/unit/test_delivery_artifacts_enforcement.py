@@ -87,6 +87,17 @@ def test_a_failed_artifact_read_is_never_recorded(db):
         result = provider.fetch_artifact_digests("o/r", MERGE, token="t0ken-value-for-test")
     assert result.status == "UNKNOWN" and "403" in (result.error or "")
     assert provider.record_artifact_evidence(db, w.project, result) is None
+    # a malformed provider answer (a run without an id, an artifact list that is not an object) is no evidence
+    for runs, artifacts in (([{"head_sha": MERGE, "status": "completed", "conclusion": "success"}], None),
+                            ([{"id": 11, "head_sha": MERGE, "status": "completed", "conclusion": "success"}], [1])):
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+            mock.get(url__regex=rf"^{API}/actions/runs(\?.*)?$").mock(return_value=httpx.Response(200, json={
+                "total_count": 1, "workflow_runs": runs}))
+            mock.get(url__regex=rf"^{API}/actions/runs/11/artifacts(\?.*)?$").mock(
+                return_value=httpx.Response(200, json=artifacts))
+            bad = provider.fetch_artifact_digests("o/r", MERGE, token="t0ken-value-for-test")
+        assert bad.status == "UNKNOWN" and "unreadable" in (bad.error or "") and bad.artifacts == []
+        assert provider.record_artifact_evidence(db, w.project, bad) is None
 
 
 def _merged_world(db, monkeypatch):
@@ -236,6 +247,35 @@ def test_the_rule_history_reader_records_evidence_only_for_an_observed_refusal(d
     assert stale.enforcement_tested == "STALE"
     out = _merge_gate_outcome(stale.to_dict(), origin="test")
     assert out.status == "CONFIGURED" and provider.ENFORCEMENT_UNTESTED in out.evidence["residual_risks"]
+
+
+def test_enforcement_is_never_verified_when_the_ruleset_binding_cannot_be_confirmed(db):
+    """Fail closed: a refusal whose ruleset ``updated_at`` was not recorded cannot be shown unchanged (STALE, not
+    VERIFIED), and while the current rulesets cannot be read the binding is not confirmed (NOT-PROVEN)."""
+    w = make_world(db, repo="o/r")
+    undated = [{**RULESETS[0], "updated_at": None}, RULESETS[1]]
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+        _mock_enforcement(mock, rulesets=undated)
+        obs = provider.fetch_enforcement_observation("o/r", "main", token="t0ken-value-for-test")
+    ev = provider.record_enforcement_evidence(db, w.project, obs)
+    db.commit()
+    assert ev is not None and ev.environment["rulesets"] == [{"id": 101, "updated_at": None}]
+    caps = provider.apply_enforcement_evidence(db, _caps())
+    assert caps.enforcement_tested == "STALE" and provider.ENFORCEMENT_UNTESTED in caps.residual_risks
+    # a dated refusal, but the rulesets cannot be read now: never VERIFIED
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+        _mock_enforcement(mock)
+        provider.record_enforcement_evidence(db, w.project, provider.fetch_enforcement_observation(
+            "o/r", "main", token="t0ken-value-for-test"))
+    db.commit()
+    assert provider.apply_enforcement_evidence(db, _caps()).enforcement_tested == "VERIFIED"
+    blind = provider.ProviderCapabilities(provider="GITHUB", repo="o/r", branch="main", checked_at="now",
+                                          credential="AVAILABLE", merge_gate="UNKNOWN",
+                                          residual_risks=[provider.ENFORCEMENT_UNTESTED])
+    blind.checks.append(provider._rulesets_check(httpx.Response(500, json={"message": "boom"}), private=True,
+                                                 plan="pro"))
+    blind = provider.apply_enforcement_evidence(db, blind)
+    assert blind.enforcement_tested == "NOT-PROVEN" and "could not be read" in blind.enforcement_test["reason"]
 
 
 def test_a_probe_branch_refusal_proves_main_only_when_the_same_ruleset_applies_to_main(db):

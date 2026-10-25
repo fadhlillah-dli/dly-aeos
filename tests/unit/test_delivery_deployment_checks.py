@@ -257,6 +257,50 @@ def test_the_generic_integration_form_keeps_the_owner_checks(personal_client, db
     assert db.scalars(select(AuditEvent).where(AuditEvent.action == "delivery.target.checks")).first() is not None
 
 
+def test_the_health_path_can_be_set_without_the_integration_form(personal_client, db, settings):
+    """W6-036/W6-091 (c): the owner can point the observer at e.g. DLY AEOS' own /api/health through the checks API
+    or the CLI (both OSes) - validated by the same absolute-path rule; a generic save that does not name it keeps
+    it, an explicit empty value goes back to /health."""
+    from typer.testing import CliRunner
+
+    from aeos.cli import app
+    from aeos.models.portfolio import ProjectIntegration
+    from tests.unit.test_portfolio_support import create_project
+
+    p = create_project(personal_client, name="Health Api")
+    r = personal_client.put(f"/api/projects/{p['id']}/integrations", json={
+        "provider": "deployment-target", "purpose": "production", "root_id": "http://127.0.0.1:8787"})
+    integ_id = r.json()["integration"]["id"]
+    bad = personal_client.put(f"/api/delivery/targets/{integ_id}/checks", json={"health_path": "@evil.example/h"})
+    assert bad.status_code == 422 and bad.json()["error"]["code"] == "HEALTH_PATH_INVALID", bad.text
+    typo = personal_client.put(f"/api/delivery/targets/{integ_id}/checks", json={"smoke_check": [{"path": "/"}]})
+    assert typo.status_code == 422, "an unknown key is refused, never silently ignored"
+    ok = personal_client.put(f"/api/delivery/targets/{integ_id}/checks", json={"health_path": "/api/health"})
+    assert ok.status_code == 200 and ok.json()["settings"]["health_path"] == "/api/health", ok.text
+    # the Integrasi form re-saves without config: the health path stays
+    assert personal_client.put(f"/api/projects/{p['id']}/integrations", json={
+        "provider": "deployment-target", "purpose": "production", "root_id": "http://127.0.0.1:8787"}).status_code == 200
+    db.expire_all()
+    assert db.get(ProjectIntegration, integ_id).config["health_path"] == "/api/health"
+    # an explicit empty value in the form clears it (default /health)
+    assert personal_client.put(f"/api/projects/{p['id']}/integrations", json={
+        "provider": "deployment-target", "purpose": "production", "root_id": "http://127.0.0.1:8787",
+        "config": {"health_path": ""}}).status_code == 200
+    db.expire_all()
+    assert "health_path" not in db.get(ProjectIntegration, integ_id).config
+    runner = CliRunner()
+    out = runner.invoke(app, ["delivery", "target-checks", p["id"], "--environment", "production",
+                              "--health-path", "/api/health"])
+    assert out.exit_code == 0 and "http://127.0.0.1:8787/api/health" in out.output and out.output.isascii(), out.output
+    refused = runner.invoke(app, ["delivery", "target-checks", p["id"], "--environment", "production",
+                                  "--health-path", "//evil.example/h"])
+    assert refused.exit_code == 2 and "HEALTH_PATH_INVALID" in refused.output
+    db.expire_all()
+    assert db.get(ProjectIntegration, integ_id).config["health_path"] == "/api/health"
+    cleared = personal_client.put(f"/api/delivery/targets/{integ_id}/checks", json={"health_path": ""})
+    assert cleared.status_code == 200 and cleared.json()["settings"]["health_path"] == "/health", cleared.text
+
+
 def test_viewers_cannot_change_target_checks(personal_client, db):
     from aeos.core.enums import Domain
     from tests.conftest import VIEWER_PW, create_viewer
@@ -319,6 +363,21 @@ def test_g6_not_applicable_needs_the_owner_no_staging_decision(db, monkeypatch):
     with pytest.raises(Blocked) as exc:
         deployment.observe(db, q.id, "staging", SHA, actor="owner")
     assert exc.value.code == "NO_DEPLOYMENT_TARGET" and "local-target" in exc.value.message
+
+
+def test_a_target_registered_without_a_base_url_is_not_observable_and_never_crashes_the_gates(db):
+    from aeos.delivery import gates
+
+    p = _project(db, "no-url")
+    deploy_target(db, p, "staging", None)  # type: ignore[arg-type]  # the registry allows a row without root_id
+    deploy_target(db, p, "production", None)  # type: ignore[arg-type]
+    authorise_staging(db, p, STAGING)
+    g6 = gates._g6(db, p, [SHA])
+    assert g6.status == "NOT_PROVEN" and "Belum ada target staging" in g6.summary
+    assert gates._g8(db, p, None).status == "PENDING"
+    with pytest.raises(Blocked) as exc:
+        deployment.observe(db, p.id, "staging", SHA, actor="owner")
+    assert exc.value.code == "NO_DEPLOYMENT_TARGET"
 
 
 def test_a_staging_authorisation_for_another_target_does_not_pass_g6(db):
@@ -422,6 +481,29 @@ def test_a_failed_production_observation_raises_alert_incident_and_decision_requ
     db.refresh(inc)
     db.refresh(req)
     assert alert.status == "RESOLVED" and inc.status == "OPEN" and req.status == "OPEN"
+
+
+def test_a_failure_after_a_resolved_incident_opens_one_new_incident_not_one_per_observation(db):
+    """Dedup survives a resolved incident: the next failure of the same commit opens ONE new incident, and every
+    later failure is linked to that open incident (never a new incident per observation)."""
+    p = _project(db, "prod-again")
+    deploy_target(db, p, "production", PROD)
+    down = {"/health": httpx.Response(503, json={"status": "down", "commit": SHA})}
+    first, _ = _observe(db, p, "production", down, base=PROD)
+    old = db.get(OpsIncident, first["post_release"]["incident_id"])
+    old.status = "RESOLVED"  # controlled precondition: the human closed the first incident
+    db.commit()
+    second, _ = _observe(db, p, "production", down, base=PROD)
+    third, _ = _observe(db, p, "production", down, base=PROD)
+    assert second["post_release"]["incident_id"] != old.id and second["post_release"]["incident_created"] is True
+    assert third["post_release"]["incident_id"] == second["post_release"]["incident_id"]
+    assert third["post_release"]["incident_created"] is False
+    alert_id = first["post_release"]["alert_id"]
+    rows = list(db.scalars(select(OpsIncident).where(OpsIncident.source == "alert", OpsIncident.source_ref == alert_id)))
+    assert len(rows) == 2, [r.status for r in rows]
+    from aeos.operations import facade as operations
+
+    assert operations.post_release_status(db, p, SHA)["incident_id"] == second["post_release"]["incident_id"]
 
 
 @pytest.mark.parametrize(("rollback_on", "expected"), [

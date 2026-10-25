@@ -53,10 +53,12 @@ def deployment_target(session: Session, project: Any, environment: str) -> dict[
 
 
 # deployment-target config keys owned by aeos.delivery (the Integration Registry validates them through
-# validate_deployment_target_config); the check keys are kept by a generic integration PUT that omits them.
+# validate_deployment_target_config); these keys are kept by a generic integration PUT whose config omits them
+# (an explicit value, even an empty one, replaces them).
 DEPLOYMENT_TARGET_CONFIG_KEYS: tuple[str, ...] = ("health_path", "smoke_checks", "sli_checks", "rollback_on",
                                                   "require_artifact_digest")
-DEPLOYMENT_TARGET_CHECK_KEYS: tuple[str, ...] = ("smoke_checks", "sli_checks", "rollback_on", "require_artifact_digest")
+DEPLOYMENT_TARGET_CHECK_KEYS: tuple[str, ...] = ("health_path", "smoke_checks", "sli_checks", "rollback_on",
+                                                 "require_artifact_digest")
 
 
 def validate_deployment_target_config(config: dict[str, Any]) -> dict[str, Any]:

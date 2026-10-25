@@ -196,16 +196,18 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   fragment are refused). AEOS never deploys, releases or rolls back; `aeos delivery observe-target
   <project> --environment staging --sha <commit>` performs read-only GETs and records one aggregate
   RUNTIME_OBSERVATION that is PASS only when the target reports the exact commit and healthy and every
-  owner check passed. DLY AEOS' own `/api/health` (set `health_path=/api/health`) proves its commit only
-  while `controller` runs the ACTIVE clean release.
+  owner check passed. DLY AEOS' own `/api/health` (set `health_path=/api/health`, e.g. Windows
+  `.\aeos.ps1 delivery target-checks <project> --environment production --health-path /api/health`, macOS
+  `./aeos delivery target-checks ...`) proves its commit only while `controller` runs the ACTIVE clean release.
   * **Checks (owner values, never defaults):** `PUT /api/delivery/targets/{integration_id}/checks` or
     `aeos delivery target-checks <project> --environment <env> --file checks.json` with
     `smoke_checks` (`name`, `path`, `expect_status` (default 200), `json_keys`, `kind` `smoke|critical_flow`;
     each one recorded as SMOKE_TEST evidence), `sli_checks` (`name`, `path`, `json_key`, `max`/`min` owner
     thresholds - without one an SLI is `NO_TARGET`, report only), `rollback_on` (any of `health_fail`,
     `smoke_fail`, `critical_flow_fail`, `sli_breach`, `artifact_digest_mismatch`; without it the rollback
-    recommendation is `UNDECIDED`) and `require_artifact_digest` (true/false). A generic integration save
-    keeps these keys; changing them makes earlier observations STALE.
+    recommendation is `UNDECIDED`) and `require_artifact_digest` (true/false); `health_path` can be set the
+    same way. A generic integration save whose config does not name these keys keeps them (an explicit value,
+    even empty, replaces them); changing them makes earlier observations STALE.
   * **Staging gate (§08):** a staging observation and a staging screenshot run only while
     `CAN_VALIDATE_STAGING` is READY for the project (verifier, restore test, and per project an
     observable `deployment-target`; a `local-target` is recorded but not observable). Refusals are audited.

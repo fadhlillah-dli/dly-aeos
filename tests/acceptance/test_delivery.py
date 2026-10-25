@@ -102,11 +102,12 @@ def _live_settings() -> tuple[str, str, str]:
 
     repo, branch, ref = (os.environ.get(k, "").strip() for k in (LIVE_REPO_ENV, LIVE_BRANCH_ENV, LIVE_TOKEN_REF_ENV))
     if not (repo and branch and ref):
-        pytest.skip("BLOCKED-real-github-enforcement: opt-in live test, never run by default. Branch protection/"
-                    "rulesets on the owner's private GitHub repository are NOT_ENFORCEABLE on GitHub Free (ADR-0063). "
-                    f"After an entitlement + active ruleset exists, opt in with {LIVE_REPO_ENV}=<owner/name>, "
-                    f"{LIVE_BRANCH_ENV}={PROBE_PREFIX}<name> (a dedicated probe branch the main ruleset also covers) "
-                    f"and {LIVE_TOKEN_REF_ENV}=<secret ref of a low-privilege token without bypass>")
+        pytest.skip("BLOCKED-real-github-enforcement: opt-in live test, never run by default. Provider rulesets are "
+                    "enforceable only on a public repository or a paid plan (a private repository on GitHub Free is "
+                    "NOT_ENFORCEABLE, ADR-0063). With an active ruleset on main whose branch targets also include "
+                    f"{PROBE_PREFIX}**, opt in with {LIVE_REPO_ENV}=<owner/name>, {LIVE_BRANCH_ENV}={PROBE_PREFIX}"
+                    f"<name> (a dedicated probe branch covered by that same ruleset) and {LIVE_TOKEN_REF_ENV}=<secret "
+                    "ref of a low-privilege token without bypass>")
     if not branch.startswith(PROBE_PREFIX) or branch in ("main", "master") or ".." in branch:
         pytest.fail(f"{LIVE_BRANCH_ENV} must name a dedicated probe branch under {PROBE_PREFIX} (never main)")
     return repo, branch, ref
@@ -158,7 +159,8 @@ def test_provider_enforces_human_only_merge_on_the_real_repository(tmp_path):
         def git(*args: str) -> subprocess.CompletedProcess[str]:
             import os
 
-            return subprocess.run(["git", "-c", "core.hooksPath=", "-c", "user.name=aeos-probe",
+            # credential.helper= : never fall back to the owner's own stored credential (it may hold a bypass)
+            return subprocess.run(["git", "-c", "core.hooksPath=", "-c", "credential.helper=", "-c", "user.name=aeos-probe",
                                    "-c", "user.email=probe@invalid", *args], cwd=work, capture_output=True,
                                   text=True, timeout=GIT_TIMEOUT * 4, env={**os.environ, **env})
 
@@ -188,7 +190,11 @@ def test_provider_enforces_human_only_merge_on_the_real_repository(tmp_path):
         try:
             assert number, f"throwaway PR could not be created (HTTP {pr.status_code})"
             merge = api.put(f"/repos/{repo}/pulls/{number}/merge", json={"merge_method": "squash"})
-            attempts["merge_api"] = "REFUSED" if merge.status_code in (403, 405, 409, 422) else "ACCEPTED"
+            # 403/405 is the provider refusing the merge; a conflict (409) or a validation error (422, e.g. the
+            # merge method is disabled) proves nothing about enforcement and fails the run as inconclusive
+            code = merge.status_code
+            attempts["merge_api"] = ("REFUSED" if code in (403, 405) else "ACCEPTED" if code == 200
+                                     else f"INCONCLUSIVE_HTTP_{code}")
         finally:
             if number:
                 api.patch(f"/repos/{repo}/pulls/{number}", json={"state": "closed"})

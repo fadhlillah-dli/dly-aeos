@@ -80,8 +80,15 @@ def record_failure(session: Session, *, project: Project, commit: str, target: s
         detail={"commit": commit, "target": target, "observation_id": observation_id, "evidence_ids": evidence_ids,
                 "failure_conditions": failure_conditions, "recommendation": rec["status"], "runbook": RUNBOOK},
         domain=project.domain, project_id=project.id, source="delivery", auto_resolve=False)
-    inc, created = incident.open_from_alert(session, alert.id, actor=actor, domain=project.domain)
-    if inc.status == "RESOLVED":  # a new failure after a resolved incident is a new incident
+    # the newest incident of this alert that is still open; open_from_alert returns the FIRST incident ever linked
+    # to the alert, which may be one the human already resolved
+    inc = session.scalar(select(OpsIncident).where(
+        OpsIncident.source == "alert", OpsIncident.source_ref == alert.id, OpsIncident.status != "RESOLVED")
+        .order_by(OpsIncident.created_at.desc()).limit(1))
+    created = False
+    if inc is None:
+        inc, created = incident.open_from_alert(session, alert.id, actor=actor, domain=project.domain)
+    if inc.status == "RESOLVED":  # a new failure after a resolved incident is a new incident (exactly one)
         inc = incident.open_incident(session, title=f"Alert: {alert.title}", actor=actor, source="alert",
                                      source_ref=alert.id, domain=project.domain, project_id=project.id,
                                      note=f"{alert.severity} {alert.kind}: kegagalan baru setelah insiden sebelumnya "

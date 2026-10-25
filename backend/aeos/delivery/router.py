@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -213,6 +213,11 @@ def list_targets(principal: CurrentPrincipal, domain: ActiveDomain, db: DB,
 
 
 class TargetChecksIn(BaseModel):
+    # an unknown key (e.g. a typo such as "smoke_check") is refused, never silently ignored
+    model_config = ConfigDict(extra="forbid")
+
+    # absolute path on the target itself, e.g. /health or /api/health ("" = back to the default /health)
+    health_path: str | None = Field(default=None, max_length=201)
     smoke_checks: list[dict[str, Any]] | None = Field(default=None, max_length=20)
     sli_checks: list[dict[str, Any]] | None = Field(default=None, max_length=20)
     rollback_on: list[str] | None = Field(default=None, max_length=10)
@@ -222,8 +227,8 @@ class TargetChecksIn(BaseModel):
 @router.put("/api/delivery/targets/{integration_id}/checks")
 def put_target_checks(integration_id: str, body: TargetChecksIn, principal: AdminPrincipal, domain: ActiveDomain,
                       db: DB) -> dict[str, Any]:
-    """Owner configuration of a target's smoke/critical-flow GET checks, product SLI checks (owner thresholds),
-    rollback criteria and the artifact-digest requirement. AEOS still only observes the target."""
+    """Owner configuration of a target's health path, smoke/critical-flow GET checks, product SLI checks (owner
+    thresholds), rollback criteria and the artifact-digest requirement. AEOS still only observes the target."""
     from aeos.delivery import deployment
 
     integ = _load_target(db, principal, domain, integration_id)

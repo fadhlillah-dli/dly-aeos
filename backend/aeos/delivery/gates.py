@@ -210,9 +210,12 @@ def release_approvers(session: Session, project: Project) -> tuple[list[str], st
 
 
 def _deployment_target(session: Session, project: Project, purpose: str) -> Any:
+    """The observable target of *purpose*: a deployment-target WITH a base URL (the observer's and the Doctor's
+    rule); a registration without ``root_id`` cannot be observed and counts as not registered."""
     from aeos.delivery.deployment import target_for
 
-    return target_for(session, project, purpose)
+    target = target_for(session, project, purpose)
+    return target if target is not None and target.root_id else None
 
 
 ENVIRONMENT_DECISION_TARGETS = {"staging": "staging_environment", "production": "production_environment"}

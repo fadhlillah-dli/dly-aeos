@@ -354,12 +354,15 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
     before = {"tenant_id": integ.tenant_id, "root_id": integ.root_id, "credential_ref": integ.credential_ref}
     proof = (integ.config or {}).get(PROOF_KEY)
     if provider == pv.DEPLOYMENT_TARGET and not created:
-        # the check keys are managed by PUT /api/delivery/targets/{id}/checks; a generic form that does not send
-        # them keeps them (an explicit value, e.g. smoke_checks: [], replaces them)
+        # health_path and the check keys are also managed by PUT /api/delivery/targets/{id}/checks; a generic form
+        # whose config does not name them keeps them (an explicit value, e.g. smoke_checks: [] or health_path: "",
+        # replaces them)
         from aeos.delivery import facade as delivery
 
+        raw = body.get("config")
+        sent = set(raw) if isinstance(raw, dict) else set()
         config = {**{k: v for k, v in (integ.config or {}).items()
-                     if k in delivery.DEPLOYMENT_TARGET_CHECK_KEYS and k not in config}, **config}
+                     if k in delivery.DEPLOYMENT_TARGET_CHECK_KEYS and k not in sent}, **config}
     integ.tenant_id = tenant
     integ.root_id = root
     integ.credential_ref = cred_ref

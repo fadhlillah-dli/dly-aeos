@@ -66,8 +66,9 @@ MAX_JSON_KEYS = 10
 ROLLBACK_CONDITIONS = ("health_fail", "smoke_fail", "critical_flow_fail", "sli_breach", "artifact_digest_mismatch")
 # deployment-target config keys owned by this module (validated here; the Integration Registry stores them).
 CONFIG_KEYS = ("health_path", "smoke_checks", "sli_checks", "rollback_on", "require_artifact_digest")
-# keys managed by PUT /api/delivery/targets/{id}/checks and kept by a generic integration PUT that omits them
-CHECK_CONFIG_KEYS = ("smoke_checks", "sli_checks", "rollback_on", "require_artifact_digest")
+# keys settable by PUT /api/delivery/targets/{id}/checks (and ``aeos delivery target-checks``) and kept by a generic
+# integration PUT that omits them (the Integrasi form may not send them; an explicit value replaces them)
+CHECK_CONFIG_KEYS = ("health_path", "smoke_checks", "sli_checks", "rollback_on", "require_artifact_digest")
 READ_ONLY_LIFECYCLES = frozenset({"ARCHIVED", "RETIRED"})  # the Integration Registry's rule (no change then)
 _SMOKE_FIELDS = frozenset({"name", "path", "expect_status", "json_keys", "kind"})
 _SLI_FIELDS = frozenset({"name", "path", "json_key", "max", "min"})
@@ -219,8 +220,9 @@ def target_settings(target: ProjectIntegration) -> dict[str, Any]:
 
 def set_target_checks(session: Session, integration: ProjectIntegration, body: dict[str, Any], *, actor: str,
                       actor_type: str = "user") -> dict[str, Any]:
-    """Owner configuration of a target's checks (``CHECK_CONFIG_KEYS``): only the given keys change; the
-    target identity (root_id) and health_path stay with the Integration Registry. Audited; does not commit."""
+    """Owner configuration of a target's observation settings (``CHECK_CONFIG_KEYS``: health_path and the checks):
+    only the given keys change (an empty ``health_path`` falls back to the default ``/health``); the target identity
+    (root_id) stays with the Integration Registry. Audited; does not commit."""
     from aeos.events import service as events
 
     if integration.provider != PROVIDER or integration.purpose not in ENVIRONMENTS:
@@ -236,7 +238,11 @@ def set_target_checks(session: Session, integration: ProjectIntegration, body: d
                                details={"allowed": list(CHECK_CONFIG_KEYS)})
     clean = validate_target_config(body)
     before = {k: (integration.config or {}).get(k) for k in CHECK_CONFIG_KEYS}
-    integration.config = {**(integration.config or {}), **clean}
+    merged = {**(integration.config or {}), **clean}
+    if "health_path" in body and "health_path" not in clean:  # explicitly cleared -> default /health
+        merged.pop("health_path", None)
+        clean["health_path"] = None
+    integration.config = merged
     session.flush()
     settings = target_settings(integration)
     audit.record(session, actor_type=actor_type, actor_id=actor, action="delivery.target.checks",

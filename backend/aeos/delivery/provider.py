@@ -760,6 +760,10 @@ def fetch_artifact_digests(repo: str, sha: str, *, token: str | None, client: ht
     except httpx.HTTPError as exc:
         out.error = f"unreachable: {type(exc).__name__}"
         return out
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:  # malformed provider answer: never evidence
+        out.error = f"unreadable provider response: {type(exc).__name__}"
+        out.artifacts = []
+        return out
     finally:
         gh.close()
     out.status = "RECORDED" if out.eligible_digests else "NO_ARTIFACTS"
@@ -818,6 +822,7 @@ def recorded_artifact_digests(session: Session, project_id: str, sha: str) -> tu
 # ---------------------------------------------------------------------------- provider enforcement test (§31, M4)
 
 ENFORCEMENT_KIND = "PROVIDER_ENFORCEMENT_TEST"
+ENFORCEMENT_COLLECTOR = "github-rule-suites"  # the one collector whose record can make enforcement VERIFIED
 RULE_SUITES_PERMISSION = ("token needs repository 'Administration: read' (fine-grained) or 'repo' (classic) to read "
                           "rule suites (Insights -> Rule insights)")
 
@@ -926,7 +931,7 @@ def record_enforcement_evidence(session: Session, project: Project,
     rulesets = sorted({(h["ruleset_id"], str(h.get("ruleset_updated_at") or "")) for x in obs.refusals
                        for h in x["rulesets"]})
     return verification.collect_evidence(
-        session, kind=ENFORCEMENT_KIND, origin="collector", collector_identity="github-rule-suites",
+        session, kind=ENFORCEMENT_KIND, origin="collector", collector_identity=ENFORCEMENT_COLLECTOR,
         claim=f"GitHub refused {len(obs.refusals)} attempt(s) to change {obs.repo}@{obs.branch} by an active "
               f"ruleset (newest {newest.get('pushed_at')})",
         content=obs.to_dict(), evidence_level="E1", subject_type="repository", subject_id=obs.repo,
@@ -988,18 +993,24 @@ def apply_enforcement_evidence(session: Session, caps: ProviderCapabilities) -> 
         return row.trusted and bool(bound) and set(bound) <= applying
 
     rows = [r for r in rows if covers(r)]
-    trusted = next((r for r in rows if r.trusted and r.origin == "collector"), None)
+    trusted = next((r for r in rows if r.trusted and r.origin == "collector"
+                    and r.collector_identity == ENFORCEMENT_COLLECTOR), None)
     rules = next((c for c in caps.checks if c.key == "rulesets"), None)
     current = {r.get("id"): r for r in (rules.detail.get("active_rulesets") or [])} if rules else {}
     if trusted is not None:
         bound = [r for r in (trusted.environment or {}).get("rulesets") or [] if isinstance(r, dict)]
-        intact = bool(bound) and all(b.get("id") in current and (
-            not b.get("updated_at") or str(current[b["id"]].get("updated_at") or "") == str(b["updated_at"]))
-            for b in bound)
         caps.enforcement_test = {"evidence_id": trusted.id, "rulesets": bound,
                                  "observed_on_branch": (trusted.environment or {}).get("branch"),
                                  "observed_at": (trusted.environment or {}).get("observed_at"),
                                  "recorded_at": trusted.created_at.isoformat() if trusted.created_at else None}
+        if rules is None or rules.status not in ("CONFIGURED", "NOT_CONFIGURED", "NOT_ENFORCEABLE"):
+            # the current ruleset state could not be read: the binding cannot be confirmed (never VERIFIED)
+            caps.enforcement_test["reason"] = "current ruleset state could not be read; the refusal cannot be bound"
+            return caps
+        # fail closed: a ruleset whose updated_at was not recorded (or is not reported now) cannot be shown unchanged
+        intact = bool(bound) and all(
+            b.get("id") in current and bool(b.get("updated_at"))
+            and str(current[b["id"]].get("updated_at") or "") == str(b["updated_at"]) for b in bound)
         if intact:
             caps.enforcement_tested = "VERIFIED"
             caps.residual_risks = [r for r in caps.residual_risks if r != ENFORCEMENT_UNTESTED]

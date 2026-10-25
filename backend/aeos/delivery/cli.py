@@ -138,11 +138,14 @@ def observe_target_cmd(
 def target_checks_cmd(
     project_id: str = typer.Argument(..., help="Project id with a registered deployment-target integration"),
     environment: str = typer.Option("staging", help="staging | production"),
-    file: str = typer.Option(None, "--file", help="JSON file with smoke_checks / sli_checks / rollback_on / "
-                                                 "require_artifact_digest to set (omit to show)"),
+    file: str = typer.Option(None, "--file", help="JSON file with health_path / smoke_checks / sli_checks / "
+                                                 "rollback_on / require_artifact_digest to set (omit to show)"),
+    health_path: str = typer.Option(None, "--health-path", help="Absolute health path on the target, e.g. /health "
+                                                               "or /api/health for DLY AEOS itself"),
 ) -> None:
-    """Show or set the owner's checks of a deployment target: smoke/critical-flow GET checks, product SLI checks
-    with owner thresholds, rollback criteria, artifact-digest requirement. AEOS still only observes."""
+    """Show or set the owner's observation settings of a deployment target: health path, smoke/critical-flow GET
+    checks, product SLI checks with owner thresholds, rollback criteria, artifact-digest requirement. AEOS still
+    only observes."""
     import json
     from pathlib import Path
 
@@ -159,15 +162,20 @@ def target_checks_cmd(
             if target is None:
                 _echo(f"no {environment} deployment-target registered for this project")
                 raise typer.Exit(2)
-            if file:
-                try:
-                    body = json.loads(Path(file).read_text(encoding="utf-8"))
-                except (OSError, ValueError) as exc:
-                    _echo(f"cannot read {file}: {type(exc).__name__}")
-                    raise typer.Exit(2) from exc
-                if not isinstance(body, dict):
-                    _echo("the file must contain a JSON object")
-                    raise typer.Exit(2)
+            if file or health_path is not None:
+                body: dict[str, object] = {}
+                if file:
+                    try:
+                        loaded = json.loads(Path(file).read_text(encoding="utf-8"))
+                    except (OSError, ValueError) as exc:
+                        _echo(f"cannot read {file}: {type(exc).__name__}")
+                        raise typer.Exit(2) from exc
+                    if not isinstance(loaded, dict):
+                        _echo("the file must contain a JSON object")
+                        raise typer.Exit(2)
+                    body.update(loaded)
+                if health_path is not None:
+                    body["health_path"] = health_path
                 view = deployment.set_target_checks(s, target, body, actor=ACTOR, actor_type="cli")
             else:
                 view = deployment.target_view(s, target)
