@@ -200,6 +200,8 @@ def readiness_invalidators(decision: Decision) -> list[str]:
         out.append("config:sandbox")
     if decision.target_type == "secret_store":
         out.append("secret:*")  # the selected secret backend may change (interim keyring exception)
+    if decision.target_type in ("architecture_snapshot", "master_architecture"):
+        out.append("config:master")  # policy.master_approval: the master's sha256 bound to a human approval (U-23)
     return list(dict.fromkeys(out))
 
 

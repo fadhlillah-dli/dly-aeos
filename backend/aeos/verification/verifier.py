@@ -53,7 +53,7 @@ from aeos.models.evidence import EvidenceArtifact
 from aeos.models.planning import TaskSpec
 from aeos.models.portfolio import Project
 from aeos.models.workforce import WorkerRun
-from aeos.verification import collector, runner, scope, suite, tamper
+from aeos.verification import collector, neutralize, runner, scope, seal, suite, tamper
 from aeos.verification.integration import call
 from aeos.verification.junit import JUnitParseError, JUnitReport, nodeid_to_key, parse_junit
 from aeos.verification.procs import (
@@ -74,7 +74,10 @@ log = logging.getLogger("aeos.verification.verifier")
 # checkout/interpreter + DB trust-table/schema tamper window around candidate code and the migration round-trip
 # (impact adds steps the verifier runs itself; it does not yet widen the trusted test selection, §22/§31 - stated
 # as NOT-PROVEN, not claimed). A new version makes earlier acceptance STALE.
-VERIFIER_VERSION = "3"
+# v4 (review W6-054/W6-057): the verifier-owned result seal on every pytest step that runs candidate code and on the
+# migration round-trip (a forged junit/exit code is QUARANTINED), every process-runner step in its own kill group
+# (a survivor is QUARANTINED), and automatic neutralisation of foreign approval/session/grant/route/policy rows.
+VERIFIER_VERSION = "4"
 ORIGIN = "verifier"
 MARK_EXPR = "not integration and not network"
 PASSING = "PASS"
@@ -121,19 +124,31 @@ filterwarnings =
 HARNESS_MODULES = frozenset({
     "pytest", "_pytest", "pluggy", "iniconfig", "packaging", "py", "tests", "conftest", "sitecustomize",
     "usercustomize", "ruff", "xdist", "exceptiongroup", "tomli", "colorama", "_distutils_hack", "setuptools",
-    "pip", "typing_extensions",
+    "pip", "typing_extensions", seal.PLUGIN_MODULE,
 })
 _MODULE_SUFFIXES = (".py", ".pyc", ".pyo", ".pyd", ".so", ".dylib")
+# runner steps that import trusted code only (controller checkout / reviewed base commit + trusted suite). A process
+# outliving any OTHER step - every step that executes candidate code, and any unnamed or future step (fail closed) -
+# is tampering (see _guard_close).
+TRUSTED_ONLY_STEPS = frozenset({"collect_expected", "baseline"})
 
 _PREFLIGHT = (
     "import importlib, json, sys\n"
+    # the verifier's result seal, imported before any candidate module: the host only uses the mapping sealed at
+    # the very end, never a line an imported candidate module printed itself (review W6-054)
+    "try:\n"
+    "    import aeos_vseal as _vseal\n"
+    "except Exception:\n"
+    "    _vseal = None\n"
     "out = {}\n"
     "for n in sys.argv[1:]:\n"
     "    try:\n"
     "        m = importlib.import_module(n)\n"
     "        out[n] = getattr(m, '__file__', None)\n"
-    "    except Exception as e:\n"
+    "    except BaseException as e:\n"  # SystemExit at import too: reported, never the end of the driver
     "        out[n] = 'IMPORT_ERROR: ' + type(e).__name__\n"
+    "if _vseal is not None:\n"
+    "    _vseal.emit('result', d=out)\n"
     "print(json.dumps(out))\n"
 )
 
@@ -143,6 +158,12 @@ _PREFLIGHT = (
 # (and inside the tamper window) because it imports and executes the candidate's migration/env code.
 _MIGRATION_ROUNDTRIP = (
     "import json, os, sqlite3, sys\n"
+    # the verifier's result seal, imported before any candidate code (reads + deletes its per-step key): the host
+    # only uses the result sealed at the very end, never a line candidate migration code printed itself
+    "try:\n"
+    "    import aeos_vseal as _vseal\n"
+    "except Exception:\n"
+    "    _vseal = None\n"
     "mig_dir, db_path = sys.argv[1], sys.argv[2]\n"
     "os.environ['AEOS_CONFIG'] = db_path + '.noconfig'\n"
     "out = {'ok': False}\n"
@@ -158,24 +179,26 @@ _MIGRATION_ROUNDTRIP = (
     "    out['heads'] = list(heads)\n"
     "    if len(heads) != 1:\n"
     "        out['error'] = 'history does not have exactly one head: ' + repr(heads)\n"
-    "        print(json.dumps(out)); sys.exit(0)\n"
-    "    out['head'] = heads[0]\n"
-    "    command.upgrade(cfg, 'head')\n"
-    "    command.downgrade(cfg, 'base')\n"
-    "    command.upgrade(cfg, 'head')\n"
-    "    conn = sqlite3.connect(db_path)\n"  # restore: the migrated DB reopens and carries the head revision
-    "    try:\n"
-    "        rev = conn.execute('select version_num from alembic_version').fetchone()\n"
-    "        tables = [r[0] for r in conn.execute(\"select name from sqlite_master where type='table'\")]\n"
-    "    finally:\n"
-    "        conn.close()\n"
-    "    out['restored_revision'] = rev[0] if rev else None\n"
-    "    out['tables'] = len([t for t in tables if t != 'alembic_version' and not t.startswith('sqlite_')])\n"
-    "    out['ok'] = out['restored_revision'] == heads[0] and out['tables'] > 0\n"
-    "    if not out['ok']:\n"
-    "        out['error'] = 'restored revision ' + repr(out['restored_revision']) + ' != head'\n"
+    "    else:\n"
+    "        out['head'] = heads[0]\n"
+    "        command.upgrade(cfg, 'head')\n"
+    "        command.downgrade(cfg, 'base')\n"
+    "        command.upgrade(cfg, 'head')\n"
+    "        conn = sqlite3.connect(db_path)\n"  # restore: the migrated DB reopens and carries the head revision
+    "        try:\n"
+    "            rev = conn.execute('select version_num from alembic_version').fetchone()\n"
+    "            tables = [r[0] for r in conn.execute(\"select name from sqlite_master where type='table'\")]\n"
+    "        finally:\n"
+    "            conn.close()\n"
+    "        out['restored_revision'] = rev[0] if rev else None\n"
+    "        out['tables'] = len([t for t in tables if t != 'alembic_version' and not t.startswith('sqlite_')])\n"
+    "        out['ok'] = out['restored_revision'] == heads[0] and out['tables'] > 0\n"
+    "        if not out['ok']:\n"
+    "            out['error'] = 'restored revision ' + repr(out['restored_revision']) + ' != head'\n"
     "except Exception as e:\n"
     "    out['error'] = type(e).__name__ + ': ' + str(e)[:300]\n"
+    "if _vseal is not None:\n"
+    "    _vseal.emit('result', d=out)\n"
     "print(json.dumps(out))\n"
 )
 
@@ -493,6 +516,9 @@ class _Verifier:
         self.tamper_findings: list[dict[str, str]] = []
         self.tamper_checks: dict[str, Any] = {}
         self.migration_roundtrip: dict[str, Any] | None = None
+        self.result_seals: dict[str, dict[str, Any]] = {}  # step -> seal.SealResult.to_dict()
+        self.neutralized: dict[str, Any] = {}
+        self.foreign_all: list[dict[str, str]] = []  # every foreign trust-table row, full keys (tamper.Window)
 
     # ------------------------------------------------------------------ orchestration
 
@@ -576,6 +602,9 @@ class _Verifier:
                     raise _Blocked("TRUSTED_SUITE_COPY_MISMATCH", "trusted suite copy does not match its hash")
                 ini = workdir / "pytest.ini"
                 ini.write_text(PYTEST_INI, encoding="utf-8")
+                # the verifier-owned result seal (aeos.verification.seal): first on PYTHONPATH of every sealed step
+                seal.install_plugin(workdir)
+                self.env_identity["result_seal_sha256"] = seal.PLUGIN_SHA256
                 # §09 Zone 1 / §21: candidate code is about to run; fingerprint the controller checkout +
                 # interpreter and the DB trust tables now, compare after the last candidate step.
                 self._guard_open()
@@ -617,6 +646,7 @@ class _Verifier:
                     if short is not None:
                         shutil.rmtree(short, ignore_errors=True)
         self._apply_tamper()
+        self._neutralize()
         self._persist(trusted_ran)
         self._side_effects()
         self._audit_and_emit()
@@ -857,12 +887,22 @@ class _Verifier:
         if not names:
             raise _Blocked("CANDIDATE_HAS_NO_BACKEND", "candidate snapshot has no importable backend/ package")
         rn = self._runner()
+        step_seal = seal.StepSeal.new(workdir, "preflight")
         res = rn.python(["-c", _PREFLIGHT, *names[:20]], pythonpath=snapshot / "backend", autoload=False,
-                        timeout=limits.preflight_timeout)
-        try:
-            mapping = json.loads((res.stdout or "").strip().splitlines()[-1])
-        except (ValueError, IndexError):
-            mapping = {}
+                        timeout=limits.preflight_timeout, seal=step_seal, step="preflight")
+        # importing the candidate's packages runs candidate code: only the mapping sealed at the driver's end counts
+        sealed = self._driver_seal(step_seal, res)
+        if sealed is None:
+            # the driver never reached its sealed end (os._exit/crash/kill at import, or a forged stream): where
+            # the candidate's packages resolve is unknown, so the trusted suite result cannot be attributed to the
+            # candidate - never PASS on it (fail closed)
+            msg = ("candidate import preflight produced no sealed result (exit "
+                   f"{'timeout' if res.timed_out else res.returncode}); whether the candidate's packages resolve "
+                   "inside its snapshot is NOT-PROVEN")
+            self.out.not_proven.append(msg)
+            self.blocking_not_proven.append(msg)
+            return
+        mapping = sealed
         snap = backend.resolve()
         mismatched = [n for n, f in mapping.items()
                       if isinstance(f, str) and not f.startswith("IMPORT_ERROR")
@@ -897,7 +937,7 @@ class _Verifier:
         # same runner (interpreter + dependency set) as the suite run, so the collected ids are comparable;
         # only trusted code is imported here (controller checkout / reviewed base commit + trusted suite)
         res = self._runner().python(args, pythonpath=trusted_root / "backend", autoload=False,
-                                    timeout=limits.collect_timeout)
+                                    timeout=limits.collect_timeout, step="collect_expected")
         if res.timed_out or res.returncode not in (0, 5):
             raise _Blocked("TRUSTED_COLLECTION_FAILED",
                            "trusted suite could not be collected with the trusted controller code: " + res.tail(600))
@@ -914,13 +954,15 @@ class _Verifier:
         out = self.out
         junit_path = workdir / "r" / "trusted-junit.xml"
         junit_path.parent.mkdir(parents=True, exist_ok=True)
-        args = ["-m", "pytest", str(trusted_copy / "tests" / "acceptance"), "-c", str(ini),
+        step_seal = seal.StepSeal.new(workdir, "trusted_suite")
+        args = ["-m", "pytest", "-p", seal.PLUGIN_MODULE, str(trusted_copy / "tests" / "acceptance"), "-c", str(ini),
                 "--rootdir", str(trusted_copy), "--confcutdir", str(trusted_copy), "-p", "no:cacheprovider",
                 "-q", "--junitxml", str(junit_path), "-m", MARK_EXPR, *self._basetemp(workdir, "b1")]
         res = self._runner().python(args, pythonpath=snapshot / "backend", autoload=False,
-                                    timeout=limits.suite_timeout)
+                                    timeout=limits.suite_timeout, seal=step_seal, step="trusted_suite")
         report, parse_error = self._parse(junit_path)
-        problems: list[str] = []
+        sealed = self._check_seal(step_seal, res, junit_path, report, label="trusted suite")
+        problems: list[str] = list(sealed.problems if sealed.status != "PASS" else [])
         not_proven: list[str] = []
         if res.timed_out:
             problems.append(f"trusted suite timed out after {limits.suite_timeout:.0f}s")
@@ -957,6 +999,7 @@ class _Verifier:
             "missing_tests": [k for k in expected if report is None or k not in {c.key for c in report.cases}][:200],
             "report": report.to_dict() if report else None,
             "parse_error": parse_error,
+            "result_seal": sealed.to_dict(),
             "output_tail": res.tail(),
         }
         counts = report.to_dict(include_cases=False) if report else {}
@@ -979,6 +1022,41 @@ class _Verifier:
             f"({counts.get('passed', 0)} passed, {counts.get('failures', 0)} failed, {counts.get('errors', 0)} errors, "
             f"{counts.get('skipped', 0)} skipped)",
             content, level, "trusted_suite", env_extra))
+
+    def _check_seal(self, step_seal: seal.StepSeal, res: ProcResult, junit_path: Path,
+                    report: JUnitReport | None, *, label: str) -> seal.SealResult:
+        """Cross-check a sealed pytest step (``aeos.verification.seal``). A disagreement is result tampering (a
+        ``result`` tamper finding: QUARANTINED); no sealed session end means the step cannot pass (fail closed)."""
+        consumed = step_seal.discard()
+        result = seal.check_pytest(step_seal, stdout=res.stdout, returncode=res.returncode, timed_out=res.timed_out,
+                                   junit_path=junit_path, report=report, key_consumed=consumed,
+                                   channel=res.channel)
+        if result.status == "MISSING" and res.timed_out:
+            result.problems = []  # the timeout is the finding; a killed session never ends sealed
+        if result.status == "FAIL":
+            self.tamper_findings += [{"kind": "result", "path": step_seal.name, "change": p[:300]}
+                                     for p in result.problems[:5]]
+        result.problems = [f"result integrity ({label}): {p}" for p in result.problems]
+        self.result_seals[step_seal.name] = result.to_dict()
+        return result
+
+    def _driver_seal(self, step_seal: seal.StepSeal, res: ProcResult) -> dict[str, Any] | None:
+        """The result a non-pytest driver step (import preflight, migration round-trip) sealed at its very end
+        (``seal.sealed_result``), recorded under the step's name. Forged or out-of-sequence channel lines naming
+        this step are result tampering (a ``result`` finding: QUARANTINED) whether or not a sealed result exists
+        (another session's seal lines are ignored); no sealed result at all, or a key file the plugin did not
+        remove, is MISSING and nothing is returned (the caller fails closed)."""
+        consumed = step_seal.discard()
+        sealed, problems = seal.sealed_result(step_seal, res.channel or res.stdout)
+        forged = [p for p in problems if not p.startswith("no sealed")]
+        if sealed is not None and not consumed:
+            # the driver sealed a result but its key file is still there: candidate code could have read the key
+            problems.append(seal.KEY_LEFT_PROBLEM)
+        status = "FAIL" if forged else ("PASS" if sealed is not None and consumed else "MISSING")
+        if forged:
+            self.tamper_findings += [{"kind": "result", "path": step_seal.name, "change": p[:300]} for p in forged[:5]]
+        self.result_seals[step_seal.name] = {"status": status, "problems": problems[:5], "key_consumed": consumed}
+        return sealed if status == "PASS" else None
 
     def _cached_baseline(self) -> dict[str, Any] | None:
         out = self.out
@@ -1009,7 +1087,7 @@ class _Verifier:
                     "--rootdir", str(trusted_copy), "--confcutdir", str(trusted_copy), "-p", "no:cacheprovider",
                     "-q", "--junitxml", str(junit_path), "-m", MARK_EXPR, *self._basetemp(workdir, "b3")]
             res = self._runner().python(args, pythonpath=base_dir / "backend", autoload=False,
-                                        timeout=limits.suite_timeout)
+                                        timeout=limits.suite_timeout, step="baseline")
             report, parse_error = self._parse(junit_path)
             if report is None:
                 msg = f"baseline run on {(out.base_commit or '')[:12]} produced no report ({parse_error})"
@@ -1077,6 +1155,44 @@ class _Verifier:
         guard, self._guard = self._guard, None
         if guard is None:
             return
+        # Kill groups of the process runner (aeos.verification.procgroup): a process that outlived its step was
+        # killed when the step ended, before this window closes - but its existence is tampering (it could have
+        # written after the window, review W6-054/W6-057): QUARANTINED, never PASS.
+        all_survivors = self.runner.survivors() if self.runner is not None else []
+        # only a step that executes candidate code can be tampered with by it; a survivor of a trusted-only step
+        # (expected-id collection, base-commit baseline) is a harness defect - stated, never blamed on the candidate
+        survivors = [s for s in all_survivors if s["step"] not in TRUSTED_ONLY_STEPS]
+        trusted_survivors = [s for s in all_survivors if s["step"] in TRUSTED_ONLY_STEPS]
+        gaps = self.runner.containment_gaps() if self.runner is not None else []
+        n_surv = sum(len(s["survivors"]) for s in survivors)
+        if gaps and not survivors:
+            # a weaker kill group (environment-marker sweep only) cannot prove that nothing outlived its step
+            msg = ("verifier step kill group degraded (" + "; ".join(gaps[:3]) + "): a process that outlived its "
+                   "step is NOT-PROVEN absent")
+            self.out.not_proven.append(msg[:500])
+        if trusted_survivors:
+            self.out.not_proven.append(
+                f"{sum(len(s['survivors']) for s in trusted_survivors)} process(es) outlived a trusted-only verifier "
+                f"step ({', '.join(s['step'] or '?' for s in trusted_survivors)}) and were killed - not candidate "
+                "code; check the trusted suite for leaked processes")
+        self._check("step_containment", "FAIL" if survivors else ("NOT_PROVEN" if gaps or trusted_survivors
+                                                                   else "PASS"),
+                    f"{n_surv} process(es) outlived their verifier step and were killed "
+                    f"({', '.join(s['step'] or '?' for s in survivors)})" if survivors else
+                    ("kill group degraded: " + "; ".join(gaps[:3]) if gaps else
+                     "a process outlived a trusted-only step (killed)" if trusted_survivors else
+                     "no process outlived its verifier step"),
+                    details={"survivors": survivors[:20], "trusted_step_survivors": trusted_survivors[:20],
+                             "gaps": gaps[:20]})
+        self.tamper_findings += [{"kind": "process", "path": s["step"] or "step",
+                                  "change": f"{len(s['survivors'])} process(es) outlived the step: " + ", ".join(
+                                      f"{p.get('name')}#{p.get('pid')}" for p in s["survivors"][:5])}
+                                 for s in survivors]
+        if self.result_seals:
+            st = [r.get("status") for r in self.result_seals.values()]
+            agg = "FAIL" if "FAIL" in st else ("NOT_PROVEN" if "MISSING" in st else "PASS")
+            self._check("result_seal", agg, "; ".join(f"{k}: {v.get('status')}" for k, v in self.result_seals.items()),
+                        details={"steps": self.result_seals, "plugin_sha256": seal.PLUGIN_SHA256})
         if guard["controller"] is None:
             changed = [{"path": "*", "change": f"integrity snapshot failed ({guard['controller_error']})"}]
         else:
@@ -1085,6 +1201,7 @@ class _Verifier:
             except Exception as exc:
                 changed = [{"path": "*", "change": f"integrity check failed ({type(exc).__name__})"}]
         db_result = guard["window"].close()
+        self.foreign_all = list(getattr(guard["window"], "foreign_all", None) or [])
         checked = len((guard["controller"] or {}).get("files") or {})
         self._check("controller_integrity", "FAIL" if changed else "PASS",
                     f"{len(changed)} controller checkout/interpreter file(s) changed while candidate code ran"
@@ -1109,11 +1226,12 @@ class _Verifier:
         self.tamper_findings += [{"kind": "db", "path": f"{f['table']}:{f['id']}", "change": f["change"]}
                                  for f in foreign]
         self.tamper_checks = {"controller": {"changed": changed[:100], "checked_files": checked},
-                              "trust_tables": db_result}
+                              "trust_tables": db_result, "step_containment": {"survivors": survivors[:20]},
+                              "result_seal": dict(self.result_seals)}
         self.pending.append(_PendingEvidence(
             "CONTAINMENT_TEST",
             f"Tamper window around candidate code: controller {'MODIFIED' if changed else 'unchanged'}, "
-            f"DB trust tables {db_status}",
+            f"DB trust tables {db_status}, {n_surv} process(es) outlived their step",
             {"status": "FAIL" if self.tamper_findings else ("UNKNOWN" if db_status == "UNKNOWN" else "PASS"),
              "runner": (self.runner.describe() if self.runner else {}), **self.tamper_checks,
              "note": "writes are detected after the fact; reads are not (see residual_risks)"},
@@ -1127,12 +1245,75 @@ class _Verifier:
             return
         out = self.out
         where = ", ".join(sorted({f"{f['kind']}:{f['path']}" for f in self.tamper_findings})[:5])
-        msg = (f"VERIFIER_TAMPER: candidate code changed the controller or control-plane records while the "
-               f"verifier ran it ({where})")
+        kinds = {f["kind"] for f in self.tamper_findings}
+        what = [w for k, w in (("controller", "changed the controller"), ("db", "changed control-plane records"),
+                               ("result", "forged or broke its test result"),
+                               ("process", "left processes running after its step")) if k in kinds]
+        msg = f"VERIFIER_TAMPER: candidate code {' / '.join(what) or 'tampered'} while the verifier ran it ({where})"
         out.reasons.insert(0, msg)
         out.status = "QUARANTINED"
         out.blocked_code = None
         out.quarantine_reason = msg[:500]
+
+    def _neutralize(self) -> None:
+        """§21 "workers may not change approval records / policy / routing policy": a foreign row found in the
+        tamper window must not stay in effect while the owner reviews the quarantine (review W6-057/W6-056/W6-060).
+        Approval decisions are INVALIDATED, open decision requests WITHDRAWN, acceptance records INVALIDATED,
+        server-side sessions and capability grants revoked, routes DISABLED (ineligible until a human re-activates
+        the configuration hash), foreign policy snapshots deactivated (the active one rebuilt from files +
+        decisions), containment proofs removed and write enablement switched off. Everything else is listed for
+        the owner's special review (``manual``). Whatever stays in effect - a changed controller file (policy/**,
+        controller code, interpreter), a row without a safe inverse, a failed neutralisation - puts the control
+        plane on an integrity hold: admission of new worker runs is paused until the owner reconciles and resumes
+        it (review W6-056 "nothing pauses admission"). The caller commits."""
+        db = (self.tamper_checks or {}).get("trust_tables") or {}
+        # every foreign row (full keys), not only the ones the report lists
+        foreign = [f for f in (self.foreign_all or db.get("foreign") or []) if isinstance(f, dict)]
+        if foreign:
+            try:
+                # one savepoint around the whole neutralisation: an unexpected error (beyond the per-row handling)
+                # leaves the session usable, so the QUARANTINE, the report and the alert are still recorded
+                with self.session.begin_nested():
+                    self.neutralized = neutralize.neutralize_foreign_rows(
+                        self.session, foreign, run_id=self.run_id, project_id=self.out.project_id,
+                        domain=self.out.domain, foreign_count=max(len(foreign), int(db.get("foreign_count") or 0)))
+            except Exception as exc:  # never hides the findings: everything stays in effect -> integrity hold
+                log.exception("tamper neutralisation failed")
+                self.neutralized = {"actions": [], "manual": [], "not_listed": 0,
+                                    "failed": [{"table": "*", "id": "*", "change": f"{len(foreign)} foreign row(s)",
+                                                "error": type(exc).__name__}],
+                                    "counts": {"actions": 0, "manual": 0, "failed": 1}}
+            counts = (self.neutralized or {}).get("counts") or {}
+            self.out.reasons.append(
+                f"VERIFIER_TAMPER: {counts.get('actions', 0)} foreign control-plane row(s) neutralised, "
+                f"{counts.get('manual', 0)} item(s) need the owner's review, {counts.get('failed', 0)} "
+                "neutralisation(s) failed (report tamper.neutralized and the HIGH alert list each row and remedy)")
+        self._integrity_hold()
+
+    def _integrity_hold(self) -> None:
+        from aeos.workforce import facade as workforce
+
+        controller = [f for f in self.tamper_findings if f["kind"] == "controller"]
+        manual = list((self.neutralized or {}).get("manual") or [])
+        failed = list((self.neutralized or {}).get("failed") or [])
+        if not (controller or manual or failed):
+            return
+        remedies = neutralize.controller_remedies([str(c.get("path") or "*") for c in controller])
+        reason = (f"VERIFIER_TAMPER integrity hold (run {self.run_id}): {len(controller)} controller file(s) changed, "
+                  f"{len(manual)} item(s) for manual review, {len(failed)} neutralisation(s) failed - reconcile, then "
+                  "resume admission (aeos work resume)")
+        res = call(workforce.set_scheduling_paused, self.session, True, actor=ORIGIN, reason=reason[:300])
+        self.neutralized = {**(self.neutralized or {}), "integrity_hold": {
+            "admission_paused": res.ok, "status": res.label(), "reason": reason[:300],
+            "controller_changes": [{"path": str(c.get("path") or "*"), "change": str(c.get("change") or "")[:200]}
+                                   for c in controller[:20]],
+            "remedies": remedies,
+            "resume": "after reconciling: aeos work resume --reason \"VERIFIER_TAMPER reconciled\" "
+                      "(or POST /api/workforce/resume)"}}
+        if not res.ok:
+            # the hold could not be recorded (workforce module unavailable / refused): said, never assumed
+            self.out.reasons.append(f"integrity hold not applied ({res.label()}): pause admission manually "
+                                    "(aeos work pause) until the tamper findings are reconciled")
 
     @staticmethod
     def _parse(path: Path) -> tuple[JUnitReport | None, str | None]:
@@ -1162,13 +1343,17 @@ class _Verifier:
             return
         junit_path = workdir / "r" / "candidate-junit.xml"
         junit_path.parent.mkdir(parents=True, exist_ok=True)
-        args = ["-m", "pytest", *[str(d) for d in dirs], "-c", str(ini), "--rootdir", str(snapshot),
-                "--confcutdir", str(snapshot), "-p", "no:cacheprovider", "-q", "--junitxml", str(junit_path),
-                "-m", MARK_EXPR, *self._basetemp(workdir, "b2")]
+        step_seal = seal.StepSeal.new(workdir, "candidate_tests")
+        args = ["-m", "pytest", "-p", seal.PLUGIN_MODULE, *[str(d) for d in dirs], "-c", str(ini),
+                "--rootdir", str(snapshot), "--confcutdir", str(snapshot), "-p", "no:cacheprovider", "-q",
+                "--junitxml", str(junit_path), "-m", MARK_EXPR, *self._basetemp(workdir, "b2")]
         res = self._runner().python(args, pythonpath=snapshot / "backend", autoload=True,
-                                    timeout=limits.unit_timeout)
+                                    timeout=limits.unit_timeout, seal=step_seal, step="candidate_tests")
         report, parse_error = self._parse(junit_path)
-        if res.timed_out:
+        sealed = self._check_seal(step_seal, res, junit_path, report, label="candidate tests")
+        if sealed.status != "PASS":
+            status, summary = "FAIL", "; ".join(sealed.problems)[:500]
+        elif res.timed_out:
             status, summary = "FAIL", f"candidate tests timed out after {limits.unit_timeout:.0f}s"
         elif res.returncode == 5:
             status, summary = "NOT_RUN", "candidate test dirs contain no selected tests"
@@ -1186,7 +1371,8 @@ class _Verifier:
             "TEST_REPORT", f"Candidate's own tests (worker-authored, lower trust): {status}",
             {"suite": "candidate-own-tests", "trust": "LOW — tests authored inside the candidate", "status": status,
              "exit_code": res.returncode, "timed_out": res.timed_out, "duration_s": res.duration_s,
-             "report": report.to_dict() if report else None, "parse_error": parse_error, "output_tail": res.tail()},
+             "report": report.to_dict() if report else None, "parse_error": parse_error,
+             "result_seal": sealed.to_dict(), "output_tail": res.tail()},
             "E2", "candidate_tests"))
 
     def _run_ruff(self, snapshot: Path, trusted_root: Path, workdir: Path, limits: VerifierLimits) -> None:
@@ -1273,18 +1459,19 @@ class _Verifier:
         reports = workdir / "r"
         reports.mkdir(parents=True, exist_ok=True)
         args = ["-c", _MIGRATION_ROUNDTRIP, rn.to_container(str(mig_dir)), rn.to_container(str(reports / "mig.sqlite3"))]
-        res = rn.python(args, pythonpath=snapshot / "backend", autoload=False, timeout=limits.unit_timeout)
-        data: dict[str, Any] = {}
-        try:
-            data = json.loads((res.stdout or "").strip().splitlines()[-1])
-        except (ValueError, IndexError):
-            data = {}
+        step_seal = seal.StepSeal.new(workdir, "migration_roundtrip")
+        res = rn.python(args, pythonpath=snapshot / "backend", autoload=False, timeout=limits.unit_timeout,
+                        seal=step_seal, step="migration_roundtrip")
+        # only the result the driver sealed at its very end counts (candidate migration code can print anything)
+        data: dict[str, Any] = dict(self._driver_seal(step_seal, res) or {})
+        seal_problems = list(self.result_seals["migration_roundtrip"].get("problems") or [])
         ok = bool(data.get("ok")) and not res.timed_out and res.returncode == 0
         if res.timed_out:
             self.migration_roundtrip = {"status": "FAIL", "reason": "migration round-trip timed out"}
         elif not data:
             self.migration_roundtrip = {"status": "NOT_PROVEN",
-                                        "reason": f"migration round-trip produced no report (exit {res.returncode})",
+                                        "reason": f"migration round-trip produced no sealed report (exit "
+                                                  f"{res.returncode}): " + "; ".join(seal_problems[:2]),
                                         "output_tail": res.tail(400)}
         else:
             self.migration_roundtrip = {"status": "PASS" if ok else "FAIL", **data}
@@ -1430,7 +1617,9 @@ class _Verifier:
             "verifier_runner": rn.kind if rn is not None else "process",
             "runner": ({**rn.describe(), "remedies": list(rn.remedies)[:5],
                         "steps": list(getattr(rn, "steps", []))[:50]} if rn is not None else {}),
-            "tamper": {"findings": self.tamper_findings[:50], **self.tamper_checks} if self.tamper_checks else {},
+            "tamper": ({"findings": self.tamper_findings[:50], **self.tamper_checks,
+                        "neutralized": self.neutralized} if self.tamper_checks else {}),
+            "result_seal": dict(self.result_seals),
             "dependency_set_hash": self.env_identity.get("dependency_set_hash"),
             "impact_categories": sorted(getattr(self, "categories", {}) or {}),
             "regressions": list(getattr(self, "regressions", []))[:50],
@@ -1524,7 +1713,10 @@ class _Verifier:
                 entity_version=out.head_commit, project_id=out.project_id, domain=out.domain, run_id=run.id,
                 attempt=run.attempt, mode=run.mode if run.mode in {m.value for m in DataMode} else "LIVE",
                 payload={"severity": "HIGH", "code": "VERIFIER_TAMPER", "findings": self.tamper_findings[:20],
-                         "report_evidence_id": out.report_evidence_id},
+                         "report_evidence_id": out.report_evidence_id,
+                         "neutralized": (self.neutralized.get("actions") or [])[:20],
+                         "manual_review": (self.neutralized.get("manual") or [])[:20],
+                         "integrity_hold": self.neutralized.get("integrity_hold")},
             )
             # wave 7 (W6-005): no further worker is admitted until the owner reconciles (fail closed)
             from aeos.worker_runtime import facade as worker

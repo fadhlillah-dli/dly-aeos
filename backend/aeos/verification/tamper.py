@@ -11,14 +11,19 @@ fresh connection before the first candidate step and again after the last one. W
 controller process* in that window are journaled by SQLAlchemy
 event hooks (ORM flushes per row id; any other write statement per table), so the controller's own legitimate
 work is not mistaken for tampering. Any other changed row - added, modified or removed - is a foreign write:
-the verification is QUARANTINED and a HIGH alert raised.
+the verification is QUARANTINED, a HIGH alert raised, and the foreign row neutralised where a safe inverse exists
+(``aeos.verification.neutralize``: approvals INVALIDATED, sessions/grants revoked, routes DISABLED, policy snapshots
+deactivated, ...; the rest is listed for the owner's special review). Every process-runner step runs in its own
+kill group (``aeos.verification.procgroup``), so nothing the candidate started survives to write after the window.
 
 Residual risks (stated, not hidden): reads of the DB are not detected; a foreign write that is undone
 before the window closes is not detected; a foreign write to a table this controller process also wrote
 through a non-ORM statement in the same window is masked; a write by *another* AEOS process (a CLI command
 recording a decision during a verification) is reported as foreign (fail closed - re-run the verification);
 the rows of the high-volume append-only logs (``audit_events``, ``events``) are not digested - only their
-guarding triggers are (a drop-modify-recreate inside the window is not detected for those two tables).
+guarding triggers are (a drop-modify-recreate inside the window is not detected for those two tables); the
+activity timestamps ``auth_sessions.last_seen_at`` and ``users.last_login_at`` are not compared (``_VOLATILE_COLUMNS``:
+no trust attribute, rewritten by the server on ordinary use).
 The worker runtime's window (wave 7, opt-in ``CROSS_PROCESS_TOLERATED``) also accepts a grant's usage counters
 growing, a grant or session being revoked and a session's ``last_seen_at`` moving forward, even from another
 process: a writer making only those changes (inflating usage, revoking, keeping an owner session from idling out)
@@ -59,6 +64,15 @@ _ROW_FILTERS: dict[str, str] = {
                         "OR key LIKE 'flags.%' OR key LIKE 'bootstrap.%' "
                         # wave 7: the worker-admission integrity hold (clearing it would re-admit workers)
                         "OR key LIKE 'worker_runtime.integrity%'"),
+}
+# Activity timestamps the API server rewrites on ordinary use (a session's last request, at most every 30 s; an
+# account's last sign-in). They are no trust attribute - a changed value grants nothing without the session token or
+# the password - so they are left out of the row digest: an open dashboard during a CLI verification (another AEOS
+# process) is not taken for tampering, and neutralisation never revokes the owner's live session for it. Every other
+# column of these rows (token hash, user, expiry, revocation, password hash, role, scopes, ...) is compared.
+_VOLATILE_COLUMNS: dict[str, frozenset[str]] = {
+    "auth_sessions": frozenset({"last_seen_at"}),
+    "users": frozenset({"last_login_at"}),
 }
 _WRITE_RE = re.compile(r'^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+'
                        r'["`\[]?(\w+)', re.IGNORECASE)
@@ -205,6 +219,8 @@ def digest(engine: Engine, *, tolerate: dict[str, dict[str, str]] | None = None,
             # the row key is the primary key, as the controller's own writes are journaled (_after_flush)
             key_col = "id" if "id" in cols else "key" if "key" in cols else None
             key_idx = cols.index(key_col) if key_col is not None else None
+            volatile = _VOLATILE_COLUMNS.get(table, frozenset())
+            keep = [i for i, c in enumerate(cols) if c not in volatile]
             soft = set((tolerate or {}).get(table) or ()) if tolerated is not None and key_idx is not None else set()
             soft_rows: dict[str, tuple[str, dict[str, Any]]] = {}
             rows: dict[str, str] = {}
@@ -213,9 +229,11 @@ def digest(engine: Engine, *, tolerate: dict[str, dict[str, str]] | None = None,
                     truncated.append(table)
                     break
                 key = str(row[key_idx]) if key_idx is not None else f"#{i}"
-                rows[key] = hashlib.sha256(repr(tuple(row)).encode("utf-8", "replace")).hexdigest()
+                values = tuple(row) if not volatile else tuple(row[j] for j in keep)
+                rows[key] = hashlib.sha256(repr(values).encode("utf-8", "replace")).hexdigest()
                 if soft:
-                    stable = tuple(v for c, v in zip(cols, row, strict=True) if c not in soft)
+                    # the stable part leaves out the volatile columns too, as the row digest above does
+                    stable = tuple(v for c, v in zip(cols, row, strict=True) if c not in soft and c not in volatile)
                     soft_rows[key] = (hashlib.sha256(repr(stable).encode("utf-8", "replace")).hexdigest(),
                                       {c: v for c, v in zip(cols, row, strict=True) if c in soft})
             out[table] = rows
@@ -251,6 +269,7 @@ class Window:
         with _lock:
             _windows[id(self)] = self.journal
         self.truncated: set[str] = set()
+        self.foreign_all: list[dict[str, str]] = []
         try:
             self.before: dict[str, dict[str, str]] | None
             self.before, cut = digest(engine, tolerate=self.tolerate, tolerated=self.tolerated_before)
@@ -301,7 +320,11 @@ class Window:
                     if not own:
                         tolerated.append({"table": table, "id": key[:64], "columns": columns})
                     continue
-                foreign.append({"table": table, "id": key[:64], "change": change})
+                foreign.append({"table": table, "id": key, "change": change})
+        # every foreign row with its full key, for neutralisation (aeos.verification.neutralize): the report below
+        # lists only the first rows with shortened keys - a row beyond them must not stay in effect
+        self.foreign_all = [dict(f) for f in foreign]
+        foreign = [{**f, "id": f["id"][:64]} for f in foreign]
         status = "FAIL" if foreign else ("UNKNOWN" if self.truncated else "PASS")
         result: dict[str, Any] = {
             "status": status, "foreign": foreign[:100], "foreign_count": len(foreign), "tables": len(after),

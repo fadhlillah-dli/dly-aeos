@@ -235,7 +235,23 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   (decisions, policy, routes, budgets, TaskSpecs, acceptance/evidence, sessions, capability grants,
   projects/integrations, eval suites, containment proofs/write enablement/flags) and the SQLite schema (tables,
   indexes, append-only/immutability triggers) are detected and the run is
-  QUARANTINED for the owner's special review with a HIGH alert.
+  QUARANTINED for the owner's special review with a HIGH alert. Foreign approval/session/grant/route/policy rows
+  are neutralised at once (decision INVALIDATED, request WITHDRAWN, acceptance INVALIDATED, session/grant
+  revoked, route DISABLED until you re-activate its configuration hash, policy snapshot rebuilt, a forged
+  containment proof removed, write enablement off, a forged or modified account deactivated; audit
+  `verification.tamper.neutralize`); the alert lists what still needs your review (removed rows, schema, a
+  modified account's role and scope, ...) with the remedy. A deactivated account is re-activated locally with a
+  one-time password: Windows `.\aeos.ps1 admin recover <username>`, macOS `./aeos admin recover <username>`. If a
+  listed decision was your own (recorded from another AEOS process during the verification), record it again.
+  When something stays in effect (a changed controller file such as `policy/**`, a row without a safe inverse,
+  a failed neutralisation) the verifier also pauses admission of new worker runs (**integrity hold**, reason
+  `VERIFIER_TAMPER integrity hold`; the alert lists each remedy). Reconcile, then resume: Windows
+  `.\aeos.ps1 work resume --reason "VERIFIER_TAMPER reconciled"`, macOS `./aeos work resume --reason ...`.
+  Two more guards apply to both runners: every pytest step that runs candidate code is **sealed** by the
+  verifier's own plugin (a junit report or exit code changed after the fact is QUARANTINED; candidate code that
+  subverts the plugin inside its interpreter is a stated residual risk), and every process-runner step runs in
+  its own kill group (Windows Job Object / POSIX session): a process that outlives its step is killed and the
+  run QUARANTINED.
 * **Specialist reviews:** a UI change (or a frontend/UX role) needs the A11Y reviewer, data/AI roles or
   CONFIDENTIAL/RESTRICTED data the PRIVACY reviewer, CI/IaC or operations roles the SRE reviewer. Request
   them with "Review wajib (spesialis)" on the run list, `POST /api/runs/<run>/reviews/batch`, or

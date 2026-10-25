@@ -68,8 +68,8 @@ def trust_table_window(engine: Any) -> Any:
     control-plane trust tables + the SQLite schema now; ``close()`` returns ``{"status": PASS|FAIL|UNKNOWN,
     "foreign": [{table, id, change}], "tolerated": [...], ...}`` - writes made by THIS process in between are
     journaled as its own, and the broker/session bookkeeping another AEOS process does for the run (grant usage
-    growing, revocation, a session's last_seen_at) is ``tolerated`` (``tamper.CROSS_PROCESS_TOLERATED``), never
-    foreign. On ``capability_grants`` (``tamper.CROSS_PROCESS_STRICT``) this process's own writes never mask a
+    growing, revocation) is ``tolerated`` (``tamper.CROSS_PROCESS_TOLERATED``), never foreign; a session's
+    last_seen_at is not compared at all (``tamper._VOLATILE_COLUMNS``). On ``capability_grants`` (``tamper.CROSS_PROCESS_STRICT``) this process's own writes never mask a
     forged cap or a forged grant row. Used by the worker runtime around WEAK process-sandbox runs (additive wave 7,
     W6-005/W6-029)."""
     from aeos.verification.tamper import CROSS_PROCESS_STRICT, CROSS_PROCESS_TOLERATED, Window
