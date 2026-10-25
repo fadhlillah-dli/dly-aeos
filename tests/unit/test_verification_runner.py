@@ -7,6 +7,7 @@ hardened argv, the mounts, path mapping and lifecycle - not the isolation of a r
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -101,8 +102,9 @@ def test_proven_container_boundary_runs_candidate_code_in_the_verifier_container
             tgt = m.split(",target=", 1)[1].split(",", 1)[0]
             assert tgt.startswith("/v/"), m
             assert not src.lower().endswith("aeos.sqlite3")
-            if tgt in ("/v/s", "/v/tr", "/v/pytest.ini", "/v/bs") or tgt.startswith("/v/x"):
-                assert m.endswith(",readonly"), m  # candidate snapshot / trusted suite / trusted code read-only
+            if tgt in ("/v/s", "/v/tr", "/v/pytest.ini", "/v/bs", "/v/vp") or tgt.startswith("/v/x"):
+                # candidate snapshot / trusted suite / trusted code / the verifier's result-seal plugin: read-only
+                assert m.endswith(",readonly"), m
             elif tgt == "/v/r":
                 assert not m.endswith(",readonly")  # only the report directory is writable
             else:
@@ -125,8 +127,15 @@ def test_proven_container_boundary_runs_candidate_code_in_the_verifier_container
             assert len(outside) == 1 and outside[0].endswith(",readonly"), outside
         else:
             assert not outside, ("a candidate step mounts the controller checkout", outside)
+        if "pytest" in argv and "--collect-only" not in argv:
+            # every pytest step that runs candidate code is sealed: the verifier's plugin first on PYTHONPATH and
+            # loaded with -p before collection, its key file in the report dir (never in the environment)
+            assert env["PYTHONPATH"].startswith("/v/vp:"), env["PYTHONPATH"]
+            assert argv[argv.index("pytest") + 1:argv.index("pytest") + 3] == ["-p", "aeos_vseal"]
+            assert env["AEOS_VSEAL_KEYFILE"].startswith("/v/r/.vseal-") and "KEY=" not in joined
     assert trusted_only_steps == 1  # the collection, and nothing else
     assert docker.containers() == []  # nothing left behind
+    assert data["result_seal"]["trusted_suite"]["status"] == "PASS", data["result_seal"]
 
 
 def test_unproven_boundary_falls_back_to_the_weak_runner_and_says_why(db, settings, controller, wf, docker):
@@ -232,6 +241,33 @@ def test_path_mapping_round_trips(tmp_path):
     outside = tmp_path / "ctl" / "backend"
     assert rn.share(outside) == "/v/x0" and rn.to_container(str(outside / "aeos")) == "/v/x0/aeos"
     assert rn.basetemp("b1") == "/tmp/b1"
+
+
+def test_process_runner_counts_an_escaped_pipe_holder_as_a_survivor_and_states_degraded_groups(tmp_path):
+    """A step whose output pipe stayed open after its whole kill group was killed had a process outside the group:
+    a survivor that could not be killed (QUARANTINED), never a clean step. A step whose kill group fell back to the
+    environment-marker sweep is a containment gap (NOT-PROVEN), and describe() reports what the steps really got."""
+    from aeos.verification.procs import PIPE_HELD_ERROR
+
+    rn = runner.ProcessRunner(workdir=tmp_path)
+    strong = "job-object" if sys.platform == "win32" else "process-group"
+    assert rn.describe()["verifier_step_containment"] == strong
+    rn.steps += [
+        {"step": "clean", "containment": strong, "survivors": [], "containment_errors": []},
+        {"step": "escaped", "containment": strong, "survivors": [], "containment_errors": [PIPE_HELD_ERROR]},
+        {"step": "orphan", "containment": strong, "survivors": [{"pid": 4242, "name": "python"}],
+         "containment_errors": []},
+        {"step": "weak", "containment": "marker-sweep", "survivors": [],
+         "containment_errors": ["job object unavailable (5)"]},
+    ]
+    surv = {s["step"]: s["survivors"] for s in rn.survivors()}
+    assert set(surv) == {"escaped", "orphan"}
+    assert surv["escaped"][0]["pid"] is None and "outside the kill group" in surv["escaped"][0]["name"]
+    gaps = rn.containment_gaps()
+    assert len(gaps) == 1 and gaps[0].startswith("weak: kill group marker-sweep") and "job object" in gaps[0]
+    assert rn.describe()["verifier_step_containment"] == ",".join(sorted({strong, "marker-sweep"}))
+    container_rn = runner.ContainerRunner(workdir=tmp_path / "c", domain="PERSONAL", run_id="r" * 12, image="img")
+    assert container_rn.survivors() == [] and container_rn.containment_gaps() == []
 
 
 def test_container_runner_runs_the_migration_round_trip_in_the_writable_report_dir(db, settings, controller, wf,

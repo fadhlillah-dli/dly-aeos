@@ -89,6 +89,52 @@ maps `aeos` on the next start — none of which the checkout integrity snapshot 
 
 The verifier version becomes `3`, which makes earlier acceptance STALE by design.
 
+### Amendment (review W6-054 / W6-056 / W6-057 / W6-060, verifier version `4`)
+
+7. **Result seal on every pytest step that runs candidate code** (`aeos.verification.seal`). Candidate code
+   imported by a test runs inside the test process in *either* runner, so it could rewrite the junit file from
+   an `atexit` hook and leave with `os._exit(0)` - a failing trusted suite then read as PASS (the audit's probe).
+   The verifier now loads its own plugin `aeos_vseal` with `-p` before collection (first on `PYTHONPATH`, the name
+   is refused as a candidate module). At import it reads a per-step random key from a key file in the report dir
+   and deletes it, and duplicates the real stdout; while pytest runs it streams every outcome and, at the very end
+   of `pytest_sessionfinish`, the exit status, the junit sha256 and pytest's own counts - HMAC-authenticated and
+   sequence-numbered. The host requires a sealed session end, the same exit code, an unchanged junit digest, the
+   same per-test outcomes and the same terminal summary. A disagreement is a `result` tamper finding
+   (QUARANTINED, HIGH alert); no sealed session end FAILS the step. The import preflight and the migration
+   round-trip driver seal their result the same way (a mapping or result an imported candidate module prints
+   itself is never used; no sealed preflight result is a blocking NOT-PROVEN, a forged seal line is a `result`
+   tamper finding). Residual (stated on every
+   report, both runners): code that deliberately subverts the plugin inside the interpreter is not excluded, and
+   black-box assertions from a separate trusted process are not implemented.
+8. **Every process-runner step runs in its own kill group** (`aeos.verification.procgroup`): a Windows Job
+   Object with `KILL_ON_JOB_CLOSE` (created suspended, assigned, then resumed) or a POSIX new session, plus an
+   inherited environment marker. When the step's main process ends, whatever is still alive in the group is
+   listed and killed before the next step and before the tamper window closes, and the verification is
+   QUARANTINED (`step_containment`). The verifier no longer waits on the step's pipes, so a descendant holding
+   stdout open cannot stall it either; a step whose output pipe stays open after its whole group was killed had
+   a process outside the group and counts as a survivor. A step whose kill group fell back to the marker sweep
+   (no Job Object) is stated as NOT-PROVEN. Residual: a process created outside the step's tree on the candidate's
+   behalf (WMI/Task Scheduler/COM servers, a POSIX daemon that leaves the session and drops the marker,
+   launchd/systemd units) is not seen.
+9. **Foreign rows are neutralised, not only detected** (`aeos.verification.neutralize`): a foreign approval
+   decision is INVALIDATED, an open decision request WITHDRAWN, the task's acceptance INVALIDATED, a session or
+   capability grant revoked, a route DISABLED (ineligible until a human re-activates its configuration hash), a
+   policy snapshot deactivated and the active one rebuilt, a containment proof removed and write enablement
+   switched off - audited as `verification.tamper.neutralize`. Every foreign row is neutralised by its full key,
+   not only the first rows the report lists. Rows without a safe inverse (removed rows, schema, TaskSpecs,
+   budgets, a modified existing account, a row that cannot be found again, ...) are listed for the owner with the
+   remedy. Controller checkout/interpreter files are never restored automatically (the checkout may hold the
+   owner's own work); whatever stays in effect - such a file, a manual row, a failed neutralisation - puts the
+   control plane on an **integrity hold**: the verifier pauses admission of new worker runs
+   (`aeos work pause` state, reason `VERIFIER_TAMPER integrity hold`) until the owner reconciles and runs
+   `aeos work resume`.
+10. **Container runner proven on a real Docker host** (Docker 29.8.2, `dly-aeos-worker:1.19.3`,
+    `dly-aeos-verifier:0.1.0`): `tests/integration/test_verification_container_live.py` records a real PASS
+    container containment report, verifies a candidate in the real verifier container (only `/v/s`, `/v/tr`,
+    `/v/pytest.ini`, `/v/vp`, `/v/r` mounted, no network, read-only root, non-root) and QUARANTINES the forged-report
+    candidate there too. On the owner's host the runner switches to CONTAINER only after `aeos worker containment
+    --kind container` PASSes there (the proof is per host and DB).
+
 ## Residual risk / owner steps
 
 * Until Docker is installed and `aeos worker containment --kind container` PASSes **and** the verifier
@@ -98,6 +144,8 @@ The verifier version becomes `3`, which makes earlier acceptance STALE by design
 * The tamper window detects **writes** during a verification, not reads, and not a write that is undone
   before the window closes; the rows of the high-volume append-only logs (`audit_events`, `events`) are
   not digested (only their triggers). The container runner (no data-dir mount) is the actual prevention.
-* The container runner and image are implemented but NOT_PROVEN on a real Docker host here (Docker was
-  not available on the build host); the AEOS side (selection, hardened argv, mounts, path mapping,
-  lifecycle) is covered by a scripted-docker test.
+* The container runner and image were first covered by a scripted-docker test only; since amendment 10 a
+  real-Docker integration test proves them on a host that has Docker and both pinned images. Each owner host
+  still needs its own PASS containment report before the verifier uses the container runner there.
+* Candidate code shares its test process with the trusted suite in both runners: the result seal (7) catches
+  after-the-fact report/exit-code forgery, not deliberate in-process subversion of the plugin.

@@ -189,6 +189,10 @@ class FakeWorkforce:
                                                  "acceptance_id": acceptance_id, "actor": actor}))
             return types.SimpleNamespace(task_id=task_id, state="DONE")
 
+        def set_scheduling_paused(session, paused, *, actor, reason=""):
+            self.calls.append(("set_scheduling_paused", {"paused": paused, "actor": actor, "reason": reason}))
+
+        mod.set_scheduling_paused = set_scheduling_paused
         mod.update_run = update_run
         mod.transition_task = transition_task
         mod.request_repair = request_repair

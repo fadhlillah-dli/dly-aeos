@@ -11,7 +11,10 @@ fresh connection before the first candidate step and again after the last one. W
 controller process* in that window are journaled by SQLAlchemy
 event hooks (ORM flushes per row id; any other write statement per table), so the controller's own legitimate
 work is not mistaken for tampering. Any other changed row - added, modified or removed - is a foreign write:
-the verification is QUARANTINED and a HIGH alert raised.
+the verification is QUARANTINED, a HIGH alert raised, and the foreign row neutralised where a safe inverse exists
+(``aeos.verification.neutralize``: approvals INVALIDATED, sessions/grants revoked, routes DISABLED, policy snapshots
+deactivated, ...; the rest is listed for the owner's special review). Every process-runner step runs in its own
+kill group (``aeos.verification.procgroup``), so nothing the candidate started survives to write after the window.
 
 Residual risks (stated, not hidden): reads of the DB are not detected; a foreign write that is undone
 before the window closes is not detected; a foreign write to a table this controller process also wrote
@@ -185,6 +188,7 @@ class Window:
         with _lock:
             _windows[id(self)] = self.journal
         self.truncated: set[str] = set()
+        self.foreign_all: list[dict[str, str]] = []
         try:
             self.before: dict[str, dict[str, str]] | None
             self.before, cut = digest(engine)
@@ -212,7 +216,11 @@ class Window:
                 if old.get(key) == new.get(key) or (table, key) in self.journal.rows:
                     continue
                 change = "added" if key not in old else "removed" if key not in new else "modified"
-                foreign.append({"table": table, "id": key[:64], "change": change})
+                foreign.append({"table": table, "id": key, "change": change})
+        # every foreign row with its full key, for neutralisation (aeos.verification.neutralize): the report below
+        # lists only the first rows with shortened keys - a row beyond them must not stay in effect
+        self.foreign_all = [dict(f) for f in foreign]
+        foreign = [{**f, "id": f["id"][:64]} for f in foreign]
         status = "FAIL" if foreign else ("UNKNOWN" if self.truncated else "PASS")
         result: dict[str, Any] = {
             "status": status, "foreign": foreign[:100], "foreign_count": len(foreign), "tables": len(after),
