@@ -292,19 +292,26 @@ Wave 7 additions:
   bookkeeping the server process does for a run when the executor runs in the CLI (`aeos work run-once`) is
   tolerated: the run's grant usage growing, a grant/session revoked, a session's `last_seen_at` moving forward.
   Anything else written by another AEOS process during the run (for example a decision recorded from the CLI, or
-  a new sign-in) is reported as foreign: fail closed, review and reconcile.
+  a new sign-in) is reported as foreign: fail closed, review and reconcile. On `capability_grants` even this
+  process's own broker writes mask nothing: a forged cap, scope or grant row is foreign in every case. If the
+  executor itself fails after the worker started, the worker is stopped and the same checks still run.
 * **Integrity hold**: any controller/config/bytecode/DB finding (from a worker run or a verification) sets the
   host-wide hold `worker_runtime.integrity_hold`: admission, the executor's start check, running attempts and
   `CAN_RUN_WORKER` are BLOCKED (`INTEGRITY_HOLD`) until the owner reviews the findings (`aeos worker status`),
   restores the checkout (`git status` / `git checkout -- <path>`) and records the reconciliation for exactly that
   hold: `aeos policy decide --kind RISK_ACCEPTANCE --target-type worker_integrity_hold --target-id <hold id> --as
-  <SUPER_ADMIN> --domain PERSONAL --days 1 --rationale "<what you checked>"`. A later finding needs a new one.
+  <SUPER_ADMIN> --domain <PERSONAL|OFFICE> --days 1 --rationale "<what you checked>"` (your explicit choice of
+  domain; the hold is host-wide). A later finding needs a new one. A domain's views show the hold, but another
+  domain's run id and findings only as a count (`aeos worker status --domain <that domain>` shows them).
 * **CPU cap**: `limits.max_cpus` is a Windows Job Object CPU-rate hard cap in the process sandbox (`run.caps.cpu_cap`
   records the rate in force); on macOS/Linux it stays a reservation only. `limits.max_processes` is part of every
   TaskSpec (256), the same cap for both sandboxes.
-* **Granted shell (container only)**: commands run only through the AEOS runner `node /aeos/aeos-run.js <command>`
-  (bash permission patterns); the engine sees the first 40 and last 80 lines, the full output is collected as
-  untrusted evidence (`worker-command-logs.json`) and removed from the candidate.
+* **Granted shell (container only)**: commands run only through the AEOS runner
+  `node /aeos/aeos-run.js <program> [args...]` (bash permission patterns). The runner starts exactly one program
+  with its arguments and never re-parses them with a shell, so a pattern grant such as `bash:npm test*` allows
+  nothing more than before. The engine sees the first 40 and last 80 lines; the full output is collected as
+  untrusted evidence (`worker-command-logs.json`) and removed from the candidate. Only runs that had the runner
+  get this; in any other run a worker-written `.aeos/cmdlog/` is an ordinary (scope-checked) change.
 * **Context**: a run without a CURRENT task-scoped ContextPack gets one built at start (knowledge facade, system
   principal bound to the TaskSpec, the TaskSpec's input artifacts as DATA items under the pack's token budget).
 * **Doctor `worker.route_behaviour`**: per APPROVED/TRIAL worker route, the §43 measure `tool_schema_failures` of a

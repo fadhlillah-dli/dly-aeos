@@ -464,6 +464,11 @@ def compare(before: dict[str, Any] | None) -> list[dict[str, str]]:
                      config_path=Path(before["config_path"]) if before.get("config_path") else None)
     old, new = before.get("files") or {}, after["files"]
     out: list[dict[str, str]] = []
+    if before.get("truncated") or after.get("truncated"):
+        # review wave 7: a capped snapshot compared only part of the controller - UNKNOWN is never a pass
+        out.append({"path": "*", "change": "incomplete",
+                    "detail": f"more than {MAX_FILES} checkout / {MAX_INTERPRETER_FILES} interpreter files: not every "
+                              "controller file was compared (fail closed)"})
     pending: list[tuple[str, Path, Path | None, str]] = []
     for rel in sorted(set(old) | set(new)):
         if rel in new and rel in old and old[rel] == new[rel]:
@@ -508,8 +513,25 @@ def _hold_row(session: Any) -> Any:
 
 
 def reconcile_command(hold_id: str) -> str:
+    """The owner's reconciliation of exactly this hold. The domain is the owner's explicit choice (AGENTS.md
+    invariant 1: never suggested or defaulted); the hold is host-wide, so either domain's decision lifts it."""
     return (f"aeos policy decide --kind {HOLD_RECONCILE_KIND} --target-type {HOLD_TARGET_TYPE} --target-id {hold_id} "
-            "--as <SUPER_ADMIN> --domain PERSONAL --days 1 --rationale \"<what you checked and restored>\"")
+            "--as <SUPER_ADMIN> --domain <PERSONAL|OFFICE> --days 1 --rationale \"<what you checked and restored>\"")
+
+
+def domain_view(hold: dict[str, Any], domain: str | None) -> dict[str, Any]:
+    """The hold as a ``domain``-scoped view may show it (AGENTS.md invariant 9: another domain's run id, project
+    and findings never reach this domain's views). The hold itself still applies to every domain (fail closed); only
+    the details of findings raised by another domain's run/verification are replaced by their count."""
+    if domain is None:
+        return dict(hold)
+    findings = list(hold.get("findings") or [])
+    visible = [f for f in findings if f.get("domain") in (None, "", domain)]
+    own_subject = hold.get("domain") in (None, "", domain)
+    out = {**hold, "findings": visible, "other_domain_findings": len(findings) - len(visible)}
+    if not own_subject:
+        out.update(subject_id=None, project_id=None, subject_in_other_domain=True)
+    return out
 
 
 def raise_hold(session: Any, *, source: str, subject_id: str, findings: list[dict[str, Any]],
@@ -531,10 +553,11 @@ def raise_hold(session: Any, *, source: str, subject_id: str, findings: list[dic
     if previous and hold_status(session, row=row) is not None:  # still unreconciled: keep its findings
         carried = list(previous.get("findings") or [])
     clean: list[dict[str, Any]] = redact([{**{k: str(v)[:300] for k, v in f.items()}, "source": source,
-                                           "subject_id": subject_id} for f in findings])
+                                           "subject_id": subject_id, "domain": domain} for f in findings])
     hold_id = str(uuid.uuid4())
     value: dict[str, Any] = {"id": hold_id, "status": "ACTIVE", "detected_at": utcnow().isoformat(), "source": source,
-                             "subject_id": subject_id, "findings": [*carried, *clean][-MAX_HOLD_FINDINGS:],
+                             "subject_id": subject_id, "domain": domain, "project_id": project_id,
+                             "findings": [*carried, *clean][-MAX_HOLD_FINDINGS:],
                              "previous_id": (previous or {}).get("id")}
     if row is None:
         session.add(SystemSetting(key=HOLD_KEY, value=value))
@@ -591,8 +614,9 @@ def _reconciled_by(session: Any, hold: dict[str, Any]) -> Any:
     return None
 
 
-def hold_view(session: Any) -> dict[str, Any]:
-    """Status of the integrity hold for status pages/CLI: ACTIVE (with findings + remedy) or CLEAR."""
+def hold_view(session: Any, *, domain: str | None = None) -> dict[str, Any]:
+    """Status of the integrity hold for status pages/CLI: ACTIVE (with findings + remedy) or CLEAR. With
+    ``domain`` the details are scoped to that domain (``domain_view``)."""
     row = _hold_row(session)
     hold = row.value if row is not None and isinstance(row.value, dict) else None
     if not hold:
@@ -600,6 +624,8 @@ def hold_view(session: Any) -> dict[str, Any]:
     active = hold_status(session, row=row)
     if active is None:
         d = _reconciled_by(session, hold)
-        return {"status": "CLEAR", "hold": {k: hold.get(k) for k in ("id", "detected_at", "source", "subject_id")},
-                "reconciled_by_decision": d.id if d is not None else None}
-    return {"status": "ACTIVE", "hold": active, "remedy": reconcile_command(str(active["id"]))}
+        brief = domain_view({k: hold.get(k) for k in ("id", "detected_at", "source", "subject_id", "domain")}, domain)
+        brief.pop("findings", None)
+        brief.pop("other_domain_findings", None)
+        return {"status": "CLEAR", "hold": brief, "reconciled_by_decision": d.id if d is not None else None}
+    return {"status": "ACTIVE", "hold": domain_view(active, domain), "remedy": reconcile_command(str(active["id"]))}

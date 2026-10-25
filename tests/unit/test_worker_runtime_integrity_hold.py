@@ -120,3 +120,60 @@ def test_can_run_worker_gate_is_blocked_by_the_hold(db):
     state = doctor.capability_state(db, Capability.CAN_RUN_WORKER, domain="PERSONAL")
     assert state.status == "BLOCKED"
     assert any("integrity hold" in r for r in state.reasons), state.reasons
+
+
+def test_another_domains_run_and_findings_reach_a_domain_view_only_as_a_count(db):
+    """Review wave 7 (AGENTS.md invariants 1 and 9): the hold blocks every domain, but a PERSONAL view never shows
+    the run id, project or findings an OFFICE run raised - only that a hold exists and how many findings it has;
+    the printed reconciliation never suggests a domain."""
+    from aeos.worker_runtime import facade as worker
+
+    process_sandbox_exception(db)
+    hold = integrity.raise_hold(db, source="worker run", subject_id="office-run-1", project_id="office-project",
+                                domain="OFFICE",
+                                findings=[{"kind": "db", "path": "decisions:office-decision-1", "change": "added"}])
+    db.commit()
+    personal = sandbox.sandbox_readiness(db, domain="PERSONAL")
+    assert personal["status"] == "BLOCKED" and personal["code"] == "INTEGRITY_HOLD"  # still fail closed everywhere
+    shown = personal["integrity_hold"]
+    assert shown["id"] == hold["id"] and shown["subject_id"] is None and shown["findings"] == []
+    assert shown["other_domain_findings"] == 1
+    flat = repr(personal)
+    assert "office-run-1" not in flat and "office-decision-1" not in flat and "office-project" not in flat
+    office = sandbox.sandbox_readiness(db, domain="OFFICE")["integrity_hold"]
+    assert office["subject_id"] == "office-run-1" and office["findings"][0]["path"] == "decisions:office-decision-1"
+    view = worker.integrity_hold(db, domain="PERSONAL")
+    assert view["status"] == "ACTIVE" and "office-run-1" not in repr(view["hold"])
+    assert "office-run-1" in repr(worker.integrity_hold(db, domain="OFFICE")["hold"])
+    for text in (view["remedy"], personal["remedies"][0]):
+        assert "--domain <PERSONAL|OFFICE>" in text and "--domain PERSONAL " not in text
+    # a later PERSONAL finding widens the same hold: PERSONAL sees its own finding, OFFICE's stays a count
+    integrity.raise_hold(db, source="verification", subject_id="personal-run-2", domain="PERSONAL",
+                         findings=[{"kind": "controller", "path": "backend/aeos/core/config.py", "change": "modified"}])
+    db.commit()
+    personal = sandbox.sandbox_readiness(db, domain="PERSONAL")["integrity_hold"]
+    assert [f["path"] for f in personal["findings"]] == ["backend/aeos/core/config.py"]
+    assert personal["subject_id"] == "personal-run-2" and personal["other_domain_findings"] == 1
+
+
+def test_worker_status_cli_shows_the_hold_scoped_to_the_chosen_domain(settings):
+    """`aeos worker status --domain <d>` (the remedy the readiness view points to): ACTIVE hold with its id, this
+    domain's findings, the other domain's only as a count, and a reconciliation that leaves the domain to the
+    owner. ASCII output."""
+    from typer.testing import CliRunner
+
+    from aeos.cli import app
+    from aeos.core.db import session_factory
+
+    with session_factory()() as s:
+        hold = integrity.raise_hold(s, source="worker run", subject_id="office-run-9", domain="OFFICE",
+                                    findings=[{"kind": "db", "path": "decisions:office-decision-9", "change": "added"}])
+        s.commit()
+    res = CliRunner().invoke(app, ["worker", "status", "--domain", "PERSONAL"])
+    assert res.exit_code == 0, res.output
+    flat = " ".join(res.output.split())
+    assert f"integrity hold: ACTIVE id={hold['id']}" in flat and "office-run-9" not in flat
+    assert "office-decision-9" not in flat and "1 finding(s) of the other domain" in flat
+    assert "--domain <PERSONAL|OFFICE>" in flat and res.output.isascii()
+    office = " ".join(CliRunner().invoke(app, ["worker", "status", "--domain", "OFFICE"]).output.split())
+    assert "subject=office-run-9" in office and "decisions:office-decision-9" in office

@@ -62,8 +62,9 @@ PROCESS_RESIDUAL_RISKS = [
     "admission worker ditahan (integrity hold) sampai pemilik merekonsiliasi. Pencegahan hanya oleh sandbox "
     "container. Penulisan DB oleh proses AEOS lain selama run dilaporkan sebagai asing (fail closed), kecuali "
     "pembukuan broker/sesi (pemakaian grant bertambah, pencabutan grant/sesi, last_seen_at maju). Tidak terdeteksi: "
-    "penulisan yang dibatalkan sebelum run selesai, penulisan yang hanya berupa pembukuan itu, dan perubahan file "
-    "dependensi yang memulihkan ukuran+mtime.",
+    "penulisan yang dibatalkan sebelum run selesai, penulisan yang hanya berupa pembukuan itu, perubahan pada baris "
+    "yang dalam jendela yang sama juga ditulis proses controller sendiri (kecuali tabel capability_grants, yang "
+    "selalu diperiksa penuh), dan perubahan file dependensi yang memulihkan ukuran+mtime.",
     "Penulisan di luar worktree tidak dicegah OS; hanya terdeteksi untuk path di dalam repository dan checkout "
     "controller.",
     "Isolasi bergantung pada env yang dibersihkan dan HOME yang dialihkan, bukan batas keamanan kernel.",
@@ -249,21 +250,29 @@ def _container_remedy(domain: str) -> str:
             "until it reports PASS")
 
 
-def integrity_hold_block(session: Session) -> dict[str, Any] | None:
+def integrity_hold_block(session: Session, *, domain: str | None = None) -> dict[str, Any] | None:
     """BLOCKED fields while the host-wide integrity hold is ACTIVE (a controller/config/bytecode/DB tamper finding
-    after a worker run or a verification), else None. Applies to every sandbox kind and domain (fail closed)."""
+    after a worker run or a verification), else None. Applies to every sandbox kind and domain (fail closed); the
+    details shown are scoped to ``domain`` (another domain's run id and findings become a count, invariant 9)."""
     from aeos.worker_runtime import integrity
 
-    hold = integrity.hold_status(session)
-    if hold is None:
+    active = integrity.hold_status(session)
+    if active is None:
         return None
+    hold = integrity.domain_view(active, domain)
     findings = list(hold.get("findings") or [])
+    hidden = int(hold.get("other_domain_findings") or 0)
     where = ", ".join(sorted({str(f.get("path") or f.get("table") or "*") for f in findings})[:5])
+    if hidden:
+        where = (where + "; " if where else "") + f"{hidden} finding(s) of another domain"
+    subject = (f"{hold.get('source')} {str(hold.get('subject_id'))[:8]}" if hold.get("subject_id")
+               else f"{hold.get('source')} in another domain")
     return {"status": "BLOCKED", "kind": None, "code": "INTEGRITY_HOLD",
             "integrity_hold": {"id": hold.get("id"), "detected_at": hold.get("detected_at"), "source": hold.get("source"),
-                               "subject_id": hold.get("subject_id"), "findings": findings[:20]},
+                               "subject_id": hold.get("subject_id"), "findings": findings[:20],
+                               "other_domain_findings": hidden},
             "reasons": [f"integrity hold {str(hold.get('id'))[:8]}: the controller, its config/bytecode or the DB trust "
-                        f"tables changed while {hold.get('source')} {str(hold.get('subject_id'))[:8]} ran ({where}); "
+                        f"tables changed while {subject} ran ({where}); "
                         "no worker starts until the owner reconciles (master s09 Zone 1, fail closed)"],
             "remedies": ["Review the findings (aeos worker status), restore the controller checkout (git status / git "
                          "checkout -- <path>) and data, then record the reconciliation: "
@@ -276,7 +285,7 @@ def sandbox_readiness(session: Session, *, domain: str) -> dict[str, Any]:
     caps = caps_all["levels"]
     base: dict[str, Any] = {"domain": domain, "checked_at": caps_all["checked_at"], "capabilities": caps,
                             "required": "container", "residual_risks": []}
-    held = integrity_hold_block(session)
+    held = integrity_hold_block(session, domain=domain)
     if held is not None:
         return {**base, **held}
     container = caps["container"]

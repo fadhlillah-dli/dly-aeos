@@ -222,6 +222,10 @@ def broker_url(profile: Profile) -> str:
 # returns a bounded head/tail to the engine context. Written into the per-run config dir (mounted read-only at
 # /aeos), so it needs no image rebuild. It is a compaction/retention convention, not a security boundary (the
 # container is): a compound command could keep part of its output out of the runner, never out of the sandbox.
+# The runner starts exactly ONE program with the argv the engine's shell gave it - never through a shell (review
+# wave 7: joining the arguments into ``sh -c`` re-interpreted quoted metacharacters, so a pattern grant such as
+# ``bash:npm test*`` would have run ``node /aeos/aeos-run.js npm test '; curl ...'`` as a second command). The
+# permission pattern therefore restricts exactly what runs, as it did without the runner.
 SHELL_RUNNER_FILE = "aeos-run.js"
 SHELL_RUNNER_COMMAND = f"node {CONTAINER_CONFIG}/{SHELL_RUNNER_FILE}"
 COMMAND_LOG_DIR = ".aeos/cmdlog"  # relative to the worktree
@@ -230,20 +234,20 @@ RUNNER_TAIL_LINES = 80
 RUNNER_MAX_LINE_CHARS = 400
 SHELL_RUNNER_JS = r"""
 'use strict';
+// AEOS shell runner (master s42): runs ONE program with its arguments exactly as given (no shell: quoting and
+// metacharacters are never re-interpreted), keeps the complete output and prints a bounded head/tail.
 const {spawn} = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const HEAD = __HEAD__, TAIL = __TAIL__, MAXLINE = __MAXLINE__;
 const args = process.argv.slice(2);
-if (!args.length) { process.stderr.write('aeos-run: usage: node /aeos/aeos-run.js <command>\n'); process.exit(2); }
-const cmd = args.join(' ');
-const dir = process.env.AEOSRUN_LOG_DIR || '/workspace/__LOGDIR__';
-const shell = process.env.AEOSRUN_SHELL ? JSON.parse(process.env.AEOSRUN_SHELL) : ['/bin/sh', '-c'];
+if (!args.length) { process.stderr.write('aeos-run: usage: node /aeos/aeos-run.js <program> [args...]\n'); process.exit(2); }
+const dir = process.env.AEOSRUN_LOG_DIR || '__WORKTREE__/__LOGDIR__';
 fs.mkdirSync(dir, {recursive: true});
 const name = Date.now() + '-' + process.pid + '.log';
 const logPath = path.join(dir, name);
 const fd = fs.openSync(logPath, 'w');
-fs.writeSync(fd, '$ ' + cmd + '\n');
+fs.writeSync(fd, '$ ' + JSON.stringify(args) + '\n');
 const head = [], tail = [];
 let total = 0;
 const partial = {out: '', err: ''};
@@ -258,12 +262,13 @@ const feed = (key) => (buf) => {
   partial[key] = parts.pop();
   parts.forEach(line);
 };
-const child = spawn(shell[0], [...shell.slice(1), cmd], {stdio: ['ignore', 'pipe', 'pipe'], env: process.env});
+const child = spawn(args[0], args.slice(1), {stdio: ['ignore', 'pipe', 'pipe'], env: process.env, shell: false});
 child.stdout.on('data', feed('out'));
 child.stderr.on('data', feed('err'));
-let failed = null;
-child.on('error', (e) => { failed = e; });
-child.on('close', (code, signal) => {
+let failed = null, done = false;
+const finish = (code, signal) => {
+  if (done) return;
+  done = true;
   for (const k of ['out', 'err']) { if (partial[k]) line(partial[k]); }
   if (failed) fs.writeSync(fd, '\n[aeos-run: could not start the command: ' + failed.code + ']\n');
   fs.writeSync(fd, '\n[aeos-run: exit ' + (signal ? 'signal ' + signal : code) + ']\n');
@@ -275,9 +280,13 @@ child.on('close', (code, signal) => {
   out.push(...tail);
   out.push('[aeos-run: exit ' + (signal ? 'signal ' + signal : code) + ', ' + total + ' line(s) of output]');
   process.stdout.write(out.join('\n') + '\n', () => process.exit(failed ? 127 : (code === null ? 128 : code)));
-});
+};
+// 'close' follows 'error' when the program could not be started; the timer only guards against a missing one
+child.on('error', (e) => { failed = e; setTimeout(() => finish(null, null), 200); });
+child.on('close', finish);
 """.replace("__HEAD__", str(RUNNER_HEAD_LINES)).replace("__TAIL__", str(RUNNER_TAIL_LINES)) \
-    .replace("__MAXLINE__", str(RUNNER_MAX_LINE_CHARS)).replace("__LOGDIR__", COMMAND_LOG_DIR)
+    .replace("__MAXLINE__", str(RUNNER_MAX_LINE_CHARS)).replace("__LOGDIR__", COMMAND_LOG_DIR) \
+    .replace("__WORKTREE__", CONTAINER_WORKTREE)
 
 
 def write_shell_runner(config_dir: Path) -> Path:

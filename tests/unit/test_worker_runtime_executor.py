@@ -944,9 +944,18 @@ def test_container_sandbox_run_end_to_end_with_scripted_docker(settings, setup, 
         assert all(not g.active for g in _grants(s, run_id))
 
 
-def test_runner_command_logs_are_taken_out_of_the_candidate_and_kept_as_evidence(settings, setup, monkeypatch):
+def test_runner_command_logs_are_taken_out_of_the_candidate_and_kept_as_evidence(settings, setup, monkeypatch,
+                                                                                  tmp_path):
     """W6-117 §42 "simpan log asli": the complete output the AEOS shell runner kept in .aeos/cmdlog/ never enters
-    the candidate diff; it is stored as untrusted (E0) evidence."""
+    the candidate diff; it is stored as untrusted (E0) evidence. (Container run with a granted shell, scripted
+    docker CLI.)"""
+    from aeos.worker_runtime.containment import containment_report, record_containment_report
+    from tests.unit.worker_container_support import install_fake_docker
+
+    install_fake_docker(monkeypatch, tmp_path, worker_cmdlog=True)
+    with session_factory()() as s:
+        record_containment_report(s, containment_report("container"), actor="cli:test")
+        s.commit()
     stored: dict = {}
     original = executor._collect_evidence
 
@@ -956,10 +965,11 @@ def test_runner_command_logs_are_taken_out_of_the_candidate_and_kept_as_evidence
 
     monkeypatch.setattr(executor, "_collect_evidence", capture)
     make, _ = setup
-    run_id, task_id = make("cmdlog")
+    run_id, task_id = make("ok", task={"tools_allowed": ["read", "edit", "bash:npm test*"]})
     res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, _te = _load(run_id, task_id)
     assert res["status"] == "REVIEW", res
+    assert run.sandbox_kind == "container"
     assert [p["path"] for p in run.diff_summary["paths"]] == ["src/feature.py"]
     assert not (Path(run.workspace_ref) / ".aeos").exists()
     logs = run.caps["command_logs"]
@@ -968,6 +978,48 @@ def test_runner_command_logs_are_taken_out_of_the_candidate_and_kept_as_evidence
         ev = s.get(EvidenceArtifact, logs["evidence_ref"].split(":", 1)[1])
         assert ev.kind == "LOG" and ev.trusted is False and ev.evidence_level == "E0"
     assert stored["worker-command-logs.json"]["logs"]["1-1.log"].count("output line") == 1000  # untruncated original
+
+
+def test_a_cmdlog_in_a_run_without_the_runner_is_an_ordinary_scope_checked_change(settings, setup):
+    """Review wave 7: only a run that had the AEOS runner (granted shell, container) has runner logs. In any other
+    run a worker-written .aeos/cmdlog/ is never silently removed from the candidate and filed as evidence - it is a
+    change like any other and the scope check judges it (here: outside the allowed paths -> quarantined)."""
+    make, _ = setup
+    run_id, task_id = make("cmdlog")
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, _te = _load(run_id, task_id)
+    assert res["status"] == "FAILED" and run.outcome_code == "SCOPE_VIOLATION" and run.quarantined, res
+    assert any(q["path"] == ".aeos/cmdlog/1-1.log" for q in run.quarantine_reasons), run.quarantine_reasons
+    assert "command_logs" not in run.caps
+
+
+@pytest.mark.parametrize("where", ["monitor", "finalize"])
+def test_an_executor_failure_after_the_worker_started_still_runs_the_tamper_checks(settings, setup, monkeypatch,
+                                                                                    where):
+    """Review wave 7 (fail closed): if the executor itself fails after the worker started - while monitoring it
+    (the live scope check raises at the worker's first edit, which it makes after writing the DB) or after the
+    post-run checks but before their results were stored (taking the worker report raises) - the worker is stopped
+    and the controller/config/bytecode/DB findings still raise the integrity hold instead of being skipped."""
+    from aeos.worker_runtime import integrity
+
+    make, _ = setup
+    run_id, task_id = make("dbwrite", engine="dbwrite:" + str(settings.layout.db_path))
+
+    def broken(*a, **kw):
+        raise RuntimeError(f"executor failure ({where})")
+
+    if where == "monitor":
+        monkeypatch.setattr(executor, "check_scope", broken)
+    else:
+        monkeypatch.setattr(executor.workspace, "take_worker_report", broken)
+    with pytest.raises(RuntimeError):
+        executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, _te = _load(run_id, task_id)
+    assert run.pid and not processes.is_alive(run.pid, run.pid_create_time)
+    with session_factory()() as s:
+        hold = integrity.hold_status(s)
+        assert hold is not None and hold["subject_id"] == run_id
+        assert any(f["kind"] == "db" and f["path"].startswith("model_routes:") for f in hold["findings"])
 
 
 def test_container_run_with_a_granted_shell_allows_only_the_aeos_runner(settings, setup, monkeypatch, tmp_path):

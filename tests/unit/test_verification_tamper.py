@@ -218,6 +218,58 @@ def test_worker_window_tolerates_cross_process_bookkeeping_only(db, settings, fo
         (f["table"], f["id"]) for f in strict["foreign"]}
 
 
+@pytest.mark.parametrize("forgery", [
+    "UPDATE capability_grants SET max_requests = 999999, max_tokens = 99999999 WHERE id = 'g-own'",  # widened cap
+    "INSERT INTO capability_grants (id, created_at, token_hash, run_id, project_id, domain, kind, scope, "
+    "max_requests, max_tokens, max_cost_usd, used_requests, used_tokens, used_cost_usd, expires_at, active) VALUES "
+    "('g-minted', '2026-10-26 00:00:00', 'h-minted', 'r', 'p', 'PERSONAL', 'GIT_BRANCH', '{}', NULL, NULL, NULL, "
+    "0, 0, 0, '2099-01-01 00:00:00', 1)",  # a token minted by the worker
+    "UPDATE capability_grants SET scope = '{\"models\": {\"*\": \"*\"}}' WHERE id = 'g-other'",  # another grant
+])
+def test_in_process_broker_usage_never_masks_a_forged_grant(db, settings, forgery):
+    """Review wave 7: in the normal case the executor runs in the server process, whose broker counts the run's
+    usage with Core ``UPDATE capability_grants`` statements (journaled per TABLE, not per row) and revokes grants
+    by ORM. Those own writes must not hide a forged cap, a minted grant or a widened scope on any grant: on
+    ``capability_grants`` the worker window masks nothing (``CROSS_PROCESS_STRICT``)."""
+    import sqlite3
+    from datetime import timedelta
+
+    from aeos.broker import grants
+    from aeos.core.timeutil import utcnow
+    from aeos.models.routing import CapabilityGrant
+    from aeos.verification import facade as verification
+
+    for gid in ("g-own", "g-other"):
+        db.add(CapabilityGrant(id=gid, token_hash=f"h-{gid}", run_id="r", project_id="p", domain="PERSONAL",
+                               kind="MODEL_PROXY", scope={}, max_requests=100, max_tokens=1000, used_requests=0,
+                               used_tokens=0, expires_at=utcnow() + timedelta(hours=1)))
+    db.commit()
+    tamper.install()
+    clean, win = verification.trust_table_window(db.get_bind()), verification.trust_table_window(db.get_bind())
+    # this (server) process: the broker counts usage on the run's grant and a policy stop revokes the other one
+    assert grants.consume_request(db, "g-own")
+    grants.add_usage(db, "g-own", tokens=120, cost_usd=0.01)
+    db.commit()
+    grants.revoke_grants(db, run_id="r", reason="policy stop")
+    db.commit()
+    assert clean.close()["status"] == "PASS"  # the controller's own bookkeeping alone is never foreign
+    clean2 = verification.trust_table_window(db.get_bind())
+    raw = sqlite3.connect(str(settings.layout.db_path))
+    try:
+        grants.consume_request(db, "g-own")  # (inactive now: no row changes, but the statement is journaled)
+        db.commit()
+        raw.execute(forgery)
+        raw.commit()
+        result, after = win.close(), clean2.close()
+    finally:
+        raw.execute("DELETE FROM capability_grants WHERE id IN ('g-own', 'g-other', 'g-minted')")
+        raw.commit()
+        raw.close()
+    assert result["status"] == "FAIL", result
+    assert {f["table"] for f in result["foreign"]} == {"capability_grants"}
+    assert after["status"] == "FAIL", after
+
+
 def _verify(db, world, **kw):
     out = verifier.verify_run(db, world.run.id, actor="tester", **kw)
     db.commit()

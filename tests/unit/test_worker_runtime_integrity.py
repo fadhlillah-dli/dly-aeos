@@ -241,3 +241,18 @@ def test_unreadable_planted_bytecode_never_verifies(tmp_path):
     res = integrity.verify_bytecode([("k", pyc, src)])
     assert res["k"] not in integrity.ACCEPTED_VERDICTS
     assert integrity.verify_bytecode([("k", pyc, src)], timeout=0.001)["k"] == "VERIFIER_FAILED"
+
+
+def test_a_capped_snapshot_is_never_an_untouched_controller(tmp_path, monkeypatch):
+    """Review wave 7 (fail closed): when the file cap is reached only part of the controller was fingerprinted, so
+    a change beyond the cap would go unseen - the comparison reports that instead of an empty (= untouched) list."""
+    checkout, src = _checkout(tmp_path)
+    for i in range(5):
+        (src.parent / f"extra{i}.py").write_text(f"X = {i}\n", encoding="utf-8")
+    monkeypatch.setattr(integrity, "MAX_FILES", 3)
+    before = integrity.snapshot(root=checkout, patterns=("backend/**",), interpreter=False)
+    assert before["truncated"] is True
+    changed = integrity.compare(before)
+    assert [(c["path"], c["change"]) for c in changed] == [("*", "incomplete")], changed
+    monkeypatch.setattr(integrity, "MAX_FILES", 1000)
+    assert integrity.compare(integrity.snapshot(root=checkout, patterns=("backend/**",), interpreter=False)) == []

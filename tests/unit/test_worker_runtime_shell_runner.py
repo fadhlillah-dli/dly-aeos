@@ -55,13 +55,35 @@ def test_runner_bounds_the_output_and_keeps_the_full_log(tmp_path):
     log_dir = tmp_path / "cmdlog"
     node = shutil.which("node")
     assert node
-    env = {**os.environ, "AEOSRUN_LOG_DIR": str(log_dir), "AEOSRUN_SHELL": json.dumps([node, "-e"])}
+    env = {**os.environ, "AEOSRUN_LOG_DIR": str(log_dir)}
     code = f"for (let i = 0; i < {LINES}; i++) console.log('line ' + i); process.exitCode = 3;"
-    proc = subprocess.run([node, str(script), code], capture_output=True, text=True, env=env, timeout=60, check=False)
+    proc = subprocess.run([node, str(script), node, "-e", code], capture_output=True, text=True, env=env, timeout=60,
+                          check=False)
     _check_output(proc.stdout, log_dir, proc.returncode, 3)
-    long = subprocess.run([node, str(script), "console.log('x'.repeat(5000))"], capture_output=True, text=True,
-                          env=env, timeout=60, check=False)
+    long = subprocess.run([node, str(script), node, "-e", "console.log('x'.repeat(5000))"], capture_output=True,
+                          text=True, env=env, timeout=60, check=False)
     assert long.returncode == 0 and "[line truncated]" in long.stdout and len(long.stdout) < 1000
+    missing = subprocess.run([node, str(script), "aeos-no-such-program-w7"], capture_output=True, text=True, env=env,
+                             timeout=60, check=False)
+    assert missing.returncode == 127 and "exit" in missing.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_runner_passes_arguments_verbatim_and_never_through_a_shell(tmp_path):
+    """Review wave 7: the runner must not widen a pattern grant. ``bash:npm test*`` allows
+    ``node /aeos/aeos-run.js npm test '; curl ...'``; joining the arguments into ``sh -c`` would run the quoted
+    part as a second command. The runner starts exactly one program with exactly these arguments."""
+    script = tmp_path / container.SHELL_RUNNER_FILE
+    script.write_text(container.SHELL_RUNNER_JS, encoding="utf-8")
+    node = shutil.which("node")
+    assert node
+    env = {**os.environ, "AEOSRUN_LOG_DIR": str(tmp_path / "cmdlog")}
+    hostile = ["; echo injected", "$(echo substituted)", "`echo tick`", "a && b", "'quoted'", "x | y", "> out.txt"]
+    proc = subprocess.run([node, str(script), node, "-e", "console.log(JSON.stringify(process.argv.slice(1)))",
+                           *hostile], capture_output=True, text=True, env=env, timeout=60, check=False, cwd=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout.splitlines()[0]) == hostile
+    assert not (tmp_path / "out.txt").exists()
 
 
 @pytest.mark.integration
@@ -77,15 +99,24 @@ def test_runner_inside_the_real_worker_image(tmp_path):
     wt.mkdir()
     cfg.mkdir()
     container.write_shell_runner(cfg)
+    runner = f"{container.CONTAINER_CONFIG}/{container.SHELL_RUNNER_FILE}"
+
+    def run(rid: str, inner: list[str]) -> subprocess.CompletedProcess[str]:
+        argv = container_command(image=container.image_tag(), run_id=rid, worktree=str(wt), config_dir=str(cfg),
+                                 inner_argv=[runner, *inner], env=container.worker_env(rid, {}), network="none",
+                                 entrypoint="node", docker=container.docker_cmd())
+        try:
+            return subprocess.run(argv, capture_output=True, text=True, timeout=180, env=container.docker_cli_env(),
+                                  stdin=subprocess.DEVNULL, check=False)
+        finally:
+            container.teardown(rid)
+
     rid = f"w7f-runner-{uuid.uuid4().hex[:8]}"
-    argv = container_command(image=container.image_tag(), run_id=rid, worktree=str(wt), config_dir=str(cfg),
-                             inner_argv=[f"{container.CONTAINER_CONFIG}/{container.SHELL_RUNNER_FILE}",
-                                         f"i=0; while [ $i -lt {LINES} ]; do echo line $i; i=$((i+1)); done; exit 4"],
-                             env=container.worker_env(rid, {}), network="none", entrypoint="node",
-                             docker=container.docker_cmd())
-    try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=180, env=container.docker_cli_env(),
-                              stdin=subprocess.DEVNULL, check=False)
-    finally:
-        container.teardown(rid)
+    # a shell script is one program (sh) with its arguments - allowed only where the grant allows `sh`
+    proc = run(rid, ["/bin/sh", "-c", f"i=0; while [ $i -lt {LINES} ]; do echo line $i; i=$((i+1)); done; exit 4"])
     _check_output(proc.stdout, wt / container.COMMAND_LOG_DIR, proc.returncode, 4)
+    # quoted shell syntax after an allowed program stays an argument: nothing else runs (no file is created)
+    pwned = run(f"w7f-runner-{uuid.uuid4().hex[:8]}", ["echo", "a; touch /workspace/pwned", "$(touch /workspace/sub)"])
+    assert pwned.returncode == 0, pwned.stderr
+    assert pwned.stdout.splitlines()[0] == "a; touch /workspace/pwned $(touch /workspace/sub)"
+    assert not (wt / "pwned").exists() and not (wt / "sub").exists()

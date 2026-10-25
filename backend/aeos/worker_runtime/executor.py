@@ -87,7 +87,9 @@ PROMPT_REPORT_RULES = (
 )
 # §42 "output command ringkas, simpan log asli" (W6-117): only when the TaskSpec grants a shell (container sandbox)
 PROMPT_SHELL_RULES = (
-    "- Run every shell command through the AEOS runner: `{runner} <command>` (other shell commands are denied).",
+    "- Run every shell command through the AEOS runner: `{runner} <program> [args...]` (other shell commands are "
+    "denied). The runner starts exactly one program with its arguments; it does not interpret shell syntax "
+    "(no pipes, `;`, `&&` or redirects inside it).",
     "- The runner returns the first and last lines of the output; the full output is kept by the runtime as "
     "evidence. Do not write files under .aeos/cmdlog yourself.",
 )
@@ -162,6 +164,13 @@ class Prepared:
     # §09 Zone 1 / §21: DB trust-table tamper window around a process-sandbox run (aeos.verification.facade)
     db_window: Any = None
     db_window_error: str | None = None
+    # §42 (W6-117): the AEOS shell runner command when the TaskSpec granted a shell (container sandbox), else None.
+    # Only then are runner logs under .aeos/cmdlog/ taken out of the candidate (otherwise they are ordinary changes).
+    shell_runner: str | None = None
+    # set once the post-run tamper checks ran / their hold was recorded (an executor failure after the worker
+    # started still runs them: fail closed, never skipped)
+    tamper_findings: list[dict[str, Any]] | None = None
+    hold_recorded: bool = False
 
 
 # ----------------------------------------------------------------------------- DB trust-table tamper window
@@ -601,7 +610,7 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
                     protected=protected, task_key=task.task_key, config_path=config_path, kind=kind,
                     container_root=container_root, limits=limits, controller_snapshot=controller_snapshot,
                     plan_version_hash=task.plan_version_hash, agent_key=run.agent_key, route_key=route_key,
-                    engine_version=engine_version, commit_identity=(ident[0], ident[1]))
+                    engine_version=engine_version, commit_identity=(ident[0], ident[1]), shell_runner=shell_runner)
 
 
 def _is_report_path(path: str) -> bool:
@@ -702,42 +711,67 @@ def execute_run(settings: Settings, run_id: str, *, shutdown: threading.Event | 
             processes.kill_run_processes(run_id)
         _abort_before_start(run_id, "SPAWN_FAILED", type(exc).__name__)
         return {"run_id": run_id, "status": "BLOCKED", "code": "SPAWN_FAILED"}
-    with sf() as s:
-        run = s.get(WorkerRun, run_id)
-        run.pid = mp.pid
-        run.pid_create_time = mp.create_time
-        # §21/§25 CPU cap actually in force for this run (W6-055): docker --cpus in the container; in the process
-        # sandbox the Windows Job Object CPU-rate hard cap, else a reservation only (stated, never assumed)
-        run.caps = {**(run.caps or {}), "cpu_cap": (
-            {"enforced": True, "by": "docker --cpus", "max_cpus": prep.limits.max_cpus} if prep.kind == "container"
-            else {"enforced": mp.cpu_rate is not None, "max_cpus": prep.limits.max_cpus, "job_cpu_rate": mp.cpu_rate,
-                  "by": "windows job CPU-rate hard cap" if mp.cpu_rate is not None else "none (reservation only)"})}
-        run.started_at = utcnow()
-        run.last_heartbeat_at = utcnow()
-        run.current_action = "Worker dimulai"
-        try:
-            scheduler.set_run_status(s, run, S.RUNNING.value, reason="worker process bound", actor=ACTOR)
-            scheduler.transition_task(s, run.task_id, S.RUNNING.value, reason=f"worker pid {mp.pid} bound",
-                                      actor=ACTOR, expected_from=S.LEASED.value)
-            s.commit()
-        except AeosError:
-            s.rollback()
-            processes.kill_run_processes(run_id)
-            # the worker may have run briefly: the same controller/DB tamper checks apply (hold on a finding)
-            _guard_after_kill(prep, run_id)
-            # A cancel/policy stop that landed while we prepared revoked only the grants that existed
-            # then: revoke the one issued in _prepare too and remove the token file.
-            from aeos.broker import facade as broker
-
-            with sf() as s2:
-                broker.revoke_grants(s2, run_id=run_id, reason="attempt changed before binding")
-                s2.commit()
+    try:
+        with sf() as s:
+            run = s.get(WorkerRun, run_id)
+            run.pid = mp.pid
+            run.pid_create_time = mp.create_time
+            # §21/§25 CPU cap actually in force for this run (W6-055): docker --cpus in the container; in the process
+            # sandbox the Windows Job Object CPU-rate hard cap, else a reservation only (stated, never assumed)
+            run.caps = {**(run.caps or {}), "cpu_cap": (
+                {"enforced": True, "by": "docker --cpus", "max_cpus": prep.limits.max_cpus} if prep.kind == "container"
+                else {"enforced": mp.cpu_rate is not None, "max_cpus": prep.limits.max_cpus, "job_cpu_rate": mp.cpu_rate,
+                      "by": "windows job CPU-rate hard cap" if mp.cpu_rate is not None else "none (reservation only)"})}
+            run.started_at = utcnow()
+            run.last_heartbeat_at = utcnow()
+            run.current_action = "Worker dimulai"
             try:
-                prep.config_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            processes.unregister(run_id)
-            return {"run_id": run_id, "status": "SKIPPED", "reason": "attempt changed before binding"}
+                scheduler.set_run_status(s, run, S.RUNNING.value, reason="worker process bound", actor=ACTOR)
+                scheduler.transition_task(s, run.task_id, S.RUNNING.value, reason=f"worker pid {mp.pid} bound",
+                                          actor=ACTOR, expected_from=S.LEASED.value)
+                s.commit()
+            except AeosError:
+                s.rollback()
+                processes.kill_run_processes(run_id)
+                # the worker may have run briefly: the same controller/DB tamper checks apply (hold on a finding)
+                _guard_after_kill(prep, run_id)
+                # A cancel/policy stop that landed while we prepared revoked only the grants that existed
+                # then: revoke the one issued in _prepare too and remove the token file.
+                from aeos.broker import facade as broker
+
+                with sf() as s2:
+                    broker.revoke_grants(s2, run_id=run_id, reason="attempt changed before binding")
+                    s2.commit()
+                try:
+                    prep.config_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                processes.unregister(run_id)
+                return {"run_id": run_id, "status": "SKIPPED", "reason": "attempt changed before binding"}
+        return _monitor_and_finalize(settings, run_id, prep, mp, shutdown=shutdown,
+                                     heartbeat_seconds=heartbeat_seconds, quota_stop_after=quota_stop_after)
+    except Exception:
+        # §09 Zone 1 fail closed: an executor failure after the worker started never skips the post-run controller /
+        # config / bytecode / DB tamper checks - stop the worker, run them (once) and hold admission on a finding.
+        # The lease then expires and reconciliation takes over the run itself (logged by the caller).
+        try:
+            processes.kill_run_processes(run_id)
+            if prep.kind == "container":
+                from aeos.worker_runtime import container
+
+                container.teardown(run_id)
+        except Exception:
+            log.exception("could not stop the worker of run %s after an executor failure", run_id)
+        _guard_after_kill(prep, run_id)
+        raise
+
+
+def _monitor_and_finalize(settings: Settings, run_id: str, prep: Prepared, mp: processes.ManagedProcess, *,
+                          shutdown: threading.Event | None, heartbeat_seconds: float,
+                          quota_stop_after: int) -> dict[str, Any]:
+    from aeos.workforce import scheduler
+
+    sf = session_factory()
     # ---------------- phase 3: monitor (observed actions, heartbeat, timeout, quota, scope, resources, cancel)
     parser = opencode.EventParser(worktree=prep.ws.repo, container_root=prep.container_root)
     lines: queue.Queue[bytes | None] = queue.Queue()
@@ -998,7 +1032,9 @@ def _tamper_checks(prep: Prepared) -> tuple[list[dict[str, str]], dict[str, Any]
         touched = integrity.compare(prep.controller_snapshot)
     except Exception as exc:  # an unverifiable controller is treated as modified (fail closed)
         touched = [{"path": "*", "change": f"integrity check failed ({type(exc).__name__})"}]
-    return touched, _close_db_window(prep)
+    db_result = _close_db_window(prep)
+    prep.tamper_findings = _hold_findings(touched, db_result)
+    return touched, db_result
 
 
 def _hold_findings(touched: list[dict[str, str]], db_result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1009,10 +1045,12 @@ def _hold_findings(touched: list[dict[str, str]], db_result: dict[str, Any]) -> 
 
 
 def _guard_after_kill(prep: Prepared, run_id: str) -> None:
-    """A worker killed before it was bound (attempt changed) may still have written: same checks, same hold."""
-    touched, db_result = _tamper_checks(prep)
-    findings = _hold_findings(touched, db_result)
-    if not findings:
+    """A worker killed before it was bound (attempt changed), or an executor failure after the worker started: the
+    worker may have written - the same checks run (once) and their findings raise the same hold (never skipped)."""
+    if prep.tamper_findings is None:
+        _tamper_checks(prep)
+    findings = list(prep.tamper_findings or [])
+    if not findings or prep.hold_recorded:
         return
     try:
         with session_factory()() as s:
@@ -1020,6 +1058,7 @@ def _guard_after_kill(prep: Prepared, run_id: str) -> None:
             integrity.raise_hold(s, source="worker run", subject_id=run_id, findings=findings,
                                  project_id=run.project_id if run else None, domain=run.domain if run else None)
             s.commit()
+            prep.hold_recorded = True
     except SQLAlchemyError:
         log.exception("could not record the integrity hold for run %s", run_id)
 
@@ -1047,7 +1086,8 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
         cmd_info: dict[str, Any] = {}
         try:
             report_data, report_info = workspace.take_worker_report(prep.ws)
-            cmd_logs, cmd_info = _take_command_logs(prep.ws)
+            if prep.shell_runner:  # only a run that had the AEOS runner has runner logs (else: ordinary changes)
+                cmd_logs, cmd_info = _take_command_logs(prep.ws)
             changes = workspace.collect_changes(prep.ws)
             result = check_scope(changes["changes"], allowed=prep.allowed, forbidden=prep.forbidden,
                                  protected=prep.protected)
@@ -1165,6 +1205,7 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
                                 if db_result.get(k) is not None},
             "integrity_hold": bool(touched or foreign), "scope_stop": bool(extra.get("scope_stop"))}
         s.commit()  # evidence phase is persisted whatever happens to the state decision below
+        prep.hold_recorded = prep.hold_recorded or bool(touched or foreign)
         quarantined, head = run.quarantined, run.head_commit
     # Outcome phase: re-read fresh state (a concurrent cancel/reassign/reconcile may have won) and
     # retry on optimistic-concurrency conflicts instead of overwriting the newer decision.

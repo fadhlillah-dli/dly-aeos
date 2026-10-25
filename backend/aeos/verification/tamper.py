@@ -22,7 +22,11 @@ guarding triggers are (a drop-modify-recreate inside the window is not detected 
 The worker runtime's window (wave 7, opt-in ``CROSS_PROCESS_TOLERATED``) also accepts a grant's usage counters
 growing, a grant or session being revoked and a session's ``last_seen_at`` moving forward, even from another
 process: a writer making only those changes (inflating usage, revoking, keeping an owner session from idling out)
-is not detected there. The container runner never mounts the data dir, which is the actual prevention.
+is not detected there. On ``capability_grants`` (``CROSS_PROCESS_STRICT``) the controller's own writes mask nothing
+(review wave 7: the in-process broker's usage ``UPDATE`` used to hide the whole table for the rest of a run). On the
+other tables a foreign change to a row this controller process also wrote by ORM in the same window is masked (for
+example the owner's own session row, touched while the owner uses the dashboard). The container runner never
+mounts the data dir, which is the actual prevention.
 """
 
 from __future__ import annotations
@@ -149,6 +153,13 @@ CROSS_PROCESS_TOLERATED: dict[str, dict[str, str]] = {
                           "active": "deactivate", "revoked_at": "set_once", "revoked_reason": "set_once"},
     "auth_sessions": {"last_seen_at": "grow", "revoked_at": "set_once", "revoked_reason": "set_once"},
 }
+# Opt-in strict tables (review wave 7): every change THIS process legitimately makes to them during a run is itself
+# one of the tolerated changes (the broker's usage counters are Core ``UPDATE`` statements, revocation/expiry are ORM
+# updates of active/revoked_*) or an ORM insert of a new grant. So the controller's own writes do NOT mask them: a
+# table-level journal entry (Core statement) never skips the table, and a modified row journaled as this process's
+# own must still change only tolerated columns in their allowed direction. Without this, the in-server broker's
+# first usage UPDATE hid every forged cap or forged grant row for the rest of the run.
+CROSS_PROCESS_STRICT: frozenset[str] = frozenset({"capability_grants"})
 # per tolerated table: row key -> (digest of the row WITHOUT the tolerated columns, {tolerated column: value})
 Tolerated = dict[str, dict[str, tuple[str, dict[str, Any]]]]
 
@@ -227,12 +238,15 @@ def digest(engine: Engine, *, tolerate: dict[str, dict[str, str]] | None = None,
 class Window:
     """Open before the first candidate step, ``close()`` after the last one."""
 
-    def __init__(self, engine: Engine, *, tolerate: dict[str, dict[str, str]] | None = None):
-        """``tolerate`` (opt-in, worker runs only): ``CROSS_PROCESS_TOLERATED``-shaped column rules."""
+    def __init__(self, engine: Engine, *, tolerate: dict[str, dict[str, str]] | None = None,
+                 strict: frozenset[str] | set[str] | None = None):
+        """``tolerate`` (opt-in, worker runs only): ``CROSS_PROCESS_TOLERATED``-shaped column rules; ``strict``: the
+        tolerated tables whose own writes never mask a change (``CROSS_PROCESS_STRICT``)."""
         install()
         self.engine = engine
         self.journal = Journal()
         self.tolerate = {t: dict(c) for t, c in (tolerate or {}).items() if t in _TRUST}
+        self.strict = frozenset(t for t in (strict or ()) if t in self.tolerate)
         self.tolerated_before: Tolerated = {}
         with _lock:
             _windows[id(self)] = self.journal
@@ -271,16 +285,21 @@ class Window:
         foreign: list[dict[str, str]] = []
         tolerated: list[dict[str, Any]] = []
         for table in sorted(set(self.before) | set(after)):
-            if table in self.journal.tables:
+            strict = table in self.strict
+            if table in self.journal.tables and not strict:
                 continue
             old, new = self.before.get(table, {}), after.get(table, {})
             for key in sorted(set(old) | set(new)):
-                if old.get(key) == new.get(key) or (table, key) in self.journal.rows:
+                if old.get(key) == new.get(key):
                     continue
                 change = "added" if key not in old else "removed" if key not in new else "modified"
+                own = (table, key) in self.journal.rows
+                if own and not (strict and change == "modified"):
+                    continue  # this process's own ORM write (strict tables: its own insert/delete only)
                 columns = self._tolerated_change(table, key, after_tolerated) if change == "modified" else None
                 if columns is not None:
-                    tolerated.append({"table": table, "id": key[:64], "columns": columns})
+                    if not own:
+                        tolerated.append({"table": table, "id": key[:64], "columns": columns})
                     continue
                 foreign.append({"table": table, "id": key[:64], "change": change})
         status = "FAIL" if foreign else ("UNKNOWN" if self.truncated else "PASS")

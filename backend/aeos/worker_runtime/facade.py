@@ -128,8 +128,9 @@ def raise_integrity_hold(session: Any, *, source: str, subject_id: str, findings
                 domain=domain)
 
 
-def integrity_hold(session: Any) -> dict[str, Any]:
-    """``{"status": "ACTIVE"|"CLEAR", "hold": ..., "remedy": ...}`` of the integrity hold (additive, wave 7)."""
+def integrity_hold(session: Any, *, domain: str | None = None) -> dict[str, Any]:
+    """``{"status": "ACTIVE"|"CLEAR", "hold": ..., "remedy": ...}`` of the integrity hold (additive, wave 7); with
+    ``domain`` another domain's run id and findings are replaced by their count."""
     from aeos.worker_runtime.integrity import hold_view as impl
 
-    return impl(session)
+    return impl(session, domain=domain)

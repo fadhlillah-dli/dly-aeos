@@ -7,7 +7,8 @@
 | `vm` | Not implemented in V1 (R4 work is BLOCKED). | — |
 
 Granted shell (container only, wave 7): the per-run config dir (mounted read-only at `/aeos`) carries the AEOS
-runner `aeos-run.js`; OpenCode's bash permission allows only `node /aeos/aeos-run.js <command>`. The runner returns a
+runner `aeos-run.js`; OpenCode's bash permission allows only `node /aeos/aeos-run.js <program> [args...]`. The runner
+starts exactly one program with its arguments (never through a shell, so a pattern grant is not widened), returns a
 bounded head/tail and keeps the full output under `.aeos/cmdlog/`, which the runtime collects as evidence and removes
 from the candidate. No image rebuild is needed for it (`tests/unit/test_worker_runtime_shell_runner.py` runs it
 inside the real image). It is a compaction and log-retention convention, not a security boundary: the container is.
