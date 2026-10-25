@@ -539,6 +539,62 @@ def test_pr_timeout_is_reconciled_or_unknown_and_reconcile_is_read_only(db, offi
     assert out["status"] == "SUCCEEDED" and db.get(BrokerSideEffect, res["side_effect_id"]).external_id == "9"
 
 
+def test_pr_retry_after_unknown_reads_first_and_never_posts_a_second_pr(db, office_run):
+    """§50 "reconcile before any retry": after a timed-out (UNKNOWN) creation the next attempt reads Bitbucket;
+    an unreadable provider keeps it UNKNOWN without a POST, an existing PR is adopted without a POST."""
+    run = office_run["run"]
+    _grants(db, run)
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+        mock.post(f"{API}/pullrequests").mock(side_effect=httpx.ReadTimeout("slow"))
+        mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": []}))
+        first = broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main",
+                                           title="t", body="b")
+    assert first["status"] == "UNKNOWN"
+    db.commit()
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+        post = mock.post(f"{API}/pullrequests").mock(return_value=httpx.Response(201, json={"id": 77}))
+        mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(503, json={}))
+        again = broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main",
+                                           title="t", body="b")
+        assert not post.called  # the earlier outcome is still unknown: never a blind second POST
+    assert again["status"] == "UNKNOWN" and not again["ok"]
+    db.commit()
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+        post = mock.post(f"{API}/pullrequests").mock(return_value=httpx.Response(201, json={"id": 77}))
+        listed = mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": [
+            {"id": 9, "links": {"html": {"href": "https://bitbucket.org/company_ws/svc/pull-requests/9"}}}]}))
+        done = broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main",
+                                          title="t", body="b")
+        assert not post.called and set(listed.calls[0].request.url.params.get_list("state")) == {
+            "OPEN", "MERGED", "DECLINED", "SUPERSEDED"}
+    assert done["ok"] and done["number"] == "9" and done["side_effect_id"] == first["side_effect_id"]
+
+
+def test_reconcile_without_company_authorisation_never_reads_the_office_credential(db, office_run, secrets_memory,
+                                                                                    monkeypatch):
+    """§23 OFFICE default deny covers reads: a reconciliation after the company authorisation was withdrawn reads
+    neither the office/bitbucket credential nor Bitbucket, and the recorded outcome stays UNKNOWN."""
+    from aeos.policy import facade as policy
+
+    run = office_run["run"]
+    _grants(db, run)
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+        mock.post(f"{API}/pullrequests").mock(side_effect=httpx.ReadTimeout("slow"))
+        mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": []}))
+        res = broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main",
+                                         title="t", body="b")
+    assert res["status"] == "UNKNOWN"
+    policy.invalidate_decisions(db, target_type="office_policy", target_id="OFFICE", reason="authorisation withdrawn")
+    db.commit()
+    reads = _count_secret_reads(monkeypatch, secrets_memory)
+    with respx.mock(assert_all_mocked=True) as mock:
+        with pytest.raises(PolicyDenied) as e:
+            broker.reconcile_side_effect(db, side_effect_id=res["side_effect_id"], actor="delivery")
+        assert not mock.calls
+    assert e.value.code == "OFFICE_NOT_AUTHORISED" and reads == []
+    assert db.get(BrokerSideEffect, res["side_effect_id"]).status == "UNKNOWN"
+
+
 def test_pr_base_and_head_guards(db, office_run):
     run = office_run["run"]
     _grants(db, run)

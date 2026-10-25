@@ -14,8 +14,11 @@ The same boundary as the GitHub path (``aeos.broker.git_broker``, every rule tes
   deny, §23), write enablement, and the human APPROVAL of the run's plan version that allows the operation
   on exactly this repository;
 * PR creation is one ``POST /pullrequests`` (draft, ``close_source_branch: false``) behind an idempotent
-  outbox row with read-only reconciliation. The broker has no operation that integrates, approves or
-  declines a pull request: that stays a human action (U-09).
+  outbox row with read-only reconciliation; a retry after an UNKNOWN/PENDING attempt reads first and never
+  posts a second PR (§50). The broker has no operation that integrates, approves or declines a pull request:
+  that stays a human action (U-09);
+* reconciliation reads with the OFFICE credential only for the exact OFFICE target and while the company
+  authorisation lists ``bitbucket`` (``require_office_read``; OFFICE default deny covers reads, §23).
 
 Exercised with mocked HTTP (respx) and local bare remotes; live Bitbucket Cloud behaviour is NOT-PROVEN
 until the company authorises a tenant (M5).
@@ -188,6 +191,25 @@ def office_target(session: Session, run: WorkerRun, repo_full_name: str) -> Repo
     return ref
 
 
+def require_office_read(session: Session, run: WorkerRun | None, repo_full_name: str) -> None:
+    """§23 OFFICE default deny covers reads too: a read with the ``office/bitbucket`` credential that is not behind
+    the write interlock (reconciliation) still needs the exact OFFICE target (``office_target``) and an ACTIVE company
+    authorisation that lists ``bitbucket`` - checked before the credential is read (fail closed)."""
+    if run is None:
+        raise PolicyDenied("the side effect has no run; its OFFICE target cannot be checked", code="TARGET_UNKNOWN")
+    office_target(session, run, repo_full_name)
+    try:
+        from aeos.policy import facade as policy
+
+        pol = policy.office_policy(session)
+    except ImportError as exc:
+        raise Blocked("policy module unavailable (fail closed)", code="INTERLOCK_UNAVAILABLE") from exc
+    if pol.get("office_authorization") is not True or PROVIDER not in (pol.get("authorized_providers") or []):
+        raise PolicyDenied("no ACTIVE company authorisation lists bitbucket: the OFFICE credential is not read and "
+                           "the outcome stays as recorded until the authorisation exists (OFFICE default deny, §23)",
+                           code="OFFICE_NOT_AUTHORISED")
+
+
 # ----------------------------------------------------------------------------- push
 def push_task_branch(session: Session, *, run: WorkerRun, worktree: str, branch: str, repo_full_name: str,
                      remote_url: str | None = None, expected_head: str | None = None) -> dict[str, Any]:
@@ -267,6 +289,31 @@ def _pr_link(pr: dict[str, Any]) -> str:
     return str(((pr.get("links") or {}).get("html") or {}).get("href") or "")
 
 
+def _post_pr(client: httpx.Client, api_base: str, repo: str, head: str, base: str, headers: dict[str, str],
+             payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str, str]:
+    """The one Bitbucket REST write: ``POST /pullrequests`` -> (pr, outcome SUCCEEDED|FAILED|UNKNOWN, detail)."""
+    try:
+        r = client.post(_pr_url(api_base, repo), json=payload, headers=headers)
+        if r.status_code == 201:
+            return r.json(), "SUCCEEDED", ""
+        if r.status_code in (400, 409):
+            # An open PR for this head/base already exists (or there is nothing to compare): read, never retry.
+            pr = _find_pr(client, api_base, repo, head, base, headers)
+            return (pr, "SUCCEEDED", "reconciled existing PR") if pr else (
+                None, "FAILED", f"Bitbucket {r.status_code}: {redact_text(r.text)[:300]}")
+        return None, "FAILED", f"Bitbucket {r.status_code}: {redact_text(r.text)[:300]}"
+    except httpx.TimeoutException:
+        # §50: the provider may have created the PR - reconcile before any retry.
+        try:
+            pr = _find_pr(client, api_base, repo, head, base, headers)
+        except (httpx.HTTPError, ValueError):
+            pr = None
+        return (pr, "SUCCEEDED", "timeout; reconciled") if pr else (
+            None, "UNKNOWN", "timeout; outcome UNKNOWN until reconciled")
+    except httpx.HTTPError as exc:
+        return None, "FAILED", type(exc).__name__
+
+
 def create_pull_request(session: Session, *, run: WorkerRun, repo_full_name: str, head: str, base: str, title: str,
                         body: str, api_base: str = BITBUCKET_API) -> dict[str, Any]:
     """Open a draft Bitbucket PR ``head -> base`` for the run (idempotent outbox; never integrates it)."""
@@ -290,6 +337,9 @@ def create_pull_request(session: Session, *, run: WorkerRun, repo_full_name: str
         return {"status": "EXISTS", "ok": True, "number": existing.external_id, "url": existing.external_url,
                 "side_effect_id": existing.id, "provider": PROVIDER}
     cred = _credential()
+    # §50 "reconcile before any retry": an earlier attempt whose outcome is UNKNOWN/PENDING (timeout, crash) may have
+    # created the PR. Read first; POST only when the provider shows none (never a second PR for one head/base).
+    unresolved = existing is not None and existing.status in ("UNKNOWN", "PENDING")
     se = _side_effect(session, run, kind="CREATE_PR", key=key, target=target)
     headers = {"Authorization": cred.api_header, "Accept": "application/json", "User-Agent": "dly-aeos-broker"}
     payload = {"title": redact_text(title)[:250], "description": redact_text(body)[:60000],
@@ -298,27 +348,16 @@ def create_pull_request(session: Session, *, run: WorkerRun, repo_full_name: str
     pr: dict[str, Any] | None = None
     outcome, detail = "FAILED", ""
     with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False, trust_env=False) as client:
-        try:
-            r = client.post(_pr_url(api_base, repo_full_name), json=payload, headers=headers)
-            if r.status_code == 201:
-                pr, outcome = r.json(), "SUCCEEDED"
-            elif r.status_code in (400, 409):
-                # An open PR for this head/base already exists (or there is nothing to compare): read, never retry.
-                pr = _find_pr(client, api_base, repo_full_name, head, base, headers)
-                outcome = "SUCCEEDED" if pr else "FAILED"
-                detail = "reconciled existing PR" if pr else f"Bitbucket {r.status_code}: {redact_text(r.text)[:300]}"
-            else:
-                detail = f"Bitbucket {r.status_code}: {redact_text(r.text)[:300]}"
-        except httpx.TimeoutException:
-            # §50: the provider may have created the PR - reconcile before any retry.
+        if unresolved:
             try:
-                pr = _find_pr(client, api_base, repo_full_name, head, base, headers)
+                pr = _find_pr(client, api_base, repo_full_name, head, base, headers, states=PR_STATES_ALL)
             except (httpx.HTTPError, ValueError):
-                pr = None
-            outcome = "SUCCEEDED" if pr else "UNKNOWN"
-            detail = "timeout; reconciled" if pr else "timeout; outcome UNKNOWN until reconciled"
-        except httpx.HTTPError as exc:
-            detail = type(exc).__name__
+                outcome, detail = "UNKNOWN", "earlier outcome UNKNOWN and Bitbucket could not be read: not retried"
+            else:
+                if pr is not None:
+                    outcome, detail = "SUCCEEDED", "reconciled existing PR before retry (no second POST)"
+        if pr is None and outcome != "UNKNOWN":
+            pr, outcome, detail = _post_pr(client, api_base, repo_full_name, head, base, headers, payload)
     se.status = outcome
     if pr:
         se.external_id = str(pr.get("id"))
@@ -351,10 +390,14 @@ def reconcile_side_effect(session: Session, se: BrokerSideEffect, *, actor: str,
         raise PolicyDenied("Bitbucket credentials serve OFFICE side effects only", code="DOMAIN_CREDENTIAL")
     target = dict(se.target or {})
     before, detail = se.status, ""
+    run = session.get(WorkerRun, se.run_id) if se.run_id else None
     if se.kind == "PUSH_BRANCH":
         branch = validate_branch(str(target.get("branch", "")))
         url = pinned_remote(str(target.get("repo", "")), str(target.get("remote_url") or "") or None)
-        cred = None if _is_local_remote(url) else _credential()
+        local = _is_local_remote(url)
+        if not local:  # a credentialed read of the company repository: OFFICE default deny applies (§23)
+            require_office_read(session, run, str(target.get("repo", "")))
+        cred = None if local else _credential()
         try:
             sha = _ls_remote_head(url, branch, cred.git_secret if cred else None,
                                   basic_user=cred.git_user if cred else ACCESS_TOKEN_GIT_USER)
@@ -374,6 +417,7 @@ def reconcile_side_effect(session: Session, se: BrokerSideEffect, *, actor: str,
         base = str(target.get("base", ""))
         if not _BASE_RE.match(base):
             raise PolicyDenied("invalid PR base", code="PR_BASE_REJECTED")
+        require_office_read(session, run, repo)
         cred = _credential()
         headers = {"Authorization": cred.api_header, "Accept": "application/json", "User-Agent": "dly-aeos-broker"}
         with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False, trust_env=False) as client:

@@ -34,8 +34,11 @@ fidelity and treated invalidated (STALE) readiness as advisory (§08, §29).
    target itself (enabled, Cloud, verified, integration root) — it never trusts delivery for it. The
    credentialed git remote is pinned to the repository's own `https://bitbucket.org/<workspace>/<repo_slug>(.git)`:
    any other host or repository is `REMOTE_REJECTED` before the credential is read (besides it only a local bare
-   remote, which gets no credential, is accepted). There is no merge, decline or approve call anywhere (static
-   tests).
+   remote, which gets no credential, is accepted). A PR retry after an UNKNOWN/PENDING attempt reads Bitbucket
+   first (all PR states) and adopts an existing PR or stays UNKNOWN when unreadable — never a blind second POST
+   (§50). Reconciliation reads with the OFFICE credential only for the exact OFFICE target and while the company
+   authorisation lists `bitbucket` (`require_office_read`: OFFICE default deny covers reads too, §23). There is
+   no merge, decline or approve call anywhere (static tests).
 3. **Read side GET only** (`publisher.providers.atlassian.BitbucketProvider`, used by delivery through the
    publisher facade): commit statuses + Pipelines steps of one exact commit → `provider-ci` evidence (E3) for
    G1/G3/G5, mapped by the project's pipeline reference (`bitbucket-pipelines/ci` integration, step names);
@@ -57,8 +60,12 @@ fidelity and treated invalidated (STALE) readiness as advisory (§08, §29).
    document stops it (CONFLICT). Every DOCX import is read back (`documents.get`) and compared with the sent
    DOCX (headings, tables, links, images) → CONSISTENT / MISMATCH / UNKNOWN on the operation and the document.
    A CAN_PUBLISH_PERSONAL dependency that passed and was then invalidated (STALE) refuses execute/retry.
-8. **Doctor.** Fine-grained PATs are judged by what they reach (`/user/repos` vs registered repos, repository
-   admin); `delivery.branch_protection` exposes and evaluates status-check identity, deploy restrictions and
+8. **Doctor.** Fine-grained PATs are judged by what they reach (`/user/repos` vs registered repos) and by the
+   token's own Administration grant. GitHub's repository `permissions.admin` is the *account's* role (the owner
+   of a personal repository always shows it), so it is never read as the token's permission: with an admin role
+   the Doctor observes the grant read-only (`GET .../branches/<default>/protection`: 403 "Resource not accessible
+   by personal access token" → NOT_GRANTED, 200 / 404 "Branch not protected" → GRANTED → not least privilege,
+   anything else → UNKNOWN → least privilege NOT proven); `delivery.branch_protection` exposes and evaluates status-check identity, deploy restrictions and
    entitlement (GitHub: OBSERVED with an enforcing rule, NOT_ENTITLED when GitHub answers "upgrade required" or a
    private Free repository 404s, AVAILABLE on "Branch not protected", else UNKNOWN; Bitbucket: OBSERVED /
    NOT_OBSERVED / UNKNOWN as in 4); `delivery.ci_workflow` shows the latest provider-ci observation; `recovery.route_rollback`
