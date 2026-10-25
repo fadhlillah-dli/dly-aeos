@@ -1,0 +1,3121 @@
+{
+  "architecture": {
+    "diagrams": [
+      {
+        "key": "D1",
+        "kind": "component",
+        "mermaid": "flowchart LR\n  subgraph FE[Frontend Control Center]\n    NAV[Registrasi rute/menu T11]\n    P[SetupWizardPage + slot StepActions]\n    B[OverviewSetupBanner]\n    L[DecisionStepLink]\n  end\n  subgraph BE[Backend aeos]\n    RR[Registrasi router T11]\n    R[Setup API routes]\n    C[SetupStatusComposer]\n    S[SetupRecheckService]\n    K[(SetupStepCatalog file)]\n    D[Readiness Doctor existing]\n    G[Capability gates existing]\n    A[Audit events existing]\n  end\n  DF[Decision forms existing + prefill T12]\n  NAV --> P\n  RR --> R\n  P -->|GET /api/setup/steps| R\n  B -->|GET /api/setup/steps| R\n  P -->|POST recheck| R\n  R --> C\n  R --> S\n  C --> K\n  C --> D\n  C --> G\n  S --> K\n  S --> D\n  S --> A\n  L -->|link with prefill| DF",
+        "title": "Komponen Penyiapan awal",
+        "verification_source": "contracts/api/setup-wizard.json (IC1), contracts/setup/setup-steps.schema.json (IC2), contracts/ui/decision-prefill.json (IC3), contracts/architecture/module-boundaries.json, laporan discovery T1"
+      },
+      {
+        "key": "D2",
+        "kind": "sequence",
+        "mermaid": "sequenceDiagram\n  actor O as Owner\n  participant UI as SetupWizardPage\n  participant API as Setup API\n  participant SVC as SetupRecheckService\n  participant DOC as Doctor runner\n  participant AUD as Audit\n  O->>UI: klik Periksa ulang (step_key)\n  UI->>API: POST /api/setup/steps/{step_key}/recheck + CSRF\n  API->>API: cek sesi (401), CSRF, peran (VIEWER -> 403)\n  API->>SVC: recheck(step_key)\n  SVC->>SVC: validasi step_key (404), lock (409), rate (429)\n  SVC->>DOC: run(check_ids langkah saja, timeout konfigurasi)\n  DOC-->>SVC: hasil + checked_at\n  SVC->>AUD: event setup.recheck\n  SVC-->>API: status langkah terbaru\n  API-->>UI: 200 step status",
+        "title": "Urutan Periksa ulang per langkah",
+        "verification_source": "contracts/api/setup-wizard.json (IC1) dan TDD-2"
+      },
+      {
+        "key": "D3",
+        "kind": "trust_boundary",
+        "mermaid": "flowchart TB\n  subgraph Browser[Browser - tidak tepercaya]\n    V[VIEWER]\n    O[Owner]\n    Q[URL prefill - tidak tepercaya]\n  end\n  subgraph Server[Proses Control Center - tepercaya]\n    AUTH[AuthN/AuthZ + CSRF existing]\n    API[Setup API allowlist response]\n    DOC[Doctor runner]\n  end\n  subgraph Secrets[OpenBao - batas secret]\n    SB[(Secrets)]\n  end\n  V -->|GET only| AUTH\n  O -->|GET / POST recheck| AUTH\n  Q -->|allowlist, tanpa auto-submit| O\n  AUTH --> API\n  API --> DOC\n  DOC -.->|status saja, tanpa nilai| SB",
+        "title": "Batas kepercayaan wizard",
+        "verification_source": "Threat model bagian 04, contracts/security/asvs-selection.yaml, ADR-0042/0043, IC3"
+      }
+    ],
+    "overview": {
+      "api_landscape": [
+        "GET /api/setup/steps (baru, VIEWER+)",
+        "POST /api/setup/steps/{step_key}/recheck (baru; hanya peran berwenang sesuai enumerasi yang diverifikasi T1; VIEWER 403)",
+        "Endpoint Doctor/readiness yang ada (dipakai internal)",
+        "Endpoint capability gate yang ada (dipakai internal)",
+        "Formulir/endpoint keputusan yang ada (hanya ditautkan, tidak dipanggil wizard)"
+      ],
+      "component_architecture": [
+        "SetupStepCatalog: data berversi (urutan §07, check_ids, unlocks, remedy per OS, decision_link) divalidasi terhadap skema IC2",
+        "SetupStatusComposer: menggabungkan katalog dengan hasil Doctor terakhir dan status gate; menghitung status langkah, freshness (aturan Doctor atau ambang ADR), progress, entry_point dan office (konstanta BLOCKED)",
+        "SetupRecheckService: memvalidasi step_key, menerapkan lock per langkah dan batas laju yang dapat dikonfigurasi, memanggil runner Doctor untuk subset check, menulis event audit",
+        "Setup API routes: GET /api/setup/steps, POST /api/setup/steps/{step_key}/recheck (terdaftar di contracts/api/routes.json)",
+        "Registrasi rute/menu (T11): pendaftaran router backend dan rute/menu frontend pada file yang dilaporkan T1",
+        "Frontend SetupWizardPage: daftar langkah, StatusBadge, panel perintah per OS, slot aksi per langkah (StepActions) untuk tombol Periksa ulang (role-gated) dan DecisionStepLink",
+        "Frontend OverviewSetupBanner: banner di Ringkasan berdasarkan entry_point",
+        "Pembacaan prefill allowlist di formulir keputusan (T12)"
+      ],
+      "context": "DLY AEOS adalah platform lokal milik satu pemilik. Control Center (frontend TypeScript) memanggil backend Python yang sudah memiliki Readiness Doctor, capability gates dan endpoint keputusan. Slice ini menambah lapisan komposisi baca di atas komponen tersebut.",
+      "data_architecture": "Tidak ada tabel atau migrasi baru. Sumber kebenaran status adalah penyimpanan hasil Doctor yang ada; katalog langkah adalah file data di repo. Audit recheck memakai mekanisme audit/event yang ada. Wizard tidak menyimpan state progres sendiri. Lock recheck in-memory; validitasnya bergantung pada model proses yang dikonfirmasi T1.",
+      "data_flow": "Alur baca: Browser -> GET /api/setup/steps -> composer membaca katalog + hasil Doctor + gate -> respons allowlist. Alur recheck: Browser (peran berwenang) -> POST recheck -> validasi peran/CSRF/step_key -> runner Doctor (subset) -> Doctor menyimpan hasil -> composer -> respons. Alur keputusan: tautan -> formulir keputusan yang ada (prefill allowlist) -> submit manual oleh manusia -> antrean keputusan.",
+      "decisions": [
+        "Usulan ADR: katalog langkah §07 sebagai file data berversi di repo, bukan tabel DB (perlu persetujuan manusia)",
+        "Usulan: OS untuk perintah default = OS host backend, dengan tab untuk OS lain",
+        "Usulan: recheck memakai runner Doctor yang ada dengan filter check_id; tidak ada jalur eksekusi check baru. Bila subset tidak didukung, fallback dipilih manusia.",
+        "Usulan: prefill keputusan via query parameter allowlist tanpa auto-submit (RFC-2), diimplementasikan terpisah di T12",
+        "Usulan: office.status konstanta BLOCKED pada slice ini",
+        "Usulan: ambang kesegaran fallback, default timeout recheck dan batas laju sebagai nilai konfigurasi yang ditetapkan di ADR slice ini (Proposed)"
+      ],
+      "external_integrations": [
+        "Tidak ada integrasi eksternal baru. Check yang dijalankan ulang (mis. adapter.github_token, adapter.google_oauth) dapat melakukan konektivitas yang sudah mereka lakukan saat ini.",
+        "OpenBao (melalui check Doctor yang ada; wizard tidak membaca secret)"
+      ],
+      "high_level_architecture": "Modul backend baru 'setup_wizard' membaca katalog langkah berversi + hasil Doctor terakhir + status gate, lalu menyusun respons terurut. Endpoint recheck mendelegasikan ke runner Doctor yang ada dengan daftar check_id dari katalog. Frontend menambah halaman 'Penyiapan awal' dan banner Ringkasan. Langkah keputusan hanya berupa tautan ke formulir keputusan yang ada. Registrasi rute backend dan rute/menu frontend dilakukan task integrasi khusus (T11) pada path yang dilaporkan T1.",
+      "infrastructure": "Tidak ada perubahan infrastruktur; berjalan di proses Control Center lokal yang ada pada Windows/macOS. CI tetap GitHub Actions yang ada.",
+      "principles": [
+        "Doctor adalah satu-satunya sumber status check. Ambang kesegaran memakai aturan Doctor; bila tidak ada, wizard memakai nilai eksplisit dari ADR yang disetujui manusia dan menampilkannya di respons.",
+        "Kejujuran status: STALE/UNKNOWN tidak pernah dibulatkan menjadi VERIFIED",
+        "Wizard tidak mengeksekusi perintah dan tidak mencatat keputusan",
+        "Discovery dan kontrak dulu (T1, IC1-IC3) sebelum implementasi paralel",
+        "Default-deny untuk aksi; read-only untuk VIEWER"
+      ],
+      "security_architecture": "Otorisasi berbasis peran yang ada: baca untuk VIEWER, recheck hanya peran berwenang dengan CSRF/same-origin. Respons dibangun dari allowlist field; remedy disaring, penanda [REDACTED] dipertahankan, dan pola jalur home diuji. Wizard tidak memiliki jalur tulis ke keputusan dan tidak menjalankan perintah shell. step_key divalidasi terhadap katalog; check_id tidak pernah diterima dari klien. Prefill formulir keputusan diisolasi di T12 dengan allowlist dan tanpa auto-submit."
+    }
+  },
+  "assumptions": [
+    {
+      "source": "§04 domain profile",
+      "statement": "source: GitHub repository (UNVERIFIED until the integration check passes)"
+    },
+    {
+      "source": "§04 domain profile",
+      "statement": "docs: Google Docs in the project's Google Drive folder (UNVERIFIED until the integration check passes)"
+    },
+    {
+      "source": "§04 domain profile",
+      "statement": "work_tracking: GitHub Issues (UNVERIFIED until the integration check passes)"
+    },
+    {
+      "source": "§04 domain profile",
+      "statement": "ci: GitHub Actions (UNVERIFIED until the integration check passes)"
+    },
+    {
+      "source": "§04 domain profile",
+      "statement": "pr: GitHub pull request (UNVERIFIED until the integration check passes)"
+    },
+    {
+      "source": "Permintaan (status dengan freshness) dan ADR-0011; diverifikasi oleh laporan discovery T1",
+      "statement": "Doctor menyimpan hasil terakhir per check beserta waktu pemeriksaan yang dapat dibaca tanpa menjalankan ulang check."
+    },
+    {
+      "source": "Usulan perencana",
+      "statement": "Perintah remedy ditampilkan untuk OS host backend dengan tab untuk OS lain."
+    },
+    {
+      "source": "Inventaris repo (tidak memuat detail modul); temuan challenger MD1",
+      "statement": "Lokasi pendaftaran router backend dan rute/menu frontend dilaporkan T1. allowed_paths T11 diperbarui melalui versi rencana baru yang disetujui manusia."
+    }
+  ],
+  "development_baseline": {
+    "branching": "Branch kandidat per task dari branch integrasi yang disetujui (inventaris saat ini integration/wave3); delivery melalui PR GitHub oleh broker tepercaya; merge ke main hanya oleh manusia.",
+    "ci_cd_requirements": [
+      "Verifier tepercaya menjalankan suite penuh pada commit baseline sebelum T2 dimulai dan mencatat hasilnya sebagai bukti baseline (saat ini NOT_RUN)",
+      "CI GitHub Actions yang ada (.github/workflows/ci.yml) harus hijau; tidak ada perubahan workflow dalam slice ini",
+      "Tes baru backend (pytest) dan frontend (Vitest) masuk suite yang ada",
+      "Validasi kontrak: tes validasi skema IC1/IC2 ditambahkan T2 di tests/setup_wizard/ bila suite contract-schema-validation belum ada (dikonfirmasi T1)"
+    ],
+    "coding_standards": [
+      "Python: gaya dan linter sesuai konfigurasi pyproject.toml yang ada; type hints pada API publik",
+      "TypeScript: konfigurasi lint/tsconfig frontend yang ada; komponen mengikuti pola halaman di frontend/src/pages",
+      "Tes berdampingan: pytest di tests/, Vitest di file *.test.tsx",
+      "Pakai komponen yang ada (StatusBadge, RemedyPanel) bila memungkinkan",
+      "Tes konkurensi memakai sinkronisasi deterministik (event/semaphore), bukan sleep/timing"
+    ],
+    "dependency_management": "Tidak ada dependensi baru yang diharapkan. Bila diperlukan, wajib melalui lockfile (requirements.lock, frontend/package-lock.json) sesuai ADR-0093 dan disetujui manusia. Worker tidak mengubah lockfile dalam slice ini.",
+    "dev_environment": "Windows (PowerShell) dan macOS sesuai docs/SETUP_WINDOWS.md dan docs/SETUP_MACOS.md; tes dijalankan lokal oleh developer dan secara resmi oleh verifier tepercaya.",
+    "guidelines": [
+      "Ikuti AGENTS.md dan CLAUDE.md di repo",
+      "Jangan membuat ulang scaffold yang sudah ada; tambahkan modul baru secara aditif",
+      "Laporan discovery T1 dan kontrak (IC1-IC3) diterima manusia sebelum task konsumen dimulai",
+      "Patuhi daftar path terlindungi proyek self-build (§09) sebagaimana dilaporkan T1. Path terlindungi tidak diubah worker tanpa keputusan manusia.",
+      "Patuhi contracts/architecture/module-boundaries.json; modul setup_wizard hanya membaca Doctor/gate/audit melalui antarmuka publiknya",
+      "Teks UI Bahasa Indonesia; identifier kode dalam bahasa Inggris",
+      "Task frontend yang berbagi frontend/src/pages/setup/** berjalan berurutan (T3 -> T5 -> T6) dan menambah aksi melalui slot StepActions"
+    ],
+    "pr_review": "Setiap PR memerlukan hasil verifier tepercaya dan review manusia. Task berisiko R3 (T4 recheck/otorisasi, T12 prefill keputusan) memerlukan review keamanan tambahan.",
+    "secrets_handling": "Tidak ada secret di kode, fixture atau output; fixture memakai nilai sintetis yang jelas palsu; secret nyata hanya di OpenBao.",
+    "secure_coding": [
+      "Respons API dari allowlist field, tanpa meneruskan objek Doctor mentah",
+      "Tidak ada eksekusi shell/subprocess di modul setup_wizard",
+      "Validasi step_key terhadap katalog; tolak input lain",
+      "Tidak pernah log atau render nilai secret; gunakan nilai sintetis di tes",
+      "Tidak menggunakan dangerouslySetInnerHTML untuk perintah/remedy",
+      "Clipboard hanya menyalin teks perintah statis",
+      "Prefill formulir keputusan hanya dari allowlist IC3; tanpa auto-submit"
+    ]
+  },
+  "facts": [
+    {
+      "source": "project record",
+      "statement": "Project DLY AEOS (dly-aeos) id b0e17ee8-cb44-4c43-8a12-10b4d5c43efe"
+    },
+    {
+      "source": "human selection (session context)",
+      "statement": "Domain PERSONAL"
+    },
+    {
+      "source": "project record",
+      "statement": "Project kind EXISTING; data classification INTERNAL"
+    },
+    {
+      "source": "project record",
+      "statement": "This is the DLY AEOS platform self-build project (§09); protected paths apply"
+    },
+    {
+      "source": "repository_references",
+      "statement": "Repository GITHUB:fadhlillah-dli/dly-aeos (verification UNVERIFIED)"
+    },
+    {
+      "source": "project_integrations",
+      "statement": "Integration github-issues:issues configured (last verified never)"
+    },
+    {
+      "source": "project_integrations",
+      "statement": "Integration google-drive:docs configured (last verified never)"
+    },
+    {
+      "source": "repository inventory",
+      "statement": "Inventaris pada commit 959bed284ac492b49c74c4dea18613eed2727b70 (branch integration/wave3), 935 file, tes belum dijalankan (NOT_RUN)"
+    },
+    {
+      "source": "integration capabilities",
+      "statement": "Doctor check adapter.github_token dan adapter.google_oauth ada dengan remedy 'aeos secrets set personal/github' dan 'aeos publish google-connect'"
+    },
+    {
+      "source": "repository inventory",
+      "statement": "Komponen frontend doctor/RemedyPanel dan StatusBadge serta halaman readiness, overview dan decisions sudah ada (berdasarkan file tes)"
+    }
+  ],
+  "feature_governance": [
+    {
+      "feature_key": "F1",
+      "needs_rfc": true,
+      "needs_security_assessment": true,
+      "needs_tdd": true,
+      "owner": "UNKNOWN",
+      "personal_data": "UNKNOWN",
+      "privacy": {
+        "data_types": [
+          "Status readiness",
+          "Remedy perintah",
+          "Kemungkinan jalur lokal berisi nama pengguna OS (UNKNOWN)"
+        ],
+        "mitigations": [
+          "Allowlist field",
+          "Template remedy tanpa jalur pengguna",
+          "Redaksi yang ada dipertahankan",
+          "Tes pola jalur home di T2 dan T8 (TP2-S8)"
+        ],
+        "necessity_proportionality": "Hanya field allowlist yang diperlukan untuk memandu setup; detail mentah tidak diteruskan.",
+        "processing_description": "Membaca dan menampilkan status/remedy Doctor. Apakah detail/remedy memuat jalur lokal berisi nama pengguna OS diperiksa T1 (butir 9), yang juga merekomendasikan YES/NO untuk keputusan manusia.",
+        "risks_to_data_subjects": [
+          "Paparan nama pengguna OS dalam jalur kepada VIEWER"
+        ]
+      },
+      "security_assessment": {
+        "mitigations": [
+          "Tes pola secret dan jalur home",
+          "Validasi katalog terhadap registri check",
+          "Freshness eksplisit dengan ambang terdokumentasi",
+          "Review keamanan T8"
+        ],
+        "requirements": [
+          "Respons allowlist",
+          "Tidak ada secret atau jalur home dalam respons/DOM",
+          "VIEWER read-only",
+          "Rute di belakang otorisasi yang ada"
+        ],
+        "risks": [
+          "RISK-1",
+          "RISK-3",
+          "RISK-6"
+        ],
+        "scope": "GET /api/setup/steps, registrasi rute (T11) dan halaman Penyiapan awal"
+      },
+      "threat_model": {
+        "actors": [
+          "Pemilik",
+          "VIEWER"
+        ],
+        "assets": [
+          "Status readiness",
+          "Secret (tidak langsung)",
+          "Nama pengguna OS dalam jalur"
+        ],
+        "entry_points": [
+          "GET /api/setup/steps"
+        ],
+        "threats": [
+          {
+            "key": "F1-TH-1",
+            "mitigation": "Allowlist dan tes kebocoran.",
+            "scenario": "Remedy/detail Doctor memuat fragmen secret yang dirender.",
+            "threat": "Information disclosure"
+          },
+          {
+            "key": "F1-TH-2",
+            "mitigation": "Pemeriksaan T1, template tanpa jalur pengguna, tes pola jalur home.",
+            "scenario": "Remedy memuat jalur home berisi nama pengguna OS yang terlihat VIEWER.",
+            "threat": "Information disclosure (data pribadi)"
+          }
+        ],
+        "trust_boundaries": [
+          "Browser <-> API"
+        ]
+      }
+    },
+    {
+      "feature_key": "F2",
+      "needs_rfc": false,
+      "needs_security_assessment": true,
+      "needs_tdd": true,
+      "owner": "UNKNOWN",
+      "personal_data": "NO",
+      "privacy": {
+        "data_types": [],
+        "mitigations": [],
+        "necessity_proportionality": "Tidak berlaku.",
+        "processing_description": "Tidak memproses data pribadi; event audit mencatat identitas aktor sesuai mekanisme audit yang ada.",
+        "risks_to_data_subjects": []
+      },
+      "security_assessment": {
+        "mitigations": [
+          "Tes negatif 401/403/404/409/429/CSRF",
+          "Tes 409 deterministik",
+          "Review keamanan T4 dan T8"
+        ],
+        "requirements": [
+          "Gate peran server-side dengan peran persis dari IC1",
+          "CSRF",
+          "Validasi step_key",
+          "Lock dan batas laju (konfigurasi)",
+          "Audit"
+        ],
+        "risks": [
+          "RISK-2",
+          "RISK-4",
+          "RISK-7"
+        ],
+        "scope": "POST /api/setup/steps/{step_key}/recheck"
+      },
+      "threat_model": {
+        "actors": [
+          "Pemilik",
+          "VIEWER",
+          "Situs pihak ketiga (CSRF)"
+        ],
+        "assets": [
+          "Eksekusi check",
+          "Kuota eksternal"
+        ],
+        "entry_points": [
+          "POST recheck"
+        ],
+        "threats": [
+          {
+            "key": "F2-TH-1",
+            "mitigation": "Gate peran + tes 403.",
+            "scenario": "VIEWER memicu recheck.",
+            "threat": "Elevation of privilege"
+          },
+          {
+            "key": "F2-TH-2",
+            "mitigation": "Proteksi CSRF yang ada + tes F2-AC6.",
+            "scenario": "Situs lain memicu recheck.",
+            "threat": "CSRF"
+          },
+          {
+            "key": "F2-TH-3",
+            "mitigation": "check_ids hanya dari katalog.",
+            "scenario": "step_key dipakai memilih check arbitrer.",
+            "threat": "Injection"
+          }
+        ],
+        "trust_boundaries": [
+          "Browser <-> API",
+          "API <-> Doctor runner"
+        ]
+      }
+    },
+    {
+      "feature_key": "F3",
+      "needs_rfc": true,
+      "needs_security_assessment": true,
+      "needs_tdd": false,
+      "owner": "UNKNOWN",
+      "personal_data": "NO",
+      "privacy": {
+        "data_types": [],
+        "mitigations": [],
+        "necessity_proportionality": "Tidak berlaku.",
+        "processing_description": "Tidak memproses data pribadi.",
+        "risks_to_data_subjects": []
+      },
+      "security_assessment": {
+        "mitigations": [
+          "Tes no-POST",
+          "Tes parameter tidak dikenal",
+          "Review keamanan T12 dan T8"
+        ],
+        "requirements": [
+          "Tanpa auto-submit",
+          "Allowlist parameter",
+          "Binding keputusan ADR-0031 tidak berubah",
+          "RFC-2 disetujui manusia sebelum T12"
+        ],
+        "risks": [
+          "RISK-5"
+        ],
+        "scope": "Tautan prefill (T6) dan perubahan pembacaan prefill pada formulir keputusan (T12)"
+      },
+      "threat_model": {
+        "actors": [
+          "Pemilik",
+          "Pembuat tautan tidak tepercaya"
+        ],
+        "assets": [
+          "Integritas antrean keputusan"
+        ],
+        "entry_points": [
+          "Query parameter prefill"
+        ],
+        "threats": [
+          {
+            "key": "F3-TH-1",
+            "mitigation": "Tinjauan manual, allowlist, tanpa auto-submit.",
+            "scenario": "Tautan prefill berisi target berbahaya untuk write enablement.",
+            "threat": "Tampering / social engineering"
+          }
+        ],
+        "trust_boundaries": [
+          "URL/query parameter <-> formulir keputusan"
+        ]
+      }
+    },
+    {
+      "feature_key": "F4",
+      "needs_rfc": false,
+      "needs_security_assessment": false,
+      "needs_tdd": false,
+      "owner": "UNKNOWN",
+      "personal_data": "NO",
+      "privacy": {
+        "data_types": [],
+        "mitigations": [],
+        "necessity_proportionality": "Tidak berlaku.",
+        "processing_description": "Tidak memproses data pribadi.",
+        "risks_to_data_subjects": []
+      },
+      "security_assessment": {
+        "mitigations": [],
+        "requirements": [],
+        "risks": [],
+        "scope": "Tidak diperlukan (hanya tampilan baca dari IC1)."
+      },
+      "threat_model": {
+        "actors": [],
+        "assets": [],
+        "entry_points": [],
+        "threats": [],
+        "trust_boundaries": []
+      }
+    }
+  ],
+  "features": [
+    {
+      "acceptance": [
+        "F1-AC1",
+        "F1-AC2",
+        "F1-AC3",
+        "F1-AC4",
+        "F1-AC5",
+        "F1-AC6",
+        "F1-AC7"
+      ],
+      "depends_on": [],
+      "key": "F1",
+      "milestone": "M1",
+      "priority": "P0",
+      "requirement": "Menampilkan langkah bootstrap §07 berurutan dengan status Doctor, kesegaran, capability yang dibuka dan perintah per OS; dapat dicapai lewat rute/menu; read-only untuk VIEWER; tanpa secret.",
+      "title": "Halaman Penyiapan awal (read-only) berbasis Doctor"
+    },
+    {
+      "acceptance": [
+        "F2-AC1",
+        "F2-AC2",
+        "F2-AC3",
+        "F2-AC4",
+        "F2-AC5",
+        "F2-AC6"
+      ],
+      "depends_on": [
+        "F1"
+      ],
+      "key": "F2",
+      "milestone": "M2",
+      "priority": "P0",
+      "requirement": "Menjalankan ulang hanya check milik satu langkah melalui runner Doctor, terbatas pada peran berwenang, dengan CSRF, audit, lock dan batas laju.",
+      "title": "Periksa ulang per langkah"
+    },
+    {
+      "acceptance": [
+        "F3-AC1",
+        "F3-AC2",
+        "F3-AC3",
+        "F3-AC4"
+      ],
+      "depends_on": [
+        "F1"
+      ],
+      "key": "F3",
+      "milestone": "M2",
+      "priority": "P1",
+      "requirement": "Tautan ke formulir keputusan yang ada dengan target terisi tanpa mencatat keputusan; OFFICE tampil BLOCKED (konstanta pada slice ini).",
+      "title": "Langkah keputusan manusia dan penanda OFFICE"
+    },
+    {
+      "acceptance": [
+        "F4-AC1",
+        "F4-AC2",
+        "F4-AC3"
+      ],
+      "depends_on": [
+        "F1"
+      ],
+      "key": "F4",
+      "milestone": "M3",
+      "priority": "P1",
+      "requirement": "Banner di Ringkasan selama ada gate CAN_* PERSONAL yang BLOCKED atau UNKNOWN.",
+      "title": "Titik masuk dari Ringkasan"
+    }
+  ],
+  "interface_contracts": [
+    {
+      "compatibility": "Versi v1; perubahan hanya aditif; penghapusan field memerlukan versi baru. Jalur positif office di masa depan = penambahan aditif.",
+      "consumer_task_keys": [
+        "T2",
+        "T3",
+        "T4",
+        "T5",
+        "T6",
+        "T7",
+        "T8",
+        "T9",
+        "T11"
+      ],
+      "contract_paths": [
+        "contracts/api/setup-wizard.json",
+        "contracts/api/routes.json"
+      ],
+      "definition": "GET /api/setup/steps -> {catalog_version, host_os, freshness_threshold_seconds, progress, steps[], entry_point{show, blocked_gates[]}, office{status: BLOCKED konstanta, reason}} (VIEWER+). POST /api/setup/steps/{step_key}/recheck -> {step} (peran persis sesuai enumerasi terverifikasi T1; 401/403/404/409/429; CSRF wajib). Field respons allowlist; tidak ada field nilai secret.",
+      "feature_keys": [
+        "F1",
+        "F2",
+        "F3",
+        "F4"
+      ],
+      "key": "IC1",
+      "kind": "api",
+      "provider_task_key": "T1",
+      "title": "API Penyiapan awal"
+    },
+    {
+      "compatibility": "catalog_version semver; penambahan langkah = minor; perubahan urutan/penghapusan = major.",
+      "consumer_task_keys": [
+        "T2",
+        "T4",
+        "T6"
+      ],
+      "contract_paths": [
+        "contracts/setup/setup-steps.schema.json",
+        "contracts/setup/setup-steps.v1.json"
+      ],
+      "definition": "Step {step_key, order, title, why, unlocks[], check_ids[], kind, remedy{windows_powershell, macos}, decision_link?}; katalog v1 berisi 10 langkah §07; langkah tanpa check ditandai eksplisit.",
+      "feature_keys": [
+        "F1",
+        "F3",
+        "F4"
+      ],
+      "key": "IC2",
+      "kind": "schema",
+      "provider_task_key": "T1",
+      "title": "Skema dan katalog langkah §07"
+    },
+    {
+      "compatibility": "Parameter tidak dikenal diabaikan; penambahan parameter aditif.",
+      "consumer_task_keys": [
+        "T6",
+        "T8",
+        "T12"
+      ],
+      "contract_paths": [
+        "contracts/ui/decision-prefill.json"
+      ],
+      "definition": "Per jenis keputusan (worker route activation, process-sandbox exception, write enablement): nama form, daftar query parameter allowlist dan bentuk target; tanpa auto-submit; tanpa nilai secret.",
+      "feature_keys": [
+        "F3"
+      ],
+      "key": "IC3",
+      "kind": "shared_interface",
+      "provider_task_key": "T1",
+      "title": "Bentuk prefill formulir keputusan"
+    }
+  ],
+  "material_questions": [
+    {
+      "blocking": false,
+      "category": "security",
+      "question": "Peran mana yang boleh menjalankan 'Periksa ulang'? T1 melaporkan enumerasi peran yang ada; apakah hanya pemilik/admin atau juga peran operator lain bila ada?"
+    },
+    {
+      "blocking": true,
+      "category": "scope",
+      "question": "Jika runner Doctor tidak mendukung eksekusi subset check, fallback mana yang dipilih? (a) task terpisah R3 untuk perluasan runner di path terlindungi; (b) F2 diturunkan menjadi 'jalankan Doctor penuh lalu tampilkan hasil langkah'; (c) F2 ditunda ke slice lain."
+    },
+    {
+      "blocking": true,
+      "category": "security",
+      "question": "Apakah perubahan pembacaan prefill pada formulir keputusan (RFC-2, T12) dapat diterima, atau langkah keputusan cukup berupa tautan tanpa prefill?"
+    },
+    {
+      "blocking": false,
+      "category": "scope",
+      "question": "Untuk langkah §07 yang belum punya Doctor check, apakah cukup ditampilkan UNKNOWN? Bila tabel T1 menunjukkan lebih dari 3 langkah tanpa check (ambang usulan), apakah slice dilanjutkan atau check baru dijadwalkan dahulu di slice terpisah?"
+    },
+    {
+      "blocking": false,
+      "category": "architecture",
+      "question": "Bila Doctor tidak memiliki aturan kesegaran, berapa ambang freshness_threshold_seconds, default timeout recheck dan batas laju yang disetujui (diusulkan di ADR oleh T1)?"
+    }
+  ],
+  "milestone_governance": [
+    {
+      "acceptance": [
+        "Bukti run baseline oleh verifier tepercaya tercatat",
+        "Laporan discovery T1 dan IC1-IC3 diterima manusia",
+        "Revisi allowed_paths T11 disetujui manusia",
+        "F1-AC1, F1-AC3..AC6 dibuktikan tes unit/kontrak/komponen (T2, T3) dan registrasi rute (T11) lulus di verifier tepercaya",
+        "Acceptance E2E F1 (F1-AC1, F1-AC2) ditunda ke M3 melalui T9"
+      ],
+      "depends_on": [],
+      "milestone_key": "M1",
+      "owner": "UNKNOWN",
+      "priority": "P0"
+    },
+    {
+      "acceptance": [
+        "Pertanyaan material subset run dijawab manusia (blocking)",
+        "RFC-2 disetujui manusia sebelum T12",
+        "F2-AC1..AC6 dan F3-AC1..AC4 lulus di verifier tepercaya"
+      ],
+      "depends_on": [
+        "M1"
+      ],
+      "milestone_key": "M2",
+      "owner": "UNKNOWN",
+      "priority": "P0"
+    },
+    {
+      "acceptance": [
+        "F4-AC1..AC3, F1-AC7, TP2 dan acceptance E2E T9 lulus di verifier tepercaya",
+        "Laporan review keamanan dan dokumentasi tersedia"
+      ],
+      "depends_on": [
+        "M2"
+      ],
+      "milestone_key": "M3",
+      "owner": "UNKNOWN",
+      "priority": "P1"
+    }
+  ],
+  "milestones": [
+    {
+      "exit_evidence": "Bukti berikut harus tersedia: (1) bukti run baseline oleh verifier tepercaya; (2) laporan discovery T1 dan kontrak IC1-IC3 diterima manusia; (3) revisi allowed_paths T11 disetujui; (4) tes unit/kontrak/komponen F1 (T2, T3, T11) lulus di verifier tepercaya; (5) PR di-review. Bukti acceptance E2E F1 dipenuhi di M3 (T9).",
+      "key": "M1",
+      "order": 1,
+      "title": "Discovery, kontrak dan halaman baca Penyiapan awal"
+    },
+    {
+      "exit_evidence": "Pertanyaan subset run dijawab manusia dan RFC-2 disetujui. Tes F2 dan F3 (termasuk negatif 401/403/404/409/429/CSRF) lulus di verifier tepercaya.",
+      "key": "M2",
+      "order": 2,
+      "title": "Periksa ulang dan tautan keputusan"
+    },
+    {
+      "exit_evidence": "Tes F4, TP2 dan acceptance E2E T9 lulus di verifier tepercaya; laporan review keamanan dan dokumentasi tersedia; rencana rilis siap untuk keputusan manusia.",
+      "key": "M3",
+      "order": 3,
+      "title": "Titik masuk Ringkasan, pengerasan dan dokumentasi"
+    }
+  ],
+  "operations": {
+    "alerting": [
+      "Usulan, tidak diimplementasikan di slice ini: alert lokal bila rasio 5xx endpoint setup > 5% dalam 1 jam (sesuai mekanisme ADR-0092)"
+    ],
+    "backup": {
+      "frequency": "Mengikuti kebijakan backup yang ada (UNKNOWN)",
+      "restore_procedure": "docs/runbooks/backup-restore.md; restore test belum dilakukan untuk slice ini.",
+      "retention": "Mengikuti kebijakan backup yang ada (UNKNOWN)",
+      "scope": "Tidak ada data baru; katalog di git, hasil Doctor dan audit tercakup backup yang ada (ADR-0090)."
+    },
+    "criticality": "UNKNOWN",
+    "dependencies": [
+      "Readiness Doctor",
+      "Capability gates",
+      "OpenBao (melalui check)",
+      "Sistem audit/event yang ada",
+      "Formulir keputusan yang ada"
+    ],
+    "logging": "Log terstruktur untuk request setup (step_key, status, durasi, aktor) tanpa isi remedy atau detail check mentah; event audit untuk recheck.",
+    "maintenance": [
+      "Perbarui katalog langkah saat §07 atau registri Doctor check berubah (via PR)",
+      "Tinjau pemetaan remedy per OS saat perintah CLI berubah",
+      "Tinjau nilai konfigurasi timeout/batas laju/ambang kesegaran melalui ADR"
+    ],
+    "monitoring": [
+      "Usulan (tidak dibangun di slice ini): hitungan dan durasi recheck per step_key",
+      "Usulan (tidak dibangun di slice ini): rasio 4xx/5xx endpoint setup",
+      "Usulan (tidak dibangun di slice ini): jumlah langkah STALE/UNKNOWN"
+    ],
+    "overview": "Fitur berjalan di dalam proses Control Center yang ada; tidak ada layanan baru. Dampak operasional utama adalah eksekusi check melalui recheck. Monitoring, alert dan SLO di bawah adalah usulan dan tidak dibangun di slice ini.",
+    "ownership": "UNKNOWN",
+    "runbooks": [
+      {
+        "key": "RB-SETUP-1",
+        "purpose": "Langkah diagnosis: bandingkan respons API dengan tabel Doctor, cek versi katalog, ambang kesegaran dan freshness, lalu jalankan Doctor penuh.",
+        "title": "Penyiapan awal menampilkan status tidak sesuai Doctor"
+      },
+      {
+        "key": "RB-SETUP-2",
+        "purpose": "Identifikasi check penyebab, cek konektivitas/OpenBao (rujuk openbao-unseal-recovery), lepaskan lock dengan restart aman (rujuk restart-recovery).",
+        "title": "Recheck macet atau timeout berulang"
+      }
+    ],
+    "sli_slo_proposals": [
+      {
+        "indicator": "Ketersediaan GET /api/setup/steps (rasio respons non-5xx)",
+        "objective": "99% per 7 hari pada instalasi lokal (usulan; pengukuran belum dibangun)",
+        "rationale": "Halaman ini adalah jalur utama bootstrap; target sejalan dengan pendekatan ADR-0092."
+      },
+      {
+        "indicator": "Latensi p95 GET /api/setup/steps",
+        "objective": "< 300 ms",
+        "rationale": "Endpoint hanya membaca hasil tersimpan; diuji di TP1-S9."
+      },
+      {
+        "indicator": "Rasio recheck yang berakhir timeout",
+        "objective": "< 5% per 7 hari (usulan; pengukuran belum dibangun)",
+        "rationale": "Mendeteksi check yang bermasalah atau ketergantungan eksternal."
+      }
+    ]
+  },
+  "overview": {
+    "data_overview": "Fitur hanya membaca hasil Doctor (status, check_id, checked_at, remedy) dan status capability gate; data berklasifikasi INTERNAL. Tidak ada tabel baru (katalog langkah berupa file berversi di repo). Tidak ada nilai secret yang dibaca atau ditampilkan; remedy yang mengandung penanda [REDACTED] tetap disamarkan. Apakah remedy/detail memuat jalur home (nama pengguna OS) diverifikasi T1.",
+    "objectives": [
+      "Satu langkah berurutan per langkah bootstrap §07. Setiap langkah menampilkan capability yang dibuka, status Doctor + waktu pemeriksaan + kesegaran, dan perintah untuk Windows PowerShell / macOS.",
+      "Progres dihitung hanya dari hasil Doctor; STALE/UNKNOWN ditampilkan apa adanya.",
+      "Periksa ulang per langkah yang hanya menjalankan check milik langkah tersebut, terbatas pada peran yang berwenang.",
+      "Langkah keputusan manusia hanya menautkan ke formulir keputusan yang ada dengan target sudah terisi; wizard tidak pernah mencatat keputusan atau menjalankan perintah.",
+      "Titik masuk dari halaman Ringkasan selama ada gate CAN_* PERSONAL yang BLOCKED.",
+      "Tidak ada nilai secret, token atau kata sandi yang dirender atau dikirim halaman."
+    ],
+    "overview": "Clone baru sudah bisa mencapai dashboard, tetapi pemilik masih harus membaca tabel Readiness Doctor dan README untuk menentukan urutan langkah manual §07. Slice ini menambahkan halaman 'Penyiapan awal' yang menyusun Doctor check yang ada menjadi langkah berurutan. Halaman menampilkan status beserta kesegarannya, perintah yang bisa disalin per OS, tombol 'Periksa ulang' per langkah, dan tautan ke formulir keputusan yang sudah ada.",
+    "roadmap": [
+      "M1 — Discovery, kontrak & halaman baca: laporan discovery, katalog langkah §07, API status, halaman Penyiapan awal read-only dan registrasi rute/menu (F1)",
+      "M2 — Aksi terkendali: Periksa ulang per langkah (F2), prefill formulir keputusan dan tautan keputusan + penanda OFFICE (F3)",
+      "M3 — Titik masuk & pengerasan: banner Ringkasan (F4), tes keamanan/acceptance E2E, dokumentasi, rencana rilis"
+    ],
+    "scope_in": [
+      "Discovery terverifikasi atas asumsi kritis (T1) sebelum implementasi",
+      "Katalog langkah §07 statis (berversi) yang memetakan langkah ke Doctor check, capability gate dan remedy yang sudah ada",
+      "API baca status penyiapan dan API periksa ulang per langkah",
+      "Halaman frontend 'Penyiapan awal' (read-only untuk VIEWER) beserta registrasi rute/menu",
+      "Deep-link ke formulir keputusan (aktivasi rute worker, pengecualian process-sandbox, pengaktifan write) dengan target terisi",
+      "Banner/titik masuk di halaman Ringkasan",
+      "Penanda OFFICE tetap BLOCKED (konstanta pada slice ini)",
+      "Tes acceptance, negatif dan keamanan; pembaruan dokumentasi setup"
+    ],
+    "scope_out": [
+      "Auto-install atau eksekusi perintah apa pun oleh wizard",
+      "Input secret/token/kata sandi di browser",
+      "Langkah setup OFFICE selain menampilkan status BLOCKED",
+      "Doctor check baru atau perubahan semantik capability gate",
+      "Perubahan runner Doctor (kecuali melalui keputusan manusia atas pertanyaan material subset run)",
+      "Pencatatan keputusan oleh wizard",
+      "State progres milik wizard sendiri (persisten atau lokal)",
+      "Implementasi metrik/alert baru (hanya usulan operasional)"
+    ],
+    "stakeholders": [
+      "Pemilik/owner DLY AEOS (manusia tunggal yang menyetujui rencana, merge dan rilis; nama tidak disebutkan)",
+      "Pengguna peran VIEWER Control Center (disebut dalam permintaan)"
+    ],
+    "system_inventory": [
+      "backend/aeos (Python, 579 file Python di repo) — Readiness Doctor, capability gates, decision endpoints (lokasi modul persis UNKNOWN; dikonfirmasi oleh laporan discovery T1)",
+      "frontend/src/pages/readiness (Doctor UI, RemedyPanel)",
+      "frontend/src/pages/overview (Ringkasan)",
+      "frontend/src/pages/decisions (formulir keputusan)",
+      "contracts/api/routes.json (kontrak rute API)",
+      "contracts/architecture/module-boundaries.json",
+      "docs/SETUP_WINDOWS.md, docs/SETUP_MACOS.md",
+      "tests/acceptance/test_bootstrap_readiness.py, tests/acceptance/test_auth_boundary.py"
+    ],
+    "team_ownership": "UNKNOWN (tidak ada pemilik tim yang disebutkan dalam input).",
+    "vision": "Pemilik dapat menyelesaikan bootstrap §07 dari clone kosong sampai gate CAN_* PERSONAL terbuka tanpa menebak urutan. Status selalu bersumber dari Doctor, dan setiap keputusan tetap dicatat manusia lewat antrean keputusan yang ada."
+  },
+  "product_home": {
+    "active_features": [
+      "F1",
+      "F2",
+      "F3",
+      "F4"
+    ],
+    "criticality": "UNKNOWN",
+    "current_development": "Slice 1: first-run setup wizard (Penyiapan awal). Status: proposal rencana versi 2, belum disetujui. Langkah pertama: T1 (discovery + kontrak) dengan checkpoint manusia.",
+    "data_classification": "INTERNAL",
+    "engineering_lead": "UNKNOWN",
+    "governance_links": [
+      "docs/decisions/ADR-0011-readiness-doctor-capability-gates.md",
+      "docs/decisions/ADR-0031-decision-binding-and-external-write-interlock.md",
+      "docs/decisions/ADR-0032-single-human-decision-queue.md",
+      "docs/decisions/ADR-0004-first-admin-bootstrap-hardening.md",
+      "docs/decisions/ADR-0051-worker-sandbox-requirement.md",
+      "docs/decisions/ADR-0090-backup-restore-test-readiness.md",
+      "contracts/api/routes.json",
+      "contracts/security/asvs-selection.yaml"
+    ],
+    "issue_tracker": "GitHub Issues fadhlillah-dli/dly-aeos (CONFIGURED, belum pernah diverifikasi; kredensial UNKNOWN)",
+    "name": "DLY AEOS",
+    "open_risks": [
+      "RISK-1",
+      "RISK-2",
+      "RISK-3",
+      "RISK-4",
+      "RISK-5",
+      "RISK-6",
+      "RISK-7"
+    ],
+    "product_owner": "UNKNOWN",
+    "quick_links": [
+      "README.md",
+      "docs/architecture/DLY_AEOS_Master_Architecture_Final.md",
+      "docs/SETUP_WINDOWS.md",
+      "docs/SETUP_MACOS.md",
+      "docs/OPERATIONS.md",
+      "docs/decisions/ADR-0011-readiness-doctor-capability-gates.md",
+      "docs/decisions/ADR-0032-single-human-decision-queue.md",
+      "docs/runbooks/README.md"
+    ],
+    "repository": "GITHUB:fadhlillah-dli/dly-aeos (verifikasi UNVERIFIED; branch inventaris integration/wave3 @ 959bed284ac492b49c74c4dea18613eed2727b70)",
+    "sdlc_lifecycle": "Proposal rencana -> persetujuan manusia -> run baseline oleh verifier tepercaya -> discovery + kontrak (T1) -> checkpoint manusia (laporan discovery, IC1-IC3, revisi allowed_paths T11) -> implementasi per task di branch kandidat -> verifier tepercaya -> PR GitHub -> merge oleh manusia -> rilis oleh manusia",
+    "service": "DLY AEOS Control Center (backend Python + frontend TypeScript)",
+    "stack": [
+      "Python (backend/aeos, pytest)",
+      "Alembic migrations (backend/aeos/migrations)",
+      "TypeScript frontend (frontend/, Vitest, @testing-library/react)",
+      "OpenBao (secret provider, ADR-0042/0043)",
+      "GitHub Actions CI (.github/workflows/ci.yml)",
+      "Sandbox container (sandbox/Dockerfile)"
+    ],
+    "summary": "Platform DLY AEOS (self-build §09). Slice 1 upgrade: halaman 'Penyiapan awal' di Control Center yang memandu pemilik melalui urutan bootstrap §07 hanya dengan Doctor check, capability gate dan endpoint keputusan yang sudah ada.",
+    "tech_lead": "UNKNOWN"
+  },
+  "release": {
+    "release_plans": [
+      {
+        "breaking_changes": [],
+        "deployment": "Promosi rilis controller sesuai ADR-0091 dan runbook controller-upgrade-rollback; diputuskan dan dijalankan oleh manusia.",
+        "enhancements": [
+          "Tautan dari Ringkasan ke Penyiapan awal",
+          "Dokumentasi setup diperbarui menunjuk ke wizard"
+        ],
+        "features": [
+          "F1",
+          "F2",
+          "F3",
+          "F4"
+        ],
+        "fixes": [],
+        "key": "REL-1",
+        "known_issues": [
+          "Langkah tanpa Doctor check yang ada akan tampil UNKNOWN (daftar final ditentukan T1)",
+          "Ambang kesegaran mengikuti Doctor atau nilai ADR yang disetujui; nilainya UNKNOWN pada saat perencanaan",
+          "OFFICE selalu tampil BLOCKED pada slice ini (tanpa jalur positif)",
+          "Bentuk F2 bergantung pada keputusan manusia atas dukungan subset runner"
+        ],
+        "migration": "Tidak ada migrasi data/skema.",
+        "overview": "Rilis aditif yang menambah halaman Penyiapan awal, endpoint setup, registrasi rute/menu, pembacaan prefill formulir keputusan dan banner Ringkasan.",
+        "post_release_validation": [
+          "Buka Penyiapan awal pada instalasi pemilik dan bandingkan status dengan tabel Doctor",
+          "Uji recheck pada langkah lokal (akun admin) dan cek event audit; hindari langkah adapter yang memerlukan jaringan/kredensial",
+          "Login VIEWER dan pastikan tidak ada tombol aksi"
+        ],
+        "production_readiness": [
+          "Bukti baseline dan verifier tepercaya lulus untuk commit rilis",
+          "RFC-2 disetujui manusia sebelum T12",
+          "Review keamanan T8 terdokumentasi",
+          "Registrasi rute/menu (T11) terverifikasi",
+          "Dokumentasi setup diperbarui (T10)",
+          "Persetujuan merge dan rilis oleh manusia"
+        ],
+        "related_requirements": [
+          "F1-AC1..AC7",
+          "F2-AC1..AC6",
+          "F3-AC1..AC4",
+          "F4-AC1..AC3"
+        ],
+        "release_notes": {
+          "highlights": [
+            "Langkah berurutan dengan status, kesegaran dan perintah per OS",
+            "Periksa ulang per langkah",
+            "Tautan ke formulir keputusan dengan target terisi (tanpa mencatat keputusan)",
+            "Banner di Ringkasan selama gate PERSONAL BLOCKED"
+          ],
+          "known_limitations": [
+            "Tidak ada auto-install",
+            "Tidak ada input secret di browser",
+            "OFFICE hanya ditampilkan BLOCKED",
+            "Tidak ada metrik/alert baru dalam rilis ini"
+          ],
+          "summary": "Menambahkan halaman 'Penyiapan awal' yang memandu urutan bootstrap §07 berdasarkan hasil Doctor.",
+          "upgrade_notes": "Tidak ada migrasi database. Setelah upgrade jalankan Doctor sekali agar status terkini tampil."
+        },
+        "risks": [
+          "RISK-1",
+          "RISK-4",
+          "RISK-5",
+          "RISK-7"
+        ],
+        "rollback": "Rollback ke rilis controller sebelumnya sesuai docs/runbooks/controller-upgrade-rollback.md; tidak ada data baru yang perlu dibersihkan.",
+        "scope": "F1-F4",
+        "title": "Slice 1: Penyiapan awal",
+        "version": "UNKNOWN (usulan: minor bump dari versi controller saat ini)"
+      }
+    ]
+  },
+  "requirements": [
+    {
+      "acceptance_criteria": [
+        "F1-AC1: Dengan data dir kosong, setiap langkah tampil MISSING (atau UNKNOWN 'tidak ada check' untuk langkah tanpa check) beserta remedy-nya dalam urutan §07.",
+        "F1-AC2: Setelah 'aeos admin create' dan Doctor dijalankan ulang, langkah 1 tampil VERIFIED dengan waktu pemeriksaan.",
+        "F1-AC3: Hasil Doctor yang melewati ambang kesegaran yang berlaku (freshness_threshold_seconds) tampil STALE dan tidak dihitung dalam progres.",
+        "F1-AC4: VIEWER dapat membuka halaman dan tidak melihat tombol aksi.",
+        "F1-AC5: Tidak ada nilai secret, token, kata sandi atau jalur home sintetis dalam respons API maupun DOM.",
+        "F1-AC6: Setiap status memiliki label teks dan tombol salin memiliki nama aksesibel.",
+        "F1-AC7: p95 GET /api/setup/steps < 300 ms pada 50 permintaan lokal dengan fixture, tanpa menjalankan check."
+      ],
+      "assumptions": [
+        "Doctor menyimpan hasil terakhir per check beserta waktu pemeriksaan yang dapat dibaca tanpa menjalankan ulang check (diverifikasi T1).",
+        "Aturan kesegaran Doctor mungkin ada atau tidak ada; bila tidak ada, ambang ditetapkan eksplisit di ADR dan disetujui manusia (diverifikasi T1).",
+        "Backend dapat mengetahui OS host tempat AEOS berjalan."
+      ],
+      "background": "Permintaan menyatakan setiap langkah §07 sudah memiliki Doctor check dan remedy yang dapat disalin (ADR-0011). Input baru memperlihatkan dua check (adapter.github_token, adapter.google_oauth); cakupan sisanya diverifikasi T1. Yang belum ada adalah penyusunan berurutan dan penjelasan apa yang dibuka setiap langkah.",
+      "business_requirements": [
+        "Pemilik dapat mengetahui langkah berikutnya tanpa membaca README",
+        "Status tidak boleh mengklaim lebih dari yang dibuktikan Doctor"
+      ],
+      "dependencies": [
+        "Readiness Doctor dan registri check yang ada (ADR-0011)",
+        "Capability gates CAN_*",
+        "Model peran/otorisasi Control Center yang ada",
+        "Kontrak IC1 dan IC2",
+        "Laporan discovery T1"
+      ],
+      "feature_key": "F1",
+      "functional_requirements": [
+        "FR1: Katalog langkah berversi (step_key, order, judul, alasan, unlocks[CAN_*], check_ids[], kind COMMAND|DECISION, remedy per OS) disimpan sebagai data di repo dan divalidasi terhadap skema kontrak.",
+        "FR2: GET /api/setup/steps mengembalikan langkah terurut dengan status agregat per langkah, status per check, checked_at, freshness (FRESH|STALE|UNKNOWN), freshness_threshold_seconds dan progress {verified,total}.",
+        "FR3: Status langkah = VERIFIED hanya jika semua check langkah VERIFIED dan FRESH. Check yang belum pernah dijalankan -> MISSING/UNKNOWN sesuai status Doctor. STALE ditampilkan sebagai STALE dan tidak dihitung dalam progres. Ambang kesegaran memakai aturan Doctor bila ada (dikonfirmasi T1); bila tidak ada, memakai nilai eksplisit yang ditetapkan di ADR slice ini dan disetujui manusia. Nilai yang dipakai selalu dikembalikan di respons.",
+        "FR4: Langkah yang tidak memiliki Doctor check yang ada ditampilkan UNKNOWN dengan keterangan 'tidak ada check', bukan VERIFIED.",
+        "FR5: Perintah remedy ditampilkan untuk OS host (Windows PowerShell atau macOS) dengan tab untuk OS lain; tombol salin hanya menyalin teks perintah.",
+        "FR6: Halaman tersedia untuk VIEWER; elemen aksi tidak dirender untuk VIEWER.",
+        "FR7: Respons API dibangun dari daftar field yang diizinkan (allowlist); detail mentah Doctor tidak diteruskan.",
+        "FR8: Halaman dapat dicapai melalui rute dan menu Control Center (registrasi oleh T11)."
+      ],
+      "goals": [
+        "Menyajikan 10 langkah §07 dalam urutan: akun admin, cek login Claude Code, OpenBao install/init/unseal, kredensial worker, OpenCode, consent Google OAuth, token GitHub, aktivasi rute worker, keputusan sandbox, backup pertama + restore test",
+        "Status dan progres hanya dari hasil Doctor",
+        "Dapat diakses VIEWER secara read-only"
+      ],
+      "non_functional_requirements": [
+        "NFR1: GET /api/setup/steps p95 < 300 ms pada data lokal tanpa menjalankan check (diukur dengan tes performa lokal, F1-AC7).",
+        "NFR2: Respons dan DOM tidak mengandung nilai yang cocok dengan pola secret maupun pola jalur home (C:\\Users\\<nama>, /Users/<nama>). Dibuktikan tes otomatis dengan nilai sintetis.",
+        "NFR3: Teks UI dalam Bahasa Indonesia. Aksesibilitas: status tidak hanya dikodekan warna (ada label teks), dan tombol salin punya label aksesibel (F1-AC6).",
+        "NFR4: Urutan langkah deterministik dan sama dengan §07 (tes snapshot katalog).",
+        "NFR5: Tidak ada egress jaringan baru dari backend untuk endpoint baca."
+      ],
+      "non_goals": [
+        "Menjalankan perintah",
+        "Menyimpan state progres wizard",
+        "Menambah Doctor check baru"
+      ],
+      "overview": "Halaman baru di Control Center yang menampilkan langkah bootstrap §07 secara berurutan dengan status Doctor, kesegaran, capability yang dibuka dan perintah per OS.",
+      "problem": "Pemilik harus menyimpulkan sendiri urutan langkah §07 dari tabel Doctor dan README.",
+      "related_work": [
+        "RFC-1",
+        "TDD-1",
+        "IC1",
+        "IC2",
+        "T1",
+        "T11",
+        "ADR-0011",
+        "ADR-0004"
+      ],
+      "risks": [
+        "Pemetaan langkah ke check_id bisa salah atau ada langkah tanpa check (RISK-3)",
+        "Remedy Doctor bisa mengandung jalur lokal/nilai sensitif (RISK-1)"
+      ],
+      "rollout_considerations": "Rute dan menu baru bersifat aditif; tidak ada migrasi data. Dapat dinonaktifkan dengan menghapus entri menu/rute (T11) pada rilis berikutnya.",
+      "success_metrics": [
+        "Seluruh 10 langkah §07 terpetakan ke check yang ada atau ditandai eksplisit tanpa check",
+        "0 temuan pola secret/jalur home dalam tes keamanan",
+        "Tes F1-AC1..AC7 lulus di verifier tepercaya (belum dijalankan)"
+      ],
+      "title": "Halaman Penyiapan awal (read-only) berbasis Doctor",
+      "user_impact": "Waktu dan kebingungan saat bootstrap berkurang; status yang ditampilkan jujur terhadap bukti Doctor.",
+      "user_stories": [
+        "Sebagai pemilik, saya ingin melihat langkah penyiapan berikutnya beserta perintah yang bisa disalin agar saya tidak perlu membaca README.",
+        "Sebagai VIEWER, saya ingin melihat status penyiapan tanpa bisa mengubah apa pun."
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "F2-AC1: Periksa ulang satu langkah hanya menjalankan check langkah itu dan memperbarui checked_at/freshness.",
+        "F2-AC2: POST langsung dari VIEWER ditolak 403 dan tidak menjalankan check.",
+        "F2-AC3: step_key tidak dikenal -> 404 tanpa eksekusi.",
+        "F2-AC4: Recheck bersamaan untuk langkah yang sama -> 409.",
+        "F2-AC5: Event audit tercatat untuk setiap recheck yang diterima.",
+        "F2-AC6: POST recheck dari pemilik tanpa token CSRF/origin yang sah ditolak sesuai mekanisme yang ada dan tidak menjalankan check."
+      ],
+      "assumptions": [
+        "Runner Doctor dapat menjalankan subset check berdasarkan daftar check_id (diverifikasi T1). Jika tidak, berlaku fallback yang dipilih manusia."
+      ],
+      "background": "Doctor sudah menjalankan check; slice ini memerlukan eksekusi subset check per langkah. Dukungan subset diverifikasi T1. Bila tidak didukung, manusia memilih fallback melalui pertanyaan material (blocking untuk M2).",
+      "business_requirements": [
+        "Aksi tulis dari UI harus tetap dalam batas otorisasi yang ada; VIEWER ditolak"
+      ],
+      "dependencies": [
+        "F1",
+        "Runner Doctor yang ada",
+        "Kontrak IC1",
+        "Jawaban manusia atas pertanyaan material dukungan subset run"
+      ],
+      "feature_key": "F2",
+      "functional_requirements": [
+        "FR1: POST /api/setup/steps/{step_key}/recheck menjalankan tepat check_ids milik langkah melalui runner Doctor yang ada dan mengembalikan status langkah terbaru.",
+        "FR2: step_key divalidasi terhadap katalog; nilai tidak dikenal -> 404 tanpa menjalankan check.",
+        "FR3: Permintaan dari peran di luar peran berwenang (nama peran persis sesuai enumerasi yang diverifikasi T1 dan ditulis di IC1) -> 403; tanpa sesi -> 401. Perlindungan CSRF/same-origin yang ada diterapkan.",
+        "FR4: Satu recheck per langkah pada satu waktu; permintaan bersamaan -> 409. Batas laju per sesi -> 429. Nilai batas laju adalah konfigurasi dengan default yang ditetapkan di ADR dan disetujui manusia.",
+        "FR5: Setiap recheck tercatat sebagai event audit (aktor, step_key, check_ids, hasil status, tanpa detail sensitif).",
+        "FR6: Body request tidak menerima parameter selain step_key di path (tidak ada check_id bebas dari klien)."
+      ],
+      "goals": [
+        "Umpan balik cepat per langkah",
+        "Hanya peran berwenang yang dapat memicu"
+      ],
+      "non_functional_requirements": [
+        "NFR1: Timeout recheck per langkah adalah konfigurasi (default usulan 60 detik, disetujui manusia di ADR). Hasil timeout ditampilkan sebagai UNKNOWN, bukan VERIFIED.",
+        "NFR2: Tes membuktikan check di luar langkah tidak dijalankan (spy/counter pada runner tiruan).",
+        "NFR3: 100% permintaan VIEWER ke endpoint recheck ditolak 403 dalam tes negatif.",
+        "NFR4: Tidak ada egress baru selain yang sudah dilakukan check yang bersangkutan.",
+        "NFR5: Tes 409 deterministik menggunakan runner tiruan yang diblokir dengan event/semaphore, bukan berbasis waktu."
+      ],
+      "non_goals": [
+        "Menjalankan remedy/perintah instalasi",
+        "Menjalankan check di luar langkah yang dipilih"
+      ],
+      "overview": "Tombol 'Periksa ulang' per langkah yang menjalankan ulang hanya check milik langkah tersebut melalui runner Doctor yang ada dan memperbarui kesegaran.",
+      "problem": "Setelah menjalankan satu perintah, pemilik harus menjalankan seluruh Doctor untuk melihat hasilnya.",
+      "related_work": [
+        "TDD-2",
+        "IC1",
+        "T4",
+        "T5",
+        "ADR-0011",
+        "ADR-0053"
+      ],
+      "risks": [
+        "Penyalahgunaan recheck untuk memicu operasi mahal/berulang (RISK-2)",
+        "Eskalasi hak akses jika gate peran salah (RISK-4)",
+        "Kelayakan bergantung pada dukungan subset runner (RISK-7)"
+      ],
+      "rollout_considerations": "Endpoint baru di belakang otorisasi yang ada; dapat dinonaktifkan dengan menyembunyikan tombol dan menghapus rute.",
+      "success_metrics": [
+        "Tes negatif 401/403/404/409/429/CSRF lulus di verifier tepercaya (belum dijalankan)"
+      ],
+      "title": "Periksa ulang per langkah",
+      "user_impact": "Siklus perbaikan-verifikasi lebih cepat tanpa memperluas hak akses.",
+      "user_stories": [
+        "Sebagai pemilik, setelah menjalankan perintah OpenBao saya ingin memeriksa ulang langkah itu saja dan melihat waktu pemeriksaan terbaru."
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "F3-AC1: Klik tautan langkah keputusan membuka formulir yang ada dengan target terisi sesuai IC3 dan tanpa submit otomatis.",
+        "F3-AC2: Wizard tidak mengirim request penulisan keputusan apa pun.",
+        "F3-AC3: Bagian OFFICE selalu tampil BLOCKED dengan alasan dan tanpa aksi pada slice ini (office.status konstanta sesuai IC1).",
+        "F3-AC4: VIEWER tidak melihat tautan keputusan."
+      ],
+      "assumptions": [
+        "Dukungan prefill via query parameter pada formulir keputusan saat ini diverifikasi T1; perubahan minimal pada formulir mungkin diperlukan (T12)."
+      ],
+      "background": "Keputusan dicatat melalui antrean keputusan tunggal (ADR-0032) dengan binding keputusan (ADR-0031). Wizard tidak boleh mencatat keputusan. Belum ada sumber status 'otorisasi perusahaan tercatat' yang diketahui; T1 mengonfirmasi.",
+      "business_requirements": [
+        "Keputusan hanya tercatat setelah manusia meninjau dan mengirim formulir yang ada"
+      ],
+      "dependencies": [
+        "F1",
+        "Formulir keputusan yang ada (frontend/src/pages/decisions)",
+        "Kontrak IC3",
+        "Persetujuan manusia atas RFC-2 (checkpoint T12)"
+      ],
+      "feature_key": "F3",
+      "functional_requirements": [
+        "FR1: Katalog langkah DECISION memuat decision_link {form, target} yang mengikuti kontrak prefill IC3.",
+        "FR2: Tautan membuka formulir keputusan yang ada dengan field terisi; formulir tetap menampilkan semua field untuk ditinjau dan memerlukan submit manual.",
+        "FR3: Nilai prefill divalidasi formulir terhadap allowlist field; parameter tidak dikenal diabaikan; tidak ada auto-submit (T12).",
+        "FR4: Status langkah DECISION tetap berasal dari Doctor/capability gate, bukan dari klik tautan.",
+        "FR5: Bagian OFFICE menampilkan office.status = BLOCKED (konstanta di IC1 pada slice ini) dengan alasan 'otorisasi perusahaan belum tercatat' tanpa langkah aksi. Jalur positif berada di luar slice ini.",
+        "FR6: Tautan keputusan tidak dirender untuk VIEWER."
+      ],
+      "goals": [
+        "Mengurangi kesalahan bentuk target",
+        "Mempertahankan keputusan sebagai tindakan manusia eksplisit"
+      ],
+      "non_functional_requirements": [
+        "NFR1: Tes membuktikan tidak ada request POST ke endpoint keputusan saat halaman wizard dibuka atau tautan diklik.",
+        "NFR2: Parameter prefill tidak pernah memuat secret (divalidasi tes skema IC3).",
+        "NFR3: Tautan stabil terhadap perubahan urutan langkah (berbasis step_key).",
+        "NFR4: Logika submit dan binding keputusan pada formulir tidak berubah (tes decisions yang ada tetap lulus)."
+      ],
+      "non_goals": [
+        "Mencatat, menyetujui atau mengirim keputusan dari wizard",
+        "Langkah setup OFFICE",
+        "Membaca atau menampilkan jalur positif otorisasi perusahaan"
+      ],
+      "overview": "Langkah keputusan (aktivasi rute worker, pengecualian process-sandbox, pengaktifan write) menautkan ke formulir keputusan yang ada dengan bentuk target terisi. OFFICE ditampilkan BLOCKED; pada slice ini status tersebut adalah konstanta.",
+      "problem": "Pemilik tidak tahu formulir keputusan mana dan target apa yang perlu diisi untuk membuka gate.",
+      "related_work": [
+        "RFC-2",
+        "IC3",
+        "T6",
+        "T12",
+        "ADR-0031",
+        "ADR-0032",
+        "ADR-0051"
+      ],
+      "risks": [
+        "Prefill dapat dimanfaatkan untuk mengelabui pemilik agar menyetujui target yang salah (RISK-5)"
+      ],
+      "rollout_considerations": "Perubahan pada formulir keputusan diisolasi di T12 (R3), dibatasi pada pembacaan parameter allowlist dan memerlukan review keamanan serta persetujuan RFC-2.",
+      "success_metrics": [
+        "Semua langkah DECISION memiliki tautan valid terhadap IC3"
+      ],
+      "title": "Langkah keputusan manusia dan penanda OFFICE",
+      "user_impact": "Keputusan lebih tepat sasaran tanpa mengurangi kontrol manusia.",
+      "user_stories": [
+        "Sebagai pemilik, saya ingin langsung membuka formulir aktivasi rute worker dengan target yang benar, lalu memutuskan sendiri."
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "F4-AC1: Dengan gate CAN_* PERSONAL BLOCKED (atau UNKNOWN), Ringkasan menampilkan banner dengan tautan ke Penyiapan awal.",
+        "F4-AC2: Ketika tidak ada gate PERSONAL yang BLOCKED atau UNKNOWN, banner tidak tampil.",
+        "F4-AC3: Error API setup menampilkan pesan degradasi tanpa merusak Ringkasan."
+      ],
+      "assumptions": [
+        "Daftar gate CAN_* yang dibutuhkan PERSONAL dapat diturunkan dari field unlocks katalog."
+      ],
+      "background": "Status gate sudah tersedia; daftar gate yang dibutuhkan PERSONAL didefinisikan di katalog langkah (unlocks). entry_point dihitung backend di T2.",
+      "business_requirements": [
+        "Banner hilang ketika semua gate PERSONAL yang dibutuhkan tidak BLOCKED"
+      ],
+      "dependencies": [
+        "F1",
+        "Kontrak IC1",
+        "T2 (perhitungan entry_point)"
+      ],
+      "feature_key": "F4",
+      "functional_requirements": [
+        "FR1: Respons IC1 memuat entry_point {show, blocked_gates[]} yang dihitung backend (T2) dari unlocks katalog dan status gate.",
+        "FR2: Ringkasan menampilkan banner dengan daftar gate BLOCKED dan tautan ke Penyiapan awal ketika show=true.",
+        "FR3: Jika status gate UNKNOWN, show=true dan banner tampil dengan label UNKNOWN (tidak disembunyikan diam-diam).",
+        "FR4: Banner terlihat juga oleh VIEWER (hanya tautan baca)."
+      ],
+      "goals": [
+        "Menampilkan titik masuk hanya saat relevan"
+      ],
+      "non_functional_requirements": [
+        "NFR1: Banner tidak menambah lebih dari satu request API pada pemuatan Ringkasan.",
+        "NFR2: Kegagalan endpoint setup tidak memecahkan halaman Ringkasan (degradasi dengan pesan)."
+      ],
+      "non_goals": [
+        "Mengubah logika gate"
+      ],
+      "overview": "Banner di halaman Ringkasan yang mengarah ke Penyiapan awal selama ada gate CAN_* yang dibutuhkan untuk kerja PERSONAL berstatus BLOCKED.",
+      "problem": "Pemilik yang mendarat di Ringkasan tidak tahu bahwa penyiapan belum selesai.",
+      "related_work": [
+        "IC1",
+        "T2",
+        "T7",
+        "ADR-0011"
+      ],
+      "risks": [
+        "Daftar gate PERSONAL tidak lengkap sehingga banner hilang terlalu dini"
+      ],
+      "rollout_considerations": "Aditif; tidak ada migrasi.",
+      "success_metrics": [
+        "Tes F4-AC1..AC3 lulus di verifier tepercaya (belum dijalankan)"
+      ],
+      "title": "Titik masuk dari Ringkasan",
+      "user_impact": "Penemuan wizard tanpa perlu dokumentasi.",
+      "user_stories": [
+        "Sebagai pemilik, saat membuka Ringkasan pada instalasi baru saya ingin diarahkan ke Penyiapan awal."
+      ]
+    }
+  ],
+  "rfcs": [
+    {
+      "alternatives": [
+        "Menyimpan katalog di DB (ditolak: perlu migrasi, tidak terlihat dalam review PR)",
+        "Menurunkan urutan dari metadata Doctor check (ditolak: mengubah registri Doctor)",
+        "Halaman statis tanpa API (ditolak: tidak dapat menghitung status)"
+      ],
+      "architecture_impact": "Modul baru setup_wizard bergantung pada antarmuka publik Doctor, gate dan audit. Entri module-boundaries ditambahkan T1 bila diwajibkan dan tidak terlindungi; bila terlindungi, diajukan sebagai usulan untuk manusia. Registrasi rute dilakukan T11.",
+      "context_problem": "Urutan bootstrap §07 tidak terwujud dalam produk; Doctor hanya menampilkan tabel datar.",
+      "feature_key": "F1",
+      "goals_non_goals": [
+        "Tujuan: urutan deterministik, status jujur, VIEWER read-only",
+        "Bukan tujuan: check baru, state progres wizard, eksekusi perintah"
+      ],
+      "key": "RFC-1",
+      "migration_rollback": "Tanpa migrasi; rollback dengan menghapus rute/menu.",
+      "operations_impact": "Katalog perlu dipelihara saat §07 berubah.",
+      "performance_impact": "Ringan; tidak menjalankan check pada GET.",
+      "privacy_impact": "UNKNOWN sampai isi detail/remedy Doctor diperiksa T1 (lihat feature_governance F1).",
+      "proposal": "Menambah katalog langkah berversi (IC2) sebagai file data di repo dan modul backend setup_wizard yang menyusun status dari hasil Doctor dan gate melalui API IC1. Status selalu turunan Doctor. Ambang kesegaran memakai aturan Doctor atau nilai eksplisit ADR yang disetujui manusia.",
+      "risks_dependencies": [
+        "RISK-1",
+        "RISK-3",
+        "RISK-6",
+        "Ketergantungan pada format hasil Doctor"
+      ],
+      "security_impact": "Permukaan baca baru; risiko kebocoran dimitigasi allowlist dan tes pola secret/jalur home.",
+      "title": "Katalog langkah §07 berversi dan API status penyiapan"
+    },
+    {
+      "alternatives": [
+        "Hanya tautan tanpa prefill (lebih aman, tetapi rawan salah isi)",
+        "Draft keputusan disimpan server (ditolak: wizard akan menulis state keputusan)"
+      ],
+      "architecture_impact": "Perubahan kecil pada pembacaan parameter di frontend/src/pages/decisions (T12).",
+      "context_problem": "Pemilik perlu membuka formulir keputusan yang tepat dengan bentuk target yang benar, tanpa wizard mencatat keputusan.",
+      "feature_key": "F3",
+      "goals_non_goals": [
+        "Tujuan: mengurangi kesalahan target",
+        "Bukan tujuan: auto-submit, endpoint keputusan baru"
+      ],
+      "key": "RFC-2",
+      "migration_rollback": "Tanpa migrasi; rollback dengan menonaktifkan pembacaan prefill.",
+      "operations_impact": "Tidak ada.",
+      "performance_impact": "Tidak ada.",
+      "privacy_impact": "Tidak ada.",
+      "proposal": "Tautan berbasis query parameter allowlist (IC3) yang hanya mengisi field formulir yang ada. Formulir menampilkan semua field dan memerlukan submit manual; binding keputusan ADR-0031 tidak berubah. Implementasi diisolasi di T12 (R3) dan baru dimulai setelah RFC ini disetujui manusia.",
+      "risks_dependencies": [
+        "RISK-5",
+        "Dukungan prefill formulir saat ini (diverifikasi T1)"
+      ],
+      "security_impact": "Risiko social engineering via tautan (RISK-5); mitigasi allowlist dan tanpa auto-submit.",
+      "title": "Prefill formulir keputusan dari wizard"
+    }
+  ],
+  "schema_version": "1",
+  "security_privacy": {
+    "data_inventory": [
+      {
+        "access": "Baca: VIEWER+ melalui API allowlist; recheck: peran berwenang",
+        "classification": "INTERNAL",
+        "data_type": "Hasil Doctor (status, check_id, checked_at, remedy tersamarkan)",
+        "disposal": "Mengikuti kebijakan Doctor yang ada (UNKNOWN)",
+        "owner": "UNKNOWN",
+        "retention": "Mengikuti kebijakan Doctor yang ada (UNKNOWN)",
+        "storage": "Penyimpanan hasil Doctor yang ada (tidak berubah)"
+      },
+      {
+        "access": "Baca oleh backend; perubahan via PR yang di-merge manusia",
+        "classification": "INTERNAL",
+        "data_type": "Katalog langkah §07",
+        "disposal": "Penghapusan via PR",
+        "owner": "UNKNOWN",
+        "retention": "Riwayat git",
+        "storage": "File data berversi di repository"
+      },
+      {
+        "access": "Sesuai akses audit yang ada",
+        "classification": "INTERNAL",
+        "data_type": "Event audit recheck",
+        "disposal": "Mengikuti kebijakan audit yang ada (UNKNOWN)",
+        "owner": "UNKNOWN",
+        "retention": "Mengikuti kebijakan audit yang ada (UNKNOWN)",
+        "storage": "Mekanisme audit/event yang ada"
+      }
+    ],
+    "initial_risks": [
+      {
+        "description": "Detail atau remedy Doctor dapat memuat jalur lokal, nama pengguna OS atau fragmen kredensial yang kemudian dirender halaman.",
+        "impact": "HIGH",
+        "key": "RISK-1",
+        "likelihood": "MEDIUM",
+        "mitigation": "T1 memeriksa contoh remedy/detail Doctor dan merekomendasikan klasifikasi personal_data F1. Remedy diambil dari template katalog/remedy Doctor yang sudah disamarkan. Mitigasi lain: respons allowlist, tes pola secret dan pola jalur home (C:\\Users\\*, /Users/*) dengan nilai sintetis di T2/T8, dan review keamanan T8.",
+        "owner": "UNKNOWN",
+        "residual_risk": "Belum dinilai; penerimaan risiko residual hanya melalui keputusan RISK_ACCEPTANCE manusia.",
+        "title": "Kebocoran secret atau data sensitif lewat remedy/detail Doctor"
+      },
+      {
+        "description": "Recheck berulang dapat memicu panggilan konektivitas eksternal atau operasi mahal dari check.",
+        "impact": "MEDIUM",
+        "key": "RISK-2",
+        "likelihood": "LOW",
+        "mitigation": "Lock per langkah (409), batas laju (429), timeout yang dapat dikonfigurasi, hanya peran berwenang.",
+        "owner": "UNKNOWN",
+        "residual_risk": "Belum dinilai; keputusan manusia.",
+        "title": "Penyalahgunaan recheck"
+      },
+      {
+        "description": "Langkah §07 dapat terpetakan ke check yang salah atau tidak memiliki check, sehingga status menyesatkan atau nilai wizard turun bila banyak langkah UNKNOWN.",
+        "impact": "MEDIUM",
+        "key": "RISK-3",
+        "likelihood": "MEDIUM",
+        "mitigation": "Tabel pemetaan T1 dengan lokasi kode menjadi checkpoint manusia. Usulan: bila lebih dari 3 langkah tanpa check, manusia memutuskan apakah slice dilanjutkan. Katalog divalidasi terhadap registri check (tes: setiap check_id ada), dan langkah tanpa check tampil UNKNOWN.",
+        "owner": "UNKNOWN",
+        "residual_risk": "Belum dinilai; keputusan manusia.",
+        "title": "Pemetaan langkah ke check salah atau tidak lengkap"
+      },
+      {
+        "description": "Kesalahan gate peran dapat membuat VIEWER memicu eksekusi check.",
+        "impact": "HIGH",
+        "key": "RISK-4",
+        "likelihood": "LOW",
+        "mitigation": "Memakai dependensi otorisasi yang ada dengan enumerasi peran terverifikasi T1, tes negatif 401/403/CSRF, review keamanan, dan tambahan pada tests/acceptance/test_auth_boundary.py bila sesuai.",
+        "owner": "UNKNOWN",
+        "residual_risk": "Belum dinilai; keputusan manusia.",
+        "title": "Eskalasi hak akses pada endpoint recheck"
+      },
+      {
+        "description": "Tautan prefill yang dibuat pihak lain dapat mengarahkan pemilik menyetujui target yang salah (mis. rute atau write enablement).",
+        "impact": "HIGH",
+        "key": "RISK-5",
+        "likelihood": "LOW",
+        "mitigation": "Perubahan diisolasi di T12 (R3) dan baru dimulai setelah RFC-2 disetujui manusia. Mitigasi lain: allowlist field, tanpa auto-submit, semua field ditampilkan untuk ditinjau, binding keputusan ADR-0031 tetap berlaku, dan review keamanan.",
+        "owner": "UNKNOWN",
+        "residual_risk": "Belum dinilai; keputusan manusia.",
+        "title": "Manipulasi prefill formulir keputusan"
+      },
+      {
+        "description": "Hasil lama ditampilkan seolah terkini sehingga pemilik mengira gate terbuka.",
+        "impact": "MEDIUM",
+        "key": "RISK-6",
+        "likelihood": "MEDIUM",
+        "mitigation": "Freshness eksplisit per check dengan ambang terdokumentasi (aturan Doctor atau ADR), freshness_threshold_seconds di respons, STALE tidak dihitung dalam progres, checked_at selalu ditampilkan.",
+        "owner": "UNKNOWN",
+        "residual_risk": "Belum dinilai; keputusan manusia.",
+        "title": "Status menyesatkan karena kesegaran"
+      },
+      {
+        "description": "F2 (P0) memerlukan eksekusi subset check per check_id. Bila runner tidak mendukungnya, T4 berhenti dan M2 tertunda.",
+        "impact": "HIGH",
+        "key": "RISK-7",
+        "likelihood": "UNKNOWN",
+        "mitigation": "T1 memverifikasi dukungan subset. Pertanyaan material dibuat blocking untuk M2, dengan opsi fallback untuk keputusan manusia: (a) task terpisah R3 untuk perluasan runner di path terlindungi, (b) F2 diturunkan menjadi 'jalankan Doctor penuh lalu tampilkan hasil langkah', atau (c) F2 ditunda.",
+        "owner": "UNKNOWN",
+        "residual_risk": "Belum dinilai; keputusan manusia.",
+        "title": "Kelayakan F2 bergantung pada dukungan subset runner Doctor"
+      }
+    ],
+    "open_questions": [
+      "Apakah detail/remedy Doctor saat ini pernah memuat jalur yang berisi nama pengguna OS? (diperiksa T1; menentukan personal_data F1)",
+      "Peran mana persisnya yang boleh memicu recheck? (enumerasi diverifikasi T1; dijawab manusia di checkpoint T1)",
+      "Ambang kesegaran (staleness) Doctor yang berlaku (diverifikasi T1; fallback nilai ADR perlu persetujuan manusia).",
+      "Apakah perubahan formulir keputusan untuk prefill memerlukan ADR baru terkait ADR-0031? (bagian dari persetujuan RFC-2)"
+    ],
+    "overview": {
+      "authn_authz": "Memakai sesi dan model peran Control Center yang ada (ADR-0004). GET /api/setup/steps untuk VIEWER ke atas. POST recheck hanya untuk peran berwenang; nama peran persis diverifikasi T1 dan ditulis di IC1. VIEWER 403, tanpa sesi 401.",
+      "controls": [
+        "Allowlist field pada respons API",
+        "Validasi step_key terhadap katalog; check_id tidak diterima dari klien",
+        "CSRF/same-origin untuk POST",
+        "Lock per langkah dan batas laju recheck (nilai konfigurasi)",
+        "Tidak ada auto-submit keputusan; prefill dengan allowlist field (T12)",
+        "Tes otomatis pemindaian pola secret dan pola jalur home pada respons dan DOM"
+      ],
+      "encryption": "Tidak ada penyimpanan data baru; mengikuti transport dan penyimpanan yang ada. Tidak ada secret yang dibaca oleh wizard.",
+      "logging_monitoring": "Event audit untuk setiap recheck (aktor, step_key, check_ids, status hasil, durasi) tanpa detail sensitif; log error tanpa isi remedy mentah.",
+      "ownership": "UNKNOWN (pemilik keamanan tidak disebutkan; keputusan risiko tetap pada pemilik manusia).",
+      "secrets": "Wizard tidak menerima, membaca, merender atau mengirim secret. Perintah remedy yang membutuhkan secret bersifat interaktif di terminal (mis. 'aeos secrets set personal/github') tanpa nilai. Penanda [REDACTED] dari remedy dipertahankan."
+    },
+    "threat_model": {
+      "actors": [
+        "Pemilik (peran berwenang)",
+        "VIEWER",
+        "Halaman/situs pihak ketiga di browser yang sama (CSRF)",
+        "Pembuat tautan prefill tidak tepercaya",
+        "Konten tidak tepercaya dalam hasil check"
+      ],
+      "assets": [
+        "Status readiness dan capability gate",
+        "Integritas antrean keputusan",
+        "Secret di OpenBao (tidak boleh terekspos tidak langsung)",
+        "Jejak audit",
+        "Jalur lokal/nama pengguna OS dalam remedy"
+      ],
+      "entry_points": [
+        "GET /api/setup/steps",
+        "POST /api/setup/steps/{step_key}/recheck",
+        "Query parameter prefill pada formulir keputusan",
+        "Halaman Ringkasan (banner)"
+      ],
+      "threats": [
+        {
+          "key": "TH-1",
+          "mitigation": "Allowlist field, redaksi, tes pola secret.",
+          "scenario": "Respons API meneruskan detail Doctor mentah berisi fragmen token.",
+          "threat": "Information disclosure"
+        },
+        {
+          "key": "TH-2",
+          "mitigation": "Gate peran server-side, tes 403.",
+          "scenario": "VIEWER mengirim POST recheck langsung.",
+          "threat": "Elevation of privilege"
+        },
+        {
+          "key": "TH-3",
+          "mitigation": "Proteksi CSRF/same-origin yang ada (tes F2-AC6), lock dan batas laju.",
+          "scenario": "Situs lain memicu recheck atas nama pemilik.",
+          "threat": "CSRF"
+        },
+        {
+          "key": "TH-4",
+          "mitigation": "Tanpa auto-submit, allowlist, tinjauan manual, binding keputusan, RFC-2 disetujui sebelum T12.",
+          "scenario": "Tautan prefill berisi target berbahaya untuk aktivasi rute atau write enablement.",
+          "threat": "Tampering / social engineering"
+        },
+        {
+          "key": "TH-5",
+          "mitigation": "step_key dicocokkan ke katalog; check_ids hanya dari katalog.",
+          "scenario": "step_key atau parameter berisi nilai yang dipakai memilih check arbitrer.",
+          "threat": "Injection"
+        },
+        {
+          "key": "TH-6",
+          "mitigation": "Lock, 429, timeout yang dapat dikonfigurasi.",
+          "scenario": "Recheck berulang membebani host atau kuota eksternal.",
+          "threat": "Denial of service lokal"
+        },
+        {
+          "key": "TH-7",
+          "mitigation": "Pemeriksaan contoh remedy di T1, template remedy tanpa jalur pengguna, tes pola jalur home di T2/T8.",
+          "scenario": "Remedy/detail memuat jalur home berisi nama pengguna OS dan dirender kepada VIEWER.",
+          "threat": "Information disclosure (data pribadi)"
+        }
+      ],
+      "trust_boundaries": [
+        "Browser <-> Control Center API",
+        "URL/query parameter <-> formulir keputusan",
+        "Control Center <-> Doctor runner/check eksternal",
+        "Control Center <-> OpenBao"
+      ]
+    }
+  },
+  "tasks": [
+    {
+      "acceptance_criteria": [
+        "Laporan discovery menjawab butir 1-12 masing-masing dengan lokasi kode atau UNKNOWN eksplisit, tanpa klaim yang tidak didukung kode",
+        "Katalog memuat tepat 10 langkah dalam urutan §07 dan valid terhadap skema IC2",
+        "Setiap check_id di katalog merujuk check yang benar-benar ada di registri Doctor (dengan lokasi); langkah tanpa check ditandai eksplisit, dan jumlahnya dilaporkan untuk keputusan manusia (usulan ambang: lebih dari 3)",
+        "IC1 mendefinisikan allowlist field respons, tidak memuat field untuk nilai secret, menyebut peran persis untuk POST, freshness_threshold_seconds dan office.status konstanta BLOCKED",
+        "IC3 hanya berisi field target non-secret dan menyatakan tanpa auto-submit",
+        "Tidak ada perubahan pada path yang dilaporkan terlindungi; perubahan yang diperlukan dituliskan sebagai usulan",
+        "ADR berstatus Proposed, bukan Accepted, dengan nomor bebas yang dilaporkan"
+      ],
+      "allowed_paths": [
+        "docs/discovery/setup-wizard-discovery.md",
+        "contracts/api/setup-wizard.json",
+        "contracts/api/routes.json",
+        "contracts/setup/**",
+        "contracts/ui/decision-prefill.json",
+        "contracts/architecture/module-boundaries.json",
+        "docs/decisions/ADR-01*-first-run-setup-wizard.md"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Discovery baca-saja atas kode; tulis hanya laporan, kontrak dan ADR usulan. routes.json dan module-boundaries.json hanya diubah bila laporan menyatakan tidak terlindungi.",
+        "operations": [
+          "read",
+          "write"
+        ],
+        "paths": [
+          "docs/discovery/setup-wizard-discovery.md",
+          "contracts/api/setup-wizard.json",
+          "contracts/api/routes.json",
+          "contracts/setup/**",
+          "contracts/ui/decision-prefill.json",
+          "contracts/architecture/module-boundaries.json",
+          "docs/decisions/ADR-01*-first-run-setup-wizard.md"
+        ]
+      },
+      "capability_ttl_seconds": 5400,
+      "data_classification": "INTERNAL",
+      "depends_on": [],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Laporan discovery dengan lokasi kode",
+        "Diff kontrak",
+        "Hasil validasi JSON/kontrak dan run baseline oleh verifier tepercaya",
+        "Tabel pemetaan langkah -> check_id dengan lokasi kode"
+      ],
+      "expected_outputs": [
+        "docs/discovery/setup-wizard-discovery.md. Laporan verifikasi asumsi; setiap butir disertai lokasi kode atau UNKNOWN: (1) penyimpanan hasil Doctor terakhir + checked_at tanpa run; (2) dukungan subset run runner per check_id; (3) dukungan prefill formulir keputusan; (4) aturan/ambang kesegaran Doctor; (5) daftar path terlindungi §09 dan status routes.json, module-boundaries.json, pages/decisions; (6) path persis file registrasi router backend dan rute/menu frontend; (7) enumerasi peran yang ada; (8) model proses server (jumlah worker proses); (9) contoh remedy/detail Doctor terkait jalur home + rekomendasi personal_data F1; (10) keberadaan suite contract-schema-validation; (11) nomor ADR berikutnya yang bebas; (12) ada/tidaknya sumber status otorisasi perusahaan OFFICE",
+        "contracts/api/setup-wizard.json (IC1: request/response, kode status 200/401/403/404/409/429, peran persis, freshness_threshold_seconds, office.status konstanta BLOCKED)",
+        "contracts/setup/setup-steps.schema.json (IC2)",
+        "contracts/setup/setup-steps.v1.json (katalog awal 10 langkah §07)",
+        "contracts/ui/decision-prefill.json (IC3)",
+        "Entri rute baru di contracts/api/routes.json (atau usulan di laporan bila path terlindungi)",
+        "Entri setup_wizard di contracts/architecture/module-boundaries.json bila diwajibkan dan tidak terlindungi (atau usulan di laporan)",
+        "docs/decisions/ADR-01NN-first-run-setup-wizard.md berstatus Proposed. Isinya: daftar langkah tanpa check, ambang kesegaran fallback bila Doctor tidak punya aturan, serta default timeout recheck dan batas laju sebagai nilai konfigurasi"
+      ],
+      "feature_key": "F1",
+      "forbidden_paths": [
+        ".github/**",
+        "backend/**",
+        "frontend/**",
+        "tests/**",
+        "sandbox/**",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "requirements.lock",
+        "frontend/package-lock.json",
+        "contracts/planning/**",
+        "contracts/worker/**",
+        "contracts/security/**",
+        "docs/decisions/ADR-00*.md"
+      ],
+      "goal": "Memverifikasi asumsi kritis dengan rujukan lokasi kode dan menetapkan tiga kontrak: IC1 (API setup), IC2 (skema + katalog awal §07 yang dipetakan ke check_id Doctor yang ada) dan IC3 (bentuk prefill formulir keputusan). Task juga menghasilkan usulan ADR berstatus Proposed. Laporan discovery menjadi checkpoint manusia sebelum fan-out.",
+      "input_artifacts": [
+        "docs/architecture/DLY_AEOS_Master_Architecture_Final.md (§07, §09)",
+        "docs/decisions/ADR-0011-readiness-doctor-capability-gates.md",
+        "docs/decisions/ADR-0004-first-admin-bootstrap-hardening.md",
+        "docs/decisions/ADR-0031-decision-binding-and-external-write-interlock.md",
+        "docs/decisions/ADR-0032-single-human-decision-queue.md",
+        "AGENTS.md dan CLAUDE.md (baca saja, untuk daftar path terlindungi)",
+        "contracts/api/routes.json",
+        "contracts/architecture/module-boundaries.json",
+        "Registri Doctor check, runner Doctor, model peran, router aplikasi backend dan router/AppShell frontend di repo (baca saja)",
+        "frontend/src/pages/decisions/ (baca saja)"
+      ],
+      "key": "T1",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 40000,
+        "timeout_seconds": 5400
+      },
+      "model_route_policy": {
+        "min_context_tokens": 64000,
+        "notes": "Perlu membaca arsitektur master, registri check, runner, model peran dan router.",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "Laporan discovery dan kontrak IC1-IC3 harus diterima manusia sebelum task konsumen dimulai. Pada checkpoint ini manusia menjawab pertanyaan material (peran, subset run, ambang langkah tanpa check) dan menyetujui revisi rencana untuk allowed_paths T11.",
+        "required": true,
+        "reviewer_role": "human owner"
+      },
+      "risk_class": "R2",
+      "role_key": "solution-architect",
+      "stop_conditions": [
+        "Bagian §07 master tidak dapat ditemukan atau ambigu terhadap 10 langkah",
+        "Pemetaan memerlukan Doctor check baru",
+        "Path yang perlu diubah terlindungi (catat sebagai usulan, jangan ubah)",
+        "Perubahan diperlukan di luar allowed_paths"
+      ],
+      "title": "Discovery asumsi, kontrak API, skema katalog langkah dan kontrak prefill keputusan",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": false,
+        "required": true,
+        "suites": [
+          "baseline-full-suite",
+          "json-wellformed",
+          "existing-contract-tests"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "F1-AC1, F1-AC2, F1-AC3 dibuktikan tes pada level unit/integrasi dengan fixture",
+        "Respons valid terhadap IC1 dan katalog valid terhadap IC2 (tes kontrak)",
+        "Tes kebocoran: nilai secret sintetis dan jalur home sintetis tidak muncul di respons",
+        "Langkah tanpa check -> UNKNOWN",
+        "GET tidak menjalankan check apa pun (spy)",
+        "entry_point dihitung dari unlocks katalog dan status gate sesuai F4 FR1/FR3, termasuk gate UNKNOWN -> show=true, dibuktikan tes",
+        "office.status selalu BLOCKED dengan alasan sesuai IC1",
+        "Freshness memakai aturan Doctor atau ambang ADR, dan freshness_threshold_seconds dikembalikan"
+      ],
+      "allowed_paths": [
+        "backend/aeos/setup_wizard/**",
+        "tests/setup_wizard/**"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Registrasi router di aplikasi utama tidak dilakukan di sini (dimiliki T11). Endpoint diuji melalui aplikasi uji yang memasang router modul.",
+        "operations": [
+          "read",
+          "write",
+          "test"
+        ],
+        "paths": [
+          "backend/aeos/setup_wizard/**",
+          "tests/setup_wizard/**"
+        ]
+      },
+      "capability_ttl_seconds": 5400,
+      "data_classification": "INTERNAL",
+      "depends_on": [
+        "T1"
+      ],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Diff",
+        "Hasil tes verifier tepercaya"
+      ],
+      "expected_outputs": [
+        "backend/aeos/setup_wizard/ (catalog, composer, routes sebagai router modul yang dapat didaftarkan T11)",
+        "tests/setup_wizard/test_catalog.py",
+        "tests/setup_wizard/test_composer.py",
+        "tests/setup_wizard/test_entry_point.py",
+        "tests/setup_wizard/test_api_get.py (memakai aplikasi uji yang memasang router modul)",
+        "tests/setup_wizard/test_contract_schemas.py (validasi IC1/IC2 bila suite contract-schema-validation belum ada)"
+      ],
+      "feature_key": "F1",
+      "forbidden_paths": [
+        ".github/**",
+        "backend/aeos/migrations/**",
+        "backend/aeos/secrets/**",
+        "contracts/**",
+        "docs/decisions/**",
+        "sandbox/**",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "requirements.lock",
+        "frontend/**"
+      ],
+      "goal": "Mengimplementasikan modul setup_wizard yang memuat katalog IC2 dan menyusun respons IC1 dari hasil Doctor terakhir dan status gate, termasuk freshness, entry_point (F4) dan office (konstanta BLOCKED), beserta tes validasi skema kontrak.",
+      "input_artifacts": [
+        "docs/discovery/setup-wizard-discovery.md",
+        "contracts/api/setup-wizard.json",
+        "contracts/setup/setup-steps.schema.json",
+        "contracts/setup/setup-steps.v1.json",
+        "ADR-01NN-first-run-setup-wizard.md (Proposed)",
+        "TDD-1"
+      ],
+      "key": "T2",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 48000,
+        "timeout_seconds": 5400
+      },
+      "model_route_policy": {
+        "min_context_tokens": 64000,
+        "notes": "",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "Review PR",
+        "required": true,
+        "reviewer_role": "human owner"
+      },
+      "risk_class": "R2",
+      "role_key": "backend-api-engineer",
+      "stop_conditions": [
+        "Hasil Doctor tidak dapat dibaca tanpa menjalankan check",
+        "Respons memerlukan field di luar IC1",
+        "Perubahan di luar allowed_paths"
+      ],
+      "title": "Backend: katalog, composer status dan GET /api/setup/steps",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "run_tests",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": true,
+        "required": true,
+        "suites": [
+          "pytest",
+          "contract-tests"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Render 10 langkah berurutan dari fixture IC1 dengan status MISSING (F1-AC1, level komponen)",
+        "STALE/UNKNOWN tampil dengan label teks; tombol salin punya nama aksesibel (F1-AC6)",
+        "VIEWER tidak melihat tombol aksi (F1-AC4)",
+        "Tes DOM tidak menemukan nilai secret/jalur home sintetis (F1-AC5)",
+        "Tidak ada request selain GET pada pemuatan",
+        "Slot StepActions tersedia sehingga T5/T6 hanya menambah file baru plus satu penyisipan terdefinisi"
+      ],
+      "allowed_paths": [
+        "frontend/src/pages/setup/**"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Registrasi rute/menu di router/AppShell dimiliki T11; halaman diuji dengan render langsung.",
+        "operations": [
+          "read",
+          "write",
+          "test"
+        ],
+        "paths": [
+          "frontend/src/pages/setup/**"
+        ]
+      },
+      "capability_ttl_seconds": 5400,
+      "data_classification": "INTERNAL",
+      "depends_on": [
+        "T1"
+      ],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Diff",
+        "Hasil Vitest dari verifier tepercaya"
+      ],
+      "expected_outputs": [
+        "frontend/src/pages/setup/SetupWizardPage.tsx (dengan slot StepActions terdokumentasi)",
+        "frontend/src/pages/setup/StepActions.tsx",
+        "frontend/src/pages/setup/api.ts",
+        "frontend/src/pages/setup/setup.test.tsx",
+        "frontend/src/pages/setup/setup.contract.test.tsx"
+      ],
+      "feature_key": "F1",
+      "forbidden_paths": [
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        ".github/**",
+        "backend/**",
+        "contracts/**",
+        "docs/decisions/**",
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "goal": "Membangun halaman 'Penyiapan awal' terhadap IC1. Isinya: daftar langkah, status + checked_at + freshness, alasan/unlocks, panel perintah per OS dengan tombol salin, dan progres. Halaman menyediakan slot ekstensi StepActions per langkah untuk T5/T6 dan tidak menampilkan tombol aksi untuk VIEWER.",
+      "input_artifacts": [
+        "contracts/api/setup-wizard.json",
+        "docs/discovery/setup-wizard-discovery.md",
+        "frontend/src/components/StatusBadge.tsx",
+        "frontend/src/components/doctor/RemedyPanel.tsx",
+        "frontend/src/pages/readiness/"
+      ],
+      "key": "T3",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 48000,
+        "timeout_seconds": 5400
+      },
+      "model_route_policy": {
+        "min_context_tokens": 32000,
+        "notes": "",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "Review PR",
+        "required": true,
+        "reviewer_role": "human owner"
+      },
+      "risk_class": "R1",
+      "role_key": "frontend-engineer",
+      "stop_conditions": [
+        "Memerlukan dependensi npm baru",
+        "Memerlukan field di luar IC1",
+        "Perubahan di luar allowed_paths"
+      ],
+      "title": "Frontend: halaman Penyiapan awal (read-only) dengan slot aksi",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "run_tests",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": true,
+        "required": true,
+        "suites": [
+          "vitest"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "GET /api/setup/steps dapat dicapai pada aplikasi utama dan tanpa sesi menghasilkan 401",
+        "Rute frontend dan entri menu 'Penyiapan awal' merender SetupWizardPage",
+        "Rute terdaftar sesuai contracts/api/routes.json",
+        "Tes yang ada untuk router/AppShell dan auth boundary tetap lulus",
+        "Hanya baris registrasi yang ditambahkan; tidak ada perubahan logika lain"
+      ],
+      "allowed_paths": [
+        "tests/setup_wizard/test_route_registration.py",
+        "frontend/src/pages/setup/navigation.test.tsx"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Path persis file registrasi (backend dan frontend) ditambahkan ke allowed_paths melalui versi rencana baru yang disetujui manusia setelah checkpoint T1. Sebelum itu task tidak boleh dimulai. Path terlindungi tidak ditambahkan tanpa keputusan manusia.",
+        "operations": [
+          "read",
+          "write",
+          "test"
+        ],
+        "paths": [
+          "tests/setup_wizard/test_route_registration.py",
+          "frontend/src/pages/setup/navigation.test.tsx"
+        ]
+      },
+      "capability_ttl_seconds": 3600,
+      "data_classification": "INTERNAL",
+      "depends_on": [
+        "T1",
+        "T2",
+        "T3"
+      ],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Diff",
+        "Hasil tes verifier tepercaya"
+      ],
+      "expected_outputs": [
+        "Perubahan minimal pada file registrasi router backend dan router/AppShell frontend yang dilaporkan T1",
+        "tests/setup_wizard/test_route_registration.py (rute terdaftar, di belakang auth: tanpa sesi 401)",
+        "frontend/src/pages/setup/navigation.test.tsx (menu dan rute menuju SetupWizardPage)"
+      ],
+      "feature_key": "F1",
+      "forbidden_paths": [
+        ".github/**",
+        "backend/aeos/migrations/**",
+        "backend/aeos/secrets/**",
+        "contracts/**",
+        "docs/decisions/**",
+        "sandbox/**",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "requirements.lock",
+        "frontend/package.json",
+        "frontend/package-lock.json"
+      ],
+      "goal": "Mendaftarkan router modul setup_wizard di aplikasi backend dan rute/menu 'Penyiapan awal' di frontend pada file persis yang dilaporkan T1, agar halaman dan endpoint dapat dicapai end-to-end di belakang otorisasi yang ada.",
+      "input_artifacts": [
+        "docs/discovery/setup-wizard-discovery.md (butir 5 dan 6)",
+        "contracts/api/routes.json",
+        "backend/aeos/setup_wizard/ (dari T2)",
+        "frontend/src/pages/setup/ (dari T3)"
+      ],
+      "key": "T11",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 24000,
+        "timeout_seconds": 3600
+      },
+      "model_route_policy": {
+        "min_context_tokens": 32000,
+        "notes": "",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "Revisi allowed_paths disetujui manusia sebelum mulai; Review PR",
+        "required": true,
+        "reviewer_role": "human owner"
+      },
+      "risk_class": "R2",
+      "role_key": "feature-implementer",
+      "stop_conditions": [
+        "allowed_paths belum memuat path registrasi yang dilaporkan T1 dan disetujui manusia",
+        "Registrasi memerlukan perubahan logika di luar penambahan entri",
+        "Perubahan di luar allowed_paths"
+      ],
+      "title": "Registrasi router backend dan rute/menu frontend",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "run_tests",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": true,
+        "required": true,
+        "suites": [
+          "pytest",
+          "vitest",
+          "contract-tests",
+          "auth-boundary"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "F2-AC1..AC6 dibuktikan tes",
+        "Spy membuktikan check di luar langkah tidak dijalankan (TP1-S4)",
+        "VIEWER 403, tanpa sesi 401 dan tanpa CSRF ditolak, semuanya tanpa eksekusi",
+        "Tes 409 deterministik (event/semaphore), tanpa sleep",
+        "Timeout dan batas laju dibaca dari konfigurasi dengan default ADR; timeout menghasilkan UNKNOWN"
+      ],
+      "allowed_paths": [
+        "backend/aeos/setup_wizard/**",
+        "tests/setup_wizard/**"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Tidak boleh mengubah runner Doctor. Task dimulai hanya setelah manusia menjawab pertanyaan material subset run (blocking). Bila fallback dipilih, rencana direvisi terlebih dahulu.",
+        "operations": [
+          "read",
+          "write",
+          "test"
+        ],
+        "paths": [
+          "backend/aeos/setup_wizard/**",
+          "tests/setup_wizard/**"
+        ]
+      },
+      "capability_ttl_seconds": 5400,
+      "data_classification": "INTERNAL",
+      "depends_on": [
+        "T1",
+        "T2"
+      ],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Diff",
+        "Hasil tes verifier tepercaya termasuk tes negatif"
+      ],
+      "expected_outputs": [
+        "backend/aeos/setup_wizard/recheck.py",
+        "tests/setup_wizard/test_recheck.py (spy runner tiruan: hanya check langkah; timeout -> UNKNOWN; audit)",
+        "tests/setup_wizard/test_recheck_authz.py (401/403/CSRF)",
+        "tests/setup_wizard/test_recheck_concurrency.py (409 deterministik dengan runner tiruan diblokir event; 429)"
+      ],
+      "feature_key": "F2",
+      "forbidden_paths": [
+        ".github/**",
+        "backend/aeos/migrations/**",
+        "backend/aeos/secrets/**",
+        "contracts/**",
+        "docs/decisions/**",
+        "sandbox/**",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "requirements.lock",
+        "frontend/**"
+      ],
+      "goal": "Mengimplementasikan POST /api/setup/steps/{step_key}/recheck dengan: gate peran (peran persis sesuai IC1), CSRF, validasi step_key, lock 409, batas laju 429 dan timeout (keduanya nilai konfigurasi sesuai ADR), eksekusi subset check melalui runner Doctor, serta event audit.",
+      "input_artifacts": [
+        "contracts/api/setup-wizard.json",
+        "docs/discovery/setup-wizard-discovery.md",
+        "ADR-01NN-first-run-setup-wizard.md (Proposed)",
+        "TDD-2",
+        "backend/aeos/setup_wizard/ (dari T2)"
+      ],
+      "key": "T4",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 48000,
+        "timeout_seconds": 5400
+      },
+      "model_route_policy": {
+        "min_context_tokens": 64000,
+        "notes": "",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "Pertanyaan material subset run dijawab manusia sebelum mulai; Review PR dengan fokus otorisasi",
+        "required": true,
+        "reviewer_role": "human owner + security review"
+      },
+      "risk_class": "R3",
+      "role_key": "backend-api-engineer",
+      "stop_conditions": [
+        "Runner Doctor tidak mendukung eksekusi subset check dan belum ada keputusan fallback manusia",
+        "Mekanisme otorisasi/CSRF yang ada tidak dapat dipakai dari modul baru",
+        "Model proses multi-worker membuat lock in-memory tidak valid (laporkan)",
+        "Perubahan di luar allowed_paths"
+      ],
+      "title": "Backend: POST recheck per langkah",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "run_tests",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": true,
+        "required": true,
+        "suites": [
+          "pytest",
+          "contract-tests",
+          "auth-boundary"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Klik memanggil hanya endpoint langkah terkait dan memperbarui checked_at",
+        "Tombol tidak dirender untuk VIEWER",
+        "Pesan jelas untuk 403/409/429/timeout",
+        "Tombol nonaktif selama recheck berjalan",
+        "Hanya file baru plus satu penyisipan di StepActions"
+      ],
+      "allowed_paths": [
+        "frontend/src/pages/setup/**"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Berjalan sebelum T6 untuk menghindari konflik pada pages/setup.",
+        "operations": [
+          "read",
+          "write",
+          "test"
+        ],
+        "paths": [
+          "frontend/src/pages/setup/**"
+        ]
+      },
+      "capability_ttl_seconds": 3600,
+      "data_classification": "INTERNAL",
+      "depends_on": [
+        "T1",
+        "T3"
+      ],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Diff",
+        "Hasil Vitest dari verifier tepercaya"
+      ],
+      "expected_outputs": [
+        "frontend/src/pages/setup/RecheckButton.tsx",
+        "frontend/src/pages/setup/recheck.test.tsx",
+        "Satu penyisipan RecheckButton di slot StepActions"
+      ],
+      "feature_key": "F2",
+      "forbidden_paths": [
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        ".github/**",
+        "backend/**",
+        "contracts/**",
+        "docs/decisions/**",
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "goal": "Menambahkan tombol 'Periksa ulang' per langkah melalui slot StepActions. Tombol hanya tampil untuk peran berwenang, memanggil POST IC1, memperbarui status/freshness langkah, dan menangani 403/404/409/429/timeout.",
+      "input_artifacts": [
+        "contracts/api/setup-wizard.json",
+        "frontend/src/pages/setup/ (dari T3)"
+      ],
+      "key": "T5",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 32000,
+        "timeout_seconds": 3600
+      },
+      "model_route_policy": {
+        "min_context_tokens": 32000,
+        "notes": "",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "Review PR",
+        "required": true,
+        "reviewer_role": "human owner"
+      },
+      "risk_class": "R2",
+      "role_key": "frontend-engineer",
+      "stop_conditions": [
+        "Perlu dependensi baru",
+        "Perubahan di luar allowed_paths"
+      ],
+      "title": "Frontend: tombol Periksa ulang",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "run_tests",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": true,
+        "required": true,
+        "suites": [
+          "vitest"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Field allowlist IC3 terisi dari query parameter; semua field tetap tampil untuk ditinjau",
+        "Parameter di luar allowlist diabaikan (TP2-S7)",
+        "Tidak ada submit otomatis dan tidak ada POST keputusan saat formulir dibuka dengan prefill",
+        "Logika submit dan binding keputusan tidak berubah (diff dibatasi pembacaan prefill)",
+        "Tes decisions yang ada tetap lulus"
+      ],
+      "allowed_paths": [
+        "frontend/src/pages/decisions/**"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Hanya pembacaan prefill. Bila laporan T1 menyatakan pages/decisions terlindungi, task tidak dimulai tanpa keputusan manusia.",
+        "operations": [
+          "read",
+          "write",
+          "test"
+        ],
+        "paths": [
+          "frontend/src/pages/decisions/**"
+        ]
+      },
+      "capability_ttl_seconds": 3600,
+      "data_classification": "INTERNAL",
+      "depends_on": [
+        "T1"
+      ],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Diff",
+        "Hasil Vitest termasuk tes decisions yang ada dari verifier tepercaya"
+      ],
+      "expected_outputs": [
+        "Perubahan minimal pembacaan prefill di frontend/src/pages/decisions/ (bila belum didukung)",
+        "frontend/src/pages/decisions/prefill.test.tsx"
+      ],
+      "feature_key": "F3",
+      "forbidden_paths": [
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        ".github/**",
+        "backend/**",
+        "contracts/**",
+        "docs/decisions/**",
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "goal": "Menambah pembacaan query parameter prefill sesuai IC3 pada formulir keputusan yang ada, tanpa auto-submit, tanpa mengubah logika submit dan binding keputusan ADR-0031.",
+      "input_artifacts": [
+        "contracts/ui/decision-prefill.json",
+        "docs/discovery/setup-wizard-discovery.md (butir 3 dan 5)",
+        "frontend/src/pages/decisions/",
+        "RFC-2 (disetujui manusia)"
+      ],
+      "key": "T12",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 32000,
+        "timeout_seconds": 3600
+      },
+      "model_route_policy": {
+        "min_context_tokens": 32000,
+        "notes": "",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "RFC-2 disetujui manusia sebelum mulai; Review PR dengan fokus integritas keputusan",
+        "required": true,
+        "reviewer_role": "human owner + security review"
+      },
+      "risk_class": "R3",
+      "role_key": "frontend-engineer",
+      "stop_conditions": [
+        "RFC-2 belum disetujui manusia",
+        "Prefill memerlukan perubahan logika submit atau backend keputusan",
+        "pages/decisions terlindungi tanpa keputusan manusia",
+        "Perubahan di luar allowed_paths"
+      ],
+      "title": "Pembacaan prefill allowlist pada formulir keputusan",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "run_tests",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": true,
+        "required": true,
+        "suites": [
+          "vitest"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "F3-AC1..AC4 dibuktikan tes (F3-AC1 bersama prefill dari T12)",
+        "Tes membuktikan tidak ada POST keputusan saat tautan diklik/halaman dibuka",
+        "Tautan dibangun hanya dari decision_link katalog sesuai IC3",
+        "Hanya file baru plus satu penyisipan di StepActions"
+      ],
+      "allowed_paths": [
+        "frontend/src/pages/setup/**"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Hanya pages/setup; perubahan formulir keputusan dimiliki T12.",
+        "operations": [
+          "read",
+          "write",
+          "test"
+        ],
+        "paths": [
+          "frontend/src/pages/setup/**"
+        ]
+      },
+      "capability_ttl_seconds": 3600,
+      "data_classification": "INTERNAL",
+      "depends_on": [
+        "T1",
+        "T3",
+        "T5",
+        "T12"
+      ],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Diff",
+        "Hasil Vitest dari verifier tepercaya"
+      ],
+      "expected_outputs": [
+        "frontend/src/pages/setup/DecisionStepLink.tsx",
+        "frontend/src/pages/setup/OfficeBlockedNotice.tsx",
+        "frontend/src/pages/setup/decisionLink.test.tsx",
+        "Satu penyisipan DecisionStepLink di slot StepActions"
+      ],
+      "feature_key": "F3",
+      "forbidden_paths": [
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        ".github/**",
+        "backend/**",
+        "contracts/**",
+        "docs/decisions/**",
+        "frontend/src/pages/decisions/**",
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "goal": "Menampilkan langkah DECISION dengan tautan ke formulir keputusan yang ada sesuai IC3 (melalui slot StepActions) dan bagian OFFICE BLOCKED (konstanta IC1), tanpa mengirim request penulisan keputusan.",
+      "input_artifacts": [
+        "contracts/ui/decision-prefill.json",
+        "contracts/api/setup-wizard.json",
+        "frontend/src/pages/setup/ (dari T3 dan T5)",
+        "RFC-2"
+      ],
+      "key": "T6",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 32000,
+        "timeout_seconds": 3600
+      },
+      "model_route_policy": {
+        "min_context_tokens": 32000,
+        "notes": "",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "Review PR",
+        "required": true,
+        "reviewer_role": "human owner"
+      },
+      "risk_class": "R2",
+      "role_key": "frontend-engineer",
+      "stop_conditions": [
+        "Formulir keputusan target tidak ada untuk salah satu langkah DECISION",
+        "Perubahan di luar allowed_paths"
+      ],
+      "title": "Tautan keputusan terisi dan penanda OFFICE",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "run_tests",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": true,
+        "required": true,
+        "suites": [
+          "vitest"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "F4-AC1..AC3 dibuktikan tes",
+        "Tes overview yang ada tetap lulus",
+        "Maksimal satu request tambahan"
+      ],
+      "allowed_paths": [
+        "frontend/src/pages/overview/**"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Bergantung pada T2 karena perilaku entry_point (termasuk UNKNOWN) dijamin oleh acceptance T2.",
+        "operations": [
+          "read",
+          "write",
+          "test"
+        ],
+        "paths": [
+          "frontend/src/pages/overview/**"
+        ]
+      },
+      "capability_ttl_seconds": 3600,
+      "data_classification": "INTERNAL",
+      "depends_on": [
+        "T1",
+        "T2"
+      ],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Diff",
+        "Hasil Vitest dari verifier tepercaya"
+      ],
+      "expected_outputs": [
+        "frontend/src/pages/overview/SetupBanner.tsx",
+        "frontend/src/pages/overview/setupBanner.test.tsx",
+        "Penyisipan banner di halaman Ringkasan yang ada"
+      ],
+      "feature_key": "F4",
+      "forbidden_paths": [
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        ".github/**",
+        "backend/**",
+        "contracts/**",
+        "docs/decisions/**",
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "goal": "Menambah banner di halaman Ringkasan berdasarkan entry_point IC1 (termasuk label UNKNOWN) dengan degradasi aman saat error.",
+      "input_artifacts": [
+        "contracts/api/setup-wizard.json",
+        "frontend/src/pages/overview/"
+      ],
+      "key": "T7",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 32000,
+        "timeout_seconds": 3600
+      },
+      "model_route_policy": {
+        "min_context_tokens": 32000,
+        "notes": "",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "Review PR",
+        "required": true,
+        "reviewer_role": "human owner"
+      },
+      "risk_class": "R1",
+      "role_key": "frontend-engineer",
+      "stop_conditions": [
+        "Perlu dependensi baru",
+        "Perubahan di luar allowed_paths"
+      ],
+      "title": "Banner Penyiapan awal di Ringkasan",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "run_tests",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": true,
+        "required": true,
+        "suites": [
+          "vitest"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Setiap TH-1..TH-7 punya minimal satu tes atau alasan tertulis",
+        "Skenario TP2-S1..S8 terotomasi, termasuk pola jalur home (C:\\Users\\*, /Users/*)",
+        "Laporan memisahkan temuan per fitur F1, F2, F3",
+        "Laporan tidak mengklaim penerimaan risiko atau VA/PT"
+      ],
+      "allowed_paths": [
+        "tests/security/test_setup_wizard_security.py",
+        "frontend/src/pages/setup/security.test.tsx",
+        "docs/security/setup-wizard-review.md"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Cakupan lintas fitur F1-F3 (skema hanya mengizinkan satu feature_key). Hanya tes dan laporan; perbaikan kode dilaporkan sebagai temuan.",
+        "operations": [
+          "read",
+          "write",
+          "test"
+        ],
+        "paths": [
+          "tests/security/test_setup_wizard_security.py",
+          "frontend/src/pages/setup/security.test.tsx",
+          "docs/security/setup-wizard-review.md"
+        ]
+      },
+      "capability_ttl_seconds": 5400,
+      "data_classification": "INTERNAL",
+      "depends_on": [
+        "T1",
+        "T4",
+        "T5",
+        "T6",
+        "T7",
+        "T11",
+        "T12"
+      ],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Laporan review",
+        "Hasil tes verifier tepercaya"
+      ],
+      "expected_outputs": [
+        "tests/security/test_setup_wizard_security.py",
+        "frontend/src/pages/setup/security.test.tsx",
+        "docs/security/setup-wizard-review.md (temuan per fitur F1/F2/F3, pemetaan ASVS, tanpa klaim VA/PT)"
+      ],
+      "feature_key": "F2",
+      "forbidden_paths": [
+        "backend/**",
+        "contracts/**",
+        ".github/**",
+        "docs/decisions/**",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "requirements.lock",
+        "frontend/package-lock.json"
+      ],
+      "goal": "Meninjau implementasi T2-T7, T11 dan T12 terhadap threat model TH-1..TH-7. Task menambah tes keamanan otomatis untuk: kebocoran secret dan jalur home, 403 VIEWER, CSRF, step_key tidak sah, dan prefill.",
+      "input_artifacts": [
+        "Threat model bagian 04",
+        "contracts/api/setup-wizard.json",
+        "contracts/ui/decision-prefill.json",
+        "contracts/security/asvs-selection.yaml",
+        "docs/discovery/setup-wizard-discovery.md",
+        "Hasil T2-T7, T11, T12"
+      ],
+      "key": "T8",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 48000,
+        "timeout_seconds": 5400
+      },
+      "model_route_policy": {
+        "min_context_tokens": 64000,
+        "notes": "",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "Review laporan dan PR",
+        "required": true,
+        "reviewer_role": "human owner"
+      },
+      "risk_class": "R2",
+      "role_key": "security-engineer",
+      "stop_conditions": [
+        "Ditemukan kebocoran secret nyata (hentikan, laporkan tanpa menyalin nilai)",
+        "Perlu mengubah kode produk"
+      ],
+      "title": "Review keamanan dan tes negatif keamanan (lintas F1-F3)",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "run_tests",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": true,
+        "required": true,
+        "suites": [
+          "pytest",
+          "vitest"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Setiap acceptance criteria F1-F4 terpetakan ke minimal satu tes (milik T2-T9) dengan referensi yang tepat",
+        "Tes memakai data dir sementara dan tidak memerlukan secret nyata atau egress",
+        "Check adapter.* tanpa jaringan tidak tampil VERIFIED"
+      ],
+      "allowed_paths": [
+        "tests/acceptance/test_setup_wizard.py",
+        "docs/evidence/setup-wizard-traceability.md"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Cakupan lintas fitur F1-F4. Matriks keterlacakan bukan bukti eksekusi.",
+        "operations": [
+          "read",
+          "write",
+          "test"
+        ],
+        "paths": [
+          "tests/acceptance/test_setup_wizard.py",
+          "docs/evidence/setup-wizard-traceability.md"
+        ]
+      },
+      "capability_ttl_seconds": 5400,
+      "data_classification": "INTERNAL",
+      "depends_on": [
+        "T1",
+        "T4",
+        "T5",
+        "T6",
+        "T7",
+        "T11",
+        "T12"
+      ],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Hasil acceptance dari verifier tepercaya",
+        "Matriks keterlacakan"
+      ],
+      "expected_outputs": [
+        "tests/acceptance/test_setup_wizard.py",
+        "Matriks keterlacakan AC/NFR -> tes (termasuk tes T2-T8) di docs/evidence/setup-wizard-traceability.md"
+      ],
+      "feature_key": "F1",
+      "forbidden_paths": [
+        "backend/**",
+        "frontend/**",
+        "contracts/**",
+        ".github/**",
+        "docs/decisions/**",
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "goal": "Menambah tes acceptance pada data dir sementara, melalui rute yang terdaftar, untuk F1-AC1, F1-AC2, F3-AC2 dan F4-AC1. Doctor nyata dipakai hanya untuk check lokal (mis. akun admin, data dir); check adapter yang memerlukan jaringan harus tampil non-VERIFIED. F2-AC1 (spy) sudah dibuktikan T4 pada level integrasi dan dirujuk di matriks.",
+      "input_artifacts": [
+        "Rencana uji TP1",
+        "tests/acceptance/test_bootstrap_readiness.py",
+        "Hasil T2-T7, T11, T12"
+      ],
+      "key": "T9",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 32000,
+        "timeout_seconds": 5400
+      },
+      "model_route_policy": {
+        "min_context_tokens": 32000,
+        "notes": "",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "Review PR",
+        "required": true,
+        "reviewer_role": "human owner"
+      },
+      "risk_class": "R1",
+      "role_key": "qa-test-designer",
+      "stop_conditions": [
+        "Tes memerlukan secret nyata atau jaringan",
+        "Perubahan kode produk diperlukan"
+      ],
+      "title": "Tes acceptance end-to-end Penyiapan awal (lintas F1-F4)",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "run_tests",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": true,
+        "required": true,
+        "suites": [
+          "pytest-acceptance"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Dokumen tidak memuat secret atau nilai contoh yang menyerupai secret nyata",
+        "Urutan langkah di dokumen sama dengan katalog IC2",
+        "Tidak ada klaim hasil tes/restore yang belum terjadi",
+        "Tidak ada klaim metrik/alert/SLO yang tidak dibangun"
+      ],
+      "allowed_paths": [
+        "docs/SETUP_WINDOWS.md",
+        "docs/SETUP_MACOS.md",
+        "README.md",
+        "docs/runbooks/setup-wizard.md",
+        "docs/runbooks/README.md"
+      ],
+      "artifact_schema_version": "1",
+      "capability_scope": {
+        "notes": "Hanya dokumentasi; registrasi navigasi dimiliki T11.",
+        "operations": [
+          "read",
+          "write"
+        ],
+        "paths": [
+          "docs/SETUP_WINDOWS.md",
+          "docs/SETUP_MACOS.md",
+          "README.md",
+          "docs/runbooks/setup-wizard.md",
+          "docs/runbooks/README.md"
+        ]
+      },
+      "capability_ttl_seconds": 3600,
+      "data_classification": "INTERNAL",
+      "depends_on": [
+        "T8",
+        "T9"
+      ],
+      "egress_allowed": [],
+      "evidence_requirements": [
+        "Diff dokumen"
+      ],
+      "expected_outputs": [
+        "Pembaruan docs/SETUP_WINDOWS.md dan docs/SETUP_MACOS.md",
+        "Pembaruan README.md (bagian mulai cepat)",
+        "docs/runbooks/setup-wizard.md (RB-SETUP-1, RB-SETUP-2) dan entri di docs/runbooks/README.md"
+      ],
+      "feature_key": "F1",
+      "forbidden_paths": [
+        "backend/**",
+        "frontend/**",
+        "contracts/**",
+        ".github/**",
+        "docs/decisions/**",
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "goal": "Memperbarui dokumentasi setup agar menunjuk ke halaman Penyiapan awal dan menambah runbook RB-SETUP-1/2.",
+      "input_artifacts": [
+        "docs/SETUP_WINDOWS.md",
+        "docs/SETUP_MACOS.md",
+        "README.md",
+        "docs/runbooks/README.md",
+        "Laporan T8",
+        "Matriks T9"
+      ],
+      "key": "T10",
+      "limits": {
+        "max_attempts": 2,
+        "max_output_tokens": 32000,
+        "timeout_seconds": 3600
+      },
+      "model_route_policy": {
+        "min_context_tokens": 32000,
+        "notes": "",
+        "pool": "WORKER",
+        "requires_tools": true
+      },
+      "reviewer_policy": {
+        "checkpoint": "Review PR",
+        "required": true,
+        "reviewer_role": "human owner"
+      },
+      "risk_class": "R0",
+      "role_key": "technical-writer",
+      "stop_conditions": [
+        "Dokumen memerlukan perubahan di luar allowed_paths"
+      ],
+      "title": "Dokumentasi setup dan runbook",
+      "tools_allowed": [
+        "read_file",
+        "write_file",
+        "search",
+        "git_diff"
+      ],
+      "verifier_policy": {
+        "negative_tests_required": false,
+        "required": true,
+        "suites": [
+          "docs-lint"
+        ]
+      }
+    }
+  ],
+  "tdds": [
+    {
+      "api_integration": "Antarmuka publik Doctor (baca hasil) dan capability gate; tidak memanggil layanan eksternal.",
+      "authn_authz": "Dependensi sesi/peran yang ada; VIEWER+ untuk GET.",
+      "components": [
+        "SetupStepCatalog (loader + validasi IC2)",
+        "SetupStatusComposer",
+        "Route GET /api/setup/steps (router modul; registrasi oleh T11)",
+        "Frontend SetupWizardPage + slot StepActions"
+      ],
+      "controls": [
+        "Allowlist serialisasi",
+        "Validasi katalog saat start (gagal tertutup)",
+        "Tes kebocoran secret dan jalur home"
+      ],
+      "data_flow": "Loader memvalidasi katalog saat start. Composer membaca hasil Doctor terakhir per check_id dan status gate, lalu mengagregasi status: (1) VERIFIED hanya bila semua check VERIFIED+FRESH; (2) STALE bila ada yang melewati ambang (aturan Doctor atau ADR); (3) MISSING/UNKNOWN mengikuti Doctor; (4) langkah tanpa check -> UNKNOWN. entry_point.show = ada gate unlocks yang BLOCKED atau UNKNOWN.",
+      "data_model": "Step {step_key, order, title, why, unlocks[CAN_*], check_ids[], kind COMMAND|DECISION, remedy {windows_powershell, macos}, decision_link?}. Respons: {catalog_version, host_os, freshness_threshold_seconds, progress{verified,total}, steps[{...step, status, checks[{check_id,status,checked_at,freshness}]}], entry_point{show, blocked_gates[]}, office{status:'BLOCKED' (konstanta), reason}}.",
+      "dependencies": [
+        "IC1",
+        "IC2",
+        "Doctor",
+        "Capability gates",
+        "Laporan discovery T1"
+      ],
+      "deployment": "Bagian dari rilis controller; tanpa konfigurasi baru selain nilai ambang fallback bila diperlukan.",
+      "errors": "Katalog tidak valid -> endpoint 503 dengan pesan generik dan log; hasil Doctor tidak tersedia -> status UNKNOWN.",
+      "feature_key": "F1",
+      "key": "TDD-1",
+      "logs_monitoring": "Log durasi dan status respons; tanpa isi remedy.",
+      "migration_rollback": "Tidak ada migrasi.",
+      "performance": "p95 < 300 ms; tanpa eksekusi check.",
+      "technical_risks": [
+        "Format hasil Doctor berbeda antar check",
+        "Ambang freshness tidak terekspos (fallback ADR)"
+      ],
+      "testing": "Unit composer dan entry_point dengan fixture, tes kontrak IC1/IC2, tes kebocoran, tes komponen frontend, acceptance pada data dir kosong (T9).",
+      "title": "Desain teknis katalog dan composer status penyiapan"
+    },
+    {
+      "api_integration": "Runner Doctor yang ada dengan filter check_id (dukungan subset diverifikasi T1; fallback keputusan manusia).",
+      "authn_authz": "Hanya peran berwenang sesuai IC1; VIEWER 403; tanpa sesi 401; CSRF wajib.",
+      "components": [
+        "SetupRecheckService",
+        "Route POST /api/setup/steps/{step_key}/recheck",
+        "RecheckButton (slot StepActions)"
+      ],
+      "controls": [
+        "Lock per langkah",
+        "Batas laju per sesi (konfigurasi)",
+        "Timeout (konfigurasi)",
+        "Audit"
+      ],
+      "data_flow": "Validasi sesi/peran/CSRF -> step_key dari katalog -> acquire lock (409 bila terkunci) -> cek batas laju (429) -> runner Doctor(check_ids) dengan timeout -> Doctor menyimpan hasil -> composer -> respons langkah.",
+      "data_model": "Tidak ada tabel baru; lock in-memory per step_key; event audit {type:'setup.recheck', actor, step_key, check_ids, result_status, duration_ms}; konfigurasi recheck_timeout_seconds dan rate limit dengan default dari ADR.",
+      "dependencies": [
+        "IC1",
+        "Doctor runner",
+        "Mekanisme audit",
+        "Laporan discovery T1 (model proses, peran)"
+      ],
+      "deployment": "Bagian dari rilis controller.",
+      "errors": "Timeout -> status UNKNOWN + pesan; error runner -> 500 generik tanpa detail sensitif.",
+      "feature_key": "F2",
+      "key": "TDD-2",
+      "logs_monitoring": "Log hitungan/durasi recheck per step_key; metrik/alert hanya usulan.",
+      "migration_rollback": "Tidak ada migrasi.",
+      "performance": "Dibatasi oleh check; timeout default usulan 60 detik.",
+      "technical_risks": [
+        "Runner tidak mendukung subset (RISK-7)",
+        "Lock in-memory hanya valid untuk proses tunggal; model proses dikonfirmasi T1"
+      ],
+      "testing": "Tes spy subset dengan runner tiruan, negatif 401/403/404/409/429/CSRF, 409 deterministik dengan event/semaphore, timeout, audit; tes komponen tombol.",
+      "title": "Desain teknis recheck per langkah"
+    }
+  ],
+  "testing": {
+    "test_plans": [
+      {
+        "acceptance_criteria": [
+          "Semua skenario TP1 lulus di verifier tepercaya",
+          "Tidak ada regresi pada suite readiness/overview/decisions yang ada dibandingkan bukti baseline"
+        ],
+        "defect_management": "Defect dicatat sebagai GitHub Issues di fadhlillah-dli/dly-aeos (integrasi belum terverifikasi) dengan label slice-1 dan tautan ke acceptance criteria.",
+        "evidence_requirements": [
+          "Bukti run baseline oleh verifier tepercaya",
+          "Laporan verifier tepercaya untuk commit kandidat",
+          "Daftar tes yang ditambahkan dan pemetaannya ke acceptance criteria",
+          "Tangkapan UI (opsional) di docs/evidence/ui sebagai bukti visual, bukan bukti runtime"
+        ],
+        "exit_criteria": [
+          "Semua acceptance criteria F1-F4 memiliki tes yang lulus di verifier tepercaya",
+          "Tidak ada defect terbuka berprioritas P0/P1"
+        ],
+        "feature_keys": [
+          "F1",
+          "F2",
+          "F3",
+          "F4"
+        ],
+        "key": "TP1",
+        "objectives": [
+          "Membuktikan urutan §07 dan status berbasis Doctor",
+          "Membuktikan recheck hanya menjalankan check langkah",
+          "Membuktikan wizard tidak mencatat keputusan",
+          "Membuktikan banner muncul/hilang sesuai gate",
+          "Membuktikan aksesibilitas dan performa dasar"
+        ],
+        "overview": "Menguji perilaku end-to-end halaman Penyiapan awal, recheck, tautan keputusan dan banner Ringkasan. Tidak ada hasil eksekusi yang diklaim pada tahap perencanaan.",
+        "scenarios": [
+          {
+            "acceptance_criteria_refs": [
+              "F1-AC1"
+            ],
+            "expected_result": "10 langkah dalam urutan §07, semua MISSING (atau UNKNOWN 'tidak ada check') dengan remedy.",
+            "key": "TP1-S1",
+            "steps": [
+              "Siapkan data dir kosong",
+              "Buka GET /api/setup/steps dan halaman Penyiapan awal melalui rute terdaftar"
+            ],
+            "title": "Data dir kosong",
+            "type": "functional"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F1-AC2"
+            ],
+            "expected_result": "Langkah 1 VERIFIED dengan checked_at; langkah adapter tanpa jaringan tidak VERIFIED.",
+            "key": "TP1-S2",
+            "steps": [
+              "Jalankan aeos admin create pada data dir uji",
+              "Jalankan Doctor nyata (check lokal)",
+              "Muat ulang halaman"
+            ],
+            "title": "Admin dibuat lalu Doctor dijalankan",
+            "type": "integration"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F1-AC3"
+            ],
+            "expected_result": "Langkah STALE, tidak dihitung dalam progres.",
+            "key": "TP1-S3",
+            "steps": [
+              "Fixture hasil VERIFIED dengan checked_at melewati freshness_threshold_seconds yang berlaku",
+              "Muat halaman"
+            ],
+            "title": "Hasil kedaluwarsa",
+            "type": "edge"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F2-AC1"
+            ],
+            "expected_result": "Hanya check langkah itu dijalankan; checked_at/freshness diperbarui.",
+            "key": "TP1-S4",
+            "steps": [
+              "Login sebagai pemilik",
+              "POST recheck pada langkah OpenBao dengan runner Doctor tiruan ber-spy",
+              "Amati daftar check_id yang dipanggil"
+            ],
+            "title": "Recheck satu langkah (runner tiruan, dimiliki T4)",
+            "type": "integration"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F3-AC1",
+              "F3-AC2"
+            ],
+            "expected_result": "Formulir yang ada terbuka dengan target terisi, tanpa submit otomatis dan tanpa POST keputusan.",
+            "key": "TP1-S5",
+            "steps": [
+              "Klik tautan langkah aktivasi rute worker",
+              "Amati formulir dan request jaringan"
+            ],
+            "title": "Tautan keputusan terisi",
+            "type": "functional"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F3-AC3"
+            ],
+            "expected_result": "Bagian OFFICE BLOCKED (konstanta) dengan alasan, tanpa aksi.",
+            "key": "TP1-S6",
+            "steps": [
+              "Buka halaman"
+            ],
+            "title": "OFFICE tetap BLOCKED",
+            "type": "functional"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F4-AC1",
+              "F4-AC2",
+              "F4-AC3"
+            ],
+            "expected_result": "Banner tampil (termasuk label UNKNOWN), lalu hilang, lalu pesan degradasi tanpa merusak halaman.",
+            "key": "TP1-S7",
+            "steps": [
+              "Gate CAN_* PERSONAL BLOCKED -> buka Ringkasan",
+              "Gate UNKNOWN -> buka Ringkasan",
+              "Ubah fixture agar semua gate tidak BLOCKED/UNKNOWN -> buka Ringkasan",
+              "Simulasikan error API setup"
+            ],
+            "title": "Banner Ringkasan",
+            "type": "integration"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F1-AC6"
+            ],
+            "expected_result": "Status punya label teks; tombol salin punya nama aksesibel.",
+            "key": "TP1-S8",
+            "steps": [
+              "Render halaman",
+              "Periksa label teks status dan label aksesibel tombol"
+            ],
+            "title": "Aksesibilitas status dan tombol salin",
+            "type": "accessibility"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F1-AC7"
+            ],
+            "expected_result": "p95 < 300 ms tanpa menjalankan check.",
+            "key": "TP1-S9",
+            "steps": [
+              "Ukur p95 GET /api/setup/steps pada 50 permintaan lokal dengan fixture"
+            ],
+            "title": "Performa GET",
+            "type": "performance"
+          }
+        ],
+        "scope": "Backend setup_wizard, API baru, registrasi rute/menu, halaman frontend baru, banner Ringkasan, integrasi tautan dan prefill formulir keputusan.",
+        "test_strategy": {
+          "approach": "Berbasis risiko dan acceptance criteria. Lapisan pengujian: (1) unit untuk composer/katalog; (2) integrasi API dengan runner Doctor tiruan untuk spy/konkurensi (T4); (3) Doctor nyata pada data dir sementara hanya untuk check lokal (T9), sementara check adapter.* yang memerlukan jaringan tidak di-mock menjadi VERIFIED dan harus tampil non-VERIFIED; (4) komponen frontend dengan Testing Library; (5) acceptance end-to-end di tests/acceptance.",
+          "data": "Data dir sementara kosong; fixture hasil Doctor sintetis (FRESH/STALE/UNKNOWN/MISSING); nilai secret dan jalur home sintetis untuk tes kebocoran; tanpa jaringan.",
+          "environments": [
+            "Lokal Windows (PowerShell)",
+            "Lokal macOS",
+            "Verifier tepercaya (CI)"
+          ],
+          "levels": [
+            "unit",
+            "integration",
+            "component",
+            "acceptance"
+          ],
+          "tools": [
+            "pytest",
+            "vitest",
+            "@testing-library/react"
+          ],
+          "types": [
+            "functional",
+            "regression",
+            "integration",
+            "negative",
+            "edge",
+            "accessibility",
+            "performance"
+          ]
+        },
+        "title": "Rencana uji fungsional Penyiapan awal"
+      },
+      {
+        "acceptance_criteria": [
+          "Semua skenario TP2 lulus di verifier tepercaya"
+        ],
+        "defect_management": "Temuan keamanan dicatat sebagai GitHub Issues berlabel security; penerimaan risiko residual hanya melalui keputusan manusia.",
+        "evidence_requirements": [
+          "Laporan verifier tepercaya",
+          "Laporan review keamanan T8 (docs/security/setup-wizard-review.md)"
+        ],
+        "exit_criteria": [
+          "0 kebocoran secret/jalur home terdeteksi",
+          "Semua tes negatif lulus",
+          "Review keamanan T8 selesai dengan temuan terdokumentasi"
+        ],
+        "feature_keys": [
+          "F1",
+          "F2",
+          "F3"
+        ],
+        "key": "TP2",
+        "objectives": [
+          "Membuktikan VIEWER tidak dapat memicu aksi",
+          "Membuktikan tidak ada secret atau jalur home dalam respons/DOM",
+          "Membuktikan input tidak sah dan permintaan tanpa CSRF ditolak"
+        ],
+        "overview": "Tes negatif otorisasi, CSRF, kebocoran secret/jalur home, validasi input dan prefill. Tidak mengklaim VA/PT.",
+        "scenarios": [
+          {
+            "acceptance_criteria_refs": [
+              "F2-AC2"
+            ],
+            "expected_result": "403 dan runner Doctor tidak dipanggil.",
+            "key": "TP2-S1",
+            "steps": [
+              "Login VIEWER",
+              "POST /api/setup/steps/{step_key}/recheck langsung"
+            ],
+            "title": "POST recheck dari VIEWER",
+            "type": "security"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F1-AC4",
+              "F3-AC4"
+            ],
+            "expected_result": "Tidak ada tombol Periksa ulang atau tautan keputusan.",
+            "key": "TP2-S2",
+            "steps": [
+              "Render halaman sebagai VIEWER"
+            ],
+            "title": "VIEWER tidak melihat tombol aksi",
+            "type": "security"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F1-AC5"
+            ],
+            "expected_result": "Nilai sintetis dan pola token tidak ditemukan.",
+            "key": "TP2-S3",
+            "steps": [
+              "Tanam nilai secret sintetis di store tiruan dan detail Doctor",
+              "Ambil respons API dan DOM"
+            ],
+            "title": "Pemindaian secret",
+            "type": "security"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F2-AC3"
+            ],
+            "expected_result": "404 tanpa eksekusi check.",
+            "key": "TP2-S4",
+            "steps": [
+              "POST recheck dengan step_key acak"
+            ],
+            "title": "step_key tidak dikenal",
+            "type": "negative"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F2-AC4"
+            ],
+            "expected_result": "Permintaan kedua 409; permintaan pertama selesai 200.",
+            "key": "TP2-S5",
+            "steps": [
+              "Runner tiruan diblokir dengan event",
+              "Kirim recheck pertama untuk langkah X",
+              "Kirim recheck kedua untuk langkah X saat runner masih diblokir",
+              "Lepaskan event"
+            ],
+            "title": "Recheck bersamaan (deterministik)",
+            "type": "negative"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F2-AC6"
+            ],
+            "expected_result": "Ditolak sesuai mekanisme CSRF yang ada; runner tidak dipanggil.",
+            "key": "TP2-S6",
+            "steps": [
+              "POST recheck sebagai pemilik tanpa token CSRF/origin sah"
+            ],
+            "title": "Tanpa token CSRF",
+            "type": "security"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F3-AC1",
+              "F3-AC2"
+            ],
+            "expected_result": "Parameter diabaikan; tidak ada submit otomatis.",
+            "key": "TP2-S7",
+            "steps": [
+              "Buka formulir keputusan dengan parameter di luar allowlist"
+            ],
+            "title": "Parameter prefill tidak dikenal",
+            "type": "negative"
+          },
+          {
+            "acceptance_criteria_refs": [
+              "F1-AC5"
+            ],
+            "expected_result": "Pola jalur home sintetis tidak ditemukan (atau tersamarkan).",
+            "key": "TP2-S8",
+            "steps": [
+              "Tanam remedy/detail sintetis berisi C:\\Users\\synthetic-user dan /Users/synthetic-user",
+              "Ambil respons API dan DOM"
+            ],
+            "title": "Pemindaian jalur home",
+            "type": "security"
+          }
+        ],
+        "scope": "Endpoint setup baru, halaman wizard, parameter prefill formulir keputusan.",
+        "test_strategy": {
+          "approach": "Tes negatif otomatis berbasis threat model TH-1..TH-7; konkurensi diuji deterministik dengan runner tiruan yang diblokir event/semaphore.",
+          "data": "Akun VIEWER dan pemilik uji; nilai secret dan jalur home sintetis yang ditanam di store tiruan untuk deteksi kebocoran.",
+          "environments": [
+            "Verifier tepercaya (CI)",
+            "Lokal"
+          ],
+          "levels": [
+            "integration",
+            "component",
+            "acceptance"
+          ],
+          "tools": [
+            "pytest",
+            "vitest",
+            "@testing-library/react"
+          ],
+          "types": [
+            "security",
+            "negative"
+          ]
+        },
+        "title": "Rencana uji keamanan dan negatif"
+      }
+    ]
+  },
+  "unknowns": [
+    {
+      "impact": "Item platform-level. Tidak ada fitur atau gate dalam slice ini yang bergantung padanya; slice ini tidak membuat klaim kepatuhan MCI.",
+      "statement": "MCI_V2 canonical policy is UNVERIFIED; no compliance claim can be made"
+    },
+    {
+      "impact": "Diverifikasi T1. Jika tidak, T4 tidak dimulai sampai manusia memilih fallback (pertanyaan material blocking untuk M2).",
+      "statement": "Apakah runner Doctor mendukung eksekusi subset check per check_id."
+    },
+    {
+      "impact": "Diverifikasi T1. Bila tidak ada, ambang eksplisit ditetapkan di ADR dan disetujui manusia sebelum T2.",
+      "statement": "Ambang kesegaran (staleness) Doctor yang berlaku."
+    },
+    {
+      "impact": "Tabel pemetaan T1 menjadi checkpoint. Langkah tanpa check tampil UNKNOWN; bila jumlahnya banyak, manusia memutuskan kelanjutan slice.",
+      "statement": "Apakah setiap dari 10 langkah §07 memiliki Doctor check yang ada (hanya adapter.github_token dan adapter.google_oauth yang terlihat di input)."
+    },
+    {
+      "impact": "Diverifikasi T1; menentukan besarnya perubahan T12.",
+      "statement": "Apakah formulir keputusan saat ini mendukung prefill."
+    },
+    {
+      "impact": "Dilaporkan T1; allowed_paths T11 direvisi sebelum T11 dimulai.",
+      "statement": "Lokasi file pendaftaran router backend dan rute/menu frontend."
+    },
+    {
+      "impact": "Diverifikasi T1. Path terlindungi hanya diubah setelah keputusan manusia.",
+      "statement": "Daftar path terlindungi proyek self-build (§09) dan apakah routes.json, module-boundaries.json serta pages/decisions termasuk di dalamnya."
+    },
+    {
+      "impact": "Menentukan validitas lock in-memory recheck; dikonfirmasi T1.",
+      "statement": "Model proses server Control Center (jumlah worker proses)."
+    },
+    {
+      "impact": "Baseline bisa berbeda dari commit; verifier tepercaya menjalankan suite baseline sebelum T2. Publikasi GitHub Issues/Drive belum terverifikasi.",
+      "statement": "Working tree inventaris dalam keadaan dirty (1 entri) dan kredensial integrasi UNKNOWN (secret store unavailable)."
+    }
+  ]
+}

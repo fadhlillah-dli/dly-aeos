@@ -1,0 +1,73 @@
+# PRODUCT 1 (DLY AEOS) — SOFTWARE DEVELOPMENT & ENGINEERING
+
+PREVIEW LOKAL — bukan publikasi eksternal. Versi BELUM DISETUJUI.
+
+- [folder] DLY AEOS — DRAFT
+  - [doc] 00. Product Home — DRAFT
+  - [doc] 01. Product Overview — DRAFT
+  - [folder] 02. Requirements — DRAFT
+    - [doc] PRD — Halaman Penyiapan awal (read-only) berbasis Doctor — DRAFT
+    - [doc] PRD — Periksa ulang per langkah — DRAFT
+    - [doc] PRD — Langkah keputusan manusia dan penanda OFFICE — DRAFT
+    - [doc] PRD — Titik masuk dari Ringkasan — DRAFT
+  - [folder] 03. Architecture & Design — DRAFT
+    - [doc] Architecture Overview — DRAFT
+    - [folder] RFCs — DRAFT
+      - [doc] RFC — Halaman Penyiapan awal (read-only) berbasis Doctor — DRAFT
+      - [doc] RFC — Langkah keputusan manusia dan penanda OFFICE — DRAFT
+    - [folder] TDDs — DRAFT
+      - [doc] TDD — Halaman Penyiapan awal (read-only) berbasis Doctor — DRAFT
+      - [doc] TDD — Periksa ulang per langkah — DRAFT
+  - [folder] 04. Security & Privacy — DRAFT
+    - [doc] Security Overview — DRAFT
+    - [folder] Security Assessments — DRAFT
+      - [doc] Initial Risk Assessment — DRAFT
+      - [doc] Security Assessment — Halaman Penyiapan awal (read-only) berbasis Doctor — DRAFT
+      - [doc] Security Assessment — Periksa ulang per langkah — DRAFT
+      - [doc] Security Assessment — Langkah keputusan manusia dan penanda OFFICE — DRAFT
+    - [folder] Threat Models — DRAFT
+      - [doc] Threat Model — Initial — DRAFT
+      - [doc] Threat Model — Halaman Penyiapan awal (read-only) berbasis Doctor — DRAFT
+      - [doc] Threat Model — Periksa ulang per langkah — DRAFT
+      - [doc] Threat Model — Langkah keputusan manusia dan penanda OFFICE — DRAFT
+    - [folder] Vulnerability Assessments — NOT_STARTED
+    - [folder] Penetration Tests — NOT_STARTED
+    - [folder] Privacy Assessments — NOT_STARTED
+    - [doc] Data Inventory — DRAFT
+    - [doc] Security & Privacy Decisions — DRAFT
+  - [doc] 05. Development — DRAFT
+  - [folder] 06. Testing — DRAFT
+    - [doc] Test Plan — Rencana uji fungsional Penyiapan awal — DRAFT (2 section pending)
+    - [doc] Test Plan — Rencana uji keamanan dan negatif — DRAFT (2 section pending)
+  - [folder] 07. Release & Deployment — DRAFT
+    - [doc] Release Plan — UNKNOWN (usulan: minor bump dari versi controller saat ini) (Slice 1: Penyiapan awal) — DRAFT (1 section pending)
+  - [folder] 08. Operations — DRAFT
+    - [doc] Operational Overview — DRAFT (1 section pending)
+    - [folder] Runbooks — DRAFT
+      - [doc] Runbook — Penyiapan awal menampilkan status tidak sesuai Doctor — DRAFT (5 section pending)
+      - [doc] Runbook — Recheck macet atau timeout berulang — DRAFT (5 section pending)
+    - [doc] Monitoring — DRAFT
+    - [doc] Logs — DRAFT (4 section pending)
+    - [doc] Alerts — DRAFT (3 section pending)
+    - [doc] Service Level Objectives — DRAFT (1 section pending)
+    - [doc] Backup & Restore — DRAFT (1 section pending)
+    - [doc] Maintenance — DRAFT (2 section pending)
+  - [folder] 09. Incidents & Problems — DRAFT
+    - [folder] Incidents — NOT_STARTED
+    - [folder] Problems — NOT_STARTED
+  - [folder] 10. Changes — NOT_STARTED
+  - [folder] 11. Improvements — NOT_STARTED
+  - [doc] 12. Retirement — NOT_APPLICABLE
+  - [folder] Templates — DRAFT
+    - [doc] Template — PRD — DRAFT
+    - [doc] Template — RFC — DRAFT
+    - [doc] Template — TDD — DRAFT
+    - [doc] Template — Risk Assessment — DRAFT
+    - [doc] Template — Security Assessment — DRAFT
+    - [doc] Template — Threat Model — DRAFT
+    - [doc] Template — Privacy Assessment / DPIA — DRAFT
+    - [doc] Template — Test Plan — DRAFT
+    - [doc] Template — Release Plan — DRAFT
+    - [doc] Template — Runbook — DRAFT
+    - [doc] Template — Post-Mortem — DRAFT
+    - [doc] Template — Retirement & Decommission — DRAFT
