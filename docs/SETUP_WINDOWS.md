@@ -5,8 +5,14 @@ the **evidence before you continue**. Nothing in this guide is installed for you
 the bootstrap script only reports what is missing. Optional components that are not installed do
 not block capabilities that do not depend on them.
 
-Tested shells: Windows PowerShell 5.1 and PowerShell 7. Run commands from the repository root.
-`.\aeos.ps1 <command>` runs the CLI from the repository virtual environment.
+Tested shells: Windows PowerShell 5.1, PowerShell 7 and Command Prompt (cmd.exe). Run commands from
+the repository root. `.\aeos.ps1 <command>` runs the CLI from the repository virtual environment in
+PowerShell; this guide writes commands that way. **In Command Prompt type `aeos <command>` instead**:
+it runs `aeos.cmd`, which starts the same CLI. Write `.eos.cmd <command>` if your environment sets
+`NoDefaultCurrentDirectoryInExePath`. In cmd.exe, `.\aeos.ps1` opens the script in an editor
+instead of running it. VS Code's default terminal may be Command Prompt; the prompt then looks like
+`C:\...>` rather than `PS C:\...>`. The bootstrap itself is a PowerShell script; from cmd.exe run it as
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1`.
 
 | Order | Component | Required for |
 |---|---|---|

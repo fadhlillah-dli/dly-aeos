@@ -1,7 +1,7 @@
 # DLY AEOS — DLY AI Engineering Operating System
 
 DLY AEOS is a **local-first control plane for AI-assisted software engineering**. It runs on your
-own machine (Windows or macOS, also Linux) from a clone of this repository, serves one dashboard on
+own machine (Windows or macOS) from a clone of this repository, serves one dashboard on
 `http://127.0.0.1:8787`, and keeps humans in charge:
 
 * **You choose the domain first** — PERSONAL or OFFICE — before any prompt. The backend refuses
@@ -71,7 +71,7 @@ the official install command, back up any existing data before migrating, instal
 
 ## Daily use
 
-| Task | Windows | macOS / Linux |
+| Task | Windows | macOS |
 |---|---|---|
 | Readiness check without server or LLM | `.\aeos.ps1 doctor` | `./aeos doctor` |
 | Start the dashboard | `.\aeos.ps1 serve` | `./aeos serve` |
@@ -81,6 +81,9 @@ the official install command, back up any existing data before migrating, instal
 | Backup + restore test | `.\aeos.ps1 ops backup create` then `ops backup restore-test <id>` | `./aeos ops backup ...` |
 | SLIs for a domain | `.\aeos.ps1 ops sli --domain PERSONAL` | `./aeos ops sli --domain PERSONAL` |
 | Emergency stop | `.\aeos.ps1 ops emergency-stop --reason "..."` | `./aeos ops emergency-stop --reason "..."` |
+
+The Windows column is for PowerShell. In **Command Prompt (cmd.exe)** type `aeos <command>` instead (for example
+`aeos serve`). That runs `aeos.cmd`, which starts the same CLI; in cmd.exe `.\aeos.ps1` would open in an editor.
 
 In the dashboard: sign in → **choose PERSONAL or OFFICE** → pick the project (the first one is
 **DLY AEOS**) → *Ringkasan* shows capability readiness, blockers, pending decisions, the approved
@@ -174,6 +177,7 @@ python -m ruff check backend tests  # lint
 cd frontend && npx tsc -b --noEmit && npx vitest run
 ```
 
-CI (`.github/workflows/ci.yml`) runs on Windows, macOS and Linux. Dependency pins:
+CI (`.github/workflows/ci.yml`) runs the full suite and the bootstrap on Windows, macOS on Apple Silicon and
+macOS on Intel. Linux is not a tested host for now: the code paths remain, but nothing proves them. Dependency pins:
 [requirements.lock](requirements.lock) (universal, regenerated as described in
 [docs/OPERATIONS.md](docs/OPERATIONS.md#dependency-lockfile)).

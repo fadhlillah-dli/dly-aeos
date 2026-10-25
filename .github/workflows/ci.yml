@@ -7,7 +7,11 @@
 #
 # Runner budget: the repository is public on GitHub Free (owner decision 2026-10-25, ADR-0115), where
 # standard GitHub-hosted runners cost nothing. Pull requests and pushes to main therefore run the full
-# suite and the bootstrap on Linux, Windows and macOS (the platforms the owner runs, master §06/§07).
+# suite and the bootstrap on the owner's host platforms: Windows, macOS on Apple Silicon (macos-latest,
+# arm64) and macOS on Intel (macos-26-intel, x86_64) (master §06/§07). Linux is not a host platform for
+# now (owner decision 2026-10-26, ADR-0115 amendment), so no backend/bootstrap job runs on Linux. The UI,
+# browser and supply-chain jobs stay on ubuntu-latest runners because they check platform-neutral
+# artifacts (the frontend bundle, lockfiles) and are fastest there; they do not claim Linux host support.
 # Use standard runner labels only: larger runners are billed even for public repositories.
 name: ci
 
@@ -30,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, macos-26-intel]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -44,15 +48,17 @@ jobs:
           python -m pip check
       - name: G1 static — ruff
         run: python -m ruff check backend tests scripts
-      - name: G1 static — mypy (ratcheted baseline in pyproject.toml)
-        if: runner.os == 'Linux'
-        run: python -m mypy
+      - name: G1 static — mypy for the macOS and Windows code paths (ratcheted baseline in pyproject.toml)
+        if: runner.os == 'macOS' && runner.arch == 'ARM64'
+        run: |
+          python -m mypy --platform darwin
+          python -m mypy --platform win32
       - name: G1 static — secret + PII scan (blueprints, contracts, docs)
         run: python scripts/secret_scan.py
       - name: G2 controlled tests
         run: python -m pytest -q -m "not integration and not network"
       - name: G2 verifier runs the trusted suite for real (git only)
-        if: runner.os == 'Linux'
+        if: runner.os == 'macOS' && runner.arch == 'ARM64'
         run: python -m pytest -q -m integration tests/integration/test_verification_real_suite.py
 
   frontend:
@@ -117,7 +123,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, macos-26-intel]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -126,7 +132,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-      - name: Bootstrap (Linux/macOS)
+      - name: Bootstrap (macOS)
         if: runner.os != 'Windows'
         env:
           AEOS_DATA_DIR: ${{ runner.temp }}/aeos-bootstrap-data

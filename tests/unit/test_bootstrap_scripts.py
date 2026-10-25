@@ -222,3 +222,29 @@ def test_docs_give_a_fallback_when_the_executable_bit_is_lost():
         lines = _lines(script)
         guard = next(i for i, ln in enumerate(lines) if 'exec bash "$0" "$@"' in ln)
         assert guard < lines.index("set -euo pipefail"), script
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe launcher")
+def test_cmd_launcher_runs_the_cli_and_fails_clearly_without_the_venv(tmp_path):
+    """In cmd.exe ``.\aeos.ps1`` opens in an editor instead of running (seen on the owner's machine), so
+    aeos.cmd starts the same CLI from cmd and passes its exit code through."""
+    root = repo_root()
+    if not (root / ".venv" / "Scripts" / "aeos.exe").exists():
+        pytest.skip("no repository virtual environment in this checkout")
+    ok = subprocess.run(["cmd", "/d", "/c", str(root / "aeos.cmd"), "version"], capture_output=True, text=True,
+                        timeout=120)
+    assert ok.returncode == 0 and ok.stdout.strip(), ok.stderr
+    bad = subprocess.run(["cmd", "/d", "/c", str(root / "aeos.cmd"), "no-such-command"], capture_output=True,
+                         text=True, timeout=120)
+    assert bad.returncode != 0  # the CLI's own exit code comes back, not 0
+    lone = tmp_path / "aeos.cmd"
+    shutil.copy(root / "aeos.cmd", lone)
+    missing = subprocess.run(["cmd", "/d", "/c", str(lone), "version"], capture_output=True, text=True, timeout=60)
+    assert missing.returncode == 1 and "bootstrap.ps1" in missing.stderr
+
+
+def test_every_launcher_is_documented_for_its_shell():
+    root = repo_root()
+    assert (root / "aeos.cmd").is_file() and (root / "aeos.ps1").is_file() and (root / "aeos").is_file()
+    windows = (root / "docs" / "SETUP_WINDOWS.md").read_text(encoding="utf-8")
+    assert "aeos.cmd" in windows and "Command Prompt" in windows
