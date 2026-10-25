@@ -9,7 +9,7 @@
 | G4 Review | completed Claude checkpoint review bound to the verified artifact **and** independent evidence (G2) |
 | G5 Integration | retest on the merged state: provider CI on the merge commit, after a human merged; the merge brought no protected path beyond the verified change |
 | G6 Staging | NOT_APPLICABLE until the owner registers a staging ``deployment-target``; then trusted runtime evidence for the commit |
-| G7 Human release | merge performed by a human account recorded as authorised release approver (POLICY ``release_approvers``), observed from GitHub ``merged_by`` (never by AEOS) |
+| G7 Human release | merge performed by a human account recorded as authorised release approver (POLICY ``release_approvers``), observed from GitHub ``merged_by`` / Bitbucket ``closed_by`` (never by AEOS) |
 | G8 Post-release | NOT_APPLICABLE until a production ``deployment-target`` is registered; then a runtime observation of the merge commit |
 
 Statuses: PASS | FAIL | PENDING | BLOCKED | NOT_PROVEN | STALE | NOT_APPLICABLE | UNKNOWN. Nothing that is
@@ -186,10 +186,12 @@ RELEASE_APPROVERS_TARGET = "release_approvers"
 
 
 def release_approvers(session: Session, project: Project) -> tuple[list[str], str | None]:
-    """GitHub logins the owner authorised to merge/release this project (§31 G7 "authorised owner/approver").
+    """Provider identities the owner authorised to merge/release this project (§31 G7 "authorised
+    owner/approver"): GitHub logins (PERSONAL) or Bitbucket Atlassian account ids (OFFICE).
 
     Recorded as a human POLICY decision ``target_type=release_approvers, target_id=<project id>`` with
-    ``auth_scope.github_logins`` (``POST /api/decisions``). Missing -> no authorised approver is known."""
+    ``auth_scope.github_logins`` / ``auth_scope.bitbucket_accounts`` (``POST /api/decisions``). Missing -> no
+    authorised approver is known."""
     from aeos.policy import facade as policy
 
     res = call(policy.find_active_decision, session, kind="POLICY", target_type=RELEASE_APPROVERS_TARGET,
@@ -199,7 +201,8 @@ def release_approvers(session: Session, project: Project) -> tuple[list[str], st
     # owner-recorded/agent row, never a decision recorded under the other domain for this project id.
     if d is None or d.actor_kind != "HUMAN" or (d.domain or "") != project.domain:
         return [], None
-    logins = (d.auth_scope or {}).get("github_logins") or []
+    key = "bitbucket_accounts" if project.domain == "OFFICE" else "github_logins"
+    logins = (d.auth_scope or {}).get(key) or []
     return sorted({str(x).strip().lower() for x in logins if str(x).strip()}), d.id
 
 
@@ -469,6 +472,7 @@ def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
 
     # G7 human release — merge observed from the provider; AEOS has no merge capability.
     approvers, approver_decision = release_approvers(session, project)
+    merged_src = "Bitbucket closed_by" if project.domain == "OFFICE" else "GitHub merged_by"
     if pr is None:
         gates.append(_gate("G7", "PENDING", "Belum ada PR", "delivery_pull_requests"))
     elif not pr.merged:
@@ -476,21 +480,21 @@ def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
                            "delivery_pull_requests", [pr.id]))
     elif (pr.merged_by_type in BOT_TYPES) or (pr.merged_by_login or "").endswith("[bot]"):
         gates.append(_gate("G7", "FAIL", f"Merge dilakukan oleh akun non-manusia: {pr.merged_by_login}",
-                           "GitHub merged_by", [pr.id]))
+                           merged_src, [pr.id]))
     elif pr.merged_by_type == "User" and not approvers:
         gates.append(_gate("G7", "NOT_PROVEN", f"Merge oleh manusia teramati ({pr.merged_by_login}), tetapi approver "
                                                "rilis berwenang belum dicatat (keputusan POLICY release_approvers)",
-                           "GitHub merged_by", [pr.id]))
+                           merged_src, [pr.id]))
     elif pr.merged_by_type == "User" and (pr.merged_by_login or "").lower() in approvers:
-        gates.append(_gate("G7", "PASS", f"Merge oleh approver berwenang: {pr.merged_by_login}", "GitHub merged_by",
+        gates.append(_gate("G7", "PASS", f"Merge oleh approver berwenang: {pr.merged_by_login}", merged_src,
                            [pr.id, approver_decision],
                            reasons=["merged_by adalah observasi provider; AEOS tidak memiliki operasi merge"]))
     elif pr.merged_by_type == "User":
         gates.append(_gate("G7", "FAIL", f"Merge oleh akun yang tidak berwenang untuk rilis: {pr.merged_by_login}",
-                           "GitHub merged_by", [pr.id, approver_decision],
+                           merged_src, [pr.id, approver_decision],
                            reasons=[f"approver berwenang: {', '.join(approvers)}"]))
     else:
-        gates.append(_gate("G7", "UNKNOWN", "Pelaku merge tidak diketahui", "GitHub merged_by", [pr.id]))
+        gates.append(_gate("G7", "UNKNOWN", "Pelaku merge tidak diketahui", merged_src, [pr.id]))
 
     # G8 post-release — only with a registered production target and a runtime observation after the merge.
     production = _deployment_target(session, project, "production")
@@ -516,7 +520,7 @@ def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
     sec_review = latest_review(session, run.id, reviewer="SECURITY") if run else None
     separate = separate_status(run, view, review, acc_view, pr)
     separate["governance"] = gov
-    separate["delivery_provider"] = delivery_provider_status(project)
+    separate["delivery_provider"] = delivery_provider_status(project, session)
     separate["release_approvers"] = {"logins": approvers, "decision_id": approver_decision}
     separate["security_reviewer"] = {
         "required": security_review_required(task, view),
@@ -553,15 +557,26 @@ def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
 
 
 OFFICE_DELIVERY_NOTE = (
-    "NOT_APPLICABLE: kode OFFICE berada di Bitbucket; adapter Bitbucket (push/PR/Pipelines) belum diimplementasikan "
-    "dan OFFICE default deny sampai ada otorisasi perusahaan tercatat (ADR-0063, §23). Tidak ada push/PR OFFICE.")
+    "Kode OFFICE berada di Bitbucket Cloud: push aeos/* (sha-pinned) dan PR lewat broker tepercaya, CI dari Bitbucket "
+    "Pipelines/commit status. Nonaktif secara default (OFFICE default deny, §23) sampai ada otorisasi perusahaan "
+    "tercatat yang mencantumkan bitbucket (deployment CLOUD), integrasi bitbucket/code enabled dan repository "
+    "terverifikasi; Bitbucket Data Center NOT_SUPPORTED (ADR-0111).")
 
 
-def delivery_provider_status(project: Project) -> dict[str, Any]:
-    """Which code/CI provider delivery uses for the project's domain — and, for OFFICE, why none is usable."""
+def delivery_provider_status(project: Project, session: Session | None = None) -> dict[str, Any]:
+    """Which code/CI provider delivery uses for the project's domain — and, for OFFICE, whether the Bitbucket
+    Cloud adapter may run and why not (DISABLED by default, NOT_SUPPORTED for Data Center, BLOCKED)."""
     if project.domain == "OFFICE":
-        return {"provider": "bitbucket", "ci": "bitbucket-pipelines", "status": "NOT_APPLICABLE",
-                "reason": OFFICE_DELIVERY_NOTE, "remedy": "owner: company authorisation + Bitbucket adapter (M5)"}
+        from aeos.delivery.bitbucket import DISABLED_REMEDY, LIVE_PROOF, office_delivery_readiness
+
+        if session is None:
+            return {"provider": "bitbucket", "ci": "bitbucket-pipelines", "status": "DISABLED",
+                    "reason": OFFICE_DELIVERY_NOTE, "remedy": DISABLED_REMEDY, "reasons": [], "live_proof": LIVE_PROOF}
+        r = office_delivery_readiness(session, project)
+        reason = OFFICE_DELIVERY_NOTE if r.status != "AVAILABLE" else "Adapter Bitbucket Cloud siap; " + LIVE_PROOF
+        return {"provider": "bitbucket", "ci": "bitbucket-pipelines", "status": r.status,
+                "reason": reason + ("" if not r.reasons else " Alasan: " + "; ".join(r.reasons)), "remedy": r.remedy,
+                "reasons": r.reasons, "deployment": r.deployment, "repo": r.repo, "live_proof": r.live_proof}
     return {"provider": "github", "ci": "github-actions", "status": "AVAILABLE", "reason": "", "remedy": ""}
 
 

@@ -82,6 +82,27 @@ def revoke_run_grants(run_id: str, body: RevokeBody, principal: AdminPrincipal, 
     return {"run_id": run_id, "revoked": n}
 
 
+@router.post("/api/broker/routes/{route_key}/feasibility")
+def probe_route_feasibility(route_key: str, principal: AdminPrincipal, domain: ActiveDomain,
+                            db: DB) -> dict[str, Any]:
+    """§23 route feasibility (ADR-0111): one synthetic PUBLIC request to a free, human-activated PERSONAL route of
+    an ARENA/COMPARATOR/LOCAL/WORKER pool. Evidence only - the route's status and eligibility never change."""
+    from aeos.broker.feasibility import probe_route
+    from aeos.core.enums import Domain
+    from aeos.core.errors import AeosError, PolicyDenied
+
+    if domain != Domain.PERSONAL:
+        raise PolicyDenied("route feasibility probes run in the PERSONAL domain only (OFFICE default deny, §23)",
+                           code="OFFICE_DEFAULT_DENY")
+    try:
+        out = probe_route(db, route_key, actor=f"user:{principal.user.id}")
+    except AeosError:
+        db.commit()  # keep the DENIED audit record
+        raise
+    db.commit()
+    return out
+
+
 @router.post("/api/broker/side-effects/{side_effect_id}/reconcile")
 def reconcile_side_effect(side_effect_id: str, principal: AdminPrincipal, domain: ActiveDomain,
                           db: DB) -> dict[str, Any]:

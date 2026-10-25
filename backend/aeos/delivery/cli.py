@@ -35,27 +35,32 @@ def capabilities_cmd(
     branch: str = typer.Option(None, help="Branch to check (default: repository default branch)"),
     record: bool = typer.Option(False, "--record", help="Store the observation as PROVIDER_CAPABILITY evidence"),
 ) -> None:
-    """Read-only GitHub capability check: branch protection, rulesets, required checks, plan."""
-    from aeos.delivery import provider
+    """Read-only capability check: GitHub branch protection/rulesets (PERSONAL) or Bitbucket Cloud branch
+    restrictions and merge-check enforcement (OFFICE, only while the OFFICE adapter is authorised)."""
+    from aeos.delivery import bitbucket, provider
     from aeos.models.portfolio import Project, RepositoryReference
     from aeos.portfolio import facade as portfolio
 
     try:
         with _session() as s:
             if repo:
-                provider.validate_repo(repo)
+                if not (provider.REPO_RE.match(repo) or bitbucket.REPO_RE.match(repo)):
+                    provider.validate_repo(repo)
                 ref = s.scalar(select(RepositoryReference).where(RepositoryReference.full_name == repo))
             else:
                 platform = portfolio.platform_project(s)
                 ref = next((r for r in portfolio.repositories(s, platform.id) if r.provider.upper() == "GITHUB"),
                            None) if platform else None
             if ref is None:
-                _echo("No registered GitHub repository found. Register it first (aeos project ...) or pass --repo.")
+                _echo("No registered repository found. Register it first (aeos project ...) or pass --repo.")
                 raise typer.Exit(2)
             project = s.get(Project, ref.project_id)
-            token, credential = provider.github_token(project.domain)
-            caps = provider.check_capabilities(ref.full_name, branch or ref.default_branch, token=token,
-                                               credential=credential)
+            if (ref.provider or "").upper() == "BITBUCKET":
+                caps = bitbucket.capabilities_for(s, project, ref.full_name, branch or ref.default_branch)
+            else:
+                token, credential = provider.github_token(project.domain)
+                caps = provider.check_capabilities(ref.full_name, branch or ref.default_branch, token=token,
+                                                   credential=credential)
             if record:
                 ev = provider.record_capability_evidence(s, project, caps)
                 _echo(f"recorded evidence {ev.id}")
@@ -66,14 +71,16 @@ def capabilities_cmd(
     _echo(f"credential: {caps.credential}")
     for c in caps.checks:
         _echo(f"  [{c.status:<15}] {c.key}: {c.summary}")
-    _echo(f"merge gate: {caps.merge_gate}  enforcement tested: {caps.enforcement_tested}")
+    _echo(f"merge gate: {caps.merge_gate}  enforcement tested: {caps.enforcement_tested}  "
+          f"entitlement: {caps.entitlement}")
     for r in caps.residual_risks:
         _echo(f"  residual risk: {r}")
 
 
 @app.command("sync-pr")
 def sync_pr_cmd(pr_id: str = typer.Argument(..., help="Delivery PR record id")) -> None:
-    """Observe a PR on GitHub (state, head/base, merged_by, CI) and invalidate stale acceptance."""
+    """Observe a PR on its provider (GitHub, or Bitbucket Cloud for OFFICE): state, head/base, merged_by, CI;
+    stale acceptance is invalidated."""
     from aeos.delivery import sync
 
     try:

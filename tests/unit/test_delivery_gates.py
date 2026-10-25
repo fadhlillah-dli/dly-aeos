@@ -264,12 +264,16 @@ def test_g6_and_g8_are_evaluated_once_targets_are_registered(db, wf, monkeypatch
     assert _by(gates.compute_gates(db, w.task.id))["G8"]["status"] == "FAIL"
 
 
-def test_office_delivery_is_stated_not_applicable(db, wf, monkeypatch):
+def test_office_delivery_is_stated_disabled_by_default(db, wf, monkeypatch):
+    """ADR-0111: OFFICE delivery exists (Bitbucket Cloud) but is DISABLED until a company authorisation, an
+    enabled bitbucket/code integration, Cloud and a verified repository; the reasons are shown, never a pass."""
     w = make_world(db, domain="OFFICE", is_platform=False, project_key="office-app")
     install_planning(monkeypatch, w.version)
     r = gates.compute_gates(db, w.task.id)
     dp = r["separate_status"]["delivery_provider"]
-    assert dp["status"] == "NOT_APPLICABLE" and "Bitbucket" in dp["reason"]
+    assert dp["status"] == "DISABLED" and "Bitbucket" in dp["reason"]
+    assert dp["provider"] == "bitbucket" and dp["ci"] == "bitbucket-pipelines"
+    assert any("otorisasi perusahaan" in x for x in dp["reasons"]) and "NOT-PROVEN" in dp["live_proof"]
 
 
 def test_governance_status_is_shown_and_gates_promotion(db, wf, monkeypatch):

@@ -178,20 +178,24 @@ def route_authorisation_problem(session: Any, route: ModelRoute) -> str | None:
         return "routing module unavailable: route approval cannot be checked"
 
 
-def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: str | None = None) -> Upstream:
+def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: str | None = None,
+                     pools: tuple[str, ...] | None = None) -> Upstream:
+    """``pools`` (additive, ADR-0111): the pools this caller may serve. The worker proxy uses the default
+    ``SERVED_POOLS`` (WORKER); only the owner-triggered feasibility probe passes ``PROBE_POOLS``."""
     from aeos.broker.facade import SERVED_POOLS
     from aeos.secrets import facade as secrets
 
+    allowed_pools = pools or SERVED_POOLS
     route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
     if route is None:
         raise ProxyError(403, "ROUTE_UNKNOWN", "route in grant scope no longer exists")
     if route.provider == "claude-native" or route.pool == "SUPERVISOR":
         raise ProxyError(403, "ROUTE_NOT_WORKER", "route is not a worker route")
-    if route.pool not in SERVED_POOLS:
-        # ARENA/COMPARATOR/LOCAL/WATCHLIST have no controlled execution path through the broker yet
-        # (ADR-0106); routing refuses such tasks at admission, this is the boundary's second line.
+    if route.pool not in allowed_pools:
+        # ARENA/COMPARATOR/LOCAL/WATCHLIST never serve worker tasks (ADR-0106); routing refuses such tasks at
+        # admission, this is the boundary's second line. Their feasibility runs only through the probe (ADR-0111).
         raise ProxyError(403, "ROUTE_NOT_WORKER",
-                         f"route pool {route.pool} has no broker serving path (only {', '.join(SERVED_POOLS)})")
+                         f"route pool {route.pool} has no broker serving path (only {', '.join(allowed_pools)})")
     if route.status not in {"APPROVED", "TRIAL"}:
         raise ProxyError(403, "ROUTE_NOT_APPROVED", f"route status {route.status}")
     if domain not in (route.eligible_domains or []):

@@ -37,14 +37,64 @@ def delivery_ci_workflow(ctx: CheckContext) -> Outcome:
                            operation="Pin action ke full commit SHA lewat PR (protected path)",
                            target=".github/workflows", privilege="reviewer manusia",
                            evidence_to_collect="delivery.ci_workflow VERIFIED"))
-    return Outcome("VERIFIED", f"{len(actions)} action di workflow CI dipin ke commit SHA (bukti statis E1).",
+    observed = _provider_ci_observation(ctx)
+    evidence["provider_ci"] = observed
+    note = (f" CI provider teramati untuk {str(observed.get('commit'))[:12]}: {observed.get('overall')} (E3)."
+            if observed.get("status") == "OBSERVED" else " Belum ada observasi CI provider (provider-ci) yang tercatat.")
+    return Outcome("VERIFIED", f"{len(actions)} action di workflow CI dipin ke commit SHA (bukti statis E1).{note}",
                    evidence=evidence)
 
 
+def _provider_ci_observation(ctx: CheckContext) -> dict[str, Any]:
+    """The newest trusted provider-ci evidence of a PERSONAL project (what the provider actually ran), shown next
+    to the static pin check so "trusted CI" is not only a statement about the workflow file."""
+    if ctx.session is None:
+        return {"status": "UNKNOWN", "reason": "database not available"}
+    try:
+        from sqlalchemy import select
+
+        from aeos.models.evidence import EvidenceArtifact
+        from aeos.verification import facade as collector
+
+        ev = ctx.session.scalar(select(EvidenceArtifact).where(
+            EvidenceArtifact.kind == "CI_STATUS", EvidenceArtifact.origin == "provider-ci",
+            EvidenceArtifact.trusted.is_(True), EvidenceArtifact.domain == "PERSONAL", EvidenceArtifact.mode == "LIVE")
+            .order_by(EvidenceArtifact.created_at.desc()).limit(1))
+        if ev is None:
+            return {"status": "NOT_OBSERVED"}
+        data = collector.read_json(ev) or {}
+        return {"status": "OBSERVED", "evidence_id": ev.id, "commit": ev.subject_id,
+                "overall": data.get("overall"), "gate_mapping": data.get("gate_mapping"),
+                "checked_at": ev.created_at.isoformat() if ev.created_at else None}
+    except Exception as exc:  # never green because of this informational read
+        return {"status": "UNKNOWN", "reason": type(exc).__name__}
+
+
 def _capability_view(caps: dict[str, Any]) -> dict[str, Any]:
-    keep = ("repo", "branch", "checked_at", "credential", "visibility", "plan", "merge_gate", "enforcement_tested",
-            "required_status_checks", "residual_risks", "source", "mode")
+    keep = ("provider", "repo", "branch", "checked_at", "credential", "visibility", "plan", "merge_gate",
+            "enforcement_tested", "required_status_checks", "status_check_identity", "deploy_restrictions",
+            "entitlement", "residual_risks", "source", "mode")
     return {k: caps.get(k) for k in keep if k in caps}
+
+
+IDENTITY_RISK = ("Required status check tidak terikat ke identitas pelapor tertentu (app/integrasi): status dapat "
+                 "dilaporkan oleh akun lain dengan izin menulis status - check tidak membuktikan CI tepercaya.")
+DEPLOY_RISK = ("Pembatasan deploy/environment provider belum terkonfigurasi atau tidak diketahui; AEOS tidak memiliki "
+               "operasi deploy dan produksi tetap tindakan manusia.")
+
+
+def _restrictions(caps: dict[str, Any], risks: list[str]) -> dict[str, str]:
+    """§08 "branch/merge/deploy restrictions, status-check identity": evaluated, not only passed through.
+    An unbound status check or missing deploy restriction is a residual risk on every outcome (never a pass)."""
+    identity = str(caps.get("status_check_identity") or "UNKNOWN").upper()
+    deploy = str(caps.get("deploy_restrictions") or "UNKNOWN").upper()
+    if (identity in ("NOT_CONFIGURED", "UNKNOWN") and caps.get("required_status_checks")
+            and not any("tidak terikat" in r for r in risks)):
+        risks.append(IDENTITY_RISK)
+    if deploy != "CONFIGURED" and not any("deploy" in r.lower() for r in risks):
+        risks.append(DEPLOY_RISK)
+    return {"status_check_identity": identity, "deploy_restrictions": deploy,
+            "entitlement": str(caps.get("entitlement") or "UNKNOWN").upper()}
 
 
 def _merge_gate_outcome(caps: dict[str, Any], *, origin: str) -> Outcome:
@@ -63,15 +113,21 @@ def _merge_gate_outcome(caps: dict[str, Any], *, origin: str) -> Outcome:
         risks.append(ENFORCEMENT_UNTESTED)
     if RESIDUAL_RISK not in risks and gate != "CONFIGURED":
         risks.append(RESIDUAL_RISK)
-    evidence = {**view, "residual_risks": risks, "origin": origin, "enforceable": gate == "CONFIGURED"}
-    target = f"github:{caps.get('repo')}@{caps.get('branch')}"
+    restrictions = _restrictions(caps, risks)
+    evidence = {**view, "residual_risks": risks, "origin": origin, "enforceable": gate == "CONFIGURED",
+                "restrictions": restrictions}
+    target = f"{str(caps.get('provider') or 'github').lower()}:{caps.get('repo')}@{caps.get('branch')}"
     if gate == "CONFIGURED":
         return Outcome("CONFIGURED", f"Merge gate provider terkonfigurasi pada {caps.get('branch')} (required checks: "
-                       f"{len(caps.get('required_status_checks') or [])}); penegakan NOT-PROVEN sampai uji bypass.",
+                       f"{len(caps.get('required_status_checks') or [])}; identitas pelapor: "
+                       f"{restrictions['status_check_identity']}; pembatasan deploy: "
+                       f"{restrictions['deploy_restrictions']}; entitlement: {restrictions['entitlement']}); "
+                       "penegakan NOT-PROVEN sampai uji bypass.",
                        evidence=evidence, target_identity=target)
     if gate == "NOT_ENFORCEABLE":
-        return Outcome("MISSING", "Branch protection tidak dapat ditegakkan pada paket/repo ini (residual risk, bukan "
-                       "penegakan): merge tetap tindakan manusia.", evidence=evidence, target_identity=target,
+        return Outcome("MISSING", "Branch protection tidak dapat ditegakkan pada paket/repo ini (entitlement: "
+                       f"{restrictions['entitlement']}; residual risk, bukan penegakan): merge tetap tindakan manusia.",
+                       evidence=evidence, target_identity=target,
                        error_code="BRANCH_PROTECTION_NOT_ENFORCEABLE", severity="HIGH")
     if gate == "NOT_CONFIGURED":
         return Outcome("MISSING", f"Branch protection/ruleset tersedia tetapi belum dikonfigurasi untuk "

@@ -60,15 +60,67 @@ def _token_kind() -> str:
     return "unknown"
 
 
-def github_token_privilege(kind: str, scopes_header: str | None) -> dict[str, Any]:
-    """Least-privilege verdict from the token kind and GitHub's ``X-OAuth-Scopes`` header (classic tokens only).
+FINE_GRAINED_REMEDY = ("gunakan fine-grained PAT dengan 'Only select repositories' (repo platform + repo proyek "
+                       "terdaftar saja): Issues RW, Pull requests RW, Contents RW, Metadata R; tanpa Administration/"
+                       "Workflows")
 
-    Fine-grained PATs are limited to selected repositories/permissions by construction; a classic/OAuth token
-    (e.g. ``gh auth token``) with ``repo`` reaches every repository of the account — a residual risk the owner sees."""
+
+ADMINISTRATION_GRANTED, ADMINISTRATION_NOT_GRANTED = "GRANTED", "NOT_GRANTED"
+ADMINISTRATION_UNKNOWN, ADMINISTRATION_NOT_POSSIBLE = "UNKNOWN", "NOT_POSSIBLE"
+
+
+def _fine_grained_privilege(permissions: dict[str, Any] | None, reachable: list[str] | None,
+                            allowed_repos: list[str] | None, truncated: bool,
+                            administration: str | None = None) -> dict[str, Any]:
+    """A fine-grained PAT is only least privilege when what it can actually reach is observed: no repository
+    beyond the ones AEOS registered (a token created for "All repositories" lists them all) and no Administration
+    permission on the token itself.
+
+    ``permissions.admin`` of ``GET /repos/{repo}`` is what GitHub reports for the token's *account* on the
+    repository: a token never exceeds it, but the owner of a personal repository always shows ``admin`` while their
+    token may carry no Administration at all. So it is never read as the token's grant: with an admin account role
+    the token's Administration permission must be observed (``administration``: GRANTED / NOT_GRANTED, see
+    ``_administration_grant``) or least privilege stays NOT proven (None, never True and never a false "has
+    Administration" claim). The Workflows permission is not observable through the API."""
+    allowed = {a.lower() for a in allowed_repos or []}
+    admin_role = bool((permissions or {}).get("admin"))
+    grant = (administration or ADMINISTRATION_UNKNOWN) if admin_role else ADMINISTRATION_NOT_POSSIBLE
+    problems: list[str] = []
+    if grant == ADMINISTRATION_GRANTED:
+        problems.append("token membawa izin Administration pada repo platform (GET branch protection diizinkan)")
+    extra = sorted(r for r in reachable or [] if r.lower() not in allowed)
+    if extra:
+        problems.append(f"token menjangkau {len(extra)} repo di luar repo terdaftar AEOS (pemilihan 'All repositories'?):"
+                        " " + ", ".join(extra[:5]) + (" ..." if len(extra) > 5 else ""))
+    out: dict[str, Any] = {"kind": "fine-grained", "scopes": [], "reachable_repositories": len(reachable or []),
+                           "beyond_registered": extra[:20], "admin": admin_role, "administration_permission": grant,
+                           "workflows_permission": "NOT_OBSERVABLE"}
+    if problems:
+        return {**out, "least_privilege": False,
+                "risk": "Fine-grained PAT melebihi least privilege: " + "; ".join(problems) + " - " + FINE_GRAINED_REMEDY}
+    if reachable is None or truncated:
+        return {**out, "least_privilege": None,
+                "note": "pemilihan repo token belum terbaca (GET /user/repos gagal atau terpotong) - least privilege "
+                        "belum terbukti"}
+    if grant == ADMINISTRATION_UNKNOWN:
+        return {**out, "least_privilege": None,
+                "note": "akun pemilik token berperan admin pada repo; izin Administration token itu sendiri tidak "
+                        "teramati (probe branch protection tidak konklusif) - least privilege belum terbukti"}
+    return {**out, "least_privilege": True,
+            "note": "fine-grained PAT: hanya repo terdaftar, tanpa izin Administration (izin Workflows tidak terlihat "
+                    "lewat API)"}
+
+
+def github_token_privilege(kind: str, scopes_header: str | None, *, permissions: dict[str, Any] | None = None,
+                           reachable: list[str] | None = None, allowed_repos: list[str] | None = None,
+                           truncated: bool = False, administration: str | None = None) -> dict[str, Any]:
+    """Least-privilege verdict from the token kind and GitHub's ``X-OAuth-Scopes`` header (classic tokens) or,
+    for a fine-grained PAT, from what it observably reaches (``reachable`` repositories vs the registered ones, the
+    observed ``administration`` grant). A classic/OAuth token (e.g. ``gh auth token``) with ``repo`` reaches every
+    repository of the account — a residual risk the owner sees."""
     scopes = sorted({s.strip() for s in (scopes_header or "").split(",") if s.strip()})
     if kind == "fine-grained":
-        return {"kind": kind, "scopes": [], "least_privilege": True,
-                "note": "fine-grained PAT (repo terpilih, izin per resource)"}
+        return _fine_grained_privilege(permissions, reachable, allowed_repos, truncated, administration)
     if scopes_header is None:
         return {"kind": kind, "scopes": [], "least_privilege": None,
                 "note": "jenis/scope token tidak terbaca — least privilege belum terbukti"}
@@ -105,6 +157,59 @@ def _record_probe(ctx: CheckContext, providers: tuple[str, ...], root_id: str, c
         import logging
 
         logging.getLogger("aeos.doctor").warning("integration probe not recorded: %s", type(exc).__name__)
+
+
+REACHABLE_PAGE = 100
+
+
+def _reachable_repos(ctx: CheckContext) -> tuple[list[str] | None, bool]:
+    """Repositories the stored token can reach (read-only ``GET /user/repos``; a fine-grained PAT lists only its
+    selected repositories). (None, False) when unreadable; truncated when a full page came back."""
+    try:
+        hr = github_get(ctx, f"/user/repos?per_page={REACHABLE_PAGE}")
+    except Exception:
+        return None, False
+    if getattr(hr, "status", None) != 200 or not isinstance(getattr(hr, "body", None), list):
+        return None, False
+    names = [str(r.get("full_name")) for r in hr.body if isinstance(r, dict) and r.get("full_name")]
+    return names, len(hr.body) >= REACHABLE_PAGE
+
+
+def _administration_grant(ctx: CheckContext, slug: str, branch: str) -> str:
+    """Whether the fine-grained token itself carries the repository Administration permission (read-only probe).
+
+    ``GET /repos/{repo}/branches/{branch}/protection`` needs Administration (read). A fine-grained token without it
+    is refused with 403 "Resource not accessible by personal access token"; a token with it gets 200 (protected) or
+    404 "Branch not protected". Anything else (plan limits, rate limit, network) is UNKNOWN - never a pass."""
+    from urllib.parse import quote
+
+    try:
+        hr = github_get(ctx, f"/repos/{slug}/branches/{quote(branch or 'main', safe='')}/protection")
+    except Exception:
+        return ADMINISTRATION_UNKNOWN
+    status = getattr(hr, "status", None)
+    body = getattr(hr, "body", None)
+    message = str(body.get("message") or "").lower() if isinstance(body, dict) else ""
+    if status == 403 and "not accessible by personal access token" in message:
+        return ADMINISTRATION_NOT_GRANTED
+    if status == 200 or (status == 404 and "branch not protected" in message):
+        return ADMINISTRATION_GRANTED
+    return ADMINISTRATION_UNKNOWN
+
+
+def _registered_github_repos(ctx: CheckContext) -> list[str]:
+    """GitHub repositories registered for PERSONAL projects (the token may legitimately reach those)."""
+    if ctx.session is None:
+        return []
+    try:
+        from sqlalchemy import select
+
+        from aeos.models.portfolio import RepositoryReference
+
+        return [r.full_name for r in ctx.session.scalars(select(RepositoryReference))
+                if (r.provider or "").upper() == "GITHUB"]
+    except Exception:
+        return []
 
 
 def _scopes(headers: dict[str, str] | None) -> list[str] | str:
@@ -148,12 +253,22 @@ def adapter_github(ctx: CheckContext) -> Outcome:
                          "permissions": {k: perms.get(k) for k in ("admin", "maintain", "push", "pull") if k in perms},
                          "repo_id": hr.body.get("id"),
                          "token_scopes": _scopes(getattr(hr, "headers", None))})
-        privilege = github_token_privilege(_token_kind(), (getattr(hr, "headers", None) or {}).get("x-oauth-scopes"))
+        kind = _token_kind()
+        reachable, truncated = _reachable_repos(ctx) if kind == "fine-grained" else (None, False)
+        # the account's admin role does not show the token's own grant: observe it (fine-grained only)
+        administration = (_administration_grant(ctx, slug, str(hr.body.get("default_branch") or "main"))
+                          if kind == "fine-grained" and isinstance(perms, dict) and perms.get("admin") else None)
+        privilege = github_token_privilege(kind, (getattr(hr, "headers", None) or {}).get("x-oauth-scopes"),
+                                           permissions=perms if isinstance(perms, dict) else {}, reachable=reachable,
+                                           allowed_repos=[slug, *_registered_github_repos(ctx)], truncated=truncated,
+                                           administration=administration)
         evidence["token_privilege"] = privilege
         summary = f"Repo github:{slug} terbaca dengan token (read-only); izin tulis/enforcement belum diverifikasi."
         if privilege["least_privilege"] is False:
             evidence["residual_risks"] = [privilege["risk"]]
             summary += " " + privilege["risk"]
+        elif privilege["least_privilege"] is None:
+            summary += " Least privilege token belum terbukti: " + str(privilege.get("note") or "")
         _record_probe(ctx, ("github-repo", "github-issues"), slug, "CONNECTED")
         return Outcome("CONNECTED", summary, evidence=evidence, target_identity=f"github:{slug}",
                        remedy=None if privilege["least_privilege"] is not False else set_secret_remedy(
