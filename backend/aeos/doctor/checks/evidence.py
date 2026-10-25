@@ -192,9 +192,9 @@ def _verifier_runner_view(ctx: CheckContext) -> dict[str, Any]:
     hidden. Fail closed: any error is reported as WEAK with the reason."""
     domain = Domain.PERSONAL.value  # OFFICE is always BLOCKED by the worker runtime; verifier re-checks per domain
     try:
-        from aeos.verification.runner import runner_status
+        from aeos.verification import facade as verification
 
-        st = runner_status(ctx.session, domain=domain)
+        st = verification.verifier_runner_status(ctx.session, domain=domain)
     except Exception as exc:
         return {"isolation": "WEAK", "runner": "process", "reasons": [f"verifier runner unreadable ({type(exc).__name__})"],
                 "residual_risks": ["verifier isolation NOT-PROVEN: runner state could not be read (fail closed)"]}
@@ -234,9 +234,12 @@ def evidence_verifier(ctx: CheckContext) -> Outcome:
     if risks:
         evidence["residual_risks"] = risks
     iso = runner_view["isolation"]
+    # Honest wording: the WEAK runner's residual risk is stated, not owner-accepted (no Decision records an
+    # acceptance of it); OFFICE and runs produced in a container are BLOCKED instead of using it.
     iso_note = (f" Runner candidate code: isolasi {iso}"
-                + ("" if iso == "CONTAINER" else " (WEAK, residual risk diterima pemilik; buktikan containment "
-                   "container + build image verifier untuk CONTAINER)") + ".")
+                + ("" if iso == "CONTAINER" else " (WEAK: belum terisolasi, residual risk dinyatakan; OFFICE dan "
+                   "run dari sandbox container diblokir; buktikan containment container + build image verifier "
+                   "untuk CONTAINER)") + ".")
     if not ctx.functional:
         return Outcome("CONFIGURED", "Collector dan acceptance tersedia; independensi diuji dengan --functional "
                        "(uji mandiri pemisahan zona kepercayaan)." + iso_note, evidence=evidence)

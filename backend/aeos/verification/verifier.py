@@ -47,7 +47,6 @@ from aeos.core.config import get_settings
 from aeos.core.enums import DataClassification, DataMode, Domain, ExecutionState
 from aeos.core.errors import AeosError, Conflict, NotFound
 from aeos.core.hashing import content_hash, file_sha256, sha256_bytes
-from aeos.core.ids import new_id
 from aeos.core.paths import UnsafePathError, ensure_within
 from aeos.events import service as events
 from aeos.models.evidence import EvidenceArtifact
@@ -72,8 +71,9 @@ log = logging.getLogger("aeos.verification.verifier")
 # v2: impact-driven checks (negative tests, dependency diff / Zone 2, frontend + migration honesty),
 # TaskSpec suite selection, E4 protected-suite references.
 # v3: isolated runner selection (container when proven, else WEAK with the hardened environment), controller
-# checkout/interpreter + DB trust-table tamper window around candidate code, impact-selected trusted tests and
-# the migration round-trip. A new version makes earlier acceptance STALE.
+# checkout/interpreter + DB trust-table/schema tamper window around candidate code and the migration round-trip
+# (impact adds steps the verifier runs itself; it does not yet widen the trusted test selection, §22/§31 - stated
+# as NOT-PROVEN, not claimed). A new version makes earlier acceptance STALE.
 VERIFIER_VERSION = "3"
 ORIGIN = "verifier"
 MARK_EXPR = "not integration and not network"
@@ -99,7 +99,6 @@ _NEGATIVE_ASSERTION = re.compile(
     r"PolicyDenied|Blocked|ValidationFailed|NotFound|Conflict"
 )
 _TEST_FILE_PATTERNS = ("tests/**", "**/test_*.py", "**/*_test.py", "**/*.test.*", "**/*.spec.*", "**/__tests__/**")
-_MIGRATION_TEST_GLOBS = ("test_*migration*.py", "test_*alembic*.py", "*migration*.test.*")
 _PY_DEPENDENCY_FILES = ("requirements.lock", "requirements", "pyproject.toml", "poetry.lock", "uv.lock",
                         "Pipfile.lock")
 # verifier_policy.suites -> candidate test directories the verifier runs (the trusted acceptance suite always runs)
@@ -552,9 +551,10 @@ class _Verifier:
             workdir = self._make_workdir()
             try:
                 # §20 isolated runner: the container when the boundary is proven on this host, else WEAK
-                # (OFFICE / verifier_policy.isolated_runner=required -> BLOCKED instead, fail closed)
+                # (OFFICE / a run produced in a container / verifier_policy.isolated_runner=required -> BLOCKED
+                # instead, fail closed: isolation is never downgraded)
                 self.runner = runner.select_runner(s, domain=project.domain, workdir=workdir, run_id=run.id,
-                                                   policy=policy)
+                                                   policy=policy, run_sandbox=run.sandbox_kind)
             except runner.RunnerError as exc:
                 raise _Blocked(exc.code, exc.message) from exc
             self.env_identity.update(self.runner.describe())
@@ -592,7 +592,7 @@ class _Verifier:
                         self._run_candidate_tests(snapshot, ini, workdir, limits, suites=self._suites(policy))
                     else:
                         self._check("candidate_tests", "NOT_RUN", "disabled by TaskSpec verifier_policy")
-                    self._run_impact_steps(snapshot, trusted_root, trusted_suite.kind, ini, workdir, limits, policy)
+                    self._run_impact_steps(snapshot, workdir, limits)
                 finally:
                     self._guard_close()
                 if policy.get("ruff", True):
@@ -612,7 +612,7 @@ class _Verifier:
         finally:
             if workdir is not None:
                 shutil.rmtree(workdir, ignore_errors=True)
-                for name in ("b1", "b2", "b3", "b4", "b5"):
+                for name in ("b1", "b2", "b3"):
                     short = _short_basetemp(workdir, name)
                     if short is not None:
                         shutil.rmtree(short, ignore_errors=True)
@@ -752,17 +752,14 @@ class _Verifier:
 
     @staticmethod
     def _make_workdir() -> Path:
-        # Short names on purpose: Windows MAX_PATH (260) is reached quickly by nested pytest tmp dirs.
-        base = get_settings().layout.root / "vw"
-        base.mkdir(parents=True, exist_ok=True)
-        for _ in range(5):
-            wd = base / new_id().split("-")[0]
-            try:
-                wd.mkdir()
-                return wd
-            except FileExistsError:
-                continue
-        raise _Blocked("WORKDIR_UNAVAILABLE", "could not allocate a verifier work directory")
+        # Private run dir under the system temp dir, never under the data dir: candidate code must not be able
+        # to derive the live DB path from the paths it is handed (runner.new_workdir). Short names on purpose:
+        # Windows MAX_PATH (260) is reached quickly by nested pytest tmp dirs.
+        try:
+            return runner.new_workdir()
+        except OSError as exc:
+            raise _Blocked("WORKDIR_UNAVAILABLE",
+                           f"could not allocate a verifier work directory ({type(exc).__name__})") from exc
 
     def _export_base(self, git: GitReader, workdir: Path) -> Path:
         """Materialise the recorded base commit (human-reviewed state) for collecting the expected ids."""
@@ -1238,8 +1235,7 @@ class _Verifier:
 
     # ------------------------------------------------------------------ impact-driven checks (§16, §22, §31)
 
-    def _run_impact_steps(self, snapshot: Path, trusted_root: Path, suite_kind: str, ini: Path, workdir: Path,
-                          limits: VerifierLimits, policy: dict[str, Any]) -> None:
+    def _run_impact_steps(self, snapshot: Path, workdir: Path, limits: VerifierLimits) -> None:
         """Steps the impact of the change adds to what the verifier itself executes (candidate code, so they run
         inside the tamper window and through the runner): a schema-migration upgrade/downgrade/upgrade round-trip."""
         categories: dict[str, list[str]] = getattr(self, "categories", {}) or {}
@@ -1272,10 +1268,11 @@ class _Verifier:
                                                   "to round-trip"}
             return
         rn = self._runner()
-        db_target = rn.to_container(str(workdir / "mig.sqlite3")) if hasattr(rn, "to_container") else \
-            str(workdir / "mig.sqlite3")
-        mig_arg = rn.to_container(str(mig_dir)) if hasattr(rn, "to_container") else str(mig_dir)
-        args = ["-c", _MIGRATION_ROUNDTRIP, mig_arg, db_target]
+        # the throwaway DB lives in the report dir: the only directory the container runner mounts writable
+        # (its root filesystem and the rest of the run dir are read-only)
+        reports = workdir / "r"
+        reports.mkdir(parents=True, exist_ok=True)
+        args = ["-c", _MIGRATION_ROUNDTRIP, rn.to_container(str(mig_dir)), rn.to_container(str(reports / "mig.sqlite3"))]
         res = rn.python(args, pythonpath=snapshot / "backend", autoload=False, timeout=limits.unit_timeout)
         data: dict[str, Any] = {}
         try:
@@ -1335,8 +1332,16 @@ class _Verifier:
             else:
                 reason = (rt or {}).get("reason") if rt else "the verifier did not run the round-trip"
                 msg = f"migration changed ({label}): upgrade/downgrade/restore round-trip NOT-PROVEN ({reason})"
+                # §31 G2 "migration/rollback ... per change": a migration change whose round-trip the verifier
+                # could not run never passes on its own (fail closed), unless the (human-approved) TaskSpec
+                # explicitly makes the round-trip optional for this task.
+                optional = str(policy.get("migration_roundtrip") or "").strip().lower() == "optional"
+                if optional:
+                    msg += "; non-blocking: TaskSpec verifier_policy.migration_roundtrip=optional"
                 self._check("migration_rollback", "NOT_PROVEN", msg)
                 out.not_proven.append(msg)
+                if not optional:
+                    self.blocking_not_proven.append(msg)
         # Frontend: the verifier runs Python tests only; product tests come from provider CI (gate G3).
         if categories.get("frontend"):
             msg = ("frontend changed: unit/browser/visual/a11y tests are not run by the verifier (Python only); "

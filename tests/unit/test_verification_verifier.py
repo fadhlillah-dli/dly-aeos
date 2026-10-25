@@ -89,6 +89,7 @@ import os, subprocess
 from pathlib import Path
 
 REAL_DB = {db!r}
+DATA_ROOT = {root!r}
 OWNER = {owner!r}
 
 
@@ -129,7 +130,31 @@ def test_data_db_not_reachable_through_the_environment():
     assert not any(os.path.isfile(os.path.join(c, "aeos.sqlite3")) for c in candidates if c)
     assert all(os.path.normcase(os.path.join(c, "aeos.sqlite3")) != os.path.normcase(REAL_DB)
                for c in candidates if c)
+    # platformdirs (how aeos.core.paths finds the data dir) resolves into the run home, not the owner profile
+    assert os.path.normcase(candidates[1]).startswith(os.path.normcase(os.path.expanduser("~")))
     assert not os.environ.get("SSH_AUTH_SOCK")
+
+
+def test_data_db_not_derivable_from_any_path_the_child_is_handed():
+    import sys
+
+    seeds = [v for v in os.environ.values() if v and (os.sep in v or "/" in v)]
+    seeds += [os.getcwd(), __file__, *[p for p in sys.path if p and "site-packages" not in p]]
+    paths = []
+    for seed in seeds:
+        for part in seed.split(os.pathsep):
+            if part:
+                paths.append(Path(part))
+    real_db = os.path.normcase(os.path.realpath(REAL_DB))
+    real_root = os.path.normcase(os.path.realpath(DATA_ROOT))
+    hits = []
+    for p in paths:
+        for anc in [p, *p.parents]:
+            a = os.path.normcase(os.path.realpath(str(anc)))
+            if a == real_root or os.path.normcase(os.path.realpath(os.path.join(a, "aeos.sqlite3"))) == real_db:
+                hits.append(str(p))
+                break
+    assert not hits, hits
 '''
 
 
@@ -144,13 +169,14 @@ def test_candidate_tests_find_no_owner_credentials_through_the_environment(db, s
     world = make_world(db, verifier_policy=FAST)
     cand, base, head = make_candidate(settings, world, head_files={
         "tests/unit/test_env_probe.py": CANDIDATE_PROBE_TEST.format(db=str(settings.layout.db_path),
+                                                                    root=str(settings.layout.root),
                                                                     owner=str(tmp_path / "owner"))})
     bind_candidate(db, world, cand, base, head)
     planted = _plant_owner_state(tmp_path, monkeypatch)
     monkeypatch.setenv("AEOS_DATA_DIR", str(settings.data_dir))  # the controller keeps its own data dir
     out = _verify(db, world)
     assert out.checks["candidate_tests"].status == "PASS", out.checks["candidate_tests"]
-    assert out.checks["candidate_tests"].details.get("passed") == 5  # the 4 probes + the base's own test
+    assert out.checks["candidate_tests"].details.get("passed") == 6  # the 5 probes + the base's own test
     assert out.status == "PASS", (out.reasons, out.not_proven)
     view = verifier.report_view(db.get(EvidenceArtifact, out.report_evidence_id))
     assert view["verifier_isolation"] == "WEAK" and view["verifier_runner"] == "process"
@@ -241,10 +267,29 @@ def test_frontend_and_migration_changes_are_stated_not_proven(db, settings, cont
     out = _verify(db, world)
     assert out.checks["frontend_tests"].status == "NOT_PROVEN"
     assert out.checks["migration_rollback"].status == "NOT_PROVEN"
-    assert out.status == "PASS"  # visible NOT-PROVEN items, but nothing the trusted suite failed
+    # §31 G2: a migration change whose upgrade/downgrade/restore round-trip the verifier could not run (no
+    # Alembic tree here) never passes on its own - blocking NOT_PROVEN (review 2026-10-19: it used to PASS)
+    assert out.status == "NOT_PROVEN", (out.status, out.reasons)
     report = db.get(EvidenceArtifact, out.report_evidence_id)
     nps = collector.read_json(report)["not_proven"]
     assert any("frontend" in n for n in nps) and any("migration" in n for n in nps)
+
+
+def test_frontend_change_alone_stays_non_blocking_and_an_optional_round_trip_is_stated(db, settings, controller,
+                                                                                        wf):
+    """Frontend tests belong to provider CI (G3): visible NOT-PROVEN, non-blocking. A TaskSpec that explicitly
+    makes the migration round-trip optional keeps the unproven round-trip visible but non-blocking."""
+    world = make_world(db, verifier_policy={**FAST, "migration_roundtrip": "optional"},
+                       allowed_paths=["backend/**", "tests/unit/**", "frontend/**"])
+    cand, base, head = make_candidate(settings, world, head_files={
+        "frontend/src/App.tsx": "export const App = () => null;\n",
+        "backend/migrations/versions/0009_x.py": "revision = '0009'\n"})
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.checks["frontend_tests"].status == "NOT_PROVEN"
+    rollback = out.checks["migration_rollback"]
+    assert rollback.status == "NOT_PROVEN" and "migration_roundtrip=optional" in rollback.summary
+    assert out.status == "PASS", (out.reasons, out.not_proven)  # visible NOT-PROVEN items, nothing blocking
 
 
 _MIG_ENV = (

@@ -2,8 +2,9 @@
 runner, evidence collector"; §25 "Worker tidak mendapat shell host / credential store").
 
 Everything the verifier runs that imports candidate code (the import preflight, the trusted acceptance
-suite against the candidate, the candidate's own tests, the migration round-trip, impact-selected trusted
-tests) goes through one ``Runner``. Two exist, chosen per verification and recorded on every
+suite against the candidate, the optional baseline, the candidate's own tests, the migration round-trip) goes
+through one ``Runner``, and so does the expected-id collection of the trusted suite (trusted code only, same
+interpreter and dependency set so the ids are comparable). Two exist, chosen per verification and recorded on every
 VERIFICATION_REPORT (``verifier_isolation`` / ``verifier_runner``):
 
 * ``container`` - isolation ``CONTAINER``. Selected only when the worker runtime reports that the verifier
@@ -12,14 +13,20 @@ VERIFICATION_REPORT (``verifier_isolation`` / ``verifier_runner``):
   admits container workers, ADR-0051 - AND the pinned verifier image). Each step is one ``docker run
   --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pull never`` as a non-root
   user, with only the run directory's snapshot, trusted-suite copy and pytest ini mounted read-only and the
-  report directory writable: never the data dir (DB), the controller checkout, the host home, the docker
-  socket, an SSH agent or a credential store.
+  report directory writable: never the data dir (DB), the controller checkout root, the host home, the docker
+  socket, an SSH agent or a credential store. The one step that imports trusted controller code from outside
+  the run dir (the expected-id collection) additionally gets that ``backend/`` read-only; no step that runs
+  candidate code does.
 * ``process`` - isolation ``WEAK``. Everything else (no Docker, unproven boundary, no verifier image).
   Candidate code runs as the controller's OS user with the hardened environment of ``procs.scrubbed_env``.
   That stops discovery of credentials *through the environment* only; the residual risk is stated on the
   report (``residual_risks``) and in the Readiness Doctor (``evidence.verifier``). A TaskSpec
-  ``verifier_policy.isolated_runner: required`` - and every OFFICE verification (§11/§23 OFFICE needs a
-  verified strong boundary) - is BLOCKED instead of running on the process runner (fail closed).
+  ``verifier_policy.isolated_runner: required``, every OFFICE verification (§11/§23 OFFICE needs a
+  verified strong boundary) and every worker run produced in the container/VM sandbox (isolation is never
+  downgraded) is BLOCKED instead of running on the process runner (fail closed).
+
+The run directory (``new_workdir``) is a private temp directory outside the AEOS data dir, so no path handed
+to candidate code leads to the live DB.
 """
 
 from __future__ import annotations
@@ -56,7 +63,8 @@ PROCESS_NOTE = (
 CONTAINER_NOTE = (
     "container runner: candidate code ran in the pinned verifier image with --network none, read-only root, "
     "non-root user, --cap-drop ALL and no-new-privileges; only the run's snapshot, trusted-suite copy and ini "
-    "(read-only) and its report directory were mounted, on a host whose container containment report PASSed")
+    "(read-only) and its report directory were mounted (plus the trusted controller backend, read-only, for the "
+    "expected-id collection step alone), on a host whose container containment report PASSed")
 PROCESS_RESIDUAL_RISKS = (
     "Candidate code runs in a child process of the same OS user as the controller; a deliberately malicious "
     "candidate could still tamper with its own test process or read the controller user's files by absolute path "
@@ -124,6 +132,10 @@ class ProcessRunner:
 
     def to_host(self, path: str) -> Path:
         return Path(path)
+
+    def to_container(self, value: str) -> str:
+        """Host paths are the child's paths on the process runner (same layout as ``ContainerRunner``)."""
+        return value
 
     def describe(self) -> dict[str, Any]:
         return {"verifier_runner": self.kind, "verifier_isolation": self.isolation,
@@ -196,7 +208,11 @@ class ContainerRunner:
             self._extra[key] = f"{CONTAINER_ROOT}/x{len(self._extra)}"
         return self._extra[key]
 
-    def mounts(self) -> list[tuple[str, str, bool]]:
+    def mounts(self, *, extra: str | None = None) -> list[tuple[str, str, bool]]:
+        """The run directory's entries, plus - read-only and only when *extra* names it - the one host directory
+        outside the run dir the step imports (the trusted controller backend of the expected-id collection).
+        Least privilege: a step that runs candidate code never sees the controller checkout (review 2026-10-19,
+        K2: every step after the collection used to mount it)."""
         out: list[tuple[str, str, bool]] = []
         for name in _READ_ONLY_ENTRIES:
             p = self.workdir / name
@@ -206,7 +222,8 @@ class ContainerRunner:
             p = self.workdir / name
             p.mkdir(parents=True, exist_ok=True)
             out.append((str(p), f"{CONTAINER_ROOT}/{name}", False))
-        out += [(host, target, True) for host, target in self._extra.items() if Path(host).exists()]
+        out += [(host, target, True) for host, target in self._extra.items()
+                if extra is not None and target == extra and Path(host).exists()]
         return out
 
     def env(self, pythonpath: str, *, autoload: bool) -> dict[str, str]:
@@ -233,7 +250,8 @@ class ContainerRunner:
         mapped = [self.to_container(a) for a in args]
         verify_id = f"{self.run_id[:12]}-{uuid.uuid4().hex[:10]}"
         try:
-            argv = worker.verifier_container_argv(domain=self.domain, verify_id=verify_id, mounts=self.mounts(),
+            argv = worker.verifier_container_argv(domain=self.domain, verify_id=verify_id,
+                                                  mounts=self.mounts(extra=pp),
                                                   env=self.env(pp, autoload=autoload),
                                                   inner_argv=["python", *mapped], workdir=CONTAINER_TMP,
                                                   image=self.image, user=self._user())
@@ -273,10 +291,28 @@ class ContainerRunner:
 Runner = ProcessRunner | ContainerRunner
 
 
-def isolation_required(policy: dict[str, Any], domain: str) -> bool:
-    """OFFICE always; otherwise when the TaskSpec says ``verifier_policy.isolated_runner: required``."""
+# Sandbox kinds of a worker run whose code was produced behind a kernel boundary: the verifier never executes
+# that code outside one (isolation is never downgraded - review 2026-10-19, K2: a container worker would
+# otherwise get delayed host code execution through the WEAK process runner whenever the verifier image is
+# missing or the containment report went stale between the worker run and its verification).
+ISOLATED_RUN_SANDBOXES = frozenset({"container", "vm"})
+
+
+def isolation_required(policy: dict[str, Any], domain: str, run_sandbox: str | None = None) -> bool:
+    """OFFICE always; a run produced in an isolated sandbox (``ISOLATED_RUN_SANDBOXES``); otherwise when the
+    TaskSpec says ``verifier_policy.isolated_runner: required``."""
     raw = policy.get("isolated_runner")
-    return domain == "OFFICE" or raw is True or str(raw or "").strip().lower() in ("required", "true", "yes")
+    return (domain == "OFFICE" or str(run_sandbox or "").strip().lower() in ISOLATED_RUN_SANDBOXES
+            or raw is True or str(raw or "").strip().lower() in ("required", "true", "yes"))
+
+
+def _required_because(policy: dict[str, Any], domain: str, run_sandbox: str | None) -> str:
+    if domain == "OFFICE":
+        return "OFFICE verification"
+    if str(run_sandbox or "").strip().lower() in ISOLATED_RUN_SANDBOXES:
+        return (f"the worker run executed in the {run_sandbox} sandbox; its code is never executed outside a "
+                "container (isolation is never downgraded), so this verification")
+    return "TaskSpec verifier_policy.isolated_runner"
 
 
 def runner_status(session: Any, *, domain: str) -> dict[str, Any]:
@@ -304,15 +340,27 @@ def runner_status(session: Any, *, domain: str) -> dict[str, Any]:
     }
 
 
-def select_runner(session: Any, *, domain: str, workdir: Path, run_id: str, policy: dict[str, Any]) -> Runner:
-    """The runner for one verification; raises ``RunnerError`` when isolation is required but unavailable."""
+def select_runner(session: Any, *, domain: str, workdir: Path, run_id: str, policy: dict[str, Any],
+                  run_sandbox: str | None = None) -> Runner:
+    """The runner for one verification; raises ``RunnerError`` when isolation is required but unavailable.
+    *run_sandbox* is the sandbox kind the worker run executed in (``WorkerRun.sandbox_kind``)."""
     st = runner_status(session, domain=domain)
     if st["runner"] == "container":
         return ContainerRunner(workdir=workdir, domain=domain, run_id=run_id, image=str(st["image"]),
                                image_id=st.get("image_id"), containment=dict(st.get("containment") or {}))
-    if isolation_required(policy, domain):
+    if isolation_required(policy, domain, run_sandbox):
         why = "; ".join(st["reasons"][:3]) or "container runner unavailable"
         raise RunnerError("VERIFIER_ISOLATION_UNAVAILABLE",
-                          ("OFFICE verification" if domain == "OFFICE" else "TaskSpec verifier_policy.isolated_runner")
+                          _required_because(policy, domain, run_sandbox)
                           + f" requires the isolated container runner, which is not available: {why}")
     return ProcessRunner(workdir=workdir, reasons=st["reasons"], remedies=st["remedies"])
+
+
+def new_workdir() -> Path:
+    """A fresh, private (0700) verifier run directory under the system temp dir.
+
+    Never under the AEOS data dir (review 2026-10-19, K2): every path the process runner hands to candidate code
+    (HOME, TMP, AEOS_DATA_DIR, PYTHONPATH, cwd, the snapshot's own ``__file__``) lives in this directory, so
+    a run dir under the data root let candidate code derive the live DB path from its own environment
+    (``Path(HOME).parents[2] / "aeos.sqlite3"``). Short on purpose (Windows MAX_PATH)."""
+    return Path(tempfile.mkdtemp(prefix="aeos-vw-")).resolve()

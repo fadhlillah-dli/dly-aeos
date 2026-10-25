@@ -27,11 +27,11 @@ RUN apt-get update \
     && chown verifier:verifier /home/verifier \
     && chown verifier-office:verifier-office /home/verifier-office
 
-# The reviewed dependency set (requirements.lock), installed into the system site-packages so a non-root,
-# read-only-rootfs container can import them. pytest + ruff are in the dev extra of the lock.
+# The reviewed dependency set (requirements.lock, compiled with the dev extra, so pytest + ruff + alembic are
+# pinned in it), installed into the system site-packages so a non-root, read-only-rootfs container can import
+# them. --no-deps: exactly the pinned set, nothing resolved at build time beyond the lock.
 COPY requirements.lock /tmp/requirements.lock
-RUN pip install --no-cache-dir --require-hashes=false -r /tmp/requirements.lock \
-    && pip install --no-cache-dir pytest ruff \
+RUN pip install --no-cache-dir --no-deps -r /tmp/requirements.lock \
     && rm -f /tmp/requirements.lock
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
