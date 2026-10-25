@@ -100,7 +100,8 @@ def visuals_status(_principal: CurrentPrincipal) -> dict[str, Any]:
             "screenshot": "NOT_PROVEN",
             "screenshot_collector": {"available": browser, "command": "aeos docs screenshot",
                                      "remedy": None if browser else screenshots.INSTALL_REMEDY,
-                                     "note": "browser engine presence only; Chromium is checked when a capture runs"},
+                                     "note": "browser engine presence only; Chromium is checked when a capture runs",
+                                     "authenticated_capture": screenshots.AUTHENTICATED_CAPTURE},
             "screenshot_note": "documents reference trusted SCREENSHOT EvidenceArtifacts (commit recorded) only after "
                                "the screenshot collector stored them for a registered deployment target",
             "diagram_verification": "UNVERIFIED unless checked: ERD vs platform schema, trust boundaries vs threat model",

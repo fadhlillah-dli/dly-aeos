@@ -9,8 +9,12 @@ screenshot manifest then *reference* that evidence by id (docs_engine.visuals.sc
 Fail closed, observe-only:
 
 * Before anything is captured the target's health endpoint must report the expected commit and healthy (the
-  rule of the deployment observer, delivery facade ``classify_deployment_health``); otherwise NOTHING is
-  captured (``Blocked`` SCREENSHOT_COMMIT_NOT_PROVEN): a screenshot of an unknown build proves nothing.
+  rule of the deployment observer, delivery facade ``classify_deployment_health``, which also accepts the DLY AEOS
+  ``/api/health`` shape while ``controller`` runs the ACTIVE clean release); otherwise NOTHING is captured
+  (``Blocked`` SCREENSHOT_COMMIT_NOT_PROVEN): a screenshot of an unknown build proves nothing. The target and its
+  ``health_path`` are the observer's checked target (an off-host path is refused, HEALTH_PATH_INVALID).
+* A staging capture is a staging validation operation: it runs only while ``CAN_VALIDATE_STAGING`` is READY for
+  the project (``Blocked`` CAPABILITY_NOT_READY otherwise, §08).
 * Each page is loaded with one headless browser GET (no login, no form input, no clicks). A final URL on
   another origin (redirect) is refused, and so is an error page (HTTP 4xx/5xx or no main response).
 * The page text is checked before the image is stored: a credential pattern or personal data refuses the
@@ -47,6 +51,14 @@ TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 _SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _ROUTE = re.compile(r"^/(?!/)[A-Za-z0-9._~/%-]{0,200}$")
 INSTALL_REMEDY = "python -m pip install playwright==1.64.0 && python -m playwright install chromium"
+# The collector never logs in: pages behind a login (e.g. DLY AEOS' own Control Center routes) would only show the
+# login page. Whether an authenticated, read-only capture is allowed is an owner decision that is not recorded.
+AUTHENTICATED_CAPTURE = {
+    "status": "UNDECIDED",
+    "note": "Collector tidak pernah login: halaman di balik login (mis. rute Control Center DLY AEOS) hanya akan "
+            "menampilkan halaman login. Capture terautentikasi read-only memerlukan KEPUTUSAN pemilik yang belum "
+            "tercatat; sampai itu hanya halaman publik target yang dapat menjadi bukti SCREENSHOT.",
+}
 
 
 @dataclass(frozen=True)
@@ -145,11 +157,16 @@ def capture_screenshots(session: Session, project: Project, *, environment: str,
     if bad:
         raise ValidationFailed("routes must be same-origin absolute paths such as /dashboard", code="ROUTES_INVALID",
                                details={"invalid": bad[:5]})
+    # one checked target for the observer and the collector: a stored health_path that is not an absolute path
+    # (e.g. '@other.host/health') is refused here (HEALTH_PATH_INVALID) before any request is made
     target = delivery.deployment_target(session, project, environment)
     if target is None:
         raise Blocked(f"no {environment} deployment target is registered for this project "
                       f"(PUT /api/projects/{project.id}/integrations provider=deployment-target purpose={environment})",
                       code="NO_DEPLOYMENT_TARGET")
+    if environment == "staging":
+        # §08: capturing the staging app is a staging validation operation - only while CAN_VALIDATE_STAGING is READY
+        delivery.require_staging_gate(session, project)
     health = _verify_commit(target, commit, client)
     shoot = capture or playwright_capture
     size = VIEWPORTS[viewport]

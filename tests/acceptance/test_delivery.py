@@ -90,11 +90,116 @@ def test_direct_push_to_main_or_merge_is_refused_by_the_broker_boundary(personal
                                        for r in res.reasons), op
 
 
+LIVE_REPO_ENV = "DLY_AEOS_LIVE_BYPASS_REPO"  # owner/name of the repository whose ruleset is tested
+LIVE_BRANCH_ENV = "DLY_AEOS_LIVE_BYPASS_BRANCH"  # dedicated probe branch covered by the same ruleset as main
+LIVE_TOKEN_REF_ENV = "DLY_AEOS_LIVE_BYPASS_TOKEN_REF"  # secret-store ref of a low-privilege, NON-bypass token
+PROBE_PREFIX = "aeos-probe/"
+GITHUB = "https://api.github.com"
+
+
+def _live_settings() -> tuple[str, str, str]:
+    import os
+
+    repo, branch, ref = (os.environ.get(k, "").strip() for k in (LIVE_REPO_ENV, LIVE_BRANCH_ENV, LIVE_TOKEN_REF_ENV))
+    if not (repo and branch and ref):
+        pytest.skip("BLOCKED-real-github-enforcement: opt-in live test, never run by default. Branch protection/"
+                    "rulesets on the owner's private GitHub repository are NOT_ENFORCEABLE on GitHub Free (ADR-0063). "
+                    f"After an entitlement + active ruleset exists, opt in with {LIVE_REPO_ENV}=<owner/name>, "
+                    f"{LIVE_BRANCH_ENV}={PROBE_PREFIX}<name> (a dedicated probe branch the main ruleset also covers) "
+                    f"and {LIVE_TOKEN_REF_ENV}=<secret ref of a low-privilege token without bypass>")
+    if not branch.startswith(PROBE_PREFIX) or branch in ("main", "master") or ".." in branch:
+        pytest.fail(f"{LIVE_BRANCH_ENV} must name a dedicated probe branch under {PROBE_PREFIX} (never main)")
+    return repo, branch, ref
+
+
 @pytest.mark.integration
-def test_provider_enforces_human_only_merge_on_the_real_repository():
-    pytest.skip("BLOCKED-real-github-enforcement: branch protection/rulesets on the owner's private GitHub repository "
-                "are NOT_ENFORCEABLE on GitHub Free (ADR-0063); a real merge-API bypass test needs the owner's "
-                "repository and plan entitlement")
+@pytest.mark.network
+def test_provider_enforces_human_only_merge_on_the_real_repository(tmp_path):
+    """1.33 provider side, OPT-IN and owner-run only (env vars above; skipped otherwise, deselected by the verifier).
+
+    Safe even if protection is absent: every attempt targets a dedicated probe branch (``aeos-probe/...``, refused
+    when it is the default branch or not covered by a ruleset) and a throwaway PR into it - main is never touched.
+    With a low-privilege token that has no bypass it attempts (1) a direct push, (2) a force-push, (3) a branch
+    deletion and (4) a merge-API call, and expects the provider to refuse each one and the probe branch to be
+    unchanged. Recording the provider's own record of the refusal is the product's read-only reader afterwards:
+    ``aeos delivery enforcement --repo <repo> --branch <probe branch>`` (PROVIDER_ENFORCEMENT_TEST evidence; then
+    ``aeos delivery capabilities --record`` shows enforcement VERIFIED for main while the same ruleset applies)."""
+    import base64
+    import uuid
+
+    import httpx
+
+    from aeos.core.redaction import redact_text, register_secret
+    from aeos.secrets import facade as secrets
+
+    repo, branch, ref = _live_settings()
+    token = secrets.get_secret(ref, purpose=f"{ref.split('/', 1)[0]}:delivery.bypass-probe", actor="live-bypass-test")
+    register_secret(token)
+    api = httpx.Client(base_url=GITHUB, timeout=20.0, headers={
+        "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "dly-aeos-live-bypass-test"})
+    try:
+        info = api.get(f"/repos/{repo}").json()
+        if info.get("default_branch") == branch:
+            pytest.fail("the probe branch is the default branch; refusing to run")
+        rules = api.get(f"/repos/{repo}/rules/branches/{branch}")
+        types = {r.get("type") for r in rules.json()} if rules.status_code == 200 else set()
+        if not types & {"pull_request", "non_fast_forward", "deletion", "update"}:
+            pytest.skip(f"BLOCKED-probe-branch-not-covered: no active ruleset applies to {branch}; nothing attempted")
+        base = api.get(f"/repos/{repo}/branches/{branch}").json()["commit"]["sha"]
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        env = {"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": "1",  # the credential never appears in argv
+               "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+               "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}"}
+        url = f"https://github.com/{repo}.git"
+        work = tmp_path / "probe"
+        work.mkdir()
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            import os
+
+            return subprocess.run(["git", "-c", "core.hooksPath=", "-c", "user.name=aeos-probe",
+                                   "-c", "user.email=probe@invalid", *args], cwd=work, capture_output=True,
+                                  text=True, timeout=GIT_TIMEOUT * 4, env={**os.environ, **env})
+
+        assert git("init", "-q").returncode == 0
+        assert git("fetch", "-q", "--depth", "1", url, f"refs/heads/{branch}").returncode == 0
+        git("checkout", "-q", "--detach", "FETCH_HEAD")
+        git("commit", "-q", "--allow-empty", "-m", "aeos enforcement probe (expected to be refused)")
+        attempts: dict[str, str] = {}
+        direct = git("push", url, f"HEAD:refs/heads/{branch}")
+        attempts["direct_push"] = "REFUSED" if direct.returncode != 0 else "ACCEPTED"
+        git("checkout", "-q", "--orphan", "aeos-orphan")
+        git("commit", "-q", "--allow-empty", "-m", "aeos force probe (expected to be refused)")
+        forced = git("push", url, f"+HEAD:refs/heads/{branch}")
+        attempts["force_push"] = "REFUSED" if forced.returncode != 0 else "ACCEPTED"
+        deleted = git("push", url, f":refs/heads/{branch}")
+        attempts["delete_branch"] = "REFUSED" if deleted.returncode != 0 else "ACCEPTED"
+        # a throwaway PR from a scratch branch into the probe branch, then the merge API
+        src = f"aeos-probe-src/{uuid.uuid4().hex[:8]}"
+        git("checkout", "-q", "--detach", "FETCH_HEAD")
+        git("commit", "-q", "--allow-empty", "-m", "aeos merge-api probe")
+        if git("push", url, f"HEAD:refs/heads/{src}").returncode != 0:
+            pytest.fail("could not push the scratch branch for the merge-API attempt (token needs contents:write on "
+                        "non-protected branches)")
+        pr = api.post(f"/repos/{repo}/pulls", json={"title": "aeos enforcement probe (do not merge)", "head": src,
+                                                    "base": branch, "body": "Created by the opt-in live test."})
+        number = pr.json().get("number") if pr.status_code == 201 else None
+        try:
+            assert number, f"throwaway PR could not be created (HTTP {pr.status_code})"
+            merge = api.put(f"/repos/{repo}/pulls/{number}/merge", json={"merge_method": "squash"})
+            attempts["merge_api"] = "REFUSED" if merge.status_code in (403, 405, 409, 422) else "ACCEPTED"
+        finally:
+            if number:
+                api.patch(f"/repos/{repo}/pulls/{number}", json={"state": "closed"})
+            api.delete(f"/repos/{repo}/git/refs/heads/{src}")
+        after = api.get(f"/repos/{repo}/branches/{branch}")
+        unchanged = after.status_code == 200 and after.json()["commit"]["sha"] == base
+    finally:
+        api.close()
+    detail = redact_text(" | ".join(f"{k}={v}" for k, v in attempts.items()))
+    assert all(v == "REFUSED" for v in attempts.values()), f"provider did not refuse every bypass: {detail}"
+    assert unchanged, "the probe branch changed: provider enforcement is NOT proven"
 
 
 # ---------------------------------------------------------------------------------------------- 1.25

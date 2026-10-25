@@ -32,6 +32,9 @@ ALERT_RULES: dict[str, dict[str, str]] = {
     "sli_breach": {"severity": "MEDIUM", "condition": "SLI di luar target yang ditetapkan pemilik"},
     "error_budget_exhausted": {"severity": "HIGH", "condition": "error budget SLI habis dalam jendela pengukuran"},
     "release_failure": {"severity": "HIGH", "condition": "build/promote/rollback rilis controller gagal"},
+    "post_release_failure": {"severity": "HIGH", "condition": "observasi pasca-rilis target produksi proyek GAGAL "
+                                                              "(G8; per proyek + commit) - insiden + keputusan "
+                                                              "rollback/forward-fix oleh manusia"},
     "emergency_stop": {"severity": "CRITICAL", "condition": "emergency stop dijalankan operator"},
 }
 NOTIFICATION = ("Event alert.raised / alert.resolved ke Control Center (stream SSE, Riwayat → SLI, alert & flag) "

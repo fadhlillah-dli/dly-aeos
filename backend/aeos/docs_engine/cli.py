@@ -187,6 +187,14 @@ def screenshot(
             session.commit()
         except AeosError as exc:
             session.rollback()
+            from aeos.audit import service as audit
+
+            # a refused capture (gate not READY, commit not proven, sensitive page ...) is audited after rollback
+            audit.record(session, actor_type="cli", actor_id="local-operator", action="docs.screenshot.capture",
+                         result="DENIED" if exc.status_code in (403, 409) else "FAILED", target_type="project",
+                         target_id=project.id, project_id=project.id, domain=project.domain,
+                         reason=f"{exc.code}: {exc.message}"[:500], details={"environment": environment})
+            session.commit()
             _echo(f"screenshot refused: {exc.code}: {exc.message}")
             remedy = (exc.details or {}).get("remedy")
             if remedy:

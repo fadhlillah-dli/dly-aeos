@@ -51,7 +51,9 @@ def test_fresh_task_nothing_is_pass(db, wf, monkeypatch):
     assert g["G3"]["status"] == "NOT_PROVEN"
     assert g["G4"]["status"] == "PENDING"
     assert g["G5"]["status"] == "PENDING" and g["G7"]["status"] == "PENDING"
-    assert g["G6"]["status"] == "NOT_APPLICABLE" and g["G8"]["status"] == "NOT_APPLICABLE"
+    # §31: no registered staging target is not "no staging" - NOT_APPLICABLE needs the owner's decision
+    assert g["G6"]["status"] == "NOT_PROVEN" and "staging=NONE" in g["G6"]["summary"]
+    assert g["G8"]["status"] == "PENDING"
     assert [x["gate"] for x in gates.compute_gates(db, w.task.id)["gates"]] == [f"G{i}" for i in range(9)]
 
 
@@ -112,7 +114,8 @@ def test_full_happy_path_then_human_merge(db, wf, monkeypatch):
     db.commit()
     g = _by(gates.compute_gates(db, w.task.id))
     assert g["G5"]["status"] == "PASS"
-    assert g["G6"]["status"] == "NOT_APPLICABLE" and g["G8"]["status"] == "NOT_APPLICABLE"
+    # merged, but no target registered and no owner "no staging / no production" decision -> never NOT_APPLICABLE
+    assert g["G6"]["status"] == "NOT_PROVEN" and g["G8"]["status"] == "NOT_PROVEN"
 
 
 def test_g7_merge_by_an_unauthorised_human_fails(db, wf, monkeypatch):
@@ -207,23 +210,23 @@ def test_g0_checks_target_repository_classification_and_scope(db, wf, monkeypatc
     assert g0["status"] == "FAIL" and any("tidak aman" in r for r in g0["reasons"])
 
 
-def _deploy_target(db, project, purpose, url="https://staging.example.org"):
-    from aeos.models.portfolio import ProjectIntegration
+def _deploy_target(db, project, purpose, url="https://staging.example.org", config=None):
+    from tests.unit.test_deployment_support import deploy_target
 
-    integ = ProjectIntegration(project_id=project.id, domain=project.domain, provider="deployment-target",
-                               purpose=purpose, root_id=url, config={})
-    db.add(integ)
-    db.commit()
-    return integ
+    return deploy_target(db, project, purpose, url, config)
 
 
 def test_g6_and_g8_are_evaluated_once_targets_are_registered(db, wf, monkeypatch):
     """§04/§31: a registered staging/production target makes G6/G8 evaluable from trusted runtime
-    observations of the exact commit; without one they stay NOT_APPLICABLE (never a pass)."""
+    observations of the exact commit; G6 PASS also needs the owner's authorisation of staging deploys to that
+    exact target ("deploy staging berizin"); the staging observation itself runs only while
+    CAN_VALIDATE_STAGING is READY (§08)."""
     import httpx
     import respx
 
+    from aeos.core.errors import Blocked
     from aeos.delivery import deployment
+    from tests.unit.test_deployment_support import authorise_staging, make_staging_ready
 
     w = make_world(db, repo="o/r")
     install_planning(monkeypatch, w.version)
@@ -235,6 +238,15 @@ def test_g6_and_g8_are_evaluated_once_targets_are_registered(db, wf, monkeypatch
     _deploy_target(db, w.project, "production", url="https://app.example.org")
     g = _by(gates.compute_gates(db, w.task.id))
     assert g["G6"]["status"] == "NOT_PROVEN" and g["G8"]["status"] == "PENDING"
+    # the gate is not READY: nothing is requested from the staging target
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.get("https://staging.example.org/health").mock(
+            return_value=httpx.Response(200, json={"status": "ok", "commit": HEAD}))
+        with pytest.raises(Blocked) as exc:
+            deployment.observe(db, w.project.id, "staging", HEAD, actor="owner")
+        assert exc.value.code == "CAPABILITY_NOT_READY" and not route.called
+    db.rollback()
+    make_staging_ready(db, w.project)
     with respx.mock(assert_all_called=False) as mock:
         mock.get("https://staging.example.org/health").mock(
             return_value=httpx.Response(200, json={"status": "ok", "commit": HEAD}))
@@ -243,12 +255,17 @@ def test_g6_and_g8_are_evaluated_once_targets_are_registered(db, wf, monkeypatch
     db.commit()
     assert out["status"] == "PASS"
     g = _by(gates.compute_gates(db, w.task.id))
-    assert g["G6"]["status"] == "PASS"
+    assert g["G6"]["status"] == "NOT_PROVEN" and "staging=AUTHORISED" in g["G6"]["summary"]
+    authorise_staging(db, w.project, "https://staging.example.org")
+    g = _by(gates.compute_gates(db, w.task.id))
+    assert g["G6"]["status"] == "PASS" and out["evidence_id"] in g["G6"]["evidence_refs"]
     # another commit on the target is not attributable -> NOT_PROVEN, never PASS
     with respx.mock(assert_all_called=False) as mock:
         mock.get("https://staging.example.org/health").mock(
             return_value=httpx.Response(200, json={"status": "ok", "commit": "f" * 40}))
         assert deployment.observe(db, w.project.id, "staging", HEAD, actor="owner")["status"] == "NOT_PROVEN"
+    db.commit()
+    assert _by(gates.compute_gates(db, w.task.id))["G6"]["status"] == "NOT_PROVEN"
     db.add(PullRequestRecord(project_id=w.project.id, domain="PERSONAL", task_id=w.task.id, run_id=w.run.id,
                              acceptance_id=acc.id, repo_full_name="o/r", number=8, head_ref="aeos/t1", base_ref="main",
                              accepted_head_sha=HEAD, observed_head_sha=HEAD, bundle_hash="sha256:b", state="MERGED",
@@ -259,9 +276,15 @@ def test_g6_and_g8_are_evaluated_once_targets_are_registered(db, wf, monkeypatch
     with respx.mock(assert_all_called=False) as mock:
         mock.get("https://app.example.org/health").mock(
             return_value=httpx.Response(503, json={"status": "down", "commit": "e" * 40}))
-        assert deployment.observe(db, w.project.id, "production", "e" * 40, actor="owner")["status"] == "FAIL"
+        prod = deployment.observe(db, w.project.id, "production", "e" * 40, actor="owner")
     db.commit()
-    assert _by(gates.compute_gates(db, w.task.id))["G8"]["status"] == "FAIL"
+    assert prod["status"] == "FAIL" and prod["post_release"]["incident_id"]
+    g8 = _by(gates.compute_gates(db, w.task.id))["G8"]
+    assert g8["status"] == "FAIL"
+    # G8 links the alert, incident and decision request of the post-release failure (rollback stays human)
+    for key in ("alert_id", "incident_id", "decision_request_id"):
+        assert prod["post_release"][key] in g8["evidence_refs"], key
+    assert "AEOS tidak melakukan rollback" in g8["summary"]
 
 
 def test_office_delivery_is_stated_disabled_by_default(db, wf, monkeypatch):

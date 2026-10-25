@@ -16,13 +16,22 @@ def _put(client: AuthedClient, pid: str, **body):
     return client.put(f"/api/projects/{pid}/integrations", json=body)
 
 
-def test_personal_staging_target_can_be_registered_and_configures_the_doctor_check(personal_client, db, settings):
-    from aeos.doctor.checks.delivery import delivery_staging_target
+def _staging_check(settings, db, project_id: str):
+    """Run the per-project ``delivery.staging_target`` check for one project (the Doctor runs it per project)."""
+    import dataclasses
+
+    from aeos.doctor.checks.delivery import delivery_staging_target, staging_targets
     from aeos.doctor.model import CheckContext
 
+    db.expire_all()
     ctx = CheckContext(settings=settings, session=db, runner=None, repo=settings.data_dir, now=utcnow())  # type: ignore[arg-type]
-    assert delivery_staging_target(ctx).status == "MISSING"
+    target = next(t for t in staging_targets(ctx) if t["project_id"] == project_id)
+    return delivery_staging_target(dataclasses.replace(ctx, project=target))
+
+
+def test_personal_staging_target_can_be_registered_and_configures_the_doctor_check(personal_client, db, settings):
     p = create_project(personal_client, name="Env App")
+    assert _staging_check(settings, db, p["id"]).status == "MISSING"
     bad = _put(personal_client, p["id"], provider="local-target", purpose="staging", root_id="my laptop")
     assert bad.status_code == 422
     r = _put(personal_client, p["id"], provider="local-target", purpose="staging", root_id="container:env-app-staging")
@@ -34,9 +43,18 @@ def test_personal_staging_target_can_be_registered_and_configures_the_doctor_che
     assert cap["write_enabled"] is False
     assert _put(personal_client, p["id"], provider="local-target", purpose="deploy",
                 root_id="host:home-server").status_code == 200
-    db.expire_all()
-    out = delivery_staging_target(ctx)
-    assert out.status == "CONFIGURED" and "local-target:PERSONAL" in out.evidence["targets"]
+    # W6-173/W6-193: the Doctor uses gate G6's rule - a local-target is recorded but cannot be observed with a GET
+    out = _staging_check(settings, db, p["id"])
+    assert out.status == "MISSING" and out.error_code == "STAGING_TARGET_NOT_OBSERVABLE"
+    assert out.evidence["local_targets"][0]["root_id"] == "container:env-app-staging"
+    r = _put(personal_client, p["id"], provider="deployment-target", purpose="staging",
+             root_id="https://staging.env-app.example.org")
+    assert r.status_code == 200, r.text
+    out = _staging_check(settings, db, p["id"])
+    assert out.status == "CONFIGURED" and out.evidence["targets"][0]["root_id"] == "https://staging.env-app.example.org"
+    # scoped to the evaluated project: another project without a staging target stays MISSING
+    other = create_project(personal_client, name="Env Other")
+    assert _staging_check(settings, db, other["id"]).status == "MISSING"
 
 
 def test_office_has_no_personal_environment_target(admin_client: AuthedClient):

@@ -72,7 +72,8 @@ def _provider_ci_observation(ctx: CheckContext) -> dict[str, Any]:
 
 def _capability_view(caps: dict[str, Any]) -> dict[str, Any]:
     keep = ("provider", "repo", "branch", "checked_at", "credential", "visibility", "plan", "merge_gate",
-            "enforcement_tested", "required_status_checks", "status_check_identity", "deploy_restrictions",
+            "enforcement_tested", "enforcement_test", "required_status_checks", "status_check_identity",
+            "deploy_restrictions",
             "entitlement", "residual_risks", "source", "mode")
     return {k: caps.get(k) for k in keep if k in caps}
 
@@ -109,14 +110,28 @@ def _merge_gate_outcome(caps: dict[str, Any], *, origin: str) -> Outcome:
         risks.append(NOT_ENFORCEABLE_MESSAGE)
     if gate == "NOT_CONFIGURED" and NOT_CONFIGURED_MESSAGE not in risks:
         risks.append(NOT_CONFIGURED_MESSAGE)
-    if ENFORCEMENT_UNTESTED not in risks:
+    # VERIFIED only from a provider refusal bound to this repo/branch and the still-unchanged active ruleset
+    # (aeos.delivery.provider.apply_enforcement_evidence); CLAIMED (owner attestation) or STALE never count.
+    tested = str(caps.get("enforcement_tested") or "NOT-PROVEN").upper()
+    raw_test = caps.get("enforcement_test")
+    test: dict[str, Any] = raw_test if isinstance(raw_test, dict) else {}
+    proven = gate == "CONFIGURED" and tested == "VERIFIED" and bool(test.get("evidence_id"))
+    if proven:
+        risks = [r for r in risks if r != ENFORCEMENT_UNTESTED]
+    elif ENFORCEMENT_UNTESTED not in risks:
         risks.append(ENFORCEMENT_UNTESTED)
     if RESIDUAL_RISK not in risks and gate != "CONFIGURED":
         risks.append(RESIDUAL_RISK)
     restrictions = _restrictions(caps, risks)
     evidence = {**view, "residual_risks": risks, "origin": origin, "enforceable": gate == "CONFIGURED",
-                "restrictions": restrictions}
+                "restrictions": restrictions, "enforcement_test": test}
     target = f"{str(caps.get('provider') or 'github').lower()}:{caps.get('repo')}@{caps.get('branch')}"
+    if proven:
+        rulesets = ", ".join(str(r.get("id")) for r in test.get("rulesets") or [])
+        return Outcome("VERIFIED", f"Merge gate provider pada {caps.get('branch')} terbukti menolak perubahan langsung: "
+                       f"penolakan oleh ruleset aktif {rulesets} teramati {test.get('observed_at')} (bukti "
+                       f"{str(test.get('evidence_id'))[:8]}); berlaku selama ruleset itu tidak berubah.",
+                       evidence=evidence, target_identity=target)
     if gate == "CONFIGURED":
         return Outcome("CONFIGURED", f"Merge gate provider terkonfigurasi pada {caps.get('branch')} (required checks: "
                        f"{len(caps.get('required_status_checks') or [])}; identitas pelapor: "
@@ -190,24 +205,74 @@ def delivery_branch_protection(ctx: CheckContext) -> Outcome:
     try:
         from aeos.delivery import provider
 
-        caps = provider.check_capabilities(slug, token=github_token(), credential="AVAILABLE").to_dict()
+        live = provider.check_capabilities(slug, token=github_token(), credential="AVAILABLE")
+        if ctx.session is not None:
+            live = provider.apply_enforcement_evidence(ctx.session, live)
+        caps = live.to_dict()
     except Exception as exc:  # store/network/validation failure: never green
         return Outcome("UNKNOWN", f"Probe kemampuan provider gagal ({type(exc).__name__}).",
                        evidence={**evidence, "residual_risks": [RESIDUAL_RISK]}, error_code="PROVIDER_PROBE_ERROR")
     return _merge_gate_outcome(caps, origin="aeos.delivery.provider.check_capabilities (live, GET only)")
 
 
-@check("delivery.staging_target", "DELIVERY", "Target staging terkonfigurasi", component_id="delivery-ci",
-       ttl_seconds=86400, needs_db=True, ok={"CONFIGURED", "VERIFIED"}, severity_fail="LOW")
-def delivery_staging_target(ctx: CheckContext) -> Outcome:
+def staging_targets(ctx: CheckContext) -> list[dict[str, Any]]:
+    """One target per (non-retired) project: its staging registrations, split into the observable
+    ``deployment-target`` (the rule of aeos.delivery.deployment.target_for, which gate G6 uses) and the
+    ``local-target`` identities that cannot be observed with a GET."""
     from sqlalchemy import select
 
+    from aeos.doctor.checks.adapters import _projects
     from aeos.models.portfolio import ProjectIntegration
 
     assert ctx.session is not None
-    rows = list(ctx.session.scalars(select(ProjectIntegration).where(ProjectIntegration.purpose == "staging")))
-    if not rows:
-        return Outcome("MISSING", "Belum ada target staging yang dikonfigurasi; validasi staging tidak tersedia.",
-                       error_code="NO_STAGING_TARGET", severity="LOW")
-    return Outcome("CONFIGURED", f"{len(rows)} target staging tercatat (deploy staging tetap butuh otorisasi).",
-                   evidence={"targets": [f"{r.provider}:{r.domain}" for r in rows]})
+    projects = _projects(ctx)
+    rows: dict[str, list[Any]] = {}
+    for integ in ctx.session.scalars(select(ProjectIntegration).where(ProjectIntegration.purpose == "staging")
+                                     .order_by(ProjectIntegration.created_at.desc())):
+        rows.setdefault(integ.project_id, []).append(integ)
+    out = []
+    for pid, p in sorted(projects.items()):
+        mine = rows.get(pid, [])
+        out.append({"project_id": pid, "domain": p.domain, "project_key": p.project_key,
+                    "targets": [{"integration_id": r.id, "root_id": r.root_id} for r in mine
+                                if r.provider == "deployment-target" and r.root_id][:1],
+                    "local_targets": [{"integration_id": r.id, "root_id": r.root_id} for r in mine
+                                      if r.provider == "local-target"],
+                    "invalidators": [f"integration:{r.id}" for r in mine]})
+    return out
+
+
+@check("delivery.staging_target", "DELIVERY", "Target staging proyek terdaftar dan dapat diobservasi (per proyek)",
+       component_id="delivery-ci", ttl_seconds=86400, needs_db=True, ok={"CONFIGURED", "VERIFIED"},
+       severity_fail="LOW", invalidators=("integration:*",), targets=staging_targets,
+       description="Per proyek, aturan yang sama dengan gate G6 (aeos.delivery.deployment.target_for): hanya integrasi "
+                   "deployment-target purpose=staging dengan URL dasar yang dapat diobservasi; local-target dicatat "
+                   "tetapi tidak dapat divalidasi lewat GET.")
+def delivery_staging_target(ctx: CheckContext) -> Outcome:
+    target = ctx.project or {}
+    pid = str(target.get("project_id") or "")
+    evidence: dict[str, Any] = {"project_key": target.get("project_key"), "targets": target.get("targets") or [],
+                                "local_targets": target.get("local_targets") or []}
+    remedy = Remedy(operation="Daftarkan target staging observe-only (URL dasar) untuk proyek ini",
+                    command=f"PUT /api/projects/{pid or '<project_id>'}/integrations provider=deployment-target "
+                            "purpose=staging root_id=https://<staging host>",
+                    target=f"project:{pid or '<project_id>'}", privilege="SUPER_ADMIN",
+                    evidence_to_collect="delivery.staging_target CONFIGURED untuk proyek ini")
+    if not pid:
+        return Outcome("UNKNOWN", "Target staging dievaluasi per proyek; tidak ada proyek yang dipilih.",
+                       error_code="PROJECT_REQUIRED")
+    if target.get("domain") == "OFFICE":
+        return Outcome("MISSING", "OFFICE belum memiliki target environment (M5, otorisasi perusahaan); validasi "
+                       "staging tidak tersedia.", evidence=evidence, error_code="OFFICE_DEFAULT_DENY", severity="LOW")
+    targets = evidence["targets"]
+    if targets:
+        return Outcome("CONFIGURED", f"Target staging deployment-target terdaftar ({targets[0]['root_id']}); hanya "
+                       "diobservasi dengan GET (deploy staging tetap tindakan manusia berizin).", evidence=evidence,
+                       target_identity=f"deployment-target:{targets[0]['root_id']}")
+    if evidence["local_targets"]:
+        return Outcome("MISSING", "Target staging lokal (local-target "
+                       + ", ".join(str(t["root_id"]) for t in evidence["local_targets"])
+                       + ") tercatat tetapi tidak dapat diobservasi lewat GET; daftarkan deployment-target dengan URL.",
+                       evidence=evidence, error_code="STAGING_TARGET_NOT_OBSERVABLE", severity="LOW", remedy=remedy)
+    return Outcome("MISSING", "Belum ada target staging yang terdaftar untuk proyek ini; validasi staging tidak "
+                   "tersedia.", evidence=evidence, error_code="NO_STAGING_TARGET", severity="LOW", remedy=remedy)

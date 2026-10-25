@@ -121,8 +121,10 @@ RULES: dict[Capability, CapRule] = {
         (*BASE, "policy.office_defaults", "adapter.office_bitbucket", "adapter.office_jira", "adapter.office_confluence"),
         domain="OFFICE", office_gate=True, description="Diblokir default sampai otorisasi perusahaan (§23)."),
     Capability.CAN_VALIDATE_STAGING: CapRule(
-        "Validasi staging", (*BASE, "delivery.staging_target", "evidence.verifier"), required=("recovery.restore_test",),
-        description="Target staging berizin, verifier, recovery teruji."),
+        "Validasi staging", (*BASE, "evidence.verifier"), required=("recovery.restore_test",),
+        project=("delivery.staging_target",),
+        description="Verifier dan recovery teruji; per proyek: target staging deployment-target yang dapat "
+                    "diobservasi (aturan gate G6). Observasi staging dan screenshot staging hanya berjalan saat READY."),
 }
 
 
@@ -460,7 +462,12 @@ def project_target(session: Session | None, project_id: str | None, domain: str 
         RepositoryReference.project_id == project_id)) if (r.provider or "").upper() == "GITHUB"]
     roots = [str(i.root_id or "") for i in session.scalars(select(ProjectIntegration).where(
         ProjectIntegration.project_id == project_id, ProjectIntegration.provider == "google-drive"))]
+    # the observable staging target, by the rule gate G6 uses (aeos.delivery.deployment.target_for: newest one)
+    staging = session.scalar(select(ProjectIntegration).where(
+        ProjectIntegration.project_id == project_id, ProjectIntegration.purpose == "staging",
+        ProjectIntegration.provider == "deployment-target").order_by(ProjectIntegration.created_at.desc()).limit(1))
     return {"id": p.id, "domain": p.domain, "known": True, "repos": repos, "drive_roots": roots,
+            "staging_targets": [str(staging.root_id)] if staging is not None and staging.root_id else [],
             "is_platform_repo": bool(repos) and all(r == slug for r in repos)}
 
 
@@ -471,6 +478,8 @@ def _target_set(check_id: str, evidence: dict[str, Any]) -> list[str] | None:
         return sorted(str(x).lower() for x in evidence.get("repos") or [])
     if check_id == "adapter.project_drive_root":
         return sorted(str((x or {}).get("root_id") or "") for x in evidence.get("roots") or [])
+    if check_id == "delivery.staging_target":
+        return sorted(str((x or {}).get("root_id") or "") for x in evidence.get("targets") or [])
     return None
 
 
@@ -479,6 +488,8 @@ def _current_target_set(check_id: str, project: dict[str, Any]) -> list[str] | N
         return sorted(project.get("repos") or [])
     if check_id == "adapter.project_drive_root":
         return sorted(project.get("drive_roots") or [])
+    if check_id == "delivery.staging_target":
+        return sorted(project.get("staging_targets") or [])
     return None
 
 

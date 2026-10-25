@@ -72,7 +72,9 @@ def test_production_observation_of_the_registered_target_validates_the_operation
     assert all(ids[k].status == "DRAFT" for k in OPS_DOCS)
     _target(db, project, "staging", "https://staging.example.org")
     _target(db, project, "production", "https://app.example.org")
+    from tests.unit.test_deployment_support import make_staging_ready
 
+    make_staging_ready(db, project)  # controlled precondition: staging observations need CAN_VALIDATE_STAGING READY
     staging = _observe(db, project, "staging", "https://staging.example.org", {"status": "ok", "commit": HEAD})
     assert staging["status"] == "PASS"
     ids = _render(world)
@@ -100,6 +102,44 @@ def test_production_observation_of_the_registered_target_validates_the_operation
     ids = _render(world)
     assert ids["08-operational-overview"].status == "DRAFT"
     assert later["evidence_id"] in ids["08-operational-overview"].status_reason
+
+
+def test_the_platform_release_health_validates_the_platform_operations_documents(settings, db, monkeypatch):
+    """W6-091: DLY AEOS itself (the first project) has an evidence path - its own /api/health reports the commit
+    only under ``controller``; the observer accepts it while the controller runs the ACTIVE clean release, so the
+    platform's 08 Operations documents leave DRAFT. A checkout (no promoted release) stays NOT_PROVEN."""
+    from aeos.delivery import deployment
+    from tests.unit.test_deployment_support import HEALTHY_RELEASE
+
+    install_fakes(monkeypatch)
+    project = make_project(db, key="dly-aeos-platform", github_repo="fadhlillah-dli/dly-aeos")
+    project.is_platform = True
+    db.commit()
+    _plan, version = make_plan(db, project, sample(), tasks=TASKS)
+    world = {"settings": settings, "db": db, "project": project, "version": version}
+    base = "http://127.0.0.1:8787"
+    db.add(ProjectIntegration(project_id=project.id, domain=project.domain, provider="deployment-target",
+                              purpose="production", root_id=base, config={"health_path": "/api/health"}))
+    db.commit()
+    checkout = {"status": "ok", "version": "0.1.0", "controller": {
+        "mode": "checkout", "release_id": None, "commit": HEAD, "dirty": False, "active_release_id": None,
+        "matches_active": None, "status": "NO_ACTIVE_RELEASE"}}
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{base}/api/health").mock(return_value=httpx.Response(200, json=checkout))
+        before = deployment.observe(db, project.id, "production", HEAD, actor="owner")
+    db.commit()
+    assert before["status"] == "NOT_PROVEN" and "ACTIVE release" in before["reason"]
+    assert _render(world)["08-operational-overview"].status == "DRAFT"
+    release = {"status": "ok", "version": "0.1.0", "controller": {**HEALTHY_RELEASE, "commit": HEAD}}
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{base}/api/health").mock(return_value=httpx.Response(200, json=release))
+        prod = deployment.observe(db, project.id, "production", HEAD, actor="owner")
+    db.commit()
+    assert prod["status"] == "PASS" and prod["target"] == f"{base}/api/health"
+    ids = _render(world)
+    for key in OPS_DOCS:
+        assert ids[key].status == "APPROVED", key
+        assert prod["evidence_id"] in ids[key].status_reason, key
 
 
 def test_untrusted_or_other_domain_production_evidence_never_validates(world):
