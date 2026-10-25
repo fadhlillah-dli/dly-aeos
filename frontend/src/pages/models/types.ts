@@ -35,10 +35,33 @@ export interface CapabilityTestView {
   evidence_level?: string;
 }
 
+/** §12 "unmodified official binary": the OS code-signature gate the bridge applies before every native call. */
+export interface BinaryAuthenticity {
+  /** OK = VALID and signer matches the owner pin; UNVERIFIED = no pin / not provable; DEGRADED = unsigned; BLOCKED; NOT_CHECKED */
+  gate: string;
+  reason: string;
+  approved_signer: string | null;
+  os: string;
+  signature_status: string;
+  observed_signer: string | null;
+  owner_step: string | null;
+  remedy: { operation: string; commands: string[]; note: string } | null;
+}
+
 export interface ClaudeStatus {
-  binary: { found: boolean; status: string; path_logical: string; version: string | null; fingerprint: string | null; reasons: string[] };
+  binary: {
+    found: boolean;
+    status: string;
+    path_logical: string;
+    version: string | null;
+    fingerprint: string | null;
+    reasons: string[];
+    authenticity?: BinaryAuthenticity;
+  };
   auth: AuthSummary;
   bridge_status: string;
+  /** why the bridge is BLOCKED (signature / binary / auth): decides which remedy is shown */
+  blocked_by?: string[];
   env_hygiene: { status: string; forbidden_present: string[]; running_inside_claude_session: boolean; note: string };
   invocation: { argv_template: string[]; forbidden_flags: string[]; prompt_via: string; workspace: string };
   policy: { allowed_families: string[]; stages: Record<string, string>; fallback: string; mode: string };

@@ -69,7 +69,9 @@ def worker_opencode(ctx: CheckContext) -> Outcome:
     path = status.get("binary") or status.get("path")
     if path:
         evidence["location"] = logical(ctx, str(path))
-    evidence["pin_source"] = "install-manifest approved_pin" if approved else "worker runtime default"
+    # the runtime resolves its pin from the reviewed manifest too (opencode.resolve_pin): quote where it came from
+    evidence["pin_source"] = "install-manifest approved_pin" if approved or \
+        status.get("pin_source") == "install-manifest approved_pin" else "worker runtime default"
     evidence["pinned_version"] = pinned
     remedy = _opencode_remedy(pinned)
     if st == "MISSING" or status.get("found") is False:

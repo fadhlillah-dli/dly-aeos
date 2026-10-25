@@ -52,6 +52,31 @@ BASE_ALLOW = ("read", "glob", "grep", "list", "edit", "todowrite")
 ALWAYS_DENY = ("websearch", "task", "skill", "lsp", "question", "external_directory", "doom_loop")
 
 
+PIN_SOURCE_MANIFEST = "install-manifest approved_pin"
+PIN_SOURCE_DEFAULT = "worker runtime default (no approved_pin for opencode in the install-manifest)"
+
+
+def resolve_pin(session: Any = None) -> dict[str, str]:
+    """THE OpenCode pin the runtime holds the engine to (§07 "pins approved by a human"): the owner-approved
+    ``approved_pin`` of component ``opencode`` in the reviewed InstallManifest when set (the seeded
+    ComponentReference with a *session*, else the reviewed manifest file), otherwise the built-in
+    ``PINNED_VERSION`` default, labelled as such. Used by the image tag, the drift flag, the contract test and the
+    image build hint, so an approved pin other than the default is what gets built, run and compared."""
+    try:
+        from aeos.inventory import facade as inventory
+
+        approved = inventory.approved_pin("opencode", session=session)
+    except Exception:  # inventory unavailable: the labelled default, never a guessed pin
+        approved = None
+    if approved:
+        return {"version": approved, "source": PIN_SOURCE_MANIFEST}
+    return {"version": PINNED_VERSION, "source": PIN_SOURCE_DEFAULT}
+
+
+def pinned_version(session: Any = None) -> str:
+    return resolve_pin(session)["version"]
+
+
 def exposed_model_id(route_key: str) -> str:
     out = re.sub(r"[^A-Za-z0-9._-]", "-", route_key).strip("-.")[:128] or "route"
     return out
@@ -96,16 +121,18 @@ def opencode_status(configured: str | None = None, *, refresh: bool = False) -> 
             configured = get_settings().opencode_binary
         except Exception:
             configured = None
+    pin = resolve_pin()
     with _status_lock:
         cached = _status_cache["value"]
-        if not refresh and cached is not None and cached.get("_cfg") == configured \
+        if not refresh and cached is not None and cached.get("_cfg") == (configured, pin["version"]) \
                 and time.monotonic() - _status_cache["at"] < STATUS_CACHE_SECONDS:
             return {k: v for k, v in cached.items() if k != "_cfg"}
     checked = utcnow().isoformat()
     binary = resolve_binary(configured)
+    pinned = {"pinned_version": pin["version"], "pin_source": pin["source"]}
     if binary is None:
         value: dict[str, Any] = {
-            "status": "MISSING", "binary": None, "version": None, "pinned_version": PINNED_VERSION,
+            "status": "MISSING", "binary": None, "version": None, **pinned,
             "checked_at": checked, "functional": "NOT_PROVEN",
             "evidence": "opencode not found (set AEOS_OPENCODE_BINARY or install the pinned version)",
         }
@@ -118,16 +145,16 @@ def opencode_status(configured: str | None = None, *, refresh: bool = False) -> 
                 ok = proc.returncode == 0 and bool(version[0])
                 value = {
                     "status": "INSTALLED" if ok else "FAILED", "binary": str(binary),
-                    "version": version[0] if ok else None, "pinned_version": PINNED_VERSION,
+                    "version": version[0] if ok else None, **pinned,
                     "checked_at": checked, "functional": "NOT_PROVEN",
-                    "drift": bool(ok and version[0] != PINNED_VERSION),
+                    "drift": bool(ok and version[0].strip().lstrip("v") != pin["version"]),
                     "evidence": f"`opencode --version` exit {proc.returncode}",
                 }
             except (OSError, subprocess.TimeoutExpired) as exc:
-                value = {"status": "FAILED", "binary": str(binary), "version": None, "pinned_version": PINNED_VERSION,
+                value = {"status": "FAILED", "binary": str(binary), "version": None, **pinned,
                          "checked_at": checked, "functional": "NOT_PROVEN", "evidence": type(exc).__name__}
     with _status_lock:
-        _status_cache.update(at=time.monotonic(), value={**value, "_cfg": configured})
+        _status_cache.update(at=time.monotonic(), value={**value, "_cfg": (configured, pin["version"])})
     return value
 
 

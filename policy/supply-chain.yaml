@@ -1,0 +1,30 @@
+# Supply-chain gate policy (master §31 G1 "dependency/license/SBOM as needed", §45 "versions, licences and
+# gates verified; scan results never invented", §48 CI controls; ADR-0095). Protected path (§09).
+#
+# Every value below is an OWNER decision. None is set: while `status: UNDECIDED` (or a value is null),
+# `scripts/supply_chain.py` evaluates the reports in REPORT_ONLY mode - findings, UNKNOWN licences and
+# failed/missing scanner reports are listed, nothing passes or fails, and the CI job stays [NO-GATE].
+#
+# To decide, the owner (in one reviewed PR that also accepts ADR-0095):
+#   * sets `status: DECIDED` and `decision_ref` (the ADR / Decision id), `decided_by`, `decided_at`;
+#   * `licenses.allow`: the list of allowed licence identifiers (SPDX ids such as MIT, Apache-2.0; matched
+#     exactly, case-insensitive). Once set, every UNKNOWN licence and every licence outside the list FAILS;
+#   * `vulnerabilities.<python|npm>.fail_at_or_above` and `sast.bandit.fail_at_or_above`: one of
+#     LOW | MEDIUM | HIGH | CRITICAL. Once set, a finding at or above it FAILS, a finding whose severity the
+#     scanner does not report (pip-audit reports none) counts as UNKNOWN and FAILS (fail closed), and a
+#     missing or unreadable scanner report FAILS (a crashed scan is never "no findings");
+#   * optionally `sast.bandit.min_confidence` (LOW | MEDIUM | HIGH): bandit findings below it are listed but
+#     do not fail;
+#   * then changes the supply-chain job tag in .github/workflows/ci.yml from [NO-GATE] to the gate (G1).
+status: UNDECIDED
+version: 1
+decision_ref: null
+decided_by: null
+decided_at: null
+licenses:
+  allow: null
+vulnerabilities:
+  python: {fail_at_or_above: null}
+  npm: {fail_at_or_above: null}
+sast:
+  bandit: {fail_at_or_above: null, min_confidence: null}

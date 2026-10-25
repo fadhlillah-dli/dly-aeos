@@ -216,25 +216,67 @@ def signature_gate(sig: dict[str, Any] | None, approved_signer: str | None) -> t
     """What the observed OS code signature means for the bridge (§12 "unmodified official binary").
 
     * ``BLOCKED``: the OS reports the signature INVALID (e.g. Authenticode HashMismatch / NotTrusted, codesign
-      verify failure), or the owner pinned a publisher identity and the observed signer is not exactly it
-      (``signer_matches``: whole subject, whole RDN or exact CN/O value - never a substring);
-    * ``DEGRADED``: the binary is not signed (reported, never treated as the official build);
+      verify failure); or the owner pinned a publisher identity for this OS and the binary is not proven to be
+      it - the signature is not VALID (UNSIGNED, UNKNOWN, not checked) or the observed signer is not exactly
+      the pin (``signer_matches``: whole subject, whole RDN or exact CN/O value - never a substring);
+    * ``DEGRADED``: no pin, and the binary is not signed (reported, never treated as the official build);
     * ``OK``: VALID and the observed signer matches the owner-pinned identity;
-    * ``UNVERIFIED``: VALID without a pinned identity, or no check ran / UNKNOWN (never shown as authentic)."""
+    * ``UNVERIFIED``: no pin, and VALID, or no check ran / UNKNOWN (never shown as authentic)."""
     status = str((sig or {}).get("status") or "NOT_CHECKED")
     signer = str((sig or {}).get("signer") or "")
+    pin_ref = "install-manifest claude-code signature.approved_signer"
     if status == "INVALID":
         return "BLOCKED", "OS reports the code signature of the claude binary INVALID (modified or untrusted build)"
-    if approved_signer and status == "VALID" and not signer_matches(signer, approved_signer):
-        return "BLOCKED", (f"observed signer {signer or 'unknown'!r} is not the owner-pinned publisher "
-                           f"{approved_signer!r} (install-manifest claude-code signature.approved_signer)")
+    if approved_signer:
+        if status != "VALID":
+            # a pinned publisher must be PROVEN: an unsigned or unverifiable binary is not that publisher's build
+            return "BLOCKED", (f"code signature {status}: the binary cannot be shown to be signed by the owner-pinned "
+                               f"publisher {approved_signer!r} ({pin_ref})")
+        if not signer_matches(signer, approved_signer):
+            return "BLOCKED", (f"observed signer {signer or 'unknown'!r} is not the owner-pinned publisher "
+                               f"{approved_signer!r} ({pin_ref})")
+        return "OK", f"signature VALID and signer matches the pinned publisher {approved_signer!r}"
     if status == "UNSIGNED":
         return "DEGRADED", "the claude binary is not code-signed; it cannot be shown to be the official build"
-    if status == "VALID" and approved_signer:
-        return "OK", f"signature VALID and signer matches the pinned publisher {approved_signer!r}"
     if status == "VALID":
         return "UNVERIFIED", "signature VALID; no publisher identity pinned in the install-manifest (owner step)"
     return "UNVERIFIED", f"code signature {status}: authenticity not established"
+
+
+SIGNATURE_REMEDY: dict[str, Any] = {
+    "operation": "Pasang ulang build resmi Claude Code (distribusi Anthropic), lalu periksa tanda tangan OS-nya",
+    "windows": ["winget install --id Anthropic.ClaudeCode -e",
+                "(Get-AuthenticodeSignature (Get-Command claude.exe).Source).SignerCertificate.Subject"],
+    "darwin": ["brew reinstall --cask claude-code", 'codesign -dv --verbose=2 "$(which claude)" 2>&1 | grep TeamIdentifier'],
+    "pin_note": "Bila penerbit resmi memang berubah, ubah signature.approved_signer (per OS: windows / darwin) di "
+                "install-manifest/manifest.yaml lewat PR yang direview; jangan menonaktifkan pemeriksaan.",
+}
+
+
+def authenticity_view(sig: dict[str, Any] | None, approved_signer: str | None, *, found: bool = True
+                      ) -> dict[str, Any]:
+    """The §12 authenticity claim as status pages and the Doctor show it: the gate, its reason, the pin that applies
+    on this OS and - when not authentic - the signature-specific remedy (never the login remedy)."""
+    from aeos.inventory.pins import host_os
+
+    status = str((sig or {}).get("status") or "NOT_CHECKED")
+    if not found:
+        gate, reason = "UNVERIFIED", "no binary"
+    elif status == "NOT_CHECKED":
+        gate, reason = "NOT_CHECKED", ("OS signature not checked yet in this process (refresh); every native call "
+                                       "checks it first" + (" and is BLOCKED unless VALID and the pinned signer"
+                                                            if approved_signer else ""))
+    else:
+        gate, reason = signature_gate(sig, approved_signer)
+    os_name = host_os()
+    return {"gate": gate, "reason": reason, "approved_signer": approved_signer, "os": os_name,
+            "signature_status": status, "observed_signer": (sig or {}).get("signer"),
+            "owner_step": None if approved_signer else
+            f"pin the Anthropic signer for {os_name} (windows: Authenticode subject / CN / O; darwin: TeamIdentifier) "
+            "in install-manifest claude-code signature.approved_signer",
+            "remedy": None if gate in ("OK", "UNVERIFIED", "NOT_CHECKED") else
+            {"operation": SIGNATURE_REMEDY["operation"], "commands": SIGNATURE_REMEDY.get(os_name, []),
+             "note": SIGNATURE_REMEDY["pin_note"]}}
 
 
 _fp_cache: dict[tuple[str, int, int], str] = {}

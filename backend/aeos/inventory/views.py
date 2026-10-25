@@ -40,6 +40,7 @@ from aeos.inventory.observations import (
     is_stale,
     latest_observations,
 )
+from aeos.inventory.pins import select_digest
 from aeos.inventory.reconcile import is_probeable, latest_run, run_view
 from aeos.models.inventory import CheckResult, ComponentObservation, ComponentReference, ComponentRelation
 from aeos.models.inventory_ext import DriftFinding
@@ -361,7 +362,7 @@ def component_row(comp: ComponentReference, latest: dict[tuple[str, str], Compon
             "license": comp.license, "manifest_hash": comp.manifest_hash,
             "relations": (relation_counts or {}).get(comp.component_id, 0), "placement": comp.placement,
             "decision_refs": state.decision_refs if state is not None else comp.decision_refs,
-            "approved_digest": (comp.details or {}).get("approved_digest"),
+            "approved_digest": select_digest((comp.details or {}).get("approved_digest"))["digest"],
         })
     return row
 
@@ -820,6 +821,7 @@ def _changes(session: Session, comp: ComponentReference, state: DecisionState | 
             proposals.append({"id": p.id, "kind": p.kind, "title": p.title, "status": p.status,
                               "created_at": _iso(p.created_at), "baseline_hash": p.baseline_hash,
                               "candidate_hash": p.candidate_hash, "candidate_pin": p.candidate_pin,
+                              "candidate_digest": p.candidate_digest,
                               "outcome": ((p.outcome or {}).get("current") or {}).get("status"),
                               "role": "candidate" if cid in (p.candidate_component_ids or []) else "existing"})
     research = [{"id": r.id, "name": r.name, "lifecycle": r.lifecycle, "checked_at": _iso(r.checked_at)}
@@ -1004,6 +1006,7 @@ def component_detail(session: Session, component_id: str, *, domain: str | None,
     inst_obs = latest.get((component_id, "installation"))
     observed_digest = inst_obs.observed_identity if inst_obs is not None and str(
         inst_obs.observed_identity or "").startswith("sha256:") else None
+    digest_sel = select_digest(details.get("approved_digest"))
     return {
         "component_id": component_id, "mode": comp.mode, "tombstoned_at": _iso(comp.tombstoned_at),
         "identity": {
@@ -1034,11 +1037,15 @@ def component_detail(session: Session, component_id: str, *, domain: str | None,
         "versions": {
             **version,
             # §37: source repo, distribution artifact and installed executable are distinct identities
-            "approved_digest": details.get("approved_digest"),
+            # §07: the approved digest of THIS host's <os>_<arch> (per-platform mapping or one digest for all)
+            "approved_digest": digest_sel["digest"],
+            "approved_digest_platform": digest_sel["platform"],
+            "approved_digest_form": digest_sel["form"],
+            "approved_digest_platforms": digest_sel["recorded_platforms"],
             "observed_digest": observed_digest,
-            "digest_status": ("MATCH" if details.get("approved_digest") and observed_digest == details["approved_digest"]
-                              else "MISMATCH" if details.get("approved_digest") and observed_digest
-                              else "NO_APPROVED_DIGEST" if not details.get("approved_digest") else "UNKNOWN"),
+            "digest_status": ("MATCH" if digest_sel["digest"] and observed_digest == digest_sel["digest"]
+                              else "MISMATCH" if digest_sel["digest"] and observed_digest
+                              else "NO_APPROVED_DIGEST" if not digest_sel["digest"] else "UNKNOWN"),
             "distribution": details.get("distribution") or {**unknown, "reason": "artefak distribusi belum dicatat"},
             "signature": details.get("signature") or {**unknown, "result": "UNKNOWN",
                                                       "reason": "tanda tangan/provenance belum dicatat"},

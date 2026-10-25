@@ -17,6 +17,8 @@ export interface ProposalRow {
   baseline_hash: string | null;
   candidate_hash: string | null;
   candidate_pin: string | null;
+  /** §25: structured sha256 of the candidate artifact (null = not recorded) */
+  candidate_digest?: string | null;
   reviewed_at: string | null;
   created_at: string | null;
   parts_count: number;

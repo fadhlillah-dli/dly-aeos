@@ -85,9 +85,11 @@ def profile_for(domain: str) -> Profile:
 
 
 def image_tag() -> str:
-    from aeos.worker_runtime.opencode import PINNED_VERSION
+    """``dly-aeos-worker:<opencode pin>``: the owner-approved install-manifest pin when set, else the labelled
+    runtime default (``opencode.resolve_pin``) - never a constant the reviewed manifest cannot change."""
+    from aeos.worker_runtime.opencode import pinned_version
 
-    return f"{IMAGE_REPOSITORY}:{PINNED_VERSION}"
+    return f"{IMAGE_REPOSITORY}:{pinned_version()}"
 
 
 def docker_cmd() -> list[str] | None:

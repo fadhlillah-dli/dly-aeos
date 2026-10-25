@@ -276,6 +276,10 @@ def compute_candidate(session: Session, p: ChangeProposal, children: list[Change
         "parts": sorted((c.id, c.kind, tuple(sorted(c.canonical_identities or [])), c.candidate_pin or UNKNOWN)
                         for c in children),
     }
+    if p.candidate_digest:
+        # §25: the structured candidate digest is part of what the owner approves (added only when recorded, so
+        # candidates without one keep their existing hash)
+        cand["candidate_digest"] = p.candidate_digest
     from aeos.proposals.plan import bound_part
 
     bound = bound_part(p.owner_plan)
@@ -544,6 +548,7 @@ def _experiment_plan(session: Session, p: ChangeProposal, baseline_hash: str, ca
     plan: dict[str, Any] = {
         "type": "CONTROLLED_TRIAL", "install": "hanya di sandbox trial setelah TRIAL_APPROVE",
         "pins": {"baseline_hash": baseline_hash, "candidate_pin": p.candidate_pin or UNKNOWN,
+                 "candidate_digest": p.candidate_digest or "NOT_RECORDED",
                  "candidate_hash": candidate_hash,
                  "note": None if p.candidate_pin else "Pin/digest kandidat wajib sebelum TRIAL_APPROVE"},
         "suites": [{"suite_key": s, "available": s in existing} for s in suggested] or UNKNOWN,

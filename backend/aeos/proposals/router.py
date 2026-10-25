@@ -24,6 +24,7 @@ class PartIn(BaseModel):
     sources: list[str] = Field(default_factory=list, max_length=20)
     existing_component_ids: list[str] = Field(default_factory=list, max_length=20)
     candidate_pin: str | None = Field(default=None, max_length=128)
+    candidate_digest: str | None = Field(default=None, max_length=80)  # sha256:<hex> (validated by the service)
     depends_on: list[int] = Field(default_factory=list, max_length=20)
 
 
@@ -40,12 +41,14 @@ class ProposalIn(BaseModel):
     limits: dict[str, Any] = Field(default_factory=dict)
     attachment_ids: list[str] = Field(default_factory=list, max_length=20)
     candidate_pin: str | None = Field(default=None, max_length=128)
+    candidate_digest: str | None = Field(default=None, max_length=80)  # sha256:<hex> (validated by the service)
     parts: list[PartIn] = Field(default_factory=list, max_length=20)
 
 
 class ReviewIn(BaseModel):
     with_claude: bool = False
     candidate_pin: str | None = Field(default=None, max_length=128)
+    candidate_digest: str | None = Field(default=None, max_length=80)  # sha256:<hex> (validated by the service)
 
 
 class DecisionIn(BaseModel):
@@ -162,7 +165,7 @@ def create_proposal(body: ProposalIn, db: DB, principal: AdminPrincipal, domain:
         sources=body.sources, problem=body.problem, expected_benefit=body.expected_benefit,
         scope_type=body.scope_type, project_id=project_id, existing_component_ids=body.existing_component_ids,
         candidate_component_ids=body.candidate_component_ids, limits=body.limits,
-        attachment_ids=body.attachment_ids, candidate_pin=body.candidate_pin,
+        attachment_ids=body.attachment_ids, candidate_pin=body.candidate_pin, candidate_digest=body.candidate_digest,
         parts=[part.model_dump() for part in body.parts] or None,
     )
     db.commit()
@@ -212,7 +215,8 @@ def review_proposal(proposal_id: str, body: ReviewIn, db: DB, principal: AdminPr
                     domain: ActiveDomain) -> dict[str, Any]:
     p = _load(db, principal, domain, proposal_id)
     _committing(db, lambda: service.review(db, p, actor_user_id=principal.user.id, with_claude=body.with_claude,
-                                           candidate_pin=body.candidate_pin, domain=domain.value))
+                                           candidate_pin=body.candidate_pin, domain=domain.value,
+                                           candidate_digest=body.candidate_digest))
     return service.proposal_view(db, p, detail=True)
 
 

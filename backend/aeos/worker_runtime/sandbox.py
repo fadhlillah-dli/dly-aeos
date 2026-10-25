@@ -235,11 +235,12 @@ def process_sandbox_exception(session: Session):  # -> Decision | None
 
 
 def _container_remedy(domain: str) -> str:
-    from aeos.worker_runtime.opencode import PINNED_VERSION
+    from aeos.worker_runtime.container import image_tag
+    from aeos.worker_runtime.opencode import pinned_version
 
     extra = " --domain OFFICE" if domain == Domain.OFFICE.value else ""
-    return (f"Install/start Docker, build the worker image (`docker build --build-arg OPENCODE_VERSION={PINNED_VERSION} "
-            f"-t dly-aeos-worker:{PINNED_VERSION} sandbox/`) and run `aeos worker containment --kind container{extra}` "
+    return (f"Install/start Docker, build the worker image (`docker build --build-arg OPENCODE_VERSION={pinned_version()} "
+            f"-t {image_tag()} sandbox/`) and run `aeos worker containment --kind container{extra}` "
             "until it reports PASS")
 
 

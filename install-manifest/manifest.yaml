@@ -209,6 +209,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 1
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: installer, url: null, digest: null, channel: null, note: "Pustaka SQLite tertanam pada interpreter Python (modul sqlite3); ikut distribusi Python yang dipilih pemilik, tidak dipasang terpisah."}
+    signature: {method: none, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Tidak ada tanda tangan terpisah; identitas mengikuti interpreter Python (tidak diverifikasi AEOS)."}
+    ports: []
+    config_refs: ["settings:data_dir"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: "AGENTS.md (CI Windows, macOS, Linux)", note: "Kebutuhan platform AEOS; versi SQLite teramati oleh probe, tidak dipin."}
     probe:
       type: sqlite
       timeout_seconds: 5
@@ -494,7 +500,7 @@ components:
     approved_pin: null
     approved_digest: null
     distribution: {kind: package_manager, url: null, digest: null, channel: "official native build", note: "Distribusi resmi Anthropic (winget Anthropic.ClaudeCode / brew cask claude-code; Linux: halaman setup resmi). Digest belum dipin."}
-    signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Authenticode/notarization tidak diperiksa oleh AEOS."}
+    signature: {method: os_codesign, available: null, verified: false, verified_at: null, result: UNKNOWN, approved_signer: null, note: "Bridge dan Doctor (claude.binary) memeriksa tanda tangan OS sebelum dipakai: Windows Get-AuthenticodeSignature, macOS codesign (TeamIdentifier). INVALID selalu BLOCKED; tanpa pin keaslian UNVERIFIED (UNSIGNED = DEGRADED). Langkah pemilik: isi approved_signer per OS {windows: subject/CN/O Authenticode, darwin: TeamIdentifier} lewat PR yang direview; setelah dipin, apa pun selain VALID + penerbit cocok = BLOCKED."}
     ports: []
     config_refs: ["settings:claude_binary"]
     compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: "ADR-0040", note: "Windows: hanya claude.exe native; shim .cmd/.ps1 ditolak bridge."}
@@ -2757,6 +2763,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 3
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: os_component, url: null, digest: null, channel: null, note: "Bagian OS: Windows Credential Manager / macOS Keychain / Secret Service (Linux); tidak dipasang oleh AEOS."}
+    signature: {method: none, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Komponen OS; keasliannya tidak diverifikasi oleh AEOS."}
+    ports: []
+    config_refs: ["settings:keyring_service"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: "§26; ADR-0002", note: "Linux butuh Secret Service yang tersedia; backend keyring fail/null ditolak."}
     probe: {type: keyring_backend, timeout_seconds: 5, ttl_seconds: 86400}
     capability_tests:
       - {id: secret.keyring_roundtrip, description: "Tulis/baca/hapus entri uji milik dly-aeos (hanya dengan --functional).", functional: true, requires_authorization: true, evidence: "CheckResult secret.keyring"}
@@ -2787,6 +2799,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 3
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: pypi, url: null, digest: null, channel: "requirements.lock (versi persis)", note: "Dipasang dari PyPI oleh scripts/bootstrap sesuai versi persis di requirements.lock; hash pinning ditunda (ADR-0093/ADR-0095). Digest wheel belum dipin."}
+    signature: {method: none, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Attestation/provenance PyPI belum diperiksa oleh AEOS."}
+    ports: []
+    config_refs: ["file:requirements.lock", "file:pyproject.toml", "settings:keyring_service"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: "25", max_version: null, source: "pyproject.toml dependencies (keyring>=25)", note: "Kebutuhan platform AEOS; bukan klaim upstream."}
     probe: {type: python_module, module: keyring, distribution: keyring, timeout_seconds: 5, ttl_seconds: 86400}
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [RESTRICTED], operations: [READ, WRITE], identity_ref: null, tenant_target: null}
@@ -3248,6 +3266,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 1
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: pypi, url: null, digest: null, channel: "requirements.lock (versi persis)", note: "Dipasang dari PyPI oleh scripts/bootstrap sesuai versi persis di requirements.lock; hash pinning ditunda (ADR-0093/ADR-0095). Digest wheel belum dipin."}
+    signature: {method: none, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Attestation/provenance PyPI belum diperiksa oleh AEOS."}
+    ports: []
+    config_refs: ["file:requirements.lock", "file:pyproject.toml"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: "8", max_version: null, source: "pyproject.toml optional-dependencies dev (pytest>=8)", note: "Kebutuhan platform AEOS; bukan klaim upstream."}
     probe: {type: python_module, module: pytest, distribution: pytest, timeout_seconds: 5, ttl_seconds: 86400}
     capability_tests: []
     access: {paths: ["<repo>/tests/**"], egress: [], data_classes: [INTERNAL], operations: [EXEC], identity_ref: null, tenant_target: null}
@@ -3278,6 +3302,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 1
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: pypi, url: null, digest: null, channel: "requirements.lock (versi persis)", note: "Dipasang dari PyPI oleh scripts/bootstrap sesuai versi persis di requirements.lock; hash pinning ditunda (ADR-0093/ADR-0095). Digest wheel belum dipin."}
+    signature: {method: none, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Attestation/provenance PyPI belum diperiksa oleh AEOS."}
+    ports: []
+    config_refs: ["file:requirements.lock", "file:pyproject.toml"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: "0.6", max_version: null, source: "pyproject.toml optional-dependencies dev (ruff>=0.6)", note: "Kebutuhan platform AEOS; bukan klaim upstream."}
     probe: {type: python_module, module: ruff, distribution: ruff, timeout_seconds: 5, ttl_seconds: 86400}
     capability_tests: []
     access: {paths: ["<repo>/backend/**", "<repo>/tests/**"], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
@@ -3308,6 +3338,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 1
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: pypi, url: null, digest: null, channel: "requirements.lock (versi persis)", note: "Dipasang dari PyPI oleh scripts/bootstrap sesuai versi persis di requirements.lock; hash pinning ditunda (ADR-0093/ADR-0095). Digest wheel belum dipin."}
+    signature: {method: none, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Attestation/provenance PyPI belum diperiksa oleh AEOS."}
+    ports: []
+    config_refs: ["file:requirements.lock", "file:pyproject.toml"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: "1.11", max_version: null, source: "pyproject.toml optional-dependencies dev (mypy>=1.11)", note: "Kebutuhan platform AEOS; bukan klaim upstream."}
     probe: {type: python_module, module: mypy, distribution: mypy, timeout_seconds: 5, ttl_seconds: 86400}
     capability_tests: []
     access: {paths: ["<repo>/backend/**"], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}
@@ -3338,6 +3374,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 1
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: npm, url: null, digest: null, channel: "frontend/package-lock.json (lockfile)", note: "Dipasang dari registry npm oleh npm ci; versi teresolusi dan integrity dipin di frontend/package-lock.json. Digest belum dipin di manifest."}
+    signature: {method: none, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Signature/provenance registry npm belum diperiksa oleh AEOS (npm ci memeriksa integrity lockfile)."}
+    ports: []
+    config_refs: ["file:frontend/package.json", "file:frontend/package-lock.json"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: "5.0.5", max_version: null, source: "frontend/package.json devDependencies (^5.0.5)", note: "Kebutuhan platform AEOS; bukan klaim upstream."}
     probe: {type: npm_package, package: vitest, timeout_seconds: 5, ttl_seconds: 86400}
     capability_tests: []
     access: {paths: ["<repo>/frontend/src/**"], egress: [], data_classes: [INTERNAL], operations: [EXEC], identity_ref: null, tenant_target: null}
@@ -3368,6 +3410,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 1
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: npm, url: null, digest: null, channel: "frontend/package-lock.json (lockfile)", note: "Dipasang dari registry npm oleh npm ci; versi teresolusi dan integrity dipin di frontend/package-lock.json. Digest belum dipin di manifest."}
+    signature: {method: none, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Signature/provenance registry npm belum diperiksa oleh AEOS (npm ci memeriksa integrity lockfile)."}
+    ports: []
+    config_refs: ["file:frontend/package.json", "file:frontend/package-lock.json", "file:frontend/tsconfig.json"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: "7.0.2", max_version: null, source: "frontend/package.json devDependencies (^7.0.2)", note: "Kebutuhan platform AEOS; bukan klaim upstream."}
     probe: {type: npm_package, package: typescript, timeout_seconds: 5, ttl_seconds: 86400}
     capability_tests: []
     access: {paths: ["<repo>/frontend/src/**"], egress: [], data_classes: [INTERNAL], operations: [READ], identity_ref: null, tenant_target: null}

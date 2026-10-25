@@ -29,9 +29,11 @@ import { hasPackage, type ProposalDetail, type Timeline } from "./types";
 function ReviewControls({ p }: { p: ProposalDetail }) {
   const qc = useQueryClient();
   const [pin, setPin] = useState(p.candidate_pin ?? "");
+  const [digest, setDigest] = useState(p.candidate_digest ?? "");
   const [withClaude, setWithClaude] = useState(false);
   const m = useMutation({
-    mutationFn: () => post<ProposalDetail>(`/api/proposals/${p.id}/review`, { with_claude: withClaude, candidate_pin: pin || null }),
+    mutationFn: () =>
+      post<ProposalDetail>(`/api/proposals/${p.id}/review`, { with_claude: withClaude, candidate_pin: pin || null, candidate_digest: digest.trim() }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["proposal", p.id] }),
   });
   const submit = (e: FormEvent) => {
@@ -42,6 +44,16 @@ function ReviewControls({ p }: { p: ProposalDetail }) {
     <form onSubmit={submit} className="flex flex-wrap items-end gap-3">
       <Field label="Pin/digest kandidat" hint="Perubahan pin membatalkan keputusan yang terikat">
         <input className={inputBase + " w-full sm:w-56"} value={pin} onChange={(e) => setPin(e.target.value)} placeholder="UNKNOWN" />
+      </Field>
+      <Field label="Digest kandidat (sha256)" hint="Wajib bila komponen dipin digest di install-manifest; dibandingkan dengan binary teramati saat ACCEPTED">
+        <input
+          className={inputBase + " mono w-full sm:w-80"}
+          value={digest}
+          onChange={(e) => setDigest(e.target.value)}
+          placeholder="sha256:… (belum tercatat)"
+          aria-label="Digest kandidat"
+          pattern="^(sha256:[0-9a-fA-F]{64})?$"
+        />
       </Field>
       <label className="flex items-center gap-2 pb-2 text-sm">
         <input type="checkbox" checked={withClaude} onChange={(e) => setWithClaude(e.target.checked)} disabled={p.domain === "OFFICE"} />

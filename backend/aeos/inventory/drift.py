@@ -32,6 +32,7 @@ from aeos.core.paths import repo_root
 from aeos.core.timeutil import utcnow
 from aeos.inventory.configlens import config_basis, is_explicit
 from aeos.inventory.observations import UNREGISTERED_PREFIX, is_stale, latest_observations
+from aeos.inventory.pins import platform_key, select_digest
 from aeos.inventory.probes import version_tuple
 from aeos.models.inventory import ComponentObservation, ComponentReference, ComponentRelation
 from aeos.models.inventory_ext import DriftFinding
@@ -201,7 +202,9 @@ def _component_items(comp: ComponentReference, latest: dict[tuple[str, str], Com
                                        "observation_id": inst.id},
                 domain_scope=scope,
             ))
-    approved_digest = (comp.details or {}).get("approved_digest")
+    # §07: the reviewed digest of THIS host's <os>_<arch> (a per-platform mapping without an entry for it is
+    # NOT_RECORDED here - never compared with another platform's executable)
+    approved_digest = select_digest((comp.details or {}).get("approved_digest"))["digest"]
     if approved_digest and inst is not None and inst.status == "INSTALLED" and inst.observed_identity \
             and str(inst.observed_identity).startswith("sha256:") and inst.observed_identity != approved_digest:
         # same --version but different bytes: the executable is not the reviewed artifact (§37)
@@ -209,7 +212,7 @@ def _component_items(comp: ComponentReference, latest: dict[tuple[str, str], Com
             cid, "resolved-version-mismatch", severity(policy, "resolved-version-mismatch", "digest"),
             f"Digest executable teramati {str(inst.observed_identity)[:23]}... berbeda dari digest yang disetujui",
             key="digest", detail={"approved_digest": approved_digest, "observed_digest": inst.observed_identity,
-                                  "observation_id": inst.id},
+                                  "platform": platform_key(), "observation_id": inst.id},
             domain_scope=scope,
         ))
     approved_schema = (comp.details or {}).get("tool_schema_hash")

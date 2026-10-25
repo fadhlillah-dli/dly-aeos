@@ -26,9 +26,9 @@ admission, §37 distinct source/distribution/executable identities), all optiona
 
 | Field | Meaning | Checked against |
 |---|---|---|
-| `approved_digest` | `sha256:` of the reviewed executable/artifact (needs `approved_pin`) | digest the reconciler observes for the probed binary (drift `resolved-version-mismatch`, key `digest`) |
+| `approved_digest` | `sha256:` of the reviewed executable/artifact (needs `approved_pin`): one value for every platform, or a mapping keyed `<os>_<arch>` (`windows_amd64`, `darwin_arm64`, `darwin_amd64`, `linux_amd64`, ...) because the executable differs per platform. A platform without an entry is NOT_RECORDED there, never a mismatch | digest the reconciler observes for the probed binary on THIS platform (drift `resolved-version-mismatch`, key `digest`); `aeos vault install` refuses an OpenBao binary that differs from this platform's entry |
 | `distribution` | `{kind, url, digest, channel, note}` of the release asset / package | `url` must appear in the master |
-| `signature` | `{method, available, verified, verified_at, result, note}`; `UNKNOWN`/`NOT_VERIFIED` stated explicitly | `VERIFIED` needs `verified_at` |
+| `signature` | `{method, available, verified, verified_at, result, approved_signer, note}`; `UNKNOWN`/`NOT_VERIFIED` stated explicitly. `approved_signer` (owner pin) is one publisher identity or a per-OS mapping `{windows: <Authenticode subject / CN / O>, darwin: <TeamIdentifier>}`; once pinned for an OS, anything but a VALID OS signature by exactly that signer is BLOCKED there | `VERIFIED` needs `verified_at`; the Claude bridge and Doctor `claude.binary` apply the pin |
 | `ports` | loopback ports with the Settings key that configures them | Settings keys; host must be loopback |
 | `config_refs` | `settings:<key>` or `file:<repo-relative path>` the component reads | Settings keys / relative paths |
 | `compatibility` | `{os, arch, min_version, max_version, source, note}` | — |

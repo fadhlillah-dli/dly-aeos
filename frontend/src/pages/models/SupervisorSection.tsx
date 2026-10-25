@@ -17,6 +17,11 @@ export function SupervisorSection() {
   if (q.error) return <ErrorBox error={q.error} />;
   const s = q.data!;
   const t = s.last_capability_test;
+  const au = s.binary.authenticity;
+  const blockedBy = s.blocked_by ?? (s.bridge_status === "BLOCKED" ? ["auth"] : []);
+  const signatureBlocked = blockedBy.includes("signature");
+  const loginBlocked = s.bridge_status === "BLOCKED" && blockedBy.some((b) => b !== "signature");
+  const headerStatus = s.bridge_status === "BLOCKED" || s.bridge_status === "DEGRADED" ? s.bridge_status : t?.status ?? "NOT_TESTED";
 
   return (
     <Card
@@ -24,7 +29,7 @@ export function SupervisorSection() {
       actions={
         <span className="flex flex-wrap items-center gap-2">
           <Freshness at={s.checked_at} label="Diperiksa" staleAfterSeconds={300} />
-          <StatusBadge status={s.bridge_status === "BLOCKED" ? "BLOCKED" : t?.status ?? "NOT_TESTED"} />
+          <StatusBadge status={headerStatus} />
         </span>
       }
     >
@@ -33,6 +38,21 @@ export function SupervisorSection() {
           <KeyValue
             items={[
               ["Binary", <span key="b" className="flex flex-wrap items-center gap-2"><StatusBadge status={s.binary.status} /> <Mono>{s.binary.path_logical}</Mono></span>],
+              [
+                "Keaslian binary (tanda tangan OS)",
+                au ? (
+                  <span key="au" className="flex flex-wrap items-center gap-2" data-testid="binary-authenticity">
+                    <StatusBadge status={au.gate} />
+                    <span className="text-xs text-ink-3">
+                      tanda tangan {au.signature_status}
+                      {au.observed_signer ? <> · penerbit teramati <Mono>{au.observed_signer}</Mono></> : null}
+                      {" · "}pin pemilik ({au.os}): {au.approved_signer ? <Mono>{au.approved_signer}</Mono> : "belum dipin"}
+                    </span>
+                  </span>
+                ) : (
+                  <StatusBadge key="au" status="UNKNOWN" />
+                ),
+              ],
               ["Versi", s.binary.version ?? <StatusBadge status="UNKNOWN" />],
               ["Mode autentikasi", <span key="a" className="flex flex-wrap items-center gap-2"><StatusBadge status={s.auth.status} /> {s.auth.authMethod ?? "UNKNOWN"}</span>],
               ["Langganan", s.auth.subscriptionType ?? "UNKNOWN"],
@@ -56,7 +76,23 @@ export function SupervisorSection() {
               Variabel ditemukan di lingkungan server: <Mono>{s.env_hygiene.forbidden_present.join(", ")}</Mono>. {s.env_hygiene.note}
             </Notice>
           )}
-          {s.bridge_status === "BLOCKED" && (
+          {au && au.gate !== "OK" && (
+            <Notice tone={au.gate === "BLOCKED" ? "bad" : "warn"}>
+              Keaslian binary {au.gate}: {au.reason}
+              {au.owner_step && <span className="mt-1 block text-xs">Langkah pemilik: {au.owner_step}</span>}
+            </Notice>
+          )}
+          {(signatureBlocked || au?.gate === "DEGRADED") && au?.remedy && (
+            <div className="space-y-1" data-testid="signature-remedy">
+              <div className="text-sm font-medium">Langkah perbaikan tanda tangan</div>
+              <p className="text-xs text-ink-3">{au.remedy.operation}</p>
+              {au.remedy.commands.map((c) => (
+                <CopyCommand key={c} command={c} />
+              ))}
+              <p className="text-xs text-ink-3">{au.remedy.note}</p>
+            </div>
+          )}
+          {loginBlocked && (
             <div className="space-y-1">
               <div className="text-sm font-medium">Langkah perbaikan</div>
               <CopyCommand command="claude" why="Jalankan lalu ketik /login dengan akun Max (alur resmi)" />

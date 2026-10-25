@@ -738,19 +738,20 @@ def status(session: Session, settings: Settings | None = None, *, refresh: bool 
                                        {"status": "NOT_CHECKED",
                                         "reason": "refresh the status to run the OS signature check"}))
     pinned = binmod.approved_publisher()
-    gate, gate_reason = binmod.signature_gate(signature, pinned) if pr.binary.found else ("UNVERIFIED", "no binary")
+    authenticity = binmod.authenticity_view(signature, pinned, found=pr.binary.found)
+    gate = authenticity["gate"]
     bridge_status = "BLOCKED" if (not pr.usable or gate == "BLOCKED") else (
         "DEGRADED" if gate == "DEGRADED" else "CONFIGURED")
+    # why it is BLOCKED decides the remedy: a signature block is never fixed by /login
+    blocked_by = (["signature"] if gate == "BLOCKED" else []) + (["binary"] if not pr.binary.found else []) + (
+        ["auth"] if pr.binary.found and pr.auth.status not in {"VERIFIED", "DEGRADED"} else [])
     return {
         "binary": {"found": pr.binary.found, "status": binary_status, "path_logical": pr.binary.logical_path,
                    "version": pr.binary.version, "fingerprint": pr.binary.fingerprint, "reasons": pr.binary.reasons,
-                   "signature": signature,
-                   "authenticity": {"gate": gate, "reason": gate_reason, "approved_signer": pinned,
-                                    "owner_step": None if pinned else
-                                    "pin the Anthropic signer (Authenticode subject / TeamIdentifier) in "
-                                    "install-manifest claude-code signature.approved_signer"}},
+                   "signature": signature, "authenticity": authenticity},
         "auth": pr.auth.summary(),
         "bridge_status": bridge_status,
+        "blocked_by": blocked_by if bridge_status == "BLOCKED" else [],
         "env_hygiene": parent_hygiene(),
         "invocation": {
             "argv_template": ["claude", "-p", "--output-format", "json", "--json-schema", "<schema>", "--model",

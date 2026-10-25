@@ -49,6 +49,18 @@
     "component_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
     "nullable_text": {"type": ["string", "null"]},
     "sha256_digest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "approved_digest": {
+      "$comment": "§07 installers pinned to a digest: the executable differs per OS/arch, so the reviewed digest is either one sha256 for every platform (scalar form) or a mapping keyed <os>_<arch> (windows_amd64, darwin_arm64, ...). A platform without an entry is NOT_RECORDED there, never a mismatch.",
+      "anyOf": [
+        {"$ref": "#/$defs/sha256_digest"},
+        {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"pattern": "^(windows|darwin|linux)_(amd64|arm64)$"},
+          "additionalProperties": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        }
+      ]
+    },
     "distribution": {
       "$comment": "§37: the distribution artifact is its own identity (not the source repo, not the binary on PATH).",
       "type": "object",
@@ -69,14 +81,26 @@
       "additionalProperties": false,
       "required": ["method", "result"],
       "properties": {
-        "method": {"enum": ["gpg", "sigstore", "authenticode", "notarization", "checksum_only", "none", "unknown"]},
+        "method": {"enum": ["gpg", "sigstore", "authenticode", "notarization", "os_codesign", "checksum_only", "none",
+                            "unknown"]},
         "available": {"type": ["boolean", "null"]},
         "verified": {"type": "boolean"},
         "verified_at": {"$ref": "#/$defs/nullable_text"},
         "result": {"enum": ["VERIFIED", "NOT_VERIFIED", "UNAVAILABLE", "UNKNOWN"]},
         "approved_signer": {
-          "$comment": "Owner-pinned publisher identity, matched exactly (never as a substring): the whole Authenticode signer subject, one whole RDN such as O=Anthropic, PBC, the exact CN/O value, or the macOS TeamIdentifier. null = not pinned: a valid signature is reported but authenticity stays UNVERIFIED; a different observed signer BLOCKS the component (§12, §25).",
-          "$ref": "#/$defs/nullable_text"
+          "$comment": "Owner-pinned publisher identity, matched exactly (never as a substring): the whole Authenticode signer subject, one whole RDN such as O=Anthropic, PBC, the exact CN/O value, or the macOS TeamIdentifier. A string applies on every OS; a mapping {windows: <Authenticode identity>, darwin: <TeamIdentifier>} applies per OS (an OS it does not name is not pinned). null = not pinned: a valid signature is reported but authenticity stays UNVERIFIED. Once pinned for an OS, the component is BLOCKED there unless the OS reports the signature VALID and the signer matches (§12, §25).",
+          "anyOf": [
+            {"$ref": "#/$defs/nullable_text"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "windows": {"type": "string", "minLength": 1},
+                "darwin": {"type": "string", "minLength": 1}
+              }
+            }
+          ]
         },
         "note": {"$ref": "#/$defs/nullable_text"}
       }
@@ -229,7 +253,7 @@
         },
         "bootstrap_order": {"type": ["integer", "null"], "minimum": 0, "maximum": 11},
         "approved_pin": {"type": ["string", "null"], "minLength": 1, "not": {"type": "string", "pattern": "[Ll][Aa][Tt][Ee][Ss][Tt]"}},
-        "approved_digest": {"$ref": "#/$defs/sha256_digest"},
+        "approved_digest": {"$ref": "#/$defs/approved_digest"},
         "distribution": {"$ref": "#/$defs/distribution"},
         "signature": {"$ref": "#/$defs/signature"},
         "ports": {"type": "array", "items": {"$ref": "#/$defs/port"}},
