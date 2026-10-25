@@ -826,8 +826,15 @@ def office_gate(session: Session, plan: Plan, *, actor: str) -> None:
         reasons.append(f"CAN_PLAN_OFFICE: {exc.message}" + (f" ({'; '.join(extra)})" if extra else ""))
     except (ImportError, ModuleNotFoundError):
         reasons.append("CAN_PLAN_OFFICE: readiness doctor not available -> UNKNOWN (fail closed)")
-    if not office_policy(session)["claude_max_allowed_for_office_data"]:
+    pol = office_policy(session)
+    if not pol["claude_max_allowed_for_office_data"]:
         reasons.append("OFFICE_POLICY: Claude Max for OFFICE data is not approved by a company authorisation (§23, §51 P1)")
+    project = session.get(Project, plan.project_id)
+    from aeos.policy.facade import office_data_class_authorised
+
+    ok, why = office_data_class_authorised(session, project.data_classification if project else None, policy=pol)
+    if not ok:
+        reasons.append(f"OFFICE_POLICY_DATA_CLASS: {why} (§01 U-03, §51 P1)")
     if not reasons:
         return
     cp = dict(plan.checkpoint or {})

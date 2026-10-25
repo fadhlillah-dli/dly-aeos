@@ -4,6 +4,10 @@ Defaults come from ``policy/office-defaults.yaml``. They can only be relaxed by 
 ``POLICY`` decisions for the OFFICE domain *and* only while an ACTIVE company-authorisation
 decision (``details.office_authorization == true``) exists. Configuration files or model output
 never relax them; ``Settings.office_external_worker_allowed`` is ignored when true.
+
+The company authorisation also carries its structured scope (``aeos.policy.office_scope``): approved targets,
+approved data classes and the optional approved identity per ``office/`` credential. They are exposed by
+``office_policy`` and checked by the interlock, the OFFICE adapters, routing, planning and the Doctor.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from sqlalchemy.orm import Session
 from aeos.core.enums import Domain
 from aeos.core.hashing import content_hash
 from aeos.core.paths import repo_root
-from aeos.policy import catalog
+from aeos.policy import catalog, office_scope
 
 # Hard fallback when the defaults file is missing or unreadable: everything denied.
 _DENY_ALL: dict[str, Any] = {
@@ -103,6 +107,10 @@ def office_policy(session: Session) -> dict[str, Any]:
     if auth is not None:
         raw = (auth.details or {}).get("allowed_providers") or (auth.auth_scope or {}).get("providers") or []
         authorized_providers = [p for p in raw if p in catalog.PROVIDERS_BY_DOMAIN[Domain.OFFICE.value]]
+    # §01 U-03 / §07 step 10 / §51 P1: the targets, data classes and identity the company approved. Recorded only on
+    # the company authorisation itself; absent = UNDECIDED and every consumer fails closed (office_scope).
+    scope = (office_scope.effective_scope(auth.details, authorized_providers) if auth is not None
+             else {"approved_targets": [], "approved_data_classes": [], "approved_identities": {}})
     # Type hygiene: never let a malformed override read as "allowed".
     policy["external_worker_allowed"] = policy.get("external_worker_allowed") is True and auth is not None
     policy["claude_max_allowed_for_office_data"] = (
@@ -119,12 +127,26 @@ def office_policy(session: Session) -> dict[str, Any]:
         "office_authorization": auth is not None,
         "authorization_decision_id": auth.id if auth else None,
         "authorized_providers": authorized_providers,
+        **scope,
         "applied_decision_ids": applied,
         "ignored_decisions": ignored,
         "source": source,
         "defaults_hash": defaults_hash,
         "config_override_ignored": _config_override_requested(),
     }
+
+
+def target_authorised(session: Session, provider: str, *, root_id: Any = None, tenant: Any = None,
+                      space_id: Any = None, policy: dict[str, Any] | None = None) -> tuple[bool, str]:
+    """(authorised, reason): is this exact OFFICE target within the company-approved targets? (fail closed)"""
+    return office_scope.target_check(policy if policy is not None else office_policy(session), provider,
+                                     root_id=root_id, tenant=tenant, space_id=space_id)
+
+
+def data_class_authorised(session: Session, classification: Any, *,
+                          policy: dict[str, Any] | None = None) -> tuple[bool, str]:
+    """(authorised, reason): may OFFICE data of *classification* reach an approved model route / Claude Max?"""
+    return office_scope.data_class_check(policy if policy is not None else office_policy(session), classification)
 
 
 def _config_override_requested() -> bool:

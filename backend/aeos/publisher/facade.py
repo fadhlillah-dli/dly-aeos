@@ -10,7 +10,32 @@ from typing import Any
 
 from aeos.publisher.providers.base import ProviderError
 
-__all__ = ["ProviderError", "bitbucket_read_auth", "bitbucket_reader", "bitbucket_repository_reference"]
+__all__ = ["ProviderError", "bitbucket_read_auth", "bitbucket_reader", "bitbucket_repository_reference",
+           "observe_httpx_response", "observe_provider_response"]
+
+
+def observe_provider_response(method: str, url: str, status: int, headers: Any = None) -> None:
+    """Additive (W7, 2026-10-25): report one provider response that did not go through the publisher's ``send``
+    (delivery GitHub reads, broker PR calls, ``git push``/``ls-remote`` over HTTPS) to the same response-observer
+    hook (§08 per-call permission observation). Method, URL, status and response headers only - never a body, a
+    request header or a credential. Never raises."""
+    from aeos.publisher.providers.base import notify_response
+
+    try:
+        pairs: list[tuple[Any, Any]] = list(dict(headers or {}).items())
+    except (TypeError, ValueError):
+        pairs = []
+    notify_response(str(method), str(url), int(status), {str(k).lower(): str(v) for k, v in pairs})
+
+
+def observe_httpx_response(response: Any) -> None:
+    """Additive (W7, 2026-10-25): ``httpx`` response event hook form of :func:`observe_provider_response`."""
+    try:
+        req = response.request
+        observe_provider_response(req.method, str(req.url.copy_with(query=None)), response.status_code,
+                                  response.headers)
+    except Exception:  # an observer never breaks a provider call
+        return
 
 
 def bitbucket_read_auth(*, use: str, actor: str) -> str:

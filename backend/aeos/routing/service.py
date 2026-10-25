@@ -277,6 +277,17 @@ def _office_policy(session: Session) -> tuple[dict[str, Any] | None, str]:
         return None, f"office policy could not be evaluated ({type(exc).__name__}) - OFFICE denied"
 
 
+def _office_data_class_rejections(session: Session, office: dict[str, Any], data_classification: str) -> list[str]:
+    """§01 U-03 / §51 P1: OFFICE data of a class the company did not approve never reaches a model route."""
+    try:
+        from aeos.policy.facade import office_data_class_authorised
+
+        ok, why = office_data_class_authorised(session, data_classification, policy=office)
+    except (ImportError, ModuleNotFoundError):
+        return ["office data-class policy unavailable - OFFICE denied"]
+    return [] if ok else [f"OFFICE policy: {why}"]
+
+
 def _quota_rows(session: Session, route: ModelRoute) -> list[QuotaState]:
     scopes = {"*", route.route_key, route.model_id}
     if route.alias:
@@ -561,6 +572,7 @@ def route_rejections(
                 reasons.append("OFFICE policy: external_worker_allowed=false")
             if route.route_key not in (office.get("approved_worker_routes") or []):
                 reasons.append("OFFICE policy: route not in approved_worker_routes")
+            reasons += _office_data_class_rejections(session, office, data_classification)
 
     if data_classification not in (route.allowed_data_classes or []):
         reasons.append(f"data classification {data_classification} not allowed by route data terms "

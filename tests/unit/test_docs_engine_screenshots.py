@@ -179,6 +179,12 @@ class _App(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - stdlib handler API
         if self.path == "/health":
             body, ctype = json.dumps({"status": "ok", "commit": SHA}).encode(), "application/json"
+        elif self.path == "/form":
+            # a prefilled field: the screenshot shows its value, the page's innerText does not contain it
+            token = "ghp_" + "A1b2" * 9
+            body = (f'<!doctype html><title>Contoh</title><h1>Pengaturan</h1>'
+                    f'<label>Token <input value="{token}"></label>').encode()
+            ctype = "text/html"
         else:
             body, ctype = b"<!doctype html><title>Contoh</title><h1>Daftar tugas</h1><p>3 terbuka</p>", "text/html"
         self.send_response(200)
@@ -220,3 +226,31 @@ def test_real_headless_chromium_captures_the_running_app(db, settings, monkeypat
     data, integrity = collector.read_content(ev)
     assert integrity == "VERIFIED" and data is not None and data.startswith(b"\x89PNG")
     assert ev.environment["viewport"] == "390x844" and ev.trusted
+    assert "form-field values" in ev.environment["text_checked"]
+
+
+@pytest.mark.integration
+def test_real_chromium_refuses_a_page_whose_prefilled_field_shows_a_credential(db, settings, monkeypatch):
+    """W6-099: innerText leaves out input values, but the picture shows them - the field values are checked too."""
+    pytest.importorskip("playwright.sync_api")
+    install_fakes(monkeypatch)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _App)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        p = make_project(db, key="real-shot-form")
+        db.add(ProjectIntegration(project_id=p.id, domain=p.domain, provider="deployment-target",
+                                  purpose="staging", root_id=base, config={}))
+        db.commit()
+        try:
+            with pytest.raises(PolicyDenied) as ei:
+                shots.capture_screenshots(db, p, environment="staging", commit=SHA, routes=["/form"], actor="owner",
+                                          viewport="mobile")
+        except Blocked as exc:
+            if exc.code == "SCREENSHOT_BROWSER_MISSING":
+                pytest.skip("Chromium for Playwright is not installed")
+            raise
+    finally:
+        server.shutdown()
+    assert ei.value.code == "SCREENSHOT_SENSITIVE_CONTENT"
+    assert _screens(db) == []

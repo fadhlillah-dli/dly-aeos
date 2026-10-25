@@ -176,7 +176,13 @@ def test_office_always_denied_by_default(routes, monkeypatch, absent_modules):
     d = eligible_routes(routes, domain="OFFICE", data_classification="INTERNAL")
     assert any("external_worker_allowed=false" in x for x in d.rejected[DS])
     assert any("approved_worker_routes" in x for x in d.rejected[DS])
-    reg.office.update(external_worker_allowed=True, approved_worker_routes=[DS])
+    reg.office.update(external_worker_allowed=True, approved_worker_routes=[DS], office_authorization=True)
+    # §01 U-03 / §51 P1: the company also has to approve the data class (approved_data_classes, UNDECIDED = deny)
+    d = eligible_routes(routes, domain="OFFICE", data_classification="INTERNAL")
+    assert d.eligible == [] and any("approved_data_classes" in x for x in d.rejected[DS])
+    reg.office["approved_data_classes"] = ["PUBLIC"]
+    assert eligible_routes(routes, domain="OFFICE", data_classification="INTERNAL").eligible == []
+    reg.office["approved_data_classes"] = ["INTERNAL"]
     assert eligible_routes(routes, domain="OFFICE", data_classification="INTERNAL").eligible == [DS]
 
 

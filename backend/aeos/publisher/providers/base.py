@@ -46,12 +46,20 @@ def remove_response_observer(fn: ResponseObserver) -> None:
         _response_observers.remove(fn)
 
 
-def _notify_observers(method: str, url: str, resp: httpx.Response) -> None:
+def notify_response(method: str, url: str, status: int, headers: Mapping[str, str]) -> None:
+    """Hand one provider response (method, URL, status, response headers - never a body or a request header) to the
+    registered observers. Delivery and broker calls that do not go through :func:`send` (GitHub REST reads, PR
+    creation, ``git push`` over HTTPS) report through here too, so a permission change they see marks the dependent
+    readiness checks STALE (§08). Never raises."""
     for fn in list(_response_observers):
         try:
-            fn(method, url, resp.status_code, resp.headers)
+            fn(method, url, status, headers)
         except Exception:  # an observer never breaks a provider call
             logging.getLogger("aeos.publisher").debug("response observer failed", exc_info=True)
+
+
+def _notify_observers(method: str, url: str, resp: httpx.Response) -> None:
+    notify_response(method, url, resp.status_code, resp.headers)
 
 
 class ProviderError(Exception):
@@ -159,8 +167,11 @@ def classify_http_error(resp: httpx.Response, *, write: bool, what: str) -> Prov
     return ProviderError(msg, retryable=False, status_code=resp.status_code)
 
 
-def send(client: httpx.Client, method: str, url: str, *, write: bool, what: str, **kw: Any) -> httpx.Response:
-    """Send one request with the timeout/unknown-outcome rules applied."""
+def send(client: httpx.Client, method: str, url: str, *, write: bool, what: str, observe: bool = True,
+         **kw: Any) -> httpx.Response:
+    """Send one request with the timeout/unknown-outcome rules applied. ``observe=False`` only for capability reads
+    whose 403 is an expected answer about a permission the least-privilege credential lacks (e.g. Bitbucket branch
+    restrictions need repository admin), never a sign that the credential changed."""
     try:
         resp = client.request(method, url, **kw)
     except httpx.ConnectError as exc:  # nothing was sent
@@ -173,5 +184,6 @@ def send(client: httpx.Client, method: str, url: str, *, write: bool, what: str,
         if write:
             raise ProviderTimeout(f"{what}: transport error — outcome unknown ({exc.__class__.__name__})") from exc
         raise ProviderError(f"{what}: transport error ({exc.__class__.__name__})", retryable=True) from exc
-    _notify_observers(method, url, resp)
+    if observe:
+        _notify_observers(method, url, resp)
     return resp

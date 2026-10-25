@@ -59,6 +59,7 @@ def _office_setup(db, project, *, deployment="CLOUD", authorise=True):
                                target_id="OFFICE", domain="OFFICE", rationale="company authorisation (test)",
                                details={"office_authorization": True, "company_reference": "CHG-42",
                                         "allowed_providers": ["bitbucket"],
+                                        "approved_targets": [{"provider": "bitbucket", "workspace": "company_ws"}],
                                         "office_policy": {"atlassian_deployment": "CLOUD"}})
     db.add(RepositoryReference(project_id=project.id, provider="BITBUCKET", full_name=REPO, default_branch="main",
                                verification_status="VERIFIED", provider_repo_id="{u1}"))

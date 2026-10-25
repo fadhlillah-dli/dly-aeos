@@ -13,8 +13,9 @@ Fail closed, observe-only:
   captured (``Blocked`` SCREENSHOT_COMMIT_NOT_PROVEN): a screenshot of an unknown build proves nothing.
 * Each page is loaded with one headless browser GET (no login, no form input, no clicks). A final URL on
   another origin (redirect) is refused, and so is an error page (HTTP 4xx/5xx or no main response).
-* The page text is checked before the image is stored: a credential pattern or personal data refuses the
-  capture (``PolicyDenied``). An image cannot be redacted, so it is never stored in that case.
+* The page text - with the values of visible form fields, placeholders and image alt text - is checked before the
+  image is stored: a credential pattern or personal data refuses the capture (``PolicyDenied``). An image cannot
+  be redacted, so it is never stored in that case. Text drawn inside images is not examined (no OCR).
 * Playwright/Chromium are optional dependencies: when absent the capture is ``Blocked`` with the install
   remedy, never a placeholder image.
 
@@ -60,6 +61,19 @@ class PageCapture:
 # (url, viewport) -> PageCapture. The default drives headless Chromium through Playwright.
 CaptureFn = Callable[[str, tuple[int, int]], PageCapture]
 
+# Text the screenshot can show that ``innerText`` does not contain: the values of visible form fields (a prefilled
+# token or e-mail address), placeholders and image alt text. It is checked together with the page text. Text drawn
+# inside an image (pixels) is not examined - there is no OCR - so that case stays NOT-PROVEN.
+VISIBLE_FIELD_TEXT_JS = (
+    "() => Array.from(document.querySelectorAll("
+    "'input:not([type=hidden]), textarea, select, [placeholder], img[alt]'))"
+    ".map(e => [e.value, e.getAttribute('placeholder'), e.getAttribute('alt')]"
+    ".filter(v => typeof v === 'string' && v.trim()).join(' '))"
+    ".filter(Boolean).join('\\n')"
+)
+TEXT_CHECKED = ("no credential pattern / personal data in the page text, visible form-field values, placeholders "
+                "or image alt text (text drawn inside images is not examined)")
+
 
 def playwright_capture(url: str, viewport: tuple[int, int]) -> PageCapture:  # pragma: no cover - real browser
     try:
@@ -77,6 +91,8 @@ def playwright_capture(url: str, viewport: tuple[int, int]) -> PageCapture:  # p
                 page = context.new_page()
                 resp = page.goto(url, wait_until="networkidle", timeout=30_000)
                 text = page.inner_text("body") if page.query_selector("body") else ""
+                # the picture also shows prefilled field values and placeholders, which innerText leaves out
+                text = "\n".join(t for t in (text, str(page.evaluate(VISIBLE_FIELD_TEXT_JS) or "")) if t)
                 png = page.screenshot(type="png", full_page=False)
                 return PageCapture(final_url=page.url, text=text, png=png,
                                    http_status=resp.status if resp is not None else None)
@@ -147,9 +163,10 @@ def capture_screenshots(session: Session, project: Project, *, environment: str,
                                details={"invalid": bad[:5]})
     target = delivery.deployment_target(session, project, environment)
     if target is None:
-        raise Blocked(f"no {environment} deployment target is registered for this project "
-                      f"(PUT /api/projects/{project.id}/integrations provider=deployment-target purpose={environment})",
-                      code="NO_DEPLOYMENT_TARGET")
+        raise Blocked(f"no {environment} deployment target is registered for this project: register it in the "
+                      f"Control Center (Portofolio -> project -> Integrasi -> Deployment target {environment}; "
+                      f"API: PUT /api/projects/{project.id}/integrations provider=deployment-target "
+                      f"purpose={environment})", code="NO_DEPLOYMENT_TARGET")
     health = _verify_commit(target, commit, client)
     shoot = capture or playwright_capture
     size = VIEWPORTS[viewport]
@@ -181,7 +198,7 @@ def capture_screenshots(session: Session, project: Project, *, environment: str,
             environment={"commit": commit.lower(), "name": environment, "route": route, "url": url,
                          "viewport": f"{size[0]}x{size[1]}", "page_http_status": page.http_status,
                          "captured_at": utcnow().isoformat(), "integration_id": target["integration_id"],
-                         "text_checked": "no credential pattern / personal data in page text", **health},
+                         "text_checked": TEXT_CHECKED, **health},
         )
         out.append({"evidence_id": ev.id, "route": route, "url": url, "commit": commit.lower(),
                     "environment": environment, "viewport": f"{size[0]}x{size[1]}"})

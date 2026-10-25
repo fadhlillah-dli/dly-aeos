@@ -12,7 +12,9 @@ consumer honours it:
   ``worker_sandbox/process`` with ``details.allow_process_sandbox = true`` (+ optional ``allow_bash``)
   (read by ``aeos.worker_runtime.sandbox``), PERSONAL only, with an explicit expiry;
 * OFFICE company authorisation → ``POLICY`` on ``office_policy/OFFICE`` with ``office_authorization``,
-  ``company_reference`` and explicit ``allowed_providers`` (read by ``aeos.policy.office``).
+  ``company_reference`` and explicit ``allowed_providers`` (read by ``aeos.policy.office``), plus the optional
+  structured scope ``approved_targets`` / ``approved_data_classes`` / ``approved_identities``
+  (``aeos.policy.office_scope``; absent = UNDECIDED, consumers fail closed).
 
 The caller authenticates the human (session + CSRF in the API, password prompt in the CLI); the registry
 still re-checks that the actor is an active SUPER_ADMIN whose scope covers the decision.
@@ -29,7 +31,7 @@ from sqlalchemy.orm import Session
 from aeos.core.enums import Domain
 from aeos.core.errors import ValidationFailed
 from aeos.models.decisions import Decision
-from aeos.policy import catalog, enablement
+from aeos.policy import catalog, enablement, office_scope
 from aeos.policy import decisions as registry
 
 GENERIC_KINDS = catalog.GENERIC_DECISION_KINDS
@@ -37,7 +39,8 @@ GENERIC_KINDS = catalog.GENERIC_DECISION_KINDS
 # them through free-form ``details`` (e.g. ``office_authorization: true`` without a company reference) is
 # refused instead of silently granting or relaxing anything (fail closed).
 RESERVED_DETAIL_KEYS = frozenset({"office_authorization", "company_reference", "allowed_providers", "office_policy",
-                                  "enabled", "provider", "handled_by"})
+                                  "enabled", "provider", "handled_by", "approved_targets", "approved_data_classes",
+                                  "approved_identities"})
 
 
 def _require_target(kind: str, target_type: str | None, target_id: str | None) -> tuple[str, str]:
@@ -136,8 +139,13 @@ def record_generic_decision(
     office_authorization: bool = False, company_reference: str | None = None,
     allowed_providers: list[str] | None = None, office_policy: dict[str, Any] | None = None,
     exception: str | None = None, allow_bash: bool | None = None,
+    approved_targets: list[Any] | None = None, approved_data_classes: list[str] | None = None,
+    approved_identities: dict[str, str] | list[str] | None = None,
 ) -> Decision:
-    """Validate and record one human decision of a generic kind. Does not commit."""
+    """Validate and record one human decision of a generic kind. Does not commit.
+
+    ``approved_targets`` / ``approved_data_classes`` / ``approved_identities`` belong to the OFFICE company
+    authorisation only (``aeos.policy.office_scope``): what the company approved, never inferred."""
     if kind not in GENERIC_KINDS:
         raise ValidationFailed(f"kind must be one of {list(GENERIC_KINDS)}")
     if not auth_scope:
@@ -149,6 +157,10 @@ def record_generic_decision(
                                code="RESERVED_DETAIL_KEYS", details={"reserved": reserved})
     if exception is not None and kind != "EXCEPTION":
         raise ValidationFailed("exception presets are EXCEPTION decisions", code="EXCEPTION_TARGET_MISMATCH")
+    scoped = bool(approved_targets or approved_data_classes or approved_identities)
+    if scoped and not (kind == "POLICY" and office_authorization):
+        raise ValidationFailed("approved_targets / approved_data_classes / approved_identities are part of the OFFICE "
+                               "company authorisation (office_authorization=true)", code="OFFICE_SCOPE_WITHOUT_AUTHORISATION")
     dedicated = catalog.DEDICATED_TARGETS.get(str(target_type or ""))
     if dedicated:
         # office_route / workforce decisions are recorded only where their evidence is checked (company
@@ -206,6 +218,13 @@ def record_generic_decision(
                                            details={"allowed": list(catalog.providers_for(Domain.OFFICE))})
                 details.update({"office_authorization": True, "company_reference": company_reference.strip(),
                                 "allowed_providers": providers})
+                # §01 U-03 / §07 step 10 / §51 P1: the company's approved targets, data classes and identities.
+                # Optional at recording; absent stays UNDECIDED and every consumer fails closed (office_scope).
+                details.update({
+                    "approved_targets": office_scope.normalize_targets(approved_targets, allowed_providers=providers),
+                    "approved_data_classes": office_scope.normalize_data_classes(approved_data_classes),
+                    "approved_identities": office_scope.normalize_identities(approved_identities),
+                })
             target_type, target_id = catalog.TARGET_OFFICE_POLICY, Domain.OFFICE.value
         else:
             target_type, target_id = _require_target(kind, target_type, target_id)

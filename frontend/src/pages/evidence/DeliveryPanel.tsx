@@ -7,9 +7,16 @@ import { shortHash } from "../../lib/format";
 import { evidenceApi, type PRItem, type ProviderCaps } from "./api";
 import { Status } from "./labels";
 
+/** The code host of the capability probe: Bitbucket (OFFICE) or GitHub (PERSONAL); never a fixed "GitHub" title. */
+export function providerLabel(provider: string | undefined, domain: string | null | undefined): string {
+  const p = (provider ?? "").toLowerCase();
+  return p === "bitbucket" || (!p && domain === "OFFICE") ? "Bitbucket" : "GitHub";
+}
+
 /** Residual-risk banner (§31): enforcement that the provider plan cannot provide is never claimed. */
 export function ProviderRiskBanner({ caps }: { caps: ProviderCaps }) {
   const enforceable = caps.merge_gate === "CONFIGURED";
+  const label = providerLabel(caps.provider, null);
   return (
     <div role="status" className="rounded-md border border-warn/40 bg-warn-bg p-3 text-sm text-warn">
       <div className="flex items-center gap-2 font-medium">
@@ -17,7 +24,7 @@ export function ProviderRiskBanner({ caps }: { caps: ProviderCaps }) {
         {enforceable
           ? "Branch protection dikonfigurasi, tetapi penegakannya belum diuji (NOT-PROVEN) — merge tetap tindakan manusia"
           : caps.merge_gate === "NOT_ENFORCEABLE"
-            ? "Branch protection tidak dapat ditegakkan pada paket GitHub ini — merge tetap tindakan manusia"
+            ? `Branch protection tidak dapat ditegakkan pada paket ${label} ini — merge tetap tindakan manusia`
             : caps.merge_gate === "NOT_CONFIGURED"
               ? "Branch protection belum dikonfigurasi — merge tetap tindakan manusia"
               : "Kemampuan penegakan merge tidak diketahui — merge tetap tindakan manusia"}
@@ -47,11 +54,12 @@ export function DeliveryPanel() {
     onSettled: () => qc.invalidateQueries({ queryKey: ["provider-caps"] }),
   });
   const noRepo = caps.error instanceof ApiError && caps.error.status === 404;
+  const host = providerLabel(caps.data?.provider, domain);
 
   return (
     <div className="space-y-4">
       <Card
-        title="Kemampuan provider (GitHub, hanya baca)"
+        title={`Kemampuan provider (${host}, hanya baca)`}
         actions={
           <>
             {caps.data && <Freshness at={caps.data.checked_at} />}
@@ -65,7 +73,7 @@ export function DeliveryPanel() {
       >
         {caps.isLoading && <Loading label="Memeriksa provider…" />}
         {noRepo && (
-          <EmptyState title="Belum ada repository GitHub terdaftar di domain ini">
+          <EmptyState title={`Belum ada repository ${host} terdaftar di domain ini`}>
             Daftarkan repository proyek (portofolio), lalu jalankan <Mono>aeos delivery capabilities</Mono>.
           </EmptyState>
         )}

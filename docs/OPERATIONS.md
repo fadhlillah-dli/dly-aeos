@@ -242,17 +242,45 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   `aeos verify review <run> --kind A11Y|PRIVACY|SRE|SECURITY`. A run has a review budget
   (`reviewer_policy.max_reviews_per_run`, default 12; quota waits do not count).
 * **OFFICE delivery (Bitbucket Cloud, ADR-0111):** DISABLED by default. It becomes AVAILABLE only with
-  (1) a company-authorisation POLICY decision on `office_policy` listing `bitbucket` whose
-  `office_policy.atlassian_deployment` is `"CLOUD"` (the interlock needs it too), (2) the project
-  integration `bitbucket/code` with `root_id=<workspace>/<repo_slug>` and `config={"enabled": true}`, (3) the
-  registered Bitbucket repository VERIFIED (`POST
-  /api/repositories/<id>/verify`), (4) `office/bitbucket` stored: `{"access_token": "..."}` (repository access
-  token) or `{"email": "...", "api_token": "..."}` (Atlassian API token; optional `git_username`), and (5)
-  `CAN_USE_OFFICE_INTEGRATIONS` READY. Data Center (`atlassian_deployment: "DATA_CENTER"`) is `NOT_SUPPORTED`. The broker then pushes the accepted head
+  (1) a company-authorisation POLICY decision on `office_policy` listing `bitbucket`, naming the repository or
+  its workspace as an approved target and carrying the override `atlassian_deployment: "CLOUD"` (the interlock
+  needs it too) - Control Center: switch the header domain to OFFICE, **Keputusan** (`/decisions`) -> POLICY ->
+  tick "Ini otorisasi perusahaan untuk OFFICE"; CLI: `aeos policy decide --kind POLICY --domain OFFICE
+  --office-authorization --company-reference "<ref>" --allowed-provider bitbucket --approved-target
+  bitbucket:workspace=<workspace> --office-policy atlassian_deployment=CLOUD --as <admin> --rationale "<why>"`;
+  (2) the project integration `bitbucket/code` with `root_id=<workspace>/<repo_slug>` and `enabled` - Control
+  Center: **Portofolio** -> project -> **Integrasi** -> "Kode — Bitbucket", tick "Aktifkan adapter" (no
+  deployment field: the deployment comes from the override above); (3) the registered Bitbucket repository
+  VERIFIED (Repositori -> "Verifikasi identitas", or `POST /api/repositories/<id>/verify`); (4)
+  `office/bitbucket` stored: `{"access_token": "..."}` (repository access token) or `{"email": "...",
+  "api_token": "..."}` (Atlassian API token; optional `git_username`) - the Doctor builds the same header as the
+  broker/publisher (Bearer / Basic); and (5) `CAN_USE_OFFICE_INTEGRATIONS` READY. Data Center
+  (`atlassian_deployment: "DATA_CENTER"`) is `NOT_SUPPORTED`. The broker then pushes the accepted head
   sha-pinned to `aeos/*` and opens a draft PR; nothing merges, declines or approves. Pipelines/commit-status CI
-  becomes provider-ci evidence (pipeline reference on `bitbucket-pipelines/ci`: step names per gate). Without
-  Bitbucket Premium's "enforce merge checks" the merge gate is NOT_ENFORCEABLE. G7 release approvers for OFFICE:
-  `auth_scope={"bitbucket_accounts": ["<Atlassian account id>"]}`. Live tenant behaviour is NOT-PROVEN (M5).
+  becomes provider-ci evidence (pipeline reference: **Integrasi** -> "CI — Bitbucket Pipelines", exact step or
+  commit-status names per gate G1/G2/G3/G5). Without Bitbucket Premium's "enforce merge checks" the merge gate is
+  NOT_ENFORCEABLE. G7 release approvers for OFFICE: `auth_scope={"bitbucket_accounts": ["<Atlassian account
+  id>"]}`. Live tenant behaviour is NOT-PROVEN (M5).
+* **Company-authorisation scope (§01 U-03, §07 step 10, §51 P1):** the authorisation also records what the
+  company approved - `approved_targets` (`confluence:tenant=<site>.atlassian.net[,space_id=<numeric id>]
+  [,root_id=<parent id>]`, `jira:tenant=<site>[,root_id=<KEY>]`, `bitbucket:workspace=<ws>[,root_id=<ws>/<repo>]`),
+  `approved_data_classes` (PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED) and, optionally, `approved_identities`
+  (`office/atlassian=<account id or email>`, `office/bitbucket=<uuid or username>`). Absent = UNDECIDED and fail
+  closed: no OFFICE target is written, read, verified or registered outside the list; no OFFICE data of an
+  unapproved class reaches a worker route or Claude Max (an OFFICE request without a project has no
+  classification and is refused). Control Center: the three fields under "Ini otorisasi perusahaan untuk
+  OFFICE" on **Keputusan**; CLI: repeatable `--approved-target`, `--approved-data-class` and
+  `--approved-identity` on `aeos policy decide --office-authorization`, plus `--office-policy KEY=VALUE` for the
+  overrides. `aeos doctor -c CAN_USE_OFFICE_INTEGRATIONS --functional` compares the stored credential's account
+  with the approved identity (`secret.office_identity`).
+* **OFFICE worker route eligibility (§23):** after the authorisation lists the route in
+  `approved_worker_routes`: Control Center **Keputusan** -> "Kebijakan OFFICE" -> "Jadikan route worker layak
+  OFFICE", or `aeos policy office-route <route_key> --as <admin> --credential-ref office/<provider> --rationale
+  "<why>"` (password-confirmed). The route becomes OFFICE-only; activation stays `aeos routes activate ...`.
+* **Deployment targets (PERSONAL, observe-only):** **Portofolio** -> project -> **Integrasi** -> "Staging —
+  Deployment target" / "Produksi — Deployment target": the https base URL and an optional health path (validated
+  with the observer's rule). AEOS only GETs it (G6/G8, `aeos delivery observe-target`, `aeos docs screenshot`);
+  deploying stays a human action. The GitHub Actions pipeline reference is "CI — GitHub Actions" on the same page.
 * **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111):** activate the free route as TRIAL (owner decision),
   then `aeos broker probe-route <route_key>` / `POST /api/broker/routes/<key>/feasibility` sends one synthetic
   PUBLIC prompt and records PROBE evidence; the route never serves worker tasks and its status is unchanged.

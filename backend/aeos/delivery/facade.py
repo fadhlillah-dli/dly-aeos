@@ -53,3 +53,19 @@ def classify_deployment_health(sha: str, http_status: int | None, body: Any) -> 
     from aeos.delivery.deployment import classify
 
     return classify(sha, http_status, body)
+
+
+def valid_health_path(path: Any) -> bool:
+    """Additive (W7, 2026-10-25): whether *path* is a valid observe-only health path for a deployment target - the
+    same rule the deployment observer applies before its one GET (``/`` + ``[A-Za-z0-9._~/-]``, max 201 chars)."""
+    from aeos.delivery.deployment import health_path_ok
+
+    return health_path_ok(path)
+
+
+def pipeline_gates() -> tuple[str, ...]:
+    """Additive (W7, 2026-10-25): the gates a project's pipeline reference may map (``config.gate_<G>`` of the CI
+    integration, §31 "pipeline reference per proyek")."""
+    from aeos.delivery.provider import PIPELINE_GATES
+
+    return tuple(PIPELINE_GATES)

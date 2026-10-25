@@ -29,6 +29,29 @@ export const EXCEPTION_PRESETS: Record<string, { label: string; target: string; 
 };
 
 const OFFICE_KEYS = ["external_worker_allowed", "approved_worker_routes", "claude_max_allowed_for_office_data", "trace_destinations_allowed", "requires_isolated_runtime", "atlassian_deployment"];
+/** Data classes the company can approve for AI processing of OFFICE data (backend DataClassification). */
+export const DATA_CLASSES = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"];
+
+/** One "office/<provider>=<identity>" per line -> {ref: identity}; the backend validates refs and values. */
+export function parseIdentities(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split(/\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    const i = t.indexOf("=");
+    if (i <= 0) throw new Error(`identitas "${t}" harus berbentuk office/<provider>=<identitas>`);
+    out[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+  }
+  return out;
+}
+
+/** One approved target per line ("provider:kunci=nilai,kunci=nilai"); parsed and validated by the backend. */
+export function parseTargets(text: string): string[] {
+  return text
+    .split(/\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
 
 /** "k=v; k2=v2" -> {k: "v", k2: "v2"}; JSON objects are accepted as-is. */
 export function parseScope(text: string): Record<string, unknown> {
@@ -62,6 +85,10 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
   const [companyRef, setCompanyRef] = useState("");
   const [allowedProviders, setAllowedProviders] = useState<string[]>([]);
   const [officeOverrides, setOfficeOverrides] = useState("");
+  // §01 U-03 / §07 step 10 / §51 P1: what the company approved; empty = UNDECIDED (consumers fail closed)
+  const [approvedTargets, setApprovedTargets] = useState("");
+  const [approvedClasses, setApprovedClasses] = useState<string[]>([]);
+  const [approvedIdentities, setApprovedIdentities] = useState("");
   const [preset, setPreset] = useState<string>("");
   const [allowBash, setAllowBash] = useState(false);
   // §41/§43 system change: a POLICY on a policy/model/tool/hook/prompt/memory/fallback/context target needs
@@ -85,9 +112,11 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
     setLocalError(null);
     let authScope: Record<string, unknown>;
     let overrides: Record<string, unknown> | null = null;
+    let identities: Record<string, string> = {};
     try {
       authScope = parseScope(scope);
       if (officeOverrides.trim()) overrides = JSON.parse(officeOverrides) as Record<string, unknown>;
+      if (officeAuth) identities = parseIdentities(approvedIdentities);
     } catch (e) {
       setLocalError(`Format tidak valid: ${e instanceof Error ? e.message : String(e)}`);
       return;
@@ -115,6 +144,9 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
       if (officeAuth) {
         body.company_reference = companyRef;
         body.allowed_providers = allowedProviders;
+        body.approved_targets = parseTargets(approvedTargets);
+        body.approved_data_classes = approvedClasses;
+        body.approved_identities = identities;
       }
       if (overrides) body.office_policy = overrides;
     } else {
@@ -215,6 +247,44 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
                     </label>
                   ))}
                 </fieldset>
+                <Field
+                  label="Target yang disetujui perusahaan (satu per baris)"
+                  hint="provider:kunci=nilai,kunci=nilai. Confluence/Jira wajib tenant (confluence:tenant=perusahaan.atlassian.net,space_id=98765 · jira:tenant=perusahaan.atlassian.net,root_id=ENG); Bitbucket wajib workspace (bitbucket:workspace=perusahaan[,root_id=perusahaan/repo]). Kosong = belum diputuskan: semua target OFFICE ditolak."
+                >
+                  <textarea
+                    aria-label="Target yang disetujui perusahaan"
+                    className={`${inputClass} mono text-xs`}
+                    value={approvedTargets}
+                    onChange={(e) => setApprovedTargets(e.target.value)}
+                    placeholder={"confluence:tenant=perusahaan.atlassian.net,space_id=98765\nbitbucket:workspace=perusahaan"}
+                  />
+                </Field>
+                <fieldset className="flex flex-wrap gap-3 text-sm">
+                  <legend className="mb-1 text-sm font-medium">Kelas data yang disetujui untuk AI (route worker / Claude Max)</legend>
+                  {DATA_CLASSES.map((c) => (
+                    <label key={c} className="flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={approvedClasses.includes(c)}
+                        onChange={(e) => setApprovedClasses(e.target.checked ? [...approvedClasses, c] : approvedClasses.filter((x) => x !== c))}
+                      />
+                      {c}
+                    </label>
+                  ))}
+                  <span className="w-full text-xs text-ink-3">Tidak ada yang dicentang = belum diputuskan: data OFFICE tidak dikirim ke model mana pun.</span>
+                </fieldset>
+                <Field
+                  label="Identitas credential yang disetujui (opsional, satu per baris)"
+                  hint="office/atlassian=<account id atau email>; office/bitbucket=<uuid atau username>. Dibandingkan Doctor (secret.office_identity) dengan akun credential tersimpan — bukan secret."
+                >
+                  <textarea
+                    aria-label="Identitas credential yang disetujui"
+                    className={`${inputClass} mono text-xs`}
+                    value={approvedIdentities}
+                    onChange={(e) => setApprovedIdentities(e.target.value)}
+                    placeholder="office/atlassian=akun@perusahaan.example"
+                  />
+                </Field>
               </>
             )}
             <Field label="Override kebijakan OFFICE (JSON, opsional)" hint={`Hanya kunci: ${OFFICE_KEYS.join(", ")}. Berlaku hanya saat otorisasi perusahaan aktif.`}>

@@ -95,6 +95,38 @@ def _scope(pairs: list[str] | None) -> dict[str, str]:
     return out
 
 
+_LIST_OVERRIDES = frozenset({"approved_worker_routes", "trace_destinations_allowed"})
+
+
+def _office_overrides(pairs: list[str] | None) -> dict[str, object]:
+    """``KEY=VALUE`` pairs -> office policy overrides (the recording layer refuses unknown keys).
+
+    VALUE is JSON (``true``, ``["a","b"]``); a bare word is a string (``atlassian_deployment=CLOUD``) and the list
+    keys also take ``a,b`` - Windows PowerShell 5.1 drops embedded double quotes when calling a native program."""
+    import json
+
+    out: dict[str, object] = {}
+    for p in pairs or []:
+        k, sep, v = p.partition("=")
+        key = k.strip()
+        if not sep or not key:
+            raise typer.BadParameter(f"--office-policy expects KEY=VALUE, got {p!r}")
+        try:
+            value: object = json.loads(v)
+        except ValueError:
+            raw = v.strip()
+            if key in _LIST_OVERRIDES:
+                value = [x.strip() for x in raw.split(",") if x.strip()]
+            elif raw.startswith(("[", "{")):
+                raise typer.BadParameter(f"--office-policy {key}: {raw!r} is not valid JSON") from None
+            else:
+                value = raw
+        if key in _LIST_OVERRIDES and isinstance(value, str):
+            value = [x.strip() for x in value.split(",") if x.strip()]
+        out[key] = value
+    return out
+
+
 @app.command("decide")
 def decide_cmd(
     kind: str = typer.Option(..., help="EXCEPTION | RISK_ACCEPTANCE | WRITE_ENABLEMENT | POLICY | BUDGET"),
@@ -110,6 +142,21 @@ def decide_cmd(
     office_authorization: bool = typer.Option(False, "--office-authorization", help="POLICY: company authorisation"),
     company_reference: str = typer.Option(None, help="Company approval reference (office authorisation)"),
     allowed_provider: list[str] = typer.Option(None, "--allowed-provider", help="OFFICE provider (repeatable)"),
+    approved_target: list[str] = typer.Option(
+        None, "--approved-target",
+        help="Company-approved OFFICE target (repeatable), e.g. confluence:tenant=acme.atlassian.net,space_id=98765 "
+             "| jira:tenant=acme.atlassian.net,root_id=ENG | bitbucket:workspace=acme,root_id=acme/app"),
+    approved_data_class: list[str] = typer.Option(
+        None, "--approved-data-class", help="Company-approved data class for AI processing (repeatable): "
+                                            "PUBLIC | INTERNAL | CONFIDENTIAL | RESTRICTED"),
+    approved_identity: list[str] = typer.Option(
+        None, "--approved-identity", help="Company-issued identity of an office/ credential (repeatable), e.g. "
+                                          "office/atlassian=<account id or email>"),
+    office_policy: list[str] = typer.Option(
+        None, "--office-policy", help="OFFICE policy override KEY=VALUE (repeatable; VALUE is JSON or a bare word), "
+                                      "e.g. atlassian_deployment=CLOUD, claude_max_allowed_for_office_data=true, "
+                                      "approved_worker_routes=route-a,route-b; applies only with an ACTIVE company "
+                                      "authorisation"),
     target_type: str = typer.Option(None), target_id: str = typer.Option(None),
     project: str = typer.Option(None, help="Project id (optional, must be in --domain)"),
 ) -> None:
@@ -129,6 +176,7 @@ def decide_cmd(
     except ValueError as exc:
         raise typer.BadParameter("--domain must be PERSONAL or OFFICE") from exc
     auth_scope = _scope(scope) or {"recorded_via": "aeos policy decide", "kind": kind.upper()}
+    overrides = _office_overrides(office_policy)
     password = typer.prompt(f"Password for {as_user} (confirms this human decision)", hide_input=True,
                             default="", show_default=False)
     try:
@@ -144,10 +192,44 @@ def decide_cmd(
                 expires_at=(utcnow() + timedelta(days=days)) if days else None, provider=provider, enabled=enable,
                 office_authorization=office_authorization, company_reference=company_reference,
                 allowed_providers=allowed_provider or [], exception=exception, allow_bash=allow_bash,
+                office_policy=overrides or None, approved_targets=list(approved_target or []),
+                approved_data_classes=list(approved_data_class or []),
+                approved_identities=list(approved_identity or []),
             )
             v = decision_view(s, d)
             console.print(f"Recorded {v['kind']} {v['id']} -> {v['target_type']}:{v['target_id']} "
                           f"status={v['status']} expires={v['expires_at'] or '-'}")
+    except AeosError as exc:
+        typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command("office-route")
+def office_route_cmd(
+    route_key: str = typer.Argument(..., help="Worker route key the company approved (approved_worker_routes)"),
+    as_user: str = typer.Option(..., "--as", help="Your SUPER_ADMIN username (the human decision actor)"),
+    credential_ref: str = typer.Option(..., "--credential-ref", help="office/<provider> credential reference"),
+    rationale: str = typer.Option(..., help="Why (min 10 characters)"),
+) -> None:
+    """Make a company-approved worker route OFFICE-eligible (section 23 controlled path; password confirms AUTH).
+
+    Needs an ACTIVE company authorisation whose approved_worker_routes lists the route; the route becomes
+    OFFICE-only. Activation stays a separate, hash-bound decision (aeos routes activate)."""
+    from aeos.core.errors import AeosError
+    from aeos.policy import office_routes
+    from aeos.policy.decisions import decision_view
+
+    _ensure_db()
+    password = typer.prompt(f"Password for {as_user} (confirms this human decision)", hide_input=True,
+                            default="", show_default=False)
+    try:
+        with session_scope() as s:
+            uid = _admin_user_id(s, as_user, password)
+            d = office_routes.authorise_office_route(s, route_key=route_key, credential_ref=credential_ref,
+                                                     actor_user_id=uid, rationale=rationale)
+            v = decision_view(s, d)
+            console.print(f"Recorded POLICY {v['id']} -> {v['target_type']}:{v['target_id']} (OFFICE-only, "
+                          f"credential {credential_ref}); activate it next: aeos routes activate {route_key} ...")
     except AeosError as exc:
         typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
         raise typer.Exit(1) from exc

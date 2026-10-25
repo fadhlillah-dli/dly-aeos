@@ -266,7 +266,7 @@ describe("IntegrationsPanel", () => {
     const conf = await screen.findByRole("form", { name: /Confluence/ });
     expect(within(conf).getByRole("button", { name: /Simpan/ })).toBeDisabled();
     fireEvent.change(within(conf).getByPlaceholderText("perusahaan.atlassian.net"), { target: { value: "acme.atlassian.net" } });
-    fireEvent.change(within(conf).getByPlaceholderText("ENG"), { target: { value: "ENG" } });
+    fireEvent.change(within(conf).getByPlaceholderText("98765"), { target: { value: "98765" } }); // numeric v2 space id
     fireEvent.change(within(conf).getByLabelText(/CONFLUENCE_PROJECTS_PARENT_ID/), { target: { value: "123456" } });
     fireEvent.change(within(conf).getByLabelText(/Deployment/), { target: { value: "CLOUD" } });
     await userEvent.click(within(conf).getByRole("button", { name: /Simpan/ }));
@@ -278,7 +278,7 @@ describe("IntegrationsPanel", () => {
       tenant_id: "acme.atlassian.net",
       root_id: "123456",
       credential_ref: "office/atlassian",
-      config: { space_id: "ENG", deployment: "CLOUD", enabled: false },
+      config: { space_id: "98765", deployment: "CLOUD", enabled: false },
     });
     expect(screen.getAllByText(/OFFICE default deny/).length).toBeGreaterThan(0);
   });
