@@ -307,7 +307,14 @@ def test_enable_rechecks_the_doctor_agent_check_and_disable_reverts(personal_cli
     r = personal_client.post("/api/workforce/agents/opencode-implementer/disable", json={"reason": "stop"})
     assert r.status_code == 200 and r.json()["enabled"] is False
     db.expire_all()
-    assert latest_results(db, ["worker.agent_definition"])["worker.agent_definition"].status == "MISSING"
+    missing = latest_results(db, ["worker.agent_definition"])["worker.agent_definition"]
+    assert missing.status == "MISSING"
+    # the Doctor remedy names the control that exists (and the CLI), not the old "Workforce Console -> Agen" path
+    import json as _json
+
+    remedy = _json.dumps(missing.remediation, ensure_ascii=False)
+    assert "Organisasi & Peran" in remedy and "work agent-enable opencode-implementer" in remedy
+    assert "Workforce Console" not in remedy
     agent = db.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == "opencode-implementer"))
     assert agent.enabled is False and "stop" in agent.enabled_reason
 
@@ -360,6 +367,11 @@ def test_cli_agent_enable_needs_the_owners_password_and_reports_prerequisites(db
                                "--reason", "pilot"], input=ADMIN_PW + "\n")
     assert r.exit_code == 1 and "AGENT_PREREQUISITES" in r.output and "OpenCode" in r.output
     assert r.output.isascii()
+    db.expire_all()  # the refusal is audited as DENIED from the terminal too (same as the Control Center)
+    denied = db.scalar(select(AuditEvent).where(AuditEvent.action == "workforce.agent.enable",
+                                                AuditEvent.result == "DENIED"))
+    assert denied is not None and denied.actor_id.startswith("user:")
+    assert agents.get_agent(db, "opencode-implementer").enabled is False
     from aeos.routing import facade as routing
     from aeos.routing.facade import RouteDecision
 

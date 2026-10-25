@@ -45,7 +45,11 @@ function SummaryCards({ s }: { s: WorkforceSummary }) {
         </div>
         <p className="mt-2 text-xs text-ink-3">
           Batas worker aktif: <strong>{s.scheduler.concurrency_cap}</strong>
-          {s.scheduler.cap_decision_id ? " (dengan keputusan pemilik)" : " (default pilot)"}
+          {s.scheduler.cap_decision_id
+            ? " (dengan keputusan pemilik)"
+            : s.scheduler.cap_source && s.scheduler.cap_source !== "PILOT_DEFAULT"
+              ? " (keputusan pemilik dibatasi budget resource)"
+              : " (default pilot)"}
           {s.scheduler.paused && s.scheduler.paused_reason ? ` · alasan jeda: ${s.scheduler.paused_reason}` : ""}
         </p>
         {s.scheduler.cap_reason && <p className="mt-1 text-xs text-ink-3">{s.scheduler.cap_reason}</p>}

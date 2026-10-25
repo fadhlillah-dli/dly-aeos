@@ -203,12 +203,17 @@ def agent_enable(agent_key: str = typer.Argument(..., help="AgentDefinition key,
                  as_user: str = AS_OPTION, domain: str = DOMAIN_OPTION,
                  reason: str = typer.Option(..., help="Why you enable it (stored in the audit trail)")) -> None:
     """Enable an implementation agent; refused with the list of unmet prerequisites (AGENT_PREREQUISITES)."""
+    from aeos.core.errors import Blocked
     from aeos.workforce import agents
 
     def act(s) -> None:
         uid = _human(s, as_user)
-        out = agents.enable_agent(s, agent_key, domain=_domain(domain), actor=f"user:{uid}", actor_type="user",
-                                  reason=reason)
+        try:
+            out = agents.enable_agent(s, agent_key, domain=_domain(domain), actor=f"user:{uid}", actor_type="user",
+                                      reason=reason)
+        except Blocked:
+            s.commit()  # the DENIED audit row is kept, as in the Control Center (nothing else was changed)
+            raise
         _out(f"{agent_key} enabled. Doctor recheck: {out['doctor'].get('status')} "
              f"{out['doctor'].get('results') or out['doctor'].get('reason') or ''}")
         _out("Enabled is not in use: runs start only for an executed approved plan (aeos work execute).")

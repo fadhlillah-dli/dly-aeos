@@ -115,6 +115,16 @@ describe("Live Work page", () => {
     }
   });
 
+  it("does not call a budget-limited owner decision the pilot default (W6-145)", async () => {
+    responses["/api/workforce/summary"] = {
+      ...summary,
+      scheduler: { ...summary.scheduler, concurrency_cap: 1, cap_decision_id: null, cap_source: "POLICY_DECISION", budget_max_parallel_workers: 1, cap_reason: "owner POLICY decision d1; limited to 1 by the owner resource budget max_parallel_workers=1" },
+    };
+    wrap(<WorkPage />);
+    expect(await screen.findByText(/keputusan pemilik dibatasi budget resource/)).toBeInTheDocument();
+    expect(screen.queryByText(/\(default pilot\)/)).not.toBeInTheDocument();
+  });
+
   it("disables the loop toggle for VIEWER and points the empty state to the Console controls", async () => {
     responses["/api/runs"] = { items: [], source: "x", checked_at: new Date().toISOString(), mode: "LIVE" };
     wrap(<WorkPage />);

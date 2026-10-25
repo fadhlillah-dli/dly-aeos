@@ -38,12 +38,17 @@ key = re.search(r"## Read-only investigation \(hypothesis \d+/\d+: ([a-z0-9_-]+)
 cfg = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])
 ev({"type": "tool_use", "part": {"type": "tool", "tool": "read", "state": {"status": "completed",
     "input": {"filePath": "src/app.py"}, "metadata": {"filepath": os.path.abspath("src/app.py")}}}})
-if scenario == "write" and key == "h1":
+def write():
     with open("src/app.py", "w", encoding="utf-8") as fh:
         fh.write("VALUE = 99\n")
     ev({"type": "tool_use", "part": {"type": "tool", "tool": "write", "state": {"status": "completed",
         "input": {"filePath": "src/app.py"}, "metadata": {"filepath": os.path.abspath("src/app.py")}}}})
+if scenario == "write" and key == "h1":
+    write()
     sys.exit(0)
+if scenario == "silent_write" and key == "h1":  # a change no tool event reports: only the post-run diff sees it
+    with open("src/app.py", "w", encoding="utf-8") as fh:
+        fh.write("VALUE = 7\n")
 report = {"schema_version": "1", "kind": "investigation", "hypothesis_key": key,
           "verdict": "SUPPORTED" if key == "h1" else "REFUTED",
           "summary": "edit permission=" + str(cfg["permission"].get("edit")),
@@ -51,6 +56,8 @@ report = {"schema_version": "1", "kind": "investigation", "hypothesis_key": key,
           "evidence_refs": ["src/app.py:1"] if key == "h1" else ["src/missing.py:3"],
           "proposed_fix": "set VALUE = 2 in src/app.py"}
 ev({"type": "text", "part": {"text": "Findings below.\n```json\n" + json.dumps(report) + "\n```"}})
+if scenario == "report_then_write" and key == "h1":  # a valid-looking report, then a write: still a violation
+    write()
 ev({"type": "step_finish", "part": {"reason": "stop", "tokens": {"input": 40, "output": 10}, "cost": 0}})
 sys.exit(0)
 '''
@@ -173,6 +180,21 @@ def test_each_hypothesis_is_a_separate_read_only_run_and_the_integrator_opens_on
         with pytest.raises(Conflict):
             investigation.choose_fix(s, ids["inv"], hypothesis_key="h1", actor="user:o", actor_user_id="owner",
                                      rationale="choose it again please")
+        # the run lifecycle codes changed (CHOSEN / NOT_CHOSEN) but what was investigated did not: every hypothesis
+        # stays investigated, none is offered again, and the comparison the choice is bound to is unchanged
+        task = s.get(TaskSpec, ids["inv"])
+        after = investigation.comparison(s, task)
+        assert all(h["investigated"] for h in after["hypotheses"]) and after["evidenced"] == ["h1"]
+        assert [h["outcome_code"] for h in after["hypotheses"]] == ["INVESTIGATION_REPORTED", "INVESTIGATION_REPORTED"]
+        assert after["comparison_hash"] == d.target_hash
+        assert investigation.next_hypothesis(s, task, investigation.spec_of(task)) is None
+        # hash-bound at use: if the reports on record change, the choice no longer opens the repair task
+        r1 = s.get(WorkerRun, run1.id)
+        r1.caps = {**r1.caps, "investigation_report": {**r1.caps["investigation_report"], "evidence_ref": "other"}}
+        s.flush()
+        adm = scheduler.admission_check(s, ids["fix"])
+        assert any(c == "DEPENDENCY_NOT_ACCEPTED" for c, _ in adm.waits), adm.waits
+        s.rollback()
 
 
 def test_a_write_during_an_investigation_is_a_violation_and_nothing_is_committed(settings, world):
@@ -189,6 +211,40 @@ def test_a_write_during_an_investigation_is_a_violation_and_nothing_is_committed
         hyps = investigation.hypotheses_state(s, s.get(TaskSpec, ids["inv"]), investigation.spec_of(
             s.get(TaskSpec, ids["inv"])))
         assert hyps[0]["investigated"] and not hyps[0]["evidenced"] and not hyps[1]["investigated"]
+
+
+def test_a_report_from_a_run_that_then_wrote_a_file_is_never_an_evidenced_fix(settings, world):
+    """§19 "integrator memilih perbaikan berbukti": a SUPPORTED report with a reference that exists does not count
+    when the same run broke the read-only rule - the run is a SCOPE_VIOLATION and its claim is inconclusive."""
+    ids, state = world
+    state["scenario"] = "report_then_write"
+    run_id = _lease(ids["inv"])
+    out = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    assert out["status"] == "NEXT_HYPOTHESIS", out
+    run = _run(run_id)
+    assert run.execution_status == "FAILED" and run.outcome_code == "SCOPE_VIOLATION" and run.head_commit is None
+    assert run.caps["investigation_report"]["evidenced"] is True  # what the report alone would claim
+    assert run.caps["investigation_outcome"] == "SCOPE_VIOLATION"
+    with session_factory()() as s:
+        task = s.get(TaskSpec, ids["inv"])
+        h1 = investigation.hypotheses_state(s, task, investigation.spec_of(task))[0]
+        assert h1["investigated"] and h1["outcome_code"] == "SCOPE_VIOLATION" and h1["evidenced"] is False
+
+
+def test_a_change_no_tool_event_reported_is_caught_by_the_post_run_diff(settings, world):
+    """Defence in depth: the read-only rule is checked on the worktree after the run, not only on tool events."""
+    ids, state = world
+    state["scenario"] = "silent_write"
+    run_id = _lease(ids["inv"])
+    out = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    assert out["status"] == "NEXT_HYPOTHESIS", out
+    run = _run(run_id)
+    assert run.execution_status == "FAILED" and run.outcome_code == "SCOPE_VIOLATION" and run.head_commit is None
+    assert any(v["rule"] == "investigation-read-only" and v["detail"] == "file changed"
+               for v in run.quarantine_reasons), run.quarantine_reasons
+    with session_factory()() as s:
+        task = s.get(TaskSpec, ids["inv"])
+        assert investigation.hypotheses_state(s, task, investigation.spec_of(task))[0]["evidenced"] is False
 
 
 @pytest.mark.parametrize("ops, tools, problem", [

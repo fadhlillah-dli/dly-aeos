@@ -186,3 +186,10 @@ made to work end to end (`tests/e2e/test_e2e_execution_chain.py`). Reconciled co
    the plan's one repair IMPLEMENTATION task, which depends on the investigation, then carries the finding as
    input and runs through normal admission, verification, review and acceptance. An investigation is never DONE
    or accepted. The investigation template and read-only permission set are part of `WORKER_PROMPT_REVISION`.
+   Review additions: the hypothesis outcome is recorded once when its run ends (`caps.investigation_outcome`), so
+   later lifecycle codes (chosen / not chosen / review findings) never make a hypothesis look uninvestigated or
+   change the compared reports; only a run that ended `INVESTIGATION_REPORTED` can be evidenced (a report from a
+   run that wrote a file, timed out or exited non-zero is inconclusive whatever it claims); the read-only rule is
+   also checked on the worktree after the run, not only on tool events; and the repair task's dependency re-checks
+   the choice's hash against the reports on record at use (a changed comparison needs a new choice). A refused CLI
+   `agent-enable` keeps its DENIED audit row, as the Control Center does.

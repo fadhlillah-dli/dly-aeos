@@ -48,6 +48,12 @@ CHOICE_OPERATION = "open_repair_task"
 # quota/lease/shutdown/cancel did not investigate anything (the owner may grant another attempt).
 INVESTIGATED_OUTCOMES = frozenset({"INVESTIGATION_REPORTED", "INVESTIGATION_REPORT_INVALID", "TIMEOUT", "EXIT_NONZERO",
                                    "SCOPE_VIOLATION", "RESOURCE_LIMIT"})
+# Only a run that ended cleanly with a valid report can carry an evidenced finding: a report from a run that wrote a
+# file, timed out or exited non-zero is inconclusive, whatever it claims.
+REPORTED_OUTCOME = "INVESTIGATION_REPORTED"
+# The hypothesis outcome is recorded once, when its run ends (``caps.investigation_outcome``). ``outcome_code`` is the
+# run's lifecycle code and changes later (integrator choice, review findings); it never decides what was investigated.
+OUTCOME_CAP = "investigation_outcome"
 READ_ONLY_FORBIDDEN_TOOLS = ("bash", "webfetch", "edit", "write", "patch")
 
 
@@ -122,19 +128,29 @@ def _hyp_key(run: WorkerRun) -> str | None:
     return (((run.caps or {}).get("investigation") or {}).get("hypothesis") or {}).get("key")
 
 
+def _outcome(run: WorkerRun) -> str:
+    """The hypothesis outcome recorded when the run ended (stable), else the run's code (a run still in flight or
+    stopped before ``after_run``, e.g. QUOTA_EXHAUSTED, which investigated nothing)."""
+    return str((run.caps or {}).get(OUTCOME_CAP) or run.outcome_code or "")
+
+
 def hypotheses_state(session: Session, task: TaskSpec, spec: dict[str, Any]) -> list[dict[str, Any]]:
     runs = investigation_runs(session, task.id)
     out = []
     for i, h in enumerate(spec["hypotheses"], start=1):
         mine = [r for r in runs if _hyp_key(r) == h["key"]]
-        done = [r for r in mine if (r.outcome_code or "") in INVESTIGATED_OUTCOMES]
+        done = [r for r in mine if _outcome(r) in INVESTIGATED_OUTCOMES]
         last = done[-1] if done else (mine[-1] if mine else None)
         report = ((last.caps or {}).get("investigation_report") or {}) if last is not None else {}
+        outcome = _outcome(last) if last is not None else None
         out.append({"key": h["key"], "statement": h["statement"], "index": i, "runs": [r.id for r in mine],
                     "investigated": bool(done), "run_id": last.id if last is not None else None,
-                    "outcome_code": last.outcome_code if last is not None else None,
+                    "outcome_code": outcome, "run_outcome_code": last.outcome_code if last is not None else None,
                     "verdict": report.get("verdict"), "valid": bool(report.get("valid")),
-                    "evidenced": bool(report.get("evidenced")), "evidence_refs": report.get("evidence_checked") or [],
+                    # evidenced = a clean, valid report (no write, timeout or non-zero exit) whose SUPPORTED verdict
+                    # names at least one reference the runtime found in the repository
+                    "evidenced": bool(report.get("evidenced")) and outcome == REPORTED_OUTCOME,
+                    "evidence_refs": report.get("evidence_checked") or [],
                     "summary": report.get("summary"), "proposed_fix": report.get("proposed_fix"),
                     "findings": report.get("findings") or [], "report_evidence_ref": report.get("evidence_ref")})
     return out
@@ -184,6 +200,7 @@ def after_run(session: Session, run: WorkerRun, te: TaskExecution, task: TaskSpe
     hyp = _hyp_key(run) or "?"
     run.verifier_status = "NOT_APPLICABLE"  # no candidate: the trusted suite has nothing to judge
     run.acceptance_status = "NOT_APPLICABLE"
+    run.caps = {**(run.caps or {}), OUTCOME_CAP: code}  # recorded once; later lifecycle codes never change it
     if code == "INVESTIGATION_REPORTED":
         scheduler.set_run_status(session, run, S.REVIEW.value, actor=actor, outcome_code=code,
                                  reason=f"hypothesis {hyp}: read-only report recorded (untrusted DATA, verdict "
@@ -234,12 +251,18 @@ def comparison(session: Session, task: TaskSpec) -> dict[str, Any]:
 
 
 def chosen_decision(session: Session, task: TaskSpec) -> Any:
+    """The integrator's ACTIVE human choice recorded by ``choose_fix`` (its operation and chosen hypothesis), newest
+    first. A decision on the same target without them (e.g. hand-recorded elsewhere) is not a choice."""
     from aeos.models.decisions import Decision
 
-    return session.scalar(select(Decision).where(Decision.kind == CHOICE_KIND, Decision.target_type == TARGET_TYPE,
-                                                 Decision.target_id == task.id, Decision.status == "ACTIVE",
-                                                 Decision.actor_kind == "HUMAN")
-                          .order_by(Decision.created_at.desc()))
+    q = (select(Decision).where(Decision.kind == CHOICE_KIND, Decision.target_type == TARGET_TYPE,
+                                Decision.target_id == task.id, Decision.status == "ACTIVE",
+                                Decision.actor_kind == "HUMAN")
+         .order_by(Decision.created_at.desc()))
+    for d in session.scalars(q):
+        if CHOICE_OPERATION in (d.allowed_operations or []) and (d.details or {}).get("hypothesis_key"):
+            return d
+    return None
 
 
 def choose_fix(session: Session, task_id: str, *, hypothesis_key: str, actor: str, actor_user_id: str,
@@ -315,7 +338,12 @@ def dependency_satisfied(session: Session, dep: TaskSpec, dep_te: TaskExecution 
     investigation is never accepted). None when *dep* is not an investigation (normal acceptance rule)."""
     if spec_of(dep) is None:
         return None
-    if dep_te is None or dep_te.reason_code != "INVESTIGATION_CHOSEN" or chosen_decision(session, dep) is None:
+    choice = chosen_decision(session, dep)
+    if dep_te is None or dep_te.reason_code != "INVESTIGATION_CHOSEN" or choice is None:
         return False, (f"investigation {dep.task_key} has no recorded integrator choice "
                        f"({dep_te.state if dep_te else 'not queued'}/{dep_te.reason_code if dep_te else '-'})")
+    current = comparison(session, dep)["comparison_hash"]
+    if choice.target_hash != current:  # hash-bound: the choice was made on other reports than the ones on record now
+        return False, (f"investigation {dep.task_key}: the integrator choice {choice.id} was made on other reports "
+                       "(comparison hash changed); a new choice is required")
     return True, ""
