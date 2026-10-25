@@ -191,6 +191,9 @@ def _verifier_runner_view(ctx: CheckContext) -> dict[str, Any]:
     a proven container boundary + the verifier image; otherwise WEAK, whose residual risk is reported, never
     hidden. Fail closed: any error is reported as WEAK with the reason."""
     domain = Domain.PERSONAL.value  # OFFICE is always BLOCKED by the worker runtime; verifier re-checks per domain
+    if ctx.session is None:  # bootstrap layer without a database: the runner state cannot be read
+        return {"isolation": "WEAK", "runner": "process", "reasons": ["no database: verifier runner state not readable"],
+                "residual_risks": ["verifier isolation NOT-PROVEN: runner state could not be read (fail closed)"]}
     try:
         from aeos.verification import facade as verification
 
