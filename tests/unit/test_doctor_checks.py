@@ -242,9 +242,62 @@ def test_github_token_privilege_is_reported_from_scopes(settings, db, secrets_me
     assert "gho_" not in json.dumps(res.as_dict())  # only the documented prefix kind, never the value
     secrets_memory.put("personal/github", "github_pat_" + "y" * 40, actor="test")
     r.http[url] = HttpResult(200, body)  # fine-grained tokens carry no X-OAuth-Scopes
+    repos_url = "https://api.github.com/user/repos?per_page=100"
+    r.http[repos_url] = HttpResult(200, [{"full_name": settings.platform_repo_slug}])  # only the selected repo
     res = check("adapter.github_token", _ctx(settings, db, r, functional=True))
     assert res.observed_evidence["token_privilege"]["least_privilege"] is True
     assert "residual_risks" not in res.observed_evidence
+
+
+def test_fine_grained_pat_is_judged_by_what_it_reaches(settings, db, secrets_memory):
+    """§07 step 7: a fine-grained PAT is not least privilege "by construction" - a token created for 'All
+    repositories' or with Administration (permissions.admin) is reported, and an unreadable repository
+    selection stays NOT proven (never True)."""
+    url = f"https://api.github.com/repos/{settings.platform_repo_slug}"
+    repos_url = "https://api.github.com/user/repos?per_page=100"
+    secrets_memory.put("personal/github", "github_pat_" + "y" * 40, actor="test")
+    r = base_runner()
+    r.http[url] = HttpResult(200, {"private": True, "default_branch": "main", "id": 1,
+                                   "permissions": {"admin": True, "push": True}})
+    r.http[repos_url] = HttpResult(200, [{"full_name": settings.platform_repo_slug}])
+    # permissions.admin is the ACCOUNT's role (the owner of a personal repo always shows it): never read as the
+    # token's grant. Unobserved -> NOT proven, never True and never a false "has Administration" claim.
+    priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is None and priv["admin"] is True and priv["administration_permission"] == "UNKNOWN"
+    assert "risk" not in priv
+    prot_url = f"https://api.github.com/repos/{settings.platform_repo_slug}/branches/main/protection"
+    r.http[prot_url] = HttpResult(403, {"message": "Resource not accessible by personal access token"})
+    priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is True and priv["administration_permission"] == "NOT_GRANTED"
+    r.http[prot_url] = HttpResult(404, {"message": "Branch not protected"})  # the token itself holds Administration
+    priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is False and priv["administration_permission"] == "GRANTED"
+    assert "Administration" in priv["risk"]
+    r.http[prot_url] = HttpResult(403, {"message": "Upgrade to GitHub Pro or make this repository public"})
+    priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is None and priv["administration_permission"] == "UNKNOWN"
+    del r.http[prot_url]
+    r.http[url] = HttpResult(200, {"private": True, "default_branch": "main", "id": 1, "permissions": {"push": True}})
+    r.http[repos_url] = HttpResult(200, [{"full_name": settings.platform_repo_slug}, {"full_name": "owner/private-x"},
+                                         {"full_name": "owner/other"}])
+    res = check("adapter.github_token", _ctx(settings, db, r, functional=True))
+    priv = res.observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is False and priv["beyond_registered"] == ["owner/other", "owner/private-x"]
+    assert res.observed_evidence["residual_risks"] and "All repositories" in res.observed_evidence["residual_risks"][0]
+    from aeos.models.portfolio import Project, RepositoryReference
+
+    p = Project(project_key="app", name="app", domain="PERSONAL")
+    db.add(p)
+    db.flush()
+    for name in ("owner/private-x", "owner/other"):  # registered project repositories are legitimate targets
+        db.add(RepositoryReference(project_id=p.id, provider="GITHUB", full_name=name))
+    db.commit()
+    assert check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence[
+        "token_privilege"]["least_privilege"] is True
+    r.http[repos_url] = HttpResult(403, {"message": "Resource not accessible"})
+    res = check("adapter.github_token", _ctx(settings, db, r, functional=True))
+    assert res.observed_evidence["token_privilege"]["least_privilege"] is None
+    assert "belum terbukti" in res.summary
 
 
 def test_google_adapter_reads_the_token_google_connect_writes(settings, db, secrets_memory):

@@ -409,10 +409,26 @@ class GoogleDriveDocsProvider:
         if resp.status_code not in (200, 201):
             raise classify_http_error(resp, write=True, what="drive upload docx")
         data = resp.json()
-        rev = self._revision(data["id"])
+        # §29 "fidelity ... heading/table/link harus diuji": read the imported document back (documents.get) and
+        # compare it with the DOCX that was sent. The document exists either way; a MISMATCH/UNKNOWN is recorded and
+        # shown, never a pass. A read failure keeps the revision unknown too.
+        from aeos.publisher import fidelity
+
+        try:
+            imported = self._get_document(data["id"])
+        except ProviderError:
+            imported = None
+        rev = imported.get("revisionId") if imported else None
+        try:  # the write already happened: the check never raises over it (an unreadable snapshot is UNKNOWN)
+            fid = fidelity.compare(fidelity.docx_structure(docx),
+                                   fidelity.gdoc_structure(imported) if imported else None)
+        except Exception as exc:  # any parse problem is reported, never a pass
+            fid = {"status": fidelity.UNKNOWN, "mismatches": [f"fidelity check failed ({type(exc).__name__})"],
+                   "expected": None, "observed": None}
         return OpResult(external_id=data["id"], external_url=data.get("webViewLink"), external_revision=rev,
                         kind="doc", response={"name": data.get("name"), "mimeType": data.get("mimeType"),
-                                              "revision_unknown": rev is None, "import": "docx->google-docs"})
+                                              "revision_unknown": rev is None, "import": "docx->google-docs",
+                                              "fidelity": fid})
 
     def _get_document(self, doc_id: str) -> dict[str, Any] | None:
         resp = self._req("GET", f"{DOCS_API}/documents/{quote(doc_id, safe='')}", write=False, what="docs get")

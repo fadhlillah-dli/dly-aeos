@@ -7,12 +7,14 @@
 # (`gate_mapping: PIPELINE_REFERENCE`): a job counts for a gate only when its exact check-run name is listed.
 #
 # Where it lives: the project's CI integration in the Integration Registry (PUT /api/projects/<id>/integrations)
-#   provider: github-actions (PERSONAL)      | bitbucket-pipelines (OFFICE; adapter not implemented, ADR-0063)
+#   provider: github-actions (PERSONAL)      | bitbucket-pipelines (OFFICE, ADR-0111)
 #   purpose:  ci
 #   config:   one scalar entry per gate, comma-separated exact CI job names:
+#             GitHub: check-run names. Bitbucket: Pipelines step names (`- step: name: ...`) or the `name` of a
+#             commit status reported by another company-approved CI.
 domain_ci:
   PERSONAL: github-actions
-  OFFICE: bitbucket-pipelines   # NOT_APPLICABLE until the Bitbucket adapter + company authorisation exist
+  OFFICE: bitbucket-pipelines   # read only while the OFFICE adapter is AVAILABLE (company authorisation, Cloud only)
 config_example:
   gate_G1: "lint, typecheck, secret-scan"          # static checks
   gate_G2: "backend (ubuntu-latest), backend (windows-latest)"   # controlled tests in CI (the verifier is G2's trusted source)

@@ -12,6 +12,9 @@ Boundary rules (each tested):
 * every operation needs an ACTIVE run-bound capability grant (GIT_BRANCH / PR_CREATE) and, for a
   remote write, the external-write interlock (§26);
 * the broker has no capability to integrate a PR into any branch: human-only (U-09, §31).
+
+OFFICE runs (and registered Bitbucket repositories) are handed to ``aeos.broker.bitbucket_broker``
+before any GitHub validation or credential read (``is_bitbucket_run``, ADR-0111).
 """
 
 from __future__ import annotations
@@ -123,6 +126,15 @@ def github_remote(repo_full_name: str) -> str:
 
 
 # ----------------------------------------------------------------------------- helpers
+def is_bitbucket_run(session: Session, run: WorkerRun, repo_full_name: str) -> bool:
+    """OFFICE code lives in Bitbucket (U-02/U-03): every OFFICE run, and any target registered as a Bitbucket
+    repository, goes through ``aeos.broker.bitbucket_broker`` - never the GitHub path or its credential."""
+    if run.domain == "OFFICE":
+        return True
+    ref = _repo_ref(session, run.project_id, repo_full_name) if isinstance(repo_full_name, str) else None
+    return ref is not None and (ref.provider or "").upper() == "BITBUCKET"
+
+
 def _repo_ref(session: Session, project_id: str, repo_full_name: str) -> RepositoryReference | None:
     return session.scalar(select(RepositoryReference).where(RepositoryReference.project_id == project_id,
                                                             RepositoryReference.full_name == repo_full_name))
@@ -210,21 +222,26 @@ def _side_effect(session: Session, run: WorkerRun, *, kind: str, key: str, targe
     return se
 
 
-def _basic_header(token: str) -> str:
-    raw = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+GITHUB_GIT_USER = "x-access-token"
+
+
+def _basic_header(token: str, user: str = GITHUB_GIT_USER) -> str:
+    raw = base64.b64encode(f"{user}:{token}".encode()).decode()
     register_secret(raw)
     return f"Authorization: Basic {raw}"
 
 
-def git_auth_env(remote_url: str, token: str | None, *, empty_global: Path) -> dict[str, str]:
-    """Environment for ONE git invocation. The credential exists only in this child's env."""
+def git_auth_env(remote_url: str, token: str | None, *, empty_global: Path,
+                 basic_user: str = GITHUB_GIT_USER) -> dict[str, str]:
+    """Environment for ONE git invocation. The credential exists only in this child's env. ``basic_user`` is
+    the provider's HTTP user for the token (GitHub ``x-access-token``; Bitbucket per credential kind)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k.upper() not in {"GCM_INTERACTIVE"}}
     env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(empty_global),
                 "GCM_INTERACTIVE": "never", "GIT_ASKPASS": "", "SSH_ASKPASS": ""})
     if token:
         u = urlparse(remote_url)
         env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"http.{u.scheme}://{u.netloc}/.extraHeader",
-                    "GIT_CONFIG_VALUE_0": _basic_header(token)})
+                    "GIT_CONFIG_VALUE_0": _basic_header(token, basic_user)})
     return env
 
 
@@ -236,7 +253,7 @@ def _git(args: list[str], *, cwd: Path, env: dict[str, str], hooks: Path) -> sub
 
 
 def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: str | None, work_root: Path,
-                     expected_head: str | None = None) -> dict[str, Any]:
+                     expected_head: str | None = None, basic_user: str = GITHUB_GIT_USER) -> dict[str, Any]:
     """Fetch the task branch from the untrusted candidate into a private bare mirror and push it.
 
     With ``expected_head`` the push is sha-pinned (``<sha>:refs/heads/<branch>``, never forced): exactly
@@ -268,7 +285,7 @@ def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: 
                     "error": "task branch head differs from the runtime-recorded head"}
         stage = "push"
         pinned_src, _ = validate_refspec(f"{head}:{dst}") if _SHA_RE.match(head or "") else (src, dst)
-        env = git_auth_env(remote_url, token, empty_global=empty_global)
+        env = git_auth_env(remote_url, token, empty_global=empty_global, basic_user=basic_user)
         push = _git(["push", "--porcelain", "--no-verify", remote_url, f"{pinned_src}:{dst}"], cwd=mirror, env=env,
                     hooks=hooks)
         out = redact_text((push.stdout or "") + (push.stderr or ""))[:800]
@@ -316,6 +333,12 @@ def push_task_branch(
     run = session.get(WorkerRun, run_id)
     if run is None:
         raise NotFound("run not found")
+    if is_bitbucket_run(session, run, repo_full_name):
+        from aeos.broker import bitbucket_broker
+
+        return bitbucket_broker.push_task_branch(session, run=run, worktree=worktree, branch=branch,
+                                                 repo_full_name=repo_full_name, remote_url=remote_url,
+                                                 expected_head=expected_head)
     validate_repo(repo_full_name)
     ref = _repo_ref(session, run.project_id, repo_full_name)
     default_branch = ref.default_branch if ref else "main"
@@ -407,6 +430,11 @@ def create_pull_request(
     run = session.get(WorkerRun, run_id)
     if run is None:
         raise NotFound("run not found")
+    if is_bitbucket_run(session, run, repo_full_name):
+        from aeos.broker import bitbucket_broker
+
+        return bitbucket_broker.create_pull_request(session, run=run, repo_full_name=repo_full_name, head=head,
+                                                    base=base, title=title, body=body)
     validate_repo(repo_full_name)
     ref = _repo_ref(session, run.project_id, repo_full_name)
     default_branch = ref.default_branch if ref else "main"
@@ -483,7 +511,7 @@ def create_pull_request(
 
 
 # ----------------------------------------------------------------------------- reconciliation (read-only)
-def _ls_remote_head(url: str, branch: str, token: str | None) -> str | None:
+def _ls_remote_head(url: str, branch: str, token: str | None, *, basic_user: str = GITHUB_GIT_USER) -> str | None:
     """Commit of ``refs/heads/<branch>`` on the remote (None = absent). Read-only; the credential
     exists only in this one child's environment."""
     from aeos.core.config import get_settings
@@ -497,7 +525,7 @@ def _ls_remote_head(url: str, branch: str, token: str | None) -> str | None:
     if token:
         register_secret(token)
     proc = _git(["ls-remote", "--heads", url, f"refs/heads/{branch}"], cwd=work,
-                env=git_auth_env(url, token, empty_global=empty_global), hooks=hooks)
+                env=git_auth_env(url, token, empty_global=empty_global, basic_user=basic_user), hooks=hooks)
     if proc.returncode != 0:
         raise Blocked("remote could not be read: " + redact_text(proc.stderr or "")[:300], code="REMOTE_UNREADABLE")
     for line in (proc.stdout or "").splitlines():
@@ -520,6 +548,10 @@ def reconcile_side_effect(session: Session, side_effect_id: str, *, actor: str,
         raise NotFound("side effect not found")
     if se.status not in ("PENDING", "UNKNOWN"):
         return {"id": se.id, "kind": se.kind, "status": se.status, "changed": False}
+    if (se.target or {}).get("provider") == "bitbucket" or se.domain == "OFFICE":
+        from aeos.broker import bitbucket_broker
+
+        return bitbucket_broker.reconcile_side_effect(session, se, actor=actor)
     target = dict(se.target or {})
     before = se.status
     detail = ""

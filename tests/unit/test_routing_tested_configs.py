@@ -476,7 +476,9 @@ def test_route_view_reports_binding_execution_path_and_restrictions(world):
     view = route_view(db, service.get_route(db, DS), principal)
     assert view["runtime_binding"]["status"] == "BOUND" and view["execution_path"]["status"] == "WORKER_RUNTIME"
     arena = route_view(db, service.get_route(db, NEMO), principal)
-    assert arena["execution_path"]["status"] == "NOT_WIRED" and arena["terms_restriction"]
+    # ADR-0111: ARENA never serves worker tasks; its feasibility runs only through the broker probe
+    assert arena["execution_path"]["status"] == "FEASIBILITY_PROBE_ONLY" and arena["terms_restriction"]
+    assert "/feasibility" in arena["execution_path"]["note"]
     assert route_view(db, service.get_route(db, BEAM), principal)["region_restricted"] is True
     laguna = route_view(db, service.get_route(db, "openrouter/poolside/laguna-s-2.1:free"), principal)
     assert laguna["terms_unknown"] == ["may_use_inputs_for_training"] and "UNKNOWN" in laguna["terms_restriction"]

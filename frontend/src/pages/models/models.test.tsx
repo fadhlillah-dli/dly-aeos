@@ -280,4 +280,26 @@ describe("Models & Routes page", () => {
     expect(within(drawer).getByText(/policy_version changed since activation/)).toBeInTheDocument();
     expect(within(drawer).getByText("Belum tersambung")).toBeInTheDocument();
   });
+
+  it("labels an arena route as feasibility-probe only, never as a worker path", async () => {
+    const arena = route({
+      execution_path: { status: "FEASIBILITY_PROBE_ONLY", note: "Uji kelayakan lewat probe broker" },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? "GET" });
+        let body: unknown = {};
+        if (url.startsWith("/api/claude/status")) body = STATUS;
+        else if (url === "/api/routes") body = { ...ROUTES, items: [arena] };
+        else if (url.startsWith("/api/routes/")) body = { ...arena, config: DS_CONFIG, decisions: [], quota_states: [] };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByText("DeepSeek V4.1 Flash Free"));
+    const drawer = await screen.findByRole("dialog", { name: /Detail rute/ });
+    expect(await within(drawer).findByText("Hanya probe kelayakan (bukan task worker)")).toBeInTheDocument();
+    expect(within(drawer).getByText("Uji kelayakan lewat probe broker")).toBeInTheDocument();
+  });
 });

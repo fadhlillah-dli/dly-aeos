@@ -10,7 +10,24 @@ from typing import Any
 
 from aeos.publisher.providers.base import ProviderError
 
-__all__ = ["ProviderError", "bitbucket_repository_reference"]
+__all__ = ["ProviderError", "bitbucket_read_auth", "bitbucket_reader", "bitbucket_repository_reference"]
+
+
+def bitbucket_read_auth(*, use: str, actor: str) -> str:
+    """API Authorization value of the OFFICE Bitbucket credential for a trusted in-process GET caller
+    (secrets purpose ``office:<use>``). Additive (K1, 2026-10-19); never returned to UI/logs."""
+    from aeos.publisher.providers.atlassian import bitbucket_read_auth as impl
+
+    return impl(use=use, actor=actor)
+
+
+def bitbucket_reader(full_name: str, *, auth_header: str, client: Any = None) -> Any:
+    """GET-only Bitbucket Cloud client (``BitbucketProvider``) for an exact ``workspace/repo_slug``. The caller
+    has already checked the company authorisation, the enabled adapter and Cloud (not Data Center); the
+    object has no write method. Close it with ``.close()``. Additive (K1, 2026-10-19)."""
+    from aeos.publisher.providers.atlassian import BitbucketProvider
+
+    return BitbucketProvider(full_name=full_name, enabled=True, client=client, auth_header=auth_header)
 
 
 def bitbucket_repository_reference(full_name: str, *, client: Any = None) -> dict[str, Any]:
