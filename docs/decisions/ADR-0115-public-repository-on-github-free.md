@@ -61,3 +61,12 @@ available to public repositories on the Free plan.
 * The owner can undo each part in the repository settings: Settings -> General -> Danger Zone for
   visibility, Settings -> Rules -> Rulesets for the ruleset, and Settings -> Code security for the
   security features.
+
+## Amendment 2026-10-26 — Intel macOS and Command Prompt
+
+1. The backend suite and the bootstrap also run on `macos-26-intel` (x86_64). `macos-latest` is Apple
+   Silicon (arm64), and both Mac architectures are target hosts, so neither one stands in for the other.
+   The Intel runner is a standard runner, free for public repositories.
+2. `aeos.cmd` starts the CLI from Command Prompt (cmd.exe), where `.\aeos.ps1` opens in an editor instead
+   of running. `tests/unit/test_bootstrap_scripts.py` runs it on Windows, including the case where the
+   virtual environment is missing.

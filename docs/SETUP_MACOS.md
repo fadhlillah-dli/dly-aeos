@@ -8,6 +8,20 @@ capabilities that do not depend on them.
 Works with the default zsh and with the bash 3.2 that ships with macOS. Run commands from the
 repository root; `./aeos <command>` runs the CLI from the repository virtual environment.
 
+**Apple Silicon (M-series) and Intel Macs are both supported** and tested in CI (`macos-latest` is
+arm64, `macos-26-intel` is x86_64). The differences you meet in this guide:
+
+| | Apple Silicon (arm64) | Intel (x86_64) |
+|---|---|---|
+| Homebrew prefix (`brew --prefix`) | `/opt/homebrew` | `/usr/local` |
+| Docker Desktop download | "Mac with Apple chip" | "Mac with Intel chip" |
+| Worker/verifier images | built natively as linux/arm64 | built natively as linux/amd64 |
+| OpenBao (`aeos vault install`) | picks the darwin_arm64 release | picks the darwin_amd64 release |
+
+Commands below use `$(brew --prefix)` so they work on both. Each Mac builds its own images and
+records its own containment report (`aeos worker containment --kind container`). A report is bound to
+the image id and the host, so a report from one Mac never admits the container sandbox on another.
+
 | Order | Component | Required for |
 |---|---|---|
 | 0 | Repository inspection + data backup | everything |
@@ -57,7 +71,8 @@ copy from another disk). Run `sh scripts/bootstrap.sh` instead; it re-runs itsel
 sets the bit on `./aeos` and `./scripts/dev.sh` again.
 
 `node@22` is keg-only in Homebrew; if `node --version` is not found, follow brew's hint
-(`echo 'export PATH="/opt/homebrew/opt/node@22/bin:$PATH"' >> ~/.zprofile`) and open a new terminal.
+(`echo "export PATH=\"$(brew --prefix)/opt/node@22/bin:\$PATH\"" >> ~/.zprofile`, which writes
+`/opt/homebrew/...` on Apple Silicon and `/usr/local/...` on Intel) and open a new terminal.
 
 **Evidence:** bootstrap ends with "Next steps"; `./aeos version`; `./aeos doctor` core checks pass.
 
@@ -204,7 +219,7 @@ Only after measured benefit.
 | Symptom | Fix |
 |---|---|
 | `xcrun: error: invalid active developer path` | `xcode-select --install` |
-| `node: command not found` after brew | add `/opt/homebrew/opt/node@22/bin` to PATH (see step 1) |
+| `node: command not found` after brew | add `$(brew --prefix)/opt/node@22/bin` to PATH (see step 1; `/opt/homebrew` on Apple Silicon, `/usr/local` on Intel) |
 | Port 8787 in use | `lsof -nP -iTCP:8787 -sTCP:LISTEN`; stop it or `./aeos serve --port 8790` |
 | Keychain prompt on first secret access | allow access for the `dly-aeos` service only |
 | `FRONTEND_NOT_BUILT` | `cd frontend && npm ci && npm run build` |

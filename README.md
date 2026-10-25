@@ -82,6 +82,9 @@ the official install command, back up any existing data before migrating, instal
 | SLIs for a domain | `.\aeos.ps1 ops sli --domain PERSONAL` | `./aeos ops sli --domain PERSONAL` |
 | Emergency stop | `.\aeos.ps1 ops emergency-stop --reason "..."` | `./aeos ops emergency-stop --reason "..."` |
 
+The Windows column is for PowerShell. In **Command Prompt (cmd.exe)** type `aeos <command>` instead (for example
+`aeos serve`). That runs `aeos.cmd`, which starts the same CLI; in cmd.exe `.\aeos.ps1` would open in an editor.
+
 In the dashboard: sign in → **choose PERSONAL or OFFICE** → pick the project (the first one is
 **DLY AEOS**) → *Ringkasan* shows capability readiness, blockers, pending decisions, the approved
 plan, cost/quota (UNKNOWN when unknown), health and the live activity feed. *Kesiapan (Doctor)*
