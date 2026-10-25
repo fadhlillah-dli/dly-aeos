@@ -260,8 +260,23 @@ def test_fine_grained_pat_is_judged_by_what_it_reaches(settings, db, secrets_mem
     r.http[url] = HttpResult(200, {"private": True, "default_branch": "main", "id": 1,
                                    "permissions": {"admin": True, "push": True}})
     r.http[repos_url] = HttpResult(200, [{"full_name": settings.platform_repo_slug}])
+    # permissions.admin is the ACCOUNT's role (the owner of a personal repo always shows it): never read as the
+    # token's grant. Unobserved -> NOT proven, never True and never a false "has Administration" claim.
     priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
-    assert priv["least_privilege"] is False and priv["admin"] is True and "Administration" in priv["risk"]
+    assert priv["least_privilege"] is None and priv["admin"] is True and priv["administration_permission"] == "UNKNOWN"
+    assert "risk" not in priv
+    prot_url = f"https://api.github.com/repos/{settings.platform_repo_slug}/branches/main/protection"
+    r.http[prot_url] = HttpResult(403, {"message": "Resource not accessible by personal access token"})
+    priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is True and priv["administration_permission"] == "NOT_GRANTED"
+    r.http[prot_url] = HttpResult(404, {"message": "Branch not protected"})  # the token itself holds Administration
+    priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is False and priv["administration_permission"] == "GRANTED"
+    assert "Administration" in priv["risk"]
+    r.http[prot_url] = HttpResult(403, {"message": "Upgrade to GitHub Pro or make this repository public"})
+    priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is None and priv["administration_permission"] == "UNKNOWN"
+    del r.http[prot_url]
     r.http[url] = HttpResult(200, {"private": True, "default_branch": "main", "id": 1, "permissions": {"push": True}})
     r.http[repos_url] = HttpResult(200, [{"full_name": settings.platform_repo_slug}, {"full_name": "owner/private-x"},
                                          {"full_name": "owner/other"}])

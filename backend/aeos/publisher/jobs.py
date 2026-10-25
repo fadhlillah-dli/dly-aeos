@@ -175,8 +175,10 @@ def approval_decision(session: Session, version: PlanVersion, *, for_publication
 
 def _blocking_checks(state: Any) -> list[str]:
     """Checks whose OBSERVED result blocks the gate (§08 "operasi dengan dependency critical gagal tidak
-    dijalankan"): a critical check that ran and is not ok (FAILED, MISSING, ...), or a required/guard check that
-    FAILED. Never-run, STALE and EXPIRED results are not observations of failure (they make the gate UNKNOWN)."""
+    dijalankan"): a critical check that ran and is not ok (FAILED, MISSING, ...), a required/guard check that
+    FAILED, or a critical/required check invalidated (STALE) after it passed. Never-run (UNKNOWN) and TTL-EXPIRED
+    results are not observations of failure: they make the gate UNKNOWN and stay advisory (owner decision,
+    ADR-0094 - enforcing them changes the protected acceptance publication fixtures)."""
     out = []
     for c in state.checks or []:
         eff = c.get("effective_status")
