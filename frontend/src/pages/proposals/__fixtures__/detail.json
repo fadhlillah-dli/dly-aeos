@@ -397,8 +397,11 @@
       ],
       "credential_egress_changes": {
         "credential_refs_to_revoke_after_cutover": [
-          "opencode: workers/openrouter"
+          "workers/openrouter"
         ],
+        "shared_credential_refs": [],
+        "not_secret_refs": [],
+        "rule": "Hanya ref pada daftar pertama: cabut/rotasi kunci di konsol provider, lalu 'aeos secrets delete <ref> --yes', setelah consumer sah dipindahkan (bukan efek review)",
         "egress": [
           "opencode: ['opencode.ai']"
         ]

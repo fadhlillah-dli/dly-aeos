@@ -295,6 +295,19 @@ export function ImpactSection({ pkg }: { pkg: ReviewPackage }) {
   );
 }
 
+// §40 credential/egress changes: only the first list is safe to act on ("aeos secrets delete <ref>");
+// SHARED refs wait for their other consumers, descriptions are not secret refs at all.
+const nestedLabels: Record<string, string> = {
+  credential_refs_to_revoke_after_cutover: "Secret ref yang dicabut setelah cutover",
+  shared_credential_refs: "SHARED (masih dipakai komponen lain)",
+  not_secret_refs: "Bukan secret ref (deskripsi)",
+  refs_not_well_known: "Ref tidak terdaftar (periksa 'aeos secrets status')",
+  credential_refs_sharing_unchecked: "Pemakaian bersama belum diperiksa",
+  shared_check: "Pemeriksaan pemakaian bersama",
+  rule: "Aturan",
+  egress: "Egress",
+};
+
 function renderValue(v: unknown): ReactNode {
   if (v === null || v === undefined || v === "UNKNOWN") return <StatusBadge status="UNKNOWN" />;
   if (Array.isArray(v))
@@ -307,7 +320,21 @@ function renderValue(v: unknown): ReactNode {
     );
   if (typeof v === "object")
     return (
-      <KeyValue items={Object.entries(v as Record<string, unknown>).map(([k, y]) => [k, y === "UNKNOWN" || y === null ? <StatusBadge status="UNKNOWN" /> : String(y)] as [ReactNode, ReactNode])} />
+      <KeyValue
+        items={Object.entries(v as Record<string, unknown>).map(
+          ([k, y]) =>
+            [
+              nestedLabels[k] ?? k,
+              y === "UNKNOWN" || y === null ? (
+                <StatusBadge status="UNKNOWN" />
+              ) : Array.isArray(y) ? (
+                y.length ? renderValue(y) : "tidak ada"
+              ) : (
+                String(y)
+              ),
+            ] as [ReactNode, ReactNode],
+        )}
+      />
     );
   return String(v);
 }
