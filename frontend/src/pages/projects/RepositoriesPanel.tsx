@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, GitBranch, ScanSearch, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { get, post } from "../../api/client";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputClass, KeyValue, Mono } from "../../components/ui";
@@ -8,6 +8,25 @@ import { shortHash } from "../../lib/format";
 import { ModuleBadge } from "./badges";
 import { InventoryFacts } from "./InventoryFacts";
 import { CODE_PROVIDER, type ProjectView, type RepositoryDetail, type RepositoryView } from "./types";
+
+/** A provider/stored URL is rendered as a link only when it is https (never javascript:/data:/http:). */
+function SafeLink({ href, children }: { href: string | null | undefined; children: ReactNode }) {
+  return /^https:\/\//i.test(href ?? "") ? (
+    <a href={href!} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-accent hover:underline">
+      {children} <ExternalLink className="h-3 w-3" aria-hidden />
+    </a>
+  ) : (
+    <>{children}</>
+  );
+}
+
+const CI_OVERALL: Record<string, [string, string]> = {
+  PASS: ["PASS", "Lulus"],
+  FAIL: ["FAILED", "Gagal"],
+  PENDING: ["PENDING", "Berjalan"],
+  NOT_PROVEN: ["NOT-PROVEN", "Belum terbukti"],
+  NO_CHECKS: ["UNVERIFIED", "Tanpa check"],
+};
 
 const PR_STATE: Record<string, [string, string]> = {
   OPEN: ["PENDING", "Terbuka"],
@@ -67,12 +86,28 @@ export function RepositoryLinks({ repoId }: { repoId: string }) {
             d.ci.length === 0
               ? none("Belum ada integrasi CI")
               : (
-                  <span className="flex flex-wrap gap-2">
+                  <span className="flex flex-col gap-1">
                     {d.ci.map((c) => (
-                      <span key={c.integration_id} className="inline-flex items-center gap-1">
-                        {c.provider} <ModuleBadge kind="config" value={c.configuration} />
+                      <span key={c.integration_id} className="inline-flex flex-wrap items-center gap-1">
+                        <SafeLink href={c.pipeline_url}>{c.provider}</SafeLink> <ModuleBadge kind="config" value={c.configuration} />
+                        {!c.pipeline_url && <span className="text-xs text-ink-3">tanpa tautan pipeline (identitas tidak cukup)</span>}
                       </span>
                     ))}
+                    {d.ci_latest ? (
+                      <span className="inline-flex flex-wrap items-center gap-1 text-xs" data-testid="ci-latest">
+                        Run terakhir tercatat:{" "}
+                        <SafeLink href={d.ci_latest.url}>
+                          <Mono>{(d.ci_latest.commit ?? "?").slice(0, 12)}</Mono>
+                        </SafeLink>
+                        {(() => {
+                          const [status, label] = CI_OVERALL[d.ci_latest.overall] ?? ["UNKNOWN", d.ci_latest.overall];
+                          return <StatusBadge status={status} label={label} />;
+                        })()}
+                        {d.ci_latest.checked_at && <Freshness at={d.ci_latest.checked_at} />}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-ink-3">Belum ada hasil CI tercatat (disinkronkan saat PR AEOS di-sync)</span>
+                    )}
                   </span>
                 ),
           ],
@@ -84,7 +119,10 @@ export function RepositoryLinks({ repoId }: { repoId: string }) {
                   <span className="flex flex-wrap gap-2">
                     {d.docs_targets.map((t) => (
                       <span key={t.integration_id}>
-                        {t.provider} · <Mono>{t.root_id ?? "UNKNOWN"}</Mono>
+                        {t.provider} ·{" "}
+                        <SafeLink href={t.target_url}>
+                          <Mono>{t.root_id ?? "UNKNOWN"}</Mono>
+                        </SafeLink>
                       </span>
                     ))}
                   </span>

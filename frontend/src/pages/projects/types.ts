@@ -79,8 +79,12 @@ export interface RepositoryDetail extends RepositoryView {
     sync_status?: string | null;
     last_synced_at?: string | null;
   }[];
-  ci: { provider: string; integration_id: string; configuration: string }[];
-  docs_targets: { provider: string; root_id: string | null; integration_id: string }[];
+  /** pipeline_url: from exact identifiers only (integration root or this repository's full_name), null = no link. */
+  ci: { provider: string; integration_id: string; configuration: string; pipeline_url?: string | null; pipeline_url_basis?: string | null }[];
+  /** Latest provider-CI observation recorded for this repository (CI_STATUS evidence); null = none recorded. */
+  ci_latest?: { evidence_id: string; commit: string | null; overall: string; checked_at: string | null; runs: number; url: string | null } | null;
+  /** target_url: folder/page link built from the stored root/tenant id (§37), null = cannot be built exactly. */
+  docs_targets: { provider: string; root_id: string | null; integration_id: string; target_url?: string | null }[];
   capability: {
     /** status: ENABLED | NOT_ENABLED | NOT_APPLICABLE (not a write provider of the domain); per provider (§26) */
     write_enablement: { integration_id: string; provider: string; purpose: string; decision_id: string | null; status: string; scope?: string }[];
