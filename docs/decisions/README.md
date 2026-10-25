@@ -59,3 +59,4 @@ never rewritten. Number ranges per module group: 0001-0009 platform, 0010 doctor
 | [ADR-0111](ADR-0111-office-code-delivery-and-route-feasibility.md) | OFFICE code delivery on the company code host (Cloud only, disabled by default), route feasibility probe, publication fidelity | PROPOSED |
 | [ADR-0114](ADR-0114-platform-docs-readiness-and-evidence-producers.md) | Platform, documentation readiness and real evidence producers (K4 audit closure) | PROPOSED |
 | [ADR-0115](ADR-0115-public-repository-on-github-free.md) | Platform repository public on GitHub Free: free CI on all three OSes, ruleset on main, free security features | ACCEPTED |
+| [ADR-0120](ADR-0120-verifier-impact-selected-steps.md) | Verifier v4: impact-selected executed checks, per-candidate environments, UI/a11y evidence, project test baseline | PROPOSED |

@@ -164,6 +164,29 @@ def accept_cmd(run_id: str = typer.Argument(..., help="Reviewed WorkerRun id")) 
     raise typer.Exit(0 if view["acceptance_status"] == "ACCEPTED" else 1)
 
 
+@app.command("project-baseline")
+def project_baseline_cmd(
+    project_id: str = typer.Argument(..., help="Project id (its primary repository must be inventoried)"),
+    timeout: float = typer.Option(1800.0, min=60, max=7200, help="Seconds for the project's test run"),
+) -> None:
+    """Run the project's existing tests at its inventory commit (verifier runner + tamper window) as the baseline."""
+    from aeos.verification import project_baseline
+
+    try:
+        with _session() as s:
+            out = project_baseline.run_project_baseline(s, project_id, actor=ACTOR, actor_type="cli",
+                                                        timeout_seconds=timeout)
+    except AeosError as exc:
+        _fail(exc)
+        return
+    _echo(f"project baseline at {out.get('commit')}: {out['status']} (evidence {out.get('evidence_id')})")
+    _echo(f"  passed={out.get('passed')} failed={out.get('failed')} skipped={out.get('skipped')} "
+          f"runner={out.get('runner')} isolation={out.get('isolation')}")
+    for t in out.get("failing_sample") or []:
+        _echo(f"  failing: {t}")
+    raise typer.Exit(0 if out["status"] == "PASS" else (1 if out["status"] == "FAIL" else 2))
+
+
 @app.command("gates")
 def gates_cmd(task_id: str = typer.Argument(..., help="TaskSpec id")) -> None:
     """Show delivery gates G0-G8 for a task (computed from records; merge stays human)."""

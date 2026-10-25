@@ -205,7 +205,51 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   a managed project whose migrations run only in its own pipeline, is a **blocking** NOT-PROVEN (G2
   needs a migration/rollback test per migration change) unless the TaskSpec sets
   `verifier_policy.migration_roundtrip: optional`; run those in the project's pipeline with a dedicated
-  migration credential separate from the runtime credential.
+  migration credential separate from the runtime credential. Since verifier v4 the round-trip also
+  seeds one generated row per table, backs the database up with the SQLite backup API, deletes and
+  restores it and compares the seeded rows, then rolls one revision back and forward **with the data
+  present** (a downgrade that only breaks on populated tables fails, leg `data_rollback`).
+* **Migration/runtime credential split (`db_credentials`, §16 DB/Data Engineer):** name both references
+  on each `deployment-target` integration: `config.migration_credential_ref` and
+  `config.runtime_credential_ref` (default: the integration's `credential_ref`), set through
+  `PUT /api/projects/{id}/integrations` and validated like `credential_ref` (secret-store reference in the
+  project's domain namespace). References only, never values. The verifier FAILs when both are the same reference, when an entry looks like a secret value,
+  or when a runtime configuration file of the candidate (env files, `config/`, settings, compose/k8s/helm)
+  names the migration reference. With no deployment target the check is NOT_APPLICABLE (local runtime);
+  a target that names only one reference is NOT_PROVEN until you add the other.
+* **Impact-selected verifier checks (§22, §31, verifier v4):** every VERIFICATION_REPORT carries
+  `impact_checks` - per impact category the checks it selected (`aeos.verification.impact`) and which
+  executed. API/auth changes execute the change's own refusal tests (found in the test syntax tree, never
+  in comments) and, for the DLY AEOS layout, the verifier-owned adversarial probes over every operation of
+  the candidate app (unauthenticated, cross-origin, non-loopback host, VIEWER write, malformed JSON,
+  traversal ids, hostile logins). Facade/OpenAPI changes get a contract diff against the base; a breaking
+  change is a blocking NOT-PROVEN unless the approved TaskSpec sets `verifier_policy.contract_breaking:
+  approved`. Integration-marked tests run only when the TaskSpec sets `verifier_policy.integration_tests:
+  run|required` (a tool-absent skip is NOT-PROVEN; blocking for `required`, api impact and the Backend/API
+  and Integration Engineer roles). The planner's TaskSpec contract (schema v1) does not emit these
+  opt-ins yet; planner-compiled tasks keep the fail-closed defaults.
+* **Per-candidate environments (§09 Zone 2):** a candidate that changes its Python dependency set is
+  verified again in a virtual environment built in the run directory from its own hash-pinned pip
+  lockfile (`pip install --require-hashes --only-binary=:all: --no-deps`; the trusted test harness is
+  the controller's). Lockfiles without `--hash` pins, pip options in the file, non-pip lock formats and
+  the container runner leave the change a blocking NOT-PROVEN with the reason. Generate hashes with
+  `uv pip compile --generate-hashes`. The install step reaches the package index (not an enforced egress
+  boundary on the process runner).
+* **Frontend verification:** a frontend change runs `npm ci --ignore-scripts` from the candidate's
+  `package-lock.json` (project `.npmrc` is not used), vitest with the verifier's own config, `tsc -b
+  --noEmit` and `vite build`, then renders the built bundle in headless Chromium per UI state (loading,
+  error, unauthenticated, empty; desktop and mobile) with screenshots and the verifier's accessibility
+  probe (a WCAG subset, not axe-core). For the DLY AEOS layout the loading/error states render for a
+  signed-in (synthetic, MOCK) session and the empty state is answered by the candidate's own app on an
+  empty throwaway database, so every endpoint has its real shape. A render that raises an uncaught script
+  error is never evidence of its state: under the error/401 envelopes or the candidate's own app it FAILs
+  `ui_a11y`, under the verifier's generic answers that state is NOT-PROVEN. Needs node/npm and Playwright's Chromium on the host and the
+  process runner; otherwise `frontend_tests` stays a visible, non-blocking NOT-PROVEN (G3 provider CI).
+* **Project test baseline (§05 step 6):** `aeos verify project-baseline <project id>` (or
+  `POST /api/projects/{id}/test-baseline`) runs the repository's own tests at the inventoried commit
+  through the verifier runner and tamper window and records a TEST_REPORT (commit, suite identity,
+  passing/failing ids). The inventory's `tests.baseline` (and so planning's repository inventory) cites
+  it for exactly that commit; a newer commit is NOT_RUN until the baseline runs again.
 * **Verifier isolation (§20 isolated runner):** the verifier executes candidate code (the trusted
   suite against the candidate, the candidate's own tests, the migration round-trip) through one of two
   runners, stated on every VERIFICATION_REPORT (`verifier_isolation` / `verifier_runner`) and shown in

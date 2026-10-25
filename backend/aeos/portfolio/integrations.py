@@ -64,6 +64,13 @@ _CONFIG_ENUMS: dict[str, tuple[str, ...]] = {
     "issue_granularity": ("task", "feature"),
 }
 _CONFIG_BOOLS = frozenset({"enabled", "milestone_labels"})
+# §16 DB/Data Engineer "credential migration dipisah runtime": a deployment target names its migration and runtime
+# credentials as secret-store *references* (validated like credential_ref, never values). The verifier's
+# db_credentials check compares them (aeos.verification.db_evidence); the generic config rule refuses any key that
+# says "credential", so these two are validated here instead of being silently unsettable.
+CREDENTIAL_REF_CONFIG_KEYS: dict[str, frozenset[str]] = {
+    pv.DEPLOYMENT_TARGET: frozenset({"migration_credential_ref", "runtime_credential_ref"}),
+}
 REMEDIES = {
     (pv.GOOGLE_DRIVE, "root"): "aeos publish google-connect",
     (pv.GOOGLE_DRIVE, "credential"): "aeos publish google-connect",
@@ -157,6 +164,31 @@ def _validate_config(config: Any) -> dict[str, Any]:
         if k == "base_url" and v not in (None, "") and not re.match(r"^https://[A-Za-z0-9.-]+/?$", str(v)):
             raise ValidationFailed("config 'base_url' must be https://<site> (no path)", code="INVALID_CONFIG")
         out[k] = v
+    return out
+
+
+def _config_without_refs(config: Any, provider: str) -> Any:
+    """*config* without the credential-reference keys of *provider* (validated by ``_config_refs``)."""
+    keys = CREDENTIAL_REF_CONFIG_KEYS.get(provider, frozenset())
+    if not keys or not isinstance(config, dict):
+        return config
+    return {k: v for k, v in config.items() if k not in keys}
+
+
+def _config_refs(config: Any, provider: str, project: Project) -> dict[str, str]:
+    """The credential *references* a provider may name in config, validated exactly like ``credential_ref``
+    (secret-store syntax, the project's domain namespace, never a value)."""
+    keys = CREDENTIAL_REF_CONFIG_KEYS.get(provider, frozenset())
+    if not keys or not isinstance(config, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in sorted(keys & set(config)):
+        try:
+            ref = _validate_credential_ref(config[key], project)
+        except ValidationFailed as exc:
+            raise ValidationFailed(f"config {key!r}: {exc.message}", code=exc.code) from exc
+        if ref is not None:
+            out[key] = ref
     return out
 
 
@@ -321,7 +353,8 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
     tenant = _validate_id(body.get("tenant_id"), field="tenant_id", pattern=_TENANT)
     root = _validate_id(body.get("root_id"), field="root_id", pattern=_ROOT_PATTERNS.get(provider))
     cred_ref = _validate_credential_ref(body.get("credential_ref"), project)
-    config = _validate_config(body.get("config"))
+    config = _validate_config(_config_without_refs(body.get("config"), provider))
+    config.update(_config_refs(body.get("config"), provider, project))
     if provider not in ATLASSIAN_PROVIDERS and ({"deployment", "space_id", "base_url"} & set(config)):
         raise ValidationFailed("deployment/space_id/base_url apply to Confluence/Jira only", code="INVALID_CONFIG")
     if "enabled" in config and provider not in ATLASSIAN_PROVIDERS | {pv.BITBUCKET}:
