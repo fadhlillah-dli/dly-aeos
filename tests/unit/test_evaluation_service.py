@@ -237,3 +237,7 @@ def test_scorecard_states_the_adoption_decision_path(db):
     assert top["decision"] == "ROUTE_ACTIVATION (APPROVED)" and top["path"] == "POST /api/routes/r-top/activate"
     assert top["decision_record_fields"] == list(DECISION_RECORD_FIELDS) and top["status"] == "READY_FOR_OWNER_DECISION"
     assert paths[1]["status"] == "NOT_ADOPTABLE" and "re-evaluate" in paths[1]["reason"]
+    # review: the role's own result is adopted only by the owner's role adoption decision (DecisionRecord)
+    assert top["role_adoption"] is None  # board without a role
+    role_paths = service.adoption_paths(board, role="feature-implementer")
+    assert role_paths[0]["role_adoption"]["path"] == "POST /api/workforce/roles/feature-implementer/adopt"

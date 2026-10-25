@@ -953,14 +953,16 @@ def scorecard_snapshot(session: Session, *, role: str, domain: str | None = None
                                           "excluded": [e["configuration_hash"] for e in s["excluded"]]}
                                          for s in board["suites"]]}
     return snapshot | {"scorecard_hash": content_hash(snapshot), "status": board["status"],
-                       "adoption": adoption_paths(board)}
+                       "adoption": adoption_paths(board, role=role)}
 
 
-def adoption_paths(board: dict[str, Any]) -> list[dict[str, Any]]:
+def adoption_paths(board: dict[str, Any], *, role: str | None = None) -> list[dict[str, Any]]:
     """§44 "Hasil routing/role/mode menjadi DecisionRecord": how a scorecard result ends in an adoption decision. The
     top-ranked, eligible configuration of each suite can be adopted only by the owner's APPROVED route activation,
     which binds the exact route config hash, references these EvalRuns and carries the DecisionRecord (options, goal,
-    evidence, cost/quality trade-off, invalidation condition). Nothing is adopted by the scorecard itself."""
+    evidence, cost/quality trade-off, invalidation condition); the role's own PASS result becomes its admission
+    eligibility only through the owner's role adoption decision (bound to the role revision and the EvalRun).
+    Nothing is adopted by the scorecard itself."""
     from aeos.policy import facade as policy
 
     record_fields = list(policy.decision_record_fields())
@@ -976,6 +978,9 @@ def adoption_paths(board: dict[str, Any]) -> list[dict[str, Any]]:
                         "route_key": route_key, "eval_run_ids": list(e.get("run_ids") or []),
                         "decision": "ROUTE_ACTIVATION (APPROVED)", "decision_record_fields": record_fields,
                         "path": f"POST /api/routes/{route_key}/activate" if route_key else None,
+                        "role_adoption": ({"decision": "POLICY role_adoption (role revision + EvalRun)",
+                                           "path": f"POST /api/workforce/roles/{role}/adopt",
+                                           "decision_record_fields": record_fields} if role else None),
                         "status": "READY_FOR_OWNER_DECISION" if ready else "NOT_ADOPTABLE",
                         "reason": None if ready else ("route not registered" if not route_key else
                                                       "route not eligible or its configuration changed since the "

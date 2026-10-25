@@ -82,7 +82,8 @@ export interface RepositoryDetail extends RepositoryView {
   ci: { provider: string; integration_id: string; configuration: string }[];
   docs_targets: { provider: string; root_id: string | null; integration_id: string }[];
   capability: {
-    write_enablement: { integration_id: string; provider: string; purpose: string; decision_id: string | null; status: string }[];
+    /** status: ENABLED | NOT_ENABLED | NOT_APPLICABLE (not a write provider of the domain); per provider (§26) */
+    write_enablement: { integration_id: string; provider: string; purpose: string; decision_id: string | null; status: string; scope?: string }[];
     merge: string;
   };
 }
@@ -243,6 +244,8 @@ export interface MemoryView {
   expires_at: string | null;
   superseded_by: string | null;
   created_at: string;
+  /** §41/§43 system change of the acceptance: EVALUATED | NOT_EVALUATED + rollback target (null while PROPOSED) */
+  system_change?: { evaluation: string; rollback_target?: string; rollback?: { how?: string } } | null;
 }
 
 export interface SearchItem {

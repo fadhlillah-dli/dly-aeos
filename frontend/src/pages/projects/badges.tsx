@@ -48,6 +48,8 @@ const MAP: Record<Kind, Record<string, [string, string]>> = {
     NOT_CHECKED: ["NOT_CHECKED", "Belum diperiksa"],
     NOT_TESTED: ["NOT_TESTED", "Belum diuji"],
     NOT_APPLICABLE: ["NOT_APPLICABLE", "Tidak berlaku"],
+    // §01 OFFICE environment: required by the master but not built yet (M5, company authorisation) - never "N/A"
+    NOT_AVAILABLE: ["BLOCKED", "Belum tersedia (M5)"],
   },
   credential: {
     CONFIGURED: ["CONFIGURED", "Credential tersimpan"],

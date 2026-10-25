@@ -41,9 +41,14 @@ export function RepositoryLinks({ repoId }: { repoId: string }) {
                       const [status, label] = PR_STATE[pr.state] ?? ["UNKNOWN", pr.state || "UNKNOWN"];
                       return (
                         <li key={pr.number} className="flex flex-wrap items-center gap-2">
-                          <a href={pr.url} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-accent hover:underline">
-                            #{pr.number} <ExternalLink className="h-3 w-3" aria-hidden />
-                          </a>
+                          {/* provider-supplied URL: rendered as a link only when it is https (never javascript:/data:) */}
+                          {/^https:\/\//i.test(pr.url ?? "") ? (
+                            <a href={pr.url} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-accent hover:underline">
+                              #{pr.number} <ExternalLink className="h-3 w-3" aria-hidden />
+                            </a>
+                          ) : (
+                            <span>#{pr.number}</span>
+                          )}
                           <StatusBadge status={status} label={label} />
                           {pr.head_ref && (
                             <span className="text-xs text-ink-3">
@@ -91,15 +96,21 @@ export function RepositoryLinks({ repoId }: { repoId: string }) {
               ? none("Tidak ada integrasi; tidak ada izin tulis")
               : (
                   <span className="flex flex-wrap gap-2">
-                    {d.capability.write_enablement.map((w) => (
-                      <span key={w.integration_id} className="inline-flex items-center gap-1">
-                        {w.provider}/{w.purpose}
-                        <StatusBadge
-                          status={w.status === "ENABLED" ? "ENABLED" : "DISABLED"}
-                          label={w.status === "ENABLED" ? "Diizinkan (keputusan)" : "Belum diizinkan"}
-                        />
-                      </span>
-                    ))}
+                    {d.capability.write_enablement.map((w) => {
+                      // §26 per provider (flag + ACTIVE human decision), exactly as the write interlock checks it
+                      const [status, label] =
+                        w.status === "ENABLED"
+                          ? ["ENABLED", "Diizinkan (keputusan, per provider)"]
+                          : w.status === "NOT_APPLICABLE"
+                            ? ["NOT_APPLICABLE", "Bukan provider tulis"]
+                            : ["DISABLED", "Belum diizinkan"];
+                      return (
+                        <span key={w.integration_id} className="inline-flex items-center gap-1">
+                          {w.provider}/{w.purpose}
+                          <StatusBadge status={status} label={label} />
+                        </span>
+                      );
+                    })}
                   </span>
                 ),
           ],

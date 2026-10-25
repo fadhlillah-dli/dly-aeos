@@ -371,11 +371,93 @@ def test_role_eligibility_from_evaluation_bound_to_the_revision(db, fakes):
     rev = roles.role_revision(db, "feature-implementer")
     _eval_run(db, role_key="feature-implementer", configuration={"role_revision_hash": "sha256:old"})
     assert roles.role_evaluation(db, "feature-implementer", rev)["status"] == "STALE"  # other revision only
-    _eval_run(db, role_key="feature-implementer", configuration={"role_revision_hash": rev})
+    run = _eval_run(db, role_key="feature-implementer", configuration={"role_revision_hash": rev})
     assert roles.refresh_role_eval_status(db, "feature-implementer") == 1
     row = db.scalar(select(RoleSkillPack).where(RoleSkillPack.role_key == "feature-implementer"))
     assert row.eval_status == "PASS"
+    # §44 (review): the PASS result is eligibility only once the owner adopted it as a DecisionRecord
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert "ROLE_RESULT_NOT_ADOPTED" in _codes(adm)
+    assert adm.answers["role_eligibility"]["eligibility_basis"] == "EVALUATION_RESULT_NOT_ADOPTED"
+    scheduler.adopt_role_result(db, role_key="feature-implementer", eval_run_id=run.id, actor="user:owner",
+                                actor_user_id="owner", rationale="hasil eval diadopsi", decision_record=RECORD)
     assert scheduler.admission_check(db, specs[0].id).admitted
+
+
+def test_role_result_adoption_is_an_owner_decision_record(personal_client, db, fakes):
+    """§44 "Hasil routing/role/mode menjadi DecisionRecord: opsi, tujuan, evidence, cost/quality tradeoff, owner AUTH,
+    scope, versi dan kondisi yang membatalkannya" (review): a PASS role evaluation used to confer admission
+    eligibility by itself, with no owner AUTH, scope or invalidation condition."""
+    _p, _pv, specs = _env(db, fakes, [{"task_key": "a"}])
+    scheduler._set_setting(db, scheduler.KEY_ROLE_EVAL_FROM, "R0")
+    rev = roles.role_revision(db, "feature-implementer")
+    failed = _eval_run(db, role_key="feature-implementer", configuration={"role_revision_hash": rev}, accepted=0)
+    db.commit()
+    url = "/api/workforce/roles/feature-implementer/adopt"
+    body = {"eval_run_id": failed.id, "rationale": "adopsi hasil eval", "decision_record": RECORD}
+    r = personal_client.post(url, json=body)  # not a PASS result
+    assert r.status_code == 409 and r.json()["error"]["code"] == "ROLE_RESULT_NOT_ADOPTABLE"
+    run = _eval_run(db, role_key="feature-implementer", configuration={"role_revision_hash": rev})
+    db.commit()
+    r = personal_client.post(url, json={**body, "eval_run_id": run.id, "decision_record": {"goal": "x"}})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "DECISION_RECORD_INCOMPLETE"
+    # the generic decision endpoint can never record an adoption without these checks
+    g = personal_client.post("/api/decisions", json={"kind": "POLICY", "target_type": "role_adoption",
+                                                     "target_id": "feature-implementer", "auth_scope": {"x": "y"},
+                                                     "rationale": "adopsi lewat jalur umum"})
+    assert g.status_code == 422 and g.json()["error"]["code"] == "DEDICATED_ENDPOINT_REQUIRED"
+    # scoped to another project: this task stays not eligible
+    r = personal_client.post(url, json={**body, "eval_run_id": run.id, "scope": {"project_ids": ["other-project"]}})
+    assert r.status_code == 200, r.text
+    db.expire_all()
+    elig = scheduler.admission_check(db, specs[0].id).answers["role_eligibility"]
+    assert elig["eligible"] is False and "outside the adoption scope" in elig["adoption_problem"]
+    r = personal_client.post(url, json={**body, "eval_run_id": run.id, "scope": {"project_ids": [specs[0].project_id]}})
+    decision_id = r.json()["decision_id"]
+    db.expire_all()
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert adm.admitted and adm.answers["role_eligibility"]["eligibility_basis"] == "EVALUATION_RESULT"
+    d = db.get(Decision, decision_id)
+    assert d.kind == "POLICY" and d.actor_kind == "HUMAN" and d.target_hash == rev
+    assert d.details["decision_record"]["evidence_ids"] == [run.id] and d.details["eval_run_id"] == run.id
+    assert d.details["rollback"]["how"].startswith("revoke")
+    # a newer result of the same revision is a new result: the old adoption no longer applies
+    newer = _eval_run(db, role_key="feature-implementer", configuration={"role_revision_hash": rev})
+    newer.updated_at = utcnow() + timedelta(seconds=5)
+    db.flush()
+    assert "ROLE_RESULT_NOT_ADOPTED" in _codes(scheduler.admission_check(db, specs[0].id))
+    # revoking the adoption (rollback: the decision is no longer ACTIVE) returns the role to "not eligible"
+    db.rollback()
+    assert scheduler.admission_check(db, specs[0].id).admitted
+    db.get(Decision, decision_id).status = "INVALIDATED"
+    db.flush()
+    assert "ROLE_RESULT_NOT_ADOPTED" in _codes(scheduler.admission_check(db, specs[0].id))
+
+
+def test_role_adoption_through_the_real_registry_is_human_and_revision_bound(db):
+    """The scheduler tests stub the policy registry; this one records and reads the adoption through the real
+    decision registry: a human actor is required and the decision binds exactly the role revision."""
+    from aeos.core.errors import PolicyDenied
+    from tests.conftest import create_admin
+
+    seed.run(db)
+    owner = create_admin(db)
+    rev = roles.role_revision(db, "feature-implementer")
+    run = _eval_run(db, role_key="feature-implementer", configuration={"role_revision_hash": rev})
+    with pytest.raises(PolicyDenied):  # never an agent/unknown actor
+        scheduler.adopt_role_result(db, role_key="feature-implementer", eval_run_id=run.id, actor="worker:x",
+                                    actor_user_id="not-a-user", rationale="adopsi otomatis", decision_record=RECORD)
+    out = scheduler.adopt_role_result(db, role_key="feature-implementer", eval_run_id=run.id, actor=f"user:{owner.id}",
+                                      actor_user_id=owner.id, rationale="hasil eval diadopsi", decision_record=RECORD)
+    task = types.SimpleNamespace(role_key="feature-implementer", risk_class="R4", project_id="p", domain="PERSONAL")
+    decision, problem = scheduler.role_adoption(db, task, revision=rev, run_id=run.id)
+    assert decision is not None and decision.id == out["decision_id"] and problem is None
+    assert decision.actor_kind == "HUMAN" and decision.target_hash == rev
+    # another role revision (a changed RoleSkillPack) is never covered by this adoption
+    assert scheduler.role_adoption(db, task, revision="sha256:" + "0" * 64, run_id=run.id)[0] is None
+    elig = scheduler.role_eligibility(db, task)
+    assert elig["required"] and elig["eligible"] and elig["eligibility_basis"] == "EVALUATION_RESULT"
+    assert elig["adoption_decision_id"] == out["decision_id"]
 
 
 def test_owner_exception_admits_an_unevaluated_role(db, fakes):
@@ -413,8 +495,10 @@ def test_owner_tightens_the_role_evaluation_threshold(personal_client, db, fakes
     elig = adm.answers["role_eligibility"]
     assert "ROLE_NOT_EVALUATED" in _codes(adm) and elig["eligibility_basis"] == "NOT_ELIGIBLE"
     rev = roles.role_revision(db, "feature-implementer")
-    _eval_run(db, role_key="feature-implementer", configuration={"role_revision_hash": rev})
+    run = _eval_run(db, role_key="feature-implementer", configuration={"role_revision_hash": rev})
     roles.refresh_role_eval_status(db, "feature-implementer")
+    scheduler.adopt_role_result(db, role_key="feature-implementer", eval_run_id=run.id, actor="user:owner",
+                                actor_user_id="owner", rationale="hasil eval diadopsi", decision_record=RECORD)
     adm = scheduler.admission_check(db, specs[0].id)
     assert adm.admitted and adm.answers["role_eligibility"]["eligibility_basis"] == "EVALUATION_RESULT"
     from aeos.models.audit import AuditEvent

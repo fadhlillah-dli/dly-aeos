@@ -6,6 +6,7 @@ or exception is invented here (§02, §20).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -77,9 +78,14 @@ DECISION_RECORD_FIELDS: tuple[str, ...] = ("options", "goal", "evidence_ids", "c
 # authorisation + company-approved route; passing evaluation run + DecisionRecord). The generic decision endpoint
 # refuses them, so a decision on these targets can never skip those checks. (RETIREMENT is not a generic kind.)
 TARGET_OFFICE_ROUTE = "office_route"
+# §44 "Hasil routing/role/mode menjadi DecisionRecord": a PASS role evaluation becomes the basis of admission
+# eligibility only through the owner's adoption decision on role_adoption/<role_key>, bound to the role revision
+# and the exact EvalRun, carrying the DecisionRecord (workforce checks the evaluation before recording it).
+TARGET_ROLE_ADOPTION = "role_adoption"
 DEDICATED_TARGETS: dict[str, str] = {
     TARGET_OFFICE_ROUTE: "POST /api/policy/office/routes",
     TARGET_WORKFORCE: "POST /api/workforce/concurrency",
+    TARGET_ROLE_ADOPTION: "POST /api/workforce/roles/{role_key}/adopt",
 }
 # §41/§43 "Perubahan policy, model, tool schema, hooks, prompt/memory, fallback, context strategy tetap system
 # change dengan eval/decision/rollback": a generic POLICY decision on one of these targets changes how agents/models
@@ -89,7 +95,18 @@ SYSTEM_CHANGE_TARGET_TYPES = frozenset({
     "policy", "policy_rule", "agent_policy", "model", "model_id", "model_route", "route", "tool_schema", "tool_set",
     "tools", "hook", "hooks", "prompt", "prompt_revision", "memory", "memory_policy", "fallback", "fallback_chain",
     "context_strategy", "retrieval", "harness",
+    # §15 supervisor stage-model pin (planning_baseline/stage_models, read by planning.configured_stage_models) is a
+    # model change; §11 "Perubahan schema/tool/prompt/instruction/memory diperlakukan sebagai system change"
+    "planning_baseline", "stage_models", "supervisor", "instruction", "instructions", "schema", "skill", "skills",
+    "role_skill_pack", "agent_definition",
 })
+
+
+def system_change_target(target_type: str | None) -> bool:
+    """Whether a decision target is a §41/§43 system change. The spelling is normalised (case, ``-``, spaces, dots,
+    slashes -> ``_``) so a variant such as ``Tool-Schema`` never records an unevaluated system change."""
+    norm = re.sub(r"[^a-z0-9]+", "_", str(target_type or "").strip().lower()).strip("_")
+    return norm in SYSTEM_CHANGE_TARGET_TYPES
 # Kinds a human may record through the generic decision endpoint. APPROVAL/REJECTION/REVISION are
 # recorded only through the plan decision endpoint, bound to an exact PlanVersion + hash.
 GENERIC_DECISION_KINDS: tuple[str, ...] = ("EXCEPTION", "RISK_ACCEPTANCE", "WRITE_ENABLEMENT", "POLICY", "BUDGET")

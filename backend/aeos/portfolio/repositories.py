@@ -634,7 +634,6 @@ def repository_view(repo: RepositoryReference, *, summary: bool = False) -> dict
 def repository_detail(session: Session, repo: RepositoryReference) -> dict[str, Any]:
     """§37 user repository view: identity + base branch, PR/CI links, policy/capability and docs targets in one
     place (joined from delivery PR records, project integrations and WRITE_ENABLEMENT decisions)."""
-    from aeos.models.decisions import Decision
     from aeos.models.portfolio import ProjectIntegration
 
     view = repository_view(repo)
@@ -651,9 +650,11 @@ def repository_detail(session: Session, repo: RepositoryReference) -> dict[str, 
     except ImportError:  # delivery module absent: say so instead of an empty "no PRs"
         prs = []
     integrations = list(session.scalars(select(ProjectIntegration).where(ProjectIntegration.project_id == repo.project_id)))
-    enabled = {d.target_id: d.id for d in session.scalars(select(Decision).where(
-        Decision.kind == "WRITE_ENABLEMENT", Decision.status == "ACTIVE",
-        Decision.target_id.in_([i.id for i in integrations] or ["-"])))}
+    from aeos.policy import facade as policy
+
+    # §26 write enablement is per provider (flag + ACTIVE human decision on provider_write/<provider>), exactly as
+    # the interlock checks it; a decision shaped any other way (e.g. on an integration id) enables nothing
+    enabled = {i.id: policy.write_enablement(session, i.provider, domain=i.domain) for i in integrations}
     view.update({
         "base_branch": repo.default_branch,
         "pull_requests": prs,
@@ -663,7 +664,8 @@ def repository_detail(session: Session, repo: RepositoryReference) -> dict[str, 
                          for i in integrations if i.purpose == "docs"],
         "capability": {
             "write_enablement": [{"integration_id": i.id, "provider": i.provider, "purpose": i.purpose,
-                                  "decision_id": enabled.get(i.id), "status": "ENABLED" if i.id in enabled else "NOT_ENABLED"}
+                                  "decision_id": enabled[i.id]["decision_id"], "status": enabled[i.id]["status"],
+                                  "scope": "provider (every target of this provider)"}
                                  for i in integrations],
             "merge": "HUMAN_ONLY (AEOS never merges)",
         },

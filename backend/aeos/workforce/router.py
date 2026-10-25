@@ -246,6 +246,26 @@ def set_role_eval_threshold(body: RoleEvalThresholdIn, principal: AdminPrincipal
     return out
 
 
+class RoleAdoptIn(BaseModel):
+    eval_run_id: str = Field(min_length=1, max_length=64)  # the role's current PASS EvalRun
+    rationale: str = Field(min_length=5, max_length=2000)
+    # §44 DecisionRecord: options, goal, evidence_ids (default: the run), cost_quality_tradeoff, invalidate_if
+    decision_record: dict[str, Any] = Field(default_factory=dict)
+    # optional scope: project_ids / risk_classes / domains (empty = every task of this role)
+    scope: dict[str, list[str]] = Field(default_factory=dict)
+
+
+@router.post("/api/workforce/roles/{role_key}/adopt")
+def adopt_role_result(role_key: str, body: RoleAdoptIn, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
+    """Owner action (§44/§46): adopt the role's current PASS evaluation as its admission eligibility, recorded as a
+    human DecisionRecord bound to the role revision and the EvalRun."""
+    out = scheduler.adopt_role_result(db, role_key=role_key, eval_run_id=body.eval_run_id, actor=_actor(principal),
+                                      actor_user_id=principal.user.id, rationale=body.rationale,
+                                      decision_record=body.decision_record, scope=body.scope)
+    db.commit()
+    return out
+
+
 class RolePackImport(BaseModel):
     pack: dict[str, Any]
     source_url: str = Field(min_length=8, max_length=500)

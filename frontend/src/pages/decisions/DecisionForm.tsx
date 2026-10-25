@@ -239,7 +239,7 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
           <fieldset className="grid gap-3 rounded-md border border-line p-3 sm:grid-cols-2">
             <legend className="px-1 text-sm font-medium">System change (§41/§43)</legend>
             <p className="text-xs text-ink-3 sm:col-span-2">
-              Wajib bila target adalah policy, model/route, tool schema/tools, hooks, prompt, memory, fallback, context strategy, retrieval atau harness:
+              Wajib bila target adalah policy, model/route, pin model tahap (planning_baseline), tool schema/tools, hooks, prompt/instruction, schema, skill/agent definition, memory, fallback, context strategy, retrieval atau harness:
               EvalRun COMPLETED dengan semua gate PASS dan target rollback. Kebijakan tata kelola lain tercatat sebagai bukan system change.
             </p>
             <Field label="ID EvalRun bukti" hint="Pisahkan dengan koma.">
