@@ -311,6 +311,9 @@ def test_real_chromium_refuses_a_page_whose_prefilled_field_shows_a_credential(d
         db.add(ProjectIntegration(project_id=p.id, domain=p.domain, provider="deployment-target",
                                   purpose="staging", root_id=base, config={}))
         db.commit()
+        from tests.unit.test_deployment_support import make_staging_ready
+
+        make_staging_ready(db, p)  # a staging capture runs only while CAN_VALIDATE_STAGING is READY (cluster B)
         try:
             with pytest.raises(PolicyDenied) as ei:
                 shots.capture_screenshots(db, p, environment="staging", commit=SHA, routes=["/form"], actor="owner",
