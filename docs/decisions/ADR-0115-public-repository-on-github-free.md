@@ -62,7 +62,7 @@ available to public repositories on the Free plan.
   visibility, Settings -> Rules -> Rulesets for the ruleset, and Settings -> Code security for the
   security features.
 
-## Amendment 2026-10-26 — Intel macOS and Command Prompt
+## Amendment 2026-10-26 — host platforms (Intel macOS added, Linux removed) and Command Prompt
 
 1. The backend suite and the bootstrap also run on `macos-26-intel` (x86_64). `macos-latest` is Apple
    Silicon (arm64), and both Mac architectures are target hosts, so neither one stands in for the other.
@@ -70,3 +70,12 @@ available to public repositories on the Free plan.
 2. `aeos.cmd` starts the CLI from Command Prompt (cmd.exe), where `.\aeos.ps1` opens in an editor instead
    of running. `tests/unit/test_bootstrap_scripts.py` runs it on Windows, including the case where the
    virtual environment is missing.
+3. **Linux removed from the host matrix (owner decision 2026-10-26).** The owner runs only Windows and macOS.
+   The backend suite and the bootstrap now run on `windows-latest`, `macos-latest` and `macos-26-intel`.
+   Linux host support becomes NOT-PROVEN: `bootstrap.sh`, XDG paths and the `sys.platform` branches stay
+   in place but no longer run in CI. Two checks that used to run only on Linux moved to the macOS arm64
+   job: mypy now checks both `--platform darwin` and `--platform win32`, which are the code paths the
+   owner's hosts execute, and the real trusted-suite verifier test moved there too. The frontend, browser
+   e2e and supply-chain jobs stay on `ubuntu-latest` runners. They check platform-neutral artifacts, not
+   Linux host support, and finish fastest there. The CI wall clock is set by the slowest job, the Windows
+   suite, so removing the Linux jobs saves runner time rather than waiting time.
