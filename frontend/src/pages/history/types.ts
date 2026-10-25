@@ -127,6 +127,13 @@ export interface ReleaseRow {
   built_at: string;
   integrity: string;
   role: string;
+  /** Pinned Control Center bundle; null = the release carries no UI bundle. */
+  ui?: {
+    sha256: string | null;
+    commit_correspondence: "VERIFIED" | "UNVERIFIED" | "MISMATCH" | string;
+    reason: string | null;
+    frontend_tree: string | null;
+  } | null;
 }
 
 export interface ReleasePointer {
@@ -183,6 +190,17 @@ export interface RetirementItem {
   status: string;
   detail: Record<string, unknown>;
   owner_action: string;
+  /** The owner's recorded workflow step (PUT .../steps/{key}); null/absent = not recorded. */
+  recorded?: RetirementStep | null;
+}
+
+export interface RetirementStep {
+  status: string;
+  owner: string;
+  evidence_ids: string[];
+  note: string;
+  by: string;
+  at: string;
 }
 
 export interface RetirementChecklist {

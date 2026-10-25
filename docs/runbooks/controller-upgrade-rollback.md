@@ -26,13 +26,18 @@ SUPER_ADMIN account.
 1. Make sure the working tree is clean and on the merged `main` commit:
    `git switch main && git pull --ff-only && git status`.
 2. **Build**: `aeos ops release build` — refuses dirty trees, commits that are not reachable
-   from `main`, and commits without acceptance: trusted provider-CI PASS for that exact commit
-   (sync CI evidence first), or an owner exception
-   `aeos ops release accept --commit <full sha> --operator <you> --reason "..."`. Writes the zip,
-   the pinned UI bundle (`frontend/dist`, run `npm run build` first) and
-   `<release>.provenance.json` (commit, tree hash, artifact SHA-256, UI SHA-256, schema head,
-   acceptance basis, built_at, builder).
-3. **Review** `aeos ops release list` (integrity must be OK).
+   from `main`, and commits without acceptance: trusted provider-CI PASS for that exact commit,
+   or an owner exception
+   `aeos ops release accept --commit <full sha> --operator <you> --reason "..."`. Provider-CI
+   evidence is recorded only when a pull request opened through AEOS is synced
+   (`aeos delivery sync-pr` or the PR page); a `main` commit from a pull request AEOS did not open
+   has no CI-sync path, so check its CI in the provider and record the owner exception. Writes the
+   zip, the pinned UI bundle (`frontend/dist`, run `npm run build` first in a clean checkout of that
+   commit) and `<release>.provenance.json` (commit, tree hash, artifact SHA-256, UI SHA-256 and UI
+   commit correspondence, schema head, acceptance basis, built_at, builder). The build prints
+   `ui bundle: <sha> (commit correspondence VERIFIED)`, or UNVERIFIED with the reason.
+3. **Review** `aeos ops release list` (integrity must be OK; `ui=` should be VERIFIED - an
+   UNVERIFIED bundle means the approval UI was not proven to come from this commit).
 4. **Promote**: `aeos ops release promote <release_id> --operator <your-username> --reason "..."`
    and type `promote`. The command:
    1. records the PROMOTION decision (fails closed if it cannot be recorded),
@@ -82,7 +87,8 @@ SUPER_ADMIN account.
 ## Known limits
 
 * The promoted artifact is a source archive run with the checkout's virtual environment. The UI
-  bundle is pinned by hash when the release is built, but that it was built from the released
-  commit is UNVERIFIED.
+  bundle is pinned by hash when the release is built; that it was built from the released commit
+  is VERIFIED only through the Vite build record of a clean frontend tree, otherwise UNVERIFIED.
+* No release has been built or promoted on the build host yet (NOT-PROVEN).
 * The smoke test proves the app factory starts, serves `/api/health` and a functional path against
   a migrated copy of the database; it does not prove every feature works (run the test suite / CI).

@@ -4,7 +4,21 @@ import { OpsBadge } from "../../components/control_center/OpsBadge";
 import { Provenance } from "../../components/control_center/Provenance";
 import { Card, EmptyState, ErrorBox, KeyValue, Loading, Mono, Notice, Table } from "../../components/ui";
 import { absoluteTime, relativeTime, shortHash } from "../../lib/format";
-import type { ReleaseList, ReleasePointer } from "./types";
+import type { ReleaseList, ReleasePointer, ReleaseRow } from "./types";
+
+/** Whether the pinned UI bundle was built from the release commit's frontend tree (§09 zone 3): the recorded
+ * value from the provenance, never assumed. UNVERIFIED shows its reason. */
+export function UiCorrespondence({ ui }: { ui: ReleaseRow["ui"] }) {
+  if (!ui) return <OpsBadge status="NOT_APPLICABLE" label="Tanpa bundle UI" />;
+  const corr = ui.commit_correspondence;
+  const label = corr === "VERIFIED" ? "UI = commit (terverifikasi)" : corr === "MISMATCH" ? "UI dari tree lain" : "UI belum terverifikasi";
+  return (
+    <span className="inline-flex flex-col gap-0.5">
+      <OpsBadge status={corr === "MISMATCH" ? "FAILED" : corr} label={label} />
+      {corr !== "VERIFIED" && ui.reason && <span className="text-xs text-ink-3">{ui.reason}</span>}
+    </span>
+  );
+}
 
 function PointerCard({ title, p }: { title: string; p: ReleasePointer | null }) {
   return (
@@ -55,6 +69,7 @@ export function ReleasesTab() {
             { header: "Integritas", cell: (r) => <OpsBadge status={r.integrity} /> },
             { header: "Commit", cell: (r) => <Mono>{r.commit.slice(0, 12)}</Mono> },
             { header: "Artifact", cell: (r) => <Mono>{shortHash(r.artifact_sha256)}</Mono> },
+            { header: "Bundle UI", cell: (r) => <UiCorrespondence ui={r.ui ?? null} /> },
             { header: "Schema head", cell: (r) => r.schema_head ?? "create_all" },
             { header: "Dibangun", cell: (r) => <span title={absoluteTime(r.built_at)}>{relativeTime(r.built_at)}</span> },
           ]}

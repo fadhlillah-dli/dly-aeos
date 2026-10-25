@@ -422,6 +422,17 @@ def artifact_integrity(settings: Settings, prov: dict[str, Any]) -> str:
     return "OK"
 
 
+def _ui_summary(ui: Any) -> dict[str, Any] | None:
+    """The pinned Control Center bundle as recorded in the provenance: its digest and whether it corresponds to
+    the release commit (VERIFIED / UNVERIFIED + reason). None = the release carries no UI bundle."""
+    if not isinstance(ui, dict):
+        return None
+    corr = ui.get("commit_correspondence") or "UNVERIFIED"  # provenance from before the record: never assumed
+    return {"sha256": ui.get("sha256"), "commit_correspondence": corr,
+            "reason": (ui.get("correspondence") or {}).get("reason"),
+            "frontend_tree": (ui.get("correspondence") or {}).get("bundle_frontend_tree")}
+
+
 def list_releases(settings: Settings) -> dict[str, Any]:
     out_dir = settings.layout.released_controller
     pointer = read_pointer(settings)
@@ -441,6 +452,7 @@ def list_releases(settings: Settings) -> dict[str, Any]:
                 "built_at": prov.get("built_at"), "builder": (prov.get("builder") or {}).get("actor"),
                 "integrity": artifact_integrity(settings, prov),
                 "role": "ACTIVE" if rid == active_id else "PREVIOUS" if rid == prev_id else "AVAILABLE",
+                "ui": _ui_summary(prov.get("ui")),
             })
     items.sort(key=lambda i: i.get("built_at") or "", reverse=True)
     return {"items": items, "active": pointer.get("active"), "previous": pointer.get("previous"),
