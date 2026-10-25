@@ -18,6 +18,11 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
   const [evalRuns, setEvalRuns] = useState("");
   const [recTraining, setRecTraining] = useState<"" | "yes" | "no">("");
   const [recTrial, setRecTrial] = useState<"" | "yes" | "no">("");
+  // §44 DecisionRecord of an APPROVED adoption: options weighed, goal, cost/quality trade-off, invalidation condition
+  const [options, setOptions] = useState("");
+  const [goal, setGoal] = useState("");
+  const [tradeoff, setTradeoff] = useState("");
+  const [invalidateIf, setInvalidateIf] = useState("");
   const activate = useActivateRoute(route.route_key);
   const paid = !route.effectively_free;
   // §23 "klaim provider bukan bukti": UNKNOWN training/trial terms limit the route to PUBLIC until the owner records
@@ -33,11 +38,13 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
   const restricted = (Boolean(route.terms_restriction) && !recordClears) || flagRestricted;
   const decisionKind = mode === "APPROVED" ? "ROUTE_ACTIVATION" : "TRIAL";
   const evalRunIds = evalRuns.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+  const optionList = options.split(/\n/).map((x) => x.trim()).filter(Boolean);
+  const recordFilled = optionList.length > 0 && goal.trim().length > 0 && tradeoff.trim().length > 0 && invalidateIf.trim().length > 0;
   const canSubmit =
     rationale.trim().length >= 10 &&
     classes.length > 0 &&
     (!paid || budgetId.trim().length > 0) &&
-    (mode !== "APPROVED" || evalRunIds.length > 0) &&
+    (mode !== "APPROVED" || (evalRunIds.length > 0 && recordFilled)) &&
     (!route.region_restricted || region.trim().length >= 2) &&
     (!recordStarted || recordComplete) &&
     (!restricted || classes.every((c) => c === "PUBLIC"));
@@ -60,6 +67,10 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
           ? { may_use_inputs_for_training: recTraining === "yes", trial_only_no_confidential: recTrial === "yes", note: termsNote.trim() }
           : null,
         eval_run_ids: mode === "APPROVED" ? evalRunIds : null,
+        decision_record:
+          mode === "APPROVED"
+            ? { options: optionList, goal: goal.trim(), cost_quality_tradeoff: tradeoff.trim(), invalidate_if: invalidateIf.trim() }
+            : null,
       },
       { onSuccess: onClose },
     );
@@ -103,6 +114,21 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
               <Field label="ID EvalRun bukti (wajib untuk APPROVED)" hint="Pisahkan dengan koma; run konfigurasi lain atau yang gagal gate ditolak backend.">
                 <input className={inputClass} value={evalRuns} onChange={(e) => setEvalRuns(e.target.value)} placeholder="uuid EvalRun" />
               </Field>
+              <fieldset className="rounded border border-line p-3">
+                <legend className="px-1 text-sm font-medium">Catatan keputusan (DecisionRecord §44, wajib)</legend>
+                <Field label="Opsi yang dipertimbangkan" hint="Satu opsi per baris, mis. tetap TRIAL / APPROVED / rute lain.">
+                  <textarea className={inputClass} rows={2} value={options} onChange={(e) => setOptions(e.target.value)} />
+                </Field>
+                <Field label="Tujuan">
+                  <input className={inputClass} value={goal} onChange={(e) => setGoal(e.target.value)} />
+                </Field>
+                <Field label="Trade-off biaya/kualitas">
+                  <input className={inputClass} value={tradeoff} onChange={(e) => setTradeoff(e.target.value)} />
+                </Field>
+                <Field label="Batal berlaku bila" hint="Kondisi yang membuat keputusan ini tidak berlaku lagi.">
+                  <input className={inputClass} value={invalidateIf} onChange={(e) => setInvalidateIf(e.target.value)} />
+                </Field>
+              </fieldset>
             </>
           )}
           <Field label="Alasan (wajib)" hint="Minimal 10 karakter; tersimpan pada keputusan dan audit.">

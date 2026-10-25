@@ -94,6 +94,39 @@ def _exception_shape(domain: Domain, *, exception: str | None, target_type: str 
     return spec.target_type, spec.target_id, out, ops or list(spec.allowed_operations)
 
 
+def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids: Any,
+                           rollback_target: Any) -> dict[str, Any]:
+    """§41/§43: validate the evaluation and rollback of a system change (policy/model/tools/hooks/prompt/memory/
+    fallback/context strategy). Every named run must be a COMPLETED evaluation whose gates all PASS, planned in this
+    domain or the platform; the rollback target names what the change replaces. Returns the stored record."""
+    from aeos.models.research import EvalRun
+
+    ids = [str(i).strip() for i in (eval_run_ids if isinstance(eval_run_ids, list) else []) if str(i).strip()]
+    rollback = str(rollback_target or "").strip()
+    problems: list[str] = []
+    if not ids:
+        problems.append("no evaluation run (system_change.eval_run_ids)")
+    runs = []
+    for rid in dict.fromkeys(ids):
+        run = session.get(EvalRun, rid)
+        if run is None or run.submitted_domain not in (None, domain):
+            problems.append(f"evaluation run {rid} not found in this domain")
+            continue
+        gates = {k: str(v).upper() for k, v in (run.gate_results or {}).items()}
+        if run.status != "COMPLETED" or not gates or any(v != "PASS" for v in gates.values()):
+            problems.append(f"evaluation run {rid} is {run.status} with gates {gates or 'none'} (needs COMPLETED, "
+                            "every gate PASS)")
+            continue
+        runs.append({"id": run.id, "suite_key": run.suite_key, "configuration_hash": run.configuration_hash})
+    if len(rollback) < 3:
+        problems.append("no rollback target (system_change.rollback_target: the version/config/decision it replaces)")
+    if problems:
+        raise ValidationFailed("a system change (§41/§43) needs evaluation and a rollback target: "
+                               + "; ".join(problems), code="SYSTEM_CHANGE_EVIDENCE_REQUIRED",
+                               details={"problems": problems})
+    return {"class": "SYSTEM_CHANGE", "evaluation": "EVALUATED", "eval_runs": runs, "rollback_target": rollback[:256]}
+
+
 def record_generic_decision(
     session: Session, *, actor_user_id: str, domain: Domain, kind: str, rationale: str,
     auth_scope: dict[str, Any], project_id: str | None = None, target_type: str | None = None,
@@ -176,6 +209,21 @@ def record_generic_decision(
             target_type, target_id = catalog.TARGET_OFFICE_POLICY, Domain.OFFICE.value
         else:
             target_type, target_id = _require_target(kind, target_type, target_id)
+        given = details.pop("system_change", None)
+        if catalog.system_change_target(target_type):
+            sc = given if isinstance(given, dict) else {}
+            ids = list(sc.get("eval_run_ids") or []) if isinstance(sc.get("eval_run_ids"), list) else []
+            if details.get("eval_run_id"):
+                # a consumer that reads details.eval_run_id (planning_baseline/stage_models) is held to the same
+                # validated run: it is part of the system-change evidence, never a second unchecked reference
+                ids.append(str(details["eval_run_id"]))
+            details["system_change"] = system_change_evidence(
+                session, domain=domain.value, eval_run_ids=ids, rollback_target=sc.get("rollback_target"))
+        else:
+            # governance/convention policy: not an agent/model configuration change; stated, never implied evaluated
+            details["system_change"] = {"class": "NOT_A_SYSTEM_CHANGE", "evaluation": "NOT_APPLICABLE",
+                                        "note": f"{target_type} is not a policy/model/tool/hook/prompt/memory/"
+                                                "fallback/context-strategy target"}
     else:  # BUDGET: semantics owned by the cost module; the registry records the human decision.
         target_type, target_id = _require_target(kind, target_type, target_id)
         details.setdefault("handled_by", "aeos.cost")

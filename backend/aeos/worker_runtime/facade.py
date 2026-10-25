@@ -48,3 +48,21 @@ def sandbox_readiness(session: Any, *, domain: str) -> dict[str, Any]:
     from aeos.worker_runtime.sandbox import sandbox_readiness as impl
 
     return impl(session, domain=domain)
+
+
+def enforced_run_limits(limits: dict[str, Any] | None, *, sandbox_kind: str | None) -> dict[str, Any]:
+    """The per-run compute this runtime ENFORCES for a TaskSpec's limits (§19, §22): ``memory_mb`` is the process
+    watchdog's RSS cap (+ Windows job memory limit) or docker ``--memory``; ``cpus`` is docker ``--cpus`` in the
+    container sandbox (the process sandbox has no CPU cap: there ``limits.max_cpus`` is a reservation only)."""
+    from aeos.worker_runtime import container, processes
+
+    lim = limits or {}
+    if sandbox_kind == "container":
+        cl = container.limits_for(lim)
+        return {"memory_mb": int(str(cl["memory"]).rstrip("m")), "cpus": float(cl["cpus"]), "cpu_enforced": True}
+    try:
+        cpus = float(lim.get("max_cpus") or 1)
+    except (TypeError, ValueError):
+        cpus = 1.0
+    return {"memory_mb": int(processes.ResourceLimits.from_task(lim).max_memory_mb), "cpus": cpus,
+            "cpu_enforced": False}

@@ -330,6 +330,62 @@ def test_manifest_pin_reads_the_reviewed_manifest(tmp_path):
     assert installer.manifest_pin() is None  # the repository manifest has no approved pin yet (owner decision)
 
 
+def _manifest_digest(monkeypatch, pin: str | None, digest: str | None) -> None:
+    monkeypatch.setattr(installer, "manifest_pin", lambda root=None: pin)
+    monkeypatch.setattr(installer, "manifest_digest", lambda root=None: digest)
+
+
+def test_install_checks_the_manifest_approved_digest_before_installing(settings, monkeypatch):
+    """§07 (re-audit): the installer used to compare the archive only with checksums.txt of the same release;
+    the owner's approved_digest was checked only by post-install drift. A wrong binary is now refused before it
+    is written, and the installed binary's digest is recorded for the drift check."""
+    good = "sha256:" + hashlib.sha256(b"fake-bao-binary").hexdigest()
+    _manifest_digest(monkeypatch, "2.7.1", "sha256:" + "f" * 64)  # the reviewed digest is NOT this release's binary
+    with respx.mock(assert_all_called=False) as m:
+        _mock_release(m)
+        r = runner.invoke(app, ["vault", "install", "--yes"])
+    assert r.exit_code == 1 and "differs from the install-manifest approved_digest" in r.output, r.output
+    assert "REQUIRED" in r.output and not (settings.data_dir / "bin" / installer.binary_name()).exists()
+
+    _manifest_digest(monkeypatch, "2.7.1", good)
+    with respx.mock(assert_all_called=False) as m:
+        _mock_release(m)
+        r = runner.invoke(app, ["vault", "install", "--yes"])
+    assert r.exit_code == 0, r.output
+    assert "matched the install-manifest approved_digest" in r.output
+    from aeos.core.db import session_scope
+    from aeos.models.inventory import ComponentObservation
+
+    with session_scope() as s:
+        obs = s.query(ComponentObservation).filter_by(component_id="openbao", dimension="installation").all()
+        assert any(o.observed_identity == good and o.status == "INSTALLED" for o in obs)
+
+
+def test_install_states_when_no_reviewed_digest_applies(settings, monkeypatch):
+    _manifest_digest(monkeypatch, "2.7.1", None)  # pin recorded, digest not (owner step)
+    with respx.mock(assert_all_called=False) as m:
+        _mock_release(m)
+        r = runner.invoke(app, ["vault", "install", "--yes"])
+    assert r.exit_code == 0 and "NOT_RECORDED" in r.output and "NOT checked against a reviewed digest" in r.output
+    _manifest_digest(monkeypatch, "2.6.0", "sha256:" + "f" * 64)  # explicit other version: the digest is not its own
+    plan = installer.digest_requirement("2.7.1")
+    assert plan["digest_status"] == "NOT_APPLICABLE" and plan["approved_digest"] is None
+
+
+def test_manifest_digest_is_read_and_a_malformed_one_fails_closed(tmp_path):
+    (tmp_path / "install-manifest").mkdir()
+    path = tmp_path / "install-manifest" / "manifest.yaml"
+    path.write_text("components:\n  - component_id: openbao\n    approved_pin: 2.7.1\n"
+                    f"    approved_digest: SHA256:{'A' * 64}\n", encoding="utf-8")
+    assert installer.manifest_digest(tmp_path) == "sha256:" + "a" * 64
+    assert installer.digest_requirement("2.7.1", tmp_path)["digest_status"] == "REQUIRED"
+    path.write_text("components:\n  - component_id: openbao\n    approved_pin: 2.7.1\n    approved_digest: abc\n",
+                    encoding="utf-8")
+    with pytest.raises(installer.InstallError):
+        installer.manifest_digest(tmp_path)
+    assert installer.manifest_digest() is None  # the repository manifest has no approved digest yet (owner step)
+
+
 def test_install_remedies_never_suggest_a_command_the_cli_refuses(settings, monkeypatch):
     """Review finding: with no approved pin `aeos vault install` is refused, so the Doctor/health remedies must
     name the exact-version form; with a pin the plain command is offered."""

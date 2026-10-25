@@ -87,3 +87,25 @@ def blast_radius(session: Session, component_id: str, *, domain: str | None,
     from aeos.inventory.views import blast_radius as impl
 
     return impl(session, component_id, domain=domain, direction=direction)
+
+
+def component_visible(comp: ComponentReference, domain: str | None) -> bool:
+    """§23/§38 scope rule: a PLATFORM component is shared; a PERSONAL-only / OFFICE-only one exists only in its
+    own domain."""
+    from aeos.inventory.views import visible
+
+    return visible(comp, domain)
+
+
+def relation_visible(rel: ComponentRelation, domain: str | None) -> bool:
+    """A relation tagged with a domain is only that domain's record (untagged = shared)."""
+    from aeos.inventory.views import _relation_visible
+
+    return _relation_visible(rel, domain)
+
+
+def observation_visible(obs: ComponentObservation, domain: str | None) -> bool:
+    """An observation tagged with a domain is only that domain's evidence (untagged = shared)."""
+    from aeos.inventory.views import _obs_visible
+
+    return _obs_visible(obs, domain)
