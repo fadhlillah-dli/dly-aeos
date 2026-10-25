@@ -142,6 +142,16 @@ def test_seed_corrects_untouched_rows_and_never_rewrites_an_activated_one(world,
     assert shape["code"] == "ROUTE_ENDPOINT_SUPERSEDED" and "aeos seed" in shape["problem"]
     assert any("ROUTE_ENDPOINT_SUPERSEDED" in x for x in service.request_shape_rejections(glm))
     assert seed.run(db)["request_shape_corrected"] == []  # idempotent
+    # the owner's way out of "pending": disabling invalidates its decisions, so the next seed corrects the request
+    # shape only - the route stays DISABLED until the owner activates the corrected configuration
+    service.disable_route(db, GLM, reason="superseded seed endpoint")
+    out = seed.run(db)
+    assert out["request_shape_corrected"] == [GLM] and out["request_shape_pending"] == []
+    glm = service.get_route(db, GLM)
+    assert glm.status == "DISABLED" and glm.endpoint == "https://opencode.ai/inference/openai/v1"
+    assert glm.config_hash == service.compute_config_hash(glm) != old[GLM]
+    assert broker.upstream_request_shape(glm)["code"] is None
+    assert seed.run(db)["request_shape_corrected"] == []
 
 
 # ------------------------------------------------------------------------------------------- feasibility probe
@@ -266,6 +276,26 @@ def test_worker_proxy_on_the_seeded_zen_route_sends_the_bare_model_and_never_the
     req = db.scalar(select(BrokerRequest).where(BrokerRequest.outcome == "OK"))
     assert req.upstream_model == "deepseek-v4.1-flash-free"
     assert req.reasoning_effort == "NOT_SENT" and req.reasoning_requested == "high"  # dropped, and observed
+
+
+def test_a_worker_sent_reasoning_value_is_recorded_only_as_a_known_level(world, db, proxy):
+    from aeos.models.audit import Event
+
+    _trial(db, world, DS, client_terms=OWNER_CLIENT_TERMS)
+    junk = "free-text-" + "q" * 30  # the worker is untrusted: its free text is never persisted
+    with respx.mock(assert_all_mocked=True) as mock:
+        up = mock.post(ZEN_CHAT).mock(return_value=httpx.Response(200, json=_ok("deepseek-v4.1-flash-free")))
+        assert _call(proxy, reasoning_effort=junk).status_code == 200
+        assert _call(proxy, reasoning={"effort": "xhigh"}).status_code == 200  # OpenRouter-style field, dropped too
+        assert _call(proxy).status_code == 200
+        sent = [json.loads(c.request.content) for c in up.calls]
+    assert len(sent) == 3 and all("reasoning_effort" not in b and "reasoning" not in b for b in sent)
+    db.expire_all()
+    reqs = db.scalars(select(BrokerRequest).where(BrokerRequest.outcome == "OK")).all()
+    assert sorted(str(r.reasoning_requested) for r in reqs) == ["None", "UNRECOGNISED", "xhigh"]
+    assert all(r.reasoning_effort == "NOT_SENT" for r in reqs)
+    payloads = json.dumps([e.payload for e in db.scalars(select(Event).where(Event.kind == "run.model_call"))])
+    assert junk not in payloads and "UNRECOGNISED" in payloads
 
 
 def test_a_reasoning_level_is_route_configuration_never_the_workers(world, db, proxy):

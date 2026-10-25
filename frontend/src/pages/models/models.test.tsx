@@ -382,12 +382,18 @@ describe("Models & Routes page", () => {
     expect(save).toBeDisabled();
     expect(within(drawer).getByText(/Hanya http pada 127\.0\.0\.1/)).toBeInTheDocument();
     fireEvent.change(within(drawer).getByRole("textbox", { name: "Endpoint loopback" }), { target: { value: "http://127.0.0.1:8080/v1" } });
+    // §23 LOCAL: the build is part of the configuration identity, stated with the endpoint
+    fireEvent.change(within(drawer).getByRole("textbox", { name: "Kuantisasi" }), { target: { value: "Q4_K_M" } });
+    fireEvent.change(within(drawer).getByRole("textbox", { name: "Backend inferensi" }), { target: { value: "llama.cpp-b5000" } });
     expect(save).not.toBeDisabled();
     fireEvent.click(save);
     await waitFor(() => expect(calls.some((c) => c.url.endsWith("/endpoint") && c.method === "POST")).toBe(true));
     expect(JSON.parse(calls.find((c) => c.url.endsWith("/endpoint"))!.body!)).toMatchObject({
       endpoint: "http://127.0.0.1:8080/v1",
       rationale: "server llama.cpp lokal",
+      quantization: "Q4_K_M",
+      inference_backend: "llama.cpp-b5000",
+      hardware: null,
     });
   });
 

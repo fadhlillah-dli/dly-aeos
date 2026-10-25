@@ -211,9 +211,11 @@ documentation). The client-restriction question in "Owner decision required" bel
    (`ROUTE_REQUEST_SHAPE_REFUSED`), so no decision is ever recorded for a request the broker would not send.
 3. **Seed backfill, never a silent rewrite of an owner decision.** `aeos seed` corrects untouched SEED CANDIDATE rows
    (endpoint, `upstream_model`/`upstream_api`/`reasoning`, client restriction) and recomputes their hash - a
-   CANDIDATE carries no approval, so nothing is invalidated (`request_shape_corrected`). A row the owner activated,
-   disabled or edited is not rewritten; it is listed in `request_shape_pending` and refused by the broker until the
-   owner re-reviews it. Migration `0006_w7c1_broker_reasoning` changes no route data for the same reason.
+   CANDIDATE carries no approval, so nothing is invalidated (`request_shape_corrected`). A TRIAL/APPROVED row is not
+   rewritten; it is listed in `request_shape_pending` and refused by the broker (`ROUTE_ENDPOINT_SUPERSEDED`). The
+   owner's way out: `aeos routes disable <key>` (its decisions are invalidated), then `aeos seed` - a DISABLED seed
+   row on a superseded endpoint gets only the request-shape correction and stays DISABLED - then a new activation of
+   the corrected configuration. Migration `0006_w7c1_broker_reasoning` changes no route data for the same reason.
 4. **Client restriction recorded, fail closed.** Every free Zen route carries `data_terms.client_restriction`
    (statement, source, `applies_to`, `owner_decision: UNDECIDED`). Until the owner decides: activation is refused
    (`CLIENT_TERMS_DECISION_REQUIRED`), routing rejects the route, the broker refuses to proxy or probe it

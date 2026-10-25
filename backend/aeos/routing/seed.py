@@ -299,10 +299,12 @@ def run(session: Session) -> dict[str, Any]:
     the C5 amendment: the placeholder tool set becomes the reviewable candidate tool set, the local build
     parameters are stated, and a seeded research date is no longer kept as a terms check - and to the
     2026-10-25 amendment: the superseded Zen/Gemini endpoints become the documented ones, the bare upstream model
-    id / API / reasoning marker are stated and the S07 client restriction is recorded. A row that is NOT an untouched
-    CANDIDATE (the owner activated, disabled or edited it) is never rewritten: rewriting it would silently void the
-    owner's decision. It is listed in ``request_shape_pending`` and the broker refuses its superseded endpoint
-    (``ROUTE_ENDPOINT_SUPERSEDED``) until the owner re-reviews it."""
+    id / API / reasoning marker are stated and the S07 client restriction is recorded. A TRIAL/APPROVED row is never
+    rewritten: rewriting it would silently void the owner's decision. It is listed in ``request_shape_pending`` and
+    the broker refuses its superseded endpoint (``ROUTE_ENDPOINT_SUPERSEDED``). The owner's way out: ``aeos routes
+    disable <key>`` (which invalidates its decisions), then ``aeos seed`` - a DISABLED seed row on a superseded
+    endpoint gets only the request-shape correction (nothing active to void; it stays DISABLED) - then activate the
+    corrected configuration."""
     created = updated = existing = backfilled = terms_reset = 0
     corrected: list[str] = []
     pending: list[str] = []
@@ -320,7 +322,15 @@ def run(session: Session) -> dict[str, Any]:
             created += 1
             continue
         existing += 1
-        if row.origin == "SEED" and row.status != "CANDIDATE" and (row.endpoint or "").rstrip("/") in SUPERSEDED_ENDPOINTS:
+        superseded = (row.endpoint or "").rstrip("/") in SUPERSEDED_ENDPOINTS
+        if row.origin == "SEED" and row.status == "DISABLED" and superseded:
+            # the owner's way out of request_shape_pending: a DISABLED row holds no active decision (disabling
+            # invalidated them), so correcting its request shape voids nothing; it stays DISABLED until re-activated
+            if _correct_request_shape(row, spec, mode_params):
+                row.config_hash = compute_config_hash(row)
+                corrected.append(row.route_key)
+            continue
+        if row.origin == "SEED" and row.status != "CANDIDATE" and superseded:
             pending.append(row.route_key)
         if row.origin == "SEED" and row.status == "CANDIDATE":
             changed = False

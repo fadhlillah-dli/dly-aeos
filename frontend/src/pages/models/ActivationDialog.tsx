@@ -198,7 +198,8 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
               <p className="mb-2 text-xs text-ink-3">
                 Penyedia menyatakan: “{route.client_restriction?.statement ?? "UNKNOWN"}” ({route.client_restriction?.source ?? "sumber UNKNOWN"}).
                 Broker AEOS memanggil upstream sebagai klien HTTP sendiri, bukan OpenCode; panggilan bisa ditolak dan itu baru terbukti lewat
-                probe kelayakan. Pilihan lain: OpenCode Go, atau rute berbayar dengan keputusan BUDGET (ADR-0041).
+                probe kelayakan. Memilih ini berarti Anda sendiri yang menilai dan menanggung kepatuhan pada syarat penyedia; AEOS
+                tidak memilih untuk Anda. Pilihan lain: OpenCode Go, atau rute berbayar dengan keputusan BUDGET (ADR-0041).
               </p>
               <label className="flex items-start gap-2 text-sm">
                 <input type="checkbox" checked={clientAccepted} onChange={(e) => setClientAccepted(e.target.checked)} />

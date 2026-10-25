@@ -230,6 +230,25 @@ def route_reasoning_effort(route: ModelRoute) -> tuple[str | None, str | None]:
                   f"({', '.join(REASONING_LEVELS)}) nor a default marker ({', '.join(REASONING_DEFAULT_MARKERS)})")
 
 
+REASONING_UNRECOGNISED = "UNRECOGNISED"  # BrokerRequest.reasoning_requested for a value that is not a known level
+
+
+def requested_reasoning(body: dict[str, Any]) -> str | None:
+    """The reasoning level the worker asked for (``reasoning_effort``, or the OpenRouter-style ``reasoning.effort``);
+    neither is ever forwarded. The worker is untrusted, so its free text is never persisted: a known level is
+    recorded as such, anything else as ``UNRECOGNISED``. None = the worker asked for nothing."""
+    from aeos.broker.facade import REASONING_LEVELS
+
+    value: Any = body.get("reasoning_effort")
+    if value is None and isinstance(body.get("reasoning"), dict):
+        value = body["reasoning"].get("effort", REASONING_UNRECOGNISED)
+    elif value is None and body.get("reasoning") is not None:
+        value = REASONING_UNRECOGNISED
+    if value is None:
+        return None
+    return value if isinstance(value, str) and value in REASONING_LEVELS else REASONING_UNRECOGNISED
+
+
 def request_shape(route: ModelRoute) -> dict[str, Any]:
     """The upstream request the broker would build for *route* (no secret, no DB), with the refusal code/reason
     when it would not build one. The route view shows the same verdict the boundary applies."""
@@ -261,7 +280,8 @@ def request_shape(route: ModelRoute) -> dict[str, Any]:
             return refuse("ROUTE_ENDPOINT_SUPERSEDED",
                           f"endpoint {base} is a superseded seed value; the provider documents "
                           f"{SUPERSEDED_ENDPOINTS[base]} (E1, ADR-0041 amendment 2026-10-25): run `aeos seed` "
-                          "(untouched CANDIDATE rows are corrected) and activate the corrected configuration")
+                          "(CANDIDATE rows are corrected; an activated row first needs `aeos routes disable`) and "
+                          "activate the corrected configuration")
         if not base or not (u.scheme == "https" or _is_loopback_http(base)) or u.username or u.password:
             return refuse("ROUTE_ENDPOINT", "route endpoint must be https (or loopback http) without credentials")
         hosts = PROVIDER_ENDPOINT_HOSTS.get(route.provider)
@@ -393,8 +413,7 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
         out["n"] = 1
         # §23 "mode/thinking params": the reasoning level is the route's configuration. A level the worker sent is
         # dropped (never forwarded silently) and recorded; the route's own level, if it states one, is sent.
-        worker_effort = body.get("reasoning_effort")
-        requested_label = None if worker_effort is None else str(worker_effort)[:32]
+        requested_label = requested_reasoning(body)
         if upstream.reasoning_effort:
             out["reasoning_effort"] = upstream.reasoning_effort
         per_req = (grant.scope or {}).get("per_request_output_cap")

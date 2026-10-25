@@ -73,6 +73,10 @@ function LocalEndpointForm({ route }: { route: RouteItem }) {
   const [endpoint, setEndpoint] = useState(route.endpoint ?? "");
   const [model, setModel] = useState("");
   const [why, setWhy] = useState("");
+  // §23 LOCAL: the build (quantization, inference backend, hardware) is part of the route's identity; empty = unchanged
+  const [quantization, setQuantization] = useState("");
+  const [backend, setBackend] = useState("");
+  const [hardware, setHardware] = useState("");
   const loopback = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+(\/.*)?$/.test(endpoint.trim());
   return (
     <fieldset className="space-y-2 rounded border border-line p-3">
@@ -87,6 +91,15 @@ function LocalEndpointForm({ route }: { route: RouteItem }) {
       <Field label="Nama model di server lokal (opsional)">
         <input aria-label="Nama model di server lokal" className={inputClass} value={model} onChange={(e) => setModel(e.target.value)} />
       </Field>
+      <Field label="Kuantisasi (opsional)" hint="Mis. Q4_K_M; kosong = tidak diubah.">
+        <input aria-label="Kuantisasi" className={inputClass} value={quantization} onChange={(e) => setQuantization(e.target.value)} />
+      </Field>
+      <Field label="Backend inferensi (opsional)" hint="Mis. llama.cpp beserta versinya.">
+        <input aria-label="Backend inferensi" className={inputClass} value={backend} onChange={(e) => setBackend(e.target.value)} />
+      </Field>
+      <Field label="Perangkat keras (opsional)">
+        <input aria-label="Perangkat keras" className={inputClass} value={hardware} onChange={(e) => setHardware(e.target.value)} />
+      </Field>
       <Field label="Alasan perubahan">
         <input aria-label="Alasan perubahan endpoint" className={inputClass} value={why} onChange={(e) => setWhy(e.target.value)} />
       </Field>
@@ -94,7 +107,16 @@ function LocalEndpointForm({ route }: { route: RouteItem }) {
       <Button
         disabled={!loopback || why.trim().length < 10}
         busy={save.isPending}
-        onClick={() => save.mutate({ endpoint: endpoint.trim(), rationale: why.trim(), upstream_model: model.trim() || null })}
+        onClick={() =>
+          save.mutate({
+            endpoint: endpoint.trim(),
+            rationale: why.trim(),
+            upstream_model: model.trim() || null,
+            quantization: quantization.trim() || null,
+            inference_backend: backend.trim() || null,
+            hardware: hardware.trim() || null,
+          })
+        }
       >
         Tetapkan endpoint
       </Button>

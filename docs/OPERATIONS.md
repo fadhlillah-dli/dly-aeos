@@ -260,7 +260,9 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   amendment 2026-10-25): OpenCode Zen `https://opencode.ai/inference/openai/v1`, Gemini
   `https://generativelanguage.googleapis.com/v1beta/openai`. After upgrading, run `aeos seed` once: it corrects
   untouched seeded CANDIDATE routes (new config hash); a route activated on the superseded endpoint is listed in
-  `request_shape_pending` and refused by the broker (`ROUTE_ENDPOINT_SUPERSEDED`) until re-reviewed.
+  `request_shape_pending` and refused by the broker (`ROUTE_ENDPOINT_SUPERSEDED`): run `aeos routes disable <key>`,
+  then `aeos seed` again (a disabled seeded route gets the corrected request shape and stays DISABLED), then
+  activate the corrected configuration.
 * **Free OpenCode Zen routes (S07 client rule):** S07 says "Free-tier chat models require OpenCode; use paid models
   or Go from other clients". The broker is its own client, so a free Zen route is not activated or proxied until
   you decide: `aeos routes activate <key> ... --accept-client-terms --client-terms-note "<what you read>"` (recorded

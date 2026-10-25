@@ -2,7 +2,8 @@
 
 * ``broker_requests.reasoning_effort`` - the reasoning level the broker sent upstream (the route's
   ``mode_params.reasoning``; ``NOT_SENT`` = provider default). A worker-chosen level is never forwarded.
-* ``broker_requests.reasoning_requested`` - the level the worker asked for (dropped, recorded).
+* ``broker_requests.reasoning_requested`` - the level the worker asked for (dropped, recorded as a known level or
+  ``UNRECOGNISED``; worker free text is never stored).
 
 Both are nullable: rows recorded before this revision did not observe the value (UNKNOWN). No data is changed:
 the corrected OpenCode Zen / Gemini request shape of untouched seeded CANDIDATE routes is applied by ``aeos seed``
