@@ -1503,8 +1503,12 @@ def _release_plan(ctx: _Ctx, key: str, rp: dict[str, Any], parent: str) -> None:
 
 
 def _validates_production(e: EvidenceRef) -> bool:
-    # The deployment observer's verdict lives in the artefact; the document only *uses* it for the status.
-    return e.kind == "PRODUCTION_VALIDATION" or e.get("status") == "PASS"
+    # The verdict lives in the artefact; the document only *uses* it for the status. A deployment observation
+    # validates only with status PASS; a PRODUCTION_VALIDATION artefact unless its own content states another
+    # result (FAIL / NOT_PROVEN / ...): a recorded failed validation never approves the documents.
+    if e.kind == "PRODUCTION_VALIDATION":
+        return (e.get("status") or "PASS").upper() == "PASS"
+    return e.get("status") == "PASS"
 
 
 def _ops_status(ctx: _Ctx) -> tuple[str, str, list[EvidenceRef]]:

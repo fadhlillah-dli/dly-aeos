@@ -169,7 +169,19 @@ def disable() -> None:
         _state.scopes = {}
 
 
+# Which provider calls feed this observer (and which do not yet): stated, never implied (evidence honesty).
+OBSERVED_CALLS = ("publisher providers via publisher.providers.base.send (Google Drive/Docs, GitHub Issues, Jira, "
+                  "Confluence, Bitbucket)",)
+NOT_OBSERVED_CALLS = ("delivery GitHub API calls (pull request / check / merge-state sync)",
+                      "broker git push and GitHub calls")
+
+
 def status() -> dict[str, Any]:
+    """Coverage of per-call permission observation (§08). A credential change seen only by an unobserved call
+    is noticed at the next ``aeos doctor --functional`` run or TTL expiry, not per call."""
     with _lock:
         return {"enabled": _state.enabled, "queued": len(_state.queue),
-                "watched": sorted({GITHUB_REF, GOOGLE_TOKEN_REF, ATLASSIAN_REF, BITBUCKET_REF})}
+                "watched": sorted({GITHUB_REF, GOOGLE_TOKEN_REF, ATLASSIAN_REF, BITBUCKET_REF}),
+                "observed_calls": list(OBSERVED_CALLS), "not_observed_calls": list(NOT_OBSERVED_CALLS),
+                "note": "Panggilan yang tidak diamati baru terdeteksi pada `aeos doctor --functional` berikutnya "
+                        "atau saat TTL habis (§08)."}

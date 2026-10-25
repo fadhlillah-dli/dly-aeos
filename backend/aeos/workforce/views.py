@@ -34,7 +34,9 @@ BLOCKING_WAIT_CODES = frozenset({"CAPABILITY_NOT_READY", "SANDBOX_NOT_READY", "R
                                  "MODULE_UNAVAILABLE", "FAN_OUT_FORBIDDEN", "NO_ALLOWED_PATHS", "NO_EXPECTED_OUTPUT",
                                  "ROLE_UNKNOWN", "ROLE_NOT_EVALUATED", "AGENT_OUT_OF_SCOPE", "CONTEXT_TOO_LARGE",
                                  "UNSAFE_PATH", "FORBIDDEN_PATH_ALLOWED", "VERIFIER_UNAVAILABLE",
-                                 "OFFICE_ROUTE_NOT_AUTHORISED"})
+                                 "OFFICE_ROUTE_NOT_AUTHORISED",
+                                 # §41: only a new approved plan version with the sections filled clears these
+                                 "DOCS_NOT_READY", "DOCS_READINESS_UNVERIFIED"})
 CURRENT_ACTION_LABELS = {"RUNNER": "observed tool action (runner)", "CONTROLLER": "controller status (bukan aksi tool)"}
 
 

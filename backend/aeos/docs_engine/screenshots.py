@@ -12,7 +12,7 @@ Fail closed, observe-only:
   rule of the deployment observer, delivery facade ``classify_deployment_health``); otherwise NOTHING is
   captured (``Blocked`` SCREENSHOT_COMMIT_NOT_PROVEN): a screenshot of an unknown build proves nothing.
 * Each page is loaded with one headless browser GET (no login, no form input, no clicks). A final URL on
-  another origin (redirect) is refused.
+  another origin (redirect) is refused, and so is an error page (HTTP 4xx/5xx or no main response).
 * The page text is checked before the image is stored: a credential pattern or personal data refuses the
   capture (``PolicyDenied``). An image cannot be redacted, so it is never stored in that case.
 * Playwright/Chromium are optional dependencies: when absent the capture is ``Blocked`` with the install
@@ -159,6 +159,11 @@ def capture_screenshots(session: Session, project: Project, *, environment: str,
         page = shoot(url, size)
         if _origin(page.final_url) != _origin(target["base_url"]):
             raise PolicyDenied(f"{route} left the target origin; nothing was stored", code="SCREENSHOT_OFF_ORIGIN")
+        if page.http_status is None or not 200 <= page.http_status < 400:
+            # an error page (404/500, or no main response at all) is not a screenshot of the running app
+            raise Blocked(f"{route} answered HTTP {page.http_status if page.http_status is not None else 'none'}; "
+                          "nothing was stored", code="SCREENSHOT_PAGE_ERROR",
+                          details={"route": route, "http_status": page.http_status})
         if contains_secret(page.text) or contains_pii(page.text):
             # the image cannot be redacted: refuse instead of storing a picture of a secret / personal data
             raise PolicyDenied(f"{route} shows a credential pattern or personal data; nothing was stored (§29)",

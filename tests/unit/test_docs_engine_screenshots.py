@@ -38,14 +38,15 @@ def project(settings, db, monkeypatch):
 
 
 class FakeBrowser:
-    def __init__(self, pages: dict[str, tuple[str, str]] | None = None):
+    def __init__(self, pages: dict[str, tuple[str, str]] | None = None, statuses: dict[str, int | None] | None = None):
         self.pages = pages or {}
+        self.statuses = statuses or {}
         self.calls: list[str] = []
 
     def __call__(self, url: str, viewport: tuple[int, int]) -> shots.PageCapture:
         self.calls.append(url)
         final, text = self.pages.get(url, (url, "Dashboard tugas: 3 terbuka"))
-        return shots.PageCapture(final_url=final, text=text, png=PNG, http_status=200)
+        return shots.PageCapture(final_url=final, text=text, png=PNG, http_status=self.statuses.get(url, 200))
 
 
 def _health(commit: str = SHA, status: str = "ok"):
@@ -116,6 +117,19 @@ def test_a_page_showing_a_secret_or_personal_data_is_refused_and_nothing_is_stor
                                       actor="owner", capture=browser)
     assert exc.value.code == "SCREENSHOT_SENSITIVE_CONTENT"
     assert _screens(db) == [], "all-or-nothing: the clean page captured before is not stored either"
+
+
+@pytest.mark.parametrize("status", [404, 500, 503, None])
+def test_an_error_page_is_never_stored_as_a_screenshot_of_the_app(db, project, status):
+    """A 404/500 page (or a navigation without a main response) proves nothing about the running app."""
+    browser = FakeBrowser(statuses={f"{BASE}/missing": status})
+    with respx.mock() as mock:
+        mock.get(f"{BASE}/health").mock(return_value=_health())
+        with pytest.raises(Blocked) as exc:
+            shots.capture_screenshots(db, project, environment="staging", commit=SHA, routes=["/", "/missing"],
+                                      actor="owner", capture=browser)
+    assert exc.value.code == "SCREENSHOT_PAGE_ERROR" and exc.value.details["http_status"] == status
+    assert _screens(db) == [], "all-or-nothing: the healthy page captured before is not stored either"
 
 
 def test_redirect_off_the_target_origin_is_refused(db, project):

@@ -40,6 +40,12 @@ were reported but never enforced, and Doctor checks that only noticed permission
 6. **Every /api response names its version/config** (`X-AEOS-Version`, `X-AEOS-Schema-Version`,
    `X-AEOS-Settings-Hash`) and every list/claim endpoint states `source` + `checked_at`/`generated_at`; the
    freshness ratchet is closed.
+7. **Review hardening (2026-10-25).** The pinned Claude Code publisher is matched exactly (whole subject, one
+   whole RDN or the exact CN/O value; never a substring). An error page (HTTP 4xx/5xx or no main response) is
+   never stored as a screenshot. A PRODUCTION_VALIDATION artefact that records FAIL/NOT_PROVEN never approves the
+   Operations documents. A task held by `DOCS_NOT_READY` shows as BLOCKED (owner action), not READY. The
+   capability view names which provider calls feed the permission watch (publisher) and which do not yet
+   (delivery, broker).
 
 ## Consequences
 

@@ -102,6 +102,25 @@ def test_admission_waits_with_docs_not_ready(db, fakes):
     assert "DOCS_NOT_READY" in waits and "§41" in waits["DOCS_NOT_READY"] and not adm.admitted
 
 
+def test_a_task_held_by_documentation_is_shown_as_blocked_not_ready(db, fakes):
+    """The wait clears only through a new approved plan version (owner action), so the dashboard must not show
+    the task as READY: the admission tick records the reason and the UI derives BLOCKED from it."""
+    from aeos.workforce import views
+
+    content = schema_sample_content()
+    content["security_privacy"]["overview"]["authn_authz"] = ""
+    plan, pv, (t1, _t2) = _product_plan(db, content)
+    fakes.approved[plan.id] = pv.id
+    scheduler.ensure_executions(db, pv.id, actor="t")
+    db.execute(update(TaskExecution).where(TaskExecution.task_id == t1.id).values(state="READY"))
+    scheduler.admit_ready_tasks(db)
+    te = scheduler.get_te(db, t1.id)
+    assert te.state == "READY" and te.reason_code == "DOCS_NOT_READY", "never leased while documentation is pending"
+    assert views.derive_ui_state(None, te) == "BLOCKED"
+    codes = {"DOCS_NOT_READY", "DOCS_READINESS_UNVERIFIED"}
+    assert codes <= views.BLOCKING_WAIT_CODES and codes <= scheduler.WAIT_CODES
+
+
 def test_a_failing_readiness_check_is_a_wait_never_a_pass(db, monkeypatch):
     _plan, pv, (t1, _t2) = _product_plan(db, schema_sample_content())
 
