@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, Lightbulb, RefreshCw } from "lucide-react";
+import { ExternalLink, Lightbulb, Paperclip, RefreshCw } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { get, patch, post } from "../../api/client";
@@ -8,6 +8,8 @@ import { IDENTITY_STATUS, MappedBadge, RESEARCH_LIFECYCLE, UPSTREAM_STATUS } fro
 import { RelatedLinks } from "../../components/proposals/PageLinks";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputBase, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table, Tabs } from "../../components/ui";
+import { uploadAttachment } from "../proposals/intake";
+import type { Meta } from "../proposals/types";
 
 interface Entry {
   id: string;
@@ -60,6 +62,8 @@ interface EntryDetail extends Entry {
   upstream: Record<string, unknown>;
   history: { at: string; event: string; from?: string; to?: string; status?: string; reason?: string; note?: string }[];
   check_status?: string;
+  /** §01 U-11 intake attachments submitted with a manual entry (untrusted DATA, entry's own domain). */
+  attachment_ids?: string[];
 }
 
 interface ListResponse {
@@ -180,6 +184,18 @@ function EntryDetailPanel({ id, onClose, isAdmin }: { id: string; onClose: () =>
           ["Relevansi", e.relevance || "—"],
           ["Klaim (bukan bukti DLY AEOS)", e.claims.length ? <ul className="list-disc pl-5">{e.claims.map((c) => <li key={c}>{c}</li>)}</ul> : "—"],
           ["Batasan", e.limitations || "—"],
+          [
+            "Lampiran (DATA tidak tepercaya)",
+            e.attachment_ids?.length ? (
+              <span key="att" className="flex flex-wrap gap-1">
+                {e.attachment_ids.map((a) => (
+                  <Mono key={a}>{a}</Mono>
+                ))}
+              </span>
+            ) : (
+              "—"
+            ),
+          ],
           ["Referensi", e.source_refs.join(", ") || "—"],
           ["Bagian master", e.section_refs.join(", ") || "—"],
           ["Lisensi", e.license ?? "UNKNOWN"],
@@ -227,15 +243,50 @@ function EntryDetailPanel({ id, onClose, isAdmin }: { id: string; onClose: () =>
   );
 }
 
+/** Files a research entry may carry (§01 U-11, .md included); intake re-checks type/signature and rejects
+ * executables, so this list only steers the file picker. */
+export const RESEARCH_UPLOAD_ACCEPT = ".md,.txt,.pdf,.docx,.png,.jpg,.json,.yaml,.yml";
+
 export function AddUrlForm() {
   const qc = useQueryClient();
+  const { projectId, domain } = useAuth();
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
   const [notes, setNotes] = useState("");
+  const [attachments, setAttachments] = useState<{ id: string; name: string }[]>([]);
+  const [uploadError, setUploadError] = useState<unknown>(null);
+  const [uploading, setUploading] = useState(false);
+  // Same rule as the proposal form: the selected project, else the platform project of this domain.
+  const meta = useQuery({ queryKey: ["proposals", "meta"], queryFn: () => get<Meta>("/api/proposals/meta"), enabled: !projectId, retry: false });
+  const attachProject = projectId ?? meta.data?.platform_project?.id ?? null;
   const m = useMutation({
-    mutationFn: () => post<{ entry: Entry; duplicate: boolean; note: string }>("/api/research", { url, name: name || null, notes: notes || null }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["research"] }),
+    mutationFn: () =>
+      post<{ entry: Entry; duplicate: boolean; note: string }>("/api/research", {
+        url,
+        name: name || null,
+        notes: notes || null,
+        attachment_ids: attachments.map((a) => a.id),
+      }),
+    onSuccess: () => {
+      setAttachments([]);
+      return qc.invalidateQueries({ queryKey: ["research"] });
+    },
   });
+  const onFiles = async (files: FileList | null) => {
+    if (!files || !attachProject) return;
+    setUploadError(null);
+    setUploading(true);
+    try {
+      for (const f of Array.from(files)) {
+        const id = await uploadAttachment(attachProject, f, "research");
+        setAttachments((a) => [...a, { id, name: f.name }]);
+      }
+    } catch (e) {
+      setUploadError(e);
+    } finally {
+      setUploading(false);
+    }
+  };
   const submit = (e: FormEvent) => {
     e.preventDefault();
     m.mutate();
@@ -253,11 +304,29 @@ export function AddUrlForm() {
           <input className={inputClass} value={notes} onChange={(e) => setNotes(e.target.value)} />
         </Field>
       </div>
-      <p className="text-xs text-ink-3" data-testid="research-upload-note">
-        Berkas (mis. .md) tidak diunggah di sini: registry riset bersifat platform (tanpa domain), sedangkan lampiran
-        selalu disimpan per proyek dan domain. Unggah dokumen pendukung di halaman proyek atau lewat{" "}
-        <code>aeos intake upload</code>, lalu rujuk URL/nama di sini.
-      </p>
+      <fieldset className="rounded-md border border-line p-3">
+        <legend className="px-1 text-sm font-medium">Lampiran (.md dan berkas lain)</legend>
+        {attachProject ? (
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <Paperclip className="h-4 w-4" aria-hidden />
+            <input aria-label="Lampirkan berkas" type="file" multiple accept={RESEARCH_UPLOAD_ACCEPT} onChange={(e) => onFiles(e.target.files)} disabled={uploading} />
+          </label>
+        ) : (
+          <p className="text-sm text-ink-3">Pilih proyek pada header untuk melampirkan berkas.</p>
+        )}
+        <p className="mt-1 text-xs text-ink-3" data-testid="research-upload-note">
+          Entri manual tersimpan di domain sesi ini ({domain ?? "—"}); lampiran diunggah lewat intake ke proyek terpilih atau proyek platform domain ini, dipindai,
+          dan tetap DATA tidak tepercaya (instruksi di dalamnya tidak menjadi izin). Bila sumbernya sudah ada sebagai entri platform bersama, lampirkan berkas pada usulan perubahan.
+        </p>
+        {attachments.length > 0 && (
+          <ul className="mt-2 list-disc pl-5 text-sm" aria-label="Lampiran terunggah">
+            {attachments.map((a) => (
+              <li key={a.id}>{a.name}</li>
+            ))}
+          </ul>
+        )}
+        <ErrorBox error={uploadError} />
+      </fieldset>
       <ErrorBox error={m.error} />
       {m.data && (
         <Notice tone={m.data.duplicate ? "warn" : "info"}>

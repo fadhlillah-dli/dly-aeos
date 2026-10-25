@@ -51,6 +51,8 @@ class AddEntryIn(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     category: str | None = Field(default=None, max_length=64)
     notes: str | None = Field(default=None, max_length=4000)
+    # §01 U-11: intake attachments (e.g. a .md brief) uploaded to a project of the active domain
+    attachment_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
 class UpdateEntryIn(BaseModel):
@@ -76,7 +78,8 @@ class DependencyDiffIn(BaseModel):
 @router.post("/api/research")
 def add_research(body: AddEntryIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
     entry, duplicate = service.add_by_url(db, url=body.url, name=body.name, category=body.category, notes=body.notes,
-                                          actor_user_id=principal.user.id, domain=domain.value)
+                                          actor_user_id=principal.user.id, domain=domain.value,
+                                          attachment_ids=body.attachment_ids)
     db.commit()
     return {"entry": service.entry_view(entry, detail=True), "duplicate": duplicate,
             "note": "Entri DISCOVERED: tidak ada instalasi, aktivasi atau pengiriman data proyek."}
