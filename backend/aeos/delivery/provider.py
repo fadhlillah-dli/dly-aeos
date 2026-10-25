@@ -77,6 +77,20 @@ def github_token(domain: str) -> tuple[str | None, str]:
     return token, "AVAILABLE"
 
 
+def _observe(resp: httpx.Response) -> None:
+    """§08 per-call permission observation: the response's method/URL/status/headers (never a body or the token)
+    go to the same observer hook the publisher feeds, so a 401/403/scope change seen by a delivery read marks the
+    checks of ``personal/github`` STALE (``aeos.doctor.provider_watch``). A plan-entitlement answer ("Upgrade to
+    GitHub Pro") is not a permission change and is not reported."""
+    if _upgrade_required(resp):
+        return
+    try:
+        from aeos.publisher.facade import observe_httpx_response
+    except ImportError:  # pragma: no cover - the publisher ships with the platform
+        return
+    observe_httpx_response(resp)
+
+
 class GitHubReader:
     """Minimal GET-only GitHub REST client."""
 
@@ -90,8 +104,14 @@ class GitHubReader:
             "User-Agent": "dly-aeos-delivery",
         }
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> httpx.Response:
-        return self._client.get(GITHUB_API + path, params=params, headers=self._headers)
+    def get(self, path: str, params: dict[str, Any] | None = None, *, observe: bool = True) -> httpx.Response:
+        """``observe=False`` for capability probes whose 403/404 is the provider's answer about a feature the
+        least-privilege token deliberately lacks (no Administration permission, FINE_GRAINED_REMEDY) - reporting it
+        would keep the token's checks STALE on every read."""
+        resp = self._client.get(GITHUB_API + path, params=params, headers=self._headers)
+        if observe:
+            _observe(resp)
+        return resp
 
     def close(self) -> None:
         if self._owns:
@@ -346,21 +366,21 @@ def check_capabilities(repo: str, branch: str | None = None, *, token: str | Non
         owner_info = info.get("owner") or {}
         plan: str | None = None
         if owner_info.get("type") == "User":
-            u = gh.get("/user")
+            u = gh.get("/user", observe=False)
             if u.status_code == 200 and (u.json() or {}).get("login") == owner_info.get("login"):
                 plan = ((u.json() or {}).get("plan") or {}).get("name")
         elif owner_info.get("type") == "Organization":
-            o = gh.get(f"/orgs/{owner}")
+            o = gh.get(f"/orgs/{owner}", observe=False)
             if o.status_code == 200:
                 plan = ((o.json() or {}).get("plan") or {}).get("name")
         caps.plan = plan
         caps.checks.append(CapabilityCheck("plan", "AVAILABLE" if plan else "UNKNOWN",
                                            f"Paket: {plan}" if plan else "Paket akun tidak terlihat oleh credential ini"))
         b = quote(branch, safe="")
-        prot = _protection_check(gh.get(f"/repos/{repo}/branches/{b}/protection"), private=private, plan=plan)
-        rules = _rulesets_check(gh.get(f"/repos/{repo}/rulesets", params={"includes_parents": "true"}),
+        prot = _protection_check(gh.get(f"/repos/{repo}/branches/{b}/protection", observe=False), private=private, plan=plan)
+        rules = _rulesets_check(gh.get(f"/repos/{repo}/rulesets", params={"includes_parents": "true"}, observe=False),
                                 private=private, plan=plan)
-        branch_rules = _branch_rules_check(gh.get(f"/repos/{repo}/rules/branches/{b}"))
+        branch_rules = _branch_rules_check(gh.get(f"/repos/{repo}/rules/branches/{b}", observe=False))
         caps.checks += [prot, rules, branch_rules]
         required = sorted(set(prot.detail.get("required_status_checks", []))
                           | set(branch_rules.detail.get("required_status_checks", [])))
@@ -383,7 +403,7 @@ def check_capabilities(repo: str, branch: str | None = None, *, token: str | Non
         if identity.status == "NOT_CONFIGURED":
             caps.residual_risks.append("Required status check tidak terikat ke GitHub App tertentu — status dapat "
                                        "dilaporkan oleh app/pengguna lain dengan izin statuses:write")
-        env_check = _environments_check(gh.get(f"/repos/{repo}/environments", params={"per_page": 100}),
+        env_check = _environments_check(gh.get(f"/repos/{repo}/environments", params={"per_page": 100}, observe=False),
                                         private=private, plan=plan)
         caps.checks.append(env_check)
         caps.deploy_restrictions = env_check.status

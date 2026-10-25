@@ -110,6 +110,26 @@ def office_policy(session: Session) -> dict[str, Any]:
     return impl(session)
 
 
+def office_target_authorised(session: Session, provider: str, *, root_id: Any = None, tenant: Any = None,
+                             space_id: Any = None, policy: dict[str, Any] | None = None) -> tuple[bool, str]:
+    """Additive (W7, 2026-10-25): (authorised, reason) for one exact OFFICE target against the company
+    authorisation's ``approved_targets`` (§01 U-03, §07 step 10). No approved target -> False (fail closed)."""
+    from aeos.policy import office_scope
+
+    pol = policy if policy is not None else office_policy(session)
+    return office_scope.target_check(pol, provider, root_id=root_id, tenant=tenant, space_id=space_id)
+
+
+def office_data_class_authorised(session: Session, classification: Any, *,
+                                 policy: dict[str, Any] | None = None) -> tuple[bool, str]:
+    """Additive (W7, 2026-10-25): (authorised, reason) for sending OFFICE data of *classification* to an approved
+    model route / Claude Max (``approved_data_classes``, §51 P1). None approved -> False (fail closed)."""
+    from aeos.policy import office_scope
+
+    pol = policy if policy is not None else office_policy(session)
+    return office_scope.data_class_check(pol, classification)
+
+
 # ---- additive (non-breaking) contract: raise a request for a human decision -----------------------
 
 

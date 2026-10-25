@@ -267,26 +267,38 @@ def preflight(request: ClaudeRequest) -> tuple[str, str] | None:
     if problem:
         return problem
     if request.domain == Domain.OFFICE.value:
-        allowed, why = office_claude_allowed()
+        allowed, why = office_claude_allowed(request.project_id)
         if not allowed:
             return "OFFICE_POLICY_DENIED", why
     return project_domain_problem(request)
 
 
-def office_claude_allowed() -> tuple[bool, str]:
-    """§23/§51: OFFICE data goes to Claude Max only after a recorded company authorisation."""
+def office_claude_allowed(project_id: str | None = None) -> tuple[bool, str]:
+    """§23/§51: OFFICE data goes to Claude Max only after a recorded company authorisation, and only data of a class
+    the company approved (approved_data_classes). The class is the project's data classification; a request without
+    a project carries no classification, which is UNKNOWN and never approved (fail closed)."""
     try:
-        from aeos.policy.facade import office_policy
+        from aeos.policy.facade import office_data_class_authorised, office_policy
 
         with session_scope() as s:
             pol = office_policy(s)
+            classification: str | None = None
+            if project_id:
+                from aeos.models.portfolio import Project
+
+                project = s.get(Project, project_id)
+                classification = project.data_classification if project is not None else None
+            class_ok, class_why = office_data_class_authorised(s, classification, policy=pol)
     except (ImportError, ModuleNotFoundError):
         return False, "office policy module unavailable - OFFICE planning/review is denied (fail closed)"
     except Exception as exc:
         return False, f"office policy could not be evaluated ({type(exc).__name__}) - denied"
-    if pol.get("claude_max_allowed_for_office_data") is True:
-        return True, ""
-    return False, "OFFICE policy: Claude Max is not authorised for office data (claude_max_allowed_for_office_data=false)"
+    if pol.get("claude_max_allowed_for_office_data") is not True:
+        return False, ("OFFICE policy: Claude Max is not authorised for office data "
+                       "(claude_max_allowed_for_office_data=false)")
+    if not class_ok:
+        return False, f"OFFICE policy: {class_why}"
+    return True, ""
 
 
 def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) -> ClaudeResult:

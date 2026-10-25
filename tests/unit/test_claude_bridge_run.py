@@ -263,8 +263,24 @@ def test_office_denied_by_default_and_when_policy_missing(settings, db, monkeypa
     reg = install_fakes(monkeypatch)
     assert bridge.run_structured(req, settings=settings).error_code == "OFFICE_POLICY_DENIED"
     assert "calls" not in fake_claude.state
-    reg.office["claude_max_allowed_for_office_data"] = True
+    reg.office.update(claude_max_allowed_for_office_data=True, office_authorization=True)
+    # W6-157: Claude Max approved, but the project's data class (INTERNAL) is not among the approved classes
+    denied = bridge.run_structured(req, settings=settings)
+    assert denied.error_code == "OFFICE_POLICY_DENIED" and "approved_data_classes" in denied.error
+    reg.office["approved_data_classes"] = ["PUBLIC"]
+    assert bridge.run_structured(req, settings=settings).error_code == "OFFICE_POLICY_DENIED"
+    assert "calls" not in fake_claude.state
+    reg.office["approved_data_classes"] = ["INTERNAL"]
     assert bridge.run_structured(req, settings=settings).ok
+    # OFFICE data without a project carries no classification: UNKNOWN is never company-approved (fail closed)
+    calls = fake_claude.state["calls"]
+    for classes in (["INTERNAL"], ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"]):
+        reg.office["approved_data_classes"] = classes
+        bare = bridge.run_structured(ClaudeRequest(purpose="doctor.explain", role="readiness-explainer", model="opus",
+                                                   prompt=PROMPT, json_schema=SCHEMA, domain="OFFICE"),
+                                     settings=settings)
+        assert bare.error_code == "OFFICE_POLICY_DENIED" and "UNKNOWN" in bare.error, bare.error
+    assert fake_claude.state["calls"] == calls
 
 
 def test_timeout_kills_the_whole_process_tree(tmp_path: Path):

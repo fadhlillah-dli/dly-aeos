@@ -257,6 +257,54 @@ def markdown_to_storage(markdown: str, *, rendered_images: set[str] | None = Non
 # ---------------------------------------------------------------------------------------------
 
 
+def confluence_capabilities(get: Any, *, space_id: str, parent_id: str, deployment: str) -> dict[str, Any]:
+    """The one read-only Confluence capability rule (REST v2 space + folder support under the configured parent),
+    shared by the publisher (``ConfluenceProvider.check_capabilities``, before any write) and the Readiness Doctor
+    (``adapter.project_office_targets``), so readiness never shows green for a target the publisher refuses.
+
+    ``get(path, what) -> (http_status | None, json_body)`` performs one GET under ``<tenant>/wiki/api/v2``.
+    ``status`` is READY only for a folder parent in the configured space; a page parent, a tenant without folder
+    support (400/501) or a parent in another space is ``needs action`` (structure is never silently changed)."""
+    caps: dict[str, Any] = {"deployment": deployment, "api_v2": "UNKNOWN", "folders": "UNKNOWN",
+                            "parent_kind": None, "status": "BLOCKED", "reasons": [], "http": {}}
+    sp_status, sp_body = get(f"/spaces/{quote(space_id, safe='')}", "confluence space")
+    caps["http"]["space"] = sp_status
+    if sp_status != 200:
+        caps["api_v2"] = "NOT_AVAILABLE" if sp_status == 404 else "UNKNOWN"
+        caps["reasons"].append(f"space/API v2 tidak tersedia (HTTP {sp_status}); Data Center tidak didukung")
+        return caps
+    caps["api_v2"] = "AVAILABLE"
+    fo_status, fo_body = get(f"/folders/{quote(parent_id, safe='')}", "confluence parent folder")
+    caps["http"]["folder"] = fo_status
+    if fo_status == 200:
+        caps["folders"] = "SUPPORTED"
+        caps["parent_kind"] = "folder"
+        space_of_parent = str((fo_body if isinstance(fo_body, dict) else {}).get("spaceId") or "")
+        space_ok = str((sp_body if isinstance(sp_body, dict) else {}).get("id") or space_id)
+        caps["parent_space"] = space_of_parent or None
+        if space_of_parent and space_of_parent not in (space_ok, space_id):
+            # §04: the configured parent is re-validated against tenant/space/target — never a second target
+            caps["space_mismatch"] = True
+            caps["reasons"].append(f"{CONFLUENCE_PARENT_KEY} berada di space {space_of_parent}, bukan space "
+                                   f"{space_id} yang dikonfigurasi — needs action")
+        else:
+            caps["status"] = "READY"
+    elif fo_status in (400, 404, 501):
+        pg_status, pg_body = get(f"/pages/{quote(parent_id, safe='')}", "confluence parent page")
+        caps["http"]["page"] = pg_status
+        caps["folders"] = "NOT_SUPPORTED" if fo_status in (400, 501) else "UNKNOWN"
+        if pg_status == 200:
+            caps["parent_kind"] = "page"
+            caps["parent_space"] = str((pg_body if isinstance(pg_body, dict) else {}).get("spaceId") or "") or None
+            caps["reasons"].append(f"{CONFLUENCE_PARENT_KEY} adalah page, bukan folder; dukungan folder tenant "
+                                   "belum terbukti — needs action (struktur tidak diganti diam-diam)")
+        else:
+            caps["reasons"].append(f"{CONFLUENCE_PARENT_KEY} tidak ditemukan / tidak dapat diakses")
+    else:
+        caps["reasons"].append(f"pemeriksaan folder gagal (HTTP {fo_status})")
+    return caps
+
+
 class ConfluenceProvider:
     name = "confluence"
 
@@ -292,41 +340,14 @@ class ConfluenceProvider:
         """Cloud REST v2 + folder support under CONFLUENCE_PROJECTS_PARENT_ID (read-only probes)."""
         if self._caps is not None:
             return self._caps
-        caps: dict[str, Any] = {"deployment": self.cfg.deployment, "api_v2": "UNKNOWN", "folders": "UNKNOWN",
-                                "status": "BLOCKED", "reasons": []}
-        sp = send(self.client, "GET", self._v2(f"/spaces/{quote(self.cfg.space_id, safe='')}"), write=False,
-                  what="confluence space", headers=self._h())
-        if sp.status_code != 200:
-            caps["api_v2"] = "NOT_AVAILABLE" if sp.status_code == 404 else "UNKNOWN"
-            caps["reasons"].append(f"space/API v2 tidak tersedia (HTTP {sp.status_code}); Data Center tidak didukung")
-            self._caps = caps
-            return caps
-        caps["api_v2"] = "AVAILABLE"
-        fo = send(self.client, "GET", self._v2(f"/folders/{quote(self.cfg.parent_id, safe='')}"), write=False,
-                  what="confluence parent folder", headers=self._h())
-        if fo.status_code == 200:
-            caps["folders"] = "SUPPORTED"
-            space_of_parent = str((_json(fo) or {}).get("spaceId") or "")
-            space_ok = str((_json(sp) or {}).get("id") or self.cfg.space_id)
-            if space_of_parent and space_of_parent not in (space_ok, self.cfg.space_id):
-                # §04: the configured parent is re-validated against tenant/space/target — never a second target
-                caps["reasons"].append(f"{CONFLUENCE_PARENT_KEY} berada di space {space_of_parent}, bukan space "
-                                       f"{self.cfg.space_id} yang dikonfigurasi — needs action")
-            else:
-                caps["status"] = "READY"
-        elif fo.status_code in (400, 404, 501):
-            pg = send(self.client, "GET", self._v2(f"/pages/{quote(self.cfg.parent_id, safe='')}"), write=False,
-                      what="confluence parent page", headers=self._h())
-            caps["folders"] = "NOT_SUPPORTED" if fo.status_code in (400, 501) else "UNKNOWN"
-            if pg.status_code == 200:
-                caps["reasons"].append(f"{CONFLUENCE_PARENT_KEY} adalah page, bukan folder; dukungan folder tenant "
-                                       "belum terbukti — needs action (struktur tidak diganti diam-diam)")
-            else:
-                caps["reasons"].append(f"{CONFLUENCE_PARENT_KEY} tidak ditemukan / tidak dapat diakses")
-        else:
-            caps["reasons"].append(f"pemeriksaan folder gagal (HTTP {fo.status_code})")
-        self._caps = caps
-        return caps
+
+        def get(path: str, what: str) -> tuple[int | None, Any]:
+            resp = send(self.client, "GET", self._v2(path), write=False, what=what, headers=self._h())
+            return resp.status_code, _json(resp)
+
+        self._caps = confluence_capabilities(get, space_id=self.cfg.space_id, parent_id=self.cfg.parent_id,
+                                             deployment=self.cfg.deployment)
+        return self._caps
 
     def _ensure_ready(self) -> None:
         caps = self.check_capabilities()
@@ -691,7 +712,7 @@ class BitbucketProvider:
         return data
 
     def _paged(self, path: str, what: str, params: dict[str, Any] | None = None,
-               max_pages: int = 5) -> tuple[list[dict[str, Any]], bool]:
+               max_pages: int = 5, *, observe: bool = True) -> tuple[list[dict[str, Any]], bool]:
         """(values, truncated). ``next`` links are followed only on the Bitbucket API host (the credential is
         never sent anywhere else); a remaining page after *max_pages* is reported as truncated."""
         out: list[dict[str, Any]] = []
@@ -699,7 +720,8 @@ class BitbucketProvider:
         query: dict[str, Any] | None = dict(params or {})
         for _ in range(max_pages):
             assert url is not None
-            resp = send(self.client, "GET", url, write=False, what=what, headers=self._h(), params=query)
+            resp = send(self.client, "GET", url, write=False, what=what, headers=self._h(), params=query,
+                        observe=observe)
             if resp.status_code != 200:
                 raise classify_http_error(resp, write=False, what=what)
             body = _json(resp) or {}
@@ -719,8 +741,9 @@ class BitbucketProvider:
         return self._get("/branching-model", "bitbucket branching model")
 
     def branch_restrictions(self) -> tuple[list[dict[str, Any]], bool]:
-        """Raw branch restrictions (needs repository admin; 403 raises ProviderBlocked with the status code)."""
-        return self._paged("/branch-restrictions", "bitbucket branch restrictions", {"pagelen": 100})
+        """Raw branch restrictions (needs repository admin; 403 raises ProviderBlocked with the status code). A 403
+        here is the expected answer for a least-privilege token, not a credential change: not observed (§08)."""
+        return self._paged("/branch-restrictions", "bitbucket branch restrictions", {"pagelen": 100}, observe=False)
 
     def restriction_summary(self, branch: str) -> dict[str, Any]:
         """Which restrictions/merge checks apply to *branch* (read-only interpretation, never a claim that

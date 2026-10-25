@@ -125,6 +125,61 @@ def github_remote(repo_full_name: str) -> str:
     return f"https://github.com/{validate_repo(repo_full_name)}.git"
 
 
+# ----------------------------------------------------------------------------- §08 per-call observation
+# Broker calls carry the same permission signal as the publisher's: a 401/403 on a PR call or on ``git push`` over
+# HTTPS means the stored credential was rejected or its permissions changed. They are reported (method, URL, status,
+# response headers - never a body or a credential) to the same observer hook, so the dependent readiness checks go
+# STALE without waiting for the next ``aeos doctor --functional`` (aeos.doctor.provider_watch).
+
+_GIT_HTTP_STATUS = re.compile(r"The requested URL returned error:\s*(\d{3})")
+_GIT_AUTH_FAILED = re.compile(r"Authentication failed for|Invalid username or password|could not read Username",
+                              re.IGNORECASE)
+_GIT_DENIED = re.compile(r"Permission to \S+ denied|HTTP 403|403 Forbidden", re.IGNORECASE)
+
+
+def observe_response(response: httpx.Response) -> None:
+    """``httpx`` response event hook of the broker's API clients."""
+    try:
+        from aeos.publisher.facade import observe_httpx_response
+    except ImportError:  # pragma: no cover - the publisher ships with the platform
+        return
+    observe_httpx_response(response)
+
+
+def http_client() -> httpx.Client:
+    """The broker's API client: no redirects, no proxy environment, every response observed (§08)."""
+    return httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False, trust_env=False,
+                        event_hooks={"response": [observe_response]})
+
+
+def git_http_status(output: str) -> int | None:
+    """The HTTP status a failed ``git`` call over HTTPS reports in its output (None when it names none)."""
+    m = _GIT_HTTP_STATUS.search(output or "")
+    if m:
+        return int(m.group(1))
+    if _GIT_AUTH_FAILED.search(output or ""):
+        return 401
+    if _GIT_DENIED.search(output or ""):
+        return 403
+    return None
+
+
+def observe_git_failure(remote_url: str, output: str, *, operation: str) -> None:
+    """Report the HTTP status of a failed ``git push`` / ``ls-remote`` to the observer hook (local remotes and
+    outputs without a status are ignored). The URL never carries credentials (``validate_remote_url``)."""
+    if not remote_url or _is_local_remote(remote_url):
+        return
+    status = git_http_status(output)
+    if status is None:
+        return
+    u = urlparse(remote_url)
+    try:
+        from aeos.publisher.facade import observe_provider_response
+    except ImportError:  # pragma: no cover
+        return
+    observe_provider_response(f"GIT {operation}", f"{u.scheme}://{u.hostname or ''}{u.path}", status, {})
+
+
 # ----------------------------------------------------------------------------- helpers
 def is_bitbucket_run(session: Session, run: WorkerRun, repo_full_name: str) -> bool:
     """OFFICE code lives in Bitbucket (U-02/U-03): every OFFICE run, and any target registered as a Bitbucket
@@ -289,6 +344,8 @@ def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: 
         push = _git(["push", "--porcelain", "--no-verify", remote_url, f"{pinned_src}:{dst}"], cwd=mirror, env=env,
                     hooks=hooks)
         out = redact_text((push.stdout or "") + (push.stderr or ""))[:800]
+        if push.returncode != 0:
+            observe_git_failure(remote_url, out, operation="PUSH")
         return {"ok": push.returncode == 0, "stage": "push", "commit": head, "output": out,
                 "error": "" if push.returncode == 0 else out}
     except subprocess.TimeoutExpired:
@@ -469,7 +526,7 @@ def create_pull_request(
     pr: dict | None = None
     outcome = "FAILED"
     detail = ""
-    with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False, trust_env=False) as client:
+    with http_client() as client:
         try:
             r = client.post(f"{api_base}/repos/{repo_full_name}/pulls", json=payload, headers=headers)
             if r.status_code == 201:
@@ -527,6 +584,7 @@ def _ls_remote_head(url: str, branch: str, token: str | None, *, basic_user: str
     proc = _git(["ls-remote", "--heads", url, f"refs/heads/{branch}"], cwd=work,
                 env=git_auth_env(url, token, empty_global=empty_global, basic_user=basic_user), hooks=hooks)
     if proc.returncode != 0:
+        observe_git_failure(url, redact_text(proc.stderr or ""), operation="LS-REMOTE")
         raise Blocked("remote could not be read: " + redact_text(proc.stderr or "")[:300], code="REMOTE_UNREADABLE")
     for line in (proc.stdout or "").splitlines():
         sha, _, ref = line.partition("\t")
@@ -592,7 +650,7 @@ def reconcile_side_effect(session: Session, side_effect_id: str, *, actor: str,
         token = secrets.get_secret(GITHUB_SECRET_REF, purpose=GITHUB_SECRET_PURPOSE, actor="service:broker")
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                    "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "dly-aeos-broker"}
-        with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False, trust_env=False) as client:
+        with http_client() as client:
             try:
                 pr = _find_open_pr(client, api_base, repo, head, base, headers, state="all")
             except (httpx.HTTPError, ValueError):

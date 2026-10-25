@@ -143,13 +143,34 @@ interface OfficePolicy {
   atlassian_deployment: string;
   office_authorization: boolean;
   authorized_providers: string[];
+  approved_targets?: Record<string, string>[];
+  approved_data_classes?: string[];
+  approved_identities?: Record<string, string>;
+  approved_target_count?: number;
+  approved_identity_count?: number;
+  decision_refs_hidden?: boolean;
   source: string;
 }
 
+function targetText(t: Record<string, string>): string {
+  return `${t.provider}(${Object.entries(t)
+    .filter(([k]) => k !== "provider")
+    .map(([k, v]) => `${k}=${v}`)
+    .join(", ")})`;
+}
+
+/** UNDECIDED is never shown as allowed (§34): an empty company-approved list keeps every consumer closed. */
+function undecided(key: string, label = "Belum diputuskan (semua ditolak)") {
+  return <StatusBadge key={key} status="UNKNOWN" label={label} />;
+}
+
 export function OfficePolicyCard() {
-  const { domain } = useAuth();
+  const { domain, isAdmin } = useAuth();
   const q = useQuery({ queryKey: ["policy", "office", domain], queryFn: () => get<OfficePolicy>("/api/policy/office") });
   const p = q.data;
+  const targets = p?.approved_targets ?? [];
+  const classes = p?.approved_data_classes ?? [];
+  const identities = Object.entries(p?.approved_identities ?? {});
   return (
     <Card title="Kebijakan OFFICE (default deny)">
       <ErrorBox error={q.error} />
@@ -161,12 +182,99 @@ export function OfficePolicyCard() {
             ["Route worker disetujui", p.approved_worker_routes.join(", ") || "—"],
             ["Claude Max untuk data kantor", p.claude_max_allowed_for_office_data ? "diizinkan" : <StatusBadge key="c" status="DENIED" label="Belum disetujui" />],
             ["Provider diotorisasi", p.authorized_providers.join(", ") || "—"],
+            [
+              "Target disetujui perusahaan",
+              p.decision_refs_hidden
+                ? `${p.approved_target_count ?? 0} target (hanya terlihat di sesi OFFICE)`
+                : targets.length
+                  ? targets.map((t) => <Mono key={targetText(t)}>{targetText(t)}</Mono>)
+                  : undecided("t"),
+            ],
+            ["Kelas data disetujui untuk AI", classes.length ? classes.join(", ") : undecided("k", "Belum diputuskan (data OFFICE tidak dikirim ke model)")],
+            [
+              "Identitas credential disetujui",
+              p.decision_refs_hidden
+                ? `${p.approved_identity_count ?? 0} identitas (hanya terlihat di sesi OFFICE)`
+                : identities.length
+                  ? identities.map(([ref, v]) => <Mono key={ref}>{`${ref}=${v}`}</Mono>)
+                  : undecided("i", "Belum dicatat (opsional; tidak dibuktikan)"),
+            ],
             ["Atlassian", <StatusBadge key="d" status={p.atlassian_deployment === "UNKNOWN" ? "UNKNOWN" : "CONFIGURED"} label={p.atlassian_deployment} />],
             ["Sumber", p.source],
           ]}
         />
       )}
+      {p && isAdmin && domain === "OFFICE" && <OfficeRouteForm approvedRoutes={p.approved_worker_routes} authorised={p.office_authorization} />}
     </Card>
+  );
+}
+
+/**
+ * §23 controlled path (W6-185): make a company-approved worker route OFFICE-eligible. Only in an OFFICE session, only
+ * for a route in approved_worker_routes and with an office/ credential reference; the backend re-checks everything and
+ * records the human decision. Activation stays a separate, hash-bound decision (Model & route).
+ */
+export function OfficeRouteForm({ approvedRoutes, authorised }: { approvedRoutes: string[]; authorised: boolean }) {
+  const qc = useQueryClient();
+  const [routeKey, setRouteKey] = useState(approvedRoutes[0] ?? "");
+  const [credentialRef, setCredentialRef] = useState("office/");
+  const [rationale, setRationale] = useState("");
+  const save = useMutation({
+    mutationFn: () => post("/api/policy/office/routes", { route_key: routeKey.trim(), credential_ref: credentialRef.trim(), rationale: rationale.trim() }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["policy"] });
+      qc.invalidateQueries({ queryKey: ["decisions"] });
+      qc.invalidateQueries({ queryKey: ["routes"] });
+      setRationale("");
+    },
+  });
+  const refOk = /^office\/[A-Za-z0-9._/-]{1,190}$/.test(credentialRef.trim()) && !credentialRef.includes("..");
+  return (
+    <form
+      aria-label="Kelayakan route OFFICE"
+      className="mt-3 grid gap-2 rounded-md border border-line p-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        save.mutate();
+      }}
+    >
+      <div className="text-sm font-medium">Jadikan route worker layak OFFICE</div>
+      <Notice tone="info">
+        Hanya route dalam approved_worker_routes otorisasi perusahaan, dengan credential <Mono>office/…</Mono>. Route menjadi khusus OFFICE; aktivasi tetap
+        keputusan terpisah yang terikat hash (halaman Model &amp; route). CLI: <Mono>aeos policy office-route &lt;route_key&gt; --as &lt;admin&gt; --credential-ref office/&lt;provider&gt;</Mono>
+      </Notice>
+      {!authorised && <StatusBadge status="BLOCKED" label="Belum ada otorisasi perusahaan: permintaan akan ditolak" />}
+      <label className="grid gap-1 text-sm">
+        <span>Route key</span>
+        {approvedRoutes.length ? (
+          <select aria-label="Route key" className="rounded-md border border-line bg-surface px-3 py-1.5 text-sm" value={routeKey} onChange={(e) => setRouteKey(e.target.value)}>
+            {approvedRoutes.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input aria-label="Route key" className="rounded-md border border-line bg-surface px-3 py-1.5 text-sm" value={routeKey} onChange={(e) => setRouteKey(e.target.value)} />
+        )}
+      </label>
+      <label className="grid gap-1 text-sm">
+        <span>Referensi credential OFFICE</span>
+        <input aria-label="Referensi credential OFFICE" className="rounded-md border border-line bg-surface px-3 py-1.5 text-sm" value={credentialRef} onChange={(e) => setCredentialRef(e.target.value)} placeholder="office/openrouter" />
+      </label>
+      <label className="grid gap-1 text-sm">
+        <span>Rationale (min. 10 karakter)</span>
+        <textarea aria-label="Rationale route OFFICE" className="rounded-md border border-line bg-surface px-3 py-1.5 text-sm" value={rationale} onChange={(e) => setRationale(e.target.value)} />
+      </label>
+      <ErrorBox error={save.error} />
+      {save.isSuccess && <StatusBadge status="CONFIGURED" label="Keputusan tercatat: route khusus OFFICE (belum aktif)" />}
+      <div>
+        <Button type="submit" variant="primary" busy={save.isPending} disabled={!routeKey.trim() || !refOk || rationale.trim().length < 10}>
+          Catat kelayakan OFFICE
+        </Button>
+        {!refOk && <span className="ml-2 text-xs text-warn">Referensi harus office/&lt;provider&gt;</span>}
+      </div>
+    </form>
   );
 }
 

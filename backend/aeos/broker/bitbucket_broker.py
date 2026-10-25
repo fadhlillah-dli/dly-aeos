@@ -48,6 +48,7 @@ from aeos.broker.git_broker import (
     _require_grant,
     _require_publishable,
     _side_effect,
+    http_client,
     push_from_mirror,
     validate_branch,
     validate_remote_url,
@@ -208,6 +209,10 @@ def require_office_read(session: Session, run: WorkerRun | None, repo_full_name:
         raise PolicyDenied("no ACTIVE company authorisation lists bitbucket: the OFFICE credential is not read and "
                            "the outcome stays as recorded until the authorisation exists (OFFICE default deny, §23)",
                            code="OFFICE_NOT_AUTHORISED")
+    ok, why = policy.office_target_authorised(session, PROVIDER, root_id=repo_full_name, policy=pol)
+    if not ok:
+        raise PolicyDenied(f"the repository is not a company-approved Bitbucket target: {why}",
+                           code="OFFICE_TARGET_NOT_AUTHORISED")
 
 
 # ----------------------------------------------------------------------------- push
@@ -347,7 +352,7 @@ def create_pull_request(session: Session, *, run: WorkerRun, repo_full_name: str
                "close_source_branch": False, "draft": True}
     pr: dict[str, Any] | None = None
     outcome, detail = "FAILED", ""
-    with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False, trust_env=False) as client:
+    with http_client() as client:
         if unresolved:
             try:
                 pr = _find_pr(client, api_base, repo_full_name, head, base, headers, states=PR_STATES_ALL)
@@ -420,7 +425,7 @@ def reconcile_side_effect(session: Session, se: BrokerSideEffect, *, actor: str,
         require_office_read(session, run, repo)
         cred = _credential()
         headers = {"Authorization": cred.api_header, "Accept": "application/json", "User-Agent": "dly-aeos-broker"}
-        with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False, trust_env=False) as client:
+        with http_client() as client:
             try:
                 pr = _find_pr(client, api_base, repo, head, base, headers, states=PR_STATES_ALL)
             except (httpx.HTTPError, ValueError):

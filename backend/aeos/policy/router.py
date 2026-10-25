@@ -18,7 +18,7 @@ from aeos.identity.service import Principal
 from aeos.models.decisions import ArchitectureDecisionRecord, Decision
 from aeos.models.policy_ext import DecisionRequest
 from aeos.policy import adrs as adr_loader
-from aeos.policy import catalog, enablement, office, recording, snapshot
+from aeos.policy import catalog, enablement, office, office_scope, recording, snapshot
 from aeos.policy import decisions as registry
 from aeos.policy import queue as decision_queue
 from aeos.policy import requests as decision_requests
@@ -117,7 +117,11 @@ def decision_shapes(_principal: CurrentPrincipal, domain: ActiveDomain) -> dict[
                        for name, p in catalog.EXCEPTION_PRESETS.items()},
         "office_authorization": {"target_type": catalog.TARGET_OFFICE_POLICY, "target_id": Domain.OFFICE.value,
                                  "providers": list(catalog.providers_for(Domain.OFFICE)),
-                                 "available": domain == Domain.OFFICE},
+                                 "available": domain == Domain.OFFICE,
+                                 "approved_target_keys": {p: {"required": list(r), "optional": list(o)}
+                                                          for p, (r, o) in office_scope.TARGET_KEYS.items()},
+                                 "data_classes": list(office_scope.DATA_CLASSES),
+                                 "identity_refs": list(office_scope.IDENTITY_REFS)},
         "domain": domain.value, "checked_at": _now(),
     }
 
@@ -150,6 +154,10 @@ class DecisionIn(BaseModel):
     company_reference: str | None = Field(default=None, max_length=500)
     allowed_providers: list[str] = Field(default_factory=list)
     office_policy: dict[str, Any] | None = None
+    # structured scope of the company authorisation (aeos.policy.office_scope): dict or "provider:key=value,..." text
+    approved_targets: list[dict[str, Any] | str] = Field(default_factory=list, max_length=50)
+    approved_data_classes: list[str] = Field(default_factory=list, max_length=10)
+    approved_identities: dict[str, str] = Field(default_factory=dict, max_length=10)
     # EXCEPTION presets with the exact target shape their consumer reads (catalog.EXCEPTION_PRESETS)
     exception: Literal["secret_store_interim_keyring", "worker_sandbox_process"] | None = None
     allow_bash: bool | None = None
@@ -187,7 +195,8 @@ def create_decision(body: DecisionIn, db: DB, principal: AdminPrincipal, domain:
         expires_at=body.expires_at, details=body.details, provider=body.provider, enabled=body.enabled,
         office_authorization=body.office_authorization, company_reference=body.company_reference,
         allowed_providers=body.allowed_providers, office_policy=body.office_policy, exception=body.exception,
-        allow_bash=body.allow_bash,
+        allow_bash=body.allow_bash, approved_targets=body.approved_targets,
+        approved_data_classes=body.approved_data_classes, approved_identities=body.approved_identities,
     )
     if body.request_id:
         req = db.get(DecisionRequest, body.request_id)
@@ -303,8 +312,12 @@ def get_office_policy(db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
     if principal.active_domain != Domain.OFFICE or not principal.can_access_domain(Domain.OFFICE):
         # The effective (default-deny) policy is visible everywhere; the OFFICE decision references
         # behind it are OFFICE metadata and stay in OFFICE sessions (§35, §50).
+        # The approved tenants/targets and identities are OFFICE metadata too (§23 "office data never flows into
+        # Personal views"); only their counts are visible outside an OFFICE session.
         view.update(authorization_decision_id=None, applied_decision_ids=[], ignored_decisions=[],
-                    decision_refs_hidden=True)
+                    decision_refs_hidden=True, approved_targets=[], approved_identities={},
+                    approved_target_count=len(view.get("approved_targets") or []),
+                    approved_identity_count=len(view.get("approved_identities") or {}))
     return view
 
 

@@ -138,6 +138,16 @@ def office_delivery_readiness(session: Session, project: Project) -> OfficeDeliv
     elif repo.verification_status != "VERIFIED":
         reasons.append(f"identitas repository {repo.full_name} belum VERIFIED lewat Bitbucket API "
                        "(POST /api/repositories/<id>/verify)")
+    if authorised and wanted:
+        # §01 U-03 / §07 step 10: the exact repository must be a company-approved target (approved_targets)
+        try:
+            from aeos.policy import facade as policy
+
+            ok, why = policy.office_target_authorised(session, PROVIDER, root_id=wanted, policy=pol)
+        except ImportError:
+            ok, why = False, "policy module unavailable (fail closed)"
+        if not ok:
+            reasons.append(f"repository {wanted} bukan target yang disetujui perusahaan: {why}")
     try:
         from aeos.secrets import facade as secrets
 

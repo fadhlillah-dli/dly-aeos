@@ -36,6 +36,12 @@ _SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _PATH = re.compile(r"^/[A-Za-z0-9._~/-]{0,200}$")
 
 
+def health_path_ok(path: Any) -> bool:
+    """The one health-path rule: an absolute URL path of safe characters (the Integration Registry validates the
+    owner's ``config.health_path`` with this same rule before it is stored)."""
+    return isinstance(path, str) and bool(_PATH.match(path)) and ".." not in path.split("/")
+
+
 def target_for(session: Session, project: Project, environment: str) -> ProjectIntegration | None:
     return session.scalar(select(ProjectIntegration).where(
         ProjectIntegration.project_id == project.id, ProjectIntegration.purpose == environment,
@@ -81,11 +87,12 @@ def observe(session: Session, project_id: str, environment: str, sha: str, *, ac
         raise NotFound("project not found")
     target = target_for(session, project, environment)
     if target is None or not target.root_id:
-        raise Blocked(f"no {environment} deployment target is registered for this project "
-                      f"(PUT /api/projects/{project.id}/integrations provider={PROVIDER} purpose={environment})",
+        raise Blocked(f"no {environment} deployment target is registered for this project: register it in the "
+                      f"Control Center (Portofolio -> project -> Integrasi -> Deployment target {environment}; "
+                      f"API: PUT /api/projects/{project.id}/integrations provider={PROVIDER} purpose={environment})",
                       code="NO_DEPLOYMENT_TARGET")
     path = str((target.config or {}).get("health_path") or DEFAULT_HEALTH_PATH)
-    if not _PATH.match(path):
+    if not health_path_ok(path):
         raise ValidationFailed("health_path must be an absolute URL path", code="HEALTH_PATH_INVALID")
     url = target.root_id.rstrip("/") + path
     http_status: int | None = None

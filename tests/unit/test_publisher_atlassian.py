@@ -195,6 +195,8 @@ def test_office_end_to_end_blocks_when_folders_unsupported(settings, db, secrets
     # CONTROLLED PRECONDITION: the company authorisation / CAN_USE_OFFICE_INTEGRATIONS gate is READY here; this
     # test is about the tenant's missing folder support (the gate itself: test_publisher_gaps).
     monkeypatch.setattr(targets_mod, "office_gate", lambda session, project: (True, []))
+    # ... and the target is one the company approved (approved_targets: test_office_company_scope)
+    monkeypatch.setattr(targets_mod, "_company_approved", lambda session, family, acfg: (True, "test: approved"))
     secrets_memory.put("office/atlassian", json.dumps({"email": "a@b.invalid", "api_token": "atl-token-1234567890"}),
                        actor="test")
     project = make_project(db, domain="OFFICE")

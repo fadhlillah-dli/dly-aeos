@@ -286,14 +286,39 @@ def test_office_without_company_authorisation_denied(db, office):
     assert {"OFFICE_NOT_AUTHORISED", "ATLASSIAN_DEPLOYMENT_UNKNOWN"} <= _codes(res)
 
 
-def test_office_with_authorisation_and_known_deployment_allowed(db, owner, office):
+def _office_authorisation(db, owner, intent, *, approved_targets):
+    """The company authorisation with its approved targets + the project's registered Confluence target (the
+    Integration Registry is where the interlock reads the tenant/space of the write target)."""
+    from aeos.models.portfolio import ProjectIntegration
+
+    db.add(ProjectIntegration(project_id=intent.project_id, domain="OFFICE", provider="confluence", purpose="docs",
+                              root_id="123", tenant_id="acme.atlassian.net",
+                              config={"deployment": "CLOUD", "space_id": "98765", "enabled": True}))
     registry.record_decision(
         db, kind="POLICY", actor_user_id=owner.id, target_type="office_policy", target_id="OFFICE", domain="OFFICE",
         allowed_operations=[], auth_scope={"company": "ACME"}, rationale="company letter 2026-10",
         details={"office_authorization": True, "company_reference": "letter", "allowed_providers": ["confluence"],
-                 "office_policy": {"atlassian_deployment": "CLOUD"}})
+                 "approved_targets": approved_targets, "office_policy": {"atlassian_deployment": "CLOUD"}})
     db.commit()
+
+
+def test_office_with_authorisation_and_known_deployment_allowed(db, owner, office):
+    _office_authorisation(db, owner, office, approved_targets=[
+        {"provider": "confluence", "tenant": "acme.atlassian.net", "space_id": "98765"}])
     res = check_external_write(db, office)
     assert res.allowed, res.reasons
     other = replace(office, provider="jira", operation="create_issue", target={"provider": "jira", "root_id": "ENG"})
     assert "OFFICE_PROVIDER_NOT_AUTHORISED" in _codes(check_external_write(db, other))
+
+
+@pytest.mark.parametrize("approved", [
+    [],  # the company named no target: UNDECIDED fails closed
+    [{"provider": "confluence", "tenant": "other.atlassian.net"}],  # another tenant
+    [{"provider": "confluence", "tenant": "acme.atlassian.net", "space_id": "11111"}],  # another space
+    [{"provider": "confluence", "tenant": "acme.atlassian.net", "root_id": "999"}],  # another parent
+])
+def test_office_write_outside_the_company_approved_targets_is_denied(db, owner, office, approved):
+    """W6-157: the company authorisation names its approved targets; a write elsewhere is refused (fail closed)."""
+    _office_authorisation(db, owner, office, approved_targets=approved)
+    res = check_external_write(db, office)
+    assert not res.allowed and "OFFICE_TARGET_NOT_AUTHORISED" in _codes(res)

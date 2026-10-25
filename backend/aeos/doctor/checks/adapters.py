@@ -684,8 +684,10 @@ OFFICE_PURPOSE = "office:doctor.atlassian-readonly-probe"
 
 
 def _office_auth(ref: str) -> str:
-    """Basic auth header from the stored OFFICE credential (email/username + API token / app password), registered
-    for redaction; read only after the company authorisation gate opened."""
+    """``Authorization`` value from the stored OFFICE credential, registered for redaction; read only after the
+    company authorisation gate opened. ``office/bitbucket`` is built exactly like the broker and the publisher do
+    (``bitbucket_auth_header``: a repository/workspace access token -> Bearer, email + API token or the legacy
+    username + app password -> Basic); ``office/atlassian`` is Basic email/username:API token."""
     import base64
     import json
 
@@ -693,6 +695,10 @@ def _office_auth(ref: str) -> str:
     from aeos.secrets import facade as secrets
 
     raw = secrets.get_secret(ref, purpose=OFFICE_PURPOSE, actor="doctor")
+    if ref == BITBUCKET_REF:
+        from aeos.publisher.providers.atlassian import bitbucket_auth_header
+
+        return bitbucket_auth_header(raw)
     try:
         data = json.loads(raw)
         user = str(data.get("email") or data.get("username") or "")
@@ -718,15 +724,73 @@ def _http_verdict(status: int | None, error: Any, what: str) -> tuple[str, str] 
     return "UNKNOWN", str(error or status or "NO_RESPONSE")
 
 
+def _target_authorisation(ctx: CheckContext, t: dict[str, Any], pol: dict[str, Any] | None) -> tuple[bool, str]:
+    """§01 U-03 / §07 step 10: is the configured target one the company approved (``approved_targets``)?"""
+    from aeos.policy import facade as policy
+
+    if ctx.session is None:
+        return False, "no database session: the company authorisation cannot be read (fail closed)"
+    cfg = t.get("config") or {}
+    return policy.office_target_authorised(ctx.session, str(t.get("provider") or ""), root_id=t.get("root_id"),
+                                           tenant=t.get("tenant_id") or cfg.get("base_url"),
+                                           space_id=cfg.get("space_id"), policy=pol)
+
+
+def _confluence_probe(ctx: CheckContext, item: dict[str, Any], base_url: str, space_id: str, parent_id: str,
+                      deployment: str, headers: dict[str, str]) -> dict[str, Any]:
+    """The publisher's own capability rule (``confluence_capabilities``) over the Doctor's read-only runner: the
+    space (REST v2), then the parent folder (page fallback). READY -> CONNECTED; a page parent, a tenant without
+    folder support or a parent in another space -> FAILED (needs action) - never green for a target the
+    publisher refuses (§50 T1 #1.19)."""
+    from aeos.publisher.providers.atlassian import confluence_capabilities
+
+    calls: list[tuple[int | None, Any]] = []
+
+    def get(path: str, _what: str) -> tuple[int | None, Any]:
+        hr = ctx.runner.http_get(f"{base_url}/wiki/api/v2{path}", timeout=10.0, headers=headers, allow_remote=True)
+        calls.append((hr.status, hr.error))
+        return hr.status, hr.body
+
+    caps = confluence_capabilities(get, space_id=space_id, parent_id=parent_id, deployment=deployment)
+    item.update(folders=caps["folders"], api_v2=caps["api_v2"], parent_kind=caps.get("parent_kind"),
+                observed_space=caps.get("parent_space"), capability_reasons=list(caps["reasons"]),
+                http_status=calls[-1][0] if calls else None)
+    if caps["status"] == "READY":
+        return {**item, "status": "CONNECTED", "needs_action": False}
+    if 401 in [s for s, _ in calls]:
+        return {**item, "status": "EXPIRED", "error": "OFFICE_CREDENTIAL_REJECTED"}
+    http = caps.get("http") or {}
+    space_status = http.get("space")
+    if space_status is None:
+        return {**item, "status": "UNKNOWN", "error": str(calls[0][1] if calls else "NO_RESPONSE")}
+    if space_status != 200:
+        if space_status in (403, 404):
+            return {**item, "status": "FAILED", "error": "CONFLUENCE_SPACE_NOT_VISIBLE"}
+        return {**item, "status": "UNKNOWN", "error": f"HTTP_{space_status}"}
+    if caps.get("space_mismatch"):
+        return {**item, "status": "FAILED", "error": "CONFLUENCE_PARENT_OTHER_SPACE", "needs_action": True}
+    if caps["parent_kind"] == "page" or caps["folders"] == "NOT_SUPPORTED":
+        # §50 T1 #1.19: the tenant/parent cannot hold a project folder -> needs action; the publisher refuses it
+        return {**item, "status": "FAILED", "error": "CONFLUENCE_FOLDERS_UNSUPPORTED", "needs_action": True}
+    folder_status, page_status = http.get("folder"), http.get("page", "not-read")
+    if folder_status is None or page_status is None:
+        return {**item, "status": "UNKNOWN", "error": "NO_RESPONSE"}
+    if folder_status == 403 or page_status in (403, 404):
+        return {**item, "status": "FAILED", "error": "CONFLUENCE_PARENT_NOT_VISIBLE"}
+    return {**item, "status": "UNKNOWN", "error": f"HTTP_{folder_status}"}
+
+
 def _probe_office_target(ctx: CheckContext, t: dict[str, Any]) -> dict[str, Any]:
-    """One read-only GET that proves the exact OFFICE target exists and is reachable with the stored credential:
-    Jira project key, Confluence parent folder/page (and its space), Bitbucket workspace/repo. Never a write."""
+    """Read-only GETs that prove the exact OFFICE target exists and is usable with the stored credential: Jira
+    project key, Confluence space + parent folder (the publisher's capability rule), Bitbucket workspace/repo.
+    Never a write."""
     from urllib.parse import quote
 
     from aeos.publisher.providers.atlassian import BITBUCKET_API, AtlassianConfig
 
     provider, root = str(t.get("provider") or ""), str(t.get("root_id") or "")
     item: dict[str, Any] = {"provider": provider, "root_id": root}
+    cfg: AtlassianConfig | None = None
     if provider == pv.BITBUCKET:
         if "/" not in root:
             return {**item, "status": "FAILED", "error": "BITBUCKET_REPO_INVALID"}
@@ -743,20 +807,24 @@ def _probe_office_target(ctx: CheckContext, t: dict[str, Any]) -> dict[str, Any]
         if product == "jira":
             url = f"{cfg.base_url}/rest/api/3/project/{quote(cfg.project_key, safe='')}"
         else:
-            url = f"{cfg.base_url}/wiki/api/v2/folders/{quote(cfg.parent_id, safe='')}"
             item["space_id"] = cfg.space_id or None
+            if not cfg.space_id:
+                # the publisher reads GET /wiki/api/v2/spaces/<numeric id> first: without it nothing can be proven
+                return {**item, "status": "FAILED", "error": "CONFLUENCE_SPACE_MISSING"}
+            url = f"{cfg.base_url}/wiki/api/v2/spaces/{quote(cfg.space_id, safe='')}"
         ref = ATLASSIAN_REF
     try:
         auth = _office_auth(ref)
     except Exception as exc:  # missing/incomplete credential: never green
         return {**item, "status": "MISSING", "error": "OFFICE_CREDENTIAL_MISSING", "detail": type(exc).__name__}
     headers = {"Authorization": auth, "Accept": "application/json", "User-Agent": "dly-aeos-doctor"}
+    if provider == pv.CONFLUENCE and cfg is not None:
+        try:
+            return _confluence_probe(ctx, item, cfg.base_url, cfg.space_id, cfg.parent_id, cfg.deployment, headers)
+        except Exception as exc:  # never green
+            return {**item, "status": "UNKNOWN", "error": type(exc).__name__}
     try:
         hr = ctx.runner.http_get(url, timeout=10.0, headers=headers, allow_remote=True)
-        if provider == pv.CONFLUENCE and hr.status == 404:  # the parent may be a page (folders not supported)
-            hr = ctx.runner.http_get(url.replace("/folders/", "/pages/"), timeout=10.0, headers=headers,
-                                     allow_remote=True)
-            item["parent_kind"] = "page" if hr.status == 200 else None
     except Exception as exc:  # never green
         return {**item, "status": "UNKNOWN", "error": type(exc).__name__}
     item["http_status"] = hr.status
@@ -769,16 +837,10 @@ def _probe_office_target(ctx: CheckContext, t: dict[str, Any]) -> dict[str, Any]
         if observed.upper() != root.upper():
             return {**item, "status": "FAILED", "error": "JIRA_PROJECT_MISMATCH", "observed": observed}
         return {**item, "status": "CONNECTED", "project_id": str(body.get("id") or ""), "name": body.get("name")}
-    if provider == pv.BITBUCKET:
-        observed = str(body.get("full_name") or "")
-        if observed.lower() != root.lower():
-            return {**item, "status": "FAILED", "error": "BITBUCKET_REPO_MISMATCH", "observed": observed}
-        return {**item, "status": "CONNECTED", "uuid": body.get("uuid"), "is_private": body.get("is_private")}
-    space = str(body.get("spaceId") or "")
-    if item.get("space_id") and space and space != item["space_id"]:
-        return {**item, "status": "FAILED", "error": "CONFLUENCE_PARENT_OTHER_SPACE", "observed_space": space}
-    item.setdefault("parent_kind", "folder")
-    return {**item, "status": "CONNECTED", "observed_space": space or None}
+    observed = str(body.get("full_name") or "")
+    if observed.lower() != root.lower():
+        return {**item, "status": "FAILED", "error": "BITBUCKET_REPO_MISMATCH", "observed": observed}
+    return {**item, "status": "CONNECTED", "uuid": body.get("uuid"), "is_private": body.get("is_private")}
 
 
 @check("adapter.project_office_targets", "PROJECT_ADAPTERS",
@@ -787,8 +849,9 @@ def _probe_office_target(ctx: CheckContext, t: dict[str, Any]) -> dict[str, Any]
        invalidators=("config:office_policy", "integration:*", f"secret:{ATLASSIAN_REF}", f"secret:{BITBUCKET_REF}"),
        ok={"CONFIGURED", "CONNECTED", "VERIFIED"}, targets=project_office_targets,
        description="Per proyek OFFICE: identitas target (repo/project key/parent id + tenant). Tetap diblokir sampai "
-                   "otorisasi perusahaan tercatat (§23); dengan --functional satu GET read-only per target "
-                   "(Jira project, parent/space Confluence, repo Bitbucket) membuktikan identitasnya.")
+                   "otorisasi perusahaan tercatat (§23); target di luar approved_targets otorisasi perusahaan GAGAL "
+                   "tanpa probe. Dengan --functional GET read-only per target (Jira project; space + folder parent "
+                   "Confluence dengan aturan kapabilitas publisher yang sama; repo Bitbucket) membuktikan identitasnya.")
 def adapter_project_office_targets(ctx: CheckContext) -> Outcome:
     from aeos.doctor.office import office_gate
 
@@ -806,6 +869,40 @@ def adapter_project_office_targets(ctx: CheckContext) -> Outcome:
     if missing:
         return Outcome("MISSING", f"Target OFFICE belum lengkap (root_id): {', '.join(missing)}.", evidence=evidence,
                        error_code="OFFICE_TARGET_MISSING")
+    # §01 U-03 / §07 step 10: the configured tenant/target must be one the company approved - checked before any
+    # credential is read or request sent; a target outside approved_targets FAILS (never probed, never green)
+    pol: dict[str, Any] | None = None
+    try:
+        from aeos.policy import facade as policy
+
+        if ctx.session is not None:
+            pol = policy.office_policy(ctx.session)
+    except ImportError:
+        pol = None
+    if pol is None:
+        # the company-approved targets cannot be read: never green, and not claimed as "outside" either
+        return Outcome("UNKNOWN", "Target yang disetujui perusahaan tidak dapat dibaca (modul policy atau database "
+                       "tidak tersedia); tidak ada yang diprobe (fail closed).", evidence=evidence,
+                       error_code="POLICY_UNAVAILABLE")
+    scoped = [t for t in items if t.get("provider") in (pv.CONFLUENCE, pv.JIRA, pv.BITBUCKET)]
+    outside = []
+    for t in scoped:
+        ok, why = _target_authorisation(ctx, t, pol)
+        if not ok:
+            outside.append({"provider": t.get("provider"), "root_id": t.get("root_id"), "reason": why})
+    evidence["company_approved_targets"] = {"approved": len(pol.get("approved_targets") or []),
+                                            "outside": outside}
+    if outside:
+        return Outcome("FAILED", "Target OFFICE di luar target yang disetujui perusahaan (approved_targets): "
+                       + "; ".join(f"{o['provider']}:{o['root_id']}" for o in outside) + ". Tidak ada yang diprobe.",
+                       evidence=evidence, error_code="OFFICE_TARGET_NOT_AUTHORISED",
+                       remedy=Remedy(operation="Catat target yang disetujui perusahaan pada keputusan otorisasi "
+                                     "perusahaan (Keputusan -> POLICY -> otorisasi perusahaan OFFICE), atau perbaiki "
+                                     "target integrasi proyek", command=aeos_cmd(
+                                         "policy decide --kind POLICY --domain OFFICE --office-authorization "
+                                         "--approved-target <provider>:<key>=<value> ..."),
+                                     privilege="SUPER_ADMIN (keputusan manusia)",
+                                     evidence_to_collect="adapter.project_office_targets bukan FAILED"))
     if not ctx.functional:
         return Outcome("CONFIGURED", "Target OFFICE terkonfigurasi; identitas project/parent/repo belum diprobe "
                        "(gunakan --functional: GET read-only per target).", evidence=evidence)
@@ -820,3 +917,135 @@ def adapter_project_office_targets(ctx: CheckContext) -> Outcome:
     return Outcome("CONNECTED", f"{len(results)} target OFFICE terbaca read-only dan identitasnya cocok ({line}); "
                    "izin tulis tidak diuji.", evidence=evidence,
                    target_identity=", ".join(f"{x['provider']}:{x['root_id']}" for x in results)[:250])
+
+
+# ---------------------------------------------------------------- OFFICE credential identity (§04, master table §03)
+#
+# "Credential OFFICE: namespace office dan identity yang disetujui kantor": the company authorisation may record the
+# identity each delegated office/ credential must act as (approved_identities). With --functional the Doctor asks the
+# provider who the stored credential is (one read-only GET) and compares; a different account FAILS.
+
+BITBUCKET_USER_URL = "https://api.bitbucket.org/2.0/user"
+# Only identifiers that name exactly one account. A Bitbucket nickname is not unique (a personal account often
+# carries the same nickname as the company-issued one, which is precisely the mix-up this check must catch), and the
+# username field is no longer returned by the Bitbucket Cloud API: neither is compared.
+_IDENTITY_FIELDS = {ATLASSIAN_REF: ("accountId", "emailAddress"),
+                    BITBUCKET_REF: ("uuid", "account_id")}
+
+
+def _mask(value: str) -> str:
+    v = str(value or "")
+    if "@" in v:
+        user, _, host = v.partition("@")
+        return (user[:2] + "***@" + host) if user else "***@" + host
+    return v if len(v) <= 8 else v[:4] + "..." + v[-4:]
+
+
+def _identity_matches(ref: str, approved: str, body: dict[str, Any]) -> tuple[bool, list[str]]:
+    want = approved.strip().lower().strip("{}")
+    seen: list[str] = []
+    for f in _IDENTITY_FIELDS[ref]:
+        v = body.get(f)
+        if isinstance(v, str) and v.strip():
+            seen.append(f)
+            if v.strip().lower().strip("{}") == want:
+                return True, [f]
+    return False, seen
+
+
+def _atlassian_tenant(pol: dict[str, Any]) -> str | None:
+    for t in pol.get("approved_targets") or []:
+        if isinstance(t, dict) and t.get("provider") in (pv.CONFLUENCE, pv.JIRA) and t.get("tenant"):
+            return f"https://{t['tenant']}"
+    return None
+
+
+def _probe_identity(ctx: CheckContext, ref: str, approved: str, pol: dict[str, Any]) -> dict[str, Any]:
+    item: dict[str, Any] = {"credential_ref": ref, "approved": _mask(approved)}
+    if ref == ATLASSIAN_REF:
+        tenant = _atlassian_tenant(pol)
+        if tenant is None:
+            return {**item, "status": "UNKNOWN", "error": "NO_APPROVED_ATLASSIAN_TENANT"}
+        url = f"{tenant}/rest/api/3/myself"
+    else:
+        url = BITBUCKET_USER_URL
+    item["url"] = url
+    try:
+        auth = _office_auth(ref)
+    except Exception as exc:  # missing/incomplete credential: never green
+        return {**item, "status": "MISSING", "error": "OFFICE_CREDENTIAL_MISSING", "detail": type(exc).__name__}
+    try:
+        hr = ctx.runner.http_get(url, timeout=10.0, allow_remote=True,
+                                 headers={"Authorization": auth, "Accept": "application/json",
+                                          "User-Agent": "dly-aeos-doctor"})
+    except Exception as exc:  # never green
+        return {**item, "status": "UNKNOWN", "error": type(exc).__name__}
+    item["http_status"] = hr.status
+    if hr.status == 401:
+        return {**item, "status": "EXPIRED", "error": "OFFICE_CREDENTIAL_REJECTED"}
+    if hr.status != 200 or not isinstance(hr.body, dict):
+        # e.g. a repository access token has no user: the identity is not observable, which is never a pass
+        return {**item, "status": "UNKNOWN", "error": "IDENTITY_NOT_OBSERVABLE" if hr.status in (403, 404)
+                else str(hr.error or hr.status or "NO_RESPONSE")}
+    ok, fields = _identity_matches(ref, approved, hr.body)
+    if ok:
+        return {**item, "status": "VERIFIED", "matched_field": fields[0]}
+    observed = next((hr.body.get(f) for f in _IDENTITY_FIELDS[ref] if isinstance(hr.body.get(f), str)), "")
+    return {**item, "status": "FAILED", "error": "OFFICE_IDENTITY_MISMATCH", "observed": _mask(str(observed)),
+            "compared_fields": fields}
+
+
+@check("secret.office_identity", "SECRET", "Identitas credential OFFICE = identitas yang disetujui perusahaan",
+       component_id="secret-provider", ttl_seconds=3600, needs_db=True, level="E1", functional_level="E3",
+       invalidators=("config:office_policy", f"secret:{ATLASSIAN_REF}", f"secret:{BITBUCKET_REF}"),
+       ok={"VERIFIED", "CONFIGURED", "NOT_APPLICABLE"}, scope={"domain": "OFFICE"},
+       description="Otorisasi perusahaan dapat mencatat identitas yang disetujui per credential office/ "
+                   "(approved_identities). Dengan --functional satu GET read-only (Atlassian /rest/api/3/myself pada "
+                   "tenant yang disetujui, Bitbucket /2.0/user) membandingkan akun credential tersimpan; akun lain "
+                   "GAGAL. Tanpa otorisasi: NOT_APPLICABLE; identitas belum diputuskan: UNKNOWN (tidak pernah hijau).")
+def secret_office_identity(ctx: CheckContext) -> Outcome:
+    from aeos.doctor.office import office_gate
+
+    allowed, reason = office_gate("CAN_USE_OFFICE_INTEGRATIONS", ctx.session)
+    evidence: dict[str, Any] = {"office_gate": reason, "policy": "OFFICE default deny (§23)"}
+    if not allowed:
+        return Outcome("NOT_APPLICABLE", f"Tidak ada otorisasi perusahaan OFFICE yang tercatat; identitas credential "
+                       f"tidak diperiksa ({reason}).", evidence=evidence)
+    try:
+        from aeos.policy import facade as policy
+
+        if ctx.session is None:
+            raise ImportError("no database session")
+        pol = policy.office_policy(ctx.session)
+    except ImportError:
+        return Outcome("UNKNOWN", "Modul policy atau database tidak tersedia (fail closed).", evidence=evidence,
+                       error_code="POLICY_UNAVAILABLE")
+    approved: dict[str, str] = dict(pol.get("approved_identities") or {})
+    evidence["approved"] = {ref: _mask(v) for ref, v in approved.items()}
+    if not approved:
+        return Outcome("UNKNOWN", "Identitas yang disetujui perusahaan untuk credential office/ belum dicatat "
+                       "(approved_identities UNDECIDED); akun credential tidak dapat dibuktikan.", evidence=evidence,
+                       error_code="OFFICE_IDENTITY_UNDECIDED", remedy=Remedy(
+                           operation="Catat identitas yang diterbitkan perusahaan pada keputusan otorisasi perusahaan",
+                           command=aeos_cmd("policy decide --kind POLICY --domain OFFICE --office-authorization "
+                                            "--approved-identity office/atlassian=<account id/email> ..."),
+                           privilege="SUPER_ADMIN (keputusan manusia)",
+                           evidence_to_collect="secret.office_identity VERIFIED"))
+    if not ctx.functional:
+        missing = [ref for ref in approved if secret_ref_status(ref)[0] != "PRESENT"]
+        if missing:
+            return Outcome("MISSING", f"Credential belum disimpan: {', '.join(missing)}.", evidence=evidence,
+                           error_code="OFFICE_CREDENTIAL_MISSING",
+                           remedy=set_secret_remedy(missing[0], "OFFICE yang diterbitkan perusahaan"))
+        return Outcome("CONFIGURED", "Identitas yang disetujui tercatat dan credential tersimpan; akun belum "
+                       "dibandingkan (gunakan --functional: satu GET read-only per credential).", evidence=evidence)
+    results = [_probe_identity(ctx, ref, value, pol) for ref, value in approved.items()]
+    evidence["results"] = results
+    statuses = {r["status"] for r in results}
+    line = ", ".join(f"{r['credential_ref']} {r['status']}" for r in results)
+    for bad, code in (("FAILED", "OFFICE_IDENTITY_MISMATCH"), ("EXPIRED", "OFFICE_CREDENTIAL_REJECTED"),
+                      ("MISSING", "OFFICE_CREDENTIAL_MISSING"), ("UNKNOWN", "OFFICE_IDENTITY_INCONCLUSIVE")):
+        if bad in statuses:
+            return Outcome(bad, f"Identitas credential OFFICE: {line}.", evidence=evidence, error_code=code)
+    return Outcome("VERIFIED", f"Credential OFFICE bertindak sebagai identitas yang disetujui perusahaan ({line}).",
+                   evidence=evidence, target_identity=", ".join(approved)[:250])

@@ -55,13 +55,16 @@ def _git(cwd: Path, *args: str) -> str:
 # ------------------------------------------------------------------------------------------- fixtures
 
 
-def _company_authorisation(db, owner, providers=("bitbucket",), deployment="CLOUD"):
+def _company_authorisation(db, owner, providers=("bitbucket",), deployment="CLOUD", approved_targets=None):
+    """The company authorisation, naming the approved Bitbucket workspace (approved_targets, W6-157)."""
     from aeos.policy import facade as policy
 
+    if approved_targets is None:
+        approved_targets = [{"provider": "bitbucket", "workspace": "company_ws"}] if "bitbucket" in providers else []
     policy.record_decision(db, kind="POLICY", actor_user_id=owner.id, target_type="office_policy", target_id="OFFICE",
                            domain="OFFICE", rationale="company authorisation (test)",
                            details={"office_authorization": True, "company_reference": "CHG-42 signed",
-                                    "allowed_providers": list(providers),
+                                    "allowed_providers": list(providers), "approved_targets": approved_targets,
                                     "office_policy": {"atlassian_deployment": deployment}},
                            auth_scope={"providers": list(providers)})
     db.commit()
@@ -434,6 +437,56 @@ def test_push_without_company_authorisation_is_denied_before_the_credential(db, 
     assert e.value.code in ("INTERLOCK_DENIED", "BITBUCKET_DEPLOYMENT_UNKNOWN")
     assert reads == []  # never read the OFFICE credential
     assert _git(office_run["bare"], "for-each-ref", "--format=%(refname)") == ""
+
+
+def _reauthorise_for(db, owner_id, approved_targets):
+    """Replace the company authorisation by one that approves other targets (W6-157)."""
+    from aeos.models.identity import User
+    from aeos.policy import facade as policy
+
+    policy.invalidate_decisions(db, target_type="office_policy", target_id="OFFICE", reason="re-scoped")
+    db.commit()
+    _company_authorisation(db, db.get(User, owner_id), approved_targets=approved_targets)
+
+
+@pytest.mark.parametrize("approved", [
+    [],  # UNDECIDED: the company named no Bitbucket target
+    [{"provider": "bitbucket", "workspace": "other_ws"}],
+    [{"provider": "bitbucket", "workspace": "company_ws", "root_id": "company_ws/other"}],
+])
+def test_push_outside_the_company_approved_targets_is_denied_before_the_credential(db, office_run, secrets_memory,
+                                                                                   monkeypatch, approved):
+    run = office_run["run"]
+    _grants(db, run)
+    _reauthorise_for(db, run.requested_by, approved)
+    reads = _count_secret_reads(monkeypatch, secrets_memory)
+    with pytest.raises(PolicyDenied) as e:
+        broker.push_task_branch(db, run_id=run.id, worktree=str(office_run["src"]), branch=BRANCH,
+                                repo_full_name=REPO, expected_head_sha=office_run["head"])
+    assert e.value.code == "INTERLOCK_DENIED"
+    assert any(r.startswith("OFFICE_TARGET_NOT_AUTHORISED") for r in e.value.details["reasons"])
+    assert reads == [] and _git(office_run["bare"], "for-each-ref", "--format=%(refname)") == ""
+
+
+def test_reconcile_and_readiness_refuse_a_target_the_company_did_not_approve(db, office_run, secrets_memory,
+                                                                            monkeypatch):
+    run = office_run["run"]
+    _grants(db, run)
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+        mock.post(f"{API}/pullrequests").mock(side_effect=httpx.ReadTimeout("slow"))
+        mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": []}))
+        res = broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main",
+                                         title="t", body="b")
+    assert res["status"] == "UNKNOWN"
+    _reauthorise_for(db, run.requested_by, [{"provider": "bitbucket", "workspace": "other_ws"}])
+    reads = _count_secret_reads(monkeypatch, secrets_memory)
+    with respx.mock(assert_all_mocked=True) as mock:
+        with pytest.raises(PolicyDenied) as e:
+            broker.reconcile_side_effect(db, side_effect_id=res["side_effect_id"], actor="delivery")
+        assert not mock.calls
+    assert e.value.code == "OFFICE_TARGET_NOT_AUTHORISED" and reads == []
+    r = bitbucket.office_delivery_readiness(db, office_run["project"])
+    assert r.status == "BLOCKED" and any("bukan target yang disetujui perusahaan" in x for x in r.reasons)
 
 
 def test_push_refused_for_disabled_data_center_unverified_or_personal(db, office_run, secrets_memory, monkeypatch):

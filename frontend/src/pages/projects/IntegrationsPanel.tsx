@@ -5,10 +5,20 @@ import { get, put } from "../../api/client";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputClass, Loading, Mono, Notice } from "../../components/ui";
 import { absoluteTime } from "../../lib/format";
+import { GATE_HELP } from "../evidence/labels";
 import { ModuleBadge } from "./badges";
 import type { IntegrationView, ListResponse, ProjectView } from "./types";
 
-const PURPOSE_LABEL: Record<string, string> = { docs: "Dokumentasi", issues: "Tracking kerja", code: "Kode", ci: "CI", roadmap: "Roadmap" };
+const PURPOSE_LABEL: Record<string, string> = {
+  docs: "Dokumentasi",
+  issues: "Tracking kerja",
+  code: "Kode",
+  ci: "CI",
+  roadmap: "Roadmap",
+  staging: "Staging",
+  production: "Produksi",
+  deploy: "Deploy",
+};
 /** One provider vocabulary (backend aeos.portfolio.providers). */
 export const PROVIDER_LABEL: Record<string, string> = {
   "google-drive": "Google Drive / Google Docs",
@@ -20,6 +30,7 @@ export const PROVIDER_LABEL: Record<string, string> = {
   jira: "Jira",
   bitbucket: "Bitbucket",
   "bitbucket-pipelines": "Bitbucket Pipelines",
+  "deployment-target": "Deployment target",
 };
 const ROOT_HINT: Record<string, string> = {
   "google-drive": "ID folder Google Drive (GOOGLE_DRIVE_FOLDER_ID), opsional",
@@ -27,8 +38,13 @@ const ROOT_HINT: Record<string, string> = {
   jira: "Kunci proyek Jira (JIRA_PROJECT_KEY), mis. AEOS",
   "github-issues": "owner/nama repository (GITHUB_REPOSITORY)",
   "github-repo": "owner/nama repository",
-  bitbucket: "workspace/nama repository",
+  bitbucket: "workspace/repo_slug (BITBUCKET_REPOSITORY)",
+  "deployment-target": "URL dasar https target (DEPLOYMENT_TARGET_URL), mis. https://staging.contoh.id",
 };
+/** Gates a project's pipeline reference maps (backend delivery.provider.PIPELINE_GATES). */
+export const PIPELINE_GATES = ["G1", "G2", "G3", "G5"] as const;
+/** Same rule as the backend deployment observer (delivery.deployment.health_path_ok). */
+export const HEALTH_PATH = /^\/[A-Za-z0-9._~/-]{0,200}$/;
 
 interface IntegrationList extends ListResponse<IntegrationView> {
   allowed_providers: Record<string, string[]>;
@@ -93,6 +109,16 @@ function IntegrationRow({ i }: { i: IntegrationView }) {
             </dd>
           </>
         )}
+        {Object.keys(i.config ?? {}).length > 0 && (
+          <>
+            <dt className="text-ink-3">Konfigurasi</dt>
+            <dd className="flex flex-wrap gap-2">
+              {Object.entries(i.config ?? {}).map(([k, v]) => (
+                <Mono key={k}>{`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`}</Mono>
+              ))}
+            </dd>
+          </>
+        )}
         <dt className="text-ink-3">Credential (referensi)</dt>
         <dd>{i.credential_ref ? <Mono>{i.credential_ref}</Mono> : "—"} <span className="text-xs text-ink-3">nilai secret tidak pernah ditampilkan</span></dd>
         <dt className="text-ink-3">Masa berlaku credential</dt>
@@ -132,9 +158,10 @@ function IntegrationRow({ i }: { i: IntegrationView }) {
   );
 }
 
-// ---------------------------------------------------------------- publication target settings (§04)
+// ---------------------------------------------------------------- project integration settings (§04, §31)
 
 type Values = Record<string, string | boolean>;
+type Purpose = "docs" | "issues" | "code" | "ci" | "staging" | "production";
 
 interface FieldSpec {
   key: string; // root_id | tenant_id | credential_ref | config.<name>
@@ -144,20 +171,71 @@ interface FieldSpec {
   required?: boolean;
   options?: string[];
   checkbox?: boolean;
+  /** Client-side convenience only; the backend validates with the same rule and stays authoritative. */
+  pattern?: RegExp;
+  patternHint?: string;
 }
 
-interface SectionSpec {
+export interface SectionSpec {
   provider: string;
-  purpose: "docs" | "issues";
+  purpose: Purpose;
   title: string;
   fields: FieldSpec[];
   defaults: Values;
   note?: string;
+  info?: string;
 }
 
 const DEPLOYMENTS = ["UNKNOWN", "CLOUD", "DATA_CENTER"];
 
-function sections(domain: string, defaultRepo: string): SectionSpec[] {
+/** config.gate_G1 … gate_G5: the project's pipeline reference (§31), exact CI job/step/commit-status names. */
+function gateFields(what: string): FieldSpec[] {
+  return PIPELINE_GATES.map((g) => ({
+    key: `config.gate_${g}`,
+    label: `Gate ${g} — nama ${what} persis`,
+    hint: `${GATE_HELP[g] ?? ""} Pisahkan beberapa nama dengan koma; kosong = gate ini tidak dipetakan.`,
+    placeholder: g === "G1" ? "lint, typecheck" : "",
+  }));
+}
+
+function gateDefaults(): Values {
+  return Object.fromEntries(PIPELINE_GATES.map((g) => [`config.gate_${g}`, ""]));
+}
+
+function deploymentTarget(purpose: "staging" | "production"): SectionSpec {
+  return {
+    provider: "deployment-target",
+    purpose,
+    title: `${PURPOSE_LABEL[purpose]} — ${PROVIDER_LABEL["deployment-target"]}`,
+    fields: [
+      {
+        key: "root_id",
+        label: "URL dasar target (https)",
+        hint: ROOT_HINT["deployment-target"],
+        placeholder: purpose === "staging" ? "https://staging.contoh.id" : "https://app.contoh.id",
+        required: true,
+        // same identity rule as the Integration Registry (portfolio.integrations: https, or loopback http)
+        pattern: /^(?:https:\/\/[A-Za-z0-9.-]{1,253}|http:\/\/(?:127\.0\.0\.1|localhost))(?::\d{1,5})?(?:\/[A-Za-z0-9._~/-]{0,200})?$/,
+        patternHint: "harus https://host[:port][/path] (atau http://127.0.0.1 lokal) tanpa user, password atau query",
+      },
+      {
+        key: "config.health_path",
+        label: "Path health/version (opsional)",
+        hint: "Satu GET read-only ke URL dasar + path ini; respons harus menyebut commit yang berjalan. Kosong = /health.",
+        placeholder: "/health",
+        pattern: HEALTH_PATH,
+        patternHint: "harus diawali / dan hanya berisi huruf, angka, . _ ~ / -",
+      },
+    ],
+    defaults: { root_id: "", "config.health_path": "" },
+    info:
+      purpose === "staging"
+        ? "Hanya diamati (gate G6, tangkapan layar dokumen): AEOS tidak pernah men-deploy. Deploy ke target ini tetap tindakan manusia."
+        : "Hanya diamati pasca-rilis (gate G8): AEOS tidak pernah men-deploy atau mempromosikan ke produksi.",
+  };
+}
+
+export function sections(domain: string, defaultRepo: string): SectionSpec[] {
   if (domain === "OFFICE") {
     const atlassian = (provider: string, purpose: "docs" | "issues", rootLabel: string, rootHint: string, extra: FieldSpec[]): SectionSpec => ({
       provider,
@@ -176,9 +254,46 @@ function sections(domain: string, defaultRepo: string): SectionSpec[] {
     });
     return [
       atlassian("confluence", "docs", "CONFLUENCE_PROJECTS_PARENT_ID", ROOT_HINT.confluence, [
-        { key: "config.space_id", label: "Space ID Confluence", required: true, placeholder: "ENG" },
+        {
+          key: "config.space_id",
+          label: "Space ID Confluence (angka)",
+          required: true,
+          placeholder: "98765",
+          hint: "ID numerik space (REST v2), bukan kunci space seperti ENG: buka https://<situs>.atlassian.net/wiki/api/v2/spaces?keys=<KUNCI> lalu salin \"id\".",
+        },
       ]),
       atlassian("jira", "issues", "Kunci proyek Jira", ROOT_HINT.jira, []),
+      {
+        provider: "bitbucket",
+        purpose: "code",
+        title: `${PURPOSE_LABEL.code} — ${PROVIDER_LABEL.bitbucket}`,
+        fields: [
+          {
+            key: "root_id",
+            label: "Repository Bitbucket (workspace/repo_slug)",
+            hint: ROOT_HINT.bitbucket,
+            placeholder: "workspace/nama-repo",
+            required: true,
+            // same identity rule as the Integration Registry (portfolio.integrations _ROOT_PATTERNS bitbucket)
+            pattern: /^[A-Za-z0-9][A-Za-z0-9_-]{0,61}\/[A-Za-z0-9._-]{1,100}$/,
+            patternHint: "harus workspace/repo_slug, mis. perusahaan/aplikasi",
+          },
+          { key: "config.enabled", label: "Aktifkan adapter (tetap butuh otorisasi perusahaan + interlock)", checkbox: true },
+          { key: "credential_ref", label: "Referensi credential", hint: "office/… atau projects/… — bukan nilai secret", placeholder: "office/bitbucket" },
+        ],
+        defaults: { root_id: "", "config.enabled": false, credential_ref: "office/bitbucket" },
+        note: "OFFICE default deny (§23): push/PR hanya setelah otorisasi perusahaan yang mencantumkan bitbucket dan target ini, write enablement, persetujuan rencana dan interlock.",
+        info:
+          "Deployment Bitbucket (Cloud vs Data Center) tidak diatur di sini: catat override atlassian_deployment pada keputusan otorisasi perusahaan (Keputusan → POLICY). Hanya Bitbucket Cloud yang didukung; Data Center tidak didukung. Root ini harus sama dengan repository terdaftar yang sudah VERIFIED.",
+      },
+      {
+        provider: "bitbucket-pipelines",
+        purpose: "ci",
+        title: `${PURPOSE_LABEL.ci} — ${PROVIDER_LABEL["bitbucket-pipelines"]}`,
+        fields: gateFields("step Pipelines / commit status"),
+        defaults: gateDefaults(),
+        info: "Pipeline reference proyek (§31): gate delivery membaca status CI Bitbucket dengan peta ini (PIPELINE_REFERENCE). Tanpa peta, nama job dicocokkan dengan heuristik dan bukti CI menyebut NAME_HEURISTIC.",
+      },
     ];
   }
   return [
@@ -203,7 +318,36 @@ function sections(domain: string, defaultRepo: string): SectionSpec[] {
       ],
       defaults: { root_id: defaultRepo, "config.issue_granularity": "task", credential_ref: "personal/github" },
     },
+    {
+      provider: "github-actions",
+      purpose: "ci",
+      title: `${PURPOSE_LABEL.ci} — ${PROVIDER_LABEL["github-actions"]}`,
+      fields: gateFields("job (check-run) GitHub Actions"),
+      defaults: gateDefaults(),
+      info: "Pipeline reference proyek (§31). Tanpa peta, tag [G1,G2] pada nama job di workflow CI dipakai; selain itu heuristik nama (bukti CI menyebut NAME_HEURISTIC).",
+    },
+    deploymentTarget("staging"),
+    deploymentTarget("production"),
   ];
+}
+
+/**
+ * A config key naming a target (legacy alias such as config.repo on an old github-issues row): the Integration
+ * Registry refuses it (TARGET_IN_CONFIG, backend portfolio.integrations._TARGET_KEY), because the exact target lives
+ * only in root_id (§04). It is dropped on re-save instead of making every save of that integration fail.
+ */
+const TARGET_ALIAS_KEY = /(parent|root|folder|target|alias|page[_-]?id|repo|project[_-]?key)/i;
+
+/**
+ * The stored config a form sends back unchanged: never the controller-written proof (_verification) or derived
+ * keys, never a legacy target alias, and only scalar values (the backend accepts nothing else).
+ */
+export function editableConfig(config: Record<string, unknown> | undefined): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(config ?? {}).filter(
+      ([k, v]) => !k.startsWith("_") && !TARGET_ALIAS_KEY.test(k) && (v === null || ["string", "number", "boolean"].includes(typeof v)),
+    ),
+  );
 }
 
 function valuesFrom(spec: SectionSpec, existing: IntegrationView | undefined): Values {
@@ -218,9 +362,13 @@ function valuesFrom(spec: SectionSpec, existing: IntegrationView | undefined): V
   return v;
 }
 
-/** PUT body for one target: credential references only, never a secret value (§26). */
-export function integrationBody(spec: SectionSpec, values: Values): Record<string, unknown> {
-  const config: Record<string, unknown> = {};
+/**
+ * PUT body for one target: credential references only, never a secret value (§26).
+ * The stored config is kept: keys this section does not edit are sent back unchanged (a re-save never wipes
+ * them); an emptied text field removes its key.
+ */
+export function integrationBody(spec: SectionSpec, values: Values, existingConfig?: Record<string, unknown>): Record<string, unknown> {
+  const config: Record<string, unknown> = editableConfig(existingConfig);
   const body: Record<string, unknown> = { provider: spec.provider, purpose: spec.purpose };
   for (const f of spec.fields) {
     const raw = values[f.key];
@@ -228,6 +376,7 @@ export function integrationBody(spec: SectionSpec, values: Values): Record<strin
       const name = f.key.slice("config.".length);
       if (f.checkbox) config[name] = raw === true;
       else if (typeof raw === "string" && raw.trim()) config[name] = raw.trim();
+      else delete config[name];
     } else {
       body[f.key] = typeof raw === "string" && raw.trim() ? raw.trim() : null;
     }
@@ -245,8 +394,16 @@ function TargetSection({ project, spec, existing, onSaved }: { project: ProjectV
     setSeen(savedAt);
     setValues(valuesFrom(spec, existing));
   }
-  const save = useMutation({ mutationFn: () => put(`/api/projects/${project.id}/integrations`, integrationBody(spec, values)), onSuccess: onSaved });
+  const save = useMutation({
+    mutationFn: () => put(`/api/projects/${project.id}/integrations`, integrationBody(spec, values, existing?.config)),
+    onSuccess: onSaved,
+  });
   const missing = spec.fields.filter((f) => f.required && !String(values[f.key] ?? "").trim());
+  const invalid = spec.fields.filter((f) => {
+    const v = String(values[f.key] ?? "").trim();
+    return !!f.pattern && !!v && !f.pattern.test(v);
+  });
+  const invalidKeys = new Set(invalid.map((f) => f.key));
   return (
     <form
       aria-label={spec.title}
@@ -258,12 +415,17 @@ function TargetSection({ project, spec, existing, onSaved }: { project: ProjectV
     >
       <div className="sm:col-span-2 flex flex-wrap items-center gap-2">
         <span className="text-sm font-semibold">{spec.title}</span>
-        <Mono>{spec.provider}</Mono>
+        <Mono>{`${spec.provider}/${spec.purpose}`}</Mono>
         {existing ? <StatusBadge status="CONFIGURED" label="Tersimpan (belum terverifikasi)" /> : <StatusBadge status="MISSING" label="Belum diatur" />}
       </div>
       {spec.note && (
         <div className="sm:col-span-2">
           <Notice tone="warn">{spec.note}</Notice>
+        </div>
+      )}
+      {spec.info && (
+        <div className="sm:col-span-2">
+          <Notice tone="info">{spec.info}</Notice>
         </div>
       )}
       {spec.fields.map((f) =>
@@ -282,7 +444,13 @@ function TargetSection({ project, spec, existing, onSaved }: { project: ProjectV
                 ))}
               </select>
             ) : (
-              <input className={inputClass} placeholder={f.placeholder} value={String(values[f.key] ?? "")} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} />
+              <input
+                className={inputClass}
+                placeholder={f.placeholder}
+                aria-invalid={invalidKeys.has(f.key) || undefined}
+                value={String(values[f.key] ?? "")}
+                onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}
+              />
             )}
           </Field>
         ),
@@ -293,10 +461,15 @@ function TargetSection({ project, spec, existing, onSaved }: { project: ProjectV
         </div>
       ) : null}
       <div className="sm:col-span-2">
-        <Button type="submit" variant="primary" busy={save.isPending} disabled={missing.length > 0}>
+        <Button type="submit" variant="primary" busy={save.isPending} disabled={missing.length > 0 || invalid.length > 0}>
           Simpan {PROVIDER_LABEL[spec.provider] ?? spec.provider}
+          {spec.provider === "deployment-target" ? ` (${PURPOSE_LABEL[spec.purpose]})` : ""}
         </Button>
         {missing.length > 0 && <span className="ml-2 text-xs text-warn">Wajib: {missing.map((f) => f.label).join(", ")}</span>}
+        {/* always rendered, so assistive technology announces the message when it appears */}
+        <span aria-live="polite" className="ml-2 text-xs text-bad">
+          {invalid.length > 0 ? `Format tidak valid: ${invalid.map((f) => `${f.label} (${f.patternHint ?? "format"})`).join(", ")}` : ""}
+        </span>
       </div>
     </form>
   );
@@ -306,11 +479,12 @@ export function IntegrationSettings({ project, integrations, onSaved }: { projec
   const repo = (project.repositories ?? []).find((r) => r.provider?.toUpperCase() === "GITHUB")?.full_name ?? "";
   const specs = useMemo(() => sections(project.domain, repo), [project.domain, repo]);
   return (
-    <Card title="Pengaturan integrasi publikasi">
+    <Card title="Pengaturan integrasi proyek">
       <div className="grid gap-3">
         <Notice tone="info">
-          Target ini menjadi identitas persis <Mono>{"{provider, root_id}"}</Mono> yang Anda setujui saat Approve &amp; Publish. Hanya referensi credential
-          yang disimpan; nilai secret disimpan dengan <Mono>aeos secrets set</Mono> atau <Mono>aeos publish google-connect</Mono>.
+          Target dokumentasi/tracking menjadi identitas persis <Mono>{"{provider, root_id}"}</Mono> yang Anda setujui saat Approve &amp; Publish; target kode,
+          CI dan deployment dipakai delivery (PR, gate) dengan aturan yang sama. Hanya referensi credential yang disimpan; nilai secret disimpan dengan{" "}
+          <Mono>aeos secrets set</Mono> atau <Mono>aeos publish google-connect</Mono>.
         </Notice>
         {specs.map((s) => (
           <TargetSection key={`${s.provider}:${s.purpose}`} project={project} spec={s} existing={integrations.find((i) => i.provider === s.provider && i.purpose === s.purpose)} onSaved={onSaved} />
@@ -320,7 +494,7 @@ export function IntegrationSettings({ project, integrations, onSaved }: { projec
   );
 }
 
-function IntegrationForm({ project, allowed, onSaved }: { project: ProjectView; allowed: Record<string, string[]>; onSaved: () => void }) {
+function IntegrationForm({ project, allowed, integrations, onSaved }: { project: ProjectView; allowed: Record<string, string[]>; integrations: IntegrationView[]; onSaved: () => void }) {
   const providers = Object.keys(allowed);
   const [provider, setProvider] = useState(providers[0] ?? "");
   const [purpose, setPurpose] = useState(allowed[providers[0]]?.[0] ?? "");
@@ -330,6 +504,19 @@ function IntegrationForm({ project, allowed, onSaved }: { project: ProjectView; 
   useEffect(() => {
     setPurpose(allowed[provider]?.[0] ?? "");
   }, [provider, allowed]);
+  // The stored integration for this provider + purpose: its identifiers prefill the form and its config is sent back
+  // unchanged, so saving here never wipes config.enabled, the pipeline reference or the health path.
+  const existing = integrations.find((i) => i.provider === provider && i.purpose === purpose);
+  const existingKey = existing ? `${existing.id}:${existing.updated_at ?? ""}` : `new:${provider}:${purpose}`;
+  const [seenKey, setSeenKey] = useState("");
+  if (seenKey !== existingKey) {
+    // reset only when the selected stored integration changes (not on every refetch of the list)
+    setSeenKey(existingKey);
+    setRootId(existing?.root_id ?? "");
+    setTenantId(existing?.tenant_id ?? "");
+    setCredentialRef(existing?.credential_ref ?? "");
+  }
+  const keptConfig = editableConfig(existing?.config);
   const save = useMutation({
     mutationFn: () =>
       put(`/api/projects/${project.id}/integrations`, {
@@ -338,6 +525,7 @@ function IntegrationForm({ project, allowed, onSaved }: { project: ProjectView; 
         root_id: rootId.trim() || null,
         tenant_id: tenantId.trim() || null,
         credential_ref: credentialRef.trim() || null,
+        config: keptConfig,
       }),
     onSuccess: onSaved,
   });
@@ -377,6 +565,15 @@ function IntegrationForm({ project, allowed, onSaved }: { project: ProjectView; 
         <Field label="Referensi credential" hint={project.domain === "OFFICE" ? "office/… atau projects/…" : "personal/… atau projects/… (bukan nilai secret)"}>
           <input className={inputClass} value={credentialRef} onChange={(e) => setCredentialRef(e.target.value)} placeholder="personal/github" />
         </Field>
+        <div className="text-xs text-ink-3 sm:col-span-2">
+          {Object.keys(keptConfig).length > 0 ? (
+            <>
+              Konfigurasi tersimpan dipertahankan apa adanya: <Mono>{Object.keys(keptConfig).join(", ")}</Mono>. Ubah lewat bagian pengaturan di atas.
+            </>
+          ) : (
+            "Belum ada konfigurasi tersimpan untuk provider + tujuan ini."
+          )}
+        </div>
         {save.error ? (
           <div className="sm:col-span-2">
             <ErrorBox error={save.error} />
@@ -420,14 +617,14 @@ export function IntegrationsPanel({ project, isAdmin }: { project: ProjectView; 
       {items.length === 0 ? (
         <EmptyState title="Belum ada integrasi">
           {project.domain === "PERSONAL"
-            ? "Atur Google Drive (dokumentasi) dan GitHub Issues (tracking kerja) di bawah, lalu jalankan aeos publish google-connect."
-            : "Atur Confluence (CONFLUENCE_PROJECTS_PARENT_ID) dan Jira setelah otorisasi kantor."}
+            ? "Atur Google Drive (dokumentasi), GitHub Issues (tracking kerja), pipeline reference GitHub Actions dan target staging/produksi di bawah, lalu jalankan aeos publish google-connect."
+            : "Atur Confluence (CONFLUENCE_PROJECTS_PARENT_ID), Jira, kode Bitbucket dan pipeline reference Bitbucket Pipelines setelah otorisasi kantor."}
         </EmptyState>
       ) : (
         items.map((i) => <IntegrationRow key={i.id} i={i} />)
       )}
       {isAdmin && q.data && <IntegrationSettings project={project} integrations={items} onSaved={refresh} />}
-      {isAdmin && q.data && <IntegrationForm project={project} allowed={q.data.allowed_providers} onSaved={refresh} />}
+      {isAdmin && q.data && <IntegrationForm project={project} allowed={q.data.allowed_providers} integrations={items} onSaved={refresh} />}
     </div>
   );
 }

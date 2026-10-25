@@ -28,15 +28,17 @@ def office(admin_client: AuthedClient, db, secrets_memory, monkeypatch):
     return {"client": admin_client, "project_id": p["id"], "repo_id": r.json()["repository"]["id"]}
 
 
-def _authorise(db, providers=("bitbucket",)):
+def _authorise(db, providers=("bitbucket",), workspace="company"):
     from aeos.models.identity import User
     from aeos.policy import facade as policy
 
     admin = db.query(User).first()
+    targets = [{"provider": "bitbucket", "workspace": workspace}] if "bitbucket" in providers else []
     policy.record_decision(db, kind="POLICY", actor_user_id=admin.id, target_type="office_policy", target_id="OFFICE",
                            domain="OFFICE", rationale="company authorisation (test)",
                            details={"office_authorization": True, "company_reference": "CHG-7 signed",
-                                    "allowed_providers": list(providers)}, auth_scope={"providers": list(providers)})
+                                    "allowed_providers": list(providers), "approved_targets": targets},
+                           auth_scope={"providers": list(providers)})
     db.commit()
 
 
@@ -82,6 +84,21 @@ def test_verified_with_exact_identity(office, db):
         mock.get(API).mock(return_value=httpx.Response(200, json={"full_name": "company/svc", "uuid": "{9999}"}))
         v = _verify(office)
     assert v["verification_status"] == "UNVERIFIED" and "uuid changed" in v["reason"]
+
+
+def test_a_repository_outside_the_company_approved_workspace_is_never_read(office, db):
+    """W6-157/W6-165: registered before the authorisation, then the company approves another workspace: the verify
+    makes no provider call, and registering the unapproved target again is refused."""
+    _enable(office)  # before any authorisation: configuration only (nothing can use it, default deny)
+    _authorise(db, workspace="other-ws")
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+        v = _verify(office)
+        assert v["verification_status"] == "UNVERIFIED" and "company-approved" in v["reason"]
+        assert not mock.calls
+    r = office["client"].put(f"/api/projects/{office['project_id']}/integrations",
+                             json={"provider": "bitbucket", "purpose": "code", "root_id": "company/svc",
+                                   "credential_ref": "office/bitbucket", "config": {"enabled": True}})
+    assert r.status_code == 403 and r.json()["error"]["code"] == "OFFICE_TARGET_NOT_AUTHORISED"
 
 
 @pytest.mark.parametrize("response,needle", [

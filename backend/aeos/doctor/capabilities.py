@@ -119,6 +119,8 @@ RULES: dict[Capability, CapRule] = {
     Capability.CAN_USE_OFFICE_INTEGRATIONS: CapRule(
         "Integrasi OFFICE (Bitbucket/Jira/Confluence)",
         (*BASE, "policy.office_defaults", "adapter.office_bitbucket", "adapter.office_jira", "adapter.office_confluence"),
+        # a credential that acts as another account than the company approved blocks; undecided/unprobed is a note
+        guard=("secret.office_identity",),
         domain="OFFICE", office_gate=True, description="Diblokir default sampai otorisasi perusahaan (§23)."),
     Capability.CAN_VALIDATE_STAGING: CapRule(
         "Validasi staging", (*BASE, "delivery.staging_target", "evidence.verifier"), required=("recovery.restore_test",),

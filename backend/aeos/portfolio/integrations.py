@@ -82,11 +82,12 @@ def _remedy(provider: str, what: str, credential_ref: str | None) -> str:
         return REMEDIES[(provider, what)]
     if what == "credential":
         return f"aeos secrets set {credential_ref}" if credential_ref else "set credential_ref, then aeos secrets set <ref>"
+    ui = "Portofolio -> proyek -> Integrasi"
     if what == "space":
-        return "PUT /api/projects/<id>/integrations with config.space_id"
+        return f"{ui}: Space ID Confluence (angka) / PUT /api/projects/<id>/integrations with config.space_id"
     if what == "tenant":
-        return "PUT /api/projects/<id>/integrations with tenant_id (<site>.atlassian.net)"
-    return f"PUT /api/projects/<id>/integrations with {ROOT_ID_NAMES.get(provider, 'root_id')}"
+        return f"{ui}: Tenant Atlassian / PUT /api/projects/<id>/integrations with tenant_id (<site>.atlassian.net)"
+    return f"{ui} / PUT /api/projects/<id>/integrations with {ROOT_ID_NAMES.get(provider, 'root_id')}"
 
 
 def _validate_id(value: Any, *, field: str, pattern: re.Pattern[str] | None) -> str | None:
@@ -324,6 +325,84 @@ def compute_capability_status(integration: ProjectIntegration) -> dict[str, Any]
     }
 
 
+_GATE_KEY = re.compile(r"^gate_(G\d)$")
+_JOB_NAME = re.compile(r"^[^\x00-\x1f\x7f]{1,200}$")
+
+
+def _validate_provider_config(provider: str, purpose: str, config: dict[str, Any]) -> None:
+    """Provider-specific config rules (the same rules their consumers apply, never a second interpretation):
+
+    * ``health_path`` - deployment-target only, validated with the deployment observer's own path rule;
+    * ``gate_G<n>`` - the CI integration's pipeline reference (§31): only the gates the reference maps, each a
+      comma-separated list of exact CI job / step / commit-status names."""
+    if "health_path" in config:
+        if provider != pv.DEPLOYMENT_TARGET:
+            raise ValidationFailed("health_path applies to deployment-target integrations only", code="INVALID_CONFIG")
+        try:
+            from aeos.delivery.facade import valid_health_path
+
+            ok = valid_health_path(config["health_path"])
+        except (ImportError, ModuleNotFoundError):
+            ok = False  # the observer's rule is unavailable: never store a path nobody validated
+        if config["health_path"] not in (None, "") and not ok:
+            raise ValidationFailed("health_path must be an absolute URL path such as /health (letters, digits, "
+                                   "._~/- only)", code="HEALTH_PATH_INVALID", details={"field": "config.health_path"})
+        if config["health_path"] in (None, ""):
+            config.pop("health_path")
+    gate_keys = [k for k in config if k.startswith("gate_")]
+    if not gate_keys:
+        return
+    if purpose != "ci":
+        raise ValidationFailed("gate_G* (pipeline reference) applies to CI integrations only", code="INVALID_CONFIG")
+    try:
+        from aeos.delivery.facade import pipeline_gates
+
+        allowed = {f"gate_{g}" for g in pipeline_gates()}
+    except (ImportError, ModuleNotFoundError):
+        allowed = set()
+    for k in gate_keys:
+        m = _GATE_KEY.match(k)
+        if not m or k not in allowed:
+            raise ValidationFailed(f"config {k!r}: the pipeline reference maps {sorted(allowed) or 'no gates'} only",
+                                   code="INVALID_CONFIG", details={"allowed": sorted(allowed)})
+        value = config[k]
+        if value in (None, ""):
+            config.pop(k)
+            continue
+        if not isinstance(value, str):
+            raise ValidationFailed(f"config {k!r} must be a comma-separated list of exact CI job names",
+                                   code="INVALID_CONFIG")
+        names = [n.strip() for n in value.split(",") if n.strip()]
+        if not names or any(not _JOB_NAME.match(n) for n in names):
+            raise ValidationFailed(f"config {k!r} must name at least one exact CI job/step (max 200 characters each)",
+                                   code="INVALID_CONFIG")
+        config[k] = ", ".join(names)
+
+
+def _require_company_approved_target(session: Session, principal: Principal, project: Project, provider: str, *,
+                                     root: str | None, tenant: str | None, config: dict[str, Any]) -> None:
+    """§01 U-03 / §07 step 10: once the company authorisation is recorded, an OFFICE target outside its
+    ``approved_targets`` is refused at registration (and every consumer refuses it again at use). Before any
+    authorisation exists, registering is configuration only - nothing can use the target (default deny)."""
+    if project.domain != Domain.OFFICE.value or provider not in (pv.CONFLUENCE, pv.JIRA, pv.BITBUCKET) or not root:
+        return
+    try:
+        from aeos.policy import facade as policy
+
+        pol = policy.office_policy(session)
+        if pol.get("office_authorization") is not True:
+            return
+        ok, why = policy.office_target_authorised(session, provider, root_id=root,
+                                                  tenant=tenant or config.get("base_url"),
+                                                  space_id=config.get("space_id"), policy=pol)
+    except (ImportError, ModuleNotFoundError):
+        ok, why = False, "policy module unavailable (fail closed)"
+    if not ok:
+        deny(session, principal, action="portfolio.integration.update", code="OFFICE_TARGET_NOT_AUTHORISED",
+             project=project, reason=f"{provider} target is not company-approved: {why}",
+             details={"provider": provider, "root_id": root})
+
+
 def upsert_integration(session: Session, principal: Principal, project: Project, body: dict[str, Any]) -> ProjectIntegration:
     if not isinstance(body, dict):
         raise ValidationFailed("request body must be an object", code="INVALID_BODY")
@@ -361,6 +440,8 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
         # OFFICE adapters are disabled by default (ADR-0073); `enabled` exists for them only
         raise ValidationFailed("enabled applies to the OFFICE adapters (Confluence/Jira/Bitbucket) only",
                                code="INVALID_CONFIG")
+    _validate_provider_config(provider, purpose, config)
+    _require_company_approved_target(session, principal, project, provider, root=root, tenant=tenant, config=config)
 
     same_purpose = list(session.scalars(select(ProjectIntegration).where(
         ProjectIntegration.project_id == project.id, ProjectIntegration.purpose == purpose)))
@@ -376,6 +457,7 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
         integ = ProjectIntegration(project_id=project.id, domain=project.domain, provider=provider, purpose=purpose)
         session.add(integ)
     before = {"tenant_id": integ.tenant_id, "root_id": integ.root_id, "credential_ref": integ.credential_ref}
+    was_enabled = (integ.config or {}).get("enabled") is True
     proof = (integ.config or {}).get(PROOF_KEY)
     integ.tenant_id = tenant
     integ.root_id = root
@@ -395,7 +477,11 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
                  target_type="integration", target_id=integ.id, project_id=project.id, domain=project.domain,
                  details={"provider": provider, "purpose": purpose, "created": created, "root_set": bool(root),
                           "tenant_set": bool(tenant), "credential_ref": cred_ref, "target_changed": target_changed,
-                          "doctor_invalidation": invalidation})
+                          "doctor_invalidation": invalidation,
+                          # which config keys were stored (values stay in the registry) and whether an OFFICE
+                          # adapter was switched on or off by this human action (ADR-0073 default disabled)
+                          "config_keys": sorted(config),
+                          "adapter_enabled": {"before": was_enabled, "after": config.get("enabled") is True}})
     events.emit(session, source="portfolio", kind="portfolio.integration.updated", entity_type="integration",
                 entity_id=integ.id, project_id=project.id, domain=project.domain,
                 payload={"provider": provider, "purpose": purpose,

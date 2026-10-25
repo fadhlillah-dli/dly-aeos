@@ -528,6 +528,11 @@ def _verify_bitbucket(session: Session, project: Project, repo: RepositoryRefere
     if integ is None or (integ.config or {}).get("enabled") is not True:
         return ("UNVERIFIED", "Bitbucket adapter is disabled for this project (integration bitbucket/code with "
                               "config.enabled=true required, ADR-0073); no provider call was made", attempt)
+    ok, why = policy.office_target_authorised(session, "bitbucket", root_id=repo.full_name, policy=pol)
+    if not ok:
+        # §01 U-03 / §07 step 10: only a company-approved target is read with the OFFICE credential
+        return ("UNVERIFIED", f"{repo.full_name} is not a company-approved Bitbucket target ({why}); no provider "
+                              "call was made", attempt)
     from aeos.publisher.facade import ProviderError, bitbucket_repository_reference
 
     attempt["auth_mode"] = "office/bitbucket"

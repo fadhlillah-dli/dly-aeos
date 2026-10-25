@@ -518,6 +518,8 @@ def test_office_gate_is_enforced_again_at_execute_time(settings, db, secrets_mem
     gate = {"ready": True}
     monkeypatch.setattr(targets_mod, "office_gate", lambda session, project: (
         (True, []) if gate["ready"] else (False, ["CAN_USE_OFFICE_INTEGRATIONS BLOCKED: otorisasi dicabut"])))
+    # the target is one the company approved (approved_targets: test_office_company_scope)
+    monkeypatch.setattr(targets_mod, "_company_approved", lambda session, family, acfg: (True, "test: approved"))
     secrets_memory.put("office/atlassian", json.dumps({"email": "a@b.invalid", "api_token": "atl-token-1234567890"}),
                        actor="test")
     project = make_project(db, domain="OFFICE")
