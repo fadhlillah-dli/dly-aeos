@@ -154,9 +154,10 @@ def publisher_signature(path: Path | None, *, fingerprint_value: str | None = No
             _rc2, out2, err2 = runner(["codesign", "-dv", "--verbose=2", str(path)], timeout=30)
             text = (out2 or "") + (err2 or "")
             team = re.search(r"TeamIdentifier=(\S+)", text)
-            unsigned = "not signed" in (err or "").lower() or "not signed" in text.lower()
             result = {"method": "codesign", "signer": team.group(1) if team else None,
-                      "status": "VALID" if rc == 0 else ("UNSIGNED" if unsigned else "INVALID")}
+                      "status": _codesign_status(rc, err or "", text)}
+            if result["status"] == "UNKNOWN":
+                result["reason"] = (err or text or "codesign gave no reason").strip().splitlines()[0][:200]
         else:
             result = {"method": None, "signer": None, "status": "UNKNOWN",
                       "reason": "no OS code-signature check on this platform"}
@@ -168,6 +169,25 @@ def publisher_signature(path: Path | None, *, fingerprint_value: str | None = No
     if run is None:
         _SIG_CACHE[key] = result
     return result
+
+
+# codesign --verify messages that mean the signature itself is broken (tampered, damaged, untrusted or revoked).
+# Anything else that fails - the file is missing or unreadable, a usage error, an unrecognised message - says
+# nothing about the signature and is UNKNOWN: reporting it INVALID would block the bridge as a "modified build".
+_CODESIGN_INVALID = ("invalid signature", "code or signature have been modified", "sealed resource",
+                     "cssmerr", "not valid", "revoked", "expired", "invalid info.plist", "resource envelope",
+                     "code has no resources but signature indicates")
+
+
+def _codesign_status(rc: int, verify_err: str, detail: str) -> str:
+    if rc == 0:
+        return "VALID"
+    low = f"{verify_err}\n{detail}".lower()
+    if "not signed" in low:
+        return "UNSIGNED"
+    if any(marker in low for marker in _CODESIGN_INVALID):
+        return "INVALID"
+    return "UNKNOWN"
 
 
 def invocation_signature(path: Path | None, fingerprint_value: str | None) -> dict[str, Any]:

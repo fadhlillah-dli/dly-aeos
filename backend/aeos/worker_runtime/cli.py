@@ -29,7 +29,11 @@ def status(domain: str = typer.Option("PERSONAL", help="PERSONAL or OFFICE")) ->
     with session_scope() as s:
         sb = sandbox_readiness(s, domain=domain.upper())
     for kind, lvl in sb["capabilities"].items():
-        _out(f"sandbox {kind:9s} available={lvl['available']}  strength={lvl['strength']}  {lvl['evidence']}")
+        strength = lvl["strength"]
+        if kind == "container" and sb.get("kind") == "container":
+            # the host probe cannot know the proof; this domain's fresh PASS containment report does
+            strength = f"PROVEN for {domain.upper()} (containment PASS {(sb.get('containment') or {}).get('checked_at')})"
+        _out(f"sandbox {kind:9s} available={lvl['available']}  strength={strength}  {lvl['evidence']}")
     _out(f"requirement for {domain.upper()}: {sb['status']} (kind={sb.get('kind')})")
     for r in sb.get("reasons", []):
         _out(f"  - {r}")

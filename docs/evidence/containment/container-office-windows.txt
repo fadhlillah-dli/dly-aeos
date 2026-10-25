@@ -1,0 +1,31 @@
+containment (container OFFICE): overall=PASS  {'PASS': 20}
+  [PASS        ] non_root: uid=10002 gid=10002 (expected 10002:10002)
+  [PASS        ] read_only_root: write / False, /etc False, /usr False
+  [PASS        ] config_read_only: write /aeos False
+  [PASS        ] worktree_writable: write /workspace True (positive control)
+  [PASS        ] mounts_allowlisted: only worktree/config/tmpfs/system mounts
+  [PASS        ] read_outside_worktree: host probe file readable=False,
+controller checkout visible=False
+  [PASS        ] read_data_db: AEOS DB readable=False, data dir visible=False
+(content never read); mounts allow-listed=True
+  [PASS        ] real_ssh_dir: host ~/.ssh visible=False; mounts
+allow-listed=True
+  [PASS        ] home_ssh_redirected: HOME=/home/worker, ~/.ssh exists=False
+  [PASS        ] env_secrets: no secret-looking variables
+  [PASS        ] home_redirected: {'HOME': '/home/worker', 'XDG_CONFIG_HOME':
+'/home/worker/.config', 'TMPDIR': '/tmp'}
+  [PASS        ] write_outside_worktree: writes outside the worktree refused by
+the read-only root/config mounts
+  [PASS        ] egress_non_broker: no non-broker endpoint reachable
+  [PASS        ] broker_gateway_reachable: gateway: {'host':
+'aeos-broker-gw-office', 'port': 8787, 'connected': True, 'error': None}
+  [PASS        ] gateway_path_filter: GET /api/session via gateway -> 403
+(deny)
+  [PASS        ] keyring_unreachable: dbus=False /run/user=False
+ssh-agent=False
+  [PASS        ] docker_socket_absent: docker socket present=False
+  [PASS        ] credential_helpers_absent: {'git_credentials': False,
+'gh_hosts': False, 'helpers': []}
+  [PASS        ] resource_limits: memory.max=2147483648 pids.max=256
+  [PASS        ] cancel_kills_tree: container started=True, containers left=[],
+docker CLI alive=False; methods=['container-rm', 'job-object', 'psutil-tree']
