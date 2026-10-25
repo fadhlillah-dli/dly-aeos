@@ -1,0 +1,167 @@
+{
+  "route_key": "opencode-zen/longcat-2.5-preview-free",
+  "pool": "ARENA",
+  "provider": "opencode-zen",
+  "endpoint": "https://opencode.ai/zen",
+  "model_id": "opencode/longcat-2.5-preview-free",
+  "alias": null,
+  "display_name": "LongCat 2.5 Preview Free",
+  "resolved_version": "UNKNOWN",
+  "resolved_observed_at": null,
+  "identity_status": "PROVIDER_CLAIMED",
+  "is_free": "YES",
+  "effectively_free": true,
+  "free_until": null,
+  "expires_note": "free for a limited time per S07 (no end date published)",
+  "pricing": {
+    "input_per_mtok": 0,
+    "output_per_mtok": 0,
+    "currency": "USD",
+    "basis": "free for a limited time (S07)"
+  },
+  "pricing_checked_at": "2026-10-18T00:00:00+00:00",
+  "data_terms": {
+    "retention": "zero-retention (provider claim, S07)",
+    "training": "not used for training (provider claim, S07)",
+    "may_use_inputs_for_training": false,
+    "trial_only_no_confidential": false,
+    "claim_level": "E1 provider statement - not proof of compliant routing",
+    "read_for_research": "2026-10-18 (master research reading; not an owner terms review)"
+  },
+  "terms_checked_at": null,
+  "eligible_domains": [
+    "PERSONAL"
+  ],
+  "allowed_data_classes": [
+    "PUBLIC",
+    "INTERNAL"
+  ],
+  "context_window": null,
+  "supports_tools": "YES",
+  "status": "CANDIDATE",
+  "mode": "DESIGN",
+  "origin": "SEED",
+  "evidence_level": "E1",
+  "availability": "UNKNOWN",
+  "availability_checked_at": null,
+  "harness": "opencode",
+  "harness_version": null,
+  "mode_thinking": {
+    "reasoning": "HARNESS_DEFAULT",
+    "bound_in": [
+      "harness_version",
+      "context_strategy"
+    ],
+    "note": "Konfigurasi OpenCode tidak menetapkan opsi reasoning/variant; default harness dipin oleh harness_version dan context_strategy"
+  },
+  "tool_set": [
+    "fs.read",
+    "fs.write:allowed_paths",
+    "tests.run"
+  ],
+  "fallback_chain": [],
+  "priority": 100,
+  "config_hash": "sha256:8c46b02db854c0f8f72b812ba4513c2e3e2b7887194383f510abe5bf05e4453e",
+  "config_changed_at": null,
+  "eval_summary": {
+    "state": "BELUM_DIUJI",
+    "roles": {},
+    "stale_roles": [],
+    "note": ""
+  },
+  "last_used": null,
+  "active_decision": null,
+  "quota": {
+    "state": "UNKNOWN_OR_OK",
+    "note": "tidak ada observasi kuota habis"
+  },
+  "source_refs": [
+    "S07",
+    "S08"
+  ],
+  "notes": "",
+  "region": null,
+  "region_restricted": false,
+  "terms_restriction": null,
+  "terms_unknown": [],
+  "reviewed_tool_set": [
+    "fs.read",
+    "fs.write:allowed_paths",
+    "tests.run"
+  ],
+  "runtime_binding": {
+    "bound": {
+      "policy_version": null,
+      "prompt_revision": "wp2-097f19024c6c47bf",
+      "context_strategy": null,
+      "harness_version": null
+    },
+    "current": {
+      "policy_version": "pol-b3e54aa93ef8d27b",
+      "prompt_revision": "wp2-097f19024c6c47bf",
+      "context_strategy": "taskspec-file+worktree:086eca51b8dd",
+      "harness_version": null
+    },
+    "status": "NOT_ACTIVATED",
+    "drift": []
+  },
+  "execution_path": {
+    "status": "FEASIBILITY_PROBE_ONLY",
+    "note": "Pool ARENA: tidak melayani task worker. Uji kelayakan lewat probe broker (satu prompt sintetis PUBLIC, route gratis berstatus TRIAL/APPROVED oleh pemilik): POST /api/broker/routes/opencode-zen/longcat-2.5-preview-free/feasibility atau aeos broker probe-route (ADR-0111). EvalRun ke pool ini belum tersambung."
+  },
+  "config": {
+    "route_key": "opencode-zen/longcat-2.5-preview-free",
+    "pool": "ARENA",
+    "provider": "opencode-zen",
+    "endpoint": "https://opencode.ai/zen",
+    "model_id": "opencode/longcat-2.5-preview-free",
+    "alias": null,
+    "resolved_version": null,
+    "mode_params": {
+      "credential_ref": "workers/opencode-zen"
+    },
+    "harness": "opencode",
+    "harness_version": null,
+    "prompt_revision": "wp2-097f19024c6c47bf",
+    "tool_set": [
+      "fs.read",
+      "fs.write:allowed_paths",
+      "tests.run"
+    ],
+    "policy_version": null,
+    "context_strategy": null,
+    "fallback_chain": [],
+    "is_free": "YES",
+    "pricing": {
+      "input_per_mtok": 0,
+      "output_per_mtok": 0,
+      "currency": "USD",
+      "basis": "free for a limited time (S07)"
+    },
+    "data_terms": {
+      "retention": "zero-retention (provider claim, S07)",
+      "training": "not used for training (provider claim, S07)",
+      "may_use_inputs_for_training": false,
+      "trial_only_no_confidential": false,
+      "claim_level": "E1 provider statement - not proof of compliant routing",
+      "read_for_research": "2026-10-18 (master research reading; not an owner terms review)"
+    },
+    "region": null,
+    "eligible_domains": [
+      "PERSONAL"
+    ],
+    "allowed_data_classes": [
+      "PUBLIC",
+      "INTERNAL"
+    ],
+    "context_window": null,
+    "supports_tools": "YES",
+    "identity_status": "PROVIDER_CLAIMED",
+    "free_until": null
+  },
+  "decisions": [],
+  "quota_states": [],
+  "source": "model_routes + decisions + quota_states",
+  "checked_at": "2026-10-18T00:00:00+00:00",
+  "generated_at": "2026-10-25T21:03:37.878626+00:00"
+}

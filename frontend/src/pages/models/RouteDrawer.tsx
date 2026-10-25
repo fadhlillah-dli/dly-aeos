@@ -4,7 +4,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { ExplainButtons } from "../../components/ExplainButtons";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, ErrorBox, Freshness, KeyValue, Loading, Mono, Notice, inputClass } from "../../components/ui";
-import { absoluteTime } from "../../lib/format";
+import { absoluteTime, shortHash } from "../../lib/format";
 import { ActivationDialog } from "./ActivationDialog";
 import { useDisableRoute, useRouteDetail } from "./api";
 import { POOL_LABELS, type RouteItem } from "./types";
@@ -124,8 +124,21 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
             />
             <ExplainButtons
               content={{
-                what: <p>{r.notes || "Rute model pekerja yang tercatat di registry."}</p>,
-                why: <p>Kandidat dari master §23 / katalog ({r.evidence_level}); pemilihan produksi hanya setelah evaluasi dan keputusan manusia.{r.decisions[0]?.rationale ? ` Alasan keputusan terakhir: ${r.decisions[0].rationale}` : ""}</p>,
+                what: (
+                  <p>
+                    {`Model ${r.model_id} lewat ${r.provider} (pool ${POOL_LABELS[r.pool] ?? r.pool}; harness ${r.harness ?? "UNKNOWN"}).`}
+                    {r.notes ? ` ${r.notes}` : ""}
+                  </p>
+                ),
+                why: (
+                  <p>
+                    {`Asal record: ${r.origin} (bukti ${r.evidence_level}; sumber ${r.source_refs.join(", ") || "tidak tercatat"}). ` +
+                      `Status ${r.status}; domain yang memenuhi syarat: ${r.eligible_domains.join(", ") || "tidak ada"}; evaluasi: ${r.eval_summary.state}. `}
+                    {r.decisions[0]?.rationale
+                      ? `Alasan keputusan terakhir (${r.decisions[0].kind} ${r.decisions[0].status}): ${r.decisions[0].rationale}`
+                      : "Belum ada keputusan pemilik: pemilihan produksi hanya setelah evaluasi dan keputusan manusia."}
+                  </p>
+                ),
                 usedBy: (
                   <p>
                     {r.last_used?.at
@@ -144,7 +157,15 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
                 evidence: (
                   <pre className="mono whitespace-pre-wrap text-xs">{JSON.stringify({ pricing: r.pricing, data_terms: r.data_terms }, null, 2)}</pre>
                 ),
-                impact: <p>Mengubah model/alias/harga/terms membuat hash konfigurasi baru: aktivasi lama tidak berlaku dan hasil evaluasi lama tidak diwariskan.</p>,
+                impact: (
+                  <p>
+                    {`Mengubah model/alias/harga/terms membuat hash konfigurasi baru (sekarang ${shortHash(r.config_hash)}): ` +
+                      (r.active_decision ? `aktivasi ${r.active_decision.kind} ${r.active_decision.id} tidak berlaku lagi` : "belum ada aktivasi yang terdampak") +
+                      `; ${Object.keys(r.eval_summary.roles).length} hasil evaluasi peran tidak diwariskan` +
+                      (r.fallback_chain.length ? `; rantai fallback terdampak: ${r.fallback_chain.join(" → ")}` : "; tidak ada rantai fallback") +
+                      "."}
+                  </p>
+                ),
               }}
             />
             <div>

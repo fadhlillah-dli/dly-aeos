@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Bot, Cog, Search, UserRound } from "lucide-react";
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { ExplainButtons } from "../../components/ExplainButtons";
@@ -8,6 +9,10 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Card, EmptyState, ErrorBox, inputClass, Loading, Mono, Notice, PageHeader } from "../../components/ui";
 import type { AgentDef, RoleCard, RoleGroup } from "../../components/workforce/types";
 import { useLiveInvalidation } from "../../components/workforce/useLive";
+
+/** §35 "Usulkan perubahan" opens the proposal form for the role/agent catalog: an UPGRADE of the
+ * workforce module that owns RoleSkillPack/AgentDefinition (inventory component workforce-scheduler). */
+const ORG_PROPOSE_HREF = "/proposals?kind=UPGRADE&component=workforce-scheduler";
 
 const KIND_LABEL: Record<string, string> = {
   PLANNER: "Perencana",
@@ -182,6 +187,17 @@ export default function OrganizationPage() {
       `Layanan deterministik (kode, bukan LLM): ${serviceNames.join(", ") || "tidak ada"}. ` +
       `Alasan tiap peran dirujuk ke bagian master: ${sections.join(", ") || "tidak tercatat"}.`
     : "Belum ada record peran; alasan pemilihan tidak dinyatakan.";
+  // "Apa dampaknya jika diganti?" from the same records: which roles carry active tasks/runs and which agents
+  // implement each role (an enabled agent would be re-evaluated on a new revision).
+  const busyRoles = allRoles.filter((r) => (r.assigned_tasks ?? 0) > 0 || r.active_runs > 0);
+  const agentItems = agents.data?.items ?? [];
+  const enabledAgents = agentItems.filter((a) => a.enabled);
+  const impactText = allRoles.length
+    ? `Mengganti peran/agent membuat revisi baru (riwayat run lama tidak ditulis ulang). Terdampak sekarang menurut record: ` +
+      `${busyRoles.length ? busyRoles.map((r) => `${r.name} (${r.assigned_tasks ?? 0} task, ${r.active_runs} run)`).join(", ") : "tidak ada peran dengan task/run aktif"}; ` +
+      `${agentItems.length} definisi agent memakai ${new Set(agentItems.map((a) => a.role_key)).size} peran, ` +
+      `${enabledAgents.length} aktif${enabledAgents.length ? ` (${enabledAgents.map((a) => a.agent_key).join(", ")})` : ""} — agent aktif perlu evaluasi ulang pada revisi baru.`
+    : "Belum ada record peran; dampak penggantian tidak dinyatakan.";
 
   return (
     <div className="space-y-5">
@@ -205,8 +221,15 @@ export default function OrganizationPage() {
           why: whyText,
           usedBy: `Run aktif saat ini: ${active}; task aktif yang ditugaskan ke peran: ${assigned}. Scheduler memilih agent per TaskSpec; peran lain tidak otomatis dipanggil.`,
           evidence: `Setiap kartu memuat versi + revision hash. Status evaluasi peran (dari katalog): ${evalText}.`,
-          impact: "Mengubah peran/agent membuat revisi baru; riwayat run lama tidak ditulis ulang.",
-          propose: "Gunakan Usulan Upgrade (ChangeProposal) untuk menambah/mengganti peran.",
+          impact: impactText,
+          propose: (
+            <p>
+              <Link className="text-accent underline" to={ORG_PROPOSE_HREF}>
+                Usulkan perubahan peran/agent
+              </Link>{" "}
+              (ChangeProposal UPGRADE; usulan tidak mengaktifkan atau mengubah peran apa pun).
+            </p>
+          ),
         }}
       />
 

@@ -1,0 +1,839 @@
+{
+  "root": "opencode",
+  "direction": "dependents",
+  "lens": "DESIGN",
+  "items": [
+    {
+      "component_id": "readiness-doctor",
+      "name": "Readiness Doctor — pemeriksaan kesiapan",
+      "category": "operations/evaluation",
+      "requirement": "REQUIRED",
+      "depth": 1,
+      "path": [
+        "opencode",
+        "readiness-doctor"
+      ],
+      "via": [
+        "verifies"
+      ]
+    },
+    {
+      "component_id": "rtk",
+      "name": "RTK — eksperimen reduksi konteks",
+      "category": "tools/context",
+      "requirement": "CANDIDATE",
+      "depth": 1,
+      "path": [
+        "opencode",
+        "rtk"
+      ],
+      "via": [
+        "runs_with"
+      ]
+    },
+    {
+      "component_id": "worker-runtime",
+      "name": "Worker Runtime — sandbox pekerja",
+      "category": "workforce",
+      "requirement": "REQUIRED",
+      "depth": 1,
+      "path": [
+        "opencode",
+        "worker-runtime"
+      ],
+      "via": [
+        "runs_with"
+      ]
+    },
+    {
+      "component_id": "dly-aeos-control-plane",
+      "name": "DLY AEOS control plane — pengendali tunggal",
+      "category": "planning/governance",
+      "requirement": "REQUIRED",
+      "depth": 2,
+      "path": [
+        "opencode",
+        "worker-runtime",
+        "dly-aeos-control-plane"
+      ],
+      "via": [
+        "runs_with",
+        "calls"
+      ]
+    },
+    {
+      "component_id": "hermes",
+      "name": "Hermes — kandidat adapter ops/konteks/skill",
+      "category": "workforce",
+      "requirement": "CANDIDATE",
+      "depth": 2,
+      "path": [
+        "opencode",
+        "worker-runtime",
+        "hermes"
+      ],
+      "via": [
+        "runs_with",
+        "runs_with"
+      ]
+    },
+    {
+      "component_id": "langgraph",
+      "name": "LangGraph — opsional di dalam activity",
+      "category": "workforce",
+      "requirement": "OPTIONAL",
+      "depth": 2,
+      "path": [
+        "opencode",
+        "worker-runtime",
+        "langgraph"
+      ],
+      "via": [
+        "runs_with",
+        "runs_with"
+      ]
+    },
+    {
+      "component_id": "verification-review",
+      "name": "Verifier independen — bukti dan acceptance",
+      "category": "operations/evaluation",
+      "requirement": "REQUIRED",
+      "depth": 2,
+      "path": [
+        "opencode",
+        "worker-runtime",
+        "verification-review"
+      ],
+      "via": [
+        "runs_with",
+        "verifies"
+      ]
+    },
+    {
+      "component_id": "workforce-scheduler",
+      "name": "Workforce & Scheduler — antrean dan lease",
+      "category": "workforce",
+      "requirement": "REQUIRED",
+      "depth": 2,
+      "path": [
+        "opencode",
+        "worker-runtime",
+        "workforce-scheduler"
+      ],
+      "via": [
+        "runs_with",
+        "calls"
+      ]
+    },
+    {
+      "component_id": "agency-agents",
+      "name": "Agency Agents — kandidat pustaka profil peran",
+      "category": "workforce",
+      "requirement": "CANDIDATE",
+      "depth": 3,
+      "path": [
+        "opencode",
+        "worker-runtime",
+        "workforce-scheduler",
+        "agency-agents"
+      ],
+      "via": [
+        "runs_with",
+        "calls",
+        "implements"
+      ]
+    },
+    {
+      "component_id": "agent-orchestrator",
+      "name": "Agent Orchestrator — kandidat pelaksana fleet",
+      "category": "workforce",
+      "requirement": "CANDIDATE",
+      "depth": 3,
+      "path": [
+        "opencode",
+        "worker-runtime",
+        "workforce-scheduler",
+        "agent-orchestrator"
+      ],
+      "via": [
+        "runs_with",
+        "calls",
+        "governed_by"
+      ]
+    },
+    {
+      "component_id": "capability-broker",
+      "name": "Capability broker — akses terbatas per run",
+      "category": "workforce",
+      "requirement": "REQUIRED",
+      "depth": 3,
+      "path": [
+        "opencode",
+        "worker-runtime",
+        "dly-aeos-control-plane",
+        "capability-broker"
+      ],
+      "via": [
+        "runs_with",
+        "calls",
+        "implements"
+      ]
+    },
+    {
+      "component_id": "claude-native-bridge",
+      "name": "ClaudeNativeBridge — jembatan Claude resmi",
+      "category": "planning/governance",
+      "requirement": "REQUIRED",
+      "depth": 3,
+      "path": [
+        "opencode",
+        "worker-runtime",
+        "verification-review",
+        "claude-native-bridge"
+      ],
+      "via": [
+        "runs_with",
+        "verifies",
+        "reads"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "source": "readiness-doctor",
+      "target": "opencode"
+    },
+    {
+      "source": "rtk",
+      "target": "opencode"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "hermes",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "langgraph",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "verification-review",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "workforce-scheduler",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "workforce-scheduler",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "agency-agents",
+      "target": "workforce-scheduler"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "workforce-scheduler",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "agent-orchestrator",
+      "target": "workforce-scheduler"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "capability-broker",
+      "target": "dly-aeos-control-plane"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "verification-review",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "claude-native-bridge",
+      "target": "verification-review"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "workforce-scheduler",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "verification-review",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "capability-broker",
+      "target": "dly-aeos-control-plane"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "verification-review",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "claude-native-bridge",
+      "target": "verification-review"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "capability-broker",
+      "target": "dly-aeos-control-plane"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "dly-aeos-control-plane",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "worker-runtime",
+      "target": "opencode"
+    },
+    {
+      "source": "verification-review",
+      "target": "worker-runtime"
+    },
+    {
+      "source": "claude-native-bridge",
+      "target": "verification-review"
+    }
+  ],
+  "summary": {
+    "affected": 75,
+    "by_category": {
+      "experience/intake": 4,
+      "planning/governance": 13,
+      "workforce": 28,
+      "tools/context": 8,
+      "code/docs/CI": 5,
+      "data/secrets": 1,
+      "operations/evaluation": 16
+    }
+  },
+  "note": "Dependensi transitif bukan koneksi jaringan langsung; dihitung dari relasi bertipe (§36).",
+  "source": "ComponentRelation lens DESIGN",
+  "checked_at": "2026-10-25T21:03:37.337728+00:00",
+  "mode": "DESIGN"
+}

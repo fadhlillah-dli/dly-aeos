@@ -65,3 +65,19 @@ def test_research_and_eval_shapes_match_ui_fixtures(personal_client: AuthedClien
     assert set(board) == set(_fixture("evaluation", "leaderboard"))
     suite = personal_client.get("/api/eval/suites").json()["items"][0]
     assert set(suite) == set(_fixture("evaluation", "suites")["items"][0])
+
+
+def test_component_and_route_detail_shapes_match_ui_fixtures(personal_client: AuthedClient, db):
+    """The explain-button page tests (W6-109) render real responses of these endpoints: keep their shape in sync."""
+    for mod in ("aeos.policy.seed", "aeos.inventory.seed", "aeos.routing.seed"):
+        __import__(mod, fromlist=["run"]).run(db)
+    db.commit()
+    comp = personal_client.get("/api/inventory/components/opencode").json()
+    fx = _fixture("tools", "component-detail")
+    assert set(comp) == set(fx)
+    assert set(comp["usage_role"]) == set(fx["usage_role"]) and set(comp["identity"]) == set(fx["identity"])
+    blast = personal_client.get("/api/inventory/blast-radius/opencode").json()
+    assert set(blast) == set(_fixture("tools", "blast-radius"))
+    key = _fixture("models", "route-detail")["route_key"]
+    route = personal_client.get(f"/api/routes/{key}").json()
+    assert set(route) == set(_fixture("models", "route-detail"))
