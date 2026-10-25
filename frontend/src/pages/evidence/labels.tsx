@@ -23,6 +23,9 @@ const MAPPED: Record<string, { status: string; label: string }> = {
   UNTRUSTED_CLAIM: { status: "UNVERIFIED", label: "Klaim (tidak dihitung)" },
   // §20 verifier isolation: process-level only (same OS user, no container/egress enforcement)
   WEAK: { status: "DEGRADED", label: "Isolasi verifier lemah (proses, bukan sandbox)" },
+  // §20 isolated runner: candidate code ran in the verifier container on a host whose containment PASSed
+  // (a kernel boundary, not a VM): configured, never shown as a stronger "verified" claim
+  CONTAINER: { status: "CONFIGURED", label: "Isolasi verifier: container (boundary terbukti di host ini)" },
 };
 
 export function Status({ status, label }: { status: string | null | undefined; label?: string }) {

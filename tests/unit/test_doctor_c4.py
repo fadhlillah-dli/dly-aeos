@@ -544,16 +544,45 @@ def test_no_recheck_without_the_server_hook(settings, db):
 
 
 def test_verifier_independence_is_self_tested_with_functional(settings, db, monkeypatch):
-    assert check("evidence.verifier", _ctx(settings, db, base_runner())).status == "CONFIGURED"
+    res0 = check("evidence.verifier", _ctx(settings, db, base_runner()))
+    assert res0.status == "CONFIGURED"
+    # §20 isolated runner: no Docker on the build host -> the verifier runs candidate code in the WEAK process
+    # runner; the Doctor states that isolation and the residual risk honestly (never hidden).
+    rv = res0.observed_evidence["verifier_runner"]
+    assert rv["isolation"] == "WEAK" and rv["runner"] == "process"
+    assert any("isolation WEAK" in r for r in res0.observed_evidence["residual_risks"])
+    # evidence honesty: the residual risk is stated, never claimed as owner-accepted (no Decision records that)
+    assert "isolasi WEAK" in res0.summary and "diterima pemilik" not in res0.summary
     res = check("evidence.verifier", _ctx(settings, db, base_runner(), functional=True))
     assert res.status == "VERIFIED", res.observed_evidence
     test = res.observed_evidence["independence_self_test"]
     assert test["shadow_detected"] and test["overlap_refused"] and test["sibling_allowed"] and test["trusted_suite_hash"]
+    assert res.observed_evidence["verifier_runner"]["isolation"] == "WEAK"
     from aeos.verification import verifier
 
     monkeypatch.setattr(verifier, "shadowed_modules", lambda cand, trusted: [])
     bad = check("evidence.verifier", _ctx(settings, db, base_runner(), functional=True))
     assert bad.status == "FAILED" and bad.error_code == "VERIFIER_NOT_INDEPENDENT"
+
+
+def test_verifier_runner_reports_container_when_the_boundary_is_proven(settings, db, monkeypatch, tmp_path):
+    """With a fresh PASS container containment report and the verifier image present, the Doctor reports the
+    verifier runs candidate code in the CONTAINER runner (no WEAK residual risk)."""
+    from aeos.worker_runtime import container, sandbox
+    from aeos.worker_runtime.containment import containment_report, record_containment_report
+    from tests.unit.worker_container_support import install_fake_docker
+
+    install_fake_docker(monkeypatch, tmp_path, verifier_image=container.verifier_image_tag())
+    rep = containment_report("container")
+    assert rep["overall"] == "PASS"
+    record_containment_report(db, rep, actor="cli:test")
+    db.commit()
+    res = check("evidence.verifier", _ctx(settings, db, base_runner()))
+    assert res.status == "CONFIGURED"
+    rv = res.observed_evidence["verifier_runner"]
+    assert rv["isolation"] == "CONTAINER" and rv["image"] == container.verifier_image_tag()
+    assert "residual_risks" not in res.observed_evidence or not res.observed_evidence["residual_risks"]
+    sandbox._cache.update(at=0.0, value=None)
 
 
 def test_claude_review_is_e0_advisory_and_sends_platform_rows_only(settings, db, monkeypatch):

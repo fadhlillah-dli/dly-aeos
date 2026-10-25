@@ -64,6 +64,11 @@ PROCESS_RESIDUAL_RISKS = [
     "Shell (bash) TIDAK pernah diberikan di process sandbox (master s25 'Worker tidak mendapat shell host'): "
     "TaskSpec dengan bash memerlukan sandbox container yang containment-nya lulus; details.allow_bash pada "
     "keputusan pengecualian tidak lagi membuka shell.",
+    "Kode yang ditulis worker dieksekusi kemudian oleh verifier (suite tepercaya terhadap kandidat, tes kandidat, "
+    "round-trip migrasi). Tanpa runner container verifier yang terbukti di host ini, eksekusi itu berjalan sebagai "
+    "user OS controller (isolasi verifier WEAK, master s20): env dialihkan ke direktori run (tanpa keyring, gh, "
+    "kredensial git, agent SSH), penulisan ke checkout/interpreter controller dan tabel kepercayaan DB dideteksi "
+    "lalu dikarantina, tetapi pembacaan file user lewat path absolut atau API kredensial OS tidak dicegah.",
 ]
 SHELL_TOOLS = ("bash",)
 EGRESS_TOOLS = ("webfetch",)

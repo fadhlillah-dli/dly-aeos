@@ -303,6 +303,128 @@ def reap_orphans(active_run_ids: set[str]) -> list[str]:
     return removed
 
 
+# ----------------------------------------------------------------------------- verifier runner (§20 Verifier ENF)
+# The independent verifier executes candidate code (trusted suite against the candidate, the candidate's own
+# tests, the migration round-trip). On a host whose container boundary is PROVEN (a fresh PASS containment
+# report for this domain profile, the same proof that admits container workers) it runs that code in the
+# pinned verifier image built from sandbox/verifier.Dockerfile: no network at all, read-only root, non-root,
+# no capabilities, and only the verifier's own run directory mounted (snapshot, trusted-suite copy and ini
+# read-only; the report directory writable). Never the data dir/DB, the controller checkout, the host home,
+# the docker socket, an SSH agent or a credential store. Not proven on a real host here (no Docker).
+VERIFIER_IMAGE_REPOSITORY = "dly-aeos-verifier"
+VERIFIER_LABEL = "aeos.verify_id"
+VERIFIER_HOME = "/home/verifier"
+VERIFIER_USERS = {Domain.PERSONAL.value: "10003:10003", Domain.OFFICE.value: "10004:10004"}
+VERIFIER_MEMORY = "4g"
+VERIFIER_CPUS = "2"
+VERIFIER_PIDS = 512
+
+
+def verifier_image_tag() -> str:
+    from aeos import __version__
+
+    return f"{VERIFIER_IMAGE_REPOSITORY}:{__version__}"
+
+
+def verifier_image_status() -> dict[str, Any]:
+    tag = verifier_image_tag()
+    try:
+        proc = run_docker(["image", "inspect", "--format", "{{.Id}}", tag], timeout=30)
+    except ContainerError as exc:
+        return {"tag": tag, "present": False, "id": None, "evidence": exc.message}
+    image_id = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not image_id:
+        return {"tag": tag, "present": False, "id": None,
+                "evidence": f"verifier image {tag} not built on this host (docker build -f sandbox/verifier.Dockerfile "
+                            f"-t {tag} .)"}
+    return {"tag": tag, "present": True, "id": image_id, "evidence": f"verifier image {tag} present"}
+
+
+def verifier_readiness(session: Any, *, domain: str) -> dict[str, Any]:
+    """Whether the verifier may run candidate code in the container runner now (READY) or only in the WEAK
+    process runner (UNAVAILABLE + reasons). READY needs a fresh PASS container containment report for this
+    host, image and domain profile (``sandbox.container_report_problems``) AND the pinned verifier image."""
+    from aeos.worker_runtime.sandbox import _last_containment, container_report_problems, sandbox_capabilities
+
+    caps_all = sandbox_capabilities()
+    caps = caps_all["levels"]
+    container = caps["container"]
+    tag = verifier_image_tag()
+    base: dict[str, Any] = {"domain": domain, "image": tag, "image_id": None, "checked_at": caps_all["checked_at"],
+                            "network": "none", "user": VERIFIER_USERS.get(domain)}
+    remedy = (f"Install/start Docker, prove the container boundary (`aeos worker containment --kind container"
+              f"{' --domain OFFICE' if domain == Domain.OFFICE.value else ''}` until PASS) and build the verifier "
+              f"image (`docker build -f sandbox/verifier.Dockerfile -t {tag} .`)")
+    if domain not in VERIFIER_USERS:
+        return {**base, "status": "UNAVAILABLE", "reasons": [f"no verifier container profile for domain {domain!r}"],
+                "remedies": [remedy]}
+    if not container.get("available"):
+        return {**base, "status": "UNAVAILABLE", "remedies": [remedy],
+                "reasons": ["container sandbox not available: " + str(container.get("evidence"))]}
+    if session is None:  # e.g. a Doctor run without the database: the containment proof cannot be read
+        return {**base, "status": "UNAVAILABLE", "remedies": [remedy],
+                "reasons": ["no database session: the container containment report cannot be read (NOT-PROVEN)"]}
+    report = _last_containment(session, "container", domain)
+    problems = container_report_problems(report, domain=domain, caps=caps)
+    image = verifier_image_status()
+    if not image["present"]:
+        problems.append(str(image["evidence"]))
+    base["image_id"] = image.get("id")
+    if problems:
+        return {**base, "status": "UNAVAILABLE", "reasons": problems, "remedies": [remedy]}
+    return {**base, "status": "READY", "reasons": [], "remedies": [],
+            "containment": {"overall": (report or {}).get("overall"), "checked_at": (report or {}).get("checked_at"),
+                            "image": (report or {}).get("image"), "evidence_id": (report or {}).get("evidence_id")}}
+
+
+def verifier_argv(*, domain: str, verify_id: str, mounts: list[tuple[str, str, bool]], env: dict[str, str],
+                  inner_argv: list[str], workdir: str = "/tmp", image: str | None = None,  # noqa: S108 - tmpfs
+                  user: str | None = None) -> list[str]:
+    """Hardened ``docker run`` argv of one verifier step: ``--network none``, read-only root fs, non-root user,
+    ``--cap-drop ALL``, no-new-privileges, pid/memory/cpu limits, tmpfs /tmp and HOME, and exactly the given
+    bind mounts (host path, container path, read-only). Refuses a mount of the docker socket or a target
+    outside /v (fail closed)."""
+    if domain not in VERIFIER_USERS:
+        raise ContainerError("UNKNOWN_DOMAIN", f"no verifier container profile for domain {domain!r}")
+    uid = (user or VERIFIER_USERS[domain]).split(":")
+    cli = docker_cmd() or ["docker"]
+    argv = [
+        *cli, "run", "--rm", "--pull", "never", "--name", f"aeos-verify-{verify_id[:24]}",
+        "--user", ":".join(uid), "--read-only", "--network", "none",
+        "--tmpfs", "/tmp:rw,exec,nosuid,size=2g",  # noqa: S108 - container-internal tmpfs
+        "--tmpfs", f"{VERIFIER_HOME}:rw,nosuid,size=256m,uid={uid[0]},gid={uid[-1]}",
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", str(VERIFIER_PIDS),
+        "--memory", VERIFIER_MEMORY, "--memory-swap", VERIFIER_MEMORY, "--cpus", VERIFIER_CPUS,
+        "--label", f"{LABEL_MANAGED}=verifier", "--label", f"{VERIFIER_LABEL}={verify_id}",
+        "--label", f"aeos.domain={domain}",
+    ]
+    for host, target, readonly in mounts:
+        low = str(host).replace("\\", "/").lower()
+        if "docker.sock" in low or "docker_engine" in low or not target.startswith("/v/") or "," in str(host):
+            raise ContainerError("MOUNT_REFUSED", f"verifier mount refused: {target}")
+        argv += ["--mount", f"type=bind,source={host},target={target}" + (",readonly" if readonly else "")]
+    argv += ["--workdir", workdir]
+    for k, v in sorted(env.items()):
+        argv += ["-e", f"{k}={v}"]
+    return [*argv, image or verifier_image_tag(), *inner_argv]
+
+
+def teardown_verifier(verify_id: str) -> dict[str, Any]:
+    """Remove the verifier step's container(s) by label (the docker CLI being killed on a timeout does not
+    stop a container). Idempotent; never raises."""
+    try:
+        proc = run_docker(["ps", "-aq", "--filter", f"label={VERIFIER_LABEL}={verify_id}"], timeout=30)
+    except ContainerError as exc:
+        return {"verify_id": verify_id, "removed": [], "error": exc.code}
+    ids = (proc.stdout or "").split()
+    if ids:
+        try:
+            run_docker(["rm", "-f", *ids], timeout=60)
+        except ContainerError as exc:
+            return {"verify_id": verify_id, "removed": [], "error": exc.code, "found": ids}
+    return {"verify_id": verify_id, "removed": ids}
+
+
 def reap_orphans_for_session(session: Any) -> list[str]:
     from sqlalchemy import select
 
