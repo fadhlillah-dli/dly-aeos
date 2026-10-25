@@ -1,0 +1,351 @@
+# OWASP Application Security Verification Standard 4.0.3 - the complete requirement catalog (master §46: "requirements
+# selected per application/risk and version-pinned").
+#
+# Source: OWASP ASVS 4.0.3 (October 2021), https://github.com/OWASP/ASVS/tree/v4.0.3/4.0 (CC BY-SA 3.0). Requirement
+# ids are transcribed; titles are abbreviated paraphrases, not the normative text - read the standard for the
+# requirement itself. Requirements the standard itself marks "[DELETED ...]" keep their id here (ids are never
+# reused) and are flagged ``deleted``: they cannot be selected. V1.3 and V1.13 are placeholders without requirements
+# in 4.0.3. 14 chapters, 286 requirement ids.
+#
+# tests/unit/test_asvs_trace.py checks that contracts/security/asvs-selection.yaml lists every non-deleted id of this
+# catalog exactly once (selected or not_selected with a reason). Moving to ASVS 5.0.x is a new catalog + selection
+# and an owner decision, never an in-place edit.
+asvs_version: "4.0.3"
+deleted:
+  V1.4.2: not actionable
+  V1.4.3: duplicate of V4.1.3
+  V1.12.1: duplicate of V12.4.1
+  V4.1.4: duplicate of V4.1.3
+  V7.3.2: duplicate of V7.3.1
+  V13.1.2: duplicate of V4.3.1
+  V13.2.4: duplicate of V11.1.4
+  V14.3.1: duplicate of V7.4.1
+chapters:
+  V1:
+    name: Architecture, Design and Threat Modeling
+    requirements:
+      V1.1.1: Secure software development lifecycle addresses security in all stages
+      V1.1.2: Threat modeling for every design change or sprint
+      V1.1.3: User stories and features contain functional security constraints
+      V1.1.4: Trust boundaries, components and significant data flows documented and justified
+      V1.1.5: Definition and security analysis of the high-level architecture and all connected remote services
+      V1.1.6: Centralized, simple, vetted, secure and reusable security controls
+      V1.1.7: Secure coding checklist, security requirements, guideline or policy available to developers
+      V1.2.1: Unique or special low-privilege operating system accounts for all components
+      V1.2.2: Communications between application components are authenticated
+      V1.2.3: Single vetted authentication mechanism, extensible and strong
+      V1.2.4: All authentication pathways and identity APIs implement consistent control strength
+      V1.4.1: Trusted enforcement points (access control gateways, servers, serverless functions)
+      V1.4.2: "[DELETED] not actionable"
+      V1.4.3: "[DELETED] duplicate of V4.1.3"
+      V1.4.4: Single, well-vetted access control mechanism
+      V1.4.5: Attribute or feature-based access control
+      V1.5.1: Input and output requirements define how to handle and process data by type and content
+      V1.5.2: Serialization is not used when communicating with untrusted clients
+      V1.5.3: Input validation is enforced on a trusted service layer
+      V1.5.4: Output encoding occurs close to or by the interpreter for which it is intended
+      V1.6.1: Explicit policy for management of cryptographic keys and key lifecycle
+      V1.6.2: Consumers of cryptographic services protect key material and other secrets
+      V1.6.3: Keys and passwords are replaceable and part of a re-encryption process
+      V1.6.4: Client-side secrets (symmetric keys, passwords, API tokens) are treated as insecure
+      V1.7.1: Common logging format and approach used across the system
+      V1.7.2: Logs are securely transmitted to a preferably remote system for analysis and escalation
+      V1.8.1: All sensitive data is identified and classified into protection levels
+      V1.8.2: All protection levels have an associated set of protection requirements
+      V1.9.1: Communications between components are encrypted (e.g. TLS)
+      V1.9.2: Application components verify the authenticity of each side in a communication link
+      V1.10.1: Source code control system in use, with check-in procedures and access control
+      V1.11.1: Definition and documentation of all application components and the business functions they provide
+      V1.11.2: High-value business logic flows do not share unsynchronized state
+      V1.11.3: High-value business logic flows are thread safe and resistant to time-of-check/time-of-use races
+      V1.12.1: "[DELETED] duplicate of V12.4.1"
+      V1.12.2: User-uploaded files are served by octet-stream download or from an unrelated domain
+      V1.14.1: Segregation of components of differing trust levels through well-defined security controls
+      V1.14.2: Binary signatures, trusted connections and verified endpoints used to deploy binaries
+      V1.14.3: The build pipeline warns of out-of-date or insecure components
+      V1.14.4: The build pipeline contains a step that builds and verifies the secure deployment
+      V1.14.5: Deployments are sandboxed, containerized and/or isolated at the network level
+      V1.14.6: No unsupported, insecure or deprecated client-side technologies (NSAPI, Flash, ActiveX, applets)
+  V2:
+    name: Authentication
+    requirements:
+      V2.1.1: User-set passwords are at least 12 characters
+      V2.1.2: Passwords of at least 64 characters are permitted, more than 128 denied
+      V2.1.3: Password truncation is not performed
+      V2.1.4: Any printable Unicode character is permitted in passwords
+      V2.1.5: Users can change their password
+      V2.1.6: Password change requires the current and the new password
+      V2.1.7: Passwords are checked against a set of breached passwords
+      V2.1.8: A password strength meter helps users set a stronger password
+      V2.1.9: No password composition rules limiting the type of characters
+      V2.1.10: No periodic credential rotation or password history requirements
+      V2.1.11: Paste, browser password helpers and external password managers are permitted
+      V2.1.12: The user can choose to view the masked password temporarily
+      V2.2.1: Anti-automation controls against breached credential testing, brute force and lockout attacks
+      V2.2.2: Weak authenticators (SMS, email) limited to secondary verification and transaction approval
+      V2.2.3: Secure notifications are sent after updates to authentication details
+      V2.2.4: Impersonation resistance against phishing (multi-factor, cryptographic devices)
+      V2.2.5: Mutually authenticated TLS where the credential service provider and the verifier are separate
+      V2.2.6: Replay resistance through mandated OTP devices, cryptographic authenticators or lookup codes
+      V2.2.7: Intent to authenticate by requiring entry of an OTP token or a user-initiated action
+      V2.3.1: System-generated initial passwords/activation codes are random, at least 6 characters, and expire
+      V2.3.2: Enrollment and use of user-provided authentication devices (U2F/FIDO) are supported
+      V2.3.3: Renewal instructions are sent with enough time to renew time-bound authenticators
+      V2.4.1: Passwords are stored in a form resistant to offline attacks (salted, approved one-way KDF)
+      V2.4.2: The salt is at least 32 bits long and unique per credential
+      V2.4.3: PBKDF2 iteration count is as large as the verification server allows (at least 100,000)
+      V2.4.4: bcrypt work factor is as large as the verification server allows (at least 10)
+      V2.4.5: An additional iteration of a key derivation function with a secret salt value is performed
+      V2.5.1: System-generated activation or recovery secrets are not sent in clear text
+      V2.5.2: Password hints and knowledge-based authentication (secret questions) are not present
+      V2.5.3: Password credential recovery does not reveal the current password
+      V2.5.4: Shared or default accounts are not present
+      V2.5.5: The user is notified when an authentication factor is changed or replaced
+      V2.5.6: Forgotten password and other recovery paths use a secure recovery mechanism
+      V2.5.7: Identity proofing at the same level as enrollment when OTP or multi-factor factors are lost
+      V2.6.1: Lookup secrets can be used only once
+      V2.6.2: Lookup secrets have sufficient randomness (112 bits of entropy)
+      V2.6.3: Lookup secrets are resistant to offline attacks
+      V2.7.1: Clear-text out-of-band authenticators (SMS, PSTN) are not offered by default
+      V2.7.2: Out-of-band authentication requests, codes or tokens expire after 10 minutes
+      V2.7.3: Out-of-band authentication requests, codes or tokens are usable only once
+      V2.7.4: Out-of-band authenticator and verifier communicate over a secure independent channel
+      V2.7.5: The out-of-band verifier retains only a hashed version of the authentication code
+      V2.7.6: The initial authentication code is generated by a secure random number generator (20 bits)
+      V2.8.1: Time-based OTPs have a defined lifetime before expiring
+      V2.8.2: Symmetric keys used to verify submitted OTPs are highly protected
+      V2.8.3: Approved cryptographic algorithms are used in OTP generation, seeding and verification
+      V2.8.4: A time-based OTP can be used only once within the validity period
+      V2.8.5: A reused time-based multi-factor OTP is logged and rejected with a secure notification
+      V2.8.6: A physical single-factor OTP generator can be revoked
+      V2.8.7: Biometric authenticators are limited to secondary factors with something you have/know
+      V2.9.1: Cryptographic keys used in verification are stored securely and protected against disclosure
+      V2.9.2: The challenge nonce is at least 64 bits and statistically unique
+      V2.9.3: Approved cryptographic algorithms are used in generation, seeding and verification
+      V2.10.1: Intra-service secrets do not rely on unchanging credentials (passwords, API keys, shared accounts)
+      V2.10.2: Service accounts used for service authentication are not default credentials
+      V2.10.3: Service passwords are stored with sufficient protection to prevent offline recovery
+      V2.10.4: Passwords, integrations, seeds, internal secrets and API keys are managed securely, not in source code
+  V3:
+    name: Session Management
+    requirements:
+      V3.1.1: Session tokens are never revealed in URL parameters
+      V3.2.1: A new session token is generated on user authentication
+      V3.2.2: Session tokens possess at least 64 bits of entropy
+      V3.2.3: Session tokens are stored in the browser only by secure methods (secure cookies, session storage)
+      V3.2.4: Session tokens are generated using approved cryptographic algorithms
+      V3.3.1: Logout and expiration invalidate the session token
+      V3.3.2: Re-authentication occurs periodically when users may remain logged in
+      V3.3.3: Option to terminate all other active sessions after a successful password change
+      V3.3.4: Users can view and log out of any or all currently active sessions and devices
+      V3.4.1: Cookie-based session tokens have the Secure attribute
+      V3.4.2: Cookie-based session tokens have the HttpOnly attribute
+      V3.4.3: Cookie-based session tokens use the SameSite attribute
+      V3.4.4: Cookie-based session tokens use the "__Host-" prefix
+      V3.4.5: Cookies set the most precise path attribute when the domain is shared with other applications
+      V3.5.1: Users can revoke OAuth tokens that form trust relationships with linked applications
+      V3.5.2: Session tokens are used rather than static API secrets and keys, except with legacy implementations
+      V3.5.3: Stateless session tokens use digital signatures, encryption and other countermeasures
+      V3.6.1: Relying parties specify the maximum authentication time to credential service providers
+      V3.6.2: Credential service providers inform relying parties of the last authentication event
+      V3.7.1: A full, valid login session or re-authentication is required before sensitive transactions
+  V4:
+    name: Access Control
+    requirements:
+      V4.1.1: Access control rules are enforced on a trusted service layer
+      V4.1.2: User and data attributes and policy information used by access controls cannot be manipulated
+      V4.1.3: Principle of least privilege
+      V4.1.4: "[DELETED] duplicate of V4.1.3"
+      V4.1.5: Access controls fail securely, including when an exception occurs
+      V4.2.1: Sensitive data and APIs are protected against insecure direct object reference (IDOR) attacks
+      V4.2.2: A strong anti-CSRF mechanism protects authenticated functionality
+      V4.3.1: Administrative interfaces use appropriate multi-factor authentication
+      V4.3.2: Directory browsing is disabled; file/directory metadata (.git, .DS_Store) is not disclosed
+      V4.3.3: Additional authorization (step-up, adaptive) and/or segregation of duties for high-value functions
+  V5:
+    name: Validation, Sanitization and Encoding
+    requirements:
+      V5.1.1: Defenses against HTTP parameter pollution attacks
+      V5.1.2: Frameworks protect against mass parameter assignment attacks
+      V5.1.3: All input is validated using positive validation (allow lists)
+      V5.1.4: Structured data is strongly typed and validated against a defined schema
+      V5.1.5: URL redirects and forwards only allow destinations on an allow list
+      V5.2.1: Untrusted HTML input from WYSIWYG editors is sanitized with an HTML sanitizer library
+      V5.2.2: Unstructured data is sanitized to enforce safety measures (allowed characters, length)
+      V5.2.3: User input is sanitized before it is passed to mail systems (SMTP/IMAP injection)
+      V5.2.4: eval() and other dynamic code execution features are avoided
+      V5.2.5: Template injection is prevented
+      V5.2.6: Server-side request forgery is prevented (validation/sanitization, allow lists)
+      V5.2.7: User-supplied SVG scriptable content is sanitized, disabled or sandboxed
+      V5.2.8: User-supplied scriptable or expression template content (Markdown, CSS, XSL, BBCode) is sanitized
+      V5.3.1: Output encoding is relevant for the interpreter and context required
+      V5.3.2: Output encoding preserves the user's chosen character set and locale
+      V5.3.3: Context-aware output escaping protects against reflected, stored and DOM-based XSS
+      V5.3.4: Data selection and database queries use parameterized queries, ORMs or entity frameworks
+      V5.3.5: Context-specific output encoding is used where parameterized mechanisms are not present
+      V5.3.6: Protection against JSON injection, JSON eval and JavaScript expression evaluation
+      V5.3.7: Protection against LDAP injection
+      V5.3.8: Protection against OS command injection; OS calls use parameterized OS queries
+      V5.3.9: Protection against local and remote file inclusion
+      V5.3.10: Protection against XPath injection and XML injection
+      V5.4.1: Memory-safe string handling, safer memory copy and pointer arithmetic
+      V5.4.2: Format strings do not take potentially hostile input and are constant
+      V5.4.3: Sign, range and input validation techniques prevent integer overflows
+      V5.5.1: Serialized objects use integrity checks or are encrypted against hostile object creation
+      V5.5.2: XML parsers use the most restrictive configuration; external entities are disabled (XXE)
+      V5.5.3: Deserialization of untrusted data is avoided or protected in custom code and libraries
+      V5.5.4: JSON is parsed with JSON.parse in browsers and JavaScript back ends, never eval()
+  V6:
+    name: Stored Cryptography
+    requirements:
+      V6.1.1: Regulated private data is stored encrypted at rest
+      V6.1.2: Regulated health data is stored encrypted at rest
+      V6.1.3: Regulated financial data is stored encrypted at rest
+      V6.2.1: Cryptographic modules fail securely and errors do not enable padding oracle attacks
+      V6.2.2: Industry-proven or government-approved cryptographic algorithms, modes and libraries are used
+      V6.2.3: Initialization vectors, cipher configuration and block modes are configured securely
+      V6.2.4: Random number, encryption and hashing algorithms, key lengths and modes can be reconfigured
+      V6.2.5: Insecure block modes, padding modes, small block ciphers and weak hashes are not used
+      V6.2.6: Nonces, IVs and other single-use numbers are not reused with a given encryption key
+      V6.2.7: Encrypted data is authenticated (signatures, authenticated cipher modes, HMAC)
+      V6.2.8: Cryptographic operations are constant-time
+      V6.3.1: Random numbers, file names, GUIDs and strings are generated by a cryptographically secure RNG
+      V6.3.2: Random GUIDs use the GUID v4 algorithm and a CSPRNG
+      V6.3.3: Random numbers have proper entropy under heavy load or the application degrades gracefully
+      V6.4.1: A secrets management solution such as a key vault creates, stores and controls access to secrets
+      V6.4.2: Key material is not exposed to the application but uses an isolated security module
+  V7:
+    name: Error Handling and Logging
+    requirements:
+      V7.1.1: Credentials and payment details are not logged; session tokens only in irreversible hashed form
+      V7.1.2: Other sensitive data as defined under local privacy laws is not logged
+      V7.1.3: Security-relevant events are logged (authentication, access control, validation failures)
+      V7.1.4: Each log event includes the information needed for a detailed investigation of the timeline
+      V7.2.1: All authentication decisions are logged, without session tokens or passwords
+      V7.2.2: All access control decisions can be logged and all failed decisions are logged
+      V7.3.1: Logging components encode data to prevent log injection
+      V7.3.2: "[DELETED] duplicate of V7.3.1"
+      V7.3.3: Security logs are protected from unauthorized access and modification
+      V7.3.4: Time sources are synchronized to the correct time and time zone (UTC)
+      V7.4.1: A generic message is shown on an unexpected or security-sensitive error, possibly with an id
+      V7.4.2: Exception handling is used across the codebase for expected and unexpected error conditions
+      V7.4.3: A last-resort error handler catches all unhandled exceptions
+  V8:
+    name: Data Protection
+    requirements:
+      V8.1.1: Sensitive data is protected from being cached in server components (load balancers, caches)
+      V8.1.2: Cached or temporary copies of sensitive data on the server are protected or purged
+      V8.1.3: The number of parameters in a request (hidden fields, Ajax variables, cookies, headers) is minimized
+      V8.1.4: Abnormal numbers of requests (by IP, user, per hour/day) can be detected and alerted on
+      V8.1.5: Regular backups of important data are performed and test restoration is performed
+      V8.1.6: Backups are stored securely to prevent data from being stolen or corrupted
+      V8.2.1: Sufficient anti-caching headers so sensitive data is not cached in modern browsers
+      V8.2.2: Browser storage (localStorage, sessionStorage, IndexedDB, cookies) holds no sensitive data
+      V8.2.3: Authenticated data is cleared from client storage after the client or session is terminated
+      V8.3.1: Sensitive data is sent in the HTTP message body or headers, never in query strings
+      V8.3.2: Users have a method to remove or export their data on demand
+      V8.3.3: Users get clear language about collection and use of personal information and opt-in consent
+      V8.3.4: Sensitive data created and processed is identified and a policy states how to handle it
+      V8.3.5: Access to sensitive data is audited (without logging the sensitive data itself)
+      V8.3.6: Sensitive information in memory is overwritten as soon as it is no longer required
+      V8.3.7: Sensitive information that must be encrypted uses approved algorithms (confidentiality + integrity)
+      V8.3.8: Sensitive personal information is subject to data retention classification and deleted on schedule
+  V9:
+    name: Communication
+    requirements:
+      V9.1.1: TLS is used for all client connectivity and does not fall back to insecure communications
+      V9.1.2: Only strong cipher suites are enabled, the strongest preferred
+      V9.1.3: Only the latest recommended TLS versions (1.2 and 1.3) are enabled
+      V9.2.1: Connections to and from the server use trusted TLS certificates
+      V9.2.2: Encrypted communications (TLS) are used for all inbound and outbound connections
+      V9.2.3: Encrypted connections to external systems involving sensitive information are authenticated
+      V9.2.4: Certificate revocation (e.g. OCSP stapling) is enabled and configured
+      V9.2.5: Backend TLS connection failures are logged
+  V10:
+    name: Malicious Code
+    requirements:
+      V10.1.1: A code analysis tool that can detect potentially malicious code is in use
+      V10.2.1: Source code and third-party libraries contain no unauthorized phone-home or data collection
+      V10.2.2: The application does not ask for unnecessary or excessive permissions to privacy features or sensors
+      V10.2.3: Source code and third-party libraries contain no back doors (hard-coded accounts/keys, obfuscation)
+      V10.2.4: Source code and third-party libraries contain no time bombs
+      V10.2.5: Source code and third-party libraries contain no malicious code (salami attacks, logic bombs)
+      V10.2.6: Source code and third-party libraries contain no Easter eggs or unwanted functionality
+      V10.3.1: An auto-update feature obtains updates over secure channels and verifies their signatures
+      V10.3.2: The application employs integrity protections such as code signing or subresource integrity
+      V10.3.3: The application is protected from subdomain takeovers
+  V11:
+    name: Business Logic
+    requirements:
+      V11.1.1: Business logic flows are processed for the same user in sequential step order, without skipping
+      V11.1.2: Business logic flows are processed with all steps in realistic human time
+      V11.1.3: Appropriate limits for specific business actions or transactions are enforced per user
+      V11.1.4: Anti-automation controls protect against excessive calls (exfiltration, uploads, denial of service)
+      V11.1.5: Business logic limits or validation protect against likely business risks or threats
+      V11.1.6: No time-of-check/time-of-use issues or other race conditions for sensitive operations
+      V11.1.7: Unusual events or activity are monitored from a business logic perspective
+      V11.1.8: Configurable alerting when automated attacks or unusual activity is detected
+  V12:
+    name: Files and Resources
+    requirements:
+      V12.1.1: Large files that could fill up storage or cause a denial of service are not accepted
+      V12.1.2: Compressed files are checked against maximum uncompressed size and number of files
+      V12.1.3: A file size quota and maximum number of files per user are enforced
+      V12.2.1: Files from untrusted sources are validated to be of the expected type based on content
+      V12.3.1: User-submitted filename metadata is not used directly by filesystems (path traversal)
+      V12.3.2: User-submitted filename metadata is validated or ignored to prevent local file disclosure/changes
+      V12.3.3: User-submitted filename metadata is validated or ignored to prevent remote file inclusion/SSRF
+      V12.3.4: Reflective file download is prevented (fixed Content-Type/Content-Disposition)
+      V12.3.5: Untrusted file metadata is not used directly with system APIs or libraries (command injection)
+      V12.3.6: No functionality from untrusted sources (unverified CDNs, libraries, DLLs) is included and executed
+      V12.4.1: Files from untrusted sources are stored outside the web root with limited permissions
+      V12.4.2: Files from untrusted sources are scanned by antivirus scanners
+      V12.5.1: The web tier serves only files with specific extensions (no .bak, .swp, source leakage)
+      V12.5.2: Direct requests to uploaded files are never executed as HTML/JavaScript content
+      V12.6.1: The server has an allow list of resources or systems it may send requests to or load data from
+  V13:
+    name: API and Web Service
+    requirements:
+      V13.1.1: All application components use the same encodings and parsers to avoid parsing attacks
+      V13.1.2: "[DELETED] duplicate of V4.3.1"
+      V13.1.3: API URLs do not expose sensitive information such as API keys or session tokens
+      V13.1.4: Authorization decisions are made at both the URI and the resource level
+      V13.1.5: Requests with unexpected or missing content types are rejected with appropriate headers
+      V13.2.1: Enabled RESTful HTTP methods are a valid choice for the user or action
+      V13.2.2: JSON schema validation is in place and verified before input is accepted
+      V13.2.3: Cookie-using RESTful services are protected from CSRF (double submit, nonces, Origin checks)
+      V13.2.4: "[DELETED] duplicate of V11.1.4"
+      V13.2.5: REST services explicitly check the incoming Content-Type
+      V13.2.6: Message headers and payload are trustworthy and not modified in transit
+      V13.3.1: XSD schema validation ensures a properly formed XML document before processing
+      V13.3.2: The message payload is signed using WS-Security
+      V13.4.1: A GraphQL query allow list or a combination of depth and amount limiting is used
+      V13.4.2: GraphQL or other data layer authorization is implemented at the business logic layer
+  V14:
+    name: Configuration
+    requirements:
+      V14.1.1: Build and deployment processes are secure and repeatable (CI/CD, automated configuration)
+      V14.1.2: Compiler flags enable all available buffer overflow protections and warnings
+      V14.1.3: Server configuration is hardened per the application server and framework recommendations
+      V14.1.4: Application, configuration and dependencies can be re-deployed by automated scripts or restored
+      V14.1.5: Authorized administrators can verify the integrity of all security-relevant configurations
+      V14.2.1: All components are up to date, preferably with a dependency checker at build or compile time
+      V14.2.2: Unneeded features, documentation, sample applications and configurations are removed
+      V14.2.3: Externally hosted assets (JavaScript, CSS, web fonts) use Subresource Integrity
+      V14.2.4: Third-party components come from pre-defined, trusted and continually maintained repositories
+      V14.2.5: A software bill of materials of all third-party libraries in use is maintained
+      V14.2.6: Attack surface is reduced by sandboxing or encapsulating third-party libraries
+      V14.3.1: "[DELETED] duplicate of V7.4.1"
+      V14.3.2: Web or application server and framework debug modes are disabled in production
+      V14.3.3: HTTP headers and responses do not expose detailed version information of system components
+      V14.4.1: Every HTTP response contains a Content-Type header with a safe character set where applicable
+      V14.4.2: API responses contain Content-Disposition attachment with a filename
+      V14.4.3: A Content Security Policy response header is in place
+      V14.4.4: All responses contain X-Content-Type-Options nosniff
+      V14.4.5: A Strict-Transport-Security header is included on all responses and for all subdomains
+      V14.4.6: A suitable Referrer-Policy header is included
+      V14.4.7: Content cannot be embedded in a third-party site by default (frame-ancestors / X-Frame-Options)
+      V14.5.1: The server accepts only the HTTP methods in use and logs/alerts on invalid requests
+      V14.5.2: The supplied Origin header is not used for authentication or access control decisions
+      V14.5.3: The CORS Access-Control-Allow-Origin header uses a strict allow list and does not support "null"
+      V14.5.4: HTTP headers added by a trusted proxy or SSO device are authenticated by the application

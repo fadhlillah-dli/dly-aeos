@@ -230,7 +230,49 @@ export function qs(params: Record<string, string | boolean | undefined | null>):
   return s ? `?${s}` : "";
 }
 
+// §46 OWASP ASVS trace of the control plane (read-only contract files, every role).
+export type AsvsStatus = "TESTED" | "NOT_PROVEN" | "NOT_SELECTED" | "DELETED";
+
+export interface AsvsItem {
+  id: string;
+  chapter: string;
+  title: string;
+  status: AsvsStatus;
+  tests?: string[];
+  note?: string | null;
+  reason?: string;
+  selected_title?: string | null;
+}
+
+export interface AsvsChapter {
+  chapter: string;
+  name: string;
+  tested: number;
+  not_proven: number;
+  not_selected: number;
+  deleted: number;
+  unlisted: number;
+}
+
+export interface AsvsTrace {
+  asvs_version: string;
+  catalog_version: string;
+  application: string;
+  items: AsvsItem[];
+  chapters: AsvsChapter[];
+  totals: { tested: number; not_proven: number; not_selected: number; deleted: number };
+  selection_sha256: string | null;
+  catalog_sha256: string | null;
+  per_project: { status: string; reason: string };
+  evidence_note: string;
+  source: string;
+  checked_at: string | null;
+  generated_at: string;
+  mode: string;
+}
+
 export const evidenceApi = {
+  asvs: () => get<AsvsTrace>("/api/verification/asvs"),
   list: (filters: Record<string, string | boolean | undefined>) => get<EvidenceList>(`/api/evidence${qs(filters)}`),
   detail: (id: string) => get<EvidenceDetail>(`/api/evidence/${encodeURIComponent(id)}`),
   reviews: (filters: Record<string, string | undefined> = {}) => get<ListEnvelope<ReviewItem>>(`/api/reviews${qs(filters)}`),

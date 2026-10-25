@@ -1,26 +1,277 @@
 # OWASP ASVS control selection for DLY AEOS itself (master §46: "requirements selected per application/risk
 # and version-pinned; evidence = a test and trace per relevant control").
 #
-# * Version pinned: ASVS 4.0.3 (the control ids below are 4.0.3 ids). Moving to ASVS 5.0.x renumbers the
+# * Version pinned: ASVS 4.0.3. The complete 4.0.3 requirement catalog is contracts/security/asvs-4.0.3-catalog.yaml;
+#   every non-deleted requirement of it appears here exactly once - under `selected` or under `not_selected` with
+#   the reason (tests/unit/test_asvs_trace.py enforces that, chapter by chapter). Moving to ASVS 5.0.x renumbers the
 #   chapters and is an owner decision (POLICY/ADR), not an automatic upgrade.
-# * Risk profile: local-first, single owner, bound to 127.0.0.1, browser session + CSRF, secrets in a vault,
-#   workers sandboxed behind a capability broker. Controls outside that profile are listed under `not_selected`
-#   with the reason, never silently dropped.
-# * Every selected control names the pytest node ids that prove it (tests/unit/test_asvs_trace.py checks that
-#   each id exists). A selected control without tests is `NOT_PROVEN` — never shown as met.
+# * Risk profile (the application this selection is for): the AEOS control plane - local-first, single owner, bound
+#   to 127.0.0.1 over plain HTTP (no TLS on loopback, §06), browser session cookie + CSRF + Origin/Host checks,
+#   SQLite in the owner's data dir, secrets in OpenBao / the OS keyring, workers sandboxed behind a capability
+#   broker, no e-mail/SMS/OTP/MFA, no SOAP/GraphQL. Controls outside that profile are under `not_selected` with the
+#   reason; a non-loopback exposure, multi-user access or a remote deployment needs a new selection (owner decision).
+# * Applications AEOS builds for other projects are NOT covered by this file: their ASVS level per data
+#   classification/risk is an owner decision that is not recorded yet (UNDECIDED), so no per-project selection is
+#   claimed.
+# * Every selected control is `TESTED` with the pytest node ids that prove it (each id must exist) or `NOT_PROVEN`
+#   with a note - a NOT_PROVEN control is never shown as met. TESTED means "the cited tests pass for the behaviour
+#   named", not a certification.
 asvs_version: "4.0.3"
 application: dly-aeos-control-plane
+catalog: contracts/security/asvs-4.0.3-catalog.yaml
 selected:
+  # ------------------------------------------------------------------ V1 Architecture, Design and Threat Modeling
+  - id: V1.1.1
+    status: NOT_PROVEN
+    note: master §31 gates G0-G8 and the ADR register describe the lifecycle; no test proves the process itself
+    tests: []
+  - id: V1.1.2
+    status: NOT_PROVEN
+    note: threat models exist per product plan (docs/evidence/first-plan); none is required per design change
+    tests: []
+  - id: V1.1.3
+    status: NOT_PROVEN
+    note: TaskSpecs carry acceptance criteria and forbidden paths; security constraints per story are not checked
+    tests: []
+  - id: V1.1.4
+    status: TESTED
+    title: Trust boundaries documented and enforced (protected paths / trust zones §09, module boundaries §10)
+    tests:
+      - tests/unit/test_protected_paths.py::test_agents_md_section_equals_the_canonical_platform_list
+      - tests/unit/test_module_boundaries.py::test_no_new_cross_module_internal_imports
+  - id: V1.1.5
+    status: NOT_PROVEN
+    note: master architecture documents the architecture and remote services; no security analysis artefact is tested
+    tests: []
+  - id: V1.1.6
+    status: NOT_PROVEN
+    note: centralised controls exist (aeos.api.security, aeos.core.redaction, policy interlock); not proven by a test
+    tests: []
+  - id: V1.1.7
+    status: NOT_PROVEN
+    note: AGENTS.md is the coding rule set; its use is not verifiable by a test
+    tests: []
+  - id: V1.2.1
+    status: NOT_PROVEN
+    note: worker and verifier containers run as dedicated non-root uids; the control plane runs as the owner's own OS user
+    tests: []
+  - id: V1.2.2
+    status: TESTED
+    title: Component calls are authenticated (worker -> broker only with a run-bound capability token)
+    tests:
+      - tests/unit/test_broker_model_proxy.py::test_rejects_missing_and_unknown_and_cookie_auth
+  - id: V1.2.3
+    status: TESTED
+    title: One vetted authentication mechanism (server-side session) guards every API
+    tests:
+      - tests/acceptance/test_auth_boundary.py::test_unauthenticated_reads_refused
+  - id: V1.2.4
+    status: NOT_PROVEN
+    note: the CLI confirms decisions with the admin password, the UI with the session; equal strength is not shown
+    tests: []
+  - id: V1.4.1
+    status: TESTED
+    title: Access control enforced at trusted server-side enforcement points
+    tests:
+      - tests/acceptance/test_auth_boundary.py::test_viewer_is_denied_on_every_write_route
+  - id: V1.4.4
+    status: TESTED
+    title: A single access control mechanism (roles + session domain) for every route
+    tests:
+      - tests/acceptance/test_auth_boundary.py::test_viewer_is_denied_on_every_write_route
+      - tests/unit/test_identity.py::test_viewer_cannot_write
+  - id: V1.4.5
+    status: NOT_PROVEN
+    note: access depends on role, session domain and project scope attributes; no attribute-based test matrix
+    tests: []
+  - id: V1.5.1
+    status: NOT_PROVEN
+    note: request models (Pydantic) define typed input; no input/output requirement artefact
+    tests: []
+  - id: V1.5.2
+    status: NOT_PROVEN
+    note: the API exchanges JSON only; no native object serialization is known, but no test asserts it
+    tests: []
+  - id: V1.5.3
+    status: NOT_PROVEN
+    note: validation happens in the FastAPI service layer; not proven by a dedicated test
+    tests: []
+  - id: V1.5.4
+    status: NOT_PROVEN
+    note: the React UI escapes output when rendering; no test
+    tests: []
+  - id: V1.6.1
+    status: NOT_PROVEN
+    note: key lifecycle is delegated to OpenBao / the OS keyring; no key management policy artefact is tested
+    tests: []
+  - id: V1.6.2
+    status: TESTED
+    title: Secret values never leave the secrets facade (status/list/delete never return values)
+    tests:
+      - tests/unit/test_secrets_openbao.py::test_put_status_list_and_delete_never_return_values
+      - tests/unit/test_secrets_selection.py::test_api_status_and_health_never_show_values
+  - id: V1.6.3
+    status: NOT_PROVEN
+    note: secrets can be rotated in the vault; no re-encryption process is tested
+    tests: []
+  - id: V1.6.4
+    status: TESTED
+    title: The browser holds no secrets; secret values are never sent to the client
+    tests:
+      - tests/unit/test_secrets_selection.py::test_api_status_and_health_never_show_values
+  - id: V1.7.1
+    status: TESTED
+    title: One audit trail format (AuditEvent rows) across modules
+    tests:
+      - tests/unit/test_audit_events_integrity.py::test_audit_event_records_the_run_it_belongs_to
+  - id: V1.8.1
+    status: TESTED
+    title: Data is classified (domain + classification) and the classification cannot be lowered
+    tests:
+      - tests/unit/test_intake_uploads.py::test_classification_cannot_be_lowered
+  - id: V1.8.2
+    status: NOT_PROVEN
+    note: OFFICE default deny and classification gates exist; a requirement set per protection level is not tested
+    tests: []
+  - id: V1.10.1
+    status: TESTED
+    title: Source control with check-in protection (protected paths quarantine worker changes)
+    tests:
+      - tests/unit/test_protected_paths.py::test_every_protected_pattern_quarantines_a_synthetic_change_in_runtime_and_verifier
+  - id: V1.11.1
+    status: NOT_PROVEN
+    note: the install manifest and inventory list components; business functions per component are not tested
+    tests: []
+  - id: V1.11.2
+    status: TESTED
+    title: High-value flows do not share unsynchronized state (budget reservations, admission lock)
+    tests:
+      - tests/unit/test_cost_service.py::test_concurrent_reservations_never_exceed_limit
+  - id: V1.11.3
+    status: TESTED
+    title: High-value flows resist time-of-check/time-of-use races
+    tests:
+      - tests/unit/test_cost_admission_guards.py::test_admission_lock_held_elsewhere_fails_closed
+  - id: V1.12.2
+    status: NOT_PROVEN
+    note: uploads are parsed in a subprocess and listed, not served back; no test covers a download path
+    tests: []
+  - id: V1.14.1
+    status: TESTED
+    title: Components of differing trust are segregated (capability broker, isolated verifier runner)
+    tests:
+      - tests/acceptance/test_containment.py::test_worker_calls_outside_its_capability_are_refused
+      - tests/unit/test_verification_runner.py::test_proven_container_boundary_runs_candidate_code_in_the_verifier_container
+  - id: V1.14.2
+    status: NOT_PROVEN
+    note: the Claude binary's signature is checked (test_claude_bridge_signature); AEOS's own deployment is not signed
+    tests: []
+  - id: V1.14.3
+    status: TESTED
+    title: The build pipeline reports out-of-date/insecure components (pip-audit, npm audit; report-only)
+    tests:
+      - tests/unit/test_ci_gates.py::test_supply_chain_reports_are_produced_and_labelled_report_only
+  - id: V1.14.4
+    status: NOT_PROVEN
+    note: CI runs lint/types/tests; a step that verifies the secure deployment itself does not exist
+    tests: []
+  - id: V1.14.5
+    status: TESTED
+    title: Worker/verifier code runs containerised (real-Docker test, skips without Docker)
+    note: integration-marked; proven on a host with Docker and the pinned images, BLOCKED (skipped) elsewhere
+    tests:
+      - tests/acceptance/test_containment.py::test_container_sandbox_blocks_filesystem_and_egress
+  - id: V1.14.6
+    status: NOT_PROVEN
+    note: the UI is a React SPA with no plugin technologies; no test asserts it
+    tests: []
+  # ------------------------------------------------------------------ V2 Authentication
   - id: V2.1.1
     title: User-set passwords are at least 12 characters
     status: TESTED
     tests:
       - tests/unit/test_identity.py::test_weak_password_rejected
+  - id: V2.1.2
+    status: NOT_PROVEN
+    note: maximum/minimum length handling for 64-128 characters is not tested
+    tests: []
+  - id: V2.1.3
+    status: NOT_PROVEN
+    note: argon2id hashes the full password; no truncation test
+    tests: []
+  - id: V2.1.4
+    status: NOT_PROVEN
+    note: Unicode passwords are not tested
+    tests: []
+  - id: V2.1.5
+    status: TESTED
+    title: Users can change their password
+    tests:
+      - tests/unit/test_identity_hardening.py::test_authentication_events_are_audited
+  - id: V2.1.6
+    status: TESTED
+    title: Password change requires the current password
+    tests:
+      - tests/unit/test_identity_hardening.py::test_authentication_events_are_audited
+  - id: V2.1.7
+    status: NOT_PROVEN
+    note: known default passwords are refused (test_default_passwords_rejected_even_after_bootstrap); no breached-password corpus is checked offline
+    tests: []
+  - id: V2.1.8
+    status: NOT_PROVEN
+    note: the UI has no password strength meter
+    tests: []
+  - id: V2.1.9
+    status: NOT_PROVEN
+    note: no composition rules exist; not asserted by a test
+    tests: []
+  - id: V2.1.10
+    status: NOT_PROVEN
+    note: no periodic rotation exists; not asserted by a test
+    tests: []
+  - id: V2.1.11
+    status: NOT_PROVEN
+    note: paste and password managers are not blocked; not asserted by a UI test
+    tests: []
+  - id: V2.1.12
+    status: NOT_PROVEN
+    note: the login form does not offer a show-password toggle
+    tests: []
   - id: V2.2.1
     title: Anti-automation controls against credential stuffing / brute force
     status: TESTED
     tests:
       - tests/unit/test_identity.py::test_login_throttling
+  - id: V2.3.1
+    status: TESTED
+    title: System-generated recovery credentials are random, single use and expire
+    tests:
+      - tests/unit/test_identity_hardening.py::test_recovery_credential_is_single_use_and_expires
+  - id: V2.4.1
+    status: TESTED
+    title: Passwords stored with argon2id (approved one-way KDF, pinned parameters)
+    tests:
+      - tests/unit/test_identity_hardening.py::test_password_hash_is_argon2id_with_pinned_parameters
+  - id: V2.4.2
+    status: NOT_PROVEN
+    note: argon2-cffi generates a random 16-byte salt per hash; salt length is not asserted by a test
+    tests: []
+  - id: V2.4.5
+    status: NOT_PROVEN
+    note: no secret pepper / additional KDF iteration is applied
+    tests: []
+  - id: V2.5.1
+    status: NOT_PROVEN
+    note: the recovery credential is printed by the local CLI to the owner's terminal, never sent; not tested as such
+    tests: []
+  - id: V2.5.2
+    status: NOT_PROVEN
+    note: no password hints or secret questions exist; not asserted by a test
+    tests: []
+  - id: V2.5.3
+    status: NOT_PROVEN
+    note: only argon2id hashes are stored, so recovery cannot reveal a password; not asserted by a test
+    tests: []
   - id: V2.5.4
     title: No shared or default accounts
     status: TESTED
@@ -28,12 +279,79 @@ selected:
       - tests/acceptance/test_auth_boundary.py::test_no_default_credentials
       - tests/acceptance/test_auth_boundary.py::test_default_passwords_rejected_even_after_bootstrap
       - tests/unit/test_identity.py::test_no_default_credentials_bootstrap_required
+  - id: V2.5.6
+    status: TESTED
+    title: Recovery uses a secure mechanism (local CLI, single-use expiring credential, sessions revoked, change forced)
+    tests:
+      - tests/unit/test_identity.py::test_recovery_revokes_sessions_and_forces_change
+      - tests/unit/test_identity_hardening.py::test_recovery_credential_is_single_use_and_expires
+  - id: V2.10.1
+    status: TESTED
+    title: Intra-service secrets are per-run capability tokens that expire and can be revoked
+    tests:
+      - tests/unit/test_broker_grants.py::test_authenticate_valid_wrong_kind_revoked_expired_unknown
+  - id: V2.10.2
+    status: NOT_PROVEN
+    note: OpenBao AppRole credentials are created per install; no test proves they are never defaults
+    tests: []
+  - id: V2.10.3
+    status: TESTED
+    title: Service credentials are kept in a real credential store (null/fail keyring backends refused)
+    tests:
+      - tests/unit/test_secrets_keyring_backend.py::test_fail_and_null_backends_are_rejected
+  - id: V2.10.4
+    status: TESTED
+    title: Secrets and API keys are not in source code or config files (config rejects secrets; CI secret scan)
+    tests:
+      - tests/unit/test_core.py::test_config_file_rejects_secrets
+      - tests/unit/test_ci_gates.py::test_g1_runs_lint_types_and_scans_and_g3_runs_browser_tests
+  # ------------------------------------------------------------------ V3 Session Management
+  - id: V3.1.1
+    status: TESTED
+    title: Session tokens never appear in URLs or response bodies (HttpOnly cookie only)
+    tests:
+      - tests/unit/test_asvs_controls.py::test_session_tokens_are_fresh_per_login_and_long
+  - id: V3.2.1
+    status: TESTED
+    title: A new session token on every authentication
+    tests:
+      - tests/unit/test_asvs_controls.py::test_session_tokens_are_fresh_per_login_and_long
+  - id: V3.2.2
+    status: TESTED
+    title: Session tokens have at least 64 bits of entropy (256-bit token_urlsafe)
+    tests:
+      - tests/unit/test_asvs_controls.py::test_session_tokens_are_fresh_per_login_and_long
+  - id: V3.2.3
+    status: TESTED
+    title: Session tokens stored in the browser only in an HttpOnly, SameSite=Strict cookie
+    tests:
+      - tests/unit/test_identity.py::test_login_session_cookie_is_httponly_strict
+  - id: V3.2.4
+    status: NOT_PROVEN
+    note: tokens come from Python's secrets module (OS CSPRNG); the generator is not asserted by a test
+    tests: []
   - id: V3.3.1
     title: Logout and expiration invalidate the session token
     status: TESTED
     tests:
       - tests/unit/test_identity.py::test_logout_revokes_session
       - tests/unit/test_identity.py::test_recovery_revokes_sessions_and_forces_change
+  - id: V3.3.2
+    status: NOT_PROVEN
+    note: sessions have an idle timeout (session_idle_minutes) and an absolute TTL (session_ttl_hours); no test asserts the idle expiry
+    tests: []
+  - id: V3.3.3
+    status: NOT_PROVEN
+    note: a password change revokes the user's other sessions (identity.service, reason password-changed); no test asserts it
+    tests: []
+  - id: V3.3.4
+    status: NOT_PROVEN
+    note: there is no UI that lists active sessions and devices
+    tests: []
+  - id: V3.4.1
+    status: NOT_PROVEN
+    note: the Secure attribute follows settings.secure_cookies, off by default on the plain-HTTP loopback bind (§06)
+    tests: []
   - id: V3.4.2
     title: Cookie-based session tokens have the HttpOnly attribute
     status: TESTED
@@ -44,6 +362,24 @@ selected:
     status: TESTED
     tests:
       - tests/unit/test_identity.py::test_login_session_cookie_is_httponly_strict
+  - id: V3.4.5
+    status: NOT_PROVEN
+    note: cookies are not port-scoped - another local service on 127.0.0.1 receives the session cookie; Path does not isolate ports
+    tests: []
+  - id: V3.5.2
+    status: TESTED
+    title: Session/capability tokens instead of static API secrets (workers never get provider keys)
+    tests:
+      - tests/unit/test_broker_model_proxy.py::test_rejects_missing_and_unknown_and_cookie_auth
+      - tests/acceptance/test_containment.py::test_worker_environment_and_tools_never_carry_vault_ssh_or_claude_credentials
+  - id: V3.7.1
+    status: TESTED
+    title: Sensitive operations re-confirm the human (CLI decisions require the admin password)
+    note: the dashboard relies on the fresh session + CSRF for decisions; no re-authentication there
+    tests:
+      - tests/unit/test_decision_consumers.py::test_cli_records_and_revokes_with_the_admin_password
+      - tests/unit/test_routing_cli.py::test_activate_requires_the_admins_password
+  # ------------------------------------------------------------------ V4 Access Control
   - id: V4.1.1
     title: Access control rules are enforced on a trusted service layer
     status: TESTED
@@ -51,12 +387,30 @@ selected:
       - tests/acceptance/test_auth_boundary.py::test_viewer_is_denied_on_every_write_route
       - tests/acceptance/test_auth_boundary.py::test_unauthenticated_reads_refused
       - tests/unit/test_operations_api_security.py::test_viewer_is_refused_on_every_ops_write
+  - id: V4.1.2
+    status: TESTED
+    title: Access-control attributes cannot be manipulated by the client (session domain, immutable project domain)
+    tests:
+      - tests/unit/test_portfolio_projects.py::test_body_domain_must_match_session
+      - tests/unit/test_claude_bridge_run.py::test_project_domain_must_match_the_projects_immutable_domain
   - id: V4.1.3
     title: Principle of least privilege (users and workers only reach what they are authorised for)
     status: TESTED
     tests:
       - tests/acceptance/test_containment.py::test_worker_calls_outside_its_capability_are_refused
       - tests/unit/test_verification_evidence_api.py::test_restricted_evidence_content_only_for_super_admin
+  - id: V4.1.5
+    status: TESTED
+    title: Access controls fail securely (fail closed on errors / missing state)
+    tests:
+      - tests/unit/test_cost_admission_guards.py::test_admission_lock_held_elsewhere_fails_closed
+      - tests/unit/test_doctor_capabilities.py::test_never_run_stale_and_expired_critical_checks_are_unknown
+  - id: V4.2.1
+    status: TESTED
+    title: Direct object references are scoped (another domain's object is "not found")
+    tests:
+      - tests/unit/test_intake_uploads.py::test_cross_domain_attachment_is_404
+      - tests/unit/test_operations_flags_export.py::test_export_download_and_cross_domain_project
   - id: V4.2.2
     title: Strong anti-CSRF mechanism for authenticated functionality
     status: TESTED
@@ -64,12 +418,144 @@ selected:
       - tests/acceptance/test_auth_boundary.py::test_write_without_csrf_token_rejected
       - tests/acceptance/test_auth_boundary.py::test_cross_origin_write_rejected
       - tests/unit/test_operations_api_security.py::test_admin_write_without_csrf_is_refused
+  - id: V4.3.2
+    status: TESTED
+    title: No directory browsing or repository metadata through the web tier
+    tests:
+      - tests/unit/test_asvs_controls.py::test_the_web_tier_serves_only_the_built_ui
+  - id: V4.3.3
+    status: TESTED
+    title: Step-up for high-value functions (route activation and decisions confirm the admin password)
+    tests:
+      - tests/unit/test_routing_cli.py::test_activate_requires_the_admins_password
+  # ------------------------------------------------------------------ V5 Validation, Sanitization and Encoding
+  - id: V5.1.1
+    status: NOT_PROVEN
+    note: duplicated query parameters are not tested
+    tests: []
+  - id: V5.1.2
+    status: NOT_PROVEN
+    note: request bodies bind to explicit Pydantic models; mass assignment is not tested
+    tests: []
+  - id: V5.1.3
+    status: NOT_PROVEN
+    note: enumerations and patterns are validated by the models; no allow-list test per input
+    tests: []
+  - id: V5.1.4
+    status: NOT_PROVEN
+    note: structured input is typed by Pydantic v2 models; no schema-rejection test matrix
+    tests: []
+  - id: V5.1.5
+    status: NOT_PROVEN
+    note: no redirect endpoint taking a destination is known; not asserted by a test
+    tests: []
+  - id: V5.2.2
+    status: TESTED
+    title: Unstructured input is sanitized (secrets redacted, prompt-injection flagged and never authority)
+    tests:
+      - tests/unit/test_intake_uploads.py::test_injection_flagged_and_not_authority
+      - tests/unit/test_intake_uploads.py::test_secret_flagged_and_redacted
+  - id: V5.2.4
+    status: NOT_PROVEN
+    note: no eval/exec of input is known; bandit runs report-only in CI
+    tests: []
+  - id: V5.2.5
+    status: NOT_PROVEN
+    note: document templates are rendered from structured data; template injection is not tested
+    tests: []
+  - id: V5.2.6
+    status: TESTED
+    title: Server-side request forgery is prevented (fixed targets, redirects off the target refused, loopback probes)
+    tests:
+      - tests/unit/test_docs_engine_screenshots.py::test_redirect_off_the_target_origin_is_refused
+      - tests/unit/test_inventory_manifest.py::test_health_probes_are_loopback_settings_only
+  - id: V5.2.7
+    status: NOT_PROVEN
+    note: diagram SVG is produced locally from plan data; user-supplied SVG handling is not tested
+    tests: []
+  - id: V5.2.8
+    status: NOT_PROVEN
+    note: Markdown from uploads/plans is rendered in the UI; sanitisation of embedded HTML is not tested
+    tests: []
+  - id: V5.3.1
+    status: NOT_PROVEN
+    note: React escapes interpolated values; no output-encoding test
+    tests: []
+  - id: V5.3.2
+    status: NOT_PROVEN
+    note: UTF-8 end to end; not tested
+    tests: []
+  - id: V5.3.3
+    status: NOT_PROVEN
+    note: no XSS test suite (reflected/stored/DOM)
+    tests: []
+  - id: V5.3.4
+    status: NOT_PROVEN
+    note: queries go through the SQLAlchemy ORM/bound parameters; raw SQL uses fixed identifiers only; no injection test
+    tests: []
+  - id: V5.3.5
+    status: NOT_PROVEN
+    note: see V5.3.4
+    tests: []
+  - id: V5.3.6
+    status: NOT_PROVEN
+    note: JSON is produced by the framework serializer; not tested
+    tests: []
+  - id: V5.3.8
+    status: NOT_PROVEN
+    note: subprocesses use list arguments without a shell (AGENTS.md); no test scans for shell=True
+    tests: []
+  - id: V5.3.9
+    status: TESTED
+    title: File inclusion / traversal is prevented (paths confined to their root; candidate symlinks never followed)
+    tests:
+      - tests/unit/test_core.py::test_ensure_within
+      - tests/acceptance/test_containment.py::test_candidate_symlink_and_traversal_are_never_materialised_or_accepted
+  - id: V5.5.2
+    status: TESTED
+    title: XML parsing refuses DTD/entity declarations (XXE)
+    tests:
+      - tests/unit/test_verification_junit.py::test_malformed_rejected
+  - id: V5.5.3
+    status: NOT_PROVEN
+    note: YAML is read with safe_load and JSON with the standard parser; no test asserts it for every reader
+    tests: []
+  - id: V5.5.4
+    status: NOT_PROVEN
+    note: the UI parses JSON with the fetch API; not asserted by a test
+    tests: []
+  # ------------------------------------------------------------------ V6 Stored Cryptography
+  - id: V6.1.1
+    status: NOT_PROVEN
+    note: the SQLite DB and the data dir are not encrypted by AEOS; protection relies on the OS account and disk encryption (owner decision)
+    tests: []
+  - id: V6.2.2
+    status: NOT_PROVEN
+    note: SHA-256, HMAC-SHA256 and argon2id from standard libraries are used; no inventory test of algorithms
+    tests: []
+  - id: V6.2.5
+    status: NOT_PROVEN
+    note: no MD5/SHA-1 use for security is known; not asserted by a test
+    tests: []
+  - id: V6.3.1
+    status: NOT_PROVEN
+    note: tokens/ids come from secrets/uuid4 (OS CSPRNG); not asserted by a test
+    tests: []
+  - id: V6.3.2
+    status: NOT_PROVEN
+    note: ids are uuid4; not asserted by a test
+    tests: []
   - id: V6.4.1
     title: A secrets management solution (key vault) creates, stores and controls access to secrets
     status: TESTED
     tests:
       - tests/unit/test_secrets_openbao.py::test_put_status_list_and_delete_never_return_values
       - tests/unit/test_secrets_openbao.py::test_sealed_or_uninitialised_blocks
+  - id: V6.4.2
+    status: NOT_PROVEN
+    note: the controller reads secret values from the vault into process memory for broker calls; no isolated security module
+    tests: []
+  # ------------------------------------------------------------------ V7 Error Handling and Logging
   - id: V7.1.1
     title: Credentials and payment details are not logged
     status: TESTED
@@ -77,26 +563,508 @@ selected:
       - tests/unit/test_identity.py::test_audit_redacts_secrets
       - tests/unit/test_core.py::test_redaction_patterns_and_registry
       - tests/unit/test_pii_identity_values.py::test_collector_redaction_keeps_identities_but_still_masks_secrets_and_pii
+  - id: V7.1.2
+    status: TESTED
+    title: Personal data is minimised/redacted before it is persisted
+    tests:
+      - tests/unit/test_core.py::test_pii_minimisation_detects_identifiers_but_spares_versions_and_ids
+      - tests/unit/test_pii_identity_values.py::test_collector_redaction_keeps_identities_but_still_masks_secrets_and_pii
+  - id: V7.1.3
+    status: TESTED
+    title: Security-relevant events (login success/failure, throttling, password change, recovery) are audited
+    tests:
+      - tests/unit/test_identity_hardening.py::test_authentication_events_are_audited
+  - id: V7.1.4
+    status: TESTED
+    title: Audit events carry actor, target, run/project/domain and time
+    tests:
+      - tests/unit/test_audit_events_integrity.py::test_audit_event_records_the_run_it_belongs_to
+  - id: V7.2.1
+    status: TESTED
+    title: Authentication decisions are logged without tokens or passwords
+    tests:
+      - tests/unit/test_identity_hardening.py::test_authentication_events_are_audited
+  - id: V7.2.2
+    status: TESTED
+    title: Failed access decisions at the capability boundary are logged
+    tests:
+      - tests/acceptance/test_containment.py::test_worker_calls_outside_its_capability_are_refused
+  - id: V7.3.1
+    status: NOT_PROVEN
+    note: audit rows are structured JSON columns, text is redacted; log injection is not tested
+    tests: []
+  - id: V7.3.3
+    status: TESTED
+    title: The audit trail is append-only and its guards are checked
+    tests:
+      - tests/acceptance/test_immutability.py::test_audit_and_events_append_only
+      - tests/unit/test_audit_append_only_guard.py::test_a_dropped_trigger_is_detected
+  - id: V7.3.4
+    status: TESTED
+    title: Times are UTC and the clock is compared with the OS time sync
+    tests:
+      - tests/unit/test_doctor_c4.py::test_clock_compares_with_os_time_sync_when_functional
+  - id: V7.4.1
+    status: TESTED
+    title: A generic message on unexpected errors (no exception text or stack trace)
+    tests:
+      - tests/unit/test_asvs_controls.py::test_an_unexpected_error_returns_a_generic_message
+  - id: V7.4.2
+    status: NOT_PROVEN
+    note: expected errors use aeos.core.errors with the error envelope; coverage of every path is not tested
+    tests: []
+  - id: V7.4.3
+    status: TESTED
+    title: A last-resort handler catches unhandled exceptions
+    tests:
+      - tests/unit/test_asvs_controls.py::test_an_unexpected_error_returns_a_generic_message
+  # ------------------------------------------------------------------ V8 Data Protection
+  - id: V8.1.2
+    status: TESTED
+    title: Temporary copies are private and removed (verifier run dir 0700, outside the data dir)
+    tests:
+      - tests/unit/test_verification_runner.py::test_verifier_workdir_is_private_and_outside_the_data_dir
+  - id: V8.1.3
+    status: NOT_PROVEN
+    note: requests carry the session cookie, CSRF header and JSON body only; not asserted by a test
+    tests: []
+  - id: V8.1.4
+    status: NOT_PROVEN
+    note: login and refresh are throttled, but abnormal request volumes are not detected or alerted
+    tests: []
+  - id: V8.1.5
+    status: TESTED
+    title: Backups with tested restoration
+    tests:
+      - tests/unit/test_operations_backup.py::test_restore_test_roundtrip_records_evidence_only_on_success
+  - id: V8.1.6
+    status: TESTED
+    title: Backups are integrity-checked and exclude login sessions
+    tests:
+      - tests/unit/test_operations_backup.py::test_tampered_archive_detected
+      - tests/unit/test_operations_backup.py::test_backup_scrubs_login_sessions
+  - id: V8.2.1
+    status: TESTED
+    title: API responses are never cached by the browser (Cache-Control no-store)
+    tests:
+      - tests/unit/test_asvs_controls.py::test_security_headers_are_on_every_response
+  - id: V8.2.2
+    status: NOT_PROVEN
+    note: the UI stores only view preferences in browser storage; not asserted by a test
+    tests: []
+  - id: V8.2.3
+    status: NOT_PROVEN
+    note: client query caches are not cleared by a tested logout path
+    tests: []
+  - id: V8.3.1
+    status: NOT_PROVEN
+    note: sensitive values travel in bodies/headers; query strings are not scanned by a test
+    tests: []
+  - id: V8.3.2
+    status: TESTED
+    title: The owner can export data on demand (scoped, redacted export); disposal is a manual, recorded step
+    tests:
+      - tests/unit/test_operations_flags_export.py::test_export_is_scoped_redacted_and_registered
+  - id: V8.3.4
+    status: TESTED
+    title: Sensitive data is identified (domain + classification) and handled by policy
+    tests:
+      - tests/unit/test_intake_uploads.py::test_classification_cannot_be_lowered
+      - tests/unit/test_intake_uploads.py::test_office_attachments_stored_in_office_partition
+  - id: V8.3.5
+    status: NOT_PROVEN
+    note: restricted evidence content is limited to SUPER_ADMIN; each read is not audited
+    tests: []
+  - id: V8.3.7
+    status: NOT_PROVEN
+    note: secret values are encrypted by the vault/keyring; other sensitive records are not encrypted by AEOS
+    tests: []
+  - id: V8.3.8
+    status: TESTED
+    title: Retention classification applies; nothing expires while the owner's retention rule is undecided
+    note: retention durations are an owner decision (UNDECIDED until recorded); disposal stays manual
+    tests:
+      - tests/unit/test_operations_retention_applied.py::test_undecided_policy_marks_every_record_retained
+      - tests/unit/test_operations_retention_applied.py::test_decided_rule_marks_old_records_expired_for_manual_disposal_only
+  # ------------------------------------------------------------------ V9 Communication (outbound only)
+  - id: V9.2.1
+    status: NOT_PROVEN
+    note: outbound provider calls (GitHub, OpenRouter, Atlassian, Google) use HTTPS with the HTTP client's default certificate verification; not asserted by a test
+    tests: []
+  - id: V9.2.2
+    status: NOT_PROVEN
+    note: provider endpoints are https:// URLs; not asserted for every adapter
+    tests: []
+  - id: V9.2.3
+    status: NOT_PROVEN
+    note: provider connections authenticate with vault-held credentials; not tested per adapter
+    tests: []
+  - id: V9.2.5
+    status: NOT_PROVEN
+    note: TLS failures surface as adapter errors; logging is not tested
+    tests: []
+  # ------------------------------------------------------------------ V10 Malicious Code
+  - id: V10.1.1
+    status: TESTED
+    title: Code analysis tools run in CI (ruff, mypy, bandit report-only, secret scan)
+    tests:
+      - tests/unit/test_ci_gates.py::test_g1_runs_lint_types_and_scans_and_g3_runs_browser_tests
+      - tests/unit/test_ci_gates.py::test_supply_chain_reports_are_produced_and_labelled_report_only
+  - id: V10.2.1
+    status: NOT_PROVEN
+    note: AEOS has no telemetry; worker tools run with auto-update/model-fetch disabled; no egress test of the control plane
+    tests: []
+  - id: V10.2.2
+    status: TESTED
+    title: No access to privacy-related browser features (Permissions-Policy denies camera, microphone, geolocation)
+    tests:
+      - tests/unit/test_asvs_controls.py::test_security_headers_are_on_every_response
+  - id: V10.2.3
+    status: NOT_PROVEN
+    note: no default accounts (V2.5.4) and worker changes to trust paths are quarantined; dependencies are not reviewed for back doors
+    tests: []
+  - id: V10.2.4
+    status: NOT_PROVEN
+    note: worker-produced changes pass the independent verifier and human review; no time-bomb analysis
+    tests: []
+  - id: V10.2.5
+    status: NOT_PROVEN
+    note: see V10.2.4
+    tests: []
+  - id: V10.2.6
+    status: NOT_PROVEN
+    note: see V10.2.4
+    tests: []
+  - id: V10.3.2
+    status: TESTED
+    title: Release integrity - serving in release mode requires a verified active release
+    tests:
+      - tests/unit/test_core_runtime_guards.py::test_serve_release_mode_refuses_without_a_verified_active_release
+  # ------------------------------------------------------------------ V11 Business Logic
+  - id: V11.1.1
+    status: TESTED
+    title: Workflows advance only through legal transitions (no skipped steps)
+    tests:
+      - tests/unit/test_planning_states.py::test_every_illegal_transition_is_refused_without_side_effects
+  - id: V11.1.3
+    status: TESTED
+    title: Budget limits per action are enforced
+    tests:
+      - tests/unit/test_cost_service.py::test_concurrent_reservations_never_exceed_limit
+  - id: V11.1.4
+    status: TESTED
+    title: Anti-automation limits (refresh rate limit, upload size limits)
+    tests:
+      - tests/unit/test_inventory_c4.py::test_full_refresh_is_rate_limited
+      - tests/unit/test_intake_uploads.py::test_size_limit_enforced
+  - id: V11.1.5
+    status: TESTED
+    title: Business risk limits (no paid route without a budget decision)
+    tests:
+      - tests/unit/test_cost_service.py::test_paid_route_blocked_without_budget_decision_even_with_tiny_estimate
+  - id: V11.1.6
+    status: TESTED
+    title: No time-of-check/time-of-use race in admission
+    tests:
+      - tests/unit/test_cost_admission_guards.py::test_admission_lock_held_elsewhere_fails_closed
+  - id: V11.1.7
+    status: TESTED
+    title: Unusual activity is detected (candidate code tampering raises a HIGH alert)
+    tests:
+      - tests/unit/test_verification_tamper.py::test_candidate_code_writing_the_trust_db_is_quarantined
+  - id: V11.1.8
+    status: TESTED
+    title: Alerting on unusual operational conditions (error budget exhaustion pauses and alerts)
+    tests:
+      - tests/unit/test_operations_sli_criticality.py::test_error_budget_exhaustion_alerts_pauses_and_recovery_lifts
+  # ------------------------------------------------------------------ V12 Files and Resources
+  - id: V12.1.1
+    status: TESTED
+    title: Large uploads are refused before parsing
+    tests:
+      - tests/unit/test_intake_uploads.py::test_size_limit_enforced
+      - tests/unit/test_intake_uploads.py::test_oversized_request_rejected_before_parsing
+  - id: V12.1.2
+    status: TESTED
+    title: Archives are checked against uncompressed size and member limits
+    tests:
+      - tests/unit/test_intake_uploads.py::test_zip_bomb_rejected
+      - tests/unit/test_intake_uploads.py::test_zip_member_limits
+  - id: V12.1.3
+    status: NOT_PROVEN
+    note: limits are per upload; no per-user quota
+    tests: []
+  - id: V12.2.1
+    status: TESTED
+    title: Uploaded file type is validated from content
+    tests:
+      - tests/unit/test_intake_uploads.py::test_extension_must_match_content
+      - tests/unit/test_intake_uploads.py::test_active_or_unknown_content_rejected
   - id: V12.3.1
     title: User-submitted file names/paths are not used directly on the filesystem (path traversal)
     status: TESTED
     tests:
       - tests/unit/test_core.py::test_safe_segment_blocks_traversal
       - tests/unit/test_core.py::test_ensure_within
+      - tests/unit/test_intake_uploads.py::test_stored_files_never_use_user_names
+  - id: V12.3.2
+    status: TESTED
+    title: Archive member names cannot write or disclose local files
+    tests:
+      - tests/unit/test_intake_uploads.py::test_zip_traversal_rejected
+      - tests/unit/test_intake_uploads.py::test_zip_symlink_rejected
+  - id: V12.3.3
+    status: NOT_PROVEN
+    note: file names are never used to fetch remote resources; not asserted by a test
+    tests: []
+  - id: V12.3.4
+    status: NOT_PROVEN
+    note: downloads (exports) set their own file names; reflective file download is not tested
+    tests: []
+  - id: V12.3.5
+    status: TESTED
+    title: Untrusted file metadata never reaches system calls (stored under generated names)
+    tests:
+      - tests/unit/test_intake_uploads.py::test_stored_files_never_use_user_names
+  - id: V12.3.6
+    status: TESTED
+    title: No code from untrusted sources is loaded by the UI (CSP script-src 'self')
+    tests:
+      - tests/unit/test_asvs_controls.py::test_security_headers_are_on_every_response
+  - id: V12.4.1
+    status: TESTED
+    title: Uploads are stored in the data dir (outside the repo/web root), partitioned per domain
+    tests:
+      - tests/unit/test_core_runtime_guards.py::test_data_dir_inside_the_repo_is_rejected
+      - tests/unit/test_intake_uploads.py::test_office_attachments_stored_in_office_partition
+  - id: V12.5.1
+    status: TESTED
+    title: The web tier serves only the built UI files
+    tests:
+      - tests/unit/test_asvs_controls.py::test_the_web_tier_serves_only_the_built_ui
+  - id: V12.5.2
+    status: NOT_PROVEN
+    note: uploads are not served back by the web tier; no test covers an attachment download
+    tests: []
+  - id: V12.6.1
+    status: TESTED
+    title: Outbound requests are limited to allow-listed targets (workers on an internal broker-only network)
+    tests:
+      - tests/unit/test_worker_runtime_container.py::test_network_is_created_internal_and_an_external_one_is_refused
+      - tests/unit/test_inventory_manifest.py::test_health_probes_are_loopback_settings_only
+  # ------------------------------------------------------------------ V13 API and Web Service
+  - id: V13.1.1
+    status: NOT_PROVEN
+    note: one framework (FastAPI/Pydantic) parses every request; not tested
+    tests: []
+  - id: V13.1.3
+    status: NOT_PROVEN
+    note: capability tokens travel in the Authorization header, the session in a cookie; URLs are not scanned by a test
+    tests: []
+  - id: V13.1.4
+    status: TESTED
+    title: Authorization at route and at resource level
+    tests:
+      - tests/acceptance/test_auth_boundary.py::test_viewer_is_denied_on_every_write_route
+      - tests/unit/test_intake_uploads.py::test_cross_domain_attachment_is_404
+  - id: V13.1.5
+    status: NOT_PROVEN
+    note: unexpected content types are not tested
+    tests: []
+  - id: V13.2.1
+    status: TESTED
+    title: Unsafe methods are refused to roles that may not use them
+    tests:
+      - tests/acceptance/test_auth_boundary.py::test_viewer_is_denied_on_every_write_route
+  - id: V13.2.2
+    status: NOT_PROVEN
+    note: JSON bodies are validated by Pydantic models; no schema-rejection test matrix
+    tests: []
+  - id: V13.2.3
+    status: TESTED
+    title: Cookie-authenticated REST calls are CSRF-protected (token + Origin check)
+    tests:
+      - tests/acceptance/test_auth_boundary.py::test_write_without_csrf_token_rejected
+      - tests/unit/test_asvs_controls.py::test_cors_is_not_opened_to_a_foreign_or_null_origin
+  - id: V13.2.5
+    status: NOT_PROVEN
+    note: the Content-Type of incoming requests is not checked explicitly
+    tests: []
+  # ------------------------------------------------------------------ V14 Configuration
+  - id: V14.1.1
+    status: TESTED
+    title: Repeatable build/bootstrap, exercised in CI including a failure case
+    tests:
+      - tests/unit/test_bootstrap_scripts.py::test_ci_runs_both_bootstrap_scripts_including_a_failure_case
+  - id: V14.1.3
+    status: TESTED
+    title: Server configuration hardened (loopback bind only, strict headers)
+    tests:
+      - tests/unit/test_core.py::test_loopback_only_binding
+      - tests/unit/test_asvs_controls.py::test_security_headers_are_on_every_response
+  - id: V14.1.4
+    status: TESTED
+    title: Data can be restored from backups (live restore keeps a pre-restore backup)
+    tests:
+      - tests/unit/test_operations_backup.py::test_restore_live_roundtrip_takes_pre_restore_backup
+  - id: V14.1.5
+    status: TESTED
+    title: Integrity of security-relevant configuration is verifiable (settings hash; master approval check)
+    tests:
+      - tests/unit/test_api_envelope_contract.py::test_settings_hash_changes_with_the_configuration
+      - tests/unit/test_doctor_master_approval.py::test_an_edited_master_is_flagged_until_a_new_approval
+  - id: V14.2.1
+    status: TESTED
+    title: Dependency checks run in CI (report-only, never a gate pass)
+    note: the audit reports are REPORT_ONLY; an outdated component does not fail the build
+    tests:
+      - tests/unit/test_ci_gates.py::test_supply_chain_reports_are_produced_and_labelled_report_only
+  - id: V14.2.2
+    status: NOT_PROVEN
+    note: API docs are off outside dev mode; removal of other unneeded features is not tested
+    tests: []
+  - id: V14.2.4
+    status: TESTED
+    title: Components come from pinned, reviewed sources (lock file, actions pinned to commit SHAs)
+    tests:
+      - tests/unit/test_delivery_ci_secrets.py::test_third_party_actions_are_pinned_to_full_commit_shas
+      - tests/unit/test_verification_runner.py::test_verifier_image_installs_exactly_the_pinned_lock
+  - id: V14.2.5
+    status: TESTED
+    title: A software bill of materials is produced (CycloneDX)
+    tests:
+      - tests/unit/test_ci_gates.py::test_sbom_is_cyclonedx_and_deterministic
+  - id: V14.2.6
+    status: NOT_PROVEN
+    note: third-party libraries run in-process; only worker tools are sandboxed
+    tests: []
+  - id: V14.3.2
+    status: TESTED
+    title: Debug modes are off (no stack traces; dev server refuses real credentials)
+    tests:
+      - tests/unit/test_asvs_controls.py::test_an_unexpected_error_returns_a_generic_message
+      - tests/unit/test_core_runtime_guards.py::test_dev_server_refuses_real_credentials_profile
+  - id: V14.4.1
+    status: TESTED
+    title: Every response has a Content-Type
+    tests:
+      - tests/unit/test_asvs_controls.py::test_security_headers_are_on_every_response
+  - id: V14.4.2
+    status: NOT_PROVEN
+    note: API responses are not sent with Content-Disposition attachment (nosniff + JSON content type only)
+    tests: []
   - id: V14.4.3
     title: A Content Security Policy response header is in place
-    status: NOT_PROVEN
-    note: headers are set in backend/aeos/api/security.py but no test asserts them yet
-    tests: []
+    status: TESTED
+    tests:
+      - tests/unit/test_asvs_controls.py::test_security_headers_are_on_every_response
   - id: V14.4.4
     title: All responses contain X-Content-Type-Options nosniff
+    status: TESTED
+    tests:
+      - tests/unit/test_asvs_controls.py::test_security_headers_are_on_every_response
+  - id: V14.4.6
+    status: TESTED
+    title: A suitable Referrer-Policy (no-referrer)
+    tests:
+      - tests/unit/test_asvs_controls.py::test_security_headers_are_on_every_response
+  - id: V14.4.7
+    status: TESTED
+    title: No third-party framing (frame-ancestors 'none', X-Frame-Options DENY)
+    tests:
+      - tests/unit/test_asvs_controls.py::test_security_headers_are_on_every_response
+  - id: V14.5.1
     status: NOT_PROVEN
-    note: set in backend/aeos/api/security.py; untested
+    note: unsupported methods get the framework's 405; invalid requests are not logged or alerted
     tests: []
+  - id: V14.5.2
+    status: TESTED
+    title: The Origin header never authenticates (it only refuses cross-origin writes)
+    tests:
+      - tests/unit/test_asvs_controls.py::test_cors_is_not_opened_to_a_foreign_or_null_origin
+  - id: V14.5.3
+    status: TESTED
+    title: No permissive CORS (no Access-Control-Allow-Origin for foreign or null origins)
+    tests:
+      - tests/unit/test_asvs_controls.py::test_cors_is_not_opened_to_a_foreign_or_null_origin
 not_selected:
-  - id: V2.7.1
+  - ids: [V1.7.2]
+    reason: local-first single host; no remote log sink (any remote log transfer is an owner decision with its own selection)
+  - ids: [V1.9.1, V1.9.2]
+    reason: all control-plane components talk over loopback on one host; TLS between them is out of profile (§06)
+  - ids: [V2.2.2, V2.2.3, V2.5.5]
+    reason: no SMS/e-mail authenticators or notification channel exist; the single local owner sees changes in the audit trail
+  - ids: [V2.2.4, V2.2.5, V2.2.6, V2.2.7, V2.3.2, V2.3.3, V2.5.7]
+    reason: no multi-factor/cryptographic authenticators in the local single-owner profile (owner decision for multi-user or remote access)
+  - ids: [V2.4.3, V2.4.4]
+    reason: passwords use argon2id (V2.4.1), not PBKDF2 or bcrypt
+  - ids: [V2.6.1, V2.6.2, V2.6.3]
+    reason: no look-up secrets (recovery codes) exist
+  - ids: [V2.7.1, V2.7.2, V2.7.3, V2.7.4, V2.7.5, V2.7.6]
     reason: no out-of-band authenticator; single local owner on 127.0.0.1 (re-evaluate for any non-local deployment)
-  - id: V2.8.1
+  - ids: [V2.8.1, V2.8.2, V2.8.3, V2.8.4, V2.8.5, V2.8.6, V2.8.7]
     reason: no one-time-password factor in the local profile (owner decision for multi-user or remote access)
-  - id: V9.1.1
+  - ids: [V2.9.1, V2.9.2, V2.9.3]
+    reason: no cryptographic (certificate/FIDO) verifier exists
+  - ids: [V3.4.4]
+    reason: the "__Host-" prefix requires a Secure cookie over HTTPS; the profile is plain HTTP on loopback (see V3.4.1, V9.1.1)
+  - ids: [V3.5.1]
+    reason: AEOS issues no OAuth tokens to linked applications; provider credentials are vault entries the owner deletes
+  - ids: [V3.5.3]
+    reason: only server-side sessions; no stateless (JWT) session tokens
+  - ids: [V3.6.1, V3.6.2]
+    reason: no federated identity provider / relying party
+  - ids: [V4.3.1]
+    reason: no multi-factor factor in the local single-owner profile; the admin interface is loopback-only (owner decision for remote access)
+  - ids: [V5.2.1]
+    reason: no WYSIWYG HTML editor accepts HTML input
+  - ids: [V5.2.3]
+    reason: AEOS sends no e-mail (no SMTP/IMAP)
+  - ids: [V5.3.7]
+    reason: no LDAP directory is queried
+  - ids: [V5.3.10]
+    reason: no XPath queries; XML is only parsed (XXE covered by V5.5.2)
+  - ids: [V5.4.1, V5.4.2, V5.4.3]
+    reason: AEOS is Python and TypeScript (managed memory); it ships no unmanaged code of its own
+  - ids: [V5.5.1]
+    reason: no native object serialization (pickle) crosses a trust boundary; data is exchanged as JSON
+  - ids: [V6.1.2, V6.1.3]
+    reason: the control plane processes no regulated health or financial records; a managed project that does needs its own selection
+  - ids: [V6.2.1, V6.2.3, V6.2.4, V6.2.6, V6.2.7, V6.2.8]
+    reason: AEOS implements no encryption itself - secrets are encrypted by OpenBao / the OS keyring (V6.4); it only hashes and MACs (V6.2.2, V6.2.5)
+  - ids: [V6.3.3]
+    reason: randomness comes from the operating system CSPRNG; AEOS keeps no entropy pool of its own
+  - ids: [V8.1.1]
+    reason: no load balancer or shared server-side cache in front of the local process
+  - ids: [V8.3.3]
+    reason: the only user is the owner; third-party personal data in OFFICE projects falls under the company authorisation (§23), not an AEOS consent flow
+  - ids: [V8.3.6]
+    reason: Python/JavaScript runtimes cannot reliably overwrite memory; not attempted
+  - ids: [V9.1.1, V9.1.2, V9.1.3]
     reason: TLS is not used on the loopback-only bind (§06); any non-loopback exposure needs a new selection
+  - ids: [V9.2.4]
+    reason: certificate revocation checking is left to the platform TLS stack of the outbound HTTP client
+  - ids: [V10.3.1]
+    reason: AEOS has no auto-update feature (§42 no auto-install)
+  - ids: [V10.3.3]
+    reason: no DNS names are used (loopback only), so no subdomain can be taken over
+  - ids: [V11.1.2]
+    reason: the owner's own workflows are driven by agents and the CLI at machine speed by design; human-time limits do not apply
+  - ids: [V12.4.2]
+    reason: no antivirus integration; uploads are parsed in a sandboxed subprocess and never executed (owner decision to add a scanner)
+  - ids: [V13.2.6]
+    reason: requests travel over loopback only (see V9.1.1)
+  - ids: [V13.3.1, V13.3.2]
+    reason: no SOAP web services
+  - ids: [V13.4.1, V13.4.2]
+    reason: no GraphQL API
+  - ids: [V14.1.2]
+    reason: AEOS compiles no native code (no compiler flags to set)
+  - ids: [V14.2.3]
+    reason: no externally hosted assets - the CSP allows 'self' only (tested under V14.4.3)
+  - ids: [V14.3.3]
+    reason: the master requires every /api response to carry X-AEOS-Version, schema version and settings hash (claim context, AGENTS.md) for the loopback-only owner; re-evaluate for any non-local exposure
+  - ids: [V14.4.5]
+    reason: no TLS on the loopback bind, so Strict-Transport-Security does not apply (see V9.1.1)
+  - ids: [V14.5.4]
+    reason: no reverse proxy or SSO device adds headers; the Host allow-list rejects anything but loopback (test_dns_rebinding_host_rejected)

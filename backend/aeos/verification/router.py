@@ -402,6 +402,19 @@ def verification_summary(principal: CurrentPrincipal, domain: ActiveDomain, db: 
             "checked_at": utcnow().isoformat(), "mode": _mode_of(r.mode for r in runs)}
 
 
+@router.get("/api/verification/asvs")
+def asvs_trace(principal: CurrentPrincipal) -> dict[str, Any]:
+    """§46 OWASP ASVS trace of the control plane (read-only, every role): every ASVS 4.0.3 requirement with its
+    disposition - TESTED (named tests), NOT_PROVEN, NOT_SELECTED (reason) or DELETED - per chapter. Platform-level
+    contract files only (no domain data); applications AEOS builds have no ASVS level until the owner decides one."""
+    from aeos.verification import asvs
+
+    body = asvs.trace()
+    return {**body, "source": f"{asvs.SELECTION_REL} + {asvs.CATALOG_REL} (reviewed contract files, ASVS "
+                              f"{body['asvs_version']} pinned)",
+            "checked_at": None, "generated_at": utcnow().isoformat(), "mode": "LIVE"}
+
+
 def audit_denied(db: Session, principal: Principal, action: str, exc: AeosError, **target: Any) -> None:
     """Persist a DENIED/FAILED audit row for a refused privileged action after rollback."""
     db.rollback()
