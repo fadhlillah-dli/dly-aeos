@@ -208,10 +208,13 @@ def serving_view(session: Session, run: EvalRun) -> dict[str, Any]:
 
 
 def eval_binding(session: Session, task_id: str) -> tuple[EvalRun, dict[str, Any]] | None:
-    """The RUNNING evaluation (and slot binding) a TaskSpec fills, if any (a task fills at most one slot)."""
+    """The RUNNING evaluation (and slot binding) a TaskSpec fills, if any (a task fills at most one slot). A slot may
+    hold an ordered set of tasks (topology B/C/D, ``topology.slot_task_ids``): a task appended to a slot is bound too."""
+    from aeos.evaluation.topology import slot_task_ids
+
     for run in session.scalars(select(EvalRun).where(EvalRun.status == "RUNNING")):
         for b in run.bindings or []:
-            if b.get("task_id") == task_id:
+            if task_id in slot_task_ids(b):
                 return run, b
     return None
 

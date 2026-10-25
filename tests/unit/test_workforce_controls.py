@@ -526,6 +526,9 @@ def test_a_slot_binds_an_ordered_task_set_and_is_collected_as_one_sample(ev):
         topology.bind_additional_task(db, run.id, slot_id=slots[1]["slot_id"], task_id=specs[1].id,
                                       actor_user_id="owner")
     topology.bind_additional_task(db, run.id, slot_id=first, task_id=specs[5].id, actor_user_id="owner")
+    # the appended task is bound to the evaluation too: routed and pinned to the evaluated route (eval_serving)
+    found = executor.eval_binding(db, specs[5].id)
+    assert found is not None and found[0].id == run.id and found[1]["slot_id"] == first
     from aeos.core.errors import Conflict
 
     with pytest.raises(Conflict):  # a task fills one place only
