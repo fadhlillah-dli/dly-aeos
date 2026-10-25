@@ -191,7 +191,7 @@ def create_decision(body: DecisionIn, db: DB, principal: AdminPrincipal, domain:
     )
     if body.request_id:
         req = db.get(DecisionRequest, body.request_id)
-        if not _request_visible(principal, domain, req):
+        if req is None or not _request_visible(principal, domain, req):
             raise NotFound("decision request not found")
         decision_requests.resolve_request(db, req.id, decision_id=decision.id, actor_user_id=principal.user.id)
     db.commit()

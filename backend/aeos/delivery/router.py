@@ -138,9 +138,10 @@ def list_prs(principal: CurrentPrincipal, domain: ActiveDomain, db: DB, task_id:
         q = q.where(PullRequestRecord.task_id == task_id)
     rows = db.scalars(q.order_by(PullRequestRecord.created_at.desc()).limit(limit)).all()
     latest_sync = max((r.last_synced_at for r in rows if r.last_synced_at), default=None)
+    # checked_at = last provider sync (null = never synced); generated_at = when this list was read
     return {"items": [gates.pr_view(r) for r in rows], "source": "delivery_pull_requests (provider observations)",
-            "checked_at": latest_sync.isoformat() if latest_sync else None, "mode": "LIVE",
-            "merge_authority": "HUMAN_ONLY"}
+            "checked_at": latest_sync.isoformat() if latest_sync else None,
+            "generated_at": utcnow().isoformat(), "mode": "LIVE", "merge_authority": "HUMAN_ONLY"}
 
 
 @router.post("/api/delivery/prs/{pr_id}/sync")

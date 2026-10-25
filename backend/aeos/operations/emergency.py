@@ -349,7 +349,7 @@ def execute(
         events.emit(session, source="operations", kind="ops.emergency_stop", entity_type="incident",
                     entity_id=incident_id, payload={"status": status_before_audit})
         alerts.raise_alert(session, dedup_key=f"GLOBAL:emergency_stop:{incident_id}", kind="emergency_stop",
-                           severity="CRITICAL", title="Emergency stop dijalankan", source="emergency",
+                           severity=alerts.rule_severity("emergency_stop"), title="Emergency stop dijalankan", source="emergency",
                            detail={"incident_id": incident_id, "status": status_before_audit, "reason": reason},
                            domain=None, auto_resolve=False)
         last = {"incident_id": incident_id, "at": finished.isoformat(), "by": actor, "status": status_before_audit,

@@ -189,6 +189,7 @@ if sys.platform == "win32":  # pragma: no branch
             self.k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
             self.k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
             self.k32.CloseHandle.argtypes = [wintypes.HANDLE]
+            self.ntdll: Any = None
             try:
                 self.ntdll = ctypes.WinDLL("ntdll")
                 self.ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]

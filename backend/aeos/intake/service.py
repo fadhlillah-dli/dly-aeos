@@ -36,7 +36,7 @@ from aeos.core.hashing import sha256_bytes
 from aeos.core.paths import ensure_within
 from aeos.core.redaction import redact_text
 from aeos.events import service as events
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.intake import parser as parser_mod
 from aeos.intake.archive import inspect_zip
 from aeos.intake.filetypes import UploadRejected, decode_text, detect, sanitize_filename

@@ -6,6 +6,15 @@
 # Never installs system software silently: missing tools are reported with the official install
 # command for you to run. Compatible with the bash 3.2 shipped by macOS (no bash 4 features).
 #   ./scripts/bootstrap.sh [--skip-frontend] [--no-doctor] [--skip-backup]
+#   sh scripts/bootstrap.sh ...   (works too, e.g. when a download lost the executable bit)
+# Started by a POSIX sh (dash has no pipefail on older systems): re-run this file under bash.
+if [ -z "${BASH_VERSION:-}" ]; then
+  if ! command -v bash >/dev/null 2>&1; then
+    echo "bash is required (macOS ships bash 3.2; on Linux install it with your package manager)." >&2
+    exit 1
+  fi
+  exec bash "$0" "$@"
+fi
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -104,7 +113,7 @@ echo
 echo "Step 5: optional components in bootstrap order (status only, nothing is installed)"
 .venv/bin/python scripts/component_status.py || true
 
-chmod +x ./aeos ./scripts/dev.sh 2>/dev/null || true
+chmod +x ./aeos ./scripts/dev.sh ./scripts/bootstrap.sh 2>/dev/null || true
 echo
 echo "Next steps:"
 echo "  ./aeos admin create      # first SUPER_ADMIN (no default credentials)"

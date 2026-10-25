@@ -69,3 +69,13 @@ def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
     from aeos.doctor.capabilities import invalidate as impl
 
     return impl(session, invalidator=invalidator, reason=reason)
+
+
+def check_catalog() -> dict[str, Any]:
+    """The registered Readiness Doctor checks (count and group labels) - static catalog, no results."""
+    from aeos.doctor.checks import REGISTRY, load_all
+    from aeos.doctor.model import GROUPS
+
+    load_all()
+    used = {s.group for s in REGISTRY.values()}
+    return {"count": len(REGISTRY), "groups": [label for g, label in GROUPS if g in used]}

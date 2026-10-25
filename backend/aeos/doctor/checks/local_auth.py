@@ -34,7 +34,7 @@ WRITE_PATH = "/api/inventory/snapshots"
 @check("auth.bootstrap", "LOCAL_AUTH", "Bootstrap SUPER_ADMIN selesai", component_id="identity-authorization",
        needs_db=True, ttl_seconds=3600, severity_fail="CRITICAL")
 def auth_bootstrap(ctx: CheckContext) -> Outcome:
-    from aeos.identity import service as identity
+    from aeos.identity import facade as identity
 
     assert ctx.session is not None
     if identity.bootstrap_complete(ctx.session):
@@ -50,7 +50,7 @@ def auth_bootstrap(ctx: CheckContext) -> Outcome:
 @check("auth.default_credentials", "LOCAL_AUTH", "Tidak ada credential default", component_id="identity-authorization",
        needs_db=True, ttl_seconds=3600, severity_fail="CRITICAL")
 def auth_default_credentials(ctx: CheckContext) -> Outcome:
-    from aeos.identity.passwords import verify_password
+    from aeos.identity.facade import verify_password
     from aeos.models.identity import User
 
     assert ctx.session is not None
@@ -138,7 +138,7 @@ def probe_database() -> Iterator[Any]:
 
 
 def _probe_users(factory: Any) -> dict[str, str]:
-    from aeos.identity import service as identity
+    from aeos.identity import facade as identity
 
     creds = {"admin": pysecrets.token_urlsafe(24), "viewer": pysecrets.token_urlsafe(24)}
     for v in creds.values():

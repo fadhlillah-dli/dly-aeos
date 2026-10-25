@@ -395,6 +395,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 1
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: package_manager, url: null, digest: null, channel: "official git build", note: "Dipasang pemilik dari distribusi resmi (Windows: winget Git.Git; macOS: Xcode Command Line Tools / Homebrew; Linux: paket distro). Digest belum dipin."}
+    signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Tanda tangan/notarisasi distribusi tidak diperiksa oleh AEOS."}
+    ports: []
+    config_refs: ["settings:commit_author_name", "settings:commit_author_email"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: null, note: "Versi minimum belum ditetapkan pemilik; worktree dipakai untuk isolasi perubahan, bukan sandbox."}
     probe:
       type: binary
       binaries:
@@ -436,6 +442,12 @@ components:
     design_label: SELECTED_DESIGN
     bootstrap_order: 1
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: installer, url: null, digest: null, channel: "stable", note: "Dipasang pemilik (Windows: winget Microsoft.VisualStudioCode; macOS: brew install --cask visual-studio-code; Linux: paket resmi)."}
+    signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Tanda tangan/notarisasi distribusi tidak diperiksa oleh AEOS."}
+    ports: []
+    config_refs: []
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: null, note: "Permukaan kerja pengguna; AEOS tidak menjalankan atau mengonfigurasinya."}
     probe:
       type: binary
       binaries:
@@ -2805,6 +2817,12 @@ components:
     design_label: OPTIONAL_CANDIDATE
     bootstrap_order: 3
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: release_asset, url: null, digest: null, channel: null, note: "Rilis resmi SOPS dan age, dipasang pemilik; digest/tanda tangan rilis belum dipin."}
+    signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Tanda tangan/notarisasi distribusi tidak diperiksa oleh AEOS."}
+    ports: []
+    config_refs: []
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: null, note: "Pelengkap backup terenkripsi; tidak dibutuhkan untuk capability lain."}
     probe:
       type: binary
       binaries:
@@ -3148,6 +3166,12 @@ components:
     design_label: OPTIONAL_CANDIDATE
     bootstrap_order: 4
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: installer, url: null, digest: null, channel: null, note: "Docker Desktop (Windows/macOS) atau Docker Engine (Linux), dipasang pemilik; lisensi Docker Desktop belum diperiksa."}
+    signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Tanda tangan/notarisasi distribusi tidak diperiksa oleh AEOS."}
+    ports: []
+    config_refs: []
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: null, note: "Opsional; container standar bukan jaminan isolasi kuat (§11)."}
     probe:
       type: binary
       binaries:
@@ -3183,6 +3207,12 @@ components:
     design_label: OPTIONAL_CANDIDATE
     bootstrap_order: 7
     approved_pin: null
+    approved_digest: null
+    distribution: {kind: npm, url: null, digest: null, channel: "@mermaid-js/mermaid-cli", note: "Dipasang pemilik lewat npm; mengunduh Chromium headless (Puppeteer)."}
+    signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Tanda tangan/notarisasi distribusi tidak diperiksa oleh AEOS."}
+    ports: []
+    config_refs: ["settings:mmdc_binary"]
+    compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: null, note: "Opsional; tanpa mmdc diagram tetap sebagai source (VISUAL_PENDING)."}
     probe:
       type: binary
       binaries:

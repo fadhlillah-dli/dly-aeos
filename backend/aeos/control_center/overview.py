@@ -20,7 +20,7 @@ from aeos.control_center._items import guarded, item, unknown
 from aeos.core.config import Settings
 from aeos.core.enums import Capability, Domain
 from aeos.core.timeutil import ensure_aware, utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.audit import Event
 from aeos.models.cost import Budget, QuotaState, UsageLedgerEntry
 from aeos.models.decisions import PolicySnapshot

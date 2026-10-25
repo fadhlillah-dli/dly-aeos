@@ -131,6 +131,33 @@ def test_change_record_rollback_and_contract_deltas_come_from_the_changed_files(
     assert info.rollback_notes == () and info.contract_deltas == ()
 
 
+def test_change_record_deltas_cover_product_contracts_dependencies_and_owner_decisions(world, monkeypatch):
+    """§28 Implementation/PR: contract/dependency deltas use the verifier's categories for any product layout,
+    and the ACTIVE human owner decisions bound to the task/plan are recorded as the decision delta."""
+    from aeos.models.decisions import Decision
+
+    db, settings, v, project = world["db"], world["settings"], world["version"], world["project"]
+    task = db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v.id, TaskSpec.task_key == "T1"))
+    _pr(db, project, task, status="ACCEPTED")
+    changed = ["api/openapi.yaml", "proto/tasks.proto", "schema/graphql/tasks.graphql", "package-lock.json",
+               "src/app.ts"]
+    monkeypatch.setattr(service, "_changed_files", lambda _s, _acc: list(changed))
+    dec = Decision(kind="RISK_ACCEPTANCE", actor_user_id="owner", actor_kind="HUMAN", target_type="task",
+                   target_id=task.id, target_hash="sha256:t", project_id=project.id, domain=project.domain,
+                   status="ACTIVE", rationale="accepted")
+    db.add(dec)
+    db.commit()
+    (info,) = service.change_infos(db, project)
+    assert {"api/openapi.yaml", "proto/tasks.proto", "schema/graphql/tasks.graphql"} <= set(info.contract_deltas)
+    assert "src/app.ts" not in info.contract_deltas and info.dependency_deltas == ("package-lock.json",)
+    assert f"RISK_ACCEPTANCE:{dec.id}" in info.decision_refs
+    assert any(d.startswith("APPROVAL:") for d in info.decision_refs), "the plan approval binds the change too"
+    result, _d, _s = service.render_version(db, settings, v, persist=False, render_visuals=False)
+    doc = result.by_id()["10-changes/change-t1"]
+    assert "proto/tasks.proto" in doc.body_markdown and "package-lock.json" in doc.body_markdown
+    assert dec.id in doc.body_markdown and dec.id in doc.links["decision"]
+
+
 def test_change_record_fails_closed_when_the_delivery_rules_are_unavailable(world, monkeypatch):
     """Without the delivery module there is no silent fallback to empty rollback notes / "no contract delta"."""
     import sys

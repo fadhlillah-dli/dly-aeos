@@ -35,6 +35,7 @@ export default function SettingsPage() {
         source="Sesi server (/api/auth/session); preferensi tema disimpan lokal di browser ini"
         checkedAt={fetchedAt ? new Date(fetchedAt).toISOString() : null}
         evidenceLimit="Peran dan domain ditegakkan backend; tampilan ini hanya membaca sesi"
+        relatedDecisionsHref="/decisions?target_type=office_policy"
       />
       <Card title="Akun">
         <KeyValue

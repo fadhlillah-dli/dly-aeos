@@ -39,3 +39,14 @@ def activation_evidence(session: Session, *, route_key: str, route_config_hash: 
     from aeos.evaluation.service import activation_evidence as impl
 
     return impl(session, route_key=route_key, route_config_hash=route_config_hash, run_ids=run_ids)
+
+
+def propose_case_from_failure(session: Session, *, source_type: str, source_id: str, actor_user_id: str,
+                              title: str, expected: str, kind: str = "incident", viewer_domain: str | None = None
+                              ) -> Any:
+    """§28/§33 an observed failure (evidence / worker_run / alert) files a CANDIDATE eval case for human review;
+    no evaluation uses it until a PROMOTION decision adopts it. Returns the EvalCaseCandidate."""
+    from aeos.evaluation.service import propose_case_from_failure as impl
+
+    return impl(session, source_type=source_type, source_id=source_id, actor_user_id=actor_user_id, title=title,
+                expected=expected, kind=kind, viewer_domain=viewer_domain)

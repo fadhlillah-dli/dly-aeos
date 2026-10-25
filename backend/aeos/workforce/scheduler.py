@@ -54,7 +54,8 @@ WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CO
                         "DEPENDENCY_NOT_ACCEPTED", "AGENT_DISABLED", "OFFICE_DENIED", "CAPABILITY_NOT_READY",
                         "SANDBOX_NOT_READY", "ROUTE_INELIGIBLE", "COST_UNKNOWN", "BUDGET_EXCEEDED",
                         "MODULE_UNAVAILABLE", "VERIFIER_UNAVAILABLE", "SIDE_EFFECT_UNRECONCILED",
-                        "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED"})
+                        "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED", "DOCS_NOT_READY",
+                        "DOCS_READINESS_UNVERIFIED"})
 QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED"})
 # BLOCKED reason codes that only an owner action clears (retry_task / quarantine release), never a tick.
 HUMAN_BLOCK_CODES = frozenset({"QUARANTINED", "REVIEW_BLOCKED", "WORKER_BLOCKER"})
@@ -1273,6 +1274,8 @@ def admission_check(session: Session, task_id: str) -> Admission:
     approved, why = ext.approved_version(session, te.plan_id)
     if approved is None or approved.id != task.plan_version_id:
         adm.waits.append(("PLAN_NOT_APPROVED", why or "task version is not the approved version"))
+    else:  # §41: required documentation of the earlier stages is complete before implementation starts
+        adm.waits.extend(ext.documentation_blockers(session, task, approved))
     for dep_key in task.depends_on or []:
         dep = session.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == task.plan_version_id,
                                                     TaskSpec.task_key == dep_key))

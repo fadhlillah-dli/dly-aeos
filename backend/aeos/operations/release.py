@@ -41,7 +41,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from aeos.core.config import Settings
-from aeos.core.errors import AeosError, Blocked, NotFound, ValidationFailed
+from aeos.core.errors import AeosError, Blocked, Conflict, NotFound, ValidationFailed
 from aeos.core.hashing import file_sha256
 from aeos.core.paths import UnsafePathError, ensure_within, repo_root, safe_segment
 from aeos.core.redaction import redact_text
@@ -220,7 +220,7 @@ def build_release(
     with zipfile.ZipFile(artifact) as zf:
         migrations = parse_migrations(zf)
         file_count = len(zf.namelist())
-    ui = _build_ui_bundle(repo, out_dir, release_id)
+    ui = _build_ui_bundle(repo, out_dir, release_id, commit)
     git_version = _git(repo, "--version").strip()
     provenance = {
         "format": FORMAT,
@@ -336,13 +336,40 @@ def record_acceptance_exception(session: Session, *, commit: str, operator_user_
 UI_MEMBER_PREFIX = "frontend/dist/"
 
 
-def _build_ui_bundle(repo: Path, out_dir: Path, release_id: str) -> dict[str, Any] | None:
+def ui_correspondence(repo: Path, commit: str, dist: Path) -> tuple[str, dict[str, Any]]:
+    """(VERIFIED | MISMATCH | UNVERIFIED, detail): does ``dist`` come from the committed ``frontend/`` tree of
+    *commit*? The build records its source tree (``dist/aeos-build.json``, written by the Vite build); it must be
+    clean and equal to ``git rev-parse <commit>:frontend``. No record -> UNVERIFIED (never assumed)."""
+    info = read_json(dist / "aeos-build.json") or {}
+    tree = info.get("frontend_tree")
+    if not tree:
+        return "UNVERIFIED", {"reason": "the bundle has no build record of its source tree (built before the record "
+                                        "existed or outside a git checkout)"}
+    expected = _git(repo, "rev-parse", f"{commit}:frontend").strip() if _git_ok(repo, "rev-parse", f"{commit}:frontend") \
+        else ""
+    detail = {"bundle_frontend_tree": tree, "commit_frontend_tree": expected or None, "built_at": info.get("built_at"),
+              "built_from_head": info.get("head"), "clean": info.get("clean")}
+    if not info.get("clean"):
+        return "UNVERIFIED", {**detail, "reason": "built from a frontend tree with uncommitted changes"}
+    if not expected or tree != expected:
+        return "MISMATCH", {**detail, "reason": f"bundle built from frontend tree {str(tree)[:12]}, commit has "
+                                                f"{(expected or 'none')[:12]}"}
+    return "VERIFIED", detail
+
+
+def _build_ui_bundle(repo: Path, out_dir: Path, release_id: str, commit: str | None = None) -> dict[str, Any] | None:
     """Pin the Control Center bundle with the release: ``frontend/dist`` is a build output (not tracked),
-    so it is zipped next to the artifact with its own SHA-256. Its correspondence to the commit is not
-    provable from the build output alone and is labelled UNVERIFIED."""
+    so it is zipped next to the artifact with its own SHA-256. Its correspondence to the commit is VERIFIED only
+    when the build's own record of its source tree equals the commit's ``frontend/`` tree; a bundle from another
+    tree refuses the release (the approval UI must be the reviewed one), without a record it stays UNVERIFIED."""
     dist = repo / "frontend" / "dist"
     if not (dist / "index.html").is_file():
         return None
+    corr, corr_detail = ui_correspondence(repo, commit, dist) if commit else ("UNVERIFIED", {"reason": "no commit"})
+    if corr == "MISMATCH":
+        raise Conflict("the Control Center bundle (frontend/dist) was built from another frontend tree than the "
+                       f"release commit; rebuild it at that commit ({corr_detail.get('reason')})",
+                       code="RELEASE_UI_MISMATCH", details=corr_detail)
     target = out_dir / f"{release_id}.ui.zip"
     tmp = out_dir / f".{release_id}.ui.zip.tmp"
     count = 0
@@ -353,7 +380,8 @@ def _build_ui_bundle(repo: Path, out_dir: Path, release_id: str) -> dict[str, An
                 count += 1
     tmp.replace(target)
     return {"artifact": target.name, "sha256": file_sha256(target), "file_count": count,
-            "source": "checkout frontend/dist at build time", "commit_correspondence": "UNVERIFIED"}
+            "source": "checkout frontend/dist at build time", "commit_correspondence": corr,
+            "correspondence": corr_detail}
 
 
 # ----------------------------------------------------------------------------------------- listing / pointer
@@ -897,7 +925,7 @@ def _record_decision(session: Session, *, operator_user_id: str, prov: dict[str,
 def _alert(session: Session, *, key: str, title: str, detail: dict[str, Any]) -> None:
     from aeos.operations import alerts
 
-    alerts.raise_alert(session, dedup_key=key, kind="release_failure", severity="HIGH", title=title,
+    alerts.raise_alert(session, dedup_key=key, kind="release_failure", severity=alerts.rule_severity("release_failure"), title=title,
                        detail=detail, domain=None, source="release", auto_resolve=False)
 
 

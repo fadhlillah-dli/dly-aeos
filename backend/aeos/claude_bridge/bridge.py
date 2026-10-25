@@ -312,6 +312,14 @@ def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) 
                      "Claude native bridge is BLOCKED: " + "; ".join(pr.reasons or ["unknown"]) +
                      " - use the manual package (official Claude Code) instead; no API fallback exists",
                      engine_version=pr.binary.version)
+    # §12 unmodified official binary: an OS-reported INVALID signature or a signer other than the owner-pinned
+    # publisher refuses the native call (fail closed); an unsigned binary is reported DEGRADED in the status.
+    gate, gate_reason = binmod.signature_gate(binmod.invocation_signature(pr.binary.path, pr.binary.fingerprint),
+                                              binmod.approved_publisher())
+    if gate == "BLOCKED":
+        return _fail(request, "BINARY_SIGNATURE_BLOCKED",
+                     f"Claude native bridge is BLOCKED: {gate_reason} - use the manual package (official Claude "
+                     "Code) instead; no API fallback exists", engine_version=pr.binary.version)
     if pr.auth.status == "DEGRADED" and not non_max_subscription_exception():
         # U-06: the supervisor is Claude Max. A Pro/other login is not silently used as the supervisor (the
         # doctor reports SUBSCRIPTION_NOT_MAX too); the manual package stays available.
@@ -724,16 +732,25 @@ def status(session: Session, settings: Settings | None = None, *, refresh: bool 
         binary_status = "MISSING"
     else:
         binary_status = "CONFIGURED"
+    signature = (binmod.publisher_signature(pr.binary.path, fingerprint_value=pr.binary.fingerprint)
+                 if pr.binary.found and refresh else
+                 binmod._SIG_CACHE.get((str(pr.binary.path), pr.binary.fingerprint or ""),
+                                       {"status": "NOT_CHECKED",
+                                        "reason": "refresh the status to run the OS signature check"}))
+    pinned = binmod.approved_publisher()
+    gate, gate_reason = binmod.signature_gate(signature, pinned) if pr.binary.found else ("UNVERIFIED", "no binary")
+    bridge_status = "BLOCKED" if (not pr.usable or gate == "BLOCKED") else (
+        "DEGRADED" if gate == "DEGRADED" else "CONFIGURED")
     return {
         "binary": {"found": pr.binary.found, "status": binary_status, "path_logical": pr.binary.logical_path,
                    "version": pr.binary.version, "fingerprint": pr.binary.fingerprint, "reasons": pr.binary.reasons,
-                   "signature": (binmod.publisher_signature(pr.binary.path, fingerprint_value=pr.binary.fingerprint)
-                                 if pr.binary.found and refresh else
-                                 binmod._SIG_CACHE.get((str(pr.binary.path), pr.binary.fingerprint or ""),
-                                                       {"status": "NOT_CHECKED",
-                                                        "reason": "refresh the status to run the OS signature check"}))},
+                   "signature": signature,
+                   "authenticity": {"gate": gate, "reason": gate_reason, "approved_signer": pinned,
+                                    "owner_step": None if pinned else
+                                    "pin the Anthropic signer (Authenticode subject / TeamIdentifier) in "
+                                    "install-manifest claude-code signature.approved_signer"}},
         "auth": pr.auth.summary(),
-        "bridge_status": ("BLOCKED" if not pr.usable else "CONFIGURED"),
+        "bridge_status": bridge_status,
         "env_hygiene": parent_hygiene(),
         "invocation": {
             "argv_template": ["claude", "-p", "--output-format", "json", "--json-schema", "<schema>", "--model",

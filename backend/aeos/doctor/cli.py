@@ -172,10 +172,11 @@ def _print_report(settings: Any, db_state: str, persisted: bool, report: Any, ma
             echo(ascii_safe(f"  [{', '.join(ids)}] {rem.get('operation')}"))
             if rem.get("command"):
                 echo(ascii_safe(f"      command : {rem['command']}"))
-            for key, label in (("source", "source  "), ("target", "target  "), ("privilege", "privilege"),
-                               ("cost", "cost    "), ("rollback", "rollback"), ("evidence_to_collect", "evidence")):
-                if rem.get(key):
-                    echo(ascii_safe(f"      {label}: {rem[key]}"))
+            for field_key, label in (("source", "source  "), ("target", "target  "), ("privilege", "privilege"),
+                                     ("cost", "cost    "), ("rollback", "rollback"),
+                                     ("evidence_to_collect", "evidence")):
+                if rem.get(field_key):
+                    echo(ascii_safe(f"      {label}: {rem[field_key]}"))
     echo("")
     from aeos.doctor.model import aeos_cmd
 

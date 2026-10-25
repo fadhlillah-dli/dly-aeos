@@ -158,6 +158,42 @@ def sbom_cmd(out: str = typer.Option(None, "--out", help="Write the CycloneDX JS
     typer.echo(text)
 
 
+@app.command("va-scan")
+def va_scan_cmd() -> None:
+    """Vulnerability assessment of the platform's requirements.lock with pip-audit (needs network) -> VA_REPORT.
+
+    Stores the real scanner result as trusted evidence for the DLY AEOS project; refuses when pip-audit is
+    missing or produced no result (nothing is recorded then).
+    """
+    from sqlalchemy import select
+
+    from aeos.cli import ensure_database
+    from aeos.core.config import get_settings
+    from aeos.core.db import session_scope
+    from aeos.core.errors import AeosError
+    from aeos.inventory.va_scan import scan_platform_dependencies
+    from aeos.models.portfolio import Project
+    from aeos.operations import facade as operations
+
+    ensure_database()
+    ctrl = operations.controller_report(get_settings())
+    with session_scope() as s:
+        project = s.scalar(select(Project).where(Project.is_platform.is_(True)))
+        if project is None:
+            typer.echo("platform project not registered (run: aeos seed)")
+            raise typer.Exit(2)
+        try:
+            out = scan_platform_dependencies(s, project, actor="local-operator", commit=ctrl.get("commit"),
+                                             dirty=ctrl.get("dirty"))
+        except AeosError as exc:
+            typer.echo(ascii_safe(f"va-scan refused: {exc.code}: {exc.message}"))
+            if (exc.details or {}).get("remedy"):
+                typer.echo(ascii_safe(f"  remedy: {exc.details['remedy']}"))
+            raise typer.Exit(1) from exc
+    typer.echo(ascii_safe(f"VA_REPORT {out['evidence_id']}: {out['findings']} finding(s) in "
+                          f"{out['packages_scanned']} packages"))
+
+
 @app.command("poll")
 def poll_cmd(
     enable: bool = typer.Option(None, "--enable/--disable", help="Turn the optional TTL-driven polling on or off"),

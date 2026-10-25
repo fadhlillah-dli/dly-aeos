@@ -505,6 +505,7 @@ export default function EvaluationPage() {
         source={suites.data?.source ?? "eval_suites / eval_runs"}
         checkedAt={suites.data?.checked_at ?? null}
         evidenceLimit="Peringkat hanya dari EvalRun tercatat; unit evaluasi = AIConfiguration lengkap; tidak ada juara yang dinyatakan tanpa hasil"
+        relatedDecisionsHref="/decisions?target_type=eval_workload_weights"
       />
       <Tabs
         tabs={[

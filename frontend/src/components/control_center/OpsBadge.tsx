@@ -41,6 +41,8 @@ const MAP: Record<string, [string, string]> = {
   NOT_REQUIRED: ["NOT_APPLICABLE", "Tidak wajib"],
   NO_POLICY: ["UNVERIFIED", "Belum ada kebijakan retensi"],
   KEEP: ["CONFIGURED", "Disimpan"],
+  LEGAL_HOLD: ["CONFIGURED", "Legal hold (tidak didisposal)"],
+  DECIDED: ["CONFIGURED", "Diputuskan pemilik"],
 };
 
 export function opsBadgeSpec(status: string | null | undefined): { status: string; label?: string } {

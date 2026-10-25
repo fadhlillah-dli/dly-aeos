@@ -27,14 +27,16 @@ def list_audit(
         target_type=target_type, target_id=target_id, run_id=run_id, before_seq=before, limit=limit,
     )
     from aeos.core.timeutil import utcnow
+    from aeos.operations import facade as operations
 
+    retention = operations.RetentionMarkers(db)  # §35: the policy rule of each record, never a deletion
     return {
         "items": [
             {
                 "seq": r.seq, "at": r.at.isoformat(), "actor_type": r.actor_type, "actor_id": r.actor_id,
                 "action": r.action, "target_type": r.target_type, "target_id": r.target_id,
                 "project_id": r.project_id, "domain": r.domain, "run_id": r.run_id, "result": r.result,
-                "reason": r.reason, "details": r.details,
+                "reason": r.reason, "details": r.details, "retention": retention.audit(r),
             }
             for r in rows
         ],

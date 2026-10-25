@@ -109,3 +109,83 @@ def observation_visible(obs: ComponentObservation, domain: str | None) -> bool:
     from aeos.inventory.views import _obs_visible
 
     return _obs_visible(obs, domain)
+
+
+def tool_schema_hash(tool_defs: list[dict[str, Any]]) -> str | None:
+    """§25 tool admission "schema": canonical hash of the tool set a model is offered (OpenAI ``tools`` entries
+    or MCP ``tools/list`` items) - name, description and parameter schema per tool, order-independent. None when
+    the set is empty (nothing observed, never a hash of nothing)."""
+    from aeos.core.hashing import content_hash
+
+    norm: dict[str, dict[str, Any]] = {}
+    for t in tool_defs or []:
+        if not isinstance(t, dict):
+            continue
+        inner = t.get("function")
+        fn: dict[str, Any] = inner if isinstance(inner, dict) else t
+        name = str(fn.get("name") or "").strip()
+        if not name:
+            continue
+        norm[name] = {"name": name, "description": str(fn.get("description") or ""),
+                      "parameters": fn.get("parameters") or fn.get("inputSchema") or fn.get("input_schema") or {}}
+    if not norm:
+        return None
+    return content_hash([norm[k] for k in sorted(norm)])
+
+
+def record_tool_schema_observation(session: Session, *, component_id: str, schema_hash: str, observer: str,
+                                   status: str = "NOT_TESTED", evidence_id: str | None = None,
+                                   tools: list[str] | None = None, ttl_seconds: int = 7 * 86400
+                                   ) -> ComponentObservation:
+    """A functional observation (status = the test's own result) carrying the observed tool schema hash; drift
+    compares it with the hash approved at admission (``tool_schema_hash`` in the InstallManifest)."""
+    from aeos.inventory.observations import record_observation as impl
+
+    return impl(session, component_id=component_id, dimension="functional", status=status, observer=observer,
+                detail={"tool_schema_hash": schema_hash, "tools": sorted(tools or [])}, ttl_seconds=ttl_seconds,
+                evidence_id=evidence_id)
+
+
+def approved_signer(component_id: str) -> str | None:
+    """The publisher identity the owner pinned for *component_id* in the reviewed InstallManifest
+    (``signature.approved_signer``); None when nothing is pinned or the manifest cannot be read (read-only)."""
+    from aeos.core.errors import ValidationFailed
+    from aeos.inventory.manifest import load_manifest
+
+    try:
+        data = load_manifest().data
+    except ValidationFailed:
+        return None
+    for comp in data.get("components") or []:
+        if isinstance(comp, dict) and comp.get("component_id") == component_id:
+            sig = comp.get("signature")
+            value = sig.get("approved_signer") if isinstance(sig, dict) else None
+            return str(value).strip() or None if value else None
+    return None
+
+
+def snapshot_checkpoint(session: Session, snapshot_id: str, *, domain: str | None) -> dict[str, Any]:
+    """Meta of one ArchitectureSnapshot in *domain* (id, label, hash, counts, ``approved`` + the human APPROVAL bound
+    to its exact hash). ``NotFound`` outside the domain. Read-only (§41 checkpoint input)."""
+    from aeos.inventory.snapshots import get_snapshot, snapshot_meta
+
+    return snapshot_meta(get_snapshot(session, snapshot_id, domain=domain), session)
+
+
+def snapshot_delta(session: Session, before_id: str, after_id: str, *, domain: str | None) -> dict[str, Any]:
+    """Compact architecture delta between two snapshots: node/edge ids added/removed/changed and which reference
+    sets (manifest, master, ADRs, contracts, decisions) changed. Read-only."""
+    from aeos.inventory.snapshots import diff_snapshots
+
+    d = diff_snapshots(session, before_id, after_id, domain=domain)
+
+    def ids(part: dict[str, Any], key: Any) -> dict[str, list[str]]:
+        return {"added": sorted(str(key(x)) for x in part.get("added") or []),
+                "removed": sorted(str(key(x)) for x in part.get("removed") or []),
+                "changed": sorted(str(x.get("key")) for x in part.get("changed") or [])}
+
+    return {"before": before_id, "after": after_id, "same_hash": d["same_hash"],
+            "both_approved": d["both_approved"],
+            "nodes": ids(d["nodes"], lambda n: n.get("id")),
+            "edges": ids(d["edges"], lambda e: f"{e.get('source')}->{e.get('target')}:{e.get('relation')}"),
+            "refs_changed": sorted(d["refs_changed"])}

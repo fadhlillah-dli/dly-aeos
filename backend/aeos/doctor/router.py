@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from aeos.api.deps import DB, AdminPrincipal, CurrentPrincipal, SettingsDep
 from aeos.audit import service as audit
 from aeos.core.enums import Capability
+from aeos.core.timeutil import utcnow
 from aeos.doctor import views
 from aeos.doctor.runner import row_view, run_doctor
 
@@ -100,7 +101,8 @@ def get_resource_budget(db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
     b = resource_budget(db)
     return {"budget": b, "status": "SET" if b else "UNKNOWN",
             "note": None if b else "Budget resource belum ditetapkan pemilik dari mesin nyata (§51 P2).",
-            "source": "system setting doctor.resource_budget", "mode": "LIVE"}
+            "source": "system setting doctor.resource_budget", "generated_at": utcnow().isoformat(),
+            "mode": "LIVE"}
 
 
 @router.put("/api/doctor/resource-budget")

@@ -28,6 +28,17 @@ def _controller_not_elevated(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sandbox, "_elevation_probe", lambda: False)
 
 
+@pytest.fixture(autouse=True)
+def _no_os_signature_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bridge checks the OS code signature of the claude binary before a native call (§12). Test binaries
+    are fakes, so the OS check (PowerShell Authenticode / codesign) is not spawned per test; the gate itself is
+    tested explicitly in test_claude_bridge_signature.py."""
+    from aeos.claude_bridge import binary
+
+    monkeypatch.setattr(binary, "invocation_signature",
+                        lambda path, fingerprint_value: {"status": "NOT_CHECKED", "reason": "test stub"})
+
+
 @pytest.fixture
 def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[config_mod.Settings]:
     monkeypatch.setenv("AEOS_DATA_DIR", str(tmp_path / "data"))

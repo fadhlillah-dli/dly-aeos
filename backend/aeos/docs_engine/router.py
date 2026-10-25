@@ -18,7 +18,7 @@ from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, Se
 from aeos.audit import service as audit
 from aeos.core.errors import Conflict, NotFound
 from aeos.core.timeutil import utcnow
-from aeos.docs_engine import product1, visuals
+from aeos.docs_engine import product1, screenshots, visuals
 from aeos.docs_engine import service as docs_service
 from aeos.events import service as events
 from aeos.models.evidence import EvidenceArtifact
@@ -92,11 +92,21 @@ def product1_structure(_principal: CurrentPrincipal) -> dict[str, Any]:
 @router.get("/api/docs/visuals/status")
 def visuals_status(_principal: CurrentPrincipal) -> dict[str, Any]:
     info = visuals.detect_mmdc()
-    return {"mmdc": info.__dict__, "kinds": visuals.VISUAL_KINDS, "screenshot": "NOT_PROVEN",
-            "screenshot_note": "AEOS has no approved browser-automation collector in this build; documents reference "
-                               "trusted SCREENSHOT EvidenceArtifacts (commit recorded) only when a collector stored them",
+    import importlib.util
+
+    browser = importlib.util.find_spec("playwright") is not None
+    return {"mmdc": info.__dict__, "kinds": visuals.VISUAL_KINDS,
+            # per project: NOT_PROVEN until the collector stored trusted SCREENSHOT evidence (see the manifest)
+            "screenshot": "NOT_PROVEN",
+            "screenshot_collector": {"available": browser, "command": "aeos docs screenshot",
+                                     "remedy": None if browser else screenshots.INSTALL_REMEDY,
+                                     "note": "browser engine presence only; Chromium is checked when a capture runs"},
+            "screenshot_note": "documents reference trusted SCREENSHOT EvidenceArtifacts (commit recorded) only after "
+                               "the screenshot collector stored them for a registered deployment target",
             "diagram_verification": "UNVERIFIED unless checked: ERD vs platform schema, trust boundaries vs threat model",
-            "evidence_role": visuals.EVIDENCE_ROLE}
+            "evidence_role": visuals.EVIDENCE_ROLE,
+            "source": "mermaid-cli probe on this host + aeos.docs_engine.visuals", "checked_at": utcnow().isoformat(),
+            "mode": "LIVE"}
 
 
 @router.get("/api/projects/{project_id}/documents/screenshots")
@@ -138,6 +148,7 @@ def list_documents(project_id: str, db: DB, principal: CurrentPrincipal, domain:
         "items": [document_view(r, refs.get(r.logical_doc_id, []), int(open_inputs.get(r.id, 0)), evidence_for(r))
                   for r in recs],
         "product_title": product1.product_title(project.name), "source": SOURCE, "checked_at": _iso(checked),
+        "generated_at": utcnow().isoformat(),  # checked_at = last render (null = never rendered)
         "mode": "LIVE",
         "summary": {"documents": sum(1 for r in recs if r.kind == "DOC"),
                     "folders": sum(1 for r in recs if r.kind == "FOLDER"),
@@ -185,6 +196,40 @@ def release_candidate(project_id: str, body: ReleaseCandidateIn, db: DB, setting
                                                 actor_user_id=principal.user.id)
     db.commit()
     return {**out, "checked_at": utcnow().isoformat(), "source": SOURCE}
+
+
+class CheckpointIn(BaseModel):
+    plan_version_id: str = Field(min_length=1, max_length=64)
+    kind: str = Field(min_length=1, max_length=32)  # ARCHITECTURE_SNAPSHOT | MILESTONE
+    ref: str = Field(min_length=1, max_length=128)  # snapshot id | milestone key
+
+
+@router.post("/api/projects/{project_id}/documents/checkpoints")
+def record_checkpoint(project_id: str, body: CheckpointIn, db: DB, settings: SettingsDep, principal: AdminPrincipal,
+                      domain: ActiveDomain) -> dict[str, Any]:
+    """§28/§41: record an ACCEPTED checkpoint's documentation change package (approved snapshot or accepted
+    milestone; a milestone finalises its documentation). Deterministic; the Tech Writer task is a draft."""
+    from aeos.docs_engine import checkpoints
+
+    project = load_project(db, principal, project_id, domain=domain)
+    version = db.get(PlanVersion, body.plan_version_id)
+    if version is None or version.project_id != project.id:
+        raise NotFound("plan version not found")
+    out = checkpoints.record_checkpoint(db, settings, version, kind=body.kind, ref=body.ref,
+                                        actor_user_id=principal.user.id)
+    db.commit()
+    return {**out, "checked_at": utcnow().isoformat(), "source": SOURCE}
+
+
+@router.get("/api/projects/{project_id}/documents/checkpoints")
+def list_checkpoints(project_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    from aeos.docs_engine import checkpoints
+
+    project = load_project(db, principal, project_id, domain=domain)
+    items = checkpoints.list_checkpoints(db, project.id)
+    return {"items": items, "source": "document_revisions (kind DOC_CHECKPOINT, immutable)",
+            "checked_at": items[0]["created_at"] if items else None, "generated_at": utcnow().isoformat(),
+            "mode": "LIVE"}
 
 
 def _load_doc(db: DB, principal: CurrentPrincipal, domain: ActiveDomain, doc_id: str) -> DocumentRecord:

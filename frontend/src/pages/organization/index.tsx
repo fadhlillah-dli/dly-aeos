@@ -136,7 +136,7 @@ export default function OrganizationPage() {
   const { domain } = useAuth();
   const roles = useQuery({
     queryKey: ["workforce-roles", domain],
-    queryFn: () => get<{ items: RoleGroup[]; note: string; checked_at: string; mode: string }>("/api/workforce/roles"),
+    queryFn: () => get<{ items: RoleGroup[]; note: string; source?: string; checked_at: string; mode: string }>("/api/workforce/roles"),
     refetchInterval: 30_000,
   });
   const agents = useQuery({
@@ -163,6 +163,25 @@ export default function OrganizationPage() {
     return acc;
   }, {});
   const evalText = Object.entries(evalCounts).map(([k, v]) => `${k}: ${v}`).join(", ") || "belum ada data peran";
+  // "Apa fungsinya?" / "Mengapa dipilih?" come from the same records: the catalog groups, the role kinds and the
+  // master sections each role cites as its rationale (never fixed copy).
+  const allRoles = (roles.data?.items ?? []).flatMap((g) => g.roles);
+  const groupLabels = (roles.data?.items ?? []).map((g) => `${g.label} (${g.roles.length})`).join(", ");
+  const agentCount = agents.data?.items.length ?? 0;
+  const whatText = allRoles.length
+    ? `Katalog berisi ${allRoles.length} peran dalam ${(roles.data?.items ?? []).length} kelompok — ${groupLabels} — dan ${agentCount} definisi agent; sumber: ${roles.data?.source ?? "katalog peran"}. Halaman ini hanya membaca katalog; tidak menjalankan LLM.`
+    : "Katalog peran belum dimuat; tidak ada fungsi yang dinyatakan tanpa record.";
+  const kindCounts = allRoles.reduce<Record<string, number>>((acc, r) => {
+    acc[r.kind] = (acc[r.kind] ?? 0) + 1;
+    return acc;
+  }, {});
+  const sections = [...new Set(allRoles.map((r) => r.source_section).filter(Boolean))].sort();
+  const serviceNames = services.map((r) => r.name);
+  const whyText = allRoles.length
+    ? `Komposisi menurut record: ${Object.entries(kindCounts).map(([k, v]) => `${KIND_LABEL[k] ?? k} ${v}`).join(", ")}. ` +
+      `Layanan deterministik (kode, bukan LLM): ${serviceNames.join(", ") || "tidak ada"}. ` +
+      `Alasan tiap peran dirujuk ke bagian master: ${sections.join(", ") || "tidak tercatat"}.`
+    : "Belum ada record peran; alasan pemilihan tidak dinyatakan.";
 
   return (
     <div className="space-y-5">
@@ -172,6 +191,7 @@ export default function OrganizationPage() {
         source="Katalog RoleSkillPack + AgentDefinition (seed DESIGN) dan run aktif (WorkerRun)"
         checkedAt={roles.data?.checked_at ?? null}
         evidenceLimit="Katalog desain, belum dievaluasi. Jumlah run aktif dihitung dari run nyata, bukan dari org chart."
+        relatedDecisionsHref="/decisions?target_type=workforce"
         mode="DESIGN"
       />
       <Notice>
@@ -181,8 +201,8 @@ export default function OrganizationPage() {
       </Notice>
       <ExplainButtons
         content={{
-          what: "Proyeksi katalog peran (§16), kelompok organisasi (§17) dan konfigurasi agent. Tidak menjalankan LLM apa pun.",
-          why: "Pola terpilih: controller deterministik + spesialis on-demand + review frontier (§18). Satu implementer cukup untuk tugas kecil.",
+          what: whatText,
+          why: whyText,
           usedBy: `Run aktif saat ini: ${active}; task aktif yang ditugaskan ke peran: ${assigned}. Scheduler memilih agent per TaskSpec; peran lain tidak otomatis dipanggil.`,
           evidence: `Setiap kartu memuat versi + revision hash. Status evaluasi peran (dari katalog): ${evalText}.`,
           impact: "Mengubah peran/agent membuat revisi baru; riwayat run lama tidak ditulis ulang.",
