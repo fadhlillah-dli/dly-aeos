@@ -5,6 +5,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from aeos.core.enums import Domain
+from aeos.evaluation import definitions as D
 from aeos.evaluation import service
 from aeos.models.research import ChangeProposal
 from aeos.models.routing import ModelRoute
@@ -23,7 +24,7 @@ def _seed(db):
 def test_suites_experiments_and_empty_leaderboard(personal_client: AuthedClient, db):
     _seed(db)
     suites = personal_client.get("/api/eval/suites").json()
-    assert len(suites["items"]) == 8 and suites["mode"] == "DESIGN"
+    assert len(suites["items"]) == len(D.SUITES) == 28 and suites["mode"] == "DESIGN"
     assert all(s["held_out"] and s["protected"] for s in suites["items"])
     exp = personal_client.get("/api/eval/experiments").json()
     assert [e["key"] for e in exp["items"]] == ["A", "B", "C", "D"] and len(exp["dimensions"]) == 7

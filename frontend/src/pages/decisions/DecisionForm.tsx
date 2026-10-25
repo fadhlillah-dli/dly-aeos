@@ -64,6 +64,10 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
   const [officeOverrides, setOfficeOverrides] = useState("");
   const [preset, setPreset] = useState<string>("");
   const [allowBash, setAllowBash] = useState(false);
+  // §41/§43 system change: a POLICY on a policy/model/tool/hook/prompt/memory/fallback/context target needs
+  // COMPLETED all-gates-PASS evaluation runs and the rollback target it replaces (backend SYSTEM_CHANGE_TARGET_TYPES)
+  const [scEvalRuns, setScEvalRuns] = useState("");
+  const [scRollback, setScRollback] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
   const usePreset = kind === "EXCEPTION" && domain === "PERSONAL" && !!preset;
 
@@ -117,6 +121,10 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
       body.target_type = targetType;
       body.target_id = targetId;
       if (targetHash) body.target_hash = targetHash;
+      const evalRunIds = scEvalRuns.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+      if (kind === "POLICY" && (evalRunIds.length || scRollback.trim())) {
+        body.details = { system_change: { eval_run_ids: evalRunIds, rollback_target: scRollback.trim() } };
+      }
     }
     save.mutate(body);
   };
@@ -226,6 +234,21 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
               <input className={inputClass} value={targetHash} onChange={(e) => setTargetHash(e.target.value)} placeholder="sha256:…" />
             </Field>
           </div>
+        )}
+        {needsTarget && kind === "POLICY" && (
+          <fieldset className="grid gap-3 rounded-md border border-line p-3 sm:grid-cols-2">
+            <legend className="px-1 text-sm font-medium">System change (§41/§43)</legend>
+            <p className="text-xs text-ink-3 sm:col-span-2">
+              Wajib bila target adalah policy, model/route, tool schema/tools, hooks, prompt, memory, fallback, context strategy, retrieval atau harness:
+              EvalRun COMPLETED dengan semua gate PASS dan target rollback. Kebijakan tata kelola lain tercatat sebagai bukan system change.
+            </p>
+            <Field label="ID EvalRun bukti" hint="Pisahkan dengan koma.">
+              <input className={inputClass} value={scEvalRuns} onChange={(e) => setScEvalRuns(e.target.value)} placeholder="uuid EvalRun" />
+            </Field>
+            <Field label="Target rollback" hint="Versi/konfigurasi/keputusan yang digantikan.">
+              <input className={inputClass} value={scRollback} onChange={(e) => setScRollback(e.target.value)} placeholder="mis. prompt rev r41" />
+            </Field>
+          </fieldset>
         )}
         {kind !== "WRITE_ENABLEMENT" && (
           <Field label="Operasi yang diizinkan (pisahkan koma)" hint="Merge/produksi adalah tindakan manusia dan akan ditolak.">

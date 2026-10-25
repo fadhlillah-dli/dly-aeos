@@ -307,12 +307,12 @@ def create_proposal(
         unknown.append(f"source.{f}")
     from aeos.inventory import facade as inventory
 
-    for cid in existing:
-        if inventory.get_component(session, cid) is None:
+    for cid in existing:  # a component of the other domain is "not in this domain's inventory" (§23)
+        if not R.component_in_domain(inventory.get_component(session, cid), domain):
             unknown.append(f"existing_component:{cid} (tidak ada di inventaris)")
     candidates = sorted({c.strip() for c in candidate_component_ids or [] if c and c.strip()})
     for cid in candidates:
-        if inventory.get_component(session, cid) is None:
+        if not R.component_in_domain(inventory.get_component(session, cid), domain):
             unknown.append(f"candidate_component:{cid} (belum terdaftar di inventaris)")
     atts = _validate_attachments(session, attachment_ids or [], domain)
     entry_ids = []
@@ -953,13 +953,18 @@ def _config_targets(p: ChangeProposal, cfg: dict[str, Any]) -> list[tuple[str, s
     return []
 
 
-def _latest_observation(session: Session, cid: str, dimensions: tuple[str, ...], since: datetime | None) -> Any:
+def _latest_observation(session: Session, cid: str, dimensions: tuple[str, ...], since: datetime | None, *,
+                        domain: str | None) -> Any:
+    """The latest observation of *cid* in *dimensions* that belongs to *domain* (untagged or tagged with it),
+    if it is newer than *since*. Another domain's observation is never this domain's evidence (§23, §38)."""
     from aeos.models.inventory import ComponentObservation
 
     since = ensure_aware(since)
     for o in session.scalars(select(ComponentObservation).where(ComponentObservation.component_id == cid,
                                                                 ComponentObservation.dimension.in_(dimensions))
                              .order_by(ComponentObservation.observed_at.desc())):
+        if not R.observation_in_domain(o, domain):
+            continue
         at = ensure_aware(o.observed_at)
         if since is None or (at is not None and at > since):
             return o
@@ -967,11 +972,12 @@ def _latest_observation(session: Session, cid: str, dimensions: tuple[str, ...],
     return None
 
 
-def observed_at_pin(session: Session, cid: str, pin: str | None, since: datetime | None) -> bool:
-    """The latest installation or configuration observation after *since* shows the component INSTALLED/
-    CONFIGURED at *pin* (§38 observed lens; desired state alone is not activation)."""
+def observed_at_pin(session: Session, cid: str, pin: str | None, since: datetime | None, *,
+                    domain: str | None) -> bool:
+    """The latest installation or configuration observation of *domain* after *since* shows the component
+    INSTALLED/CONFIGURED at *pin* (§38 observed lens; desired state alone is not activation)."""
     for dim, ok in (("installation", "INSTALLED"), ("configuration", "CONFIGURED")):
-        o = _latest_observation(session, cid, (dim,), since)
+        o = _latest_observation(session, cid, (dim,), since, domain=domain)
         if o is not None and o.status == ok and (not pin or (o.observed_version or "").lstrip("v") == pin.lstrip("v")):
             return True
     return False
@@ -992,11 +998,12 @@ def config_applied_problems(session: Session, p: ChangeProposal, cfg: dict[str, 
     problems = []
     for cid, pin in targets:
         comp = inventory.get_component(session, cid)
-        if comp is None:
+        if not R.component_in_domain(comp, p.domain):
             problems.append(f"{cid} is not registered in the inventory")
             continue
+        assert comp is not None
         if p.kind == "REMOVE":
-            gone = _latest_observation(session, cid, ("installation",), since)
+            gone = _latest_observation(session, cid, ("installation",), since, domain=p.domain)
             if not (comp.tombstoned_at or comp.lifecycle_final in ("RETIRED", "DEPRECATED")
                     or (gone is not None and gone.status in ("NOT_INSTALLED", "REMOVED"))):
                 problems.append(f"{cid} is still {comp.enablement}/{comp.lifecycle_final} and not observed removed "
@@ -1006,7 +1013,7 @@ def config_applied_problems(session: Session, p: ChangeProposal, cfg: dict[str, 
             problems.append(f"{cid} approved_pin {comp.approved_pin} != accepted {pin} (manifest not applied)")
         if pin and p.candidate_pin and pin != p.candidate_pin:
             problems.append(f"accepted pin {pin} differs from the promoted candidate pin {p.candidate_pin}")
-        if comp.enablement != "ENABLED" and not observed_at_pin(session, cid, pin, since):
+        if comp.enablement != "ENABLED" and not observed_at_pin(session, cid, pin, since, domain=p.domain):
             problems.append(f"{cid} is neither enabled by decision nor observed installed/configured"
                             + (f" at {pin}" if pin else "") + " after the promotion (configuration not applied)")
     return problems
@@ -1026,6 +1033,8 @@ def _observed_after(session: Session, p: ChangeProposal, since: datetime | None,
     except ValidationFailed:
         targets = []
     for o in session.scalars(select(ComponentObservation).where(ComponentObservation.component_id.in_(targets))):
+        if not R.observation_in_domain(o, p.domain):
+            continue  # another domain's observation is never evidence for this proposal's outcome
         at = ensure_aware(o.observed_at)
         if at is not None and at > since and str(o.status).upper() in GOOD_OBSERVATION:
             return True
@@ -1091,12 +1100,11 @@ def _rollback_reference(session: Session, p: ChangeProposal, rb: dict[str, Any],
                                code="ROLLBACK_NOT_REFERENCED")
     out: dict[str, Any] = {"audit_event_id": aid, "action": ev.action, "at": at.isoformat() if at else None}
     if ev.action == "inventory.manifest.load" and p.kind in ("UPGRADE", "REPLACE"):
-        from aeos.inventory import facade as inventory
-
         prev = {b["component_id"]: b.get("approved_pin") for b in
                 ((p.review_package or {}).get("baseline") or {}).get("components") or [] if b.get("status") == "KNOWN"}
         def live_pin(cid: str) -> str:
-            return getattr(inventory.get_component(session, cid), "approved_pin", None) or R.UNKNOWN
+            comp = R.domain_component(session, cid, p.domain)
+            return (comp.approved_pin if comp is not None else None) or R.UNKNOWN
 
         wrong = [f"{cid} pin {live_pin(cid)} != {pin}" for cid, pin in prev.items() if live_pin(cid) != (pin or R.UNKNOWN)]
         if wrong:
@@ -1362,12 +1370,14 @@ def delivery_dimensions(session: Session, p: ChangeProposal) -> dict[str, dict[s
     enabled: list[Any] = []
     observed: list[Any] = []
     for c in (inventory.get_component(session, cid) for cid in targets):
-        if c is None or (p.kind == "UPGRADE" and p.candidate_pin and c.approved_pin != p.candidate_pin):
+        if c is None or not R.component_in_domain(c, p.domain) or \
+                (p.kind == "UPGRADE" and p.candidate_pin and c.approved_pin != p.candidate_pin):
             continue
         if c.enablement == "ENABLED":
             enabled.append(c)
             continue
-        if promotion is not None and observed_at_pin(session, c.component_id, p.candidate_pin, promotion.created_at):
+        if promotion is not None and observed_at_pin(session, c.component_id, p.candidate_pin, promotion.created_at,
+                                                     domain=p.domain):
             observed.append(c)
     after = cur.get("after_snapshot") or {}
     arch_ok = False
@@ -1379,13 +1389,13 @@ def delivery_dimensions(session: Session, p: ChangeProposal) -> dict[str, dict[s
     # §41 "kapan aktif": when the inventory first observed a candidate as ENABLED (never the approval time)
     activated_at = None
     if enabled:
-        from sqlalchemy import func as _f
-
         from aeos.models.inventory import ComponentObservation
 
-        first = session.scalar(select(_f.min(ComponentObservation.observed_at)).where(
+        firsts = [o.observed_at for o in session.scalars(select(ComponentObservation).where(
             ComponentObservation.component_id.in_([c.component_id for c in enabled]),
             ComponentObservation.dimension == "enablement", ComponentObservation.status == "ENABLED"))
+            if o.observed_at is not None and R.observation_in_domain(o, p.domain)]
+        first = min(firsts, key=lambda at: ensure_aware(at) or at) if firsts else None
         activated_at = first.isoformat() if first else None
 
     def dim(status: str, note: str, **extra: Any) -> dict[str, Any]:

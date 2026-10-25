@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ContextView, OperationCatalog, PlanDetail, VersionSummary } from "../../components/planning/types";
-import { BridgeProofNotice } from "./BridgeProof";
+import { BridgeProofNotice, SupervisorConfigNotice } from "./BridgeProof";
 import { ContextPanel } from "./ContextPanel";
 import { DecisionPanel } from "./DecisionPanel";
 
@@ -148,5 +148,23 @@ describe("local Claude integration proof (§02, §08 CAN_PLAN_PERSONAL)", () => 
     expect(screen.getByText(/tidak dihitung sebagai terbukti/)).toBeInTheDocument();
     rerender(<BridgeProofNotice proof={null} />);
     expect(screen.queryByLabelText("Bukti integrasi Claude lokal")).not.toBeInTheDocument();
+  });
+
+  it("states that UNKNOWN still executes as an open owner decision (§02 re-audit)", () => {
+    render(<BridgeProofNotice proof={{ label: "NOT-PROVEN", status: "UNKNOWN", owner_decision: "OPEN" }} />);
+    expect(screen.getByText(/Keputusan pemilik terbuka/)).toBeInTheDocument();
+  });
+
+  it("states a stage that ran on an unevaluated supervisor configuration (§02/§23 re-audit)", () => {
+    const { rerender } = render(
+      <SupervisorConfigNotice
+        unevaluated={{ CHALLENGE_REVIEW: { route_key: "claude-native/opus", resolved_version: "claude-opus-5-6", harness_version: "2.2.0" } }}
+      />,
+    );
+    const notice = screen.getByLabelText("Konfigurasi supervisor belum dievaluasi");
+    expect(notice).toHaveTextContent("CHALLENGE_REVIEW: claude-native/opus (claude-opus-5-6) · Claude Code 2.2.0");
+    expect(notice).toHaveTextContent(/keputusan pemilik diperlukan/);
+    rerender(<SupervisorConfigNotice unevaluated={{}} />);
+    expect(screen.queryByLabelText("Konfigurasi supervisor belum dievaluasi")).not.toBeInTheDocument();
   });
 });

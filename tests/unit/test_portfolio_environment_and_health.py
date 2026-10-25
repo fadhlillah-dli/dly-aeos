@@ -44,6 +44,19 @@ def test_office_has_no_personal_environment_target(admin_client: AuthedClient):
     p = create_project(admin_client, domain=Domain.OFFICE, name="Office Env")
     r = _put(admin_client, p["id"], provider="local-target", purpose="staging", root_id="container:x")
     assert r.status_code == 403 and r.json()["error"]["code"] == "PROVIDER_DOMAIN_MISMATCH"
+    # §01 (re-audit, owner/M5 dependency): the product states that OFFICE has no environment target yet
+    assert "M5" in r.json()["error"]["message"] and "otorisasi perusahaan" in r.json()["error"]["message"]
+    env = admin_client.get(f"/api/projects/{p['id']}").json()["project"]["environment"]
+    assert env["status"] == "NOT_AVAILABLE" and env["targets"] == [] and "M5" in env["reason"]
+
+
+def test_personal_environment_state_lists_the_recorded_targets(personal_client: AuthedClient):
+    p = create_project(personal_client, name="Env State")
+    assert personal_client.get(f"/api/projects/{p['id']}").json()["project"]["environment"]["status"] == "NOT_CONFIGURED"
+    r = _put(personal_client, p["id"], provider="local-target", purpose="staging", root_id="container:app")
+    assert r.status_code == 200, r.text
+    env = personal_client.get(f"/api/projects/{p['id']}").json()["project"]["environment"]
+    assert env["status"] == "CONFIGURED" and env["targets"][0]["purpose"] == "staging"
 
 
 def test_probe_result_is_recorded_for_the_exact_target_and_reset_on_target_change(personal_client, db,

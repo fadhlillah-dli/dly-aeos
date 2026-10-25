@@ -209,8 +209,9 @@ def set_scheduler(body: Enable, principal: AdminPrincipal, db: DB) -> dict[str, 
 class ConcurrencyIn(BaseModel):
     max_active: int = Field(ge=1, le=2)
     rationale: str = Field(default="", max_length=2000)
-    eval_run_id: str | None = Field(default=None, max_length=64)
-    # §44 task-class scope: project_ids / role_keys / risk_classes / domains (empty = every task class)
+    eval_run_id: str | None = Field(default=None, max_length=64)  # bounded-parallel run (topology C)
+    baseline_eval_run_id: str | None = Field(default=None, max_length=64)  # sequential baseline (topology A)
+    # §44 task-class scope: project_ids / role_keys / risk_classes / domains (required for two workers)
     scope: dict[str, list[str]] = Field(default_factory=dict)
     # §44 DecisionRecord: options, goal, evidence_ids, cost_quality_tradeoff, invalidate_if
     decision_record: dict[str, Any] = Field(default_factory=dict)
@@ -223,10 +224,26 @@ def set_concurrency(body: ConcurrencyIn, principal: AdminPrincipal, db: DB) -> d
     out = scheduler.set_concurrency(db, max_active=body.max_active, actor=_actor(principal),
                                     actor_user_id=principal.user.id, rationale=body.rationale,
                                     eval_run_id=body.eval_run_id, scope=body.scope,
-                                    decision_record=body.decision_record)
+                                    decision_record=body.decision_record,
+                                    baseline_eval_run_id=body.baseline_eval_run_id)
     db.commit()
     cap, decision_id = scheduler.concurrency_cap(db)
     return {**out, "effective_cap": cap, "cap_decision_id": decision_id}
+
+
+class RoleEvalThresholdIn(BaseModel):
+    risk_class: str = Field(pattern=r"^R[0-4]$")
+    rationale: str = Field(min_length=5, max_length=2000)
+
+
+@router.post("/api/workforce/role-eval-threshold")
+def set_role_eval_threshold(body: RoleEvalThresholdIn, principal: AdminPrincipal, db: DB) -> dict[str, Any]:
+    """Owner action (§46): from which risk class admission requires a PASS role evaluation (or an owner EXCEPTION).
+    R4 is the pilot default; a lower class tightens admission."""
+    out = scheduler.set_role_eval_threshold(db, risk_class=body.risk_class, actor=_actor(principal),
+                                            rationale=body.rationale)
+    db.commit()
+    return out
 
 
 class RolePackImport(BaseModel):

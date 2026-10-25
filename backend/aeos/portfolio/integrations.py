@@ -307,8 +307,10 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
         if provider in OFFICE_PROVIDERS and project.domain != Domain.OFFICE.value:
             deny(session, principal, action="portfolio.integration.update", code="OFFICE_PROVIDER_IN_PERSONAL",
                  project=project, reason=f"{provider} is an OFFICE provider; it is not allowed in a PERSONAL project")
+        office_env = project.domain == Domain.OFFICE.value and purpose in ENVIRONMENT_PURPOSES
         deny(session, principal, action="portfolio.integration.update", code="PROVIDER_DOMAIN_MISMATCH",
-             project=project, reason=f"provider {provider or '(none)'} is not allowed for {project.domain} projects",
+             project=project, reason=f"provider {provider or '(none)'} is not allowed for {project.domain} projects"
+             + (f"; {OFFICE_ENVIRONMENT_NOTE}" if office_env else ""),
              details={"allowed": sorted(allowed)})
     if purpose not in PURPOSES or purpose not in allowed[provider]:
         raise ValidationFailed(f"purpose {purpose or '(none)'} is not valid for {provider}", code="INVALID_PURPOSE",
@@ -477,6 +479,24 @@ def live_integration_view(integ: ProjectIntegration) -> dict[str, Any]:
     view = integration_view(integ)
     view["capability_status"] = compute_capability_status(integ)
     return view
+
+
+ENVIRONMENT_PURPOSES = ("staging", "production", "deploy")
+OFFICE_ENVIRONMENT_NOTE = ("OFFICE belum memiliki environment/deployment target maupun runtime OFFICE terisolasi di "
+                           "build ini: pekerjaan M5 yang memerlukan otorisasi perusahaan tercatat (§01, §23). Tidak ada "
+                           "target yang ditebak atau dipinjam dari PERSONAL.")
+
+
+def environment_state(project: Project, integrations: list[ProjectIntegration]) -> dict[str, Any]:
+    """§01 "setiap aplikasi memiliki ... environment sesuai domainnya": the project's environment targets as recorded
+    (PERSONAL), or the honest NOT_AVAILABLE state of OFFICE, which has no environment target in this build."""
+    if project.domain == Domain.OFFICE.value:
+        return {"status": "NOT_AVAILABLE", "targets": [], "reason": OFFICE_ENVIRONMENT_NOTE,
+                "owner_step": "otorisasi perusahaan + runtime OFFICE terisolasi (M5)"}
+    targets = [{"provider": i.provider, "purpose": i.purpose, "root_id": i.root_id, "integration_id": i.id}
+               for i in integrations if i.purpose in ENVIRONMENT_PURPOSES]
+    return {"status": "CONFIGURED" if targets else "NOT_CONFIGURED", "targets": targets,
+            "reason": None if targets else "Belum ada target staging/production/deploy untuk proyek ini"}
 
 
 def integration_state(integrations: list[ProjectIntegration],

@@ -4,7 +4,8 @@ Baseline/impact come from the inventory (ComponentReference + typed relations + 
 source identity from the research registry; anything not derivable is UNKNOWN — never guessed.
 The optional Claude recommendation (item 8) receives only generic public metadata and is DATA,
 never owner approval (§19, §39). Every record read here is scoped to the proposal's domain
-(snapshots, usage, drift): one domain's records never shape the other domain's package (§23, §35).
+(snapshots, inventory components/relations/observations, usage, drift): one domain's records never shape
+the other domain's package, baseline hash or outcome (§23, §35, §41).
 """
 
 from __future__ import annotations
@@ -114,21 +115,63 @@ def latest_snapshot(session: Session, domain: str | None) -> ArchitectureSnapsho
     return None
 
 
+# --------------------------------------------------------------------------- inventory records (domain-scoped)
+# The same scope rules as the inventory views (§23, §35, §38): a PLATFORM component is shared, a PERSONAL-only
+# or OFFICE-only component exists only in its own domain, and a relation/observation tagged with a domain is
+# only that domain's record. A proposal reads the inventory exclusively through these helpers, so an OFFICE
+# record never shapes a PERSONAL package, baseline hash or outcome (and vice versa).
+
+
+def component_in_domain(comp: ComponentReference | None, domain: str | None) -> bool:
+    from aeos.inventory import facade as inventory
+
+    return comp is not None and inventory.component_visible(comp, domain)
+
+
+def domain_component(session: Session, component_id: str, domain: str | None) -> ComponentReference | None:
+    """The inventory component as the proposal's domain sees it (None when it belongs to the other domain)."""
+    comp = session.get(ComponentReference, component_id)
+    return comp if component_in_domain(comp, domain) else None
+
+
+def relation_in_domain(session: Session, rel: ComponentRelation, domain: str | None) -> bool:
+    """A relation is this domain's when it is not tagged with another domain and neither registered end is a
+    component of the other domain (an unregistered end, e.g. a control-plane module, carries no domain)."""
+    from aeos.inventory import facade as inventory
+
+    if not inventory.relation_visible(rel, domain):
+        return False
+    for end in (rel.source_id, rel.target_id):
+        comp = session.get(ComponentReference, end)
+        if comp is not None and not inventory.component_visible(comp, domain):
+            return False
+    return True
+
+
+def observation_in_domain(obs: ComponentObservation, domain: str | None) -> bool:
+    from aeos.inventory import facade as inventory
+
+    return inventory.observation_visible(obs, domain)
+
+
 # --------------------------------------------------------------------------- baseline / candidate
 
 
-def _relations(session: Session, component_id: str) -> tuple[list[ComponentRelation], list[ComponentRelation]]:
-    inbound = list(session.scalars(select(ComponentRelation).where(ComponentRelation.target_id == component_id)))
-    outbound = list(session.scalars(select(ComponentRelation).where(ComponentRelation.source_id == component_id)))
+def _relations(session: Session, component_id: str, domain: str | None
+               ) -> tuple[list[ComponentRelation], list[ComponentRelation]]:
+    inbound = [r for r in session.scalars(select(ComponentRelation).where(ComponentRelation.target_id == component_id))
+               if relation_in_domain(session, r, domain)]
+    outbound = [r for r in session.scalars(select(ComponentRelation).where(ComponentRelation.source_id == component_id))
+                if relation_in_domain(session, r, domain)]
     return inbound, outbound
 
 
-def _latest_observations(session: Session, component_id: str) -> dict[str, dict[str, Any]]:
+def _latest_observations(session: Session, component_id: str, domain: str | None) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     rows = session.scalars(select(ComponentObservation).where(ComponentObservation.component_id == component_id)
                            .order_by(ComponentObservation.observed_at.desc()))
     for o in rows:
-        if o.dimension in out:
+        if o.dimension in out or not observation_in_domain(o, domain):
             continue
         out[o.dimension] = {"status": o.status, "observed_version": o.observed_version, "observer": o.observer,
                             "observed_at": o.observed_at.isoformat() if o.observed_at else None}
@@ -164,17 +207,14 @@ def _known_issues(session: Session, component_id: str, domain: str | None) -> li
 
 
 def component_baseline(session: Session, component_id: str, *, domain: str | None = None) -> dict[str, Any]:
-    try:
-        from aeos.inventory import facade as inventory
-
-        comp: ComponentReference | None = inventory.get_component(session, component_id)
-    except (ImportError, ModuleNotFoundError):  # pragma: no cover - facade ships with the foundation
-        comp = None
+    # A component of the other domain is "not in this domain's inventory": same answer as a missing one, so
+    # the package never reveals that it exists (§23).
+    comp = domain_component(session, component_id, domain)
     if comp is None:
         return {"component_id": component_id, "status": UNKNOWN,
                 "reason": "komponen tidak ditemukan di inventaris; baseline UNKNOWN"}
-    inbound, outbound = _relations(session, component_id)
-    obs = _latest_observations(session, component_id)
+    inbound, outbound = _relations(session, component_id, domain)
+    obs = _latest_observations(session, component_id, domain)
     return {
         "component_id": comp.component_id, "status": "KNOWN", "name": comp.name, "friendly_name": comp.friendly_name,
         "kind": comp.kind, "category": comp.category, "function": comp.function or UNKNOWN,
@@ -350,8 +390,8 @@ def _dimension(items: list[str], known_source: str | None, unknown_reason: str) 
     return {"status": UNKNOWN, "items": [], "source": None, "reason": unknown_reason}
 
 
-def _related_component(session: Session, cid: str) -> ComponentReference | None:
-    return session.get(ComponentReference, cid)
+def _related_component(session: Session, cid: str, domain: str | None) -> ComponentReference | None:
+    return domain_component(session, cid, domain)
 
 
 def _route(session: Session, key: str) -> Any:
@@ -390,12 +430,12 @@ def _impact(session: Session, p: ChangeProposal, baseline: list[dict[str, Any]])
                 consumers.append(f"{r['source_id']} {r['relation']} {b['component_id']} ({r['lens']})")
             if r["relation"] in DATA_RELATIONS:
                 data.append(f"{r['source_id']} {r['relation']} {b['component_id']}")
-            if _is_ci(_related_component(session, r["source_id"])):
+            if _is_ci(_related_component(session, r["source_id"], p.domain)):
                 ci.append(f"{r['source_id']} {r['relation']} {b['component_id']}")
             if r.get("identity_ref"):
                 identity.append(f"{r['source_id']} -> {b['component_id']}: identity {r['identity_ref']} (referensi)")
         for r in b["dependencies"]:
-            target = _related_component(session, r["target_id"])
+            target = _related_component(session, r["target_id"], p.domain)
             if r["relation"] in DATA_RELATIONS:
                 data.append(f"{b['component_id']} {r['relation']} {r['target_id']}: {r['data'] or 'data UNKNOWN'}")
             if r["relation"] in POLICY_RELATIONS:
@@ -670,7 +710,7 @@ def overlap_components(session: Session, p: ChangeProposal, entries: list[Resear
         return []
     out = []
     for c in session.scalars(select(ComponentReference).order_by(ComponentReference.component_id)):
-        if c.tombstoned_at is not None or _norm_kind(c.kind) not in kinds:
+        if c.tombstoned_at is not None or _norm_kind(c.kind) not in kinds or not component_in_domain(c, p.domain):
             continue
         if c.component_id in (p.candidate_component_ids or []):
             continue
@@ -709,7 +749,7 @@ def security_privacy(session: Session, p: ChangeProposal, *, data_class: str | N
                                               "perusahaan" if not allowed else "Otorisasi OFFICE tercatat"}
     else:
         dims["office_eligibility"] = {"status": "NOT_APPLICABLE", "note": "Proposal PERSONAL"}
-    cands = [c for c in (session.get(ComponentReference, cid) for cid in p.candidate_component_ids or []) if c]
+    cands = [c for c in (domain_component(session, cid, p.domain) for cid in p.candidate_component_ids or []) if c]
     if not cands:
         dims["egress"] = {"status": UNKNOWN, "note": "Kandidat belum terdaftar di inventaris; egress UNKNOWN"}
         dims["credentials"] = {"status": UNKNOWN, "note": "Kandidat belum terdaftar; kebutuhan credential UNKNOWN"}

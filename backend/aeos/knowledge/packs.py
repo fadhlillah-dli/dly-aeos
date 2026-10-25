@@ -356,6 +356,27 @@ def _collect_task(col: _Collector, task: TaskSpec) -> None:
                         "plan_version_id": task.plan_version_id, "spec_hash": task.spec_hash})
 
 
+# §24 "Project context: PRD/RFC/TDD, keputusan, kontrak, accepted artifacts": only accepted records become
+# metadata context - an approved/published plan, an ACTIVE decision, an ACCEPTED ADR, an APPROVED/PUBLISHED document
+# (TaskSpecs exist only for compiled, approved plan versions). Drafts, superseded, rejected or revoked records are
+# never project context, not even as a SUBORDINATE summary.
+ACCEPTED_METADATA_STATUSES: dict[str, frozenset[str] | None] = {
+    "plan": frozenset({"APPROVED", "PUBLISHING", "PUBLISHED", "PUBLICATION_PARTIAL", "PUBLICATION_FAILED"}),
+    "task": None,  # immutable TaskSpec of an approved PlanVersion
+    "decision": frozenset({"ACTIVE"}),
+    "adr": frozenset({"ACCEPTED"}),
+    "document": frozenset(ACCEPTED_DOC_STATUSES),
+}
+
+
+def metadata_accepted(item: dict[str, Any]) -> bool:
+    kind = str(item.get("kind") or "")
+    if kind not in ACCEPTED_METADATA_STATUSES:
+        return False
+    allowed = ACCEPTED_METADATA_STATUSES[kind]
+    return allowed is None or str(item.get("status") or "").upper() in allowed
+
+
 def _collect_metadata(col: _Collector, session: Session, principal: Principal, project: Project, terms: list[str]) -> None:
     from aeos.portfolio.search import search
 
@@ -370,6 +391,8 @@ def _collect_metadata(col: _Collector, session: Session, principal: Principal, p
             # only this project's records and platform-global ones (no cross-project leakage)
             if it.get("project_id") not in (None, project.id) or n >= CAPS["metadata"]:
                 continue
+            if not metadata_accepted(it):
+                continue  # a draft/superseded/revoked record is not project context (not a budget omission)
             body = f"{it['kind']}: {it['title']}" + (f"\n{it['subtitle']}" if it.get("subtitle") else "") + \
                 (f"\n{it['snippet']}" if it.get("snippet") else "")
             if col.add(kind="metadata", ref=f"{it['kind']}:{it['id']}", content=body, trust="AEOS_RECORD",
@@ -446,6 +469,9 @@ def _collect_memory(col: _Collector, session: Session, principal: Principal, pro
                 provenance={"source": "aeos-db memory_records (ACCEPTED)", "memory_id": r.id, "scope": r.scope,
                             "source_type": prov.get("source_type"), "source_id": prov.get("source_id"),
                             "auth_decision_id": r.auth_decision_id, "owner_project_id": r.project_id,
+                            # §41/§43: whether this memory's acceptance was evaluated as a system change
+                            "system_change_evaluation": (prov.get("system_change") or {}).get("evaluation",
+                                                                                               "NOT_EVALUATED"),
                             "precedence": "SUBORDINATE", "subordinate_to": subordinate})
 
 
