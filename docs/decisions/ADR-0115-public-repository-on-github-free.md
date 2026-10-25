@@ -9,7 +9,8 @@
 
 `fadhlillah-dli/dly-aeos` was a private repository on GitHub Free. Private repositories get a monthly
 quota of Actions minutes, with macOS runners billed at 10x and Windows at 2x. On 2026-10-25 the push run
-on `main` after PR #7 (merge commit 32652a1) never started: every job was refused with *"recent account
+on `main` after PR #7 (merge commit ecf8b87; 32652a1 before the 2026-10-26 history normalisation, see
+[docs/evidence/commit-id-map.md](../evidence/commit-id-map.md)) never started: every job was refused with *"recent account
 payments have failed or your spending limit needs to be increased"*. PR #7 itself had passed all its
 checks, and the merge commit has the same tree as the tested PR head, but no further PR could get CI.
 Private repositories on GitHub Free also cannot enforce branch protection or rulesets (ADR-0063
