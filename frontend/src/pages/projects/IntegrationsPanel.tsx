@@ -268,7 +268,16 @@ export function sections(domain: string, defaultRepo: string): SectionSpec[] {
         purpose: "code",
         title: `${PURPOSE_LABEL.code} — ${PROVIDER_LABEL.bitbucket}`,
         fields: [
-          { key: "root_id", label: "Repository Bitbucket (workspace/repo_slug)", hint: ROOT_HINT.bitbucket, placeholder: "workspace/nama-repo", required: true },
+          {
+            key: "root_id",
+            label: "Repository Bitbucket (workspace/repo_slug)",
+            hint: ROOT_HINT.bitbucket,
+            placeholder: "workspace/nama-repo",
+            required: true,
+            // same identity rule as the Integration Registry (portfolio.integrations _ROOT_PATTERNS bitbucket)
+            pattern: /^[A-Za-z0-9][A-Za-z0-9_-]{0,61}\/[A-Za-z0-9._-]{1,100}$/,
+            patternHint: "harus workspace/repo_slug, mis. perusahaan/aplikasi",
+          },
           { key: "config.enabled", label: "Aktifkan adapter (tetap butuh otorisasi perusahaan + interlock)", checkbox: true },
           { key: "credential_ref", label: "Referensi credential", hint: "office/… atau projects/… — bukan nilai secret", placeholder: "office/bitbucket" },
         ],
@@ -322,9 +331,23 @@ export function sections(domain: string, defaultRepo: string): SectionSpec[] {
   ];
 }
 
-/** Config keys the controller writes itself (proof) or derives; never sent back by the forms. */
-function editableConfig(config: Record<string, unknown> | undefined): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(config ?? {}).filter(([k]) => !k.startsWith("_") && k !== "root_id_name"));
+/**
+ * A config key naming a target (legacy alias such as config.repo on an old github-issues row): the Integration
+ * Registry refuses it (TARGET_IN_CONFIG, backend portfolio.integrations._TARGET_KEY), because the exact target lives
+ * only in root_id (§04). It is dropped on re-save instead of making every save of that integration fail.
+ */
+const TARGET_ALIAS_KEY = /(parent|root|folder|target|alias|page[_-]?id|repo|project[_-]?key)/i;
+
+/**
+ * The stored config a form sends back unchanged: never the controller-written proof (_verification) or derived
+ * keys, never a legacy target alias, and only scalar values (the backend accepts nothing else).
+ */
+export function editableConfig(config: Record<string, unknown> | undefined): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(config ?? {}).filter(
+      ([k, v]) => !k.startsWith("_") && !TARGET_ALIAS_KEY.test(k) && (v === null || ["string", "number", "boolean"].includes(typeof v)),
+    ),
+  );
 }
 
 function valuesFrom(spec: SectionSpec, existing: IntegrationView | undefined): Values {
@@ -380,6 +403,7 @@ function TargetSection({ project, spec, existing, onSaved }: { project: ProjectV
     const v = String(values[f.key] ?? "").trim();
     return !!f.pattern && !!v && !f.pattern.test(v);
   });
+  const invalidKeys = new Set(invalid.map((f) => f.key));
   return (
     <form
       aria-label={spec.title}
@@ -420,7 +444,13 @@ function TargetSection({ project, spec, existing, onSaved }: { project: ProjectV
                 ))}
               </select>
             ) : (
-              <input className={inputClass} placeholder={f.placeholder} value={String(values[f.key] ?? "")} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} />
+              <input
+                className={inputClass}
+                placeholder={f.placeholder}
+                aria-invalid={invalidKeys.has(f.key) || undefined}
+                value={String(values[f.key] ?? "")}
+                onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}
+              />
             )}
           </Field>
         ),
@@ -436,11 +466,10 @@ function TargetSection({ project, spec, existing, onSaved }: { project: ProjectV
           {spec.provider === "deployment-target" ? ` (${PURPOSE_LABEL[spec.purpose]})` : ""}
         </Button>
         {missing.length > 0 && <span className="ml-2 text-xs text-warn">Wajib: {missing.map((f) => f.label).join(", ")}</span>}
-        {invalid.length > 0 && (
-          <span className="ml-2 text-xs text-bad">
-            Format tidak valid: {invalid.map((f) => `${f.label} (${f.patternHint ?? "format"})`).join(", ")}
-          </span>
-        )}
+        {/* always rendered, so assistive technology announces the message when it appears */}
+        <span aria-live="polite" className="ml-2 text-xs text-bad">
+          {invalid.length > 0 ? `Format tidak valid: ${invalid.map((f) => `${f.label} (${f.patternHint ?? "format"})`).join(", ")}` : ""}
+        </span>
       </div>
     </form>
   );

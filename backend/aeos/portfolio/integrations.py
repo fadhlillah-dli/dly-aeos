@@ -424,6 +424,7 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
         integ = ProjectIntegration(project_id=project.id, domain=project.domain, provider=provider, purpose=purpose)
         session.add(integ)
     before = {"tenant_id": integ.tenant_id, "root_id": integ.root_id, "credential_ref": integ.credential_ref}
+    was_enabled = (integ.config or {}).get("enabled") is True
     proof = (integ.config or {}).get(PROOF_KEY)
     integ.tenant_id = tenant
     integ.root_id = root
@@ -443,7 +444,11 @@ def upsert_integration(session: Session, principal: Principal, project: Project,
                  target_type="integration", target_id=integ.id, project_id=project.id, domain=project.domain,
                  details={"provider": provider, "purpose": purpose, "created": created, "root_set": bool(root),
                           "tenant_set": bool(tenant), "credential_ref": cred_ref, "target_changed": target_changed,
-                          "doctor_invalidation": invalidation})
+                          "doctor_invalidation": invalidation,
+                          # which config keys were stored (values stay in the registry) and whether an OFFICE
+                          # adapter was switched on or off by this human action (ADR-0073 default disabled)
+                          "config_keys": sorted(config),
+                          "adapter_enabled": {"before": was_enabled, "after": config.get("enabled") is True}})
     events.emit(session, source="portfolio", kind="portfolio.integration.updated", entity_type="integration",
                 entity_id=integ.id, project_id=project.id, domain=project.domain,
                 payload={"provider": provider, "purpose": purpose,

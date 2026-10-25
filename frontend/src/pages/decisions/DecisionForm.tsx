@@ -275,7 +275,7 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
                 </fieldset>
                 <Field
                   label="Identitas credential yang disetujui (opsional, satu per baris)"
-                  hint="office/atlassian=<account id atau email>; office/bitbucket=<uuid atau username>. Dibandingkan Doctor (secret.office_identity) dengan akun credential tersimpan — bukan secret."
+                  hint="office/atlassian=<account id atau email>; office/bitbucket=<uuid atau account id> (bukan nickname: tidak unik). Dibandingkan Doctor (secret.office_identity) dengan akun credential tersimpan — bukan secret."
                 >
                   <textarea
                     aria-label="Identitas credential yang disetujui"

@@ -102,7 +102,9 @@ def _office_overrides(pairs: list[str] | None) -> dict[str, object]:
     """``KEY=VALUE`` pairs -> office policy overrides (the recording layer refuses unknown keys).
 
     VALUE is JSON (``true``, ``["a","b"]``); a bare word is a string (``atlassian_deployment=CLOUD``) and the list
-    keys also take ``a,b`` - Windows PowerShell 5.1 drops embedded double quotes when calling a native program."""
+    keys also take ``a,b`` - Windows PowerShell 5.1 drops embedded double quotes when calling a native program. A
+    value with a comma must be quoted on Windows PowerShell (``'approved_worker_routes=a,b'``): it splits an unquoted
+    comma into separate arguments."""
     import json
 
     out: dict[str, object] = {}
@@ -144,8 +146,9 @@ def decide_cmd(
     allowed_provider: list[str] = typer.Option(None, "--allowed-provider", help="OFFICE provider (repeatable)"),
     approved_target: list[str] = typer.Option(
         None, "--approved-target",
-        help="Company-approved OFFICE target (repeatable), e.g. confluence:tenant=acme.atlassian.net,space_id=98765 "
-             "| jira:tenant=acme.atlassian.net,root_id=ENG | bitbucket:workspace=acme,root_id=acme/app"),
+        help="Company-approved OFFICE target (repeatable), e.g. 'confluence:tenant=acme.atlassian.net,space_id=98765' "
+             "| 'jira:tenant=acme.atlassian.net,root_id=ENG' | 'bitbucket:workspace=acme,root_id=acme/app'. Keep "
+             "the single quotes: Windows PowerShell splits an unquoted comma into separate arguments"),
     approved_data_class: list[str] = typer.Option(
         None, "--approved-data-class", help="Company-approved data class for AI processing (repeatable): "
                                             "PUBLIC | INTERNAL | CONFIDENTIAL | RESTRICTED"),
@@ -155,8 +158,8 @@ def decide_cmd(
     office_policy: list[str] = typer.Option(
         None, "--office-policy", help="OFFICE policy override KEY=VALUE (repeatable; VALUE is JSON or a bare word), "
                                       "e.g. atlassian_deployment=CLOUD, claude_max_allowed_for_office_data=true, "
-                                      "approved_worker_routes=route-a,route-b; applies only with an ACTIVE company "
-                                      "authorisation"),
+                                      "'approved_worker_routes=route-a,route-b' (quoted: Windows PowerShell splits an "
+                                      "unquoted comma); applies only with an ACTIVE company authorisation"),
     target_type: str = typer.Option(None), target_id: str = typer.Option(None),
     project: str = typer.Option(None, help="Project id (optional, must be in --domain)"),
 ) -> None:

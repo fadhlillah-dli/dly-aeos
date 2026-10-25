@@ -309,6 +309,20 @@ def test_a_credential_acting_as_another_account_fails(settings, db, secrets_memo
     assert _run(settings, db, r, check="secret.office_identity").status == "UNKNOWN"
 
 
+def test_a_bitbucket_nickname_is_never_accepted_as_the_identity(settings, db, secrets_memory):
+    """A nickname is not unique: a personal Bitbucket account with the same nickname as the company-issued one is
+    exactly the mix-up the check exists for. Only the uuid / account_id are compared."""
+    _authorise(db, identities=("office/bitbucket=me",))
+    _credentials(secrets_memory, bitbucket={"access_token": BB_ACCESS})
+    r = base_runner()
+    r.http[BB_USER_URL] = HttpResult(200, {"uuid": "{personal-uuid}", "account_id": "557058:personal",
+                                           "nickname": "me", "username": "me"})
+    res = _run(settings, db, r, check="secret.office_identity")
+    assert res.status == "FAILED" and res.error_code == "OFFICE_IDENTITY_MISMATCH", res.observed_evidence
+    (item,) = res.observed_evidence["results"]
+    assert item["compared_fields"] == ["uuid", "account_id"]
+
+
 def test_the_identity_check_guards_office_integrations():
     """A FAILED identity (another account) blocks CAN_USE_OFFICE_INTEGRATIONS; undecided/unprobed is a note."""
     from aeos.core.enums import Capability

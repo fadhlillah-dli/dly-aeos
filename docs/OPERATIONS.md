@@ -265,14 +265,16 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   company approved - `approved_targets` (`confluence:tenant=<site>.atlassian.net[,space_id=<numeric id>]
   [,root_id=<parent id>]`, `jira:tenant=<site>[,root_id=<KEY>]`, `bitbucket:workspace=<ws>[,root_id=<ws>/<repo>]`),
   `approved_data_classes` (PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED) and, optionally, `approved_identities`
-  (`office/atlassian=<account id or email>`, `office/bitbucket=<uuid or username>`). Absent = UNDECIDED and fail
-  closed: no OFFICE target is written, read, verified or registered outside the list; no OFFICE data of an
-  unapproved class reaches a worker route or Claude Max (an OFFICE request without a project has no
-  classification and is refused). Control Center: the three fields under "Ini otorisasi perusahaan untuk
+  (`office/atlassian=<account id or email>`, `office/bitbucket=<uuid or account id>`; a nickname is not unique
+  and is never compared). Absent = UNDECIDED and fail closed: no OFFICE target is written, read, verified or
+  registered outside the list; no OFFICE data of an unapproved class reaches a worker route or Claude Max (an
+  OFFICE request without a project has no classification and is refused). Control Center: the three fields under "Ini otorisasi perusahaan untuk
   OFFICE" on **Keputusan**; CLI: repeatable `--approved-target`, `--approved-data-class` and
   `--approved-identity` on `aeos policy decide --office-authorization`, plus `--office-policy KEY=VALUE` for the
-  overrides. `aeos doctor -c CAN_USE_OFFICE_INTEGRATIONS --functional` compares the stored credential's account
-  with the approved identity (`secret.office_identity`).
+  overrides. Single-quote every value that contains a comma (`--approved-target
+  'confluence:tenant=<site>.atlassian.net,space_id=<id>'`): Windows PowerShell splits an unquoted comma into
+  separate arguments. `aeos doctor -c CAN_USE_OFFICE_INTEGRATIONS --functional` compares the stored credential's
+  account with the approved identity (`secret.office_identity`).
 * **OFFICE worker route eligibility (§23):** after the authorisation lists the route in
   `approved_worker_routes`: Control Center **Keputusan** -> "Kebijakan OFFICE" -> "Jadikan route worker layak
   OFFICE", or `aeos policy office-route <route_key> --as <admin> --credential-ref office/<provider> --rationale

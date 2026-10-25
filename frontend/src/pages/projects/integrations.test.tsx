@@ -235,16 +235,62 @@ describe("PERSONAL deployment target (W6-099) and GitHub Actions pipeline refere
   it("sends the GitHub Actions job names per gate", async () => {
     const fn = await panel("PERSONAL");
     const form = await screen.findByRole("form", { name: /CI — GitHub Actions/ });
-    fireEvent.change(within(form).getByLabelText(/Gate G2/), { target: { value: "backend (ubuntu-latest), backend (macos-latest)" } });
+    fireEvent.change(within(form).getByLabelText(/Gate G2/), { target: { value: "backend (windows-latest), backend (macos-latest)" } });
     await userEvent.click(within(form).getByRole("button", { name: /Simpan GitHub Actions/ }));
     await waitFor(() => expect(putBodies(fn)).toHaveLength(1));
-    expect(putBodies(fn)[0]).toEqual({ provider: "github-actions", purpose: "ci", config: { gate_G2: "backend (ubuntu-latest), backend (macos-latest)" } });
+    expect(putBodies(fn)[0]).toEqual({ provider: "github-actions", purpose: "ci", config: { gate_G2: "backend (windows-latest), backend (macos-latest)" } });
   });
 
   it("OFFICE has no deployment target section (no OFFICE environment in this build)", async () => {
     await panel("OFFICE");
     await screen.findByRole("form", { name: /Kode — Bitbucket/ });
     expect(screen.queryByRole("form", { name: /Deployment target/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("legacy and malformed values", () => {
+  it("drops a legacy target alias (config.repo) on re-save instead of failing with TARGET_IN_CONFIG", async () => {
+    const fn = await panel("PERSONAL", [
+      integration({
+        domain: "PERSONAL",
+        provider: "github-issues",
+        purpose: "issues",
+        root_id: "owner/app",
+        credential_ref: "personal/github",
+        config: { repo: "owner/app", issue_granularity: "feature", milestone_labels: true },
+      }),
+    ]);
+    const form = await screen.findByRole("form", { name: /Tracking kerja — GitHub Issues/ });
+    await userEvent.click(within(form).getByRole("button", { name: /Simpan GitHub Issues/ }));
+    await waitFor(() => expect(putBodies(fn)).toHaveLength(1));
+    expect(putBodies(fn)[0]).toEqual({
+      provider: "github-issues",
+      purpose: "issues",
+      root_id: "owner/app",
+      credential_ref: "personal/github",
+      config: { issue_granularity: "feature", milestone_labels: true },
+    });
+  });
+
+  it("editableConfig keeps only scalar, non-target, non-proof keys", async () => {
+    const { editableConfig } = await import("./IntegrationsPanel");
+    expect(
+      editableConfig({ enabled: true, gate_G1: "Lint", repo: "o/r", parent_id: "1", project_key: "ENG", _verification: {}, root_id_name: "X", nested: { a: 1 } }),
+    ).toEqual({ enabled: true, gate_G1: "Lint" });
+  });
+
+  it("a Bitbucket root that is not workspace/repo_slug cannot be saved and is marked invalid", async () => {
+    const fn = await panel("OFFICE");
+    const form = await screen.findByRole("form", { name: /Kode — Bitbucket/ });
+    const root = within(form).getByLabelText(/Repository Bitbucket/);
+    fireEvent.change(root, { target: { value: "acme" } });
+    expect(within(form).getByRole("button", { name: /Simpan Bitbucket/ })).toBeDisabled();
+    expect(root).toHaveAttribute("aria-invalid", "true");
+    expect(within(form).getByText(/Format tidak valid/)).toBeInTheDocument();
+    fireEvent.change(root, { target: { value: "acme/app" } });
+    expect(root).not.toHaveAttribute("aria-invalid");
+    expect(within(form).getByRole("button", { name: /Simpan Bitbucket/ })).toBeEnabled();
+    expect(putBodies(fn)).toHaveLength(0);
   });
 });
 

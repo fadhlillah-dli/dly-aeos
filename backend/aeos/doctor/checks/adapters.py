@@ -926,8 +926,11 @@ def adapter_project_office_targets(ctx: CheckContext) -> Outcome:
 # provider who the stored credential is (one read-only GET) and compares; a different account FAILS.
 
 BITBUCKET_USER_URL = "https://api.bitbucket.org/2.0/user"
+# Only identifiers that name exactly one account. A Bitbucket nickname is not unique (a personal account often
+# carries the same nickname as the company-issued one, which is precisely the mix-up this check must catch), and the
+# username field is no longer returned by the Bitbucket Cloud API: neither is compared.
 _IDENTITY_FIELDS = {ATLASSIAN_REF: ("accountId", "emailAddress"),
-                    BITBUCKET_REF: ("uuid", "account_id", "nickname", "username")}
+                    BITBUCKET_REF: ("uuid", "account_id")}
 
 
 def _mask(value: str) -> str:

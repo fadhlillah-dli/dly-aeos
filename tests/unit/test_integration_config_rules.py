@@ -78,9 +78,9 @@ def test_deployment_target_root_must_be_an_https_base_url(personal):
 def test_personal_pipeline_reference_is_stored_and_read_by_delivery(personal, db):
     c, pid = personal
     _put(c, pid, {"provider": "github-actions", "purpose": "ci",
-                  "config": {"gate_G1": " lint ,  typecheck", "gate_G2": "backend (ubuntu-latest)", "gate_G5": ""}})
+                  "config": {"gate_G1": " lint ,  typecheck", "gate_G2": "backend (windows-latest)", "gate_G5": ""}})
     ref = pipeline_reference(db, db.get(Project, pid))
-    assert ref == {"G1": ["lint", "typecheck"], "G2": ["backend (ubuntu-latest)"]}
+    assert ref == {"G1": ["lint", "typecheck"], "G2": ["backend (windows-latest)"]}
     assert delivery.pipeline_gates() == PIPELINE_GATES
 
 
@@ -109,3 +109,23 @@ def test_office_bitbucket_code_adapter_can_be_enabled_without_a_deployment_field
                           "config": {"gate_G1": "Lint", "gate_G3": "Integration tests"}})["integration"]
     assert pipes["config"] == {"gate_G1": "Lint", "gate_G3": "Integration tests"}
     assert pipeline_reference(db, db.get(Project, pid)) == {"G1": ["Lint"], "G3": ["Integration tests"]}
+
+
+def test_switching_the_office_bitbucket_adapter_on_and_off_is_audited(office_proj, db):
+    """Enabling OFFICE delivery is now a Control Center action: the audit trail names who switched the adapter on or
+    off (before/after) and which config keys were stored - never their values beyond the registry row."""
+    from sqlalchemy import select
+
+    from aeos.models.audit import AuditEvent
+
+    c, pid = office_proj
+    body = {"provider": "bitbucket", "purpose": "code", "root_id": "acme/app", "credential_ref": "office/bitbucket"}
+    _put(c, pid, {**body, "config": {"enabled": False}})
+    _put(c, pid, {**body, "config": {"enabled": True}})
+    _put(c, pid, {**body, "config": {"enabled": False}})
+    rows = list(db.scalars(select(AuditEvent).where(AuditEvent.action == "portfolio.integration.update",
+                                                    AuditEvent.project_id == pid).order_by(AuditEvent.seq)))
+    assert [r.details["adapter_enabled"] for r in rows] == [{"before": False, "after": False},
+                                                            {"before": False, "after": True},
+                                                            {"before": True, "after": False}]
+    assert all(r.details["config_keys"] == ["enabled"] and r.actor_type == "user" for r in rows)
