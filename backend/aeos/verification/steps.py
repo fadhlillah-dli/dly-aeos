@@ -14,9 +14,10 @@ import importlib.resources
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from aeos.verification.junit import JUnitParseError, JUnitReport, parse_junit
+from aeos.verification.procs import ProcResult
 
 
 @dataclass
@@ -64,6 +65,44 @@ class StepContext:
     basetemp: Callable[[str], list[str]] = lambda name: []
     session: Any = None
     project: Any = None
+    # The verifier's result seal (``aeos.verification.seal``, review W6-054) for steps that run candidate code:
+    # ``seal_step(name)`` opens a step's channel, ``check_seal(step_seal, res, junit, report, label=...)`` cross-checks a
+    # sealed pytest step and records its result (and any tamper finding) on the verification. Both are set by the
+    # verifier only; a context built without them (unit tests with a scripted runner) runs steps unsealed and unnamed.
+    seal_step: Callable[[str], Any] | None = None
+    check_seal: Callable[..., Any] | None = None
+
+
+def run_named(ctx: StepContext, name: str, args: list[str], *, pythonpath: Path, autoload: bool,
+              timeout: float | None = None) -> ProcResult:
+    """A non-pytest step through the runner, named in the verifier's step list (kill-group survivors are attributed
+    to it, ``aeos.verification.runner``)."""
+    kw: dict[str, Any] = {"step": name} if ctx.seal_step is not None else {}
+    return cast(ProcResult, ctx.runner.python(args, pythonpath=pythonpath, autoload=autoload,
+                                              timeout=ctx.timeout if timeout is None else timeout, **kw))
+
+
+def run_pytest(ctx: StepContext, name: str, args: list[str], *, pythonpath: Path, autoload: bool, junit: Path,
+               label: str, runner: Any = None) -> tuple[ProcResult, JUnitReport | None, str | None, list[str]]:
+    """One pytest step that runs candidate code (``args`` start with ``-m pytest``), under the verifier's result seal
+    when the verifier provides it. Returns the process result, the parsed junit report, the parse error and the seal
+    problems: a non-empty list means the step's result cannot be trusted and the step must not pass (a forged or
+    inconsistent result is also recorded as a tamper finding by ``check_seal``: the run is QUARANTINED)."""
+    rn = runner if runner is not None else ctx.runner
+    step_seal = ctx.seal_step(name) if ctx.seal_step is not None else None
+    if step_seal is None:
+        res = rn.python(args, pythonpath=pythonpath, autoload=autoload, timeout=ctx.timeout)
+        report, parse_error = parse_report(junit)
+        return res, report, parse_error, []
+    from aeos.verification.seal import PLUGIN_MODULE
+
+    sealed_args = [*args[:2], "-p", PLUGIN_MODULE, *args[2:]] if args[:2] == ["-m", "pytest"] else args
+    res = rn.python(sealed_args, pythonpath=pythonpath, autoload=autoload, timeout=ctx.timeout, seal=step_seal,
+                    step=name)
+    report, parse_error = parse_report(junit)
+    sealed = ctx.check_seal(step_seal, res, junit, report, label=label) if ctx.check_seal is not None else None
+    problems = list(sealed.problems) if sealed is not None and sealed.status != "PASS" else []
+    return res, report, parse_error, problems
 
 
 def pack_text(name: str) -> str:

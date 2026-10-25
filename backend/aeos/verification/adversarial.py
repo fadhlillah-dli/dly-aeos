@@ -29,7 +29,7 @@ from aeos.verification.steps import (
     StepResult,
     outcomes_for,
     pack_text,
-    parse_report,
+    run_pytest,
 )
 
 SUITE_PACK: dict[str, tuple[str, ...]] = {
@@ -130,10 +130,13 @@ def run(ctx: StepContext) -> StepResult | None:
             args = ["-m", "pytest", *[str(f) for f in files], "-c", str(ctx.ini), "--rootdir", str(ctx.trusted_copy),
                     "--confcutdir", str(ctx.trusted_copy), "-p", "no:cacheprovider", "-q", "--junitxml", str(junit),
                     "-m", MARK_EXPR, *ctx.basetemp("b7")]
-            res = ctx.runner.python(args, pythonpath=ctx.snapshot / "backend", autoload=False, timeout=ctx.timeout)
-            report, parse_error = parse_report(junit)
+            res, report, parse_error, seal_problems = run_pytest(
+                ctx, "adversarial_pack", args, pythonpath=ctx.snapshot / "backend", autoload=False, junit=junit,
+                label="adversarial probes")
             if res.timed_out:
                 reasons.append(f"adversarial probes timed out after {ctx.timeout:.0f}s")
+            elif seal_problems:  # the junit/exit code cannot be trusted (verifier result seal): never a pass
+                reasons.append("adversarial probes: " + "; ".join(seal_problems)[:500])
             elif report is None:
                 blocking.append(f"adversarial probes produced no report ({parse_error}; exit {res.returncode})")
             else:

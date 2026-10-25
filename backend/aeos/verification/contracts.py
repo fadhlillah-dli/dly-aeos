@@ -36,6 +36,7 @@ from aeos.verification.steps import (
     last_json_line,
     outcomes_for,
     pack_text,
+    run_named,
 )
 
 OPENAPI_FILE = re.compile(r"(^|/)(openapi|swagger)[\w.-]*\.(json|ya?ml)$", re.IGNORECASE)
@@ -211,8 +212,10 @@ def _generated_openapi(ctx: StepContext, tree: Path, name: str) -> tuple[dict[st
     rn = ctx.runner
     out = ctx.workdir / "r" / f"openapi-{name}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    res = rn.python(["-c", pack_text("openapi_dump.py"), rn.to_container(str(out))], pythonpath=tree / "backend",
-                    autoload=False, timeout=min(ctx.timeout, 300.0))
+    # named step: the base tree's dump imports reviewed code only (verifier.TRUSTED_ONLY_STEPS), the head's runs
+    # candidate code (a process outliving it is tampering)
+    res = run_named(ctx, f"contract_openapi_{name}", ["-c", pack_text("openapi_dump.py"), rn.to_container(str(out))],
+                    pythonpath=tree / "backend", autoload=False, timeout=min(ctx.timeout, 300.0))
     status = last_json_line(res.stdout)
     if not status.get("ok") or not out.is_file():
         return None, str(status.get("error") or f"no document (exit {res.returncode}, timed out {res.timed_out})")

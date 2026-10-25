@@ -101,6 +101,59 @@ def test_an_added_refusal_test_is_executed_and_its_failure_fails_the_run(db, set
     assert out.status == "FAIL"
     ev = db.scalar(select(EvidenceArtifact).where(EvidenceArtifact.id == neg.evidence_id))
     assert ev is not None and collector.read_json(ev)["tests"][0]["outcome"] == "failed"
+    # the step ran under the verifier's result seal (cluster E2) and its honest failure is consistent with it
+    assert _report(db, out)["result_seal"]["negative_tests"]["status"] == "PASS"
+
+
+# Candidate code imported by the change's own refusal test strips the <failure> from the junit file in an atexit
+# hook and leaves with exit code 0 (os._exit spelled so the static harness-tamper scan does not see it).
+FORGING_ROUTER = r'''
+import atexit
+import os
+import re
+import sys
+
+
+def get_item(i):
+    return i
+
+
+def _forge():
+    if "--junitxml" not in sys.argv:
+        return
+    path = sys.argv[sys.argv.index("--junitxml") + 1]
+    with open(path, encoding="utf-8") as fh:
+        xml = fh.read()
+    xml = re.sub(r"<failure[^>]*>.*?</failure>", "", xml, flags=re.S)
+    xml = re.sub(r'failures="\d+"', 'failures="0"', xml)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    sys.stdout.flush()
+    getattr(os, "_" + "exit")(0)
+
+
+atexit.register(_forge)
+'''
+
+
+def test_a_forged_negative_test_report_is_result_tampering(db, settings, controller, wf):
+    """Integration of E1 and E2: the impact-selected negative-test step runs candidate code, so it is sealed like the
+    trusted suite. A refusal test that fails on the head, with a forged junit and exit code 0, is never a PASS: the
+    step FAILs and the verification is QUARANTINED as result tampering."""
+    world = make_world(db, verifier_policy={**FAST, "negative_tests_required": True, "candidate_tests": False})
+    cand, base, head = make_candidate(settings, world, head_files={
+        "backend/api/router.py": FORGING_ROUTER,
+        "tests/unit/test_router.py": ("import pytest\n\nfrom api.router import get_item\n\n\n"
+                                      "def test_negative_id_is_refused():\n    with pytest.raises(ValueError):\n"
+                                      "        get_item(-1)\n")})
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.checks["negative_tests"].status == "FAIL", out.checks["negative_tests"]
+    assert "result integrity (negative tests)" in out.checks["negative_tests"].summary
+    assert out.status == "QUARANTINED", (out.status, out.reasons)
+    assert any(f["kind"] == "result" and f["path"] == "negative_tests" for f in out.tamper_findings)
+    assert _report(db, out)["result_seal"]["negative_tests"]["status"] == "FAIL"
+    assert out.checks["result_seal"].status == "FAIL"
 
 
 # ------------------------------------------------------------------------------- integration tests (W6-104)
@@ -131,6 +184,7 @@ def test_opted_in_integration_tests_pass_and_fail(db, settings, tmp_path, monkey
     bind_candidate(db, world, cand, base, head)
     out = _verify(db, world)
     assert out.checks["integration_tests"].status == "PASS" and out.status == "PASS", (out.reasons, out.not_proven)
+    assert _report(db, out)["result_seal"]["integration_trusted_acceptance"]["status"] == "PASS"  # sealed (E2)
     (root / "tests" / "acceptance" / "test_tools.py").write_text(INTEGRATION_PASS.replace("assert True", "assert False"),
                                                                  encoding="utf-8")
     world2 = make_world(db, project_key="it-fail", verifier_policy={**FAST, "integration_tests": "required"})
@@ -277,6 +331,11 @@ def test_python_dependency_change_is_verified_in_a_per_candidate_environment(db,
     assert "aeosprobe==1.0.0" in data["distributions"] and data["dependency_set_hash"].startswith("sha256:")
     assert data["dependency_set_hash"] != verifier.dependency_set()["hash"]
     assert ev.environment["candidate_dependency_set_hash"] == data["dependency_set_hash"]
+    # the trusted suite in the candidate environment is sealed like the trusted suite (E2), and its steps are in the
+    # verifier runner's kill-group record
+    report = _report(db, out)
+    assert report["result_seal"]["dependency_env"]["status"] == "PASS"
+    assert {"dependency_env", "dependency_env_listing"} <= {s["step"] for s in report["runner"]["steps"]}
     # a lockfile without hashes is refused before any install: the change stays a blocking NOT-PROVEN
     world2 = make_world(db, project_key="nohash", verifier_policy=FAST,
                         allowed_paths=["backend/**", "tests/unit/**", manifest])
@@ -452,6 +511,7 @@ def test_migration_round_trip_seeds_backs_up_restores_and_rolls_back_with_data(d
     assert rb.status == "PASS", rb
     assert rb.details["seeded_tables"] == 2 and rb.details["restore_ok"] is True
     assert rb.details["data_rollback_ok"] is True and rb.details["data_rollback_target"] == "0001"
+    assert _report(db, out)["result_seal"]["migration_roundtrip"]["status"] == "PASS"  # the pack driver is sealed
     assert out.checks["db_credentials"].status == "NOT_APPLICABLE"  # no deployment target registered
     report = _report(db, out)
     impact = report["impact_checks"]

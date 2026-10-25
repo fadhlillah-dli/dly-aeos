@@ -71,3 +71,15 @@ split was documentation only, and an existing project's inventory never had a te
   there (stated).
 * npm/pip installs reach the package registry/index; on the process runner that egress is not enforced.
 * Provider CI check-runs are not imported into the project baseline.
+
+## Integration note (wave 7 merge with ADR-0107 amendments 7-10)
+
+This ADR and the verifier-isolation amendments of ADR-0107 (result seal, per-step kill groups, neutralisation)
+landed together as `VERIFIER_VERSION` 4. In the merged verifier the impact-selected pytest steps that run candidate
+code - negative tests, integration-marked tests (trusted and candidate), the adversarial probes and the trusted
+suite in the per-candidate environment - run under the same result seal as the trusted suite (a forged or
+inconsistent result FAILs the step and QUARANTINES the run), the migration pack driver seals its result, and the
+per-candidate interpreter's steps are recorded in the verifier runner's kill-group list. Not covered, stated: the
+OpenAPI dump of the head, the UI driver and the distribution listing are named runner steps (kill group) but their
+JSON output is not sealed, and the frontend's npm/vitest/tsc/vite processes and the pip install run outside a kill
+group (a process they leave behind is not detected).

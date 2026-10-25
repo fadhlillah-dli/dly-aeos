@@ -32,13 +32,14 @@ from typing import Any
 from aeos.core.hashing import content_hash
 from aeos.verification import runner as runner_mod
 from aeos.verification.procs import ProcResult, run_process, scrubbed_env
+from aeos.verification.seal import PLUGIN_DIR, StepSeal
 from aeos.verification.steps import (
     StepContext,
     StepEvidence,
     StepResult,
     last_json_line,
     pack_text,
-    parse_report,
+    run_pytest,
 )
 
 # pip's configured default index unless set (tests point this at a local wheel directory with --no-index)
@@ -59,11 +60,22 @@ class VenvRunner(runner_mod.ProcessRunner):
     interpreter: str = ""
     harness: list[Path] = field(default_factory=list)
 
-    def python(self, args: list[str], *, pythonpath: Path, autoload: bool, timeout: float) -> ProcResult:
+    def python(self, args: list[str], *, pythonpath: Path, autoload: bool, timeout: float,
+               seal: StepSeal | None = None, step: str = "") -> ProcResult:
+        """Like ``ProcessRunner.python`` (own kill group, recorded step, the verifier's result-seal plugin first on
+        ``PYTHONPATH`` of a sealed step), with the per-candidate interpreter."""
         wd = self.workdir
-        env = scrubbed_env(pythonpath=[pythonpath, *self.harness], home=wd / "h", tmp=wd / "t", data_dir=wd / "d",
+        paths = [*([wd / PLUGIN_DIR] if seal is not None else []), pythonpath, *self.harness]
+        env = scrubbed_env(pythonpath=paths, home=wd / "h", tmp=wd / "t", data_dir=wd / "d",
                            disable_plugin_autoload=not autoload)
-        return run_process([self.interpreter, *args], cwd=self.cwd(), env=env, timeout=timeout)
+        if seal is not None:
+            env.update(seal.child_env(str(seal.keyfile)))
+        res = run_process([self.interpreter, *args], cwd=self.cwd(), env=env, timeout=timeout, contain=True)
+        self.steps.append({"step": step or (seal.name if seal else ""), "exit_code": res.returncode,
+                           "timed_out": res.timed_out, "duration_s": res.duration_s,
+                           "containment": res.containment, "survivors": list(res.survivors),
+                           "containment_errors": list(res.containment_errors)})
+        return res
 
 
 def requirement_files(snapshot: Path, changed: list[str]) -> tuple[list[str], list[str]]:
@@ -195,9 +207,12 @@ def run(ctx: StepContext, python_pins_changed: bool) -> StepResult | None:
         harness = build_harness(wd / "hx")
     except (OSError, importlib.metadata.PackageNotFoundError) as exc:
         return not_run(f"trusted test harness could not be prepared ({type(exc).__name__})")
-    vr = VenvRunner(workdir=wd, interpreter=str(py), harness=[wd / "hx"], kind="process+candidate-venv")
+    # its steps are recorded in the verifier runner's step list, so a process outliving one reaches the tamper
+    # window's kill-group check like every other candidate step (aeos.verification.runner)
+    vr = VenvRunner(workdir=wd, interpreter=str(py), harness=[wd / "hx"], kind="process+candidate-venv",
+                    steps=ctx.runner.steps)
     listing = last_json_line(vr.python(["-c", pack_text("dist_list.py")], pythonpath=wd / "c", autoload=False,
-                                       timeout=120).stdout)
+                                       timeout=120, step="dependency_env_listing").stdout)
     pins = [p for p in listing.get("pins") or [] if isinstance(p, str)]
     dep_hash = content_hash(sorted(pins))
     if ctx.trusted_copy is None or ctx.ini is None:
@@ -207,11 +222,14 @@ def run(ctx: StepContext, python_pins_changed: bool) -> StepResult | None:
     args = ["-m", "pytest", str(ctx.trusted_copy / "tests" / "acceptance"), "-c", str(ctx.ini), "--rootdir",
             str(ctx.trusted_copy), "--confcutdir", str(ctx.trusted_copy), "-p", "no:cacheprovider", "-q",
             "--junitxml", str(junit), "-m", MARK_EXPR, *ctx.basetemp("b8")]
-    res = vr.python(args, pythonpath=ctx.snapshot / "backend", autoload=False, timeout=ctx.timeout)
-    report, parse_error = parse_report(junit)
+    res, report, parse_error, seal_problems = run_pytest(
+        ctx, "dependency_env", args, pythonpath=ctx.snapshot / "backend", autoload=False, junit=junit,
+        label="trusted suite in the candidate environment", runner=vr)
     problems = []
     if res.timed_out:
         problems.append(f"trusted suite in the candidate environment timed out after {ctx.timeout:.0f}s")
+    elif seal_problems:  # the junit/exit code cannot be trusted (verifier result seal): never a pass
+        problems.extend(seal_problems[:5])
     elif report is None:
         problems.append(f"trusted suite in the candidate environment produced no report ({parse_error}; exit "
                         f"{res.returncode})")

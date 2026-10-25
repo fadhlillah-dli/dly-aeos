@@ -147,7 +147,7 @@ _MODULE_SUFFIXES = (".py", ".pyc", ".pyo", ".pyd", ".so", ".dylib")
 # runner steps that import trusted code only (controller checkout / reviewed base commit + trusted suite). A process
 # outliving any OTHER step - every step that executes candidate code, and any unnamed or future step (fail closed) -
 # is tampering (see _guard_close).
-TRUSTED_ONLY_STEPS = frozenset({"collect_expected", "baseline"})
+TRUSTED_ONLY_STEPS = frozenset({"collect_expected", "baseline", "contract_openapi_base"})
 
 _PREFLIGHT = (
     "import importlib, json, sys\n"
@@ -1460,7 +1460,9 @@ class _Verifier:
             is_platform=bool(self.project.is_platform), role=str(getattr(task, "role_key", "") or ""),
             ini=self.ini, trusted_copy=self.trusted_copy, expected=list(self.expected),
             trusted_cases=dict(self.trusted_cases), base_tree=lambda: self._base_tree(workdir),
-            basetemp=lambda name: self._basetemp(workdir, name), session=self.session, project=self.project)
+            basetemp=lambda name: self._basetemp(workdir, name), session=self.session, project=self.project,
+            # the impact-selected pytest steps run candidate code: sealed like the trusted suite (review W6-054)
+            seal_step=lambda name: seal.StepSeal.new(workdir, name), check_seal=self._check_seal)
 
     def _base_tree(self, workdir: Path) -> Path | None:
         """The recorded base commit materialised once (reused when the trusted collection already did it)."""

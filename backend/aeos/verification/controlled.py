@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from aeos.verification import scope
-from aeos.verification.steps import StepContext, StepEvidence, StepResult, parse_report
+from aeos.verification.steps import StepContext, StepEvidence, StepResult, run_pytest
 
 TEST_FILE_PATTERNS = ("tests/**", "**/test_*.py", "**/*_test.py")
 MARK_EXPR = "not integration and not network"
@@ -170,14 +170,14 @@ def run_negative_tests(ctx: StepContext, risky: list[str]) -> StepResult:
     if ctx.ini is None:
         msg = "negative tests found but the verifier pytest configuration is missing; not executed"
         return StepResult("negative_tests", "NOT_PROVEN", msg, not_proven=[msg], blocking=[msg])
-    rn = ctx.runner
     junit = ctx.workdir / "r" / "negative-junit.xml"
     junit.parent.mkdir(parents=True, exist_ok=True)
     args = ["-m", "pytest", *[t.nodeid(ctx.snapshot) for t in tests], "-c", str(ctx.ini), "--rootdir",
             str(ctx.snapshot), "--confcutdir", str(ctx.snapshot), "-p", "no:cacheprovider", "-q", "--junitxml",
             str(junit), "-m", MARK_EXPR, *ctx.basetemp("b4")]
-    res = rn.python(args, pythonpath=ctx.snapshot / "backend", autoload=True, timeout=ctx.timeout)
-    report, parse_error = parse_report(junit)
+    res, report, parse_error, seal_problems = run_pytest(
+        ctx, "negative_tests", args, pythonpath=ctx.snapshot / "backend", autoload=True, junit=junit,
+        label="negative tests")
     rows: list[dict[str, Any]] = []
     passed = failed = missing = 0
     for t in tests:
@@ -200,6 +200,9 @@ def run_negative_tests(ctx: StepContext, risky: list[str]) -> StepResult:
     if res.timed_out:
         msg = f"negative tests timed out after {ctx.timeout:.0f}s"
         return StepResult("negative_tests", "FAIL", msg, details, [ev], reasons=[msg])
+    if seal_problems:  # the junit/exit code cannot be trusted (verifier result seal): never a pass
+        return StepResult("negative_tests", "FAIL", "; ".join(seal_problems)[:500], details, [ev],
+                          reasons=seal_problems[:5])
     if failed:
         bad = [r["test"] for r in rows if r["outcome"] == "failed"]
         msg = f"{failed} added negative/refusal test(s) failed against the head ({', '.join(bad[:5])})"
@@ -233,7 +236,6 @@ def run_integration_tests(ctx: StepContext, suites: list[str]) -> StepResult | N
     if ctx.ini is None:
         msg = f"integration-marked tests ({mode}) not run: the verifier pytest configuration is missing"
         return StepResult("integration_tests", "NOT_PROVEN", msg, not_proven=[msg], blocking=[msg] if blocking else [])
-    rn = ctx.runner
     runs: list[dict[str, Any]] = []
     targets: list[tuple[str, Path, Path]] = []
     if ctx.trusted_copy is not None and (ctx.trusted_copy / "tests" / "acceptance").is_dir():
@@ -243,20 +245,26 @@ def run_integration_tests(ctx: StepContext, suites: list[str]) -> StepResult | N
         targets.append(("candidate-integration", cand_dir, ctx.snapshot))
     passed = failed = skipped = 0
     skip_reasons: list[str] = []
+    seal_reasons: list[str] = []
     for label, path, root in targets:
         junit = ctx.workdir / "r" / f"integration-{label}.xml"
         junit.parent.mkdir(parents=True, exist_ok=True)
         args = ["-m", "pytest", str(path), "-c", str(ctx.ini), "--rootdir", str(root), "--confcutdir", str(root),
                 "-p", "no:cacheprovider", "-q", "-rs", "--junitxml", str(junit), "-m", INTEGRATION_MARK_EXPR,
                 *ctx.basetemp("b5" if label.startswith("trusted") else "b6")]
-        res = rn.python(args, pythonpath=ctx.snapshot / "backend", autoload=label.startswith("candidate"),
-                        timeout=ctx.timeout)
-        report, parse_error = parse_report(junit)
+        res, report, parse_error, seal_problems = run_pytest(
+            ctx, "integration_" + label.replace("-", "_"), args, pythonpath=ctx.snapshot / "backend",
+            autoload=label.startswith("candidate"), junit=junit, label=f"integration-marked tests ({label})")
         entry: dict[str, Any] = {"suite": label, "exit_code": res.returncode, "timed_out": res.timed_out,
                                  "duration_s": res.duration_s, "parse_error": parse_error,
                                  "report": report.to_dict() if report else None, "output_tail": res.tail(3000)}
         runs.append(entry)
         if res.timed_out:
+            failed += 1
+            continue
+        if seal_problems:  # the junit/exit code cannot be trusted (verifier result seal): counted as a failure
+            entry["seal_problems"] = seal_problems[:5]
+            seal_reasons += seal_problems[:2]
             failed += 1
             continue
         if report is None:
@@ -276,8 +284,8 @@ def run_integration_tests(ctx: StepContext, suites: list[str]) -> StepResult | N
     details = {"passed": passed, "failed": failed, "skipped": skipped, "mode": mode, "blocking": blocking,
                "skipped_tests": skip_reasons[:20]}
     if failed:
-        msg = f"integration-marked tests: {failed} failed"
-        return StepResult("integration_tests", "FAIL", msg, details, [ev], reasons=[msg])
+        msg = f"integration-marked tests: {failed} failed" + (f" ({seal_reasons[0]})" if seal_reasons else "")
+        return StepResult("integration_tests", "FAIL", msg[:600], details, [ev], reasons=[msg[:600]])
     if passed and not skipped and not skip_reasons:
         return StepResult("integration_tests", "PASS", f"{passed} integration-marked test(s) passed with real tools",
                           details, [ev])

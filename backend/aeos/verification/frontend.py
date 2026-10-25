@@ -246,12 +246,14 @@ def run_package_tests(rn: Any, package_dir: Path, workdir: Path) -> dict[str, An
 
 
 def run_ui(rn: Any, dist: Path, out_dir: Path, timeout: float = UI_TIMEOUT, *,
-           options: dict[str, Any] | None = None, backend: Path | None = None) -> dict[str, Any]:
+           options: dict[str, Any] | None = None, backend: Path | None = None, step: str = "") -> dict[str, Any]:
     """The UI state/a11y driver against a built bundle, through the runner (process runner only). With
     ``options["live_app"]`` the driver imports the candidate backend (*backend* on ``PYTHONPATH``)."""
+    named: dict[str, Any] = {"step": step} if step else {}  # the verifier's step list (kill-group survivors)
     res = rn.python(["-c", pack_text("ui_driver.py"), str(dist), str(out_dir), browsers_path(),
                      json.dumps(options) if options else "-"],
-                    pythonpath=backend if backend is not None else out_dir.parent, autoload=False, timeout=timeout)
+                    pythonpath=backend if backend is not None else out_dir.parent, autoload=False, timeout=timeout,
+                    **named)
     data = last_json_line(res.stdout)
     if not data:
         data = {"status": "ERROR", "reason": f"ui driver produced no report (exit {res.returncode}): {res.tail(400)}"}
@@ -374,9 +376,10 @@ def run(ctx: StepContext) -> list[StepResult]:
         dist = fe / "dist"
         if st == "PASS" and (dist / "index.html").is_file():
             platform = (ctx.snapshot / "backend" / "aeos" / "api" / "app.py").is_file() and root == "frontend"
+            named = "ui_states" if ctx.seal_step is not None else ""
             ui = (run_ui(ctx.runner, dist, reports / "ui", backend=ctx.snapshot / "backend",
-                         options={"fixtures": PLATFORM_UI_FIXTURES, "live_app": "aeos"})
-                  if platform else run_ui(ctx.runner, dist, reports / "ui"))
+                         options={"fixtures": PLATFORM_UI_FIXTURES, "live_app": "aeos"}, step=named)
+                  if platform else run_ui(ctx.runner, dist, reports / "ui", step=named))
             results.append(ui_result(ui, reports / "ui"))
         else:
             msg = "UI states/a11y not rendered: no built bundle (dist/index.html)"
