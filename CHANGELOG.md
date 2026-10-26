@@ -12,7 +12,7 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ## [0.1.0] - 2026-10-26
 
-First release of the local-first control plane. It contains pull requests #1 to #11 (#8 was
+First release of the local-first control plane. It contains pull requests #1 to #12 (#8 was
 closed unmerged and replaced by #9). Anything that needs the owner's credentials, a company tenant or a
 tool that was absent on the build host is NOT-PROVEN. The full list and the owner setup steps are
 in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
@@ -124,6 +124,24 @@ in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
   `CODE_OF_CONDUCT.md`, `CITATION.cff`, `.github/CODEOWNERS`, issue forms, a pull request template,
   and `tests/unit/test_repository_hygiene.py`, which keeps them consistent.
 
+- **Control Center for the wave 7 backend (#12).** Screens and forms for:
+  - deployment-target checks (health path, smoke and critical-flow checks, SLI thresholds,
+    rollback criteria, artifact digest);
+  - the staging/production environment decisions;
+  - the promotion block and ruleset enforcement evidence;
+  - verifier impact checks, tamper neutralisation and UI-state screenshots;
+  - the project test baseline;
+  - route request shapes and client terms;
+  - the worker integrity hold and DB-trust alerts;
+  - the worker.route_behaviour threshold.
+
+  Owner decisions still go through confirmed Decision records. VIEWER sees the screens read-only.
+- **Code-host identity and no AI attribution (#12, ADR-0121, owner rule 2026-10-26).** Commits
+  for each code host use the owner's identity for that host, from the local `aeos.yaml` (never
+  committed). The broker refuses a push whose commits carry another identity or an AI attribution
+  trailer. Outbound PR, issue and page text with AI attribution is refused, and the renderers use
+  neutral role labels. Provenance stays inside DLY AEOS's own records.
+
 ### Changed
 
 - **Public repository on GitHub Free (#9, ADR-0115, owner decision 2026-10-25).** Pull requests and
@@ -139,6 +157,12 @@ in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
 - **Licence metadata (this release).** `pyproject.toml` now uses the PEP 639 licence expression
   `LicenseRef-DLY-AEOS-Proprietary` with `license-files = ["LICENSE"]`, and the build needs
   setuptools 77.0.3 or newer. `frontend/package.json` declares `"license": "UNLICENSED"`.
+
+- **Verifier version 5 (#12).** The dependency-set hash covers only the candidate's packages, and the
+  venv and pip steps run isolated. Build-tool steps and the project baseline run inside the kill group
+  with sealed results. Reports and acceptances from version 4 are STALE and need re-verification.
+- **ADR-0003 wording (#12, owner decision 2026-10-26).** The seed-build delegation is stated without
+  naming a tool as author; its scope is unchanged.
 
 ### Removed
 
@@ -160,6 +184,10 @@ in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
   proven container. It now shows the per-domain proof.
 - **macOS `codesign` (#9).** A `codesign` failure that is not a broken signature was reported as
   INVALID and blocked the native bridge. It is now UNKNOWN with the reason.
+- **Detached processes on macOS (#12).** On the macOS Intel CI, a process that left the verifier
+  step's process group and session received the 2-second exit grace, acted, and exited unreported. A
+  detached member is now a survivor at once and is killed, and an empty first sweep is repeated
+  briefly.
 - **Merge integration (#4, #11).** Secret purpose contract, provider vocabulary, approved-pin
   drift, the migration chain order, facade imports, and the shared health-path rule for the
   registry, the checks API and the observer.
