@@ -124,15 +124,22 @@ During the first Mac setup the unseal key reached a chat because the whole termi
 prove the step (the vault was still empty and was re-initialised). The scrollback was the leak path, so the
 presentation changed:
 
-* In an interactive terminal (stdin and stdout are a TTY with VT support; on Windows the console's virtual
-  terminal mode is switched on first), `init` shows the material on the alternate screen and asks the owner
-  to type `stored`. The screen then closes and the keys are not in the scrollback. Ctrl+C or end of input
-  also closes it; `init` then exits 1 and names the reset of the still empty vault. Without such a terminal
-  (pipes, tests, `TERM=dumb`) the material is printed as before, with a warning to clear the terminal.
-* The root token is shown only when setup is incomplete. After a complete setup it is already revoked, so
-  showing it added exposure and no use.
-* The banner, OWNER_ACTIONS 1.7, the setup guides and the unseal runbook say never to paste or screenshot
-  the output into a chat or an AI assistant, and how to reset or rotate after an exposure.
+* `init` needs an interactive terminal (stdin and stdout are a TTY with VT support; on Windows the console's
+  virtual terminal mode is switched on first). Without one it refuses before touching OpenBao, unless the owner
+  passes `--plain-output`, which prints the material to stdout as before, with a warning.
+* In the terminal the material is shown on the alternate screen until the owner types `stored`. No
+  erase-in-display is sent while that screen is active, because iTerm2 copies an erased alternate screen into
+  the scrollback by default. A wrong answer is asked again on the same row, so nothing scrolls off the top, and
+  the rows are wiped with erase-in-line before the screen closes. Ctrl+C or end of input also closes it; `init`
+  then exits 1 and names the reset of the still empty vault.
+* The root token is shown only when setup is incomplete. Then the banner says so, and the prompt asks to store
+  the root token too, because it is needed to finish. After a complete setup it is already revoked.
+* The banner, OWNER_ACTIONS 1.7, the setup guides and the unseal runbook say never to paste or screenshot the
+  output into a chat or an AI assistant, and how to reset after an exposure. The runbook states what an exposed
+  unseal key allows on this listener config: unseal after a restart and decryption of a copy of the storage,
+  not minting a root token (the unauthenticated generate-root endpoint is disabled in OpenBao 2.7).
 
-Proof: unit tests drive both paths through the CLI, and a pty run on macOS arm64 showed the alternate screen
-sequences and the repeated prompt. A real Windows console run is NOT-PROVEN.
+Proof: unit tests drive the refusal, the plain output, the temporary screen (no erase-in-display, one same-row
+re-ask, rows wiped), the early close and the incomplete setup through the CLI. A pty run on macOS arm64 showed
+the byte sequence. The xterm.js alternate buffer (VS Code) keeps no scrollback by its source; iTerm2 behaviour
+is derived from its source; a real iTerm2, Terminal.app and Windows console run is NOT-PROVEN.

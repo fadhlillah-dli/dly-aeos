@@ -12,12 +12,14 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ### Security
 
-- **Unseal keys no longer stay in the terminal.** `aeos vault init` shows the unseal key(s) on a temporary
-  (alternate) terminal screen that closes when the owner types `stored`, so the keys never reach the
-  scrollback and cannot be copied with the rest of the output. A revoked root token is no longer shown at
-  all. The banner and the docs say never to paste the output into a chat or an AI assistant, and the unseal
-  runbook covers an exposed key. Unit tests drive both paths; a macOS pty run showed the alternate
-  screen. A real Windows console run is NOT-PROVEN.
+- **Unseal keys no longer stay in the terminal (#15).** `aeos vault init` shows the unseal key(s) on a
+  temporary (alternate) terminal screen that closes when the owner types `stored`, without erase-in-display or
+  scrolling, so the keys are not written to the scrollback and cannot be copied with the rest of the output.
+  Outside a terminal it refuses before touching OpenBao unless `--plain-output` is passed. A revoked root token
+  is no longer shown; an incomplete setup asks to store it too. The banner and the docs say never to paste the
+  output into a chat or an AI assistant, and the unseal runbook covers an exposed key. Unit tests drive every
+  path (E2) and a macOS pty run showed the byte sequence; real iTerm2, Terminal.app and Windows console runs
+  are NOT-PROVEN.
 
 ## [0.1.0] - 2026-10-26
 

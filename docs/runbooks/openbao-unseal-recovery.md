@@ -30,16 +30,19 @@ operation that needs a secret fails closed while OpenBao is unavailable — that
    tooling) or re-initialise (`aeos vault init`) and re-enter every credential
    ([credential-rotation](credential-rotation.md) step 4). Re-initialising produces new unseal
    keys: store them offline immediately.
-6. **Exposed unseal key.** Anyone who holds the unseal key quorum and can reach the loopback listener
-   can create a new root token, so replace the keys at once.
-   * *No secret stored yet* (`aeos secrets status`, or doctor `secret.status` with 0 refs): reset the
-     vault with `aeos vault stop`, delete `<data>/openbao/raft`, `aeos vault start`, `aeos vault init`.
-     The AppRole credentials in the OS keyring are replaced by the new init.
-   * *Secrets stored*: OpenBao 2.7 requires a token for key rotation (an unauthenticated
-     `sys/rotate/keys` request was refused with 403 on 2026-10-26). Create a root token from the
-     unseal key quorum (`bao operator generate-root`), run `bao operator rotate-keys`, then revoke
-     that root token. AEOS has no command for this yet and the sequence is NOT-PROVEN. Alternatively,
-     re-initialise as in step 5 and re-enter every credential.
+6. **Exposed unseal key.** The unseal key quorum unseals the vault after a restart and, together with a
+   copy of the storage (`<data>/openbao/raft`), decrypts every stored secret. It does not mint a root
+   token on its own: on the AEOS listener config with OpenBao 2.7 the unauthenticated generate-root
+   endpoint is disabled (`sys/generate-root/attempt` answered 405, `sys/generate-root-token/attempt`
+   and `sys/rotate/keys/init` answered 403 without a token on 2026-10-26). Replace the keys anyway.
+   * *Right after `vault init`, before any `secrets set`*: reset the empty vault with `aeos vault stop`,
+     delete `<data>/openbao/raft`, `aeos vault start`, `aeos vault init`. The AppRole credentials in the
+     OS keyring are replaced by the new init. Do not judge emptiness by doctor `secret.status`: it does
+     not count `office/` and `projects/` references.
+   * *Secrets stored*: key rotation needs a token with `sudo` on `sys/rotate/keys`, and AEOS revokes the
+     root token after init, so there is no supported in-place rotation (break-glass with a new root
+     token is an owner decision and NOT-PROVEN). Re-initialise as in step 5 and re-enter every
+     credential.
 7. **Re-run the doctor**: `aeos doctor`; secret-dependent capabilities stay BLOCKED until their
    checks pass.
 

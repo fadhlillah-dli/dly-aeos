@@ -202,14 +202,15 @@ image rebuild and at least weekly ([1.15](#115-recurring-owner-actions)).
 ./aeos doctor --functional -g SECRET     # secret.keyring VERIFIED (allow the Keychain prompt for the dly-aeos service only)
 ```
 
-In a terminal, `vault init` shows the unseal key(s) on a temporary screen. Store them offline (password manager
-or paper), then type `stored`: the screen closes and the keys are not left in the terminal's scrollback. The
-root token is revoked when setup completes, so it is not shown at all; only a `setup incomplete` run shows it,
-so you can finish. Never paste or screenshot the `vault init` output into a chat or an AI assistant. To prove
-the step, paste only `./aeos doctor --functional -g SECRET`, which contains no secret. If an unseal key was
-exposed anyway and the vault holds no secret yet (`secret.status` shows 0 refs), reset it right away:
-`./aeos vault stop`, delete `~/Library/Application Support/DLY-AEOS/openbao/raft`, `./aeos vault start`,
-`./aeos vault init`. With secrets stored, follow the runbook below.
+Run `vault init` in a terminal: it shows the unseal key(s) on a temporary screen. Store them offline (password
+manager or paper), then type `stored`: the screen closes and the keys are not written to the terminal's
+scrollback. Outside a terminal it refuses unless you pass `--plain-output`. The root token is revoked when setup
+completes, so it is not shown at all; only a `setup incomplete` run shows it, and then you store it too so you
+can finish. Never paste or screenshot the `vault init` output into a chat or an AI assistant. To prove the step,
+paste only `./aeos doctor --functional -g SECRET`, which contains no secret. If an unseal key was exposed right
+after `vault init`, before any `secrets set`, reset the empty vault: `./aeos vault stop`, delete
+`~/Library/Application Support/DLY-AEOS/openbao/raft`, `./aeos vault start`, `./aeos vault init`. Once a secret
+is stored, follow the runbook below instead.
 
 After every restart, run `./aeos vault start`, then `./aeos vault unseal`. Unseal keys never go into the
 repository, a config file, chat or AEOS backups. Recovery:

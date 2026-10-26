@@ -131,8 +131,10 @@ holds the bootstrap identity used to reach OpenBao.
 
 Store the unseal keys **offline** (password manager entry or paper), never in the repository,
 config files, chat, screenshots or the AEOS database. They are deliberately excluded from AEOS
-backups (§33). In a console, init shows them on a temporary screen that closes when you type
-`stored`, so they are not left in the scrollback; never paste that output into a chat or an AI
+backups (§33). In a console, init switches on virtual terminal mode and shows them on a temporary
+screen that closes when you type `stored`, so they are not written to the scrollback (NOT-PROVEN on a
+real Windows console; if the mode cannot be switched on, init refuses unless you pass `--plain-output`,
+and then you clear or close the console afterwards). Never paste that output into a chat or an AI
 assistant. Init revokes the root token when setup completes (the controller uses AppRole), so it is
 not shown and there is no root token to keep; only when init reports `setup incomplete` is it shown
 and left valid so you can finish, and then you revoke it. Official downloads: https://openbao.org/downloads/.
