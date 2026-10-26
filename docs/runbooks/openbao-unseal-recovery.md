@@ -4,7 +4,8 @@
 
 After a reboot OpenBao is sealed (doctor: secret store FAILED/UNKNOWN; *Integrasi & Akses* shows
 credential status UNKNOWN), the AppRole/agent token expired, the OpenBao data directory was lost or
-corrupted, or unseal/recovery material must be re-created.
+corrupted, or unseal/recovery material must be re-created, for example because an unseal key was
+exposed (pasted into a chat or an AI assistant, captured in a screenshot, written to a file).
 
 ## Authority
 
@@ -29,7 +30,20 @@ operation that needs a secret fails closed while OpenBao is unavailable — that
    tooling) or re-initialise (`aeos vault init`) and re-enter every credential
    ([credential-rotation](credential-rotation.md) step 4). Re-initialising produces new unseal
    keys: store them offline immediately.
-6. **Re-run the doctor**: `aeos doctor`; secret-dependent capabilities stay BLOCKED until their
+6. **Exposed unseal key.** The unseal key quorum unseals the vault after a restart and, together with a
+   copy of the storage (`<data>/openbao/raft`), decrypts every stored secret. It does not mint a root
+   token on its own: on the AEOS listener config with OpenBao 2.7 the unauthenticated generate-root
+   endpoint is disabled (`sys/generate-root/attempt` answered 405, `sys/generate-root-token/attempt`
+   and `sys/rotate/keys/init` answered 403 without a token on 2026-10-26). Replace the keys anyway.
+   * *Right after `vault init`, before any `secrets set`*: reset the empty vault with `aeos vault stop`,
+     delete `<data>/openbao/raft`, `aeos vault start`, `aeos vault init`. The AppRole credentials in the
+     OS keyring are replaced by the new init. Do not judge emptiness by doctor `secret.status`: it does
+     not count `office/` and `projects/` references.
+   * *Secrets stored*: key rotation needs a token with `sudo` on `sys/rotate/keys`, and AEOS revokes the
+     root token after init, so there is no supported in-place rotation (break-glass with a new root
+     token is an owner decision and NOT-PROVEN). Re-initialise as in step 5 and re-enter every
+     credential.
+7. **Re-run the doctor**: `aeos doctor`; secret-dependent capabilities stay BLOCKED until their
    checks pass.
 
 ## Verification
