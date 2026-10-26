@@ -119,6 +119,8 @@ class FakeModules:
         # per-request route authorisation (broker §23): the real rule is tested with the real routing module
         routing.route_use_problem = lambda session, route: fake.route_use_problem
         routing.client_restriction_problem = lambda route: None  # the real rule: test_w7c1_route_request_shape.py
+        # decision C per request (free OpenRouter WORKER route, PUBLIC task): the real rule is test_routing_free_worker.py
+        routing.free_worker_problem = lambda session, route, run_id=None: None
         mods["aeos.routing.service"] = routing
 
         cost = types.ModuleType("aeos.cost.service")
@@ -249,6 +251,7 @@ def make_plan(db: Session, project: Project, tasks: list[dict[str, Any]]) -> tup
                       input_artifacts=t.get("input_artifacts", []), base_commit=t.get("base_commit"),
                       capability_ttl_seconds=t.get("capability_ttl_seconds", 600), spec_hash=content_hash(spec),
                       **({"role_key": t["role_key"]} if t.get("role_key") else {}),
+                      **({"data_classification": t["data_classification"]} if "data_classification" in t else {}),
                       **({"verifier_policy": t["verifier_policy"]} if "verifier_policy" in t else {}))
         db.add(ts)
         specs.append(ts)
@@ -259,10 +262,12 @@ def make_plan(db: Session, project: Project, tasks: list[dict[str, Any]]) -> tup
 
 def make_route(db: Session, *, key: str = "worker.test-free", provider: str = "openrouter",
                model_id: str = "vendor/test-model:free", status: str = "APPROVED", domains: list[str] | None = None,
-               is_free: str = "YES", endpoint: str | None = None, mode_params: dict | None = None) -> ModelRoute:
+               is_free: str = "YES", endpoint: str | None = None, mode_params: dict | None = None,
+               pricing: dict | None = None, data_classes: list[str] | None = None) -> ModelRoute:
     r = ModelRoute(route_key=key, pool="WORKER", provider=provider, model_id=model_id, status=status,
                    eligible_domains=domains if domains is not None else ["PERSONAL"], is_free=is_free,
-                   endpoint=endpoint, mode_params=mode_params or {})
+                   endpoint=endpoint, mode_params=mode_params or {}, pricing=pricing or {},
+                   allowed_data_classes=data_classes or [])
     db.add(r)
     db.flush()
     if status in ("APPROVED", "TRIAL"):

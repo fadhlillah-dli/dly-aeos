@@ -10,6 +10,11 @@ session_ttl_hours: 12
 session_idle_minutes: 120
 max_upload_bytes: 26214400
 openbao_addr: http://127.0.0.1:8200
+# OpenRouter :free model limits (owner decision C, ADR-0041 amendment 2026-10-26). Per OpenRouter account and shared by
+# every :free model: 20 requests/minute; 50 requests per UTC day, or 1000 once at least 10 credits were purchased (all
+# time). Raise the daily cap only after that purchase; a value above the documented limit is refused at startup.
+# openrouter_free_rpm_limit: 20
+# openrouter_free_daily_limit: 50
 # Canonical MCI_V2 source (owner-supplied, never committed: the platform repository is public). Default:
 # <data dir>/policy/canonical/<file> named by policy/mci-reference.yaml "location: local:<file>". An absolute
 # path here overrides it; a path inside the repository is refused.

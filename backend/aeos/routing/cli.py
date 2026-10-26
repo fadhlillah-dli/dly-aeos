@@ -57,6 +57,9 @@ def list_cmd(pool: str = typer.Option(None, help="Filter by pool"), status: str 
                 flags += " request=REFUSED"
             if service.is_subscription(r):
                 flags += " billing=SUBSCRIPTION"  # plan fee + allowance windows (ADR-0080 amendment 2026-10-26)
+            if service.free_tier.is_decision_c_route(r):
+                # decision C (ADR-0041 amendment 2026-10-26): free OpenRouter WORKER route, PUBLIC data only
+                flags += " decision-c=" + ("INELIGIBLE" if service.free_tier.worker_problems(s, r) else "PUBLIC-ONLY")
             typer.echo(
                 f"{r.pool:<10} {r.status:<10} {r.mode:<6} free={r.is_free:<7} {r.route_key:<46} "
                 f"resolved={r.resolved_version or 'UNKNOWN'} hash={r.config_hash or '-'}{flags}"
@@ -196,6 +199,45 @@ def set_endpoint_cmd(
             typer.echo(f"{route.route_key} endpoint={route.endpoint} hash={route.config_hash}")
             typer.echo("Next: aeos routes activate " + route.route_key + " --mode TRIAL --expected-hash "
                        f"{route.config_hash} ... (a new configuration needs a new TRIAL)")
+    except AeosError as exc:
+        typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command("set-pool")
+def set_pool_cmd(
+    route_key: str = typer.Argument(..., help="An OpenRouter route, e.g. openrouter/cohere/north-mini-code:free"),
+    pool: str = typer.Option(..., help="WORKER (serves PUBLIC worker tasks, decision C) or ARENA (evaluation only)"),
+    as_user: str = typer.Option(..., "--as", help="Your SUPER_ADMIN username"),
+    rationale: str = typer.Option(..., help="Why (min 10 chars)"),
+) -> None:
+    """Move an OpenRouter route between ARENA and WORKER (decision C: free routes, PUBLIC data, PERSONAL only).
+
+    A new configuration: every decision bound to the route (an ARENA TRIAL included) stops applying; activate a new
+    TRIAL afterwards. The catalog refresh never changes a pool."""
+    from aeos.audit import service as audit
+    from aeos.cli import ensure_database
+    from aeos.core.db import session_scope
+    from aeos.core.errors import AeosError
+    from aeos.routing import service
+
+    ensure_database()
+    password = typer.prompt(f"Password for {as_user} (confirms this configuration change)", hide_input=True,
+                            default="", show_default=False)
+    try:
+        with session_scope() as s:
+            uid = _admin_user_id(s, as_user, password)
+            route, change = service.set_route_pool(s, route_key, pool=pool, rationale=rationale)
+            audit.record(s, actor_type="cli", actor_id=uid, action="route.set_pool", target_type="model_route",
+                         target_id=route.route_key, reason=rationale[:500],
+                         details={"pool": route.pool, "previous_pool": change["previous"]["pool"],
+                                  "previous_config_hash": change["previous"]["config_hash"],
+                                  "config_hash": route.config_hash, "needs_new_trial": change["needs_new_trial"]})
+            typer.echo(f"{route.route_key} pool={route.pool} (was {change['previous']['pool']}) "
+                       f"status={route.status} hash={route.config_hash}")
+            typer.echo("Every earlier decision of this route is invalidated. Next: aeos routes activate "
+                       f"{route.route_key} --mode TRIAL --expected-hash {route.config_hash} ... (a new configuration "
+                       "needs a new TRIAL)")
     except AeosError as exc:
         typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
         raise typer.Exit(1) from exc

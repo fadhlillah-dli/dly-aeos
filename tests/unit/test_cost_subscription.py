@@ -473,7 +473,9 @@ def test_probe_runs_on_a_subscription_route_and_is_refused_on_a_per_token_paid_r
         assert len(mock.calls) == 1
     assert out["outcome"] == "REACHABLE" and out["billing"]["allowance_basis"] == "REPORTED"
     assert GO_KEY not in json.dumps(out)
-    paid = ModelRoute(route_key="worker.paid-pro", pool="WORKER", provider="openrouter", model_id="vendor/pro",
+    # ARENA: an OpenRouter route in WORKER is a decision C route, refused before the spend check (a paid one never
+    # serves; ADR-0041 amendment 2026-10-26, test_routing_free_worker.py)
+    paid = ModelRoute(route_key="worker.paid-pro", pool="ARENA", provider="openrouter", model_id="vendor/pro",
                       status="TRIAL", is_free="NO", eligible_domains=["PERSONAL"], allowed_data_classes=["PUBLIC"],
                       pricing={"input_per_mtok": 1.0, "output_per_mtok": 2.0}, pricing_checked_at=utcnow(),
                       mode_params={"credential_ref": "workers/openrouter"})

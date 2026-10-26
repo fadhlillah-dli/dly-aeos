@@ -103,6 +103,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
         _retry_after,
         _upstream_headers,
         _usage_of,
+        rate_limit_info,
         resolve_upstream,
     )
 
@@ -128,6 +129,9 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     spend = _spend_problem(session, route, upstream.base_url)
     if spend:
         raise PolicyDenied(spend[1], code=spend[0])
+    limit = _free_tier_limit(session, route)
+    if limit:
+        raise PolicyDenied(limit[1], code=limit[0])
     from aeos.cost import facade as cost_facade
 
     subscription = cost_facade.subscription_terms(route)[0] is not None
@@ -144,6 +148,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     error: str | None = None
     data: dict[str, Any] = {}
     retry_after: int | None = None
+    rate_limit: dict[str, Any] = {}
     own = client is None
     http = client or httpx.Client(timeout=PROBE_TIMEOUT, follow_redirects=False, trust_env=False)
     try:
@@ -159,6 +164,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
                 error, status = "invalid upstream JSON", 502
         elif status == 429:
             retry_after = _retry_after(resp)
+            rate_limit = rate_limit_info(resp)
     except httpx.TimeoutException:
         error = "timeout"
     except httpx.HTTPError as exc:
@@ -200,7 +206,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
                                "fallback: is Extra Usage ON?) - the route is refused (SUBSCRIPTION_BEYOND_PLAN) until "
                                "you re-activate it")
     if outcome == "RATE_LIMITED":
-        _quota(session, upstream, route_key, retry_after)
+        _quota(session, upstream, route_key, retry_after, rate_limit)
     result["ledger"] = ledger
     ev = _evidence(session, route, result)
     result["evidence_id"] = ev
@@ -233,7 +239,8 @@ def _ledger(session: Session, upstream: Any, route_key: str, prompt: int | None,
         return f"LEDGER_REJECTED:{exc.code}", {}
 
 
-def _quota(session: Session, upstream: Any, route_key: str, retry_after: int | None) -> None:
+def _quota(session: Session, upstream: Any, route_key: str, retry_after: int | None,
+           rate_limit: dict[str, Any] | None = None) -> None:
     from datetime import timedelta
 
     try:
@@ -247,6 +254,33 @@ def _quota(session: Session, upstream: Any, route_key: str, retry_after: int | N
                                     observed_at=now, resets_at=now + timedelta(seconds=wait))
     except ImportError:
         pass
+    if upstream.is_openrouter and str(upstream.model_id).endswith(":free"):
+        # the free-model limits are per OpenRouter account (decision C): every free route waits
+        info = rate_limit or {}
+        try:
+            from aeos.routing import facade as routing
+
+            routing.note_free_tier_rate_limited(session, route_key=route_key,
+                                                retry_after_seconds=info.get("retry_after"),
+                                                headers=info.get("headers"), source="observed-429-probe")
+        except (ImportError, AttributeError):
+            pass
+
+
+def _free_tier_limit(session: Session, route: ModelRoute) -> tuple[str, str] | None:
+    """(code, reason) when an OpenRouter ``:free`` probe would exceed the account's free-model limit (decision C);
+    routing unavailable -> refused for an OpenRouter route (fail closed)."""
+    try:
+        from aeos.routing import facade as routing
+
+        limit = routing.free_tier_limit_problem(session, route)
+    except (ImportError, AttributeError):
+        if route.provider == "openrouter":
+            return "FREE_TIER_LIMIT_REACHED", "routing unavailable: the free-model limit cannot be checked (fail closed)"
+        return None
+    if limit:
+        return str(limit.get("code") or "FREE_TIER_LIMIT_REACHED"), str(limit.get("reason") or "")
+    return None
 
 
 def _evidence(session: Session, route: ModelRoute, result: dict[str, Any]) -> str | None:

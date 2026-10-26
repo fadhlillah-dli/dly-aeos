@@ -57,12 +57,14 @@ WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CO
                         "MODULE_UNAVAILABLE", "VERIFIER_UNAVAILABLE", "SIDE_EFFECT_UNRECONCILED",
                         "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED", "DOCS_NOT_READY",
                         "DOCS_READINESS_UNVERIFIED", "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
-                        "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "SUBSCRIPTION_BEYOND_PLAN"})
+                        "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "SUBSCRIPTION_BEYOND_PLAN", "FREE_TIER_LIMIT_REACHED"})
 # ADR-0080 amendment 2026-10-26, flat-fee routes: SUBSCRIPTION_ALLOWANCE_EXHAUSTED (the 5h window used up) and
 # SUBSCRIPTION_ALLOWANCE_UNKNOWN (an uncountable call in it, at most 5 hours) clear with time, like a quota;
 # SUBSCRIPTION_BEYOND_PLAN (a call billed beyond the plan) clears only when the owner re-activates the route.
+# ADR-0041 amendment 2026-10-26, decision C: FREE_TIER_LIMIT_REACHED (the free OpenRouter WORKER route is at the
+# account's requests/minute or requests/UTC-day limit) clears with time; the task never moves to a route that is not free.
 QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED", "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
-                         "SUBSCRIPTION_ALLOWANCE_UNKNOWN"})
+                         "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "FREE_TIER_LIMIT_REACHED"})
 # BLOCKED reason codes that only an owner action clears (retry_task / quarantine release), never a tick.
 HUMAN_BLOCK_CODES = frozenset({"QUARANTINED", "REVIEW_BLOCKED", "WORKER_BLOCKER"})
 
@@ -749,8 +751,9 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
 
 
 def route_quota_exhausted(session: Session, route_key: str | None) -> str | None:
-    """Observed quota exhaustion (e.g. upstream 429 recorded by the broker) that has not reset yet.
-    §22/§42: wait/back off on the same approved route — never switch to a paid/unapproved one."""
+    """Observed quota exhaustion (e.g. upstream 429 recorded by the broker) that has not reset yet, or - for an
+    OpenRouter ``:free`` model - the account's free-model limit (decision C: requests/minute, requests/UTC day, a 429
+    recorded account-wide). §22/§42: wait/back off on the same approved route — never switch to a paid/unapproved one."""
     from aeos.models.cost import QuotaState
 
     if not route_key:
@@ -762,7 +765,8 @@ def route_quota_exhausted(session: Session, route_key: str | None) -> str | None
         if resets is None or resets > now:
             until = resets.isoformat() if resets else "UNKNOWN (no reset time reported)"
             return f"quota for {route_key} exhausted until {until}"
-    return None
+    route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
+    return ext.free_tier_limit(session, route) if route is not None else None
 
 
 def _quota_wait(session: Session, te: TaskExecution) -> str | None:
@@ -1503,14 +1507,14 @@ def admission_check(session: Session, task_id: str) -> Admission:
         if vp["suite"].get("code") in ("TRUSTED_SUITE_TAMPERED", "TRUSTED_SUITE_MISSING"):
             # a registered suite that no longer verifies would end every attempt BLOCKED after spending budget
             adm.waits.append(("VERIFIER_UNAVAILABLE", f"trusted suite {vp['suite']['code']}: {vp['suite'].get('reason')}"))
-    route, rreasons = ext.select_route(session, task)
+    route, rreasons, rcode = ext.select_route_detail(session, task)
     implementer = agent if agent is not None and agent.harness == "opencode" and \
         agent.agent_key not in REVIEWER_AGENT_KEYS else None
     eval_route = route is not None and route.pool != "WORKER" and ext.eval_served(session, task, route)
     for code, why in agent_configuration_problems(implementer, task, route, eval_route=eval_route):
         adm.blocks.append((code, why))
     if route is None:
-        adm.waits.append(("ROUTE_INELIGIBLE", "; ".join(rreasons)))
+        adm.waits.append((rcode, "; ".join(rreasons)))  # ROUTE_INELIGIBLE, or a free-tier quota wait (decision C)
     else:
         adm.route = route
         if task.domain == "OFFICE":

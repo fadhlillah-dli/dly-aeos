@@ -8,7 +8,11 @@
   matching, eval baselines are not inherited and ``config:routes`` Doctor checks go STALE.
 * Key info: GET /api/v1/key with the key from secret ref ``workers/openrouter`` (falls back to
   ``personal/openrouter``); no key -> quota UNKNOWN. The response ``label`` (it can contain a key
-  fragment) is never stored.
+  fragment) is never stored. ``free_model_daily_requests`` (used/limit/remaining of the UTC day), when reported,
+  lowers the free-model daily cap and marks ``free-daily`` EXHAUSTED when none remain (decision C).
+* The pool of a known route is never changed here (decision C, ADR-0041 amendment 2026-10-26): an OpenRouter route the
+  owner moved into WORKER stays there; a repriced model becomes ``is_free=NO`` with its catalog price (a configuration
+  change: its activation stops applying and decision C refuses it), a model no longer listed becomes MISSING.
 * OpenCode Go (ADR-0041 amendment 2026-10-26): GET the documented Go model list with the key from
   ``workers/opencode-go``; it only sets the availability of the seeded ``opencode-go/*`` routes. Anything but a
   list that was actually read (no key, rejected key, unreachable, unexpected answer) is UNKNOWN, never MISSING.
@@ -21,7 +25,7 @@ import logging
 import shutil
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -33,7 +37,7 @@ from aeos.claude_bridge.env import child_env
 from aeos.core.config import Settings, get_settings
 from aeos.core.errors import AeosError
 from aeos.core.redaction import redact_text
-from aeos.core.timeutil import utcnow
+from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.cost import QuotaState
 from aeos.models.routing import ModelRoute
 from aeos.models.routing_ext import CatalogRefresh
@@ -220,7 +224,19 @@ def parse_key_info(payload: Any) -> dict[str, Any]:
         "is_provisioning_key": data.get("is_provisioning_key"),
         "free_model_daily_limit_documented": (FREE_DAILY_LIMIT_NO_CREDITS if is_free_tier is True
                                               else FREE_DAILY_LIMIT_WITH_CREDITS if is_free_tier is False else None),
+        "free_model_daily_requests": _free_daily_requests(data.get("free_model_daily_requests")),
     }
+
+
+def _free_daily_requests(value: Any) -> dict[str, int] | None:
+    """``free_model_daily_requests`` of the key endpoint (E1, OpenRouter limits page read 2026-10-26: ``used``,
+    ``limit`` and ``remaining`` free-model requests of the current UTC day; the per-minute limit is not reported).
+    Only non-negative integers are kept; anything else is not an observation (None)."""
+    if not isinstance(value, dict):
+        return None
+    out = {k: value[k] for k in ("used", "limit", "remaining")
+           if isinstance(value.get(k), int) and not isinstance(value.get(k), bool) and value[k] >= 0}
+    return out or None
 
 
 def refresh_openrouter_key_info(session: Session, client: httpx.Client) -> dict[str, Any]:
@@ -249,14 +265,23 @@ def refresh_openrouter_key_info(session: Session, client: httpx.Client) -> dict[
     credits.source = "official-key-endpoint"
     credits.observed_at = now
     credits.details = {k: v for k, v in info.items() if k != "credit_state"} | {"secret_ref": ref}
-    if daily.state != "EXHAUSTED" or (daily.resets_at is not None and daily.resets_at <= now):
+    observed = info.get("free_model_daily_requests") or {}
+    if isinstance(observed.get("remaining"), int) and observed["remaining"] <= 0:
+        # the key endpoint reports the free-model daily requests used up (decision C): every free route waits until
+        # the next UTC midnight - never a fallback to another route
+        daily.state, daily.source, daily.observed_at = "EXHAUSTED", "official-key-endpoint", now
+        daily.resets_at = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        daily.details = {"free_model_daily_requests": observed,
+                         "note": "free-model requests of the current UTC day used up per the key endpoint"}
+    elif daily.state != "EXHAUSTED" or (daily.resets_at is not None and ensure_aware(daily.resets_at) <= now):
         daily.state = "UNKNOWN"
         daily.source = "documented-limit"
         daily.observed_at = now
         daily.resets_at = None
         daily.details = {"documented_daily_limit": info["free_model_daily_limit_documented"],
-                         "note": "remaining free-model requests are not reported by the API; becomes EXHAUSTED "
-                                 "after an observed 429 (S12)"}
+                         "free_model_daily_requests": observed or None,
+                         "note": "AEOS counts its own free-model requests (decision C); this state becomes EXHAUSTED "
+                                 "after an observed 429 or when the key endpoint reports none remaining (S12)"}
     session.flush()
     return {"status": "OK", "checked_at": now.isoformat(), "credit_state": credits.state, "secret_ref": ref,
             "is_free_tier": info["is_free_tier"], "documented_free_daily_limit": info["free_model_daily_limit_documented"]}

@@ -104,3 +104,32 @@ def supervisor_configuration(session: Session, model: str) -> dict[str, object] 
     from aeos.routing.service import supervisor_configuration as impl
 
     return impl(session, model)
+
+
+def free_worker_problem(session: Session, route: ModelRoute, *, run_id: str | None = None) -> str | None:
+    """Decision C (additive, ADR-0041 amendment 2026-10-26): why a free OpenRouter WORKER route may not serve this
+    request (None = not such a route, or allowed) - its eligibility rules and, with *run_id*, that the run's TaskSpec
+    is PUBLIC (an unreadable TaskSpec is refused). The broker checks it on every request."""
+    from aeos.routing.service import free_worker_problem as impl
+
+    return impl(session, route, run_id=run_id)
+
+
+def free_tier_limit_problem(session: Session, route: ModelRoute) -> dict[str, object] | None:
+    """The account-wide OpenRouter free-model limit (requests/minute, requests/UTC day, an observed 429) that refuses a
+    call of *route* now: ``code`` FREE_TIER_LIMIT_REACHED, ``reason``, ``retry_after_seconds``; None when the route is
+    not an OpenRouter ``:free`` model or no limit is reached (additive, decision C)."""
+    from aeos.routing.free_tier import route_limit_problem as impl
+
+    return impl(session, route)
+
+
+def note_free_tier_rate_limited(session: Session, *, route_key: str, retry_after_seconds: int | None,
+                                headers: dict[str, str] | None = None, run_id: str | None = None,
+                                source: str = "observed-429") -> dict[str, object]:
+    """Record a 429 OpenRouter answered for a ``:free`` model as an account-wide quota state (every free route waits;
+    additive, decision C). ``retry_after_seconds`` None = the provider sent no Retry-After."""
+    from aeos.routing.free_tier import note_rate_limited as impl
+
+    return impl(session, route_key=route_key, retry_after_seconds=retry_after_seconds, headers=headers, run_id=run_id,
+                source=source)

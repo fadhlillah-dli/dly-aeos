@@ -27,7 +27,12 @@ Guarantees:
   (the cost module estimates it from the tokens, or from the request's upper bound - clamped ``max_tokens`` plus the
   prompt size - when the provider reports no usage) - never the reservation as dollars. A provider dollar figure above
   ``MAX_PROVIDER_USD`` is unreported. A call billed beyond the plan (a charge, a non-plan ``billing_source``) refuses
-  the route on every later request until the owner re-activates it (``SUBSCRIPTION_BEYOND_PLAN``, fail closed).
+  the route on every later request until the owner re-activates it (``SUBSCRIPTION_BEYOND_PLAN``, fail closed);
+* a free OpenRouter WORKER route (owner decision C, ADR-0041 amendment 2026-10-26) serves only a run whose TaskSpec is
+  PUBLIC and only while it meets decision C (``FREE_WORKER_ROUTE_INELIGIBLE``, 403); a call of any OpenRouter ``:free``
+  model over the account's free-model limit (requests/minute, requests/UTC day, a recorded 429) is refused with 429 +
+  Retry-After (``FREE_TIER_LIMIT_REACHED``) before it counts against the grant - never sent upstream, never another
+  route. An upstream 429 of a ``:free`` model is also recorded account-wide (every free route waits).
 """
 
 from __future__ import annotations
@@ -454,6 +459,16 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
         if cap is not None and (used > cap or (cap > 0 and used >= cap)):
             _deny(s, grant, "CAP_EXCEEDED", "cost cap exhausted")
             raise ProxyError(403, "CAP_EXCEEDED", "cost cap for this run is exhausted")
+        # decision C (ADR-0041 amendment 2026-10-26), before the request counts against the grant: a free OpenRouter
+        # WORKER route serves PUBLIC tasks only, and every OpenRouter :free call respects the account's free-model limits
+        refused = free_tier_refusal(s, grant, models[exposed])
+        if refused is not None:
+            status, code, message, retry = refused
+            if status == 429:
+                _rate_limited_locally(s, grant, models[exposed], code, message, retry)
+            else:
+                _deny(s, grant, code, message)
+            raise ProxyError(status, code, message, retry_after=retry)
         if not grants.consume_request(s, grant.id):
             s.rollback()
             fresh = s.get(CapabilityGrant, grant.id)
@@ -500,6 +515,54 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
                         grant.max_tokens)
 
 
+FREE_WORKER_INELIGIBLE = "FREE_WORKER_ROUTE_INELIGIBLE"
+
+
+def free_tier_refusal(s: Any, grant: CapabilityGrant, route_key: str) -> tuple[int, str, str, int | None] | None:
+    """(status, code, message, retry-after) when decision C refuses this request; None otherwise (ADR-0041 amendment
+    2026-10-26). A free OpenRouter WORKER route must still meet its eligibility rules and the run's TaskSpec must be
+    PUBLIC (403 ``FREE_WORKER_ROUTE_INELIGIBLE``); a call of an OpenRouter ``:free`` model over the account's
+    free-model limit is refused with 429 + Retry-After (``FREE_TIER_LIMIT_REACHED``) - never sent upstream, never
+    another route. Routing unavailable -> an OpenRouter route is refused (fail closed)."""
+    route = s.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
+    if route is None:
+        return None  # resolve_upstream refuses it (ROUTE_UNKNOWN)
+    try:
+        from aeos.routing import facade as routing
+
+        problem = routing.free_worker_problem(s, route, run_id=grant.run_id)
+        limit = None if problem else routing.free_tier_limit_problem(s, route)
+    except (ImportError, AttributeError):
+        if route.provider == "openrouter":
+            return 403, FREE_WORKER_INELIGIBLE, "routing module unavailable: decision C cannot be checked", None
+        return None
+    if problem:
+        return 403, FREE_WORKER_INELIGIBLE, f"free OpenRouter WORKER route refused: {problem}", None
+    if limit:
+        retry = limit.get("retry_after_seconds")
+        return (429, str(limit.get("code") or "FREE_TIER_LIMIT_REACHED"), str(limit.get("reason") or ""),
+                int(retry) if isinstance(retry, int) else DEFAULT_RETRY_AFTER)
+    return None
+
+
+def _rate_limited_locally(s: Any, grant: CapabilityGrant, route_key: str, code: str, message: str,
+                          retry_after: int | None) -> None:
+    """A request the broker refused at the free-model limit: recorded RATE_LIMITED (the executor stops a run after
+    repeated rate limits and the task waits) but never forwarded, so it carries no upstream model and does not count
+    as a request OpenRouter saw."""
+    s.add(BrokerRequest(grant_id=grant.id, run_id=grant.run_id, project_id=grant.project_id, domain=grant.domain,
+                        route_key=route_key, outcome="RATE_LIMITED", status_code=429, retry_after_seconds=retry_after,
+                        error_summary=redact_text(f"{code}: {message}")[:500]))
+    run = s.get(WorkerRun, grant.run_id)
+    if run is not None:
+        run.quota_status = "RATE_LIMITED"
+        run.current_action = f"WAITING_QUOTA: {code} (retry-after {retry_after}s)"
+    audit.record(s, actor_type="worker", actor_id=f"run:{grant.run_id}", action="broker.model_proxy.deny",
+                 result="DENIED", target_type="capability_grant", target_id=grant.id, project_id=grant.project_id,
+                 domain=grant.domain, reason=f"{code}: {message}"[:500])
+    s.commit()
+
+
 def _eval_pools(s: Any, grant: CapabilityGrant, route_key: str) -> tuple[str, ...] | None:
     """The pools this request may be served from. Ordinary grants: ``SERVED_POOLS`` (None = default). A grant issued
     with an evaluation scope (``grants.EVAL_SCOPE_KEY``) for *route_key* additionally serves that route's eval-only pool
@@ -528,7 +591,8 @@ def _deny(s: Any, grant: CapabilityGrant, code: str, message: str, *, commit: bo
 
 def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None, completion: int | None = None,
             cost: float | None = None, model_resolved: str | None = None, latency_ms: int | None = None,
-            retry_after: int | None = None, error: str = "", billing: dict[str, Any] | None = None) -> None:
+            retry_after: int | None = None, error: str = "", billing: dict[str, Any] | None = None,
+            rate_limit: dict[str, Any] | None = None) -> None:
     with session_factory()() as s:
         req = s.get(BrokerRequest, p.request_id)
         if req is not None:
@@ -587,7 +651,7 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
                 run.current_action = f"WAITING_QUOTA: upstream 429 (retry-after {retry_after}s)"
             run.usage_summary = us
         if outcome == "RATE_LIMITED":
-            _record_quota(s, p, retry_after or DEFAULT_RETRY_AFTER)
+            _record_quota(s, p, retry_after or DEFAULT_RETRY_AFTER, rate_limit)
         events.emit(s, source="broker", kind="run.model_call", entity_type="run", entity_id=p.run_id,
                     run_id=p.run_id, project_id=p.project_id, domain=p.domain, mode=run.mode if run else "LIVE",
                     payload={"route_key": p.upstream.route_key, "outcome": outcome, "status": status,
@@ -646,9 +710,11 @@ def _record_ledger(s: Any, p: Prepared, run: WorkerRun | None, *, prompt: int | 
     return "RECORDED"
 
 
-def _record_quota(s: Any, p: Prepared, retry_after: int) -> None:
+def _record_quota(s: Any, p: Prepared, retry_after: int, rate_limit: dict[str, Any] | None = None) -> None:
     """Observed 429 -> QuotaState EXHAUSTED for this provider/route through the cost module (the single
-    owner of quota state). No other route is tried (§42, §50 "Free quota habis / 429")."""
+    owner of quota state). No other route is tried (§42, §50 "Free quota habis / 429"). An OpenRouter ``:free`` model
+    is limited per account (shared by every ``:free`` model, decision C): the 429 is also recorded account-wide, so
+    every free OpenRouter route waits."""
     from aeos.cost import facade as cost_facade
 
     now = utcnow()
@@ -660,6 +726,37 @@ def _record_quota(s: Any, p: Prepared, retry_after: int) -> None:
             observed_at=now, resets_at=now + timedelta(seconds=retry_after))
     except ImportError:
         log.warning("cost module unavailable: 429 for %s not recorded as quota state", p.upstream.route_key)
+    if p.upstream.is_openrouter and p.upstream.model_id.endswith(":free"):
+        info = rate_limit or {}
+        try:
+            from aeos.routing import facade as routing
+
+            routing.note_free_tier_rate_limited(s, route_key=p.upstream.route_key,
+                                                retry_after_seconds=info.get("retry_after"),
+                                                headers=info.get("headers"), run_id=p.run_id)
+        except (ImportError, AttributeError):
+            log.warning("routing unavailable: free-model 429 for %s recorded on the route only", p.upstream.route_key)
+
+
+def reported_retry_after(resp: httpx.Response) -> int | None:
+    """The Retry-After the upstream sent (seconds, 1..86400), or None when it sent none (or nothing readable)."""
+    raw = (resp.headers.get("retry-after") or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(1, min(int(float(raw)), 86400))
+    except (ValueError, OverflowError):  # "nan", "inf" or text: not a readable Retry-After
+        return None
+
+
+def rate_limit_info(resp: httpx.Response) -> dict[str, Any]:
+    """What a 429 says about the limit it hit: the reported Retry-After and the ``X-RateLimit-*`` headers."""
+    headers: dict[str, str] = {}
+    for name in ("x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset"):
+        value = resp.headers.get(name)
+        if value is not None:
+            headers[name] = redact_text(str(value))[:32]
+    return {"retry_after": reported_retry_after(resp), "headers": headers}
 
 
 def _retry_after(resp: httpx.Response) -> int:
@@ -767,7 +864,7 @@ async def _upstream_failure(p: Prepared, resp: httpx.Response, started: float) -
     if resp.status_code == 429:
         ra = _retry_after(resp)
         await run_in_threadpool(_finish, p, status=429, outcome="RATE_LIMITED", latency_ms=latency, retry_after=ra,
-                                error=text)
+                                error=text, rate_limit=rate_limit_info(resp))
         return _error(429, "UPSTREAM_RATE_LIMITED",
                       "upstream quota/rate limit reached; no fallback model is used", retry_after=ra)
     await run_in_threadpool(_finish, p, status=resp.status_code, outcome="UPSTREAM_ERROR", latency_ms=latency, error=text)
