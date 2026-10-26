@@ -197,8 +197,28 @@ def _load_result_json(stdout: str) -> dict[str, Any] | None:
     return None
 
 
+_VALID_SCHEMAS: set[str] = set()
+_MAX_VALID_SCHEMAS = 256
+
+
 def validate_schema(schema: dict[str, Any]) -> None:
-    Draft202012Validator.check_schema(schema)
+    """Raise SchemaError for an invalid JSON Schema. A schema already proven valid (identical canonical JSON) is not
+    re-checked; failures are never cached, and a schema that does not round-trip through JSON exactly is always
+    checked."""
+    key: str | None
+    try:
+        key = json.dumps(schema, sort_keys=True, allow_nan=False)
+        if json.loads(key) != schema:  # tuples, int keys, subclasses ... are not exactly representable: no cache
+            key = None
+    except (TypeError, ValueError, RecursionError):
+        key = None
+    if key is not None and key in _VALID_SCHEMAS:
+        return
+    Draft202012Validator.check_schema(schema)  # always validate the original object
+    if key is not None:
+        if len(_VALID_SCHEMAS) >= _MAX_VALID_SCHEMAS:
+            _VALID_SCHEMAS.clear()
+        _VALID_SCHEMAS.add(key)
 
 
 def schema_errors(schema: dict[str, Any], instance: Any) -> list[str]:

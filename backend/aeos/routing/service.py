@@ -426,15 +426,15 @@ def current_policy_version() -> str | None:
     """Version of the canonical policy in force (hash of ``policy/*.yaml``). Decisions are deliberately not
     part of it: an owner EXCEPTION/BUDGET elsewhere is not a policy change of the route. None = unknown."""
     try:
-        from aeos.policy.snapshot import load_policy_files
+        from aeos.policy.snapshot import policy_file_hashes
     except (ImportError, ModuleNotFoundError):
         return None
     try:
-        files = load_policy_files()
+        hashes = policy_file_hashes()
     except Exception:  # pragma: no cover - fail closed (an unreadable policy is not a known version)
         log.exception("policy files could not be read")
         return None
-    return "pol-" + content_hash({name: entry.get("sha256") for name, entry in sorted(files.items())})[7:23]
+    return "pol-" + content_hash(dict(sorted(hashes.items())))[7:23]
 
 
 def current_worker_runtime() -> dict[str, str | None]:

@@ -45,6 +45,7 @@ def normalize(path: str) -> str:
     return "/".join(parts)
 
 
+@lru_cache(maxsize=1024)
 def normalize_pattern(pattern: str) -> str:
     trailing = pattern.strip().replace("\\", "/").endswith("/")
     p = normalize(pattern)
@@ -86,9 +87,27 @@ def matches(path: str, pattern: str, *, case_insensitive: bool = False) -> bool:
         return False
 
 
-def matches_any(path: str, patterns: list[str] | tuple[str, ...], *, case_insensitive: bool = False) -> str | None:
+@lru_cache(maxsize=64)
+def _compiled(patterns: tuple[str, ...], ci: bool) -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """(pattern, regex) in order for every pattern that normalizes; a pattern that raises ScopePathError never matches."""
+    out: list[tuple[str, re.Pattern[str]]] = []
     for pat in patterns:
-        if matches(path, pat, case_insensitive=case_insensitive):
+        try:
+            out.append((pat, _regex(normalize_pattern(pat), ci)))
+        except ScopePathError:
+            continue
+    return tuple(out)
+
+
+def matches_any(path: str, patterns: list[str] | tuple[str, ...], *, case_insensitive: bool = False) -> str | None:
+    """The first pattern (in order) that ``path`` matches, else None. Same result as looping ``matches``, but the
+    path is normalized once and the patterns are compiled once per distinct pattern set."""
+    try:
+        norm = normalize(path)
+    except ScopePathError:
+        return None
+    for pat, rx in _compiled(tuple(patterns), case_insensitive):
+        if rx.match(norm):
             return pat
     return None
 

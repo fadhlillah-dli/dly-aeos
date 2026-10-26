@@ -46,6 +46,15 @@ def policy_dir() -> Path:
     return repo_root() / "policy"
 
 
+def policy_file_hashes() -> dict[str, str]:
+    """``{file name: sha256}`` of every ``policy/*.yaml`` without parsing any YAML (the same hashes as
+    ``load_policy_files``; an unreadable file raises OSError)."""
+    root = policy_dir()
+    if not root.is_dir():
+        return {}
+    return {path.name: file_sha256(path) for path in sorted(root.glob("*.yaml"))}
+
+
 def load_policy_files() -> dict[str, dict[str, Any]]:
     """Every ``policy/*.yaml`` with its file hash and parsed content (parse errors are recorded)."""
     out: dict[str, dict[str, Any]] = {}
