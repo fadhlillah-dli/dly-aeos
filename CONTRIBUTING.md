@@ -51,6 +51,7 @@ python -m ruff check backend tests scripts
 python -m mypy --platform darwin
 python -m mypy --platform win32
 python scripts/secret_scan.py
+python scripts/changelog.py --check
 python -m pytest -q -n auto -m "not integration and not network"
 cd frontend && npm ci && npx tsc -b --noEmit && npm test && npm run build
 ```
@@ -127,6 +128,8 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
   checks are real jobs: `bootstrap [G2] (<os>)`, `frontend [G1,G3]` and
   `browser e2e + a11y smoke [G3]`. The supply-chain report is `[NO-GATE]`. Keep these names when you
   change the workflow; `tests/unit/test_ci_gates.py` checks them.
+- **Changelog check.** The job `browser e2e + a11y smoke [G3]` first runs
+  `python scripts/changelog.py --check` (stdlib only, a few seconds).
 - **Concurrency.** A new push to a pull request cancels that pull request's older run. Runs on `main`
   are never cancelled, so every merge commit gets its own CI result.
 - **Caches.** The pip, npm and Playwright browser downloads are cached, keyed on `requirements.lock`,
@@ -169,8 +172,11 @@ is added or dropped.
 - **Migrations stay linear.** Alembic has one chain and one head. `aeos db upgrade` takes a backup
   first.
 - **Docs follow the code.** Update the ADRs (`docs/decisions`), the
-  [coverage matrix](docs/IMPLEMENTATION_COVERAGE.md), the runbooks and the `[Unreleased]` section
-  of the [changelog](CHANGELOG.md).
+  [coverage matrix](docs/IMPLEMENTATION_COVERAGE.md) and the runbooks.
+- **Changelog by fragment.** Add one fragment file under [changelog.d/](changelog.d/README.md)
+  (`changelog.d/<short-slug>.md`); do not edit [CHANGELOG.md](CHANGELOG.md) in a pull request. Two pull
+  requests that edit `[Unreleased]` conflict on every merge. `python scripts/changelog.py --check` validates
+  the fragments, and CI runs it.
 - **Merge to `main` is the owner's decision.** It happens only through a pull request that passes
   the required CI checks under the ruleset on `main` (no force-push, no deletion). Any delegation of
   that authority is an owner decision recorded as an ADR in `docs/decisions`. DLY AEOS workers never
@@ -180,8 +186,9 @@ is added or dropped.
 
 1. Set the new version in `pyproject.toml`, `frontend/package.json` (and the root entry of
    `frontend/package-lock.json`) and `CITATION.cff`, together with `date-released`.
-2. In `CHANGELOG.md`, move the `[Unreleased]` entries under a new version heading, and add its
-   compare/tag link.
+2. Run `python scripts/changelog.py --assemble` (add `--dry-run` first to see it) to move the fragments
+   into `[Unreleased]` of `CHANGELOG.md`. Then move the `[Unreleased]` entries under a new version heading,
+   and add its compare/tag link.
 3. Write the release notes in `docs/releases/vX.Y.Z.md`.
 4. After the release pull request is merged, tag the merge commit `vX.Y.Z` and publish the GitHub
    Release with the release notes as its body.

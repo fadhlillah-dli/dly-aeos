@@ -7,9 +7,11 @@ carry an AI-assistant attribution line: commits and files carry no attribution (
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -90,8 +92,9 @@ def test_citation_cff_parses_with_the_required_keys_and_the_project_version():
     assert cff["keywords"] and all(isinstance(k, str) and k for k in cff["keywords"])
 
 
-def test_changelog_has_unreleased_and_the_current_version_with_its_release_link():
-    log = _read("CHANGELOG.md")
+def assert_changelog_structure(log: str) -> None:
+    """The CHANGELOG.md structure test. Fragments (changelog.d/) are moved into [Unreleased] by
+    ``scripts/changelog.py --assemble``, so an assembled file must pass exactly this."""
     assert "keepachangelog.com/en/1.1.0" in log and "semver.org" in log
     assert re.search(r"^## \[Unreleased\]$", log, re.M)
     m = re.search(rf"^## \[{re.escape(VERSION)}\] - (\d{{4}}-\d{{2}}-\d{{2}})$", log, re.M)
@@ -99,6 +102,32 @@ def test_changelog_has_unreleased_and_the_current_version_with_its_release_link(
     assert m.group(1) == yaml.safe_load(_read("CITATION.cff"))["date-released"], "release dates disagree"
     assert f"[{VERSION}]: {REPO_URL}/releases/tag/v{VERSION}" in log
     assert re.search(r"^\[unreleased\]: \S+/compare/v" + re.escape(VERSION) + r"\.\.\.HEAD$", log, re.M | re.I)
+    assert _changelog_script().structure_problems(log) == []
+
+
+def _changelog_script():
+    spec = importlib.util.spec_from_file_location("aeos_script_changelog", ROOT / "scripts" / "changelog.py")
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_changelog_has_unreleased_and_the_current_version_with_its_release_link():
+    assert_changelog_structure(_read("CHANGELOG.md"))
+
+
+def test_changelog_fragments_are_valid_and_count_as_part_of_unreleased():
+    # A pull request adds changelog.d/<slug>.md instead of editing CHANGELOG.md; until the release assembles them
+    # they ARE the pending [Unreleased] entries, so each must be well formed.
+    script = _changelog_script()
+    files, problems = script.check_fragments(ROOT)
+    assert problems == [], problems
+    assert (ROOT / "changelog.d" / "README.md").is_file()
+    assert all(f.suffix == ".md" and f.name != "README.md" for f in files)
+    for rel in ("CONTRIBUTING.md", ".github/PULL_REQUEST_TEMPLATE.md"):
+        assert "changelog.d/" in _read(rel), f"{rel} must tell contributors to add a fragment"
 
 
 def test_release_notes_exist_for_the_current_version():
