@@ -184,3 +184,44 @@ def test_worker_runtime_endpoints(personal_client):
     assert personal_client.get("/api/worker-runtime/engine").status_code == 200
     assert personal_client.get("/api/worker-runtime/containment").json()["items"] == []
     assert personal_client.post("/api/worker-runtime/containment", json={"kind": "vm"}).status_code == 422
+
+
+def test_summary_states_the_integrity_hold_scoped_to_the_domain(personal_client, db):
+    """Wave 7b UI: the Control Center shows the host-wide hold from the summary (code + details), and another
+    domain's run id and findings reach this domain's view only as a count (AGENTS.md invariant 9)."""
+    from aeos.worker_runtime import integrity
+
+    hold = integrity.raise_hold(db, source="worker run", subject_id="office-run-1", project_id="office-project",
+                                domain="OFFICE",
+                                findings=[{"kind": "db", "path": "decisions:office-decision-1", "change": "added"}])
+    db.commit()
+    sb = personal_client.get("/api/workforce/summary").json()["sandbox"]
+    assert sb["status"] == "BLOCKED" and sb["code"] == "INTEGRITY_HOLD" and sb["kind"] is None
+    shown = sb["integrity_hold"]
+    assert shown["id"] == hold["id"] and shown["subject_id"] is None and shown["findings"] == []
+    assert shown["other_domain_findings"] == 1
+    assert "office-run-1" not in str(sb) and "office-decision-1" not in str(sb)
+    assert hold["id"] in sb["remedies"][0] and "<PERSONAL|OFFICE>" in sb["remedies"][0]
+
+
+def test_summary_without_a_hold_has_no_hold_code(personal_client):
+    sb = personal_client.get("/api/workforce/summary").json()["sandbox"]
+    assert sb["code"] != "INTEGRITY_HOLD" and sb["integrity_hold"] is None
+
+
+def test_run_detail_model_calls_state_the_reasoning_levels(personal_client, db):
+    """ADR-0041 amendment 2026-10-25: the run's model-call view shows the level the broker sent and the level the
+    worker asked for (dropped, never forwarded); a row recorded before the columns existed stays None (UNKNOWN)."""
+    from aeos.models.broker_ext import BrokerRequest
+
+    run = WorkerRun(project_id="p", domain="PERSONAL", execution_status="RUNNING", mode="LIVE")
+    db.add(run)
+    db.flush()
+    db.add(BrokerRequest(grant_id="g", run_id=run.id, project_id="p", domain="PERSONAL", route_key="worker.r",
+                         outcome="OK", prompt_tokens=10, completion_tokens=5, reasoning_effort="NOT_SENT",
+                         reasoning_requested="high"))
+    db.add(BrokerRequest(grant_id="g", run_id=run.id, project_id="p", domain="PERSONAL", route_key="worker.r",
+                         outcome="OK", prompt_tokens=10, completion_tokens=5))
+    db.commit()
+    calls = personal_client.get(f"/api/runs/{run.id}").json()["model_calls"]
+    assert {(c["reasoning_effort"], c["reasoning_requested"]) for c in calls} == {("NOT_SENT", "high"), (None, None)}

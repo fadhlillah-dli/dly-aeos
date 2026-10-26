@@ -226,7 +226,10 @@ def run_detail(session: Session, run: WorkerRun) -> dict[str, Any]:
     calls = [{"at": _iso(c.created_at), "route_key": c.route_key, "outcome": c.outcome, "status": c.status_code,
               "prompt_tokens": c.prompt_tokens, "completion_tokens": c.completion_tokens,
               "cost_usd": float(c.cost_usd) if c.cost_usd is not None else "UNKNOWN",
-              "model_resolved": c.model_resolved, "latency_ms": c.latency_ms}
+              "model_resolved": c.model_resolved, "latency_ms": c.latency_ms,
+              # ADR-0041 amendment 2026-10-25: the level the broker sent (NOT_SENT = provider default) and the level
+              # the worker asked for, which is never forwarded (None = not recorded / nothing asked)
+              "reasoning_effort": c.reasoning_effort, "reasoning_requested": c.reasoning_requested}
              for c in session.scalars(select(BrokerRequest).where(BrokerRequest.run_id == run.id)
                                       .order_by(BrokerRequest.created_at).limit(200))]
     spec = None
@@ -505,6 +508,9 @@ def summary(session: Session, *, domain: str, project_ids: list[str] | None, loo
         "cost": cost_summary(session, domain=domain, project_ids=project_ids),
         "sandbox": {"status": sb["status"], "kind": sb.get("kind"), "reasons": sb.get("reasons", []),
                     "remedies": sb.get("remedies", []), "residual_risks": sb.get("residual_risks", []),
-                    "levels": sb.get("capabilities")},
+                    "levels": sb.get("capabilities"),
+                    # wave 7 (W6-000/005): the host-wide integrity hold (code INTEGRITY_HOLD), already scoped to
+                    # this domain by sandbox_readiness (another domain's findings are only a count)
+                    "code": sb.get("code"), "integrity_hold": sb.get("integrity_hold")},
         "engine": opencode_status(),
     }
