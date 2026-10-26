@@ -10,6 +10,15 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ## [Unreleased]
 
+### Added
+
+- **GitHub token expiry warning.** The Doctor check `adapter.github_token` reads the expiry GitHub reports for
+  the token (`GitHub-Authentication-Token-Expiration`) and the date recorded with `aeos secrets set
+  personal/github --expires-at`, and warns 14 days ahead with the rotation command, without turning the check
+  red while the token still works. The probe runner keeps that header (and still drops every other one). Unit
+  tests cover both header formats, an unreadable header, the recorded date and the header filter (E2); a live
+  GitHub response with the header is NOT-PROVEN until the next `aeos doctor --functional`.
+
 ## [0.1.0] - 2026-10-26
 
 First release of the local-first control plane. It contains pull requests #1 to #13 (#8 was

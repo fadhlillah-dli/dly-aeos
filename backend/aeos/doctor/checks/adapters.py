@@ -7,9 +7,11 @@ and remain blocked by the OFFICE default-deny policy even when configured.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from aeos.core.enums import Domain
+from aeos.core.timeutil import ensure_aware
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import secret_ref_status, set_secret_remedy
 from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
@@ -24,6 +26,7 @@ GOOGLE_REF = GOOGLE_TOKEN_REF  # kept for callers of the earlier single-ref cont
 ATLASSIAN_REF = "office/atlassian"
 BITBUCKET_REF = "office/bitbucket"
 GITHUB_API = "https://api.github.com"
+GITHUB_EXPIRY_WARN_DAYS = 14  # warn this many days before the token expires
 # secrets facade contract: purpose "<namespace>:<use>" with the namespace of the reference (§26)
 GITHUB_PURPOSE = "personal:doctor.github-readonly-probe"
 # The PERSONAL publication providers of the one provider vocabulary (aeos.portfolio.providers): Google Docs
@@ -212,6 +215,29 @@ def _registered_github_repos(ctx: CheckContext) -> list[str]:
         return []
 
 
+def _github_token_expiry(headers: dict[str, str] | None) -> datetime | None:
+    """Expiry GitHub reports for the token (``GitHub-Authentication-Token-Expiration``, ``2027-01-24 10:57:27 UTC``
+    or ``... +0700``); None when the header is absent (no expiry) or unreadable."""
+    raw = (headers or {}).get("github-authentication-token-expiration")
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw.strip().replace(" UTC", " +0000"), "%Y-%m-%d %H:%M:%S %z")
+    except ValueError:
+        return None
+
+
+def _github_expiry_warning(expires: datetime | None, now: datetime) -> str | None:
+    """Text for a token that expires within GITHUB_EXPIRY_WARN_DAYS; None otherwise."""
+    if expires is None:
+        return None
+    days = (expires - ensure_aware(now)).total_seconds() / 86400
+    if days > GITHUB_EXPIRY_WARN_DAYS:
+        return None
+    return (f"Token GitHub kedaluwarsa {expires.date().isoformat()} ({max(0, int(days))} hari lagi): buat token baru "
+            f"dengan izin yang sama, lalu {aeos_cmd(f'secrets set {GITHUB_REF} --expires-at <YYYY-MM-DD>')}.")
+
+
 def _scopes(headers: dict[str, str] | None) -> list[str] | str:
     """Token scopes GitHub reports for classic tokens (``X-OAuth-Scopes``); fine-grained tokens expose none."""
     raw = (headers or {}).get("x-oauth-scopes")
@@ -238,9 +264,14 @@ def adapter_github(ctx: CheckContext) -> Outcome:
     if state == "ABSENT":
         return Outcome("MISSING", f"Token {GITHUB_REF} belum disimpan.", evidence=evidence, error_code="GITHUB_TOKEN_MISSING",
                        remedy=set_secret_remedy(GITHUB_REF, "GitHub (fine-grained, repo terpilih saja)"))
+    recorded = evidence.get("expires_at")
+    recorded_expiry = ensure_aware(datetime.fromisoformat(recorded)) if isinstance(recorded, str) else None
     if not ctx.functional:
-        return Outcome("CONFIGURED", f"Token {GITHUB_REF} tersimpan; akses repo belum diprobe (gunakan --functional).",
-                       evidence=evidence, target_identity=f"github:{slug}")
+        summary = f"Token {GITHUB_REF} tersimpan; akses repo belum diprobe (gunakan --functional)."
+        warning = _github_expiry_warning(recorded_expiry, ctx.now)
+        return Outcome("CONFIGURED", summary + (" " + warning if warning else ""), evidence=evidence,
+                       target_identity=f"github:{slug}",
+                       remedy=set_secret_remedy(GITHUB_REF, "GitHub (token baru sebelum kedaluwarsa)") if warning else None)
     try:
         hr = github_get(ctx, f"/repos/{slug}")
     except Exception as exc:  # store/network failure: never green
@@ -253,6 +284,9 @@ def adapter_github(ctx: CheckContext) -> Outcome:
                          "permissions": {k: perms.get(k) for k in ("admin", "maintain", "push", "pull") if k in perms},
                          "repo_id": hr.body.get("id"),
                          "token_scopes": _scopes(getattr(hr, "headers", None))})
+        reported_expiry = _github_token_expiry(getattr(hr, "headers", None))
+        evidence["token_expires_at"] = reported_expiry.isoformat() if reported_expiry else None
+        expiry = min((e for e in (reported_expiry, recorded_expiry) if e is not None), default=None)
         kind = _token_kind()
         reachable, truncated = _reachable_repos(ctx) if kind == "fine-grained" else (None, False)
         # the account's admin role does not show the token's own grant: observe it (fine-grained only)
@@ -264,16 +298,21 @@ def adapter_github(ctx: CheckContext) -> Outcome:
                                            administration=administration)
         evidence["token_privilege"] = privilege
         summary = f"Repo github:{slug} terbaca dengan token (read-only); izin tulis/enforcement belum diverifikasi."
+        warning = _github_expiry_warning(expiry, ctx.now)
+        if warning:
+            evidence["residual_risks"] = [warning]
+            summary = warning + " " + summary
         if privilege["least_privilege"] is False:
-            evidence["residual_risks"] = [privilege["risk"]]
+            evidence.setdefault("residual_risks", []).append(privilege["risk"])
             summary += " " + privilege["risk"]
         elif privilege["least_privilege"] is None:
             summary += " Least privilege token belum terbukti: " + str(privilege.get("note") or "")
         _record_probe(ctx, ("github-repo", "github-issues"), slug, "CONNECTED")
-        return Outcome("CONNECTED", summary, evidence=evidence, target_identity=f"github:{slug}",
-                       remedy=None if privilege["least_privilege"] is not False else set_secret_remedy(
-                           GITHUB_REF, "GitHub fine-grained PAT, hanya repo platform: Issues RW, Pull requests RW, "
-                                       "Contents RW (push aeos/*), Metadata R"))
+        remedy = None
+        if privilege["least_privilege"] is False or warning:
+            remedy = set_secret_remedy(GITHUB_REF, "GitHub fine-grained PAT, hanya repo platform: Issues RW, Pull "
+                                                   "requests RW, Contents RW (push aeos/*), Metadata R")
+        return Outcome("CONNECTED", summary, evidence=evidence, target_identity=f"github:{slug}", remedy=remedy)
     if hr.status == 401:
         _record_probe(ctx, ("github-repo", "github-issues"), slug, "EXPIRED")
         return Outcome("EXPIRED", "Token GitHub ditolak (kedaluwarsa/dicabut).", evidence=evidence,
