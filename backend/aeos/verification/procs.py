@@ -63,6 +63,9 @@ class ProcResult:
     survivors: list[dict[str, Any]] = field(default_factory=list)
     containment: str = ""
     containment_errors: list[str] = field(default_factory=list)
+    # allow-listed build-tool helper processes that were still exiting after the main process and ended within their
+    # extra grace (``procgroup.StepGroup.helpers``): listed, not survivors
+    helper_exits: list[dict[str, Any]] = field(default_factory=list)
     # every result-seal line of stdout (``aeos.verification.seal``), kept in full even when the stdout tail above
     # is trimmed - a long failing run never loses the sealed stream (that would read as tampering)
     channel: str = ""
@@ -164,13 +167,13 @@ class _PipeReader:
 
 
 def _run_contained(args: list[str], *, cwd: Path, env: dict[str, str], timeout: float, max_output: int,
-                   start: float) -> ProcResult:
+                   start: float, helpers: frozenset[str], helper_grace: float) -> ProcResult:
     """One step in its own kill group (``procgroup.StepGroup``): the main process is waited for (not its pipes),
     then every survivor of the group is listed and killed before the output is collected - a descendant holding
     the step's stdout open can neither outlive the step nor stall the verifier."""
     from aeos.verification.procgroup import StepGroup
 
-    group = StepGroup()
+    group = StepGroup(helpers=helpers, helper_grace=helper_grace)
     proc = group.popen(args, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, creationflags=_creationflags())
     out_r, err_r = _PipeReader(proc.stdout, max_output), _PipeReader(proc.stderr, max_output)
@@ -200,16 +203,19 @@ def _run_contained(args: list[str], *, cwd: Path, env: dict[str, str], timeout: 
         args=[str(a) for a in args], returncode=None if timed_out else proc.returncode,
         stdout=out_r.text(), stderr=err_r.text(), timed_out=timed_out,
         duration_s=round(time.monotonic() - start, 3), survivors=survivors, containment=group.method,
-        containment_errors=errors, channel=out_r.channel_text())
+        containment_errors=errors, channel=out_r.channel_text(), helper_exits=list(group.helper_exits))
 
 
 def run_process(args: list[str], *, cwd: Path, env: dict[str, str], timeout: float,
-                max_output: int = 4_000_000, contain: bool = False) -> ProcResult:
+                max_output: int = 4_000_000, contain: bool = False, helpers: frozenset[str] = frozenset(),
+                helper_grace: float = 0.0) -> ProcResult:
     """Run *args* (no shell) with a timeout that kills the whole tree. ``contain=True`` (every step that executes
-    candidate code on the process runner) runs it in its own kill group and reports its survivors."""
+    candidate code on the process runner) runs it in its own kill group and reports its survivors; *helpers* /
+    *helper_grace* name the build-tool helper processes that get extra time to exit (``procgroup``)."""
     start = time.monotonic()
     if contain:
-        return _run_contained(args, cwd=cwd, env=env, timeout=timeout, max_output=max_output, start=start)
+        return _run_contained(args, cwd=cwd, env=env, timeout=timeout, max_output=max_output, start=start,
+                              helpers=helpers, helper_grace=helper_grace)
     proc = subprocess.Popen(
         args, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, creationflags=_creationflags(),

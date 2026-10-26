@@ -344,6 +344,8 @@ def test_every_report_states_the_in_process_forgery_risk():
         assert runner.RESULT_FORGERY_RISK in risks
     assert "subverts the plugin itself" in runner.RESULT_FORGERY_RISK
     assert "NOT-PROVEN" in runner.RESULT_FORGERY_RISK
+    # the process runner also states that a later step reads what an earlier candidate step left in the run dir
+    assert any("run directory is writable by candidate code" in r for r in runner.PROCESS_RESIDUAL_RISKS)
 
 
 def test_the_plugin_name_cannot_be_shadowed_by_a_candidate(tmp_path: Path):

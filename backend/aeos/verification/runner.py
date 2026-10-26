@@ -103,6 +103,10 @@ PROCESS_RESIDUAL_RISKS = (
     "the verification is QUARANTINED. A process created outside the step's tree on the candidate's behalf (Windows "
     "WMI/Task Scheduler/COM out-of-process servers, a POSIX daemon that leaves the session and drops the marker, "
     "launchd/systemd user units) is not in the group: it can outlive the step and act after the window, undetected.",
+    "The run directory is writable by candidate code on this runner: a file one candidate step leaves there (a "
+    "module in the shared step working directory, which python -c / -m put first on sys.path; the result-seal plugin "
+    "file; the base-commit export) is read by later steps, trusted-only ones included. Only the trusted-suite copy is "
+    "hash-checked before and after; the container runner mounts these read-only.",
     "The dead-proxy environment is an egress deterrent, not an enforced network boundary.",
 )
 CONTAINER_RESIDUAL_RISKS = (
@@ -166,10 +170,26 @@ class ProcessRunner:
         if seal is not None:
             env.update(seal.child_env(str(seal.keyfile)))
         res = run_process([sys.executable, *args], cwd=self.cwd(), env=env, timeout=timeout, contain=True)
-        self.steps.append({"step": step or (seal.name if seal else ""), "exit_code": res.returncode,
-                           "timed_out": res.timed_out, "duration_s": res.duration_s,
-                           "containment": res.containment, "survivors": list(res.survivors),
-                           "containment_errors": list(res.containment_errors)})
+        return self.record(step or (seal.name if seal else ""), res)
+
+    def tool(self, args: list[str], *, cwd: Path, env: dict[str, str], timeout: float, step: str,
+             helpers: frozenset[str] = frozenset(), helper_grace: float = 0.0) -> ProcResult:
+        """A non-Python tool step (the frontend's npm ci / vitest / tsc / vite build, the per-candidate pip install)
+        in its own kill group, recorded in the step list like ``python``: a process outliving it reaches the tamper
+        window's kill-group check. *helpers* are the build-tool helper process names that get *helper_grace* more
+        seconds to exit (``procgroup``); every other process left behind is a survivor."""
+        res = run_process(args, cwd=cwd, env=env, timeout=timeout, contain=True, helpers=helpers,
+                          helper_grace=helper_grace)
+        return self.record(step, res)
+
+    def record(self, step: str, res: ProcResult) -> ProcResult:
+        """Add one contained step's outcome to the kill-group record (``survivors`` / ``containment_gaps``)."""
+        entry: dict[str, Any] = {"step": step, "exit_code": res.returncode, "timed_out": res.timed_out,
+                                 "duration_s": res.duration_s, "containment": res.containment,
+                                 "survivors": list(res.survivors), "containment_errors": list(res.containment_errors)}
+        if res.helper_exits:
+            entry["helper_exits"] = list(res.helper_exits)
+        self.steps.append(entry)
         return res
 
     def survivors(self) -> list[dict[str, Any]]:

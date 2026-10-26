@@ -146,8 +146,11 @@ HARNESS_MODULES = frozenset({
 _MODULE_SUFFIXES = (".py", ".pyc", ".pyo", ".pyd", ".so", ".dylib")
 # runner steps that import trusted code only (controller checkout / reviewed base commit + trusted suite). A process
 # outliving any OTHER step - every step that executes candidate code, and any unnamed or future step (fail closed) -
-# is tampering (see _guard_close).
-TRUSTED_ONLY_STEPS = frozenset({"collect_expected", "baseline", "contract_openapi_base"})
+# is tampering (see _guard_close). The frontend's npm ci and the per-candidate pip install execute no candidate code
+# (install scripts off, hash-pinned wheels only) but install candidate-chosen packages: not trusted-only (fail closed).
+# The per-candidate venv is created by the controller's own interpreter (stdlib ``venv``, isolated mode ``-I``: nothing
+# of the run directory is importable) before anything is installed (``envs.venv_command``).
+TRUSTED_ONLY_STEPS = frozenset({"collect_expected", "baseline", "contract_openapi_base", "dependency_env_venv"})
 
 _PREFLIGHT = (
     "import importlib, json, sys\n"
@@ -1036,23 +1039,20 @@ class _Verifier:
         self.result_seals[step_seal.name] = result.to_dict()
         return result
 
-    def _driver_seal(self, step_seal: seal.StepSeal, res: ProcResult) -> dict[str, Any] | None:
-        """The result a non-pytest driver step (import preflight, migration round-trip) sealed at its very end
-        (``seal.sealed_result``), recorded under the step's name. Forged or out-of-sequence channel lines naming
-        this step are result tampering (a ``result`` finding: QUARANTINED) whether or not a sealed result exists
-        (another session's seal lines are ignored); no sealed result at all, or a key file the plugin did not
-        remove, is MISSING and nothing is returned (the caller fails closed)."""
-        consumed = step_seal.discard()
-        sealed, problems = seal.sealed_result(step_seal, res.channel or res.stdout)
-        forged = [p for p in problems if not p.startswith("no sealed")]
-        if sealed is not None and not consumed:
-            # the driver sealed a result but its key file is still there: candidate code could have read the key
-            problems.append(seal.KEY_LEFT_PROBLEM)
-        status = "FAIL" if forged else ("PASS" if sealed is not None and consumed else "MISSING")
-        if forged:
-            self.tamper_findings += [{"kind": "result", "path": step_seal.name, "change": p[:300]} for p in forged[:5]]
-        self.result_seals[step_seal.name] = {"status": status, "problems": problems[:5], "key_consumed": consumed}
-        return sealed if status == "PASS" else None
+    def _driver_seal(self, step_seal: seal.StepSeal, res: ProcResult, *,
+                     out_dir: Path | None = None) -> dict[str, Any] | None:
+        """The result a non-pytest driver step (import preflight, migration round-trip, OpenAPI dump, UI state
+        driver) sealed at its very end (``seal.sealed_result``), recorded under the step's name. Forged or
+        out-of-sequence channel lines naming this step are result tampering (a ``result`` finding: QUARANTINED)
+        whether or not a sealed result exists (another session's seal lines are ignored), and so is an output the
+        driver sealed by digest under *out_dir* that changed after it (``seal.output_problems``); no sealed result at
+        all, or a key file the plugin did not remove, is MISSING and nothing is returned (the caller fails closed)."""
+        checked = seal.check_driver(step_seal, res.channel or res.stdout, out_dir=out_dir)
+        if checked.forged:
+            self.tamper_findings += [{"kind": "result", "path": step_seal.name, "change": p[:300]}
+                                     for p in checked.forged[:5]]
+        self.result_seals[step_seal.name] = checked.record()
+        return checked.payload
 
     def _cached_baseline(self) -> dict[str, Any] | None:
         out = self.out
@@ -1461,8 +1461,10 @@ class _Verifier:
             ini=self.ini, trusted_copy=self.trusted_copy, expected=list(self.expected),
             trusted_cases=dict(self.trusted_cases), base_tree=lambda: self._base_tree(workdir),
             basetemp=lambda name: self._basetemp(workdir, name), session=self.session, project=self.project,
-            # the impact-selected pytest steps run candidate code: sealed like the trusted suite (review W6-054)
-            seal_step=lambda name: seal.StepSeal.new(workdir, name), check_seal=self._check_seal)
+            # the impact-selected pytest steps run candidate code: sealed like the trusted suite (review W6-054); so
+            # are the verifier's own drivers (OpenAPI dump, UI state driver) and the outputs they write
+            seal_step=lambda name: seal.StepSeal.new(workdir, name), check_seal=self._check_seal,
+            check_driver_seal=self._driver_seal)
 
     def _base_tree(self, workdir: Path) -> Path | None:
         """The recorded base commit materialised once (reused when the trusted collection already did it)."""

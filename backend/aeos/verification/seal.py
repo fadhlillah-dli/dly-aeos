@@ -17,6 +17,10 @@ consistent with the junit - are defeated by forging both). The seal raises that 
   exit status; the junit file must still have the sealed digest; the per-test outcomes in the junit must equal the
   streamed ones; the terminal summary line must equal pytest's own counts.
 
+Non-pytest drivers (the import preflight, the migration round-trip, the OpenAPI dump, the UI state driver) import the
+plugin module first and emit one sealed ``result`` event at their very end (``sealed_result``); the output files
+they wrote are sealed by digest in it and checked again on the host (``output_problems``).
+
 Any disagreement is ``FAIL`` (the verifier QUARANTINES the run as result tampering); no sealed session end at all is
 ``MISSING`` (the step cannot pass - fail closed), and so is a key file the plugin did not remove (code under test could
 have read the key, so the seal proves nothing). Only lines naming this step's nonce belong to its channel: a seal line
@@ -366,3 +370,69 @@ def sealed_result(seal: StepSeal, stdout: str, event: str = "result") -> tuple[d
         return None, [*problems, f"no sealed '{event}' line (the driver ended before reporting)"]
     data = found[-1].get("d")
     return (data if isinstance(data, dict) else None), problems
+
+
+# A driver that writes output files (the OpenAPI document, UI screenshots) seals their sha256 under this key of its
+# result - ``{plain file name: sha256 hex}``, names relative to the output directory the host gave it - so a file
+# rewritten after the sealed end (an ``atexit`` hook of imported candidate code) is detected, not read as evidence.
+SEALED_FILES_KEY = "files"
+_PLAIN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+
+
+def output_problems(sealed: dict[str, Any], out_dir: Path) -> list[str]:
+    """Outputs a driver sealed by digest (``SEALED_FILES_KEY``) that changed or disappeared under *out_dir* after it
+    sealed them, or a sealed name that is not a plain file name: result tampering. The host only uses outputs the
+    sealed result names (no digest sealed: the file is not used)."""
+    files = sealed.get(SEALED_FILES_KEY)
+    if files is None:
+        return []
+    if not isinstance(files, dict):
+        return ["the sealed result's output digests are not readable"]
+    problems: list[str] = []
+    for name, digest in files.items():
+        if not isinstance(name, str) or not _PLAIN_NAME.match(name) or not isinstance(digest, str):
+            problems.append(f"the sealed result names an output that is not a plain file name ({str(name)[:60]!r})")
+            continue
+        actual = _sha256(out_dir / name)
+        if actual is None:
+            problems.append(f"output {name} disappeared after the driver sealed it")
+        elif not hmac.compare_digest(actual, digest):
+            problems.append(f"output {name} changed after the driver sealed it (digest differs)")
+    return problems
+
+
+def sealed_output(sealed: dict[str, Any] | None, name: str) -> bool:
+    """True when the (already checked) sealed result names *name* among its digested outputs."""
+    files = (sealed or {}).get(SEALED_FILES_KEY)
+    return isinstance(files, dict) and isinstance(files.get(name), str)
+
+
+@dataclass
+class DriverSeal:
+    """The host-side check of one sealed non-pytest driver step (``check_driver``)."""
+
+    status: str  # PASS | FAIL (forged channel line or output changed after the seal: tamper) | MISSING (fail closed)
+    problems: list[str] = field(default_factory=list)
+    forged: list[str] = field(default_factory=list)  # the problems that are result tampering
+    payload: dict[str, Any] | None = None  # the sealed result, only when PASS
+    key_consumed: bool | None = None
+
+    def record(self) -> dict[str, Any]:
+        return {"status": self.status, "problems": self.problems[:5], "key_consumed": self.key_consumed}
+
+
+def check_driver(seal: StepSeal, output: str, *, out_dir: Path | None = None) -> DriverSeal:
+    """Cross-check a sealed driver step after it ended: *output* is its seal channel (``ProcResult.channel``, or the
+    stdout). Forged or out-of-sequence lines naming this step, and outputs sealed by digest under *out_dir* that
+    changed afterwards, are FAIL (tampering) whether or not a sealed result exists; no sealed result at all, or a key
+    file the plugin did not remove, is MISSING. Only a PASS carries the payload. Removes the step's key file."""
+    consumed = seal.discard()
+    sealed, problems = sealed_result(seal, output)
+    if sealed is not None and out_dir is not None:
+        problems += output_problems(sealed, out_dir)
+    forged = [p for p in problems if not p.startswith("no sealed")]
+    if sealed is not None and not consumed:
+        # the driver sealed a result but its key file is still there: the code it imported could have read the key
+        problems.append(KEY_LEFT_PROBLEM)
+    status = "FAIL" if forged else ("PASS" if sealed is not None and consumed else "MISSING")
+    return DriverSeal(status, problems, forged, sealed if status == "PASS" else None, consumed)

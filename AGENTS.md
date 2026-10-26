@@ -22,7 +22,8 @@ a decision — do not silently pick one.
 | `docs/` | architecture, ADRs (`docs/decisions`), runbooks, coverage matrix |
 
 Runtime state never lives in the repo: data dir is `%LOCALAPPDATA%\DLY-AEOS` (Windows),
-`~/Library/Application Support/DLY-AEOS` (macOS), `$XDG_DATA_HOME/DLY-AEOS` (Linux) (§06).
+`~/Library/Application Support/DLY-AEOS` (macOS), `$XDG_DATA_HOME/DLY-AEOS` (Linux, not a tested
+host) (§06).
 
 ## Invariants (never break these)
 
@@ -87,7 +88,11 @@ quarantined as well.
   evidence stays per claim (`evidence_ids`/`evidence_level` on the record, never a page-wide level).
   `tests/unit/test_api_envelope_contract.py` enforces this.
 * Cross-platform: `pathlib`, no shell=True, no POSIX-only calls without a Windows path (and vice
-  versa); `psutil` for process trees. CI runs Windows, macOS and Linux.
+  versa); `psutil` for process trees. Host platforms are Windows, macOS arm64 and macOS Intel
+  (ADR-0115): CI runs the backend suite and the bootstrap on `windows-latest`, `macos-latest` (arm64)
+  and `macos-26-intel`, and mypy for `--platform darwin` and `--platform win32`. `ubuntu-latest`
+  runners are used only for the platform-neutral frontend, browser e2e and supply-chain jobs. Linux
+  host support is NOT-PROVEN: its code paths stay but no CI job runs them.
 * Tests: `pytest` (`tests/`), isolated data dir via fixtures in `tests/conftest.py`. Tests that
   need real tools (claude, opencode, openbao, docker, network) are marked `integration`/`network`
   and skip cleanly when the tool is absent.
@@ -97,7 +102,7 @@ quarantined as well.
 ## Commands
 
 ```
-./aeos.ps1 <cmd>   (Windows)      ./aeos <cmd>   (macOS/Linux)
+./aeos.ps1 <cmd>   (Windows PowerShell)   aeos.cmd <cmd>   (Command Prompt)   ./aeos <cmd>   (macOS)
 aeos doctor        bootstrap readiness (no LLM)
 aeos serve         http://127.0.0.1:8787
 aeos admin create  first SUPER_ADMIN (no default credentials)

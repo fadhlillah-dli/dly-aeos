@@ -42,9 +42,15 @@ from tests.unit.test_publisher_support import (
     use_fake_providers,
 )
 
-TOKEN = json.dumps({"token": "ya29.unit-test-access-token-0123456789", "refresh_token": "1//unit-refresh-0123456789abc",
-                    "client_id": "cid", "client_secret": "csecret-value", "token_uri": gg.DEFAULT_TOKEN_URI,
-                    "scopes": [gg.DRIVE_FILE_SCOPE], "expiry": (utcnow() + timedelta(hours=1)).isoformat()})
+
+def _token() -> str:
+    """A stored OAuth token that is valid when the test uses it (computed then, never at import: a suite running
+    longer than the token lifetime must not see it expire)."""
+    return json.dumps({"token": "ya29.unit-test-access-token-0123456789",
+                       "refresh_token": "1//unit-refresh-0123456789abc", "client_id": "cid",
+                       "client_secret": "csecret-value", "token_uri": gg.DEFAULT_TOKEN_URI,
+                       "scopes": [gg.DRIVE_FILE_SCOPE], "expiry": (utcnow() + timedelta(hours=1)).isoformat()})
+
 
 TEST_PLAN_TITLES = [s.title for s in rnd.p1.DOC_TYPES["TEST_PLAN"].sections]
 TP_SPEC = [(s.title, s.content_type.value) for s in rnd.p1.DOC_TYPES["TEST_PLAN"].sections]
@@ -67,7 +73,7 @@ def _ctx(**kw) -> OpContext:
 
 
 def _google(client: httpx.Client) -> gg.GoogleDriveDocsProvider:
-    return gg.GoogleDriveDocsProvider(client=client, auth=gg.GoogleAuth(client, token_json=TOKEN))
+    return gg.GoogleDriveDocsProvider(client=client, auth=gg.GoogleAuth(client, token_json=_token()))
 
 
 def _human_sign_off(text: str, line: str) -> str:

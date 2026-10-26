@@ -203,6 +203,55 @@ def test_a_contained_step_is_not_stalled_by_a_descendant_holding_its_output(tmp_
     assert res.duration_s < 45 and len(res.survivors) >= 1, (res.duration_s, res.survivors)
 
 
+# A step whose main process returns while a helper it started is still finishing (esbuild's service process ends when
+# its parent's pipe closes): the helper here lingers HELPER_SECONDS, longer than the default survivor grace.
+HELPER_SECONDS = 3.5
+LINGERING_HELPER = r'''
+import os, subprocess, sys
+kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
+if os.name == "nt":
+    kw["creationflags"] = 0x00000008  # DETACHED_PROCESS: no console host of its own (still in the step's job)
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(float(__import__('sys').argv[1]))", sys.argv[1]], **kw)
+'''
+
+
+def _helper_names() -> frozenset[str]:
+    """The allow-list naming this interpreter (the lingering helper of the tests is a child of the same executable)."""
+    import psutil
+
+    from aeos.verification.procgroup import helper_key
+
+    return frozenset({helper_key(psutil.Process().name()), helper_key(Path(sys.executable).name)})
+
+
+def _contained(tmp_path: Path, seconds: float, **kw):
+    env = procs.scrubbed_env(pythonpath=[tmp_path], home=tmp_path / "h", tmp=tmp_path / "t", data_dir=tmp_path / "d",
+                             disable_plugin_autoload=True)
+    return procs.run_process([sys.executable, "-c", LINGERING_HELPER, str(seconds)], cwd=tmp_path, env=env,
+                             timeout=60, contain=True, **kw)
+
+
+def test_an_allow_listed_build_tool_helper_that_exits_within_its_grace_is_no_survivor(tmp_path: Path):
+    """An honest build step is not quarantined: an allow-listed helper process still finishing after its parent got
+    the helper grace, ended inside it (while the tamper window was open) and is listed, not hidden."""
+    res = _contained(tmp_path, HELPER_SECONDS, helpers=_helper_names(), helper_grace=15.0)
+    assert res.returncode == 0 and not res.timed_out
+    assert res.survivors == [], res.survivors
+    assert res.helper_exits and all(s.get("pid") for s in res.helper_exits), res.helper_exits
+    assert res.duration_s < 15
+
+
+def test_the_same_lingering_process_is_a_survivor_when_it_is_not_allow_listed(tmp_path: Path):
+    res = _contained(tmp_path, HELPER_SECONDS)
+    assert res.returncode == 0 and len(res.survivors) >= 1 and res.helper_exits == [], res.survivors
+
+
+def test_an_allow_listed_helper_still_alive_after_its_grace_is_a_survivor(tmp_path: Path):
+    res = _contained(tmp_path, 60, helpers=_helper_names(), helper_grace=1.0)
+    assert res.returncode == 0 and len(res.survivors) >= 1, res.survivors
+    assert res.duration_s < 30  # listed and killed, never waited for
+
+
 def test_a_contained_step_without_descendants_has_no_survivors(tmp_path: Path):
     env = procs.scrubbed_env(pythonpath=[tmp_path], home=tmp_path / "h", tmp=tmp_path / "t", data_dir=tmp_path / "d",
                              disable_plugin_autoload=True)

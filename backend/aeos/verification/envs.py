@@ -9,10 +9,21 @@ in the verifier's private run directory from the **candidate's own lockfile**:
    runs while installing. This is the one step with package-index egress (the process runner does not enforce
    an egress boundary; stated). Requirement files that carry pip options (other indexes, includes, editables)
    are refused instead of honoured;
-3. the trusted acceptance suite against the candidate with that interpreter, ``-m "not integration and not
+3. the environment's ``dependency_set_hash``: the distributions installed in its ``site-packages``, read by the
+   verifier itself from their metadata files right after the install (no process of the candidate environment
+   reports it, so nothing it imports can change the listing). Start-up hooks the install brought (``.pth`` files
+   with ``import`` lines, which the interpreter runs at start, before the verifier's result seal loads) are listed
+   and stated;
+4. the trusted acceptance suite against the candidate with that interpreter, ``-m "not integration and not
    network"``, the trusted test harness (pytest and its requirements, copied from the controller) first on
-   ``PYTHONPATH`` so the candidate's pins cannot replace the grader's runner;
-4. the environment's ``dependency_set_hash`` (its distributions) is recorded.
+   ``PYTHONPATH`` so the candidate's pins cannot replace the grader's runner, under the verifier's result seal.
+
+The venv creation, the install and the suite each run in their own kill group and are recorded in the verifier
+runner's step list (``dependency_env_venv`` - the controller's own stdlib, a trusted-only step -,
+``dependency_env_install``, ``dependency_env``): a process left behind is a survivor (QUARANTINED). The venv
+creation and the install run the controller interpreter in isolated mode (``-I``: no ``PYTHONPATH``, no working
+directory on ``sys.path``), so a module an earlier candidate step left in the run directory cannot replace ``venv``
+or ``pip`` - the trusted-only classification of the venv step holds whatever the run directory contains.
 
 The container runner keeps the verifier image's dependency set (no per-candidate environment there): NOT_RUN,
 stated. Lockfiles without hashes, non-pip lock formats and failed installs are NOT_RUN with the reason - the
@@ -25,6 +36,7 @@ import importlib.metadata
 import re
 import shutil
 import sys
+import sysconfig
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,8 +49,6 @@ from aeos.verification.steps import (
     StepContext,
     StepEvidence,
     StepResult,
-    last_json_line,
-    pack_text,
     run_pytest,
 )
 
@@ -51,6 +61,8 @@ _NON_PIP_LOCKS = ("poetry.lock", "uv.lock", "Pipfile.lock", "pyproject.toml", "p
 _ALLOWED_OPTION = re.compile(r"^--hash[=\s]")
 _PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
 MARK_EXPR = "not integration and not network"
+MAX_METADATA_BYTES = 1024 * 1024
+MAX_LISTED_HOOKS = 50
 
 
 @dataclass
@@ -71,11 +83,7 @@ class VenvRunner(runner_mod.ProcessRunner):
         if seal is not None:
             env.update(seal.child_env(str(seal.keyfile)))
         res = run_process([self.interpreter, *args], cwd=self.cwd(), env=env, timeout=timeout, contain=True)
-        self.steps.append({"step": step or (seal.name if seal else ""), "exit_code": res.returncode,
-                           "timed_out": res.timed_out, "duration_s": res.duration_s,
-                           "containment": res.containment, "survivors": list(res.survivors),
-                           "containment_errors": list(res.containment_errors)})
-        return res
+        return self.record(step or (seal.name if seal else ""), res)
 
 
 def requirement_files(snapshot: Path, changed: list[str]) -> tuple[list[str], list[str]]:
@@ -165,6 +173,79 @@ def _venv_python(ve: Path) -> Path:
                                                                      else "python")
 
 
+def venv_command(ve: Path) -> list[str]:
+    """The venv creation: the controller's own stdlib ``venv`` in isolated mode (``-I`` ignores ``PYTHONPATH`` and
+    keeps the working directory off ``sys.path``: nothing in the run directory is imported - a trusted-only step)."""
+    return [sys.executable, "-I", "-m", "venv", "--without-pip", str(ve)]
+
+
+def pip_command(py: Path, reqs: list[str]) -> list[str]:
+    """The install: the controller's pip in isolated mode (no module of the run directory can stand in for pip),
+    hash-pinned wheels only, no dependency resolution beyond the lockfile."""
+    return [sys.executable, "-I", "-m", "pip", "--python", str(py), "install", "--isolated", "--no-input",
+            "--disable-pip-version-check", "--no-cache-dir", "--require-hashes", "--only-binary=:all:", "--no-deps",
+            *PIP_INDEX_ARGS, *reqs]
+
+
+def site_dirs(ve: Path) -> list[Path]:
+    """The ``site-packages`` directories of a venv this interpreter created (``venv`` install scheme)."""
+    base = {"base": str(ve), "platbase": str(ve), "installed_base": str(ve), "installed_platbase": str(ve)}
+    out: list[Path] = []
+    for key in ("purelib", "platlib"):
+        p = Path(sysconfig.get_path(key, scheme="venv", vars=base))
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def installed_pins(dirs: list[Path]) -> tuple[list[str], list[str]]:
+    """(``name==version`` of every distribution installed in *dirs*, problems), read by the verifier from the
+    metadata files (no candidate process). A metadata file that is unreadable or oversized is a problem: the
+    listing - and so the dependency set identity - is then incomplete."""
+    pins: set[str] = set()
+    problems: list[str] = []
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for info in sorted(d.iterdir()):
+            if not info.is_dir() or not info.name.endswith((".dist-info", ".egg-info")):
+                continue
+            meta = info / ("METADATA" if info.name.endswith(".dist-info") else "PKG-INFO")
+            try:
+                if meta.stat().st_size > MAX_METADATA_BYTES:
+                    problems.append(f"{info.name}: metadata larger than {MAX_METADATA_BYTES} bytes")
+                    continue
+                dist = importlib.metadata.PathDistribution(info)
+                name = str((dist.metadata.get_all("Name") or [""])[0] or "").strip().lower()
+                version = str(dist.version or "").strip()
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                problems.append(f"{info.name}: metadata unreadable ({type(exc).__name__})")
+                continue
+            if name:
+                pins.add(f"{name}=={version}")
+            else:
+                problems.append(f"{info.name}: metadata names no distribution")
+    return sorted(pins), problems
+
+
+def startup_hooks(dirs: list[Path]) -> list[dict[str, Any]]:
+    """``.pth`` files in *dirs*: the interpreter processes them when it starts and runs every line that begins with
+    ``import`` - before any ``-p`` plugin, so before the verifier's result seal reads its key (stated)."""
+    hooks: list[dict[str, Any]] = []
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for pth in sorted(d.glob("*.pth")):
+            try:
+                # utf-8-sig: the interpreter strips a byte-order mark before it looks for ``import`` lines
+                lines = pth.read_bytes()[:MAX_METADATA_BYTES].decode("utf-8-sig", errors="replace").splitlines()
+            except OSError:
+                lines = ["import ?"]  # unreadable: assume it runs code (fail closed)
+            runs = any(ln.startswith(("import ", "import\t")) for ln in lines)
+            hooks.append({"file": pth.name, "executes_code": runs})
+    return hooks[:MAX_LISTED_HOOKS]
+
+
 def run(ctx: StepContext, python_pins_changed: bool) -> StepResult | None:
     """Build the per-candidate environment and run the trusted suite in it (Python dependency changes only)."""
     if not python_pins_changed and not ctx.policy.get("isolated_dependencies"):
@@ -188,33 +269,37 @@ def run(ctx: StepContext, python_pins_changed: bool) -> StepResult | None:
                        + "; ".join(problems[:3]), problems=problems[:20])
     ve = ctx.workdir / "ve"
     wd = ctx.workdir
+    rn = ctx.runner
     base_env = scrubbed_env(pythonpath=[wd / "c"], home=wd / "h", tmp=wd / "t", data_dir=wd / "d",
                             disable_plugin_autoload=True)
-    mk = run_process([sys.executable, "-m", "venv", "--without-pip", str(ve)], cwd=wd, env=base_env, timeout=300)
+    # the venv (controller stdlib, isolated mode) and the install run in their own kill groups, recorded in the
+    # runner's step list
+    mk = rn.tool(venv_command(ve), cwd=wd, env=base_env, timeout=300, step="dependency_env_venv")
     py = _venv_python(ve)
     if mk.returncode != 0 or not py.is_file():
         return not_run(f"python -m venv failed (exit {mk.returncode}): {mk.tail(300)}")
     install_env = {k: v for k, v in base_env.items() if k not in _PROXY_KEYS}  # the install step's registry egress
     install_env["PYTHONPATH"] = ""
     reqs = [a for p in pip_files for a in ("-r", str(ctx.snapshot.joinpath(*p.split("/"))))]
-    pip = run_process([sys.executable, "-m", "pip", "--python", str(py), "install", "--isolated", "--no-input",
-                       "--disable-pip-version-check", "--no-cache-dir", "--require-hashes", "--only-binary=:all:",
-                       "--no-deps", *PIP_INDEX_ARGS, *reqs], cwd=wd, env=install_env, timeout=INSTALL_TIMEOUT)
+    pip = rn.tool(pip_command(py, reqs), cwd=wd, env=install_env, timeout=INSTALL_TIMEOUT,
+                  step="dependency_env_install")
     if pip.timed_out or pip.returncode != 0:
         return not_run(f"pip install --require-hashes failed (exit {pip.returncode}, timed out {pip.timed_out}): "
                        f"{pip.tail(600)}", install_tail=pip.tail(2000))
+    # the dependency set identity is read by the verifier itself, before anything of the environment has run
+    sites = site_dirs(ve)
+    pins, listing_problems = installed_pins(sites)
+    hooks = startup_hooks(sites)
+    dep_hash = content_hash(sorted(pins))
     try:
         harness = build_harness(wd / "hx")
     except (OSError, importlib.metadata.PackageNotFoundError) as exc:
-        return not_run(f"trusted test harness could not be prepared ({type(exc).__name__})")
+        return not_run(f"trusted test harness could not be prepared ({type(exc).__name__})",
+                       dependency_set_hash=dep_hash)
     # its steps are recorded in the verifier runner's step list, so a process outliving one reaches the tamper
     # window's kill-group check like every other candidate step (aeos.verification.runner)
     vr = VenvRunner(workdir=wd, interpreter=str(py), harness=[wd / "hx"], kind="process+candidate-venv",
-                    steps=ctx.runner.steps)
-    listing = last_json_line(vr.python(["-c", pack_text("dist_list.py")], pythonpath=wd / "c", autoload=False,
-                                       timeout=120, step="dependency_env_listing").stdout)
-    pins = [p for p in listing.get("pins") or [] if isinstance(p, str)]
-    dep_hash = content_hash(sorted(pins))
+                    steps=rn.steps)
     if ctx.trusted_copy is None or ctx.ini is None:
         return not_run("trusted suite copy missing", dependency_set_hash=dep_hash)
     junit = wd / "r" / "venv-junit.xml"
@@ -242,11 +327,22 @@ def run(ctx: StepContext, python_pins_changed: bool) -> StepResult | None:
         if missing:
             problems.append(f"{len(missing)} trusted test(s) missing from the candidate-environment run")
     skipped = report.skipped if report is not None else 0
-    status = "FAIL" if problems else ("NOT_PROVEN" if skipped or report is None or not report.passed else "PASS")
+    status = "FAIL" if problems else ("NOT_PROVEN" if skipped or report is None or not report.passed
+                                      or listing_problems else "PASS")
+    running_hooks = [h["file"] for h in hooks if h["executes_code"]]
+    stated: list[str] = []
+    if running_hooks:
+        stated.append(f"the candidate environment has {len(running_hooks)} start-up hook(s) that run code when its "
+                      f"interpreter starts ({', '.join(running_hooks[:5])}): they run before the verifier's result "
+                      "seal loads, so the seal of the candidate-environment run does not cover them")
     content = {"suite": "trusted-acceptance-candidate-env", "status": status, "lockfiles": pip_files,
                "dependency_set_hash": dep_hash, "distributions": pins[:500], "harness": harness,
+               "listing": {"source": "metadata files of the venv site-packages, read by the verifier after the "
+                                     "install (no candidate process)", "problems": listing_problems[:20]},
+               "startup_hooks": hooks,
                "install": {"command": "pip install --require-hashes --only-binary=:all: --no-deps",
                            "exit_code": pip.returncode, "duration_s": pip.duration_s,
+                           "kill_group": pip.containment or "none", "survivors": list(pip.survivors)[:10],
                            "egress": "package index reachable for this step only; not enforced on the process runner"},
                "report": report.to_dict() if report else None, "exit_code": res.returncode, "timed_out": res.timed_out,
                "parse_error": parse_error, "output_tail": res.tail(3000)}
@@ -254,13 +350,16 @@ def run(ctx: StepContext, python_pins_changed: bool) -> StepResult | None:
                                      f"({dep_hash[:19]}): {status}", content, "E2", "dependency_env",
                       {"candidate_dependency_set_hash": dep_hash})
     details = {"dependency_set_hash": dep_hash, "lockfiles": pip_files, "distributions": len(pins),
-               "report": report.to_dict(include_cases=False) if report else None}
+               "startup_hooks": running_hooks[:10], "report": report.to_dict(include_cases=False) if report else None}
     if status == "FAIL":
-        return StepResult("dependency_env", "FAIL", problems[0], details, [ev], reasons=problems)
+        return StepResult("dependency_env", "FAIL", problems[0], details, [ev], reasons=problems, not_proven=stated)
     if status == "NOT_PROVEN":
-        msg = (f"trusted suite in the candidate environment did not pass completely ({skipped} skipped); "
+        msg = (f"dependency set of the candidate environment could not be read completely "
+               f"({'; '.join(listing_problems[:2])}); dependency change NOT-PROVEN" if listing_problems else
+               f"trusted suite in the candidate environment did not pass completely ({skipped} skipped); "
                "dependency change NOT-PROVEN")
-        return StepResult("dependency_env", "NOT_PROVEN", msg, details, [ev], not_proven=[msg])
+        return StepResult("dependency_env", "NOT_PROVEN", msg, details, [ev], not_proven=[msg, *stated])
     return StepResult("dependency_env", "PASS",
                       f"trusted suite passed in an isolated environment built from {', '.join(pip_files)} "
-                      f"(dependency set {dep_hash[:19]}, {len(pins)} distributions)", details, [ev])
+                      f"(dependency set {dep_hash[:19]}, {len(pins)} distributions)", details, [ev],
+                      not_proven=stated)

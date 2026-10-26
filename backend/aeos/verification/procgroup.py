@@ -15,6 +15,13 @@ When the step's main process has exited (or was killed on its timeout), whatever
 *survivor* - is listed and killed (Windows ``TerminateJobObject``; POSIX ``killpg`` plus the marker/session sweep)
 before the verifier compares its tamper window; the verifier QUARANTINES a verification with any survivor.
 
+Every member gets ``SURVIVOR_GRACE_SECONDS`` to finish exiting. A step may name an allow-list of build-tool helper
+processes (``helpers``: process names such as esbuild's service process, which ends when its parent's pipe closes):
+while *only* allow-listed helpers are left they get ``helper_grace`` more seconds, and the ones that exited in it
+are recorded (``helper_exits``), never hidden; a Windows console host (``conhost``) of such a helper waits with
+them. A helper still alive after that, and every other process, is a survivor. A grace never weakens the tamper
+window: a process that ends inside it acted while the window was still open.
+
 Residual risk (stated on the report, ``runner.PROCESS_RESIDUAL_RISKS``): a process created *outside* the step's tree
 on the candidate's behalf - Windows WMI/Task Scheduler/COM out-of-process servers, a POSIX daemon that both leaves
 the session and drops the marker from its environment, launchd/systemd user units - is not in the group and is not
@@ -161,6 +168,30 @@ def _describe(pid: int) -> dict[str, Any]:
     return out
 
 
+def helper_key(name: str) -> str:
+    """A process name as the helper allow-list compares it (case-insensitive, without a Windows ``.exe``)."""
+    key = (name or "").strip().lower()
+    return key[:-4] if key.endswith(".exe") else key
+
+
+# Windows console hosts: a console helper the step started without a console of its own gets one, which lives exactly
+# as long as its last client. It counts as a helper for the extra grace: alongside a non-helper there is no extra
+# grace at all, and a console host still alive when the grace ends is a survivor like any other process.
+CONSOLE_HOSTS = frozenset({"conhost"})
+
+
+def _is_helper(pid: int, helpers: frozenset[str]) -> bool:
+    if pid <= 0:  # an unnamed job member is never an allow-listed helper (fail closed)
+        return False
+    try:
+        key = helper_key(psutil.Process(pid).name())
+        return key in helpers or key in CONSOLE_HOSTS
+    except psutil.NoSuchProcess:
+        return True  # it ended right now: the next poll drops it from the group
+    except psutil.Error:
+        return False  # unreadable: no extra grace
+
+
 def _alive(p: psutil.Process) -> bool:
     try:
         return p.is_running() and p.status() != psutil.STATUS_ZOMBIE
@@ -178,6 +209,11 @@ class StepGroup:
     started: float = 0.0
     _job: int | None = None
     errors: list[str] = field(default_factory=list)
+    # build-tool helper processes (``helper_key`` names) allowed ``helper_grace`` more seconds to exit after the
+    # step's main process (see the module docstring); those that did are listed here
+    helpers: frozenset[str] = frozenset()
+    helper_grace: float = 0.0
+    helper_exits: list[dict[str, Any]] = field(default_factory=list)
 
     def popen(self, args: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
         env = dict(kwargs.pop("env", None) or {})
@@ -277,6 +313,13 @@ class StepGroup:
             while members and time.monotonic() < deadline:
                 time.sleep(0.1)
                 members = self._members()
+            if members and self.helpers and self.helper_grace > 0:
+                waiting = {pid: _describe(pid) for pid in members if pid > 0}
+                deadline = time.monotonic() + self.helper_grace
+                while members and time.monotonic() < deadline and all(_is_helper(p, self.helpers) for p in members):
+                    time.sleep(0.1)
+                    members = self._members()
+                self.helper_exits = [d for pid, d in waiting.items() if pid not in members][:_MAX_LISTED]
             survivors = [_describe(pid) if pid > 0 else {"pid": None, "name": "?"} for pid in members[:_MAX_LISTED]]
             if members:
                 self.kill_all()

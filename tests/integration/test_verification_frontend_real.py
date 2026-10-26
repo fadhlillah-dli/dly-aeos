@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from aeos.verification import frontend, runner
+from aeos.verification import frontend, runner, seal
 from aeos.verification.steps import StepContext
 
 pytestmark = pytest.mark.integration
@@ -71,9 +71,18 @@ def test_frontend_step_on_the_platform_frontend(tmp_path: Path):
     # the DLY AEOS layout: the empty state is answered by the candidate's own app on an empty database
     shutil.copytree(REPO / "backend", snapshot / "backend", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     workdir = runner.new_workdir()
+    checked: dict = {}
+
+    def check(step_seal, res, out_dir=None):  # what the verifier wires (_Verifier._driver_seal)
+        checked[step_seal.name] = seal.check_driver(step_seal, res.channel or res.stdout, out_dir=out_dir)
+        return checked[step_seal.name].payload
+
     try:
-        ctx = StepContext(runner=runner.ProcessRunner(workdir=workdir), snapshot=snapshot, workdir=workdir,
-                          changed=["frontend/src/App.tsx"], categories={"frontend": ["frontend/src/App.tsx"]})
+        seal.install_plugin(workdir)
+        rn = runner.ProcessRunner(workdir=workdir)
+        ctx = StepContext(runner=rn, snapshot=snapshot, workdir=workdir,
+                          changed=["frontend/src/App.tsx"], categories={"frontend": ["frontend/src/App.tsx"]},
+                          seal_step=lambda name: seal.StepSeal.new(workdir, name), check_driver_seal=check)
         results = {r.check: r for r in frontend.run(ctx)}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -85,3 +94,11 @@ def test_frontend_step_on_the_platform_frontend(tmp_path: Path):
     report = results["ui_a11y"].evidence[0].content
     assert isinstance(report, dict) and report["live_app"] and not report["unproven_states"]
     assert {s["answered_by"] for s in report["states"] if s["state"] == "empty"} == {"candidate-app"}
+    # the UI driver was a sealed step: its report and every screenshot digest passed the host-side check
+    assert report["sealed_report"] is True and report["screenshots_without_sealed_digest"] == []
+    assert checked[frontend.UI_STEP].status == "PASS"
+    assert len([e for e in results["ui_a11y"].evidence if e.kind == "SCREENSHOT"]) == 8
+    # honest npm ci / vitest / tsc / vite / UI runs leave nothing behind in their kill groups (never QUARANTINED)
+    named = {s["step"]: s for s in rn.steps}
+    assert {*frontend.STEP_NAMES.values(), frontend.UI_STEP} <= set(named), sorted(named)
+    assert rn.survivors() == [], rn.survivors()

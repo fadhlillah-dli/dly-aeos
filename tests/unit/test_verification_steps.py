@@ -464,3 +464,197 @@ def test_a_ui_render_with_an_uncaught_script_error_is_never_evidence_of_its_stat
     for crash in (state("error", ["TypeError: boom"]), state("empty", ["TypeError: boom"], "candidate-app")):
         res = frontend.ui_result(ui([state("loading"), crash]), tmp_path)
         assert res.status == "FAIL" and "uncaught-script-error" in res.summary and res.reasons, res
+
+
+# ------------------------------------------------------------------------------------- sealed verifier drivers
+# ADR-0120 integration note: the OpenAPI dump and the UI driver are sealed like the migration pack driver - only the
+# result sealed at the driver's very end counts, and the files it wrote must still have the digests it sealed.
+
+_APP = '''class _App:
+    def openapi(self):
+        return {"openapi": "3.1.0", "paths": {"/api/items": {"get": {"parameters": []}}}}
+
+
+def create_app(testing=False, init_db=True):
+    __EXTRA__
+    return _App()
+'''
+_ATEXIT_REWRITE = ('import atexit, sys\n'
+                   '    atexit.register(lambda: open(sys.argv[1], "w").write(\'{"openapi": "3.1.0", "paths": {}}\'))')
+_FORGED_EXIT = ('import os, sys\n'
+                '    open(sys.argv[1], "w").write(\'{"openapi": "3.1.0", "paths": {}}\')\n'
+                '    print(\'{"ok": true, "paths": 0, "files": {}}\', flush=True)\n'
+                '    os._exit(0)')
+
+
+def _app_tree(root: Path, extra: str = "pass") -> Path:
+    api = root / "backend" / "aeos" / "api"
+    api.mkdir(parents=True)
+    (root / "backend" / "aeos" / "__init__.py").write_text("", encoding="utf-8")
+    (api / "__init__.py").write_text("", encoding="utf-8")
+    (api / "app.py").write_text(_APP.replace("__EXTRA__", extra), encoding="utf-8")
+    return root
+
+
+def _sealed_ctx(tmp_path: Path) -> tuple[StepContext, dict]:
+    """A step context with the verifier's real result seal on a real process runner (what the verifier wires)."""
+    from aeos.verification import runner, seal
+
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    seal.install_plugin(workdir)
+    checked: dict = {}
+
+    def check(step_seal, res, out_dir=None):
+        checked[step_seal.name] = seal.check_driver(step_seal, res.channel or res.stdout, out_dir=out_dir)
+        return checked[step_seal.name].payload
+
+    ctx = StepContext(runner=runner.ProcessRunner(workdir=workdir), snapshot=tmp_path, workdir=workdir, timeout=120,
+                      seal_step=lambda name: seal.StepSeal.new(workdir, name), check_driver_seal=check)
+    return ctx, checked
+
+
+def test_the_openapi_dump_is_sealed_with_the_digest_of_its_document(tmp_path: Path):
+    ctx, checked = _sealed_ctx(tmp_path)
+    doc, err = contracts._generated_openapi(ctx, _app_tree(tmp_path / "honest"), "head")
+    assert err == "" and doc is not None and "/api/items" in doc["paths"]
+    assert checked["contract_openapi_head"].status == "PASS"
+    assert "openapi-head.json" in checked["contract_openapi_head"].payload["files"]
+    assert {"contract_openapi_head"} <= {s["step"] for s in ctx.runner.steps}  # its own kill group, recorded
+
+
+def test_a_document_rewritten_after_the_sealed_end_is_tampering_not_a_contract(tmp_path: Path):
+    """Candidate app code used to be able to replace the dumped document from an atexit hook (the diff then read a
+    document of its choice); the sealed digest no longer matches: FAIL (QUARANTINED by the verifier)."""
+    ctx, checked = _sealed_ctx(tmp_path)
+    doc, err = contracts._generated_openapi(ctx, _app_tree(tmp_path / "rewrite", _ATEXIT_REWRITE), "head")
+    assert doc is None and "no usable sealed result" in err
+    assert checked["contract_openapi_head"].status == "FAIL"
+    assert any("changed after the driver sealed it" in p for p in checked["contract_openapi_head"].forged)
+
+
+def test_a_printed_status_without_the_sealed_end_is_never_used(tmp_path: Path):
+    ctx, checked = _sealed_ctx(tmp_path)
+    doc, err = contracts._generated_openapi(ctx, _app_tree(tmp_path / "forged", _FORGED_EXIT), "head")
+    assert doc is None and "no usable sealed result" in err
+    assert checked["contract_openapi_head"].status == "MISSING" and not checked["contract_openapi_head"].forged
+    # the same tree without the verifier's seal (a scripted context) would have taken the printed line
+    from aeos.verification import runner
+
+    unsealed = StepContext(runner=runner.ProcessRunner(workdir=ctx.workdir), snapshot=tmp_path, workdir=ctx.workdir,
+                           timeout=120)
+    doc2, _ = contracts._generated_openapi(unsealed, tmp_path / "forged", "head")
+    assert doc2 == {"openapi": "3.1.0", "paths": {}}
+
+
+def test_sealed_output_digests_are_checked_on_the_host(tmp_path: Path):
+    import hashlib
+
+    from aeos.verification import seal
+
+    (tmp_path / "a.png").write_bytes(b"one")
+    good = {"files": {"a.png": hashlib.sha256(b"one").hexdigest()}}
+    assert seal.output_problems(good, tmp_path) == [] and seal.sealed_output(good, "a.png")
+    assert seal.output_problems({}, tmp_path) == [] and not seal.sealed_output({}, "a.png")
+    (tmp_path / "a.png").write_bytes(b"two")
+    assert "changed after the driver sealed it" in seal.output_problems(good, tmp_path)[0]
+    (tmp_path / "a.png").unlink()
+    assert "disappeared" in seal.output_problems(good, tmp_path)[0]
+    for bad in ("../a.png", "sub/a.png", "C:a.png", ".hidden"):
+        assert "not a plain file name" in seal.output_problems({"files": {bad: "0" * 64}}, tmp_path)[0]
+    assert seal.output_problems({"files": ["a.png"]}, tmp_path) == ["the sealed result's output digests are not "
+                                                                    "readable"]
+
+
+def test_only_screenshots_the_sealed_ui_report_digested_are_evidence(tmp_path: Path):
+    import hashlib
+
+    from aeos.verification import frontend
+
+    states = []
+    for name in ("loading", "error"):
+        (tmp_path / f"{name}.png").write_bytes(b"\x89PNG\r\n\x1a\n" + name.encode())
+        states.append({"state": name, "viewport": "desktop", "screenshot": f"{name}.png", "title": "t",
+                       "violations": [], "page_errors": [], "console_errors": 0, "answered_by": "verifier"})
+    digest = hashlib.sha256((tmp_path / "loading.png").read_bytes()).hexdigest()
+    ui = {"status": "RAN", "states": states, "rules": [], "browser": "fake", "sealed": True,
+          "files": {"loading.png": digest}}
+    res = frontend.ui_result(ui, tmp_path)
+    shots = [e.env_extra["ui_state"] for e in res.evidence if e.kind == "SCREENSHOT"]
+    assert shots == ["loading"], shots
+    report = res.evidence[0].content
+    assert isinstance(report, dict) and report["sealed_report"] is True
+    assert report["screenshots_without_sealed_digest"] == ["error.png"]
+    assert any("without a digest" in n for n in res.not_proven)
+    # a direct (unsealed) call keeps using what the driver printed
+    unsealed = frontend.ui_result({**ui, "sealed": False}, tmp_path)
+    assert sorted(e.env_extra["ui_state"] for e in unsealed.evidence if e.kind == "SCREENSHOT") == ["error", "loading"]
+
+
+def test_the_ui_driver_is_a_sealed_step(tmp_path: Path):
+    """No Chromium needed: a bundle without index.html makes the driver report NOT_RUN - through the seal."""
+    from aeos.verification import frontend
+
+    ctx, checked = _sealed_ctx(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    ui = frontend.run_ui(ctx.runner, dist, ctx.workdir / "r" / "ui", ctx=ctx)
+    assert ui["sealed"] is True and ui["status"] == "NOT_RUN" and "index.html" in ui["reason"], ui
+    assert checked[frontend.UI_STEP].status == "PASS"
+    assert frontend.UI_STEP in {s["step"] for s in ctx.runner.steps}
+
+
+def test_installed_dependency_listing_and_startup_hooks_are_read_by_the_verifier(tmp_path: Path):
+    site = tmp_path / "site-packages"
+    for name, version in (("Alpha", "1.0"), ("beta_pkg", "2.1")):
+        info = site / f"{name}-{version}.dist-info"
+        info.mkdir(parents=True)
+        (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n", encoding="utf-8")
+    (site / "broken-0.1.dist-info").mkdir()  # no METADATA: the listing is incomplete, never silently short
+    (site / "a1_hook.pth").write_text("import os; os.environ.setdefault('X', '1')\n", encoding="utf-8")
+    (site / "paths.pth").write_text("./extra\n", encoding="utf-8")
+    pins, problems = envs.installed_pins([site, tmp_path / "missing"])
+    assert pins == ["alpha==1.0", "beta_pkg==2.1"]
+    assert len(problems) == 1 and problems[0].startswith("broken-0.1.dist-info")
+    assert envs.startup_hooks([site]) == [{"file": "a1_hook.pth", "executes_code": True},
+                                          {"file": "paths.pth", "executes_code": False}]
+    assert all(d.name == "site-packages" for d in envs.site_dirs(tmp_path / "ve"))
+
+
+def test_a_byte_order_mark_does_not_hide_a_startup_hook(tmp_path: Path):
+    """The interpreter strips a UTF-8 byte-order mark before it runs a .pth file's import lines: so does the listing."""
+    (tmp_path / "bom.pth").write_bytes(b"\xef\xbb\xbfimport os\n")
+    assert envs.startup_hooks([tmp_path]) == [{"file": "bom.pth", "executes_code": True}]
+
+
+def test_the_venv_and_install_steps_import_nothing_from_the_run_directory(tmp_path: Path):
+    """The venv creation is a trusted-only step (a process it leaves behind is not blamed on the candidate): a
+    ``venv.py`` or ``pip.py`` an earlier candidate step left in the run directory - the step's working directory or
+    the PYTHONPATH entry it is given - must never stand in for the controller's stdlib venv or its pip."""
+    import sys
+
+    from aeos.verification import procs, runner
+
+    wd = tmp_path / "w"
+    (wd / "c").mkdir(parents=True)
+    marker = tmp_path / "planted-module-ran"
+    for d in (wd, wd / "c"):
+        for mod in ("venv.py", "pip.py"):
+            (d / mod).write_text(f"open({str(marker)!r}, 'w').write({mod!r})\n", encoding="utf-8")
+    env = procs.scrubbed_env(pythonpath=[wd / "c"], home=wd / "h", tmp=wd / "t", data_dir=wd / "d",
+                             disable_plugin_autoload=True)
+    rn = runner.ProcessRunner(workdir=wd)
+    ve = wd / "ve"
+    cmd = envs.venv_command(ve)
+    assert cmd[:4] == [sys.executable, "-I", "-m", "venv"]
+    mk = rn.tool(cmd, cwd=wd, env=env, timeout=300, step="dependency_env_venv")
+    py = envs._venv_python(ve)
+    assert mk.returncode == 0 and py.is_file(), mk.tail(800)
+    assert not marker.exists(), marker.read_text(encoding="utf-8")
+    # the install step (pip's help: no index needed) with an empty PYTHONPATH, as the verifier runs it
+    pip = rn.tool(envs.pip_command(py, ["--help"]), cwd=wd, env={**env, "PYTHONPATH": ""}, timeout=300,
+                  step="dependency_env_install")
+    assert pip.returncode == 0 and "--require-hashes" in pip.stdout, pip.tail(800)
+    assert not marker.exists(), marker.read_text(encoding="utf-8")
+    assert [s["step"] for s in rn.steps] == ["dependency_env_venv", "dependency_env_install"]
+    assert all(s["survivors"] == [] for s in rn.steps)

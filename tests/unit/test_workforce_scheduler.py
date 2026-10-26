@@ -380,13 +380,17 @@ def test_mark_accepted_fails_closed_without_verification_module(db, monkeypatch)
     fk.accepted.add(tid)
     # The verification module disappears after the run reached REVIEW (admission itself already
     # refuses to start a worker without a verifier: see test_admission_waits_without_verifier).
-    monkeypatch.delitem(sys.modules, "aeos.verification.acceptance")
+    # A None entry makes every import of it raise ImportError - deleting the entry instead re-imported the real
+    # module from disk: alone that failed on the fake collector, after other tests it left a second module object
+    # on the package that later monkeypatches (test_doctor_c4) no longer reached.
+    monkeypatch.setitem(sys.modules, "aeos.verification.acceptance", None)
     rec = AcceptanceRecord(task_id=tid, run_id=run.id, project_id=run.project_id, artifact_hash="sha256:x",
                            acceptance_status="ACCEPTED")
     db.add(rec)
     db.flush()
-    with pytest.raises(Blocked):
+    with pytest.raises(Blocked) as exc:
         scheduler.mark_accepted(db, tid, run.id, acceptance_id=rec.id, actor="v")
+    assert exc.value.code == "ACCEPTANCE_INVALID" and "verification module unavailable" in exc.value.message
 
 
 def test_update_run_keeps_status_fields_separate(db, fakes):
