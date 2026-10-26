@@ -37,9 +37,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
@@ -395,6 +396,7 @@ def _doc_ops(session: Session, project: Project, version: PlanVersion, result: d
         chash = doc.content_hash or (rec.content_hash if rec else None) or content_hash({"markdown": body})
         used = sorted(k for k in visuals if f"(visual:{k})" in body)
         rendered = [k for k in used if visuals[k].status == "RENDERED" and visuals[k].png_path]
+        payload: dict[str, Any]
         payload = {"markdown": body, "content_hash": chash, "doc_type": doc.doc_type, "status": doc.status,
                    "rendered_visuals": rendered, "visual_paths": {k: visuals[k].png_path for k in rendered},
                    "visual_titles": {k: visuals[k].title for k in used}}
@@ -773,11 +775,11 @@ def create_preview(session: Session, settings: Settings, *, plan_id: str, actor_
 
     # Resolve dependencies (parent folders, labels) to op ids within this publication.
     for op in _ops_for(session, pub.id):
-        p = planned_by_op.get(op.id)
-        if p is None:
+        planned_op = planned_by_op.get(op.id)
+        if planned_op is None:
             continue
         deps: list[str] = []
-        for ref in ([p.parent_ref] if p.parent_ref else []) + list(p.dep_refs):
+        for ref in ([planned_op.parent_ref] if planned_op.parent_ref else []) + list(planned_op.dep_refs):
             dep = by_ref.get(ref)
             if dep is not None and dep.publication_id == pub.id and dep.id != op.id:
                 deps.append(dep.id)
@@ -882,7 +884,7 @@ def _write_target(pub: Publication, op: PublicationOperation) -> tuple[str, dict
     target = dict(op.target or {})
     if not target.get("root_id"):
         fam = FAMILY_OF.get(op.provider)
-        resolved = next((t for t in pub.targets or [] if t.get("family") == fam), {})
+        resolved: dict[str, Any] = next((t for t in pub.targets or [] if t.get("family") == fam), {})
         if resolved.get("root_id"):
             target["root_id"] = resolved["root_id"]
     target["provider"] = provider
@@ -1097,7 +1099,7 @@ class _Run:
         if family in self.provider_errors:
             raise self.provider_errors[family]
         if family not in self.providers:
-            cfg = next((t.get("config", {}) for t in self.pub.targets if t.get("family") == family), {})
+            cfg: dict[str, Any] = next((t.get("config", {}) for t in self.pub.targets if t.get("family") == family), {})
             try:
                 self.providers[family] = build_provider(family, cfg)
             except ProviderBlocked as exc:
@@ -1296,7 +1298,7 @@ def _record_functional_proof(run: _Run, op: PublicationOperation) -> None:
     if (pub.mode or "LIVE") != "LIVE":
         return
     fam = FAMILY_OF.get(op.provider)
-    resolved = next((t for t in pub.targets or [] if t.get("family") == fam), {})
+    resolved: dict[str, Any] = next((t for t in pub.targets or [] if t.get("family") == fam), {})
     integration_id = resolved.get("integration_id")
     if not integration_id:
         return
@@ -1388,11 +1390,11 @@ def _existing_target_guard(run: _Run, op: PublicationOperation) -> bool:
 
 
 def _claim(session: Session, op: PublicationOperation, now: datetime) -> bool:
-    res = session.execute(update(PublicationOperation).where(
+    res = cast("CursorResult[Any]", session.execute(update(PublicationOperation).where(  # UPDATE -> CursorResult
         PublicationOperation.id == op.id, PublicationOperation.status == op.status,
         PublicationOperation.attempts == op.attempts,
     ).values(status=OP_IN_FLIGHT, attempts=op.attempts + 1, last_attempt_at=now, updated_at=now)
-        .execution_options(synchronize_session=False))
+        .execution_options(synchronize_session=False)))
     if res.rowcount != 1:
         session.rollback()
         return False

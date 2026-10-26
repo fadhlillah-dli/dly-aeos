@@ -12,9 +12,10 @@ import os
 import socket
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
@@ -496,8 +497,10 @@ def transition_task(
         "row_version": te.row_version + 1, "state_changed_at": utcnow(), "updated_at": utcnow(),
     }
     values.update(set_fields)
-    res = session.execute(update(TaskExecution).where(TaskExecution.id == te.id, TaskExecution.state == src,
-                                                      TaskExecution.row_version == te.row_version).values(**values))
+    # an UPDATE returns a CursorResult (rowcount)
+    res = cast("CursorResult[Any]", session.execute(
+        update(TaskExecution).where(TaskExecution.id == te.id, TaskExecution.state == src,
+                                    TaskExecution.row_version == te.row_version).values(**values)))
     if res.rowcount != 1:
         raise Conflict("task execution changed concurrently", code="CONCURRENT_UPDATE")
     te = get_te(session, task_id)
@@ -1572,13 +1575,13 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
                               route_key=adm.route.route_key, est_usd=adm.est_usd, est_tokens=adm.est_tokens,
                               est_requests=int((task.limits or {}).get("max_requests", DEFAULT_MAX_REQUESTS)))
     now = utcnow()
-    res = session.execute(
+    res = cast("CursorResult[Any]", session.execute(  # an UPDATE returns a CursorResult (rowcount)
         update(TaskExecution)
         .where(TaskExecution.id == te.id, TaskExecution.state == S.READY.value, TaskExecution.row_version == expected_rv)
         .values(state=S.LEASED.value, row_version=expected_rv + 1, active_run_id=run_id,
                 attempts_used=TaskExecution.attempts_used + 1, reason="lease acquired", reason_code="",
                 state_changed_at=now, updated_at=now)
-    )
+    ))
     if res.rowcount != 1:
         ext.release(session, getattr(reservation, "id", None))
         raise Conflict("lost the lease to a concurrent admission", code="LEASE_CONFLICT")
@@ -1718,6 +1721,7 @@ def heartbeat(session: Session, run_id: str, *, lease_id: str | None) -> bool:
         _reject_stale(session, run, why, "heartbeat", {})
         return False
     lease = session.get(Lease, lease_id)
+    assert lease is not None  # _stale() returned "unknown lease" otherwise
     now = utcnow()
     lease.heartbeat_at = now
     lease.expires_at = now + timedelta(seconds=lease.ttl_seconds or DEFAULT_LEASE_TTL)

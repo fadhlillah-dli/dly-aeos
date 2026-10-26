@@ -48,7 +48,7 @@ jobs:
           python -m pip check
       - name: G1 static — ruff
         run: python -m ruff check backend tests scripts
-      - name: G1 static — mypy for the macOS and Windows code paths (ratcheted baseline in pyproject.toml)
+      - name: G1 static — mypy for the macOS and Windows code paths (every module, none exempt in pyproject.toml)
         if: runner.os == 'macOS' && runner.arch == 'ARM64'
         run: |
           python -m mypy --platform darwin

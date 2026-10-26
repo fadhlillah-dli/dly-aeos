@@ -60,7 +60,7 @@ def test_every_job_names_its_gates_explicitly():
 
 
 def test_mypy_baseline_only_shrinks():
-    """The ratcheted baseline may lose entries (a module got fixed) but never gain one."""
+    """The ratcheted baseline may lose entries (a module got fixed) but never gain one - it is now empty."""
     import tomllib
 
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -83,8 +83,15 @@ def test_mypy_baseline_only_shrinks():
     fixed |= {"aeos.policy.decisions", "aeos.policy.router", "aeos.policy.snapshot", "aeos.publisher.targets",
               "aeos.routing.catalog", "aeos.routing.service", "aeos.worker_runtime.processes",
               "aeos.workforce.demo", "aeos.workforce.loop"}
-    assert len(fixed) == 20 and fixed <= baseline_2026_10_19 and not (exempt & fixed), sorted(exempt & fixed)
-    assert len(exempt) <= 13
+    # ... and the rest on 2026-10-26 (W6-040): no module is exempt any more
+    fixed |= {"aeos.broker.git_broker", "aeos.broker.grants", "aeos.broker.model_proxy", "aeos.cost.service",
+              "aeos.delivery.pr_bundle", "aeos.planning.dag", "aeos.policy.queue", "aeos.proposals.review",
+              "aeos.publisher.jobs", "aeos.worker_runtime.executor", "aeos.worker_runtime.opencode",
+              "aeos.worker_runtime.sandbox", "aeos.workforce.scheduler"}
+    assert fixed == baseline_2026_10_19 and not (exempt & fixed), sorted(exempt & fixed)
+    assert len(exempt) == 0, sorted(exempt)
+    # no override may switch errors off for any module, old or new
+    assert not [o for o in overrides if o.get("ignore_errors")], overrides
 
 
 def test_pii_scan_flags_personal_data_and_tenant_hosts_in_templates():

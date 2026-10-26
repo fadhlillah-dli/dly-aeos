@@ -306,6 +306,12 @@ def build_container_command(*, model: str, worktree: str, task_file: str) -> lis
 
 
 # ----------------------------------------------------------------------------- event parsing
+def _obj(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    """``parent[key]`` when it is a JSON object, else an empty one (engine events are untrusted input)."""
+    value = parent.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 @dataclass
 class ObservedAction:
     kind: str  # edit_file|read_file|search|run_command|fetch|tool_error|error|narration|step|unknown
@@ -375,7 +381,7 @@ class EventParser:
         at = utcnow().isoformat() if not isinstance(ts, int | float) else \
             time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts / 1000)) + "Z"
         etype = ev.get("type")
-        part = ev.get("part") if isinstance(ev.get("part"), dict) else {}
+        part = _obj(ev, "part")
         if etype == "tool_use":
             return self._tool(part, at)
         if etype == "text":
@@ -385,7 +391,7 @@ class EventParser:
                                   observed_at=at, is_narration=True)
         if etype == "step_finish":
             self.steps += 1
-            tokens = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
+            tokens = _obj(part, "tokens")
             self.tokens_input += int(tokens.get("input") or 0)
             self.tokens_output += int(tokens.get("output") or 0)
             try:
@@ -397,8 +403,8 @@ class EventParser:
         if etype == "step_start":
             return None
         if etype == "error":
-            err = ev.get("error") if isinstance(ev.get("error"), dict) else {}
-            data = err.get("data") if isinstance(err.get("data"), dict) else {}
+            err = _obj(ev, "error")
+            data = _obj(err, "data")
             info = {"name": err.get("name"), "status_code": data.get("statusCode"),
                     "retryable": data.get("isRetryable"), "message": redact_text(str(data.get("message", "")))[:300]}
             self.errors.append(info)
@@ -408,10 +414,10 @@ class EventParser:
 
     def _tool(self, part: dict[str, Any], at: str) -> ObservedAction:
         tool = str(part.get("tool") or "")
-        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        state = _obj(part, "state")
         status = str(state.get("status") or "")
-        inp = state.get("input") if isinstance(state.get("input"), dict) else {}
-        meta = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+        inp = _obj(state, "input")
+        meta = _obj(state, "metadata")
         raw_path = inp.get("filePath") or meta.get("filepath") or inp.get("path")
         path, outside = self._rel(raw_path if isinstance(raw_path, str) else None)
         if outside and path:

@@ -91,24 +91,8 @@ ignore_missing_imports = true
 warn_unused_ignores = false
 check_untyped_defs = true
 
-# Ratcheted type-check baseline (master §11 "type checking", CI step "G1 static - mypy"): these
-# modules had errors when the gate was introduced (2026-10-19, 230 errors in 33 files) and are
-# exempt until fixed. Every other module - including every NEW module - must type-check cleanly.
-# Remove an entry once its module is clean; never add one (tests/unit/test_ci_gates.py enforces it).
-# 2026-10-19 (K4): docs_engine.renderer, doctor.* and inventory.* were fixed and removed (33 -> 22), then
-# policy.decisions/router/snapshot, publisher.targets, routing.catalog/service, worker_runtime.processes and
-# workforce.demo/loop (22 -> 13).
-[[tool.mypy.overrides]]
-module = [
-  "aeos.broker.git_broker", "aeos.broker.grants", "aeos.broker.model_proxy",
-  "aeos.cost.service",
-  "aeos.delivery.pr_bundle",
-  "aeos.planning.dag",
-  "aeos.policy.queue",
-  "aeos.proposals.review",
-  "aeos.publisher.jobs",
-  "aeos.worker_runtime.executor", "aeos.worker_runtime.opencode",
-  "aeos.worker_runtime.sandbox",
-  "aeos.workforce.scheduler",
-]
-ignore_errors = true
+# Type checking is a real gate (master §11 "type checking", CI step "G1 static - mypy"): every module
+# type-checks cleanly on both host platforms (--platform darwin and win32). The ratcheted baseline of
+# 2026-10-19 (230 errors in 33 modules, exempt via ignore_errors) was burned down to zero: 33 -> 13 (K4,
+# 2026-10-19), 13 -> 0 (W6-040, 2026-10-26). Never add an ignore_errors override (tests/unit/test_ci_gates.py
+# enforces it); a narrowly scoped "# type: ignore[code]" needs a reason and a genuine third-party typing gap.

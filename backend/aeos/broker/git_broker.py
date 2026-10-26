@@ -713,8 +713,9 @@ def create_pull_request(
     events.emit(session, source="broker", kind="run.side_effect", entity_type="run", entity_id=run.id, run_id=run.id,
                 project_id=run.project_id, domain=run.domain,
                 payload={"kind": "CREATE_PR", "status": outcome, "number": se.external_id, "url": se.external_url})
-    head_obj = (pr or {}).get("head") if isinstance((pr or {}).get("head"), dict) else {}
-    base_obj = (pr or {}).get("base") if isinstance((pr or {}).get("base"), dict) else {}
+    raw_head, raw_base = (pr or {}).get("head"), (pr or {}).get("base")
+    head_obj: dict[str, Any] = raw_head if isinstance(raw_head, dict) else {}
+    base_obj: dict[str, Any] = raw_base if isinstance(raw_base, dict) else {}
     return {"status": "CREATED" if outcome == "SUCCEEDED" else outcome, "ok": outcome == "SUCCEEDED",
             "number": se.external_id, "url": se.external_url, "side_effect_id": se.id, "error": detail[:300],
             "head_sha": head_obj.get("sha"), "base_sha": base_obj.get("sha"),
