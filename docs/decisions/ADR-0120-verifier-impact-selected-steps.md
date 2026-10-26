@@ -79,7 +79,57 @@ landed together as `VERIFIER_VERSION` 4. In the merged verifier the impact-selec
 code - negative tests, integration-marked tests (trusted and candidate), the adversarial probes and the trusted
 suite in the per-candidate environment - run under the same result seal as the trusted suite (a forged or
 inconsistent result FAILs the step and QUARANTINES the run), the migration pack driver seals its result, and the
-per-candidate interpreter's steps are recorded in the verifier runner's kill-group list. Not covered, stated: the
-OpenAPI dump of the head, the UI driver and the distribution listing are named runner steps (kill group) but their
-JSON output is not sealed, and the frontend's npm/vitest/tsc/vite processes and the pip install run outside a kill
-group (a process they leave behind is not detected).
+per-candidate interpreter's steps are recorded in the verifier runner's kill-group list.
+
+The gaps this note first stated (OpenAPI dump, UI driver and distribution listing unsealed; npm/vitest/tsc/vite and
+the pip install outside a kill group; the project baseline outside both) were closed in wave 7b (2026-10-26):
+
+* **Kill groups for the tool steps.** The frontend's `npm ci`, vitest, `tsc -b --noEmit` and `vite build`
+  (`frontend_install`, `frontend_vitest`, `frontend_typecheck`, `frontend_build`) and the per-candidate venv
+  creation and pip install (`dependency_env_venv`, `dependency_env_install`) run in their own kill groups and are
+  recorded in the runner's step list (`ProcessRunner.tool`): a process left behind is a survivor and the run is
+  QUARANTINED. The venv creation runs only the controller's stdlib and is a trusted-only step. `npm ci
+  --ignore-scripts` and the hash-pinned wheel install run no candidate code, but they install candidate-chosen
+  packages, so they are not trusted-only (fail closed). Honest runs are not quarantined: every member keeps the
+  2 s grace it already had. Only the allow-listed build-tool helper `esbuild` (esbuild's service process ends when its
+  parent's pipe closes), together with a Windows console host serving it, gets 10 s more, and only while nothing
+  else is left. Helpers that exit in that time are listed on the step (`helper_exits`). Anything still alive
+  after it is a survivor. A grace never weakens the tamper window, because a process that ends inside it acted
+  while the window was still open. Measured on Windows 11 (Job Object): `npm ci`, the platform's whole vitest
+  suite, `tsc -b` and `vite build` left no process behind at all.
+  `tests/integration/test_verification_frontend_real.py` (real `npm ci` from the registry, the real
+  toolchain, Chromium) passes with no survivor. On macOS (process group plus marker sweep) only the unit tests
+  with a scripted node run. An honest real-toolchain run there is NOT-PROVEN.
+* **Sealed drivers.** The OpenAPI dump (base and head) and the UI state driver import the seal plugin before
+  anything else and seal their result at their very end, with the sha256 of every file they wrote: the document,
+  and each screenshot. The host re-checks those digests (`seal.output_problems`), and a file that changed after the
+  seal is result tampering (QUARANTINED). Without a sealed end, the OpenAPI diff is NOT-PROVEN (or breaking, when
+  only the head fails) and the UI states are NOT_RUN. A screenshot without a sealed digest is never evidence.
+* **Dependency listing.** The listing is no longer a process of the candidate environment, so there is no output
+  left to forge: the verifier reads the installed distributions' metadata from the venv's `site-packages` itself,
+  right after the install and before anything in the environment has run. `dependency_set_hash` now covers
+  the candidate's installed distributions only. The trusted harness is recorded separately (`harness`).
+  `.pth` start-up hooks are listed, and the ones with `import` lines are stated: they run when the
+  candidate interpreter starts, before the seal plugin reads its key, so the seal of the candidate-environment suite
+  does not cover them (residual). An honest lockfile can carry one too (coverage ships `a1_coverage.pth`), so this
+  is stated, not blocking.
+* **Project baseline** (`verification/project_baseline.py`) follows the same discipline. Its pytest step is
+  sealed: a forged or inconsistent result makes the baseline TAMPERED, and a missing sealed end leaves its Python
+  part NOT_RUN, so there is no trusted measurement. Every step (pytest, `npm ci`, vitest) runs in a kill group: a
+  survivor makes the baseline TAMPERED (audited as `verification.controller_modified`, with the survivors), and a
+  degraded kill group leaves the tamper status UNKNOWN. A project whose import path ships a top-level module that
+  would shadow the test runner, the seal plugin or the standard library is not run (NOT_RUN, stated), the same
+  rule the verifier applies to candidates. Not applied by the baseline: the verifier's automatic neutralisation of
+  foreign trust-table rows and its admission integrity hold. The baseline reports and audits such rows only.
+
+Still not covered (stated):
+
+* vitest, `tsc` and `vite` come from the candidate's (or project's) own lockfile, so their reports and exit codes
+  are the candidate toolchain's own. A verifier plugin cannot seal them (trust LOW, as the evidence says).
+* On the process runner the run directory is writable by candidate code. A later step reads what an earlier
+  candidate step wrote there, and that includes trusted-only steps. Examples are a module in the shared step
+  working directory, which `python -c` / `python -m` put first on `sys.path`, the seal plugin file itself, or the
+  base-commit export. For steps that import candidate code this reaches no further than the stated in-interpreter
+  subversion of the seal. For trusted-only steps it is an additional gap: only the trusted-suite copy is
+  hash-checked before and after. The container runner mounts these read-only and gives each step its own tmpfs
+  working directory.
