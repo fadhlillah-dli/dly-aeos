@@ -72,10 +72,14 @@ for example to debug a single test.
 `scripts/gates.py` runs the static gates above for you (stdlib only; use the `.venv` Python). It prints one
 line per gate with PASS, FAIL or SKIPPED and the seconds, and exits 1 when a gate fails.
 
+The plain run covers ruff, mypy for darwin and win32, the secret scan, the commit subjects and the frontend gates if
+`frontend/` changed. `--tests` also runs the backend suite (pytest `-n logical` when xdist is installed). `--json`
+prints machine-readable results.
+
 ```bash
-python scripts/gates.py            # ruff, mypy darwin + win32, secret scan, commit subjects, frontend if it changed
-python scripts/gates.py --tests    # also the backend suite (pytest -n logical when xdist is installed)
-python scripts/gates.py --json     # machine-readable
+python scripts/gates.py
+python scripts/gates.py --tests
+python scripts/gates.py --json
 ```
 
 The frontend gates (typecheck, unit tests) run only when files under `frontend/` differ from `origin/main` and
@@ -125,7 +129,7 @@ on a detached `HEAD`, so the push and the pull request went out on an old commit
 - **Identity.** Every commit the push adds (not reachable from the remote sha or from `origin/main`) must have
   author and committer e-mail equal to this repository's `git config user.email`, no AI identity and no AI
   attribution (`aeos.core.commit_identity` and `aeos.core.attribution`, the broker's own checks). The message names
-  the commits and the exact fix (`git config user.email`, then `git rebase -r <base> --exec '<amend>'`, where
+  the commits and the exact fix (`git config user.email`, then `git rebase -r <base> --exec "<amend>"` with the exec string in double quotes so that cmd.exe, PowerShell and sh read it as one argument, where
   `<amend>` is `git merge-base --is-ancestor HEAD origin/main || git commit --amend --no-edit --reset-author
   --allow-empty`: commits that `origin/main` already has keep their author); it never prints an address. The address is set per repository, never committed.
 
@@ -223,8 +227,20 @@ Two standalone helpers in `scripts/` (stdlib only, ASCII output, last line is th
   commit on `main`). It reads the check runs with `gh api` and the required contexts from the repository
   rulesets. An empty or incomplete list is PENDING, never GREEN. `--wait --deadline <minutes>` polls (30 s
   or more) and ends with `CI: TIMEOUT` (exit 2) at the deadline; `--report <path.json>` saves the result.
-  Exit codes: 0 GREEN, 1 RED, SUPERSEDED or sha mismatch, 2 TIMEOUT or ERROR, 3 PENDING without `--wait`. The
-  last line is always `CI: <VERDICT> <sha>`.
+  Exit codes: 0 GREEN, 1 RED, SUPERSEDED or sha mismatch, 2 TIMEOUT or ERROR, 3 PENDING without `--wait`, 4 INFRA.
+  The last line is always `CI: <VERDICT> <sha>`, with ` (non-required failed: <names>)` after the sha under
+  `--required-only`.
+
+  By default a failure of any check, required or not, is RED. `--required-only` computes the verdict from the
+  required contexts only: GREEN when all of them are success, skipped or neutral, PENDING while one is missing,
+  queued or running, RED only when a required one failed. A non-required failure is still listed, marked
+  `[NON-REQUIRED FAILED]`, and named in the last line, for example
+  `CI: GREEN <sha> (non-required failed: commit subjects [G1])`; fix it before you merge, because the verdict no
+  longer blocks on it. With no required context found, every check counts as required.
+
+  INFRA means a required job was cancelled because GitHub never gave it a runner (the annotation says the job was
+  not acquired by a runner, as when hosted macOS capacity runs out). It is infrastructure, not a code failure:
+  re-run the job and never read it as RED.
 
 Both have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`): a violating
 fixture is red and a near-miss legitimate one is green. The junction test runs only on Windows.

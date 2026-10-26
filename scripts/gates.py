@@ -448,9 +448,13 @@ def identity_guard(ref: PushRef, base: str | None, root: Path, env: Mapping[str,
     if len(problems) > MAX_LISTED:
         lines.append(f"  (+{len(problems) - MAX_LISTED} more)")
     since = base[:12] if len(base) >= 40 else base
-    fix = ["Fix, for the commits listed (never print or commit the address; it stays in local git config):",
-           "  git config user.email                      # must be this code host's address for the owner",
-           f"  git rebase -r {since} --exec '{AMEND_EXEC}'",
+    # Printed commands are paste-safe: no inline '#' comment (zsh passes it on), and the exec string in double quotes
+    # (one argument in cmd.exe, PowerShell and sh; cmd.exe does not treat single quotes as quoting).
+    fix = ["Fix, for the commits listed (never print or commit the address; it stays in local git config).",
+           "First check that this repository's address is the owner's address for this code host:",
+           "  git config user.email",
+           "Then re-author the commits listed above:",
+           f'  git rebase -r {since} --exec "{AMEND_EXEC}"',
            f"  (-r keeps merges; commits that {DEFAULT_BASE} already has are left as they are)"]
     if any(p["code"] == CODE_ATTRIBUTION for p in problems):
         fix.append(f"  an AI attribution in a message or identity must be removed: git rebase -i {since} (reword) "

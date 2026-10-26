@@ -280,10 +280,10 @@ date, `./aeos doctor --functional` also from the date GitHub reports for the tok
 1. Open the OpenCode Console and select the **Personal** workspace. Go works only in single-member workspaces.
 2. Create an API key with permission **Restricted → Models: Request**. That is the least privilege the docs give for
    inference.
-3. Store it, prompted without echo:
+3. Store it, prompted without echo, under its own ref `workers/opencode-go` (never the Zen key's ref):
 
    ```bash
-   ./aeos secrets set workers/opencode-go   # a separate ref, never the Zen key
+   ./aeos secrets set workers/opencode-go
    ./aeos secrets status
    ```
 

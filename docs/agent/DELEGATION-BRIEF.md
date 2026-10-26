@@ -24,14 +24,15 @@ RULES (lesson ids in brackets)
 3. No links in a worktree [L4]. Never create a symlink or junction in a worktree (a .venv link once
    made worktree removal delete a real venv). Call the interpreter of the main checkout by path.
 4. Reuse canonical modules [L10]. Search for an existing module first (for example
-   aeos.core.attribution for attribution rules). Do not re-implement it.
+   aeos.core.attribution for attribution rules, scripts/changelog.py for the changelog fragment format).
+   Do not re-implement it.
 5. Owner decisions [L11]. The owner decision is quoted verbatim below with its exact scope.
    Do not widen it. A wider idea is a new question for the owner, not part of this change.
    OWNER DECISION: "<verbatim quote>"  SCOPE: <exact scope>
 6. Domains [L12]. A change for one domain (PERSONAL or OFFICE) must not alter the other domain's
    view. Add a test that shows it.
-7. Full gates before "done" [L8]. Run scripts/gates.py (or the commands in CONTRIBUTING.md) and,
-   when the change touches the API shape or the frontend, the integration and frontend tests too.
+7. Full gates before "done" [L8]. Run scripts/gates.py (or the commands in CONTRIBUTING.md) and the
+   unit, acceptance and integration suites; add the frontend tests when the change touches the frontend.
    Unit tests alone are not "done".
 8. Claims carry evidence [L3]. Every security or readiness statement names its E-level, the host it
    ran on and its NOT-PROVEN part. Anything not run on Windows is NOT-PROVEN there.
@@ -41,12 +42,20 @@ RULES (lesson ids in brackets)
     and dry-run it in-process against a temporary database. Paste the result with the command.
     Commands must be paste-safe: no inline '#' comments, every '[]' and '*' quoted.
 11. Diagnosis order [L14]. Input, then environment, then code. No background job without a
-    deadline and a failure marker file; check the marker, not the silence.
-12. CI state [L7]. A check list that is empty or pending is not green. Name each required check.
+    deadline and a failure marker file; check the marker, not the silence. Run tests through
+    scripts/run_tests.sh; zsh does not word-split a variable, so use an array, never 'set -- $var'.
+12. CI state [L7, L18]. Never hand-write a CI wait loop: use scripts/ci_status.py --wait --deadline, and
+    --required-only for a merge decision. A check list that is empty or pending is not green; name each
+    required check. A job cancelled because no runner acquired it is INFRA: re-run it, do not debug code.
 13. Changelog [L5]. Merge main into the branch and resolve the changelog before push. Use a
     changelog fragment where the repository has them.
 14. Flaky tests [L15]. A test that passes on re-run is a defect. Report it and fix the timing
     assumption; do not re-run until green.
+15. Single owner [L17]. This prompt names the one owner (module, script and branch) of every tool the
+    task touches: OWNERS: <tool -> owner>. Extend the owner's tool; never build a second checker beside
+    it. A tool with no named owner is a question to the delegating session, not a license to build.
+16. Machine load [L19]. At most 2 full-suite runs at once on the owner's Mac. Time or compare speed only
+    on a quiet machine (load average below the core count) and write the load average next to the numbers.
 
 REPORT (at most 15 lines): commit sha, files changed, gate results, bite-test results
 (violating fixture red, near-miss fixture green), NOT-PROVEN items.

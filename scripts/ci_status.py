@@ -8,6 +8,7 @@ and a check that was cancelled by a newer run is SUPERSEDED, not "fine".
   python scripts/ci_status.py --pr 21 [--expect-sha <sha or prefix>=7+] [--wait --deadline 30]
   python scripts/ci_status.py --after-merge 21 [--wait]       # judge the merge commit of PR 21 on main
   add: --repo owner/name  --require "<check name>" (extra required context)  --report out.json
+       --required-only    judge from the required contexts only; other failures are listed and named, not RED
 
 Data comes from the GitHub CLI (``gh api``), through a runner function the tests replace with fixture JSON:
   repos/{owner}/{repo}/commits/{sha}/check-runs   (paginated; the count is compared with total_count)
@@ -16,19 +17,28 @@ Data comes from the GitHub CLI (``gh api``), through a runner function the tests
   repos/{owner}/{repo}/actions/runs               (only to prove that a cancelled run was superseded)
 
 Required checks = the required status check contexts of the active branch rulesets plus every ``--require``.
-Every other reported check is informational: a failure of one still makes the verdict RED, a queued or running
-one does not block. If no required context can be found, every reported check counts as required (fail closed).
+Every other reported check is informational: a failure of one still makes the verdict RED (default), a queued or
+running one does not block. With ``--required-only`` the verdict comes from the required checks alone (GREEN when all
+are success, skipped or neutral; PENDING while one is missing, queued or running; RED only when a required one
+failed); a failed check that is not required is still listed, marked ``[NON-REQUIRED FAILED]``, and named in the
+last line: ``CI: GREEN <sha> (non-required failed: <name>, ...)``. If no required context can be found, every
+reported check counts as required (fail closed).
 Only the check-run name is matched. Classic branch protection and commit-status contexts are not read (NOT-PROVEN).
 
-Verdicts, strongest first: ERROR (api or auth failure), RED (a failure, timed out, action required, startup
+Verdicts, strongest first: ERROR (api or auth failure), INFRA (see below), RED (a failure, timed out, action required, startup
 failure or unrecognised conclusion on the LATEST attempt of a check), SUPERSEDED (a required check was cancelled
 and a newer run exists for the same branch, or the PR head moved while waiting), PENDING (list empty, or a
 required check is missing, queued or running), GREEN (every required check present and success, skipped or
 neutral). A cancelled check with no newer run for its branch is RED, not SUPERSEDED.
 
+INFRA: a required check that was cancelled because GitHub never gave the job a runner (its output or annotations say
+the job was not acquired by a runner, as happens when hosted macOS capacity runs out while the job is queued). That
+is infrastructure, not a code failure: re-run the job, do not read it as RED. It has its own exit code (4) and only
+applies when no check failed and every cancelled required check has that reason.
+
 ``--wait`` polls (interval 30 s or more, ``--deadline`` minutes, default 30) until the verdict is not PENDING;
 at the deadline the verdict is TIMEOUT. The last line is always exactly one ``CI: <VERDICT> <sha>``.
-Exit 0 GREEN; 1 RED, SUPERSEDED or sha mismatch (MISMATCH); 2 TIMEOUT or ERROR; 3 PENDING without --wait.
+Exit 0 GREEN; 1 RED, SUPERSEDED or sha mismatch (MISMATCH); 2 TIMEOUT or ERROR; 3 PENDING without --wait; 4 INFRA.
 Output is ASCII only. Stdlib only.
 """
 
@@ -50,9 +60,12 @@ from typing import Any, TextIO
 Runner = Callable[[list[str]], str]
 
 MIN_INTERVAL = 30
-GREEN, RED, PENDING, SUPERSEDED, ERROR, TIMEOUT, MISMATCH = (
-    "GREEN", "RED", "PENDING", "SUPERSEDED", "ERROR", "TIMEOUT", "MISMATCH")
-EXIT_CODES = {GREEN: 0, RED: 1, SUPERSEDED: 1, MISMATCH: 1, TIMEOUT: 2, ERROR: 2, PENDING: 3}
+GREEN, RED, PENDING, SUPERSEDED, ERROR, TIMEOUT, MISMATCH, INFRA = (
+    "GREEN", "RED", "PENDING", "SUPERSEDED", "ERROR", "TIMEOUT", "MISMATCH", "INFRA")
+EXIT_CODES = {GREEN: 0, RED: 1, SUPERSEDED: 1, MISMATCH: 1, TIMEOUT: 2, ERROR: 2, PENDING: 3, INFRA: 4}
+# What GitHub writes on a job it could not start: "The job was not acquired by Runner of type hosted even after
+# multiple attempts" (an annotation; the check-run output can carry it too).
+NOT_ACQUIRED = re.compile(r"not\s+acquired\s+by\s+runner", re.I)
 
 OK_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required", "startup_failure"})
@@ -196,6 +209,20 @@ def cancellation_superseded(api: Api, sha: str) -> tuple[bool, str]:
     return True, "a newer run exists for the same branch"
 
 
+def infra_cancelled(api: Api, run: dict[str, Any]) -> bool:
+    """True when a cancelled check run says that no runner ever acquired its job (output text or annotations)."""
+    output = run.get("output") if isinstance(run.get("output"), dict) else {}
+    if any(NOT_ACQUIRED.search(str(output.get(key) or "")) for key in ("title", "summary", "text")):
+        return True
+    count = output.get("annotations_count")
+    rid = run.get("id")
+    if not isinstance(count, int) or count < 1 or not isinstance(rid, int):
+        return False
+    pages = api.get(f"check-runs/{rid}/annotations?per_page=100", paginate=True)
+    return any(NOT_ACQUIRED.search(str(a.get("message") or "") + " " + str(a.get("title") or ""))
+               for page in pages if isinstance(page, list) for a in page if isinstance(a, dict))
+
+
 # ------------------------------------------------------------------------------------------------ judgement
 @dataclass
 class Row:
@@ -211,6 +238,8 @@ class Judgement:
     reasons: list[str] = field(default_factory=list)
     rows: list[Row] = field(default_factory=list)
     required_source: str = ""
+    required_only: bool = False
+    non_required_failed: list[str] = field(default_factory=list)  # --required-only: named in the last line
 
 
 def classify(run: dict[str, Any]) -> tuple[str, str]:
@@ -228,7 +257,8 @@ def classify(run: dict[str, Any]) -> tuple[str, str]:
 
 
 def judge(runs: Sequence[dict[str, Any]], required: Sequence[str],
-          superseded: Callable[[], tuple[bool, str]]) -> Judgement:
+          superseded: Callable[[], tuple[bool, str]], required_only: bool = False,
+          infra: Callable[[dict[str, Any]], bool] | None = None) -> Judgement:
     latest = latest_by_name(runs)
     source = "rulesets/--require" if required else "all reported checks (no required context found)"
     req = list(required) if required else sorted(latest)
@@ -244,17 +274,25 @@ def judge(runs: Sequence[dict[str, Any]], required: Sequence[str],
         state, detail = classify(latest[name])
         rows.append(Row(name, False, state, detail))
 
-    result = Judgement(PENDING, rows=rows, required_source=source)
+    result = Judgement(PENDING, rows=rows, required_source=source, required_only=required_only)
     failed = [r for r in rows if r.state == "FAILED" or (r.required and r.state == "UNKNOWN")]
+    if required_only:
+        result.non_required_failed = [r.name for r in failed if not r.required]
+        failed = [r for r in failed if r.required]
     cancelled = [r for r in rows if r.required and r.state == "CANCELLED"]
+    infra_rows = [r for r in cancelled if infra is not None and infra(latest[r.name])]
     waiting = [r for r in rows if r.required and r.state in {"PENDING", "MISSING"}]
     if failed:
         result.verdict = RED
         result.reasons = [f"{r.name}: {r.detail}" for r in failed]
+    elif cancelled and len(infra_rows) == len(cancelled):
+        result.verdict = INFRA
+        result.reasons = [f"{r.name}: cancelled, the job was not acquired by a runner" for r in infra_rows] + [
+            "infrastructure, not a code failure: re-run the job (gh run rerun <run id> --failed); do not read it as RED"]
     elif cancelled:
         ok, why = superseded()
         result.verdict = SUPERSEDED if ok else RED
-        result.reasons = [f"{r.name}: cancelled" for r in cancelled] + [why]
+        result.reasons = [f"{r.name}: cancelled" for r in cancelled if r not in infra_rows] + [why]
     elif not latest:
         result.reasons = ["no check has reported for this commit yet (an empty list is never green)"]
     elif waiting:
@@ -317,7 +355,9 @@ def run(argv: Sequence[str] | None = None, *, runner: Runner = gh_runner, sleep:
             except OSError as exc:
                 say(f"error: cannot write --report {args.report}: {exc.__class__.__name__}", out)
                 verdict = ERROR
-        say(f"CI: {verdict} {shown_sha}", out)
+        named = report.get("non_required_failed") or []
+        suffix = f" (non-required failed: {', '.join(named)})" if named else ""
+        say(f"CI: {verdict} {shown_sha}{suffix}", out)
         return EXIT_CODES[verdict]
 
     try:
@@ -341,7 +381,8 @@ def run(argv: Sequence[str] | None = None, *, runner: Runner = gh_runner, sleep:
                         say(f"PR #{args.pr} head moved to {head}; {sha} was superseded", out)
                         report["reasons"] = [f"PR head moved to {head}"]
                         return finish(SUPERSEDED, sha)
-                result = judge(fetch_check_runs(api, sha), required, lambda: cancellation_superseded(api, sha))
+                result = judge(fetch_check_runs(api, sha), required, lambda: cancellation_superseded(api, sha),
+                               args.required_only, lambda r: infra_cancelled(api, r))
                 errors = 0
             except CiError as exc:
                 errors += 1
@@ -351,6 +392,7 @@ def run(argv: Sequence[str] | None = None, *, runner: Runner = gh_runner, sleep:
                 result = None
             if result is not None:
                 report.update(reasons=result.reasons, required_source=result.required_source,
+                              required_only=result.required_only, non_required_failed=result.non_required_failed,
                               checks=[{"name": r.name, "required": r.required, "state": r.state, "detail": r.detail}
                                       for r in result.rows])
                 if result.verdict != PENDING or not args.wait:
@@ -382,7 +424,8 @@ def print_result(result: Judgement, out: TextIO) -> None:
         say(f"  [{row.state}] {row.name} ({row.detail})", out)
     say(f"other checks ({len(other)}, informational):", out)
     for row in other:
-        say(f"  [{row.state}] {row.name} ({row.detail})", out)
+        marker = " [NON-REQUIRED FAILED]" if result.required_only and row.name in result.non_required_failed else ""
+        say(f"  [{row.state}] {row.name} ({row.detail}){marker}", out)
     for reason in result.reasons:
         say(f"reason: {reason}", out)
 
@@ -418,6 +461,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="with --pr / --after-merge: exit 1 when the resolved commit does not start with this")
     p.add_argument("--repo", default=None, help="owner/name (default: the current directory's GitHub remote)")
     p.add_argument("--require", action="append", default=[], metavar="NAME", help="extra required check name")
+    p.add_argument("--required-only", action="store_true",
+                   help="verdict from the required checks only; other failures are listed and named, not RED")
     p.add_argument("--wait", action="store_true", help="poll while PENDING")
     p.add_argument("--deadline", type=float, default=30.0, help="minutes to wait (default 30)")
     p.add_argument("--interval", type=interval_arg, default=MIN_INTERVAL, help="seconds between polls (min 30)")

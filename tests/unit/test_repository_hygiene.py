@@ -336,7 +336,6 @@ REVIEWED_PROSE = (
     ("CITATION.cff", "GENERATED_WITH_AI", "AI-assisted development"),
     ("README.md", "GENERATED_WITH_AI", "AI-assisted software engineering"),
     ("docs/releases/v0.1.0.md", "GENERATED_WITH_AI", "control plane for AI-assisted"),
-    ("docs/OPERATIONS.md", "GENERATED_WITH_AI", "written with the help of"),
     ("docs/OPERATIONS.md", "GENERATED_WITH_AI", '"AI-generated"'),
     ("backend/aeos/doctor/checks/claude.py", "GENERATED_WITH_AI", "dibuat dengan Claude Code {version}"),
     ("backend/aeos/doctor/checks/worker.py", "GENERATED_WITH_AI", "dibuat dengan OpenCode {recorded}"),
@@ -346,9 +345,10 @@ REVIEWED_PROSE = (
 def attribution_findings(rel: str, text: str, reviewed: set[int] | None = None,
                          prose: tuple[tuple[str, str, str], ...] | None = None) -> list[str]:
     """The canonical guard's findings for *text* as ``rel: ...`` lines, minus the reviewed prose. A finding is accepted
-    only when its line still has NO finding once the reviewed fragment is removed, so a real attribution appended to a
-    reviewed line stays red. Indexes of *prose* (default REVIEWED_PROSE) entries whose fragment sits on a finding line
-    are added to *reviewed* (for the stale-entry check)."""
+    only when the WHOLE text, with the reviewed fragments removed from that one line, still has no finding reported at
+    that line: a real attribution appended to a reviewed line, or one that wraps onto the next line, stays red. Indexes
+    of *prose* (default REVIEWED_PROSE) entries whose fragment sits on a finding line are added to *reviewed* (for
+    the stale-entry check)."""
     entries = REVIEWED_PROSE if prose is None else prose
     lines = text.split("\n")
     found: list[str] = []
@@ -357,27 +357,38 @@ def attribution_findings(rel: str, text: str, reviewed: set[int] | None = None,
         # every reviewed fragment of this file and code that sits on the line (a line may quote several forms)
         matches = [i for i, (r, code, fragment) in enumerate(entries)
                    if r == rel and code == finding.code and fragment in raw]
-        residue = raw
-        for i in matches:
-            residue = residue.replace(entries[i][2], "")
         if reviewed is not None:
             reviewed.update(matches)
-        if not matches or find_ai_attribution(residue):
-            found.append(f"{rel}: {finding.describe()}")
+        if matches:
+            residue = raw
+            for i in matches:
+                residue = residue.replace(entries[i][2], "")
+            rest = [*lines[:finding.line - 1], residue, *lines[finding.line:]]
+            if not any(f.line == finding.line for f in find_ai_attribution("\n".join(rest))):
+                continue
+        found.append(f"{rel}: {finding.describe()}")
     return found
 
 
 def scan_attribution(files: dict[str, str], prose: tuple[tuple[str, str, str], ...] | None = None
                      ) -> tuple[list[str], list[tuple[str, str, str]]]:
     """(findings, stale reviewed-prose entries) for a ``{relative path: text}`` map. Guard-sample files are skipped. An
-    entry is stale when its fragment sits on no finding line of its file: it must be removed."""
+    entry is stale when its fragment sits on no finding line of its file, or when the scan of its file gives the same
+    findings without it (an unneeded entry would excuse a real attribution that happens to contain its words)."""
     entries = REVIEWED_PROSE if prose is None else prose
     findings: list[str] = []
     reviewed: set[int] = set()
+    per_file: dict[str, list[str]] = {}
     for rel, text in files.items():
         if _is_guard_sample_file(rel, text):
             continue
-        findings += attribution_findings(rel, text, reviewed, entries)
+        per_file[rel] = attribution_findings(rel, text, reviewed, entries)
+        findings += per_file[rel]
+    for i in sorted(reviewed):
+        rel = entries[i][0]
+        without = tuple(e for n, e in enumerate(entries) if n != i)
+        if attribution_findings(rel, files[rel], None, without) == per_file[rel]:
+            reviewed.discard(i)  # nothing needs this entry
     return findings, [entry for i, entry in enumerate(entries) if i not in reviewed]
 
 
@@ -487,6 +498,28 @@ def test_stale_reviewed_prose_entries_are_reported():
     assert scan_attribution({"c.md": live, "b.md": both["b.md"]}, entries)[1] == [entries[0]]
 
 
+def test_an_unneeded_reviewed_prose_entry_is_stale_and_cannot_excuse_a_real_attribution():
+    """docs/OPERATIONS.md quotes the phrase 'written with the help of' in a list of forbidden forms: removing the other
+    entry's fragment is what clears the line, so an entry for the phrase itself was never needed."""
+    line = 'forms: "written with the help of", "AI-generated", the robot emoji\n'
+    needed = ("a.md", "GENERATED_WITH_AI", '"AI-generated"')
+    unneeded = ("a.md", "GENERATED_WITH_AI", "written with the help of")
+    assert scan_attribution({"a.md": line}, (needed,)) == ([], [])  # green: the one entry that clears the line
+    assert scan_attribution({"a.md": line}, (needed, unneeded)) == ([], [unneeded])  # red: the other is stale
+    # and with the unneeded entry present a real attribution on the same file would have been excused; without it it is not
+    real = "This runbook was written with the help of " + "Claude.\n"
+    assert attribution_findings("a.md", real, None, (unneeded,)) == []  # the hole the entry opened
+    assert attribution_findings("a.md", real, None, (needed,))  # red once the entry is gone
+
+
+def test_reviewed_prose_does_not_excuse_an_attribution_that_wraps_onto_the_next_line():
+    prose = "DLY AEOS is a control plane for AI-assisted software engineering."
+    wrapped = prose + " Generated" + " with\n" + "Claude Code.\n"
+    assert attribution_findings("README.md", wrapped)  # red: reported at the first line, whose fragment is reviewed
+    assert attribution_findings("README.md", wrapped.replace("\n", "\r\n"))  # red with CRLF
+    assert not attribution_findings("README.md", prose + " It runs on your\nown machine.\n")  # green near miss
+
+
 # ------------------------------------------------------------------ one attribution implementation (ratchet)
 # No other module may carry its own attribution pattern: a string-constant pattern given to re.compile / re.search /
 # ... that matches an attribution marker (co-authored-by, generated with/by, a noreply address at an AI vendor) is a
@@ -506,29 +539,33 @@ def _squeeze(pattern: str) -> str:
     return "".join(ch for ch in flat.lower() if ch.isalnum())
 
 
-# Behavioural check: a pattern is a private attribution matcher when it really finds a probe statement but not its
-# decoy. A decoy is the probe with the marker words swapped for neutral ones of the same shape ("Re-Viewed-On: x",
-# "reported near x", "noreply@example.com"), so a generic validator (an e-mail, host:path or name check, a catch-all)
-# that merely accepts the probe is not flagged. A probe counts only when the match covers the marker itself (verb and
-# preposition, key and ``by``, ``@`` and the vendor label), so ``generated`` or ``noreply@`` alone is not attribution.
-_PROBE_SUBJECTS = ("x", "Claude", "ChatGPT", "Copilot")
+# Behavioural check: a pattern is a private attribution matcher when it really finds a probe statement but none of its
+# decoys. There is one decoy per marker word, each changing that word ONLY ("reported with x", "generated near x",
+# "Re-Viewed-By: x", "Co-Authored-On: x", "noreply@example.com"), so a generic pattern built on one word alone (a
+# preposition such as ``(\w+) by (\w+)``, a ``[\w-]+-by:`` trailer reader) accepts a decoy as well and is not flagged,
+# and neither is a validator (an e-mail, host:path or name check, a catch-all). A probe counts only when the match
+# covers the marker itself (verb and preposition, key and ``by``, ``@`` and the vendor label), so ``generated`` or
+# ``noreply@`` alone is not attribution.
+_PROBE_SUBJECTS = ("x", "Claude", "Claude Code", "[Claude Code](https://claude.ai)", "ChatGPT", "Copilot")
 _PROBE_VERBS = (("generated", "reported"), ("created", "printed"), ("written", "carried"))
 _PROBE_PREPOSITIONS = (("with", "near"), ("by", "for"), ("using", "over"))
 _NEUTRAL_CONTROLS = ("plain text 123, release v1.2.3 for user@example.org", "user@example.org", "v1.2.3", "abc")
 
 
-def _behavioural_probes() -> list[tuple[str, str, str, tuple[str, ...]]]:
-    """(marker name, probe text, decoy text, words the match on the probe must cover)."""
-    probes: list[tuple[str, str, str, tuple[str, ...]]] = []
+def _behavioural_probes() -> list[tuple[str, str, tuple[str, ...], tuple[str, ...]]]:
+    """(marker name, probe text, decoy texts, words the match on the probe must cover)."""
+    probes: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = []
     for subject in _PROBE_SUBJECTS:
-        probes.append(("co-authored-by", f"Co-Authored-By: {subject}", f"Re-Viewed-On: {subject}", ("authored", "by")))
+        for tail in (subject, f"{subject} <noreply@example.invalid>"):  # a bare trailer and one that carries an address
+            probes.append(("co-authored-by", f"Co-Authored-By: {tail}",
+                           (f"Re-Viewed-By: {tail}", f"Co-Authored-On: {tail}"), ("authored", "by")))
         for verb, plain_verb in _PROBE_VERBS:
             for prep, plain_prep in _PROBE_PREPOSITIONS:
-                probes.append(("generated with/by", f"{verb} {prep} {subject}", f"{plain_verb} {plain_prep} {subject}",
-                               (verb, prep)))
+                probes.append(("generated with/by", f"{verb} {prep} {subject}",
+                               (f"{plain_verb} {prep} {subject}", f"{verb} {plain_prep} {subject}"), (verb, prep)))
     for domain in AI_VENDOR_DOMAINS:
         label, _, tld = domain.partition(".")
-        probes.append(("noreply address at an AI vendor", f"noreply@{domain}", f"noreply@example.{tld}",
+        probes.append(("noreply address at an AI vendor", f"noreply@{domain}", (f"noreply@example.{tld}",),
                        ("@" + label,)))
     return probes
 
@@ -544,9 +581,9 @@ def _behavioural_marker(pattern: str) -> str | None:
         return None
     if any(rx.search(control) for control in _NEUTRAL_CONTROLS):
         return None
-    for marker, probe, decoy, words in _behavioural_probes():
+    for marker, probe, decoys, words in _behavioural_probes():
         m = rx.search(probe)
-        if m and all(word in m.group(0).lower() for word in words) and not rx.search(decoy):
+        if m and all(word in m.group(0).lower() for word in words) and not any(rx.search(d) for d in decoys):
             return marker
     return None
 
@@ -659,6 +696,8 @@ def test_attribution_ratchet_flags_private_patterns_and_passes_legitimate_ones()
         "short vendor label": "import re\nre.compile(r'noreply@groq\\.com')\n",
         "short vendor domain": "import re\nre.compile(r'noreply@x\\.ai')\n",
         "short vendor tld": "import re\nre.compile(r'noreply@z\\.ai')\n",
+        "trailer parser with an address": "import re\nre.compile(r'(?im)^[Cc]o-[Aa]uthored-[Bb]y:\\s*(?P<name>[^<]+)<(?P<mail>[^>]+)>')\n",
+        "markdown footer": "import re\nre.compile(r'[Gg]enerated [Ww]ith \\[Claude Code\\]')\n",
         "byte order mark": "\ufeffimport re\nPAT = re.compile('co-' + 'authored-by:')\n",
         "unparsable": "re.compile('co-authored-by'\n",
     }
@@ -680,6 +719,10 @@ def test_attribution_ratchet_flags_private_patterns_and_passes_legitimate_ones()
         "host path validator": "import re\nre.match(r'^(?:[\\w.-]+@)?([\\w.-]+):(?!//)(.+)$', 'h:p')\n",
         "name validator": "import re\nre.compile(r'^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$')\n",
         "env secret names": "import re\nre.compile(r'(?i)(TOKEN|ANTHROPIC|OPENAI|GITHUB)')\n",
+        "generic by pattern": "import re\nre.compile(r'(\\w+)\\s+by\\s+(\\w+)')\n",
+        "generic with pattern": "import re\nre.compile(r'(\\w+) with (\\w+)')\n",
+        "generic using pattern": "import re\nre.compile(r'(\\S+) using (\\S+)')\n",
+        "dco style trailer reader": "import re\nre.compile(r'(?im)^[\\w-]+-by:\\s*(.+)$')\n",
         "uncompilable constant": "import re\nre.compile('(unclosed')\n",
     }
     for case, source in legitimate.items():

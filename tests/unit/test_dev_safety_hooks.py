@@ -208,6 +208,20 @@ def _printed_rebase(detail: str) -> list[str]:
     return shlex.split(line)[1:]
 
 
+def test_the_printed_commands_are_paste_safe_in_zsh_and_cmd(repo: Path):
+    """cmd.exe splits an argument in single quotes at '||', and zsh passes an inline '#' comment on to the command:
+    the printed commands use double quotes and carry no comment."""
+    base = _commit(repo, "feat: base")
+    _commit(repo, "feat: wrong identity", git_author_email=OTHER)
+    detail = _guard(repo, base).detail
+    commands = [ln.strip() for ln in detail.splitlines() if ln.strip().startswith("git ")]
+    assert len(commands) == 2
+    for command in commands:
+        assert "#" not in command and "'" not in command, command
+    rebase = _printed_rebase(detail)
+    assert rebase[-2] == "--exec" and rebase[-1] == gates.AMEND_EXEC  # one argument, "||" and all
+
+
 def test_the_fix_the_message_prints_makes_the_guard_pass(repo: Path):
     base = _commit(repo, "feat: base")
     _commit(repo, "feat: wrong identity", git_author_email=OTHER)
@@ -1036,55 +1050,3 @@ def test_contributing_documents_the_guards_the_verdict_and_the_test_runner():
     for needle in ("scripts/run_tests.sh", "RUN_TESTS: PASS", "NOT RUN:", "GATES: PASS|FAIL", "--report", "merge-conflict",
                    "git branch -f <branch> HEAD", "preflight.py --facts", "--reset-author", "shellcheck", "--deadline"):
         assert needle in text, needle
-
-
-FRAGMENT_HEADINGS = ("### Added", "### Changed", "### Deprecated", "### Removed", "### Fixed", "### Security")
-
-
-def _fragment_problems(text: str) -> list[str]:
-    lines = text.splitlines()
-    problems = []
-    if not lines or lines[0] not in FRAGMENT_HEADINGS:
-        problems.append("line 1 is not a '### <Added|Changed|Deprecated|Removed|Fixed|Security>' heading")
-    if len(lines) < 2 or lines[1] != "":
-        problems.append("line 2 is not empty")
-    bullets = [line for line in lines[2:] if line.strip()]
-    if not bullets or not all(line.startswith("- **") and ".** " in line for line in bullets):
-        problems.append("the body is not one or more '- **Title.** text' bullets")
-    return problems
-
-
-def test_the_fragment_format_check_is_red_for_a_malformed_fragment_and_green_for_a_good_one():
-    good = "### Fixed\n\n- **Title.** What changed, why, and E1 static.\n"
-    assert _fragment_problems(good) == []
-    for bad in ("Fixed\n\n- **Title.** x\n", "### Fixed\n- **Title.** x\n", "### Fixed\n\nplain text\n",
-                "### Fixed\n\n- **Title** no full stop\n", "### Fixed\n\n", ""):
-        assert _fragment_problems(bad), repr(bad)
-
-
-def _fragments_problems(folder: Path) -> dict[str, list[str]]:
-    """Problems per fragment of changelog.d/*.md; nothing (not an error) when the folder is empty or absent."""
-    found = sorted(folder.glob("*.md")) if folder.is_dir() else []
-    return {f.name: p for f in found if (p := _fragment_problems(f.read_text(encoding="utf-8")))}
-
-
-def test_fragments_are_checked_wherever_they_are_and_none_is_required_by_name(tmp_path: Path):
-    folder = tmp_path / "changelog.d"
-    assert _fragments_problems(folder) == {}  # absent
-    folder.mkdir()
-    assert _fragments_problems(folder) == {}  # empty: the state after a release folded them all in
-    (folder / "ok.md").write_text("### Added\n\n- **Title.** x\n", encoding="utf-8")
-    (folder / "README.txt").write_text("not a fragment", encoding="utf-8")
-    assert _fragments_problems(folder) == {}
-    (folder / "broken.md").write_text("Added\n- nope\n", encoding="utf-8")
-    assert list(_fragments_problems(folder)) == ["broken.md"]
-
-
-def test_every_changelog_fragment_that_exists_follows_the_format():
-    """Fragments are folded into CHANGELOG.md and deleted at release (CONTRIBUTING.md), so this must not read one by
-    name: it passes with an empty or absent directory and checks whatever is there."""
-    assert _fragments_problems(ROOT / "changelog.d") == {}
-    mine = ROOT / "changelog.d" / "dev-safety-hooks.md"
-    if mine.is_file():  # while this branch's own fragment exists it also carries the evidence levels
-        bullets = [ln for ln in mine.read_text(encoding="utf-8").splitlines()[2:] if ln.strip()]
-        assert all("NOT-PROVEN" in ln and "E2" in ln for ln in bullets)

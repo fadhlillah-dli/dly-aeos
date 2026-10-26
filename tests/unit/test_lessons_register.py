@@ -27,7 +27,9 @@ METHOD_COLUMNS = ["method", "re-runnable proof", "failure it prevents", "retire 
 _PENDING = re.compile(r"^PENDING:[A-Za-z0-9._/-]+(\s.*)?$")
 _OWNER = re.compile(r"^OWNER-SETTING:\S.*$")
 _NEVER = re.compile(r"\bnever\b", re.I)
-_REPO_PATH = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._/-]*$")
+# A leading dot is allowed (.github/workflows/ci.yml, .githooks/..., .claude/...); '..' is caught by the segment
+# check and '.' by is_file.
+_REPO_PATH = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9._/-]*$")
 _LESSON_ID = re.compile(r"^L(\d+)$")
 
 
@@ -99,10 +101,10 @@ def lessons_problems(text: str, brief_text: str, root: Path) -> list[str]:
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", rec["date"]):
             problems.append(f"{rid}: date '{rec['date']}' is not YYYY-MM-DD")
         if rec["class"] not in CLASSES:
-            problems.append(f"{rid}: unknown class '{rec['class']}'")
+            problems.append(f"{rid}: unknown class '{rec['class']}' (use one of {', '.join(sorted(CLASSES))})")
             continue
         if rec["level"] not in LEVELS:
-            problems.append(f"{rid}: unknown level '{rec['level']}'")
+            problems.append(f"{rid}: unknown level '{rec['level']}' (use one of {', '.join(sorted(LEVELS))})")
         if rec["brief"] not in {"yes", "no"}:
             problems.append(f"{rid}: brief must be yes or no")
         if not rec["strikes"].isdigit() or int(rec["strikes"]) < 1:
@@ -124,6 +126,25 @@ def lessons_problems(text: str, brief_text: str, root: Path) -> list[str]:
     return problems
 
 
+SEED_IDS = range(1, 17)
+
+
+def pruned_ids(text: str) -> set[int]:
+    """Ids named by entries of the '## Pruned' section: 'Lnn - date - reason', bare or as a markdown list item."""
+    section = re.split(r"^## Pruned\s*$", text, maxsplit=1, flags=re.M)
+    if len(section) < 2:
+        return set()
+    body = re.split(r"^## ", section[1], maxsplit=1, flags=re.M)[0]
+    return {int(n) for n in re.findall(r"^\s*(?:[*+-]\s+)?L(\d+) - ", body, re.M)}
+
+
+def removed_seeds(text: str) -> list[int]:
+    """Seed ids that are neither a row of table 1 nor named in the Pruned section."""
+    rows = parse_tables(text).get("|".join(RULE_COLUMNS), [])
+    present = {int(m.group(1)) for m in (_LESSON_ID.match(r[0]) for r in rows if r) if m}
+    return sorted(set(SEED_IDS) - present - pruned_ids(text))
+
+
 def _repo_texts() -> tuple[str, str]:
     return (ROOT / LESSONS).read_text(encoding="utf-8"), (ROOT / BRIEF).read_text(encoding="utf-8")
 
@@ -140,13 +161,39 @@ def test_the_seed_rows_exist_and_ids_are_well_formed():
     numbers = [int(m.group(1)) for m in (_LESSON_ID.match(i) for i in ids) if m]
     assert len(numbers) == len(ids), f"ids must match L<number>: {ids}"
     assert numbers == sorted(set(numbers)), "ids must be ascending and unique"
-    pruned = {int(n) for n in re.findall(r"^L(\d+) - ", text, re.M)}  # "Pruned" entries: Lnn - date - reason
-    missing = set(range(1, 17)) - set(numbers) - pruned
-    assert not missing, f"seed rows removed without a Pruned entry: {sorted(missing)}"
+    assert not removed_seeds(text), f"seed rows removed without a Pruned entry: {removed_seeds(text)}"
     assert len(parse_tables(text)["|".join(METHOD_COLUMNS)]) >= 4
 
 
 # ---------------------------------------------------------------------------------- bite tests
+def _register_without(seed: int, pruned_section: str) -> str:
+    live = (ROOT / LESSONS).read_text(encoding="utf-8")
+    kept = [ln for ln in live.splitlines() if not re.match(rf"^\| L{seed} \|", ln)]
+    assert len(kept) == len(live.splitlines()) - 1
+    text = "\n".join(kept) + "\n"
+    head, _, _tail = text.partition("## Pruned")
+    return head + "## Pruned\n\n" + pruned_section + "\n"
+
+
+def test_a_seed_row_removed_without_a_pruned_entry_is_red():
+    assert removed_seeds(_register_without(16, "None yet.")) == [16]
+
+
+@pytest.mark.parametrize("entry", ["L16 - 2026-11-01 - obstructs - owner", "* L16 - 2026-11-01 - obstructs - owner",
+                                   "- L16 - 2026-11-01 - obstructs - owner", "  - L16 - 2026-11-01 - x - owner"])
+def test_a_seed_row_removed_with_a_pruned_entry_is_green(entry):
+    assert removed_seeds(_register_without(16, entry)) == []
+
+
+def test_a_pruned_looking_line_outside_the_pruned_section_does_not_excuse_a_removal():
+    text = _register_without(16, "None yet.") + "\n## Later\n\nL16 - 2026-11-01 - elsewhere - owner\n"
+    assert removed_seeds(text) == [16]
+
+
+def test_the_live_register_has_every_seed():
+    assert removed_seeds((ROOT / LESSONS).read_text(encoding="utf-8")) == []
+
+
 # The fixtures are a small synthetic register built in tmp_path, never the live file, so the bite tests
 # stay valid when the real register grows, a PENDING tool merges or a row is pruned.
 RULE_HEADER = "| " + " | ".join(RULE_COLUMNS) + " |\n|" + "---|" * len(RULE_COLUMNS) + "\n"
@@ -216,6 +263,37 @@ def test_non_strict_class_at_strike_two_without_tool_is_green(root):
                                   "C:/Windows/win.ini", "scripts\\real_tool.py"])
 def test_tool_that_is_not_an_existing_repo_file_is_red(root, tool):
     assert any("L2" in p and "threshold" in p for p in problems(with_cell("L2", "tool", tool), root))
+
+
+def test_a_dot_prefixed_repo_file_is_a_tool_but_dot_and_dotdot_are_not(root):
+    (root / ".github" / "workflows").mkdir(parents=True)
+    (root / ".github" / "workflows" / "ci.yml").write_text("name: ci\n", encoding="utf-8")
+    (root / ".gitattributes").write_text("* text=auto\n", encoding="utf-8")
+    for tool in (".github/workflows/ci.yml", ".gitattributes"):
+        assert problems(with_cell("L2", "tool", tool), root) == [], tool
+    for bad in (".", "./", "..", ".github", ".github/workflows/missing.yml"):  # a folder or a missing file
+        assert any("L2" in p and "threshold" in p for p in problems(with_cell("L2", "tool", bad), root)), bad
+
+
+def test_a_symlink_that_leaves_the_root_is_not_a_repo_file(root, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside") / "target.py"
+    outside.write_text("x\n", encoding="utf-8")
+    link = root / "scripts" / "link.py"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks need a privilege on this host")
+    assert any("L2" in p and "threshold" in p for p in problems(with_cell("L2", "tool", "scripts/link.py"), root))
+    inside = root / "scripts" / "inside_link.py"  # near miss: a link that stays inside the root is a repo file
+    inside.symlink_to(root / "scripts" / "real_tool.py")
+    assert problems(with_cell("L2", "tool", "scripts/inside_link.py"), root) == []
+
+
+def test_unknown_class_and_level_messages_list_the_allowed_values(root):
+    msg = next(p for p in problems(with_cell("L4", "class", "security"), root) if "unknown class" in p)
+    assert all(c in msg for c in CLASSES)
+    msg = next(p for p in problems(with_cell("L3", "level", "hook"), root) if "unknown level" in p)
+    assert all(lv in msg for lv in LEVELS)
 
 
 def test_existing_repo_file_is_green_and_so_is_a_combined_tool(root):

@@ -16,3 +16,8 @@
   the next `## ` heading, hidden junk such as `.DS_Store` is ignored, an unreadable `changelog.d/` exits 2 instead of
   1, `--assemble` keeps the file permissions of `CHANGELOG.md`, and the CI-wiring test has red and green fixtures.
   Evidence E2 on macOS arm64; the permission and chmod tests are skipped on Windows (NOT-PROVEN there).
+  The fragment format is defined only in `scripts/changelog.py`: a second checker that had been written beside it
+  (it rejected `changelog.d/README.md` and the documented continuation lines) was removed, and the bite tests of
+  `tests/unit/test_changelog_fragments.py` cover a heading-only fragment, a heading without `###`, an empty
+  directory and a README alone. The ordering of `[Unreleased]` after a hand-edited link definition is asserted
+  without going through the module under test.

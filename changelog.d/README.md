@@ -16,7 +16,7 @@ every merge, and each conflict costs another full CI run. Instead, each pull req
 - Line 1 is `### <Section>` with the section one of `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`,
   `Security`. Line 2 is empty. The bullets follow, the first one starting with `- **`.
 - UTF-8, no other heading, no merge conflict markers, no trailing whitespace, no `[label]: url` link
-  definition at column 0 (those live in `CHANGELOG.md`; use inline `[text](url)` links).
+  definition at column 0 (those live in `CHANGELOG.md`; use inline links, the bracketed text directly followed by the url in parentheses).
 - One section per file. A change that belongs under two sections is two files.
 - Name the file after the change (`github-token-expiry.md`), not after a number, so that two pull requests
   never pick the same name.
@@ -32,10 +32,10 @@ validates every fragment and the structure of `CHANGELOG.md`. CI runs it on ever
 
 ## Release
 
-The release pull request runs
+The release pull request first runs the dry run, which shows what would move, and then the real assembly:
 
 ```
-python scripts/changelog.py --assemble --dry-run   # show what would move
+python scripts/changelog.py --assemble --dry-run
 python scripts/changelog.py --assemble
 ```
 

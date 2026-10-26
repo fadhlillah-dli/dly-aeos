@@ -97,6 +97,9 @@ def _run(root: Path, *args: str) -> int:
     ("trailing-tab.md", "### Added\n\n- **Title.** Text.\t\n", "trailing whitespace"),
     ("h2.md", "### Added\n\n- **Title.** Text.\n\n## Extra\n", "only one heading"),
     ("empty.md", "", "line 1"),
+    ("heading-without-hashes.md", "Fixed\n\n- **Title.** Text.\n", "line 1"),
+    ("heading-only.md", "### Fixed\n\n", "line 3"),
+    ("heading-only-no-newline.md", "### Fixed", "line 2"),
     ("fenced-h3.md", "### Fixed\n\n- **Code.** Example:\n\n  ```\n### Added\n  ```\n", "only one heading"),
     ("fenced-h2.md", "### Fixed\n\n- **Code.** Example:\n\n```\n## Extra\n```\n", "only one heading"),
     ("link-def.md", "### Added\n\n- **Linked.** See [the ADR][adr].\n\n[adr]: docs/decisions/x.md\n",
@@ -178,6 +181,17 @@ def test_near_miss_fragments_are_green(tmp_path):
     _frag(root, "d-crlf.md", "### Security\r\n\r\n- **Windows.** Text.\r\n")
     _frag(root, "e-nonl.md", "### Removed\n\n- **No final newline.** Text.")
     _frag(root, "f-unicode.md", "### Deprecated\n\n- **Unicode — dash.** Text.\n")
+    assert _run(root, "--check") == 0
+
+
+def test_an_empty_fragment_directory_and_a_readme_alone_are_green(tmp_path):
+    """The state after a release folded every fragment in: nothing is required by name (L10: the one place that
+    defines the fragment format is scripts/changelog.py, so no other test carries its own copy of it)."""
+    root = tmp_path / "repo"
+    _write(root / "CHANGELOG.md", BASE_LOG)
+    (root / "changelog.d").mkdir()
+    assert _run(root, "--check") == 0
+    _write(root / "changelog.d" / "README.md", "# Changelog fragments\n\nNot a fragment.\n")
     assert _run(root, "--check") == 0
 
 
@@ -271,13 +285,35 @@ def test_assemble_is_idempotent(tmp_path):
     assert (plain / "CHANGELOG.md").read_bytes() == before
 
 
-def test_a_fenced_heading_cannot_corrupt_the_changelog_and_a_link_definition_is_refused(tmp_path):
+def test_a_link_definition_fragment_is_refused_and_a_fenced_heading_fragment_is_refused_by_assemble(tmp_path):
     """The two ways a fragment that passed --check used to break the next --assemble."""
     root = _repo(tmp_path)
     _frag(root, "a.md", "### Added\n\n- **Linked.** See [the ADR][adr].\n\n[adr]: docs/decisions/x.md\n")
     assert _run(root, "--check") == 1
     (root / "changelog.d" / "a.md").unlink()
-    # a link definition that already is in [Unreleased] (hand-edited) does not hide the sections after it
+    before = (root / "CHANGELOG.md").read_bytes()
+    _frag(root, "b.md", "### Fixed\n\n- **Code.** Example:\n\n  ```\n### Added\n  ```\n")
+    assert _run(root, "--assemble") == 1
+    assert (root / "CHANGELOG.md").read_bytes() == before
+
+
+def _unreleased_headings(text: str) -> list[str]:
+    """The '## ' and '### ' headings from [Unreleased] to the first release, found without going through cl."""
+    lines = text.split("\n")
+    start = lines.index("## [Unreleased]")
+    out = ["## [Unreleased]"]
+    for line in lines[start + 1:]:
+        if line.startswith("## "):
+            break
+        if line.startswith("### "):
+            out.append(line)
+    return out
+
+
+def test_a_hand_edited_link_definition_in_unreleased_does_not_hide_the_sections_after_it(tmp_path):
+    """_unreleased_span must run to the next release heading: with the old rule (end at the first link definition) the
+    sections after the definition were invisible to --assemble and Security landed above Fixed."""
+    root = _repo(tmp_path)
     log = BASE_LOG.replace("### Fixed\n", "[adr]: docs/x.md\n\n### Fixed\n", 1)
     (root / "CHANGELOG.md").write_bytes(log.encode("utf-8"))
     _frag(root, "b.md", "### Security\n\n- **Sec.** S.\n")
@@ -289,8 +325,9 @@ def test_a_fenced_heading_cannot_corrupt_the_changelog_and_a_link_definition_is_
     assert _run(root, "--assemble") == 0
     assert _run(root, "--check") == 0
     final = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert cl.structure_problems(final) == []
-    assert final.count("### Security") == 1 and final.count("### Changed") == 1
+    assert _unreleased_headings(final) == ["## [Unreleased]", "### Added", "### Changed", "### Fixed", "### Security"]
+    assert final.index("### Fixed") < final.index("### Security") < final.index("## [0.1.0]")
+    assert "- **Sec.** S.\n\n- **Sec two.** S2." in final or "- **Sec.** S.\n- **Sec two.** S2." in final
 
 
 def test_assemble_keeps_the_file_permissions(tmp_path):

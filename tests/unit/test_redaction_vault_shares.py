@@ -41,7 +41,7 @@ def _vault_patterns() -> list[re.Pattern[str]]:
     return [
         p
         for p in redaction._PATTERNS
-        if not p.groups and any(k in p.pattern for k in ("unseal", "initial root", "hv[sbr]", r")r\\."))
+        if not p.groups and any(k in p.pattern for k in ("unseal", "initial root", "hv[sbr]", r")r\."))
     ]
 
 
@@ -139,7 +139,8 @@ def test_new_patterns_have_no_false_positive_in_tracked_files():
     if proc.returncode != 0:
         pytest.skip("not a git checkout")
     new = _vault_patterns()
-    assert len(new) >= 4
+    assert len(new) >= 5
+    assert any(r")r\." in p.pattern for p in new)
     hits: list[str] = []
     for rel in proc.stdout.splitlines():
         path = root / rel

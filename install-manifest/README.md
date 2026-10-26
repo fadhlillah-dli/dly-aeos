@@ -11,11 +11,17 @@ UNVERIFIED/candidate entries, relation targets exist). See ADR-0010.
 
 This directory is a protected path (§09): workers may only propose edits; a human reviews them.
 
+`aeos seed` loads or upserts the catalog (DESIGN only, never "installed"). `aeos inventory reconcile` runs the
+read-only probes and records observations and drift (no install, no LLM). `aeos inventory list` and
+`aeos inventory show <id>` show the separate status dimensions per component. `aeos doctor` runs the readiness
+checks, which share the same component ids.
+
 ```
-aeos seed                         # load/upsert the catalog (DESIGN only, never "installed")
-aeos inventory reconcile          # read-only probes -> observations + drift (no install, no LLM)
-aeos inventory list | show <id>   # separate status dimensions per component
-aeos doctor                       # readiness checks sharing the same component ids
+aeos seed
+aeos inventory reconcile
+aeos inventory list
+aeos inventory show <id>
+aeos doctor
 ```
 
 Loading the manifest never marks anything installed, enabled, verified or in use; those come from
@@ -35,7 +41,12 @@ admission, §37 distinct source/distribution/executable identities), all optiona
 | `tool_schema_hash` | hash of the tool/MCP schema surface recorded at admission | a schema hash reported by an observation (no probe recomputes it) |
 | `cost.free_until` | free-tier expiry date or `UNKNOWN` | — |
 
+`aeos inventory sbom` writes a CycloneDX 1.5 SBOM from `requirements.lock` and `frontend/package-lock.json`.
+`aeos inventory poll` is an optional TTL-driven refresh, off by default; `--enable` or `--disable` changes it and
+needs `--reason`.
+
 ```
-aeos inventory sbom --out sbom/aeos.cdx.json   # CycloneDX 1.5 from requirements.lock + frontend/package-lock.json
-aeos inventory poll [--enable|--disable --reason ...]  # optional TTL-driven refresh (off by default)
+aeos inventory sbom --out sbom/aeos.cdx.json
+aeos inventory poll --enable --reason "<why>"
+aeos inventory poll --disable --reason "<why>"
 ```

@@ -21,8 +21,9 @@ from aeos.core.paths import repo_root
 ROOT = repo_root()
 SHELL_LANGS = frozenset({"bash", "sh", "zsh", "shell", "console"})
 OPT_OUT = "<!-- paste-safe: file-content -->"
-# CommonMark fence: optional blockquote markers and/or one list marker, then 3+ backticks or tildes.
-FENCE = re.compile(r"^[ \t]*(?:>[ \t]?)*[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})[ \t]*(.*)$")
+# CommonMark fence: any number of blockquote markers and list markers (nested lists, a list inside a quote and a
+# quote inside a list), then 3+ backticks or tildes.
+FENCE = re.compile(r"^[ \t]*(?:(?:>[ \t]?|(?:[-*+]|\d{1,9}[.)])[ \t]+)[ \t]*)*(`{3,}|~{3,})[ \t]*(.*)$")
 CLOSE_PREFIX = re.compile(r"^[ \t]*(?:>[ \t]?)*[ \t]*")
 PROMPT = re.compile(r"^\s*[$%] ")
 HEREDOC = re.compile(r"<<(-?)[ \t]*([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
@@ -122,11 +123,15 @@ def paste_problems(markdown: str) -> list[tuple[int, str, str]]:
     return out
 
 
+NOT_REPOSITORY_FILES = frozenset({".git", ".venv", "node_modules", "dist", "build", "__pycache__", ".mypy_cache",
+                                  ".ruff_cache", ".pytest_cache"})
+
+
 def owner_markdown_files() -> list[Path]:
-    files = sorted((ROOT / "docs").rglob("*.md"))
-    files += [ROOT / n for n in ("README.md", "CONTRIBUTING.md", "SECURITY.md")]
-    files += sorted(ROOT.glob("SETUP*.md"))
-    return [p for p in files if p.is_file()]
+    """Every Markdown file of the repository (an owner reads a README, a runbook or a fragment alike); folders that
+    hold installed or generated files are skipped."""
+    return sorted(p for p in ROOT.rglob("*.md")
+                  if p.is_file() and not NOT_REPOSITORY_FILES & set(p.relative_to(ROOT).parts))
 
 
 def test_owner_markdown_shell_blocks_are_paste_safe():
@@ -140,7 +145,9 @@ def test_owner_markdown_shell_blocks_are_paste_safe():
 
 def test_scanner_covers_the_owner_documents():
     names = {p.relative_to(ROOT).as_posix() for p in owner_markdown_files()}
-    assert {"README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/OWNER_ACTIONS.md", "docs/SETUP_MACOS.md"} <= names
+    assert {"README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/OWNER_ACTIONS.md", "docs/SETUP_MACOS.md",
+            "changelog.d/README.md", "install-manifest/README.md", "tests/acceptance/MATRIX.md"} <= names
+    assert not {n for n in names if NOT_REPOSITORY_FILES & set(n.split("/"))}
 
 
 def _block(body: str, lang: str = "bash", before: str = "") -> str:
@@ -230,6 +237,17 @@ def test_violation_inside_a_list_item_fence_is_red():
     for marker in ("- ", "* ", "+ ", "5. ", "5) "):
         text = f"{marker}```bash\n   ./aeos serve  # x\n   ```\n"
         assert len(paste_problems(text)) == 1, marker
+
+
+@pytest.mark.parametrize("opener, indent", [("1. - ", "     "), ("- > ", "  > "), ("> - ", "> "), ("- - ", "    "),
+                                            ("1) * ", "     ")])
+def test_nested_container_fences_are_scanned_and_do_not_desynchronise(opener, indent):
+    violating = f"{opener}```bash\n{indent}./aeos serve  # x\n{indent}```\n"
+    assert len(paste_problems(violating)) == 1, opener
+    # the closer of a nested fence must not be read as an opener that pairs with the next top-level block
+    desync = f"{opener}```bash\n{indent}echo ok\n{indent}```\n\n```bash\n./aeos serve  # x\n```\n"
+    assert [ln for ln, _, _ in paste_problems(desync)] == [6], opener
+    assert paste_problems(f"{opener}```bash\n{indent}./aeos serve\n{indent}```\n") == []  # near miss
 
 
 def test_blockquote_fence_is_scanned():

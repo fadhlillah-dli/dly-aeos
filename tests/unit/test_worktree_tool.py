@@ -36,10 +36,14 @@ wt_tool = _load()
 
 @pytest.fixture(autouse=True)
 def hermetic_git(tmp_path, monkeypatch):
+    # Git also reads a user-level ignore file ($XDG_CONFIG_HOME/git/ignore, else ~/.config/git/ignore), which often lists
+    # .venv/: point XDG_CONFIG_HOME into tmp_path and name an excludes file that does not exist, so no ignore rule of
+    # the machine changes what `git status` reports.
     empty = tmp_path / "gitconfig-empty"
-    empty.write_text("", encoding="utf-8")
+    empty.write_text(f"[core]\n\texcludesFile = {(tmp_path / 'no-excludes').as_posix()}\n", encoding="utf-8")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
     for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
         monkeypatch.delenv(var, raising=False)
@@ -233,6 +237,22 @@ def test_remove_junction_is_refused_then_removed_with_rmdir_and_target_survives(
     code, out = run(repo, capsys, "remove", "jn", "--unlink-links")
     assert code == 0, out
     assert not dest.exists() and sentinel_intact(sentinel)
+
+
+def test_a_user_level_ignore_file_cannot_change_what_git_status_reports(tmp_path):
+    """Bite for the hermetic fixture: a machine whose ~/.config/git/ignore lists .venv/ must not make
+    test_dirty_paths_... red (git reads the XDG ignore file by default)."""
+    r = tmp_path / "plain"
+    r.mkdir()
+    g(r, "init", "-q")
+    (r / ".venv").mkdir()
+    (r / ".venv" / "pyvenv.cfg").write_text("x\n", encoding="utf-8")
+    ignore = tmp_path / "xdg" / "git" / "ignore"
+    ignore.parent.mkdir(parents=True)
+    ignore.write_text(".venv/\n", encoding="utf-8")
+    assert wt_tool.dirty_paths(r, set()) == [".venv/pyvenv.cfg"]  # the ignore file is not read
+    (r / ".gitignore").write_text(".venv/\n", encoding="utf-8")  # near miss: the repository's own rule still applies
+    assert wt_tool.dirty_paths(r, set()) == [".gitignore"]
 
 
 def test_dirty_paths_ignores_the_files_git_lists_below_a_link_it_sees_as_a_directory(tmp_path):

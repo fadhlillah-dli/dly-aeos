@@ -442,3 +442,117 @@ def test_non_ascii_check_names_are_escaped_in_the_output():
     runs = [check("bäckend", conclusion="failure")]
     code, _, text = call(["--sha", SHA], FakeGh(files(runs, required=[])))
     assert code == 1 and "b\\xe4ckend" in text
+
+
+# ------------------------------------------------------------------------------------------------ --required-only
+def _one_non_required_failure(required_status="success"):
+    """Both required checks reported (or one still running) and a check that is not required has failed: the PR #21
+    situation, where only 'commit subjects [G1]' failed."""
+    return [check(REQUIRED[0]), check(REQUIRED[1], status="in_progress" if required_status == "running" else "completed",
+                                      conclusion=None if required_status == "running" else required_status, rid=2),
+            check("commit subjects [G1]", conclusion="failure", rid=9)]
+
+
+def test_a_non_required_failure_is_red_by_default_and_green_with_required_only():
+    gh = FakeGh(files(_one_non_required_failure()))
+    assert call(["--sha", SHA], gh)[:2] == (1, f"CI: RED {SHA}")  # the default is unchanged
+    code, last, text = call(["--sha", SHA, "--required-only"], FakeGh(files(_one_non_required_failure())))
+    assert (code, last) == (0, f"CI: GREEN {SHA} (non-required failed: commit subjects [G1])")
+    assert "[FAILED] commit subjects [G1] (failure) [NON-REQUIRED FAILED]" in text
+
+
+def test_required_only_names_every_non_required_failure_in_the_last_line():
+    runs = [*_one_non_required_failure(), check("lint", conclusion="timed_out", rid=10)]
+    last = call(["--sha", SHA, "--required-only"], FakeGh(files(runs)))[1]
+    assert last == f"CI: GREEN {SHA} (non-required failed: commit subjects [G1], lint)"
+
+
+def test_required_only_with_no_failure_has_a_plain_last_line():
+    code, last, text = call(["--sha", SHA, "--required-only"], FakeGh(files(all_green())))
+    assert (code, last) == (0, f"CI: GREEN {SHA}") and "NON-REQUIRED" not in text
+
+
+@pytest.mark.parametrize("flags", [[], ["--required-only"]])
+def test_a_required_failure_is_red_either_way(flags):
+    runs = [check(REQUIRED[0], conclusion="failure"), check(REQUIRED[1], rid=2),
+            check("commit subjects [G1]", conclusion="failure", rid=9)]
+    code, last, _ = call(["--sha", SHA, *flags], FakeGh(files(runs)))
+    assert code == 1 and last.startswith(f"CI: RED {SHA}")
+
+
+def test_required_only_with_a_required_check_still_running_is_pending_and_names_the_non_required_failure():
+    runs = _one_non_required_failure("running")
+    code, last, _ = call(["--sha", SHA, "--required-only"], FakeGh(files(runs)))
+    assert (code, last) == (3, f"CI: PENDING {SHA} (non-required failed: commit subjects [G1])")
+    assert call(["--sha", SHA], FakeGh(files(runs)))[1] == f"CI: RED {SHA}"  # near miss: the default stays RED
+
+
+def test_required_only_with_a_missing_required_check_is_pending():
+    runs = [check(REQUIRED[0]), check("commit subjects [G1]", conclusion="failure", rid=9)]
+    assert call(["--sha", SHA, "--required-only"], FakeGh(files(runs)))[0] == 3
+
+
+def test_required_only_without_any_required_context_judges_every_check_as_required():
+    code, last, _ = call(["--sha", SHA, "--required-only"], FakeGh(files(_one_non_required_failure(), required=[])))
+    assert code == 1 and last == f"CI: RED {SHA}"  # fail closed: nothing is "non-required" when none is known
+
+
+def test_required_only_is_in_the_report(tmp_path):
+    report = tmp_path / "r.json"
+    call(["--sha", SHA, "--required-only", "--report", str(report)], FakeGh(files(_one_non_required_failure())))
+    data = json.loads(report.read_text(encoding="utf-8"))
+    assert data["required_only"] is True and data["non_required_failed"] == ["commit subjects [G1]"]
+
+
+# ------------------------------------------------------------------------------------------------ INFRA
+NOT_ACQUIRED_MESSAGE = "The job was not acquired by Runner of type hosted even after multiple attempts"
+
+
+def _infra_files(via="annotations", second="success"):
+    """macOS arm64 capacity ran out: a required job was cancelled before any runner took it."""
+    cancelled = check(REQUIRED[0], conclusion="cancelled")
+    extra = {}
+    if via == "annotations":
+        cancelled["output"] = {"title": REQUIRED[0], "summary": None, "annotations_count": 1}
+        extra[f"{BASE}/check-runs/1/annotations"] = [{"message": NOT_ACQUIRED_MESSAGE, "annotation_level": "failure"}]
+    elif via == "output":
+        cancelled["output"] = {"title": REQUIRED[0], "summary": NOT_ACQUIRED_MESSAGE, "annotations_count": 0}
+    elif via == "other-annotation":
+        cancelled["output"] = {"title": REQUIRED[0], "summary": None, "annotations_count": 1}
+        extra[f"{BASE}/check-runs/1/annotations"] = [{"message": "The operation was canceled.", "annotation_level": "failure"}]
+    other = check(REQUIRED[1], conclusion=second, rid=2)
+    return files([cancelled, other], **extra, **{f"{BASE}/actions/runs": {"workflow_runs": []}})
+
+
+@pytest.mark.parametrize("via", ["annotations", "output"])
+def test_a_job_that_no_runner_acquired_is_infra_with_its_own_exit_code(via):
+    code, last, text = call(["--sha", SHA], FakeGh(_infra_files(via)))
+    assert (code, last) == (4, f"CI: INFRA {SHA}")
+    assert "not acquired by a runner" in text and "re-run" in text
+
+
+def test_a_plain_cancellation_is_not_infra():
+    """Near miss: the same cancelled job with another annotation, or none, stays RED (or SUPERSEDED), never INFRA."""
+    code, last, _ = call(["--sha", SHA], FakeGh(_infra_files("other-annotation")))
+    assert (code, last) == (1, f"CI: RED {SHA}")
+    code, last, _ = call(["--sha", SHA], FakeGh(_infra_files("none")))
+    assert (code, last) == (1, f"CI: RED {SHA}")
+
+
+def test_infra_never_hides_a_real_failure_or_a_second_plain_cancellation():
+    assert call(["--sha", SHA], FakeGh(_infra_files("annotations", second="failure")))[1] == f"CI: RED {SHA}"
+    runs = [check(REQUIRED[0], conclusion="cancelled", rid=1), check(REQUIRED[1], conclusion="cancelled", rid=2)]
+    runs[0]["output"] = {"summary": NOT_ACQUIRED_MESSAGE}  # only one of the two is infrastructure
+    gh = FakeGh(files(runs, **{f"{BASE}/actions/runs": {"workflow_runs": []}}))
+    assert call(["--sha", SHA], gh)[1] == f"CI: RED {SHA}"
+
+
+def test_infra_on_a_check_that_is_not_required_is_ignored():
+    runs = [*all_green()[:2], check("extra", conclusion="cancelled", rid=9)]
+    runs[2]["output"] = {"summary": NOT_ACQUIRED_MESSAGE}
+    assert call(["--sha", SHA], FakeGh(files(runs)))[0] == 0
+
+
+def test_the_infra_verdict_is_in_the_docstring_and_the_exit_code_differs_from_red():
+    assert ci.EXIT_CODES[ci.INFRA] not in {ci.EXIT_CODES[ci.RED], ci.EXIT_CODES[ci.ERROR], ci.EXIT_CODES[ci.PENDING]}
+    assert "INFRA" in ci.__doc__
