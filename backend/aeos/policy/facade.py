@@ -257,6 +257,40 @@ def claude_extra_usage_attestation(session: Session | None) -> dict[str, Any]:
             "recorded_at": d.created_at.isoformat() if d.created_at else None, "reason": "owner attestation (E0)"}
 
 
+def authenticated_screenshot_capture(session: Session | None, domain: str | None) -> dict[str, Any]:
+    """Additive (§29): the owner's POLICY choice whether the screenshot collector may make an authenticated, read-only
+    capture of pages behind a login, for *domain*.
+
+    ``status`` is ALLOWED / DENIED from the newest ACTIVE, unexpired human POLICY decision on
+    ``screenshot_capture/PERSONAL`` (preset ``screenshot_authenticated_capture``), with the ``scope`` it covers; else
+    UNDECIDED. Only PERSONAL can be decided (another domain is always UNDECIDED). A consumer may log in only on
+    ALLOWED; UNDECIDED and DENIED keep capture unauthenticated (fail closed)."""
+    from aeos.policy import catalog
+    from aeos.policy.decisions import find_active_decision
+
+    spec = catalog.POLICY_PRESETS[catalog.SCREENSHOT_CAPTURE_PRESET]
+    base: dict[str, Any] = {"status": "UNDECIDED", "decision_id": None, "scope": None, "expires_at": None,
+                            "recorded_at": None, "target": f"{spec.target_type}/{spec.target_id}",
+                            "preset": catalog.SCREENSHOT_CAPTURE_PRESET, "choices": list(spec.choices),
+                            "domains": list(spec.domains)}
+    if domain not in spec.domains:
+        return {**base, "reason": f"only {'/'.join(spec.domains)} can decide it; {domain or 'no domain'} stays "
+                                  "UNDECIDED (fail closed)"}
+    if session is None:
+        return {**base, "reason": "no database: the owner decision cannot be read"}
+    d = find_active_decision(session, kind="POLICY", target_type=spec.target_type, target_id=spec.target_id)
+    if d is None or d.actor_kind != "HUMAN" or d.domain != domain:
+        return {**base, "reason": "no ACTIVE owner decision recorded"}
+    details = d.details or {}
+    choice = details.get(spec.detail_key)
+    if choice not in spec.choices:
+        return {**base, "decision_id": d.id,
+                "reason": f"decision without a valid {spec.detail_key} (ignored, fail closed)"}
+    return {**base, "status": choice, "decision_id": d.id, "scope": details.get(spec.scope_key or "") or None,
+            "expires_at": d.expires_at.isoformat() if d.expires_at else None,
+            "recorded_at": d.created_at.isoformat() if d.created_at else None, "reason": "owner POLICY decision"}
+
+
 def write_enablement(session: Session, provider: str, *, domain: str) -> dict[str, Any]:
     """§26 external write enablement of *provider* exactly as the interlock evaluates it: effective only with the
     ``write_enabled.<provider>`` flag AND an ACTIVE human WRITE_ENABLEMENT decision on ``provider_write/<provider>``

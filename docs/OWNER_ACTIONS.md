@@ -1,0 +1,864 @@
+# Owner actions: what only the owner can do
+
+This is the ordered list of every step that only you, the owner, can do: logins, consent, secrets, installs on
+your own machines, and decisions. Do them in this order. Afterwards the only gaps left are the external ones in
+[section 4](#4-external-items-company-tenant-provider): company authorisation, a company tenant, a live provider
+bypass test and real deployment targets.
+
+The list is written for the move to the MacBooks (Apple Silicon M4 and Intel i9). Windows stays supported:
+[section 5](#5-windows-notes) gives the Windows form of every command. It complements
+[SETUP_MACOS.md](SETUP_MACOS.md), [SETUP_WINDOWS.md](SETUP_WINDOWS.md) and [OPERATIONS.md](OPERATIONS.md). It does
+not replace them.
+
+## 0. How to read this list
+
+**Commands.** Run them from the repository root. macOS commands are written `./aeos <command>`. On Windows,
+type `aeos <command>` in Command Prompt (cmd.exe) or `.\aeos.ps1 <command>` in PowerShell (section 5). `<admin>`
+is your SUPER_ADMIN username. Commands with `--as <admin>` ask for your password. Never type a secret on a
+command line: `secrets set` prompts for it without echo.
+
+**Scope tags.**
+
+* **[per machine]**: each machine has its own data directory, database, vault, Keychain and Docker images, so
+  do the step on every machine where you run DLY AEOS. In-app decisions (`policy decide`, `routes activate`, SLI
+  targets, ADR decisions) are stored in that machine's database, so they are per machine too.
+* **[once]**: the step changes the repository, for example `install-manifest/manifest.yaml` or `policy/*.yaml`,
+  through a reviewed pull request. Every machine picks it up after `git pull`.
+
+Pick one Mac as your primary machine (the M4 is the natural choice) and do everything there. On the second Mac,
+do only the [per machine] steps, and only if you will run DLY AEOS on it.
+
+**Status words.**
+
+| Word | Meaning |
+|---|---|
+| OWNER | Only you can do it (login, consent, secret, install, run on your hardware). |
+| DECISION | You choose. The line "Record:" says exactly where. Until then it shows as UNDECIDED or OWNER_DECISION_REQUIRED. |
+| EXTERNAL | Needs your company, a company tenant or a provider. You can prepare for it, but not finish it alone. |
+| NOT-PROVEN | No real run on your machine shows it yet. The steps below produce that proof. |
+
+The Doctor reports each check as VERIFIED, CONFIGURED, CONNECTED, MISSING, FAILED, EXPIRED, STALE, UNKNOWN or
+NOT_APPLICABLE. It reports each capability (`CAN_*`) as READY, DEGRADED, BLOCKED or UNKNOWN. CONFIGURED is not
+VERIFIED: a value is set, but no probe has confirmed it.
+
+**Where each item shows up.** `./aeos doctor` prints every check, `./aeos doctor -g <GROUP>` prints one group and
+`./aeos doctor -c <CAPABILITY>` prints one capability (add `--functional` for the heavier probes). In the
+Control Center (`./aeos serve`, then http://127.0.0.1:8787) the same results are on *Kesiapan (Doctor)*
+(`/readiness`), and open items are in the decision queue on *Keputusan* (`/decisions`).
+
+| Step | Doctor group / check | Control Center page |
+|---|---|---|
+| 1.2 bootstrap | `HOST`, `REPOSITORY`, `RUNTIME` | Kesiapan (Doctor) |
+| 1.3 admin | `LOCAL_AUTH`: `auth.bootstrap`, `auth.default_credentials` | sign-in page |
+| 1.4 Claude Code | `CLAUDE_NATIVE`: `claude.auth`, `claude.binary`, `claude.capability_test`, `claude.env`; `CAN_PLAN_PERSONAL`, `CAN_REVIEW_WITH_MAX` | Model & Rute → Pengawas |
+| 1.5 commit identity | `REPOSITORY`: `git.commit_identity.github`, `git.commit_identity.bitbucket`; `CAN_PREPARE_PR` | Kesiapan (Doctor) |
+| 1.6 Docker + containment | `CONTAINMENT`: `containment.docker`, `containment.sandbox`, `containment.report`; `EVIDENCE_REVIEW`: `evidence.verifier` | Kesiapan (Doctor); Pekerjaan Live |
+| 1.7 OpenBao | `SECRET`: `secret.openbao_binary`, `secret.openbao_health`, `secret.openbao_auth`, `secret.keyring` | Integrasi & Akses |
+| 1.8 secrets | `SECRET`: `secret.status`; `MODEL_ROUTE`: `route.worker_key`; `PROJECT_ADAPTERS`: `adapter.github_token`; `DELIVERY`: `delivery.branch_protection` | Integrasi & Akses; Bukti → PR & provider |
+| 1.9 OpenCode | `WORKER`: `worker.opencode`, `worker.contract` | Kesiapan (Doctor) |
+| 1.10 Google | `PROJECT_ADAPTERS`: `adapter.google_oauth`, `adapter.project_drive_root`, `adapter.write_enablement`; `CAN_PUBLISH_PERSONAL` | Integrasi & Akses |
+| 1.11 routes and budget | `MODEL_ROUTE`: `route.registry`, `route.budget_admission`; `HOST`: `host.resource_budget`; `WORKER`: `worker.agent_definition`; `CAN_RUN_WORKER` | Model & Rute; Organisasi & Peran |
+| 1.12 pins | `REPOSITORY`: `repo.install_manifest`; `claude.binary` (signer pin) | Tools & Repos → component |
+| 1.13 first plan | `CAN_PLAN_PERSONAL`, `CAN_RUN_WORKER`, `CAN_PUBLISH_PERSONAL` | Rencana; Pekerjaan Live; Dokumen & Publikasi |
+| 1.14 backup | `RECOVERY`: `recovery.backups`, `recovery.restore_test`, `recovery.config_rollback` | Riwayat & Pemulihan → Backup & pemulihan |
+
+---
+
+## 1. Mac setup, in order
+
+### 1.1 Clone [per machine]
+
+```bash
+xcode-select --install                    # git and compilers
+brew install git python@3.13 node@22      # Homebrew prefix: /opt/homebrew on the M4, /usr/local on the i9
+git clone https://github.com/fadhlillah-dli/dly-aeos.git
+cd dly-aeos
+```
+
+Work on `main`. If `node --version` is not found, follow the PATH hint in
+[SETUP_MACOS.md step 1](SETUP_MACOS.md#1-git-vs-code-python-nodejs) (`node@22` is keg-only).
+
+### 1.2 Bootstrap [per machine]
+
+```bash
+./scripts/bootstrap.sh        # "Permission denied": run  sh scripts/bootstrap.sh
+./aeos version
+./aeos doctor
+```
+
+The bootstrap creates the venv from `requirements.lock`, backs up any existing data, builds the frontend, migrates
+the database, seeds the catalog and the DLY AEOS project, and lists the optional components. It installs no system
+software. Data lives in `~/Library/Application Support/DLY-AEOS`. Start each Mac with its own fresh data
+directory: there is no sync between machines, and restoring a Windows backup on a Mac has never been tested.
+
+*macOS evidence (optional, closes "never run on a physical Mac"):* run `./aeos doctor > ~/aeos-doctor-macos.txt`.
+Redact your user name and home paths the way [doctor-sample-windows.txt](evidence/doctor-sample-windows.txt) is
+redacted, then hand the file to the builder as `docs/evidence/doctor-sample-macos-arm64.txt` (M4) or
+`...-x86_64.txt` (i9).
+
+### 1.3 First admin [per machine]
+
+```bash
+./aeos admin create           # prompts for your login name and a password of at least 12 characters
+./aeos doctor -g LOCAL_AUTH   # auth.bootstrap and auth.default_credentials: VERIFIED
+./aeos serve                  # http://127.0.0.1:8787, sign in, choose PERSONAL
+```
+
+Lost password: `./aeos admin recover <username>`.
+
+### 1.4 Claude Code login and bridge test [per machine]
+
+```bash
+brew install --cask claude-code
+claude                        # sign in with your Claude Max account, then /exit
+claude auth status            # loggedIn true, authMethod "claude.ai", subscriptionType "max"
+echo "${ANTHROPIC_API_KEY:-<not set>}"   # must print <not set>; remove any export from ~/.zshrc and ~/.zprofile
+./aeos bridge test --model opus
+./aeos bridge test --model fable         # must resolve inside the Fable family, no MODEL_POLICY_MISMATCH
+./aeos bridge status
+./aeos doctor --functional               # Claude capability test (uses a little Max quota)
+```
+
+You can run the same capability test from the Control Center: *Model & Rute* (`/models`) → *Pengawas* →
+*Uji kemampuan*. If `fable` keeps resolving outside the Fable family, that is a DECISION: choose another
+supervisor through a recorded POLICY decision ([2.12](#212-smaller-open-decisions)). Never switch silently.
+
+### 1.5 Commit identity in the local `aeos.yaml` [per machine]
+
+Every commit, push, PR and issue that DLY AEOS sends uses your identity, never an AI identity
+([ADR-0121](decisions/ADR-0121-code-host-identity-and-no-ai-attribution.md)). The real addresses live only in the
+local file on each machine. The repository is public, so never commit them.
+
+```bash
+CFG="$HOME/Library/Application Support/DLY-AEOS/aeos.yaml"
+[ -f "$CFG" ] || cp config/aeos.example.yaml "$CFG"
+code "$CFG"                   # or: nano "$CFG"
+```
+
+Uncomment the `commit_identities` block and replace every placeholder. A value left as `<...>` is refused.
+
+```yaml
+commit_identities:
+  github:
+    name: <Your Name>
+    email: <id>+<login>@users.noreply.github.com   # GitHub noreply address recommended
+  bitbucket:                                       # only for OFFICE work (section 4)
+    name: <Your Name>
+    email: <you>@<company-domain>
+```
+
+Find `<id>` and `<login>` with `gh api user --jq '.id, .login'` or on github.com → Settings → Emails. Restart
+`./aeos serve`, then run `./aeos doctor -g REPOSITORY`: `git.commit_identity.github` must be CONFIGURED.
+`git.commit_identity.bitbucket` stays NOT_APPLICABLE until a Bitbucket repository is registered. Also set the
+same identity for your own manual commits: `git config --global user.name "<Your Name>"` and
+`git config --global user.email "<id>+<login>@users.noreply.github.com"`.
+
+Before the first push, check two things. Push or rewrite yourself any local history of a project that was
+authored with another address. The broker refuses to push it (`COMMIT_IDENTITY_MISMATCH`). Re-run any candidate
+committed before this rule: those commits still carry `AEOS-*` trailers and are refused
+(`AI_ATTRIBUTION_IN_COMMIT`).
+
+### 1.6 Docker Desktop, images and containment [per machine]
+
+Each Mac builds its own images, natively: linux/arm64 on the M4, linux/amd64 on the i9. Each Mac also records its
+own containment report. A report is bound to the image id and the host, so a report from one Mac never admits
+the container sandbox on another.
+
+```bash
+brew install --cask docker    # Homebrew picks the right build. Or download from docker.com:
+                              # "Mac with Apple chip" (M4) or "Mac with Intel chip" (i9)
+open -a Docker && docker version
+docker build --build-arg OPENCODE_VERSION=1.19.3 -t dly-aeos-worker:1.19.3 sandbox/
+docker build -f sandbox/verifier.Dockerfile -t dly-aeos-verifier:0.1.0 .
+./aeos worker containment --kind container                  # PERSONAL profile: overall=PASS
+./aeos worker containment --kind container --domain OFFICE  # OFFICE profile: overall=PASS (OFFICE stays blocked, section 4)
+./aeos worker status --domain PERSONAL   # "requirement for PERSONAL: READY (kind=container)", "integrity hold: CLEAR"
+./aeos doctor -g CONTAINMENT             # containment.sandbox and containment.report no longer BLOCKED / NOT_PROVEN
+./aeos doctor -g EVIDENCE_REVIEW         # evidence.verifier reports the CONTAINER runner, not WEAK
+.venv/bin/python -m pytest -m integration -q -p no:cacheprovider tests/acceptance/test_containment.py
+```
+
+The verifier tag follows `./aeos version`. If the pinned OpenCode version changes, use the exact `docker build`
+command that `./aeos worker status` prints. These checks must pass: `read_only_root`, `mounts_allowlisted`,
+`write_outside_worktree`, `read_outside_worktree`, `docker_socket_absent`, `real_ssh_dir`,
+`home_ssh_redirected`, `keyring_unreachable`, `env_secrets`, `credential_helpers_absent`, `read_data_db`,
+`egress_non_broker`, `broker_gateway_reachable` and `gateway_path_filter`. If `egress_non_broker` fails on Docker
+Desktop for Mac, keep workers blocked and report it. Do not fall back to the process sandbox for that work.
+
+A report is valid for 7 days and only for the image it was recorded with. Re-run the containment after every
+image rebuild and at least weekly ([1.15](#115-recurring-owner-actions)).
+
+### 1.7 OpenBao: install, init, unseal [per machine]
+
+```bash
+./aeos vault install --version <X.Y.Z>   # an exact release you reviewed at github.com/openbao/openbao/releases;
+                                         # the installer picks darwin_arm64 or darwin_amd64 and shows the SHA256
+./aeos vault start
+./aeos vault init                        # shows the unseal key(s) ONCE: write them down offline; the root token is revoked
+./aeos vault status --verify
+./aeos doctor -g SECRET                  # secret.openbao_* checks pass
+./aeos doctor --functional -g SECRET     # secret.keyring VERIFIED (allow the Keychain prompt for the dly-aeos service only)
+```
+
+After every restart, run `./aeos vault start`, then `./aeos vault unseal`. Unseal keys never go into the
+repository, a config file, chat or AEOS backups. Recovery:
+[runbooks/openbao-unseal-recovery.md](runbooks/openbao-unseal-recovery.md). Each Mac has its own vault with its
+own unseal keys.
+
+Optional live proof on a throw-away vault:
+`DLY_AEOS_TEST_BAO="$HOME/Library/Application Support/DLY-AEOS/bin/bao" .venv/bin/python -m pytest -m integration tests/integration/test_secrets_openbao_live.py -q`.
+
+If you cannot run OpenBao on a machine, `./aeos secrets interim-keyring` explains the weaker interim OS-keyring
+EXCEPTION. You record it on *Keputusan* with the preset "Secret store sementara di OS keyring (OpenBao belum
+tersedia)". Never combine it with the process-sandbox exception ([2.7](#27-process-sandbox-exception-per-machine)).
+
+### 1.8 Secrets: OpenRouter and the GitHub token [per machine]
+
+```bash
+./aeos secrets set workers/openrouter    # an OpenRouter key with a spend limit, prompted without echo
+./aeos secrets set personal/github       # fine-grained PAT, see below
+./aeos secrets status
+./aeos delivery capabilities --record    # records the GitHub provider capability probe as evidence
+./aeos doctor -g DELIVERY                # delivery.branch_protection: the main ruleset reads CONFIGURED
+./aeos doctor --functional -g PROJECT_ADAPTERS
+```
+
+To create the GitHub token, open github.com → Settings → Developer settings → Fine-grained tokens → "Only select
+repositories" and choose `dly-aeos`. Grant Contents RW, Issues RW, Pull requests RW and Metadata R. Grant no
+Workflows and no Administration. You can also record the capability probe from *Bukti* → *PR & provider* →
+*Catat sebagai bukti*. Other route keys are needed only for the routes you choose in 1.11:
+`./aeos secrets set workers/opencode-zen` and `./aeos secrets set workers/gemini`.
+
+### 1.9 OpenCode and the contract test [per machine]
+
+```bash
+npm install -g opencode-ai@1.19.3        # install-manifest/ is authoritative for the version
+opencode --version                       # 1.19.3
+./aeos worker contract-test              # overall=PASS
+./aeos doctor -g WORKER
+```
+
+Optional: `.venv/bin/python -m pytest -m integration tests/integration/test_worker_runtime_opencode_e2e.py -q -p no:cacheprovider`.
+
+### 1.10 Google OAuth client and `google-connect` [per machine]
+
+1. In the Google Cloud Console, create a project. Under *APIs & Services → Library*, enable the **Google Drive
+   API** and the **Google Docs API**.
+2. Set up the *OAuth consent screen* as External and add your own account as a test user. While the app is in
+   "Testing", Google expires the refresh token after 7 days. Either re-run `google-connect` weekly, or set the
+   publishing status to "In production" (AEOS requests only `drive.file`).
+3. Under *Credentials → Create credentials → OAuth client ID*, choose type **Desktop app** and download the JSON.
+
+```bash
+./aeos publish google-connect --client-secret ~/Downloads/client_secret_<...>.json
+rm ~/Downloads/client_secret_<...>.json          # after consent succeeded
+./aeos publish google-status
+./aeos policy decide --kind WRITE_ENABLEMENT --provider google-drive --enable --domain PERSONAL --as <admin> --rationale "Enable PERSONAL docs publication"
+./aeos policy decide --kind WRITE_ENABLEMENT --provider github-issues --enable --domain PERSONAL --as <admin> --rationale "Enable platform GitHub issues"
+./aeos doctor --functional -c CAN_PUBLISH_PERSONAL   # READY
+```
+
+Leave the Drive root empty for the first publication: AEOS creates the project folder in My Drive. Or enter a
+folder id that AEOS created under *Portofolio* → DLY AEOS → *Integrasi* → Google Drive / Google Docs. Optional
+rendered diagrams: `npm install -g @mermaid-js/mermaid-cli`, then `./aeos docs visuals-status`.
+
+### 1.11 Route activation, budget and the worker agent [per machine, DECISION]
+
+Activating a route is your explicit decision. Nothing is active by default.
+
+```bash
+./aeos routes refresh
+./aeos routes list --pool WORKER         # copy the route key and its config hash
+./aeos routes activate <route_key> --as <admin> --mode TRIAL --expected-hash <hash> --terms-reviewed --terms-note "<what you read>" --rationale "<why this route>"
+```
+
+* **In the UI:** *Model & Rute* (`/models`) → route → *Aktifkan rute…*.
+* **Paid route:** first record a BUDGET decision on *Keputusan* → *Catat keputusan manusia* (Jenis keputusan:
+  BUDGET), then add `--budget-decision <id>`.
+* **Free OpenCode Zen routes:** they need the client-terms decision in [2.12](#212-smaller-open-decisions) first.
+* **Prompt revision change:** a route approved under an older worker prompt revision stops with
+  `PROMPT_REVISION_CHANGED`. Approve it again.
+
+Then set this machine's resource budget and enable the worker agent:
+
+```bash
+./aeos doctor budget --cpu <n> --ram <GiB> --disk <GiB> --max-workers <n> --reason "<measured on this Mac>"
+./aeos work agent-prereqs opencode-implementer --domain PERSONAL     # until READY
+./aeos work agent-enable opencode-implementer --as <admin> --domain PERSONAL --reason "<why>"
+./aeos doctor -c CAN_RUN_WORKER                                      # READY
+```
+
+The M4 and the i9 have different hardware, so measure each one. In the UI the agent controls are on *Organisasi &
+Peran* → agent card → *Periksa prasyarat* / *Aktifkan*.
+
+### 1.12 Approve the pins [once per platform, through a reviewed PR]
+
+The real manifest has no approved pins, so drift from an approved version is never detected. On each platform
+you use, collect the observed values:
+
+```bash
+./aeos inventory reconcile
+./aeos inventory show claude-code --json      # versions.observed_version, versions.observed_digest
+./aeos inventory show opencode --json         # also the contract test's tool schema hash
+./aeos inventory show openbao --json
+./aeos inventory show git --json
+./aeos inventory show python-runtime --json
+./aeos inventory show nodejs-runtime --json
+codesign -dv --verbose=2 "$(which claude)" 2>&1 | grep TeamIdentifier   # macOS signer of claude-code
+```
+
+Then make the change in `install-manifest/manifest.yaml` through a reviewed PR (see
+[install-manifest/README.md](../install-manifest/README.md)):
+
+* `approved_pin` is the exact version, never `latest`.
+* `approved_digest` holds one `sha256:` value per platform: `{windows_amd64: ..., darwin_arm64: ..., darwin_amd64: ...}`.
+  The M4 gives `darwin_arm64` and the i9 gives `darwin_amd64`. A platform without an entry shows NOT_RECORDED.
+* `claude-code` `signature.approved_signer` is `{windows: <Authenticode subject>, darwin: <TeamIdentifier>}`. After
+  that pin, an unsigned or foreign-signed Claude binary is BLOCKED on that OS.
+* `opencode` gets `tool_schema_hash`.
+* The top-level `reviewed_by` names you.
+
+After the merge, on each machine:
+
+```bash
+git pull --ff-only
+./aeos seed --only aeos.inventory.seed
+./aeos inventory reconcile
+```
+
+*Tools & Repos* (`/tools`) → component must show the approved pin instead of "pin belum disetujui (UNKNOWN)", with
+no `resolved-version-mismatch` drift. When the pinned OpenCode version changes, rebuild the worker image (1.6) so
+it carries the new `aeos.opencode_version` label.
+
+### 1.13 First plan approval, first run, first publication [primary machine]
+
+```bash
+./aeos plan create --project dly-aeos --domain PERSONAL --title "<title>" --prompt-file <idea.md> --actor <admin>
+./aeos plan run <plan_id> --actor <admin>
+./aeos plan status <plan_id>     # READY_FOR_HUMAN_REVIEW, bridge proof PROVEN, four verified stage runs
+```
+
+1. **Approve.** On *Rencana* (`/plans`) → plan, review the version, then press *Approve*. Press *Approve &
+   Publish* instead if you want targets Google Drive/Docs and GitHub Issues.
+2. **Execute.** On *Rencana* → plan → *Jalankan rencana*, or
+   `./aeos work execute <plan_id> --as <admin> --domain PERSONAL --reason "<why>"`.
+3. **Run.** On *Pekerjaan Live* (`/work`) → *Aktifkan loop scheduler*, or `./aeos work run-once`. Then run
+   `./aeos verify run <run_id>` and `./aeos verify review <run_id>`, which is the native checkpoint review.
+4. **Publish.** On *Dokumen & Publikasi* (`/publications`), review the preview, tick the confirmation and
+   execute. Then run `./aeos publish list` and `./aeos publish show <publication_id>`: every operation must be
+   SUCCEEDED with an external id. The DOCX fidelity verdict is in
+   `http://127.0.0.1:8787/api/publications/<publication_id>` (`operations[].response.fidelity`).
+5. **M2 pilot evidence.** Edit the published Google Doc by hand, approve a new plan version and publish again.
+   That document must show CONFLICT in `./aeos publish show <new id>` and must not be overwritten. For an
+   UNKNOWN or FAILED operation, run `./aeos publish reconcile <id>`, then `./aeos publish run <id>`. Keep the
+   ids and the `publish show` output for `docs/evidence/`.
+6. **Optional live fidelity test.**
+   `DLY_AEOS_NETWORK_TESTS=1 DLY_AEOS_GOOGLE_FIDELITY_FOLDER=<AEOS-created folder id> .venv/bin/python -m pytest tests/integration/test_google_docx_fidelity_live.py -q -s -p no:cacheprovider`.
+7. **First broker-created PR.** On GitHub, open the PR's Actions run → job step "Set up job" → "GITHUB_TOKEN
+   Permissions". It must list read access only. Settings → Secrets and variables → Actions must list no secret
+   the CI could expose.
+
+### 1.14 Backup, restore test, first release [per machine]
+
+```bash
+./aeos ops backup create --label first
+./aeos ops backup list                     # note the backup_id
+./aeos ops backup restore-test <backup_id>
+./aeos doctor -g RECOVERY                  # recovery.restore_test VERIFIED
+```
+
+The same controls are on *Riwayat & Pemulihan* (`/history`) → *Backup & pemulihan*. Copy one restore-tested
+backup to encrypted external storage. Backups exclude OpenBao data and the Keychain: the unseal keys from 1.7 are
+your recovery path for those.
+
+Optional but needed for `recovery.config_rollback`: promote the first controller release
+([runbook](runbooks/controller-upgrade-rollback.md)).
+
+```bash
+(cd frontend && npm ci && npm run build)
+./aeos ops release build --ref HEAD
+# RELEASE_NOT_ACCEPTED (no trusted CI PASS recorded for this commit):
+./aeos ops release accept --commit "$(git rev-parse HEAD)" --operator <admin> --reason "GitHub Actions CI green on main for this commit"
+./aeos ops release build --ref HEAD        # note the release_id
+./aeos ops release promote <release_id> --operator <admin> --reason "first release"
+```
+
+AEOS never creates a GitHub tag or Release. To publish one, use
+`gh release create v0.1.0 --target <commit> --title "DLY AEOS 0.1.0" --notes-file docs/releases/v0.1.0.md`.
+
+### 1.15 Recurring owner actions
+
+| When | Action |
+|---|---|
+| After every reboot | `./aeos vault start`, then `./aeos vault unseal` |
+| Every 7 days and after every Claude Code upgrade | `./aeos doctor --functional` (Claude capability test) |
+| Every 7 days and after every image rebuild | `./aeos worker containment --kind container` (and `--domain OFFICE` if used) |
+| Weekly, while the Google app is in "Testing" | `./aeos publish google-connect --client-secret <file>` |
+| Before every upgrade, and at a fixed interval | `./aeos ops backup create`, then `./aeos ops backup restore-test <id>` |
+| When Claude Code reports a usage or weekly limit | at once, save `./aeos bridge status` and `./aeos cost summary --domain PERSONAL` (no account email) for `docs/evidence/claude-quota-<date>.txt`; after the reset, quota must read UNKNOWN, not OK. Never provoke a limit with paid usage on |
+| When an integrity hold is raised | review the findings on *Pekerjaan Live* (or `./aeos worker status`), restore the checkout and data, then *Catat rekonsiliasi*. Each hold needs its own reconciliation |
+| After a process-sandbox exception is no longer needed | *Keputusan* → *Cabut* ([2.7](#27-process-sandbox-exception-per-machine)) |
+
+---
+
+## 2. Owner decisions still UNDECIDED
+
+Each decision has a "Record:" line that says where it goes. Until you record it, the product shows it as
+UNDECIDED (or NO_TARGET, RETAIN, REPORT_ONLY) and fails closed.
+
+### 2.1 SLO/SLI targets [per machine]
+
+Every SLI shows NO_TARGET until you set one. Choose targets per project criticality.
+
+Record:
+
+```bash
+./aeos ops sli criticality <project_key> HIGH --rationale "<why>"
+./aeos ops sli target queue_age_seconds --max <seconds> --rationale "<why>"
+./aeos ops sli target stale_leases --max 0 --rationale "<why>"
+./aeos ops sli target recovery_point_age_seconds --max <seconds> --rationale "<why>"
+./aeos ops sli target sync_freshness_seconds --max <seconds> --rationale "<why>"
+./aeos ops sli budget-policy --window-days 28 --objective <objective> --action alert --rationale "<why>"
+./aeos ops sli --domain PERSONAL --raise-alerts
+```
+
+The SLI keys are listed in [OPERATIONS.md](OPERATIONS.md#slis-and-alerts). Results are on *Riwayat & Pemulihan* →
+*SLI, alert & flag*.
+
+### 2.2 Retention durations [once]
+
+Every `retain_days` in `policy/retention.yaml` is `null`, so everything is retained and nothing is ever reported as
+expired. Decide days per data class (`audit_events`, `evidence`, `attachments`, `external_references`, `backups`)
+and per domain. OFFICE values follow company policy.
+
+Record: replace `null` with days in `policy/retention.yaml` through a reviewed PR (protected path). If a promoted
+release is ACTIVE, the new values apply after the next release build and promote. Check the result on *Riwayat &
+Pemulihan* → *Retensi*, and on *Bukti* → *Ledger bukti* (Retensi column).
+
+### 2.3 Supply-chain licence and threshold policy [once]
+
+`policy/supply-chain.yaml` is `status: UNDECIDED`, so the SBOM, licence, vulnerability and SAST reports are
+REPORT_ONLY (`[NO-GATE]`).
+
+Record, through a reviewed PR:
+
+* In `policy/supply-chain.yaml`, set `licenses.allow`, `vulnerabilities.python/npm.fail_at_or_above`,
+  `sast.bandit.fail_at_or_above` and `min_confidence`, `status: DECIDED` and a `decision_ref`.
+* Accept [ADR-0095](decisions/ADR-0095-ci-gates-supply-chain-and-security-tooling.md) ([2.8](#28-adr-registrations-of-proposed-adrs-per-machine)).
+* Change the CI job tag `supply-chain report [NO-GATE]` to G1.
+
+### 2.4 Staging/production environments and rollback criteria [per machine]
+
+For each PERSONAL project, decide whether it has a staging and a production environment, and if so, the exact
+target.
+
+Record: *Portofolio* → project → *Integrasi* → "Target deployment: pemeriksaan, observasi & keputusan
+lingkungan (G6/G8)". Record the environment decision there: staging AUTHORISED with the exact target URL, or
+staging NONE / production NONE for a project without that environment. Then set the target checks with *Ubah
+pemeriksaan target*: health path, smoke checks, SLI thresholds, *Kriteria rollback* (`rollback_on`) and the
+artifact-digest requirement.
+
+CLI alternative for the checks:
+`./aeos delivery target-checks <project_id> --environment production --file <checks.json>`, where the JSON holds
+`health_path`, `smoke_checks`, `sli_checks`, `rollback_on` and `require_artifact_digest`. Until you record these,
+the UI shows UNDECIDED / NO_TARGET and G6/G8 stay NOT_PROVEN. Registering a real target is in
+[section 4](#4-external-items-company-tenant-provider).
+
+### 2.5 `worker.route_behaviour` failure-rate threshold [per machine]
+
+Record: in a PERSONAL session, *Kesiapan (Doctor)* → check `worker.route_behaviour` → *Tetapkan ambang
+pemilik*. The form shows the exact `max_failure_rate` before you confirm. CLI alternative, the same POLICY decision
+(target `worker_route_behaviour:tool_schema_failures`); it prints the exact value before it asks for your password:
+
+```bash
+./aeos policy route-threshold --max-failure-rate 0.05 --domain PERSONAL --as <admin> --rationale "<why>"   # 0..1, 0.05 = 5%
+```
+
+A newer decision replaces the threshold. It never makes a route pass without trusted evaluation.
+
+### 2.6 Authenticated screenshot capture [per machine]
+
+Decide whether the screenshot collector may make an authenticated, read-only capture of pages behind a login,
+such as the Control Center's own routes. The status (UNDECIDED until you decide) is shown on *Bukti* →
+*Tangkapan layar UI*.
+
+Record: *Bukti* → *Tangkapan layar UI* → *Catat keputusan pemilik (ALLOWED/DENIED)*, which opens *Keputusan* on the
+preset "Capture screenshot terautentikasi read-only". Choose ALLOWED with the scope it covers (for example "Control
+Center routes, read-only"), or DENIED. Or run:
+
+```bash
+./aeos policy decide --kind POLICY --authenticated-capture ALLOWED --capture-scope "<pages it covers>" --domain PERSONAL --as <admin> --rationale "<why>"
+./aeos policy decide --kind POLICY --authenticated-capture DENIED --domain PERSONAL --as <admin> --rationale "<why>"
+```
+
+It is PERSONAL only, and `--days` is optional. Either way the collector stays unauthenticated in this build:
+authenticated capture is not built yet, so ALLOWED records your decision and the status says so (capture mode
+"tanpa login"). Until it is built, only a target's public pages can become SCREENSHOT evidence. UNDECIDED and DENIED
+never log in.
+
+### 2.7 Process-sandbox exception [per machine]
+
+Recommended: do not record it on a machine where the container proof (1.6) passes. The process sandbox is WEAK.
+Candidate code runs as your OS user and can reach the OS keyring and the data directory, and there is no egress
+enforcement. It is never allowed for OFFICE, shell or egress work.
+
+Record, only if a machine has no Docker: *Keputusan* → *Catat keputusan manusia* → preset "Worker di process
+sandbox (WEAK) untuk PERSONAL". Or run:
+
+```bash
+./aeos policy decide --kind EXCEPTION --exception worker_sandbox_process --no-allow-bash --days 7 --domain PERSONAL --as <admin> --rationale "<why>"
+```
+
+To revoke it: *Keputusan* → highlighted EXCEPTION row → *Cabut*, or
+`./aeos policy revoke <decision_id> --as <admin> --reason "container sandbox proven"`.
+
+### 2.8 ADR registrations of PROPOSED ADRs [per machine]
+
+These ADRs are PROPOSED: [0004](decisions/ADR-0004-first-admin-bootstrap-hardening.md),
+[0043](decisions/ADR-0043-openbao-direct-approle-instead-of-agent.md),
+[0070](decisions/ADR-0070-publication-outbox-idempotency-reconciliation.md),
+[0071](decisions/ADR-0071-product1-document-model-and-delta-rendering.md),
+[0072](decisions/ADR-0072-google-drive-file-scope-docx-import.md),
+[0073](decisions/ADR-0073-office-atlassian-adapters-disabled-by-default.md),
+[0074](decisions/ADR-0074-publication-approval-decision-binding.md),
+[0075](decisions/ADR-0075-diagram-contract-references-and-checkpoint-handoff.md),
+[0095](decisions/ADR-0095-ci-gates-supply-chain-and-security-tooling.md),
+[0106](decisions/ADR-0106-verification-delivery-broker-audit-closure.md),
+[0107](decisions/ADR-0107-verifier-isolated-runner.md),
+[0111](decisions/ADR-0111-office-code-delivery-and-route-feasibility.md),
+[0114](decisions/ADR-0114-platform-docs-readiness-and-evidence-producers.md) and
+[0120](decisions/ADR-0120-verifier-impact-selected-steps.md). The full list is in
+[docs/decisions/README.md](decisions/README.md).
+
+Record:
+
+```bash
+./aeos policy adrs --load
+./aeos policy adr-decide ADR-0004 --outcome ACCEPTED --as <admin> --rationale "<why>"   # or REJECTED / SUPERSEDED --superseded-by ADR-NNNN
+```
+
+Or use *Keputusan* → *Register ADR*. Your decision is bound to the ADR's content hash: a later edit of the file
+makes it STALE until you decide again. Two of these ADRs carry larger choices:
+
+* ADR-0043 is direct AppRole instead of OpenBao Agent. Rejecting it means Agent mode has to be built.
+* ADR-0107 decides whether the container is required for PERSONAL.
+
+### 2.9 End of the ADR-0003 seed-build delegation [per machine]
+
+The delegation lets the builder commit, push and merge on the platform repository while DLY AEOS is being built.
+When you judge the build done (M4 delivery enforcement reached), revoke it.
+
+Record: open *Keputusan* (`/decisions`) with PERSONAL selected. The queue item "Delegasi owner:ADR-0003 masih
+aktif" links to the EXCEPTION row (actor `owner:ADR-0003`). Press *Cabut* with a reason such as "seed reached M4".
+
+CLI alternative: find the id with `./aeos policy decisions --kind EXCEPTION --status ACTIVE` (each row starts with
+the decision id; the delegation row shows `actor=owner:ADR-0003`), then run
+`./aeos policy revoke <decision_id> --as <admin> --reason "seed reached M4"`. A re-seed does not re-create a
+revoked delegation. A REJECTED or SUPERSEDED decision on ADR-0003 (2.8) also revokes it.
+
+### 2.10 Claude extra usage disabled [per machine]
+
+No official API reports this account setting, so `claude.extra_billing` stays UNKNOWN by design. First, on
+claude.ai with the Max account, open Settings → Usage and switch paid extra usage off, with no auto-reload.
+
+Record the attestation: *Keputusan* → preset "Atestasi pemilik: extra usage berbayar Claude NONAKTIF di pengaturan
+akun claude.ai". Or run:
+
+```bash
+./aeos policy decide --kind POLICY --policy-preset claude_extra_usage_off --domain PERSONAL --as <admin> --days <N> --rationale "<what you checked>"
+```
+
+It is shown as an owner attestation (E0), never VERIFIED.
+
+### 2.11 MCI source location [per machine, plus once]
+
+The canonical MCI_V2 is owner-supplied and never lives in the repository, which is public. Decide whether you
+are entitled to keep a copy on each machine and where.
+
+Record, on each machine:
+
+1. Put the file at `~/Library/Application Support/DLY-AEOS/policy/canonical/MCI_V2_SOURCE_OF_TRUTH.md`. Or set an
+   absolute `mci_source_path` outside the checkout in `aeos.yaml`. A path inside the repository is refused.
+2. Hash it: `echo "sha256:$(shasum -a 256 '<path>' | cut -d' ' -f1)"`.
+
+Then, once, through a reviewed PR: in `policy/mci-reference.yaml` set `status: VERIFIED`, `version`,
+`content_hash`, `location: local:MCI_V2_SOURCE_OF_TRUTH.md` and `verified_at`. Every machine must hold the
+byte-identical file.
+
+```bash
+./aeos policy snapshot --refresh
+./aeos doctor -g CANONICAL_POLICY    # policy.mci CONFIGURED; compliance stays NOT-PROVEN
+```
+
+After that, three follow-up decisions open up, all from MCI_V2 only:
+
+* **Pack mapping.** Copy `blueprints/mci-pack-mapping.template.yaml` to
+  `<data dir>/policy/canonical/mci-pack-mapping.yaml`, fill it from MCI_V2 only and never commit the filled copy.
+  Approve each pack with
+  `./aeos policy decide --kind POLICY --target-type mci_pack_mapping --target-id <PACK> --target-hash <binding hash shown on /decisions> --domain PERSONAL --as <admin> --rationale "<why>"`.
+* **Risk classes.** Decide which MCI thresholds map to R0-R4, as a POLICY decision.
+* **Off-host audit store.** Decide whether MCI requires a WORM or off-host audit store. The builder records it as
+  an ADR.
+
+### 2.12 Smaller open decisions
+
+Each item below is recorded either as an ADR, through the builder, or with the command given.
+
+* **Free OpenCode Zen routes** (ADR-0041 amendment 2026-10-25). The provider documents "Free-tier chat models
+  require OpenCode; use paid models or Go from other clients", and the AEOS broker is its own client. Choose one
+  option:
+  * (A) OpenCode Go. It is not seeded yet, so tell the builder.
+  * (B) A paid Zen route: a BUDGET decision, then `./aeos routes activate ... --budget-decision <id>`.
+  * (C) Another route: OpenRouter, or LOCAL through `./aeos routes set-endpoint <local route_key> --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "<why>"`.
+  * (D) Proxy anyway: `./aeos routes activate ... --accept-client-terms --client-terms-note "<what you read>"`.
+* **Supervisor model.** If Fable resolves to another family (1.4), choose another supervisor, or pin a stage
+  model with
+  `./aeos policy decide --kind POLICY --stage-model <STAGE>=<exact-model-id> --eval-run <id> --rollback-target <old> --domain PERSONAL --as <admin> --rationale "<why>"`,
+  or on *Keputusan* with the preset that starts "Pin model supervisor per tahap perencanaan". Also decide whether a
+  supervisor version change must stop planning until it is evaluated.
+* **CAN_PLAN_PERSONAL = UNKNOWN.** Decide whether the bridge may still run automatically, or must use the manual
+  package. Record it as an ADR. Until then, run `./aeos doctor --functional` before planning.
+* **CAN_PUBLISH_PERSONAL.** Decide whether to adopt full READY enforcement (ADR-0094, open item). Until then, run
+  `./aeos doctor --functional -c CAN_PUBLISH_PERSONAL` before each publication.
+* **NO_TRUSTED_SUITE.** Decide whether admission must refuse a non-platform project without a trusted suite. Or
+  register suites (section 3).
+* **Role eligibility.** Decide whether a role becomes eligible only after a PASS evaluation:
+  * Adopt a role's PASS run with `./aeos work adopt-role <role_key> --eval-run <id> --as <admin> --rationale "<why>" --option "<a>" --option "<b>" --goal "<goal>" --tradeoff "<tradeoff>" --invalidate-if "<condition>"`,
+    or on *Organisasi & Peran*.
+  * Tighten the default R4 pilot threshold on *Organisasi & Peran* → "Ambang evaluasi peran (§46)" → *Ubah ambang
+    evaluasi peran*, which shows the risk classes it covers before you confirm, or with
+    `./aeos work role-eval-threshold R2 --as <admin> --rationale "<why>"`. R2 means R2, R3 and R4 tasks need an
+    adopted PASS evaluation or an owner EXCEPTION.
+* **Memory acceptance.** Decide whether memory acceptance must require EVALUATED. Author the memory fixture suite
+  first (ADR-0060, ADR-0081).
+* **Verifier coverage:**
+  * Which planner-compiled tasks must run integration (real-tool) tests.
+  * The ASVS level for the applications AEOS builds, per data class.
+  * Which high-trust black-box checks a separate trusted process should run.
+* **`requirements.lock` hashes.** Approve regenerating the lock with `--generate-hashes` (protected file). Without
+  it, the platform's own dependency changes keep `dependency_env` NOT_RUN.
+* **Governance handoff.** Say whether a downstream governance harness or pipeline exists that AEOS must hand off
+  to. If none exists, an ADR makes NOT_CONFIGURED the accepted state.
+* **Earlier project.** Tell the builder which repository, branch or archive, if any, is the earlier DLY AEOS
+  (`gh repo list <your-login> --limit 50`). The builder records a read-only inventory with
+  `./aeos project inventory <project_key> --domain PERSONAL`. If none exists, say so and ADR-0001 records it.
+* **Earlier specification.** Say whether alignment with the earlier Phase-1 and gateway specifications matters.
+  The repository is public, so commit a sanitised copy only if you may publish it. If any credential example in it
+  was ever real, rotate it first.
+* **GitHub profile (optional).** Contributions on the public repository count once commits land on `main` with
+  your verified or noreply address.
+
+---
+
+## 3. Catalog activation (master §45)
+
+The catalog is a design watchlist, not a list of installed components. Status comes from the observed inventory:
+`./aeos inventory list --requirement REQUIRED|OPTIONAL|CANDIDATE|REFERENCE_ONLY`, or *Tools & Repos* (`/tools`).
+
+### 3.1 Core components must be active
+
+After section 1, run `./aeos inventory reconcile`, then `./aeos inventory list --requirement REQUIRED`. Every
+REQUIRED row should be installed, connected and functional. That includes Claude Code, OpenCode, OpenBao, the OS
+credential store, Git, Python, Node.js, VS Code, GitHub, GitHub Issues, GitHub Actions, Google Drive and Google Docs.
+The exceptions are the OFFICE integrations (Bitbucket, Bitbucket Pipelines, Jira, Confluence), which stay disabled
+until section 4. A
+REQUIRED row that is not active points back to its step in section 1.
+
+### 3.2 Token-saving candidates: TRIAL, measured benefit, then ACCEPTED
+
+Serena, Context7, RTK, ccusage, Promptfoo, ToolHive, Hermes and Langfuse/OpenTelemetry are adopted only through
+the Usulan Upgrade flow. Nothing is installed or promoted automatically. Go through them one at a time. A sensible
+order: ccusage first (a measurement baseline), then Serena and Context7, RTK, Promptfoo, ToolHive (only once an MCP
+server is adopted), Hermes, and Langfuse/OpenTelemetry. Langfuse and OpenTelemetry send traces off the machine,
+so choose a trace destination, and for OFFICE get company approval.
+
+1. **Propose.** Open *Tools & Repos* → component (for example `serena`) → *Usulkan perubahan*, which opens
+   `/proposals?component=serena`. Or open *Usulan Upgrade* (`/proposals`) → *Usulkan perubahan* with kind ADD.
+   Or open *Riset* (`/research`) → entry → *Usulkan*.
+2. **Review package.** On the proposal → *Buat paket review*.
+3. **Benefit criteria, before the trial.** In "Rencana pemilik (ditetapkan sebelum trial, terikat candidate
+   hash)", add criteria with metric, threshold and baseline. Examples: tokens per accepted task, cost per
+   accepted outcome, accepted outcomes, review time. Then press *Simpan rencana (review ulang otomatis)*.
+4. **Trial decision.** In "Keputusan manusia yang diperlukan", choose *Setujui TRIAL terisolasi (bukan promosi)*
+   and press *Catat keputusan terikat hash*.
+5. **Trial.** In "Trial terisolasi (di bawah keputusan TRIAL)", press *Luncurkan trial*. Run `./aeos work run-once`
+   and `./aeos verify run <run_id>`, then press *Lampirkan bukti trial*. For a baseline-versus-candidate
+   measurement, plan runs on *Evaluasi Model* → *Rencanakan run evaluasi*. Then run
+   `./aeos eval start <run_id> --as <admin>`, bind tasks before executing them with
+   `./aeos eval bind <run_id> <slot_id> <task_id> --as <admin>`, and finish with
+   `./aeos eval collect <run_id> --as <admin>` and `./aeos eval finish <run_id> --reason "<why>" --as <admin>`.
+   Use at least 3 repetitions. A two-worker topology needs
+   `./aeos work experiment-grant <eval_run> --as <admin> --domain PERSONAL --days <1-30> --rationale "<why>"`,
+   or *Pekerjaan Live* → *Beri hibah eksperimen*.
+6. **Checkpoint.** In "Checkpoint Claude atas bukti trial (sebelum PROMOTE)", press *Minta checkpoint Claude*. Or
+   use *Buat paket manual*, or *Catat NOT-PROVEN secara eksplisit*.
+7. **Decision.** If the measured benefit met the criteria, choose *Setujui PROMOSI (keputusan terpisah dari
+   trial)*. If not, choose *Pertahankan baseline (KEEP)* or *Tolak (REJECT)*.
+8. **Accept.** Merge the reviewed `install-manifest` PR (requirement and `approved_pin`). Then run
+   `./aeos seed --only aeos.inventory.seed` and `./aeos inventory reconcile`. Link the ADR and the publication
+   under "Catatan tertaut". Finally, in "Hasil setelah implementasi", press *Catat hasil* with *ACCEPTED —
+   diterima*. Finalisation needs inventory DONE and docs PUBLISHED.
+
+Read-only CLI: `./aeos proposal list --domain PERSONAL` and `./aeos proposal show <proposal_id> --domain PERSONAL`.
+Creating and deciding proposals is UI-only. The proposal timeline is the M3 exit evidence.
+
+For ccusage, install a version you reviewed with `npm install -g ccusage@<version>`. Then open *Biaya & Kuota*
+(`/costs`) → *Jalankan estimator ccusage (ESTIMATE)*. The result is an estimate, never an invoice or a quota.
+
+Trusted suites for evaluation: register each project's suite on *Portofolio* → project → *Suite tepercaya*, or with
+`./aeos verify suite-register <project_id> --as <admin> --domain PERSONAL --rationale "<why>" --commit <reviewed sha>`.
+Check it with `./aeos verify suite-status <project_id> --domain PERSONAL`. Role evaluation cases come with
+`./aeos seed`, and their fixtures are yours to author (ADR-0060).
+
+### 3.3 References stay catalogued
+
+Paperclip, OpenAI Symphony, Ralph, MetaGPT, ChatDev, CrewAI, Spec Kit, OpenSpec, BMAD and GSD are REFERENCE_ONLY.
+They stay in the catalog and are not installed. If a proposal is opened for one, choose *Simpan sebagai referensi
+saja*.
+
+### 3.4 Stays unused (§45)
+
+* **9Router:** routes based on session or subscription credentials are not used.
+* **Infisical:** an alternative vault; OpenBao is the decided one.
+* **Docker MCP Gateway:** an alternative to ToolHive, not a second gateway authority.
+* **DDorchestrator:** its repository identity is UNVERIFIED.
+
+You need to do nothing here. Do not open proposals for them. If one appears, choose *Tolak (REJECT)* or *Simpan
+sebagai referensi saja*.
+
+---
+
+## 4. External items (company, tenant, provider)
+
+These items stay open after sections 1 to 3. The software is complete and fails closed: OFFICE stays BLOCKED and
+G6/G8 stay NOT_PROVEN. Below is what to prepare for each one.
+
+### 4.1 Company authorisation for OFFICE
+
+Get a written authorisation from the company, with a reference number. It should name:
+
+* whether personal Claude Max may process office data;
+* the approved external model routes;
+* the allowed data classes (PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED);
+* the trace destinations;
+* the exact tenant and project targets;
+* the company-issued identities;
+* the OFFICE environments (staging, production), the approved deploy mechanism, who may trigger it, and the
+  read-only health endpoint AEOS may call.
+
+Record it in an OFFICE session: *Keputusan* → *Catat keputusan manusia* → Jenis keputusan POLICY. Tick "Ini
+otorisasi perusahaan untuk OFFICE", enter the company reference, tick the providers, and put only the approved
+keys in the OFFICE override. Or run:
+
+```bash
+./aeos policy decide --kind POLICY --domain OFFICE --office-authorization --company-reference "<ref>" --allowed-provider bitbucket --allowed-provider jira --allowed-provider confluence --approved-target 'bitbucket:workspace=<ws>,root_id=<ws>/<repo>' --approved-data-class <CLASS> --approved-identity office/atlassian=<account id> --office-policy atlassian_deployment=CLOUD --as <admin> --rationale "<what the company approved>"
+```
+
+Keep the single quotes around values with commas: Windows PowerShell splits them otherwise. Once the
+authorisation exists, OFFICE targets, data classes and identities fail closed until they are recorded.
+
+Next, make each approved route OFFICE-eligible with
+`./aeos policy office-route <route_key> --as <admin> --credential-ref office/<provider> --rationale "<why>"`, then
+activate it with only the approved data classes:
+`./aeos routes activate <route_key> --as <admin> --expected-hash <hash> --data-class <CLASS> --terms-reviewed --terms-note "<what you read>" --rationale "<why>"`.
+The OFFICE container profile must pass on that machine (1.6).
+
+The deploy mechanism needs a reviewed adapter contract (an ADR, milestone M5). Hand the description over to the
+builder: environments, pipeline, triggers and consumers, with no credentials. Until then the project page shows
+"Belum tersedia (M5)".
+
+### 4.2 Atlassian and Bitbucket tenant
+
+* **Deployment type.** Ask company IT which Atlassian deployment is in use. Cloud is `<site>.atlassian.net`.
+  For Cloud, record `atlassian_deployment=CLOUD` (4.1); no adapter needs to be built. Data Center has no adapter:
+  record it and commission one, tested against a DC instance the company authorises.
+* **Secrets.** With OpenBao running, store `./aeos secrets set office/atlassian` (JSON `{"email": ..., "api_token": ...}`
+  at the hidden prompt) and `./aeos secrets set office/bitbucket` (`{"access_token": ...}`).
+* **Project.** In an OFFICE session, create the project at *Portofolio* → *Proyek baru* (`/projects/new`). Under
+  *Integrasi*, set the Bitbucket repository (workspace/repo_slug, tick *Aktifkan adapter*), optionally Bitbucket Pipelines, the
+  Confluence numeric space id and the Jira project key. Then verify the repository identity with *Verifikasi
+  identitas*. Record a Bitbucket identity as its uuid or account id, not a nickname.
+* **Check.** Run `./aeos doctor -g PROJECT_ADAPTERS --functional` and
+  `./aeos doctor -c CAN_USE_OFFICE_INTEGRATIONS --functional`.
+* **Pilot (M5 exit evidence).** Run one scoped pilot. Check that no OFFICE item appears in a PERSONAL session
+  (Projects, Decisions, Evidence, History) and keep the evidence.
+
+### 4.3 Live provider bypass test (GitHub)
+
+The `main` ruleset is CONFIGURED ([ADR-0115](decisions/ADR-0115-public-repository-on-github-free.md)), but
+`enforcement_tested` stays NOT-PROVEN until a real bypass attempt is refused. Choose one option.
+
+* **Option 1.** With a non-bypass credential, `git push origin HEAD:main` must be refused (GH013). Then run
+  `./aeos delivery enforcement --repo <your-login>/dly-aeos --branch main` (the token needs Administration: read),
+  then `./aeos delivery capabilities --record`.
+* **Option 2.** Add `aeos-probe/**` to the ruleset's branch targets. Store a low-privilege token with
+  `./aeos secrets set <ref>`, then run
+  `DLY_AEOS_LIVE_BYPASS_REPO=<your-login>/dly-aeos DLY_AEOS_LIVE_BYPASS_BRANCH=aeos-probe/<name> DLY_AEOS_LIVE_BYPASS_TOKEN_REF=<ref> .venv/bin/python -m pytest tests/acceptance/test_delivery.py::test_provider_enforces_human_only_merge_on_the_real_repository -q`.
+
+Optional fork check: allow fork PR workflows with no write token and no secrets. From a second account, open a
+fork PR that prints only env-var names, keep the run URL and close it unmerged. Hand the run URL to the builder.
+
+### 4.4 Real deployment targets
+
+For each project that is actually deployed:
+
+1. **Register the target.** *Portofolio* → project → *Integrasi* → *Atur integrasi lain*. Provider:
+   Deployment target. Purpose: staging or production. Root ID: `https://<host>`, whose GET health path returns
+   JSON with `status` and `commit`.
+2. **Record the environment decision and checks** (2.4).
+3. **Back up and check.** Run backup and restore-test (1.14) and `./aeos doctor -c CAN_VALIDATE_STAGING`.
+4. **Observe.** Run `./aeos delivery observe-target <project_id> --environment staging --sha <deployed commit>`
+   and `./aeos delivery gates <task_id>`.
+5. **Screenshots.** `./aeos docs screenshot <project_id> --environment staging --commit <sha> --route /`.
+6. **Artifact digests.** Have each product's CI publish artifact digests or attestations, and its health endpoint
+   report `artifact_digest`. Verifying attestation signatures needs a signer pin from you.
+7. **DLY AEOS itself.** After promoting a release (1.14), register its production target and set
+   `./aeos delivery target-checks <platform project id> --environment production --health-path /api/health`.
+
+Optional vulnerability evidence for the platform:
+
+* Python: `.venv/bin/python -m pip install pip-audit==2.7.3`, then `./aeos inventory va-scan`. This is the remedy
+  the product prints, and it needs network access.
+* npm: upload an `npm audit --json` report with
+  `./aeos intake upload <project_key> <npm-audit.json> --domain PERSONAL --actor <admin>`, then
+  `./aeos docs register-va-report <project_id> --attachment <id> --assessor "<who>" --performed-on <YYYY-MM-DD> --scope "frontend/package-lock.json dependencies" --tools "npm audit"`.
+
+---
+
+## 5. Windows notes
+
+Windows stays a supported host. Everything above applies, with these differences.
+
+| macOS | Windows Command Prompt (cmd.exe) | Windows PowerShell |
+|---|---|---|
+| `./scripts/bootstrap.sh` | run it from PowerShell | `.\scripts\bootstrap.ps1` |
+| `./aeos <command>` | `aeos <command>` | `.\aeos.ps1 <command>` |
+| `.venv/bin/python ...` | `.venv\Scripts\python.exe ...` | `.\.venv\Scripts\python.exe ...` |
+| `~/Library/Application Support/DLY-AEOS` | `%LOCALAPPDATA%\DLY-AEOS` | `$env:LOCALAPPDATA\DLY-AEOS` |
+
+In cmd.exe, `.\aeos.ps1` opens in an editor instead of running. Use `aeos`, which runs `aeos.cmd`. If PowerShell
+blocks scripts, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once. Environment variables for the
+pytest lines: in PowerShell write `$env:NAME="value"; <command>`, in cmd.exe `set NAME=value` first.
+
+* **Docker:** `winget install -e --id Docker.DockerDesktop`, then start it. The `docker build` lines are the same.
+  The container boundary was proven on the Windows build host in a throw-away data directory. Your real data
+  directory still needs its own `aeos worker containment --kind container` report.
+* **Claude Code:** `winget install --id Anthropic.ClaudeCode -e`. To remove `ANTHROPIC_API_KEY`, run
+  `Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue` and delete it under System Properties →
+  Environment Variables.
+* **Signer for the pin (1.12):**
+  `(Get-AuthenticodeSignature (Get-Command claude.exe).Source).SignerCertificate.Subject`. The `windows` entry of
+  `approved_signer`.
+* **Commit identity (1.5):** edit `%LOCALAPPDATA%\DLY-AEOS\aeos.yaml` (copy `config\aeos.example.yaml` there if it
+  does not exist).
+* **OpenBao:** `vault install` picks the `windows_amd64` release. The bootstrap identity is in Windows Credential
+  Manager. The live test is
+  `$env:DLY_AEOS_TEST_BAO="$env:LOCALAPPDATA\DLY-AEOS\bin\bao.exe"; .\.venv\Scripts\python.exe -m pytest -m integration tests/integration/test_secrets_openbao_live.py -q`.
+* **MCI hash (2.11):** `"sha256:" + (Get-FileHash -Algorithm SHA256 -LiteralPath '<path>').Hash.ToLower()`. The file
+  goes to `%LOCALAPPDATA%\DLY-AEOS\policy\canonical\`.
+* **Several machines:** if you keep using the Windows machine next to the Macs, it is one more machine. It has its
+  own data directory, vault, unseal keys, secrets, decisions and containment report. Repository-level steps
+  ([once]) apply to all machines after `git pull`.
+
+Related: [OWNER_TARGET_CAPABILITY_MATRIX.md](OWNER_TARGET_CAPABILITY_MATRIX.md) (owner, target and capability per
+milestone) and [IMPLEMENTATION_COVERAGE.md](IMPLEMENTATION_COVERAGE.md) (what is built and what is proven).

@@ -57,9 +57,12 @@ def snapshot_cmd(
 def decisions_cmd(
     kind: str = typer.Option(None, help="Filter by kind (APPROVAL, EXCEPTION, POLICY, ...)"),
     status: str = typer.Option(None, help="Filter by effective status (ACTIVE, EXPIRED, INVALIDATED, SUPERSEDED)"),
+    target_type: str = typer.Option(None, "--target-type", help="Filter by target type (e.g. worker_sandbox, "
+                                                                "screenshot_capture, worker_route_behaviour)"),
     limit: int = typer.Option(50, help="Maximum rows"),
 ) -> None:
-    """List recorded human decisions (newest first)."""
+    """List recorded human decisions (newest first). Each row starts with the decision id, the argument of
+    'aeos policy revoke <decision_id>'."""
     from aeos.models.decisions import Decision
     from aeos.policy.decisions import effective_status
 
@@ -68,14 +71,17 @@ def decisions_cmd(
         q = select(Decision).order_by(Decision.created_at.desc()).limit(max(1, min(limit, 500)))
         if kind:
             q = q.where(Decision.kind == kind)
+        if target_type:
+            q = q.where(Decision.target_type == target_type)
         rows = [d for d in s.scalars(q) if not status or effective_status(d) == status]
         if not rows:
             console.print("No decisions recorded.")
         for d in rows:
             exp = d.expires_at.isoformat() if d.expires_at else "-"
-            console.print(f"{d.created_at.isoformat()[:19]} {d.kind:16} {effective_status(d):11} "
-                          f"{d.target_type}:{d.target_id} actor={d.actor_user_id} ({d.actor_kind}) "
-                          f"ops={','.join(d.allowed_operations or []) or '-'} expires={exp}")
+            line = (f"{d.id} {d.created_at.isoformat()[:19]} {d.kind:16} {effective_status(d):11} "
+                    f"{d.domain or '-'} {d.target_type}:{d.target_id} actor={d.actor_user_id} ({d.actor_kind}) "
+                    f"ops={','.join(d.allowed_operations or []) or '-'} expires={exp}")
+            console.print(line.encode("ascii", "replace").decode("ascii"))
 
 
 def _admin_user_id(session, username: str, password: str) -> str:
@@ -171,8 +177,18 @@ def decide_cmd(
                                       "unquoted comma); applies only with an ACTIVE company authorisation"),
     policy_preset: str = typer.Option(
         None, "--policy-preset",
-        help="POLICY owner attestation preset: claude_extra_usage_off (you turned paid extra usage OFF in "
-             "claude.ai; needs --days; shown as owner-attested E0, never VERIFIED)"),
+        help="POLICY preset: claude_extra_usage_off (attestation: you turned paid extra usage OFF in claude.ai; "
+             "needs --days; shown as owner-attested E0, never VERIFIED) | screenshot_authenticated_capture (your "
+             "choice, given with --authenticated-capture)"),
+    authenticated_capture: str = typer.Option(
+        None, "--authenticated-capture",
+        help="POLICY preset screenshot_authenticated_capture: ALLOWED | DENIED - may the screenshot collector make an "
+             "authenticated, read-only capture of pages behind a login (PERSONAL only; --days optional). ALLOWED "
+             "needs --capture-scope. This build has no authenticated capture path: the collector stays "
+             "unauthenticated whatever you decide"),
+    capture_scope: str = typer.Option(
+        None, "--capture-scope", help="--authenticated-capture: the pages/targets the decision covers, e.g. "
+                                      "'Control Center routes, read-only'"),
     target_type: str = typer.Option(None), target_id: str = typer.Option(None),
     target_version: str = typer.Option(None, help="System change: the new value the evaluation ran with "
                                                   "(e.g. prompt revision, policy version, route key)"),
@@ -222,6 +238,17 @@ def decide_cmd(
                 raise typer.BadParameter(f"--stage-model expects STAGE=model-id, got {pair!r}")
             models[stage.strip().upper()] = model.strip()
         details["models"] = models
+    if authenticated_capture is not None or capture_scope is not None:
+        if kind.upper() != "POLICY":
+            raise typer.BadParameter("--authenticated-capture is a POLICY decision")
+        if authenticated_capture is None:
+            raise typer.BadParameter("--capture-scope goes with --authenticated-capture ALLOWED|DENIED")
+        if policy_preset and policy_preset != catalog.SCREENSHOT_CAPTURE_PRESET:
+            raise typer.BadParameter(f"--authenticated-capture records the preset {catalog.SCREENSHOT_CAPTURE_PRESET}")
+        policy_preset = catalog.SCREENSHOT_CAPTURE_PRESET
+        details["authenticated_capture"] = authenticated_capture.strip().upper()
+        if capture_scope is not None:
+            details["scope"] = capture_scope
     if eval_run or rollback_target:
         if kind.upper() != "POLICY":
             raise typer.BadParameter("--eval-run/--rollback-target are system-change evidence of a POLICY decision")
@@ -254,11 +281,64 @@ def decide_cmd(
             v = decision_view(s, d)
             console.print(f"Recorded {v['kind']} {v['id']} -> {v['target_type']}:{v['target_id']} "
                           f"status={v['status']} expires={v['expires_at'] or '-'}")
+            if (d.details or {}).get("policy_preset") == catalog.SCREENSHOT_CAPTURE_PRESET:
+                shown = (f"  authenticated_capture={d.details.get('authenticated_capture')} "
+                         f"scope={d.details.get('scope') or '-'} (this build has no authenticated capture path: the "
+                         "collector stays unauthenticated)")
+                console.print(shown.encode("ascii", "replace").decode("ascii"))
             sc = (d.details or {}).get("system_change") or {}
             if sc:
                 runs = ", ".join(f"{r.get('id')} ({r.get('binding')})" for r in sc.get("eval_runs") or []) or "-"
                 console.print(f"  system change: {sc.get('class')} evaluation={sc.get('evaluation')} runs={runs} "
                               f"rollback={sc.get('rollback_target') or '-'}")
+    except AeosError as exc:
+        typer.secho(f"{exc.code}: {exc.message}".encode("ascii", "replace").decode(), fg="red", err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command("route-threshold")
+def route_threshold_cmd(
+    max_failure_rate: float = typer.Option(..., "--max-failure-rate", min=0.0, max=1.0,
+                                           help="Highest tolerated share of evaluation samples with a tool/schema "
+                                                "failure, 0..1 (0.05 = 5%); recorded with 4 decimals"),
+    as_user: str = typer.Option(..., "--as", help="Your SUPER_ADMIN username (the human decision actor)"),
+    domain: str = typer.Option(..., help="PERSONAL or OFFICE (explicit, never inferred)"),
+    rationale: str = typer.Option(..., help="Why (min 10 characters)"),
+) -> None:
+    """Set the owner threshold of Doctor worker.route_behaviour (Readiness -> 'Tetapkan ambang pemilik').
+
+    Records the same POLICY decision as the Control Center form: target worker_route_behaviour:tool_schema_failures,
+    details.max_failure_rate. There is no default: without it failures are reported, never judged (UNKNOWN). A newer
+    decision replaces the current threshold; the threshold never makes a route pass without trusted evaluation."""
+    from aeos.core.enums import Domain
+    from aeos.core.errors import AeosError
+    from aeos.policy import catalog, recording
+    from aeos.policy.decisions import decision_view
+
+    _ensure_db()
+    try:
+        dom = Domain(domain.upper())
+    except ValueError as exc:
+        raise typer.BadParameter("--domain must be PERSONAL or OFFICE") from exc
+    rate = round(max_failure_rate, 4)
+    target_type, target_id = catalog.TARGET_ROUTE_BEHAVIOUR
+    # the exact value is shown before the password confirms the decision (as the Control Center form does)
+    console.print(f"Decision to record: POLICY {target_type}:{target_id} details.max_failure_rate = {rate} "
+                  f"({round(rate * 100, 2)}%) in {dom.value}")
+    password = typer.prompt(f"Password for {as_user} (confirms this human decision)", hide_input=True,
+                            default="", show_default=False)
+    try:
+        with session_scope() as s:
+            uid = _admin_user_id(s, as_user, password)
+            d = recording.record_generic_decision(
+                s, actor_user_id=uid, domain=dom, kind="POLICY", rationale=rationale,
+                auth_scope={"threshold": "worker.route_behaviour tool_schema_failures",
+                            "recorded_via": "aeos policy route-threshold"},
+                target_type=target_type, target_id=target_id, allowed_operations=[],
+                details={catalog.ROUTE_BEHAVIOUR_DETAIL_KEY: rate})
+            v = decision_view(s, d)
+            console.print(f"Recorded POLICY {v['id']} -> {v['target_type']}:{v['target_id']} max_failure_rate={rate}. "
+                          "The Doctor result turns STALE and is judged again on the next check.")
     except AeosError as exc:
         typer.secho(f"{exc.code}: {exc.message}".encode("ascii", "replace").decode(), fg="red", err=True)
         raise typer.Exit(1) from exc

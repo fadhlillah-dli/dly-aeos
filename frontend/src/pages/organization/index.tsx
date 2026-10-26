@@ -9,6 +9,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Card, EmptyState, ErrorBox, inputClass, Loading, Mono, Notice, PageHeader } from "../../components/ui";
 import { AgentControls } from "../../components/workforce/AgentControls";
 import { RoleAdoption } from "../../components/workforce/RoleAdoption";
+import { RoleEvalThreshold, type RoleEvalThresholdView } from "../../components/workforce/RoleEvalThreshold";
 import type { AgentDef, RoleCard, RoleGroup } from "../../components/workforce/types";
 import { useLiveInvalidation } from "../../components/workforce/useLive";
 
@@ -150,7 +151,9 @@ export default function OrganizationPage() {
   };
   const roles = useQuery({
     queryKey: ["workforce-roles", domain],
-    queryFn: () => get<{ items: RoleGroup[]; note: string; source?: string; checked_at: string; mode: string }>("/api/workforce/roles"),
+    queryFn: () => get<{ items: RoleGroup[]; note: string; source?: string; role_eval_threshold?: RoleEvalThresholdView; checked_at: string; mode: string }>(
+        "/api/workforce/roles",
+      ),
     refetchInterval: 30_000,
   });
   const agents = useQuery({
@@ -160,7 +163,11 @@ export default function OrganizationPage() {
   });
   useLiveInvalidation(
     [["workforce-roles", domain], ["workforce-agents", domain]],
-    (e) => e.kind === "run.state_changed" || e.kind.startsWith("scheduler.agent_") || e.kind === "scheduler.role_result_adopted",
+    (e) =>
+      e.kind === "run.state_changed" ||
+      e.kind.startsWith("scheduler.agent_") ||
+      e.kind === "scheduler.role_result_adopted" ||
+      e.kind === "scheduler.role_eval_threshold_changed",
   );
   const [query, setQuery] = useState("");
   const groups = useMemo(() => {
@@ -282,6 +289,11 @@ export default function OrganizationPage() {
               {total} definisi · {active} run aktif
             </span>
           </div>
+          {roles.data?.role_eval_threshold && (
+            <Card title="Ambang evaluasi peran (§46)">
+              <RoleEvalThreshold threshold={roles.data.role_eval_threshold} isAdmin={isAdmin} onChanged={refresh} />
+            </Card>
+          )}
           {groups.map((g) => (
             <Card key={g.key} title={<span className="inline-flex items-center gap-2"><UserRound className="h-4 w-4" aria-hidden />{g.label} ({g.roles.length})</span>}>
               {g.roles.length === 0 ? (

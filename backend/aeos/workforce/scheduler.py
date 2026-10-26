@@ -12,9 +12,10 @@ import os
 import socket
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
@@ -496,8 +497,10 @@ def transition_task(
         "row_version": te.row_version + 1, "state_changed_at": utcnow(), "updated_at": utcnow(),
     }
     values.update(set_fields)
-    res = session.execute(update(TaskExecution).where(TaskExecution.id == te.id, TaskExecution.state == src,
-                                                      TaskExecution.row_version == te.row_version).values(**values))
+    # an UPDATE returns a CursorResult (rowcount)
+    res = cast("CursorResult[Any]", session.execute(
+        update(TaskExecution).where(TaskExecution.id == te.id, TaskExecution.state == src,
+                                    TaskExecution.row_version == te.row_version).values(**values)))
     if res.rowcount != 1:
         raise Conflict("task execution changed concurrently", code="CONCURRENT_UPDATE")
     te = get_te(session, task_id)
@@ -1008,8 +1011,8 @@ def role_eligibility(session: Session, task: TaskSpec) -> dict[str, Any]:
         out["eligibility_basis"] = "PILOT_THRESHOLD_UNEVALUATED"
         out["note"] = (f"Role {task.role_key} belum dievaluasi ({evaluation['status']}); risiko {risk} di bawah ambang "
                        f"{threshold}, jadi diizinkan oleh mode pilot - BUKAN dari hasil evaluasi. Fixture/grader kasus "
-                       "suite role disusun pemilik (ADR-0060); ambang dapat diperketat lewat "
-                       "POST /api/workforce/role-eval-threshold.")
+                       "suite role disusun pemilik (ADR-0060); ambang dapat diperketat pemilik di Organisasi & Peran "
+                       "-> Ambang evaluasi peran, atau aeos work role-eval-threshold <R0-R4> --as <admin> ...")
     return out
 
 
@@ -1098,6 +1101,17 @@ def adopt_role_result(session: Session, *, role_key: str, eval_run_id: str, acto
                 entity_id=role_key, payload={"decision_id": d.id, "eval_run_id": eval_run_id})
     return {"role_key": role_key, "decision_id": d.id, "eval_run_id": eval_run_id, "role_revision_hash": revision,
             "scope": clean_scope}
+
+
+def role_eval_threshold(session: Session) -> dict[str, Any]:
+    """The risk class from which admission requires a PASS role evaluation (or an owner EXCEPTION), as
+    ``role_eligibility`` reads it: ``source`` DEFAULT (pilot R4, never set) or OWNER_SETTING."""
+    raw = _setting(session, KEY_ROLE_EVAL_FROM, None)
+    value = str(raw) if raw is not None and str(raw) in RISK_ORDER else None
+    return {"required_from": value or DEFAULT_ROLE_EVAL_FROM, "default": DEFAULT_ROLE_EVAL_FROM,
+            "source": "OWNER_SETTING" if value else "DEFAULT", "risk_classes": list(RISK_ORDER),
+            "requires_evaluation": list(RISK_ORDER[RISK_ORDER.index(value or DEFAULT_ROLE_EVAL_FROM):]),
+            "setting": KEY_ROLE_EVAL_FROM}
 
 
 def set_role_eval_threshold(session: Session, *, risk_class: str, actor: str, rationale: str) -> dict[str, Any]:
@@ -1572,13 +1586,13 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
                               route_key=adm.route.route_key, est_usd=adm.est_usd, est_tokens=adm.est_tokens,
                               est_requests=int((task.limits or {}).get("max_requests", DEFAULT_MAX_REQUESTS)))
     now = utcnow()
-    res = session.execute(
+    res = cast("CursorResult[Any]", session.execute(  # an UPDATE returns a CursorResult (rowcount)
         update(TaskExecution)
         .where(TaskExecution.id == te.id, TaskExecution.state == S.READY.value, TaskExecution.row_version == expected_rv)
         .values(state=S.LEASED.value, row_version=expected_rv + 1, active_run_id=run_id,
                 attempts_used=TaskExecution.attempts_used + 1, reason="lease acquired", reason_code="",
                 state_changed_at=now, updated_at=now)
-    )
+    ))
     if res.rowcount != 1:
         ext.release(session, getattr(reservation, "id", None))
         raise Conflict("lost the lease to a concurrent admission", code="LEASE_CONFLICT")
@@ -1718,6 +1732,7 @@ def heartbeat(session: Session, run_id: str, *, lease_id: str | None) -> bool:
         _reject_stale(session, run, why, "heartbeat", {})
         return False
     lease = session.get(Lease, lease_id)
+    assert lease is not None  # _stale() returned "unknown lease" otherwise
     now = utcnow()
     lease.heartbeat_at = now
     lease.expires_at = now + timedelta(seconds=lease.ttl_seconds or DEFAULT_LEASE_TTL)

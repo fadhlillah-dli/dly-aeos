@@ -178,6 +178,18 @@ def _latest_observations(session: Session, component_id: str, domain: str | None
     return out
 
 
+def _obj(parent: dict[str, Any], key: Any) -> dict[str, Any]:
+    """``parent[key]`` when it is a JSON object, else an empty one."""
+    value = parent.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _list(parent: dict[str, Any], key: str) -> list[Any]:
+    """``parent[key]`` when it is a JSON array, else an empty one."""
+    value = parent.get(key)
+    return value if isinstance(value, list) else []
+
+
 def _rel_view(r: ComponentRelation) -> dict[str, Any]:
     return {"source_id": r.source_id, "target_id": r.target_id, "relation": r.relation, "lens": r.lens,
             "provenance": r.provenance, "data": r.data_description, "boundary": r.boundary,
@@ -270,7 +282,7 @@ def compute_candidate(session: Session, p: ChangeProposal, children: list[Change
     material = sorted(
         (e.identity or "", e.identity_status if e.identity_status in ("CHANGED", "NOT_FOUND") else "",
          (e.upstream or {}).get("observed_identity") or "") for e in entries)
-    cand = {
+    cand: dict[str, Any] = {
         "kind": p.kind, "identities": sorted(p.canonical_identities or []), "candidate_pin": p.candidate_pin or UNKNOWN,
         "candidate_component_ids": sorted(p.candidate_component_ids or []), "identity_state": material,
         # a part's candidate digest is bound too (appended only when recorded: existing hashes stay unchanged)
@@ -317,7 +329,7 @@ def _source_identity(session: Session, p: ChangeProposal) -> list[dict[str, Any]
         out.append({
             "identity": ident, "status": status, "research_entry_id": e.id if e else None,
             "research_lifecycle": e.lifecycle if e else None, "evidence_level": e.evidence_level if e else "E0",
-            "official_repo": up.get("html_url") or ((e.urls or [None])[0] if e else None) or UNKNOWN,
+            "official_repo": up.get("html_url") or ((e.urls[0] if e.urls else None) if e else None) or UNKNOWN,
             "release_or_commit": up.get("latest_tag") or UNKNOWN,
             "latest_release": up.get("latest_release") or UNKNOWN,
             "maintainer": up.get("owner") or (e.maintainer if e and e.maintainer else UNKNOWN),
@@ -615,7 +627,7 @@ def credential_entries(value: Any) -> list[dict[str, Any]]:
 
 def _access_identity_values(access: dict[str, Any] | None) -> list[Any]:
     acc = access or {}
-    more = acc.get("credential_refs") if isinstance(acc.get("credential_refs"), list) else []
+    more = _list(acc, "credential_refs")
     return [acc.get("credential_ref"), acc.get("identity_ref"), *more]
 
 
@@ -758,7 +770,7 @@ def credential_revocation(p: ChangeProposal, baseline: list[dict[str, Any]], *,
             text += f" - {_shared_text(ref, users)} (WAIVED dengan alasan bila tetap dipakai)"
         elif ref_users is None:
             text += " - pemakaian oleh komponen lain belum diperiksa"
-        rec = record.get(f"credential:{ref}") if isinstance(record.get(f"credential:{ref}"), dict) else {}
+        rec = _obj(record, f"credential:{ref}")
         items.append({"id": f"credential:{ref}", "kind": "credential", "item": text, "secret_ref": ref,
                       "shared_with": users, "status": rec.get("status") or "OPEN", "note": rec.get("note") or "",
                       "evidence_id": rec.get("evidence_id")})
@@ -782,7 +794,7 @@ def apply_progress(p: ChangeProposal, package: dict[str, Any]) -> dict[str, Any]
             continue
         items = []
         for i in section["items"]:
-            rec = progress.get(i.get("id")) if isinstance(progress.get(i.get("id")), dict) else {}
+            rec = _obj(progress, i.get("id"))
             items.append({**i, "status": rec.get("status") or "OPEN", "note": rec.get("note") or "",
                           "evidence_id": rec.get("evidence_id")})
         open_items = [i["id"] for i in items if i["status"] not in ("CLOSED", "WAIVED")]
@@ -804,7 +816,7 @@ def removal_plan(p: ChangeProposal, baseline: list[dict[str, Any]], *,
     def add(item_id: str, kind: str, text: str, **extra: Any) -> None:
         if any(i["id"] == item_id for i in items):
             return
-        rec = closure.get(item_id) if isinstance(closure.get(item_id), dict) else {}
+        rec = _obj(closure, item_id)
         items.append({"id": item_id, "kind": kind, "item": text, "status": rec.get("status") or "OPEN",
                       "note": rec.get("note") or "", "evidence_id": rec.get("evidence_id"), **extra})
 
@@ -865,8 +877,8 @@ def upgrade_delta(p: ChangeProposal, baseline: list[dict[str, Any]], entries: li
         publisher_to = up.get("owner") or (up.get("observed_identity") if up.get("observed_identity") else None)
         publisher_from = b.get("upstream_identity")
         license_to = up.get("license_spdx") or (e.license if e and e.license else None)
-        dep = up.get("dependency_diff") if isinstance(up.get("dependency_diff"), dict) else None
-        dep_ok = dep and dep.get("head") == p.candidate_pin
+        dep = _obj(up, "dependency_diff")
+        dep_ok = bool(dep) and dep.get("head") == p.candidate_pin
 
         def pair(a: Any, b2: Any) -> dict[str, Any]:
             a = a if a not in (None, "", UNKNOWN) else UNKNOWN
@@ -953,7 +965,7 @@ def security_privacy(session: Session, p: ChangeProposal, *, data_class: str | N
         refs: list[str] = []
         for c in cands:
             acc = c.access or {}
-            more = acc.get("credential_refs") if isinstance(acc.get("credential_refs"), list) else []
+            more = _list(acc, "credential_refs")
             refs += [str(r) for r in [acc.get("credential_ref"), acc.get("identity_ref"), *more] if r]
         try:
             from aeos.core.redaction import redact_text

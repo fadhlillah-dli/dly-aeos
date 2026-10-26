@@ -250,14 +250,21 @@ def exception_preset_for_target(target_type: str | None, target_id: str | None) 
     return None
 
 
-# ---- owner attestations read by other modules (POLICY decisions with an exact target shape) -----------------
+# ---- owner attestations and owner policy choices read by other modules (POLICY decisions, exact target shape) --
 #
 # §12 "Menonaktifkan penggunaan tambahan berbayar sesuai pengaturan resmi": AEOS cannot read the claude.ai account
 # setting (no official API). The owner turns paid extra usage off in claude.ai and records it here; the Doctor
 # check claude.extra_billing and the ClaudeNativeBridge view then show it as an owner attestation (evidence E0,
 # CONFIGURED - never VERIFIED). The attestation needs an explicit expiry chosen by the owner (no default).
+#
+# §29 screenshot collector: whether it may make an authenticated, read-only capture of pages behind a login (e.g.
+# the Control Center's own routes) is an owner POLICY choice (ALLOWED | DENIED, with the scope it covers), read by
+# ``aeos.docs_engine.screenshots.authenticated_capture_status`` through the policy facade. No decision = UNDECIDED;
+# UNDECIDED and DENIED keep every capture unauthenticated (fail closed), and so does ALLOWED while this build has
+# no authenticated capture path.
 
 TARGET_CLAUDE_EXTRA_USAGE = "claude_extra_usage"
+TARGET_SCREENSHOT_CAPTURE = "screenshot_capture"
 # §34 pack -> MCI control mapping approval (aeos.policy.snapshot.mci_reference, aeos.policy.recording)
 TARGET_MCI_PACK_MAPPING = "mci_pack_mapping"
 
@@ -267,20 +274,34 @@ class PolicyPreset:
     target_type: str
     target_id: str
     domains: tuple[str, ...]
-    detail_key: str  # boolean detail the consumer reads
-    value: bool  # the value this preset records
+    detail_key: str  # the detail the consumer reads
+    value: bool | None = None  # attestation: the boolean this preset records
     consumer: str = ""
     label: str = ""
+    # an owner attestation (E0, expiry required) states a setting AEOS cannot read; a choice preset records the
+    # owner's policy choice among ``choices`` (expiry optional), with a free-text scope detail
+    attestation: bool = True
+    choices: tuple[str, ...] = ()
+    scope_key: str | None = None
+    scope_required_for: tuple[str, ...] = ()  # the choices that are recorded only with a stated scope
 
 
+SCREENSHOT_CAPTURE_PRESET = "screenshot_authenticated_capture"
 POLICY_PRESETS: dict[str, PolicyPreset] = {
     "claude_extra_usage_off": PolicyPreset(
         TARGET_CLAUDE_EXTRA_USAGE, Domain.PERSONAL.value, (Domain.PERSONAL.value,), "extra_usage_disabled", True,
         consumer="aeos.doctor.checks.claude.claude_extra_billing, aeos.claude_bridge.bridge.status",
         label="Atestasi pemilik: extra usage berbayar Claude NONAKTIF di pengaturan akun claude.ai"),
+    SCREENSHOT_CAPTURE_PRESET: PolicyPreset(
+        TARGET_SCREENSHOT_CAPTURE, Domain.PERSONAL.value, (Domain.PERSONAL.value,), "authenticated_capture",
+        consumer="aeos.docs_engine.screenshots.authenticated_capture_status",
+        label="Capture screenshot terautentikasi read-only (halaman di balik login, mis. rute Control Center)",
+        attestation=False, choices=("ALLOWED", "DENIED"), scope_key="scope", scope_required_for=("ALLOWED",)),
 }
 # Detail keys whose meaning a consumer reads; they are accepted only on their preset target.
 POLICY_PRESET_DETAIL_KEYS = frozenset(p.detail_key for p in POLICY_PRESETS.values())
+# Length bounds of the free-text scope a choice preset records
+POLICY_PRESET_SCOPE_MIN, POLICY_PRESET_SCOPE_MAX = 5, 500
 
 
 def policy_preset_for_target(target_type: str | None, target_id: str | None) -> str | None:
@@ -288,3 +309,16 @@ def policy_preset_for_target(target_type: str | None, target_id: str | None) -> 
         if spec.target_type == target_type and spec.target_id == target_id:
             return name
     return None
+
+
+def policy_preset_for_target_type(target_type: str | None) -> str | None:
+    """The preset that owns *target_type*, whatever the target id: a decision on another id of a preset's target type
+    (e.g. ``screenshot_capture/OFFICE``) is refused as a mismatch instead of being recorded where no consumer reads
+    it."""
+    return next((name for name, spec in POLICY_PRESETS.items() if spec.target_type == target_type), None)
+
+
+# §08 Doctor ``worker.route_behaviour``: the owner's tool/schema failure-rate threshold, a POLICY decision on exactly
+# this target with ``details.max_failure_rate`` in 0..1 (read by aeos.doctor.checks.worker._threshold; no default)
+TARGET_ROUTE_BEHAVIOUR: tuple[str, str] = ("worker_route_behaviour", "tool_schema_failures")
+ROUTE_BEHAVIOUR_DETAIL_KEY = "max_failure_rate"

@@ -143,6 +143,7 @@ proves it. MCI alignment remains **UNVERIFIED** until the canonical source can b
 ## Manual steps only the owner can do
 
 These cannot (and must not) be automated. The dashboard and `aeos doctor` show which are missing.
+The complete ordered list, with the open owner decisions and the external items, is [docs/OWNER_ACTIONS.md](docs/OWNER_ACTIONS.md).
 
 1. **Create the first admin** — `aeos admin create` (no default credentials; password ≥ 12 chars).
 2. **Claude Code login check** — install the official Claude Code, run `claude` once, sign in with
@@ -152,8 +153,10 @@ These cannot (and must not) be automated. The dashboard and `aeos doctor` show w
    then `aeos secrets set workers/openrouter` (input is not echoed). Never put it in a file.
 4. **OpenBao** — `aeos vault install` (installs the install-manifest `approved_pin`; while none is
    recorded pass `--version X.Y.Z` for a version you reviewed - `latest` is never implied),
-   `aeos vault start`, `aeos vault init` (store the unseal keys
-   and root token **offline**, never in the repo or chat), `aeos vault unseal` after each restart.
+   `aeos vault start`, `aeos vault init` (store the unseal keys **offline**, never in the repo or
+   chat; init shows the root token once and revokes it when setup completes - the controller then
+   uses AppRole - so there is no root token to keep; only if init reports `setup incomplete` is it
+   left valid so you can finish, then revoke it), `aeos vault unseal` after each restart.
 5. **Google OAuth client + consent** (PERSONAL docs) — in Google Cloud Console create a project,
    enable the Google Drive API and Google Docs API, configure the OAuth consent screen, create an
    OAuth client of type **Desktop app**, download the JSON, then

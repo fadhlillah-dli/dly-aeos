@@ -399,8 +399,9 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
             raise ProxyError(403, "CAP_EXCEEDED", "cost cap for this run is exhausted")
         if not grants.consume_request(s, grant.id):
             s.rollback()
-            grant = s.get(CapabilityGrant, grant.id)
-            _deny(s, grant, "CAP_EXCEEDED", "request cap exhausted")
+            fresh = s.get(CapabilityGrant, grant.id)
+            assert fresh is not None  # authenticated in this session a moment ago
+            _deny(s, fresh, "CAP_EXCEEDED", "request cap exhausted")
             raise ProxyError(403, "CAP_EXCEEDED", "request cap for this run is exhausted")
         try:
             upstream = resolve_upstream(s, models[exposed], domain=grant.domain, project_id=grant.project_id,
@@ -541,7 +542,7 @@ def _record_ledger(s: Any, p: Prepared, run: WorkerRun | None, *, prompt: int | 
 
     mode = run.mode if run is not None and run.mode else "LIVE"
     reservation_id = run.budget_reservation_id if run is not None else None
-    base = dict(provider=p.upstream.provider, category="WORKER_API", source="broker", project_id=p.project_id,
+    base: dict[str, Any] = dict(provider=p.upstream.provider, category="WORKER_API", source="broker", project_id=p.project_id,
                 domain=p.domain, run_id=p.run_id, route_key=p.upstream.route_key, model=model, input_tokens=prompt,
                 output_tokens=completion, requests=1, cost_usd=cost, is_estimate=False, mode=mode)
     try:
@@ -588,7 +589,8 @@ def _retry_after(resp: httpx.Response) -> int:
 
 
 def _usage_of(data: dict[str, Any]) -> tuple[int | None, int | None, float | None, str | None]:
-    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    raw_usage = data.get("usage")
+    usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
     prompt = usage.get("prompt_tokens")
     completion = usage.get("completion_tokens")
     cost = usage.get("cost")

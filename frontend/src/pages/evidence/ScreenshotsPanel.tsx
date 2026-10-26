@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Camera } from "lucide-react";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { StatusBadge } from "../../components/StatusBadge";
@@ -12,6 +13,19 @@ import { LevelBadge, TrustBadge } from "./labels";
 import { Outcome } from "./outcomes";
 import { isObj } from "./ReportViews";
 
+/** The owner's POLICY decision on authenticated, read-only capture (backend docs_engine.screenshots). */
+export interface AuthenticatedCapture {
+  status?: string; // ALLOWED | DENIED | UNDECIDED
+  note?: string;
+  decision_id?: string | null;
+  scope?: string | null;
+  expires_at?: string | null;
+  preset?: string;
+  capture_mode?: string; // what the collector does: UNAUTHENTICATED in this build
+  authenticated_capture_built?: boolean;
+  record_hint?: string | null;
+}
+
 /** GET /api/docs/visuals/status (only the part this page states). */
 export interface VisualsStatus {
   screenshot?: string;
@@ -20,7 +34,7 @@ export interface VisualsStatus {
     command?: string;
     remedy?: string | null;
     note?: string;
-    authenticated_capture?: { status?: string; note?: string };
+    authenticated_capture?: AuthenticatedCapture;
   };
   screenshot_note?: string;
   checked_at?: string | null;
@@ -28,18 +42,52 @@ export interface VisualsStatus {
 
 const env = (e: EvidenceItem, k: string): unknown => e.environment?.[k];
 
-/** Owner decision still open: the collector never logs in, so pages behind a login are not evidence (W6-047). */
+/**
+ * The owner's decision on authenticated capture (ALLOWED / DENIED / UNDECIDED, W6-047) and what the collector does: it
+ * never logs in in this build, so pages behind a login are not evidence whatever the decision says.
+ */
 export function AuthenticatedCaptureNotice() {
-  const q = useQuery({ queryKey: ["docs-visuals-status"], queryFn: () => get<VisualsStatus>("/api/docs/visuals/status"), staleTime: 300_000 });
+  const { isAdmin, domain } = useAuth();
+  const q = useQuery({ queryKey: ["docs-visuals-status", domain], queryFn: () => get<VisualsStatus>("/api/docs/visuals/status"), staleTime: 300_000 });
   const cap = q.data?.screenshot_collector?.authenticated_capture;
   if (q.error) return <ErrorBox error={q.error} />;
   if (!cap) return null;
+  const preset = cap.preset ?? "screenshot_authenticated_capture";
   return (
     <div role="status" className="rounded-md border border-warn/40 bg-warn-bg p-3 text-sm text-warn" data-testid="authenticated-capture">
       <div className="flex flex-wrap items-center gap-2 font-medium">
-        Capture terautentikasi (halaman di balik login): <Outcome status={cap.status ?? "UNKNOWN"} />
+        Capture terautentikasi (halaman di balik login):{" "}
+        {cap.status === "ALLOWED" ? (
+          <StatusBadge status="CONFIGURED" label="ALLOWED oleh pemilik (jalur capture terautentikasi belum dibangun)" />
+        ) : cap.status === "DENIED" ? (
+          <StatusBadge status="DISABLED" label="DENIED oleh pemilik" />
+        ) : (
+          <Outcome status={cap.status ?? "UNKNOWN"} />
+        )}
+        {cap.capture_mode && <span className="text-xs font-normal">· mode kolektor: {cap.capture_mode === "UNAUTHENTICATED" ? "tanpa login" : cap.capture_mode}</span>}
       </div>
       {cap.note && <p className="mt-1">{cap.note}</p>}
+      {cap.decision_id && (
+        <p className="mt-1 text-xs">
+          Keputusan pemilik{" "}
+          <Link className="underline" to={`/decisions?decision=${encodeURIComponent(cap.decision_id)}`}>
+            <Mono>{cap.decision_id}</Mono>
+          </Link>
+          {cap.scope ? ` · scope: ${cap.scope}` : ""}
+          {cap.expires_at ? ` · berlaku sampai ${cap.expires_at}` : ""}
+        </p>
+      )}
+      {domain === "PERSONAL" && (
+        <p className="mt-1 text-xs">
+          {isAdmin ? (
+            <Link className="underline" to={`/decisions?preset=${encodeURIComponent(preset)}`}>
+              {cap.status === "UNDECIDED" ? "Catat keputusan pemilik (ALLOWED/DENIED)…" : "Ubah keputusan pemilik…"}
+            </Link>
+          ) : (
+            "Hanya SUPER_ADMIN yang dapat mencatat keputusan ini; peran VIEWER hanya-baca."
+          )}
+        </p>
+      )}
       {q.data?.screenshot_collector?.available === false && q.data.screenshot_collector.remedy && (
         <p className="mt-1 text-xs">
           Kolektor belum tersedia di host ini: <Mono>{q.data.screenshot_collector.remedy}</Mono>

@@ -530,7 +530,7 @@ def artifact_index(session: Session | None, version: PlanVersion) -> dict[str, d
         fk = str(prd.get("feature_key") or "")
         if not fk:
             continue
-        entry = {"ref": f"plan:requirements/{fk}", "kind": "plan_section", "sha256": content_hash(prd),
+        entry: dict[str, Any] = {"ref": f"plan:requirements/{fk}", "kind": "plan_section", "sha256": content_hash(prd),
                  "name": f"PRD {fk}", "content": prd}
         for label in (f"prd {fk}", fk, str(prd.get("title") or "")):
             if label.strip():
@@ -598,7 +598,7 @@ def task_spec_fields(task: dict[str, Any], *, project: Project, version: PlanVer
     route_in = task.get("model_route_policy") or {}
     reviewer_in = task.get("reviewer_policy") or {}
     verifier_in = task.get("verifier_policy") or {}
-    risk = task.get("risk_class") if task.get("risk_class") in RISK_ORDER else "R1"
+    risk: str = task["risk_class"] if task.get("risk_class") in RISK_ORDER else "R1"
     reviewer = {
         "required": True,  # an independent checkpoint review is always required (§19, §22)
         "reviewer_role": str(reviewer_in.get("reviewer_role") or "claude-checkpoint-reviewer"),
@@ -752,6 +752,7 @@ def _acceptance_for(session: Session, task_id: str, plan_version_hash: str) -> d
 def dag_view(session: Session, plan: Plan, version: PlanVersion) -> dict[str, Any]:
     specs = compiled_tasks(session, version.id)
     persisted = bool(specs)
+    tasks: list[dict[str, Any]]
     if persisted:
         tasks = [{
             "key": s.task_key, "id": s.id, "title": s.title, "feature_key": s.feature_key, "goal": s.goal,
@@ -849,7 +850,7 @@ def dag_view(session: Session, plan: Plan, version: PlanVersion) -> dict[str, An
                              "blocks": blocked, "impact": len(blocked)})
     blockers.sort(key=lambda b: -b["impact"])
 
-    conflicts = []
+    conflicts: list[dict[str, Any]] = []
     ordered = sorted(keys)
     for i, a in enumerate(ordered):
         for b in ordered[i + 1:]:
