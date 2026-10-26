@@ -26,12 +26,14 @@ changes the route's status or eligibility.
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from typing import Any
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
@@ -39,7 +41,10 @@ from aeos.broker.facade import PROBE_POOLS
 from aeos.core.errors import AeosError, Blocked, NotFound, PolicyDenied
 from aeos.core.redaction import redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
+from aeos.models.broker_ext import BrokerRequest
 from aeos.models.routing import ModelRoute
+
+log = logging.getLogger("aeos.broker.feasibility")
 
 __all__ = ["PROBE_MAX_TOKENS", "PROBE_POOLS", "PROBE_PROMPT", "probe_route"]
 PROBE_PROMPT = "Feasibility check. Reply with the single word: OK"  # synthetic PUBLIC data, nothing else
@@ -51,6 +56,9 @@ PROBE_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 # Errors raised before the request left this host: such a probe never reached the upstream and is not counted against
 # an OpenRouter free-model limit; every other outcome (an answer, a read timeout, a broken response) is counted.
 NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.UnsupportedProtocol)
+# A probe of an OpenRouter ``:free`` model is a broker request row like a worker call (decision C): recorded PENDING under
+# the free-model count lock and committed before anything is sent, then settled. It has no grant and no project.
+PROBE_MARK = "feasibility-probe"
 
 
 def _spend_problem(session: Session, route: ModelRoute, base_url: str) -> tuple[str, str] | None:
@@ -132,9 +140,10 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     spend = _spend_problem(session, route, upstream.base_url)
     if spend:
         raise PolicyDenied(spend[1], code=spend[0])
-    limit = _free_tier_limit(session, route)
-    if limit:
-        raise PolicyDenied(limit[1], code=limit[0])
+    # an OpenRouter :free probe counts against the account's free-model limit (decision C): checked and recorded under
+    # the same count lock as worker requests, in its own committed transaction, before anything is sent (the caller's
+    # session must not hold uncommitted writes here - the API and the CLI start the probe with none)
+    reservation = _reserve_free_probe(route, upstream.model_id) if _is_free_model(route) else None
     from aeos.cost import facade as cost_facade
 
     subscription = cost_facade.subscription_terms(route)[0] is not None
@@ -153,33 +162,39 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     retry_after: int | None = None
     rate_limit: dict[str, Any] = {}
     sent = False  # whether the request reached the upstream (counted against an OpenRouter :free limit, decision C)
+    settled = reservation is None
     try:
-        own = client is None
-        http = client or httpx.Client(timeout=PROBE_TIMEOUT, follow_redirects=False, trust_env=False)
         try:
-            # a probe is its own one-request conversation: its own opaque x-opencode-session on OpenCode Go
-            resp = http.post(upstream.url, json=body,
-                             headers=_upstream_headers(upstream, run_id=f"probe:{route_key}:{uuid.uuid4().hex}"))
-            status = resp.status_code
-            sent = True
-            if status == 200:
-                try:
-                    parsed = resp.json()
-                    data = parsed if isinstance(parsed, dict) else {}
-                except ValueError:
-                    error, status = "invalid upstream JSON", 502
-            elif status == 429:
-                retry_after = _retry_after(resp)
-                rate_limit = rate_limit_info(resp)
-        except httpx.TimeoutException as exc:
-            error = "timeout"
-            sent = not isinstance(exc, NOT_SENT_ERRORS)  # a read/write timeout: the request was sent
-        except httpx.HTTPError as exc:
-            error = type(exc).__name__
-            sent = not isinstance(exc, NOT_SENT_ERRORS)
+            own = client is None
+            http = client or httpx.Client(timeout=PROBE_TIMEOUT, follow_redirects=False, trust_env=False)
+            try:
+                # a probe is its own one-request conversation: its own opaque x-opencode-session on OpenCode Go
+                resp = http.post(upstream.url, json=body,
+                                 headers=_upstream_headers(upstream, run_id=f"probe:{route_key}:{uuid.uuid4().hex}"))
+                status = resp.status_code
+                sent = True
+                if status == 200:
+                    try:
+                        parsed = resp.json()
+                        data = parsed if isinstance(parsed, dict) else {}
+                    except ValueError:
+                        error, status = "invalid upstream JSON", 502
+                elif status == 429:
+                    retry_after = _retry_after(resp)
+                    rate_limit = rate_limit_info(resp)
+            except httpx.TimeoutException as exc:
+                error = "timeout"
+                sent = not isinstance(exc, NOT_SENT_ERRORS)  # a read/write timeout: the request was sent
+            except httpx.HTTPError as exc:
+                error = type(exc).__name__
+                sent = not isinstance(exc, NOT_SENT_ERRORS)
+            finally:
+                if own:
+                    http.close()
         finally:
-            if own:
-                http.close()
+            # settled in its own transaction right after the attempt, before (and independent of) any other bookkeeping
+            if reservation is not None:
+                settled = _settle_free_probe(reservation, sent=sent, status=status, outcome=_outcome(status, error))
         latency_ms = int((time.monotonic() - started) * 1000)
         outcome = _outcome(status, error if error != "invalid upstream JSON" else None)
         prompt, completion, cost, model_resolved = _usage_of(data)
@@ -225,16 +240,97 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
                               "ledger": ledger, "upstream": "SENT" if sent else "NOT_SENT"})
         return result
     except AeosError:
-        raise
+        raise  # the free-model count was settled right after the attempt (or stays PENDING: still counted)
     except Exception as exc:
-        # whatever failed after the attempt, the probe that reached the upstream still counts against an OpenRouter
-        # free-model limit (decision C): the marker is recorded and the error is an AeosError, which the callers commit
-        audit.record(session, actor_type="user" if actor.startswith("user:") else "service", actor_id=actor,
-                     action="broker.route_feasibility.probe", result="FAILED", target_type="model_route",
-                     target_id=route_key, domain="PERSONAL", reason=f"PROBE_BOOKKEEPING_FAILED: {type(exc).__name__}",
-                     details={"pool": route.pool, "http_status": status, "upstream": "SENT" if sent else "NOT_SENT"})
-        raise Blocked(f"the probe result could not be recorded ({type(exc).__name__}); the attempt is audited and "
-                      "counted", code="PROBE_BOOKKEEPING_FAILED") from exc
+        # e.g. a failed flush (database locked, disk full): the session cannot be used before a rollback. The free-model
+        # count does not depend on it: the probe's broker request row was committed before sending and settled after.
+        session.rollback()
+        what = _attempt_statement(sent=sent, counted=reservation is not None, settled=settled)
+        try:
+            audit.record(session, actor_type="user" if actor.startswith("user:") else "service", actor_id=actor,
+                         action="broker.route_feasibility.probe", result="FAILED", target_type="model_route",
+                         target_id=route_key, domain="PERSONAL",
+                         reason=f"PROBE_BOOKKEEPING_FAILED: {type(exc).__name__}: {what}"[:500],
+                         details={"pool": route.pool, "http_status": status, "upstream": "SENT" if sent else "NOT_SENT"})
+            session.flush()
+        except Exception:  # the database still refuses: the error below says what happened
+            session.rollback()
+        raise Blocked(f"the probe result could not be recorded ({type(exc).__name__}): {what}",
+                      code="PROBE_BOOKKEEPING_FAILED") from exc
+
+
+def _attempt_statement(*, sent: bool, counted: bool, settled: bool) -> str:
+    """What happened to the probe's request, for the error the owner sees (never claims more than is known)."""
+    if sent:
+        return ("the request was sent and is counted against the OpenRouter free-model limit" if counted
+                else "the request was sent")
+    if not counted:
+        return "the request was not sent"
+    return ("the request was not sent (its count reservation was released)" if settled else
+            "the request was not sent, but its count reservation could not be released and still counts")
+
+
+def _is_free_model(route: ModelRoute) -> bool:
+    return route.provider == "openrouter" and str(route.model_id or "").endswith(":free")
+
+
+def _reserve_free_probe(route: ModelRoute, upstream_model: str) -> str:
+    """Record an OpenRouter ``:free`` probe as a PENDING broker request under the free-model count lock, in its own
+    transaction, committed before the request is sent (decision C): concurrent probes and worker requests at the limit
+    cannot all pass, and the count never depends on the probe's later bookkeeping. Refused when the limit is reached
+    (``FREE_TIER_LIMIT_REACHED``) or the count cannot be taken or recorded (fail closed, nothing is sent)."""
+    from aeos.core.db import session_factory
+
+    try:
+        from aeos.routing import facade as routing
+
+        lock, limit_of = routing.free_tier_count_lock, routing.free_tier_limit_problem
+    except (ImportError, AttributeError) as exc:
+        raise PolicyDenied("routing unavailable: the free-model limit cannot be checked; nothing was sent",
+                           code="FREE_TIER_LIMIT_REACHED") from exc
+    with session_factory()() as s:
+        try:
+            if not lock(s):
+                raise Blocked("the free-model request count is busy; nothing was sent - retry",
+                              code="FREE_TIER_LOCK_UNAVAILABLE")
+            limit = limit_of(s, route)
+            if limit:
+                raise PolicyDenied(str(limit.get("reason") or "free-model limit reached"),
+                                   code=str(limit.get("code") or "FREE_TIER_LIMIT_REACHED"))
+            row = BrokerRequest(grant_id=PROBE_MARK, run_id=str(uuid.uuid4()), project_id=PROBE_MARK, domain="PERSONAL",
+                                route_key=route.route_key, provider=route.provider, exposed_model=PROBE_MARK,
+                                upstream_model=upstream_model, outcome="PENDING")
+            s.add(row)
+            s.commit()
+            return row.id
+        except AeosError:
+            s.rollback()
+            raise
+        except SQLAlchemyError as exc:
+            s.rollback()
+            raise Blocked("the probe could not be counted before sending; nothing was sent - retry",
+                          code="FREE_TIER_LOCK_UNAVAILABLE") from exc
+
+
+def _settle_free_probe(row_id: str, *, sent: bool, status: int | None, outcome: str) -> bool:
+    """Settle the probe's broker request row in its own transaction: NOT_SENT (uncounted) when nothing left this host,
+    else the observed outcome. False when it cannot be written: the row then stays PENDING and keeps counting (the count
+    is never lowered by a bookkeeping failure)."""
+    from aeos.core.db import session_factory
+
+    try:
+        with session_factory()() as s:
+            row = s.get(BrokerRequest, row_id)
+            if row is not None:
+                row.outcome = ("NOT_SENT" if not sent else
+                               {"REACHABLE": "OK", "RATE_LIMITED": "RATE_LIMITED", "TIMEOUT": "TIMEOUT"}.get(
+                                   outcome, "UPSTREAM_ERROR"))
+                row.status_code = status
+                s.commit()
+        return True
+    except Exception:  # a database that refuses the write: the PENDING row still counts (conservative)
+        log.warning("feasibility probe %s could not be settled; it stays PENDING and counted", row_id)
+        return False
 
 
 def _ledger(session: Session, upstream: Any, route_key: str, prompt: int | None, completion: int | None,
@@ -284,22 +380,6 @@ def _quota(session: Session, upstream: Any, route_key: str, retry_after: int | N
                                                 headers=info.get("headers"), source="observed-429-probe")
         except (ImportError, AttributeError):
             pass
-
-
-def _free_tier_limit(session: Session, route: ModelRoute) -> tuple[str, str] | None:
-    """(code, reason) when an OpenRouter ``:free`` probe would exceed the account's free-model limit (decision C);
-    routing unavailable -> refused for an OpenRouter route (fail closed)."""
-    try:
-        from aeos.routing import facade as routing
-
-        limit = routing.free_tier_limit_problem(session, route)
-    except (ImportError, AttributeError):
-        if route.provider == "openrouter" and str(route.model_id or "").endswith(":free"):
-            return "FREE_TIER_LIMIT_REACHED", "routing unavailable: the free-model limit cannot be checked (fail closed)"
-        return None
-    if limit:
-        return str(limit.get("code") or "FREE_TIER_LIMIT_REACHED"), str(limit.get("reason") or "")
-    return None
 
 
 def _evidence(session: Session, route: ModelRoute, result: dict[str, Any]) -> str | None:

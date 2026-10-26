@@ -142,10 +142,13 @@ def attempt_refund() -> Any:
 
 
 def _last_retry_decision_at(session: Session, task_id: str) -> Any:
-    """When the owner last decided a retry of this task (its newest human EXCEPTION decision), else None."""
-    return session.scalar(select(func.max(Decision.created_at)).where(
+    """When the owner last decided a retry of this task: its newest ACTIVE human EXCEPTION decision allowing the
+    ``retry`` operation, else None. A revoked or invalidated decision never resets the quota-stop count."""
+    rows = session.scalars(select(Decision).where(
         Decision.kind == "EXCEPTION", Decision.target_type == "task", Decision.target_id == task_id,
-        func.coalesce(Decision.actor_kind, "HUMAN") == "HUMAN"))
+        Decision.status == "ACTIVE", func.coalesce(Decision.actor_kind, "HUMAN") == "HUMAN")
+        .order_by(Decision.created_at.desc()))
+    return next((d.created_at for d in rows if "retry" in (d.allowed_operations or [])), None)
 
 
 def quota_stops(session: Session, task_id: str) -> int:

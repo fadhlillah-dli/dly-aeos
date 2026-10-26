@@ -57,8 +57,10 @@ HTTP_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 # S12 (documentation, E1): free-model daily request caps depend on purchased credits.
 FREE_DAILY_LIMIT_NO_CREDITS = 50
 FREE_DAILY_LIMIT_WITH_CREDITS = 1000
-# expires_note prefix of a free_until the OpenRouter catalog itself stated (its provenance; see _apply_openrouter)
+# expires_note text of a free_until the OpenRouter catalog itself stated (for the owner; the provenance itself is
+# data_terms.catalog.free_until_from_catalog, see _apply_openrouter)
 CATALOG_EXPIRY_NOTE = "catalog expiration_date"
+FREE_UNTIL_FROM_CATALOG = "free_until_from_catalog"
 
 
 def _is_zero(v: Any) -> bool:
@@ -106,22 +108,30 @@ def _apply_openrouter(route: ModelRoute, m: dict[str, Any], now: datetime) -> No
     params = m.get("supported_parameters")
     if isinstance(params, list):
         route.supports_tools = "YES" if "tools" in params else "NO"
+    # Provenance of free_until (decision C): whether the stored end date was taken from this catalog. It lives in
+    # data_terms.catalog (outside the configuration identity), never parsed from the human expires_note. Only a date the
+    # catalog itself set is cleared when the catalog stops stating one; a date from another source (the seed's research
+    # reading, e.g. S11 for Laguna S 2.1) is kept until the owner changes it.
+    from_catalog = bool(((route.data_terms or {}).get("catalog") or {}).get(FREE_UNTIL_FROM_CATALOG))
     expiry = _parse_date(m.get("expiration_date"))
-    if expiry is not None:
-        route.free_until = expiry if route.is_free == "YES" else route.free_until
+    if expiry is not None and route.is_free == "YES":
+        route.free_until = expiry
         route.expires_note = f"{CATALOG_EXPIRY_NOTE} {m.get('expiration_date')}"
-    elif (route.is_free == "YES" and route.free_until is not None and m.get("expiration_date") in (None, "")
-          and str(route.expires_note or "").startswith(CATALOG_EXPIRY_NOTE)):
-        # the end date came from this catalog (expires_note says so) and the catalog no longer states one: clear it (a
-        # configuration change - free_until is part of the identity - so an activation bound to it stops applying). A
-        # date from another source (the seed's research reading, e.g. S11) is kept until the owner changes it.
+        from_catalog = True
+    elif (expiry is None and from_catalog and route.is_free == "YES" and route.free_until is not None
+          and m.get("expiration_date") in (None, "")):
+        # the catalog set this end date and no longer states one: clear it (a configuration change - free_until is part
+        # of the identity - so an activation bound to the old date stops applying)
         route.free_until = None
         route.expires_note = f"catalog lists no expiration_date (checked {now.date().isoformat()})"
+        from_catalog = False
+    # a priced or unknown-price model's expiration_date is not taken: free_until, expires_note and provenance unchanged
     raw_top = m.get("top_provider")
     top: dict[str, Any] = raw_top if isinstance(raw_top, dict) else {}
     terms = dict(route.data_terms or {})
     # Not a data-terms review: the catalog only exposes moderation; terms_checked_at is unchanged.
-    terms["catalog"] = {"checked_at": now.isoformat(), "is_moderated": top.get("is_moderated")}
+    terms["catalog"] = {"checked_at": now.isoformat(), "is_moderated": top.get("is_moderated"),
+                        FREE_UNTIL_FROM_CATALOG: from_catalog}
     route.data_terms = terms
     route.availability = "AVAILABLE"
     route.availability_checked_at = now

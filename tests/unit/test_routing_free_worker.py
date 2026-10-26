@@ -697,10 +697,13 @@ def test_every_probe_that_reached_openrouter_counts_against_the_free_limit(proxy
                           httpx.ReadTimeout("no answer"), httpx.ConnectError("refused")]
         for expected in ("UPSTREAM_ERROR", "TIMEOUT", "UNREACHABLE"):
             assert broker.probe_route(db, route_key=FREE, actor="user:owner")["outcome"] == expected
-    db.flush()
+            db.commit()  # what the API and the CLI do after every probe
     assert free_tier.usage(db)["day"] == 2  # the 503 and the read timeout were sent; the refused connection was not
+    rows = db.scalars(select(BrokerRequest).where(BrokerRequest.exposed_model == "feasibility-probe")
+                      .order_by(BrokerRequest.created_at)).all()
+    assert [r.outcome for r in rows] == ["UPSTREAM_ERROR", "TIMEOUT", "NOT_SENT"]
     marks = [e.details.get("upstream") for e in db.scalars(select(AuditEvent).where(
-        AuditEvent.action == free_tier.PROBE_ACTION).order_by(AuditEvent.seq))]
+        AuditEvent.action == "broker.route_feasibility.probe").order_by(AuditEvent.seq))]
     assert marks == ["SENT", "SENT", "NOT_SENT"]
 
 
@@ -833,24 +836,85 @@ def test_a_429_with_an_unparseable_retry_after_is_still_recorded_as_a_rate_limit
     assert db.scalar(select(QuotaState).where(QuotaState.scope == "free-rpm")).state == "EXHAUSTED"
 
 
-def test_a_probe_that_reached_openrouter_is_counted_even_when_its_bookkeeping_fails(proxy, db, monkeypatch):
+def _probe_rows() -> list[BrokerRequest]:
+    from aeos.core.db import session_factory
+
+    with session_factory()() as s:  # a fresh connection: what is committed, not what this test's session holds
+        return list(s.scalars(select(BrokerRequest).where(BrokerRequest.exposed_model == "feasibility-probe")))
+
+
+def test_a_probe_stays_counted_when_the_database_refuses_its_bookkeeping(proxy, db, settings):
+    """A REAL flush failure after the request was sent: another connection holds the SQLite write lock (BEGIN
+    IMMEDIATE) from the moment the upstream answers. The probe's count was committed before sending, so it survives;
+    the error says the request was sent and counted (no PendingRollbackError, no 500)."""
+    import sqlite3
+
+    holder = sqlite3.connect(str(settings.layout.db_path), isolation_level=None, timeout=1)
+
+    def answer(request):
+        holder.execute("BEGIN IMMEDIATE")  # from here on every write of this AEOS instance waits, then fails
+        return httpx.Response(503, json={"error": "upstream down"})
+
+    try:
+        with respx.mock(assert_all_mocked=True) as mock:
+            mock.post(UPSTREAM).mock(side_effect=answer)
+            with pytest.raises(Blocked) as ei:
+                broker.probe_route(db, route_key=FREE, actor="user:owner")
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert ei.value.code == "PROBE_BOOKKEEPING_FAILED"
+    assert "was sent and is counted against the OpenRouter free-model limit" in ei.value.message
+    (row,) = _probe_rows()
+    assert row.outcome == "PENDING"  # its settlement was refused too: it keeps counting, never under-counted
+    from aeos.core.db import session_factory
+
+    with session_factory()() as s:
+        assert free_tier.usage(s)["day"] == 1
+
+
+def test_a_probe_error_after_sending_keeps_its_count(proxy, db, monkeypatch):
     from aeos.broker import feasibility
 
-    real_evidence = feasibility._evidence
+    def refuse(*_a, **_k):
+        raise Blocked("evidence store refused", code="EVIDENCE_REFUSED")
+
+    monkeypatch.setattr(feasibility, "_evidence", refuse)
     with respx.mock(assert_all_mocked=True) as mock:
         mock.post(UPSTREAM).mock(return_value=httpx.Response(503))
-        monkeypatch.setattr(feasibility, "_evidence", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full")))
         with pytest.raises(Blocked) as ei:
             broker.probe_route(db, route_key=FREE, actor="user:owner")
-        assert ei.value.code == "PROBE_BOOKKEEPING_FAILED"
-        failed = db.scalars(select(AuditEvent).where(AuditEvent.action == free_tier.PROBE_ACTION)
-                            .order_by(AuditEvent.seq.desc())).first()
-        assert failed.details["upstream"] == "SENT" and "PROBE_BOOKKEEPING_FAILED" in failed.reason
-        monkeypatch.setattr(feasibility, "_evidence", real_evidence)
-        mock.post(UPSTREAM).mock(return_value=httpx.Response(429, headers={"retry-after": OVERFLOW_DATE}))
-        assert broker.probe_route(db, route_key=FREE, actor="user:owner")["outcome"] == "RATE_LIMITED"
-    db.flush()
-    assert free_tier.usage(db)["day"] == 2  # both reached OpenRouter: both count
+    assert ei.value.code == "EVIDENCE_REFUSED"
+    assert [r.outcome for r in _probe_rows()] == ["UPSTREAM_ERROR"]  # settled right after the attempt: counted
+    assert free_tier.usage(db)["day"] == 1
+
+
+def test_a_probe_that_was_never_sent_says_so_and_releases_its_count(proxy, db):
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(UPSTREAM).mock(side_effect=httpx.InvalidURL("no such url"))  # not an HTTPError: a bookkeeping path
+        with pytest.raises(Blocked) as ei:
+            broker.probe_route(db, route_key=FREE, actor="user:owner")
+    assert ei.value.code == "PROBE_BOOKKEEPING_FAILED"
+    assert "the request was not sent (its count reservation was released)" in ei.value.message
+    assert "counted against" not in ei.value.message
+    assert [r.outcome for r in _probe_rows()] == ["NOT_SENT"] and free_tier.usage(db)["day"] == 0
+
+
+def test_a_probe_reserves_its_count_before_sending_so_a_worker_request_cannot_take_the_same_slot(proxy, db):
+    _forwarded(db, 19)  # 19 of 20 per-minute requests used
+    db.commit()
+    seen: dict[str, int] = {}
+
+    def answer(request):
+        # while the probe's request is in flight, a worker request asks for the last slot: the probe already holds it
+        seen["worker_status"] = _call(proxy).status_code
+        return httpx.Response(503)
+
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(UPSTREAM).mock(side_effect=answer)
+        assert broker.probe_route(db, route_key=FREE, actor="user:owner")["outcome"] == "UPSTREAM_ERROR"
+    assert seen["worker_status"] == 429
+    assert free_tier.usage(db)["minute"] == 20
 
 
 def test_negative_retry_after_falls_back_to_the_rate_limit_reset_header(routes):
@@ -915,3 +979,76 @@ def test_the_worker_agent_can_be_enabled_with_a_public_only_free_route(routes, m
     with pytest.raises(Blocked) as ei:
         select_route(routes, task=task(classification="INTERNAL"))
     assert ei.value.code == "NO_ELIGIBLE_ROUTE" and FREE in ei.value.details["rejected"]
+
+
+# ------------------------------------------------------------------ third verification round (2026-10-27)
+
+LAGUNA = "openrouter/poolside/laguna-s-2.1:free"
+
+
+def _laguna(pricing: dict, expiration: str | None) -> dict:
+    entry = {"id": "poolside/laguna-s-2.1:free", "name": "Poolside: Laguna S 2.1 (free)", "context_length": 262144,
+             "pricing": pricing, "supported_parameters": ["tools"]}
+    if expiration is not None:
+        entry["expiration_date"] = expiration
+    return {"data": [entry]}
+
+
+@pytest.mark.parametrize("first_pricing", [{"prompt": "0.000001", "completion": "0.000002"}, {}],
+                         ids=["priced", "unknown-pricing"])
+def test_a_priced_or_unknown_listing_never_takes_over_the_seeded_end_date(routes, monkeypatch, first_pricing):
+    """Seeded Laguna S 2.1 (free until 2026-10-31 per S11): a listing that is priced or has no price states an
+    expiration_date AEOS does not take; a later free listing without a date then leaves the seeded date alone, and
+    decision C refuses the route after it."""
+    install_fakes(monkeypatch)
+    seeded = service.get_route(routes, LAGUNA).free_until
+    _discover(routes, _laguna(first_pricing, "2026-12-31"))
+    r = service.get_route(routes, LAGUNA)
+    assert r.free_until == seeded and "S11" in r.expires_note
+    assert r.data_terms["catalog"]["free_until_from_catalog"] is False
+    _discover(routes, _laguna({"prompt": "0", "completion": "0"}, None))
+    r = service.get_route(routes, LAGUNA)
+    assert r.free_until == seeded and r.is_free == "YES"
+    assert any("free period ended" in p for p in free_tier.decision_c_problems(r, now=datetime(2026, 11, 2, 12, tzinfo=UTC)))
+
+
+def test_seed_keeps_the_note_of_a_catalog_end_date_which_the_catalog_can_clear_later(routes, monkeypatch):
+    install_fakes(monkeypatch)
+    _discover(routes, _laguna({"prompt": "0", "completion": "0"}, "2026-12-31"))  # the catalog's own end date
+    r = service.get_route(routes, LAGUNA)
+    assert r.free_until.date().isoformat() == "2026-12-31" and r.data_terms["catalog"]["free_until_from_catalog"]
+    seed.run(routes)  # an untouched CANDIDATE seed row: its catalog note is not reset to the seed's S11 note
+    r = service.get_route(routes, LAGUNA)
+    assert r.expires_note == "catalog expiration_date 2026-12-31"
+    _discover(routes, _laguna({"prompt": "0", "completion": "0"}, None))
+    r = service.get_route(routes, LAGUNA)
+    assert r.free_until is None and "no expiration_date" in r.expires_note
+
+
+def test_only_an_active_retry_decision_resets_the_quota_stop_count(db, monkeypatch):
+    FakeModules().install(monkeypatch)
+    project = make_project(db)
+    _plan, pv, (spec,) = make_plan(db, project, [{"task_key": "a"}])
+    scheduler.ensure_executions(db, pv.id, actor="t")
+    te = scheduler.get_te(db, spec.id)
+    monkeypatch.setattr(scheduler, "QUOTA_STOPS_MAX", 2)
+    for _ in range(2):
+        db.add(WorkerRun(task_id=spec.id, project_id=project.id, domain="PERSONAL", outcome_code="QUOTA_EXHAUSTED",
+                         created_at=utcnow() - timedelta(minutes=5)))
+    db.flush()
+    assert scheduler.quota_stop_problem(db, spec, te)
+
+    def decision(operations: list[str]) -> Decision:
+        d = Decision(kind="EXCEPTION", actor_user_id="owner", actor_kind="HUMAN", target_type="task", target_id=spec.id,
+                     domain="PERSONAL", allowed_operations=operations, rationale="owner retry decision")
+        db.add(d)
+        db.flush()
+        return d
+
+    decision(["run_worker_process_sandbox"])  # an EXCEPTION for something else resets nothing
+    assert scheduler.quota_stop_problem(db, spec, te)
+    retry = decision(["retry"])
+    assert scheduler.quota_stop_problem(db, spec, te) is None
+    retry.status = "INVALIDATED"  # a revoked retry decision no longer resets the count
+    db.flush()
+    assert scheduler.quota_stop_problem(db, spec, te)

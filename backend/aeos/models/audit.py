@@ -19,7 +19,7 @@ from aeos.core.timeutil import utcnow
 
 class AuditEvent(Base):
     __tablename__ = "audit_events"
-    # (action, at): the OpenRouter free-model count reads the probes of the last minute / UTC day (decision C, 0010)
+    # (action, at): audit lookups by action and time, e.g. a route's feasibility probes of the last day (0010)
     __table_args__ = (Index("ix_audit_target", "target_type", "target_id"), Index("ix_audit_project", "project_id"),
                       Index("ix_audit_action_at", "action", "at"))
 

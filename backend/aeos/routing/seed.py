@@ -469,7 +469,12 @@ def run(session: Session) -> dict[str, Any]:
             pending.append(row.route_key)
         if row.origin == "SEED" and row.status == "CANDIDATE":
             changed = False
+            # the catalog set this row's end date (decision C provenance): its expires_note describes that date and is
+            # not reset to the seed's research note, which would contradict the stored free_until
+            catalog_dated = bool(((row.data_terms or {}).get("catalog") or {}).get("free_until_from_catalog"))
             for f in _NON_CONFIG_UPDATABLE:
+                if f == "expires_note" and catalog_dated:
+                    continue
                 if spec.get(f) is not None and getattr(row, f) != spec[f]:
                     setattr(row, f, spec[f])
                     changed = True

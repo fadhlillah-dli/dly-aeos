@@ -1,9 +1,9 @@
 """Index on ``audit_events (action, at)`` (owner decision C, ADR-0041 amendment 2026-10-26).
 
-The OpenRouter free-model limits count every feasibility probe that reached OpenRouter by its audit event (action
-``broker.route_feasibility.probe``, ``upstream: SENT``) in the last minute and the current UTC day - inside the broker's
-count lock. Without this index the lookup reads every audit row of the route across its whole history. No data is
-changed (the audit trail stays append-only).
+Audit lookups by action and time (e.g. the feasibility probes of a route, action ``broker.route_feasibility.probe``,
+in the last minute or UTC day) read only that range instead of every audit row of the route. It was added for the
+free-model probe count; probes are now counted as broker request rows (``broker.feasibility``), and the index stays for
+those lookups. No data is changed (the audit trail stays append-only).
 
 Revision ID: 0010_dc_audit_action_time
 Revises: 0009_dc_broker_request_created

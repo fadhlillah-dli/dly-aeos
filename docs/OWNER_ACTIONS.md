@@ -437,7 +437,7 @@ Copy the route key and its config hash from the `routes list` output.
 
      ```bash
      CFG="$HOME/Library/Application Support/DLY-AEOS/aeos.yaml"
-     [ -f "$CFG" ] || cp config/aeos.example.yaml "$CFG"
+     test -f "$CFG" || cp config/aeos.example.yaml "$CFG"
      grep -q '^openrouter_free_daily_limit:' "$CFG" || printf '\nopenrouter_free_daily_limit: 1000\n' >> "$CFG"
      grep '^openrouter_free_daily_limit:' "$CFG"
      ```

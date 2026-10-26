@@ -31,7 +31,6 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from aeos.core.timeutil import ensure_aware, utcnow
-from aeos.models.audit import AuditEvent
 from aeos.models.broker_ext import BrokerRequest
 from aeos.models.cost import CostAdmissionLock, QuotaState, UsageLedgerEntry
 from aeos.models.decisions import Decision
@@ -53,11 +52,9 @@ SCOPE_DAILY = "free-daily"
 SCOPE_RPM = "free-rpm"
 QUOTA_SCOPES = (SCOPE_DAILY, SCOPE_RPM)
 MINUTE = timedelta(seconds=60)
-# Broker request outcomes that never reached the upstream (refused by the broker itself)
-NOT_FORWARDED = ("DENIED", "CAP_EXCEEDED", "UNKNOWN_MODEL")
-# A feasibility probe that reached OpenRouter: its audit event (PROBE_ACTION) carries ``upstream: SENT``.
-PROBE_ACTION = "broker.route_feasibility.probe"
-PROBE_SENT = "SENT"
+# Broker request outcomes that never reached the upstream (refused by the broker itself, or a feasibility probe whose
+# request never left this host). Every other row - PENDING included - counts as a request OpenRouter saw.
+NOT_FORWARDED = ("DENIED", "CAP_EXCEEDED", "UNKNOWN_MODEL", "NOT_SENT")
 # OpenRouter documents 20 requests/minute for :free models; an X-RateLimit-Limit at or below it names the
 # per-minute limit, a larger one the daily limit (50 or 1000).
 DOCUMENTED_RPM = 20
@@ -202,15 +199,11 @@ def next_utc_midnight(now: datetime) -> datetime:
     return _day_start(now) + timedelta(days=1)
 
 
-def _free_route_keys(session: Session) -> list[str]:
-    return list(session.scalars(select(ModelRoute.route_key).where(
-        ModelRoute.provider == PROVIDER, ModelRoute.model_id.like(f"%{FREE_SUFFIX}"))))
-
-
 def usage(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
     """Requests this AEOS instance sent to OpenRouter ``:free`` models in the last minute and in the current UTC day:
-    forwarded broker requests (any outcome the upstream saw, a 429 included) and feasibility probes that reached
-    OpenRouter (their audit event). Requests the broker refused itself never reached OpenRouter and are not counted."""
+    the broker request rows of worker and evaluation calls and of feasibility probes (a probe is recorded PENDING
+    under the count lock before it is sent), whatever the upstream answered (a 429 included). Requests the broker
+    refused itself, and probes that never left this host, are not counted."""
     current = ensure_aware(now or utcnow())
     assert current is not None
     minute_start = current - MINUTE
@@ -218,12 +211,7 @@ def usage(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
     broker = [ensure_aware(t) for t in session.scalars(select(BrokerRequest.created_at).where(
         BrokerRequest.provider == PROVIDER, BrokerRequest.upstream_model.like(f"%{FREE_SUFFIX}"),
         BrokerRequest.outcome.not_in(NOT_FORWARDED), BrokerRequest.created_at >= since))]
-    keys = _free_route_keys(session)
-    # every probe that reached OpenRouter, whatever it answered (a 5xx, a 429, a timeout after the request was sent)
-    probes = [ensure_aware(t) for t in session.scalars(select(AuditEvent.at).where(
-        AuditEvent.action == PROBE_ACTION, AuditEvent.target_type == "model_route", AuditEvent.target_id.in_(keys),
-        AuditEvent.details["upstream"].as_string() == PROBE_SENT, AuditEvent.at >= since))] if keys else []
-    stamps = [t for t in (*broker, *probes) if t is not None]
+    stamps = [t for t in broker if t is not None]
     in_minute = sorted(t for t in stamps if t >= minute_start)
     day = sum(1 for t in stamps if t >= _day_start(current))
     return {"minute": len(in_minute), "day": day, "minute_oldest": in_minute[0] if in_minute else None,
