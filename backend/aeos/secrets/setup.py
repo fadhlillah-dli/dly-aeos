@@ -1,6 +1,7 @@
 """OpenBao initialisation for DLY AEOS (§26, S24).
 
-1. ``sys/init`` (key shares/threshold) -> unseal keys + root token (shown to the owner ONCE);
+1. ``sys/init`` (key shares/threshold) -> unseal keys (shown to the owner ONCE) + root token (shown only if
+   setup stays incomplete);
 2. unseal with the threshold keys;
 3. with the root token: KV v2 at ``aeos``; ACL policies ``aeos-personal``/``aeos-office``/
    ``aeos-workers``/``aeos-platform``/``aeos-projects`` (one per namespace); AppRole auth with role

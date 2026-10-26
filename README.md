@@ -153,10 +153,12 @@ The complete ordered list, with the open owner decisions and the external items,
    then `aeos secrets set workers/openrouter` (input is not echoed). Never put it in a file.
 4. **OpenBao** — `aeos vault install` (installs the install-manifest `approved_pin`; while none is
    recorded pass `--version X.Y.Z` for a version you reviewed - `latest` is never implied),
-   `aeos vault start`, `aeos vault init` (store the unseal keys **offline**, never in the repo or
-   chat; init shows the root token once and revokes it when setup completes - the controller then
-   uses AppRole - so there is no root token to keep; only if init reports `setup incomplete` is it
-   left valid so you can finish, then revoke it), `aeos vault unseal` after each restart.
+   `aeos vault start`, `aeos vault init` (store the unseal keys **offline**, never in the repo,
+   a chat or an AI assistant; in a terminal they are shown on a temporary screen that closes when you
+   type `stored`; init revokes the root token when setup completes - the controller then uses
+   AppRole - so it is not shown and there is no root token to keep; only if init reports
+   `setup incomplete` is it shown and left valid so you can finish, then revoke it),
+   `aeos vault unseal` after each restart.
 5. **Google OAuth client + consent** (PERSONAL docs) — in Google Cloud Console create a project,
    enable the Google Drive API and Google Docs API, configure the OAuth consent screen, create an
    OAuth client of type **Desktop app**, download the JSON, then

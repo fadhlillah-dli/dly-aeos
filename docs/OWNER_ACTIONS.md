@@ -15,7 +15,9 @@ not replace them.
 **Commands.** Run them from the repository root. macOS commands are written `./aeos <command>`. On Windows,
 type `aeos <command>` in Command Prompt (cmd.exe) or `.\aeos.ps1 <command>` in PowerShell (section 5). `<admin>`
 is your SUPER_ADMIN username. Commands with `--as <admin>` ask for your password. Never type a secret on a
-command line: `secrets set` prompts for it without echo.
+command line: `secrets set` prompts for it without echo. The macOS shell (zsh) rejects the `# ...` comments in
+these code blocks as extra arguments unless you run `setopt interactivecomments` once (or add it to
+`~/.zshrc`); otherwise copy each command without its comment.
 
 **Scope tags.**
 
@@ -194,11 +196,21 @@ image rebuild and at least weekly ([1.15](#115-recurring-owner-actions)).
 ./aeos vault install --version <X.Y.Z>   # an exact release you reviewed at github.com/openbao/openbao/releases;
                                          # the installer picks darwin_arm64 or darwin_amd64 and shows the SHA256
 ./aeos vault start
-./aeos vault init                        # shows the unseal key(s) ONCE: write them down offline; the root token is revoked
+./aeos vault init                        # shows the unseal key(s) ONCE on a temporary screen; type "stored" to close it
 ./aeos vault status --verify
 ./aeos doctor -g SECRET                  # secret.openbao_* checks pass
 ./aeos doctor --functional -g SECRET     # secret.keyring VERIFIED (allow the Keychain prompt for the dly-aeos service only)
 ```
+
+Run `vault init` in a terminal: it shows the unseal key(s) on a temporary screen. Store them offline (password
+manager or paper), then type `stored`: the screen closes and the keys are not written to the terminal's
+scrollback. Outside a terminal it refuses unless you pass `--plain-output`. The root token is revoked when setup
+completes, so it is not shown at all; only a `setup incomplete` run shows it, and then you store it too so you
+can finish. Never paste or screenshot the `vault init` output into a chat or an AI assistant. To prove the step,
+paste only `./aeos doctor --functional -g SECRET`, which contains no secret. If an unseal key was exposed right
+after `vault init`, before any `secrets set`, reset the empty vault: `./aeos vault stop`, delete
+`~/Library/Application Support/DLY-AEOS/openbao/raft`, `./aeos vault start`, `./aeos vault init`. Once a secret
+is stored, follow the runbook below instead.
 
 After every restart, run `./aeos vault start`, then `./aeos vault unseal`. Unseal keys never go into the
 repository, a config file, chat or AEOS backups. Recovery:

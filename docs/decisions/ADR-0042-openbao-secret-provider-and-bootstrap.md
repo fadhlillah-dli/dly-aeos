@@ -117,3 +117,29 @@ together; the provider contract is unchanged, the callers were reconciled with i
   status read (bootstrap doctor before `aeos init`, §08/§50 "Dependency inti belum terpasang").
   When the database file does not exist yet no exception can exist, so it now returns `None`
   without opening a session.
+
+## Amendment 2026-10-26 (init material on a temporary screen)
+
+During the first Mac setup the unseal key reached a chat because the whole terminal output was copied to
+prove the step (the vault was still empty and was re-initialised). The scrollback was the leak path, so the
+presentation changed:
+
+* `init` needs an interactive terminal (stdin and stdout are a TTY with VT support; on Windows the console's
+  virtual terminal mode is switched on first). Without one it refuses before touching OpenBao, unless the owner
+  passes `--plain-output`, which prints the material to stdout as before, with a warning.
+* In the terminal the material is shown on the alternate screen until the owner types `stored`. No
+  erase-in-display is sent while that screen is active, because iTerm2 copies an erased alternate screen into
+  the scrollback by default. A wrong answer is asked again on the same row, so nothing scrolls off the top, and
+  the rows are wiped with erase-in-line before the screen closes. Ctrl+C or end of input also closes it; `init`
+  then exits 1 and names the reset of the still empty vault.
+* The root token is shown only when setup is incomplete. Then the banner says so, and the prompt asks to store
+  the root token too, because it is needed to finish. After a complete setup it is already revoked.
+* The banner, OWNER_ACTIONS 1.7, the setup guides and the unseal runbook say never to paste or screenshot the
+  output into a chat or an AI assistant, and how to reset after an exposure. The runbook states what an exposed
+  unseal key allows on this listener config: unseal after a restart and decryption of a copy of the storage,
+  not minting a root token (the unauthenticated generate-root endpoint is disabled in OpenBao 2.7).
+
+Proof: unit tests drive the refusal, the plain output, the temporary screen (no erase-in-display, one same-row
+re-ask, rows wiped), the early close and the incomplete setup through the CLI. A pty run on macOS arm64 showed
+the byte sequence. The xterm.js alternate buffer (VS Code) keeps no scrollback by its source; iTerm2 behaviour
+is derived from its source; a real iTerm2, Terminal.app and Windows console run is NOT-PROVEN.
