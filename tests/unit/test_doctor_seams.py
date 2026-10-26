@@ -14,6 +14,7 @@ Docker absence, OpenCode status, GitHub (respx) and the secret store (in-memory 
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import threading
@@ -43,6 +44,42 @@ GITHUB = "https://api.github.com"
 
 
 # ------------------------------------------------------------------------------------------- fixtures
+
+
+@pytest.fixture(autouse=True)
+def _cheap_argon2(monkeypatch):
+    """This file creates and verifies many users (default-credential checks, probe logins); none of its assertions
+    concern hash parameters. verify() reads the parameters from each encoded hash, so hashes made with the
+    production profile still verify. The production profile is asserted in test_identity_hardening.py."""
+    from argon2 import PasswordHasher, Type
+
+    import aeos.identity.passwords as pw
+
+    monkeypatch.setattr(pw, "_hasher", PasswordHasher(time_cost=1, memory_cost=8, parallelism=1, hash_len=32,
+                                                      salt_len=16, type=Type.ID))
+
+
+_GUARD_MEMO: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def _memo_http_guard(monkeypatch):
+    """The real in-process HTTP guard probe (create_app + in-memory database + logins + requests) runs once per
+    guard fingerprint (host/port/origins/dev mode/secure cookies) in this process, exactly as the product treats
+    its result as valid for the same fingerprint (local_auth.auth_http_guard, 24 h). Never a canned value: the
+    first call per fingerprint is the real probe, and the broken-guard cases stay in test_doctor_c4.py."""
+    from aeos.doctor.checks import local_auth
+
+    real = local_auth.http_guard_probe
+
+    def probe(settings):
+        key = (settings.host, settings.port, tuple(sorted(settings.allowed_origins)), settings.dev_mode,
+               settings.secure_cookies)
+        if key not in _GUARD_MEMO:
+            _GUARD_MEMO[key] = real(settings)
+        return copy.deepcopy(_GUARD_MEMO[key])
+
+    monkeypatch.setattr(local_auth, "http_guard_probe", probe)
 
 
 @pytest.fixture
