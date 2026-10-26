@@ -51,6 +51,7 @@ python -m ruff check backend tests scripts
 python -m mypy --platform darwin
 python -m mypy --platform win32
 python scripts/secret_scan.py
+python scripts/changelog.py --check
 python -m pytest -q -n auto -m "not integration and not network"
 cd frontend && npm ci && npx tsc -b --noEmit && npm test && npm run build
 ```
@@ -71,15 +72,40 @@ for example to debug a single test.
 `scripts/gates.py` runs the static gates above for you (stdlib only; use the `.venv` Python). It prints one
 line per gate with PASS, FAIL or SKIPPED and the seconds, and exits 1 when a gate fails.
 
+The plain run covers ruff, mypy for darwin and win32, the secret scan, the commit subjects and the frontend gates if
+`frontend/` changed. `--tests` also runs the backend suite (pytest `-n logical` when xdist is installed). `--json`
+prints machine-readable results.
+
 ```bash
-python scripts/gates.py            # ruff, mypy darwin + win32, secret scan, commit subjects, frontend if it changed
-python scripts/gates.py --tests    # also the backend suite (pytest -n logical when xdist is installed)
-python scripts/gates.py --json     # machine-readable
+python scripts/gates.py
+python scripts/gates.py --tests
+python scripts/gates.py --json
 ```
 
 The frontend gates (typecheck, unit tests) run only when files under `frontend/` differ from `origin/main` and
 `frontend/node_modules` exists; otherwise they are SKIPPED and the reason is printed. The gate list is the G1
 step of `ci.yml`; `tests/unit/test_dev_gates.py` fails when the two diverge.
+
+The run also does what CI cannot do for you, and says what it did not do:
+
+- **`merge-conflict`.** When `origin/main` exists, `git merge-tree --write-tree origin/main HEAD` must be clean. A
+  conflict is a FAIL that lists the files: pushing such a branch costs a conflict-resolution commit and a full CI
+  re-run. Any other failure of that command (for example unrelated histories, exit 128) is a FAIL with git's message.
+  It needs git 2.38 or newer; only with an older git (usage error, exit 129) is the gate SKIPPED with that reason.
+- **`NOT RUN: <job> (<reason>)`.** One line for every job of `ci.yml` that this run does not execute (the job ids
+  are read from the workflow, so a new job shows up by itself): the backend shards, the verifier, bootstrap,
+  browser e2e, the supply-chain report and the aggregators. `commit-subjects` is the only job that counts as run, and
+  only when both of its steps ran here: the commit-subject gate and the `shellcheck` gate (SKIPPED when shellcheck
+  is not installed; then the job stays NOT RUN). CI uses the shellcheck that ubuntu-latest ships (0.9.x), so a newer
+  local one can accept what CI rejects. A local PASS is therefore never a CI PASS.
+- **One verdict line, last:** `GATES: PASS|FAIL (<n> run, <m> failed, <k> not run)`; "not run" counts SKIPPED gates
+  and the NOT RUN jobs. `--report path.json` writes the same verdict, every result and the NOT RUN list to a file,
+  for tools that hide lines of long output. With `--json` the JSON is the only thing on stdout and the verdict goes
+  to stderr, written after the JSON is flushed so that `2>&1` output also ends with it.
+- **Environment facts first** (`python scripts/preflight.py --facts`, informational, never fails the run): the Python
+  path and version, whether it is the project venv, whether pytest and pytest-xdist import, the node, npm and git
+  versions, `core.hooksPath`, the shell and whether `gh auth status` succeeds (only the exit status is used; no token
+  is read or printed). `--no-facts` skips it.
 
 To run the static gates automatically before every push, enable the hook once in each clone:
 
@@ -93,10 +119,38 @@ get only the commit-message check over `base..tip`, and only when a base is know
 for a new branch); with no base that check is SKIPPED and says so. A failing gate stops the push. Frontend gates are SKIPPED in
 the hook (the temporary worktree has no `node_modules`). `git push --no-verify` skips the hook; CI stays the gate.
 
+Before any gate the hook refuses two classes of wrong push (incident 2026-10-26: a delegated agent left a worktree
+on a detached `HEAD`, so the push and the pull request went out on an old commit):
+
+- **Wrong commit.** `HEAD` is detached and is neither a pushed commit nor an ancestor of one (the commits made on it
+  are on no branch), or a pushed ref is `refs/heads/<current branch>` and its sha is not `HEAD`. The message prints
+  both shas and the fix: check the ancestry (`git merge-base --is-ancestor <branch> HEAD`), then
+  `git branch -f <branch> HEAD`. Pushing another branch from a clean `HEAD` stays allowed.
+- **Identity.** Every commit the push adds (not reachable from the remote sha or from `origin/main`) must have
+  author and committer e-mail equal to this repository's `git config user.email`, no AI identity and no AI
+  attribution (`aeos.core.commit_identity` and `aeos.core.attribution`, the broker's own checks). The message names
+  the commits and the exact fix (`git config user.email`, then `git rebase -r <base> --exec "<amend>"` with the exec string in double quotes so that cmd.exe, PowerShell and sh read it as one argument, where
+  `<amend>` is `git merge-base --is-ancestor HEAD origin/main || git commit --amend --no-edit --reset-author
+  --allow-empty`: commits that `origin/main` already has keep their author); it never prints an address. The address is set per repository, never committed.
+
 The hook picks its Python in this order: `AEOS_GATES_PYTHON` (an existing executable; the hook stops with an error
 if it is not), the `.venv` of the checkout, the `.venv` of the main checkout (a linked worktree has none of its
 own, found only when the common git directory is a `.git`; never link or junction one into a worktree), then `python3` or `python` from `PATH` with a warning. Gates
 that need ruff or mypy report FAIL, not SKIPPED, when the chosen Python does not have them.
+
+### Run the tests with a preflight
+
+`scripts/run_tests.sh [--deadline MINUTES] [--] [pytest arguments]` runs the backend suite as CI does
+(`pytest -q -m "not integration and not network" -n logical`, then your arguments). It exists because a background
+test run once failed on a missing dependency and again because zsh does not word-split an unquoted variable: the
+script is `bash` with `set -euo pipefail` and keeps its arguments in arrays. Before pytest starts it runs
+`python -m pip check` and imports `pytest` and `xdist`; a missing or conflicting package stops the run (exit 2) with
+the package named, and pytest is never started. `--deadline` (or `AEOS_TEST_DEADLINE_MIN`) stops the run after that
+many minutes with exit 124, through `scripts/run_with_deadline.py` because macOS has no `timeout`. The interpreter is
+chosen as the pre-push hook does (`AEOS_GATES_PYTHON`, the `.venv`, the main checkout's `.venv`, `python3`). The last
+line of output is always `RUN_TESTS: PASS rc=<n>` or `RUN_TESTS: FAIL rc=<n>`, so grep for it instead of trusting a
+tail of the log. macOS arm64 is proven; Windows and Intel macOS are NOT-PROVEN (Windows runs the suite with
+`python -m pytest` directly). CI lints the shell scripts with `shellcheck scripts/*.sh scripts/git-hooks/pre-push`.
 
 Commit subjects follow Conventional Commits, `type(scope)?!?: description` (types `feat`, `fix`, `docs`,
 `test`, `ci`, `build`, `chore`, `refactor`, `perf`, `style`, `revert`, `security`; at most 100 characters;
@@ -119,7 +173,8 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
   JUnit XML as the artifact `junit-backend-<os>-shard-<k>`.
 - **Commit subjects.** `commit subjects [G1]` runs only on pull requests (`ubuntu-latest`, full history) and
   checks the subjects and the no-attribution rule (message, author and committer e-mail, merge commits
-  included) of the pull request's commits with `scripts/commit_subject.py`.
+  included) of the pull request's commits with `scripts/commit_subject.py`, and runs `shellcheck` over the shell
+  scripts (`scripts/*.sh`, `scripts/git-hooks/pre-push`).
 - **Verifier.** `backend verifier [G2] (macos-latest)` runs the real trusted-suite verifier test.
 - **Required names are aggregators.** The ruleset on `main` requires `backend [G1,G2] (<os>)` for each
   OS. These are small jobs on `ubuntu-latest` that wait for every backend job of their OS. They pass only
@@ -127,6 +182,8 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
   checks are real jobs: `bootstrap [G2] (<os>)`, `frontend [G1,G3]` and
   `browser e2e + a11y smoke [G3]`. The supply-chain report is `[NO-GATE]`. Keep these names when you
   change the workflow; `tests/unit/test_ci_gates.py` checks them.
+- **Changelog check.** The job `browser e2e + a11y smoke [G3]` first runs
+  `python scripts/changelog.py --check` (stdlib only, a few seconds).
 - **Concurrency.** A new push to a pull request cancels that pull request's older run. Runs on `main`
   are never cancelled, so every merge commit gets its own CI result.
 - **Caches.** The pip, npm and Playwright browser downloads are cached, keyed on `requirements.lock`,
@@ -153,6 +210,41 @@ python scripts/ci_durations.py junit-shard-1.xml junit-shard-2.xml --source "CI 
 Commit the rewritten `tests/ci_durations.json`. The weights only move files between shards: no test
 is added or dropped.
 
+### Developer tools
+
+Two standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the verdict):
+
+- **`scripts/worktree.py`** makes git worktrees safe. `python scripts/worktree.py add <name> <branch> [<base>]`
+  creates `<main checkout>-wt-<name>` on a new branch, marks it as created by the tool and prints the
+  interpreter of the main checkout (`.venv` there) and the `PYTHONPATH=backend` hint. Never put a `.venv`
+  symlink or junction inside a worktree: `git worktree remove` can follow the link and delete the real
+  environment. `list` shows every worktree with merged, pushed, marker and LINKS columns. `remove <name>`
+  refuses a worktree that holds a link, has no marker (`--foreign`), has uncommitted changes, or whose branch is
+  neither merged into origin/main nor pushed (`--force`); `--unlink-links` removes only the link entries, then
+  scans again. Merged and pushed come from the remote-tracking refs of the last `git fetch`.
+- **`scripts/ci_status.py`** gives one verdict for one exact commit: `--sha <40-hex>`, `--pr <n>`
+  (`--expect-sha <sha>` exits 1 if the pull request points at another commit) or `--after-merge <n>` (the merge
+  commit on `main`). It reads the check runs with `gh api` and the required contexts from the repository
+  rulesets. An empty or incomplete list is PENDING, never GREEN. `--wait --deadline <minutes>` polls (30 s
+  or more) and ends with `CI: TIMEOUT` (exit 2) at the deadline; `--report <path.json>` saves the result.
+  Exit codes: 0 GREEN, 1 RED, SUPERSEDED or sha mismatch, 2 TIMEOUT or ERROR, 3 PENDING without `--wait`, 4 INFRA.
+  The last line is always `CI: <VERDICT> <sha>`, with ` (non-required failed: <names>)` after the sha under
+  `--required-only`.
+
+  By default a failure of any check, required or not, is RED. `--required-only` computes the verdict from the
+  required contexts only: GREEN when all of them are success, skipped or neutral, PENDING while one is missing,
+  queued or running, RED only when a required one failed. A non-required failure is still listed, marked
+  `[NON-REQUIRED FAILED]`, and named in the last line, for example
+  `CI: GREEN <sha> (non-required failed: commit subjects [G1])`; fix it before you merge, because the verdict no
+  longer blocks on it. With no required context found, every check counts as required.
+
+  INFRA means a required job was cancelled because GitHub never gave it a runner (the annotation says the job was
+  not acquired by a runner, as when hosted macOS capacity runs out). It is infrastructure, not a code failure:
+  re-run the job and never read it as RED.
+
+Both have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`): a violating
+fixture is red and a near-miss legitimate one is green. The junction test runs only on Windows.
+
 ### Rules for every change
 
 - **NOT-PROVEN stays visible.** A pull request says what is proven, at which evidence level, and
@@ -169,8 +261,11 @@ is added or dropped.
 - **Migrations stay linear.** Alembic has one chain and one head. `aeos db upgrade` takes a backup
   first.
 - **Docs follow the code.** Update the ADRs (`docs/decisions`), the
-  [coverage matrix](docs/IMPLEMENTATION_COVERAGE.md), the runbooks and the `[Unreleased]` section
-  of the [changelog](CHANGELOG.md).
+  [coverage matrix](docs/IMPLEMENTATION_COVERAGE.md) and the runbooks.
+- **Changelog by fragment.** Add one fragment file under [changelog.d/](changelog.d/README.md)
+  (`changelog.d/<short-slug>.md`); do not edit [CHANGELOG.md](CHANGELOG.md) in a pull request. Two pull
+  requests that edit `[Unreleased]` conflict on every merge. `python scripts/changelog.py --check` validates
+  the fragments, and CI runs it.
 - **Merge to `main` is the owner's decision.** It happens only through a pull request that passes
   the required CI checks under the ruleset on `main` (no force-push, no deletion). Any delegation of
   that authority is an owner decision recorded as an ADR in `docs/decisions`. DLY AEOS workers never
@@ -180,8 +275,9 @@ is added or dropped.
 
 1. Set the new version in `pyproject.toml`, `frontend/package.json` (and the root entry of
    `frontend/package-lock.json`) and `CITATION.cff`, together with `date-released`.
-2. In `CHANGELOG.md`, move the `[Unreleased]` entries under a new version heading, and add its
-   compare/tag link.
+2. Run `python scripts/changelog.py --assemble` (add `--dry-run` first to see it) to move the fragments
+   into `[Unreleased]` of `CHANGELOG.md`. Then move the `[Unreleased]` entries under a new version heading,
+   and add its compare/tag link.
 3. Write the release notes in `docs/releases/vX.Y.Z.md`.
 4. After the release pull request is merged, tag the merge commit `vX.Y.Z` and publish the GitHub
    Release with the release notes as its body.

@@ -53,14 +53,17 @@ Full guide: [docs/SETUP_WINDOWS.md](docs/SETUP_WINDOWS.md).
 
 ### macOS (zsh/bash)
 
+`xcode-select --install` provides git and the compilers. `./aeos serve` serves the app at
+http://127.0.0.1:8787.
+
 ```bash
-xcode-select --install           # git + compilers
+xcode-select --install
 brew install python@3.13 node@22
 git clone https://github.com/fadhlillah-dli/dly-aeos.git
 cd dly-aeos
 ./scripts/bootstrap.sh
 ./aeos admin create
-./aeos serve                     # http://127.0.0.1:8787
+./aeos serve
 ```
 
 If `./scripts/bootstrap.sh` says `Permission denied` (a ZIP download or copy lost the executable
@@ -182,9 +185,11 @@ The complete ordered list, with the open owner decisions and the external items,
 
 ## Development
 
+`pytest` runs the backend tests (isolated temporary data dirs) and `ruff check` is the lint.
+
 ```bash
-python -m pytest -q                 # backend tests (isolated temp data dirs)
-python -m ruff check backend tests  # lint
+python -m pytest -q
+python -m ruff check backend tests
 cd frontend && npx tsc -b --noEmit && npx vitest run
 ```
 

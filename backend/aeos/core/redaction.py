@@ -24,7 +24,17 @@ _PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
     re.compile(r"ya29\.[0-9A-Za-z_\-]{20,}"),  # Google OAuth access token
     re.compile(r"1//[0-9A-Za-z_\-]{20,}"),  # Google refresh token
-    re.compile(r"(?:hvs|s|b)\.[A-Za-z0-9]{24,}"),  # Vault/OpenBao tokens
+    re.compile(r"(?<![A-Za-z0-9])hv[sbr]\.[A-Za-z0-9_\-]{24,}"),  # Vault/OpenBao service, batch, recovery tokens
+    re.compile(r"(?:hvs|s|b)\.[A-Za-z0-9]{24,}"),  # Vault/OpenBao tokens (older and short forms)
+    re.compile(r"(?<![A-Za-z0-9.])r\.[A-Za-z0-9]{24,}"),  # OpenBao recovery token (short form)
+    # Vault/OpenBao `operator init` output. The label is required, so a bare base64 string (a lockfile
+    # hash, a digest) never matches, nor does prose that only names an unseal key.
+    re.compile(r"(?i)\b(?:unseal|recovery) key(?: share)?\s*\d*\s*:\s*[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=_\-])"),
+    re.compile(r"(?i)\binitial root token\s*:\s*[A-Za-z0-9._\-]{20,}(?![A-Za-z0-9._\-])"),
+    re.compile(
+        r'(?i)"(?:unseal|recovery)_keys_(?:b64|hex)"\s*:\s*\[\s*"[A-Za-z0-9+/=]{32,}"'
+        r'(?:\s*,\s*"[A-Za-z0-9+/=]{32,}")*'
+    ),
     re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-~+/]{16,}=*"),

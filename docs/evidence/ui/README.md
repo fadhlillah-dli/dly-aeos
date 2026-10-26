@@ -35,11 +35,14 @@ the header data-mode label for `MIXED`, which now reads "LIVE + MOCK/DEMO" (the 
 
 ## Reproduce
 
-```
-pip install -e .[dev]                  # includes playwright
+The `[dev]` extra includes playwright. The first pytest run writes screenshots to a temp dir; the second
+(with `AEOS_UI_EVIDENCE=1`) refreshes this folder.
+
+```bash
+pip install -e ".[dev]"
 python -m playwright install chromium
-python -m pytest tests/e2e/test_ui_smoke.py -m integration -q            # screenshots to a temp dir
-AEOS_UI_EVIDENCE=1 python -m pytest tests/e2e/test_ui_smoke.py -m integration -q   # refresh this folder
+python -m pytest tests/e2e/test_ui_smoke.py -m integration -q
+AEOS_UI_EVIDENCE=1 python -m pytest tests/e2e/test_ui_smoke.py -m integration -q
 ```
 
 The test builds `frontend/dist` when it is missing or older than `frontend/src`, starts its own

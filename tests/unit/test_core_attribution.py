@@ -181,3 +181,36 @@ def test_assert_refuses_and_never_strips():
 ])
 def test_ai_identity_problem(name, email, bad):
     assert (ai_identity_problem(name, email) is not None) is bad
+
+
+# ----------------------------------------------------------------------------- known gaps (reported, not hidden)
+# Forms the pre-2026-10-27 repository hygiene regexes caught and this guard does not (found while moving that scan
+# onto the guard). strict xfail: when the guard is extended, the test turns green-by-surprise and must be moved to the
+# caught list above. A gap is fixed in the guard, never by a private pattern elsewhere (AGENTS.md invariant 11).
+_MARK = "Co-Authored" + "-By: "
+_GEN = "Generated "
+
+
+@pytest.mark.xfail(strict=True, reason="known gap: a comment prefix ('#', '//') hides a trailer from _LINE_PREFIX")
+@pytest.mark.parametrize("text", [
+    "# " + _MARK + "Claude",
+    "// " + _MARK + "Claude",
+    "fix: y\n\n## " + _MARK + "Claude",
+])
+def test_known_gap_commented_trailer(text):
+    assert find_ai_attribution(text)
+
+
+@pytest.mark.xfail(strict=True, reason="known gap: Devin is not in the guard's AI name list")
+@pytest.mark.parametrize("text", [
+    "fix: y\n\n" + _MARK + "Devin",
+    "fix: y\n\n" + _MARK + "Devin <devin@example.com>",
+    _GEN + "with devin",
+])
+def test_known_gap_devin(text):
+    assert find_ai_attribution(text)
+
+
+@pytest.mark.xfail(strict=True, reason="known gap: 'Cursor' alone is read as a database cursor in prose")
+def test_known_gap_generated_by_bare_cursor():
+    assert find_ai_attribution(_GEN + "by Cursor")

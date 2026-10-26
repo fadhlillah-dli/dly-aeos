@@ -180,8 +180,10 @@ install it with `pip install -r requirements.lock` and then the project with `--
 
 Regenerate after changing `[project].dependencies` or the `dev` extra:
 
+Run the first command inside the repository venv.
+
 ```bash
-python -m pip install uv            # inside the repository venv
+python -m pip install uv
 python -m uv pip compile pyproject.toml --universal --extra dev -o requirements.lock
 python -m pip install -r requirements.lock && python -m pip install --no-deps -e . && python -m pip check
 ```

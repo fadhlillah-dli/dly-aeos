@@ -16,6 +16,7 @@ from sqlalchemy import select
 from aeos.broker import facade as broker
 from aeos.broker import git_broker
 from aeos.core import config as config_mod
+from aeos.core.attribution import ai_identity_problem, find_ai_attribution
 from aeos.core.errors import PolicyDenied
 from aeos.models.audit import AuditEvent
 from aeos.models.broker_ext import BrokerSideEffect
@@ -119,11 +120,14 @@ def test_push_with_a_mismatching_author_or_committer_is_refused(db, env, author,
     assert row.details["code"] == "COMMIT_IDENTITY_MISMATCH" and row.details["problems"][0]["sha"] == head
 
 
-@pytest.mark.parametrize("message", [
+ATTRIBUTION_MESSAGES = [
     "feat: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
     "feat: x\n\n\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)",
     "aeos: candidate\n\nAEOS-Route: worker.test-free",
-])
+]
+
+
+@pytest.mark.parametrize("message", ATTRIBUTION_MESSAGES)
 def test_push_with_an_ai_attribution_in_a_commit_message_is_refused(db, env, message):
     run = _run(db, env, _commit(env["src"], TEST_GIT_NAME, TEST_GIT_EMAIL, message))
     with pytest.raises(PolicyDenied) as e:
@@ -205,3 +209,13 @@ def test_pr_with_ai_attribution_is_refused_before_any_credential_or_request(db, 
         git_broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main",
                                        title="Generated with ChatGPT", body="ok")
     assert e2.value.details["field"] == "title"
+
+
+def test_the_attribution_samples_of_this_file_are_attribution_for_the_canonical_guard():
+    """The samples above are only meaningful while the canonical guard (aeos.core.attribution) still calls them
+    attribution; an ordinary message and a human identity stay clean."""
+    for message in ATTRIBUTION_MESSAGES + ["Generated with ChatGPT"]:
+        assert find_ai_attribution(message), message
+    assert ai_identity_problem("Claude", "noreply@anthropic.com")
+    assert not find_ai_attribution("aeos: candidate")
+    assert ai_identity_problem(TEST_GIT_NAME, TEST_GIT_EMAIL) is None
