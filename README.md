@@ -143,6 +143,7 @@ proves it. MCI alignment remains **UNVERIFIED** until the canonical source can b
 ## Manual steps only the owner can do
 
 These cannot (and must not) be automated. The dashboard and `aeos doctor` show which are missing.
+The complete ordered list, with the open owner decisions and the external items, is [docs/OWNER_ACTIONS.md](docs/OWNER_ACTIONS.md).
 
 1. **Create the first admin** — `aeos admin create` (no default credentials; password ≥ 12 chars).
 2. **Claude Code login check** — install the official Claude Code, run `claude` once, sign in with
