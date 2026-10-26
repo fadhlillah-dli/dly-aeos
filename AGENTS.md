@@ -47,6 +47,17 @@ host) (§06).
 9. **OFFICE default deny** (§23): `external_worker_allowed=false`, `approved_worker_routes=[]`
    until a recorded company authorisation exists. Office data never flows into Personal views.
 10. **Localhost only** (§06): bind 127.0.0.1; never 0.0.0.0; never disable auth/CSRF/origin checks.
+11. **Owner identity on code hosts, no AI attribution** (owner rule 2026-10-26; applies to DLY AEOS and to every
+    project it creates or manages): every GitHub activity (commits as author AND committer, pushes, PRs, issues,
+    comments) uses the owner's GitHub identity; every Bitbucket activity the owner's company identity (two
+    different addresses, configured only in the gitignored `aeos.yaml` as `commit_identities`, never committed).
+    No AI may appear on GitHub, Bitbucket or the company's Jira/Confluence: not as author, committer, co-author
+    or contributor, and not in any attribution line (`Co-Authored-By:` naming an AI or a bot, "Generated
+    with/by <AI tool>" footers, robot emoji, AI vendor noreply addresses, model/route/agent names). Provenance
+    (run, agent, route, model) stays in DLY AEOS records. Every outbound text goes through
+    `aeos.core.attribution` (refused, never silently stripped); the broker refuses any push whose commits do not
+    match the configured identity of the provider (`aeos.core.commit_identity`). The repository is public:
+    placeholders only (`you@example.com`), never a real address.
 
 ## Protected paths (self-build, §09)
 

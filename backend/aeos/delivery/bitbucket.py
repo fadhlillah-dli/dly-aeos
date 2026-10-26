@@ -155,6 +155,14 @@ def office_delivery_readiness(session: Session, project: Project) -> OfficeDeliv
             reasons.append(f"credential {SECRET_REF} belum disimpan")
     except (ImportError, AeosError, ValueError):
         reasons.append(f"status credential {SECRET_REF} tidak dapat dibaca (fail closed)")
+    # owner rule (AGENTS.md invariant 11): every pushed commit carries the company identity, or the broker refuses
+    from aeos.core import commit_identity as cid
+    from aeos.core.config import get_settings
+
+    ident = cid.resolve(get_settings(), cid.BITBUCKET)
+    if not ident.configured:
+        reasons.append(f"identitas commit Bitbucket {'tidak valid' if ident.status == cid.INVALID else 'belum diisi'} "
+                       f"({ident.key} di aeos.yaml): broker menolak push tanpa identitas perusahaan owner")
     ci = _code_integration(session, project, "ci", CI_PROVIDER)
     if dc:
         status = "NOT_SUPPORTED"

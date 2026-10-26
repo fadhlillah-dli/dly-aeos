@@ -22,6 +22,8 @@ from tests.unit.test_workforce_support import FakeModules, init_git_repo, make_p
 
 BRANCH = "aeos/task-a-1234abcd"
 TOKEN = "ghp_" + "t" * 36
+# the identity init_git_repo commits with = the github identity the test owner configured (tests/conftest.py)
+OWNER_POLICY = git_broker.CommitPolicy(provider="github", email="test@example.invalid")
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -139,7 +141,7 @@ def test_credential_only_in_child_env_never_in_config(repo_env, tmp_path):
     work = tmp_path / "broker-work"
     work.mkdir()
     res = git_broker.push_from_mirror(source_repo=repo_env["src"], branch=BRANCH, remote_url=str(repo_env["bare"]),
-                                      token=TOKEN, work_root=work)
+                                      token=TOKEN, work_root=work, commit_policy=OWNER_POLICY)
     assert res["ok"], res
     for cfg in (repo_env["src"] / ".git" / "config", repo_env["bare"] / "config"):
         text = cfg.read_text(encoding="utf-8")
@@ -163,7 +165,7 @@ def test_worktree_hooks_do_not_run_during_push(repo_env, tmp_path):
     work = tmp_path / "w"
     work.mkdir()
     res = git_broker.push_from_mirror(source_repo=repo_env["src"], branch=BRANCH, remote_url=str(repo_env["bare"]),
-                                      token=TOKEN, work_root=work)
+                                      token=TOKEN, work_root=work, commit_policy=OWNER_POLICY)
     assert res["ok"] and not marker.exists()
 
 

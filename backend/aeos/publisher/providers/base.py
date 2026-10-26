@@ -167,6 +167,25 @@ def classify_http_error(resp: httpx.Response, *, write: bool, what: str) -> Prov
     return ProviderError(msg, retryable=False, status_code=resp.status_code)
 
 
+ATTRIBUTION_REMEDY = ("hapus atribusi AI dari teks (aturan owner, AGENTS.md invariant 11: tidak ada AI di GitHub/"
+                      "Bitbucket/Atlassian perusahaan) lalu terbitkan ulang; provenance tetap di catatan DLY AEOS")
+
+
+def refuse_ai_attribution(where: str, texts: Mapping[str, str | None]) -> None:
+    """Owner rule (AGENTS.md invariant 11): text bound for GitHub Issues or the company's Jira/Confluence that carries
+    AI attribution is refused BEFORE anything is sent (``ProviderBlocked`` AI_ATTRIBUTION_IN_TEXT -> the operation is
+    FAILED with the reason; nothing is stripped silently)."""
+    from aeos.core.attribution import find_ai_attribution, refusal_message
+
+    for field_name, text in texts.items():
+        findings = find_ai_attribution(text or "")
+        if findings:
+            raise ProviderBlocked(refusal_message(f"{where} {field_name}", findings), remedy=ATTRIBUTION_REMEDY,
+                                  code="AI_ATTRIBUTION_IN_TEXT",
+                                  details={"where": where, "field": field_name,
+                                           "findings": [f.as_dict() for f in findings[:10]]})
+
+
 def send(client: httpx.Client, method: str, url: str, *, write: bool, what: str, observe: bool = True,
          **kw: Any) -> httpx.Response:
     """Send one request with the timeout/unknown-outcome rules applied. ``observe=False`` only for capability reads

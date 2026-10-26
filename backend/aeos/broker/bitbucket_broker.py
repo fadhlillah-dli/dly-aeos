@@ -13,6 +13,10 @@ The same boundary as the GitHub path (``aeos.broker.git_broker``, every rule tes
   external-write interlock: the company authorisation POLICY decision listing ``bitbucket`` (OFFICE default
   deny, §23), write enablement, and the human APPROVAL of the run's plan version that allows the operation
   on exactly this repository;
+* owner rule (AGENTS.md invariant 11): every pushed commit is authored and committed by the company identity
+  (``commit_identities.bitbucket``) without AI attribution, and the PR title/description carries none either - the
+  same gate as the GitHub path (``COMMIT_IDENTITY_MISSING`` / ``COMMIT_IDENTITY_MISMATCH`` /
+  ``AI_ATTRIBUTION_IN_COMMIT`` / ``AI_ATTRIBUTION_IN_TEXT``, audited, nothing sent);
 * PR creation is one ``POST /pullrequests`` (draft, ``close_source_branch: false``) behind an idempotent
   outbox row with read-only reconciliation; a retry after an UNKNOWN/PENDING attempt reads first and never
   posts a second PR (§50). The broker has no operation that integrates, approves or declines a pull request:
@@ -48,11 +52,15 @@ from aeos.broker.git_broker import (
     _require_grant,
     _require_publishable,
     _side_effect,
+    commit_policy,
+    guard_outbound_text,
     http_client,
     push_from_mirror,
+    refuse_push,
     validate_branch,
     validate_remote_url,
 )
+from aeos.core import commit_identity as cid
 from aeos.core.errors import Blocked, PolicyDenied, ValidationFailed
 from aeos.core.redaction import redact_text, register_secret
 from aeos.events import service as events
@@ -234,6 +242,8 @@ def push_task_branch(session: Session, *, run: WorkerRun, worktree: str, branch:
     if expected_head and expected_head != run.head_commit:
         raise PolicyDenied("expected head differs from the runtime-recorded head", code="HEAD_MISMATCH")
     expected_head = run.head_commit
+    # Owner rule (AGENTS.md invariant 11): no push without the owner's company (Bitbucket) identity configured.
+    policy = commit_policy(session, run, cid.BITBUCKET, action="broker.bitbucket.push_branch")
     source = Path(run.git_dir_ref) if run.git_dir_ref and Path(run.git_dir_ref).is_dir() else Path(worktree)
     url = pinned_remote(repo_full_name, remote_url)
     local = _is_local_remote(url)
@@ -249,8 +259,10 @@ def push_task_branch(session: Session, *, run: WorkerRun, worktree: str, branch:
     work_root = get_settings().layout.root / "broker" / "git"
     work_root.mkdir(parents=True, exist_ok=True)
     res = push_from_mirror(source_repo=source, branch=branch, remote_url=url, token=cred.git_secret if cred else None,
-                           work_root=work_root, expected_head=expected_head,
+                           work_root=work_root, expected_head=expected_head, commit_policy=policy,
                            basic_user=cred.git_user if cred else ACCESS_TOKEN_GIT_USER)
+    if res.get("refused"):
+        refuse_push(session, run, se, res, action="broker.bitbucket.push_branch", provider=cid.BITBUCKET)
     se.status = "SUCCEEDED" if res["ok"] else ("UNKNOWN" if res.get("unknown") else "FAILED")
     se.commit_sha = res.get("commit")
     se.result_summary = (res.get("output") or res.get("error") or "")[:500]
@@ -329,6 +341,9 @@ def create_pull_request(session: Session, *, run: WorkerRun, repo_full_name: str
     if run.branch and head != run.branch:
         raise PolicyDenied("PR head does not belong to this run", code="BRANCH_NOT_ALLOWED")
     _require_publishable(session, run, "bitbucket.create_pr")
+    # Owner rule (AGENTS.md invariant 11): no AI attribution in what lands on Bitbucket - refused, never stripped.
+    guard_outbound_text(session, run, action="broker.bitbucket.create_pr", where="Bitbucket pull request",
+                        texts={"title": title, "description": body})
     target = {"provider": PROVIDER, "repo": repo_full_name, "head": head, "base": base}
     grant = _require_grant(session, run, "PR_CREATE", {"repo": repo_full_name, "head": head, "base": base})
     _interlock(session, run, provider=PROVIDER, operation="create_pr", target=target, grant=grant)

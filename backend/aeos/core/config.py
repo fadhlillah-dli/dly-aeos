@@ -82,8 +82,14 @@ class Settings(BaseSettings):
     mci_source_path: Path | None = None
 
     platform_repo_slug: str = "fadhlillah-dli/dly-aeos"
-    # §06 commit attribution of worker candidates: the owner's own identity (e.g. the GitHub noreply address
-    # ``<id>+<user>@users.noreply.github.com``). Unset -> the runtime identity, reported as not linked.
+    # §06 + owner rule 2026-10-26 (AGENTS.md invariant 11): the commit identity per code host, keyed by provider -
+    # ``{github: {name, email}, bitbucket: {name, email}}`` (the owner's GitHub identity and the company identity,
+    # two different addresses). Only in the gitignored aeos.yaml / AEOS_COMMIT_IDENTITIES (JSON), never committed.
+    # Without the identity of a project's code host, candidates are committed locally with the runtime identity,
+    # marked not pushable, and the broker refuses the push (aeos.core.commit_identity).
+    commit_identities: dict[str, Any] = Field(default_factory=dict)
+    # Backward-compatible fallback for the github identity only (e.g. the noreply address
+    # ``<id>+<user>@users.noreply.github.com``); ``commit_identities.github`` wins when both are set.
     commit_author_name: str | None = None
     commit_author_email: str | None = None
 

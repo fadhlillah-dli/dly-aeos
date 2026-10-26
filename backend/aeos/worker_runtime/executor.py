@@ -606,8 +606,8 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
             config_path, inline=opencode.inline_config(cfg)))
         argv = opencode.build_command(status["binary"], model=exposed, worktree=ws.repo, task_file=task_file)
         engine_version = status.get("version")
-    ident = workspace.commit_identity(getattr(settings, "commit_author_name", None),
-                                      getattr(settings, "commit_author_email", None))
+    commit_ident = _commit_identity_record(s, settings, project)
+    ident = (commit_ident.pop("_name"), commit_ident.pop("_email"))
     run.capability_id = grant.id
     run.workspace_ref = str(ws.repo)
     run.git_dir_ref = str(ws.common_dir) if ws.common_dir else None  # trusted git dir (ADR-0054)
@@ -624,7 +624,7 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
                 "prompt_revision": WORKER_PROMPT_REVISION, "context_pack": pack_info,
                 "resource_limits": limits.as_dict(), "timeout_seconds_effective": None,
                 # the address itself stays out of the run record (PII minimisation, §50 1.37); it is in the commit
-                "commit_identity": {"name": ident[0], "email": redact_pii(ident[1]), "source": ident[2]},
+                "commit_identity": commit_ident,
                 "residual_risks": list(req.get("residual_risks") or [])}
     run.current_action = "Menyiapkan workspace dan sandbox"
     timeout = int(caps.get("timeout_seconds") or (task.limits or {}).get("timeout_seconds", 1800))
@@ -634,8 +634,43 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
                     protected=protected, task_key=task.task_key, config_path=config_path, kind=kind,
                     container_root=container_root, limits=limits, controller_snapshot=controller_snapshot,
                     plan_version_hash=task.plan_version_hash, agent_key=run.agent_key, route_key=route_key,
-                    engine_version=engine_version, commit_identity=(ident[0], ident[1]), shell_runner=shell_runner,
+                    engine_version=engine_version, commit_identity=ident, shell_runner=shell_runner,
                     investigation=investigation)
+
+
+def code_host_provider(session: Any, project: Project) -> str:
+    """The code host the project's candidates go to (the broker's routing, U-02..U-04): OFFICE -> bitbucket; the
+    platform project -> github; otherwise the provider of the registered local repository (default github)."""
+    from aeos.core.commit_identity import GITHUB, provider_for
+
+    if project.domain == "OFFICE":
+        return provider_for("OFFICE")
+    if project.is_platform:
+        return GITHUB
+    ref = session.scalar(select(RepositoryReference).where(RepositoryReference.project_id == project.id,
+                                                           RepositoryReference.local_path_ref.is_not(None)))
+    return provider_for(project.domain, ref.provider if ref is not None else None)
+
+
+def _commit_identity_record(session: Any, settings: Settings, project: Project) -> dict[str, Any]:
+    """Owner rule (AGENTS.md invariant 11): candidates are committed with the owner's identity for the project's
+    code host. Without a valid one the runtime identity commits locally and the candidate is NOT pushable (the
+    broker refuses the push). The record names the aeos.yaml key, never the address (``_name``/``_email`` are
+    the commit identity for the caller and are popped before the record is stored)."""
+    from aeos.core import commit_identity as cid
+
+    provider = code_host_provider(session, project)
+    resolved = cid.resolve(settings, provider)
+    if resolved.configured:
+        name, email = workspace.commit_identity(resolved.name, resolved.email)[:2]
+        source = "owner-configured"
+    else:
+        name, email = workspace.RUNTIME_IDENTITY
+        source = workspace.RUNTIME_SOURCE
+    return {"provider": provider, "config_key": resolved.key, "status": resolved.status, "source": source,
+            "name": name, "email": redact_pii(email), "pushable": resolved.configured,
+            "not_pushable_reason": None if resolved.configured else cid.missing_message(resolved),
+            "_name": name, "_email": email}
 
 
 def _is_report_path(path: str) -> bool:
@@ -1002,6 +1037,30 @@ def _record_report(s: Any, run: WorkerRun, prep: Prepared, data: dict[str, Any] 
     return blocker
 
 
+def _mark_pushable(run: WorkerRun, prep: Prepared, head: str | None) -> None:
+    """Record whether the candidate could pass the broker's push gate (owner rule, AGENTS.md invariant 11): every
+    commit ``base..head`` - the runtime's and any the worker made itself - authored and committed by the configured
+    code-host identity, without AI attribution. Informational: the broker re-checks the pushed range and refuses
+    regardless; an unreadable range marks the candidate not pushable (fail closed)."""
+    from aeos.core import commit_identity as cid
+
+    rec = dict((run.caps or {}).get("commit_identity") or {})
+    if not rec.get("pushable") or not head or not prep.commit_identity:
+        run.caps = {**(run.caps or {}), "commit_identity": rec}
+        return
+    try:
+        commits = workspace.candidate_commits(prep.ws, head)
+    except workspace.WorkspaceError as exc:
+        problems = [{"sha": head, "code": cid.CODE_RANGE, "detail": redact_text(str(exc))[:200]}]
+    else:
+        problems = cid.commit_problems(commits, provider=str(rec.get("provider") or ""),
+                                       expected_email=prep.commit_identity[1])
+    if problems:
+        rec.update(pushable=False, not_pushable_reason=f"{cid.refusal_code(problems)}: " + "; ".join(
+            f"{p['sha'][:12]} {p['detail']}" for p in problems[:5])[:500])
+    run.caps = {**(run.caps or {}), "commit_identity": rec}
+
+
 MAX_COMMAND_LOGS = 200
 MAX_COMMAND_LOG_BYTES = 8 * 1024 * 1024
 MAX_COMMAND_LOG_TOTAL = 32 * 1024 * 1024
@@ -1162,15 +1221,15 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
                     violations.append({"path": workspace.REPORT_PATH, "rule": "investigation-read-only",
                                        "detail": "report file written"})
             else:
+                # Owner rule (AGENTS.md invariant 11): the commit can reach a code host, so it names no agent,
+                # route, engine, model or prompt revision - that provenance is in this run record (agent_key,
+                # model_route_key, engine_version, caps.prompt_revision); the subject keeps the run link.
                 head = workspace.commit_candidate(
                     prep.ws, f"aeos: candidate for {prep.task_key} (run {run_id[:8]})\n\nCommitted by the AEOS runtime; "
                              "worker output is unverified until independent verification and review.",
-                    identity=prep.commit_identity,
-                    trailers={"AEOS-Run-Id": run_id, "AEOS-Task": prep.task_key, "AEOS-Agent": prep.agent_key or "",
-                              "AEOS-Route": prep.route_key or "",
-                              "AEOS-Engine": f"opencode {prep.engine_version or 'UNKNOWN'} ({prep.kind} sandbox)",
-                              "AEOS-Prompt-Revision": WORKER_PROMPT_REVISION})
+                    identity=prep.commit_identity)
                 run.head_commit = head
+                _mark_pushable(run, prep, head)
                 diff_info = {"files": changes["files"], "added": changes["added"], "deleted": changes["deleted"],
                              "paths": [{"path": c.path, "status": c.status, "mode": c.mode}
                                        for c in changes["changes"]][:500],

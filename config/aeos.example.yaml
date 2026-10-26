@@ -17,7 +17,18 @@ openbao_addr: http://127.0.0.1:8200
 # claude_binary: /path/to/claude          # default: found on PATH
 # opencode_binary: /path/to/opencode      # default: found on PATH
 platform_repo_slug: fadhlillah-dli/dly-aeos
-# Attribution of worker candidate commits (master s06): the owner's own identity, e.g. the GitHub noreply
-# address. Unset -> "AEOS Runtime <aeos-runtime@localhost>", reported as not linked to an account.
+# Commit identity per code host (master s06 + owner rule, AGENTS.md invariant 11). Every commit DLY AEOS pushes is
+# authored AND committed by this identity of the code host: github = your GitHub identity (e.g. the noreply
+# address), bitbucket = your company identity (a different address). No AI or bot identity is accepted. Keep the
+# real addresses only in your local aeos.yaml - never commit them. Unset for a host -> candidates are committed
+# locally as "AEOS Runtime <aeos-runtime@localhost>", marked not pushable, and the broker refuses the push.
+# commit_identities:
+#   github:
+#     name: Your Name
+#     email: 12345+you@users.noreply.github.com
+#   bitbucket:
+#     name: Your Name
+#     email: you@company.example.com
+# Backward-compatible fallback for the github identity only (commit_identities.github wins when both are set):
 # commit_author_name: Your Name
-# commit_author_email: 12345+user@users.noreply.github.com
+# commit_author_email: 12345+you@users.noreply.github.com

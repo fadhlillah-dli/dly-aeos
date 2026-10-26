@@ -405,7 +405,7 @@ components:
     distribution: {kind: package_manager, url: null, digest: null, channel: "official git build", note: "Dipasang pemilik dari distribusi resmi (Windows: winget Git.Git; macOS: Xcode Command Line Tools / Homebrew; Linux: paket distro). Digest belum dipin."}
     signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Tanda tangan/notarisasi distribusi tidak diperiksa oleh AEOS."}
     ports: []
-    config_refs: ["settings:commit_author_name", "settings:commit_author_email"]
+    config_refs: ["settings:commit_identities", "settings:commit_author_name", "settings:commit_author_email"]
     compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: null, note: "Versi minimum belum ditetapkan pemilik; worktree dipakai untuk isolasi perubahan, bukan sandbox."}
     probe:
       type: binary
