@@ -195,3 +195,42 @@ def test_a_step_cannot_cite_the_other_domains_evidence(personal_client, db):
     r = personal_client.put(f"/api/ops/retirement/{p.id}/steps/data",
                             json={"status": "DONE", "evidence_ids": [ev["PERSONAL"].id]})
     assert r.status_code == 200 and r.json()["recorded"]["evidence_ids"] == [ev["PERSONAL"].id]
+
+
+def test_cli_records_a_step_and_show_prints_it(personal_client, db, settings):
+    """W6-197: the owner records the communication (and data) step from the local CLI; it is audited, shows in
+    the checklist ('recorded') and in 'aeos ops retirement show'. Evidence of the other domain is refused."""
+    from typer.testing import CliRunner
+
+    from aeos.models.evidence import EvidenceArtifact
+    from aeos.operations import cli as ops_cli
+
+    p = _project(db, key="gamma")
+    office_ev = EvidenceArtifact(kind="NOTE", origin="manual", collector_identity="owner", trusted=False,
+                                 content_hash="sha256:" + "d" * 64, domain="OFFICE", claim="office note")
+    db.add(office_ev)
+    db.commit()
+    runner = CliRunner()
+    r = runner.invoke(ops_cli.app, ["retirement", "step", "gamma", "communication", "--status", "done",
+                                    "--note", "stakeholders and integration owners informed"])
+    assert r.exit_code == 0, r.output
+    assert "Step communication of gamma: DONE" in r.output and r.output.isascii()
+    db.expire_all()
+    _, items = _items(personal_client, p.id)
+    rec = items["communication"]["recorded"]
+    assert rec["status"] == "DONE" and rec["note"] == "stakeholders and integration owners informed"
+    assert rec["by"].startswith("cli:")
+    audit = db.scalar(select(AuditEvent).where(AuditEvent.action == "ops.retirement.step",
+                                               AuditEvent.target_id == p.id))
+    assert audit is not None and audit.actor_type == "cli" and audit.details["step"] == "communication"
+    shown = runner.invoke(ops_cli.app, ["retirement", "show", "gamma"])
+    assert shown.exit_code == 0 and "step DONE by" in shown.output
+    assert "note: stakeholders and integration owners informed" in shown.output
+    # fail closed: unknown step, bad status, other-domain evidence
+    bad = runner.invoke(ops_cli.app, ["retirement", "step", "gamma", "final_verification", "--status", "DONE"])
+    assert bad.exit_code == 1 and "unknown retirement step" in bad.output
+    bad = runner.invoke(ops_cli.app, ["retirement", "step", "gamma", "data", "--status", "FINISHED"])
+    assert bad.exit_code == 1 and "status must be one of" in bad.output
+    bad = runner.invoke(ops_cli.app, ["retirement", "step", "gamma", "data", "--status", "DONE",
+                                      "--evidence", office_ev.id])
+    assert bad.exit_code == 1 and "EVIDENCE_NOT_FOUND" in bad.output

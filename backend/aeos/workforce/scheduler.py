@@ -2129,7 +2129,7 @@ def reconcile(session: Session, *, actor: str = "system:reconciler") -> dict[str
 
 def _authorisation_lost(session: Session, run: WorkerRun, te: TaskExecution) -> str | None:
     """Why a running attempt is no longer authorised (None = still authorised)."""
-    from aeos.worker_runtime.sandbox import sandbox_readiness
+    from aeos.worker_runtime.facade import sandbox_readiness
 
     approved, why = ext.approved_version(session, te.plan_id)
     if approved is None or approved.id != run.plan_version_id:

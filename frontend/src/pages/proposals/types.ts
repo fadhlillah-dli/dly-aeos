@@ -113,6 +113,10 @@ export interface RemovalItem {
   status: "OPEN" | "CLOSED" | "WAIVED";
   note: string;
   evidence_id: string | null;
+  /** identity/credential items: the exact secret reference ('aeos secrets delete' accepts it); null = a description. */
+  secret_ref?: string | null;
+  /** components (or "komponen domain lain") that still use the reference: SHARED when non-empty. */
+  shared_with?: string[];
 }
 
 export interface AcceptanceCriterion {
@@ -256,6 +260,8 @@ export interface ReviewPackage {
   experiment_plan: Record<string, unknown> & { type: string; pins?: Record<string, string | null> };
   replacement_plan: Record<string, unknown> | null;
   removal_plan?: { items: RemovalItem[]; open: string[]; status: string; rule: string } | null;
+  /** §40 W6-201 REPLACE/UPGRADE: per exact secret reference of the replaced component, revoked or kept (progress). */
+  credential_revocation?: { items: RemovalItem[]; open: string[]; status: string; rule: string } | null;
   upgrade_delta?: { components: Record<string, unknown>[]; source: string } | null;
   security_privacy?: SecurityPrivacy;
   review_contributors?: { role: string; performed_by: string }[];

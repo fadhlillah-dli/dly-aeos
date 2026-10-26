@@ -362,7 +362,8 @@ def list_incidents(principal: CurrentPrincipal, db: DB,
 def get_incident(incident_id: str, principal: CurrentPrincipal, db: DB) -> dict[str, Any]:
     from aeos.operations import incident
 
-    return incident.get_incident(db, incident_id, domain=_incident_domain(principal))
+    # the record's own "source" names where the incident came from (alert/manual); the read time is added here
+    return {**incident.get_incident(db, incident_id, domain=_incident_domain(principal)), "generated_at": _now()}
 
 
 @router.get("/api/ops/incidents/{incident_id}/report")
@@ -372,7 +373,7 @@ def incident_report(incident_id: str, principal: CurrentPrincipal, db: DB,
 
     view = incident.get_incident(db, incident_id, domain=_incident_domain(principal))
     return {"incident_id": incident_id, "kind": kind, "markdown": incident.render_report(view, kind=kind),
-            "generated_at": _now(), "mode": "SNAPSHOT"}
+            "source": "ops_incidents (scoped incident record)", "generated_at": _now(), "mode": "SNAPSHOT"}
 
 
 @router.post("/api/ops/incidents")

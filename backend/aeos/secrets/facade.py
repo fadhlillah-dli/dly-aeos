@@ -46,6 +46,27 @@ def validate_ref(ref: str) -> tuple[str, str]:
     return ns, name
 
 
+def parse_ref(text: str) -> str | None:
+    """*text* when it is exactly one secret reference in the grammar ``aeos secrets set/delete`` accepts, else
+    None. Prose ("capability token per run"), wildcards (``workers/*``) and lists are not references."""
+    from aeos.core.errors import AeosError
+    from aeos.secrets.provider import strict_ref
+
+    candidate = (text or "").strip()
+    try:
+        strict_ref(candidate)
+    except AeosError:
+        return None
+    return candidate
+
+
+def well_known_ref(ref: str) -> bool:
+    """True when *ref* is one of the platform's well-known references (``aeos secrets status`` lists them)."""
+    from aeos.secrets.refs import known
+
+    return known(ref) is not None
+
+
 def get_secret(ref: str, *, purpose: str, actor: str) -> str:
     """Return a secret value for an in-process trusted caller. Raises ``Blocked`` if unavailable."""
     from aeos.secrets.provider import get_provider

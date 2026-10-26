@@ -574,23 +574,139 @@ def _experiment_plan(session: Session, p: ChangeProposal, baseline_hash: str, ca
     return plan
 
 
-def replacement_plan(p: ChangeProposal, baseline: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _split_outside_parens(text: str) -> list[str]:
+    """Split a free-text list on ',' / ';' that are not inside parentheses ("a, b (x; y)" -> ["a", "b (x; y)"])."""
+    parts: list[str] = []
+    cur: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        if ch in ",;" and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return [x.strip() for x in parts if x.strip()]
+
+
+def credential_entries(value: Any) -> list[dict[str, Any]]:
+    """§40 W6-201: an inventory identity/credential field (free text, possibly a comma list, or a list) split into
+    exact secret references - the grammar ``aeos secrets delete`` accepts - and descriptions that are NOT secret
+    references (prose such as "capability token per run", wildcards such as ``workers/*``). A trailing note in
+    parentheses stays with its reference ("personal/github (diambil broker)")."""
+    from aeos.secrets import facade as secrets
+
+    out: list[dict[str, Any]] = []
+    for raw in value if isinstance(value, list) else [value]:
+        if not isinstance(raw, str):
+            continue
+        for part in _split_outside_parens(raw):
+            head, _, rest = part.partition(" ")
+            ref = secrets.parse_ref(head)
+            note = rest.strip().strip("()").strip() if ref else ""
+            out.append({"ref": ref, "known": secrets.well_known_ref(ref), "note": note or None} if ref
+                       else {"description": part})
+    return out
+
+
+def _access_identity_values(access: dict[str, Any] | None) -> list[Any]:
+    acc = access or {}
+    more = acc.get("credential_refs") if isinstance(acc.get("credential_refs"), list) else []
+    return [acc.get("credential_ref"), acc.get("identity_ref"), *more]
+
+
+def component_credentials(b: dict[str, Any]) -> list[dict[str, Any]]:
+    """Credentials a KNOWN baseline component holds: its access record and the identities of its own outbound
+    relations, de-duplicated (one entry per reference / description)."""
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    values = [*_access_identity_values(b.get("access")), *(r.get("identity_ref") for r in b.get("dependencies") or [])]
+    for e in credential_entries([v for v in values if isinstance(v, str)]):
+        key = e.get("ref") or e["description"]
+        if key not in seen:
+            seen.add(key)
+            out.append(e)
+    return out
+
+
+# A user of a secret reference that belongs to the other domain: counted (the secret store is one per host, so
+# revoking the ref would break it too) but never named in this domain's review (domain-first).
+OTHER_DOMAIN_USER = "komponen domain lain (tidak ditampilkan)"
+
+
+def credential_ref_users(session: Session, p: ChangeProposal) -> dict[str, list[str]]:
+    """§40 "credential lama dicabut setelah consumer sah dipindahkan": for every secret reference, the KNOWN
+    components OUTSIDE the proposal that still use it (access record or an outbound relation identity), plus the
+    replacement candidate ("<id> (kandidat)"; an UPGRADE's new version is the same component). A reference with
+    users is SHARED: revoke it only after those consumers have moved too. A user in the other domain makes the ref
+    SHARED as well (fail closed: one secret store per host) but appears only as :data:`OTHER_DOMAIN_USER`."""
+    leaving = set(p.existing_component_ids or [])
+    candidates = set(p.candidate_component_ids or []) | (leaving if p.kind == "UPGRADE" else set())
+    users: dict[str, set[str]] = {}
+
+    def note(value: Any, who: str) -> None:
+        for e in credential_entries(value):
+            if e.get("ref"):
+                users.setdefault(e["ref"], set()).add(who)
+
+    def label(cid: str, visible: bool) -> str:
+        if not visible:
+            return OTHER_DOMAIN_USER
+        return f"{cid} (kandidat)" if cid in candidates else cid
+
+    for comp in session.scalars(select(ComponentReference)):
+        cid = comp.component_id
+        if cid in leaving and cid not in candidates:
+            continue
+        who = label(cid, component_in_domain(comp, p.domain))
+        for v in _access_identity_values(comp.access):
+            note(v, who)
+    for rel in session.scalars(select(ComponentRelation).where(ComponentRelation.identity_ref.is_not(None))):
+        src = rel.source_id
+        if src in leaving and src not in candidates:
+            continue
+        note(rel.identity_ref, label(src, relation_in_domain(session, rel, p.domain)))
+    return {ref: sorted(who) for ref, who in users.items()}
+
+
+def _shared_text(ref: str, users: list[str]) -> str:
+    return (f"{ref}: SHARED - masih dipakai {', '.join(users)}; cabut hanya setelah consumer tersebut ikut "
+            "pindah")
+
+
+def replacement_plan(p: ChangeProposal, baseline: list[dict[str, Any]], *,
+                     ref_users: dict[str, list[str]] | None = None) -> dict[str, Any] | None:
     """§40 "Rencana penggantian dan rollback" for REPLACE/UPGRADE/REMOVE; owner-declared values (owner_plan)
-    replace UNKNOWN; anything not declared stays UNKNOWN."""
+    replace UNKNOWN; anything not declared stays UNKNOWN. *ref_users* (:func:`credential_ref_users`) decides
+    which secret references are safe to revoke after cutover; without it no reference is called safe."""
     if p.kind not in ("REPLACE", "UPGRADE", "REMOVE"):
         return None
     owner = (p.owner_plan or {}).get("replacement") or {}
     known = [b for b in baseline if b.get("status") == "KNOWN"]
     consumers = sorted({r["source_id"] for b in known for r in b["consumers"]})
-    creds: list[str] = []
-    for b in known:
-        acc = b.get("access") or {}
-        refs = acc.get("credential_refs") if isinstance(acc.get("credential_refs"), list) else []
-        for ref in [acc.get("credential_ref"), acc.get("identity_ref"), *refs]:
-            if ref:
-                creds.append(f"{b['component_id']}: {ref}")
+    held = [(b["component_id"], e) for b in known for e in component_credentials(b)]
+    refs = sorted({str(e["ref"]) for _cid, e in held if e.get("ref")})
+    revoke = [r for r in refs if ref_users is not None and not ref_users.get(r)]
+    shared = [_shared_text(r, (ref_users or {})[r]) for r in refs if (ref_users or {}).get(r)]
+    descriptions = [f"{cid}: {e['description']} (deskripsi, bukan secret ref)" for cid, e in held if "description" in e]
     egress = [f"{b['component_id']}: {(b.get('access') or {}).get('egress')}" for b in known
               if (b.get("access") or {}).get("egress")]
+    creds: dict[str, Any] = {}
+    if refs or descriptions:
+        creds = {"credential_refs_to_revoke_after_cutover": revoke, "shared_credential_refs": shared,
+                 "not_secret_refs": descriptions,
+                 "rule": "Hanya ref pada daftar pertama: cabut/rotasi kunci di konsol provider, lalu "
+                         "'aeos secrets delete <ref> --yes', setelah consumer sah dipindahkan (bukan efek review)"}
+        unregistered = sorted({str(e["ref"]) for _cid, e in held if e.get("ref") and not e["known"]})
+        if unregistered:
+            creds["refs_not_well_known"] = unregistered
+        if ref_users is None:
+            creds["shared_check"] = "NOT_CHECKED"
+            creds["credential_refs_sharing_unchecked"] = refs
     data_state = any(r["relation"] in DATA_RELATIONS for b in known for r in b["consumers"] + b["dependencies"])
     restore = owner.get("backup_restore_evidence_id")
     named_owners = sorted({str(b["owner"]) for b in known if str(b.get("owner") or "").strip()})
@@ -603,8 +719,7 @@ def replacement_plan(p: ChangeProposal, baseline: list[dict[str, Any]]) -> dict[
                                         "Diperlukan sebelum cutover bila ada state/data; belum ada bukti restore"),
         "data_state_relations": data_state,
         "adapter_consumer_changes": consumers or UNKNOWN,
-        "credential_egress_changes": ({"credential_refs_to_revoke_after_cutover": creds, "egress": egress}
-                                      if creds or egress else UNKNOWN),
+        "credential_egress_changes": ({**creds, "egress": egress} if creds or egress else UNKNOWN),
         "cutover_order": owner.get("cutover_order") or UNKNOWN,
         "retire_old_version_after": owner.get("retire_old_version_after") or UNKNOWN,
         "coexistence": "Hanya bila aman; tidak menjalankan dua scheduler/vault/credential authority aktif",
@@ -618,20 +733,96 @@ def replacement_plan(p: ChangeProposal, baseline: list[dict[str, Any]]) -> dict[
     }
 
 
-def removal_plan(p: ChangeProposal, baseline: list[dict[str, Any]]) -> dict[str, Any] | None:
+CREDENTIAL_KINDS = ("REPLACE", "UPGRADE")
+
+
+def credential_revocation(p: ChangeProposal, baseline: list[dict[str, Any]], *,
+                          ref_users: dict[str, list[str]] | None = None) -> dict[str, Any] | None:
+    """§40 W6-201 REPLACE/UPGRADE: one progress item per exact secret reference the replaced component(s) hold
+    (``credential:<ref>``), OPEN until the owner records it in ``owner_plan.credentials``: CLOSED (revoked/rotated
+    at the provider, then 'aeos secrets delete <ref>', after the legitimate consumers moved) or WAIVED (kept, e.g.
+    still SHARED, with the reason). Descriptions that are not secret references have nothing to revoke here and stay
+    in ``replacement_plan.credential_egress_changes.not_secret_refs``. Progress only: outside the candidate hash and
+    never a gate - the right time is after cutover, possibly after ACCEPTED - and AEOS revokes nothing itself."""
+    if p.kind not in CREDENTIAL_KINDS:
+        return None
+    record = (p.owner_plan or {}).get("credentials") or {}
+    refs = sorted({str(e["ref"]) for b in baseline if b.get("status") == "KNOWN" for e in component_credentials(b)
+                   if e.get("ref")})
+    items: list[dict[str, Any]] = []
+    for ref in refs:
+        users = (ref_users or {}).get(ref) or []
+        text = (f"Cabut credential ref {ref} setelah consumer sah dipindahkan: cabut/rotasi di konsol provider, lalu "
+                f"'aeos secrets delete {ref} --yes'")
+        if users:
+            text += f" - {_shared_text(ref, users)} (WAIVED dengan alasan bila tetap dipakai)"
+        elif ref_users is None:
+            text += " - pemakaian oleh komponen lain belum diperiksa"
+        rec = record.get(f"credential:{ref}") if isinstance(record.get(f"credential:{ref}"), dict) else {}
+        items.append({"id": f"credential:{ref}", "kind": "credential", "item": text, "secret_ref": ref,
+                      "shared_with": users, "status": rec.get("status") or "OPEN", "note": rec.get("note") or "",
+                      "evidence_id": rec.get("evidence_id")})
+    open_items = [i["id"] for i in items if i["status"] not in ("CLOSED", "WAIVED")]
+    return {"items": items, "open": open_items, "status": "OPEN" if open_items else "CLOSED",
+            "rule": "Progres, bukan gate: catat CLOSED setelah ref dicabut (sesudah cutover, boleh setelah ACCEPTED) "
+                    "atau WAIVED dengan alasan; review dan AEOS tidak pernah mencabut apa pun."}
+
+
+def apply_progress(p: ChangeProposal, package: dict[str, Any]) -> dict[str, Any]:
+    """The stored review package with the owner's CURRENT progress records (``owner_plan.removal`` /
+    ``owner_plan.credentials``) on its REMOVE closure and credential revocation items. Progress is recorded after the
+    review and never re-reviews (it is outside the candidate hash), so the view refreshes only these statuses; the
+    items themselves stay the reviewed ones."""
+    plan = p.owner_plan or {}
+    out = dict(package)
+    for key, progress in (("removal_plan", plan.get("removal") or {}), ("credential_revocation",
+                                                                        plan.get("credentials") or {})):
+        section = out.get(key)
+        if not isinstance(section, dict) or not isinstance(section.get("items"), list):
+            continue
+        items = []
+        for i in section["items"]:
+            rec = progress.get(i.get("id")) if isinstance(progress.get(i.get("id")), dict) else {}
+            items.append({**i, "status": rec.get("status") or "OPEN", "note": rec.get("note") or "",
+                          "evidence_id": rec.get("evidence_id")})
+        open_items = [i["id"] for i in items if i["status"] not in ("CLOSED", "WAIVED")]
+        out[key] = {**section, "items": items, "open": open_items, "status": "OPEN" if open_items else "CLOSED"}
+    return out
+
+
+def removal_plan(p: ChangeProposal, baseline: list[dict[str, Any]], *,
+                 ref_users: dict[str, list[str]] | None = None) -> dict[str, Any] | None:
     """§39 REMOVE/RETIRE: dependency, data, identity, job and support items that must be closed. Each item
-    is OPEN until the owner records it CLOSED or WAIVED (``owner_plan.removal``)."""
+    is OPEN until the owner records it CLOSED or WAIVED (``owner_plan.removal``). Identity items name one exact
+    secret reference each (``identity:<ref>``, SHARED when *ref_users* shows another user) or a description that
+    is not a secret reference (nothing to 'aeos secrets delete')."""
     if p.kind != "REMOVE":
         return None
     closure = (p.owner_plan or {}).get("removal") or {}
     items: list[dict[str, Any]] = []
 
-    def add(item_id: str, kind: str, text: str) -> None:
+    def add(item_id: str, kind: str, text: str, **extra: Any) -> None:
         if any(i["id"] == item_id for i in items):
             return
         rec = closure.get(item_id) if isinstance(closure.get(item_id), dict) else {}
         items.append({"id": item_id, "kind": kind, "item": text, "status": rec.get("status") or "OPEN",
-                      "note": rec.get("note") or "", "evidence_id": rec.get("evidence_id")})
+                      "note": rec.get("note") or "", "evidence_id": rec.get("evidence_id"), **extra})
+
+    def add_identity(e: dict[str, Any]) -> None:
+        ref = e.get("ref")
+        if not ref:
+            add(f"identity:{e['description']}", "identity", f"Tutup identity '{e['description']}' (deskripsi, bukan "
+                                                             "secret ref; tidak ada 'aeos secrets delete')",
+                secret_ref=None)
+            return
+        users = (ref_users or {}).get(ref) or []
+        text = (f"Cabut credential ref {ref} (referensi, tanpa nilai): cabut/rotasi di konsol provider, lalu "
+                f"'aeos secrets delete {ref} --yes'")
+        if users:
+            text += f" - {_shared_text(ref, users)}"
+        elif ref_users is None:
+            text += " - pemakaian oleh komponen lain belum diperiksa"
+        add(f"identity:{ref}", "identity", text, secret_ref=ref, shared_with=users)
 
     for b in baseline:
         cid = b["component_id"]
@@ -648,14 +839,8 @@ def removal_plan(p: ChangeProposal, baseline: list[dict[str, Any]]) -> dict[str,
             if r["relation"] in DATA_RELATIONS:
                 add(f"data:{cid}:{r['target_id']}", "data",
                     f"Retensi/penghapusan data {cid} di {r['target_id']}: {r['data'] or 'data UNKNOWN'}")
-            if r.get("identity_ref"):
-                add(f"identity:{r['identity_ref']}", "identity", f"Cabut identity/credential ref {r['identity_ref']} "
-                                                                 "(referensi, tanpa nilai)")
-        acc = b.get("access") or {}
-        refs = acc.get("credential_refs") if isinstance(acc.get("credential_refs"), list) else []
-        for ref in [acc.get("credential_ref"), acc.get("identity_ref"), *refs]:
-            if ref:
-                add(f"identity:{ref}", "identity", f"Cabut identity/credential ref {ref} (referensi, tanpa nilai)")
+        for e in component_credentials(b):
+            add_identity(e)
         operations = b.get("operations") or {}
         for key in ("uninstall", "retention", "recovery"):
             if operations.get(key):
@@ -1070,6 +1255,7 @@ def build_package(session: Session, p: ChangeProposal, children: list[ChangeProp
                  for e in entries]
     impact = _impact(session, p, baseline)
     sp = security_privacy(session, p)
+    ref_users = credential_ref_users(session, p) if p.kind in ("REPLACE", "UPGRADE", "REMOVE") else None
     package: dict[str, Any] = {
         "summary": {
             "kind": p.kind, "decision_question": KIND_QUESTIONS[p.kind], "problem": p.problem or UNKNOWN,
@@ -1084,8 +1270,9 @@ def build_package(session: Session, p: ChangeProposal, children: list[ChangeProp
         "alternatives": _alternatives(p, bool(p.existing_component_ids)),
         "impact": impact,
         "experiment_plan": _experiment_plan(session, p, baseline_hash, candidate_hash, categories),
-        "replacement_plan": replacement_plan(p, baseline),
-        "removal_plan": removal_plan(p, baseline),
+        "replacement_plan": replacement_plan(p, baseline, ref_users=ref_users),
+        "removal_plan": removal_plan(p, baseline, ref_users=ref_users),
+        "credential_revocation": credential_revocation(p, baseline, ref_users=ref_users),
         "upgrade_delta": upgrade_delta(p, baseline, entries),
         "security_privacy": sp,
         "cost": _cost(session, p, baseline),

@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { get, post } from "../../api/client";
+import { get, post, put } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { OpsBadge } from "../../components/control_center/OpsBadge";
 import { Provenance } from "../../components/control_center/Provenance";
 import { Button, EmptyState, ErrorBox, inputClass, Loading, Mono, Notice } from "../../components/ui";
-import type { RetirementChecklist } from "./types";
+import { absoluteTime, relativeTime } from "../../lib/format";
+import type { RetirementChecklist, RetirementItem, RetirementStep } from "./types";
 
 function detailText(detail: Record<string, unknown>): string {
   return Object.entries(detail)
@@ -13,8 +14,112 @@ function detailText(detail: Record<string, unknown>): string {
     .join(" · ");
 }
 
-/** Read-only retirement checklist (§33): maps what exists and which owner actions remain. */
-export function RetirementView({ data }: { data: RetirementChecklist }) {
+/** Checklist items whose workflow step the owner records (PUT /api/ops/retirement/{id}/steps/{key}); the final
+ * verification is the RETIREMENT decision, not a step. */
+const STEP_KEYS = ["consumers", "jobs", "credentials", "repositories", "integrations", "infra", "data", "legal_hold", "backups", "communication"];
+const STEP_STATUSES: [string, string, string][] = [
+  ["DONE", "DONE", "Selesai"],
+  ["IN_PROGRESS", "PENDING", "Sedang dikerjakan"],
+  ["NOT_APPLICABLE", "NOT_APPLICABLE", "Tidak berlaku"],
+];
+
+function stepBadge(status: string) {
+  const s = STEP_STATUSES.find(([v]) => v === status);
+  return <OpsBadge status={s ? s[1] : status} label={s ? s[2] : undefined} />;
+}
+
+/** What the owner recorded for this step (status, owner, note, evidence) - a workflow record, not proof. */
+export function RecordedStep({ step }: { step: RetirementStep }) {
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink-2" aria-label="Langkah tercatat">
+      <span className="text-ink-3">Langkah tercatat:</span>
+      {stepBadge(step.status)}
+      <span>oleh {step.owner || step.by}</span>
+      <span className="text-ink-3" title={absoluteTime(step.at)}>{relativeTime(step.at)}</span>
+      {step.note && <span>· {step.note}</span>}
+      {step.evidence_ids.length > 0 && (
+        <span>
+          · bukti:{" "}
+          {step.evidence_ids.map((id) => (
+            <Mono key={id}>{id}</Mono>
+          ))}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** §33 per-step record ("Catat langkah"): status, owner, note and same-domain evidence ids, audited server-side.
+ * Recording a step never deletes, revokes or contacts anyone. */
+export function RetirementStepForm({ projectId, item, onDone }: { projectId: string; item: RetirementItem; onDone?: () => void }) {
+  const qc = useQueryClient();
+  const [status, setStatus] = useState(item.recorded?.status ?? "DONE");
+  const [owner, setOwner] = useState(item.recorded?.owner ?? "");
+  const [note, setNote] = useState(item.recorded?.note ?? "");
+  const [evidence, setEvidence] = useState((item.recorded?.evidence_ids ?? []).join(", "));
+  const save = useMutation({
+    mutationFn: () =>
+      put(`/api/ops/retirement/${encodeURIComponent(projectId)}/steps/${encodeURIComponent(item.key)}`, {
+        status,
+        owner: owner.trim(),
+        note: note.trim(),
+        evidence_ids: evidence.split(/[\s,]+/).filter(Boolean),
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["ops-retirement", projectId] });
+      onDone?.();
+    },
+  });
+  return (
+    <div className="mt-2 grid gap-2 rounded-md border border-line p-2 text-sm">
+      <label className="grid gap-1">
+        <span className="text-xs text-ink-3">Status langkah</span>
+        <select aria-label={`Status langkah ${item.key}`} className={inputClass} value={status} onChange={(e) => setStatus(e.target.value)}>
+          {STEP_STATUSES.map(([v, , label]) => (
+            <option key={v} value={v}>
+              {label} ({v})
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="grid gap-1">
+        <span className="text-xs text-ink-3">Pemilik langkah (kosong = Anda)</span>
+        <input aria-label={`Pemilik langkah ${item.key}`} className={inputClass} value={owner} maxLength={200} onChange={(e) => setOwner(e.target.value)} />
+      </label>
+      <label className="grid gap-1">
+        <span className="text-xs text-ink-3">Catatan (apa yang dilakukan, kepada siapa)</span>
+        <textarea aria-label={`Catatan langkah ${item.key}`} className={inputClass} value={note} maxLength={1000} onChange={(e) => setNote(e.target.value)} />
+      </label>
+      <label className="grid gap-1">
+        <span className="text-xs text-ink-3">ID bukti (opsional, dipisah koma; domain proyek ini)</span>
+        <input aria-label={`Bukti langkah ${item.key}`} className={inputClass} value={evidence} onChange={(e) => setEvidence(e.target.value)} />
+      </label>
+      <ErrorBox error={save.error} />
+      <div>
+        <Button variant="primary" busy={save.isPending} onClick={() => save.mutate()}>
+          Simpan langkah
+        </Button>
+      </div>
+      <div className="text-xs text-ink-3">Hanya mencatat langkah (diaudit); tidak ada yang dihapus, dicabut atau dikirim dari sini.</div>
+    </div>
+  );
+}
+
+function StepControl({ projectId, item }: { projectId: string; item: RetirementItem }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-1">
+      <Button aria-expanded={open} onClick={() => setOpen(!open)}>
+        {open ? "Tutup" : "Catat langkah"}
+      </Button>
+      {open && <RetirementStepForm projectId={projectId} item={item} onDone={() => setOpen(false)} />}
+    </div>
+  );
+}
+
+/** Retirement checklist (§33): maps what exists, which owner actions remain and what the owner recorded per
+ * step. With ``canRecord`` (an admin session) each step offers "Catat langkah"; nothing is deleted from here. */
+export function RetirementView({ data, canRecord = false }: { data: RetirementChecklist; canRecord?: boolean }) {
   return (
     <div className="space-y-3">
       <Notice tone="info">{data.notice}</Notice>
@@ -32,6 +137,8 @@ export function RetirementView({ data }: { data: RetirementChecklist }) {
             </div>
             <div className="mt-1 text-ink-2">{i.owner_action}</div>
             {Object.keys(i.detail).length > 0 && <div className="mt-0.5 text-xs text-ink-3">{detailText(i.detail)}</div>}
+            {i.recorded && <RecordedStep step={i.recorded} />}
+            {canRecord && STEP_KEYS.includes(i.key) && <StepControl projectId={data.project.id} item={i} />}
           </li>
         ))}
       </ol>
@@ -95,7 +202,7 @@ export function RetirementTab() {
   if (q.error) return <ErrorBox error={q.error} />;
   return q.data ? (
     <div className="space-y-3">
-      <RetirementView data={q.data} />
+      <RetirementView data={q.data} canRecord={!!isAdmin} />
       <RetirementDecisionForm data={q.data} isAdmin={!!isAdmin} />
     </div>
   ) : null;

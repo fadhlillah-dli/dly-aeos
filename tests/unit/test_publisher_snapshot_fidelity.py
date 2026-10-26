@@ -148,23 +148,25 @@ def env(settings, db, secrets_memory, monkeypatch):
 
 def _with_rendered_image(env, logical_id="00-product-home"):
     """The docs engine output with one rendered diagram embedded in *logical_id* (mmdc is not run in tests)."""
+    from aeos.docs_engine import service as docs_service
     from aeos.docs_engine import visuals as vis
 
-    real = jobs.docs_service.render_version
+    real = docs_service.render_version
     png = _png(env["settings"].layout.root / "ctx.png")
 
     def render_version(session, settings, version, **kw):
         result, delta, state = real(session, settings, version, **kw)
         for d in result.documents:
             if d.logical_doc_id == logical_id:
-                body = jobs.docs_service.document_body(session, version.project_id, d) + "\n\n![Context](visual:ctx)\n"
+                body = docs_service.document_body(session, version.project_id, d) + "\n\n![Context](visual:ctx)\n"
                 d.body_markdown = body
                 d.content_hash = content_hash({"markdown": body})
         result.visuals.append(vis.VisualArtifact(key="ctx", title="Context", kind="context", source="flowchart TD",
                                                  source_hash="h", status=vis.STATUS_RENDERED, png_path=str(png)))
         return result, delta, state
 
-    env["monkeypatch"].setattr(jobs.docs_service, "render_version", render_version)
+    # the publisher renders through aeos.docs_engine.facade, which calls this service implementation
+    env["monkeypatch"].setattr(docs_service, "render_version", render_version)
 
 
 def _preview(env):

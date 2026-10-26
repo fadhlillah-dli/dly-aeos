@@ -148,11 +148,23 @@ export function OwnerPlanCard({ p, isAdmin }: { p: ProposalDetail; isAdmin: bool
   );
 }
 
-/** §39 REMOVE closure: every dependency/data/identity/job/support item CLOSED or WAIVED before ACCEPTED. */
-export function RemovalClosure({ p, items, isAdmin }: { p: ProposalDetail; items: RemovalItem[]; isAdmin: boolean }) {
+/** §39 REMOVE closure (planKey "removal": every item CLOSED or WAIVED before ACCEPTED) and §40 credential revocation
+ * of a REPLACE/UPGRADE (planKey "credentials": progress per secret ref, not a gate). Recording never revokes or deletes
+ * anything; the owner does that at the provider and with 'aeos secrets delete'. */
+export function RemovalClosure({
+  p,
+  items,
+  isAdmin,
+  planKey = "removal",
+}: {
+  p: ProposalDetail;
+  items: RemovalItem[];
+  isAdmin: boolean;
+  planKey?: "removal" | "credentials";
+}) {
   const m = useProposalMutation(p.id, (body: Record<string, unknown>) => patch(`/api/proposals/${p.id}/plan`, body));
   const [notes, setNotes] = useState<Record<string, string>>({});
-  const mark = (id: string, status: string) => m.mutate({ removal: { [id]: { status, note: notes[id] ?? "" } } });
+  const mark = (id: string, status: string) => m.mutate({ [planKey]: { [id]: { status, note: notes[id] ?? "" } } });
   return (
     <div className="mt-3">
       <Table
@@ -160,7 +172,19 @@ export function RemovalClosure({ p, items, isAdmin }: { p: ProposalDetail; items
         rowKey={(i) => i.id}
         columns={[
           { header: "Jenis", cell: (i) => <Mono>{i.kind}</Mono> },
-          { header: "Yang harus ditutup", cell: (i) => i.item },
+          {
+            header: planKey === "credentials" ? "Yang harus dicabut" : "Yang harus ditutup",
+            cell: (i) => (
+              <span>
+                {i.item}
+                {i.shared_with && i.shared_with.length > 0 && (
+                  <span className="ml-1">
+                    <StatusBadge status="WARN" label="SHARED (masih dipakai)" />
+                  </span>
+                )}
+              </span>
+            ),
+          },
           { header: "Status", cell: (i) => <StatusBadge status={i.status === "CLOSED" ? "DONE" : i.status === "WAIVED" ? "NOT_APPLICABLE" : "PENDING"} label={i.status} /> },
           {
             header: "Aksi",

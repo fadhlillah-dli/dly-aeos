@@ -282,7 +282,8 @@ def render_preview(doc_id: str, db: DB, principal: CurrentPrincipal, domain: Act
             "status": rec.status, "content_type": rec.content_type, "content_hash": rec.content_hash,
             "markdown": rec.body_markdown if rec.kind == "DOC" else "", "sections": rec.sections or [],
             "pending_sections": rec.pending_sections or [], "source_plan_version_id": rec.source_plan_version_id,
-            "rendered_at": _iso(rec.rendered_at), "mode": rec.mode, "format": "markdown"}
+            "rendered_at": _iso(rec.rendered_at), "mode": rec.mode, "format": "markdown",
+            "source": SOURCE, "generated_at": utcnow().isoformat()}  # stored snapshot, read now
 
 
 @router.get("/api/documents/{doc_id}/revisions")

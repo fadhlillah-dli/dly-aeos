@@ -226,7 +226,11 @@ def diff_snapshots(db: DB, principal: CurrentPrincipal, domain: ActiveDomain,
 @router.get("/api/inventory/snapshots/{snapshot_id}")
 def get_snapshot(snapshot_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
     snap = snaps.get_snapshot(db, snapshot_id, domain=domain.value)
-    return {**snaps.snapshot_meta(snap, db), "refs": snap.refs}
+    meta = snaps.snapshot_meta(snap, db)
+    # a frozen record: its claims were observed when it was taken, not now
+    return {**meta, "refs": snap.refs, "source": "architecture_snapshots (frozen, hash-bound)",
+            "checked_at": meta["taken_at"] or meta["created_at"], "generated_at": utcnow().isoformat(),
+            "mode": "SNAPSHOT"}
 
 
 @router.post("/api/inventory/snapshots/{snapshot_id}/approve", status_code=201)

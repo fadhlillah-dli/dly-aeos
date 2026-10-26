@@ -25,7 +25,7 @@ from aeos.portfolio import gitread
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
-    from aeos.identity.service import Principal
+    from aeos.identity.facade import Principal
 
 INVENTORY_SCHEMA = "1"
 

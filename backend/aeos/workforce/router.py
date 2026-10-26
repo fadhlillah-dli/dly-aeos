@@ -16,12 +16,13 @@ from sqlalchemy import select
 from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, load_project
 from aeos.core.errors import Blocked, NotFound
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.planning import Plan
 from aeos.models.workforce import TaskExecution, WorkerRun
 from aeos.workforce import scheduler, views
 
 router = APIRouter(tags=["workforce"])
+RUN_DETAIL_SOURCE = "worker_runs, task_executions, leases, evidence_artifacts, review_records, acceptance_records"
 
 
 def _actor(p: Principal) -> str:
@@ -120,7 +121,7 @@ def list_runs(principal: CurrentPrincipal, domain: ActiveDomain, db: DB,
 @router.get("/api/runs/{run_id}")
 def get_run(run_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     run = _visible_run(db, principal, domain, run_id)
-    return {**views.run_detail(db, run), "checked_at": utcnow().isoformat()}
+    return {**views.run_detail(db, run), "source": RUN_DETAIL_SOURCE, "checked_at": utcnow().isoformat()}
 
 
 class Reason(BaseModel):
@@ -387,7 +388,9 @@ def admission(task_id: str, principal: CurrentPrincipal, domain: ActiveDomain, d
     te = _visible_task(db, principal, domain, task_id)
     if te.state != "READY":
         return {"task_id": task_id, "admitted": False, "state": te.state, "reason": te.reason,
-                "reason_code": te.reason_code, "checked_at": utcnow().isoformat()}
+                "reason_code": te.reason_code, "source": "task_executions (stored state, admission not evaluated)",
+                "checked_at": utcnow().isoformat()}
     adm = scheduler.admission_check(db, task_id)
     db.rollback()
-    return {**adm.as_dict(), "state": te.state, "checked_at": utcnow().isoformat()}
+    return {**adm.as_dict(), "state": te.state, "source": "scheduler admission check (§19, read-only)",
+            "checked_at": utcnow().isoformat()}

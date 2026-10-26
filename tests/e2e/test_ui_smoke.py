@@ -8,10 +8,10 @@ then drives the UI like a human: login form -> domain gate -> project switch -> 
 
 Per page it asserts: no uncaught page error, no console error, no ``/api`` response >= 500 (and in
 admin flows no 4xx either: that is a broken API path or a page/backend shape mismatch), the
-PageHeader ``h1`` and its provenance ("Sumber data") render, no untranslated control/heading copy,
-no horizontal overflow at 390px and readable contrast in dark mode. MOCK/DEMO/DESIGN rows must carry
-their label. OFFICE shows empty/blocked states without PERSONAL data; a VIEWER sees no admin-only
-controls and a direct write is rejected with 403 by the backend.
+PageHeader ``h1`` and its provenance ("Sumber data", "Diperiksa pada", "Batas bukti") render, no
+untranslated control/heading copy, no horizontal overflow at 390px and readable contrast in dark mode.
+MOCK/DEMO/DESIGN rows must carry their label. OFFICE shows empty/blocked states without PERSONAL data; a
+VIEWER sees no admin-only controls and a direct write is rejected with 403 by the backend.
 
 External tools are never called: claude/opencode/bao/mmdc point at absent paths, OpenBao at a closed
 loopback port and the keyring service name is unique to the run. Nothing leaves the machine.
@@ -462,8 +462,16 @@ def visit(page: Any, srv: Server, watch: Watch, path: str, *, shots: Path | None
     title = h1.inner_text().strip()
     if not title:
         watch.problems.append(f"{watch.current}: PageHeader h1 is empty")
-    if page.locator("main").get_by_text("Sumber data:", exact=True).count() == 0:
+    # §41 (W6-113): the PageHeader provenance block names its source, when it was checked and the evidence limit
+    # side by side ("Diperiksa pada: belum pernah" when nothing was ever checked).
+    provenance = page.locator("main dl").filter(has=page.get_by_text("Sumber data:", exact=True)).first
+    if provenance.count() == 0:
         watch.problems.append(f"{watch.current}: PageHeader provenance ('Sumber data') missing")
+    else:
+        for label in ("Diperiksa pada:", "Batas bukti:"):
+            if provenance.get_by_text(label, exact=True).count() == 0:
+                watch.problems.append(f"{watch.current}: PageHeader provenance ('{label[:-1]}') missing next to "
+                                      "'Sumber data'")
     if page.locator("main").get_by_text("Memuat…").count() > 0:
         watch.settle(page, timeout=5)
     if watch.streams > 1:

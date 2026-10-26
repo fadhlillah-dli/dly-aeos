@@ -174,3 +174,65 @@ def test_doctor_github_probe_records_connectivity_only(personal_client, db, sett
     db.commit()
     cap = personal_client.get(f"/api/projects/{p['id']}/integrations").json()["items"][0]["capability_status"]
     assert cap["connectivity"] == "CONNECTED" and cap["functional"] == "NOT_TESTED"  # read-only: never VERIFIED
+
+
+def test_repository_view_links_ci_pipeline_latest_run_and_docs_folder(personal_client, db, secrets_memory):
+    """W6-110 §37 "PR/CI links, docs folder/page links": the CI pipeline link comes from exact identifiers (this
+    repository's full_name on the CI provider's host), the latest run link from the provider's own recorded
+    check-run URL (https only), and the docs target links to its folder via the stored root id."""
+    from aeos.delivery.provider import CheckRunView, CIStatus, record_ci_evidence
+    from aeos.models.portfolio import Project
+
+    p = create_project(personal_client, name="Repo Links")
+    rid = personal_client.post(f"/api/projects/{p['id']}/repositories",
+                               json={"provider": "GITHUB", "owner": "octo", "name": "links"}).json()["repository"]["id"]
+    _put(personal_client, p["id"], provider="google-drive", purpose="docs", root_id="1AbCdEfGhIjKlMnOpQrStUvWxYz012345")
+    _put(personal_client, p["id"], provider="github-actions", purpose="ci")
+    view = personal_client.get(f"/api/repositories/{rid}").json()["repository"]
+    assert view["docs_targets"][0]["target_url"] == "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+    ci = view["ci"][0]
+    assert ci["pipeline_url"] == "https://github.com/octo/links/actions"
+    assert ci["pipeline_url_basis"] == "repository full_name"
+    assert view["ci_latest"] is None  # nothing recorded: no run link is invented
+
+    project = db.get(Project, p["id"])
+    runs = [CheckRunView(name="lint", status="completed", conclusion="success", app="github-actions",
+                         url="javascript:alert(1)", started_at=None, completed_at=None),
+            CheckRunView(name="tests", status="completed", conclusion="success", app="github-actions",
+                         url="https://github.com/octo/links/actions/runs/42/job/7", started_at=None, completed_at=None)]
+    sha = "a" * 40
+    record_ci_evidence(db, project, CIStatus(repo="octo/links", sha=sha, overall="PASS", total=2, runs=runs,
+                                             checked_at=utcnow().isoformat()))
+    record_ci_evidence(db, project, CIStatus(repo="octo/other", sha="b" * 40, overall="FAIL", total=0, runs=[],
+                                             checked_at=utcnow().isoformat()))  # another repository's CI
+    db.commit()
+    latest = personal_client.get(f"/api/repositories/{rid}").json()["repository"]["ci_latest"]
+    assert latest["commit"] == sha and latest["overall"] == "PASS" and latest["runs"] == 2
+    assert latest["url"] == "https://github.com/octo/links/actions/runs/42/job/7"  # https only, never javascript:
+    assert latest["mode"] == "LIVE" and latest["integrity"] == "VERIFIED"
+
+    # a newer CI_STATUS row that is not trusted (the delivery CI gate ignores it too) never becomes "the latest run"
+    from aeos.core.hashing import content_hash
+    from aeos.models.evidence import EvidenceArtifact
+
+    db.add(EvidenceArtifact(project_id=project.id, domain=project.domain, kind="CI_STATUS", origin="provider-ci",
+                            collector_identity="forged", trusted=False, content_hash=content_hash({"overall": "PASS"}),
+                            evidence_level="E0", claim="forged", subject_type="commit", subject_id="c" * 40,
+                            environment={"commit": "c" * 40, "repo": "octo/links"}))
+    db.commit()
+    assert personal_client.get(f"/api/repositories/{rid}").json()["repository"]["ci_latest"]["commit"] == sha
+
+
+def test_ci_link_is_never_guessed_across_hosts():
+    from aeos.models.portfolio import ProjectIntegration, RepositoryReference
+    from aeos.portfolio.repositories import ci_pipeline_link
+
+    gh = RepositoryReference(provider="GITHUB", full_name="octo/app")
+    assert ci_pipeline_link(gh, ProjectIntegration(provider="bitbucket-pipelines", purpose="ci")) == (None, None)
+    assert ci_pipeline_link(gh, ProjectIntegration(provider="github-actions", purpose="ci", root_id="octo/ci-repo")) == (
+        "https://github.com/octo/ci-repo/actions", "integration root_id")
+    assert ci_pipeline_link(gh, ProjectIntegration(provider="github-actions", purpose="ci",
+                                                   root_id="../../evil")) == (None, None)
+    bb = RepositoryReference(provider="BITBUCKET", full_name="team/svc")
+    assert ci_pipeline_link(bb, ProjectIntegration(provider="bitbucket-pipelines", purpose="ci"))[0] == (
+        "https://bitbucket.org/team/svc/pipelines")

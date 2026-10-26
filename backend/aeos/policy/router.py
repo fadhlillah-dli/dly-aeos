@@ -14,7 +14,7 @@ from aeos.core.enums import Domain
 from aeos.core.errors import NotFound
 from aeos.core.hashing import content_hash
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.decisions import ArchitectureDecisionRecord, Decision
 from aeos.models.policy_ext import DecisionRequest
 from aeos.policy import adrs as adr_loader
@@ -135,7 +135,9 @@ def decision_shapes(_principal: CurrentPrincipal, domain: ActiveDomain) -> dict[
 
 @router.get("/api/decisions/{decision_id}")
 def get_decision(decision_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
-    return registry.decision_view(db, _load_visible_decision(db, principal, domain, decision_id))
+    # the effective status (expiry/revocation/supersession) is evaluated at read time, like the register list
+    view = registry.decision_view(db, _load_visible_decision(db, principal, domain, decision_id))
+    return {**view, "source": "decisions", "checked_at": _now(), "mode": "LIVE"}
 
 
 # ---------------------------------------------------------------- decisions (write)
@@ -414,4 +416,4 @@ def get_adr(adr_key: str, db: DB, principal: CurrentPrincipal) -> dict[str, Any]
     visible = [d for d in linked if d.domain is None
                or (active is not None and principal.can_access_domain(active) and _visible(principal, active, d))]
     view["linked_decisions"] = [{"id": d.id, "kind": d.kind, "status": registry.effective_status(d)} for d in visible]
-    return view
+    return {**view, "source": "docs/decisions (loaded by aeos seed) + decisions", "checked_at": _now(), "mode": "LIVE"}

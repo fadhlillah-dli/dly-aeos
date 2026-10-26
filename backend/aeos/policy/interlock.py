@@ -208,7 +208,7 @@ def _office_target_reason(session: Session, intent: WriteIntent, office: dict) -
 
 
 def check_external_write(session: Session, intent: WriteIntent) -> InterlockResult:
-    from aeos.identity.service import bootstrap_complete
+    from aeos.identity.facade import bootstrap_complete
 
     reasons: list[str] = []
     if not bootstrap_complete(session):

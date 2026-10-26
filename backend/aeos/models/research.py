@@ -66,6 +66,9 @@ class ResearchEntry(IdMixin, TimestampMixin, Base):
     distribution: Mapped[str] = mapped_column(String(256), default="")
     terms_checked_at: Mapped[datetime | None] = mapped_column(nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # --- 0006_w7i2 (§01 U-11): intake attachments (e.g. a .md brief) submitted with a manual entry; each lives in
+    # the entry's submitted_domain and is untrusted DATA (never authority). Seeded platform rows have none.
+    attachment_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
 class ChangeProposal(IdMixin, TimestampMixin, Base):

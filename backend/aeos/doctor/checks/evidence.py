@@ -303,7 +303,8 @@ def evidence_acceptance_invalidation(ctx: CheckContext) -> Outcome:
 
     try:
         from aeos.models.evidence import AcceptanceRecord
-        from aeos.verification.acceptance import acceptance_is_valid, latest_acceptance, staleness
+        from aeos.verification.acceptance import staleness
+        from aeos.verification.facade import acceptance_is_valid, latest_acceptance
     except (ImportError, ModuleNotFoundError):
         return Outcome("UNKNOWN", "Modul verification belum tersedia.", error_code="VERIFIER_NOT_IMPLEMENTED")
     assert ctx.session is not None

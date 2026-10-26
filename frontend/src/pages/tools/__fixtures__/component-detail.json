@@ -1,0 +1,1018 @@
+{
+  "component_id": "opencode",
+  "mode": "DESIGN",
+  "tombstoned_at": null,
+  "identity": {
+    "component_id": "opencode",
+    "kind": "worker_engine",
+    "name": "OpenCode",
+    "friendly_name": "OpenCode — mesin eksekusi pekerja",
+    "function": "Worker engine pertama: menjalankan model murah/gratis yang eligible secara non-interaktif dengan output JSON events.",
+    "category": "workforce",
+    "category_label": "Workforce",
+    "source_kind": "GITHUB_REPO",
+    "upstream_identity": "github:anomalyco/opencode",
+    "upstream_identity_status": "VERIFIED",
+    "instances": null,
+    "instances_note": "belum ada instance teramati"
+  },
+  "scope": {
+    "level": "platform",
+    "domains": [
+      "PLATFORM"
+    ],
+    "environment": "local",
+    "owner": "owner",
+    "maintainer": {
+      "value": null,
+      "status": "UNKNOWN",
+      "reason": "maintainer operasional belum ditetapkan; tidak ditebak"
+    },
+    "authorization_scope": {
+      "value": null,
+      "design": null,
+      "integrations": [],
+      "routes": [],
+      "status": "DESIGN",
+      "note": "Target/izin berlaku dari Integration Registry dan route yang disetujui; teks desain bukan izin."
+    }
+  },
+  "source": {
+    "source_url": "https://github.com/anomalyco/opencode",
+    "source_url_note": null,
+    "source_refs": [
+      "S07",
+      "S08",
+      "S28"
+    ],
+    "identity_verified": "VERIFIED",
+    "publisher": {
+      "value": null,
+      "status": "UNKNOWN",
+      "reason": "publisher/maintainer upstream belum diverifikasi"
+    },
+    "license": {
+      "value": null,
+      "status": "UNKNOWN",
+      "reason": "master tidak mencantumkan lisensi; tidak ditebak"
+    },
+    "retrieval_time": "2026-10-17/2026-10-18",
+    "unresolved_identity": false
+  },
+  "versions": {
+    "approved_pin": null,
+    "observed_version": null,
+    "status": "NO_PIN",
+    "pin_note": "pin belum disetujui (UNKNOWN); 'latest' tidak dipakai",
+    "approved_digest": null,
+    "observed_digest": null,
+    "digest_status": "NO_APPROVED_DIGEST",
+    "distribution": {
+      "kind": "release_asset",
+      "url": null,
+      "digest": null,
+      "channel": null,
+      "note": "Rilis resmi github:anomalyco/opencode; aset dan digest dipin setelah capability test (belum)."
+    },
+    "signature": {
+      "method": "unknown",
+      "available": null,
+      "verified": false,
+      "verified_at": null,
+      "result": "UNKNOWN",
+      "note": "Belum diperiksa apakah rilis ditandatangani/beratestasi."
+    },
+    "tool_schema_hash": null,
+    "config_revision": {
+      "value": null,
+      "status": "UNKNOWN",
+      "reason": "revisi konfigurasi belum teramati"
+    },
+    "lockfile_refs": [],
+    "provenance_note": "Pin source commit tidak membuktikan binary di PATH dibangun dari commit itu (§37)."
+  },
+  "compatibility": {
+    "ports": [],
+    "config_refs": [
+      "settings:opencode_binary"
+    ],
+    "compatibility": {
+      "os": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "arch": [],
+      "min_version": null,
+      "max_version": null,
+      "source": "AGENTS.md (platform AEOS)",
+      "note": "Kebutuhan platform; dukungan upstream per OS belum diverifikasi."
+    }
+  },
+  "usage_role": {
+    "usage_role": "runtime",
+    "requirement": "REQUIRED",
+    "design_label": "SELECTED_DESIGN",
+    "why_selected": "§07 urutan 5, §11: worker engine pertama yang diuji (S07, S08, S28).",
+    "placement": "Worker engine pertama yang diuji (§45).",
+    "used_by": [
+      {
+        "component_id": "worker-runtime",
+        "name": "Worker Runtime — sandbox pekerja",
+        "relation": "runs_with",
+        "lens": "DESIGN"
+      },
+      {
+        "component_id": "rtk",
+        "name": "RTK — eksperimen reduksi konteks",
+        "relation": "runs_with",
+        "lens": "DESIGN"
+      },
+      {
+        "component_id": "readiness-doctor",
+        "name": "Readiness Doctor — pemeriksaan kesiapan",
+        "relation": "verifies",
+        "lens": "DESIGN"
+      }
+    ],
+    "consuming_tasks": {
+      "routes": [],
+      "agents": [
+        {
+          "agent_key": "opencode-implementer",
+          "role_key": "feature-implementer",
+          "enabled": false,
+          "harness": "opencode",
+          "revision_hash": "sha256:e19aca6d11217e5992bac4f994a9d2c82ca0e308999207e0b7911689ea963a28"
+        }
+      ],
+      "items": [],
+      "status": "KNOWN",
+      "reason": null,
+      "source": "ModelRoute + AgentDefinition + WorkerRun"
+    },
+    "bootstrap_order": 5
+  },
+  "lifecycle": {
+    "admission": {
+      "value": "DISCOVERED",
+      "effective": "DISCOVERED",
+      "at": "2026-10-25T21:03:37.052163+00:00",
+      "expires_at": null,
+      "stale": false,
+      "source": "seed manifest",
+      "observation_id": null,
+      "version": null,
+      "reason": "belum ada keputusan admission (katalog desain)",
+      "decision_refs": [],
+      "scope": {}
+    },
+    "installation": {
+      "value": "UNKNOWN",
+      "effective": "UNKNOWN",
+      "at": null,
+      "expires_at": null,
+      "stale": false,
+      "source": "belum ada observasi",
+      "observation_id": null,
+      "version": null,
+      "reason": "belum diprobe; jalankan aeos inventory reconcile"
+    },
+    "configuration": {
+      "value": "UNKNOWN",
+      "effective": "UNKNOWN",
+      "at": null,
+      "expires_at": null,
+      "stale": false,
+      "source": "belum ada observasi",
+      "observation_id": null,
+      "version": null,
+      "reason": "konfigurasi belum diperiksa"
+    },
+    "connectivity": {
+      "value": "NOT_CHECKED",
+      "effective": "NOT_CHECKED",
+      "at": null,
+      "expires_at": null,
+      "stale": false,
+      "source": "belum ada observasi",
+      "observation_id": null,
+      "version": null,
+      "reason": "konektivitas belum diperiksa"
+    },
+    "functional": {
+      "value": "NOT_TESTED",
+      "effective": "NOT_TESTED",
+      "at": null,
+      "expires_at": null,
+      "stale": false,
+      "source": "belum ada observasi",
+      "observation_id": null,
+      "version": null,
+      "reason": "capability test belum dijalankan"
+    },
+    "enablement": {
+      "value": "DISABLED",
+      "effective": "DISABLED",
+      "at": "2026-10-25T21:03:37.052163+00:00",
+      "expires_at": null,
+      "stale": false,
+      "source": "approved config",
+      "observation_id": null,
+      "version": null,
+      "reason": "belum di-enable dalam konfigurasi yang disetujui",
+      "basis": [],
+      "note": "Enablement bukan bukti dipakai (lihat Penggunaan)."
+    },
+    "usage": {
+      "value": "NEVER_OBSERVED",
+      "effective": "NEVER_OBSERVED",
+      "at": null,
+      "expires_at": null,
+      "stale": false,
+      "source": "belum ada observasi",
+      "observation_id": null,
+      "version": null,
+      "reason": "belum ada run/proses/operasi teramati"
+    },
+    "lifecycle_final": {
+      "value": "ACTIVE",
+      "effective": "ACTIVE",
+      "at": "2026-10-25T21:03:37.052163+00:00",
+      "expires_at": null,
+      "stale": false,
+      "source": "manifest",
+      "observation_id": null,
+      "version": null,
+      "reason": "status lifecycle"
+    }
+  },
+  "admission": {
+    "status": "DISCOVERED",
+    "decision_refs": [],
+    "scope": {},
+    "capability_tests": [
+      {
+        "id": "worker.contract",
+        "functional": true,
+        "result": "NOT_TESTED",
+        "stale": null,
+        "evidence_id": null,
+        "at": null
+      }
+    ]
+  },
+  "next_action": {
+    "code": "RUN_RECONCILE",
+    "label": "Jalankan aeos inventory reconcile",
+    "command": "aeos inventory reconcile",
+    "link": null
+  },
+  "config_lens": {
+    "present": false,
+    "basis": [],
+    "note": "Konfigurasi berlaku hanya dengan dasar eksplisit; nilai default bukan enablement."
+  },
+  "access": {
+    "paths": [
+      "<data>/*/projects/*/task-data/** (sandbox)"
+    ],
+    "egress": [
+      "broker saja"
+    ],
+    "data_classes": [
+      "INTERNAL"
+    ],
+    "operations": [
+      "EXEC",
+      "WRITE"
+    ],
+    "identity_ref": "capability token per run",
+    "tenant_target": null,
+    "expiry": {
+      "value": null,
+      "status": "UNKNOWN",
+      "reason": "referensi bukan secret ref AEOS (mis. login client resmi); expiry dikelola pemiliknya"
+    },
+    "note": "Nilai credential tidak pernah ditampilkan; hanya referensi logis."
+  },
+  "relations": {
+    "component_id": "opencode",
+    "outgoing": [
+      {
+        "id": "b1dda6b2-8736-43de-87c1-df392193a995",
+        "source": "opencode",
+        "target": "opencode-console",
+        "relation": "calls",
+        "lens": "DESIGN",
+        "source_name": "OpenCode — mesin eksekusi pekerja",
+        "target_name": "OpenCode Console — katalog route gratis/murah",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Route model OpenCode (lewat broker).",
+        "operation": "CALL",
+        "boundary": "egress broker",
+        "identity_ref": "capability token",
+        "direction": "opencode -> opencode-console",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073558+00:00",
+        "updated_at": "2026-10-25T21:03:37.073559+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "35949860-5ae9-48d0-b8db-feb530295b9a",
+        "source": "opencode",
+        "target": "openrouter",
+        "relation": "calls",
+        "lens": "DESIGN",
+        "source_name": "OpenCode — mesin eksekusi pekerja",
+        "target_name": "OpenRouter — route inferensi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Route model OpenRouter (lewat broker).",
+        "operation": "CALL",
+        "boundary": "egress broker",
+        "identity_ref": "capability token",
+        "direction": "opencode -> openrouter",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073565+00:00",
+        "updated_at": "2026-10-25T21:03:37.073565+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      }
+    ],
+    "incoming": [
+      {
+        "id": "98b235eb-e6f6-445c-b2b5-c325e371d048",
+        "source": "goose",
+        "target": "opencode",
+        "relation": "alternative_to",
+        "lens": "DESIGN",
+        "source_name": "Goose — alternatif adapter pekerja",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Alternatif engine bila OpenCode tidak memenuhi kontrak.",
+        "operation": "NONE",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "goose -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073571+00:00",
+        "updated_at": "2026-10-25T21:03:37.073572+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "7f4645c5-fd6c-4e82-9fbc-3f6623cd1996",
+        "source": "pi",
+        "target": "opencode",
+        "relation": "alternative_to",
+        "lens": "DESIGN",
+        "source_name": "Pi — alternatif adapter pekerja",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Alternatif engine bila OpenCode tidak memenuhi kontrak.",
+        "operation": "NONE",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "pi -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073582+00:00",
+        "updated_at": "2026-10-25T21:03:37.073583+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "9a2ce85a-6fc2-40f3-9cf9-00a8568a8e41",
+        "source": "openhands",
+        "target": "opencode",
+        "relation": "alternative_to",
+        "lens": "DESIGN",
+        "source_name": "OpenHands — kandidat engine",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Kandidat engine pengganti/pembanding.",
+        "operation": "NONE",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "openhands -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073605+00:00",
+        "updated_at": "2026-10-25T21:03:37.073606+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "a4fc7296-fe6c-4b3d-aaa3-f1601d45745e",
+        "source": "deep-agents",
+        "target": "opencode",
+        "relation": "alternative_to",
+        "lens": "DESIGN",
+        "source_name": "Deep Agents — kandidat engine",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Kandidat engine pengganti/pembanding.",
+        "operation": "NONE",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "deep-agents -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073636+00:00",
+        "updated_at": "2026-10-25T21:03:37.073654+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "6e4d673e-8085-4dae-8e1a-dc033a0df3e0",
+        "source": "worker-runtime",
+        "target": "opencode",
+        "relation": "runs_with",
+        "lens": "DESIGN",
+        "source_name": "Worker Runtime — sandbox pekerja",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Menjalankan OpenCode non-interaktif dengan TaskSpec terbatas.",
+        "operation": "EXEC",
+        "boundary": "sandbox per task, tanpa host home/SSH/docker socket",
+        "identity_ref": "capability token",
+        "direction": "worker-runtime -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073365+00:00",
+        "updated_at": "2026-10-25T21:03:37.073366+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "e5d1111e-7fb6-4d27-8bce-6d098fdf144c",
+        "source": "rtk",
+        "target": "opencode",
+        "relation": "runs_with",
+        "lens": "DESIGN",
+        "source_name": "RTK — eksperimen reduksi konteks",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Eksperimen reduksi output tool pekerja.",
+        "operation": "EXEC",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "rtk -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073783+00:00",
+        "updated_at": "2026-10-25T21:03:37.073784+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "b448a30b-3e02-41af-a93a-5b1e0c9fb0ce",
+        "source": "readiness-doctor",
+        "target": "opencode",
+        "relation": "verifies",
+        "lens": "DESIGN",
+        "source_name": "Readiness Doctor — pemeriksaan kesiapan",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Status engine pekerja.",
+        "operation": "READ",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "readiness-doctor -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073541+00:00",
+        "updated_at": "2026-10-25T21:03:37.073541+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      }
+    ],
+    "items": [
+      {
+        "id": "b1dda6b2-8736-43de-87c1-df392193a995",
+        "source": "opencode",
+        "target": "opencode-console",
+        "relation": "calls",
+        "lens": "DESIGN",
+        "source_name": "OpenCode — mesin eksekusi pekerja",
+        "target_name": "OpenCode Console — katalog route gratis/murah",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Route model OpenCode (lewat broker).",
+        "operation": "CALL",
+        "boundary": "egress broker",
+        "identity_ref": "capability token",
+        "direction": "opencode -> opencode-console",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073558+00:00",
+        "updated_at": "2026-10-25T21:03:37.073559+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "35949860-5ae9-48d0-b8db-feb530295b9a",
+        "source": "opencode",
+        "target": "openrouter",
+        "relation": "calls",
+        "lens": "DESIGN",
+        "source_name": "OpenCode — mesin eksekusi pekerja",
+        "target_name": "OpenRouter — route inferensi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Route model OpenRouter (lewat broker).",
+        "operation": "CALL",
+        "boundary": "egress broker",
+        "identity_ref": "capability token",
+        "direction": "opencode -> openrouter",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073565+00:00",
+        "updated_at": "2026-10-25T21:03:37.073565+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "98b235eb-e6f6-445c-b2b5-c325e371d048",
+        "source": "goose",
+        "target": "opencode",
+        "relation": "alternative_to",
+        "lens": "DESIGN",
+        "source_name": "Goose — alternatif adapter pekerja",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Alternatif engine bila OpenCode tidak memenuhi kontrak.",
+        "operation": "NONE",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "goose -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073571+00:00",
+        "updated_at": "2026-10-25T21:03:37.073572+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "7f4645c5-fd6c-4e82-9fbc-3f6623cd1996",
+        "source": "pi",
+        "target": "opencode",
+        "relation": "alternative_to",
+        "lens": "DESIGN",
+        "source_name": "Pi — alternatif adapter pekerja",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Alternatif engine bila OpenCode tidak memenuhi kontrak.",
+        "operation": "NONE",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "pi -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073582+00:00",
+        "updated_at": "2026-10-25T21:03:37.073583+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "9a2ce85a-6fc2-40f3-9cf9-00a8568a8e41",
+        "source": "openhands",
+        "target": "opencode",
+        "relation": "alternative_to",
+        "lens": "DESIGN",
+        "source_name": "OpenHands — kandidat engine",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Kandidat engine pengganti/pembanding.",
+        "operation": "NONE",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "openhands -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073605+00:00",
+        "updated_at": "2026-10-25T21:03:37.073606+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "a4fc7296-fe6c-4b3d-aaa3-f1601d45745e",
+        "source": "deep-agents",
+        "target": "opencode",
+        "relation": "alternative_to",
+        "lens": "DESIGN",
+        "source_name": "Deep Agents — kandidat engine",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Kandidat engine pengganti/pembanding.",
+        "operation": "NONE",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "deep-agents -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073636+00:00",
+        "updated_at": "2026-10-25T21:03:37.073654+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "6e4d673e-8085-4dae-8e1a-dc033a0df3e0",
+        "source": "worker-runtime",
+        "target": "opencode",
+        "relation": "runs_with",
+        "lens": "DESIGN",
+        "source_name": "Worker Runtime — sandbox pekerja",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Menjalankan OpenCode non-interaktif dengan TaskSpec terbatas.",
+        "operation": "EXEC",
+        "boundary": "sandbox per task, tanpa host home/SSH/docker socket",
+        "identity_ref": "capability token",
+        "direction": "worker-runtime -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073365+00:00",
+        "updated_at": "2026-10-25T21:03:37.073366+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "e5d1111e-7fb6-4d27-8bce-6d098fdf144c",
+        "source": "rtk",
+        "target": "opencode",
+        "relation": "runs_with",
+        "lens": "DESIGN",
+        "source_name": "RTK — eksperimen reduksi konteks",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Eksperimen reduksi output tool pekerja.",
+        "operation": "EXEC",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "rtk -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073783+00:00",
+        "updated_at": "2026-10-25T21:03:37.073784+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      },
+      {
+        "id": "b448a30b-3e02-41af-a93a-5b1e0c9fb0ce",
+        "source": "readiness-doctor",
+        "target": "opencode",
+        "relation": "verifies",
+        "lens": "DESIGN",
+        "source_name": "Readiness Doctor — pemeriksaan kesiapan",
+        "target_name": "OpenCode — mesin eksekusi pekerja",
+        "status": "DESIGN",
+        "provenance": "install-manifest:sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+        "data_description": "Status engine pekerja.",
+        "operation": "READ",
+        "boundary": null,
+        "identity_ref": null,
+        "direction": "readiness-doctor -> opencode",
+        "scope": {
+          "domains": [
+            "PLATFORM"
+          ],
+          "source": "manifest"
+        },
+        "created_at": "2026-10-25T21:03:37.073541+00:00",
+        "updated_at": "2026-10-25T21:03:37.073541+00:00",
+        "last_observed_at": null,
+        "freshness": {
+          "at": null,
+          "stale": false
+        },
+        "tombstoned_at": null,
+        "evidence": "relasi rancangan dari manifest (bukan traffic teramati)",
+        "tests": []
+      }
+    ],
+    "total": 9,
+    "total_outgoing": 2,
+    "total_incoming": 7,
+    "page": 1,
+    "page_size": 500,
+    "source": "ComponentRelation (DESIGN/CONFIG/OBSERVED) + run/ledger records",
+    "checked_at": "2026-10-25T21:03:37.289381+00:00",
+    "mode": "DESIGN"
+  },
+  "evidence": {
+    "checks": [],
+    "observations": [],
+    "claims": [
+      {
+        "claim": "Tercatat dalam rancangan (InstallManifest)",
+        "level": "E1",
+        "status": "SELECTED_DESIGN",
+        "source": "install-manifest",
+        "at": null
+      },
+      {
+        "claim": "Instalasi",
+        "level": null,
+        "status": "UNKNOWN",
+        "source": "belum ada observasi",
+        "at": null,
+        "note": "belum diprobe; jalankan aeos inventory reconcile"
+      },
+      {
+        "claim": "Konektivitas (bukan bukti izin/keamanan)",
+        "level": null,
+        "status": "NOT_CHECKED",
+        "source": "belum ada observasi",
+        "at": null
+      },
+      {
+        "claim": "Fungsi terverifikasi untuk skenario tertentu",
+        "level": null,
+        "status": "NOT_TESTED",
+        "source": "belum ada observasi",
+        "at": null
+      }
+    ],
+    "eval_runs": [],
+    "last_checked_at": null,
+    "last_observed_at": null,
+    "last_used_at": null,
+    "last_used_refs": null,
+    "drift": []
+  },
+  "dependencies": [],
+  "cost": {
+    "design": {
+      "model": "FREE_TIER",
+      "amount": null,
+      "note": "Route gratis/murah per katalog bertanggal; bukan jaminan gratis selamanya.",
+      "source": "S07"
+    },
+    "actual": {
+      "status": "UNKNOWN",
+      "reason": "usage ledger belum menautkan komponen ini",
+      "total_usd": null
+    },
+    "free_expiry": {
+      "value": null,
+      "status": "UNKNOWN",
+      "reason": "masa gratis tidak tercatat; tidak ditebak"
+    },
+    "budget_source": {
+      "items": [],
+      "status": "NOT_APPLICABLE",
+      "reason": "bukan provider berbayar/terukur"
+    },
+    "quota_source": {
+      "items": [],
+      "status": "NOT_APPLICABLE",
+      "reason": "bukan provider"
+    }
+  },
+  "operations": {
+    "health": "opencode --version",
+    "restart": "Per run (dibunuh beserta process tree saat cancel).",
+    "uninstall": "Dikelola pemilik.",
+    "recovery": "Run diulang dengan attempt baru.",
+    "rollback": "Pin versi engine yang lulus kontrak.",
+    "retention": "Trace teredaksi.",
+    "support_status": "UNKNOWN",
+    "install": {
+      "kind": "manual",
+      "note": "Dari source resmi github:anomalyco/opencode; versi dipin setelah capability test."
+    },
+    "probe": {
+      "type": "binary",
+      "binaries": [
+        {
+          "name": "opencode",
+          "settings_override": "opencode_binary",
+          "version_args": [
+            "--version"
+          ],
+          "version_regex": "(\\d+\\.\\d+\\.\\d+)"
+        }
+      ],
+      "timeout_seconds": 15,
+      "ttl_seconds": 86400
+    },
+    "capability_tests": [
+      {
+        "id": "worker.contract",
+        "description": "Bounded tool/schema/patch task sesuai kontrak (§07 urutan 5).",
+        "functional": true,
+        "requires_authorization": true,
+        "evidence": "WorkerRun + verifier evidence"
+      }
+    ]
+  },
+  "changes": {
+    "decision_refs": [],
+    "decisions": [],
+    "proposals": [],
+    "research_entries": [],
+    "manifest_hash": "sha256:5049aa0e86ba7ec6db19579253aa402a083f51823001fb750ecf86dddcb6e3ec",
+    "manifest_record": {
+      "id": "59cad88c-6035-4b70-a339-7d16d274483d",
+      "loaded_at": "2026-10-25T21:03:37.034334+00:00"
+    },
+    "previous_accepted_configuration": {
+      "value": null,
+      "status": "UNKNOWN",
+      "reason": "belum ada outcome ACCEPTED dengan konfigurasi tercatat"
+    },
+    "propose_url": "/proposals?component=opencode"
+  },
+  "source_label": "InstallManifest + observasi + keputusan + run/ledger records",
+  "checked_at": "2026-10-25T21:03:37.237257+00:00"
+}

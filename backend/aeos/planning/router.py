@@ -13,7 +13,7 @@ from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, lo
 from aeos.core.enums import Domain
 from aeos.core.errors import Conflict, NotFound
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.planning import Plan, PlanVersion
 from aeos.planning import dag, runner, service
 
@@ -82,7 +82,8 @@ def list_plans(db: DB, principal: CurrentPrincipal, domain: ActiveDomain, projec
 def get_plan(plan_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
     plan = _load_plan(db, principal, domain, plan_id)
     _reconcile_expiry(db)
-    return {**service.plan_detail(db, plan), "checked_at": utcnow().isoformat()}
+    return {**service.plan_detail(db, plan), "source": "plans, plan_versions, planning_runs, decisions",
+            "checked_at": utcnow().isoformat()}
 
 
 @router.post("/api/plans/{plan_id}/run", status_code=202)
@@ -128,14 +129,16 @@ def get_version(plan_id: str, version_id: str, db: DB, principal: CurrentPrincip
     plan = _load_plan(db, principal, domain, plan_id)
     v = _load_version(db, plan, version_id)
     return {**service.version_view(v), "is_current": plan.current_version_id == v.id,
-            "is_approved": plan.approved_version_id == v.id}
+            "is_approved": plan.approved_version_id == v.id, "source": "plan_versions (immutable)",
+            "generated_at": utcnow().isoformat()}
 
 
 @router.get("/api/plans/{plan_id}/versions/{version_id}/diff")
 def diff_version(plan_id: str, version_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain,
                  against: str | None = None) -> dict[str, Any]:
     plan = _load_plan(db, principal, domain, plan_id)
-    return service.diff_versions(db, plan.id, version_id, against)
+    return {**service.diff_versions(db, plan.id, version_id, against), "source": "plan_versions (immutable)",
+            "generated_at": utcnow().isoformat()}
 
 
 class VersionIn(BaseModel):

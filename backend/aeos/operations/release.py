@@ -167,7 +167,12 @@ def build_release(
     main_branch: str = "main",
     builder: str = "cli",
     session: Session | None = None,
+    allow_unverified_ui: bool = False,
 ) -> dict[str, Any]:
+    """Build the release artifact of an accepted, clean ``main`` commit. A Control Center bundle whose commit
+    correspondence is UNVERIFIED (no build record, or built from a frontend tree with uncommitted changes) refuses
+    the build (fail closed: the approval UI must be the reviewed one) unless the owner passes
+    *allow_unverified_ui*, which is recorded in the provenance and the audit. MISMATCH always refuses."""
     repo = (repo or repo_root()).resolve()
     if not ref or ref.startswith("-") or any(ch.isspace() for ch in ref):
         raise ValidationFailed("invalid git ref (must be a commit/ref name, not an option)", code="RELEASE_BAD_REF")
@@ -214,6 +219,14 @@ def build_release(
                       "exact commit and no owner EXCEPTION decision. Sync CI evidence for the commit, or record "
                       f"an owner exception: aeos ops release accept --commit {commit} --operator <you> --reason ...",
                       code="RELEASE_NOT_ACCEPTED", details=acceptance)
+    dist = repo / "frontend" / "dist"
+    if (dist / "index.html").is_file():  # checked before anything is written
+        corr, corr_detail = ui_correspondence(repo, commit, dist)
+        if corr == "UNVERIFIED" and not allow_unverified_ui:
+            raise Blocked("the Control Center bundle (frontend/dist) is not proven to come from this commit "
+                          f"({corr_detail.get('reason')}); rebuild it in a clean checkout of the commit (npm run build) "
+                          "or, as an explicit owner choice, pass --allow-unverified-ui",
+                          code="RELEASE_UI_UNVERIFIED", details=corr_detail)
     tmp = out_dir / f".{release_id}.zip.tmp"
     _git(repo, "archive", "--format=zip", "-o", str(tmp), commit, timeout=300)
     tmp.replace(artifact)
@@ -221,6 +234,8 @@ def build_release(
         migrations = parse_migrations(zf)
         file_count = len(zf.namelist())
     ui = _build_ui_bundle(repo, out_dir, release_id, commit)
+    if ui is not None and ui.get("commit_correspondence") != "VERIFIED":
+        ui["unverified_allowed_by"] = builder  # the explicit owner override (allow_unverified_ui)
     git_version = _git(repo, "--version").strip()
     provenance = {
         "format": FORMAT,
@@ -251,7 +266,9 @@ def build_release(
                  target_type="controller_release", target_id=release_id,
                  details={"commit": commit, "artifact_sha256": provenance["artifact_sha256"],
                           "schema_head": provenance["schema_head"],
-                          "acceptance": {k: acceptance.get(k) for k in ("basis", "evidence_id", "decision_id")}})
+                          "acceptance": {k: acceptance.get(k) for k in ("basis", "evidence_id", "decision_id")},
+                          "ui_commit_correspondence": (ui or {}).get("commit_correspondence"),
+                          "ui_unverified_allowed": bool(ui and ui.get("unverified_allowed_by"))})
     return provenance
 
 
@@ -422,6 +439,18 @@ def artifact_integrity(settings: Settings, prov: dict[str, Any]) -> str:
     return "OK"
 
 
+def _ui_summary(ui: Any) -> dict[str, Any] | None:
+    """The pinned Control Center bundle as recorded in the provenance: its digest and whether it corresponds to
+    the release commit (VERIFIED / UNVERIFIED + reason). None = the release carries no UI bundle."""
+    if not isinstance(ui, dict):
+        return None
+    corr = ui.get("commit_correspondence") or "UNVERIFIED"  # provenance from before the record: never assumed
+    return {"sha256": ui.get("sha256"), "commit_correspondence": corr,
+            "reason": (ui.get("correspondence") or {}).get("reason"),
+            "frontend_tree": (ui.get("correspondence") or {}).get("bundle_frontend_tree"),
+            "unverified_allowed_by": ui.get("unverified_allowed_by")}
+
+
 def list_releases(settings: Settings) -> dict[str, Any]:
     out_dir = settings.layout.released_controller
     pointer = read_pointer(settings)
@@ -441,6 +470,7 @@ def list_releases(settings: Settings) -> dict[str, Any]:
                 "built_at": prov.get("built_at"), "builder": (prov.get("builder") or {}).get("actor"),
                 "integrity": artifact_integrity(settings, prov),
                 "role": "ACTIVE" if rid == active_id else "PREVIOUS" if rid == prev_id else "AVAILABLE",
+                "ui": _ui_summary(prov.get("ui")),
             })
     items.sort(key=lambda i: i.get("built_at") or "", reverse=True)
     return {"items": items, "active": pointer.get("active"), "previous": pointer.get("previous"),

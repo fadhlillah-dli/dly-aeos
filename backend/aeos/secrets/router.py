@@ -13,7 +13,7 @@ from aeos.api.deps import DB, CurrentPrincipal, SettingsDep
 from aeos.core.config import Settings
 from aeos.core.enums import Domain
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.cost import QuotaState
 from aeos.secrets.health import secrets_status, store_health
 

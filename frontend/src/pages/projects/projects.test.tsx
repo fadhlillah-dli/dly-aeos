@@ -346,8 +346,15 @@ describe("RepositoriesPanel joined repository view (§37)", () => {
               { number: 7, url: "https://github.com/octo/view/pull/7", state: "OPEN", head_ref: "aeos/t1", base_ref: "main", last_synced_at: null },
               { number: 8, url: "javascript:alert(1)", state: "CLOSED", head_ref: null, base_ref: null, last_synced_at: null },
             ],
-            ci: [{ provider: "github-actions", integration_id: "i-ci", configuration: "CONFIGURED" }],
-            docs_targets: [{ provider: "google-drive", root_id: "1AbCdEfGh", integration_id: "i-docs" }],
+            ci: [
+              { provider: "github-actions", integration_id: "i-ci", configuration: "CONFIGURED", pipeline_url: "https://github.com/octo/view/actions", pipeline_url_basis: "repository full_name" },
+              { provider: "bitbucket-pipelines", integration_id: "i-ci2", configuration: "CONFIGURED", pipeline_url: null, pipeline_url_basis: null },
+            ],
+            ci_latest: { evidence_id: "ev-ci", commit: "abcdef1234567890", overall: "PASS", checked_at: new Date().toISOString(), runs: 2, url: "https://github.com/octo/view/actions/runs/42/job/7", integrity: "VERIFIED", mode: "DEMO" },
+            docs_targets: [
+              { provider: "google-drive", root_id: "1AbCdEfGh", integration_id: "i-docs", target_url: "https://drive.google.com/drive/folders/1AbCdEfGh" },
+              { provider: "confluence", root_id: "998877", integration_id: "i-conf", target_url: "javascript:alert(1)" },
+            ],
             capability: {
               write_enablement: [
                 { integration_id: "i-docs", provider: "google-drive", purpose: "docs", decision_id: "d1", status: "ENABLED" },
@@ -374,6 +381,17 @@ describe("RepositoriesPanel joined repository view (§37)", () => {
     expect(within(section).getByRole("link", { name: /#7/ })).toHaveAttribute("href", "https://github.com/octo/view/pull/7");
     expect(within(section).getByText("Terbuka")).toBeInTheDocument();
     expect(within(section).getByText("1AbCdEfGh")).toBeInTheDocument();
+    // W6-110: CI pipeline / latest run / docs folder links from exact identifiers, https only
+    expect(within(section).getByRole("link", { name: /github-actions/ })).toHaveAttribute("href", "https://github.com/octo/view/actions");
+    expect(within(section).queryByRole("link", { name: /bitbucket-pipelines/ })).toBeNull();
+    expect(within(section).getByText(/tanpa tautan pipeline/)).toBeInTheDocument();
+    expect(within(section).getByRole("link", { name: /abcdef123456/ })).toHaveAttribute("href", "https://github.com/octo/view/actions/runs/42/job/7");
+    expect(within(within(section).getByTestId("ci-latest")).getByText("Lulus")).toBeInTheDocument();
+    // a DEMO/MOCK record is labelled, never shown as a real provider run
+    expect(within(within(section).getByTestId("ci-latest")).getByText("DEMO (fixture)")).toBeInTheDocument();
+    expect(within(section).getByRole("link", { name: /1AbCdEfGh/ })).toHaveAttribute("href", "https://drive.google.com/drive/folders/1AbCdEfGh");
+    expect(within(section).queryByRole("link", { name: /998877/ })).toBeNull();
+    expect(within(section).getByText("998877")).toBeInTheDocument();
     // a non-https provider URL is never rendered as a link
     expect(within(section).queryByRole("link", { name: /#8/ })).toBeNull();
     expect(within(section).getByText("#8")).toBeInTheDocument();

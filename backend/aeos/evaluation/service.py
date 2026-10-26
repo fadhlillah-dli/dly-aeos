@@ -125,7 +125,8 @@ def route_binding(session: Session, run: EvalRun) -> dict[str, Any]:
                 "reasons": ["route not in the model registry: terms/provider eligibility not assessed"],
                 "mismatches": [], "route_config_current": None}
     from aeos.evaluation.executor import configuration_mismatches
-    from aeos.routing.service import compute_config_hash, terms_eligibility
+    from aeos.routing.facade import terms_eligibility
+    from aeos.routing.service import compute_config_hash
 
     current = compute_config_hash(route)
     mismatches = configuration_mismatches(run, route)

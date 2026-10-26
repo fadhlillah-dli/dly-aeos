@@ -16,7 +16,7 @@ from aeos.core.errors import NotFound, PolicyDenied, ValidationFailed
 from aeos.core.timeutil import utcnow
 from aeos.cost import service
 from aeos.cost.ccusage import ccusage_estimate
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.routing import ModelRoute
 from aeos.models.workforce import WorkerRun
 

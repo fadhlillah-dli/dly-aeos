@@ -1,7 +1,8 @@
 import { api, ApiError } from "../../api/client";
 
 /**
- * Upload a proposal attachment (.md or other) through the intake module (parser isolation, §05/U-11).
+ * Upload an attachment (.md or other) for a proposal or a research entry through the intake module (parser
+ * isolation, §05/U-11); `source` labels the intake surface on the Attachment.
  * Attachments belong to a project in the active domain. The intake route is owned by the intake
  * module; both candidate paths are tried, and failure is reported — never silently skipped.
  */
@@ -15,14 +16,14 @@ function extractId(data: unknown): string | null {
   return nested && typeof nested.id === "string" ? nested.id : null;
 }
 
-export async function uploadAttachment(projectId: string, file: File): Promise<string> {
+export async function uploadAttachment(projectId: string, file: File, source = "proposal"): Promise<string> {
   let lastError: unknown = null;
   for (const path of CANDIDATE_PATHS(projectId)) {
     const form = new FormData();
     form.append("file", file);
     form.append("project_id", projectId);
     // The intake upload records an optional "source" label on the Attachment (default "upload").
-    form.append("source", "proposal");
+    form.append("source", source);
     try {
       const data = await api<unknown>(path, { method: "POST", body: form });
       const id = extractId(data);

@@ -270,7 +270,8 @@ def _result_key(r: CheckResultData | CheckResult) -> Any:
 def _persist(session: Session, results: list[CheckResultData], run: DoctorRun, ctx: CheckContext) -> None:
     from aeos.doctor.capabilities import invalidate
     from aeos.events import service as events
-    from aeos.inventory.observations import component_known, record_observation
+    from aeos.inventory.facade import record_observation
+    from aeos.inventory.observations import component_known
 
     previous: dict[Any, CheckResult] = dict(latest_results(session, [r.check_id for r in results
                                                                      if not (r.scope or {}).get("project_id")]))

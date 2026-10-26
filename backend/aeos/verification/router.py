@@ -21,7 +21,7 @@ from aeos.core.enums import Domain, Role
 from aeos.core.errors import AeosError, NotFound, ValidationFailed
 from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.evidence import AcceptanceRecord, EvidenceArtifact, ReviewRecord
 from aeos.models.planning import TaskSpec
 from aeos.models.portfolio import Project
@@ -187,7 +187,8 @@ def get_review(review_id: str, principal: CurrentPrincipal, domain: ActiveDomain
     rec = db.scalar(select(ReviewRecord).where(ReviewRecord.id == review_id, _review_scope(db, principal, domain)))
     if rec is None:
         raise NotFound("review not found")
-    return review.review_view(rec)
+    # an immutable review record: its claims date from created_at; generated_at = when it was read
+    return {**review.review_view(rec), "source": "review_records", "generated_at": utcnow().isoformat()}
 
 
 class ManualResultIn(BaseModel):

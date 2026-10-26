@@ -108,7 +108,9 @@ def _scoped_attachment(db: Any, principal: Any, domain: Any, attachment_id: str)
 @router.get("/api/attachments/{attachment_id}")
 def get_attachment(attachment_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     att = _scoped_attachment(db, principal, domain, attachment_id)
-    return {"attachment": service.attachment_view(att), "notice": service.TRUST_NOTICE}
+    return {"attachment": service.attachment_view(att), "notice": service.TRUST_NOTICE,
+            "source": "aeos-intake (stored upload + scan result)", "generated_at": utcnow().isoformat(),
+            "mode": "LIVE"}
 
 
 @router.get("/api/attachments/{attachment_id}/text")
@@ -126,4 +128,7 @@ def get_attachment_text(
         "trust": "UNTRUSTED_DATA",
         "findings": att.scan_findings or [],
         "notice": service.TRUST_NOTICE,
+        "source": "aeos-intake (extracted text, redacted)",
+        "generated_at": utcnow().isoformat(),
+        "mode": "LIVE",
     }
