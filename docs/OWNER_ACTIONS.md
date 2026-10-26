@@ -70,9 +70,12 @@ Control Center (`./aeos serve`, then http://127.0.0.1:8787) the same results are
 
 ### 1.1 Clone [per machine]
 
+`xcode-select --install` provides git and the compilers. The Homebrew prefix is `/opt/homebrew` on the M4 and
+`/usr/local` on the i9.
+
 ```bash
-xcode-select --install                    # git and compilers
-brew install git python@3.13 node@22      # Homebrew prefix: /opt/homebrew on the M4, /usr/local on the i9
+xcode-select --install
+brew install git python@3.13 node@22
 git clone https://github.com/fadhlillah-dli/dly-aeos.git
 cd dly-aeos
 ```
@@ -82,8 +85,10 @@ Work on `main`. If `node --version` is not found, follow the PATH hint in
 
 ### 1.2 Bootstrap [per machine]
 
+If `./scripts/bootstrap.sh` answers "Permission denied", run `sh scripts/bootstrap.sh` instead.
+
 ```bash
-./scripts/bootstrap.sh        # "Permission denied": run  sh scripts/bootstrap.sh
+./scripts/bootstrap.sh
 ./aeos version
 ./aeos doctor
 ```
@@ -100,25 +105,35 @@ redacted, then hand the file to the builder as `docs/evidence/doctor-sample-maco
 
 ### 1.3 First admin [per machine]
 
+`admin create` prompts for your login name and a password of at least 12 characters. `doctor -g LOCAL_AUTH` must
+show `auth.bootstrap` and `auth.default_credentials` VERIFIED. `serve` runs at http://127.0.0.1:8787: sign in and
+choose PERSONAL.
+
 ```bash
-./aeos admin create           # prompts for your login name and a password of at least 12 characters
-./aeos doctor -g LOCAL_AUTH   # auth.bootstrap and auth.default_credentials: VERIFIED
-./aeos serve                  # http://127.0.0.1:8787, sign in, choose PERSONAL
+./aeos admin create
+./aeos doctor -g LOCAL_AUTH
+./aeos serve
 ```
 
 Lost password: `./aeos admin recover <username>`.
 
 ### 1.4 Claude Code login and bridge test [per machine]
 
+Running `claude` the first time asks you to sign in with your Claude Max account; then type `/exit`.
+`claude auth status` must show `loggedIn true`, authMethod `claude.ai` and subscriptionType `max`. The `echo`
+must print `<not set>`; remove any `ANTHROPIC_API_KEY` export from `~/.zshrc` and `~/.zprofile`. The `fable` bridge
+test must resolve inside the Fable family, with no MODEL_POLICY_MISMATCH. `doctor --functional` is the Claude
+capability test and uses a little Max quota.
+
 ```bash
 brew install --cask claude-code
-claude                        # sign in with your Claude Max account, then /exit
-claude auth status            # loggedIn true, authMethod "claude.ai", subscriptionType "max"
-echo "${ANTHROPIC_API_KEY:-<not set>}"   # must print <not set>; remove any export from ~/.zshrc and ~/.zprofile
+claude
+claude auth status
+echo "${ANTHROPIC_API_KEY:-<not set>}"
 ./aeos bridge test --model opus
-./aeos bridge test --model fable         # must resolve inside the Fable family, no MODEL_POLICY_MISMATCH
+./aeos bridge test --model fable
 ./aeos bridge status
-./aeos doctor --functional               # Claude capability test (uses a little Max quota)
+./aeos doctor --functional
 ```
 
 You can run the same capability test from the Control Center: *Model & Rute* (`/models`) → *Pengawas* →
@@ -133,9 +148,11 @@ local file on each machine. The repository is public, so never commit them.
 
 ```bash
 CFG="$HOME/Library/Application Support/DLY-AEOS/aeos.yaml"
-[ -f "$CFG" ] || cp config/aeos.example.yaml "$CFG"
-code "$CFG"                   # or: nano "$CFG"
+test -f "$CFG" || cp config/aeos.example.yaml "$CFG"
+code "$CFG"
 ```
+
+Use `nano "$CFG"` instead of `code "$CFG"` if you prefer a terminal editor.
 
 Uncomment the `commit_identities` block and replace every placeholder. A value left as `<...>` is refused.
 
@@ -166,17 +183,23 @@ Each Mac builds its own images, natively: linux/arm64 on the M4, linux/amd64 on 
 own containment report. A report is bound to the image id and the host, so a report from one Mac never admits
 the container sandbox on another.
 
+Homebrew picks the right Docker build. Or download it from docker.com: "Mac with Apple chip" (M4) or "Mac with
+Intel chip" (i9). Expected results: `worker containment` reports overall=PASS for the PERSONAL profile and for
+the OFFICE profile (OFFICE stays blocked, section 4). `worker status` shows "requirement for PERSONAL: READY
+(kind=container)" and "integrity hold: CLEAR". `doctor -g CONTAINMENT` shows `containment.sandbox` and
+`containment.report` no longer BLOCKED / NOT_PROVEN, and `doctor -g EVIDENCE_REVIEW` shows `evidence.verifier`
+reporting the CONTAINER runner, not WEAK.
+
 ```bash
-brew install --cask docker    # Homebrew picks the right build. Or download from docker.com:
-                              # "Mac with Apple chip" (M4) or "Mac with Intel chip" (i9)
+brew install --cask docker
 open -a Docker && docker version
 docker build --build-arg OPENCODE_VERSION=1.19.3 -t dly-aeos-worker:1.19.3 sandbox/
 docker build -f sandbox/verifier.Dockerfile -t dly-aeos-verifier:0.1.0 .
-./aeos worker containment --kind container                  # PERSONAL profile: overall=PASS
-./aeos worker containment --kind container --domain OFFICE  # OFFICE profile: overall=PASS (OFFICE stays blocked, section 4)
-./aeos worker status --domain PERSONAL   # "requirement for PERSONAL: READY (kind=container)", "integrity hold: CLEAR"
-./aeos doctor -g CONTAINMENT             # containment.sandbox and containment.report no longer BLOCKED / NOT_PROVEN
-./aeos doctor -g EVIDENCE_REVIEW         # evidence.verifier reports the CONTAINER runner, not WEAK
+./aeos worker containment --kind container
+./aeos worker containment --kind container --domain OFFICE
+./aeos worker status --domain PERSONAL
+./aeos doctor -g CONTAINMENT
+./aeos doctor -g EVIDENCE_REVIEW
 .venv/bin/python -m pytest -m integration -q -p no:cacheprovider tests/acceptance/test_containment.py
 ```
 
@@ -192,14 +215,19 @@ image rebuild and at least weekly ([1.15](#115-recurring-owner-actions)).
 
 ### 1.7 OpenBao: install, init, unseal [per machine]
 
+`<X.Y.Z>` is an exact release you reviewed at github.com/openbao/openbao/releases; the installer picks
+darwin_arm64 or darwin_amd64 and shows the SHA256. `vault init` shows the unseal key(s) ONCE on a temporary
+screen; type `stored` to close it. `doctor -g SECRET` must show the `secret.openbao_*` checks passing, and
+`doctor --functional -g SECRET` must show `secret.keyring` VERIFIED (allow the Keychain prompt for the dly-aeos
+service only).
+
 ```bash
-./aeos vault install --version <X.Y.Z>   # an exact release you reviewed at github.com/openbao/openbao/releases;
-                                         # the installer picks darwin_arm64 or darwin_amd64 and shows the SHA256
+./aeos vault install --version <X.Y.Z>
 ./aeos vault start
-./aeos vault init                        # shows the unseal key(s) ONCE on a temporary screen; type "stored" to close it
+./aeos vault init
 ./aeos vault status --verify
-./aeos doctor -g SECRET                  # secret.openbao_* checks pass
-./aeos doctor --functional -g SECRET     # secret.keyring VERIFIED (allow the Keychain prompt for the dly-aeos service only)
+./aeos doctor -g SECRET
+./aeos doctor --functional -g SECRET
 ```
 
 Run `vault init` in a terminal: it shows the unseal key(s) on a temporary screen. Store them offline (password
@@ -226,12 +254,16 @@ tersedia)". Never combine it with the process-sandbox exception ([2.7](#27-proce
 
 ### 1.8 Secrets: OpenRouter and the GitHub token [per machine]
 
+The OpenRouter key should have a spend limit; it is prompted without echo. `personal/github` takes the fine-grained
+PAT and its expiry date (see below). `delivery capabilities --record` records the GitHub provider capability
+probe as evidence. `doctor -g DELIVERY` must show `delivery.branch_protection`: the main ruleset reads CONFIGURED.
+
 ```bash
-./aeos secrets set workers/openrouter    # an OpenRouter key with a spend limit, prompted without echo
-./aeos secrets set personal/github --expires-at <YYYY-MM-DD>   # fine-grained PAT and its expiry date, see below
+./aeos secrets set workers/openrouter
+./aeos secrets set personal/github --expires-at <YYYY-MM-DD>
 ./aeos secrets status
-./aeos delivery capabilities --record    # records the GitHub provider capability probe as evidence
-./aeos doctor -g DELIVERY                # delivery.branch_protection: the main ruleset reads CONFIGURED
+./aeos delivery capabilities --record
+./aeos doctor -g DELIVERY
 ./aeos doctor --functional -g PROJECT_ADAPTERS
 ```
 
@@ -267,10 +299,13 @@ verified.
 
 ### 1.9 OpenCode and the contract test [per machine]
 
+`install-manifest/` is authoritative for the version. `opencode --version` must print 1.19.3 and
+`worker contract-test` must report overall=PASS.
+
 ```bash
-npm install -g opencode-ai@1.19.3        # install-manifest/ is authoritative for the version
-opencode --version                       # 1.19.3
-./aeos worker contract-test              # overall=PASS
+npm install -g opencode-ai@1.19.3
+opencode --version
+./aeos worker contract-test
 ./aeos doctor -g WORKER
 ```
 
@@ -285,13 +320,16 @@ Optional: `.venv/bin/python -m pytest -m integration tests/integration/test_work
    publishing status to "In production" (AEOS requests only `drive.file`).
 3. Under *Credentials → Create credentials → OAuth client ID*, choose type **Desktop app** and download the JSON.
 
+Delete the downloaded client secret file (the `rm` below) only after the consent succeeded. `doctor --functional -c
+CAN_PUBLISH_PERSONAL` must end READY.
+
 ```bash
 ./aeos publish google-connect --client-secret ~/Downloads/client_secret_<...>.json
-rm ~/Downloads/client_secret_<...>.json          # after consent succeeded
+rm ~/Downloads/client_secret_<...>.json
 ./aeos publish google-status
 ./aeos policy decide --kind WRITE_ENABLEMENT --provider google-drive --enable --domain PERSONAL --as <admin> --rationale "Enable PERSONAL docs publication"
 ./aeos policy decide --kind WRITE_ENABLEMENT --provider github-issues --enable --domain PERSONAL --as <admin> --rationale "Enable platform GitHub issues"
-./aeos doctor --functional -c CAN_PUBLISH_PERSONAL   # READY
+./aeos doctor --functional -c CAN_PUBLISH_PERSONAL
 ```
 
 Leave the Drive root empty for the first publication: AEOS creates the project folder in My Drive. Or enter a
@@ -302,9 +340,11 @@ rendered diagrams: `npm install -g @mermaid-js/mermaid-cli`, then `./aeos docs v
 
 Activating a route is your explicit decision. Nothing is active by default.
 
+Copy the route key and its config hash from the `routes list` output.
+
 ```bash
 ./aeos routes refresh
-./aeos routes list --pool WORKER         # copy the route key and its config hash
+./aeos routes list --pool WORKER
 ./aeos routes activate <route_key> --as <admin> --mode TRIAL --expected-hash <hash> --terms-reviewed --terms-note "<what you read>" --rationale "<why this route>"
 ```
 
@@ -387,11 +427,13 @@ Activating a route is your explicit decision. Nothing is active by default.
 
 Then set this machine's resource budget and enable the worker agent:
 
+`agent-prereqs` is repeated until it reports READY; `doctor -c CAN_RUN_WORKER` must end READY.
+
 ```bash
 ./aeos doctor budget --cpu <n> --ram <GiB> --disk <GiB> --max-workers <n> --reason "<measured on this Mac>"
-./aeos work agent-prereqs opencode-implementer --domain PERSONAL     # until READY
+./aeos work agent-prereqs opencode-implementer --domain PERSONAL
 ./aeos work agent-enable opencode-implementer --as <admin> --domain PERSONAL --reason "<why>"
-./aeos doctor -c CAN_RUN_WORKER                                      # READY
+./aeos doctor -c CAN_RUN_WORKER
 ```
 
 The M4 and the i9 have different hardware, so measure each one. In the UI the agent controls are on *Organisasi &
@@ -402,15 +444,18 @@ Peran* → agent card → *Periksa prasyarat* / *Aktifkan*.
 The real manifest has no approved pins, so drift from an approved version is never detected. On each platform
 you use, collect the observed values:
 
+For `claude-code` note `versions.observed_version` and `versions.observed_digest`; for `opencode` also the
+contract test's tool schema hash. The `codesign` line shows the macOS signer of claude-code.
+
 ```bash
 ./aeos inventory reconcile
-./aeos inventory show claude-code --json      # versions.observed_version, versions.observed_digest
-./aeos inventory show opencode --json         # also the contract test's tool schema hash
+./aeos inventory show claude-code --json
+./aeos inventory show opencode --json
 ./aeos inventory show openbao --json
 ./aeos inventory show git --json
 ./aeos inventory show python-runtime --json
 ./aeos inventory show nodejs-runtime --json
-codesign -dv --verbose=2 "$(which claude)" 2>&1 | grep TeamIdentifier   # macOS signer of claude-code
+codesign -dv --verbose=2 "$(which claude)" 2>&1 | grep TeamIdentifier
 ```
 
 Then make the change in `install-manifest/manifest.yaml` through a reviewed PR (see
@@ -438,10 +483,12 @@ it carries the new `aeos.opencode_version` label.
 
 ### 1.13 First plan approval, first run, first publication [primary machine]
 
+`plan status` must show READY_FOR_HUMAN_REVIEW, bridge proof PROVEN and four verified stage runs.
+
 ```bash
 ./aeos plan create --project dly-aeos --domain PERSONAL --title "<title>" --prompt-file <idea.md> --actor <admin>
 ./aeos plan run <plan_id> --actor <admin>
-./aeos plan status <plan_id>     # READY_FOR_HUMAN_REVIEW, bridge proof PROVEN, four verified stage runs
+./aeos plan status <plan_id>
 ```
 
 1. **Approve.** On *Rencana* (`/plans`) → plan, review the version, then press *Approve*. Press *Approve &
@@ -466,11 +513,13 @@ it carries the new `aeos.opencode_version` label.
 
 ### 1.14 Backup, restore test, first release [per machine]
 
+Note the `backup_id` from `backup list`. `doctor -g RECOVERY` must show `recovery.restore_test` VERIFIED.
+
 ```bash
 ./aeos ops backup create --label first
-./aeos ops backup list                     # note the backup_id
+./aeos ops backup list
 ./aeos ops backup restore-test <backup_id>
-./aeos doctor -g RECOVERY                  # recovery.restore_test VERIFIED
+./aeos doctor -g RECOVERY
 ```
 
 The same controls are on *Riwayat & Pemulihan* (`/history`) → *Backup & pemulihan*. Copy one restore-tested
@@ -480,12 +529,14 @@ your recovery path for those.
 Optional but needed for `recovery.config_rollback`: promote the first controller release
 ([runbook](runbooks/controller-upgrade-rollback.md)).
 
+The first `release build` answers RELEASE_NOT_ACCEPTED when no trusted CI PASS is recorded for the commit; the
+`release accept` line records it. Note the `release_id` printed by the second build.
+
 ```bash
 (cd frontend && npm ci && npm run build)
 ./aeos ops release build --ref HEAD
-# RELEASE_NOT_ACCEPTED (no trusted CI PASS recorded for this commit):
 ./aeos ops release accept --commit "$(git rev-parse HEAD)" --operator <admin> --reason "GitHub Actions CI green on main for this commit"
-./aeos ops release build --ref HEAD        # note the release_id
+./aeos ops release build --ref HEAD
 ./aeos ops release promote <release_id> --operator <admin> --reason "first release"
 ```
 
@@ -578,8 +629,10 @@ Record: in a PERSONAL session, *Kesiapan (Doctor)* → check `worker.route_behav
 pemilik*. The form shows the exact `max_failure_rate` before you confirm. CLI alternative, the same POLICY decision
 (target `worker_route_behaviour:tool_schema_failures`); it prints the exact value before it asks for your password:
 
+The value is between 0 and 1 (0.05 = 5%).
+
 ```bash
-./aeos policy route-threshold --max-failure-rate 0.05 --domain PERSONAL --as <admin> --rationale "<why>"   # 0..1, 0.05 = 5%
+./aeos policy route-threshold --max-failure-rate 0.05 --domain PERSONAL --as <admin> --rationale "<why>"
 ```
 
 A newer decision replaces the threshold. It never makes a route pass without trusted evaluation.
@@ -640,9 +693,11 @@ These ADRs are PROPOSED: [0004](decisions/ADR-0004-first-admin-bootstrap-hardeni
 
 Record:
 
+The outcome is ACCEPTED, or REJECTED / SUPERSEDED (with `--superseded-by ADR-NNNN`).
+
 ```bash
 ./aeos policy adrs --load
-./aeos policy adr-decide ADR-0004 --outcome ACCEPTED --as <admin> --rationale "<why>"   # or REJECTED / SUPERSEDED --superseded-by ADR-NNNN
+./aeos policy adr-decide ADR-0004 --outcome ACCEPTED --as <admin> --rationale "<why>"
 ```
 
 Or use *Keputusan* → *Register ADR*. Your decision is bound to the ADR's content hash: a later edit of the file
@@ -693,9 +748,11 @@ Then, once, through a reviewed PR: in `policy/mci-reference.yaml` set `status: V
 `content_hash`, `location: local:MCI_V2_SOURCE_OF_TRUTH.md` and `verified_at`. Every machine must hold the
 byte-identical file.
 
+`doctor -g CANONICAL_POLICY` must show `policy.mci` CONFIGURED; compliance stays NOT-PROVEN.
+
 ```bash
 ./aeos policy snapshot --refresh
-./aeos doctor -g CANONICAL_POLICY    # policy.mci CONFIGURED; compliance stays NOT-PROVEN
+./aeos doctor -g CANONICAL_POLICY
 ```
 
 After that, three follow-up decisions open up, all from MCI_V2 only:

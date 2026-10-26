@@ -58,6 +58,10 @@ host) (§06).
     `aeos.core.attribution` (refused, never silently stripped); the broker refuses any push whose commits do not
     match the configured identity of the provider (`aeos.core.commit_identity`). The repository is public:
     placeholders only (`you@example.com`), never a real address.
+12. **A secret seen in chat is burned** (incident 2026-10-26): a secret that appears in chat, a log, a ticket or a
+    terminal paste is compromised. Never quote it back, repeat it or store it; tell the owner to rotate or re-key it
+    (unseal keys: `docs/runbooks/openbao-unseal-recovery.md` step 6, `docs/OWNER_ACTIONS.md` 1.7). Credentials are
+    touched only on the owner's explicit instruction.
 
 ## Protected paths (self-build, §09)
 
