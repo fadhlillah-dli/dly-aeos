@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ShieldAlert, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
@@ -13,6 +13,8 @@ import { CopyCommand } from "../integrations/CopyCommand";
 /** Backend worker_runtime.integrity: the human decision that reconciles exactly one hold. */
 export const HOLD_TARGET_TYPE = "worker_integrity_hold";
 export const HOLD_RECONCILE_KIND = "RISK_ACCEPTANCE";
+/** sandbox.integrity_hold_block sends at most this many of this domain's findings */
+const MAX_SHOWN_FINDINGS = 20;
 
 const SOURCE_LABEL: Record<string, string> = { "worker run": "run worker", verification: "verifikasi" };
 const CHANGE_LABEL: Record<string, string> = {
@@ -25,7 +27,8 @@ const CHANGE_LABEL: Record<string, string> = {
 /** What the runtime did with a changed controller/config/bytecode file (its English detail text), never a pass. */
 export function neutralisationSpec(detail: string | undefined): { status: string; label: string } | null {
   const d = detail ?? "";
-  if (/could NOT be removed|NOT restored/.test(d)) return { status: "FAILED", label: "Netralisasi gagal - pulihkan manual" };
+  // "NOT restored (...)", "not restored (no config path)", "could NOT be removed": the owner restores it by hand
+  if (/could not be removed|not restored/i.test(d)) return { status: "FAILED", label: "Netralisasi gagal - pulihkan manual" };
   if (/restored to the pre-run content/.test(d)) return { status: "UPDATED", label: "Config dipulihkan ke isi sebelum run" };
   if (/cache file removed|removed \(did not exist before the run\)/.test(d)) return { status: "UPDATED", label: "File dihapus oleh runtime" };
   return null;
@@ -81,7 +84,7 @@ function FindingsTable({ findings }: { findings: IntegrityFinding[] }) {
  * to exactly this hold id. Two explicit steps; the domain is the one the human chose for this session (never
  * suggested). A later finding raises a NEW hold that needs its own reconciliation.
  */
-function ReconcileForm({ hold, domain, onDone }: { hold: IntegrityHold & { id: string }; domain: string; onDone: () => void }) {
+function ReconcileForm({ hold, domain, onDone }: { hold: IntegrityHold & { id: string }; domain: string; onDone: (decisionId: string) => void }) {
   const [open, setOpen] = useState(false);
   const [checked, setChecked] = useState(false);
   const [rationale, setRationale] = useState("");
@@ -96,54 +99,63 @@ function ReconcileForm({ hold, domain, onDone }: { hold: IntegrityHold & { id: s
         allowed_operations: [],
         expires_at: new Date(Date.now() + 86_400_000).toISOString(),
       }),
-    onSuccess: () => onDone(),
+    onSuccess: (d) => onDone(d.id),
   });
-  if (save.data) {
-    return (
-      <div aria-live="polite">
-        <Notice tone="info">
-          <span className="inline-flex items-center gap-1 font-medium">
-            <ShieldCheck className="h-4 w-4" aria-hidden /> Rekonsiliasi tercatat sebagai keputusan <Mono>{save.data.id}</Mono>.
-          </span>{" "}
-          Admission worker dibaca ulang dari backend; temuan baru akan memunculkan hold baru yang memerlukan rekonsiliasi baru.
-        </Notice>
-      </div>
-    );
-  }
-  if (!open) {
-    return (
-      <Button variant="danger" onClick={() => setOpen(true)}>
-        <ShieldCheck className="h-4 w-4" aria-hidden /> Catat rekonsiliasi…
-      </Button>
-    );
-  }
+  // focus returns to the opener when the owner cancels (the form's first control takes focus when it opens)
+  const opener = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (wasOpen.current && !open) opener.current?.focus();
+    wasOpen.current = open;
+  }, [open]);
   const valid = checked && rationale.trim().length >= 10;
   return (
-    <div className="space-y-3 rounded-md border border-line bg-surface-2 p-3 text-sm" role="group" aria-label="Rekonsiliasi integrity hold">
-      <p>
-        Keputusan yang akan dicatat: <b>{HOLD_RECONCILE_KIND}</b> oleh Anda (manusia), target{" "}
-        <Mono>
-          {HOLD_TARGET_TYPE}:{hold.id}
-        </Mono>
-        , domain sesi <b>{domain}</b> (pilihan Anda), berlaku 1 hari. Hold ini berlaku untuk semua domain; keputusan dari domain mana pun
-        mengangkatnya. AEOS tidak memulihkan apa pun untuk Anda.
-      </p>
-      <label className="flex items-start gap-2">
-        <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} />
-        Saya sudah meninjau temuan, memulihkan checkout controller (git status / git checkout) dan data, dan menerima risiko residualnya.
-      </label>
-      <Field label="Apa yang Anda periksa dan pulihkan (wajib)" hint="Minimal 10 karakter; tersimpan pada keputusan dan audit.">
-        <textarea aria-label="Apa yang Anda periksa dan pulihkan" className={inputClass} rows={2} value={rationale} onChange={(e) => setRationale(e.target.value)} />
-      </Field>
-      <ErrorBox error={save.error} />
-      <div className="flex flex-wrap gap-2">
-        <Button variant="danger" disabled={!valid} busy={save.isPending} onClick={() => save.mutate()}>
-          Konfirmasi keputusan {HOLD_RECONCILE_KIND}
-        </Button>
-        <Button variant="ghost" onClick={() => setOpen(false)}>
-          Batal
-        </Button>
+    <div className="space-y-2">
+      {/* always mounted, so a screen reader announces the recorded decision when it appears */}
+      <div aria-live="polite">
+        {save.data && (
+          <Notice tone="info">
+            <span className="inline-flex items-center gap-1 font-medium">
+              <ShieldCheck className="h-4 w-4" aria-hidden /> Rekonsiliasi tercatat sebagai keputusan <Mono>{save.data.id}</Mono>.
+            </span>{" "}
+            Admission worker dibaca ulang dari backend; temuan baru akan memunculkan hold baru yang memerlukan rekonsiliasi baru.
+          </Notice>
+        )}
       </div>
+      {!save.data && !open && (
+        <Button ref={opener} variant="danger" onClick={() => setOpen(true)}>
+          <ShieldCheck className="h-4 w-4" aria-hidden /> Catat rekonsiliasi…
+        </Button>
+      )}
+      {!save.data && open && (
+        <div className="space-y-3 rounded-md border border-line bg-surface-2 p-3 text-sm" role="group" aria-label="Rekonsiliasi integrity hold">
+          <p>
+            Keputusan yang akan dicatat: <b>{HOLD_RECONCILE_KIND}</b> oleh Anda (manusia), target{" "}
+            <Mono>
+              {HOLD_TARGET_TYPE}:{hold.id}
+            </Mono>
+            , domain sesi <b>{domain}</b> (pilihan Anda), berlaku 1 hari. Hold ini berlaku untuk semua domain; keputusan dari domain mana pun
+            mengangkatnya. AEOS tidak memulihkan apa pun untuk Anda.
+          </p>
+          <label className="flex items-start gap-2">
+            {/* autoFocus: focus moves into the form the owner just opened */}
+            <input type="checkbox" className="mt-0.5 shrink-0" autoFocus checked={checked} onChange={(e) => setChecked(e.target.checked)} />
+            <span>Saya sudah meninjau temuan, memulihkan checkout controller (git status / git checkout) dan data, dan menerima risiko residualnya.</span>
+          </label>
+          <Field label="Apa yang Anda periksa dan pulihkan (wajib)" hint="Minimal 10 karakter; tersimpan pada keputusan dan audit.">
+            <textarea aria-label="Apa yang Anda periksa dan pulihkan" className={inputClass} rows={2} value={rationale} onChange={(e) => setRationale(e.target.value)} />
+          </Field>
+          <ErrorBox error={save.error} />
+          <div className="flex flex-wrap gap-2">
+            <Button variant="danger" disabled={!valid} busy={save.isPending} onClick={() => save.mutate()}>
+              Konfirmasi keputusan {HOLD_RECONCILE_KIND}
+            </Button>
+            <Button variant="ghost" onClick={() => setOpen(false)}>
+              Batal
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -152,17 +164,28 @@ function ReconcileForm({ hold, domain, onDone }: { hold: IntegrityHold & { id: s
  * Wave 7 (W6-000/005, master §09 Zone 1): the host-wide integrity hold. Shown prominently (text + icon + colour):
  * it blocks every worker in every domain until the owner reconciles it with a human decision bound to the hold id.
  */
-export function IntegrityHoldPanel({ sandbox, compact = false }: { sandbox: SandboxReadiness & { integrity_hold: IntegrityHold }; compact?: boolean }) {
+export function IntegrityHoldPanel({
+  sandbox,
+  compact = false,
+  onReconciled,
+}: {
+  sandbox: SandboxReadiness & { integrity_hold: IntegrityHold };
+  compact?: boolean;
+  /** called with the recorded decision id, so the page can confirm it after the hold (and this panel) is gone */
+  onReconciled?: (decisionId: string, holdId: string) => void;
+}) {
   const { isAdmin, domain } = useAuth();
   const qc = useQueryClient();
   const hold = sandbox.integrity_hold;
+  const findings = hold.findings ?? [];
+  const otherDomain = hold.other_domain_findings ?? 0;
   const command = reconcileCommand(sandbox.remedies ?? []);
   const source = hold.source ? SOURCE_LABEL[hold.source] ?? hold.source : "UNKNOWN";
   return (
     <section className="space-y-3 rounded-lg border-2 border-bad/50 bg-bad-bg p-4 text-sm text-bad" aria-label="Integrity hold aktif" data-testid="integrity-hold">
       <div className="flex flex-wrap items-center gap-2">
         <ShieldAlert className="h-5 w-5 shrink-0" aria-hidden />
-        <h2 className="text-base font-semibold">Integrity hold aktif: semua worker di semua domain diblokir</h2>
+        <h2 className="min-w-0 text-base font-semibold">Integrity hold aktif: semua worker di semua domain diblokir</h2>
         <StatusBadge status="BLOCKED" label="INTEGRITY_HOLD" title="INTEGRITY_HOLD" />
       </div>
       <p className="text-ink">
@@ -172,8 +195,8 @@ export function IntegrityHoldPanel({ sandbox, compact = false }: { sandbox: Sand
       </p>
       {compact ? (
         <p className="text-ink">
-          ID hold <Mono>{hold.id ?? "UNKNOWN"}</Mono> · terdeteksi {absoluteTime(hold.detected_at)} · {hold.findings.length} temuan di domain ini
-          {hold.other_domain_findings > 0 ? ` + ${hold.other_domain_findings} dari domain lain` : ""}.{" "}
+          ID hold <Mono>{hold.id ?? "UNKNOWN"}</Mono> · terdeteksi {absoluteTime(hold.detected_at)} · {findings.length} temuan di domain ini
+          {otherDomain > 0 ? ` + ${otherDomain} dari domain lain` : ""}.{" "}
           <Link to="/work" className="text-accent underline">
             Lihat temuan dan langkah pemilik di Pekerjaan Live
           </Link>
@@ -201,10 +224,15 @@ export function IntegrityHoldPanel({ sandbox, compact = false }: { sandbox: Sand
               ],
             ]}
           />
-          <FindingsTable findings={hold.findings} />
-          {hold.other_domain_findings > 0 && (
+          <FindingsTable findings={findings} />
+          {findings.length >= MAX_SHOWN_FINDINGS && (
             <p className="text-xs text-ink-2">
-              + {hold.other_domain_findings} temuan dari domain lain: hanya jumlahnya yang ditampilkan di domain ini (invarian 9).
+              Hanya {MAX_SHOWN_FINDINGS} temuan pertama yang dikirim ke tampilan ini; daftar lengkap: <Mono>aeos worker status</Mono>.
+            </p>
+          )}
+          {otherDomain > 0 && (
+            <p className="text-xs text-ink-2">
+              + {otherDomain} temuan dari domain lain: hanya jumlahnya yang ditampilkan di domain ini (invarian 9).
             </p>
           )}
           {sandbox.reasons.length > 0 && (
@@ -240,9 +268,12 @@ export function IntegrityHoldPanel({ sandbox, compact = false }: { sandbox: Sand
           </div>
           {isAdmin && domain && hold.id ? (
             <ReconcileForm
+              // a new hold (new id) after a reconciliation gets a fresh form, never the previous hold's result
+              key={hold.id}
               hold={{ ...hold, id: hold.id }}
               domain={domain}
-              onDone={() => {
+              onDone={(decisionId) => {
+                onReconciled?.(decisionId, hold.id as string);
                 qc.invalidateQueries({ queryKey: ["workforce-summary"] });
                 qc.invalidateQueries({ queryKey: ["worker-sandbox"] });
                 qc.invalidateQueries({ queryKey: ["decisions"] });

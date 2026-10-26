@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
@@ -41,7 +41,10 @@ function ThresholdForm({ current, domain }: { current: RouteBehaviourThreshold; 
   const [rate, setRate] = useState("");
   const [rationale, setRationale] = useState("");
   const parsed = rate.trim() === "" ? NaN : Number(rate.replace(",", "."));
-  const valid = Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 && rationale.trim().length >= 10;
+  const inRange = Number.isFinite(parsed) && parsed >= 0 && parsed <= 100;
+  // the exact value recorded (0..1, 4 decimals) - shown before the owner confirms
+  const recordedRate = inRange ? Math.round((parsed / 100) * 10000) / 10000 : null;
+  const valid = recordedRate !== null && rationale.trim().length >= 10;
   const save = useMutation({
     mutationFn: () =>
       post<{ id: string }>("/api/decisions", {
@@ -51,52 +54,73 @@ function ThresholdForm({ current, domain }: { current: RouteBehaviourThreshold; 
         rationale: rationale.trim(),
         auth_scope: { threshold: "worker.route_behaviour tool_schema_failures", recorded_via: "Control Center" },
         allowed_operations: [],
-        details: { max_failure_rate: Math.round((parsed / 100) * 10000) / 10000 },
+        details: { max_failure_rate: recordedRate },
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["doctor"] });
       qc.invalidateQueries({ queryKey: ["decisions"] });
     },
   });
-  if (save.data)
-    return (
-      <div aria-live="polite">
-        <Notice tone="info">
-          Ambang tercatat sebagai keputusan <Mono>{save.data.id}</Mono>. Hasil Doctor menjadi STALE dan dinilai ulang pada pemeriksaan
-          berikutnya; ambang tidak membuat route lulus tanpa evaluasi tepercaya.
-        </Notice>
-      </div>
-    );
-  if (!open)
-    return (
-      <Button onClick={() => setOpen(true)}>{current.status === "DECIDED" ? "Ubah ambang pemilik…" : "Tetapkan ambang pemilik…"}</Button>
-    );
+  // focus returns to the opener when the owner cancels (the rate field takes focus when the form opens)
+  const opener = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (wasOpen.current && !open) opener.current?.focus();
+    wasOpen.current = open;
+  }, [open]);
   return (
-    <div className="space-y-2 rounded-md border border-line bg-surface-2 p-3 text-sm" role="group" aria-label="Ambang kegagalan tool/schema">
-      <p>
-        Keputusan yang akan dicatat: <b>POLICY</b> oleh Anda (manusia), target{" "}
-        <Mono>
-          {ROUTE_BEHAVIOUR_TARGET.type}:{ROUTE_BEHAVIOUR_TARGET.id}
-        </Mono>
-        , <Mono>details.max_failure_rate</Mono>, domain sesi <b>{domain}</b>. Tidak ada nilai bawaan: tanpa keputusan ini kegagalan
-        hanya dilaporkan (UNKNOWN).
-      </p>
-      <Field label="Laju kegagalan maksimum (%)" hint="0-100; mis. 5 = maks 5% sampel evaluasi dengan kegagalan tool/schema.">
-        <input aria-label="Laju kegagalan maksimum (%)" inputMode="decimal" className={inputClass} value={rate} onChange={(e) => setRate(e.target.value)} />
-      </Field>
-      <Field label="Alasan (wajib)" hint="Minimal 10 karakter; tersimpan pada keputusan dan audit.">
-        <textarea aria-label="Alasan ambang" className={inputClass} rows={2} value={rationale} onChange={(e) => setRationale(e.target.value)} />
-      </Field>
-      {rate.trim() !== "" && !(Number.isFinite(parsed) && parsed >= 0 && parsed <= 100) && <p className="text-xs text-warn">Isi angka 0 sampai 100.</p>}
-      <ErrorBox error={save.error} />
-      <div className="flex flex-wrap gap-2">
-        <Button variant="primary" disabled={!valid} busy={save.isPending} onClick={() => save.mutate()}>
-          Konfirmasi keputusan POLICY
-        </Button>
-        <Button variant="ghost" onClick={() => setOpen(false)}>
-          Batal
-        </Button>
+    <div className="space-y-2">
+      {/* always mounted, so a screen reader announces the recorded decision when it appears */}
+      <div aria-live="polite">
+        {save.data && (
+          <Notice tone="info">
+            Ambang tercatat sebagai keputusan <Mono>{save.data.id}</Mono>. Hasil Doctor menjadi STALE dan dinilai ulang pada pemeriksaan
+            berikutnya; ambang tidak membuat route lulus tanpa evaluasi tepercaya.
+          </Notice>
+        )}
       </div>
+      {!save.data && !open && (
+        <Button ref={opener} onClick={() => setOpen(true)}>
+          {current.status === "DECIDED" ? "Ubah ambang pemilik…" : "Tetapkan ambang pemilik…"}
+        </Button>
+      )}
+      {!save.data && open && (
+        <div className="space-y-2 rounded-md border border-line bg-surface-2 p-3 text-sm" role="group" aria-label="Ambang kegagalan tool/schema">
+          <p>
+            Keputusan yang akan dicatat: <b>POLICY</b> oleh Anda (manusia), target{" "}
+            <Mono>
+              {ROUTE_BEHAVIOUR_TARGET.type}:{ROUTE_BEHAVIOUR_TARGET.id}
+            </Mono>
+            , <Mono>details.max_failure_rate</Mono>, domain sesi <b>{domain}</b>. Tidak ada nilai bawaan: tanpa keputusan ini kegagalan
+            hanya dilaporkan (UNKNOWN).
+            {current.status === "DECIDED" && current.max_failure_rate !== null
+              ? ` Keputusan baru menggantikan ambang yang berlaku sekarang (${pct(current.max_failure_rate)}) sebagai yang terbaru.`
+              : ""}
+          </p>
+          <Field label="Laju kegagalan maksimum (%)" hint="0-100; mis. 5 = maks 5% sampel evaluasi dengan kegagalan tool/schema.">
+            {/* autoFocus: focus moves into the form the owner just opened */}
+            <input aria-label="Laju kegagalan maksimum (%)" inputMode="decimal" autoFocus className={inputClass} value={rate} onChange={(e) => setRate(e.target.value)} />
+          </Field>
+          <Field label="Alasan (wajib)" hint="Minimal 10 karakter; tersimpan pada keputusan dan audit.">
+            <textarea aria-label="Alasan ambang" className={inputClass} rows={2} value={rationale} onChange={(e) => setRationale(e.target.value)} />
+          </Field>
+          {rate.trim() !== "" && !inRange && <p className="text-xs text-warn">Isi angka 0 sampai 100.</p>}
+          {recordedRate !== null && (
+            <p className="text-xs">
+              Nilai yang dicatat: <Mono>max_failure_rate = {recordedRate}</Mono> ({pct(recordedRate)})
+            </p>
+          )}
+          <ErrorBox error={save.error} />
+          <div className="flex flex-wrap gap-2">
+            <Button variant="primary" disabled={!valid} busy={save.isPending} onClick={() => save.mutate()}>
+              Konfirmasi keputusan POLICY
+            </Button>
+            <Button variant="ghost" onClick={() => setOpen(false)}>
+              Batal
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -152,7 +176,7 @@ export function RouteBehaviourEvidence({ evidence }: { evidence: Record<string, 
             header: "Run terverifikasi",
             cell: (r) => (
               <span className="text-xs">
-                {r.verified_runs ?? 0} run lulus verifier · {r.tool_errors ?? 0} error alat teramati runner
+                {r.verified_runs ?? "UNKNOWN"} run lulus verifier · {r.tool_errors ?? "UNKNOWN"} error alat teramati runner
               </span>
             ),
           },

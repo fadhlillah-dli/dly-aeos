@@ -121,9 +121,11 @@ export function evaluationPath(r: RouteItem) {
 }
 
 /** §22/§42: a paid route needs its own BUDGET decision at activation; a free or loopback LOCAL route does not. */
-function budgetRequired(r: RouteItem) {
+export function budgetRequired(r: RouteItem) {
   if (r.budget_required === undefined || r.budget_required === null)
     return <StatusBadge key="br" status="UNKNOWN" label="Tidak diketahui (server lama): diperlakukan wajib bila tidak gratis" />;
+  if (r.pool === "SUPERVISOR" && !r.budget_required)
+    return <StatusBadge key="br" status="NOT_APPLICABLE" label="Tidak berlaku (bridge native, bukan broker)" />;
   return r.budget_required ? (
     <StatusBadge key="br" status="NEEDS_DECISION" label="Wajib: keputusan BUDGET terpisah saat aktivasi" />
   ) : (

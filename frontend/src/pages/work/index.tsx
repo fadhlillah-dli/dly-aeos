@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Ban, Pause, Play, Power, PowerOff, Radio, ShieldAlert } from "lucide-react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
@@ -126,6 +127,9 @@ export default function WorkPage() {
   const hasDemo = rows.some((r) => r.mode !== "LIVE");
   const paused = summary.data?.scheduler.paused ?? false;
   const loopEnabled = summary.data?.scheduler.enabled ?? false;
+  // the owner's reconciliation stays confirmed after the hold (and its panel) is gone from the re-read summary
+  const [reconciled, setReconciled] = useState<{ decision: string; hold: string } | null>(null);
+  const activeHold = summary.data && isIntegrityHold(summary.data.sandbox) ? summary.data.sandbox : null;
 
   return (
     <div className="space-y-5">
@@ -208,7 +212,17 @@ export default function WorkPage() {
       )}
 
       {/* wave 7: the host-wide integrity hold blocks every worker in every domain - shown first, before the counters */}
-      {summary.data && isIntegrityHold(summary.data.sandbox) && <IntegrityHoldPanel sandbox={summary.data.sandbox} />}
+      <div aria-live="polite">
+        {reconciled && activeHold?.integrity_hold.id !== reconciled.hold && (
+          <Notice tone="info">
+            Rekonsiliasi integrity hold <Mono>{reconciled.hold}</Mono> tercatat sebagai keputusan <Mono>{reconciled.decision}</Mono>.{" "}
+            {activeHold
+              ? "Hold baru aktif (temuan lain): perlu rekonsiliasinya sendiri."
+              : "Status sandbox di bawah dibaca ulang dari backend; temuan baru akan memunculkan hold baru."}
+          </Notice>
+        )}
+      </div>
+      {activeHold && <IntegrityHoldPanel sandbox={activeHold} onReconciled={(decision, hold) => setReconciled({ decision, hold })} />}
 
       {summary.isLoading ? <Loading /> : summary.error ? <ErrorBox error={summary.error} /> : summary.data && <SummaryCards s={summary.data} />}
 

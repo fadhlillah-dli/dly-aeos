@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import ModelsPage from "./index";
-import { evaluationPath, reasoningSentText } from "./RouteDrawer";
+import { budgetRequired, evaluationPath, reasoningSentText } from "./RouteDrawer";
 import type { RouteItem } from "./types";
 
 // Wave 7b UI lane 2 (C1 routing): the route view states the upstream request, the provider client restriction, the
@@ -188,6 +188,12 @@ describe("Route view (C1 routing fields)", () => {
     vi.unstubAllGlobals();
     expect(reasoningSentText("NOT_SENT")).toBe("tidak dikirim (default provider)");
     expect(reasoningSentText(undefined)).toBe("UNKNOWN");
+  });
+
+  it("a supervisor route's budget row says not applicable (native bridge), not 'free or local'", () => {
+    render(<>{budgetRequired(route({ pool: "SUPERVISOR", provider: "claude-native", budget_required: false }) as unknown as RouteItem)}</>);
+    expect(screen.getByText("Tidak berlaku (bridge native, bukan broker)")).toBeInTheDocument();
+    expect(screen.queryByText(/gratis atau LOKAL/)).toBeNull();
   });
 
   it("an older server without budget_required shows UNKNOWN, never 'not needed'", async () => {

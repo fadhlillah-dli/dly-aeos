@@ -206,6 +206,46 @@ describe("Integrity hold on the Live Work page", () => {
     expect(screen.getByText("dec-hold-1")).toBeInTheDocument();
   });
 
+  it("keeps the recorded reconciliation confirmed after the hold is gone, and a new hold gets a fresh form", async () => {
+    auth.isAdmin = true;
+    responses["/api/workforce/agents"] = { items: [] };
+    vi.mocked(post).mockResolvedValueOnce({ id: "dec-hold-2" });
+    const user = userEvent.setup({ delay: null });
+    wrap(<WorkPage />);
+    const open = await screen.findByRole("button", { name: /Catat rekonsiliasi/ });
+    await user.click(open);
+    // the form's first control takes focus; cancelling returns focus to the opener
+    expect(screen.getByRole("checkbox", { name: /Saya sudah meninjau temuan/ })).toHaveFocus();
+    await user.click(screen.getByRole("button", { name: "Batal" }));
+    expect(screen.getByRole("button", { name: /Catat rekonsiliasi/ })).toHaveFocus();
+    await user.click(screen.getByRole("button", { name: /Catat rekonsiliasi/ }));
+    await user.click(screen.getByRole("checkbox", { name: /Saya sudah meninjau temuan/ }));
+    await user.type(screen.getByRole("textbox", { name: "Apa yang Anda periksa dan pulihkan" }), "checkout dipulihkan dan diperiksa");
+    // the backend re-reads admission: a NEW finding raised a new hold meanwhile
+    const NEW_HOLD = "aaaaaaaa-1111-4222-8333-444455556666";
+    responses["/api/workforce/summary"] = {
+      ...summary,
+      sandbox: { ...holdSandbox, integrity_hold: { ...holdSandbox.integrity_hold, id: NEW_HOLD } },
+    };
+    await user.click(screen.getByRole("button", { name: /Konfirmasi keputusan RISK_ACCEPTANCE/ }));
+    expect(await screen.findByText(/Hold baru aktif \(temuan lain\)/)).toBeInTheDocument();
+    expect(screen.getByText("dec-hold-2")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("region", { name: "Integrity hold aktif" })).toHaveTextContent(NEW_HOLD));
+    // the new hold's form starts over: the earlier result never stands for it
+    expect(screen.getByRole("button", { name: /Catat rekonsiliasi/ })).toBeInTheDocument();
+    // and once no hold is active, the confirmation stays on the page
+    responses["/api/workforce/summary"] = { ...summary, sandbox: { status: "BLOCKED", kind: null, reasons: [], remedies: [], residual_risks: [], code: null, integrity_hold: null } };
+    await user.click(screen.getByRole("button", { name: /Catat rekonsiliasi/ }));
+    await user.click(screen.getByRole("checkbox", { name: /Saya sudah meninjau temuan/ }));
+    await user.type(screen.getByRole("textbox", { name: "Apa yang Anda periksa dan pulihkan" }), "checkout dipulihkan dan diperiksa");
+    vi.mocked(post).mockResolvedValueOnce({ id: "dec-hold-3" });
+    await user.click(screen.getByRole("button", { name: /Konfirmasi keputusan RISK_ACCEPTANCE/ }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Integrity hold aktif" })).toBeNull());
+    expect(screen.getByText(/Status sandbox di bawah dibaca ulang dari backend/)).toBeInTheDocument();
+    expect(screen.getByText("dec-hold-3")).toBeInTheDocument();
+    expect(screen.getByText(NEW_HOLD)).toBeInTheDocument();
+  });
+
   it("the Ringkasan banner appears only while a hold is active and links to the owner steps", async () => {
     responses["/api/worker-runtime/sandbox"] = holdSandbox;
     const { unmount } = wrap(<IntegrityHoldBanner />);
@@ -224,6 +264,8 @@ describe("Integrity hold on the Live Work page", () => {
     expect(changeLabel(undefined)).toBe("UNKNOWN");
     expect(neutralisationSpec("cache file could NOT be removed")).toEqual({ status: "FAILED", label: "Netralisasi gagal - pulihkan manual" });
     expect(neutralisationSpec("owner config ...; NOT restored (no pre-run copy kept)")?.status).toBe("FAILED");
+    expect(neutralisationSpec("owner config file changed while the worker ran; not restored (no config path)")?.status).toBe("FAILED");
+    expect(neutralisationSpec("owner config file changed while the worker ran; restored to the pre-run content")?.status).toBe("UPDATED");
     expect(neutralisationSpec("")).toBeNull();
     expect(reconcileCommand(holdSandbox.remedies)).toMatch(/^aeos policy decide --kind RISK_ACCEPTANCE/);
     expect(reconcileCommand(["install docker"])).toBeNull();
@@ -254,7 +296,7 @@ describe("Run detail: runtime integrity, DB-trust quarantine, alerts and reasoni
       controller_integrity: { checked_files: 812, changed: 2 },
       db_trust_window: { status: "FAIL", foreign_count: 1, tables: 9, rows: 120, own_writes: 3, tolerated_count: 4 },
       cpu_cap: { enforced: false, max_cpus: 2, job_cpu_rate: null, by: "none (reservation only)" },
-      command_logs: { present: true, files: 3, bytes: 2048, truncated: false, skipped: 0, removed_from_candidate: true, evidence_ref: "ev-cmdlog-1" },
+      command_logs: { present: true, files: 3, bytes: 2048, truncated: false, skipped: 0, removed_from_candidate: true, evidence_ref: "evidence:ev-cmdlog-1" },
       context_pack: {
         used: true,
         items: 4,
@@ -307,7 +349,7 @@ describe("Run detail: runtime integrity, DB-trust quarantine, alerts and reasoni
     responses[`/api/runs/${RUN_ID}`] = detail;
     wrap(<RunDetailPage />, `/runs/${RUN_ID}`);
     expect(await screen.findByText("Run ini memicu integrity hold (semua domain diblokir)")).toBeInTheDocument();
-    expect(screen.getByText("2 file berubah dari 812 diperiksa")).toBeInTheDocument();
+    expect(screen.getByText("2 temuan dari 812 file diperiksa")).toBeInTheDocument();
     expect(screen.getByText("Perubahan asing pada tabel tepercaya")).toBeInTheDocument();
     expect(screen.getByText(/1 baris asing · 4 ditoleransi/)).toBeInTheDocument();
     expect(screen.getByText("Tidak ditegakkan: none (reservation only)")).toBeInTheDocument();
@@ -338,6 +380,23 @@ describe("Run detail: runtime integrity, DB-trust quarantine, alerts and reasoni
     expect(screen.getByText("medium (konfigurasi rute)")).toBeInTheDocument();
     expect(screen.getByText(/Nilai tak dikenal - dibuang/)).toBeInTheDocument();
     expect(screen.getAllByText("Tidak tercatat (UNKNOWN)").length).toBe(2);
+  });
+
+  it("never shows an empty controller comparison, a refused context pack or a local-only log as a pass", async () => {
+    responses[`/api/runs/${RUN_ID}`] = {
+      ...detail,
+      caps: {
+        controller_integrity: { checked_files: 0, changed: 0 },
+        command_logs: { present: true, files: 1, bytes: 10, truncated: false, skipped: 0, removed_from_candidate: true, evidence_ref: "local-unverified:worker-command-logs.json" },
+        context_pack: { used: false, pack_id: "pack-1", pack_hash: "sha256:" + "f".repeat(64), freshness: "STALE", reason: "context pack is STALE" },
+      },
+    };
+    wrap(<RunDetailPage />, `/runs/${RUN_ID}`);
+    expect(await screen.findByText("Tidak ada file yang dibandingkan (bukan lulus)")).toBeInTheDocument();
+    expect(screen.queryByText(/^Tidak ada perubahan/)).toBeNull();
+    expect(screen.getByText(/ContextPack ditolak \(STALE\)/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Bukti log perintah/ })).toBeNull();
+    expect(screen.getByText(/hanya tersimpan lokal \(collector tidak tersedia, UNVERIFIED\)/)).toBeInTheDocument();
   });
 
   it("states that nothing was recorded for a run without runtime integrity caps", async () => {

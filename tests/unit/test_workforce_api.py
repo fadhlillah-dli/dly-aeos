@@ -225,3 +225,70 @@ def test_run_detail_model_calls_state_the_reasoning_levels(personal_client, db):
     db.commit()
     calls = personal_client.get(f"/api/runs/{run.id}").json()["model_calls"]
     assert {(c["reasoning_effort"], c["reasoning_requested"]) for c in calls} == {("NOT_SENT", "high"), (None, None)}
+
+
+def _ui_reconcile_body(hold_id: str) -> dict:
+    """Exactly what the Control Center's 'Catat rekonsiliasi' sends (frontend/src/pages/work/IntegrityHold.tsx)."""
+    from datetime import timedelta
+
+    from aeos.core.timeutil import utcnow
+
+    return {"kind": "RISK_ACCEPTANCE", "target_type": "worker_integrity_hold", "target_id": hold_id,
+            "rationale": "git checkout -- config.py; data checked",
+            "auth_scope": {"integrity_hold": hold_id, "findings_reviewed": "yes", "controller_and_data_restored": "yes",
+                           "recorded_via": "Control Center"},
+            "allowed_operations": [], "expires_at": (utcnow() + timedelta(days=1)).isoformat()}
+
+
+def test_the_control_center_reconciliation_lifts_exactly_this_hold(personal_client, db):
+    """Wave 7b UI review: the UI's reconciliation body goes through the existing Decision API as a HUMAN
+    RISK_ACCEPTANCE bound to the hold id and lifts the hold; the summary then no longer states INTEGRITY_HOLD."""
+    from aeos.worker_runtime import integrity
+
+    hold = integrity.raise_hold(db, source="worker run", subject_id="run-1", domain="PERSONAL",
+                                findings=[{"kind": "controller", "path": "backend/aeos/core/config.py",
+                                           "change": "modified"}])
+    db.commit()
+    assert personal_client.get("/api/workforce/summary").json()["sandbox"]["code"] == "INTEGRITY_HOLD"
+    r = personal_client.post("/api/decisions", json=_ui_reconcile_body(hold["id"]))
+    assert r.status_code == 201, r.text
+    sb = personal_client.get("/api/workforce/summary").json()["sandbox"]
+    assert sb["code"] != "INTEGRITY_HOLD" and sb["integrity_hold"] is None
+    db.expire_all()
+    assert integrity.hold_view(db)["reconciled_by_decision"] == r.json()["id"]
+
+
+def test_a_viewer_cannot_reconcile_the_hold_or_set_the_route_behaviour_threshold(client, db):
+    from aeos.worker_runtime import integrity
+    from tests.conftest import create_admin
+
+    create_admin(db)
+    create_viewer(db)
+    hold = integrity.raise_hold(db, source="worker run", subject_id="run-1", domain="PERSONAL",
+                                findings=[{"kind": "db", "path": "decisions:x", "change": "added"}])
+    db.commit()
+    client.login("viewer", VIEWER_PW)
+    client.select_domain(Domain.PERSONAL)
+    assert client.post("/api/decisions", json=_ui_reconcile_body(hold["id"])).status_code == 403
+    assert client.post("/api/decisions", json=_ui_threshold_body(0.05)).status_code == 403
+    db.expire_all()
+    assert integrity.hold_status(db) is not None
+
+
+def _ui_threshold_body(rate: float) -> dict:
+    """Exactly what Kesiapan -> worker.route_behaviour -> 'Tetapkan ambang pemilik' sends
+    (frontend/src/components/doctor/RouteBehaviourEvidence.tsx)."""
+    return {"kind": "POLICY", "target_type": "worker_route_behaviour", "target_id": "tool_schema_failures",
+            "rationale": "pilot: at most 5% of samples may fail",
+            "auth_scope": {"threshold": "worker.route_behaviour tool_schema_failures", "recorded_via": "Control Center"},
+            "allowed_operations": [], "details": {"max_failure_rate": rate}}
+
+
+def test_the_control_center_threshold_is_the_one_the_doctor_check_reads(personal_client, db):
+    from aeos.doctor.checks import worker as worker_checks
+
+    assert worker_checks._threshold(db) == (None, None)  # UNDECIDED: reported, never judged
+    r = personal_client.post("/api/decisions", json=_ui_threshold_body(0.05))
+    assert r.status_code == 201, r.text
+    db.expire_all()
+    assert worker_checks._threshold(db) == (0.05, r.json()["id"])

@@ -29,7 +29,7 @@ const undecided = {
       verified_runs: 2,
       tool_errors: 1,
     },
-    { route_key: "opencode-zen/other", route_status: "TRIAL", verdict: "STALE", why: "evaluasi terakhir dibuat pada konfigurasi lain", verified_runs: 0, tool_errors: 0 },
+    { route_key: "opencode-zen/other", route_status: "TRIAL", verdict: "STALE", why: "evaluasi terakhir dibuat pada konfigurasi lain" },
   ],
 };
 
@@ -56,6 +56,7 @@ describe("worker.route_behaviour evidence", () => {
     expect(screen.getByText("opencode-zen/glm-free")).toBeInTheDocument();
     expect(screen.getByText("3/20 sampel · 15%")).toBeInTheDocument();
     expect(screen.getByText(/2 run lulus verifier · 1 error alat teramati runner/)).toBeInTheDocument();
+    expect(screen.getByText(/UNKNOWN run lulus verifier · UNKNOWN error alat/)).toBeInTheDocument(); // not recorded, never 0
     expect(screen.getByText("Tidak tercatat")).toBeInTheDocument(); // the STALE route has no measurement
     expect(screen.getByText(/Usang/)).toBeInTheDocument();
     expect(screen.queryByText(/Terverifikasi|Lulus/)).toBeNull();
@@ -76,12 +77,17 @@ describe("worker.route_behaviour evidence", () => {
     const user = userEvent.setup({ delay: null });
     renderIt(undecided);
     await user.click(screen.getByRole("button", { name: "Tetapkan ambang pemilik…" }));
+    expect(screen.getByRole("textbox", { name: "Laju kegagalan maksimum (%)" })).toHaveFocus();
+    await user.click(screen.getByRole("button", { name: "Batal" }));
+    expect(screen.getByRole("button", { name: "Tetapkan ambang pemilik…" })).toHaveFocus(); // focus returns to the opener
+    await user.click(screen.getByRole("button", { name: "Tetapkan ambang pemilik…" }));
     const confirm = screen.getByRole("button", { name: "Konfirmasi keputusan POLICY" });
     expect(confirm).toBeDisabled();
     await user.type(screen.getByRole("textbox", { name: "Laju kegagalan maksimum (%)" }), "150");
     expect(screen.getByText("Isi angka 0 sampai 100.")).toBeInTheDocument();
     await user.clear(screen.getByRole("textbox", { name: "Laju kegagalan maksimum (%)" }));
     await user.type(screen.getByRole("textbox", { name: "Laju kegagalan maksimum (%)" }), "5");
+    expect(screen.getByText("max_failure_rate = 0.05")).toBeInTheDocument(); // the exact value, before confirming
     expect(confirm).toBeDisabled();
     await user.type(screen.getByRole("textbox", { name: "Alasan ambang" }), "pilot: maks 5% sampel gagal");
     expect(vi.mocked(post)).not.toHaveBeenCalled();

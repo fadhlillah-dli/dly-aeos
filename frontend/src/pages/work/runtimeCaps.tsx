@@ -112,6 +112,12 @@ function cpuCap(c: NonNullable<RunRuntimeCaps["cpu_cap"]>) {
   );
 }
 
+/** A runtime evidence ref: ``evidence:<id>`` (ledger record) or ``local-unverified:<file>`` (collector unavailable). */
+export function evidenceRefLink(ref: string): { id: string | null; text: string } {
+  if (ref.startsWith("evidence:")) return { id: ref.slice("evidence:".length), text: ref.slice("evidence:".length) };
+  return { id: null, text: ref };
+}
+
 function commandLogs(c: NonNullable<RunRuntimeCaps["command_logs"]>) {
   if (c.rejected || c.ignored)
     return (
@@ -128,11 +134,19 @@ function commandLogs(c: NonNullable<RunRuntimeCaps["command_logs"]>) {
         {c.files} perintah · {c.bytes ?? 0} byte{c.truncated ? " · terpotong" : ""}
         {c.skipped ? ` · ${c.skipped} dilewati` : ""} · {c.removed_from_candidate ? "dikeluarkan dari kandidat" : "TIDAK dikeluarkan dari kandidat"}
       </span>
-      {c.evidence_ref && (
-        <Link className="text-xs text-accent underline" to={`/evidence?id=${encodeURIComponent(c.evidence_ref)}`}>
-          Bukti log perintah <Mono>{shortHash(c.evidence_ref, 12)}</Mono>
-        </Link>
-      )}
+      {c.evidence_ref &&
+        (() => {
+          const ref = evidenceRefLink(c.evidence_ref);
+          return ref.id ? (
+            <Link className="text-xs text-accent underline" to={`/evidence?id=${encodeURIComponent(ref.id)}`}>
+              Bukti log perintah <Mono>{shortHash(ref.id, 12)}</Mono>
+            </Link>
+          ) : (
+            <span className="block text-xs text-warn">
+              Bukti log perintah hanya tersimpan lokal (collector tidak tersedia, UNVERIFIED): <Mono>{ref.text}</Mono>
+            </span>
+          );
+        })()}
     </span>
   );
 }
@@ -143,6 +157,9 @@ function contextPack(p: NonNullable<RunRuntimeCaps["context_pack"]>) {
     <span key="cp" className="space-y-1">
       {p.used ? (
         <StatusBadge status="CURRENT" label={`ContextPack dipakai (${p.items ?? "?"} item, budget ${p.token_budget ?? "UNKNOWN"} token)`} />
+      ) : p.pack_id ? (
+        // a pack existed but was refused (stale/expired, or built for another base commit): never given to the worker
+        <StatusBadge status="STALE" label={`ContextPack ditolak (${p.freshness && p.freshness !== "CURRENT" ? p.freshness : "base commit lain"}); hanya konteks TaskSpec`} />
       ) : (
         <StatusBadge status="NOT_APPLICABLE" label="Tanpa ContextPack (hanya konteks TaskSpec)" />
       )}
@@ -186,9 +203,12 @@ export function RuntimeIntegrity({ caps }: { caps: Record<string, unknown> }) {
     items.push([
       "Integritas controller",
       c.controller_integrity.changed ? (
-        <StatusBadge key="ci" status="FAILED" label={`${c.controller_integrity.changed} file berubah dari ${c.controller_integrity.checked_files ?? "?"} diperiksa`} />
+        <StatusBadge key="ci" status="FAILED" label={`${c.controller_integrity.changed} temuan dari ${c.controller_integrity.checked_files ?? "?"} file diperiksa`} />
+      ) : !c.controller_integrity.checked_files ? (
+        // no file compared (no snapshot recorded): nothing was checked, so this is never a pass
+        <StatusBadge key="ci" status="UNKNOWN" label="Tidak ada file yang dibandingkan (bukan lulus)" />
       ) : (
-        <StatusBadge key="ci" status="PASS" label={`Tidak ada perubahan (${c.controller_integrity.checked_files ?? "?"} file diperiksa)`} />
+        <StatusBadge key="ci" status="PASS" label={`Tidak ada perubahan (${c.controller_integrity.checked_files} file diperiksa)`} />
       ),
     ]);
   if (c.db_trust_window) items.push(["Jendela DB tepercaya", dbWindow(c.db_trust_window)]);
