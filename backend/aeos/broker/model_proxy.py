@@ -12,19 +12,30 @@ Guarantees:
   ``opencode/`` config prefix), the provider's credential only towards the provider's own host, a superseded seed
   endpoint or a non-chat-completions API refused; the reasoning level is the route's (``mode_params.reasoning``),
   never the worker's - a worker-sent ``reasoning_effort`` is dropped and recorded on the BrokerRequest;
+* OpenCode Go (ADR-0041 amendment 2026-10-26): the broker identifies itself with its own User-Agent and sends a
+  stable, opaque ``x-opencode-session`` per worker run (a hash of the run id, never a secret), as the Go docs ask
+  of clients other than OpenCode;
 * request/token/cost caps and expiry are enforced before forwarding; ``max_tokens`` is clamped;
 * upstream 429 -> 429 + ``Retry-After`` to the worker, QuotaState recorded, and NO fallback to any
   other (paid or unapproved) model (§42, §50 "Free quota habis / 429");
 * the real provider key is fetched in-process from the secrets facade, registered for redaction,
   and never appears in any response, log, event or audit record;
 * usage (prompt/completion tokens, cost when the upstream reports it, else UNKNOWN) goes to the
-  cost ledger via ``aeos.cost.facade.record_usage`` and to the grant counters.
+  cost ledger via ``aeos.cost.facade.record_usage`` and to the grant counters;
+* a SUBSCRIPTION route (ADR-0080 amendment 2026-10-26, OpenCode Go): ``usage.cost`` is the marginal charge (0 within
+  the plan) and ``usage.opencode.allowance`` / ``billing_source`` go to the ledger as the allowance the call consumed
+  (the cost module estimates it from the tokens, or from the request's upper bound - clamped ``max_tokens`` plus the
+  prompt size - when the provider reports no usage) - never the reservation as dollars. A provider dollar figure above
+  ``MAX_PROVIDER_USD`` is unreported. A call billed beyond the plan (a charge, a non-plan ``billing_source``) refuses
+  the route on every later request until the owner re-activates it (``SUBSCRIPTION_BEYOND_PLAN``, fail closed).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -38,6 +49,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import select
 from starlette.concurrency import run_in_threadpool
 
+from aeos import __version__
 from aeos.audit import service as audit
 from aeos.broker import grants
 from aeos.core.db import session_factory
@@ -68,6 +80,20 @@ ALLOWED_FIELDS = frozenset({
 })
 REASONING_NOT_SENT = "NOT_SENT"  # BrokerRequest.reasoning_effort when nothing was sent (provider default)
 ZEN_CONFIG_PREFIX = "opencode/"  # OpenCode config/catalog format; the Zen API takes the bare model id (S07)
+# OpenCode Go (ADR-0041 amendment 2026-10-26, E1 Go docs read 2026-10-26): ``opencode-go/<id>`` is the OpenCode config
+# format, the API takes the bare id; clients other than OpenCode identify themselves with their own User-Agent ("rather
+# than a generic SDK or HTTP-library name") and send a stable ``x-opencode-session`` per conversation ("Go requires it").
+GO_PROVIDER = "opencode-go"
+GO_CONFIG_PREFIX = "opencode-go/"
+BROKER_USER_AGENT = f"dly-aeos-broker/{__version__}"
+OPENCODE_SESSION_HEADER = "x-opencode-session"
+CONFIG_PREFIXES = {"opencode-zen": ZEN_CONFIG_PREFIX, GO_PROVIDER: GO_CONFIG_PREFIX}
+# A provider-stated dollar figure above this is not a real figure (a broken upstream or proxy): treated as unreported
+# (ADR-0080 amendment 2026-10-26). On a SUBSCRIPTION route an unreadable stated cost is paid usage beyond the plan.
+MAX_PROVIDER_USD = 1e9
+# Chat-template tokens the prompt-size bound adds on top of the request body's UTF-8 bytes (a byte-level tokenizer never
+# makes more tokens than bytes): part of the upper bound recorded when the upstream reports no usage.
+TEMPLATE_TOKEN_MARGIN = 64
 
 
 class ProxyError(Exception):
@@ -98,6 +124,7 @@ class Upstream:
     is_openrouter: bool
     reasoning_effort: str | None = None  # set by the route's configuration, None = not sent (provider default)
     catalog_model_id: str | None = None  # ModelRoute.model_id (e.g. ``opencode/<id>``) when it differs
+    subscription: bool = False  # flat-fee SUBSCRIPTION route (``pricing.billing``, ADR-0080 amendment 2026-10-26)
 
     @property
     def url(self) -> str:
@@ -115,6 +142,7 @@ class Prepared:
     body: dict[str, Any]
     request_id: str
     stream: bool
+    token_cap: int | None = None  # the grant's token cap (an upper bound of any one call of the run)
 
 
 def _is_loopback_http(url: str) -> bool:
@@ -192,6 +220,29 @@ def route_authorisation_problem(session: Any, route: ModelRoute) -> str | None:
         return "routing module unavailable: route approval cannot be checked"
 
 
+def is_subscription_route(route: ModelRoute) -> bool:
+    return isinstance(route.pricing, dict) and route.pricing.get("billing") == "SUBSCRIPTION"
+
+
+def subscription_beyond_plan_problem(session: Any, route: ModelRoute) -> str | None:
+    """A SUBSCRIPTION route with a call billed beyond its plan (provider-side paid fallback, e.g. Extra Usage ON) that
+    the owner has not re-activated the route after: refused per request, so the run that hit it stops too, not only
+    new admissions (ADR-0080 amendment 2026-10-26; invariant 8, fail closed)."""
+    if not is_subscription_route(route):
+        return None
+    try:
+        from aeos.cost import facade as cost
+
+        bp = cost.subscription_beyond_plan(session, route)
+    except (ImportError, AttributeError):  # cost module unavailable: the billing state cannot be checked
+        return "cost module unavailable: the subscription route's billing state cannot be checked (fail closed)"
+    if bp is None:
+        return None
+    return (f"a call at {bp.get('at')} on subscription route {route.route_key} was billed beyond the plan (billing "
+            f"source {bp.get('billing_source') or 'not reported'}); refused until the owner checks that Extra Usage "
+            "is OFF and re-activates the route")
+
+
 def client_restriction_problem(session: Any, route: ModelRoute) -> str | None:
     """A provider rule on which *client* may call the route (S07: "Free-tier chat models require OpenCode"), not
     decided by the owner: the broker is its own HTTP client, so it never proxies such a route silently."""
@@ -205,13 +256,15 @@ def client_restriction_problem(session: Any, route: ModelRoute) -> str | None:
 
 def upstream_model_id(route: ModelRoute) -> str:
     """The model id sent upstream: ``mode_params.upstream_model`` when the route states it, else the route's model
-    id - for OpenCode Zen without the ``opencode/`` OpenCode-config prefix (S07: API requests use the bare id)."""
+    id - for OpenCode Zen/Go without the ``opencode/`` / ``opencode-go/`` OpenCode-config prefix (S07 and the Go
+    docs: API requests use the bare id)."""
     explicit = (route.mode_params or {}).get("upstream_model")
     if isinstance(explicit, str) and explicit.strip():
         return explicit.strip()
     model = route.model_id or ""
-    if route.provider == "opencode-zen" and model.startswith(ZEN_CONFIG_PREFIX):
-        return model[len(ZEN_CONFIG_PREFIX):]
+    prefix = CONFIG_PREFIXES.get(route.provider or "")
+    if prefix and model.startswith(prefix):
+        return model[len(prefix):]
     return model
 
 
@@ -325,6 +378,9 @@ def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: s
     problem = route_authorisation_problem(session, route)
     if problem:
         raise ProxyError(403, "ROUTE_APPROVAL_INVALID", problem)
+    beyond = subscription_beyond_plan_problem(session, route)
+    if beyond:
+        raise ProxyError(403, "SUBSCRIPTION_BEYOND_PLAN", beyond)
     shape = request_shape(route)
     if shape["code"]:
         raise ProxyError(403, shape["code"], shape["problem"])
@@ -359,7 +415,8 @@ def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: s
             raise ProxyError(503, "UPSTREAM_CREDENTIAL_MISSING", exc.message) from exc
     elif not _is_loopback_http(base):
         raise ProxyError(503, "UPSTREAM_CREDENTIAL_MISSING", "route has no credential_ref")
-    return Upstream(base.rstrip("/"), key, route.provider, route_key, shape["model"], False, effort, catalog_id)
+    return Upstream(base.rstrip("/"), key, route.provider, route_key, shape["model"], False, effort, catalog_id,
+                    is_subscription_route(route))
 
 
 def _check_auth_headers(headers: dict[str, str], cookies: dict[str, str]) -> str:
@@ -439,7 +496,8 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
                             reasoning_requested=requested_label)
         s.add(req)
         s.commit()
-        return Prepared(grant.id, grant.run_id, grant.project_id, grant.domain, exposed, upstream, out, req.id, stream)
+        return Prepared(grant.id, grant.run_id, grant.project_id, grant.domain, exposed, upstream, out, req.id, stream,
+                        grant.max_tokens)
 
 
 def _eval_pools(s: Any, grant: CapabilityGrant, route_key: str) -> tuple[str, ...] | None:
@@ -470,7 +528,7 @@ def _deny(s: Any, grant: CapabilityGrant, code: str, message: str, *, commit: bo
 
 def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None, completion: int | None = None,
             cost: float | None = None, model_resolved: str | None = None, latency_ms: int | None = None,
-            retry_after: int | None = None, error: str = "") -> None:
+            retry_after: int | None = None, error: str = "", billing: dict[str, Any] | None = None) -> None:
     with session_factory()() as s:
         req = s.get(BrokerRequest, p.request_id)
         if req is not None:
@@ -491,9 +549,15 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
             grants.add_usage(s, p.grant_id, tokens=tokens, cost_usd=cost)
         run = s.get(WorkerRun, p.run_id)
         ledger = "NOT_RECORDED"
+        recorded: dict[str, Any] = {}
+        if counted and prompt is None and completion is None and p.upstream.subscription:
+            # no usage reported: the call's upper bound, so the allowance is ESTIMATED, never UNKNOWN
+            bound = request_token_bound(p.body, p.token_cap)
+            if bound is not None:
+                billing = {**(billing or {}), "charged_tokens": bound}
         if counted:
             ledger = _record_ledger(s, p, run, prompt=prompt, completion=completion, cost=cost,
-                                    model=model_resolved or p.upstream.model_id)
+                                    model=model_resolved or p.upstream.model_id, billing=billing, facts=recorded)
             if ledger != "RECORDED" and req is not None:
                 req.error_summary = f"usage ledger: {ledger}; counted on grant only"[:500]
         if run is not None:
@@ -507,6 +571,14 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
                 else:
                     us["cost_usd"] = round(float(us.get("cost_usd", 0.0)) + cost, 6)
                 us["ledger"] = ledger
+                if recorded.get("billing") == "SUBSCRIPTION":
+                    # the plan allowance this run consumed (REPORTED by the provider or ESTIMATED), apart from money
+                    us["billing"] = "SUBSCRIPTION"
+                    if recorded.get("allowance_usd") is not None:
+                        us["allowance_usd"] = round(float(us.get("allowance_usd", 0.0))
+                                                    + float(recorded["allowance_usd"]), 6)
+                    if recorded.get("allowance_basis") != "REPORTED":
+                        us["allowance_not_reported_requests"] = int(us.get("allowance_not_reported_requests", 0)) + 1
                 if model_resolved:
                     run.model_resolved = model_resolved[:128]
             if outcome == "RATE_LIMITED":
@@ -521,6 +593,9 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
                     payload={"route_key": p.upstream.route_key, "outcome": outcome, "status": status,
                              "prompt_tokens": prompt, "completion_tokens": completion,
                              "cost_usd": cost if cost is not None else "UNKNOWN", "latency_ms": latency_ms,
+                             **({"allowance_usd": recorded.get("allowance_usd"),
+                                 "allowance_basis": recorded.get("allowance_basis")}
+                                if recorded.get("billing") == "SUBSCRIPTION" else {}),
                              "reasoning_effort": req.reasoning_effort if req is not None else None,
                              "reasoning_requested_dropped": req.reasoning_requested if req is not None else None})
         audit.record(s, actor_type="worker", actor_id=f"run:{p.run_id}", action="broker.model_proxy.call",
@@ -531,8 +606,10 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
 
 
 def _record_ledger(s: Any, p: Prepared, run: WorkerRun | None, *, prompt: int | None, completion: int | None,
-                   cost: float | None, model: str) -> str:
-    """One broker call -> one ledger entry (§42), committed into the run's budget hold.
+                   cost: float | None, model: str, billing: dict[str, Any] | None = None,
+                   facts: dict[str, Any] | None = None) -> str:
+    """One broker call -> one ledger entry (§42), committed into the run's budget hold. ``billing``: the provider's
+    billing facts of the call; ``facts`` receives the entry's subscription allowance (ADR-0080 amendment 2026-10-26).
 
     LIVE: ``record_usage(partial=True)`` with the run's reservation (the hold stays until the run ends
     and the scheduler settles it). MOCK/DEMO: recorded with its mode and never against the hold — the
@@ -545,23 +622,28 @@ def _record_ledger(s: Any, p: Prepared, run: WorkerRun | None, *, prompt: int | 
     base: dict[str, Any] = dict(provider=p.upstream.provider, category="WORKER_API", source="broker", project_id=p.project_id,
                 domain=p.domain, run_id=p.run_id, route_key=p.upstream.route_key, model=model, input_tokens=prompt,
                 output_tokens=completion, requests=1, cost_usd=cost, is_estimate=False, mode=mode)
+    if billing:
+        base["details"] = dict(billing)
     try:
         if mode != "LIVE":
-            cost_facade.record_usage(s, **base)
+            entry = cost_facade.record_usage(s, **base)
             if reservation_id:
                 cost_facade.release(s, reservation_id)
-            return "RECORDED"
-        try:
-            # record_usage raises Conflict before it writes anything when the hold is not RESERVED
-            cost_facade.record_usage(s, **base, reservation_id=reservation_id, partial=True)
-        except Conflict:
-            cost_facade.record_usage(s, **base)  # hold already settled/released: plain LIVE usage
-        return "RECORDED"
+        else:
+            try:
+                # record_usage raises Conflict before it writes anything when the hold is not RESERVED
+                entry = cost_facade.record_usage(s, **base, reservation_id=reservation_id, partial=True)
+            except Conflict:
+                entry = cost_facade.record_usage(s, **base)  # hold already settled/released: plain LIVE usage
     except ImportError:
         return "LEDGER_UNAVAILABLE"
     except AeosError as exc:
         log.warning("usage ledger refused broker usage for run %s: %s", p.run_id, exc.code)
         return f"LEDGER_REJECTED:{exc.code}"
+    if facts is not None:
+        info = getattr(entry, "details", None) or {}
+        facts.update({k: info[k] for k in ("billing", "allowance_usd", "allowance_basis") if k in info})
+    return "RECORDED"
 
 
 def _record_quota(s: Any, p: Prepared, retry_after: int) -> None:
@@ -588,27 +670,94 @@ def _retry_after(resp: httpx.Response) -> int:
         return DEFAULT_RETRY_AFTER
 
 
+def request_token_bound(body: dict[str, Any], token_cap: int | None = None) -> int | None:
+    """Upper bound of one forwarded request's tokens when the upstream reports no usage (ADR-0080 amendment
+    2026-10-26): the clamped ``max_tokens`` the broker sent plus the prompt size (the UTF-8 bytes of the whole forwarded
+    body - a byte-level tokenizer never makes more tokens than bytes - plus a chat-template margin); else the grant's
+    token cap. None when nothing bounds the call."""
+    out = body.get("max_tokens")
+    if isinstance(out, int) and not isinstance(out, bool) and out >= 0:
+        try:
+            prompt = len(json.dumps(body, ensure_ascii=False, default=str).encode("utf-8")) + TEMPLATE_TOKEN_MARGIN
+        except (TypeError, ValueError):
+            prompt = None
+        if prompt is not None:
+            return out + prompt
+    if isinstance(token_cap, int) and not isinstance(token_cap, bool) and token_cap >= 0:
+        return token_cap
+    return None
+
+
+def _provider_usd(value: Any) -> float | None:
+    """A provider-stated dollar figure: finite, >= 0 and <= ``MAX_PROVIDER_USD``; None otherwise (unreported)."""
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if math.isfinite(f) and 0 <= f <= MAX_PROVIDER_USD else None
+
+
 def _usage_of(data: dict[str, Any]) -> tuple[int | None, int | None, float | None, str | None]:
     raw_usage = data.get("usage")
     usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
     prompt = usage.get("prompt_tokens")
     completion = usage.get("completion_tokens")
     cost = usage.get("cost")
-    try:
-        cost_f = float(cost) if cost is not None else None
-    except (TypeError, ValueError):
-        cost_f = None
+    cost_f = _provider_usd(cost) if cost is not None else None  # absurd or unreadable: unreported
     model = data.get("model") if isinstance(data.get("model"), str) else None
     return (int(prompt) if isinstance(prompt, int | float) else None,
             int(completion) if isinstance(completion, int | float) else None, cost_f, model)
 
 
-def _upstream_headers(up: Upstream) -> dict[str, str]:
+def _billing_of(data: dict[str, Any]) -> dict[str, Any]:
+    """Provider billing facts beyond the parsed ``usage.cost`` (OpenCode Go API docs, E1 2026-10-26):
+    ``usage.opencode.allowance`` (dollars of the plan allowance the request counted) and ``usage.opencode.billing_source``
+    (e.g. go / go-plus / balance). Only finite numbers in [0, ``MAX_PROVIDER_USD``] and short source names are kept;
+    an absurd figure (e.g. 1e25) is unreported. A ``usage.cost`` the provider stated but that is unreadable or absurd is
+    flagged ``cost_reported_unusable``, and a stated ``usage.opencode`` / ``billing_source`` that is not readable is
+    flagged ``billing_source_unreadable`` (both count as paid usage beyond the plan on a SUBSCRIPTION route). {} when
+    nothing applies."""
+    raw_usage = data.get("usage")
+    usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+    out: dict[str, Any] = {}
+    if usage.get("cost") is not None and _provider_usd(usage.get("cost")) is None:
+        out["cost_reported_unusable"] = True
+    oc = usage.get("opencode")
+    if oc is None:
+        return out
+    if not isinstance(oc, dict):
+        out["billing_source_unreadable"] = True  # stated but unreadable: never read as "within the plan"
+        return out
+    value = _provider_usd(oc.get("allowance"))
+    if value is not None:
+        out["reported_allowance_usd"] = value
+    source = oc.get("billing_source")
+    if isinstance(source, str) and source.strip():
+        out["billing_source"] = redact_text(source.strip())[:32]
+    elif "billing_source" in oc:
+        out["billing_source_unreadable"] = True
+    return out
+
+
+def opencode_session_id(run_id: str) -> str:
+    """The stable ``x-opencode-session`` of one worker run (the Go docs: one stable id per conversation, used for
+    routing and prompt caching). Opaque: a hash prefix of the run id, never the capability token or any secret."""
+    return "ses_" + hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()[:24]
+
+
+def _upstream_headers(up: Upstream, *, run_id: str | None = None) -> dict[str, str]:
     h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
     if up.api_key:
         h["Authorization"] = f"Bearer {up.api_key}"
     if up.is_openrouter:
         h["X-Title"] = "DLY AEOS worker broker"
+    if up.provider == GO_PROVIDER:
+        # the client identification the Go docs ask of other clients (not httpx's generic default User-Agent)
+        h["User-Agent"] = BROKER_USER_AGENT
+        if run_id:
+            h[OPENCODE_SESSION_HEADER] = opencode_session_id(run_id)
     return h
 
 
@@ -676,7 +825,8 @@ async def chat_completions(request: Request) -> Response:
     started = time.monotonic()
     client = httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT, follow_redirects=False, trust_env=False)
     try:
-        resp = await client.send(client.build_request("POST", url, json=p.body, headers=_upstream_headers(p.upstream)),
+        resp = await client.send(client.build_request("POST", url, json=p.body,
+                                                      headers=_upstream_headers(p.upstream, run_id=p.run_id)),
                                  stream=True)
     except httpx.TimeoutException:
         await client.aclose()
@@ -704,7 +854,8 @@ async def chat_completions(request: Request) -> Response:
         await client.aclose()
         prompt, completion, cost, model = _usage_of(data if isinstance(data, dict) else {})
         await run_in_threadpool(_finish, p, status=200, outcome="OK", prompt=prompt, completion=completion, cost=cost,
-                                model_resolved=model, latency_ms=int((time.monotonic() - started) * 1000))
+                                model_resolved=model, latency_ms=int((time.monotonic() - started) * 1000),
+                                billing=_billing_of(data) if isinstance(data, dict) else None)
         if isinstance(data, dict):
             data["model"] = p.exposed
         return JSONResponse(data, headers={"Cache-Control": "no-store"})
@@ -712,6 +863,7 @@ async def chat_completions(request: Request) -> Response:
     async def relay():  # type: ignore[no-untyped-def]
         buf = b""
         usage: tuple[int | None, int | None, float | None, str | None] = (None, None, None, None)
+        billing: dict[str, Any] = {}
         failed = ""
         try:
             async for chunk in resp.aiter_raw():
@@ -728,6 +880,7 @@ async def chat_completions(request: Request) -> Response:
                             u = _usage_of(obj)
                             if u[0] is not None or u[1] is not None:
                                 usage = (u[0], u[1], u[2], u[3] or usage[3])
+                                billing = _billing_of(obj) or billing
                             elif u[3]:
                                 usage = (usage[0], usage[1], usage[2], u[3])
                 yield chunk
@@ -741,7 +894,7 @@ async def chat_completions(request: Request) -> Response:
                 await run_in_threadpool(
                     _finish, p, status=200, outcome="OK" if not failed else "UPSTREAM_ERROR", prompt=usage[0],
                     completion=usage[1], cost=usage[2], model_resolved=usage[3],
-                    latency_ms=int((time.monotonic() - started) * 1000), error=failed)
+                    latency_ms=int((time.monotonic() - started) * 1000), error=failed, billing=billing)
 
     return StreamingResponse(relay(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

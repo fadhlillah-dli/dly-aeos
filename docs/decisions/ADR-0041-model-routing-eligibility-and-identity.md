@@ -174,7 +174,8 @@ context 262144, tools, `expiration_date` 2026-10-31; 16 `:free` models in total)
 ## Amendment 2026-10-25 (wave 7, C1): upstream request shape and the S07 client restriction
 
 Status of this amendment: the request-shape correction is ACCEPTED (it only aligns the seed with the provider
-documentation). The client-restriction question in "Owner decision required" below is **open: owner decision**.
+documentation). The client-restriction question in "Owner decision" below was **decided by the owner on 2026-10-26:
+option A, OpenCode Go** (see "Amendment 2026-10-26 (decision A: OpenCode Go WORKER routes)" at the end).
 
 ### Context (E1 documentation reading, 2026-10-25; nothing exercised live)
 
@@ -233,29 +234,33 @@ documentation). The client-restriction question in "Owner decision required" bel
    it does not touch the bridge, it does not invalidate the bridge capability proof (an engine/effort change still
    does).
 
-### Owner decision required (open)
+### Owner decision (decided 2026-10-26: A, OpenCode Go)
 
 How AEOS should use the free Zen routes given the S07 client rule. Options:
 
-* **A. OpenCode Go** for broker calls (a subscription; its endpoint/terms are not in this build: a new route after
-  the owner reads its terms).
+* **A. OpenCode Go** for broker calls (a subscription). **Chosen by the owner on 2026-10-26** for broker-served
+  WORKER routes; seeded as CANDIDATE routes by the 2026-10-26 amendment below. Activation, terms, budget and the
+  attestations stay the owner's decisions in the app.
 * **B. Paid Zen models with a BUDGET decision** (e.g. the chat-completions watchlist routes `kimi-k2.7-code`,
   `minimax-m3`, `mistral-large-4`); the existing paid-route path (BUDGET decision, no paid fallback) applies.
-* **C. Another worker route** (e.g. an OpenRouter free route, or a LOCAL loopback model).
+* **C. Another worker route** (e.g. an OpenRouter free route, or a LOCAL loopback model). Correction 2026-10-26: the
+  seeded OpenRouter route is ARENA and the local route is LOCAL; only the WORKER pool is broker-served for worker
+  tasks (ADR-0106 `SERVED_POOLS`), so neither serves a worker task in this build (only the feasibility probe).
 * **D. Proxy the free route anyway**, under the owner's responsibility for the provider terms: activation with an
   explicit client-terms decision (`client_terms` in the API / Models page, `--accept-client-terms
   --client-terms-note` in the CLI). It is written into `data_terms.client_restriction.owner_decision`
   (`OWNER_ACCEPTED_BROKER_CLIENT`) and onto the decision, bound to the configuration hash. A feasibility probe then
   shows (E3) whether the provider accepts the broker call; acceptance stays NOT-PROVEN until then.
 
-Until the owner records one of these, the free Zen routes - including the pilot WORKER routes - stay
-non-activatable for broker proxying. AEOS does not pick an option.
+The owner chose A. The free Zen routes - including the pilot WORKER routes - keep their client restriction
+(`owner_decision: UNDECIDED`) and stay non-activatable for broker proxying unless the owner records D for one of
+them; decision A does not decide the Zen rule. AEOS does not pick an option.
 
 ### Not done here (honest status)
 
 * No live call: the corrected shape is E1 until a probe records E3 (owner key + activation).
-* OpenCode Go and new free models in the S07 catalog (e.g. `flint-40b-free`) are not seeded; there is no OpenCode
-  catalog discovery in this build. LongCat & co. stay seeded; `aeos routes refresh` marks them MISSING when
+* New free models in the S07 catalog (e.g. `flint-40b-free`) are not seeded; there is no OpenCode catalog discovery
+  in this build. (OpenCode Go is seeded by the 2026-10-26 amendment.) LongCat & co. stay seeded; `aeos routes refresh` marks them MISSING when
   `opencode models` no longer lists them.
 * EvalRun still cannot execute COMPARATOR/LOCAL routes: the route view states `evaluation_path` NOT_WIRED
   (DESIGN, NOT-PROVEN, §49 M6). ARENA routes are evaluated only through the eval-only path of the W6-141
@@ -297,3 +302,299 @@ non-activatable for broker proxying. AEOS does not pick an option.
   stays an owner decision.
 * **Unchanged (owner decision):** planning/review continue on a re-resolved supervisor version (protected
   acceptance 1.31); the change is stated as NEEDS_EVALUATION / `supervisor_unevaluated`.
+
+## Amendment 2026-10-26 (decision A: OpenCode Go WORKER routes)
+
+Status of this amendment: the owner decided option A on 2026-10-26 (OpenCode Go, a $10/month subscription) for
+broker-served WORKER routes. This amendment records that decision. Part 1 implements the CANDIDATE routes and the
+code paths. Part 2 implements the subscription billing and cost semantics (cost module, scheduler, feasibility probe,
+views); see "Part 2 (2026-10-26): subscription accounting" at the end and the ADR-0080 amendment of the same date.
+Activating a route, the terms review, the budget and the attestations stay the owner's decisions in the app. Seeding
+activates nothing.
+
+### Context (E1 documentation reading, 2026-10-26; nothing exercised live)
+
+Sources, all read on 2026-10-26: the Go docs `https://opencode.ai/v2/docs/console/go/`, the product page and FAQ
+`https://opencode.ai/go`, `https://opencode.ai/v2/docs/console/harnesses/`,
+`https://opencode.ai/v2/docs/console/api/inference/`, `https://opencode.ai/v2/docs/console/api/`,
+`https://opencode.ai/v2/docs/console/billing/`, the terms of service `https://opencode.ai/legal/terms-of-service`,
+and models.dev `providers/opencode-go` (`https://github.com/anomalyco/models.dev`, the OpenCode org's model catalog).
+These pages belong to the OpenCode Console documentation that S07 cites. The research catalog keeps only the URLs the
+master states, so they are cited here and in the seeded `data_terms.sources`, not added to S07.
+
+* **Plan.** Go costs $10/month and Go Plus $40/month. Both are for single-member workspaces only, such as the
+  Personal workspace.
+* **Endpoint.** Chat completions are at `https://opencode.ai/inference/go/openai/v1/chat/completions` and take the
+  bare model id. `opencode-go/<id>` is the OpenCode config format. Other Go models are documented on Anthropic
+  messages, OpenAI responses or the Gemini path. The broker does not speak those APIs, so those models are not seeded.
+* **Auth.** `Authorization: Bearer <OpenCode Console API key, oc_sk_...>` from the workspace subscribed to Go. The
+  documented least privilege is permission Restricted with Models: Request. A revoked key gets 401, and a call outside
+  the key's permissions gets 403.
+* **Other clients are allowed.**
+  * The FAQ says: "Can I use Go with other coding agents? Yes, you can use Go with any agent."
+  * The Go docs say: "Your client should: Send typical coding agent traffic; Identify itself with its own user agent
+    ... rather than a generic SDK or HTTP-library name; Send a stable session ID in x-opencode-session for each
+    conversation".
+  * The harnesses page says "Go requires it" about that session ID.
+  * Free-tier chat models are different: "other clients receive HTTP 403 ... Use paid models or a Go subscription
+    from other clients".
+* **Limits.**
+  * Each model has a monthly DOLLAR allowance. The windows are 5 hours = 20%, week = 50% and month = 100% of it.
+  * Within the limits `usage.cost` is 0. `usage.opencode.allowance` reports the dollars counted, and
+    `usage.opencode.billing_source` is `go` or `go-plus`.
+  * At a limit the docs say requests are blocked. That the answer is HTTP 429 (`GoUsageLimitError`, `Retry-After`)
+    comes from OpenCode's own client test fixture, not from the docs (NOT-PROVEN).
+  * The block only holds while "Extra Usage" is off. When it is on, Go "will fall back to your pay-as-you-go
+    balance". That is a paid fallback on the provider side.
+  * No requests-per-minute, tokens-per-minute or concurrency limit is documented. The docs only say "Traffic is
+    monitored for abuse".
+* **Privacy.**
+  * Privacy is a workspace setting. Paid endpoints that train on request data are blocked by default, and the allowed
+    regions default to Europe and United States.
+  * Every seeded model is listed as not used for training, with 0-day retention.
+  * DeepSeek V4.1 Flash and V4 Pro need the Global region. Their zero-retention agreement "is renewed monthly. The
+    current agreement is valid through October 31, 2026."
+* **Tool calling** is not in the Go docs. models.dev states tool support for glm-5.3-flash, mimo-v2.6-flash,
+  minimax-m3.1-flash and kimi-k2.7-code. It states no tool capability for hy3.
+* **Terms of service.** Users may not use the Services in a way that "automatically or programmatically extracts data
+  or Output", or run "processes that run or are activated while you are not logged into the Services". The Console
+  API docs, on the other hand, support scripts and integrations. How the ToS applies to an unattended broker is
+  unclear. This is not a legal conclusion.
+* **Not confirmed:**
+  * a "$5 first month" price, which appears only on third-party mirrors;
+  * whether `reasoning_effort` works on Go;
+  * whether Extra Usage is off by default;
+  * whether the model list needs the key.
+
+### Decision (implemented, part 1 of 2)
+
+1. **Seed** (`routing/seed.py`). A new `_go` builder makes the routes. `_zen` is not reused, because it attaches the
+   Zen client restriction and sets tool support to UNKNOWN on paid routes. Every Go route has:
+   * provider `opencode-go`, and route key and model id `opencode-go/<id>`;
+   * endpoint `https://opencode.ai/inference/go/openai/v1`;
+   * `mode_params`: `credential_ref` `workers/opencode-go`, the bare `upstream_model`, `upstream_api`
+     `openai.chat_completions` and `reasoning` `PROVIDER_DEFAULT`;
+   * PERSONAL only, CANDIDATE/DESIGN/E1, an empty `terms_checked_at` (the reading is in
+     `data_terms.read_for_research`) and an empty fallback chain.
+
+   The routes:
+   * **WORKER, priority 1-5:** glm-5.3-flash, mimo-v2.6-flash, minimax-m3.1-flash, hy3 and kimi-k2.7-code, with data
+     classes PUBLIC and INTERNAL. They rank above the client-restricted Zen pilots (priority 10 and 20). This is pilot
+     priority, not a ranking. `supports_tools` is YES as models.dev states, except hy3, which is UNKNOWN. A route
+     with UNKNOWN tool support is never eligible for tool-using tasks.
+   * **WATCHLIST:** longcat-2.0, glm-5.2, glm-5.3, kimi-k3.1-pro and mimo-v2.6-pro, with PUBLIC and INTERNAL.
+   * **WATCHLIST, PUBLIC only:** deepseek-v4.1-flash. Its terms and expiry note record the Global region and the
+     2026-10-31 zero-retention date.
+   * **Not seeded:**
+     * the models on other API families;
+     * the models that train on data or keep it for 30 days (Muse Spark Contributor, Grok, GPT Luna, Claude Haiku,
+       Beam Free);
+     * the remaining chat-completions models (kimi-k3, mimo-v2.5, mimo-v2.5-pro, hy4-preview, step-5-preview,
+       deepseek-v4-pro).
+
+     A later reviewed change can add them.
+
+   `data_terms` holds:
+   * no training and 0-day retention;
+   * `regions`: the workspace setting, Europe and United States by default. A provider that restricts regions needs
+     the owner's reviewed region at activation (`REGION_REVIEW_REQUIRED`).
+   * `client_permission`: the FAQ quote, with the claim level NOT-PROVEN for the broker. There is no
+     `client_restriction`.
+   * `provider_paid_fallback`: Extra Usage must stay OFF.
+   * `automation_terms`: the ToS clause is an owner risk.
+   * the sources.
+
+   `pricing`:
+   * `is_free` is NO. The pricing record is `billing` SUBSCRIPTION, `plan` OpenCode Go, `monthly_fee_usd` 10,
+     `allowance_usd_month`, `allowance_windows` {5h: 0.2, week: 0.5, month: 1.0}, `allowance_rate_per_mtok` and
+     `checked_at`.
+   * There are deliberately no `input_per_mtok`/`output_per_mtok` keys, so nothing reads the allowance rate as a
+     metered price.
+   * `pricing_checked_at` is 2026-10-26.
+2. **Broker.**
+   * `PROVIDER_ENDPOINT_HOSTS` gains `opencode-go` -> `opencode.ai`, https only. A Go row edited to another host, or
+     to plain or loopback http, is refused with `ROUTE_ENDPOINT`.
+   * `upstream_model_id` strips `opencode-go/` from a row without `upstream_model`.
+   * For provider `opencode-go` the broker sends `User-Agent: dly-aeos-broker/<version>` and
+     `x-opencode-session: ses_<first 24 hex of sha256(run id)>`. The session ID is stable per worker run and opaque:
+     never the capability token, a key or the run id itself.
+   * `Authorization: Bearer` comes from `mode_params.credential_ref`.
+   * Everything else is the existing non-OpenRouter path. For example, a 429 becomes RATE_LIMITED with no fallback.
+3. **Secrets.**
+   * `workers/opencode-go` is in `KNOWN_REFS`, separate from `workers/opencode-zen`, so a stored Zen key never reads
+     as Go.
+   * The integrations card "OpenCode Go (langganan, rute pekerja)" carries the Extra Usage OFF warning.
+   * `workers/` serves PERSONAL worker-model calls only. OFFICE refuses it.
+4. **Availability.** The catalog source `opencode_go_catalog` runs in `aeos routes refresh` and
+   `POST /api/routes/refresh-catalog`.
+   * It sends `GET https://opencode.ai/inference/go/v1/models` with Bearer `workers/opencode-go` (purpose
+     `workers:routing.catalog`).
+   * A listed id becomes AVAILABLE and an absent id MISSING.
+   * Without a stored key nothing is requested, and the Go routes become UNKNOWN. The same holds for 401/403, an
+     unreachable endpoint, another status or an unexpected shape: UNKNOWN, never MISSING.
+   * `opencode-go` is in `CATALOG_OBSERVED_PROVIDERS`. `opencode models` stays the Zen source only.
+5. **Doctor and inventory.**
+   * `route.worker_key` is invalidated by `secret:workers/*`, so any worker-model key counts, including
+     `workers/opencode-go`. Before, only the OpenRouter keys did.
+   * Its remedy names the eligible route's own key.
+   * The inventory CONFIG lens maps `opencode-go` to the `opencode-console` component. The research catalog
+     component hint is added.
+
+### Consequences
+
+* **Master §23 is extended through this ADR.** Its pool table names the free Zen pilots as the initial workers; this
+  amendment adds Go WORKER candidates. The master is not edited (`docs/architecture` is protected). Go is an official
+  API-key subscription that the provider documents for other clients. It is not the session/subscription-credential
+  routing that §45 excludes (9Router).
+* **The ToS automation clause is an owner risk.** It is recorded at activation: the TRIAL needs `terms_reviewed` and
+  a terms note. This is not a legal conclusion.
+* **Extra Usage must stay OFF.** AEOS cannot observe that account setting. With it ON, the provider silently falls
+  back to the paid balance after an allowance (invariant 8, no silent paid fallback). No attestation exists in code
+  (no decision preset): the owner states Extra Usage OFF in the terms note at activation (OWNER_ACTIONS 1.8/1.11). At
+  runtime, a call Go bills beyond the plan (a marginal charge, or a `billing_source` other than `go`/`go-plus`) is
+  flagged and refuses the route until the owner re-activates it (part 2).
+* **DeepSeek on Go** needs the Global region, and its zero-retention agreement expires 2026-10-31 unless renewed. It
+  stays WATCHLIST and PUBLIC only.
+* **A Go route is paid, never free:**
+  * a BUDGET decision is needed at activation, in routing and on every request; one decision can cover several Go
+    routes through `auth_scope.routes`;
+  * it is never an automatic fallback.
+
+  Part 1 alone left the cost path of a per-token paid route in place: the probe refused it, a TaskSpec needed
+  `max_cost_usd`, and the reservation was charged when the upstream reported no cost. Part 2 replaces that for
+  SUBSCRIPTION routes (below).
+* **A later change to a seeded Go row voids its TRIAL.** Changing its pricing, terms or `mode_params` changes its
+  config hash. The seed only backfills untouched CANDIDATE rows.
+* **ADR-0041 changed again.** An owner ACCEPTED registration of it is STALE until it is recorded again (OWNER_ACTIONS
+  2.8).
+* **The install manifest is not updated here.** Component `opencode-console` still describes Zen only (cost
+  FREE_TIER, no Go `identity_ref`). It is a protected path and is updated through a reviewed change. The egress host
+  does not change: `opencode.ai`, through the broker and routing.
+
+### NOT-PROVEN
+
+* **No live call.** The endpoint, model ids, request shape, headers, auth, model-list shape and limit behaviour are E1
+  documentation; the 429 status at a limit is only an OpenCode client test fixture. The unit tests exercise the AEOS
+  side against respx mocks (E2).
+* Whether Go accepts the AEOS broker as a client: typical coding-agent traffic, abuse monitoring.
+* Tool calling per models.dev is E1 and not exercised on Go. hy3 is UNKNOWN.
+* Whether the model list needs the key, and its exact shape. An OpenAI list is assumed; any other shape is UNKNOWN.
+* The owner's subscription, key, region and Extra Usage setting. None of them are observed by AEOS.
+
+### Part 2 (2026-10-26): subscription accounting
+
+Status: implemented, owner decision A. The cost-module rules are recorded in ADR-0080 (amendment 2026-10-26). This
+section states how they apply to the Go routes.
+
+**Context.** Part 1 seeded every Go route with `pricing.billing` SUBSCRIPTION: a $10/month plan fee and a per-model
+dollar allowance consumed at the listed rates. The cost path did not know that billing class:
+
+* the scheduler refused a non-free route without TaskSpec `limits.max_cost_usd` (`COST_UNKNOWN`), which the planner
+  never sets;
+* the ledger charged the whole reservation as dollars when the upstream reported no `usage.cost`;
+* the probe refused every non-free route (`ROUTE_NOT_FREE`).
+
+A Go route could be activated but could not run honestly.
+
+**Decision.**
+
+1. **Activation.** A SUBSCRIPTION route still needs a BUDGET decision: the plan fee is paid. `needs_budget` stays
+   true. The copy now names the plan: "subscription route (OpenCode Go, $10/month plan fee; the BUDGET decision covers
+   the fee, usage is plan allowance)". The same wording appears in activation errors, eligibility rejections, the
+   per-request check and the route view (`billing`, `budget_note`, `subscription`). The owner records one BUDGET
+   decision per route (`aeos policy decide --kind BUDGET --target-type model_route --target-id <route> --days 30`).
+   The TRIAL keeps that decision's id, so a new BUDGET decision for the next cycle needs `aeos routes activate ...
+   --budget-decision <new id>` again; a TRIAL lasts 14 days unless `--days` says otherwise.
+2. **Broker accounting** (`broker/model_proxy.py`).
+   * `usage.cost` is recorded as the call's cost: the marginal charge, 0 within the plan.
+   * `usage.opencode.allowance` and `usage.opencode.billing_source` go to the cost module as
+     `details.reported_allowance_usd` / `billing_source`. This works for JSON answers and for a stream's usage chunk.
+     A dollar figure that is not finite, negative or above 1e9 USD is unreported; a stated `usage.cost` AEOS cannot
+     read is flagged `cost_reported_unusable`.
+   * The cost module writes `details.allowance_usd` with `allowance_basis` REPORTED, or ESTIMATED from the tokens x
+     the route's `allowance_rate_per_mtok`, rounded up. When the answer reports no usage at all, the broker records
+     the call's upper bound as `details.charged_tokens`: the clamped `max_tokens` it sent plus the prompt size (UTF-8
+     bytes of the forwarded body plus a chat-template margin), else the grant's token cap. The estimate is that
+     bound x the highest rate, so the basis is ESTIMATED, never UNKNOWN - also on the path without a hold (no
+     reservation, or one already settled when a late answer arrives).
+   * The run's `usage_summary` adds `allowance_usd`.
+   * No migration: the figures live in the existing JSON `usage_ledger.details` and `worker_runs.usage_summary`.
+     `broker_requests` has no JSON column, and its `cost_usd` stays the marginal cost.
+3. **Admission** (`cost/service.py`, `workforce/scheduler.py`).
+   * A SUBSCRIPTION route's marginal estimate is $0, and no TaskSpec `max_cost_usd` is needed. The reservation's
+     `pricing_basis` is SUBSCRIPTION.
+   * The run's grant cost cap is $0. A reported marginal charge (Extra Usage spend) therefore stops the run's next
+     request.
+   * The cost module counts the recorded allowance of **this AEOS instance's calls** per route over trailing 5 h /
+     7 day / 31 day windows (20% / 50% / 100% of `allowance_usd_month`). Usage of the same Go workspace from other
+     clients or machines (the owner's own OpenCode, the other Mac) is invisible to AEOS, so Go's own limit stays
+     authoritative: its docs say requests are blocked; HTTP 429 per the OpenCode client fixture (NOT-PROVEN).
+   * Only the **5-hour window blocks**: a used-up window waits with `SUBSCRIPTION_ALLOWANCE_EXHAUSTED`, and a call in
+     it whose allowance cannot be counted waits with `SUBSCRIPTION_ALLOWANCE_UNKNOWN` until it leaves the window (at
+     most 5 hours). Both are QUOTA wait codes, shown as WAITING_QUOTA, in the scheduler and in `reserve`. A Go refusal
+     maps to RATE_LIMITED with no fallback only if Go answers HTTP 429 (NOT-PROVEN); any other status is
+     UPSTREAM_ERROR and records no quota wait.
+   * The **week and month windows are advisory** (`WARN_EXHAUSTED`, never blocking). AEOS cannot know where Go anchors
+     or resets them, and with Extra Usage OFF exceeding them only yields Go's refusals, never money. A trailing count
+     could otherwise lock a route for up to 31 days after Go reset it.
+   * **Paid usage beyond the plan fails closed.** A call with a marginal charge, a `billing_source` other than `go` /
+     `go-plus` (e.g. `balance`) or an unreadable stated cost is flagged `beyond_plan_usd` (amount or UNKNOWN) and
+     emitted as `cost.subscription.beyond_plan`. The route is then refused (`SUBSCRIPTION_BEYOND_PLAN`) for new
+     admissions, probes and every broker request until the owner re-activates it (a TRIAL/APPROVED decision newer
+     than the call). In task views it is BLOCKED.
+   * Incomplete subscription terms wait with `COST_UNKNOWN` in the scheduler and are refused with
+     `BUDGET_STATE_UNTRUSTED` by `reserve` (fail closed).
+   * Wait and refusal reasons carry no allowance figures.
+4. **Feasibility probe.** One synthetic PUBLIC probe is allowed on an activated SUBSCRIPTION route (ADR-0111
+   amendment 2026-10-26). It consumes allowance, not money.
+   * It sends its own opaque `x-opencode-session`.
+   * It records the allowance (a token bound when Go reports no usage).
+   * It is refused with the admission codes above (`SUBSCRIPTION_ALLOWANCE_EXHAUSTED`,
+     `SUBSCRIPTION_ALLOWANCE_UNKNOWN`, `SUBSCRIPTION_BEYOND_PLAN`); advisory windows never refuse it. A probe Go bills
+     beyond the plan is flagged in its result.
+
+   Per-token paid routes are still refused (`ROUTE_NOT_FREE`).
+5. **Views.**
+   * `aeos cost summary` prints "Worker subscriptions": the plan, the monthly allowance, the counted scope, and per
+     window the used, limit, remaining, reported and estimated amounts, with the advisory windows marked, the
+     beyond-plan refusal and its remedy. It is ASCII only.
+   * `GET /api/costs/summary` adds `subscriptions` and `by_route[].billing` / `allowance_usd`; the route view adds
+     `subscription`; `GET /api/tasks/{id}/admission` adds `answers.subscription`.
+   * In ledger entries, `cost_kind` is SUBSCRIPTION for a $0 call within the plan.
+   * `aeos routes list` only flags `billing=SUBSCRIPTION`. The Costs page and the route drawer show the plan, the
+     allowance per window and the beyond-plan state (component tests on the contract fixtures; not exercised in a browser).
+   * Window figures span domains, so they follow the GLOBAL/ROUTE budget visibility rule in all three API answers.
+6. **Doctor.** `route.registry` lists SUBSCRIPTION candidates apart as `subscription_candidates`, never as free and
+   never as `paid_or_unknown_price_candidates`. The latter keeps routes with incomplete terms. `requires_paid_write`
+   stays true while either list is non-empty, because the plan fee is a BUDGET decision.
+
+**Consequences.**
+
+* A Go route with its BUDGET decision runs at $0 marginal cost until this instance's count of the 5h window is used
+  up, then waits. It never falls back to another route, and a call Go bills beyond the plan refuses the route until the
+  owner acts.
+* The 429 scope stays per route. The Go docs list the limits per model ("Each model has the following usage
+  limits"); whether Go pools them across models is NOT-PROVEN (below).
+* **Per-token paid routes are unchanged (open).** They still need TaskSpec `limits.max_cost_usd`, which the planner
+  never sets (`COST_UNKNOWN`), and an unknown upstream cost still charges the reservation. A cost estimate for them
+  (route per-token price x the token cap, or a plan-approved limit) is an open owner decision, recorded in ADR-0080.
+* **No Extra Usage attestation in code.** The owner's terms note records it. At runtime the $0 grant cap, the
+  `billing_source` check and the beyond-plan refusal catch a charge Go reports or signals. A charge Go neither reports
+  nor signals is not observable.
+
+**NOT-PROVEN (part 2).**
+
+* Whether Go reports `usage.opencode.allowance` on every answer, including the final stream chunk, and in which
+  number format. AEOS accepts a finite number in [0, 1e9] and otherwise estimates.
+* **Per-model or pooled allowance, and the unit of `usage.opencode.allowance`.** The Go page says "Each model's monthly
+  limit below determines how its usage counts toward those allowances", and the API docs call the figure "dollars of
+  the plan's monthly limit". AEOS assumes one allowance per model in USD of that model's limit. To check on the first
+  probe or TRIAL run: compare `usage.opencode.allowance` with the call's tokens x the seeded rate, and the Go
+  Console's usage page with `aeos cost summary`.
+* Usage of the same Go workspace from other clients or machines is invisible to AEOS; its count can be lower than
+  Go's.
+* Where Go anchors its windows. Only the 5h window blocks; the week and month windows are advisory for this reason.
+* The allowance rates are an E1 reading (2026-10-26). If Go changes them, estimated figures drift until the seed
+  is updated, which is a config change and needs a new TRIAL. Reported figures do not drift.
+* In-flight runs hold no allowance. With concurrency 1-2, the provider's limit is the boundary inside a run.
+* The billing source values `go` / `go-plus` / `balance` are an E1 reading of the API docs.

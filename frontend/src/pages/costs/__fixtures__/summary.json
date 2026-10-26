@@ -131,6 +131,74 @@
    "quantity": {}
   }
  ],
+ "subscriptions": [
+  {
+   "route_key": "opencode-go/glm-5.3-flash",
+   "provider": "opencode-go",
+   "status": "TRIAL",
+   "billing": "SUBSCRIPTION",
+   "plan": "OpenCode Go",
+   "currency": "USD",
+   "monthly_fee_usd": 10.0,
+   "allowance_usd_month": 60.0,
+   "basis": "AEOS counts only the calls made through this AEOS instance; usage of the same provider workspace from other clients or machines is invisible to it, so the provider's own limit (blocked requests; HTTP 429 per OpenCode's client test fixture, NOT-PROVEN) stays authoritative. Allowance per request: provider usage.opencode.allowance (REPORTED), else tokens x the route's allowance rates or a token upper bound x the highest rate (ESTIMATED, rounded up). The trailing 5h window blocks admission; the week (7 days) and month (31 days) windows are advisory (WARN_EXHAUSTED): the provider's reset anchors are unknown and with Extra Usage OFF exceeding them only yields provider refusals.",
+   "counted_scope": "THIS_AEOS_INSTANCE",
+   "checked_at": "2026-10-18T12:09:14.970016+00:00",
+   "windows": [
+    {
+     "window": "5h",
+     "share": 0.2,
+     "trailing_hours": 5,
+     "since": "2026-10-18T07:09:14.970016+00:00",
+     "blocking": true,
+     "limit_usd": 12.0,
+     "used_usd": 3.12,
+     "remaining_usd": 8.88,
+     "reported_usd": 3.12,
+     "estimated_usd": 0.0,
+     "requests": 3,
+     "unknown_requests": 0,
+     "state": "OK"
+    },
+    {
+     "window": "week",
+     "share": 0.5,
+     "trailing_hours": 168,
+     "since": "2026-10-11T12:09:14.970016+00:00",
+     "blocking": false,
+     "limit_usd": 30.0,
+     "used_usd": 3.12,
+     "remaining_usd": 26.88,
+     "reported_usd": 3.12,
+     "estimated_usd": 0.0,
+     "requests": 3,
+     "unknown_requests": 0,
+     "state": "OK"
+    },
+    {
+     "window": "month",
+     "share": 1.0,
+     "trailing_hours": 744,
+     "since": "2026-09-17T12:09:14.970016+00:00",
+     "blocking": false,
+     "limit_usd": 60.0,
+     "used_usd": 3.12,
+     "remaining_usd": 56.88,
+     "reported_usd": 3.12,
+     "estimated_usd": 0.0,
+     "requests": 3,
+     "unknown_requests": 0,
+     "state": "OK"
+    }
+   ],
+   "problems": [],
+   "warnings": [],
+   "beyond_plan": null,
+   "beyond_plan_usd": 0.0,
+   "beyond_plan_unknown_requests": 0,
+   "state": "OK"
+  }
+ ],
  "native_subscription": {
   "provider": "claude-native",
   "billing": "SUBSCRIPTION",

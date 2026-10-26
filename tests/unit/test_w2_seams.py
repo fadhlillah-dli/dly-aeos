@@ -261,6 +261,8 @@ def test_observed_429_is_written_through_the_cost_module(db, fakes):
 # ----------------------------------------------------------------------------- 7. credential namespaces (§26)
 @pytest.mark.parametrize("domain,ref,project,ok", [
     ("PERSONAL", "workers/opencode-zen", None, True),
+    ("PERSONAL", "workers/opencode-go", None, True),
+    ("OFFICE", "workers/opencode-go", None, False),
     ("PERSONAL", "personal/openrouter", None, True),
     ("PERSONAL", "projects/p1/zen", "p1", True),
     ("PERSONAL", "projects/p2/zen", "p1", False),
@@ -275,9 +277,12 @@ def test_credential_namespace_rule(domain, ref, project, ok):
 
 def test_secret_purposes_follow_the_secrets_contract():
     from aeos.delivery import provider
+    from aeos.routing import catalog
     from aeos.secrets.provider import check_purpose
 
     check_purpose("workers/opencode-zen", model_proxy.secret_purpose("workers/opencode-zen"))
+    check_purpose("workers/opencode-go", model_proxy.secret_purpose("workers/opencode-go"))
+    check_purpose(*catalog.OPENCODE_GO_KEY_REF)  # the Go model list is read in the workers: purpose scope
     check_purpose("projects/p1/zen", model_proxy.secret_purpose("projects/p1/zen"))
     check_purpose(git_broker.GITHUB_SECRET_REF, git_broker.GITHUB_SECRET_PURPOSE)
     check_purpose(provider.SECRET_REF, provider.SECRET_PURPOSE)
@@ -311,6 +316,15 @@ def test_seed_sets_and_backfills_credential_ref(db):
     out = seed.run(db)
     assert out["credential_ref_backfilled"] >= 1
     assert zen.mode_params["credential_ref"] == "workers/opencode-zen" and zen.config_hash == compute_config_hash(zen)
+    # OpenCode Go (ADR-0041 amendment 2026-10-26): its own reference, never the Zen key
+    go = db.scalars(select(ModelRoute).where(ModelRoute.provider == "opencode-go")).all()
+    assert go and {r.mode_params["credential_ref"] for r in go} == {"workers/opencode-go"}
+    go[0].mode_params = {k: v for k, v in go[0].mode_params.items() if k != "credential_ref"}
+    go[0].config_hash = compute_config_hash(go[0])
+    db.flush()
+    seed.run(db)
+    assert go[0].mode_params["credential_ref"] == "workers/opencode-go"
+    assert go[0].config_hash == compute_config_hash(go[0])
 
 
 # ----------------------------------------------------------------------------- 8. sha-pinned push (§31)

@@ -503,6 +503,25 @@ def test_secret_store_fail_closed_and_status_without_values(settings, db, secret
     assert key.status == "CONFIGURED" and key.observed_evidence["paid_call_made"] is False
 
 
+def test_worker_key_remedy_names_the_eligible_routes_own_provider(settings, db, secrets_memory, monkeypatch):
+    """An eligible OpenCode Go route (ADR-0041 amendment 2026-10-26) needs workers/opencode-go: the check and its remedy
+    name that key, never the OpenRouter default."""
+    from aeos.doctor.checks import model_route
+    from aeos.routing import seed
+
+    seed.run(db)
+    db.commit()
+    monkeypatch.setattr(model_route, "eligible_worker_routes", lambda s: (["opencode-go/glm-5.3-flash"], {}, None))
+    res = check("route.worker_key", _ctx(settings, db, base_runner()))
+    assert res.status == "MISSING" and res.error_code == "WORKER_KEY_MISSING"
+    assert "workers/opencode-go" in res.observed_evidence["ref_states"]
+    assert "secrets set workers/opencode-go" in res.remediation["command"]
+    assert "OpenCode Go" in json.dumps(res.remediation) and "OpenRouter" not in json.dumps(res.remediation)
+    secrets_memory.put("workers/opencode-go", "g" * 30, actor="test")
+    res = check("route.worker_key", _ctx(settings, db, base_runner()))
+    assert res.status == "CONFIGURED" and "g" * 30 not in json.dumps(res.as_dict())
+
+
 def test_secret_store_unavailable_is_missing(settings, db):
     assert check("secret.status", _ctx(settings, db, base_runner())).status == "MISSING"
     res = check("route.worker_key", _ctx(settings, db, base_runner()))

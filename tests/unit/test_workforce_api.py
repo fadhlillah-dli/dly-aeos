@@ -311,3 +311,44 @@ def test_the_control_center_threshold_is_the_one_the_doctor_check_reads(personal
     assert r.status_code == 201, r.text
     db.expire_all()
     assert worker_checks._threshold(db) == (0.05, r.json()["id"])
+
+
+def test_admission_drops_subscription_figures_for_a_principal_who_cannot_see_every_domain(personal_client, db,
+                                                                                            fakes):
+    """ADR-0080 amendment 2026-10-26: a subscription route's allowance counts every domain's calls, so the admission
+    answer shows its window figures only to a principal who may see every domain (as the route view and the Costs
+    page); the wait reasons never carry figures."""
+    from datetime import timedelta
+
+    from aeos.core.timeutil import utcnow
+    from aeos.models.cost import UsageLedgerEntry
+    from aeos.models.identity import User
+    from aeos.routing.seed import _go_pricing
+
+    p = make_project(db)
+    plan, pv, specs = make_plan(db, p, [{"task_key": "a"}])
+    fakes.approved[plan.id] = pv.id
+    route = make_route(db, key="opencode-go/glm-5.3-flash", provider="opencode-go", is_free="NO")
+    route.pricing = _go_pricing(60, {"input": 0.15, "output": 0.50})
+    route.pricing_checked_at = utcnow()
+    fakes.route_key = route.route_key
+    seed_and_enable_implementer(db)
+    process_sandbox_exception(db)
+    scheduler.ensure_executions(db, pv.id, actor="t")
+    scheduler.refresh_readiness(db, pv.id)
+    db.add(UsageLedgerEntry(at=utcnow() - timedelta(hours=1), route_key=route.route_key, provider="opencode-go",
+                            category="WORKER_API", source="broker", cost_usd=0, charged_usd=0, mode="LIVE",
+                            details={"billing": "SUBSCRIPTION", "allowance_usd": "12", "allowance_basis": "REPORTED"}))
+    db.commit()
+    full = personal_client.get(f"/api/tasks/{specs[0].id}/admission").json()
+    assert full["answers"]["subscription"]["windows"][0]["used_usd"] == 12.0
+    waits = dict((c, m) for c, m in full["waits"])
+    assert "$" not in waits["SUBSCRIPTION_ALLOWANCE_EXHAUSTED"]
+    owner = db.query(User).filter(User.username == "owner").one()
+    owner.project_scope = [p.id]  # a project-scoped principal: other projects' usage is not visible
+    db.commit()
+    scoped = personal_client.get(f"/api/tasks/{specs[0].id}/admission").json()
+    sub = scoped["answers"]["subscription"]
+    assert sub["windows"] is None and sub["spend_hidden"] is True and sub["state"] == "EXHAUSTED"
+    assert not {"problems", "warnings", "beyond_plan", "beyond_plan_usd"} & set(sub)
+    assert "used_usd" not in str(sub) and "$" not in " ".join(m for _, m in scoped["waits"])

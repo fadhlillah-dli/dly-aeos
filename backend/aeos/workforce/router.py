@@ -14,12 +14,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from aeos.api.deps import DB, ActiveDomain, AdminPrincipal, CurrentPrincipal, load_project
+from aeos.core.enums import Domain
 from aeos.core.errors import Blocked, NotFound
 from aeos.core.timeutil import utcnow
 from aeos.identity.facade import Principal
 from aeos.models.planning import Plan
 from aeos.models.workforce import TaskExecution, WorkerRun
-from aeos.workforce import scheduler, views
+from aeos.workforce import integrations, scheduler, views
 
 router = APIRouter(tags=["workforce"])
 RUN_DETAIL_SOURCE = "worker_runs, task_executions, leases, evidence_artifacts, review_records, acceptance_records"
@@ -394,5 +395,17 @@ def admission(task_id: str, principal: CurrentPrincipal, domain: ActiveDomain, d
                 "checked_at": utcnow().isoformat()}
     adm = scheduler.admission_check(db, task_id)
     db.rollback()
-    return {**adm.as_dict(), "state": te.state, "source": "scheduler admission check (§19, read-only)",
+    out = adm.as_dict()
+    sub = (out.get("answers") or {}).get("subscription")
+    if sub is not None and not _sees_every_domain(principal):
+        # ADR-0080 amendment 2026-10-26: a subscription route's allowance counts every domain's calls, so its window
+        # figures follow the GLOBAL/ROUTE budget visibility rule (as the route view and the Costs page); the wait
+        # reasons carry no figures
+        out["answers"] = {**out["answers"], "subscription": integrations.subscription_without_figures(sub)}
+    return {**out, "state": te.state, "source": "scheduler admission check (§19, read-only)",
             "checked_at": utcnow().isoformat()}
+
+
+def _sees_every_domain(principal: Principal) -> bool:
+    """A principal without a project scope who may access every domain (the cost module's cross-domain rule)."""
+    return principal.allowed_project_ids is None and all(principal.can_access_domain(d) for d in Domain)

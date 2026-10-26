@@ -19,6 +19,10 @@ from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
 
 WORKER_KEY_REF = "workers/openrouter"
 OPENROUTER_PERSONAL_REFS = ("workers/openrouter", "personal/openrouter")  # broker model proxy order (PERSONAL)
+# Remedy wording per worker credential reference (an eligible route names its own, e.g. workers/opencode-go)
+KEY_LABELS = {"workers/openrouter": "OpenRouter untuk pekerja",
+              "workers/opencode-go": "OpenCode Go (langganan) untuk pekerja",
+              "workers/opencode-zen": "OpenCode Zen untuk pekerja", "workers/gemini": "Gemini API (pembanding)"}
 CATALOG_MAX_AGE = timedelta(days=30)
 ROUTE_DOMAIN = "PERSONAL"  # OFFICE routes stay denied by the office policy (§23) and are gated per domain
 ROUTE_CLASSIFICATION = "INTERNAL"  # TaskSpec default data classification (same probe as the agent enable endpoint)
@@ -94,9 +98,10 @@ def route_registry(ctx: CheckContext) -> Outcome:
     evidence["eligible"] = eligible
     evidence["rejected_decided"] = {k: v[:4] for k, v in rejected.items() if k in decided_keys}
     activate = Remedy(operation="Evaluasi lalu aktifkan satu route pekerja lewat keputusan manusia (ROUTE_ACTIVATION "
-                      "atau TRIAL terikat hash konfigurasi; route berbayar butuh keputusan BUDGET)",
+                      "atau TRIAL terikat hash konfigurasi; route berbayar butuh keputusan BUDGET, route langganan "
+                      "butuh keputusan BUDGET untuk biaya paket bulanannya)",
                       command=aeos_cmd("routes activate <route_key>"), target="Models & Routes", privilege="pemilik",
-                      cost="sesuai route; paid nonaktif tanpa budget",
+                      cost="sesuai route; paid nonaktif tanpa budget; langganan = biaya paket + allowance per jendela",
                       rollback=aeos_cmd("routes disable <route_key>"),
                       evidence_to_collect="Decision ROUTE_ACTIVATION/TRIAL + route.registry CONFIGURED")
     if error:
@@ -106,18 +111,41 @@ def route_registry(ctx: CheckContext) -> Outcome:
         return Outcome("CONFIGURED", f"{len(eligible)} route pekerja eligible untuk {ROUTE_DOMAIN}/{ROUTE_CLASSIFICATION}: "
                        f"{', '.join(eligible[:5])} (keputusan manusia terikat hash; belum bukti kualitas).",
                        evidence=evidence)
-    # §08: the remedy (activating a worker route) may be a paid write when any candidate is not free.
-    paid = sorted(k for (k,) in ctx.session.execute(select(ModelRoute.route_key).where(
-        ModelRoute.pool == "WORKER", ModelRoute.status != "DISABLED", ModelRoute.is_free != "YES")))
+    # §08: the remedy (activating a worker route) may be a paid write when any candidate is not free. A flat-fee
+    # SUBSCRIPTION candidate (ADR-0080 amendment 2026-10-26) is neither free nor an unpriced paid route: activating it
+    # is a BUDGET decision for its plan fee (a paid write); incomplete subscription terms stay unknown-price.
+    paid, subscription = _non_free_candidates(ctx.session)
     evidence["paid_or_unknown_price_candidates"] = paid[:10]
+    evidence["subscription_candidates"] = subscription[:10]
     if decided == 0:
         return Outcome("MISSING", "Belum ada route pekerja APPROVED/TRIAL; kandidat tidak otomatis aktif (§23).",
                        evidence=evidence, error_code="NO_APPROVED_WORKER_ROUTE", remedy=activate,
-                       requires_paid_write=bool(paid))
+                       requires_paid_write=bool(paid or subscription))
     first = next(iter(evidence["rejected_decided"].items()), None)
     why = f" (mis. {first[0]}: {first[1][0]})" if first and first[1] else ""
     return Outcome("MISSING", f"{decided} route APPROVED/TRIAL tetapi tidak ada yang eligible{why}.", evidence=evidence,
-                   error_code="NO_ELIGIBLE_WORKER_ROUTE", remedy=activate, requires_paid_write=bool(paid))
+                   error_code="NO_ELIGIBLE_WORKER_ROUTE", remedy=activate,
+                   requires_paid_write=bool(paid or subscription))
+
+
+def _non_free_candidates(session: Any) -> tuple[list[str], list[str]]:
+    """(paid or unknown-price WORKER candidates, flat-fee SUBSCRIPTION candidates with complete terms), not DISABLED.
+    A route whose pricing says SUBSCRIPTION is never counted as free, whatever its is_free flag."""
+    from aeos.cost import facade as cost
+    from aeos.models.routing import ModelRoute
+
+    paid: list[str] = []
+    subscription: list[str] = []
+    for r in session.scalars(select(ModelRoute).where(ModelRoute.pool == "WORKER", ModelRoute.status != "DISABLED")):
+        try:
+            terms, problem = cost.subscription_terms(r)
+        except (ImportError, ModuleNotFoundError):  # pragma: no cover - cost ships with the doctor; is_free decides
+            terms, problem = None, None
+        if terms is not None:
+            subscription.append(r.route_key)
+        elif problem or r.is_free != "YES":
+            paid.append(r.route_key)
+    return sorted(paid), sorted(subscription)
 
 
 def _required_key_refs(ctx: CheckContext) -> tuple[list[str], list[tuple[str, tuple[str, ...]]]]:
@@ -145,9 +173,10 @@ def _required_key_refs(ctx: CheckContext) -> tuple[list[str], list[tuple[str, tu
     return eligible, out
 
 
-# Secret changes are signalled by explicit invalidators (secret:<ref>), not by reading the store.
+# Secret changes are signalled by explicit invalidators (secret:<ref>), not by reading the store. ``secret:workers/*``
+# covers every worker-model key an eligible route may name (workers/openrouter, workers/opencode-go, ...).
 @check("route.worker_key", "MODEL_ROUTE", "Referensi kunci route pekerja (tanpa panggilan)", component_id="openrouter",
-       ttl_seconds=3600, invalidators=(f"secret:{WORKER_KEY_REF}", "secret:personal/openrouter", "config:routes",
+       ttl_seconds=3600, invalidators=("secret:workers/*", "secret:personal/openrouter", "config:routes",
                                        "model:route"),
        ok={"CONFIGURED", "VERIFIED", "NOT_APPLICABLE"}, severity_fail="HIGH", observation="configuration")
 def route_worker_key(ctx: CheckContext) -> Outcome:
@@ -196,7 +225,7 @@ def route_worker_key(ctx: CheckContext) -> Outcome:
                        evidence=evidence, error_code="SECRET_STORE_UNAVAILABLE")
     ref = (required[0][1][0] if required else WORKER_KEY_REF)
     return Outcome("MISSING", f"Kunci route belum disimpan: {'; '.join(missing)}.", evidence=evidence,
-                   error_code="WORKER_KEY_MISSING", remedy=set_secret_remedy(ref, "OpenRouter untuk pekerja"))
+                   error_code="WORKER_KEY_MISSING", remedy=set_secret_remedy(ref, KEY_LABELS.get(ref, ref)))
 
 
 @check("route.catalog_freshness", "MODEL_ROUTE", "Kesegaran harga/terms route yang diputuskan", component_id="model-routing",

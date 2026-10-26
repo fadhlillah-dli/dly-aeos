@@ -17,7 +17,7 @@ class ModelRoute(IdMixin, TimestampMixin, Base):
 
     route_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     pool: Mapped[str] = mapped_column(String(32), nullable=False)  # SUPERVISOR|WORKER|COMPARATOR|ARENA|WATCHLIST|LOCAL
-    provider: Mapped[str] = mapped_column(String(64), nullable=False)  # claude-native|openrouter|opencode-zen|gemini
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)  # claude-native|openrouter|opencode-zen|opencode-go|gemini|local
     endpoint: Mapped[str | None] = mapped_column(String(512), nullable=True)
     model_id: Mapped[str] = mapped_column(String(160), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), default="")

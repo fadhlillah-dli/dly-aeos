@@ -44,7 +44,8 @@ def grants_cmd(active: bool = typer.Option(False, help="Only active grants"),
 
 @app.command("probe-route")
 def probe_route_cmd(route_key: str = typer.Argument(..., help="Route key (ARENA/COMPARATOR/LOCAL/WORKER pool)")) -> None:
-    """One synthetic PUBLIC feasibility request to a free, owner-activated (TRIAL) route; evidence only."""
+    """One synthetic PUBLIC feasibility request to an owner-activated (TRIAL) route that spends no money: free, local
+    loopback, or a flat-fee subscription (it consumes plan allowance); evidence only."""
     from aeos.broker.feasibility import probe_route
     from aeos.cli import ensure_database
     from aeos.core.db import session_scope
@@ -59,6 +60,13 @@ def probe_route_cmd(route_key: str = typer.Argument(..., help="Route key (ARENA/
         raise typer.Exit(2) from exc
     _out(f"{out['route_key']} ({out['pool']}): {out['outcome']} http={out['http_status']} "
          f"latency={out['latency_ms']}ms model={out['model_resolved'] or 'UNKNOWN'} cost={out['cost_usd']}")
+    if out.get("billing"):
+        b = out["billing"]
+        _out(f"subscription allowance used: {b['allowance_usd']} USD ({b['allowance_basis']}, "
+             f"billing source {b['billing_source']})")
+        if b.get("beyond_plan_usd") is not None:
+            _out(f"BEYOND THE PLAN: {b['beyond_plan_usd']} USD - route refused (SUBSCRIPTION_BEYOND_PLAN) until you "
+                 "check Extra Usage is OFF and re-activate it")
     _out(f"evidence {out['evidence_id']}; {out['note']}")
 
 

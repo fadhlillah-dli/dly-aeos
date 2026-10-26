@@ -243,6 +243,28 @@ date, `./aeos doctor --functional` also from the date GitHub reports for the tok
 *Catat sebagai bukti*. Other route keys are needed only for the routes you choose in 1.11:
 `./aeos secrets set workers/opencode-zen` and `./aeos secrets set workers/gemini`.
 
+**OpenCode Go key (decision A, ADR-0041 amendment 2026-10-26).** Only after you subscribe to Go:
+
+1. Open the OpenCode Console and select the **Personal** workspace. Go works only in single-member workspaces.
+2. Create an API key with permission **Restricted → Models: Request**. That is the least privilege the docs give for
+   inference.
+3. Store it, prompted without echo:
+
+   ```bash
+   ./aeos secrets set workers/opencode-go   # a separate ref, never the Zen key
+   ./aeos secrets status
+   ```
+
+4. On the Console's Go page, keep **Extra Usage OFF**. With it ON, Go falls back to your pay-as-you-go balance after
+   a usage limit, and AEOS cannot see that setting.
+
+AEOS counts only the Go calls made through this AEOS instance. If you also use the same Go workspace from your own
+OpenCode or from the other Mac, Go's limits are reached sooner than `aeos cost summary` shows; Go's own limit stays
+authoritative.
+
+The Integrasi & Akses card "OpenCode Go (langganan, rute pekerja)" then reads CONFIGURED. That means stored, not
+verified.
+
 ### 1.9 OpenCode and the contract test [per machine]
 
 ```bash
@@ -290,6 +312,76 @@ Activating a route is your explicit decision. Nothing is active by default.
 * **Paid route:** first record a BUDGET decision on *Keputusan* → *Catat keputusan manusia* (Jenis keputusan:
   BUDGET), then add `--budget-decision <id>`.
 * **Free OpenCode Zen routes:** they need the client-terms decision in [2.12](#212-smaller-open-decisions) first.
+* **OpenCode Go routes (decision A, ADR-0041 amendment 2026-10-26):** the WORKER candidates are
+  `opencode-go/glm-5.3-flash` (first), `opencode-go/mimo-v2.6-flash`, `opencode-go/minimax-m3.1-flash`,
+  `opencode-go/hy3` and `opencode-go/kimi-k2.7-code`. hy3 has no documented tool support, so it never serves
+  tool-using tasks. **A WORKER route activated as TRIAL is eligible for real worker tasks at once.** If you want the
+  probe (step 6) first, activate it before you enable the worker agent (below), or pause scheduling around it
+  (`./aeos work pause --reason "Go probe"`, then `./aeos work resume`). To activate one:
+  1. Store the Go key (1.8), then run `./aeos routes refresh`. The `opencode_go_catalog` line must read OK, and its
+     `available:` line must list the route. A `missing:` line means Go does not list that model.
+  2. Read the Go terms: <https://opencode.ai/v2/docs/console/go/>, <https://opencode.ai/go> and the terms of service
+     <https://opencode.ai/legal/terms-of-service>. The ToS clause on automated or programmatic use is your risk to
+     accept: write what you read into `--terms-note`.
+  3. Check on the Console's Go page that **Extra Usage is OFF**. With it ON, Go bills your pay-as-you-go balance after
+     a limit, and AEOS cannot see that setting. A call Go does bill beyond the plan refuses the route (below).
+  4. Record a BUDGET decision for the **monthly subscription fee** ($10/month), one per route you activate. It covers
+     the plan fee, not per-token spend. Usage inside the plan costs $0 and only uses up plan allowance:
+
+     ```bash
+     ./aeos policy decide --kind BUDGET --as <admin> --domain PERSONAL --target-type model_route --target-id opencode-go/glm-5.3-flash --days 30 --rationale "OpenCode Go subscription, \$10/month plan fee for the TRIAL"
+     ```
+
+     The command prints the decision id. In the UI the same decision is *Keputusan* → *Catat keputusan manusia*, with
+     Jenis keputusan BUDGET and target `model_route` / the route key. In PowerShell, use single quotes
+     (`'OpenCode Go subscription, $10/month plan fee for the TRIAL'`) or escape the dollar sign with a backtick
+     (`` `$10 ``): inside double quotes PowerShell reads `$10` as a variable.
+  5. Activate it as TRIAL with that BUDGET decision. The provider restricts regions, so state the region(s) your
+     workspace allows: `--region EU-US` for the workspace default (Europe and United States). If you want one region
+     only, restrict the workspace first (Console → Settings → Privacy → Regions), then state that one. Name the ToS
+     automation-clause risk in the terms note. `--days 30` keeps the TRIAL as long as the BUDGET decision (a TRIAL
+     lasts 14 days by default):
+     `./aeos routes activate opencode-go/glm-5.3-flash --as <admin> --mode TRIAL --expected-hash <hash> --terms-reviewed --terms-note "Read Go docs, FAQ and ToS on <date>: ToS forbids automated/programmatic extraction and processes running while not logged in; I accept that risk for this TRIAL. Extra Usage OFF." --region EU-US --days 30 --budget-decision <id> --rationale "<why>"`.
+     No client-terms flag: Go allows other clients, and passing one is refused with `CLIENT_TERMS_NOT_APPLICABLE`.
+  6. Probe, before real work (see the warning above): `./aeos broker probe-route opencode-go/glm-5.3-flash` sends one
+     synthetic PUBLIC request (E3 evidence). On a subscription route the probe uses allowance, not money.
+  7. **Each billing cycle** (and before the TRIAL expires): record a new BUDGET decision (step 4) and run step 5
+     again with `--budget-decision <new id>`. The TRIAL keeps the id of the BUDGET decision it was activated with, so
+     a new BUDGET decision alone does not renew the route. See [1.15](#115-recurring-owner-actions).
+
+  **What AEOS does with a Go route** (ADR-0080 amendment 2026-10-26):
+
+  * **No cost limit per task.** A TaskSpec needs no `max_cost_usd`. The marginal cost of each run is $0, and the
+    run's cost cap is $0.
+  * **AEOS counts only its own calls.** Each call records the allowance it used (`usage.opencode.allowance`; estimated
+    from the tokens, or from the request's upper bound when Go reports no usage). AEOS sums the calls made **through
+    this AEOS instance** per route. Your own OpenCode with the same Go workspace, or the other Mac, is invisible to
+    it, so Go can refuse requests before AEOS's count is used up. Go's own limit stays authoritative, and Extra Usage
+    OFF stays your only guard against a bill.
+  * **Windows.** 5 hours = 20%, week = 50%, month = 100% of the model's monthly allowance (glm-5.3-flash: $12 / $30 /
+    $60). Only the 5-hour window blocks new tasks. The week and month windows are advisory (`WARN_EXHAUSTED`): AEOS
+    cannot know when Go resets them, and with Extra Usage OFF going past them only gets refusals from Go, never a
+    charge. A refusal from Go is RATE_LIMITED (a quota wait, no fallback to another route) only if Go answers HTTP
+    429, which is NOT-PROVEN; any other status is UPSTREAM_ERROR and records no quota wait.
+  * **Paid usage beyond the plan.** If Go reports a charge, or bills a call from another source than the plan
+    (`billing_source` such as `balance`, i.e. Extra Usage ON), AEOS flags the call (`cost.subscription.beyond_plan`),
+    refuses the run's next request and refuses the route for new tasks and probes. A reported charge also counts
+    against your budgets.
+  * **Admission codes and remedies:**
+
+    | Code | Shown as | What to do |
+    |---|---|---|
+    | `SUBSCRIPTION_ALLOWANCE_EXHAUSTED` | WAITING_QUOTA | Nothing: the 5h window frees up as calls age out. |
+    | `SUBSCRIPTION_ALLOWANCE_UNKNOWN` | WAITING_QUOTA | Nothing: a call in the 5h window could not be counted; it blocks for at most 5 hours. |
+    | `SUBSCRIPTION_BEYOND_PLAN` | BLOCKED | Turn Extra Usage OFF on the Console's Go page, then activate the route again (step 5 with a valid BUDGET decision). A TRIAL newer than the flagged call clears it. If Go reported a charge, that charge also counts against the GLOBAL $0 hard stop: every route, free ones included, waits with BUDGET_EXCEEDED until the budget period ends or you record a GLOBAL budget that covers it (Biaya page); re-activation alone is not enough. |
+    | `COST_UNKNOWN` | BLOCKED | The route's subscription terms are incomplete: run `./aeos seed` (it corrects an untouched CANDIDATE row) or report it. |
+    | `ROUTE_INELIGIBLE` naming the budget decision or the TRIAL | BLOCKED | The BUDGET decision or the TRIAL expired: step 7. |
+
+  * **Where to see it:** `./aeos cost summary --domain PERSONAL` lists "Worker subscriptions": the plan, the state and
+    the allowance used, limit and remaining per window, the advisory windows marked. `GET /api/costs/summary`, the
+    route view and the task admission answer (`GET /api/tasks/<id>/admission`) carry the same figures for a user who
+    may see every domain. `./aeos routes list` only flags `billing=SUBSCRIPTION`, and the Control Center pages do not
+    show the windows yet.
 * **Prompt revision change:** a route approved under an older worker prompt revision stops with
   `PROMPT_REVISION_CHANGED`. Approve it again.
 
@@ -413,6 +505,7 @@ AEOS never creates a GitHub tag or Release. To publish one, use
 | When Claude Code reports a usage or weekly limit | at once, save `./aeos bridge status` and `./aeos cost summary --domain PERSONAL` (no account email) for `docs/evidence/claude-quota-<date>.txt`; after the reset, quota must read UNKNOWN, not OK. Never provoke a limit with paid usage on |
 | When an integrity hold is raised | review the findings on *Pekerjaan Live* (or `./aeos worker status`), restore the checkout and data, then *Catat rekonsiliasi*. Each hold needs its own reconciliation |
 | After a process-sandbox exception is no longer needed | *Keputusan* → *Cabut* ([2.7](#27-process-sandbox-exception-per-machine)) |
+| Each OpenCode Go billing cycle, and before a Go TRIAL expires | a new BUDGET decision, then `./aeos routes activate <route> ... --days 30 --budget-decision <new id>` ([1.11](#111-route-activation-budget-and-the-worker-agent-per-machine-decision) step 7) |
 
 ---
 
@@ -620,12 +713,18 @@ After that, three follow-up decisions open up, all from MCI_V2 only:
 Each item below is recorded either as an ADR, through the builder, or with the command given.
 
 * **Free OpenCode Zen routes** (ADR-0041 amendment 2026-10-25). The provider documents "Free-tier chat models
-  require OpenCode; use paid models or Go from other clients", and the AEOS broker is its own client. Choose one
-  option:
-  * (A) OpenCode Go. It is not seeded yet, so tell the builder.
+  require OpenCode; use paid models or Go from other clients", and the AEOS broker is its own client.
+  **Decided 2026-10-26: option A, OpenCode Go** (ADR-0041 amendment 2026-10-26). The `opencode-go/*` routes are
+  seeded as CANDIDATE. Activate them through [1.8](#18-secrets-openrouter-and-the-github-token-per-machine) and
+  [1.11](#111-route-activation-budget-and-the-worker-agent-per-machine-decision). The options were:
+  * (A) OpenCode Go. **Chosen.** Still yours to do: the Go key, the terms review including the ToS automation
+    clause, the region, a BUDGET decision and Extra Usage OFF.
   * (B) A paid Zen route: a BUDGET decision, then `./aeos routes activate ... --budget-decision <id>`.
-  * (C) Another route: OpenRouter, or LOCAL through `./aeos routes set-endpoint <local route_key> --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "<why>"`.
-  * (D) Proxy anyway: `./aeos routes activate ... --accept-client-terms --client-terms-note "<what you read>"`.
+  * (C) Another route. Correction: the seeded OpenRouter route is ARENA and the local route is LOCAL. Only the WORKER
+    pool serves worker tasks through the broker, so neither one serves worker tasks in this build. They can only be
+    probed (LOCAL through `./aeos routes set-endpoint <local route_key> --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "<why>"`).
+  * (D) Proxy anyway: `./aeos routes activate ... --accept-client-terms --client-terms-note "<what you read>"`. Still
+    possible per free Zen route. Decision A leaves the Zen client restriction UNDECIDED.
 * **Supervisor model.** If Fable resolves to another family (1.4), choose another supervisor, or pin a stage
   model with
   `./aeos policy decide --kind POLICY --stage-model <STAGE>=<exact-model-id> --eval-run <id> --rollback-target <old> --domain PERSONAL --as <admin> --rationale "<why>"`,

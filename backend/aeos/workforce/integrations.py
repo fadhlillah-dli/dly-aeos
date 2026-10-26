@@ -182,6 +182,55 @@ def reserve(session: Session, *, run_id: str, project_id: str, domain: str, rout
         raise Blocked(_unavailable("cost", exc), code="BUDGET_UNAVAILABLE") from exc
 
 
+def subscription_terms(route: ModelRoute) -> tuple[dict[str, Any] | None, str | None]:
+    """(terms, problem) of a flat-fee SUBSCRIPTION route (ADR-0080 amendment 2026-10-26); (None, None) otherwise."""
+    from aeos.cost import facade as cost
+
+    try:
+        return cost.subscription_terms(route)
+    except ImportError as exc:
+        if (route.pricing or {}).get("billing") == "SUBSCRIPTION":
+            return None, _unavailable("cost", exc)
+        return None, None
+
+
+def subscription_allowance(session: Session, route: ModelRoute) -> dict[str, Any] | None:
+    """Plan + allowance per provider window of a SUBSCRIPTION route (None for any other route); UNKNOWN when the cost
+    module cannot count it (fail closed)."""
+    from aeos.cost import facade as cost
+
+    try:
+        return cost.allowance_status(session, route)
+    except ImportError as exc:
+        if (route.pricing or {}).get("billing") == "SUBSCRIPTION":
+            return {"route_key": route.route_key, "state": "UNKNOWN", "problems": [_unavailable("cost", exc)],
+                    "windows": []}
+        return None
+
+
+def subscription_block(status: dict[str, Any] | None) -> tuple[str, str] | None:
+    """(wait code, reason without allowance figures) when a subscription route's state refuses admission: a call billed
+    beyond the plan, the 5h window used up, or an uncountable call in it (advisory week/month windows never block)."""
+    if not status:
+        return None
+    from aeos.cost import facade as cost
+
+    try:
+        return cost.subscription_admission_block(status)
+    except ImportError as exc:
+        return "SUBSCRIPTION_ALLOWANCE_UNKNOWN", _unavailable("cost", exc)
+
+
+def subscription_without_figures(status: dict[str, Any]) -> dict[str, Any]:
+    """The allowance status for a principal who cannot see every domain: no window figures (GLOBAL/ROUTE rule)."""
+    from aeos.cost import facade as cost
+
+    try:
+        return cost.subscription_without_figures(status)
+    except ImportError:
+        return {"state": status.get("state"), "plan": status.get("plan"), "windows": None, "spend_hidden": True}
+
+
 def release(session: Session, reservation_id: str | None) -> str:
     if not reservation_id:
         return "NONE"

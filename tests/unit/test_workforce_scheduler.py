@@ -22,6 +22,7 @@ from aeos.models.evidence import AcceptanceRecord
 from aeos.models.publishing import OperationalWorkProjection
 from aeos.models.routing import CapabilityGrant
 from aeos.models.workforce import AgentDefinition, Lease, RoleSkillPack, TaskExecution, WorkerRun
+from aeos.routing.seed import _go_pricing  # imported before FakeModules replaces aeos.routing.service
 from aeos.workforce import demo, scheduler, seed
 from aeos.workforce.catalog import ALL_ROLES, EXECUTOR_ROLES, PLANNING_ROLES, SERVICE_ROLES
 from tests.unit.test_workforce_support import (
@@ -208,6 +209,119 @@ def test_paid_route_without_cost_limit_is_not_admitted(db, fakes):
     scheduler.refresh_readiness(db, pv.id)
     adm = scheduler.admission_check(db, specs[0].id)
     assert "COST_UNKNOWN" in {c for c, _ in adm.waits}
+
+
+def test_subscription_route_is_admitted_at_zero_marginal_cost_until_a_window_is_used_up(db, fakes):
+    """ADR-0080 amendment 2026-10-26: a flat-fee route needs no TaskSpec cost limit (its plan fee is the activation's
+    BUDGET decision; marginal $0 within the plan) and waits - WAITING_QUOTA, never another route - once the allowance
+    of a provider window is used up."""
+    from aeos.workforce import views
+
+    p = make_project(db)
+    plan, pv, specs = make_plan(db, p, [{"task_key": "a"}])
+    fakes.approved[plan.id] = pv.id
+    route = make_route(db, key="opencode-go/glm-5.3-flash", provider="opencode-go", is_free="NO")
+    route.pricing = _go_pricing(60, {"input": 0.15, "output": 0.50})
+    route.pricing_checked_at = utcnow()
+    fakes.route_key = route.route_key
+    seed_and_enable_implementer(db)
+    process_sandbox_exception(db)
+    scheduler.ensure_executions(db, pv.id, actor="t")
+    scheduler.refresh_readiness(db, pv.id)
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert adm.admitted, adm.reasons
+    assert adm.est_usd == 0.0 and adm.answers["subscription"]["state"] == "OK"
+    db.add(UsageLedgerEntry(at=utcnow() - timedelta(hours=1), route_key=route.route_key, provider="opencode-go",
+                            category="WORKER_API", source="broker", cost_usd=0, charged_usd=0, mode="LIVE",
+                            details={"billing": "SUBSCRIPTION", "allowance_usd": "12", "allowance_basis": "REPORTED"}))
+    db.flush()
+    adm = scheduler.admission_check(db, specs[0].id)
+    waits = dict(adm.waits)
+    assert not adm.admitted and "the 5h window allowance" in waits["SUBSCRIPTION_ALLOWANCE_EXHAUSTED"]
+    assert "$" not in waits["SUBSCRIPTION_ALLOWANCE_EXHAUSTED"]  # no allowance figures in a wait reason
+    assert adm.answers["subscription"]["windows"][0]["used_usd"] == 12.0  # the figures are in the answer
+    assert scheduler.admit_ready_tasks(db) == [] and fakes.calls.get("reserve") is None
+    te = scheduler.get_te(db, specs[0].id)
+    assert te.state == "READY" and te.reason_code == "SUBSCRIPTION_ALLOWANCE_EXHAUSTED" and "$" not in te.reason
+    assert views.derive_ui_state(None, te) == "WAITING_QUOTA"
+
+
+def _go_ready(db, fakes):
+    p = make_project(db)
+    plan, pv, specs = make_plan(db, p, [{"task_key": "a"}])
+    fakes.approved[plan.id] = pv.id
+    route = make_route(db, key="opencode-go/glm-5.3-flash", provider="opencode-go", is_free="NO")
+    route.pricing = _go_pricing(60, {"input": 0.15, "output": 0.50})
+    route.pricing_checked_at = utcnow()
+    fakes.route_key = route.route_key
+    seed_and_enable_implementer(db)
+    process_sandbox_exception(db)
+    scheduler.ensure_executions(db, pv.id, actor="t")
+    scheduler.refresh_readiness(db, pv.id)
+    return route, specs
+
+
+def _go_use(db, route, *, hours_ago: float, **details) -> UsageLedgerEntry:
+    e = UsageLedgerEntry(at=utcnow() - timedelta(hours=hours_ago), route_key=route.route_key, provider="opencode-go",
+                         category="WORKER_API", source="broker", cost_usd=0, charged_usd=0, mode="LIVE",
+                         details={"billing": "SUBSCRIPTION", **details})
+    db.add(e)
+    db.flush()
+    return e
+
+
+def test_subscription_advisory_windows_are_shown_but_never_block_admission(db, fakes):
+    """The week/month windows are advisory (ADR-0080 amendment 2026-10-26): WARN_EXHAUSTED in the admission answer,
+    the task is still admitted - with Extra Usage OFF, exceeding them only yields provider refusals."""
+    route, specs = _go_ready(db, fakes)
+    _go_use(db, route, hours_ago=24 * 3, allowance_usd="30", allowance_basis="REPORTED")
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert adm.admitted, adm.reasons
+    sub = adm.answers["subscription"]
+    assert sub["state"] == "WARN_EXHAUSTED" and sub["windows"][1]["state"] == "WARN_EXHAUSTED"
+    assert sub["windows"][1]["blocking"] is False and sub["warnings"]
+
+
+def test_subscription_uncountable_and_beyond_plan_calls_wait_with_their_own_codes(db, fakes):
+    from aeos.workforce import views
+
+    route, specs = _go_ready(db, fakes)
+    e = _go_use(db, route, hours_ago=1)  # no allowance, no tokens, no bound: UNKNOWN for at most 5 hours
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert "at most 5 hours" in dict(adm.waits)["SUBSCRIPTION_ALLOWANCE_UNKNOWN"]
+    assert "COST_UNKNOWN" not in dict(adm.waits)
+    e.at = utcnow() - timedelta(hours=6)
+    db.flush()
+    assert scheduler.admission_check(db, specs[0].id).admitted  # out of the 5h window: advisory only
+    # recorded now: after the route's activation (make_route records the owner's decision)
+    _go_use(db, route, hours_ago=0, allowance_usd="0.01", allowance_basis="REPORTED", billing_source="balance",
+            beyond_plan_usd="UNKNOWN")
+    adm = scheduler.admission_check(db, specs[0].id)
+    reason = dict(adm.waits)["SUBSCRIPTION_BEYOND_PLAN"]
+    assert "re-activates the route" in reason and "balance" in reason
+    assert scheduler.admit_ready_tasks(db) == []
+    te = scheduler.get_te(db, specs[0].id)
+    assert te.reason_code == "SUBSCRIPTION_BEYOND_PLAN" and views.derive_ui_state(None, te) == "BLOCKED"
+
+
+def test_subscription_run_grant_has_a_zero_cost_cap(db, fakes):
+    """The run's grant cost cap is the marginal estimate: $0 on a subscription route, so a marginal charge (paid usage
+    beyond the plan) stops the run's next model request at the broker."""
+    p = make_project(db)
+    plan, pv, specs = make_plan(db, p, [{"task_key": "a"}])
+    fakes.approved[plan.id] = pv.id
+    route = make_route(db, key="opencode-go/glm-5.3-flash", provider="opencode-go", is_free="NO")
+    route.pricing = _go_pricing(60, {"input": 0.15, "output": 0.50})
+    route.pricing_checked_at = utcnow()
+    fakes.route_key = route.route_key
+    seed_and_enable_implementer(db)
+    process_sandbox_exception(db)
+    scheduler.ensure_executions(db, pv.id, actor="t")
+    scheduler.refresh_readiness(db, pv.id)
+    (run_id,) = scheduler.admit_ready_tasks(db)
+    run = db.get(WorkerRun, run_id)
+    assert run.caps["max_cost_usd"] == 0.0 and run.model_route_key == route.route_key
+    assert fakes.calls["reserve"] == 1
 
 
 def test_pause_blocks_admission_and_resume(db, fakes):

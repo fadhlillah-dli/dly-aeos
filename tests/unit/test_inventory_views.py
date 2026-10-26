@@ -87,6 +87,25 @@ def test_config_lens_needs_explicit_basis(seeded, settings):
     assert node["present"] and node["status"] == "ENABLED" and node["basis"]
 
 
+def test_config_lens_counts_an_activated_go_route_for_the_opencode_console(seeded):
+    """An OpenCode Go route (ADR-0041 amendment 2026-10-26) runs on the OpenCode Console component once activated;
+    a CANDIDATE row is no basis."""
+    from aeos.models.routing import ModelRoute
+
+    route = ModelRoute(route_key="opencode-go/glm-5.3-flash", pool="WORKER", provider="opencode-go",
+                       model_id="opencode-go/glm-5.3-flash", status="CANDIDATE", eligible_domains=["PERSONAL"])
+    seeded.add(route)
+    seeded.commit()
+    node = next(n for n in views.system_map(seeded, lens="CONFIG", domain="PERSONAL")["nodes"]
+                if n["id"] == "opencode-console")
+    assert not node["present"]
+    route.status = "TRIAL"
+    seeded.commit()
+    node = next(n for n in views.system_map(seeded, lens="CONFIG", domain="PERSONAL")["nodes"]
+                if n["id"] == "opencode-console")
+    assert node["present"] and any("opencode-go/glm-5.3-flash" in b for b in node["basis"])
+
+
 def test_invalid_lens_rejected(seeded):
     with pytest.raises(ValidationFailed):
         views.system_map(seeded, lens="LIVE", domain="PERSONAL")

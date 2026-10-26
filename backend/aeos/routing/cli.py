@@ -30,7 +30,8 @@ def _admin_user_id(session, username: str, password: str) -> str:
 
 @app.command("list")
 def list_cmd(pool: str = typer.Option(None, help="Filter by pool"), status: str = typer.Option(None)) -> None:
-    """List routes: pool, status, free/paid, resolved version, config hash."""
+    """List routes: pool, status, free/paid (billing=SUBSCRIPTION for a flat-fee plan), resolved version, config
+    hash."""
     from aeos.cli import ensure_database
     from aeos.core.db import session_scope
     from aeos.models.routing import ModelRoute
@@ -54,6 +55,8 @@ def list_cmd(pool: str = typer.Option(None, help="Filter by pool"), status: str 
                 flags += " client-terms=OWNER_DECISION_REQUIRED"
             if r.pool != "SUPERVISOR" and service.request_shape_rejections(r):
                 flags += " request=REFUSED"
+            if service.is_subscription(r):
+                flags += " billing=SUBSCRIPTION"  # plan fee + allowance windows (ADR-0080 amendment 2026-10-26)
             typer.echo(
                 f"{r.pool:<10} {r.status:<10} {r.mode:<6} free={r.is_free:<7} {r.route_key:<46} "
                 f"resolved={r.resolved_version or 'UNKNOWN'} hash={r.config_hash or '-'}{flags}"
@@ -62,7 +65,8 @@ def list_cmd(pool: str = typer.Option(None, help="Filter by pool"), status: str 
 
 @app.command("refresh")
 def refresh_cmd() -> None:
-    """Refresh OpenRouter catalog + key info and the OpenCode model list (never activates)."""
+    """Refresh OpenRouter catalog + key info, the OpenCode model list and the OpenCode Go model list (never
+    activates)."""
     from aeos.audit import service as audit
     from aeos.cli import ensure_database
     from aeos.core.db import session_scope
@@ -75,7 +79,7 @@ def refresh_cmd() -> None:
                      target_type="model_catalog", target_id="openrouter+opencode", details={"status": row.status})
         for name, res in row.results.items():
             typer.echo(f"{name:<20} {res.get('status')} {res.get('reason', '')}")
-            for k in ("discovered", "config_changed", "missing"):
+            for k in ("discovered", "available", "config_changed", "missing"):
                 if res.get(k):
                     typer.echo(f"  {k}: {', '.join(res[k])}")
         typer.echo(f"overall: {row.status}")
@@ -89,7 +93,8 @@ def activate_cmd(
     rationale: str = typer.Option(..., help="Why this route may be used (min 10 chars)"),
     expected_hash: str = typer.Option(..., help="Config hash you reviewed (see `aeos routes list`/dashboard)"),
     data_class: list[str] = typer.Option(None, help="Allowed data classes (repeatable)"),
-    budget_decision: str = typer.Option(None, help="BUDGET decision id (required for paid routes)"),
+    budget_decision: str = typer.Option(None, help="BUDGET decision id (required for paid routes; for a subscription "
+                                                   "route it covers the monthly plan fee)"),
     days: int = typer.Option(None, help="Decision expiry in days"),
     terms_reviewed: bool = typer.Option(False, help="You re-read pricing and data terms now"),
     terms_note: str = typer.Option("", help="What you read (stored on the decision)"),

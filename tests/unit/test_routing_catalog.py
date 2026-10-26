@@ -188,5 +188,73 @@ def test_refresh_all_isolates_failures_and_records_history(routes, settings, mon
     assert row.status == "FAILED" or row.status == "PARTIAL"
     assert row.results["openrouter_catalog"]["status"] == "FAILED"
     assert row.results["openrouter_key"]["status"] == "UNKNOWN"
+    assert row.results["opencode_go_catalog"]["status"] == "UNKNOWN"  # no Go key: nothing requested
     assert routes.query(CatalogRefresh).count() == 1
     assert service.get_route(routes, LAGUNA).pricing_checked_at.year == 2026  # unchanged seed timestamp
+
+
+# ------------------------------------------------------------------- OpenCode Go (ADR-0041 amendment 2026-10-26)
+
+GO_GLM = "opencode-go/glm-5.3-flash"
+GO_HY3 = "opencode-go/hy3"
+GO_KEY = "go-test-" + "c" * 40  # visibly fake
+# The documented Go model list (GET /inference/go/v1/models, OpenAI list shape); trimmed and synthetic, not a reading.
+GO_LIST = {"object": "list", "data": [{"id": m, "object": "model", "owned_by": "opencode"} for m in (
+    "glm-5.3-flash", "mimo-v2.6-flash", "minimax-m3.1-flash", "kimi-k2.7-code", "glm-5.2", "minimax-m3")]}
+
+
+def _go_rows(db) -> dict[str, ModelRoute]:
+    return {r.route_key: r for r in db.query(ModelRoute).filter(ModelRoute.provider == "opencode-go")}
+
+
+@respx.mock
+def test_go_catalog_without_a_key_is_unknown_and_requests_nothing(routes, secrets_memory):
+    listing = respx.get(catalog.OPENCODE_GO_MODELS_URL).mock(return_value=httpx.Response(200, json=GO_LIST))
+    with httpx.Client() as c:
+        out = catalog.refresh_opencode_go_catalog(routes, c)
+    assert out["status"] == "UNKNOWN" and not listing.called
+    assert out["remedy"] == "aeos secrets set workers/opencode-go" and "workers/opencode-go" in out["reason"]
+    rows = _go_rows(routes)
+    assert rows and all(r.availability == "UNKNOWN" for r in rows.values())
+    reasons = service.route_rejections(routes, rows[GO_GLM], domain="PERSONAL", data_classification="PUBLIC",
+                                       needs_tools=False, min_context=None)
+    assert any("availability UNKNOWN" in x and "aeos routes refresh" in x for x in reasons)
+
+
+@respx.mock
+def test_go_catalog_marks_listed_routes_available_and_absent_ones_missing(routes, secrets_memory):
+    secrets_memory.put("workers/opencode-go", GO_KEY, actor="test")
+    before = {k: r.config_hash for k, r in _go_rows(routes).items()}
+    listing = respx.get(catalog.OPENCODE_GO_MODELS_URL).mock(return_value=httpx.Response(200, json=GO_LIST))
+    with httpx.Client() as c:
+        out = catalog.refresh_opencode_go_catalog(routes, c)
+    assert listing.calls.last.request.headers["Authorization"] == f"Bearer {GO_KEY}"
+    assert out["status"] == "OK" and out["listed"] == 6 and GO_KEY not in str(out)
+    rows = _go_rows(routes)
+    assert {GO_GLM, "opencode-go/kimi-k2.7-code", "opencode-go/glm-5.2"} <= set(out["available"])
+    assert {GO_HY3, "opencode-go/deepseek-v4.1-flash"} <= set(out["missing"])
+    assert rows[GO_GLM].availability == "AVAILABLE" and rows[GO_GLM].availability_checked_at is not None
+    assert rows[GO_HY3].availability == "MISSING"
+    # availability is an observation, not part of the identity; nothing is activated, Zen rows are not touched
+    assert {k: r.config_hash for k, r in rows.items()} == before
+    assert all(r.status == "CANDIDATE" for r in rows.values())
+    assert service.get_route(routes, "opencode-zen/deepseek-v4.1-flash-free").availability == "UNKNOWN"
+
+
+@respx.mock
+@pytest.mark.parametrize("answer", [httpx.Response(401, json={"error": "no"}), httpx.Response(403, json={}),
+                                    httpx.Response(500, text="oops"), httpx.Response(200, json={"models": []}),
+                                    httpx.Response(200, text="not json"), httpx.ConnectError("offline")])
+def test_go_catalog_rejected_key_or_unreachable_list_is_unknown_never_missing(routes, secrets_memory, answer):
+    secrets_memory.put("workers/opencode-go", GO_KEY, actor="test")
+    glm = _go_rows(routes)[GO_GLM]
+    glm.availability = "AVAILABLE"  # an earlier observation does not survive a list that could not be read
+    mock = respx.get(catalog.OPENCODE_GO_MODELS_URL)
+    if isinstance(answer, Exception):
+        mock.mock(side_effect=answer)
+    else:
+        mock.mock(return_value=answer)
+    with httpx.Client() as c:
+        out = catalog.refresh_opencode_go_catalog(routes, c)
+    assert out["status"] == "UNKNOWN" and "availability UNKNOWN" in out["reason"] and GO_KEY not in str(out)
+    assert all(r.availability == "UNKNOWN" for r in _go_rows(routes).values())

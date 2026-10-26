@@ -56,8 +56,13 @@ WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CO
                         "SANDBOX_NOT_READY", "ROUTE_INELIGIBLE", "COST_UNKNOWN", "BUDGET_EXCEEDED",
                         "MODULE_UNAVAILABLE", "VERIFIER_UNAVAILABLE", "SIDE_EFFECT_UNRECONCILED",
                         "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED", "DOCS_NOT_READY",
-                        "DOCS_READINESS_UNVERIFIED"})
-QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED"})
+                        "DOCS_READINESS_UNVERIFIED", "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
+                        "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "SUBSCRIPTION_BEYOND_PLAN"})
+# ADR-0080 amendment 2026-10-26, flat-fee routes: SUBSCRIPTION_ALLOWANCE_EXHAUSTED (the 5h window used up) and
+# SUBSCRIPTION_ALLOWANCE_UNKNOWN (an uncountable call in it, at most 5 hours) clear with time, like a quota;
+# SUBSCRIPTION_BEYOND_PLAN (a call billed beyond the plan) clears only when the owner re-activates the route.
+QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED", "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
+                         "SUBSCRIPTION_ALLOWANCE_UNKNOWN"})
 # BLOCKED reason codes that only an owner action clears (retry_task / quarantine release), never a tick.
 HUMAN_BLOCK_CODES = frozenset({"QUARANTINED", "REVIEW_BLOCKED", "WORKER_BLOCKER"})
 
@@ -949,14 +954,24 @@ def scope_contract_problems(session: Session, task: TaskSpec) -> list[tuple[str,
     return problems
 
 
-def _cost_estimate(task: TaskSpec, route: ModelRoute) -> tuple[float | None, int]:
+def _cost_estimate(task: TaskSpec, route: ModelRoute) -> tuple[float | None, int, str]:
+    """(marginal USD estimate, token cap, why the estimate is unknown). A flat-fee SUBSCRIPTION route (ADR-0080
+    amendment 2026-10-26) has a $0 marginal estimate within its plan and needs no TaskSpec cost limit: its plan fee is
+    the activation's BUDGET decision and its allowance windows are checked separately. The estimate is also the run's
+    grant cost cap, so a marginal charge on such a route stops the run's next request."""
     limits = task.limits or {}
     tokens = int(limits.get("max_tokens", DEFAULT_MAX_TOKENS) or DEFAULT_MAX_TOKENS)
+    terms, problem = ext.subscription_terms(route)
+    if problem:
+        return None, tokens, f"route {route.route_key}: {problem}; no paid run on untrusted subscription terms"
+    if terms is not None:
+        return 0.0, tokens, ""
     if route.is_free == "YES":
-        return 0.0, tokens
+        return 0.0, tokens, ""
     if limits.get("max_cost_usd") is not None:
-        return float(limits["max_cost_usd"]), tokens
-    return None, tokens
+        return float(limits["max_cost_usd"]), tokens, ""
+    return None, tokens, (f"route {route.route_key} is not free and the TaskSpec has no limits.max_cost_usd; no paid "
+                          "run without a cost decision")
 
 
 # ----------------------------------------------------------------------------- §19 admission answers (C7)
@@ -1512,12 +1527,21 @@ def admission_check(session: Session, task_id: str) -> Admission:
         quota = route_quota_exhausted(session, route.route_key)
         if quota:
             adm.waits.append(("QUOTA_EXHAUSTED", quota + "; waiting (no fallback to another route)"))
-        est_usd, est_tokens = _cost_estimate(task, route)
+        est_usd, est_tokens, cost_unknown = _cost_estimate(task, route)
         if est_usd is None:
-            adm.waits.append(("COST_UNKNOWN", f"route {route.route_key} is not free and the TaskSpec has no "
-                                              "limits.max_cost_usd; no paid run without a cost decision"))
+            adm.waits.append(("COST_UNKNOWN", cost_unknown))
         else:
             adm.est_usd, adm.est_tokens = est_usd, est_tokens
+        allowance = ext.subscription_allowance(session, route)
+        if allowance is not None:
+            # §19 admission answer: the plan and the allowance this AEOS instance counted per provider window (cost
+            # module). The figures span domains: the admission API drops them for a principal who cannot see every
+            # domain. WARN_EXHAUSTED (an advisory week/month window) is shown here and never blocks.
+            adm.answers["subscription"] = {k: allowance.get(k) for k in (
+                "route_key", "plan", "state", "basis", "windows", "problems", "warnings", "beyond_plan")}
+            block = ext.subscription_block(allowance)
+            if block:
+                adm.waits.append(block)  # the reason carries no allowance figures (task views show it to anyone)
     # §40 trial admission: a TaskSpec launched for a change-proposal trial runs only while its TRIAL decision is
     # still bound to the live baseline/candidate/scope (provider, operations, caps) - re-checked every attempt.
     try:
@@ -1689,8 +1713,10 @@ def admit_ready_tasks(session: Session, *, actor: str = "system:scheduler", limi
         except Blocked as exc:
             # The reservation was refused by the cost module (§22 "Sistem mencadangkan compute, biaya,
             # dan slot sebelum memulai"): no lease, no run; the task waits with the cost module's reason.
-            code = {"BUDGET_UNAVAILABLE": "MODULE_UNAVAILABLE", "QUOTA_EXHAUSTED": "QUOTA_EXHAUSTED"}.get(
-                exc.code, "BUDGET_EXCEEDED")
+            code = {"BUDGET_UNAVAILABLE": "MODULE_UNAVAILABLE", "QUOTA_EXHAUSTED": "QUOTA_EXHAUSTED",
+                    "SUBSCRIPTION_ALLOWANCE_EXHAUSTED": "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
+                    "SUBSCRIPTION_ALLOWANCE_UNKNOWN": "SUBSCRIPTION_ALLOWANCE_UNKNOWN",
+                    "SUBSCRIPTION_BEYOND_PLAN": "SUBSCRIPTION_BEYOND_PLAN"}.get(exc.code, "BUDGET_EXCEEDED")
             reasons = "; ".join(str(r) for r in (exc.details or {}).get("reasons", [])[:5])
             _set_wait_reason(session, get_te(session, te.task_id), code,
                              f"{exc.code}: {exc.message}" + (f" ({reasons})" if reasons else ""))

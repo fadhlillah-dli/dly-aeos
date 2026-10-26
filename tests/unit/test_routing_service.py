@@ -28,6 +28,12 @@ PICKLE = "opencode-zen/big-pickle"
 LAGUNA = "openrouter/poolside/laguna-s-2.1:free"
 QWEN = "opencode-zen/qwen3.8-flash"
 KIMI = "opencode-zen/kimi-k2.7-code"  # paid, chat-completions API (QWEN: anthropic.messages, never served)
+# OpenCode Go (owner decision A, ADR-0041 amendment 2026-10-26): subscription WORKER candidates, no client restriction
+GO_WORKERS = ("glm-5.3-flash", "mimo-v2.6-flash", "minimax-m3.1-flash", "hy3", "kimi-k2.7-code")
+GO_WATCH = ("longcat-2.0", "glm-5.2", "glm-5.3", "kimi-k3.1-pro", "mimo-v2.6-pro", "deepseek-v4.1-flash")
+GO_GLM = "opencode-go/glm-5.3-flash"
+GO_HY3 = "opencode-go/hy3"
+GO_DS = "opencode-go/deepseek-v4.1-flash"
 
 
 @pytest.fixture
@@ -101,14 +107,15 @@ def test_seed_is_design_candidate_personal_only(routes):
 
 SEEDED = {
     "SUPERVISOR": {"claude-native/fable", "claude-native/opus"},
-    "WORKER": {DS, GLM},
+    "WORKER": {DS, GLM, *(f"opencode-go/{m}" for m in GO_WORKERS)},
     "COMPARATOR": {GEMINI},
     "ARENA": {"opencode-zen/longcat-2.5-preview-free", "opencode-zen/mimo-v2.6-flash-free", "opencode-zen/beam-free",
               "opencode-zen/nemotron-3-ultra-free", "opencode-zen/nemotron-3.5-lightning-free",
               "opencode-zen/nemotron-3.5-super-vl-free", LAGUNA, "opencode-zen/space-bunny-free",
               "opencode-zen/ll-alpha-free", "opencode-zen/exo-free", PICKLE},
     "WATCHLIST": {QWEN, *(f"opencode-zen/{m}" for m in ("kimi-k2.7-code", "minimax-m3", "mistral-large-4",
-                                                       "gpt-5.3-codex", "grok-build-0.1", "muse-spark-1.3"))},
+                                                       "gpt-5.3-codex", "grok-build-0.1", "muse-spark-1.3")),
+                  *(f"opencode-go/{m}" for m in GO_WATCH)},
     "LOCAL": {"local/qwen3.8-flash-next"},
 }
 
@@ -118,7 +125,7 @@ def test_seed_registers_every_section_23_candidate_with_its_terms(routes):
     data terms the hard filter relies on (a widened MiMo or a Nemotron without its trial flag fails here)."""
     by = {r.route_key: r for r in routes.query(ModelRoute).all()}
     assert {k: {key for key, r in by.items() if r.pool == k} for k in SEEDED} == SEEDED
-    assert len(by) == sum(len(v) for v in SEEDED.values()) == 24
+    assert len(by) == sum(len(v) for v in SEEDED.values()) == 35
     for key in SEEDED["ARENA"] | SEEDED["WORKER"] | SEEDED["WATCHLIST"] | SEEDED["COMPARATOR"]:
         r = by[key]
         # a research reading of a provider claim is not an owner terms review (§23, §51 P2)
@@ -135,10 +142,87 @@ def test_seed_registers_every_section_23_candidate_with_its_terms(routes):
                 "opencode-zen/nemotron-3.5-super-vl-free"):
         assert by[key].data_terms["trial_only_no_confidential"] is True and by[key].allowed_data_classes == ["PUBLIC"]
         assert service.terms_restriction(by[key].data_terms, by[key].identity_status)
-    assert all(by[k].is_free == "NO" and by[k].allowed_data_classes == ["PUBLIC"] for k in SEEDED["WATCHLIST"])
+    assert all(by[k].is_free == "NO" for k in SEEDED["WATCHLIST"])
+    # Zen watchlist terms are UNKNOWN (PUBLIC only); Go states no training / 0 days (DeepSeek: ZDR expiring, PUBLIC)
+    assert all(by[k].allowed_data_classes == ["PUBLIC"] for k in SEEDED["WATCHLIST"] if k.startswith("opencode-zen/"))
+    assert by[GO_DS].allowed_data_classes == ["PUBLIC"] and by["opencode-go/glm-5.2"].allowed_data_classes == [
+        "PUBLIC", "INTERNAL"]
     assert by[DS].tool_set == list(service.REVIEWED_WORKER_TOOLS)  # a reviewable candidate tool set, no placeholder
     assert by["local/qwen3.8-flash-next"].mode_params == {"quantization": "UNKNOWN", "inference_backend": "UNKNOWN",
                                                           "hardware": "UNKNOWN"}
+
+
+def test_seeded_go_routes_are_subscription_candidates_without_a_client_restriction(routes):
+    """Owner decision A (ADR-0041 amendment 2026-10-26, E1 Go docs read 2026-10-26): Go WORKER candidates, PERSONAL
+    only, a subscription with dollar allowances (never a per-token price), Go allows other clients, the reviewed
+    region is required, and the free Zen pilots keep their S07 client restriction."""
+    by = {r.route_key: r for r in routes.query(ModelRoute).filter(ModelRoute.provider == "opencode-go")}
+    assert set(by) == {f"opencode-go/{m}" for m in GO_WORKERS + GO_WATCH}
+    for key, r in by.items():
+        assert (r.status, r.mode, r.origin, r.evidence_level) == ("CANDIDATE", "DESIGN", "SEED", "E1"), key
+        assert r.eligible_domains == ["PERSONAL"] and r.is_free == "NO" and service.needs_budget(r), key
+        assert r.endpoint == seed.GO_OPENAI_BASE and r.model_id == key and r.fallback_chain == [], key
+        assert r.mode_params["credential_ref"] == "workers/opencode-go", key
+        assert r.mode_params["upstream_model"] == key.split("/", 1)[1], key
+        assert r.mode_params["upstream_api"] == "openai.chat_completions", key
+        p = r.pricing
+        assert (p["billing"], p["plan"], p["monthly_fee_usd"]) == ("SUBSCRIPTION", "OpenCode Go", 10), key
+        assert p["allowance_windows"] == {"5h": 0.2, "week": 0.5, "month": 1.0} and p["allowance_usd_month"] > 0, key
+        assert "input_per_mtok" not in p and "output_per_mtok" not in p, key  # never read as a metered price
+        assert r.pricing_checked_at is not None and r.terms_checked_at is None, key
+        t = r.data_terms
+        assert t["may_use_inputs_for_training"] is False and "0 days" in t["retention"], key
+        assert service.client_restriction(r) is None and service.client_restriction_problem(r) is None, key
+        assert "any agent" in t["client_permission"]["statement"], key
+        assert service.region_restricted(r) and "Extra Usage" in t["provider_paid_fallback"], key
+    glm = by[GO_GLM]
+    assert glm.pricing["allowance_usd_month"] == 60 and glm.pricing["allowance_rate_per_mtok"] == {
+        "input": 0.15, "output": 0.50, "cached_read": 0.03}
+    assert by["opencode-go/minimax-m3.1-flash"].pricing["allowance_usd_month"] == 20
+    assert by["opencode-go/kimi-k3.1-pro"].pricing["allowance_usd_month"] == 15
+    # tool calling per models.dev (E1); hy3 states none, so it stays UNKNOWN and never serves tool-using tasks
+    assert {m: by[f"opencode-go/{m}"].supports_tools for m in GO_WORKERS} == {
+        "glm-5.3-flash": "YES", "mimo-v2.6-flash": "YES", "minimax-m3.1-flash": "YES", "hy3": "UNKNOWN",
+        "kimi-k2.7-code": "YES"}
+    assert all(by[f"opencode-go/{m}"].supports_tools == "UNKNOWN" for m in GO_WATCH)
+    # ranked above the client-restricted Zen pilots, glm-5.3-flash first
+    zen = {k: service.get_route(routes, k) for k in (DS, GLM)}
+    assert min(by[f"opencode-go/{m}"].priority for m in GO_WORKERS) == glm.priority
+    assert max(by[f"opencode-go/{m}"].priority for m in GO_WORKERS) < min(r.priority for r in zen.values())
+    assert all(service.client_restriction_problem(r) for r in zen.values())  # the Zen pilots stay restricted
+    ds = by[GO_DS]
+    assert ds.pool == "WATCHLIST" and "2026-10-31" in ds.data_terms["retention"] and "Global" in ds.data_terms["regions"]
+    assert "2026-10-31" in ds.expires_note
+
+
+def test_go_worker_route_needs_budget_region_and_tools(routes):
+    """A Go WORKER route is eligible only with its BUDGET decision and reviewed region; it then ranks above an
+    approved Zen pilot. hy3 has no documented tool support: never selected for tool-using work."""
+    r = service.get_route(routes, GO_GLM)
+    approve(routes, GO_GLM)
+    d = eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL")
+    assert GO_GLM in d.rejected and any("subscription route (OpenCode Go, $10/month plan fee" in x
+                                        for x in d.rejected[GO_GLM])
+    assert any("region not reviewed" in x for x in d.rejected[GO_GLM])
+    assert not any("client restriction" in x for x in d.rejected[GO_GLM])
+    budget = human_decision(routes, kind="BUDGET", target_type="model_budget", target_id="opencode-go",
+                            auth_scope={"routes": [GO_GLM, GO_HY3]})
+    r.region = "EU"
+    approve(routes, GO_GLM, details={"budget_decision_id": budget.id})
+    approve(routes, DS)
+    d = eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL")
+    assert d.eligible == [GO_GLM, DS]
+    assert select_route(routes, task=task()).route.route_key == GO_GLM
+    hy3 = service.get_route(routes, GO_HY3)
+    hy3.region = "EU"
+    approve(routes, GO_HY3, details={"budget_decision_id": budget.id})
+    d = eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL")
+    assert GO_HY3 not in d.eligible and any("tool support UNKNOWN" in x for x in d.rejected[GO_HY3])
+    assert GO_HY3 in eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL",
+                                     needs_tools=False).eligible
+    budget.status = "INVALIDATED"
+    routes.flush()
+    assert eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL").eligible == [DS]
 
 
 def test_seed_resets_a_seeded_research_date_on_untouched_rows(routes):

@@ -148,6 +148,19 @@ def integrations_overview(db: Session, settings: Settings, principal: Principal)
         "Rute gratis OpenCode Zen untuk pekerja pertama", "Rute disetujui saja; data terms per rute",
         [{"command": "aeos secrets set workers/opencode-zen", "why": "Simpan kunci OpenCode Zen"}],
     ))
+    # ADR-0041 amendment 2026-10-26 (owner decision A): its own card and ref, so a stored Zen key never reads as Go
+    cards.append(card(
+        "opencode-go", "OpenCode Go (langganan, rute pekerja)", None, ["workers/opencode-go"],
+        "Rute pekerja OpenCode Go lewat broker (langganan $10/bulan; batas dolar per model per 5 jam/minggu/bulan)",
+        "Rute disetujui saja; keputusan BUDGET dan region saat aktivasi; tanpa fallback berbayar otomatis",
+        [{"command": "aeos secrets set workers/opencode-go",
+          "why": "Simpan kunci API OpenCode Console dari workspace Personal yang berlangganan Go "
+                 "(izin Restricted: Models: Request)"},
+         {"command": "aeos routes refresh", "why": "Perbarui ketersediaan rute opencode-go/* dari daftar model Go"}],
+        warning="Extra Usage di halaman Go harus OFF: bila ON, Go beralih ke saldo pay-as-you-go setelah batas "
+                "tercapai (fallback berbayar di sisi provider; pengaturannya tidak terlihat oleh AEOS). Panggilan yang "
+                "ditagih di luar paket menghentikan rute sampai Anda mengaktifkannya ulang.",
+    ))
     atl = card(
         "atlassian", "Atlassian Jira/Confluence/Bitbucket (OFFICE)", "OFFICE",
         ["office/atlassian", "office/bitbucket"],

@@ -260,7 +260,9 @@ ENTRIES: tuple[Entry, ...] = (
           group="OpenRouter / OpenCode Console / provider resmi"),
     Entry("tool:opencode-console", "OpenCode Console", "inference-route",
           "Route inferensi; terms, data, quota dan versi diuji per endpoint", SV, STATED, "OFFICIAL_DOCS",
-          urls=_u("S07"), source_refs=("S07",), component_hints=("opencode-console", "opencode-zen"),
+          # OpenCode Go (ADR-0041 amendment 2026-10-26) is part of the same console: its docs are cited in the ADR,
+          # not added here (only master URLs are seeded)
+          urls=_u("S07"), source_refs=("S07",), component_hints=("opencode-console", "opencode-zen", "opencode-go"),
           group="OpenRouter / OpenCode Console / provider resmi"),
     Entry("tool:gemini-api", "Gemini API (provider resmi)", "inference-route",
           "Pembanding; hanya input sesuai data terms", SV, STATED, "OFFICIAL_DOCS", urls=_u("S09"), source_refs=("S09",),

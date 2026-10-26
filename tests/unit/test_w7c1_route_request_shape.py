@@ -6,10 +6,16 @@ E1 facts (documentation read 2026-10-25, not exercised live): S07 documents the 
 endpoint ``https://opencode.ai/inference/openai/v1/chat/completions`` with BARE model ids (``opencode/<id>`` is the
 OpenCode config format) and "Free-tier chat models require OpenCode; use paid models or Go from other clients"; the
 Gemini API documents ``https://generativelanguage.googleapis.com/v1beta/openai/chat/completions``. The upstreams are
-respx mocks (or a real loopback HTTP server for LOCAL); every rule on the AEOS side is the real one."""
+respx mocks (or a real loopback HTTP server for LOCAL); every rule on the AEOS side is the real one.
+
+OpenCode Go (owner decision A, ADR-0041 amendment 2026-10-26; E1 Go docs read 2026-10-26): chat completions on
+``https://opencode.ai/inference/go/openai/v1/chat/completions`` with the bare model id, ``Authorization: Bearer`` with
+the Console key, the client's own User-Agent and a stable ``x-opencode-session`` per conversation; Go allows other
+clients, so its routes carry no client restriction."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -21,20 +27,26 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from aeos import __version__
 from aeos.broker import facade as broker
 from aeos.core.errors import PolicyDenied, ValidationFailed
 from aeos.core.timeutil import utcnow
 from aeos.models.broker_ext import BrokerRequest
+from aeos.models.cost import UsageLedgerEntry
 from aeos.models.decisions import Decision
 from aeos.models.routing import ModelRoute
 from aeos.models.workforce import WorkerRun
 from aeos.routing import seed, service
 from aeos.routing.router import route_view
 from tests.conftest import VIEWER_PW, AuthedClient, create_admin, create_viewer, make_app
-from tests.unit.test_routing_fakes import OWNER_CLIENT_TERMS
+from tests.unit.test_routing_fakes import OWNER_CLIENT_TERMS, human_decision
 from tests.unit.test_workforce_support import make_project
 
 ZEN_CHAT = "https://opencode.ai/inference/openai/v1/chat/completions"
+GO_CHAT = "https://opencode.ai/inference/go/openai/v1/chat/completions"
+GO_GLM = "opencode-go/glm-5.3-flash"
+GO_KIMI = "opencode-go/kimi-k2.7-code"
+GO_KEY = "go-test-" + "o" * 40  # visibly fake
 GEMINI_CHAT = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 DS = "opencode-zen/deepseek-v4.1-flash-free"
 GLM = "opencode-zen/glm-5.3-flash-free"
@@ -55,6 +67,7 @@ def world(db, secrets_memory):
     admin = create_admin(db)
     secrets_memory.put("workers/opencode-zen", ZEN_KEY, actor="test")
     secrets_memory.put("workers/gemini", GEMINI_KEY, actor="test")
+    secrets_memory.put("workers/opencode-go", GO_KEY, actor="test")
     db.commit()
     return admin
 
@@ -112,6 +125,24 @@ def test_seeded_gemini_comparator_uses_the_openai_compatible_base(world, db):
     assert g.endpoint == "https://generativelanguage.googleapis.com/v1beta/openai"
     assert shape["url"] == GEMINI_CHAT and shape["model"] == "gemini-3.8-flash" and shape["code"] is None
     assert service.client_restriction(g) is None
+
+
+def test_seeded_go_routes_carry_the_documented_go_endpoint_and_no_client_restriction(world, db):
+    rows = {r.route_key: r for r in db.scalars(select(ModelRoute).where(ModelRoute.provider == "opencode-go"))}
+    assert rows and all(r.model_id == key for key, r in rows.items())  # the OpenCode config id is kept
+    for key, r in rows.items():
+        shape = broker.upstream_request_shape(r)
+        bare = key.split("/", 1)[1]
+        assert shape["url"] == GO_CHAT and shape["model"] == bare and shape["code"] is None, key
+        assert shape["api"] == "openai.chat_completions" and shape["reasoning_effort"] == "NOT_SENT", key
+        assert service.client_restriction(r) is None and not service.request_shape_rejections(r), key
+    # an older row without upstream_model still sends the bare id (the opencode-go/ config prefix is stripped)
+    r = rows[GO_GLM]
+    r.mode_params = {k: v for k, v in r.mode_params.items() if k != "upstream_model"}
+    assert broker.upstream_request_shape(r)["model"] == "glm-5.3-flash"
+    # the free Zen pilots keep their S07 client restriction: decision A seeds Go, it does not decide the Zen rule
+    for key in (DS, GLM):
+        assert service.client_restriction(service.get_route(db, key))["owner_decision"] == "UNDECIDED"
 
 
 def test_seed_corrects_untouched_rows_and_never_rewrites_an_activated_one(world, db):
@@ -279,6 +310,7 @@ def test_worker_proxy_on_the_seeded_zen_route_sends_the_bare_model_and_never_the
         assert str(up.calls[0].request.url) == ZEN_CHAT
         assert up.calls[0].request.headers["authorization"] == f"Bearer {ZEN_KEY}"
     assert sent["model"] == "deepseek-v4.1-flash-free" and "reasoning_effort" not in sent
+    assert "x-opencode-session" not in up.calls[0].request.headers  # the Go client identification is Go-only
     assert r.json()["model"] == "aeos-ds" and ZEN_KEY not in r.text
     db.expire_all()
     req = db.scalar(select(BrokerRequest).where(BrokerRequest.outcome == "OK"))
@@ -331,6 +363,198 @@ def test_a_reasoning_level_is_route_configuration_never_the_workers(world, db, p
     assert broker.upstream_request_shape(bad)["code"] == "ROUTE_MODE_PARAMS"
 
 
+def _go_budget(db, admin) -> Decision:
+    """The owner's BUDGET decision covering the Go routes it names (one decision through ``auth_scope.routes``)."""
+    return human_decision(db, kind="BUDGET", target_type="model_budget", target_id="opencode-go",
+                          auth_scope={"routes": [GO_GLM, GO_KIMI]}, actor_user_id=admin.id)
+
+
+def test_go_route_activates_without_client_terms_but_needs_region_and_budget(world, db):
+    budget = _go_budget(db, world)
+    with pytest.raises(ValidationFailed) as ei:  # a workspace privacy setting restricts regions
+        _trial(db, world, GO_GLM, budget_decision_id=budget.id)
+    assert ei.value.code == "REGION_REVIEW_REQUIRED"
+    with pytest.raises(ValidationFailed) as ei:  # a paid subscription route
+        _trial(db, world, GO_GLM, region="EU")
+    assert ei.value.code == "BUDGET_DECISION_REQUIRED"
+    with pytest.raises(ValidationFailed) as ei:  # Go allows other clients: there is no client rule to decide
+        _trial(db, world, GO_GLM, region="EU", budget_decision_id=budget.id, client_terms=OWNER_CLIENT_TERMS)
+    assert ei.value.code == "CLIENT_TERMS_NOT_APPLICABLE"
+    assert service.get_route(db, GO_GLM).status == "CANDIDATE"
+    route = _trial(db, world, GO_GLM, region="EU", budget_decision_id=budget.id)
+    assert route.status == "TRIAL" and route.region == "EU" and service.route_use_problem(db, route) is None
+    from types import SimpleNamespace
+
+    view = route_view(db, route, SimpleNamespace(active_domain=None))
+    assert view["client_restriction"] is None and view["budget_required"] is True
+    assert view["upstream_request"]["status"] == "READY_SHAPE" and view["upstream_request"]["url"] == GO_CHAT
+    assert view["evaluation_path"]["status"] == "EVAL_RUN"
+    # the budget copy names the plan fee, never per-token spend (ADR-0080 amendment 2026-10-26)
+    assert view["billing"] == "SUBSCRIPTION" and "$10/month plan fee" in view["budget_note"]
+    assert view["subscription"]["plan"] == "OpenCode Go" and view["subscription"]["state"] == "OK"
+    assert view["subscription"]["spend_hidden"] is True  # this principal may not see every domain's usage
+
+
+def test_go_route_takes_one_feasibility_probe_that_consumes_allowance_not_money(world, db):
+    """ADR-0080 amendment 2026-10-26: the probe may run on a flat-fee route (it consumes plan allowance, not money);
+    the provider's allowance figure is recorded apart from the marginal cost (0 within the plan)."""
+    _trial(db, world, GO_GLM, region="EU", budget_decision_id=_go_budget(db, world).id)
+    usage = {"prompt_tokens": 12, "completion_tokens": 1, "cost": 0,
+             "opencode": {"allowance": 0.000004, "billing_source": "go"}}
+    with respx.mock(assert_all_mocked=True) as mock:
+        up = mock.post(GO_CHAT).mock(return_value=httpx.Response(200, json={**_ok("glm-5.3-flash"), "usage": usage}))
+        out = broker.probe_route(db, route_key=GO_GLM, actor="user:owner")
+        db.commit()
+        assert len(mock.calls) == 1
+        sent = up.calls[0].request
+    assert json.loads(sent.content)["model"] == "glm-5.3-flash" and sent.headers["authorization"] == f"Bearer {GO_KEY}"
+    assert sent.headers["user-agent"] == f"dly-aeos-broker/{__version__}"
+    assert sent.headers["x-opencode-session"].startswith("ses_")  # its own one-request conversation
+    assert out["outcome"] == "REACHABLE" and out["cost_usd"] == 0 and GO_KEY not in json.dumps(out)
+    assert out["billing"] == {"billing": "SUBSCRIPTION", "allowance_usd": "0.000004", "allowance_basis": "REPORTED",
+                              "billing_source": "go", "beyond_plan_usd": None}
+    led = db.scalar(select(UsageLedgerEntry).where(UsageLedgerEntry.route_key == GO_GLM))
+    assert led.source == "broker-feasibility" and led.cost_usd == 0 and led.charged_usd == 0
+    assert led.details["allowance_usd"] == "0.000004" and led.details["billing_source"] == "go"
+
+
+@pytest.fixture
+def go_proxy(world, db, settings):
+    p = make_project(db)
+    run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="RUNNING", model_route_key=GO_GLM)
+    db.add(run)
+    db.flush()
+    raw, _grant = broker.issue_grant(db, run_id=run.id, project_id=p.id, domain="PERSONAL", kind="MODEL_PROXY",
+                                     scope={"models": {"aeos-go-glm": GO_GLM}, "per_request_output_cap": 256},
+                                     ttl_seconds=600, max_requests=10, max_tokens=10_000, max_cost_usd=1.0)
+    db.commit()
+    with TestClient(make_app(settings), base_url="http://testserver") as c:
+        yield {"client": c, "token": raw, "run_id": run.id}
+
+
+def test_worker_proxy_on_a_go_route_sends_its_own_client_identity_and_a_stable_session(world, db, go_proxy):
+    _trial(db, world, GO_GLM, region="EU", budget_decision_id=_go_budget(db, world).id)
+    run_id = go_proxy["run_id"]
+    with respx.mock(assert_all_mocked=True) as mock:
+        up = mock.post(GO_CHAT).mock(return_value=httpx.Response(200, json=_ok("glm-5.3-flash")))
+        for _ in range(2):
+            r = go_proxy["client"].post("/broker/v1/chat/completions", headers={
+                "Authorization": f"Bearer {go_proxy['token']}"}, json={
+                "model": "aeos-go-glm", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "high"})
+            assert r.status_code == 200, r.text
+        reqs = [c.request for c in up.calls]
+    assert len(reqs) == 2 and all(str(q.url) == GO_CHAT for q in reqs)
+    assert all(q.headers["authorization"] == f"Bearer {GO_KEY}" for q in reqs)  # only towards opencode.ai
+    assert all(q.headers["user-agent"] == f"dly-aeos-broker/{__version__}" for q in reqs)  # not python-httpx
+    sessions = {q.headers["x-opencode-session"] for q in reqs}
+    assert sessions == {"ses_" + hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:24]}  # stable per run
+    sid = sessions.pop()
+    assert run_id not in sid and go_proxy["token"] not in sid and GO_KEY not in sid  # opaque, never a secret
+    sent = json.loads(reqs[0].content)
+    assert sent["model"] == "glm-5.3-flash" and "reasoning_effort" not in sent
+    assert r.json()["model"] == "aeos-go-glm" and GO_KEY not in r.text
+    db.expire_all()
+    req = db.scalars(select(BrokerRequest).where(BrokerRequest.outcome == "OK")).all()[-1]
+    assert req.provider == "opencode-go" and req.upstream_model == "glm-5.3-flash"
+
+
+def test_worker_proxy_on_a_go_route_records_allowance_apart_from_money(world, db, go_proxy):
+    """ADR-0080 amendment 2026-10-26: each Go call records the provider's marginal cost (0 within the plan) and the
+    allowance it consumed - REPORTED (usage.opencode.allowance, also from a stream's usage chunk) or ESTIMATED from its
+    tokens. The run's $0 hold is never charged as made-up dollars."""
+    from aeos.cost import facade as cost
+    from aeos.models.cost import BudgetReservation
+
+    _trial(db, world, GO_GLM, region="EU", budget_decision_id=_go_budget(db, world).id)
+    run = db.get(WorkerRun, go_proxy["run_id"])
+    res = cost.reserve(db, cost.ReservationRequest(run_id=run.id, project_id=run.project_id, domain="PERSONAL",
+                                                   route_key=GO_GLM, est_usd=0.0, est_tokens=10_000, est_requests=10))
+    run.budget_reservation_id = res.id
+    db.commit()
+    assert res.pricing_basis == "SUBSCRIPTION"
+
+    def usage(allowance: float) -> dict[str, Any]:
+        return {"prompt_tokens": 12, "completion_tokens": 1, "cost": 0,
+                "opencode": {"allowance": allowance, "billing_source": "go"}}
+
+    chunks = [{"choices": [{"index": 0, "delta": {"content": "OK"}}], "model": "glm-5.3-flash"},
+              {"choices": [], "usage": usage(0.00003)}]
+    sse = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(GO_CHAT).mock(side_effect=[
+            httpx.Response(200, json={**_ok("glm-5.3-flash"), "usage": usage(0.00002)}),
+            httpx.Response(200, json=_ok("glm-5.3-flash")),  # no cost, no allowance reported
+            httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse.encode())])
+        for extra in ({}, {}, {"stream": True}):
+            r = go_proxy["client"].post("/broker/v1/chat/completions", headers={
+                "Authorization": f"Bearer {go_proxy['token']}"}, json={
+                "model": "aeos-go-glm", "messages": [{"role": "user", "content": "hi"}], **extra})
+            assert r.status_code == 200, r.text
+    db.expire_all()
+    entries = list(db.scalars(select(UsageLedgerEntry).where(UsageLedgerEntry.run_id == run.id)
+                              .order_by(UsageLedgerEntry.at)))
+    assert [(e.details["allowance_basis"], e.details["allowance_usd"]) for e in entries] == [
+        ("REPORTED", "0.000020"), ("ESTIMATED", "0.000003"), ("REPORTED", "0.000030")]  # 12 x 0.15 + 1 x 0.50 / 1M
+    assert [float(e.charged_usd) for e in entries] == [0.0, 0.0, 0.0]
+    assert entries[1].cost_usd is None and entries[1].details["marginal_cost_unreported"] is True
+    assert not any("cost_unknown_charged_reservation" in e.details for e in entries)
+    hold = db.get(BudgetReservation, res.id)
+    assert hold.status == "RESERVED" and float(hold.committed_usd) == 0 and hold.committed_requests == 3
+    summary = db.get(WorkerRun, run.id).usage_summary
+    assert summary["billing"] == "SUBSCRIPTION" and summary["allowance_usd"] == pytest.approx(0.000053)
+    assert summary["allowance_not_reported_requests"] == 1 and summary["cost_unknown_requests"] == 1
+
+
+def _go_call(go_proxy, **extra: Any):
+    return go_proxy["client"].post("/broker/v1/chat/completions", headers={
+        "Authorization": f"Bearer {go_proxy['token']}"}, json={
+        "model": "aeos-go-glm", "messages": [{"role": "user", "content": "hi"}], **extra})
+
+
+def test_go_call_without_usage_records_an_upper_bound_estimate_never_unknown(world, db, go_proxy):
+    """No reservation (or a hold already settled) and an answer without any usage: the broker records the call's upper
+    bound (clamped max_tokens + prompt size), so the allowance is ESTIMATED and the route is never locked out."""
+    _trial(db, world, GO_GLM, region="EU", budget_decision_id=_go_budget(db, world).id)
+    no_usage = {"model": "glm-5.3-flash", "choices": [{"message": {"role": "assistant", "content": "OK"}}]}
+    with respx.mock(assert_all_mocked=True) as mock:
+        up = mock.post(GO_CHAT).mock(return_value=httpx.Response(200, json=no_usage))
+        r = _go_call(go_proxy, max_tokens=100)
+        assert r.status_code == 200, r.text
+        sent = json.loads(up.calls[0].request.content)
+    assert sent["max_tokens"] == 100  # clamped to the grant's per-request cap (256)
+    db.expire_all()
+    (entry,) = db.scalars(select(UsageLedgerEntry).where(UsageLedgerEntry.run_id == go_proxy["run_id"])).all()
+    from aeos.broker import model_proxy
+
+    assert entry.input_tokens is None and entry.details["allowance_basis"] == "ESTIMATED"
+    assert entry.details["charged_tokens"] == model_proxy.request_token_bound(sent)
+    from aeos.cost import facade as cost
+
+    assert cost.allowance_status(db, service.get_route(db, GO_GLM))["state"] == "OK"
+
+
+def test_go_call_billed_beyond_the_plan_stops_the_run_until_the_owner_reactivates(world, db, go_proxy):
+    """Invariant 8: a call the provider bills from the pay-as-you-go balance (Extra Usage ON) without a usage.cost is
+    flagged; the broker refuses the run's next request (and new admissions/probes) until the owner re-activates."""
+    budget = _go_budget(db, world)
+    _trial(db, world, GO_GLM, region="EU", budget_decision_id=budget.id)
+    balance = {**_ok("glm-5.3-flash"), "usage": {"prompt_tokens": 12, "completion_tokens": 1,
+                                                 "opencode": {"allowance": 0, "billing_source": "balance"}}}
+    with respx.mock(assert_all_mocked=True) as mock:
+        up = mock.post(GO_CHAT).mock(return_value=httpx.Response(200, json=balance))
+        assert _go_call(go_proxy).status_code == 200
+        r = _go_call(go_proxy)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "SUBSCRIPTION_BEYOND_PLAN", r.text
+        assert len(up.calls) == 1  # the second request never left the broker
+    db.expire_all()
+    entry = db.scalar(select(UsageLedgerEntry).where(UsageLedgerEntry.run_id == go_proxy["run_id"]))
+    assert entry.details["beyond_plan_usd"] == "UNKNOWN" and entry.details["billing_source"] == "balance"
+    _trial(db, world, GO_GLM, region="EU", budget_decision_id=budget.id)  # the owner re-activates the route
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(GO_CHAT).mock(return_value=httpx.Response(200, json=_ok("glm-5.3-flash")))
+        assert _go_call(go_proxy).status_code == 200
+
+
 def test_provider_credentials_only_go_to_the_providers_own_host(world, db):
     r = service.get_route(db, DS)
     r.endpoint = "https://zen.example.com/v1"
@@ -339,6 +563,16 @@ def test_provider_credentials_only_go_to_the_providers_own_host(world, db):
     g = service.get_route(db, GEMINI)
     g.endpoint = "http://127.0.0.1:9/v1beta/openai"
     assert broker.upstream_request_shape(g)["code"] == "ROUTE_ENDPOINT"
+    # the Go subscription key goes to https://opencode.ai only (another host, loopback or plain http fail closed)
+    go = service.get_route(db, GO_GLM)
+    for endpoint in ("https://go.example.com/inference/go/openai/v1", "http://127.0.0.1:9/inference/go/openai/v1",
+                     "http://opencode.ai/inference/go/openai/v1"):
+        go.endpoint = endpoint
+        shape = broker.upstream_request_shape(go)
+        assert shape["code"] == "ROUTE_ENDPOINT", endpoint
+        assert shape["problem"] in ("the opencode-go credential is only sent to https://opencode.ai",
+                                    "route endpoint must be https (or loopback http) without credentials"), endpoint
+    assert any("ROUTE_ENDPOINT" in x for x in service.request_shape_rejections(go))
 
 
 # ------------------------------------------------------------------------------------------- LOCAL loopback route

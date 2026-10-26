@@ -151,8 +151,38 @@ def _client_restriction_view(r: ModelRoute) -> dict[str, Any] | None:
             "note": ("Pemilik mencatat keputusan pada aktivasi (terikat hash konfigurasi). Apakah provider menerima "
                      "panggilan broker tetap NOT-PROVEN sampai probe kelayakan." if decided else
                      "Broker AEOS memanggil upstream sebagai klien HTTP sendiri, bukan OpenCode. Rute ini tidak dapat "
-                     "diaktifkan atau diproksikan sampai pemilik memutuskan: OpenCode Go, rute berbayar dengan "
-                     "keputusan BUDGET, atau keputusan syarat-klien eksplisit saat aktivasi (ADR-0041).")}
+                     "diaktifkan atau diproksikan sampai pemilik memutuskan: rute OpenCode Go (opencode-go/*, "
+                     "keputusan pemilik A), rute berbayar dengan keputusan BUDGET, atau keputusan syarat-klien "
+                     "eksplisit saat aktivasi (ADR-0041).")}
+
+
+def _billing(r: ModelRoute) -> str:
+    """How the route is paid: SUBSCRIPTION (flat plan fee + allowance, ADR-0080 amendment 2026-10-26), FREE, METERED
+    (per token) or UNKNOWN - never a guess."""
+    if service.is_subscription(r):
+        return "SUBSCRIPTION"
+    if service.is_effectively_free(r):
+        return "FREE"
+    return "METERED" if r.is_free == "NO" else "UNKNOWN"
+
+
+def _subscription_view(session: Session, r: ModelRoute, principal: Principal) -> dict[str, Any] | None:
+    """Plan + allowance per provider window of a SUBSCRIPTION route (cost module). The allowance counts every domain's
+    usage of the route, so the window figures are shown only to a principal who may see all domains (as GLOBAL/ROUTE
+    budget spend on the Costs page)."""
+    if not service.is_subscription(r):
+        return None
+    try:
+        from aeos.cost import facade as cost
+
+        status = cost.allowance_status(session, r)
+    except ImportError:
+        return {"state": "UNKNOWN", "note": "modul biaya tidak tersedia; allowance tidak dapat dihitung"}
+    if status is None:
+        return None
+    can = getattr(principal, "can_access_domain", None)
+    cross = getattr(principal, "allowed_project_ids", None) is None and callable(can) and all(can(d) for d in Domain)
+    return status if cross else cost.subscription_without_figures(status)
 
 
 def route_view(session: Session, r: ModelRoute, principal: Principal,
@@ -190,6 +220,11 @@ def route_view(session: Session, r: ModelRoute, principal: Principal,
         "execution_path": _execution_path(r), "evaluation_path": _evaluation_path(r),
         "upstream_request": _upstream_request(r), "client_restriction": _client_restriction_view(r),
         "budget_required": service.needs_budget(r) if r.pool != "SUPERVISOR" else False,
+        # ADR-0080 amendment 2026-10-26: the BUDGET decision of a SUBSCRIPTION route covers its plan fee; its usage is
+        # plan allowance per provider window, not per-token spend
+        "billing": _billing(r) if r.pool != "SUPERVISOR" else None,  # native supervisor: Max plan, §42
+        "budget_note": (service.budget_label(r) if service.needs_budget(r) and r.pool != "SUPERVISOR" else None),
+        "subscription": _subscription_view(session, r, principal),
     }
 
 

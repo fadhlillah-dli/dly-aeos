@@ -24,4 +24,17 @@ describe("Costs page renders real API payloads", () => {
     expect(screen.getByText("240 s / 600 s (n=3 dari 4 run)")).toBeInTheDocument();
     expect(screen.getByText("2 (1 dari 2 task)")).toBeInTheDocument();
   });
+
+  it("shows the OpenCode Go subscription as plan + allowance per window, not as dollars spent", async () => {
+    mockApi({ "/api/costs/summary": summary, "/api/budgets": budgets, "/api/costs/ledger": ledger, "/api/quotas": quotas });
+    renderPage(<CostsPage />);
+    expect(await screen.findByText("Langganan worker (paket + allowance)")).toBeInTheDocument();
+    const sub = summary.subscriptions[0];
+    expect(screen.getByText(sub.route_key)).toBeInTheDocument();
+    expect(screen.getByText("OpenCode Go · $10.00/bulan")).toBeInTheDocument();
+    for (const label of ["5 jam", "Minggu (saran)", "Bulan (saran)"]) expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getAllByText("Dalam paket").length).toBe(4); // route state + three windows
+    expect(screen.getByText(/instance AEOS ini saja/)).toBeInTheDocument();
+    expect(screen.queryByText(/Dibayar di luar paket/)).toBeNull();
+  });
 });

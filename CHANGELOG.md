@@ -12,6 +12,79 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ### Added
 
+- **OpenCode Go WORKER routes (owner decision A).** The owner chose option A of ADR-0041 on 2026-10-26: OpenCode Go,
+  a $10/month subscription, for broker-served worker routes. Part 1 adds the routes and the code paths. Part 2 adds the
+  subscription accounting.
+  - **Routes.** `aeos seed` adds PERSONAL-only CANDIDATE routes for provider `opencode-go`:
+    - WORKER, ranked above the client-restricted free Zen pilots: glm-5.3-flash, mimo-v2.6-flash,
+      minimax-m3.1-flash, hy3 and kimi-k2.7-code.
+    - WATCHLIST: longcat-2.0, glm-5.2, glm-5.3, kimi-k3.1-pro and mimo-v2.6-pro, plus deepseek-v4.1-flash
+      (PUBLIC only: Global region, zero-retention agreement valid through 2026-10-31).
+
+    Each route records the Go terms: no training, 0-day retention, the region setting and Go's permission for other
+    clients, with no client restriction. Its pricing is a subscription: $10/month, a dollar allowance per model, 5h
+    20% / week 50% / month 100% windows and allowance rates per 1M tokens, never a metered price.
+  - **Broker.** It sends the Go key (`workers/opencode-go`) only to https://opencode.ai, with the bare model id, its
+    own User-Agent and a stable opaque `x-opencode-session` per worker run.
+  - **Availability.** `aeos routes refresh` reads the Go model list with that key and now prints the `available:`
+    routes too. A listed model is AVAILABLE and an absent one MISSING. No key, a rejected key or an unreachable list is
+    UNKNOWN, never MISSING.
+  - **Secrets, Doctor and inventory.** The secret ref and its "OpenCode Go" integrations card warn that Extra Usage
+    must stay OFF. Doctor `route.worker_key` now follows every `workers/*` key, and its remedy names the route's own
+    key. The inventory CONFIG lens maps Go routes to the `opencode-console` component.
+  - **Evidence.** The facts are E1: the OpenCode Go docs, FAQ, ToS and models.dev for tool calling, read 2026-10-26.
+    The AEOS side is E2: unit tests against mocked upstreams for the request shape, host pin, headers, catalog
+    AVAILABLE/MISSING/UNKNOWN, activation (region + BUDGET, no client terms) and the separate credential. No live
+    call was made.
+  - **Subscription accounting (part 2; ADR-0080 amendment 2026-10-26).** A route whose `pricing.billing` is
+    SUBSCRIPTION is a third billing class beside free and per-token.
+    - **Activation.** It still needs a BUDGET decision, for the monthly plan fee. The activation and eligibility copy
+      say "subscription route (OpenCode Go, $10/month plan fee ...)".
+    - **Broker.** It records `usage.cost` as the marginal charge (0 within the plan). `usage.opencode.allowance` and
+      `billing_source` go to the ledger entry's details as `allowance_usd`. The basis is REPORTED, else ESTIMATED from
+      tokens x the allowance rates, or from the request's upper bound (clamped `max_tokens` plus prompt size) when Go
+      reports no usage, so a late answer without usage never locks the route. An unreported cost is charged $0, never
+      the reservation. A provider dollar figure above 1e9 USD is unreported, and `money()` turns every decimal
+      arithmetic error (e.g. 1e25) into a validation error instead of crashing the ledger write.
+    - **Counted scope.** AEOS counts only the calls made through this AEOS instance. Usage of the same Go workspace
+      from other clients or machines (your own OpenCode, the other Mac) is invisible, so Go's own limit stays
+      authoritative: the docs say requests are blocked at a limit; HTTP 429 comes from OpenCode's client test fixture
+      (NOT-PROVEN). Extra Usage OFF stays the only guard against a provider-side bill.
+    - **Admission.** It needs no TaskSpec `max_cost_usd`: the marginal estimate is $0 and the run's grant cost cap is
+      $0. The allowance is counted per route over trailing 5 h / 7 day / 31 day windows (20% / 50% / 100% of the
+      monthly allowance). Only the 5h window blocks: `SUBSCRIPTION_ALLOWANCE_EXHAUSTED`, or
+      `SUBSCRIPTION_ALLOWANCE_UNKNOWN` for at most 5 hours while a call in it cannot be counted (both WAITING_QUOTA).
+      The week and month windows are advisory (`WARN_EXHAUSTED`, never blocking): Go's reset anchors are unknown, and
+      with Extra Usage OFF exceeding them only yields Go's refusals. Wait reasons carry no allowance figures.
+    - **Paid usage beyond the plan fails closed.** A reported charge, a `billing_source` other than `go` / `go-plus`
+      (e.g. `balance`) or an unreadable stated cost is flagged `beyond_plan_usd` and emitted as
+      `cost.subscription.beyond_plan`. The route is refused (`SUBSCRIPTION_BEYOND_PLAN`, BLOCKED) for new admissions,
+      probes and every broker request until the owner turns Extra Usage OFF and re-activates it.
+    - **Probe.** One synthetic PUBLIC feasibility probe is allowed on an activated subscription route (ADR-0111
+      amendment 2026-10-26), refused with the same codes; a per-token paid route is still refused (`ROUTE_NOT_FREE`).
+    - **Views.** `aeos cost summary`, `GET /api/costs/summary` (`subscriptions`, `by_route[].billing`), the route view
+      and the task admission answer show the plan and the allowance per window (advisory windows marked), never
+      per-token spend; the figures are hidden from a principal who cannot see every domain, also in
+      `GET /api/tasks/{id}/admission`. `aeos routes list` only flags `billing=SUBSCRIPTION`; the Costs page ("Langganan
+      worker") and the route drawer show the plan, the allowance per window and the beyond-plan state (UI contract
+      fixtures refreshed). Doctor `route.registry` lists `subscription_candidates` apart from paid or unknown-price
+      candidates.
+    - **No migration.** Existing JSON columns hold the new figures.
+    - **Evidence.** E2: unit tests with mocked upstreams cover allowance recording (reported, estimated, upper bound,
+      stream), the blocking 5h window, the advisory week/month windows, the beyond-plan refusal and its clearing by
+      re-activation (cost, scheduler, probe, broker), no reservation charge, absurd provider figures, the admission
+      visibility, the cost summary and CLI, and Doctor.
+    - **Open.** Per-token paid routes keep the `COST_UNKNOWN` gap (no TaskSpec cost limit from the planner).
+  - **NOT-PROVEN:** whether Go accepts the broker as a client, tool calling on Go (hy3 UNKNOWN), the model-list shape,
+    whether Go reports the allowance on every answer, whether the allowance is per model or pooled and the unit of
+    `usage.opencode.allowance` (to compare with tokens x rate on the first probe or run), the 429 status at a limit,
+    where Go anchors its windows, and the owner's subscription, key, region and Extra Usage setting.
+  - **Not changed.** The free Zen pilots keep their S07 client restriction. ADR-0041 records the decision and its
+    risks (the ToS automation clause and Extra Usage are owner risks). OWNER_ACTIONS 1.8, 1.11, 1.15 and 2.12 and
+    OPERATIONS give the owner steps: a TRIAL WORKER route serves real tasks at once (probe first or pause
+    scheduling), each billing cycle needs a new BUDGET decision and a new `routes activate ... --budget-decision`, and
+    the admission codes with their remedies.
+
 - **GitHub token expiry warning (#16).** The Doctor check `adapter.github_token` reads the expiry GitHub reports for
   the token (`GitHub-Authentication-Token-Expiration`) and the date recorded with `aeos secrets set
   personal/github --expires-at`, and warns 14 days ahead with the rotation command, without turning the check

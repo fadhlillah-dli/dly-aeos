@@ -1,8 +1,9 @@
 import { X } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useAuth } from "../../auth/AuthContext";
 import { ExplainButtons } from "../../components/ExplainButtons";
 import { StatusBadge } from "../../components/StatusBadge";
+import { SubscriptionStatusBlock } from "../../components/SubscriptionBlock";
 import { Button, ErrorBox, Field, Freshness, KeyValue, Loading, Mono, Notice, inputClass } from "../../components/ui";
 import { absoluteTime, shortHash } from "../../lib/format";
 import { ActivationDialog } from "./ActivationDialog";
@@ -133,6 +134,17 @@ export function budgetRequired(r: RouteItem) {
   );
 }
 
+/** ADR-0080 amendment (2026-10-26): a subscription route is paid by a flat plan fee (the BUDGET decision) plus allowance per window. */
+function billingCell(r: RouteItem) {
+  return (
+    <div key="bl" className="space-y-2">
+      <StatusBadge status="NOT_APPLICABLE" label="Langganan — biaya paket + allowance, bukan per token" />
+      {r.budget_note && <p className="text-xs text-ink-3">{r.budget_note}</p>}
+      {r.subscription && <SubscriptionStatusBlock s={r.subscription} />}
+    </div>
+  );
+}
+
 /** The value the configuration records now (``mode_params``), shown next to an "empty = unchanged" field. */
 function recorded(config: Record<string, unknown> | undefined, key: string): string {
   const mp = config?.mode_params;
@@ -255,6 +267,7 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
                 ["Permintaan upstream", upstreamRequest(r)],
                 ["Syarat klien penyedia", clientRestriction(r)],
                 ["Keputusan BUDGET", budgetRequired(r)],
+                ...(r.billing === "SUBSCRIPTION" ? ([["Penagihan", billingCell(r)]] as [ReactNode, ReactNode][]) : []),
                 ["Versi teresolusi", r.resolved_version === "UNKNOWN" ? <StatusBadge status="UNKNOWN" /> : <Mono>{r.resolved_version}</Mono>],
                 ["Hash konfigurasi", <Mono key="h">{r.config_hash}</Mono>],
                 ["Konfigurasi berubah", r.config_changed_at ? absoluteTime(r.config_changed_at) : "—"],

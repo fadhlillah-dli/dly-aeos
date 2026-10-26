@@ -394,9 +394,12 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   Deployment target" / "Produksi — Deployment target": the https base URL and an optional health path (validated
   with the observer's rule). AEOS only GETs it (G6/G8, `aeos delivery observe-target`, `aeos docs screenshot`);
   deploying stays a human action. The GitHub Actions pipeline reference is "CI — GitHub Actions" on the same page.
-* **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111):** activate the free route as TRIAL (owner decision),
+* **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111; WORKER too):** activate the free (or local, or flat-fee
+  subscription) route as TRIAL (owner decision),
   then `aeos broker probe-route <route_key>` / `POST /api/broker/routes/<key>/feasibility` sends one synthetic
-  PUBLIC prompt and records PROBE evidence; the route never serves worker tasks and its status is unchanged.
+  PUBLIC prompt and records PROBE evidence; the probe never changes the route's status. An ARENA/COMPARATOR/LOCAL
+  route never serves worker tasks. A WORKER route activated as TRIAL is eligible for real worker tasks at once: probe
+  it before enabling the worker agent, or with scheduling paused (`aeos work pause`, then `aeos work resume`).
   The probe sends the route's own request shape (`<endpoint>/chat/completions`, bare upstream model id; ADR-0041
   amendment 2026-10-25): OpenCode Zen `https://opencode.ai/inference/openai/v1`, Gemini
   `https://generativelanguage.googleapis.com/v1beta/openai`. After upgrading, run `aeos seed` once: it corrects
@@ -410,6 +413,56 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   on the decision and in the config hash; whether the provider accepts the call stays NOT-PROVEN until a probe),
   or use OpenCode Go / a paid route with a BUDGET decision instead. `aeos routes list` flags undecided routes with
   `client-terms=OWNER_DECISION_REQUIRED`.
+* **OpenCode Go routes (owner decision A, ADR-0041 amendment 2026-10-26):** `aeos seed` adds the `opencode-go/*`
+  CANDIDATE routes. In the WORKER pool they rank above the Zen pilots: glm-5.3-flash, mimo-v2.6-flash,
+  minimax-m3.1-flash, hy3 (no documented tool support) and kimi-k2.7-code. The other chat-completions models are on
+  the WATCHLIST.
+  * **Request.** The broker calls `https://opencode.ai/inference/go/openai/v1/chat/completions` with the bare model
+    id and the key `workers/opencode-go`, sent only to https://opencode.ai. It also sends `User-Agent:
+    dly-aeos-broker/<version>` and a stable `x-opencode-session` per worker run (a hash, never a secret), as the Go
+    docs ask of clients other than OpenCode.
+  * **Availability.** `aeos routes refresh` (`opencode_go_catalog`) reads `https://opencode.ai/inference/go/v1/models`
+    with that key: a listed model is AVAILABLE (printed on the `available:` line) and an absent one MISSING (`missing:`).
+    No key, a rejected key, an unreachable endpoint or an unexpected answer leaves every Go route UNKNOWN.
+  * **Activation.** A Go route has no client restriction. Activating it needs the terms review (incl. the ToS
+    automation clause), the region(s) the workspace allows (`--region EU-US` for the workspace default Europe &
+    United States), a BUDGET decision for the monthly plan fee and, to match it, `--days 30` (a TRIAL lasts 14 days by
+    default). The TRIAL keeps the BUDGET decision's id: each cycle needs a new BUDGET decision and `aeos routes
+    activate ... --budget-decision <new id>` again (OWNER_ACTIONS 1.11). A TRIAL WORKER route serves real tasks at
+    once (see Route feasibility above).
+  * **Extra Usage on the Console's Go page must stay OFF.** With it ON, Go falls back to the pay-as-you-go balance
+    after a limit, and AEOS cannot observe that setting.
+  * **Subscription accounting (ADR-0080 amendment 2026-10-26).**
+    * The route's `pricing.billing` is SUBSCRIPTION. A run's marginal cost estimate is $0, so a TaskSpec needs no
+      `max_cost_usd`, and the run's grant cost cap is $0.
+    * Each call records `usage.cost` as the marginal charge (0 within the plan; an unreported cost stays UNKNOWN and
+      is charged $0, never the reservation). It records `usage.opencode.allowance` as `allowance_usd` (REPORTED, else
+      ESTIMATED from tokens x the route's allowance rates, or from the request's upper bound - clamped `max_tokens`
+      plus prompt size - when Go reports no usage) and the `billing_source`, both in the ledger entry's details. A
+      dollar figure above 1e9 USD is treated as unreported.
+    * **Only this AEOS instance's calls are counted.** Usage of the same Go workspace from other clients or machines
+      is invisible, so Go's own limit stays authoritative (the docs say requests are blocked; HTTP 429 per the
+      OpenCode client fixture, NOT-PROVEN).
+    * Admission counts the recorded allowance per route over trailing 5 h / 7 day / 31 day windows (20% / 50% /
+      100% of `allowance_usd_month`). Only the 5h window blocks: a used-up window waits with
+      `SUBSCRIPTION_ALLOWANCE_EXHAUSTED` and a call in it whose allowance cannot be counted waits with
+      `SUBSCRIPTION_ALLOWANCE_UNKNOWN` (at most 5 hours); both show as WAITING_QUOTA. The week and month windows are
+      advisory (`WARN_EXHAUSTED`, never blocking): Go's reset anchors are unknown, and with Extra Usage OFF exceeding
+      them only yields Go's refusals. Incomplete subscription terms wait with `COST_UNKNOWN` (`reserve`:
+      `BUDGET_STATE_UNTRUSTED`).
+    * **Paid usage beyond the plan fails closed.** A reported charge, a `billing_source` other than `go` / `go-plus`
+      (e.g. `balance`) or an unreadable stated cost flags the call `beyond_plan_usd` (event
+      `cost.subscription.beyond_plan`); a reported charge counts against the budgets. The route is then refused with
+      `SUBSCRIPTION_BEYOND_PLAN` (BLOCKED) for new admissions, probes and every broker request until the owner turns
+      Extra Usage OFF and re-activates the route (a TRIAL newer than the call).
+    * `aeos cost summary` and `GET /api/costs/summary` (`subscriptions`, `by_route[].billing`), the route view and the
+      task admission answer show the plan and the allowance per window (advisory windows marked), never per-token
+      spend; the figures are hidden from a principal who cannot see every domain. `aeos routes list` only flags
+      `billing=SUBSCRIPTION`; the Control Center pages do not show the windows yet.
+  * **Probe.** `aeos broker probe-route opencode-go/<id>` is allowed on an activated Go route. It consumes allowance,
+    not money, and is refused with the same codes (`SUBSCRIPTION_ALLOWANCE_EXHAUSTED`,
+    `SUBSCRIPTION_ALLOWANCE_UNKNOWN`, `SUBSCRIPTION_BEYOND_PLAN`). A per-token paid route is still refused
+    (`ROUTE_NOT_FREE`). Everything about Go is E1 (docs read 2026-10-26) until a probe or TRIAL run.
 * **LOCAL route endpoint:** start an OpenAI-compatible server on this host, then `aeos routes set-endpoint
   local/qwen3.8-flash-next --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "..." [--model <served
   name>] [--quantization ...] [--backend ...] [--hardware ...]` (or the Models page form). Loopback `http` only;

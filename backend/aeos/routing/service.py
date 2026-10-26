@@ -62,8 +62,9 @@ WORKER_EXECUTED_POOLS = ("WORKER",)
 REVIEWED_WORKER_TOOLS = ("fs.read", "fs.write:allowed_paths", "tests.run")
 TOOL_VOCABULARY = frozenset({*REVIEWED_WORKER_TOOLS, "bash", "webfetch"})
 PLACEHOLDER_TOOL_SETS = frozenset({"opencode-default"})
-# Providers whose availability a catalog refresh observes (routing.catalog: OpenRouter models, `opencode models`).
-CATALOG_OBSERVED_PROVIDERS = frozenset({"openrouter", "opencode-zen"})
+# Providers whose availability a catalog refresh observes (routing.catalog: OpenRouter models, `opencode models`,
+# the OpenCode Go model list with the workers/opencode-go key - ADR-0041 amendment 2026-10-26).
+CATALOG_OBSERVED_PROVIDERS = frozenset({"openrouter", "opencode-zen", "opencode-go"})
 _REGION = re.compile(r"^[A-Z0-9][A-Z0-9-]{1,31}$")
 # TaskSpec model_route_policy keys: consumed by routing, or constraints routing always enforces (a TaskSpec
 # asking to relax one of them is refused rather than silently ignored).
@@ -237,7 +238,7 @@ def find_route_decision(session: Session, *, kind: str, route: ModelRoute) -> De
 
 def budget_decision_valid(session: Session, decision_id: str | None, route: ModelRoute) -> tuple[bool, str]:
     if not decision_id:
-        return False, "paid route requires an explicit BUDGET decision id"
+        return False, "an explicit BUDGET decision id is required"
     d = session.get(Decision, decision_id)
     if not _decision_valid(d, kind="BUDGET", config_hash=None):
         return False, "budget decision is missing, not ACTIVE, not human or expired"
@@ -267,6 +268,8 @@ def route_use_problem(session: Session, route: ModelRoute) -> str | None:
     if needs_budget(route):
         ok, why = budget_decision_valid(session, (decision.details or {}).get("budget_decision_id"), route)
         if not ok:
+            if is_subscription(route):
+                return f"{budget_label(route)} has no valid budget decision: {why}"
             label = "free period ended" if route.is_free == "YES" else f"is_free={route.is_free}"
             return f"route is no longer free ({label}) and has no valid budget decision: {why}"
     return None
@@ -290,8 +293,26 @@ def is_local_loopback(route: ModelRoute) -> bool:
 
 def needs_budget(route: ModelRoute, now: datetime | None = None) -> bool:
     """Whether using *route* needs an ACTIVE BUDGET decision: anything not effectively free, except a loopback
-    LOCAL route (local compute is the owner's own hardware, not a paid upstream)."""
+    LOCAL route (local compute is the owner's own hardware, not a paid upstream). A flat-fee SUBSCRIPTION route needs
+    it too: its plan fee is paid (ADR-0080 amendment 2026-10-26)."""
     return not is_effectively_free(route, now) and not is_local_loopback(route)
+
+
+def is_subscription(route: ModelRoute) -> bool:
+    """The route's pricing declares a flat-fee subscription (``pricing.billing``; the cost module checks its terms)."""
+    return isinstance(route.pricing, dict) and route.pricing.get("billing") == "SUBSCRIPTION"
+
+
+def budget_label(route: ModelRoute) -> str:
+    """Budget copy: a SUBSCRIPTION route's BUDGET decision covers its monthly plan fee, not per-token spend (its usage
+    is plan allowance, counted per provider window by the cost module; ADR-0080 amendment 2026-10-26)."""
+    if not is_subscription(route):
+        return "paid route"
+    pricing = route.pricing or {}
+    fee = pricing.get("monthly_fee_usd")
+    plan = pricing.get("plan") or "plan"
+    return (f"subscription route ({plan}, {'$' + str(fee) if fee is not None else 'fee UNKNOWN'}/month plan fee; "
+            "the BUDGET decision covers the fee, usage is plan allowance)")
 
 
 def client_restriction(route: ModelRoute) -> dict[str, Any] | None:
@@ -310,8 +331,8 @@ def client_restriction_problem(route: ModelRoute) -> str | None:
     return (f"provider client restriction ({cr.get('source') or 'provider terms'}): "
             f"{cr.get('statement') or 'the provider restricts which client may call this route'} The AEOS broker "
             "calls the upstream as its own HTTP client, not OpenCode: no owner decision is recorded for this route "
-            "(options: OpenCode Go, a paid route with a BUDGET decision, or an explicit client-terms decision at "
-            "activation; ADR-0041 amendment 2026-10-25)")
+            "(options: the seeded OpenCode Go routes opencode-go/* (owner decision A), a paid route with a BUDGET "
+            "decision, or an explicit client-terms decision at activation; ADR-0041 amendments 2026-10-25/26)")
 
 
 def request_shape_rejections(route: ModelRoute) -> list[str]:
@@ -682,7 +703,7 @@ def route_rejections(
         ok, why = budget_decision_valid(session, budget_id, route)
         if not ok:
             label = "free period expired" if route.is_free == "YES" else f"is_free={route.is_free}"
-            reasons.append(f"paid route ({label}): {why}")
+            reasons.append(f"{budget_label(route)}: {why}" if is_subscription(route) else f"paid route ({label}): {why}")
     return reasons
 
 
@@ -1177,7 +1198,8 @@ def _validated_client_terms(client_terms: dict[str, Any] | None, route: ModelRou
         raise ValidationFailed("client_terms accepts accepted and note only", details={"unknown": unknown})
     if client_terms.get("accepted") is not True:
         raise ValidationFailed("client_terms.accepted must be true to activate a client-restricted route; otherwise "
-                               "keep it inactive and use OpenCode Go or a paid route with a BUDGET decision",
+                               "keep it inactive and use an OpenCode Go route (opencode-go/*) or a paid route with "
+                               "a BUDGET decision",
                                code="CLIENT_TERMS_DECISION_REQUIRED")
     note = str(client_terms.get("note") or "").strip()
     if len(note) < 10:
@@ -1256,7 +1278,8 @@ def activate_route(
     * The decision binds the runtime in force (policy version, worker prompt revision, context strategy,
       observed harness version), the reviewed tool set and, where the provider restricts regions, the
       reviewed region; a change of any of them makes the route ineligible until re-activated.
-    * Paid routes also need an explicit BUDGET decision.
+    * Paid routes also need an explicit BUDGET decision; for a flat-fee SUBSCRIPTION route it covers the plan fee
+      (ADR-0080 amendment 2026-10-26).
     * APPROVED (production) additionally needs ``eval_run_ids``: COMPLETED, gate-passing EvalRuns made on
       exactly this configuration (§23 "telah diuji", §43). Their per-role result is written to
       ``eval_results`` by this decision — the only writer — and a rollback target is recorded. TRIAL needs no
@@ -1329,7 +1352,7 @@ def activate_route(
     if needs_budget(route):
         ok, why = budget_decision_valid(session, budget_decision_id, route)
         if not ok:
-            raise ValidationFailed(f"paid route: {why}", code="BUDGET_DECISION_REQUIRED")
+            raise ValidationFailed(f"{budget_label(route)}: {why}", code="BUDGET_DECISION_REQUIRED")
     client_decision = _validated_client_terms(client_terms, route)
     if client_decision is not None:
         terms["client_restriction"] = client_decision
