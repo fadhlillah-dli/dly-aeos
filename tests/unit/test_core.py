@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,43 @@ def test_domain_partitions_are_separate(tmp_path: Path):
     layout = DataLayout(tmp_path)
     assert layout.project_root(Domain.PERSONAL, "p") != layout.project_root(Domain.OFFICE, "p")
     assert "personal" in str(layout.project_root(Domain.PERSONAL, "p"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows ACLs are checked by the Doctor")
+def test_layout_is_private_to_the_os_user_and_tightens_an_open_data_dir(tmp_path: Path):
+    from aeos.core.enums import Domain
+
+    root = tmp_path / "data"
+    (root / "personal").mkdir(parents=True)
+    for p in (root, root / "personal"):
+        p.chmod(0o755)  # left open by an older bootstrap under umask 022
+    layout = DataLayout(root)
+    layout.ensure()
+    for p in (layout.root, layout.backups, layout.domain_root(Domain.PERSONAL), layout.domain_root(Domain.OFFICE)):
+        assert p.stat().st_mode & 0o077 == 0, p
+
+
+def test_layout_keeps_inherited_acls_on_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """On Windows, Python 3.13 turns mkdir mode 0o700 into a protected DACL; the layout must not request it."""
+    import types
+
+    import aeos.core.paths as paths_mod
+
+    modes: list[int] = []
+    real_mkdir = Path.mkdir
+
+    def spy_mkdir(self: Path, mode: int = 0o777, parents: bool = False, exist_ok: bool = False) -> None:
+        modes.append(mode)
+        real_mkdir(self, parents=parents, exist_ok=exist_ok)
+
+    def no_chmod(self: Path, mode: int, *, follow_symlinks: bool = True) -> None:
+        raise AssertionError(f"chmod on Windows: {self}")
+
+    monkeypatch.setattr(paths_mod, "sys", types.SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(Path, "mkdir", spy_mkdir)
+    monkeypatch.setattr(Path, "chmod", no_chmod)
+    DataLayout(tmp_path / "data").ensure()
+    assert modes and set(modes) == {0o777}
 
 
 def test_content_hash_is_canonical():
