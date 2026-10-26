@@ -4,6 +4,9 @@ The authoritative design is `docs/architecture/DLY_AEOS_Master_Architecture_Fina
 "master"). Section numbers below (§NN) refer to it. When code and master disagree, stop and raise
 a decision — do not silently pick one.
 
+Known mistakes, their incidents and the tools that stop them: `docs/agent/LESSONS.md`. Every delegated agent prompt
+includes the block in `docs/agent/DELEGATION-BRIEF.md`.
+
 ## Layout
 
 | Path | Contents |

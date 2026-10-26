@@ -1,0 +1,60 @@
+# DELEGATION-BRIEF - the standard block for every delegated agent prompt
+
+Sub-agents do not read the session memory or [LESSONS.md](LESSONS.md). Whatever they must know, the
+prompt must say. Paste the block below at the top of every delegated prompt and fill the angle
+brackets. Each rule names the lesson id of its incident. `tests/unit/test_lessons_register.py` checks
+that every lesson with `brief` = yes appears here.
+
+## The block
+
+```text
+REPOSITORY: <name>. Work ONLY in the worktree <absolute path>. First run
+'git -C <path> branch --show-current'; it must print <branch>. If HEAD is detached or the branch
+differs, STOP and report. Read AGENTS.md and CONTRIBUTING.md first.
+
+RULES (lesson ids in brackets)
+1. Identity and attribution [L9]. Commits, pushes, PRs and comments use the owner's identity for
+   the code host, set locally per repository.
+   IDENTITY: <name> <email> (set with git config user.name and user.email in this repo, then check
+   with git config user.email before the first commit). No AI name, co-author trailer, "generated" footer,
+   robot emoji or AI address anywhere. Never write literal attribution samples into a file; build
+   them from parts.
+2. Branch and HEAD [L6]. After committing, check that 'git branch --show-current' is the branch
+   and that 'git rev-parse <branch>' equals 'git rev-parse HEAD'. Never push from a detached HEAD.
+3. No links in a worktree [L4]. Never create a symlink or junction in a worktree (a .venv link once
+   made worktree removal delete a real venv). Call the interpreter of the main checkout by path.
+4. Reuse canonical modules [L10]. Search for an existing module first (for example
+   aeos.core.attribution for attribution rules). Do not re-implement it.
+5. Owner decisions [L11]. The owner decision is quoted verbatim below with its exact scope.
+   Do not widen it. A wider idea is a new question for the owner, not part of this change.
+   OWNER DECISION: "<verbatim quote>"  SCOPE: <exact scope>
+6. Domains [L12]. A change for one domain (PERSONAL or OFFICE) must not alter the other domain's
+   view. Add a test that shows it.
+7. Full gates before "done" [L8]. Run scripts/gates.py (or the commands in CONTRIBUTING.md) and,
+   when the change touches the API shape or the frontend, the integration and frontend tests too.
+   Unit tests alone are not "done".
+8. Claims carry evidence [L3]. Every security or readiness statement names its E-level, the host it
+   ran on and its NOT-PROVEN part. Anything not run on Windows is NOT-PROVEN there.
+9. Secrets [L1]. Never print, paste, log or commit a secret. If one appears, stop and report it
+   without repeating its value.
+10. Owner-facing commands [L2, L13]. Run every command or script meant for the owner in zsh first,
+    and dry-run it in-process against a temporary database. Paste the result with the command.
+    Commands must be paste-safe: no inline '#' comments, every '[]' and '*' quoted.
+11. Diagnosis order [L14]. Input, then environment, then code. No background job without a
+    deadline and a failure marker file; check the marker, not the silence.
+12. CI state [L7]. A check list that is empty or pending is not green. Name each required check.
+13. Changelog [L5]. Merge main into the branch and resolve the changelog before push. Use a
+    changelog fragment where the repository has them.
+14. Flaky tests [L15]. A test that passes on re-run is a defect. Report it and fix the timing
+    assumption; do not re-run until green.
+
+REPORT (at most 15 lines): commit sha, files changed, gate results, bite-test results
+(violating fixture red, near-miss fixture green), NOT-PROVEN items.
+```
+
+## Using it
+
+* Fill every angle bracket. An unfilled one means the delegation is not ready.
+* A new lesson with `brief` = yes adds its rule to the block in the same pull request.
+* The delegating session verifies the report: branch and HEAD, gates actually run, and that no
+  attribution line exists in the commit.
