@@ -573,6 +573,45 @@ def test_push_whose_commits_carry_the_github_identity_is_refused_on_bitbucket(db
     assert row.details["code"] == "COMMIT_IDENTITY_MISMATCH" and row.details["provider"] == "bitbucket"
 
 
+@pytest.mark.parametrize("trailer", [
+    "Co-Authored-By: Claude <noreply@anthropic.com>",
+    "\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)",
+    "AEOS-Route: worker.test-free",
+])
+def test_push_whose_commit_carries_ai_attribution_is_refused_on_bitbucket(db, office_run, monkeypatch, trailer):
+    """The Bitbucket path runs the same commit gate as GitHub: a commit authored and committed by the configured
+    company identity but whose message carries AI attribution never reaches Bitbucket (AI_ATTRIBUTION_IN_COMMIT,
+    audited, outbox FAILED, nothing pushed)."""
+    from tests.conftest import TEST_GIT_EMAIL, TEST_GIT_NAME
+
+    _identities(monkeypatch, github={"name": TEST_GIT_NAME, "email": TEST_GIT_EMAIL},
+                bitbucket={"name": TEST_GIT_NAME, "email": TEST_GIT_EMAIL})
+    src, run = office_run["src"], office_run["run"]
+    (src / "feature.txt").write_text("more work\n", encoding="utf-8")
+    _git(src, "add", "-A")
+    subprocess.run(["git", "-c", f"user.name={TEST_GIT_NAME}", "-c", f"user.email={TEST_GIT_EMAIL}", "-c",
+                    "commit.gpgsign=false", "commit", "-q", "-m", f"feat: more work\n\n{trailer}"], cwd=src,
+                   check=True, capture_output=True)
+    head = _git(src, "rev-parse", "HEAD")
+    run.head_commit = head
+    db.commit()
+    _grants(db, run)
+    real = bitbucket_broker.push_from_mirror
+    monkeypatch.setattr(bitbucket_broker, "push_from_mirror",
+                        lambda **kw: real(**{**kw, "remote_url": str(office_run["bare"])}))
+    with pytest.raises(PolicyDenied) as e:
+        broker.push_task_branch(db, run_id=run.id, worktree=str(src), branch=BRANCH, repo_full_name=REPO,
+                                expected_head_sha=head)
+    assert e.value.code == "AI_ATTRIBUTION_IN_COMMIT"
+    assert _git(office_run["bare"], "for-each-ref", "--format=%(refname)") == ""
+    se = db.scalar(select(BrokerSideEffect).where(BrokerSideEffect.run_id == run.id))
+    assert se.status == "FAILED" and se.commit_sha == head
+    row = db.scalar(select(AuditEvent).where(AuditEvent.action == "broker.bitbucket.push_branch",
+                                             AuditEvent.result == "DENIED"))
+    assert row.details["code"] == "AI_ATTRIBUTION_IN_COMMIT" and row.details["provider"] == "bitbucket"
+    assert all(p["code"] != "COMMIT_IDENTITY_MISMATCH" for p in row.details["problems"])  # the identity matched
+
+
 def test_bitbucket_pr_with_ai_attribution_is_refused_before_the_credential(db, office_run, secrets_memory,
                                                                           monkeypatch):
     run = office_run["run"]
