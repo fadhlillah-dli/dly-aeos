@@ -228,7 +228,7 @@ tersedia)". Never combine it with the process-sandbox exception ([2.7](#27-proce
 
 ```bash
 ./aeos secrets set workers/openrouter    # an OpenRouter key with a spend limit, prompted without echo
-./aeos secrets set personal/github       # fine-grained PAT, see below
+./aeos secrets set personal/github --expires-at <YYYY-MM-DD>   # fine-grained PAT and its expiry date, see below
 ./aeos secrets status
 ./aeos delivery capabilities --record    # records the GitHub provider capability probe as evidence
 ./aeos doctor -g DELIVERY                # delivery.branch_protection: the main ruleset reads CONFIGURED
@@ -237,7 +237,9 @@ tersedia)". Never combine it with the process-sandbox exception ([2.7](#27-proce
 
 To create the GitHub token, open github.com → Settings → Developer settings → Fine-grained tokens → "Only select
 repositories" and choose `dly-aeos`. Grant Contents RW, Issues RW, Pull requests RW and Metadata R. Grant no
-Workflows and no Administration. You can also record the capability probe from *Bukti* → *PR & provider* →
+Workflows and no Administration. Give it an expiration (for example 90 days) and pass the same date as
+`--expires-at`. The Doctor check `adapter.github_token` warns 14 days ahead: `./aeos doctor` from that recorded
+date, `./aeos doctor --functional` also from the date GitHub reports for the token. You can also record the capability probe from *Bukti* → *PR & provider* →
 *Catat sebagai bukti*. Other route keys are needed only for the routes you choose in 1.11:
 `./aeos secrets set workers/opencode-zen` and `./aeos secrets set workers/gemini`.
 
@@ -499,6 +501,7 @@ AEOS never creates a GitHub tag or Release. To publish one, use
 | Every 7 days and after every image rebuild | `./aeos worker containment --kind container` (and `--domain OFFICE` if used) |
 | Weekly, while the Google app is in "Testing" | `./aeos publish google-connect --client-secret <file>` |
 | Before every upgrade, and at a fixed interval | `./aeos ops backup create`, then `./aeos ops backup restore-test <id>` |
+| When the Doctor warns that the GitHub token expires (14 days ahead) | create a new fine-grained PAT with the same permissions (1.8), then `./aeos secrets set personal/github --expires-at <YYYY-MM-DD>` |
 | When Claude Code reports a usage or weekly limit | at once, save `./aeos bridge status` and `./aeos cost summary --domain PERSONAL` (no account email) for `docs/evidence/claude-quota-<date>.txt`; after the reset, quota must read UNKNOWN, not OK. Never provoke a limit with paid usage on |
 | When an integrity hold is raised | review the findings on *Pekerjaan Live* (or `./aeos worker status`), restore the checkout and data, then *Catat rekonsiliasi*. Each hold needs its own reconciliation |
 | After a process-sandbox exception is no longer needed | *Keputusan* → *Cabut* ([2.7](#27-process-sandbox-exception-per-machine)) |

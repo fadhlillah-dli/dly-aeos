@@ -298,6 +298,83 @@ def test_github_token_privilege_is_reported_from_scopes(settings, db, secrets_me
     assert "residual_risks" not in res.observed_evidence
 
 
+def test_public_repositories_a_fine_grained_pat_can_read_are_not_a_breach(settings, db, secrets_memory, monkeypatch):
+    """GitHub lists every public repository for a fine-grained PAT ("Also includes public repositories
+    (read-only)"), so an unregistered public repository is no breach but does not prove the selection either (None);
+    an unregistered private one (or one whose visibility is not reported) still is."""
+    from aeos.doctor.checks import adapters as adapters_mod
+
+    slug = settings.platform_repo_slug
+    url = f"https://api.github.com/repos/{slug}"
+    repos_url = "https://api.github.com/user/repos?per_page=100"
+    secrets_memory.put("personal/github", "github_pat_" + "y" * 40, actor="test")
+    monkeypatch.setattr(adapters_mod, "_administration_grant", lambda ctx, slug, branch: "NOT_GRANTED")
+    r = base_runner()
+    r.http[url] = HttpResult(200, {"private": False, "default_branch": "main", "id": 1,
+                                   "permissions": {"admin": True, "push": True}})
+    r.http[repos_url] = HttpResult(200, [{"full_name": slug, "private": False},
+                                         {"full_name": "owner/other-public", "private": False}])
+    res = check("adapter.github_token", _ctx(settings, db, r, functional=True))
+    priv = res.observed_evidence["token_privilege"]
+    assert res.status == "CONNECTED" and priv["least_privilege"] is None and "residual_risks" not in res.observed_evidence
+    assert priv["beyond_registered_public"] == ["owner/other-public"] and priv["beyond_registered"] == []
+    r.http[repos_url] = HttpResult(200, [{"full_name": slug, "private": False},
+                                         {"full_name": "owner/secret-stuff", "private": True}])
+    priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is False and "private" in priv["risk"]
+    r.http[repos_url] = HttpResult(200, [{"full_name": slug, "private": False}])
+    priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is True
+
+
+def test_github_token_expiry_is_read_and_warned_two_weeks_ahead(settings, db, secrets_memory):
+    """A fine-grained PAT reports its expiry in GitHub-Authentication-Token-Expiration (``... UTC`` or ``... +0700``);
+    the Doctor records it and warns GITHUB_EXPIRY_WARN_DAYS ahead without turning the check red."""
+    from datetime import timedelta
+
+    from aeos.core.timeutil import utcnow
+
+    slug = settings.platform_repo_slug
+    url = f"https://api.github.com/repos/{slug}"
+    body = {"private": False, "default_branch": "main", "permissions": {"push": True}, "id": 1}
+    secrets_memory.put("personal/github", "github_pat_" + "y" * 40, actor="test")
+    r = base_runner()
+    r.http["https://api.github.com/user/repos?per_page=100"] = HttpResult(200, [{"full_name": slug}])
+    far = (utcnow() + timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S UTC")
+    r.http[url] = HttpResult(200, body, headers={"github-authentication-token-expiration": far})
+    res = check("adapter.github_token", _ctx(settings, db, r, functional=True))
+    assert res.status == "CONNECTED" and res.observed_evidence["token_expires_at"].startswith(far[:10])
+    assert "kedaluwarsa" not in res.summary and not res.remediation
+    near = (utcnow() + timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S +0700")
+    r.http[url] = HttpResult(200, body, headers={"github-authentication-token-expiration": near})
+    res = check("adapter.github_token", _ctx(settings, db, r, functional=True))
+    assert res.status == "CONNECTED" and "kedaluwarsa" in res.summary and "hari lagi" in res.summary
+    assert "secrets set personal/github" in json.dumps(res.remediation)
+    assert "kedaluwarsa" in res.observed_evidence["residual_risks"][0]
+    r.http[url] = HttpResult(200, body, headers={"github-authentication-token-expiration": "soon"})
+    assert check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence[
+        "token_expires_at"] is None  # unreadable header: no expiry claimed
+
+
+def test_github_token_recorded_expiry_warns_without_a_probe(settings, db, secrets_memory, monkeypatch):
+    """`aeos secrets set personal/github --expires-at <date>` is enough for the plain Doctor to warn."""
+    from datetime import timedelta
+
+    from aeos.core.timeutil import utcnow
+    from aeos.doctor.checks import adapters as adapters_mod
+
+    soon = (utcnow() + timedelta(days=3)).isoformat()
+    monkeypatch.setattr(adapters_mod, "secret_ref_status",
+                        lambda ref: ("PRESENT", {"ref": ref, "backend": "memory", "expires_at": soon}))
+    res = check("adapter.github_token", _ctx(settings, db, base_runner()))
+    assert res.status == "CONFIGURED" and "kedaluwarsa" in res.summary and res.remediation
+    later = (utcnow() + timedelta(days=90)).isoformat()
+    monkeypatch.setattr(adapters_mod, "secret_ref_status",
+                        lambda ref: ("PRESENT", {"ref": ref, "backend": "memory", "expires_at": later}))
+    res = check("adapter.github_token", _ctx(settings, db, base_runner()))
+    assert res.status == "CONFIGURED" and "kedaluwarsa" not in res.summary and not res.remediation
+
+
 def test_fine_grained_pat_is_judged_by_what_it_reaches(settings, db, secrets_memory):
     """§07 step 7: a fine-grained PAT is not least privilege "by construction" - a token created for 'All
     repositories' or with Administration (permissions.admin) is reported, and an unreadable repository
@@ -524,3 +601,19 @@ def test_repo_checks_against_real_worktree(settings, db):
     r.outputs["git"] = git_handler(remote="https://user:ghp_" + "x" * 30 + "@github.com/a/b.git")
     res = check("repo.origin", _ctx(settings, db, r))
     assert "ghp_" not in json.dumps(res.as_dict())
+
+
+def test_system_probe_runner_keeps_only_the_listed_response_headers():
+    """The real runner passes the token expiry through and never keeps other headers (cookies, request ids)."""
+    import httpx
+    import respx
+
+    from aeos.inventory.probes import SystemProbeRunner
+
+    with respx.mock() as m:
+        m.get("https://api.github.com/repos/o/r").mock(return_value=httpx.Response(200, json={"id": 1}, headers={
+            "GitHub-Authentication-Token-Expiration": "2027-01-24 10:57:27 UTC", "X-OAuth-Scopes": "repo",
+            "Set-Cookie": "session=secret", "X-GitHub-Request-Id": "ABC"}))
+        hr = SystemProbeRunner().http_get("https://api.github.com/repos/o/r", timeout=5.0, allow_remote=True)
+    assert hr.headers == {"github-authentication-token-expiration": "2027-01-24 10:57:27 UTC",
+                          "x-oauth-scopes": "repo"}
