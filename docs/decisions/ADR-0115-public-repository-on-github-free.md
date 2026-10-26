@@ -134,10 +134,14 @@ cancelled a push run on `main` when the next merge landed: the merge commit of P
    (`~/.cache/ms-playwright`) are cached by the installed Playwright version through `actions/cache`. The
    bootstrap still installs everything from the lockfiles, so a cache changes download time only.
 8. **Rebalancing.** Each shard uploads its JUnit XML as the artifact `junit-backend-<os>-shard-<k>`, kept for
-   30 days. `python scripts/ci_durations.py <reports...>` rebuilds `tests/ci_durations.json` from them, summing
+   14 days. `python scripts/ci_durations.py <reports...>` rebuilds `tests/ci_durations.json` from them, summing
    seconds per file. The committed weights come from the local 2026-10-26 run (Apple Silicon, `-n 4`). They
    should be replaced with the first CI run's reports, normally both `windows-latest` shards.
-9. **New action pins** (full commit SHAs of released tags, both older than two weeks):
+9. **Job timeouts.** Every job sets `timeout-minutes` (backend shards 25, macOS verifier 20, aggregators 5,
+   bootstrap 15, frontend 15, browser e2e 20, supply-chain 20). The default is 360 minutes, and a hung macOS job
+   would hold one of GitHub Free's 5 account-wide macOS slots for hours. `tests/unit/test_ci_gates.py` requires
+   the key on every job.
+10. **New action pins** (full commit SHAs of released tags, both older than two weeks):
    `actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9` (v7.0.2, released 2026-10-07) and
    `actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9` (v6.1.0, released 2026-06-26). The other pins
    are unchanged.

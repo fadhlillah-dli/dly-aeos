@@ -19,7 +19,8 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
   checks run once per OS in shard 1. The real trusted-suite verifier run has its own `macos-latest` job. The
   required check names `backend [G1,G2] (<os>)` are now aggregator jobs: each passes only when every backend
   job of its OS succeeded, and a skipped or cancelled job fails it. The pip, npm and Playwright browser downloads
-  are cached. Each shard uploads its JUnit XML, and `scripts/ci_durations.py` rebuilds the weights from those
+  are cached. Every CI job now has a `timeout-minutes` (the default is 360, and a hung macOS job would block one
+  of the 5 macOS slots of GitHub Free). Each shard uploads its JUnit XML, and `scripts/ci_durations.py` rebuilds the weights from those
   reports. `pytest-xdist` 3.8.0 (with `execnet` 2.1.2) joins the dev extra, and `requirements.lock` was
   regenerated (ADR-0093 amendment). Proven locally (E2, Apple Silicon, `-n 4`): shards 1/2 and 2/2 ran
   disjoint sets of tests whose union is the full collection (4,325 tests). They took 246 s and 203 s, and

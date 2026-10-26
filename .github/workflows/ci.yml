@@ -21,7 +21,8 @@
 # macos-latest. The required check names of the main ruleset, "backend [G1,G2] (<os>)", are aggregator jobs on
 # ubuntu-latest that need every backend job of their OS and pass only when each of them ended in success
 # (skipped or cancelled is never a pass). Each shard uploads its JUnit XML (rebalance input for
-# scripts/ci_durations.py).
+# scripts/ci_durations.py). Every job sets timeout-minutes: the default is 360, and a hung macOS job would hold
+# one of GitHub Free's 5 account-wide macOS slots for hours.
 name: ci
 
 on:
@@ -44,6 +45,7 @@ jobs:
   backend-shards-windows-latest:
     name: backend shard ${{ matrix.shard }}/2 [${{ matrix.gates }}] (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -85,11 +87,12 @@ jobs:
           name: junit-backend-${{ matrix.os }}-shard-${{ matrix.shard }}
           path: junit-backend.xml
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 14
 
   backend-shards-macos-latest:
     name: backend shard ${{ matrix.shard }}/2 [${{ matrix.gates }}] (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -131,11 +134,12 @@ jobs:
           name: junit-backend-${{ matrix.os }}-shard-${{ matrix.shard }}
           path: junit-backend.xml
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 14
 
   backend-shards-macos-26-intel:
     name: backend shard ${{ matrix.shard }}/2 [${{ matrix.gates }}] (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -177,12 +181,13 @@ jobs:
           name: junit-backend-${{ matrix.os }}-shard-${{ matrix.shard }}
           path: junit-backend.xml
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 14
 
   # Moved out of the macos-latest backend job so that it runs next to the shards instead of after the suite.
   backend-verifier-macos-latest:
     name: backend verifier [G2] (macos-latest)
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -206,6 +211,7 @@ jobs:
     if: always()
     needs: [backend-shards-windows-latest]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Every backend job of windows-latest succeeded (skipped, cancelled or failed is never a pass)
         shell: bash
@@ -227,6 +233,7 @@ jobs:
     if: always()
     needs: [backend-shards-macos-latest, backend-verifier-macos-latest]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Every backend job of macos-latest succeeded (skipped, cancelled or failed is never a pass)
         shell: bash
@@ -249,6 +256,7 @@ jobs:
     if: always()
     needs: [backend-shards-macos-26-intel]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Every backend job of macos-26-intel succeeded (skipped, cancelled or failed is never a pass)
         shell: bash
@@ -268,6 +276,7 @@ jobs:
   frontend:
     name: frontend [G1,G3]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
@@ -289,6 +298,7 @@ jobs:
   browser-e2e:
     name: browser e2e + a11y smoke [G3]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -338,6 +348,7 @@ jobs:
   bootstrap:
     name: bootstrap [G2] (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -393,6 +404,7 @@ jobs:
   supply-chain:
     name: supply-chain report [NO-GATE] (SBOM, licences, vulnerabilities, SAST)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

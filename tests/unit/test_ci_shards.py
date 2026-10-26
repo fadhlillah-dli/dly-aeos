@@ -13,6 +13,7 @@ import os
 import random
 import subprocess
 import sys
+import xml.etree.ElementTree as ET  # noqa: S405 - parses only the report pytest wrote in tmp_path
 from pathlib import Path
 
 import pytest
@@ -200,17 +201,61 @@ def test_an_invalid_shard_is_a_usage_error_never_a_silent_full_or_empty_run(shar
     assert "K/N" in res.stderr
 
 
-def test_shards_run_under_pytest_xdist_and_report_their_summary():
+def _junit_key(classname: str, name: str) -> str:
+    return f"{classname}::{name}"
+
+
+def _collected_junit_keys(out: str) -> set[str]:
+    """Collected node ids ``tests/unit/test_x.py::Class::test_y[param]`` in the form JUnit reports them
+    (``tests.unit.test_x.Class::test_y[param]``), so collection and run can be compared test by test."""
+    keys = set()
+    for node in _collected(out):
+        base, bracket, params = node.partition("[")
+        head, *rest = base.split("::")
+        classname = ".".join([head.removesuffix(".py").replace("/", "."), *rest[:-1]])
+        keys.add(_junit_key(classname, rest[-1] + bracket + params))
+    return keys
+
+
+def _run_shard_with_junit(tmp_path: Path, k: int, *, by_env: bool) -> set[str]:
+    """Run shard k/2 under xdist (2 workers), select it by --shard or by AEOS_TEST_SHARD, and return its test ids from
+    the JUnit report. A shard must end green: no failure and no error (a skipped test is not one)."""
+    report = tmp_path / f"shard-{k}-{'env' if by_env else 'flag'}.xml"
+    args = ["-q", "-p", "xdist", "-n", "2", f"--junitxml={report}", *FAST_FILES]
+    if by_env:
+        res = _pytest(*args, env_extra={SHARD_ENV: f"{k}/2"})
+    else:
+        res = _pytest(*args, "--shard", f"{k}/2")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert f"AEOS test shard {k}/2: " in res.stdout
+    next(ln for ln in res.stdout.splitlines() if ln.startswith(f"AEOS test shard {k}/2: ")).encode("ascii")
+    cases = ET.parse(report).getroot().iter("testcase")  # noqa: S314 - the report pytest just wrote
+    keys = []
+    for case in cases:
+        assert case.find("failure") is None and case.find("error") is None, case.attrib
+        keys.append(_junit_key(case.get("classname", ""), case.get("name", "")))
+    assert keys and len(keys) == len(set(keys)), "a test ran twice within one shard"
+    return set(keys)
+
+
+def _assert_shards_partition_the_full_collection(tmp_path: Path, *, by_env: bool) -> None:
     pytest.importorskip("xdist")
-    total = 0
-    for k in (1, 2):
-        res = _pytest("-q", "-p", "xdist", "-n", "2", "--shard", f"{k}/2", *FAST_FILES)
-        assert res.returncode == 0, res.stdout + res.stderr
-        line = next(ln for ln in res.stdout.splitlines() if ln.startswith(f"AEOS test shard {k}/2: "))
-        line.encode("ascii")
-        total += int(res.stdout.strip().splitlines()[-1].split(" passed")[0].split()[-1])
     full = _pytest("--collect-only", "-q", *FAST_FILES)
-    assert total == len(_collected(full.stdout))
+    assert full.returncode == 0, full.stdout + full.stderr
+    everything = _collected_junit_keys(full.stdout)
+    first, second = (_run_shard_with_junit(tmp_path, k, by_env=by_env) for k in (1, 2))
+    assert not first & second, "a test ran in both shards"
+    assert first | second == everything, "a collected test ran in no shard (or an uncollected one ran)"
+
+
+def test_shards_run_under_pytest_xdist_and_together_run_every_collected_test_once(tmp_path: Path):
+    """Compares test ids, not counts: a test skipped on a platform (tests/unit/test_core.py has a win32 skipif) is in
+    the report as skipped, so the union still equals the collection."""
+    _assert_shards_partition_the_full_collection(tmp_path, by_env=False)
+
+
+def test_shards_selected_by_the_environment_variable_run_under_xdist_without_overlap(tmp_path: Path):
+    _assert_shards_partition_the_full_collection(tmp_path, by_env=True)
 
 
 # ------------------------------------------------------------------------------------------------ weights script
@@ -243,6 +288,23 @@ def test_the_weights_script_sums_seconds_per_file_and_round_trips(tmp_path: Path
     again = tmp_path / "again.json"
     assert script.main([str(b), str(a), "-o", str(again), "--source", "unit test"]) == 0
     assert again.read_bytes() == out.read_bytes()  # deterministic output
+
+
+def test_the_weights_script_skips_and_reports_cases_with_a_time_that_is_not_finite(tmp_path: Path, capsys):
+    script = _durations_script()
+    report = tmp_path / "odd.xml"
+    report.write_text(JUNIT.replace('time="1.25"', 'time="inf"').replace('time="0.75"', 'time="nan"')
+                      .replace('time="9"', 'time="-inf"'), encoding="utf-8")
+    out = tmp_path / "w.json"
+    assert script.main([str(report), "-o", str(out), "--source", "odd"]) == 0
+    printed = capsys.readouterr().out
+    assert "3 testcase(s) with a time that is not finite were skipped" in printed
+    assert "tests.unit.test_core::a" in printed
+    text = out.read_text(encoding="utf-8")
+    assert "Infinity" not in text and "NaN" not in text
+    assert json.loads(text)["files"] == {"tests/unit/test_ci_shards.py": 2.5, "tests/unit/test_core.py": 1.0}
+    with pytest.raises(ValueError):
+        script.render({"tests/unit/test_core.py": float("nan")}, "x")  # never writes a non-JSON number
 
 
 def test_the_weights_script_refuses_reports_it_cannot_use(tmp_path: Path):

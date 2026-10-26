@@ -61,8 +61,9 @@ execution is blocked. mypy must report no errors for `--platform darwin` and `--
 `tests/unit/test_repository_hygiene.py` keeps the licence, version and repository files consistent.
 
 `-n auto` runs the suite on parallel workers (pytest-xdist, part of the `dev` extra). It starts one
-worker per physical core, and `-n logical` one per logical CPU. The suite is parallel-safe (on an
-Apple Silicon Mac it ran about three times faster with 4 workers). Leave out `-n` to run it serially,
+worker per physical core, and `-n logical` one per logical CPU. Parallel runs are proven on macOS
+Apple Silicon only (locally, about three times faster with 4 workers). On Windows and Intel macOS they are
+NOT-PROVEN until the first CI run of the sharded layout (ADR-0115 amendment). Leave out `-n` to run it serially,
 for example to debug a single test.
 
 ### CI layout

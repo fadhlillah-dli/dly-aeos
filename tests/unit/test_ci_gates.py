@@ -263,6 +263,12 @@ def test_the_aggregator_passes_only_when_every_needed_job_succeeded(tmp_path: Pa
     assert ("FAIL" in res.stdout) is not passes
 
 
+# The exact shard command: -n logical (one worker per logical CPU, "-n auto" counts physical cores), the same marker
+# selection the single backend job had, and the JUnit report the rebalancing script reads.
+SHARD_PYTEST = ('python -m pytest -q -m "not integration and not network" -n logical '
+                '--shard ${{ matrix.shard }}/2 --junitxml=junit-backend.xml')
+
+
 def _shard_jobs() -> dict[str, dict]:
     return {jid: j for jid, j in _workflow()["jobs"].items() if jid.startswith("backend-shards-")}
 
@@ -283,8 +289,9 @@ def test_every_host_os_runs_the_whole_backend_suite_as_shards_with_identical_ste
         m = re.search(r"--shard \$\{\{ matrix\.shard \}\}/(\d+)", run)
         assert m, run
         assert sorted(c["shard"] for c in combos) == list(range(1, int(m.group(1)) + 1)), combos
-        assert run.startswith("python -m pytest -q -m \"not integration and not network\" ")
-        assert " -n " in run and "--junitxml=" in run
+        assert run == SHARD_PYTEST, run
+        assert "continue-on-error" not in job
+        assert not [s for s in job["steps"] if "continue-on-error" in s], "a failing shard step must fail the job"
         assert {c["gates"] for c in combos if c["shard"] == 1} == {"G1,G2"}
         assert {c["gates"] for c in combos if c["shard"] != 1} == {"G2"}
 
@@ -309,6 +316,7 @@ def test_each_shard_uploads_its_junit_report_for_rebalancing():
     (upload,) = [s for s in first if str(s.get("uses", "")).startswith("actions/upload-artifact@")]
     assert upload["with"]["path"] == "junit-backend.xml" and upload["if"] == "${{ !cancelled() }}"
     assert upload["with"]["name"] == "junit-backend-${{ matrix.os }}-shard-${{ matrix.shard }}"
+    assert upload["with"]["retention-days"] == 14
 
 
 def test_the_real_trusted_suite_verifier_runs_in_its_own_macos_arm64_job():
@@ -318,6 +326,17 @@ def test_the_real_trusted_suite_verifier_runs_in_its_own_macos_arm64_job():
     (step,) = [s for s in job["steps"] if s.get("name") == "G2 verifier runs the trusted suite for real (git only)"]
     assert step["run"] == "python -m pytest -q -m integration tests/integration/test_verification_real_suite.py"
     assert "if" not in step and "if" not in job  # never skipped (a skipped step would still pass the job)
+
+
+def test_every_job_has_a_timeout_so_a_hung_runner_cannot_hold_a_macos_slot_for_six_hours():
+    """The default is 360 minutes; GitHub Free has 5 account-wide macOS slots."""
+    caps = {"backend-shards-": 25, "backend-verifier-": 20, "frontend": 15, "browser-e2e": 20, "bootstrap": 15,
+            "supply-chain": 20}
+    for jid, job in _workflow()["jobs"].items():
+        timeout = job.get("timeout-minutes")
+        assert isinstance(timeout, int) and not isinstance(timeout, bool) and 0 < timeout <= 25, (jid, timeout)
+        expected = next((v for k, v in caps.items() if jid.startswith(k)), 5)  # the rest are the aggregators
+        assert timeout == expected, (jid, timeout)
 
 
 def test_only_pull_request_runs_are_cancelled_by_a_newer_run():

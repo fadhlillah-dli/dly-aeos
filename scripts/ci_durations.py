@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -43,25 +44,30 @@ def case_file(classname: str, root: Path = ROOT) -> str | None:
     return None
 
 
-def durations(reports: list[Path], root: Path = ROOT) -> tuple[dict[str, float], int, list[str]]:
-    """(seconds per file, testcases read, classnames that map to no existing file)."""
+def durations(reports: list[Path], root: Path = ROOT) -> tuple[dict[str, float], int, list[str], list[str]]:
+    """(seconds per file, testcases read, classnames that map to no existing file, ids of cases skipped because
+    their time is not finite)."""
     per_file: dict[str, float] = {}
     cases = 0
     unmapped: set[str] = set()
+    bad_time: list[str] = []
     for report in reports:
         for case in parse_junit(report).cases:
             cases += 1
+            if not math.isfinite(case.time):
+                bad_time.append(f"{case.classname}::{case.name}")
+                continue
             rel = case_file(case.classname, root)
             if rel is None:
                 unmapped.add(case.classname or "<no classname>")
                 continue
             per_file[rel] = per_file.get(rel, 0.0) + max(case.time, 0.0)
-    return {k: round(v, 2) for k, v in sorted(per_file.items())}, cases, sorted(unmapped)
+    return {k: round(v, 2) for k, v in sorted(per_file.items())}, cases, sorted(unmapped), bad_time
 
 
 def render(files: dict[str, float], source: str) -> str:
     return json.dumps({"about": ABOUT, "source": source, "files": files}, indent=1, sort_keys=True,
-                      ensure_ascii=True) + "\n"
+                      ensure_ascii=True, allow_nan=False) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -73,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true", help="print the summary only, write nothing")
     args = ap.parse_args(argv)
     try:
-        files, cases, unmapped = durations(args.reports, args.root.resolve())
+        files, cases, unmapped, bad_time = durations(args.reports, args.root.resolve())
     except JUnitParseError as exc:
         print(f"ERROR  {exc}")
         return 2
@@ -88,6 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     if unmapped:
         print(f"WARNING  {len(unmapped)} classname(s) map to no existing test file and were left out: "
               + ", ".join(unmapped[:5]) + (" ..." if len(unmapped) > 5 else ""))
+    if bad_time:
+        print(f"WARNING  {len(bad_time)} testcase(s) with a time that is not finite were skipped: "
+              + ", ".join(bad_time[:5]) + (" ..." if len(bad_time) > 5 else ""))
     if args.check:
         return 0
     source = args.source or ", ".join(p.name for p in args.reports)
