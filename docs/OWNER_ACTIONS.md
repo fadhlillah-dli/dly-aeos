@@ -303,14 +303,38 @@ Activating a route is your explicit decision. Nothing is active by default.
   2. Read the Go terms: <https://opencode.ai/v2/docs/console/go/>, <https://opencode.ai/go> and the terms of service
      <https://opencode.ai/legal/terms-of-service>. The ToS clause on automated or programmatic use is your risk to
      accept: write what you read into `--terms-note`.
-  3. Record a BUDGET decision for the route (*Keputusan* → *Catat keputusan manusia*, Jenis keputusan: BUDGET).
-  4. Activate it. The provider restricts regions (workspace default EU & US), so state the region you reviewed:
-     `./aeos routes activate opencode-go/glm-5.3-flash --as <admin> --mode TRIAL --expected-hash <hash> --terms-reviewed --terms-note "<what you read, incl. the ToS automation clause>" --region <EU|US> --budget-decision <id> --rationale "<why>"`.
-     No client-terms flag: Go allows other clients, and passing one is refused with `CLIENT_TERMS_NOT_APPLICABLE`.
+  3. Check on the Console's Go page that **Extra Usage is OFF**. With it ON, Go bills your pay-as-you-go balance after
+     a limit, and AEOS cannot see that setting. A marginal charge that Go does report stops the run (below).
+  4. Record a BUDGET decision for the **monthly subscription fee** ($10/month), one per route you activate. It covers
+     the plan fee, not per-token spend. Usage inside the plan costs $0 and only uses up plan allowance:
 
-  Keep Extra Usage OFF. The feasibility probe covers free routes only, so the first live evidence of a Go route is a
-  TRIAL worker run. Until part 2 of decision A (subscription billing in the cost module), the cost ledger treats a
-  Go route as a paid route.
+     ```bash
+     ./aeos policy decide --kind BUDGET --as <admin> --domain PERSONAL --target-type model_route --target-id opencode-go/glm-5.3-flash --days 30 --rationale "OpenCode Go subscription, \$10/month plan fee for the TRIAL"
+     ```
+
+     The command prints the decision id. With `--days 30` the decision expires with the billing month, and you
+     re-confirm the fee each month. In the UI the same decision is *Keputusan* → *Catat keputusan manusia*, with
+     Jenis keputusan BUDGET and target `model_route` / the route key. In PowerShell, write `$10` without the
+     backslash and keep the double quotes, or use single quotes.
+  5. Activate it as TRIAL with that BUDGET decision. The provider restricts regions (workspace default EU & US), so
+     state the region you reviewed. Name the ToS automation-clause risk in the terms note:
+     `./aeos routes activate opencode-go/glm-5.3-flash --as <admin> --mode TRIAL --expected-hash <hash> --terms-reviewed --terms-note "Read Go docs, FAQ and ToS on <date>: ToS forbids automated/programmatic extraction and processes running while not logged in; I accept that risk for this TRIAL. Extra Usage OFF." --region <EU|US> --budget-decision <id> --rationale "<why>"`.
+     No client-terms flag: Go allows other clients, and passing one is refused with `CLIENT_TERMS_NOT_APPLICABLE`.
+  6. Optional, before real work: `./aeos broker probe-route opencode-go/glm-5.3-flash` sends one synthetic PUBLIC
+     request (E3 evidence). On a subscription route the probe uses allowance, not money.
+
+  **What AEOS does with a Go route** (ADR-0080 amendment 2026-10-26):
+
+  * **No cost limit per task.** A TaskSpec needs no `max_cost_usd`. The marginal cost of each run is $0, and the
+    run's cost cap is $0. If Go reports a charge anyway (Extra Usage ON), the run's next request is refused, and the
+    charge counts against your budgets as spend beyond the plan.
+  * **Allowance per window.** Each call records the allowance it used (`usage.opencode.allowance`; estimated from
+    tokens when Go reports none). AEOS counts it per route over the provider windows: 5 hours = 20%, week = 50%,
+    month = 100% of the model's monthly allowance (glm-5.3-flash: $12 / $30 / $60). When a window is used up, new
+    tasks wait with `SUBSCRIPTION_ALLOWANCE_EXHAUSTED`, shown as WAITING_QUOTA. This happens before Go answers 429.
+    A 429 from Go is still RATE_LIMITED, with no fallback to another route.
+  * **Where to see it:** `./aeos cost summary --domain PERSONAL` lists "Worker subscriptions": the plan and the
+    allowance used, limit and remaining per window. The route view and the Costs API show the same.
 * **Prompt revision change:** a route approved under an older worker prompt revision stops with
   `PROMPT_REVISION_CHANGED`. Approve it again.
 

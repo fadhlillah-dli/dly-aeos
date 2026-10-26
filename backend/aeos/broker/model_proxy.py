@@ -21,7 +21,10 @@ Guarantees:
 * the real provider key is fetched in-process from the secrets facade, registered for redaction,
   and never appears in any response, log, event or audit record;
 * usage (prompt/completion tokens, cost when the upstream reports it, else UNKNOWN) goes to the
-  cost ledger via ``aeos.cost.facade.record_usage`` and to the grant counters.
+  cost ledger via ``aeos.cost.facade.record_usage`` and to the grant counters;
+* a SUBSCRIPTION route (ADR-0080 amendment 2026-10-26, OpenCode Go): ``usage.cost`` is the marginal charge (0 within
+  the plan) and ``usage.opencode.allowance`` / ``billing_source`` go to the ledger as the allowance the call consumed
+  (the cost module estimates it from the tokens when the provider reports none) - never the reservation as dollars.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -485,7 +489,7 @@ def _deny(s: Any, grant: CapabilityGrant, code: str, message: str, *, commit: bo
 
 def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None, completion: int | None = None,
             cost: float | None = None, model_resolved: str | None = None, latency_ms: int | None = None,
-            retry_after: int | None = None, error: str = "") -> None:
+            retry_after: int | None = None, error: str = "", billing: dict[str, Any] | None = None) -> None:
     with session_factory()() as s:
         req = s.get(BrokerRequest, p.request_id)
         if req is not None:
@@ -506,9 +510,10 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
             grants.add_usage(s, p.grant_id, tokens=tokens, cost_usd=cost)
         run = s.get(WorkerRun, p.run_id)
         ledger = "NOT_RECORDED"
+        recorded: dict[str, Any] = {}
         if counted:
             ledger = _record_ledger(s, p, run, prompt=prompt, completion=completion, cost=cost,
-                                    model=model_resolved or p.upstream.model_id)
+                                    model=model_resolved or p.upstream.model_id, billing=billing, facts=recorded)
             if ledger != "RECORDED" and req is not None:
                 req.error_summary = f"usage ledger: {ledger}; counted on grant only"[:500]
         if run is not None:
@@ -522,6 +527,14 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
                 else:
                     us["cost_usd"] = round(float(us.get("cost_usd", 0.0)) + cost, 6)
                 us["ledger"] = ledger
+                if recorded.get("billing") == "SUBSCRIPTION":
+                    # the plan allowance this run consumed (REPORTED by the provider or ESTIMATED), apart from money
+                    us["billing"] = "SUBSCRIPTION"
+                    if recorded.get("allowance_usd") is not None:
+                        us["allowance_usd"] = round(float(us.get("allowance_usd", 0.0))
+                                                    + float(recorded["allowance_usd"]), 6)
+                    if recorded.get("allowance_basis") != "REPORTED":
+                        us["allowance_not_reported_requests"] = int(us.get("allowance_not_reported_requests", 0)) + 1
                 if model_resolved:
                     run.model_resolved = model_resolved[:128]
             if outcome == "RATE_LIMITED":
@@ -536,6 +549,9 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
                     payload={"route_key": p.upstream.route_key, "outcome": outcome, "status": status,
                              "prompt_tokens": prompt, "completion_tokens": completion,
                              "cost_usd": cost if cost is not None else "UNKNOWN", "latency_ms": latency_ms,
+                             **({"allowance_usd": recorded.get("allowance_usd"),
+                                 "allowance_basis": recorded.get("allowance_basis")}
+                                if recorded.get("billing") == "SUBSCRIPTION" else {}),
                              "reasoning_effort": req.reasoning_effort if req is not None else None,
                              "reasoning_requested_dropped": req.reasoning_requested if req is not None else None})
         audit.record(s, actor_type="worker", actor_id=f"run:{p.run_id}", action="broker.model_proxy.call",
@@ -546,8 +562,10 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
 
 
 def _record_ledger(s: Any, p: Prepared, run: WorkerRun | None, *, prompt: int | None, completion: int | None,
-                   cost: float | None, model: str) -> str:
-    """One broker call -> one ledger entry (§42), committed into the run's budget hold.
+                   cost: float | None, model: str, billing: dict[str, Any] | None = None,
+                   facts: dict[str, Any] | None = None) -> str:
+    """One broker call -> one ledger entry (§42), committed into the run's budget hold. ``billing``: the provider's
+    billing facts of the call; ``facts`` receives the entry's subscription allowance (ADR-0080 amendment 2026-10-26).
 
     LIVE: ``record_usage(partial=True)`` with the run's reservation (the hold stays until the run ends
     and the scheduler settles it). MOCK/DEMO: recorded with its mode and never against the hold — the
@@ -560,23 +578,28 @@ def _record_ledger(s: Any, p: Prepared, run: WorkerRun | None, *, prompt: int | 
     base: dict[str, Any] = dict(provider=p.upstream.provider, category="WORKER_API", source="broker", project_id=p.project_id,
                 domain=p.domain, run_id=p.run_id, route_key=p.upstream.route_key, model=model, input_tokens=prompt,
                 output_tokens=completion, requests=1, cost_usd=cost, is_estimate=False, mode=mode)
+    if billing:
+        base["details"] = dict(billing)
     try:
         if mode != "LIVE":
-            cost_facade.record_usage(s, **base)
+            entry = cost_facade.record_usage(s, **base)
             if reservation_id:
                 cost_facade.release(s, reservation_id)
-            return "RECORDED"
-        try:
-            # record_usage raises Conflict before it writes anything when the hold is not RESERVED
-            cost_facade.record_usage(s, **base, reservation_id=reservation_id, partial=True)
-        except Conflict:
-            cost_facade.record_usage(s, **base)  # hold already settled/released: plain LIVE usage
-        return "RECORDED"
+        else:
+            try:
+                # record_usage raises Conflict before it writes anything when the hold is not RESERVED
+                entry = cost_facade.record_usage(s, **base, reservation_id=reservation_id, partial=True)
+            except Conflict:
+                entry = cost_facade.record_usage(s, **base)  # hold already settled/released: plain LIVE usage
     except ImportError:
         return "LEDGER_UNAVAILABLE"
     except AeosError as exc:
         log.warning("usage ledger refused broker usage for run %s: %s", p.run_id, exc.code)
         return f"LEDGER_REJECTED:{exc.code}"
+    if facts is not None:
+        info = getattr(entry, "details", None) or {}
+        facts.update({k: info[k] for k in ("billing", "allowance_usd", "allowance_basis") if k in info})
+    return "RECORDED"
 
 
 def _record_quota(s: Any, p: Prepared, retry_after: int) -> None:
@@ -616,6 +639,30 @@ def _usage_of(data: dict[str, Any]) -> tuple[int | None, int | None, float | Non
     model = data.get("model") if isinstance(data.get("model"), str) else None
     return (int(prompt) if isinstance(prompt, int | float) else None,
             int(completion) if isinstance(completion, int | float) else None, cost_f, model)
+
+
+def _billing_of(data: dict[str, Any]) -> dict[str, Any]:
+    """Provider billing facts beyond ``usage.cost`` (OpenCode Go API docs, E1 2026-10-26): ``usage.opencode.allowance``
+    (dollars of the plan allowance the request counted) and ``usage.opencode.billing_source`` (e.g. go / go-plus /
+    balance). Only finite non-negative numbers and short source names are kept; {} when the provider states neither."""
+    raw_usage = data.get("usage")
+    usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+    oc = usage.get("opencode")
+    if not isinstance(oc, dict):
+        return {}
+    out: dict[str, Any] = {}
+    allowance = oc.get("allowance")
+    if not isinstance(allowance, bool):
+        try:
+            value = float(allowance) if isinstance(allowance, int | float | str) else None
+        except ValueError:
+            value = None
+        if value is not None and math.isfinite(value) and value >= 0:
+            out["reported_allowance_usd"] = value
+    source = oc.get("billing_source")
+    if isinstance(source, str) and source.strip():
+        out["billing_source"] = redact_text(source.strip())[:32]
+    return out
 
 
 def opencode_session_id(run_id: str) -> str:
@@ -731,7 +778,8 @@ async def chat_completions(request: Request) -> Response:
         await client.aclose()
         prompt, completion, cost, model = _usage_of(data if isinstance(data, dict) else {})
         await run_in_threadpool(_finish, p, status=200, outcome="OK", prompt=prompt, completion=completion, cost=cost,
-                                model_resolved=model, latency_ms=int((time.monotonic() - started) * 1000))
+                                model_resolved=model, latency_ms=int((time.monotonic() - started) * 1000),
+                                billing=_billing_of(data) if isinstance(data, dict) else None)
         if isinstance(data, dict):
             data["model"] = p.exposed
         return JSONResponse(data, headers={"Cache-Control": "no-store"})
@@ -739,6 +787,7 @@ async def chat_completions(request: Request) -> Response:
     async def relay():  # type: ignore[no-untyped-def]
         buf = b""
         usage: tuple[int | None, int | None, float | None, str | None] = (None, None, None, None)
+        billing: dict[str, Any] = {}
         failed = ""
         try:
             async for chunk in resp.aiter_raw():
@@ -755,6 +804,7 @@ async def chat_completions(request: Request) -> Response:
                             u = _usage_of(obj)
                             if u[0] is not None or u[1] is not None:
                                 usage = (u[0], u[1], u[2], u[3] or usage[3])
+                                billing = _billing_of(obj) or billing
                             elif u[3]:
                                 usage = (usage[0], usage[1], usage[2], u[3])
                 yield chunk
@@ -768,7 +818,7 @@ async def chat_completions(request: Request) -> Response:
                 await run_in_threadpool(
                     _finish, p, status=200, outcome="OK" if not failed else "UPSTREAM_ERROR", prompt=usage[0],
                     completion=usage[1], cost=usage[2], model_resolved=usage[3],
-                    latency_ms=int((time.monotonic() - started) * 1000), error=failed)
+                    latency_ms=int((time.monotonic() - started) * 1000), error=failed, billing=billing)
 
     return StreamingResponse(relay(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

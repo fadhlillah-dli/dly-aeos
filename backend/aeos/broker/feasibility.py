@@ -8,8 +8,10 @@ fast, at what reported cost, is it rate limited - is tested only through this pr
   never probed (default deny, §23);
 * the route is TRIAL/APPROVED on an ACTIVE human decision bound to its CURRENT configuration hash (the same
   per-request rule as the proxy: ``routing.route_use_problem``) - i.e. the owner reviewed its terms/region;
-* free only: ``is_free=YES`` within its free period, or a loopback LOCAL endpoint. There is no budget path for a
-  probe (no silent paid fallback, §42);
+* no money: ``is_free=YES`` within its free period, a loopback LOCAL endpoint, or a flat-fee SUBSCRIPTION route whose
+  terms are complete and whose allowance windows are not used up (ADR-0080 amendment 2026-10-26: the probe consumes
+  plan allowance, not money - the plan fee is the activation's BUDGET decision). A per-token paid route is refused
+  (``ROUTE_NOT_FREE``): there is no budget path for a probe (no silent paid fallback, §42);
 * the route accepts PUBLIC data and the request is ONE fixed synthetic PUBLIC prompt - no project, task, user or
   OFFICE data, no tools, ``max_tokens`` 16, no streaming, no retry and never another route;
 * the credential comes from the route's own reference under the PERSONAL namespaces (same checks as the proxy).
@@ -22,6 +24,7 @@ changes the route's status or eligibility.
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any
 
 import httpx
@@ -38,19 +41,38 @@ from aeos.models.routing import ModelRoute
 __all__ = ["PROBE_MAX_TOKENS", "PROBE_POOLS", "PROBE_PROMPT", "probe_route"]
 PROBE_PROMPT = "Feasibility check. Reply with the single word: OK"  # synthetic PUBLIC data, nothing else
 PROBE_MAX_TOKENS = 16
+# Upper bound of the probe's tokens when the upstream reports none (prompt characters >= its tokens, the output cap, a
+# margin for the chat template): what a subscription route's allowance estimate counts (ADR-0080 amendment 2026-10-26).
+PROBE_TOKEN_BOUND = len(PROBE_PROMPT) + PROBE_MAX_TOKENS + 64
 PROBE_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 
 
-def _free_or_local(route: ModelRoute, base_url: str) -> str | None:
+def _spend_problem(session: Session, route: ModelRoute, base_url: str) -> tuple[str, str] | None:
+    """(code, reason) when the probe would spend money (or plan allowance that is used up); None when it may run."""
     from aeos.broker.model_proxy import _is_loopback_http
+    from aeos.cost import facade as cost
 
     if route.pool == "LOCAL" and _is_loopback_http(base_url):
+        return None
+    terms, problem = cost.subscription_terms(route)
+    if problem:
+        return "ROUTE_NOT_FREE", f"subscription terms cannot be trusted ({problem}); a probe never spends money"
+    if terms is not None:
+        # a flat-fee plan: one synthetic request consumes allowance, not money - unless a window is used up
+        status = cost.allowance_status(session, route) or {}
+        if status.get("state") == "EXHAUSTED":
+            return "SUBSCRIPTION_ALLOWANCE_EXHAUSTED", ("the subscription allowance is used up in a provider window: "
+                                                        + "; ".join(w["window"] for w in status.get("windows") or []
+                                                                    if w.get("state") == "EXHAUSTED"))
+        if status.get("state") != "OK":
+            return "SUBSCRIPTION_ALLOWANCE_UNKNOWN", ("the subscription allowance consumed cannot be counted: "
+                                                      + "; ".join(status.get("problems") or ["state UNKNOWN"]))
         return None
     # The routing rule (is_free=YES and the free period not over) re-applied here: a probe has no budget path.
     until = ensure_aware(route.free_until)
     if route.is_free != "YES" or (until is not None and until <= utcnow()):
-        return (f"route is not free (is_free={route.is_free}, free_until={route.free_until}); a feasibility probe "
-                "never spends money (no budget path, §42)")
+        return "ROUTE_NOT_FREE", (f"route is not free (is_free={route.is_free}, free_until={route.free_until}); a "
+                                  "feasibility probe never spends money (no budget path, §42)")
     return None
 
 
@@ -74,6 +96,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     """Send the one synthetic probe to *route_key* and record the observation (caller commits)."""
     from aeos.broker.model_proxy import (
         ProxyError,
+        _billing_of,
         _retry_after,
         _upstream_headers,
         _usage_of,
@@ -99,9 +122,12 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
                      action="broker.route_feasibility.probe", result="DENIED", target_type="model_route",
                      target_id=route_key, domain="PERSONAL", reason=f"{exc.code}: {exc.message}"[:500])
         raise PolicyDenied(f"route cannot be probed: {exc.message}", code=exc.code) from exc
-    paid = _free_or_local(route, upstream.base_url)
-    if paid:
-        raise PolicyDenied(paid, code="ROUTE_NOT_FREE")
+    spend = _spend_problem(session, route, upstream.base_url)
+    if spend:
+        raise PolicyDenied(spend[1], code=spend[0])
+    from aeos.cost import facade as cost_facade
+
+    subscription = cost_facade.subscription_terms(route)[0] is not None
     # the route's own request shape (ADR-0041 amendment 2026-10-25): <endpoint>/chat/completions, the bare upstream
     # model id, the route's reasoning level when it states one - the probe tests the configuration that would serve
     body: dict[str, Any] = {"model": upstream.model_id, "messages": [{"role": "user", "content": PROBE_PROMPT}],
@@ -118,7 +144,9 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     own = client is None
     http = client or httpx.Client(timeout=PROBE_TIMEOUT, follow_redirects=False, trust_env=False)
     try:
-        resp = http.post(upstream.url, json=body, headers=_upstream_headers(upstream))
+        # a probe is its own one-request conversation: its own opaque x-opencode-session on OpenCode Go
+        resp = http.post(upstream.url, json=body,
+                         headers=_upstream_headers(upstream, run_id=f"probe:{route_key}:{uuid.uuid4().hex}"))
         status = resp.status_code
         if status == 200:
             try:
@@ -153,9 +181,19 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
         "checked_at": utcnow().isoformat(),
         "note": "feasibility observation only: route status and eligibility are unchanged (owner decision)",
     }
-    if cost:
+    if cost and subscription:
+        result["note"] += ("; a subscription route reported a marginal charge - paid usage beyond the plan (is the "
+                           "provider's Extra Usage ON?)")
+    elif cost:
         result["note"] += "; a free route reported a cost - review its pricing before any activation"
-    ledger = _ledger(session, upstream, route_key, prompt, completion, cost, model_resolved, outcome)
+    billing = _billing_of(data)
+    if prompt is None and completion is None:
+        billing["charged_tokens"] = PROBE_TOKEN_BOUND  # the probe's own upper bound, never a guess
+    ledger, facts = _ledger(session, upstream, route_key, prompt, completion, cost, model_resolved, outcome, billing)
+    if subscription:
+        result["billing"] = {"billing": "SUBSCRIPTION", "allowance_usd": facts.get("allowance_usd") or "UNKNOWN",
+                             "allowance_basis": facts.get("allowance_basis") or "UNKNOWN",
+                             "billing_source": billing.get("billing_source") or "UNKNOWN"}
     if outcome == "RATE_LIMITED":
         _quota(session, upstream, route_key, retry_after)
     result["ledger"] = ledger
@@ -170,21 +208,24 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
 
 
 def _ledger(session: Session, upstream: Any, route_key: str, prompt: int | None, completion: int | None,
-            cost: float | None, model: str | None, outcome: str) -> str:
+            cost: float | None, model: str | None, outcome: str,
+            billing: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
     if outcome != "REACHABLE" and prompt is None and completion is None:
-        return "NOT_RECORDED (no usage reported)"
+        return "NOT_RECORDED (no usage reported)", {}
     try:
         from aeos.cost import facade as cost_facade
 
-        cost_facade.record_usage(session, provider=upstream.provider, category="WORKER_API",
-                                 source="broker-feasibility", domain="PERSONAL", route_key=route_key,
-                                 model=model or upstream.model_id, input_tokens=prompt, output_tokens=completion,
-                                 requests=1, cost_usd=cost, is_estimate=False, mode="LIVE")
-        return "RECORDED"
+        entry = cost_facade.record_usage(session, provider=upstream.provider, category="WORKER_API",
+                                         source="broker-feasibility", domain="PERSONAL", route_key=route_key,
+                                         model=model or upstream.model_id, input_tokens=prompt,
+                                         output_tokens=completion, requests=1, cost_usd=cost, is_estimate=False,
+                                         mode="LIVE", details=billing or None)
+        info = entry.details or {}
+        return "RECORDED", {k: info[k] for k in ("allowance_usd", "allowance_basis") if k in info}
     except ImportError:
-        return "LEDGER_UNAVAILABLE"
+        return "LEDGER_UNAVAILABLE", {}
     except AeosError as exc:
-        return f"LEDGER_REJECTED:{exc.code}"
+        return f"LEDGER_REJECTED:{exc.code}", {}
 
 
 def _quota(session: Session, upstream: Any, route_key: str, retry_after: int | None) -> None:

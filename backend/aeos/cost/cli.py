@@ -19,7 +19,7 @@ def summary_cmd(
     domain: Domain = typer.Option(..., help="PERSONAL or OFFICE - chosen explicitly, never defaulted"),
     period: str = typer.Option("MONTH", help="DAY|WEEK|MONTH|TOTAL"),
 ) -> None:
-    """Actual vs estimate vs UNKNOWN per category, native subscription, stop caps."""
+    """Actual vs estimate vs UNKNOWN per category, worker subscriptions (plan + allowance), native subscription."""
     from aeos.cli import ensure_database
     from aeos.core.db import session_scope
     from aeos.cost import service
@@ -39,12 +39,39 @@ def summary_cmd(
         else:
             typer.echo(f"  {c['category']:<14} actual={_usd(c['actual_usd'])} estimate={_usd(c['estimate_usd'])} "
                        f"unknown={c['unknown_count']}")
+    for line in subscription_lines(data.get("subscriptions") or []):
+        typer.echo(line)
     n = data["native_subscription"]
     typer.echo(f"Native Claude (Max): remaining quota {n['remaining_quota']} - source: {n['quota_source']}")
     p = data["per_accepted_outcome"]
     typer.echo(f"Accepted outcomes: {p['accepted_outcomes']}  cost/accepted: {_usd(p.get('cost_per_accepted_usd'))} "
                f"({p['status']})")
     typer.echo(f"Excluded non-LIVE entries: {data['excluded_non_live']['entries']}")
+
+
+def subscription_lines(subs: list[dict]) -> list[str]:
+    """Worker subscription routes (ADR-0080 amendment 2026-10-26): the plan and the allowance consumed per provider
+    window - never per-token spend. ASCII only."""
+    if not subs:
+        return []
+    out = ["Worker subscriptions (plan fee + allowance per window; not per-token spend):"]
+    for s in subs:
+        fee = s.get("monthly_fee_usd")
+        plan = f"{s.get('plan') or 'subscription'} {_usd(fee) if fee is not None else 'fee UNKNOWN'}/month"
+        out.append(f"  {s['route_key']}  plan={plan}  allowance={_usd(s.get('allowance_usd_month'))}/month  "
+                   f"state={s['state']}  route={s.get('status')}")
+        if s.get("spend_hidden"):
+            out.append("    allowance hidden: it spans domains you cannot see")
+            continue
+        for w in s.get("windows") or []:
+            out.append(f"    {w['window']:<5} used {_usd(w['used_usd'])} of {_usd(w['limit_usd'])} "
+                       f"(remaining {_usd(w['remaining_usd'])}; reported {_usd(w['reported_usd'])}, "
+                       f"estimated {_usd(w['estimated_usd'])}; {w['requests']} request(s)) {w['state']}")
+        if s.get("beyond_plan_usd"):
+            out.append(f"    paid beyond the plan: {_usd(s['beyond_plan_usd'])} (provider overage was used)")
+        for p in s.get("problems") or []:
+            out.append(f"    untrusted: {p}")
+    return out
 
 
 @app.command("budgets")

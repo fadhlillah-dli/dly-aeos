@@ -306,10 +306,11 @@ them; decision A does not decide the Zen rule. AEOS does not pick an option.
 ## Amendment 2026-10-26 (decision A: OpenCode Go WORKER routes)
 
 Status of this amendment: the owner decided option A on 2026-10-26 (OpenCode Go, a $10/month subscription) for
-broker-served WORKER routes. This amendment records that decision and implements part 1 of 2: the CANDIDATE routes and
-the code paths. Part 2 is not in this amendment. It covers the subscription billing and cost semantics (cost module,
-scheduler, feasibility probe). Activating a route, the terms review, the budget and the attestations stay the owner's
-decisions in the app. Seeding activates nothing.
+broker-served WORKER routes. This amendment records that decision. Part 1 implements the CANDIDATE routes and the
+code paths. Part 2 implements the subscription billing and cost semantics (cost module, scheduler, feasibility probe,
+views); see "Part 2 (2026-10-26): subscription accounting" at the end and the ADR-0080 amendment of the same date.
+Activating a route, the terms review, the budget and the attestations stay the owner's decisions in the app. Seeding
+activates nothing.
 
 ### Context (E1 documentation reading, 2026-10-26; nothing exercised live)
 
@@ -448,20 +449,19 @@ master states, so they are cited here and in the seeded `data_terms.sources`, no
 * **The ToS automation clause is an owner risk.** It is recorded at activation: the TRIAL needs `terms_reviewed` and
   a terms note. This is not a legal conclusion.
 * **Extra Usage must stay OFF.** AEOS cannot observe that account setting. With it ON, the provider silently falls
-  back to the paid balance after an allowance (invariant 8, no silent paid fallback). Until part 2 adds an
-  attestation preset, the owner step is in OWNER_ACTIONS 1.8/1.11.
+  back to the paid balance after an allowance (invariant 8, no silent paid fallback). Part 2 adds no attestation
+  preset. The owner states Extra Usage OFF in the terms note at activation (OWNER_ACTIONS 1.8/1.11). At runtime, a
+  marginal charge that Go reports stops the run and is flagged as spend beyond the plan (part 2).
 * **DeepSeek on Go** needs the Global region, and its zero-retention agreement expires 2026-10-31 unless renewed. It
   stays WATCHLIST and PUBLIC only.
-* **Under the current cost semantics a Go route is a paid route:**
+* **A Go route is paid, never free:**
   * a BUDGET decision is needed at activation, in routing and on every request; one decision can cover several Go
     routes through `auth_scope.routes`;
-  * it is never an automatic fallback;
-  * the feasibility probe refuses it (`ROUTE_NOT_FREE`), so its first live evidence is a TRIAL worker run;
-  * a TaskSpec needs `max_cost_usd`;
-  * when the upstream reports no cost, the reservation is charged.
+  * it is never an automatic fallback.
 
-  Part 2 of decision A changes this: allowance accounting, $0 within the allowance, the account-wide 429 scope and the
-  Extra Usage attestation.
+  Part 1 alone left the cost path of a per-token paid route in place: the probe refused it, a TaskSpec needed
+  `max_cost_usd`, and the reservation was charged when the upstream reported no cost. Part 2 replaces that for
+  SUBSCRIPTION routes (below).
 * **A later change to a seeded Go row voids its TRIAL.** Changing its pricing, terms or `mode_params` changes its
   config hash. The seed only backfills untouched CANDIDATE rows.
 * **ADR-0041 changed again.** An owner ACCEPTED registration of it is STALE until it is recorded again (OWNER_ACTIONS
@@ -478,3 +478,87 @@ master states, so they are cited here and in the seeded `data_terms.sources`, no
 * Tool calling per models.dev is E1 and not exercised on Go. hy3 is UNKNOWN.
 * Whether the model list needs the key, and its exact shape. An OpenAI list is assumed; any other shape is UNKNOWN.
 * The owner's subscription, key, region and Extra Usage setting. None of them are observed by AEOS.
+
+### Part 2 (2026-10-26): subscription accounting
+
+Status: implemented, owner decision A. The cost-module rules are recorded in ADR-0080 (amendment 2026-10-26). This
+section states how they apply to the Go routes.
+
+**Context.** Part 1 seeded every Go route with `pricing.billing` SUBSCRIPTION: a $10/month plan fee and a per-model
+dollar allowance consumed at the listed rates. The cost path did not know that billing class:
+
+* the scheduler refused a non-free route without TaskSpec `limits.max_cost_usd` (`COST_UNKNOWN`), which the planner
+  never sets;
+* the ledger charged the whole reservation as dollars when the upstream reported no `usage.cost`;
+* the probe refused every non-free route (`ROUTE_NOT_FREE`).
+
+A Go route could be activated but could not run honestly.
+
+**Decision.**
+
+1. **Activation.** A SUBSCRIPTION route still needs a BUDGET decision: the plan fee is paid. `needs_budget` stays
+   true. The copy now names the plan: "subscription route (OpenCode Go, $10/month plan fee; the BUDGET decision covers
+   the fee, usage is plan allowance)". The same wording appears in activation errors, eligibility rejections, the
+   per-request check and the route view (`billing`, `budget_note`, `subscription`). The owner records one BUDGET
+   decision per route (`aeos policy decide --kind BUDGET --target-type model_route --target-id <route> --days 30`).
+2. **Broker accounting** (`broker/model_proxy.py`).
+   * `usage.cost` is recorded as the call's cost: the marginal charge, 0 within the plan.
+   * `usage.opencode.allowance` and `usage.opencode.billing_source` go to the cost module as
+     `details.reported_allowance_usd` / `billing_source`. This works for JSON answers and for a stream's usage chunk.
+   * The cost module writes `details.allowance_usd` with `allowance_basis` REPORTED, or ESTIMATED from the tokens x
+     the route's `allowance_rate_per_mtok`, rounded up. When no tokens are reported, the estimate uses the hold's
+     charged tokens x the highest rate.
+   * The run's `usage_summary` adds `allowance_usd`.
+   * No migration: the figures live in the existing JSON `usage_ledger.details` and `worker_runs.usage_summary`.
+     `broker_requests` has no JSON column, and its `cost_usd` stays the marginal cost.
+3. **Admission** (`cost/service.py`, `workforce/scheduler.py`).
+   * A SUBSCRIPTION route's marginal estimate is $0, and no TaskSpec `max_cost_usd` is needed. The reservation's
+     `pricing_basis` is SUBSCRIPTION.
+   * The run's grant cost cap is $0. A marginal charge, meaning Extra Usage spend, therefore stops the run's next
+     request.
+   * The cost module counts the recorded allowance per route over trailing 5 h / 7 day / 31 day windows (20% / 50% /
+     100% of `allowance_usd_month`).
+   * A used-up window makes the task wait with `SUBSCRIPTION_ALLOWANCE_EXHAUSTED` (a WAIT/QUOTA code, shown as
+     WAITING_QUOTA). This happens at admission and in `reserve`, before Go answers 429. Go's own 429 still maps to
+     RATE_LIMITED with no fallback.
+   * A window entry whose allowance cannot be counted refuses admission (`BUDGET_STATE_UNTRUSTED`). So do incomplete
+     subscription terms (fail closed).
+4. **Feasibility probe.** One synthetic PUBLIC probe is allowed on an activated SUBSCRIPTION route. It consumes
+   allowance, not money.
+   * It sends its own opaque `x-opencode-session`.
+   * It records the allowance (a token bound when Go reports no usage).
+   * It is refused while a window is used up (`SUBSCRIPTION_ALLOWANCE_EXHAUSTED`).
+
+   Per-token paid routes are still refused (`ROUTE_NOT_FREE`).
+5. **Views.**
+   * `aeos cost summary` prints "Worker subscriptions": the plan, the monthly allowance, and per window the used,
+     limit, remaining, reported and estimated amounts. It is ASCII only.
+   * `GET /api/costs/summary` adds `subscriptions` and `by_route[].billing` / `allowance_usd`.
+   * In ledger entries, `cost_kind` is SUBSCRIPTION for a $0 call within the plan.
+   * `aeos routes list` flags `billing=SUBSCRIPTION`.
+   * Window figures span domains, so they follow the GLOBAL/ROUTE budget visibility rule.
+6. **Doctor.** `route.registry` lists SUBSCRIPTION candidates apart as `subscription_candidates`, never as free and
+   never as `paid_or_unknown_price_candidates`. The latter keeps routes with incomplete terms. `requires_paid_write`
+   stays true while either list is non-empty, because the plan fee is a BUDGET decision.
+
+**Consequences.**
+
+* A Go route with its BUDGET decision runs at $0 marginal cost until a provider window is used up, then waits. It
+  never falls back to another route and never draws on paid overage.
+* The 429 scope stays per route. Part 1 expected an account-wide scope, but the Go docs state the limits per model
+  ("Each model has the following usage limits"), so a 429 on one model does not exhaust the others.
+* **Per-token paid routes are unchanged (open).** They still need TaskSpec `limits.max_cost_usd`, which the planner
+  never sets (`COST_UNKNOWN`), and an unknown upstream cost still charges the reservation. A cost estimate for them
+  (route per-token price x the token cap, or a plan-approved limit) is an open owner decision, recorded in ADR-0080.
+* **No Extra Usage attestation preset.** The owner's terms note records it. At runtime, the $0 grant cap and the
+  `beyond_plan_usd` flag catch a charge that Go reports. A silent charge that Go does not report is not observable.
+
+**NOT-PROVEN (part 2).**
+
+* Whether Go reports `usage.opencode.allowance` on every answer, including the final stream chunk, and in which
+  number format. AEOS accepts a finite non-negative number and otherwise estimates.
+* Where Go anchors its windows. The trailing windows of maximal length are conservative: they never count less than
+  any fixed or rolling window of that length.
+* The allowance rates are an E1 reading (2026-10-26). If Go changes them, estimated figures drift until the seed
+  is updated, which is a config change and needs a new TRIAL. Reported figures do not drift.
+* In-flight runs hold no allowance. With concurrency 1-2, the provider's 429 is the boundary inside a run.

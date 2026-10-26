@@ -394,7 +394,8 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   Deployment target" / "Produksi — Deployment target": the https base URL and an optional health path (validated
   with the observer's rule). AEOS only GETs it (G6/G8, `aeos delivery observe-target`, `aeos docs screenshot`);
   deploying stays a human action. The GitHub Actions pipeline reference is "CI — GitHub Actions" on the same page.
-* **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111):** activate the free route as TRIAL (owner decision),
+* **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111; WORKER too):** activate the free (or local, or flat-fee
+  subscription) route as TRIAL (owner decision),
   then `aeos broker probe-route <route_key>` / `POST /api/broker/routes/<key>/feasibility` sends one synthetic
   PUBLIC prompt and records PROBE evidence; the route never serves worker tasks and its status is unchanged.
   The probe sends the route's own request shape (`<endpoint>/chat/completions`, bare upstream model id; ADR-0041
@@ -422,11 +423,27 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
     with that key: a listed model is AVAILABLE and an absent one MISSING. No key, a rejected key, an unreachable
     endpoint or an unexpected answer leaves every Go route UNKNOWN.
   * **Activation.** A Go route has no client restriction. Activating it needs the terms review (incl. the ToS
-    automation clause), the reviewed region (`--region`, workspace default EU & US) and a BUDGET decision.
+    automation clause), the reviewed region (`--region`, workspace default EU & US) and a BUDGET decision for the
+    monthly plan fee (OWNER_ACTIONS 1.11).
   * **Extra Usage on the Console's Go page must stay OFF.** With it ON, Go falls back to the pay-as-you-go balance
-    after a limit, and AEOS cannot observe that.
-  * **No probe.** The feasibility probe refuses a paid route (`ROUTE_NOT_FREE`), so the first live evidence is a
-    TRIAL worker run. Everything about Go is E1 (docs read 2026-10-26) until then.
+    after a limit, and AEOS cannot observe that setting.
+  * **Subscription accounting (ADR-0080 amendment 2026-10-26).**
+    * The route's `pricing.billing` is SUBSCRIPTION. A run's marginal cost estimate is $0, so a TaskSpec needs no
+      `max_cost_usd`, and the run's grant cost cap is $0.
+    * Each call records `usage.cost` as the marginal charge (0 within the plan; an unreported cost stays UNKNOWN and
+      is charged $0, never the reservation). It records `usage.opencode.allowance` as `allowance_usd` (REPORTED,
+      else ESTIMATED from tokens x the route's allowance rates) and the `billing_source`, both in the ledger entry's
+      details.
+    * Admission counts the recorded allowance per route over trailing 5 h / 7 day / 31 day windows (20% / 50% /
+      100% of `allowance_usd_month`). A used-up window makes the task wait with `SUBSCRIPTION_ALLOWANCE_EXHAUSTED`
+      (WAITING_QUOTA). A ledger entry whose allowance cannot be counted refuses admission (`BUDGET_STATE_UNTRUSTED`).
+    * A marginal charge above $0 is spend beyond the plan: it counts against the budgets, is flagged
+      `beyond_plan_usd` (event `cost.subscription.beyond_plan`), and the $0 grant cap stops the run's next request.
+    * `aeos cost summary` and `GET /api/costs/summary` (`subscriptions`, `by_route[].billing`) show the plan and the
+      allowance per window, never per-token spend. `aeos routes list` flags `billing=SUBSCRIPTION`.
+  * **Probe.** `aeos broker probe-route opencode-go/<id>` is allowed on an activated Go route. It consumes allowance,
+    not money, and is refused while a window is used up (`SUBSCRIPTION_ALLOWANCE_EXHAUSTED`). A per-token paid route
+    is still refused (`ROUTE_NOT_FREE`). Everything about Go is E1 (docs read 2026-10-26) until a probe or TRIAL run.
 * **LOCAL route endpoint:** start an OpenAI-compatible server on this host, then `aeos routes set-endpoint
   local/qwen3.8-flash-next --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "..." [--model <served
   name>] [--quantization ...] [--backend ...] [--hardware ...]` (or the Models page form). Loopback `http` only;

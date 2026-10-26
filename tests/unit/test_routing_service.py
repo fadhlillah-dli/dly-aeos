@@ -201,7 +201,8 @@ def test_go_worker_route_needs_budget_region_and_tools(routes):
     r = service.get_route(routes, GO_GLM)
     approve(routes, GO_GLM)
     d = eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL")
-    assert GO_GLM in d.rejected and any("paid route" in x for x in d.rejected[GO_GLM])
+    assert GO_GLM in d.rejected and any("subscription route (OpenCode Go, $10/month plan fee" in x
+                                        for x in d.rejected[GO_GLM])
     assert any("region not reviewed" in x for x in d.rejected[GO_GLM])
     assert not any("client restriction" in x for x in d.rejected[GO_GLM])
     budget = human_decision(routes, kind="BUDGET", target_type="model_budget", target_id="opencode-go",
