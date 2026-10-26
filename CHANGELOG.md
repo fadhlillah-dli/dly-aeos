@@ -41,6 +41,9 @@ in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
   - Cost and quota, the evaluation leaderboard, change proposals and the research registry.
   - Backup and restore test, release promotion, SLIs and alerts, the emergency stop, and the setup
     guides.
+
+  NOT-PROVEN in that PR: real Google, GitHub and OpenRouter writes, the container sandbox, OFFICE
+  tenants, an interactive macOS run and MCI alignment.
 - **End-to-end seams (#4).** Two chains run end to end against scripted fakes: planning to
   publication, and owner decision to pull request (scheduler, cost, routing, broker, runtime,
   verifier, review, acceptance, delivery). The fakes are an official-binary fake, HTTP mocks and a
@@ -49,9 +52,10 @@ in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
   Playwright smoke test covers every route at 1440 px and 390 px and in dark mode. A real `aeos doctor` run
   is recorded for one Windows machine (E3, that machine only). The initial schema migration.
 - **First gap-closing round (#5).** An audit classified 1,656 master requirements. The PR reports
-  416 fixed, each with a test that fails without the fix, and 79 that now state their owner or external
-  dependency. Notable fixes: the Product 1 renderer consumes the real planning schema, a
-  controller-integrity check covers every controller runtime file, workers get a blocker channel, and
+  416 fixed, each with a test that fails without the fix, 79 that now state their owner or external
+  dependency, and 17 that cannot be fixed without the owner or an external system. Notable fixes:
+  the Product 1 renderer consumes the real planning schema, a controller-integrity check covers
+  every controller runtime file, workers get a blocker channel, and
   the worker contract test is bound to the engine version. Also added: evaluation execution,
   retirement verification, a mypy gate, real-browser and bootstrap CI jobs, and migrations 0001 to
   0005 with a single head.
@@ -70,10 +74,15 @@ in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
   - A tamper window covers trust tables and the schema.
   - Per-run limits are enforced.
   - API envelope freshness, docs readiness checks and evidence producers.
+
+  NOT-PROVEN in that PR: a real Docker container boundary, a live Bitbucket or Atlassian tenant
+  (company authorisation, milestone M5) and a live OpenCode worker on a real route.
 - **Container boundary on the build host (#9).** Docker Desktop on Windows 11. The images were built
   unchanged from `sandbox/`. `aeos worker containment --kind container` passed 20/20 checks for both
   the PERSONAL and OFFICE profiles, and the real-daemon containment test passed (E3, that host only).
   ADR-0115 was added, with a test that keeps every ADR listed in the decision register.
+  NOT-PROVEN: a real OpenCode worker run, the verifier container runner on a real candidate, Docker
+  on macOS, and a provider bypass test against the ruleset.
 - **Host launcher and guides (#10).** `aeos.cmd` starts the CLI from Command Prompt. The macOS guide
   covers both Apple Silicon and Intel.
 - **Third gap-closing round (#11).** The PR reports 101 fixed and 13 that now state their dependency
@@ -106,6 +115,11 @@ in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
     ADR decisions can be recorded from a live admin session. Research attachments, and release and
     retirement controls.
   - Migrations 0006 to 0008, in one linear chain after 0005.
+
+  Stated in that PR: the verifier's npm, vitest, tsc and vite steps and the per-candidate
+  `pip install` run outside a kill group (ADR-0120); two fragile tests are scheduled for the next
+  round. Live behaviour that needs owner credentials or tenants (Bitbucket, Atlassian, real
+  deployment targets, OpenCode) is NOT-PROVEN.
 - **Repository files (this release).** `LICENSE`, this changelog, `SECURITY.md`, `CONTRIBUTING.md`,
   `CODE_OF_CONDUCT.md`, `CITATION.cff`, `.github/CODEOWNERS`, issue forms, a pull request template,
   and `tests/unit/test_repository_hygiene.py`, which keeps them consistent.
@@ -158,8 +172,9 @@ in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
   credential store, never in `.env`, config, logs, the UI, prompts or worker sandboxes.
 - **Claude only through the official client (#3).** Never the Claude API, never `--bare`, never
   `ANTHROPIC_API_KEY`.
-- **Human-only gates (#1, #3).** Agent output is data, never approval. Merge to `main` and production
-  stay human-only.
+- **Human-only gates (#1, #3).** Inside DLY AEOS, plan approval, publication, merge to `main` and
+  production are human `Decision` records bound to an exact target and hash. Agent output is data,
+  never approval, and workers can push only `aeos/*` task branches.
 - **Repository settings (#9).** These live in the GitHub settings, not in the code: secret scanning
   with push protection, Dependabot alerts, required SHA-pinned actions and CodeQL default setup. A
   ruleset on `main` requires a pull request and the CI gates, and blocks force-push and deletion. A

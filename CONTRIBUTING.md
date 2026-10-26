@@ -21,6 +21,10 @@ project are closed without review. Do not send patches by any other route either
   Say what you want to do with the software and for how long. Permission exists only when the
   copyright holder gives it in writing, and it covers only its stated scope.
 
+Opening an issue grants no licence. Running, copying or modifying DLY AEOS still needs the copyright
+holder's prior written permission ([LICENSE](LICENSE) section 2). Reports based on reading the
+source are welcome.
+
 Never put secrets, tokens, passwords, personal data, company names, tenant addresses or unredacted
 logs in an issue. Use obviously fake values.
 
@@ -72,8 +76,10 @@ execution is blocked. The mypy baseline in `pyproject.toml` may only shrink.
 - **Docs follow the code.** Update the ADRs (`docs/decisions`), the
   [coverage matrix](docs/IMPLEMENTATION_COVERAGE.md), the runbooks and the `[Unreleased]` section
   of the [changelog](CHANGELOG.md).
-- **Merge to `main` stays human.** It happens through a pull request with the CI gates, under the
-  ruleset on `main`.
+- **Merge to `main` is the owner's decision.** It happens only through a pull request that passes
+  the required CI checks under the ruleset on `main` (no force-push, no deletion). Any delegation of
+  that authority is an owner decision recorded as an ADR in `docs/decisions`. DLY AEOS workers never
+  inherit it: they can push only `aeos/*` task branches.
 
 ### Releasing
 

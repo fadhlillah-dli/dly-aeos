@@ -110,9 +110,27 @@ def test_release_notes_exist_for_the_current_version():
     assert "All rights reserved" in notes and "aeos db upgrade" in notes
 
 
+MD_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+
+
+def test_release_notes_links_work_as_a_github_release_body():
+    # The file is pasted as the GitHub Release body, where a relative link resolves against the releases
+    # page and breaks; every link is therefore absolute, and links into the repository are pinned to the tag.
+    notes = _read(f"docs/releases/v{VERSION}.md")
+    links = MD_LINK.findall(notes)
+    assert links, "the release notes link nothing"
+    relative = [t for t in links if not re.match(r"^https?://", t)]
+    assert not relative, f"relative or in-page links break in a release body: {relative}"
+    pinned = f"{REPO_URL}/blob/v{VERSION}/"
+    missing = [t for t in links if t.startswith(pinned) and not (ROOT / t[len(pinned):].split("#", 1)[0]).is_file()]
+    assert not missing, f"tag-pinned links to files that do not exist: {missing}"
+    unpinned = [t for t in links if t.startswith(f"{REPO_URL}/blob/") and not t.startswith(pinned)]
+    assert not unpinned, f"repository links must be pinned to v{VERSION}: {unpinned}"
+
+
 # ------------------------------------------------------------------ governance files and GitHub config
-@pytest.mark.parametrize("rel", GOVERNANCE_FILES)
-def test_governance_file_exists_and_contains_no_personal_identifier(rel):
+@pytest.mark.parametrize("rel", GOVERNANCE_FILES + ("README.md", f"docs/releases/v{VERSION}.md"))
+def test_public_file_exists_and_contains_no_personal_identifier(rel):
     text = _read(rel)
     assert text.strip(), f"{rel} is empty"
     # public repository: contact paths are GitHub mechanisms only (no e-mail address, no phone number)
@@ -147,13 +165,78 @@ def test_issue_forms_parse_and_blank_issues_are_off():
     config = yaml.safe_load(_read(".github/ISSUE_TEMPLATE/config.yml"))
     assert config["blank_issues_enabled"] is False
     assert f"{REPO_URL}/security/advisories/new" in [link["url"] for link in config["contact_links"]]
+    for link in config["contact_links"]:
+        assert link["name"] and link["url"].startswith("https://") and link["about"], link
     for name in ("bug_report", "feature_request", "licence_request"):
         form = yaml.safe_load(_read(f".github/ISSUE_TEMPLATE/{name}.yml"))
         assert form["name"] and form["description"] and form["body"], name
-        ids = [item["id"] for item in form["body"] if item["type"] != "markdown"]
-        assert ids and len(ids) == len(set(ids)), f"{name}: field ids must be unique"
+        allowed = {"name", "description", "body", "title", "labels", "assignees", "projects", "type"}
+        assert set(form) <= allowed, f"{name}: top-level keys {set(form) - allowed} are not permitted"
+        _check_issue_form_body(name, form["body"])
     licence = yaml.safe_load(_read(".github/ISSUE_TEMPLATE/licence_request.yml"))
     assert licence["title"] == "Licence request", "LICENSE section 8 names this exact issue title"
+
+
+# GitHub issue-form syntax and its documented validation errors ("Syntax for GitHub's form schema", "Common
+# validation errors when creating issue forms"). A form that breaks these is dropped from the issue chooser.
+_FORM_TYPES = {"markdown": {"value"}, "input": {"label"}, "textarea": {"label"}, "dropdown": {"label", "options"},
+               "checkboxes": {"label", "options"}}
+_FORM_BLOCK_KEYS = {"type", "id", "attributes", "validations"}
+_FORM_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _check_issue_form_body(name: str, body: list[dict]) -> None:
+    ids, labels = [], []
+    for item in body:
+        kind, attrs = item.get("type"), item.get("attributes") or {}
+        assert kind in _FORM_TYPES, f"{name}: unknown element type {kind!r}"
+        assert set(item) <= _FORM_BLOCK_KEYS, f"{name}: block keys {set(item) - _FORM_BLOCK_KEYS} are not permitted"
+        assert _FORM_TYPES[kind] <= set(attrs), f"{name}: {kind} needs {_FORM_TYPES[kind]}"
+        if kind == "markdown":
+            continue
+        assert _FORM_ID.match(item.get("id", "")), f"{name}: {kind} needs an id of letters, digits, - or _"
+        ids.append(item["id"])
+        label = attrs["label"]
+        assert isinstance(label, str) and label.strip(), f"{name}: {item['id']} label must be a non-empty string"
+        labels.append(label)
+        if kind in ("input", "textarea"):
+            assert "password" not in label.lower(), f"{name}: GitHub rejects 'password' in an input/textarea label"
+        if kind == "dropdown":
+            opts = attrs["options"]
+            assert opts and all(isinstance(o, str) and o.strip() for o in opts), f"{name}: empty dropdown option"
+            assert len(opts) == len(set(opts)), f"{name}: dropdown options must be unique"
+            assert "none" not in {o.strip().lower() for o in opts}, f"{name}: 'None' is reserved in dropdowns"
+        if kind == "checkboxes":
+            boxes = attrs["options"]
+            assert all(isinstance(o, dict) and isinstance(o.get("label"), str) and o["label"].strip()
+                       for o in boxes), f"{name}: every checkbox needs a label"
+            labels += [o["label"] for o in boxes]  # unique among peers and among the other fields
+    assert ids, f"{name}: a form needs at least one field besides markdown"
+    assert len(ids) == len(set(ids)), f"{name}: field ids must be unique"
+    assert len(labels) == len(set(labels)), f"{name}: field and checkbox labels must be unique"
+
+
+def test_issue_form_checker_rejects_broken_forms():
+    good = [{"type": "markdown", "attributes": {"value": "x"}},
+            {"type": "input", "id": "v", "attributes": {"label": "Version"}}]
+    _check_issue_form_body("good", good)
+    broken = {
+        "no field": good[:1],
+        "unknown type": good + [{"type": "select", "id": "s", "attributes": {"label": "S"}}],
+        "missing label": good + [{"type": "textarea", "id": "t", "attributes": {}}],
+        "bad id": good + [{"type": "textarea", "id": "has space", "attributes": {"label": "T"}}],
+        "duplicate id": good + [{"type": "textarea", "id": "v", "attributes": {"label": "T"}}],
+        "duplicate label": good + [{"type": "textarea", "id": "t", "attributes": {"label": "Version"}}],
+        "reserved option": good + [{"type": "dropdown", "id": "d", "attributes": {"label": "D", "options": ["None"]}}],
+        "repeated option": good + [{"type": "dropdown", "id": "d", "attributes": {"label": "D", "options": ["a", "a"]}}],
+        "unknown block key": good + [{"type": "textarea", "id": "t", "label": "T", "attributes": {"label": "T"}}],
+        "password label": good + [{"type": "input", "id": "p", "attributes": {"label": "Your password"}}],
+        "checkbox label clash": good + [{"type": "checkboxes", "id": "c",
+                                         "attributes": {"label": "C", "options": [{"label": "Version"}]}}],
+    }
+    for case, body in broken.items():
+        with pytest.raises(AssertionError):
+            _check_issue_form_body(case, body)
 
 
 def test_readme_states_the_licence_and_links_the_governance_files():

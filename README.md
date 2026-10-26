@@ -188,8 +188,8 @@ macOS on Intel. Linux is not a tested host for now: the code paths remain, but n
 [requirements.lock](requirements.lock) (universal, regenerated as described in
 [docs/OPERATIONS.md](docs/OPERATIONS.md#dependency-lockfile)).
 
-Changes per release are in [CHANGELOG.md](CHANGELOG.md), and the release notes are in
-[docs/releases](docs/releases/v0.1.0.md).
+Changes per release are in [CHANGELOG.md](CHANGELOG.md). The release notes for the first release
+are in [docs/releases/v0.1.0.md](docs/releases/v0.1.0.md).
 
 ## Licence
 

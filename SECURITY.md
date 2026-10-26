@@ -18,7 +18,8 @@ Report them privately through GitHub private vulnerability reporting:
 1. Open the repository on GitHub and go to **Security**.
 2. Choose **Report a vulnerability**. The direct link is
    <https://github.com/fadhlillah-dli/dly-aeos/security/advisories/new>.
-3. Fill in the form. Only you and the repository owner can see the report.
+3. Fill in the form. Only you, the repository owner and anyone the owner adds to the advisory can
+   see the report.
 
 If you cannot use that form, open a public issue that only asks the owner
 ([@fadhlillah-dli](https://github.com/fadhlillah-dli)) for a private channel. Put no details of the
