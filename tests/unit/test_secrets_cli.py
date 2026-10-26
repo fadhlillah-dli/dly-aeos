@@ -302,6 +302,18 @@ def test_vault_status_and_start_without_binary(settings, memory_keyring, monkeyp
     assert r.exit_code == 1 and "aeos vault install" in r.output
 
 
+def test_vault_start_with_an_unusable_openbao_binary_setting_does_not_advise_install(settings, tmp_path,
+                                                                                    monkeypatch):
+    """The settings override wins over <data>/bin, so `aeos vault install` would change nothing."""
+    a_directory = tmp_path / "bao-dir"
+    a_directory.mkdir()
+    monkeypatch.setattr(settings, "openbao_binary", str(a_directory))
+    r = runner.invoke(app, ["vault", "start"])
+    assert r.exit_code == 1
+    assert f"settings openbao_binary={a_directory} is not an executable file; fix the setting or remove it" in r.output
+    assert "aeos vault install" not in r.output
+
+
 def test_generated_server_config_is_loopback_only(settings):
     text = server.config_text(settings)
     assert 'address         = "127.0.0.1:8200"' in text and "tls_disable     = true" in text and "ui = false" in text

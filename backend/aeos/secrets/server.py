@@ -10,7 +10,6 @@ only, V1 §06); ``cluster_addr`` on the next loopback port; UI disabled. No secr
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
 import time
@@ -20,9 +19,8 @@ from urllib.parse import urlsplit
 
 import psutil
 
-from aeos.core.binaries import locate_binary
+from aeos.core.binaries import BinaryLookup, locate_binary
 from aeos.core.config import Settings
-from aeos.secrets.installer import binary_name
 from aeos.secrets.openbao import LOOPBACK, OpenBaoUnavailable
 
 
@@ -38,11 +36,14 @@ def log_file(settings: Settings) -> Path:
     return settings.layout.logs / "openbao.log"
 
 
+def bin_lookup(settings: Settings) -> BinaryLookup:
+    """The OpenBao binary by the one rule the reconciler and the Doctor also use (``aeos.core.binaries``); on a miss
+    ``lookup`` / ``rejected`` say which step decided (an unusable ``openbao_binary`` setting is authoritative)."""
+    return locate_binary("bao", configured=settings.openbao_binary, data_dir=settings.data_dir)
+
+
 def bin_path(settings: Settings) -> Path | None:
-    """The OpenBao binary by the one rule the reconciler and the Doctor also use (``aeos.core.binaries``)."""
-    found, _ = locate_binary(
-        "bao", configured=settings.openbao_binary, data_dir=settings.data_dir,
-        which=lambda name: shutil.which(binary_name()) or shutil.which(name))
+    found = bin_lookup(settings).path
     return Path(found) if found else None
 
 

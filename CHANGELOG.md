@@ -55,10 +55,14 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
   ToolHive v0.51.4 and Deep Agents 0.7.24 stay blocked, their patched pins pass).
 
 - **OpenBao found in the data bin; a binary that cannot run is UNKNOWN.** The inventory, the Doctor and the vault
-  runtime now find OpenBao through one resolver (`aeos.core.binaries`): settings override, `<data>/bin`, PATH; a
-  candidate counts only as a regular executable file. A located binary that times out, fails to start, is killed by a
-  signal or (Windows) crashes with an NTSTATUS code is UNKNOWN, no longer INSTALLED, also for the REQUIRED `claude`,
-  `git` and `opencode` (before, a TIMEOUT/OS_ERROR was reported INSTALLED; intentional evidence honesty).
+  runtime now find binaries through one resolver (`aeos.core.binaries`): settings override (`~` expanded),
+  `<data>/bin` (OpenBao only), PATH; a candidate counts only as a regular executable file, so the Doctor and the
+  inventory agree for every binary (`claude`, `opencode`, `node`, `docker` too) and `aeos vault start` names an
+  unusable `openbao_binary` setting instead of advising `aeos vault install`. A located binary that times out, fails
+  to start, is killed by a signal or (Windows) crashes with an NTSTATUS code is UNKNOWN, no longer INSTALLED, also
+  for the REQUIRED `claude`, `git` and `opencode` (before, a TIMEOUT/OS_ERROR was reported INSTALLED; intentional
+  evidence honesty). An UNKNOWN installation also leaves an open version/digest drift finding OPEN (not evaluated,
+  never resolved).
   Evidence: OpenBao lookup E3 on the owner's Mac arm64 only (reconcile observed INSTALLED 2.7.1); the rest E2 unit
   tests. Windows `bao.exe` and the NTSTATUS path: NOT-PROVEN.
 

@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from aeos.inventory.probes import RunResult
+from aeos.inventory.probes import RunResult, file_digest
 from aeos.inventory.reconcile import reconcile
 from aeos.inventory.seed import run as seed_run
 from aeos.models.inventory import ComponentObservation
@@ -81,7 +81,7 @@ def test_bao_absent_is_not_installed(seeded, settings):
     seeded.commit()
     obs = _installation(seeded, "openbao")
     assert obs.status == "NOT_INSTALLED" and obs.detail["missing"] == ["bao"]
-    assert obs.detail["lookup"] == "settings/data-dir/PATH"
+    assert obs.detail["lookup"] == "data-dir/PATH" and "rejected" not in obs.detail
 
 
 # ---------------------------------------------------------------- lookup precedence and executable check
@@ -155,7 +155,9 @@ def test_bao_without_execute_bit_in_data_bin_is_ignored(seeded, settings):
 def _unknown_assertions(seeded, path, name="bao"):
     obs = _installation(seeded, "openbao")
     assert obs.status == "UNKNOWN" and obs.observed_identity is None and obs.observed_version is None
-    assert obs.detail["failed"] == [name] and obs.detail["binaries"][0]["digest"] is None
+    assert obs.detail["failed"] == [name]
+    # the located file's hash is a fact and stays in the evidence, but it is not copied to observed_identity
+    assert obs.detail["binaries"][0]["digest"] == file_digest(path, use_cache=False)
     return obs
 
 
@@ -220,3 +222,108 @@ def test_required_binary_that_does_not_run_is_unknown_too(seeded, settings, cid,
     seeded.commit()
     obs = _installation(seeded, cid)
     assert obs.status == "UNKNOWN" and obs.observed_identity is None and obs.observed_version is None
+
+
+# ---------------------------------------------------------------- UNKNOWN is "not evaluated", never "resolved"
+
+
+def _digest_finding_status(db) -> list[str]:
+    from aeos.models.inventory_ext import DriftFinding
+
+    db.expire_all()
+    return [f.status for f in db.scalars(select(DriftFinding).where(
+        DriftFinding.component_id == "opencode", DriftFinding.drift_class == "resolved-version-mismatch",
+        DriftFinding.finding_key == "digest"))]
+
+
+def _resolved_events(db, *, drift_class: str) -> int:
+    """inventory.drift.resolved events of opencode for ``drift_class`` (other classes, e.g. installed-but-disabled,
+    legitimately resolve when the installation is no longer INSTALLED)."""
+    from aeos.models.audit import Event
+
+    return len([e for e in db.scalars(select(Event).where(Event.kind == "inventory.drift.resolved",
+                                                          Event.entity_id == "opencode"))
+                if e.payload.get("drift_class") == drift_class])
+
+
+def test_binary_that_crashes_does_not_resolve_an_open_digest_mismatch(seeded, settings, tmp_path):
+    """The mismatch is only evaluated while the installation is INSTALLED: a crashed binary keeps it OPEN, silently."""
+    from aeos.models.inventory import ComponentReference
+
+    exe = tmp_path / "opencode.exe"
+    exe.write_bytes(b"opencode build A")
+    exe.chmod(0o755)
+    runner = base_runner()
+    runner.binaries["opencode"] = str(exe)
+    runner.outputs["opencode"] = ok("1.19.3\n")
+    comp = seeded.get(ComponentReference, "opencode")
+    comp.approved_pin = "1.19.3"
+    comp.details = {**comp.details, "approved_digest": "sha256:" + "0" * 64}
+    seeded.commit()
+    reconcile(seeded, settings, runner=runner, component_id="opencode")
+    seeded.commit()
+    assert _digest_finding_status(seeded) == ["OPEN"]
+    runner.outputs["opencode"] = RunResult(-9, "", "", None, 5)  # killed (e.g. SIGKILL)
+    reconcile(seeded, settings, runner=runner, component_id="opencode")
+    seeded.commit()
+    assert _latest_installation(seeded, "opencode").status == "UNKNOWN"
+    assert _digest_finding_status(seeded) == ["OPEN"]
+    assert _resolved_events(seeded, drift_class="resolved-version-mismatch") == 0
+    # a normal run that now matches the reviewed digest is what resolves it
+    comp = seeded.get(ComponentReference, "opencode")
+    comp.details = {**comp.details, "approved_digest": file_digest(exe, use_cache=False)}
+    seeded.commit()
+    runner.outputs["opencode"] = ok("1.19.3\n")
+    reconcile(seeded, settings, runner=runner, component_id="opencode")
+    seeded.commit()
+    assert _digest_finding_status(seeded) == ["RESOLVED"]
+    assert _resolved_events(seeded, drift_class="resolved-version-mismatch") == 1
+
+
+# ---------------------------------------------------------------- evidence of a miss and of a partial failure
+
+
+def test_unusable_settings_override_is_recorded_as_the_deciding_step(seeded, settings, monkeypatch, tmp_path):
+    d = tmp_path / "a-directory"
+    d.mkdir()
+    monkeypatch.setattr(settings, "openbao_binary", str(d))
+    runner = base_runner()
+    runner.add_binary("bao", BAO_OUT)  # PATH has one, but the settings override is authoritative
+    reconcile(seeded, settings, runner=runner, component_id="openbao")
+    seeded.commit()
+    obs = _installation(seeded, "openbao")
+    assert obs.status == "NOT_INSTALLED" and obs.detail["lookup"] == "settings"
+    assert obs.detail["rejected"]["bao"].endswith("a-directory")
+    assert runner.calls == []
+
+
+def test_failed_second_binary_of_a_probe_names_that_binary(seeded, settings):
+    """sops + age: age fails, so location / operation_ref are age's, not sops'."""
+    runner = base_runner()
+    runner.add_binary("sops", "sops 3.9.0\n")
+    runner.add_binary("age", "v1.2.0\n")
+    runner.outputs["age"] = RunResult(None, "", "", "TIMEOUT", 5)
+    reconcile(seeded, settings, runner=runner, component_id="sops-age")
+    seeded.commit()
+    obs = _installation(seeded, "sops-age")
+    assert obs.status == "UNKNOWN" and obs.detail["failed"] == ["age"]
+    assert obs.observed_location.endswith("/age") and obs.operation_ref == "age --version"
+    assert "sops" not in obs.detail["reason"] and "age (TIMEOUT)" in obs.detail["reason"]
+
+
+def test_windows_exit_minus_one_is_a_normal_exit_not_a_crash(seeded, settings, monkeypatch):
+    from aeos.inventory import reconcile as reconcile_mod
+
+    monkeypatch.setattr(reconcile_mod.sys, "platform", "win32")
+    path = settings.data_dir / "bin" / "bao.exe"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"x")
+    runner = base_runner()
+    runner.add_binary("bao")
+    runner.binaries["bao"] = str(path)
+    for rc, status in ((0xFFFFFFFF, "INSTALLED"), (0xC0000135, "UNKNOWN"), (0xCFFFFFFF, "UNKNOWN"),
+                       (0xD0000000, "INSTALLED")):
+        runner.outputs["bao"] = RunResult(rc, "", "", None, 5)
+        reconcile(seeded, settings, runner=runner, component_id="openbao")
+        seeded.commit()
+        assert _latest_installation(seeded, "openbao").status == status, hex(rc)
