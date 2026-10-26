@@ -359,7 +359,8 @@ Activating a route is your explicit decision. Nothing is active by default.
   * **Windows.** 5 hours = 20%, week = 50%, month = 100% of the model's monthly allowance (glm-5.3-flash: $12 / $30 /
     $60). Only the 5-hour window blocks new tasks. The week and month windows are advisory (`WARN_EXHAUSTED`): AEOS
     cannot know when Go resets them, and with Extra Usage OFF going past them only gets refusals from Go, never a
-    charge. A refusal from Go is RATE_LIMITED, with no fallback to another route.
+    charge. A refusal from Go is RATE_LIMITED (a quota wait, no fallback to another route) only if Go answers HTTP
+    429, which is NOT-PROVEN; any other status is UPSTREAM_ERROR and records no quota wait.
   * **Paid usage beyond the plan.** If Go reports a charge, or bills a call from another source than the plan
     (`billing_source` such as `balance`, i.e. Extra Usage ON), AEOS flags the call (`cost.subscription.beyond_plan`),
     refuses the run's next request and refuses the route for new tasks and probes. A reported charge also counts
@@ -370,7 +371,7 @@ Activating a route is your explicit decision. Nothing is active by default.
     |---|---|---|
     | `SUBSCRIPTION_ALLOWANCE_EXHAUSTED` | WAITING_QUOTA | Nothing: the 5h window frees up as calls age out. |
     | `SUBSCRIPTION_ALLOWANCE_UNKNOWN` | WAITING_QUOTA | Nothing: a call in the 5h window could not be counted; it blocks for at most 5 hours. |
-    | `SUBSCRIPTION_BEYOND_PLAN` | BLOCKED | Turn Extra Usage OFF on the Console's Go page, then activate the route again (step 5 with a valid BUDGET decision). A TRIAL newer than the flagged call clears it. |
+    | `SUBSCRIPTION_BEYOND_PLAN` | BLOCKED | Turn Extra Usage OFF on the Console's Go page, then activate the route again (step 5 with a valid BUDGET decision). A TRIAL newer than the flagged call clears it. If Go reported a charge, that charge also counts against the GLOBAL $0 hard stop: every route, free ones included, waits with BUDGET_EXCEEDED until the budget period ends or you record a GLOBAL budget that covers it (Biaya page); re-activation alone is not enough. |
     | `COST_UNKNOWN` | BLOCKED | The route's subscription terms are incomplete: run `./aeos seed` (it corrects an untouched CANDIDATE row) or report it. |
     | `ROUTE_INELIGIBLE` naming the budget decision or the TRIAL | BLOCKED | The BUDGET decision or the TRIAL expired: step 7. |
 

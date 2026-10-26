@@ -157,7 +157,7 @@ third billing class beside free and per-token. Native Claude (rule 6) is unchang
 |---|---|---|
 | `SUBSCRIPTION_ALLOWANCE_EXHAUSTED` | when the 5h window's counted allowance drops below its limit | none; wait (the Go Console shows Go's own count) |
 | `SUBSCRIPTION_ALLOWANCE_UNKNOWN` | when the uncountable call leaves the 5h window (at most 5 hours) | none; wait |
-| `SUBSCRIPTION_BEYOND_PLAN` | when a human TRIAL/APPROVED decision for the route is newer than the flagged call | turn Extra Usage OFF on the Go Console, then `aeos routes activate <route> --mode TRIAL ... --budget-decision <id>` again |
+| `SUBSCRIPTION_BEYOND_PLAN` | when a human TRIAL/APPROVED decision for the route is newer than the flagged call | turn Extra Usage OFF on the Go Console, then `aeos routes activate <route> --mode TRIAL ... --budget-decision <id>` again; a reported charge also counts against the GLOBAL $0 hard stop, so every route (free ones included) waits with BUDGET_EXCEEDED until the period ends or a GLOBAL budget covers it |
 | `COST_UNKNOWN` / `BUDGET_STATE_UNTRUSTED` | when the route's subscription terms are complete again | `aeos seed` corrects an untouched CANDIDATE row; any pricing change needs a new TRIAL |
 
 Consequences:
@@ -166,8 +166,9 @@ Consequences:
   never sets it, so such a route waits with `COST_UNKNOWN`, and an UNKNOWN upstream cost still charges the
   reservation. A cost estimate for per-token routes is an open owner decision: route price x token cap, or a
   plan-approved limit.
-* There is no allowance hold for in-flight runs. Inside a run the provider's limit is the boundary (RATE_LIMITED on
-  its refusal, no fallback).
+* There is no allowance hold for in-flight runs. Inside a run the provider's limit is the boundary: RATE_LIMITED
+  (no fallback) only if the provider answers HTTP 429 (NOT-PROVEN for Go); any other status is UPSTREAM_ERROR
+  and records no quota wait.
 * AEOS's count can be lower than Go's (other clients, other machines) and, for estimates, higher (upper bounds). It is
   a guard for this instance, not the provider's meter.
 * This ADR changed, so an owner ACCEPTED registration of it is STALE until it is recorded again (OWNER_ACTIONS 2.8).

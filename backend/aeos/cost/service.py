@@ -730,7 +730,8 @@ def record_usage(
     if subscription_priced:
         # provider-side paid fallback (e.g. Extra Usage ON): a charge, a non-plan billing source or an unreadable cost
         beyond = subs.beyond_plan_amount(cost=cost, billing_source=info.get("billing_source"),
-                                         cost_unreadable=bool(info.get("cost_reported_unusable")))
+                                         cost_unreadable=bool(info.get("cost_reported_unusable")
+                                                              or info.get("billing_source_unreadable")))
         if beyond is not None:
             info["beyond_plan_usd"] = beyond
 

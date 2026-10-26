@@ -716,14 +716,19 @@ def _billing_of(data: dict[str, Any]) -> dict[str, Any]:
     ``usage.opencode.allowance`` (dollars of the plan allowance the request counted) and ``usage.opencode.billing_source``
     (e.g. go / go-plus / balance). Only finite numbers in [0, ``MAX_PROVIDER_USD``] and short source names are kept;
     an absurd figure (e.g. 1e25) is unreported. A ``usage.cost`` the provider stated but that is unreadable or absurd is
-    flagged ``cost_reported_unusable`` (paid usage beyond the plan on a SUBSCRIPTION route). {} when nothing applies."""
+    flagged ``cost_reported_unusable``, and a stated ``usage.opencode`` / ``billing_source`` that is not readable is
+    flagged ``billing_source_unreadable`` (both count as paid usage beyond the plan on a SUBSCRIPTION route). {} when
+    nothing applies."""
     raw_usage = data.get("usage")
     usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
     out: dict[str, Any] = {}
     if usage.get("cost") is not None and _provider_usd(usage.get("cost")) is None:
         out["cost_reported_unusable"] = True
     oc = usage.get("opencode")
+    if oc is None:
+        return out
     if not isinstance(oc, dict):
+        out["billing_source_unreadable"] = True  # stated but unreadable: never read as "within the plan"
         return out
     value = _provider_usd(oc.get("allowance"))
     if value is not None:
@@ -731,6 +736,8 @@ def _billing_of(data: dict[str, Any]) -> dict[str, Any]:
     source = oc.get("billing_source")
     if isinstance(source, str) and source.strip():
         out["billing_source"] = redact_text(source.strip())[:32]
+    elif "billing_source" in oc:
+        out["billing_source_unreadable"] = True
     return out
 
 

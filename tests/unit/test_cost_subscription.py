@@ -516,3 +516,19 @@ def test_probe_is_refused_after_a_call_billed_beyond_the_plan_and_flags_its_own(
     assert ei.value.code == "SUBSCRIPTION_BEYOND_PLAN"
     out = runner.invoke(app, ["cost", "summary", "--domain", "PERSONAL"])
     assert out.exit_code == 0 and "REFUSED (SUBSCRIPTION_BEYOND_PLAN)" in out.output and out.output.isascii()
+
+
+@pytest.mark.parametrize("opencode", [["balance"], "balance", {"billing_source": ["balance"]},
+                                      {"billing_source": {"type": "balance"}}, {"billing_source": ""}])
+def test_an_unreadable_billing_source_is_paid_usage_beyond_the_plan(db, opencode):
+    """A stated usage.opencode / billing_source AEOS cannot read is never taken as 'within the plan' (fail closed)."""
+    from aeos.broker import model_proxy
+
+    billing = model_proxy._billing_of({"usage": {"prompt_tokens": 10, "completion_tokens": 2, "opencode": opencode}})
+    assert billing.get("billing_source_unreadable") is True
+    route = _go_route(db)
+    e = facade.record_usage(db, provider="opencode-go", category="WORKER_API", source="broker", route_key=GO,
+                            input_tokens=10, output_tokens=2, cost_usd=None, details=billing)
+    db.commit()
+    assert e.details["beyond_plan_usd"] == "UNKNOWN" and facade.allowance_status(db, route)["state"] == "BEYOND_PLAN"
+    assert model_proxy._billing_of({"usage": {"prompt_tokens": 1}}) == {}  # nothing stated: nothing flagged

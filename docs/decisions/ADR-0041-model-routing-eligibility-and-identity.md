@@ -532,7 +532,8 @@ A Go route could be activated but could not run honestly.
    * Only the **5-hour window blocks**: a used-up window waits with `SUBSCRIPTION_ALLOWANCE_EXHAUSTED`, and a call in
      it whose allowance cannot be counted waits with `SUBSCRIPTION_ALLOWANCE_UNKNOWN` until it leaves the window (at
      most 5 hours). Both are QUOTA wait codes, shown as WAITING_QUOTA, in the scheduler and in `reserve`. A Go refusal
-     still maps to RATE_LIMITED with no fallback.
+     maps to RATE_LIMITED with no fallback only if Go answers HTTP 429 (NOT-PROVEN); any other status is
+     UPSTREAM_ERROR and records no quota wait.
    * The **week and month windows are advisory** (`WARN_EXHAUSTED`, never blocking). AEOS cannot know where Go anchors
      or resets them, and with Extra Usage OFF exceeding them only yields Go's refusals, never money. A trailing count
      could otherwise lock a route for up to 31 days after Go reset it.
