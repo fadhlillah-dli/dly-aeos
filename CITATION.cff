@@ -1,0 +1,30 @@
+cff-version: "1.2.0"
+message: >-
+  If you refer to DLY AEOS, please cite it using the metadata from this file.
+  Citing it grants no licence to use the software (see LICENSE).
+type: software
+title: "DLY AEOS - DLY AI Engineering Operating System"
+abstract: >-
+  DLY AEOS is a local-first control plane for AI-assisted software engineering.
+  It runs on the owner's own Windows or macOS machine, serves one dashboard on
+  the loopback interface and keeps humans in charge: the work domain (PERSONAL
+  or OFFICE) is a human choice, plan approvals are decisions bound to an exact
+  content hash, a deterministic controller enforces scope, access, cost and
+  state, and merge to main and production stay human-only. Capabilities that
+  are not proven by the Readiness Doctor or a recorded test are stated as
+  NOT-PROVEN.
+authors:
+  - name: Fadhlillah
+version: "0.1.0"
+date-released: "2026-10-26"
+repository-code: "https://github.com/fadhlillah-dli/dly-aeos"
+license-url: "https://github.com/fadhlillah-dli/dly-aeos/blob/main/LICENSE"
+keywords:
+  - software engineering
+  - control plane
+  - local-first
+  - AI-assisted development
+  - human-in-the-loop
+  - evidence ledger
+  - FastAPI
+  - React

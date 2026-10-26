@@ -1,0 +1,59 @@
+name: "Usulan fitur / Feature request"
+description: "Usulkan perubahan atau kemampuan baru. / Suggest a change or a new capability."
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        DLY AEOS adalah perangkat lunak proprietary (all rights reserved). Ide diterima, tetapi pull request eksternal tidak diterima dan pemilik yang memutuskan (lihat CONTRIBUTING.md).
+        DLY AEOS is proprietary (all rights reserved). Ideas are welcome, but external pull requests are not accepted and the owner decides (see CONTRIBUTING.md).
+
+        Issue ini publik. Jangan sertakan secret, data pribadi, nama perusahaan atau alamat tenant.
+        This issue is public. Do not include secrets, personal data, company names or tenant addresses.
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Masalah yang ingin diselesaikan / Problem to solve"
+      description: "Apa yang sulit atau tidak mungkin sekarang? / What is hard or impossible today?"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Usulan / Proposal"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatif yang dipertimbangkan / Alternatives considered"
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Area"
+      options:
+        - "Bootstrap / setup"
+        - "Readiness Doctor"
+        - "Control Center (UI)"
+        - "CLI"
+        - "Planning / Claude bridge"
+        - "Workforce / worker runtime / sandbox"
+        - "Verifier / delivery"
+        - "Publisher / docs engine"
+        - "Operations (backup, release, SLI)"
+        - "Lainnya / Other"
+    validations:
+      required: true
+  - type: input
+    id: master
+    attributes:
+      label: "Bagian master architecture (opsional) / Master architecture section (optional)"
+      placeholder: "§23"
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: "Konfirmasi / Confirmation"
+      options:
+        - label: "Saya tidak menyertakan secret, data pribadi atau detail perusahaan/tenant. / I included no secrets, personal data or company/tenant details."
+          required: true

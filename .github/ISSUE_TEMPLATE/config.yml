@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "Laporkan kerentanan keamanan / Report a security vulnerability"
+    url: "https://github.com/fadhlillah-dli/dly-aeos/security/advisories/new"
+    about: "Privat, melalui GitHub private vulnerability reporting. Jangan buka issue publik. / Private, through GitHub private vulnerability reporting. Never open a public issue."
+  - name: "Lisensi / Licence"
+    url: "https://github.com/fadhlillah-dli/dly-aeos/blob/main/LICENSE"
+    about: "All rights reserved. Untuk izin, gunakan formulir Permintaan lisensi. / For permission, use the Licence request form."

@@ -1,0 +1,52 @@
+name: "Permintaan lisensi / Licence request"
+description: "Minta izin untuk menggunakan DLY AEOS (LICENSE bagian 8). / Ask for permission to use DLY AEOS (LICENSE section 8)."
+title: "Licence request"
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        DLY AEOS: Copyright (c) 2026 Fadhlillah. All rights reserved. Publikasi di GitHub tidak memberikan lisensi apa pun.
+        DLY AEOS: Copyright (c) 2026 Fadhlillah. All rights reserved. Publishing on GitHub grants no licence.
+
+        Izin hanya ada jika diberikan secara tertulis oleh pemegang hak cipta, dan hanya berlaku untuk cakupan yang dinyatakan.
+        Permission exists only when the copyright holder gives it in writing, and it applies only to its stated scope.
+
+        Issue ini publik. Jangan sertakan informasi rahasia.
+        This issue is public. Do not include confidential information.
+  - type: dropdown
+    id: use
+    attributes:
+      label: "Penggunaan yang diminta / Requested use"
+      multiple: true
+      options:
+        - "Menjalankan secara lokal untuk evaluasi / Run locally for evaluation"
+        - "Penggunaan pribadi / Personal use"
+        - "Penggunaan di dalam organisasi / Use inside an organisation"
+        - "Memodifikasi atau membangun di atasnya / Modify or build on it"
+        - "Mendistribusikan atau menyediakan sebagai layanan / Redistribute or offer as a service"
+        - "Pengajaran atau penelitian / Teaching or research"
+        - "Lainnya / Other"
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: "Cakupan / Scope"
+      description: "Bagian mana, untuk tujuan apa, komersial atau tidak, dan berapa lama. / Which parts, for what purpose, commercial or not, and for how long."
+    validations:
+      required: true
+  - type: input
+    id: requester
+    attributes:
+      label: "Pemohon (opsional) / Requester (optional)"
+      description: "Cukup handle GitHub Anda; jangan sertakan alamat e-mail atau nomor telepon. / Your GitHub handle is enough; do not include an e-mail address or phone number."
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: "Konfirmasi / Confirmation"
+      options:
+        - label: "Saya mengerti bahwa membuka issue ini tidak memberikan hak apa pun. / I understand that opening this issue grants no rights."
+          required: true
+        - label: "Saya tidak menyertakan informasi rahasia. / I included no confidential information."
+          required: true
