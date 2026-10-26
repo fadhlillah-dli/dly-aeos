@@ -279,7 +279,13 @@ def build_context(session: Session, *, project: Project, domain: str, prompt: st
     if domain == Domain.OFFICE.value:
         assumptions.append({"statement": "Atlassian Cloud is an assumption; Cloud vs Data Center is UNKNOWN",
                             "source": "§04"})
-    unknowns = [{"statement": "MCI_V2 canonical policy is UNVERIFIED; no compliance claim can be made",
+    # §24: the MCI status the policy module verifies on this machine (never the declared one); compliance is never
+    # claimed, so this stays an unknown even with a VERIFIED source
+    mci = snapshot.mci_reference()
+    unknowns = [{"statement": (f"MCI_V2 canonical source VERIFIED (version {mci['version']}, {mci['content_hash']}); "
+                               "compliance NOT-PROVEN" if mci["status"] == "VERIFIED" else
+                               f"MCI_V2 canonical policy is UNVERIFIED ({mci['verification_code']}); no compliance "
+                               "claim can be made"),
                  "impact": "Gates depending on MCI stay NOT-PROVEN"}]
     if repo["status"] == "UNKNOWN":
         unknowns.append({"statement": f"Repository inventory UNKNOWN: {repo.get('reason')}",
@@ -893,11 +899,16 @@ def personal_gate(session: Session, plan: Plan, *, actor: str) -> dict[str, Any]
       official Claude Code (explicit, never the Claude API).
     * UNKNOWN (readiness never checked) -> the official bridge is used, labelled NOT-PROVEN on the plan and every
       run (``bridge_proof``); it is never shown as a proven automatic integration.
+    * a critical check that passed and was invalidated since (STALE: environment, data dir, dependencies, schema
+      changed) -> §08 "memicu recheck sebelum capability tersebut digunakan kembali": no model call; the recheck is
+      queued where a server recheck worker runs and the plan waits in NEEDS_DECISION with the ``aeos doctor``
+      remedy (a never-run critical check stays UNKNOWN as above).
     * READY -> native bridge, labelled PROVEN.
     Returns the recorded ``bridge_proof``. OFFICE plans are gated by ``office_gate``."""
     if plan.domain != Domain.PERSONAL.value:
         return {}
     remedies: list[Any] = []
+    stale: list[str] = []
     try:
         from aeos.doctor import facade as doctor
 
@@ -905,11 +916,25 @@ def personal_gate(session: Session, plan: Plan, *, actor: str) -> dict[str, Any]
                                         project_id=plan.project_id)
         status, reasons = str(state.status), [str(r) for r in state.reasons]
         remedies = list(state.remedies or [])
+        stale = [str(c.get("check_id")) for c in state.checks or []
+                 if c.get("tier") == "critical" and c.get("effective_status") == "STALE"]
     except (ImportError, ModuleNotFoundError):
         status, reasons = "UNKNOWN", ["readiness doctor not available in this build"]
+    recheck = bool(stale) and status != "BLOCKED"
+    if recheck:
+        queued = doctor.request_recheck(stale)
+        status = "BLOCKED"
+        reasons = [f"pemeriksaan kritis STALE (dicek ulang sebelum bridge dipakai lagi): {', '.join(stale)}"
+                   + ("; recheck dijadwalkan, coba lagi sesudahnya" if queued else ""), *reasons]
+        remedies = [{"check_id": c, "operation": "Jalankan ulang pemeriksaan Readiness Doctor",
+                     "command": doctor.launcher_command(f"doctor --capability {Capability.CAN_PLAN_PERSONAL.value}"),
+                     "executed_by": "MANUSIA (salin dan jalankan sendiri)"} for c in stale] + remedies
     proof = {"capability": Capability.CAN_PLAN_PERSONAL.value, "status": status,
              "label": {"READY": "PROVEN", "DEGRADED": "MANUAL_PACKAGE", "BLOCKED": "BLOCKED"}.get(status, "NOT-PROVEN"),
              "reasons": [redact_text(r)[:300] for r in reasons[:10]], "checked_at": utcnow().isoformat()}
+    if recheck:
+        proof["label"] = "RECHECK_REQUIRED"
+        proof["stale_checks"] = stale
     if proof["label"] == "NOT-PROVEN":
         # §02 Istilah: UNKNOWN is not proven. This build still runs the official bridge on UNKNOWN (the trusted
         # acceptance helper relies on it); stated on the plan as an open owner decision, never as automatic/proven.

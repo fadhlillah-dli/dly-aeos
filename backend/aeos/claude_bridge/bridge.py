@@ -735,6 +735,28 @@ def mark_stale_if_binary_changed(session: Session, row: ClaudeCapabilityTest | N
     return True
 
 
+def extra_usage_view(session: Session | None) -> dict[str, Any]:
+    """§12 paid extra usage, mirroring the Doctor check claude.extra_billing: the CLI does not report it, so the only
+    source is the owner's attestation (POLICY decision, preset claude_extra_usage_off) - CONFIGURED (E0), never
+    VERIFIED; without one it stays UNKNOWN."""
+    from aeos.policy import facade as policy
+
+    att = policy.claude_extra_usage_attestation(session)
+    base = {"attestation": att["state"], "evidence_level": "E0", "decision_id": att["decision_id"],
+            "expires_at": att["expires_at"], "source": "atestasi pemilik (keputusan POLICY)"}
+    if att["state"] == "ATTESTED_OFF":
+        return {**base, "state": "CONFIGURED",
+                "note": "Pemilik menyatakan extra usage berbayar NONAKTIF di pengaturan akun claude.ai (atestasi E0, "
+                        "tidak dapat diverifikasi AEOS)."}
+    if att["state"] == "ATTESTED_ON":
+        return {**base, "state": "FAILED",
+                "note": "Pemilik mencatat extra usage berbayar AKTIF; §12 meminta dinonaktifkan di pengaturan akun."}
+    return {**base, "state": "UNKNOWN", "source": "tidak ada sumber resmi",
+            "note": "Pembelian/penggunaan tambahan berbayar dimatikan lewat pengaturan akun claude.ai (langkah manual "
+                    "pemilik); CLI tidak melaporkan status ini. Catat atestasi pemilik: aeos policy decide --kind POLICY "
+                    "--policy-preset claude_extra_usage_off."}
+
+
 def status(session: Session, settings: Settings | None = None, *, refresh: bool = False) -> dict[str, Any]:
     from aeos.models.routing import ModelRoute
 
@@ -787,11 +809,7 @@ def status(session: Session, settings: Settings | None = None, *, refresh: bool 
         "last_capability_test": capability_test_view(row, fingerprint=pr.binary.fingerprint, version=pr.binary.version),
         "capability_test_invalidated": changed,
         "quota": quota_view(session),
-        "extra_usage": {
-            "state": "UNKNOWN",
-            "note": "Pembelian/penggunaan tambahan berbayar dimatikan lewat pengaturan akun claude.ai (langkah "
-                    "manual pemilik); CLI tidak melaporkan status ini.",
-        },
+        "extra_usage": extra_usage_view(session),
         "manual_fallback": "Bila bridge BLOCKED, paket manual dibuat untuk dijalankan di Claude Code resmi.",
         "checked_at": utcnow().isoformat(),
         "source": "claude --version, claude auth status (env bersih), riwayat uji kemampuan",

@@ -210,6 +210,62 @@ def _bind(run: Any, change: dict[str, Any]) -> tuple[str | None, str]:
     return None, f"its configuration ({shown}) does not carry {wanted[0] if len(wanted) == 1 else wanted}"
 
 
+def _policy_preset_shape(domain: Domain, *, preset: str | None, target_type: str | None, target_id: str | None,
+                         details: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
+    """(target_type, target_id, details) of a POLICY attestation preset, or None when it is not one.
+
+    A decision on a preset's target always gets the preset's exact shape (the consumer reads exactly that), and the
+    consumer-read detail key is refused anywhere else, so an attestation can never look effective by accident."""
+    name = preset or catalog.policy_preset_for_target(target_type, target_id)
+    if name is None and target_type == catalog.TARGET_CLAUDE_EXTRA_USAGE:
+        name = "claude_extra_usage_off"  # the only shape its consumers read (target id PERSONAL)
+    if name is None:
+        stray = sorted(set(details) & catalog.POLICY_PRESET_DETAIL_KEYS)
+        if stray:
+            raise ValidationFailed(f"details {stray} are read only on their attestation target; use policy_preset="
+                                   f"{sorted(catalog.POLICY_PRESETS)}", code="POLICY_PRESET_MISMATCH")
+        return None
+    spec = catalog.POLICY_PRESETS.get(name)
+    if spec is None:
+        raise ValidationFailed(f"unknown policy preset {name!r}", details={"allowed": sorted(catalog.POLICY_PRESETS)})
+    if (target_type and target_type != spec.target_type) or (target_id and target_id != spec.target_id):
+        raise ValidationFailed(f"policy preset {name} is bound to target {spec.target_type}/{spec.target_id}",
+                               code="POLICY_PRESET_MISMATCH")
+    if domain.value not in spec.domains:
+        raise ValidationFailed(f"policy preset {name} can only be recorded in {list(spec.domains)}",
+                               code="POLICY_PRESET_DOMAIN_DENIED")
+    given = details.get(spec.detail_key, spec.value)
+    if not isinstance(given, bool):
+        raise ValidationFailed(f"details.{spec.detail_key} must be true/false", code="POLICY_PRESET_DETAILS_INVALID")
+    if preset is not None and given is not spec.value:
+        raise ValidationFailed(f"policy preset {name} records details.{spec.detail_key} = {str(spec.value).lower()}",
+                               code="POLICY_PRESET_DETAILS_INVALID")
+    out = {**details, spec.detail_key: given, "policy_preset": name, "consumer": spec.consumer,
+           "evidence_level": "E0", "attestation": "owner statement; AEOS cannot read this setting"}
+    return spec.target_type, spec.target_id, out
+
+
+def _mci_pack_mapping_check(target_id: str | None, target_hash: str | None) -> None:
+    """§34: a pack-to-MCI-control mapping is approved only for a VERIFIED MCI source and only bound to the exact hash
+    of the pack entry + MCI content hash shown in ``GET /api/policy/mci`` (fail closed: never a dangling approval)."""
+    from aeos.policy import snapshot
+
+    ref = snapshot.mci_reference()
+    if ref["status"] != "VERIFIED":
+        raise ValidationFailed("an MCI pack mapping can only be approved while the MCI_V2 source is VERIFIED "
+                               f"(now {ref['status']}: {ref['verification_note']})", code="MCI_NOT_VERIFIED")
+    pack = next((p for p in ref["pack_mappings"] if p["key"] == target_id), None)
+    if pack is None:
+        raise ValidationFailed(f"unknown pack {target_id!r}", code="MCI_PACK_UNKNOWN",
+                               details={"packs": [p["key"] for p in ref["pack_mappings"]]})
+    if not pack["mci_controls"] or pack["evidence_contract_status"] != "DECLARED":
+        raise ValidationFailed(f"pack {target_id} has no MCI controls / complete evidence contract in the local "
+                               f"{ref['pack_mapping_file']}", code="MCI_PACK_MAPPING_INCOMPLETE")
+    if target_hash != pack["binding"]["target_hash"]:
+        raise ValidationFailed("target_hash must be the current binding hash of this pack mapping",
+                               code="MCI_PACK_HASH_MISMATCH", details={"expected": pack["binding"]["target_hash"]})
+
+
 def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids: Any,
                            rollback_target: Any, change: dict[str, Any] | None = None) -> dict[str, Any]:
     """§41/§43: validate the evaluation and rollback of a system change (policy/model/tools/hooks/prompt/memory/
@@ -286,7 +342,7 @@ def record_generic_decision(
     details: dict[str, Any] | None = None, provider: str | None = None, enabled: bool | None = None,
     office_authorization: bool = False, company_reference: str | None = None,
     allowed_providers: list[str] | None = None, office_policy: dict[str, Any] | None = None,
-    exception: str | None = None, allow_bash: bool | None = None,
+    exception: str | None = None, allow_bash: bool | None = None, policy_preset: str | None = None,
     approved_targets: list[Any] | None = None, approved_data_classes: list[str] | None = None,
     approved_identities: dict[str, str] | list[str] | None = None,
 ) -> Decision:
@@ -296,6 +352,8 @@ def record_generic_decision(
     authorisation only (``aeos.policy.office_scope``): what the company approved, never inferred."""
     if kind not in GENERIC_KINDS:
         raise ValidationFailed(f"kind must be one of {list(GENERIC_KINDS)}")
+    if policy_preset is not None and kind != "POLICY":
+        raise ValidationFailed("policy presets are POLICY decisions", code="POLICY_PRESET_MISMATCH")
     if not auth_scope:
         raise ValidationFailed("auth_scope must state the explicit scope of this decision")
     details = dict(details or {})
@@ -347,7 +405,20 @@ def record_generic_decision(
             Decision.kind == "WRITE_ENABLEMENT", Decision.target_type == target_type,
             Decision.target_id == provider, Decision.status == "ACTIVE")))
     elif kind == "POLICY":
-        if office_authorization or office_policy:
+        office = bool(office_authorization or office_policy)
+        if office and policy_preset is not None:
+            raise ValidationFailed("a policy preset is not an OFFICE policy decision", code="POLICY_PRESET_MISMATCH")
+        shaped = None if office else _policy_preset_shape(domain, preset=policy_preset, target_type=target_type,
+                                                          target_id=target_id, details=details)
+        if shaped is not None:
+            target_type, target_id, details = shaped
+            if expires_at is None:
+                raise ValidationFailed("an owner attestation needs an explicit expiry (expires_at)",
+                                       code="POLICY_PRESET_EXPIRY_REQUIRED")
+            supersede = list(session.scalars(select(Decision).where(
+                Decision.kind == "POLICY", Decision.target_type == target_type, Decision.target_id == target_id,
+                Decision.domain == domain.value, Decision.status == "ACTIVE")))
+        elif office:
             if domain != Domain.OFFICE:
                 raise ValidationFailed("OFFICE policy decisions are recorded in the OFFICE domain only")
             if office_policy:
@@ -376,6 +447,14 @@ def record_generic_decision(
             target_type, target_id = catalog.TARGET_OFFICE_POLICY, Domain.OFFICE.value
         else:
             target_type, target_id = _require_target(kind, target_type, target_id)
+            if target_type == catalog.TARGET_MCI_PACK_MAPPING:
+                if domain != Domain.PERSONAL:
+                    raise ValidationFailed("platform MCI pack mappings are recorded in the PERSONAL (platform) domain",
+                                           code="MCI_PACK_DOMAIN_DENIED")
+                _mci_pack_mapping_check(target_id, target_hash)
+                supersede = list(session.scalars(select(Decision).where(
+                    Decision.kind == "POLICY", Decision.target_type == target_type, Decision.target_id == target_id,
+                    Decision.status == "ACTIVE")))
         given = details.pop("system_change", None)
         if catalog.system_change_target(target_type):
             sc = given if isinstance(given, dict) else {}

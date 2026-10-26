@@ -107,14 +107,57 @@ def test_metadata_context_never_carries_draft_or_revoked_records(personal_client
         db.add(Decision(kind="POLICY", actor_user_id="owner", actor_kind="HUMAN", target_type="project_convention",
                         target_id=f"zebraplan-{status}", project_id=p["id"], domain="PERSONAL", status=status,
                         rationale=f"zebraplan decision {status}"))
+    # past its expires_at but the expiry is not written back yet (stored status still ACTIVE): EXPIRED, not context
+    db.add(Decision(kind="POLICY", actor_user_id="owner", actor_kind="HUMAN", target_type="project_convention",
+                    target_id="zebraplan-LAPSED", project_id=p["id"], domain="PERSONAL", status="ACTIVE",
+                    expires_at=utcnow() - timedelta(minutes=5), rationale="zebraplan decision lapsed"))
     db.commit()
     pack = _build(personal_client, p["id"], role_key=role, query=["zebraplan"])
     meta = [i for i in pack["items"] if i["kind"] == "metadata"]
     titles = str([i["title"] for i in meta])
     assert "OKMARK" in titles and "DRAFTMARK" not in str(pack["items"])
     assert "zebraplan-ACTIVE" in str(meta) and "zebraplan-INVALIDATED" not in str(pack["items"])
+    assert "zebraplan-LAPSED" not in str(pack["items"])
     assert all(packs.metadata_accepted({"kind": (i["provenance"]["record_kind"]), "status": i["provenance"]["status"]})
                for i in meta)
+
+
+def test_metadata_judges_an_adr_by_the_owner_decision_not_the_builder_status(personal_client: AuthedClient, db,
+                                                                              tmp_path, monkeypatch):
+    """§02/§24: the ADR file's Status line is builder-written; the owner's ADR decision (bound to the content hash)
+    decides whether it is accepted project context - a file-ACCEPTED ADR the owner REJECTED is not, a file-PROPOSED
+    ADR the owner ACCEPTED is (labelled with its status source)."""
+    from aeos.models.decisions import ArchitectureDecisionRecord
+    from aeos.policy import adrs
+
+    d = tmp_path / "decisions"
+    d.mkdir()
+    for key, status in (("ADR-0901", "ACCEPTED"), ("ADR-0902", "PROPOSED")):
+        (d / f"{key}-zebra.md").write_text(
+            f"# {key} \u2014 zebraadr {status.lower()}\n\n* Status: {status}\n\n## Decision\nUse zebraadr.\n",
+            encoding="utf-8")
+    monkeypatch.setattr(adrs, "decisions_dir", lambda: d)
+    adrs.load_adrs(db)
+    db.commit()
+    p = create_project(personal_client, name="ADR ctx")
+
+    def adr_items() -> dict[str, dict]:
+        pack = _build(personal_client, p["id"], role_key="planner", query=["zebraadr"])
+        return {i["provenance"]["record_id"]: i for i in pack["items"]
+                if i["kind"] == "metadata" and i["provenance"]["record_kind"] == "adr"}
+
+    items = adr_items()
+    assert set(items) == {"ADR-0901"} and items["ADR-0901"]["provenance"]["status_source"] == "FILE (builder-written)"
+    user_id = personal_client.session["user"]["id"]
+    for key, outcome in (("ADR-0901", "REJECTED"), ("ADR-0902", "ACCEPTED")):
+        row = db.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == key))
+        adrs.record_adr_decision(db, adr_key=key, outcome=outcome, actor_user_id=user_id,
+                                 rationale="keputusan pemilik atas ADR ini", content_hash=row.content_hash)
+    db.commit()
+    items = adr_items()
+    assert set(items) == {"ADR-0902"}
+    assert items["ADR-0902"]["provenance"]["status"] == "ACCEPTED"
+    assert items["ADR-0902"]["provenance"]["status_source"] == "OWNER_DECISION"
 
 
 @needs_git

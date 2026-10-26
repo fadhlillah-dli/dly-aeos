@@ -6,6 +6,7 @@ CAN_PLAN_PERSONAL gate (§02, §05 step 2, §08)."""
 from __future__ import annotations
 
 import copy
+import sys
 
 import pytest
 from sqlalchemy import select
@@ -362,6 +363,43 @@ def test_blocked_personal_capability_stops_before_any_model_call(db, owner, monk
     assert plan.state == "NEEDS_DECISION" and "CAN_PLAN_PERSONAL" in plan.state_reason
 
 
+def test_a_stale_critical_check_is_rechecked_before_the_bridge_runs_again(db, owner, monkeypatch, tmp_path):
+    """§08 "memicu recheck sebelum capability tersebut digunakan kembali": a critical CAN_PLAN_PERSONAL check that
+    passed and was invalidated since (STALE) no longer runs the bridge NOT-PROVEN - no model call, the recheck is
+    queued (where a recheck worker runs) and the plan waits with the ``aeos doctor`` remedy. A never-run critical
+    check stays UNKNOWN -> NOT-PROVEN as before."""
+    from aeos.doctor import facade as doctor
+
+    bridge = FakeBridge(monkeypatch, tmp_path)
+    queued: list[list[str]] = []
+    monkeypatch.setattr(doctor, "request_recheck", lambda ids: queued.append(list(ids)) or list(ids))
+
+    def cap(eff: str) -> None:
+        monkeypatch.setattr(doctor, "capability_state", lambda *a, **k: doctor.CapabilityState(
+            capability=a[1], status="UNKNOWN", reasons=[f"claude.env: {eff}"],
+            checks=[{"check_id": "claude.env", "tier": "critical", "effective_status": eff, "ok": False}]))
+
+    cap("STALE")
+    plan = _plan(db, owner)
+    with pytest.raises(Blocked) as exc:
+        service.run_pipeline(db, plan.id, actor=owner.id)
+    assert exc.value.code == "PERSONAL_PLANNING_BLOCKED" and bridge.calls == []
+    assert queued == [["claude.env"]]
+    # the copyable launcher of this OS (.\aeos.ps1 on Windows, ./aeos on macOS), like the Doctor's own remedies
+    launcher = ".\\aeos.ps1 " if sys.platform == "win32" else "./aeos "
+    assert any(str(r.get("command")) == launcher + "doctor --capability CAN_PLAN_PERSONAL"
+               for r in exc.value.details["remedies"])
+    db.refresh(plan)
+    proof = plan.checkpoint["bridge_proof"]
+    assert plan.state == "NEEDS_DECISION" and proof["label"] == "RECHECK_REQUIRED"
+    assert proof["stale_checks"] == ["claude.env"] and "STALE" in proof["reasons"][0]
+    cap("UNKNOWN")  # never run: unchanged behaviour (NOT-PROVEN, owner decision OPEN)
+    plan2 = _plan(db, owner)
+    service.run_pipeline(db, plan2.id, actor=owner.id)
+    db.refresh(plan2)
+    assert plan2.checkpoint["bridge_proof"]["label"] == "NOT-PROVEN" and bridge.calls
+
+
 def test_degraded_personal_capability_uses_the_manual_package(db, owner, monkeypatch, tmp_path):
     bridge = FakeBridge(monkeypatch, tmp_path)
     _cap(monkeypatch, "DEGRADED", ["claude.capability_test: UNKNOWN"])
@@ -545,3 +583,18 @@ def test_integration_engineer_task_requires_provider_contract_test_evidence(db):
     reqs = " | ".join(specs["T1"].evidence_requirements)
     assert "provider contract test" in reqs and "idempotency key" in reqs and "tenant" in reqs
     assert not [r for r in specs["T2"].evidence_requirements if "contract test" in r]
+
+
+def test_doctor_request_recheck_queues_only_implicitly_rerunnable_checks(monkeypatch):
+    """The planning gate's recheck goes through the Doctor facade: nothing is queued without a recheck worker (CLI),
+    and a functional check is never re-run implicitly."""
+    from aeos.doctor import capabilities as caps
+    from aeos.doctor import facade as doctor
+
+    monkeypatch.setattr(caps, "auto_recheck_enabled", lambda: False)
+    assert doctor.request_recheck(["claude.env"]) == []
+    queued: list[list[str]] = []
+    monkeypatch.setattr(caps, "auto_recheck_enabled", lambda: True)
+    monkeypatch.setattr(caps, "request_recheck", lambda ids: queued.append(list(ids)))
+    assert doctor.request_recheck(["claude.env", "containment.report"]) == ["claude.env"]
+    assert queued == [["claude.env"]]

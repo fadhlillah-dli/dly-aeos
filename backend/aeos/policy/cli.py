@@ -30,7 +30,7 @@ def snapshot_cmd(
     with session_scope() as s:
         snap = snapshot.ensure_active_snapshot(s, source="cli refresh") if refresh else snapshot.active_snapshot(s)
         current = content_hash(snapshot.compute_content(s))
-        mci = snapshot.mci_reference()
+        mci = snapshot.mci_reference(session=s)
         if snap is None:
             console.print("No active policy snapshot. Run: aeos seed --only aeos.policy.seed")
         else:
@@ -41,7 +41,16 @@ def snapshot_cmd(
             console.print(f"  decisions bound: {len(snap.content.get('decisions') or [])}")
             if snap.content_hash != current:
                 console.print("  DRIFT: policy files or decisions changed; run with --refresh")
-        console.print(f"MCI reference: {mci['name']} status={mci['status']} compliance={mci['compliance']}")
+        console.print(f"MCI reference: {mci['name']} status={mci['status']} ({mci['verification_code']}) "
+                      f"compliance={mci['compliance']}")
+        from aeos.core.config import get_settings
+
+        # the document is local-only (the repository is public); say where this machine looks for it
+        local_dir = str(get_settings().layout.canonical_policy).encode("ascii", "replace").decode("ascii")
+        console.print(f"  source: local only, location={mci['source_location'] or '-'} (directory {local_dir})")
+        approved = sum(1 for p in mci["pack_mappings"] if p["mapping_status"] == "APPROVED")
+        console.print(f"  packs: {approved}/{len(mci['pack_mappings'])} mappings APPROVED "
+                      f"(packs_mapping_status={mci['packs_mapping_status']})")
 
 
 @app.command("decisions")
@@ -160,10 +169,16 @@ def decide_cmd(
                                       "e.g. atlassian_deployment=CLOUD, claude_max_allowed_for_office_data=true, "
                                       "'approved_worker_routes=route-a,route-b' (quoted: Windows PowerShell splits an "
                                       "unquoted comma); applies only with an ACTIVE company authorisation"),
+    policy_preset: str = typer.Option(
+        None, "--policy-preset",
+        help="POLICY owner attestation preset: claude_extra_usage_off (you turned paid extra usage OFF in "
+             "claude.ai; needs --days; shown as owner-attested E0, never VERIFIED)"),
     target_type: str = typer.Option(None), target_id: str = typer.Option(None),
     target_version: str = typer.Option(None, help="System change: the new value the evaluation ran with "
                                                   "(e.g. prompt revision, policy version, route key)"),
-    target_hash: str = typer.Option(None, help="Exact target hash (system change: the EvalRun configuration_hash)"),
+    target_hash: str = typer.Option(None, "--target-hash",
+                                    help="Exact target hash (system change: the EvalRun configuration_hash; MCI pack "
+                                         "mapping: its binding hash)"),
     eval_run: list[str] = typer.Option(None, "--eval-run", help="System change: COMPLETED all-PASS EvalRun id bound "
                                                                 "to this change (repeatable)"),
     rollback_target: str = typer.Option(None, help="System change: the version/config/decision this replaces"),
@@ -234,6 +249,7 @@ def decide_cmd(
                 approved_data_classes=list(approved_data_class or []),
                 approved_identities=list(approved_identity or []),
                 details=details or None,
+                policy_preset=policy_preset,
             )
             v = decision_view(s, d)
             console.print(f"Recorded {v['kind']} {v['id']} -> {v['target_type']}:{v['target_id']} "
@@ -304,7 +320,7 @@ def revoke_cmd(
 
 @app.command("adrs")
 def adrs_cmd(load: bool = typer.Option(False, "--load", help="(Re)load docs/decisions/ADR-*.md first")) -> None:
-    """List the ADR register."""
+    """List the ADR register: file status (written by the file author) and the owner's recorded decision."""
     from aeos.models.decisions import ArchitectureDecisionRecord
     from aeos.policy import adrs
 
@@ -316,6 +332,44 @@ def adrs_cmd(load: bool = typer.Option(False, "--load", help="(Re)load docs/deci
         rows = list(s.scalars(select(ArchitectureDecisionRecord).order_by(ArchitectureDecisionRecord.adr_key)))
         if not rows:
             console.print("No ADRs loaded. Run: aeos policy adrs --load")
+        owner = adrs.owner_decisions(s)
         for r in rows:
             title = r.title.encode("ascii", "replace").decode("ascii")
-            console.print(f"{r.adr_key} [{r.status}] {title}  ({r.source_path}, {r.content_hash})")
+            st = adrs.register_status(r, owner.get(r.adr_key, []))
+            who = (f"owner={st['owner_status']} ({st['owner_status_state']})" if st["owner_status"]
+                   else "owner=NOT_RECORDED")
+            console.print(f"{r.adr_key} file=[{r.status}] {who} {title}  ({r.source_path}, {r.content_hash})")
+
+
+@app.command("adr-decide")
+def adr_decide_cmd(
+    adr_key: str = typer.Argument(..., help="ADR key, e.g. ADR-0004"),
+    outcome: str = typer.Option(..., help="ACCEPTED | REJECTED | SUPERSEDED"),
+    as_user: str = typer.Option(..., "--as", help="Your SUPER_ADMIN username (the human decision actor)"),
+    rationale: str = typer.Option(..., help="Why (min 10 characters)"),
+    content_hash: str = typer.Option(None, "--content-hash",
+                                     help="Hash of the ADR content you reviewed (default: the loaded hash, which "
+                                          "must still match the file)"),
+    superseded_by: str = typer.Option(None, "--superseded-by", help="SUPERSEDED only: the successor ADR key"),
+) -> None:
+    """Record YOUR acceptance/rejection/supersession of an ADR, bound to its content hash (password confirms AUTH).
+
+    A later edit of the ADR file makes this owner status STALE until you decide again."""
+    from aeos.core.errors import AeosError
+    from aeos.policy import adrs
+    from aeos.policy.decisions import decision_view
+
+    _ensure_db()
+    password = typer.prompt(f"Password for {as_user} (confirms this human decision)", hide_input=True,
+                            default="", show_default=False)
+    try:
+        with session_scope() as s:
+            uid = _admin_user_id(s, as_user, password)
+            d = adrs.record_adr_decision(s, adr_key=adr_key.upper(), outcome=outcome, actor_user_id=uid,
+                                         rationale=rationale, content_hash=content_hash, superseded_by=superseded_by)
+            v = decision_view(s, d)
+            console.print(f"Recorded ADR {v['target_id']} {v['details'].get('outcome')} decision {v['id']} "
+                          f"bound to {v['target_hash']}")
+    except AeosError as exc:
+        typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
+        raise typer.Exit(1) from exc

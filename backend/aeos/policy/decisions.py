@@ -67,6 +67,14 @@ def _resolve_actor(session: Session, actor_user_id: str, *, domain: str | None, 
                 f"owner-recorded decisions must reference an ACCEPTED ADR ({m.group(1)} not loaded/accepted)",
                 code="DECISION_ACTOR_NOT_HUMAN",
             )
+        from aeos.policy import adrs as adr_register
+
+        # §02: the owner's own ADR decision wins over the file's Status line - an ADR the owner REJECTED or
+        # SUPERSEDED no longer backs an owner-recorded actor, even after the file is edited again
+        owner_status = adr_register.effective_register_status(session, adr)
+        if owner_status != "ACCEPTED":
+            raise PolicyDenied(f"the owner recorded {owner_status} for {m.group(1)}; it no longer backs an "
+                               "owner-recorded actor", code="DECISION_ACTOR_NOT_HUMAN")
         return ACTOR_HUMAN_RECORDED
     user = session.get(User, actor_user_id)
     if user is None or not user.is_active:
@@ -202,6 +210,8 @@ def readiness_invalidators(decision: Decision) -> list[str]:
         out.append("secret:*")  # the selected secret backend may change (interim keyring exception)
     if decision.target_type in ("architecture_snapshot", "master_architecture"):
         out.append("config:master")  # policy.master_approval: the master's sha256 bound to a human approval (U-23)
+    if decision.target_type == catalog.TARGET_CLAUDE_EXTRA_USAGE:
+        out.append("config:claude_extra_usage")  # claude.extra_billing reads the owner attestation
     return list(dict.fromkeys(out))
 
 

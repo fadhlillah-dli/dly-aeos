@@ -176,8 +176,10 @@ def approval_decision(session: Session, version: PlanVersion, *, for_publication
 def _blocking_checks(state: Any) -> list[str]:
     """Checks whose OBSERVED result blocks the gate (§08 "operasi dengan dependency critical gagal tidak
     dijalankan"): a critical check that ran and is not ok (FAILED, MISSING, ...), a required/guard check that
-    FAILED, or a critical/required check invalidated (STALE) after it passed. Never-run (UNKNOWN) and TTL-EXPIRED
-    results are not observations of failure: they make the gate UNKNOWN and stay advisory (owner decision,
+    FAILED, a critical/required check invalidated (STALE) after it passed, or a project-tier check of this project's
+    own target (e.g. ``adapter.project_drive_root``) that FAILED/MISSING or went STALE (Drive root changed, token
+    invalidated: §08 "memicu recheck sebelum capability tersebut digunakan kembali"). Never-run (UNKNOWN) and
+    TTL-EXPIRED results are not observations of failure: they make the gate UNKNOWN and stay advisory (owner decision,
     ADR-0094 - enforcing them changes the protected acceptance publication fixtures)."""
     out = []
     for c in state.checks or []:
@@ -189,7 +191,8 @@ def _blocking_checks(state: Any) -> list[str]:
         # Never-run (None/UNKNOWN) and TTL-EXPIRED results carry no new information and stay advisory (ADR-0094).
         if (c.get("tier") == "critical" and eff not in (None, "UNKNOWN", "EXPIRED")) or \
                 (c.get("tier") == "required" and eff in ("FAILED", "STALE")) or \
-                (c.get("tier") == "guard" and eff == "FAILED"):
+                (c.get("tier") == "guard" and eff == "FAILED") or \
+                (c.get("tier") == "project" and eff in ("FAILED", "MISSING", "STALE")):
             out.append(str(c.get("check_id")))
     if state.status == "BLOCKED" and not out:  # e.g. a policy gate reason without a single check row
         out.append(str(getattr(state.capability, "value", state.capability) or "gate"))
@@ -230,9 +233,10 @@ def publish_gate(session: Session, project_id: str, domain: str) -> dict[str, An
                       code="CAPABILITY_NOT_READY") from exc
     return {"capability": "CAN_PUBLISH_PERSONAL", "status": state.status, "reasons": list(state.reasons[:8]),
             "failed_checks": _blocking_checks(state), "remedies": list(state.remedies[:5]),
-            "enforcement": "observed failing/missing checks and checks invalidated since they passed (STALE) refuse "
-                           "execute/retry; never-run (UNKNOWN) or TTL-expired results are advisory until the owner "
-                           "adopts full READY enforcement (ADR-0094; the interlock enforces every write)",
+            "enforcement": "observed failing/missing checks and checks invalidated since they passed (STALE), including "
+                           "this project's own targets (project tier), refuse execute/retry; never-run (UNKNOWN) or "
+                           "TTL-expired results are advisory until the owner adopts full READY enforcement (ADR-0094; "
+                           "the interlock enforces every write)",
             "full_ready_enforcement": "OWNER_DECISION_PENDING"}
 
 

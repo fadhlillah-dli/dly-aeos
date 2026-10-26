@@ -19,7 +19,7 @@ from aeos.doctor.checks._common import (
     resolve_binary,
     run_version,
 )
-from aeos.doctor.model import CheckContext, Outcome, Remedy, os_install_command
+from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd, os_install_command
 from aeos.inventory.probes import PROVIDER_ENV_NAMES, scrubbed_env
 
 FORBIDDEN_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", *PROVIDER_ENV_NAMES)
@@ -221,18 +221,55 @@ def claude_env(ctx: CheckContext) -> Outcome:
                    evidence=evidence)
 
 
+EXTRA_USAGE_PRESET_CMD = ("policy decide --kind POLICY --policy-preset claude_extra_usage_off --domain PERSONAL "
+                          "--as <admin> --days <hari> --rationale \"Extra usage berbayar dimatikan di claude.ai\"")
+
+
+def _fp_extra_usage(ctx: CheckContext) -> dict[str, Any] | None:
+    """The owner attestation the result was computed from: a new, revoked or expired attestation makes it STALE."""
+    if ctx.session is None:
+        return None
+    from aeos.policy import facade as policy
+
+    att = policy.claude_extra_usage_attestation(ctx.session)
+    return {"state": att["state"], "decision_id": att["decision_id"], "expires_at": att["expires_at"]}
+
+
 @check("claude.extra_billing", "CLAUDE_NATIVE", "Konfigurasi extra usage berbayar", component_id="claude-code",
-       ttl_seconds=86400, ok=frozenset(), severity_fail="MEDIUM")
+       ttl_seconds=86400, ok=frozenset(), severity_fail="MEDIUM", fingerprint=_fp_extra_usage,
+       invalidators=("config:claude_extra_usage",))
 def claude_extra_billing(ctx: CheckContext) -> Outcome:
+    """§12: AEOS cannot read the claude.ai paid extra-usage setting. An ACTIVE owner attestation (POLICY decision,
+    preset ``claude_extra_usage_off``) is consumed as an owner claim: CONFIGURED (E0), never VERIFIED."""
+    from aeos.policy import facade as policy
+
+    remedy = Remedy(operation="Di claude.ai (akun Max): Settings -> Usage, matikan extra usage berbayar (§12), lalu catat "
+                    "atestasi pemilik dengan masa berlaku yang Anda pilih", command=aeos_cmd(EXTRA_USAGE_PRESET_CMD),
+                    source=f"S03: {LOGIN_DOCS}", privilege="pemilik akun", cost="mencegah tagihan tambahan",
+                    evidence_to_collect="catatan keputusan pemilik (atestasi E0, tidak dapat diverifikasi AEOS)")
+    att = policy.claude_extra_usage_attestation(ctx.session)
+    evidence: dict[str, Any] = {"source": "tidak ada API resmi untuk status ini", "attestation": att["state"],
+                                "decision_id": att["decision_id"], "attestation_expires_at": att["expires_at"],
+                                "evidence_level": "E0"}
+    if att["state"] == "ATTESTED_OFF":
+        return Outcome("CONFIGURED", "Pemilik menyatakan extra usage berbayar NONAKTIF (atestasi E0, tidak dapat "
+                       f"diverifikasi AEOS; berlaku s.d. {att['expires_at'] or '-'}).", evidence={
+                           **evidence, "source": "atestasi pemilik (keputusan POLICY claude_extra_usage/PERSONAL)",
+                           "residual_risks": ["Extra usage berbayar: hanya atestasi pemilik (E0); AEOS tidak dapat "
+                                              "membaca pengaturan akun - bila diaktifkan lagi, pemakaian di atas kuota "
+                                              "Max dapat ditagih (§12)"]})
+    if att["state"] == "ATTESTED_ON":
+        return Outcome("FAILED", "Pemilik mencatat extra usage berbayar AKTIF; §12 meminta dinonaktifkan (pemakaian di "
+                       "atas kuota Max dapat ditagih).", severity="MEDIUM", error_code="EXTRA_USAGE_ATTESTED_ON",
+                       evidence={**evidence, "residual_risks": ["Extra usage berbayar akun Claude AKTIF menurut "
+                                                                "atestasi pemilik (§12)"]}, remedy=remedy)
     return Outcome("UNKNOWN", "Pengaturan extra usage berbayar tidak dapat dibaca secara resmi oleh AEOS; status UNKNOWN.",
                    severity="MEDIUM", evidence={
-                       "source": "tidak ada API resmi untuk status ini",
+                       **evidence,
                        # advisory for the Max gates, but true even when they are READY (no silent paid usage, §12)
                        "residual_risks": ["Extra usage berbayar akun Claude UNKNOWN: bila aktif, pemakaian di atas kuota "
                                           "Max dapat ditagih; pastikan nonaktif di pengaturan akun (§12)"]},
-                   remedy=Remedy(operation="Periksa manual pengaturan usage di akun Claude dan pastikan extra usage "
-                                 "berbayar nonaktif (§12)", source=f"S03: {LOGIN_DOCS}", privilege="pemilik akun",
-                                 cost="mencegah tagihan tambahan", evidence_to_collect="catatan keputusan pemilik"))
+                   remedy=remedy)
 
 
 @check("claude.quota", "CLAUDE_NATIVE", "Status kuota Max", component_id="claude-code", ttl_seconds=3600,

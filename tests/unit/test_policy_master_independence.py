@@ -14,9 +14,10 @@ MASTER = "docs/architecture/DLY_AEOS_Master_Architecture_Final.md"
 
 
 def _fake_repo(tmp_path: Path) -> Path:
+    from tests.unit import mci_support
+
     real = paths.repo_root()
-    root = tmp_path / "repo"
-    shutil.copytree(real / "policy", root / "policy")
+    root = mci_support.fake_repo(tmp_path)  # real policy files; MCI not supplied (independent of the owner's file)
     (root / MASTER).parent.mkdir(parents=True)
     shutil.copyfile(real / MASTER, root / MASTER)
     return root

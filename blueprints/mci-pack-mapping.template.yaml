@@ -1,0 +1,81 @@
+# Template of the owner's LOCAL per-pack MCI mapping (master §34 "17 packs dipetakan ke kontrol MCI yang benar dengan
+# evidence contracts sebelum readiness yang membutuhkannya"). Generic: every slot is empty and nothing is invented.
+#
+# Copy it to <data dir>/policy/canonical/mci-pack-mapping.yaml (Windows %LOCALAPPDATA%\DLY-AEOS\policy\canonical,
+# macOS ~/Library/Application Support/DLY-AEOS/policy/canonical) and fill it ONLY from the supplied MCI_V2. It is
+# derived MCI content: never commit the filled copy (the repository is public). A pack is APPROVED only while the
+# MCI source is VERIFIED and an owner POLICY decision on mci_pack_mapping/<key> binds the hash shown at /decisions
+# (GET /api/policy/mci, pack_mappings[].binding). Compliance stays NOT-PROVEN.
+#
+#   mci_controls:      control ids from MCI_V2
+#   mapping_status:    UNVERIFIED (a declared status is never trusted without the owner decision)
+#   evidence_contract: claim_types, required_evidence_kinds, min_level (E0-E4), trusted_origins, freshness
+packs:
+  - key: ARCH
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: PRODUCT
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: UX/FE
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: BE/API
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: DB/DATA
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: PLATFORM/SRE
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: QA
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: SEC/GRC
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: AGENT/HARNESS/ROUTING
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: TOOL/MCP
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: RESEARCH
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: DOCS/DECISIONS
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: CLIENT/AUDIT
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: SUPPLY-CHAIN
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: INCIDENT/REL
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: AI-GOV
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
+  - key: COST/QUOTA
+    mci_controls: []
+    mapping_status: UNVERIFIED
+    evidence_contract: {claim_types: [], required_evidence_kinds: [], min_level: null, trusted_origins: [], freshness: null}
