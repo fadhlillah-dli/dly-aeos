@@ -80,6 +80,16 @@ export const QUOTA_STATE: BadgeMap = {
   UNKNOWN: ["UNKNOWN", "Tidak diketahui"],
 };
 
+// Allowance state of a flat-fee SUBSCRIPTION route (ADR-0080 amendment 2026-10-26); never a dollar-spend state.
+export const SUBSCRIPTION_STATE: BadgeMap = {
+  OK: ["READY", "Dalam paket"],
+  WARN_EXHAUSTED: ["DEGRADED", "Habis (saran, tidak memblokir)"],
+  EXHAUSTED: ["BLOCKED", "Allowance habis — menunggu jendela"],
+  UNKNOWN: ["UNKNOWN", "Allowance tak terhitung — menunggu"],
+  BEYOND_PLAN: ["BLOCKED", "Di luar paket (Extra Usage) — ditolak"],
+  UNTRUSTED: ["UNKNOWN", "Ketentuan paket tidak lengkap — ditolak"],
+};
+
 export const COST_KIND: BadgeMap = {
   ACTUAL: ["LIVE", "Aktual"],
   ESTIMATE: ["ESTIMATE", "Estimasi"],

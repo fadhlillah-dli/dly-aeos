@@ -65,9 +65,10 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
     - **Views.** `aeos cost summary`, `GET /api/costs/summary` (`subscriptions`, `by_route[].billing`), the route view
       and the task admission answer show the plan and the allowance per window (advisory windows marked), never
       per-token spend; the figures are hidden from a principal who cannot see every domain, also in
-      `GET /api/tasks/{id}/admission`. `aeos routes list` only flags `billing=SUBSCRIPTION`; the Control Center pages
-      do not show the allowance windows yet (UI gap). Doctor `route.registry` lists `subscription_candidates` apart
-      from paid or unknown-price candidates.
+      `GET /api/tasks/{id}/admission`. `aeos routes list` only flags `billing=SUBSCRIPTION`; the Costs page ("Langganan
+      worker") and the route drawer show the plan, the allowance per window and the beyond-plan state (UI contract
+      fixtures refreshed). Doctor `route.registry` lists `subscription_candidates` apart from paid or unknown-price
+      candidates.
     - **No migration.** Existing JSON columns hold the new figures.
     - **Evidence.** E2: unit tests with mocked upstreams cover allowance recording (reported, estimated, upper bound,
       stream), the blocking 5h window, the advisory week/month windows, the beyond-plan refusal and its clearing by
