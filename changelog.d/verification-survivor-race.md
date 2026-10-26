@@ -18,3 +18,4 @@
   six tests that had flaked ran 30 times each: 174 of 180 passed before the fix (all 6 failures were "group
   unreadable (SystemError)"), 180 of 180 passed after it. NOT-PROVEN on Windows (that path uses the Job Object; its marker-sweep fallback shares the new per-process read
   but was not run there) and on Intel macOS until CI runs there.
+- **Order-dependent routing test.** `tests/unit/test_routing_service.py::test_activation_guards` failed when run on its own: the fake `aeos.policy.office` module in `tests/unit/test_routing_fakes.py` lacked `company_authorisation`, and the test only passed when an earlier test had imported the real module first. The fake now returns no company authorisation (fail closed). E2: the test passes alone and in its file.
