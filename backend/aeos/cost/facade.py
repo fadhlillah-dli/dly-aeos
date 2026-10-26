@@ -8,8 +8,13 @@ held until commit/rollback). Native Claude usage (category ``NATIVE_CLAUDE``) is
 into dollars; any ``cost_usd`` passed for it is discarded.
 
 Flat-fee SUBSCRIPTION routes (additive, ADR-0080 amendment 2026-10-26): ``subscription_terms`` and
-``allowance_status`` state a route's plan and the allowance consumed per provider window; ``reserve`` refuses
-``SUBSCRIPTION_ALLOWANCE_EXHAUSTED`` when a window is used up.
+``allowance_status`` state a route's plan and the allowance this AEOS instance consumed per provider window;
+``reserve`` refuses ``SUBSCRIPTION_ALLOWANCE_EXHAUSTED`` (the 5h window used up), ``SUBSCRIPTION_ALLOWANCE_UNKNOWN``
+(a call in the 5h window cannot be counted; at most 5 hours) and ``SUBSCRIPTION_BEYOND_PLAN`` (a call billed beyond
+the plan, until the owner re-activates the route). The week/month windows are advisory (``WARN_EXHAUSTED``).
+``subscription_admission_block`` gives the same (code, reason) to the scheduler and the probe,
+``subscription_beyond_plan`` the broker's per-request check, and ``subscription_without_figures`` the view of a
+principal who cannot see every domain.
 """
 
 from __future__ import annotations
@@ -96,11 +101,34 @@ def subscription_terms(route: ModelRoute | None) -> tuple[dict[str, Any] | None,
 
 
 def allowance_status(session: Session, route: ModelRoute, *, now: datetime | None = None) -> dict[str, Any] | None:
-    """Plan + allowance consumed per provider window (state OK/EXHAUSTED/UNKNOWN/UNTRUSTED); None when *route* is not a
-    SUBSCRIPTION route. Read-only."""
+    """Plan + allowance this AEOS instance consumed per provider window (state OK / WARN_EXHAUSTED (advisory) /
+    EXHAUSTED / UNKNOWN / BEYOND_PLAN / UNTRUSTED); None when *route* is not a SUBSCRIPTION route. Read-only."""
     from aeos.cost.subscription import allowance_status as impl
 
     return impl(session, route, now=now)
+
+
+def subscription_admission_block(status: dict[str, Any] | None) -> tuple[str, str] | None:
+    """(code, ASCII reason without allowance figures) when an ``allowance_status`` refuses a new admission or probe:
+    ``SUBSCRIPTION_BEYOND_PLAN``, ``SUBSCRIPTION_ALLOWANCE_EXHAUSTED`` or ``SUBSCRIPTION_ALLOWANCE_UNKNOWN``."""
+    from aeos.cost.subscription import admission_block as impl
+
+    return impl(status)
+
+
+def subscription_beyond_plan(session: Session, route: ModelRoute) -> dict[str, Any] | None:
+    """The newest call of a SUBSCRIPTION route billed beyond the plan that no owner (re-)activation postdates (entry
+    id, time, amount or UNKNOWN, billing source, remedy); None when the route may be used. Read-only."""
+    from aeos.cost.subscription import beyond_plan_block as impl
+
+    return impl(session, route)
+
+
+def subscription_without_figures(status: dict[str, Any]) -> dict[str, Any]:
+    """An ``allowance_status`` without the figures that span domains (windows, beyond-plan amounts, problems)."""
+    from aeos.cost.subscription import without_figures as impl
+
+    return impl(status)
 
 
 def set_quota_state(

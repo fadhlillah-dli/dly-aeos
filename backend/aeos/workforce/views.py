@@ -36,6 +36,8 @@ BLOCKING_WAIT_CODES = frozenset({"CAPABILITY_NOT_READY", "SANDBOX_NOT_READY", "R
                                  "CONTEXT_TOO_LARGE",
                                  "UNSAFE_PATH", "FORBIDDEN_PATH_ALLOWED", "VERIFIER_UNAVAILABLE",
                                  "OFFICE_ROUTE_NOT_AUTHORISED",
+                                 # ADR-0080 amendment 2026-10-26: only the owner's route re-activation clears it
+                                 "SUBSCRIPTION_BEYOND_PLAN",
                                  # §41: only a new approved plan version with the sections filled clears these
                                  "DOCS_NOT_READY", "DOCS_READINESS_UNVERIFIED"})
 CURRENT_ACTION_LABELS = {"RUNNER": "observed tool action (runner)", "CONTROLLER": "controller status (bukan aksi tool)"}

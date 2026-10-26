@@ -182,11 +182,7 @@ def _subscription_view(session: Session, r: ModelRoute, principal: Principal) ->
         return None
     can = getattr(principal, "can_access_domain", None)
     cross = getattr(principal, "allowed_project_ids", None) is None and callable(can) and all(can(d) for d in Domain)
-    if not cross:
-        return {k: v for k, v in status.items() if k not in ("windows", "beyond_plan_usd", "problems")} | {
-            "windows": None, "spend_hidden": True,
-            "spend_note": "Allowance rute mencakup domain lain yang tidak dapat Anda lihat."}
-    return status
+    return status if cross else cost.subscription_without_figures(status)
 
 
 def route_view(session: Session, r: ModelRoute, principal: Principal,

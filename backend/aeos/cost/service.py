@@ -15,7 +15,10 @@ Rules implemented here (see ADR-0080):
 * Flat-fee SUBSCRIPTION worker routes (``pricing.billing``, ADR-0080 amendment 2026-10-26; ``aeos.cost.subscription``):
   the plan fee is the owner's BUDGET decision at activation, the marginal cost is the provider's ``usage.cost`` (0
   within the plan, never the reservation charged as made-up dollars) and the allowance each call consumes is recorded
-  apart from money; admission waits when a provider window's allowance is used up (``SUBSCRIPTION_ALLOWANCE_EXHAUSTED``).
+  apart from money. Only this AEOS instance's calls are counted. Admission waits while the 5h window's allowance is
+  used up (``SUBSCRIPTION_ALLOWANCE_EXHAUSTED``) or a call in it cannot be counted (``SUBSCRIPTION_ALLOWANCE_UNKNOWN``,
+  at most 5 hours); the week/month windows are advisory. A call billed beyond the plan refuses the route until the
+  owner re-activates it (``SUBSCRIPTION_BEYOND_PLAN``, fail closed).
 * Categories WORKER_API / NATIVE_CLAUDE / CI / COMPUTE / STORAGE / HUMAN_TIME stay separate.
 * MOCK/DEMO entries never count as actual usage or against budgets (§50).
 
@@ -480,13 +483,13 @@ def reserve(session: Session, req: Any) -> BudgetReservation:
             sink.append(f"{_label(b)}: requests {spent.requests}+{held.requests}+{est_requests} > {b.limit_requests}")
         checked.append({"budget_id": b.id, "scope": _label(b), "limit_usd": None if lim_usd is None else str(lim_usd)})
 
-    # ADR-0080 amendment 2026-10-26: a subscription route's allowance windows (provider limits, not a budget). A
-    # ledger entry of a window whose allowance cannot be counted makes the state untrusted (incomplete terms are
-    # already refused by the pricing check above).
+    # ADR-0080 amendment 2026-10-26: a subscription route's state (provider limits as counted by this AEOS instance,
+    # not a budget). Blocking: a call billed beyond the plan (until the owner re-activates the route), the 5h window
+    # used up, or a call in it whose allowance cannot be counted (at most 5 hours). The week/month windows are advisory.
+    # Incomplete terms are already refused by the pricing check above.
     route = routes.get(req.route_key or "")
     allowance = subs.allowance_status(session, route, now=now) if route is not None else None
-    if allowance is not None and allowance["state"] == "UNKNOWN":
-        untrusted += list(allowance["problems"])
+    block = subs.admission_block(allowance)
     if untrusted:
         raise Blocked("budget state cannot be trusted; admission refused (fail closed)",
                       code="BUDGET_STATE_UNTRUSTED", details={"reasons": untrusted, "budgets": checked})
@@ -494,11 +497,10 @@ def reserve(session: Session, req: Any) -> BudgetReservation:
     if quota:
         raise Blocked("provider quota exhausted; wait/backoff or use an approved free fallback (no paid fallback)",
                       code="QUOTA_EXHAUSTED", details={"reasons": quota})
-    if allowance is not None and allowance["state"] == "EXHAUSTED":
-        # before the provider's 429: wait for the window; never another route, never paid usage beyond the plan
-        raise Blocked("subscription allowance used up in a provider window; the run waits for the window (no "
-                      "fallback route, no paid usage beyond the plan)", code="SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
-                      details={"reasons": subs.exhausted_reasons(allowance), "windows": allowance["windows"]})
+    if block and allowance is not None:
+        # never another route, never paid usage beyond the plan; the reason carries no allowance figures
+        raise Blocked(subs.BLOCK_MESSAGES[block[0]], code=block[0],
+                      details={"reasons": [block[1]], "state": allowance["state"]})
     if exceeded:
         raise Blocked("budget hard stop reached; admission refused (no paid fallback, no auto-topup)",
                       code="BUDGET_EXCEEDED", details={"reasons": exceeded, "budgets": checked})
@@ -591,8 +593,13 @@ def record_usage(
     A SUBSCRIPTION route (ADR-0080 amendment 2026-10-26) is never charged its reservation: ``cost_usd`` is the
     provider's marginal charge (0 within the plan; UNKNOWN stays UNKNOWN and is charged $0), and the allowance the call
     consumed goes to ``details.allowance_usd`` with its basis: ``details.reported_allowance_usd`` from the provider
-    (REPORTED), else estimated from the tokens x the route's allowance rates (ESTIMATED). A marginal charge above $0 is
-    paid usage beyond the plan: charged to the budgets and flagged (``beyond_plan_usd``)."""
+    (REPORTED), else estimated from the tokens x the route's allowance rates, else from an upper bound of the call's
+    tokens (``details.charged_tokens`` from the caller - the broker's clamped ``max_tokens`` plus the prompt size - else
+    the tokens charged against the hold) x the highest rate (ESTIMATED); UNKNOWN only when nothing bounds the call.
+    Paid usage beyond the plan - a marginal charge above $0, a ``details.billing_source`` that is not one of the plan's
+    sources (e.g. ``balance``), or a cost the provider stated but AEOS could not read (``details.cost_reported_unusable``)
+    - is charged to the budgets when reported, flagged ``beyond_plan_usd`` (the amount, else UNKNOWN) and emitted as
+    ``cost.subscription.beyond_plan``; the route is then refused until the owner re-activates it."""
     extra.pop("impl", None)  # the facade forwards **locals(), which includes its import alias
     if extra:
         raise TypeError(f"unexpected arguments: {sorted(extra)}")
@@ -660,7 +667,11 @@ def record_usage(
         route_key = route_key or res.route_key
         run_id = run_id or res.run_id
     domain = _check_domain(session, domain=domain, project_id=project_id, run_id=run_id, required=False)
-    sub_terms, reported_allowance = _subscription_usage(session, category, route_key, info)
+    subscription_priced, sub_terms, reported_allowance = _subscription_usage(session, category, route_key, info)
+    # the caller's upper bound of this call's tokens when the upstream reported none (facade contract)
+    caller_bound = subs.token_count(info.get("charged_tokens"))
+    if caller_bound is None:
+        info.pop("charged_tokens", None)
     if res is not None and partial:
         reserved_usd = money(res.reserved_usd) or ZERO
         already_usd = money(res.committed_usd) or ZERO
@@ -706,14 +717,22 @@ def record_usage(
         charged = ZERO
         info["marginal_cost_unreported"] = True
     if sub_terms is not None:
+        # the caller's per-call bound (clamped max_tokens + prompt size) is tighter than the hold's remainder
+        bound = caller_bound if caller_bound is not None else subs.token_count(info.get("charged_tokens"))
+        if caller_bound is not None and info.get("charged_tokens") != caller_bound:
+            info["allowance_token_bound"] = caller_bound
         allowance, basis, how = subs.allowance_of(sub_terms, reported=reported_allowance, input_tokens=input_tokens,
-                                                  output_tokens=output_tokens, charged_tokens=info.get("charged_tokens"))
+                                                  output_tokens=output_tokens, charged_tokens=bound)
         info.update({"plan": sub_terms["plan"], "allowance_usd": None if allowance is None else str(allowance),
                      "allowance_basis": basis})
         if how:
             info["allowance_estimate_from"] = how
-        if cost is not None and cost > ZERO:
-            info["beyond_plan_usd"] = str(cost)  # e.g. the provider's paid overage ("Extra Usage") was ON
+    if subscription_priced:
+        # provider-side paid fallback (e.g. Extra Usage ON): a charge, a non-plan billing source or an unreadable cost
+        beyond = subs.beyond_plan_amount(cost=cost, billing_source=info.get("billing_source"),
+                                         cost_unreadable=bool(info.get("cost_reported_unusable")))
+        if beyond is not None:
+            info["beyond_plan_usd"] = beyond
 
     entry = UsageLedgerEntry(
         project_id=project_id, domain=domain, run_id=run_id, task_id=task_id, route_key=route_key,
@@ -732,11 +751,14 @@ def record_usage(
                  **({"billing": subs.SUBSCRIPTION, "allowance_usd": info.get("allowance_usd"),
                      "allowance_basis": info.get("allowance_basis")} if sub_terms is not None else {})},
     )
-    if "beyond_plan_usd" in info:
+    if subscription_priced and "beyond_plan_usd" in info:
         events.emit(session, source="cost", kind="cost.subscription.beyond_plan", entity_type="usage_ledger",
                     entity_id=entry.id, project_id=project_id, domain=domain, run_id=run_id, mode=mode,
                     payload={"route_key": route_key, "charged_usd": info["beyond_plan_usd"],
-                             "note": "marginal charge on a subscription route: paid usage beyond the plan"})
+                             "billing_source": info.get("billing_source"),
+                             "note": "paid usage beyond the plan on a subscription route (provider-side paid "
+                                     "fallback); the route is refused for new admissions, probes and broker requests "
+                                     "until the owner re-activates it"})
     if res is not None and "overrun_usd" in info:
         events.emit(session, source="cost", kind="cost.budget.overrun", entity_type="budget_reservation",
                     entity_id=res.id, project_id=project_id, domain=domain, run_id=run_id,
@@ -745,8 +767,9 @@ def record_usage(
 
 
 def _subscription_usage(session: Session, category: str, route_key: str | None,
-                        info: dict[str, Any]) -> tuple[dict[str, Any] | None, Any]:
-    """(trusted subscription terms or None, the provider-reported allowance) of a model call; marks the entry's billing.
+                        info: dict[str, Any]) -> tuple[bool, dict[str, Any] | None, Any]:
+    """(the route is subscription-priced, its trusted terms or None, the provider-reported allowance) of a model call;
+    marks the entry's billing.
 
     The provider figure arrives as ``details.reported_allowance_usd``; it is kept as such on any other route."""
     reported = info.pop("reported_allowance_usd", None)
@@ -755,14 +778,14 @@ def _subscription_usage(session: Session, category: str, route_key: str | None,
     if not subs.is_subscription_priced(route):
         if reported is not None:
             info["reported_allowance_usd"] = reported
-        return None, None
+        return False, None, None
     terms, problem = subs.subscription_terms(route)
     info["billing"] = subs.SUBSCRIPTION
     if problem:
         info["subscription_terms_problem"] = problem  # an unpriced paid route: the paid-route rules apply
         if reported is not None:
             info["reported_allowance_usd"] = reported
-    return terms, reported
+    return True, terms, reported
 
 
 # --------------------------------------------------------------------------- budgets (owner decisions)
@@ -1258,11 +1281,7 @@ def subscription_views(session: Session, *, routes: dict[str, ModelRoute] | None
             continue
         if route.status not in ("TRIAL", "APPROVED") and not any(w["requests"] for w in status["windows"]):
             continue
-        if not spend_visible:
-            status = {k: v for k, v in status.items() if k not in ("windows", "beyond_plan_usd", "problems")} | {
-                "windows": None, "spend_hidden": True,
-                "spend_note": "Allowance rute mencakup domain lain yang tidak dapat Anda lihat."}
-        out.append(status)
+        out.append(status if spend_visible else subs.without_figures(status))
     return out
 
 

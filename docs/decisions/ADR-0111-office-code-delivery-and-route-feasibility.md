@@ -117,3 +117,17 @@ fidelity and treated invalidated (STALE) readiness as advisory (§08, §29).
   start, PERSONAL, TRIAL/APPROVED on a decision bound to the current configuration hash, free (no budget path for
   an eval-only route, no silent paid spend) and terms allowing the task's data classification - the probe's
   checks applied to a controlled evaluation. Usage, ledger, 429/quota and caps follow the ordinary proxy path.
+
+## Amendment 2026-10-26 (probe on a flat-fee SUBSCRIPTION route)
+
+* Decision 6 above says the probe goes to "a free" route. Since the ADR-0080 amendment 2026-10-26 (and ADR-0041
+  decision A, OpenCode Go), the probe may also target an activated flat-fee SUBSCRIPTION route whose terms are
+  complete: one synthetic PUBLIC request consumes plan allowance, not money (the plan fee is the activation's BUDGET
+  decision). Free routes and loopback LOCAL routes are probed as before; a per-token paid route is still refused
+  (`ROUTE_NOT_FREE`, no budget path for a probe).
+* A subscription route is refused before any call while its 5h window is used up (`SUBSCRIPTION_ALLOWANCE_EXHAUSTED`),
+  while a call in it cannot be counted (`SUBSCRIPTION_ALLOWANCE_UNKNOWN`) and after a call billed beyond the plan
+  until the owner re-activates the route (`SUBSCRIPTION_BEYOND_PLAN`). Its advisory week/month windows never refuse.
+* On OpenCode Go the probe sends its own opaque `x-opencode-session` and the broker's User-Agent, and records the
+  allowance it consumed (a token upper bound when Go reports no usage) next to the PROBE evidence.
+* This ADR changed, so an owner ACCEPTED registration of it is STALE until it is recorded again (OWNER_ACTIONS 2.8).

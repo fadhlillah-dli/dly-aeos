@@ -79,7 +79,7 @@ def refresh_cmd() -> None:
                      target_type="model_catalog", target_id="openrouter+opencode", details={"status": row.status})
         for name, res in row.results.items():
             typer.echo(f"{name:<20} {res.get('status')} {res.get('reason', '')}")
-            for k in ("discovered", "config_changed", "missing"):
+            for k in ("discovered", "available", "config_changed", "missing"):
                 if res.get(k):
                     typer.echo(f"  {k}: {', '.join(res[k])}")
         typer.echo(f"overall: {row.status}")

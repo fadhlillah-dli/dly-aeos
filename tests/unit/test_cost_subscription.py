@@ -1,13 +1,17 @@
 """Flat-fee SUBSCRIPTION routes in the cost and admission path (ADR-0080 amendment 2026-10-26; ADR-0041 decision A,
 OpenCode Go). The plan fee is the owner's BUDGET decision; a model call costs the provider's marginal charge (0 within
 the plan) and consumes plan ALLOWANCE, counted per provider window (5 hours 20%, week 50%, month 100% of the monthly
-allowance; E1 Go docs read 2026-10-26). Never per-token spend, never the reservation charged as made-up dollars.
-Real cost module, real ledger; upstreams are respx mocks."""
+allowance; E1 Go docs read 2026-10-26) over the calls of THIS AEOS instance only. The 5h window blocks admission; the
+week and month windows are advisory (WARN_EXHAUSTED). A call billed beyond the plan (a charge, a non-plan billing
+source) refuses the route until the owner re-activates it. Never per-token spend, never the reservation charged as
+made-up dollars. Real cost module, real ledger; upstreams are respx mocks."""
 
 from __future__ import annotations
 
 import json
+import math
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -18,7 +22,7 @@ from typer.testing import CliRunner
 
 from aeos.broker import facade as broker
 from aeos.cli import app
-from aeos.core.errors import Blocked, PolicyDenied
+from aeos.core.errors import Blocked, PolicyDenied, ValidationFailed
 from aeos.core.timeutil import utcnow
 from aeos.cost import facade, service, subscription
 from aeos.models.audit import Event
@@ -134,6 +138,16 @@ def test_usage_records_marginal_cost_and_allowance_and_never_charges_the_reserva
     assert service.ledger_view(unreported)["cost_kind"] == "UNKNOWN"
 
 
+def _reactivate(db, key: str = GO) -> Decision:
+    """The owner's (re-)activation of the route: a human TRIAL decision recorded now."""
+    d = Decision(kind="TRIAL", actor_user_id="owner", actor_kind="HUMAN", target_type="model_route", target_id=key,
+                 target_hash="sha256:" + "0" * 64, domain="PERSONAL", rationale="owner re-activation after review",
+                 allowed_operations=["route.use"])
+    db.add(d)
+    db.commit()
+    return d
+
+
 def test_a_marginal_charge_is_paid_usage_beyond_the_plan_and_counts_against_budgets(db):
     _go_route(db)
     e = facade.record_usage(db, provider="opencode-go", category="WORKER_API", source="broker", route_key=GO,
@@ -143,10 +157,93 @@ def test_a_marginal_charge_is_paid_usage_beyond_the_plan_and_counts_against_budg
     assert e.details["beyond_plan_usd"] == "0.020000" and float(e.charged_usd) == pytest.approx(0.02)
     assert service.ledger_view(e)["cost_kind"] == "ACTUAL"
     ev = db.scalar(select(Event).where(Event.kind == "cost.subscription.beyond_plan"))
-    assert ev is not None and ev.payload["route_key"] == GO
-    with pytest.raises(Blocked) as ei:  # $0.02 real spend under the $0 default hard stop: the next run waits
+    assert ev is not None and ev.payload["route_key"] == GO and ev.payload["billing_source"] == "balance"
+    with pytest.raises(Blocked) as ei:  # fail closed: the route is refused until the owner re-activates it
         facade.reserve(db, _req(run="r2"))
+    db.rollback()
+    assert ei.value.code == "SUBSCRIPTION_BEYOND_PLAN" and "$" not in " ".join(ei.value.details["reasons"])
+    _reactivate(db)
+    with pytest.raises(Blocked) as ei:  # $0.02 real spend under the $0 default hard stop: the next run still waits
+        facade.reserve(db, _req(run="r3"))
     assert ei.value.code == "BUDGET_EXCEEDED"
+    db.rollback()
+
+
+@pytest.mark.parametrize("cost,source,amount", [
+    (None, "balance", "UNKNOWN"),   # the pay-as-you-go balance paid it, no usage.cost reported
+    (0.0, "Balance", "UNKNOWN"),    # case-insensitive; a $0 cost does not override a non-plan billing source
+    (0.5, "go", "0.500000"),        # a marginal charge, whatever the source says
+])
+def test_provider_side_paid_fallback_refuses_the_route_until_the_owner_reactivates_it(db, cost, source, amount):
+    """Invariant 8 (no silent paid fallback): a call billed beyond the plan on the provider side - a billing source
+    outside the plan or a marginal charge - is flagged, emitted, and refuses the route for new admissions (fail closed)
+    until a human TRIAL/APPROVED decision for the route is newer than the call."""
+    route = _go_route(db)
+    first = _reactivate(db)  # the activation in force when the call happens: older than the call
+    e = facade.record_usage(db, provider="opencode-go", category="WORKER_API", source="broker", route_key=GO,
+                            input_tokens=10, output_tokens=10, cost_usd=cost,
+                            details={"reported_allowance_usd": 0.00001, "billing_source": source})
+    db.commit()
+    assert e.details["beyond_plan_usd"] == amount
+    ev = db.scalar(select(Event).where(Event.kind == "cost.subscription.beyond_plan"))
+    assert ev is not None and ev.payload["charged_usd"] == amount and ev.entity_id == e.id
+    status = facade.allowance_status(db, route)
+    assert status["state"] == "BEYOND_PLAN" and status["beyond_plan"]["entry_id"] == e.id
+    assert status["beyond_plan"]["activated_at"] == subscription.ensure_aware(first.created_at).isoformat()
+    code, reason = facade.subscription_admission_block(status)
+    assert code == "SUBSCRIPTION_BEYOND_PLAN" and "re-activates" in reason and reason.isascii()
+    assert facade.subscription_beyond_plan(db, route)["entry_id"] == e.id
+    with pytest.raises(Blocked) as ei:
+        facade.reserve(db, _req(usd=0.0))
+    db.rollback()
+    assert ei.value.code == "SUBSCRIPTION_BEYOND_PLAN"
+    _reactivate(db)  # the owner checked Extra Usage and re-activated the route: newer than the flagged call
+    assert facade.subscription_beyond_plan(db, route) is None
+    assert facade.allowance_status(db, route)["state"] != "BEYOND_PLAN"
+
+
+def test_calls_within_the_plan_are_never_flagged(db):
+    route = _go_route(db)
+    for source in ("go", "go-plus", None):
+        facade.record_usage(db, provider="opencode-go", category="WORKER_API", source="broker", route_key=GO,
+                            input_tokens=10, output_tokens=10, cost_usd=0.0,
+                            details={"billing_source": source} if source else None)
+    db.commit()
+    assert db.scalar(select(Event).where(Event.kind == "cost.subscription.beyond_plan")) is None
+    assert facade.allowance_status(db, route)["state"] == "OK"
+    assert facade.reserve(db, _req()).pricing_basis == "SUBSCRIPTION"
+    db.rollback()
+
+
+def test_an_absurd_provider_figure_never_crashes_the_ledger(db):
+    """money() turns every decimal arithmetic error into ValueError (1e25 does not fit the 6-dp context); the broker
+    parser treats absurd figures as unreported, and a cost the provider stated but AEOS cannot read is paid usage
+    beyond the plan on a subscription route."""
+    from aeos.broker import model_proxy
+    from aeos.cost.amounts import money
+
+    for bad in (1e25, "1e25", Decimal("1e25"), 10 ** 30):
+        with pytest.raises(ValueError):
+            money(bad)
+    assert subscription.allowance_of({"rates": {"input": Decimal("0.15"), "output": Decimal("0.5")}},
+                                     reported=1e25, input_tokens=1_000_000)[1] == "ESTIMATED"
+    data = {"usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 1e25,
+                      "opencode": {"allowance": 1e25, "billing_source": "go"}}}
+    assert model_proxy._usage_of(data)[2] is None
+    assert model_proxy._billing_of(data) == {"cost_reported_unusable": True, "billing_source": "go"}
+    assert model_proxy._billing_of({"usage": {"opencode": {"allowance": 2e9}}}) == {}  # above the guard: unreported
+    assert model_proxy._billing_of({"usage": {"opencode": {"allowance": 0.25}}}) == {"reported_allowance_usd": 0.25}
+    route = _go_route(db)
+    e = facade.record_usage(db, provider="opencode-go", category="WORKER_API", source="broker", route_key=GO,
+                            input_tokens=10, output_tokens=2, cost_usd=model_proxy._usage_of(data)[2],
+                            details=model_proxy._billing_of(data))
+    db.commit()
+    assert e.cost_usd is None and e.details["allowance_basis"] == "ESTIMATED"
+    assert e.details["beyond_plan_usd"] == "UNKNOWN" and facade.allowance_status(db, route)["state"] == "BEYOND_PLAN"
+    # the cost module itself refuses an out-of-range amount as a validation error, never an arithmetic crash
+    with pytest.raises(ValidationFailed):
+        facade.record_usage(db, provider="opencode-go", category="WORKER_API", source="broker", route_key=GO,
+                            cost_usd=1e25)
     db.rollback()
 
 
@@ -174,23 +271,48 @@ def test_per_token_paid_route_keeps_charging_the_reservation_when_cost_is_unknow
 # ---------------------------------------------------------------------------------------------- admission
 
 
-@pytest.mark.parametrize("hours_ago,allowance,window", [
-    (1, "12", "5h"),         # 20% of $60 within the trailing 5 hours
-    (6, "30", "week"),       # outside 5h, 50% within the trailing week
-    (24 * 8, "60", "month"),  # outside the week, 100% within the trailing 31 days
-])
-def test_admission_waits_when_a_provider_window_is_used_up(db, hours_ago, allowance, window):
+def test_admission_waits_when_the_5h_window_is_used_up(db):
     _go_route(db)
-    _use(db, hours_ago=hours_ago, allowance=allowance)
+    _use(db, hours_ago=1, allowance="12")  # 20% of $60 within the trailing 5 hours
     status = facade.allowance_status(db, db.scalar(select(ModelRoute).where(ModelRoute.route_key == GO)))
-    states = {w["window"]: w["state"] for w in status["windows"]}
-    assert status["state"] == "EXHAUSTED" and states[window] == "EXHAUSTED"
-    assert [w for w, st in states.items() if st == "EXHAUSTED"] == [window]
+    states = {w["window"]: (w["state"], w["blocking"]) for w in status["windows"]}
+    assert status["state"] == "EXHAUSTED" and states == {
+        "5h": ("EXHAUSTED", True), "week": ("OK", False), "month": ("OK", False)}
+    assert status["counted_scope"] == "THIS_AEOS_INSTANCE" and "this AEOS instance" in status["basis"]
     with pytest.raises(Blocked) as ei:
         facade.reserve(db, _req())
     db.rollback()
     assert ei.value.code == "SUBSCRIPTION_ALLOWANCE_EXHAUSTED"
-    assert any(f"{window} window" in r for r in ei.value.details["reasons"])
+    (reason,) = ei.value.details["reasons"]
+    assert "5h window" in reason and "$" not in reason  # no allowance figures in a reason (they span domains)
+
+
+@pytest.mark.parametrize("hours_ago,allowance,window", [
+    (6, "30", "week"),        # outside 5h, 50% within the trailing week
+    (24 * 8, "60", "month"),  # outside the week, 100% within the trailing 31 days
+])
+def test_week_and_month_windows_are_advisory_and_never_block(db, hours_ago, allowance, window):
+    """AEOS cannot know where the provider anchors its week/month windows, and with Extra Usage OFF exceeding them
+    only yields provider refusals (no money): shown as WARN_EXHAUSTED, never a lock of up to 31 days."""
+    _go_route(db)
+    _use(db, hours_ago=hours_ago, allowance=allowance)
+    status = facade.allowance_status(db, db.scalar(select(ModelRoute).where(ModelRoute.route_key == GO)))
+    states = {w["window"]: w["state"] for w in status["windows"]}
+    assert status["state"] == "WARN_EXHAUSTED" and states[window] == "WARN_EXHAUSTED" and states["5h"] == "OK"
+    assert any(f"{window} window" in w and "advisory" in w for w in status["warnings"])
+    assert facade.subscription_admission_block(status) is None
+    assert facade.reserve(db, _req()).pricing_basis == "SUBSCRIPTION"  # admitted: the provider's limit decides
+    db.rollback()
+
+
+def test_window_lengths_are_trailing_5_hours_7_days_and_31_days(db):
+    _go_route(db)
+    sec = 1 / 3600
+    for hours_ago, allowance in ((5 + sec, "1"), (24 * 7 + sec, "2"), (24 * 31 + sec, "4"), (24 * 31 - 0.01, "8")):
+        _use(db, hours_ago=hours_ago, allowance=allowance)
+    status = facade.allowance_status(db, db.scalar(select(ModelRoute).where(ModelRoute.route_key == GO)))
+    used = {w["window"]: w["used_usd"] for w in status["windows"]}
+    assert used == {"5h": 0.0, "week": 1.0, "month": 11.0}  # 31 days + 1 s is outside the month window
 
 
 def test_admission_counts_reported_and_estimated_allowance_and_admits_below_the_limit(db):
@@ -212,13 +334,56 @@ def test_admission_counts_reported_and_estimated_allowance_and_admits_below_the_
     assert ei.value.code == "SUBSCRIPTION_ALLOWANCE_EXHAUSTED"
 
 
-def test_an_entry_without_countable_allowance_or_incomplete_terms_refuses_admission(db):
-    _go_route(db)
-    _use(db, hours_ago=1, allowance=None, cost=None)  # no allowance, no tokens, no bound: UNKNOWN
+def test_an_uncountable_call_blocks_only_the_5h_window_and_at_most_5_hours(db):
+    """Truly nothing known (no allowance, no tokens, no bound): UNKNOWN blocks the 5h window until the call leaves it
+    (at most 5 hours, fail closed); in the advisory week/month windows it is a warning - never a 31-day lock."""
+    route = _go_route(db)
+    e = _use(db, hours_ago=1, allowance=None, cost=None)
+    status = facade.allowance_status(db, route)
+    five = status["windows"][0]
+    assert status["state"] == "UNKNOWN" and five["state"] == "UNKNOWN" and five["unknown_requests"] == 1
+    assert five["blocked_until"] == (subscription.ensure_aware(e.at) + timedelta(hours=5)).isoformat()
     with pytest.raises(Blocked) as ei:
         facade.reserve(db, _req())
     db.rollback()
-    assert ei.value.code == "BUDGET_STATE_UNTRUSTED" and any("UNKNOWN allowance" in r for r in ei.value.details["reasons"])
+    assert ei.value.code == "SUBSCRIPTION_ALLOWANCE_UNKNOWN" and "at most 5 hours" in ei.value.details["reasons"][0]
+    e.at = utcnow() - timedelta(hours=6)  # the call left the 5h window: advisory only
+    db.commit()
+    status = facade.allowance_status(db, route)
+    assert status["state"] == "OK" and status["windows"][1]["unknown_requests"] == 1
+    assert any("UNKNOWN allowance" in w and "advisory" in w for w in status["warnings"])
+    assert facade.reserve(db, _req(run="r2")).pricing_basis == "SUBSCRIPTION"
+    db.rollback()
+
+
+def test_a_call_without_usage_on_the_settled_path_records_an_upper_bound_estimate(db):
+    """No reservation (the hold was already settled) and no usage reported: the broker's bound (clamped max_tokens +
+    prompt size) makes the allowance ESTIMATED, never UNKNOWN - no lock-out from an ordinary late answer."""
+    from aeos.broker import model_proxy
+
+    route = _go_route(db)
+    body = {"model": "glm-5.3-flash", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 256}
+    bound = model_proxy.request_token_bound(body, token_cap=10_000)
+    assert bound == 256 + len(json.dumps(body).encode("utf-8")) + model_proxy.TEMPLATE_TOKEN_MARGIN
+    assert model_proxy.request_token_bound({"messages": []}, token_cap=10_000) == 10_000  # no max_tokens: the cap
+    assert model_proxy.request_token_bound({"messages": []}) is None  # truly nothing bounds it
+    e = facade.record_usage(db, provider="opencode-go", category="WORKER_API", source="broker", route_key=GO,
+                            cost_usd=None, details={"charged_tokens": bound})
+    db.commit()
+    assert e.details["allowance_basis"] == "ESTIMATED"
+    assert e.details["allowance_estimate_from"] == "TOKEN_BOUND_X_HIGHEST_RATE"
+    assert facade.allowance_status(db, route)["state"] == "OK"
+    # on the hold path the caller's per-call bound wins over the hold's remainder (a tighter upper bound)
+    res = facade.reserve(db, _req(run="r2", tokens=500_000))
+    db.commit()
+    p = facade.record_usage(db, provider="opencode-go", category="WORKER_API", source="broker", run_id="r2",
+                            route_key=GO, reservation_id=res.id, partial=True, details={"charged_tokens": bound})
+    db.commit()
+    assert p.details["charged_tokens"] == 500_000 and p.details["allowance_token_bound"] == bound
+    assert float(p.details["allowance_usd"]) == pytest.approx(math.ceil(bound * 0.5) / 1_000_000)
+
+
+def test_incomplete_terms_refuse_admission(db):
     _go_route(db, "opencode-go/broken", allowance_rate_per_mtok={})
     with pytest.raises(Blocked) as ei:
         facade.reserve(db, _req(key="opencode-go/broken"))
@@ -248,6 +413,9 @@ def test_cost_summary_shows_plan_and_allowance_per_window_never_per_token_spend(
     assert f"{GO}  plan=OpenCode Go $10.0000/month  allowance=$60.0000/month  state=OK" in out.output
     assert "    5h    used $1.5000 of $12.0000 (remaining $10.5000; reported $1.5000, estimated $0.0000; " \
            "1 request(s)) OK" in out.output
+    assert "    week  used $1.5000 of $30.0000 (remaining $28.5000; reported $1.5000, estimated $0.0000; " \
+           "1 request(s)) OK (advisory)" in out.output
+    assert "counted: calls made through this AEOS instance only" in out.output
     assert "kimi-k2.7-code" not in out.output and out.output.isascii()
 
 
@@ -327,3 +495,24 @@ def test_probe_on_a_used_up_subscription_window_is_refused_before_any_call(db, k
             broker.probe_route(db, route_key=GO, actor="user:owner")
         assert not mock.calls
     assert ei.value.code == "SUBSCRIPTION_ALLOWANCE_EXHAUSTED" and "5h" in ei.value.message
+
+
+def test_probe_is_refused_after_a_call_billed_beyond_the_plan_and_flags_its_own(db, keys):
+    """The probe shares the beyond-plan refusal (fail closed) and flags a probe the provider billed beyond the plan."""
+    route = _go_route(db)
+    _activate(db, route)
+    usage = {"prompt_tokens": 12, "completion_tokens": 1, "opencode": {"allowance": 0.000006,
+                                                                       "billing_source": "balance"}}
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(GO_CHAT).mock(return_value=httpx.Response(200, json={
+            "model": "glm-5.3-flash", "choices": [{"message": {"content": "OK"}}], "usage": usage}))
+        out = broker.probe_route(db, route_key=GO, actor="user:owner")
+        db.commit()
+    assert out["billing"]["beyond_plan_usd"] == "UNKNOWN" and "SUBSCRIPTION_BEYOND_PLAN" in out["note"]
+    with respx.mock(assert_all_mocked=True) as mock:
+        with pytest.raises(PolicyDenied) as ei:
+            broker.probe_route(db, route_key=GO, actor="user:owner")
+        assert not mock.calls
+    assert ei.value.code == "SUBSCRIPTION_BEYOND_PLAN"
+    out = runner.invoke(app, ["cost", "summary", "--domain", "PERSONAL"])
+    assert out.exit_code == 0 and "REFUSED (SUBSCRIPTION_BEYOND_PLAN)" in out.output and out.output.isascii()

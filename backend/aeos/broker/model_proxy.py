@@ -24,7 +24,10 @@ Guarantees:
   cost ledger via ``aeos.cost.facade.record_usage`` and to the grant counters;
 * a SUBSCRIPTION route (ADR-0080 amendment 2026-10-26, OpenCode Go): ``usage.cost`` is the marginal charge (0 within
   the plan) and ``usage.opencode.allowance`` / ``billing_source`` go to the ledger as the allowance the call consumed
-  (the cost module estimates it from the tokens when the provider reports none) - never the reservation as dollars.
+  (the cost module estimates it from the tokens, or from the request's upper bound - clamped ``max_tokens`` plus the
+  prompt size - when the provider reports no usage) - never the reservation as dollars. A provider dollar figure above
+  ``MAX_PROVIDER_USD`` is unreported. A call billed beyond the plan (a charge, a non-plan ``billing_source``) refuses
+  the route on every later request until the owner re-activates it (``SUBSCRIPTION_BEYOND_PLAN``, fail closed).
 """
 
 from __future__ import annotations
@@ -85,6 +88,12 @@ GO_CONFIG_PREFIX = "opencode-go/"
 BROKER_USER_AGENT = f"dly-aeos-broker/{__version__}"
 OPENCODE_SESSION_HEADER = "x-opencode-session"
 CONFIG_PREFIXES = {"opencode-zen": ZEN_CONFIG_PREFIX, GO_PROVIDER: GO_CONFIG_PREFIX}
+# A provider-stated dollar figure above this is not a real figure (a broken upstream or proxy): treated as unreported
+# (ADR-0080 amendment 2026-10-26). On a SUBSCRIPTION route an unreadable stated cost is paid usage beyond the plan.
+MAX_PROVIDER_USD = 1e9
+# Chat-template tokens the prompt-size bound adds on top of the request body's UTF-8 bytes (a byte-level tokenizer never
+# makes more tokens than bytes): part of the upper bound recorded when the upstream reports no usage.
+TEMPLATE_TOKEN_MARGIN = 64
 
 
 class ProxyError(Exception):
@@ -115,6 +124,7 @@ class Upstream:
     is_openrouter: bool
     reasoning_effort: str | None = None  # set by the route's configuration, None = not sent (provider default)
     catalog_model_id: str | None = None  # ModelRoute.model_id (e.g. ``opencode/<id>``) when it differs
+    subscription: bool = False  # flat-fee SUBSCRIPTION route (``pricing.billing``, ADR-0080 amendment 2026-10-26)
 
     @property
     def url(self) -> str:
@@ -132,6 +142,7 @@ class Prepared:
     body: dict[str, Any]
     request_id: str
     stream: bool
+    token_cap: int | None = None  # the grant's token cap (an upper bound of any one call of the run)
 
 
 def _is_loopback_http(url: str) -> bool:
@@ -207,6 +218,29 @@ def route_authorisation_problem(session: Any, route: ModelRoute) -> str | None:
         return routing.route_use_problem(session, route)
     except (ImportError, AttributeError):  # routing unavailable: the approval cannot be checked -> fail closed
         return "routing module unavailable: route approval cannot be checked"
+
+
+def is_subscription_route(route: ModelRoute) -> bool:
+    return isinstance(route.pricing, dict) and route.pricing.get("billing") == "SUBSCRIPTION"
+
+
+def subscription_beyond_plan_problem(session: Any, route: ModelRoute) -> str | None:
+    """A SUBSCRIPTION route with a call billed beyond its plan (provider-side paid fallback, e.g. Extra Usage ON) that
+    the owner has not re-activated the route after: refused per request, so the run that hit it stops too, not only
+    new admissions (ADR-0080 amendment 2026-10-26; invariant 8, fail closed)."""
+    if not is_subscription_route(route):
+        return None
+    try:
+        from aeos.cost import facade as cost
+
+        bp = cost.subscription_beyond_plan(session, route)
+    except (ImportError, AttributeError):  # cost module unavailable: the billing state cannot be checked
+        return "cost module unavailable: the subscription route's billing state cannot be checked (fail closed)"
+    if bp is None:
+        return None
+    return (f"a call at {bp.get('at')} on subscription route {route.route_key} was billed beyond the plan (billing "
+            f"source {bp.get('billing_source') or 'not reported'}); refused until the owner checks that Extra Usage "
+            "is OFF and re-activates the route")
 
 
 def client_restriction_problem(session: Any, route: ModelRoute) -> str | None:
@@ -344,6 +378,9 @@ def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: s
     problem = route_authorisation_problem(session, route)
     if problem:
         raise ProxyError(403, "ROUTE_APPROVAL_INVALID", problem)
+    beyond = subscription_beyond_plan_problem(session, route)
+    if beyond:
+        raise ProxyError(403, "SUBSCRIPTION_BEYOND_PLAN", beyond)
     shape = request_shape(route)
     if shape["code"]:
         raise ProxyError(403, shape["code"], shape["problem"])
@@ -378,7 +415,8 @@ def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: s
             raise ProxyError(503, "UPSTREAM_CREDENTIAL_MISSING", exc.message) from exc
     elif not _is_loopback_http(base):
         raise ProxyError(503, "UPSTREAM_CREDENTIAL_MISSING", "route has no credential_ref")
-    return Upstream(base.rstrip("/"), key, route.provider, route_key, shape["model"], False, effort, catalog_id)
+    return Upstream(base.rstrip("/"), key, route.provider, route_key, shape["model"], False, effort, catalog_id,
+                    is_subscription_route(route))
 
 
 def _check_auth_headers(headers: dict[str, str], cookies: dict[str, str]) -> str:
@@ -458,7 +496,8 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
                             reasoning_requested=requested_label)
         s.add(req)
         s.commit()
-        return Prepared(grant.id, grant.run_id, grant.project_id, grant.domain, exposed, upstream, out, req.id, stream)
+        return Prepared(grant.id, grant.run_id, grant.project_id, grant.domain, exposed, upstream, out, req.id, stream,
+                        grant.max_tokens)
 
 
 def _eval_pools(s: Any, grant: CapabilityGrant, route_key: str) -> tuple[str, ...] | None:
@@ -511,6 +550,11 @@ def _finish(p: Prepared, *, status: int, outcome: str, prompt: int | None = None
         run = s.get(WorkerRun, p.run_id)
         ledger = "NOT_RECORDED"
         recorded: dict[str, Any] = {}
+        if counted and prompt is None and completion is None and p.upstream.subscription:
+            # no usage reported: the call's upper bound, so the allowance is ESTIMATED, never UNKNOWN
+            bound = request_token_bound(p.body, p.token_cap)
+            if bound is not None:
+                billing = {**(billing or {}), "charged_tokens": bound}
         if counted:
             ledger = _record_ledger(s, p, run, prompt=prompt, completion=completion, cost=cost,
                                     model=model_resolved or p.upstream.model_id, billing=billing, facts=recorded)
@@ -626,39 +670,64 @@ def _retry_after(resp: httpx.Response) -> int:
         return DEFAULT_RETRY_AFTER
 
 
+def request_token_bound(body: dict[str, Any], token_cap: int | None = None) -> int | None:
+    """Upper bound of one forwarded request's tokens when the upstream reports no usage (ADR-0080 amendment
+    2026-10-26): the clamped ``max_tokens`` the broker sent plus the prompt size (the UTF-8 bytes of the whole forwarded
+    body - a byte-level tokenizer never makes more tokens than bytes - plus a chat-template margin); else the grant's
+    token cap. None when nothing bounds the call."""
+    out = body.get("max_tokens")
+    if isinstance(out, int) and not isinstance(out, bool) and out >= 0:
+        try:
+            prompt = len(json.dumps(body, ensure_ascii=False, default=str).encode("utf-8")) + TEMPLATE_TOKEN_MARGIN
+        except (TypeError, ValueError):
+            prompt = None
+        if prompt is not None:
+            return out + prompt
+    if isinstance(token_cap, int) and not isinstance(token_cap, bool) and token_cap >= 0:
+        return token_cap
+    return None
+
+
+def _provider_usd(value: Any) -> float | None:
+    """A provider-stated dollar figure: finite, >= 0 and <= ``MAX_PROVIDER_USD``; None otherwise (unreported)."""
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if math.isfinite(f) and 0 <= f <= MAX_PROVIDER_USD else None
+
+
 def _usage_of(data: dict[str, Any]) -> tuple[int | None, int | None, float | None, str | None]:
     raw_usage = data.get("usage")
     usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
     prompt = usage.get("prompt_tokens")
     completion = usage.get("completion_tokens")
     cost = usage.get("cost")
-    try:
-        cost_f = float(cost) if cost is not None else None
-    except (TypeError, ValueError):
-        cost_f = None
+    cost_f = _provider_usd(cost) if cost is not None else None  # absurd or unreadable: unreported
     model = data.get("model") if isinstance(data.get("model"), str) else None
     return (int(prompt) if isinstance(prompt, int | float) else None,
             int(completion) if isinstance(completion, int | float) else None, cost_f, model)
 
 
 def _billing_of(data: dict[str, Any]) -> dict[str, Any]:
-    """Provider billing facts beyond ``usage.cost`` (OpenCode Go API docs, E1 2026-10-26): ``usage.opencode.allowance``
-    (dollars of the plan allowance the request counted) and ``usage.opencode.billing_source`` (e.g. go / go-plus /
-    balance). Only finite non-negative numbers and short source names are kept; {} when the provider states neither."""
+    """Provider billing facts beyond the parsed ``usage.cost`` (OpenCode Go API docs, E1 2026-10-26):
+    ``usage.opencode.allowance`` (dollars of the plan allowance the request counted) and ``usage.opencode.billing_source``
+    (e.g. go / go-plus / balance). Only finite numbers in [0, ``MAX_PROVIDER_USD``] and short source names are kept;
+    an absurd figure (e.g. 1e25) is unreported. A ``usage.cost`` the provider stated but that is unreadable or absurd is
+    flagged ``cost_reported_unusable`` (paid usage beyond the plan on a SUBSCRIPTION route). {} when nothing applies."""
     raw_usage = data.get("usage")
     usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+    out: dict[str, Any] = {}
+    if usage.get("cost") is not None and _provider_usd(usage.get("cost")) is None:
+        out["cost_reported_unusable"] = True
     oc = usage.get("opencode")
     if not isinstance(oc, dict):
-        return {}
-    out: dict[str, Any] = {}
-    allowance = oc.get("allowance")
-    if not isinstance(allowance, bool):
-        try:
-            value = float(allowance) if isinstance(allowance, int | float | str) else None
-        except ValueError:
-            value = None
-        if value is not None and math.isfinite(value) and value >= 0:
-            out["reported_allowance_usd"] = value
+        return out
+    value = _provider_usd(oc.get("allowance"))
+    if value is not None:
+        out["reported_allowance_usd"] = value
     source = oc.get("billing_source")
     if isinstance(source, str) and source.strip():
         out["billing_source"] = redact_text(source.strip())[:32]

@@ -64,6 +64,9 @@ def probe_route_cmd(route_key: str = typer.Argument(..., help="Route key (ARENA/
         b = out["billing"]
         _out(f"subscription allowance used: {b['allowance_usd']} USD ({b['allowance_basis']}, "
              f"billing source {b['billing_source']})")
+        if b.get("beyond_plan_usd") is not None:
+            _out(f"BEYOND THE PLAN: {b['beyond_plan_usd']} USD - route refused (SUBSCRIPTION_BEYOND_PLAN) until you "
+                 "check Extra Usage is OFF and re-activate it")
     _out(f"evidence {out['evidence_id']}; {out['note']}")
 
 

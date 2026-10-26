@@ -412,7 +412,7 @@ def test_go_route_takes_one_feasibility_probe_that_consumes_allowance_not_money(
     assert sent.headers["x-opencode-session"].startswith("ses_")  # its own one-request conversation
     assert out["outcome"] == "REACHABLE" and out["cost_usd"] == 0 and GO_KEY not in json.dumps(out)
     assert out["billing"] == {"billing": "SUBSCRIPTION", "allowance_usd": "0.000004", "allowance_basis": "REPORTED",
-                              "billing_source": "go"}
+                              "billing_source": "go", "beyond_plan_usd": None}
     led = db.scalar(select(UsageLedgerEntry).where(UsageLedgerEntry.route_key == GO_GLM))
     assert led.source == "broker-feasibility" and led.cost_usd == 0 and led.charged_usd == 0
     assert led.details["allowance_usd"] == "0.000004" and led.details["billing_source"] == "go"
@@ -503,6 +503,56 @@ def test_worker_proxy_on_a_go_route_records_allowance_apart_from_money(world, db
     summary = db.get(WorkerRun, run.id).usage_summary
     assert summary["billing"] == "SUBSCRIPTION" and summary["allowance_usd"] == pytest.approx(0.000053)
     assert summary["allowance_not_reported_requests"] == 1 and summary["cost_unknown_requests"] == 1
+
+
+def _go_call(go_proxy, **extra: Any):
+    return go_proxy["client"].post("/broker/v1/chat/completions", headers={
+        "Authorization": f"Bearer {go_proxy['token']}"}, json={
+        "model": "aeos-go-glm", "messages": [{"role": "user", "content": "hi"}], **extra})
+
+
+def test_go_call_without_usage_records_an_upper_bound_estimate_never_unknown(world, db, go_proxy):
+    """No reservation (or a hold already settled) and an answer without any usage: the broker records the call's upper
+    bound (clamped max_tokens + prompt size), so the allowance is ESTIMATED and the route is never locked out."""
+    _trial(db, world, GO_GLM, region="EU", budget_decision_id=_go_budget(db, world).id)
+    no_usage = {"model": "glm-5.3-flash", "choices": [{"message": {"role": "assistant", "content": "OK"}}]}
+    with respx.mock(assert_all_mocked=True) as mock:
+        up = mock.post(GO_CHAT).mock(return_value=httpx.Response(200, json=no_usage))
+        r = _go_call(go_proxy, max_tokens=100)
+        assert r.status_code == 200, r.text
+        sent = json.loads(up.calls[0].request.content)
+    assert sent["max_tokens"] == 100  # clamped to the grant's per-request cap (256)
+    db.expire_all()
+    (entry,) = db.scalars(select(UsageLedgerEntry).where(UsageLedgerEntry.run_id == go_proxy["run_id"])).all()
+    from aeos.broker import model_proxy
+
+    assert entry.input_tokens is None and entry.details["allowance_basis"] == "ESTIMATED"
+    assert entry.details["charged_tokens"] == model_proxy.request_token_bound(sent)
+    from aeos.cost import facade as cost
+
+    assert cost.allowance_status(db, service.get_route(db, GO_GLM))["state"] == "OK"
+
+
+def test_go_call_billed_beyond_the_plan_stops_the_run_until_the_owner_reactivates(world, db, go_proxy):
+    """Invariant 8: a call the provider bills from the pay-as-you-go balance (Extra Usage ON) without a usage.cost is
+    flagged; the broker refuses the run's next request (and new admissions/probes) until the owner re-activates."""
+    budget = _go_budget(db, world)
+    _trial(db, world, GO_GLM, region="EU", budget_decision_id=budget.id)
+    balance = {**_ok("glm-5.3-flash"), "usage": {"prompt_tokens": 12, "completion_tokens": 1,
+                                                 "opencode": {"allowance": 0, "billing_source": "balance"}}}
+    with respx.mock(assert_all_mocked=True) as mock:
+        up = mock.post(GO_CHAT).mock(return_value=httpx.Response(200, json=balance))
+        assert _go_call(go_proxy).status_code == 200
+        r = _go_call(go_proxy)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "SUBSCRIPTION_BEYOND_PLAN", r.text
+        assert len(up.calls) == 1  # the second request never left the broker
+    db.expire_all()
+    entry = db.scalar(select(UsageLedgerEntry).where(UsageLedgerEntry.run_id == go_proxy["run_id"]))
+    assert entry.details["beyond_plan_usd"] == "UNKNOWN" and entry.details["billing_source"] == "balance"
+    _trial(db, world, GO_GLM, region="EU", budget_decision_id=budget.id)  # the owner re-activates the route
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(GO_CHAT).mock(return_value=httpx.Response(200, json=_ok("glm-5.3-flash")))
+        assert _go_call(go_proxy).status_code == 200
 
 
 def test_provider_credentials_only_go_to_the_providers_own_host(world, db):

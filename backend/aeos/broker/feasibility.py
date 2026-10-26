@@ -9,8 +9,11 @@ fast, at what reported cost, is it rate limited - is tested only through this pr
 * the route is TRIAL/APPROVED on an ACTIVE human decision bound to its CURRENT configuration hash (the same
   per-request rule as the proxy: ``routing.route_use_problem``) - i.e. the owner reviewed its terms/region;
 * no money: ``is_free=YES`` within its free period, a loopback LOCAL endpoint, or a flat-fee SUBSCRIPTION route whose
-  terms are complete and whose allowance windows are not used up (ADR-0080 amendment 2026-10-26: the probe consumes
-  plan allowance, not money - the plan fee is the activation's BUDGET decision). A per-token paid route is refused
+  terms are complete and whose state admits (ADR-0080 amendment 2026-10-26: the probe consumes plan allowance, not
+  money - the plan fee is the activation's BUDGET decision). A subscription route is refused while its 5h window is
+  used up (``SUBSCRIPTION_ALLOWANCE_EXHAUSTED``), while a call in it cannot be counted
+  (``SUBSCRIPTION_ALLOWANCE_UNKNOWN``) and after a call billed beyond the plan until the owner re-activates it
+  (``SUBSCRIPTION_BEYOND_PLAN``); its advisory week/month windows never refuse. A per-token paid route is refused
   (``ROUTE_NOT_FREE``): there is no budget path for a probe (no silent paid fallback, §42);
 * the route accepts PUBLIC data and the request is ONE fixed synthetic PUBLIC prompt - no project, task, user or
   OFFICE data, no tools, ``max_tokens`` 16, no streaming, no retry and never another route;
@@ -58,15 +61,15 @@ def _spend_problem(session: Session, route: ModelRoute, base_url: str) -> tuple[
     if problem:
         return "ROUTE_NOT_FREE", f"subscription terms cannot be trusted ({problem}); a probe never spends money"
     if terms is not None:
-        # a flat-fee plan: one synthetic request consumes allowance, not money - unless a window is used up
-        status = cost.allowance_status(session, route) or {}
-        if status.get("state") == "EXHAUSTED":
-            return "SUBSCRIPTION_ALLOWANCE_EXHAUSTED", ("the subscription allowance is used up in a provider window: "
-                                                        + "; ".join(w["window"] for w in status.get("windows") or []
-                                                                    if w.get("state") == "EXHAUSTED"))
-        if status.get("state") != "OK":
-            return "SUBSCRIPTION_ALLOWANCE_UNKNOWN", ("the subscription allowance consumed cannot be counted: "
-                                                      + "; ".join(status.get("problems") or ["state UNKNOWN"]))
+        # a flat-fee plan: one synthetic request consumes allowance, not money - unless the route's state refuses it
+        # (the same answer the scheduler and the cost module's reserve give; advisory windows never refuse)
+        status = cost.allowance_status(session, route)
+        block = cost.subscription_admission_block(status)
+        if block:
+            return block
+        if status is None or status.get("state") not in ("OK", "WARN_EXHAUSTED"):
+            return "SUBSCRIPTION_ALLOWANCE_UNKNOWN", (f"the subscription state cannot be read (state "
+                                                      f"{(status or {}).get('state', 'UNKNOWN')}); fail closed")
         return None
     # The routing rule (is_free=YES and the free period not over) re-applied here: a probe has no budget path.
     until = ensure_aware(route.free_until)
@@ -181,19 +184,21 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
         "checked_at": utcnow().isoformat(),
         "note": "feasibility observation only: route status and eligibility are unchanged (owner decision)",
     }
-    if cost and subscription:
-        result["note"] += ("; a subscription route reported a marginal charge - paid usage beyond the plan (is the "
-                           "provider's Extra Usage ON?)")
-    elif cost:
-        result["note"] += "; a free route reported a cost - review its pricing before any activation"
     billing = _billing_of(data)
+    if cost and not subscription:
+        result["note"] += "; a free route reported a cost - review its pricing before any activation"
     if prompt is None and completion is None:
         billing["charged_tokens"] = PROBE_TOKEN_BOUND  # the probe's own upper bound, never a guess
     ledger, facts = _ledger(session, upstream, route_key, prompt, completion, cost, model_resolved, outcome, billing)
     if subscription:
         result["billing"] = {"billing": "SUBSCRIPTION", "allowance_usd": facts.get("allowance_usd") or "UNKNOWN",
                              "allowance_basis": facts.get("allowance_basis") or "UNKNOWN",
-                             "billing_source": billing.get("billing_source") or "UNKNOWN"}
+                             "billing_source": billing.get("billing_source") or "UNKNOWN",
+                             "beyond_plan_usd": facts.get("beyond_plan_usd")}
+        if facts.get("beyond_plan_usd") is not None:
+            result["note"] += ("; the subscription route billed this probe beyond the plan (provider-side paid "
+                               "fallback: is Extra Usage ON?) - the route is refused (SUBSCRIPTION_BEYOND_PLAN) until "
+                               "you re-activate it")
     if outcome == "RATE_LIMITED":
         _quota(session, upstream, route_key, retry_after)
     result["ledger"] = ledger
@@ -221,7 +226,7 @@ def _ledger(session: Session, upstream: Any, route_key: str, prompt: int | None,
                                          output_tokens=completion, requests=1, cost_usd=cost, is_estimate=False,
                                          mode="LIVE", details=billing or None)
         info = entry.details or {}
-        return "RECORDED", {k: info[k] for k in ("allowance_usd", "allowance_basis") if k in info}
+        return "RECORDED", {k: info[k] for k in ("allowance_usd", "allowance_basis", "beyond_plan_usd") if k in info}
     except ImportError:
         return "LEDGER_UNAVAILABLE", {}
     except AeosError as exc:

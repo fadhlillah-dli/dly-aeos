@@ -7,7 +7,7 @@ importing the service module (ADR-0080 amendment 2026-10-26).
 from __future__ import annotations
 
 import math
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, Overflow
 from typing import Any
 
 USD_Q = Decimal("0.000001")
@@ -15,7 +15,9 @@ ZERO = Decimal("0")
 
 
 def money(value: Any) -> Decimal | None:
-    """Exact 6-dp Decimal. Rejects NaN/inf (an untrusted number is not a budget number)."""
+    """Exact 6-dp Decimal. Rejects NaN/inf (an untrusted number is not a budget number) and any amount the 6-dp
+    quantization cannot represent (e.g. 1e25 needs more digits than the decimal context has): always ``ValueError``,
+    never a ``decimal`` arithmetic error escaping to a caller that only expects ``ValueError``."""
     if value is None:
         return None
     if isinstance(value, bool):
@@ -28,7 +30,10 @@ def money(value: Any) -> Decimal | None:
         raise ValueError(f"invalid amount {value!r}") from exc
     if not d.is_finite():
         raise ValueError("amount must be finite")
-    return d.quantize(USD_Q, rounding=ROUND_HALF_UP)
+    try:
+        return d.quantize(USD_Q, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, Overflow) as exc:
+        raise ValueError(f"amount {value!r} is out of range") from exc
 
 
 def money_out(value: Any) -> float | None:

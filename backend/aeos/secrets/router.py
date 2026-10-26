@@ -158,7 +158,8 @@ def integrations_overview(db: Session, settings: Settings, principal: Principal)
                  "(izin Restricted: Models: Request)"},
          {"command": "aeos routes refresh", "why": "Perbarui ketersediaan rute opencode-go/* dari daftar model Go"}],
         warning="Extra Usage di halaman Go harus OFF: bila ON, Go beralih ke saldo pay-as-you-go setelah batas "
-                "tercapai (fallback berbayar di sisi provider, tidak terlihat oleh AEOS).",
+                "tercapai (fallback berbayar di sisi provider; pengaturannya tidak terlihat oleh AEOS). Panggilan yang "
+                "ditagih di luar paket menghentikan rute sampai Anda mengaktifkannya ulang.",
     ))
     atl = card(
         "atlassian", "Atlassian Jira/Confluence/Bitbucket (OFFICE)", "OFFICE",

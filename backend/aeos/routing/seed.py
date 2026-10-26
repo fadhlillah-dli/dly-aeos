@@ -24,7 +24,9 @@ exercised live): a $10/month subscription with per-model monthly DOLLAR allowanc
 (``workers/opencode-go``). Go allows other clients ("Yes, you can use Go with any agent"), so its routes carry no
 client restriction. Only chat-completions models are seeded (the broker speaks nothing else): the flash/coding models
 as WORKER candidates ranked above the client-restricted Zen pilots, the others as WATCHLIST. Seeding activates nothing:
-the terms review, the region, the BUDGET decision and the Extra Usage attestation stay the owner's at activation.
+the terms review, the region and the BUDGET decision stay the owner's at activation. No Extra Usage attestation exists
+in code (no decision preset, nothing AEOS can observe): the owner states Extra Usage OFF in the activation terms note;
+at runtime a call billed beyond the plan refuses the route until the owner re-activates it (ADR-0080 amendment).
 """
 
 from __future__ import annotations
@@ -118,7 +120,7 @@ GO_TERMS: dict[str, Any] = {
         "claim_level": "E1 provider statement - whether Go accepts the broker as a client is NOT-PROVEN (no live call)",
     },
     "provider_paid_fallback": "Extra Usage falls back to the pay-as-you-go balance after a limit: must stay OFF "
-                              "(owner attestation)",
+                              "(the owner states it in the activation terms note; AEOS cannot observe the setting)",
     "automation_terms": "the ToS clause on automated/programmatic use is an owner risk recorded at activation "
                         "(https://opencode.ai/legal/terms-of-service)",
     "sources": list(GO_SOURCES),
@@ -198,7 +200,8 @@ def _go_pricing(allowance: float, rates: dict[str, float], **extra: Any) -> dict
             "allowance_usd_month": allowance, "allowance_windows": dict(GO_ALLOWANCE_WINDOWS),
             "allowance_rate_per_mtok": dict(rates), **extra,
             "basis": "OpenCode Go subscription ($10/month): per-model monthly dollar allowance consumed at the listed "
-                     "rates (5h 20%, week 50%, month 100%); HTTP 429 at a limit while Extra Usage is OFF (Go docs)",
+                     "rates (5h 20%, week 50%, month 100%); requests blocked at a limit while Extra Usage is OFF (Go "
+                     "docs; HTTP 429 per OpenCode client test fixture, NOT-PROVEN)",
             "checked_at": GO_READ}
 
 
