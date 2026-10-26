@@ -255,6 +255,9 @@ def test_verifier_probes_the_candidates_http_surface_for_api_impact(db, settings
     assert len(cases) >= 10  # cross-origin, host, VIEWER, malformed JSON, traversal, hostile logins all ran
     diff = out.checks["contract_diff"]
     assert diff.status == "PASS" and diff.details["analysed"] == 1, diff
+    # both generated documents came through the verifier's result seal, with their digests checked on the host
+    seals = _report(db, out)["result_seal"]
+    assert seals["contract_openapi_head"]["status"] == "PASS" and seals["contract_openapi_base"]["status"] == "PASS"
 
 
 # ------------------------------------------------------------------------------- contract diff (W6-045)
@@ -331,11 +334,19 @@ def test_python_dependency_change_is_verified_in_a_per_candidate_environment(db,
     assert "aeosprobe==1.0.0" in data["distributions"] and data["dependency_set_hash"].startswith("sha256:")
     assert data["dependency_set_hash"] != verifier.dependency_set()["hash"]
     assert ev.environment["candidate_dependency_set_hash"] == data["dependency_set_hash"]
-    # the trusted suite in the candidate environment is sealed like the trusted suite (E2), and its steps are in the
-    # verifier runner's kill-group record
+    # the dependency set is read by the verifier from the installed metadata (no candidate process reports it)
+    assert "no candidate process" in data["listing"]["source"] and data["listing"]["problems"] == []
+    assert data["startup_hooks"] == [] and data["install"]["survivors"] == []
+    # the trusted suite in the candidate environment is sealed like the trusted suite (E2); the venv creation, the
+    # pip install and the suite are in the verifier runner's kill-group record (the listing is no step any more)
     report = _report(db, out)
     assert report["result_seal"]["dependency_env"]["status"] == "PASS"
-    assert {"dependency_env", "dependency_env_listing"} <= {s["step"] for s in report["runner"]["steps"]}
+    steps_run = {s["step"]: s for s in report["runner"]["steps"]}
+    assert {"dependency_env_venv", "dependency_env_install", "dependency_env"} <= set(steps_run)
+    assert "dependency_env_listing" not in steps_run
+    assert all(steps_run[k]["containment"] and steps_run[k]["survivors"] == []
+               for k in ("dependency_env_venv", "dependency_env_install"))
+    assert report["tamper"]["step_containment"]["survivors"] == []
     # a lockfile without hashes is refused before any install: the change stays a blocking NOT-PROVEN
     world2 = make_world(db, project_key="nohash", verifier_policy=FAST,
                         allowed_paths=["backend/**", "tests/unit/**", manifest])
@@ -383,6 +394,14 @@ if script == "tsc":
 if script == "vite.js":
     (cwd / "dist").mkdir(exist_ok=True)
     (cwd / "dist" / "index.html").write_text("<!doctype html><html lang='id'><title>x</title></html>")
+    if sc.get("leak"):  # a build plugin that leaves a detached process behind (it could act after the window)
+        import os, subprocess
+        kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if os.name == "nt":
+            kw["creationflags"] = 0x00000008 | 0x00000200
+        else:
+            kw["start_new_session"] = True
+        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], **kw)
     sys.exit(0)
 sys.exit(9)
 '''
@@ -439,6 +458,25 @@ def test_frontend_change_runs_npm_ci_vitest_build_and_ui_states(db, settings, co
     assert report["impact_checks"]["frontend"]["executed"] == ["frontend_tests", "ui_a11y"]
     vitest_json = data["steps"]["unit"]
     assert vitest_json["passed"] == 2
+    # every tool step ran in its own kill group and is in the runner's step list; nothing outlived it
+    steps_run = {s["step"]: s for s in report["runner"]["steps"]}
+    for name in ("frontend_install", "frontend_vitest", "frontend_typecheck", "frontend_build"):
+        assert steps_run[name]["containment"] in ("job-object", "process-group"), steps_run[name]
+        assert steps_run[name]["survivors"] == []
+    assert all(data["steps"][k]["survivors"] == [] for k in ("install", "unit", "typecheck", "build"))
+    assert out.checks["step_containment"].status == "PASS"
+
+
+def test_a_process_left_behind_by_a_frontend_tool_step_quarantines_the_run(db, settings, controller, wf, tmp_path,
+                                                                          monkeypatch):
+    """The frontend's npm/vitest/tsc/vite steps used to run outside any kill group: a process a build plugin left
+    behind was never seen. Now it is a survivor of its step - killed, and the run is QUARANTINED."""
+    world, _ = _frontend_world(db, settings, tmp_path, monkeypatch, scenario={"leak": True}, key="fe-leak")
+    out = _verify(db, world)
+    assert out.checks["frontend_tests"].status == "PASS"  # the tools themselves succeeded
+    assert out.checks["step_containment"].status == "FAIL", out.checks["step_containment"]
+    assert [s["step"] for s in out.checks["step_containment"].details["survivors"]] == ["frontend_build"]
+    assert out.status == "QUARANTINED" and any("left processes running" in r for r in out.reasons), out.reasons
 
 
 def test_failing_frontend_test_or_a11y_violation_fails_the_run(db, settings, controller, wf, tmp_path, monkeypatch):

@@ -11,7 +11,13 @@ Boundary rules (each tested):
   never written to any config file and never passed on the command line;
 * every operation needs an ACTIVE run-bound capability grant (GIT_BRANCH / PR_CREATE) and, for a
   remote write, the external-write interlock (§26);
-* the broker has no capability to integrate a PR into any branch: human-only (U-09, §31).
+* the broker has no capability to integrate a PR into any branch: human-only (U-09, §31);
+* owner rule (AGENTS.md invariant 11): before any push every commit of the pushed range (every commit of the
+  head that no branch of the remote reaches yet) is authored AND committed by the configured identity of the
+  provider (``commit_identities.github`` / ``.bitbucket``) and carries no AI attribution - otherwise
+  ``COMMIT_IDENTITY_MISSING`` / ``COMMIT_IDENTITY_MISMATCH`` / ``AI_ATTRIBUTION_IN_COMMIT``, audited, nothing
+  pushed; PR titles/bodies with AI attribution are refused (``AI_ATTRIBUTION_IN_TEXT``) before any credential is
+  read.
 
 OFFICE runs (and registered Bitbucket repositories) are handed to ``aeos.broker.bitbucket_broker``
 before any GitHub validation or credential read (``is_bitbucket_run``, ADR-0111).
@@ -26,6 +32,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -36,6 +43,8 @@ from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
 from aeos.broker import grants
+from aeos.core import commit_identity as cid
+from aeos.core.attribution import find_ai_attribution, refusal_message
 from aeos.core.errors import AeosError, Blocked, NotFound, PolicyDenied, ValidationFailed
 from aeos.core.ids import new_id
 from aeos.core.redaction import redact_text, register_secret
@@ -300,19 +309,142 @@ def git_auth_env(remote_url: str, token: str | None, *, empty_global: Path,
     return env
 
 
+def _git_cmd(args: list[str], hooks: Path) -> list[str]:
+    return ["git", "-c", f"core.hooksPath={hooks.as_posix()}", "-c", "credential.helper=", "-c", "core.fsmonitor=false",
+            "-c", "http.followRedirects=false", "-c", "protocol.ext.allow=never", *args]
+
+
 def _git(args: list[str], *, cwd: Path, env: dict[str, str], hooks: Path) -> subprocess.CompletedProcess[str]:
-    cmd = ["git", "-c", f"core.hooksPath={hooks.as_posix()}", "-c", "credential.helper=", "-c", "core.fsmonitor=false",
-           "-c", "http.followRedirects=false", "-c", "protocol.ext.allow=never", *args]
-    return subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=GIT_TIMEOUT, check=False)
+    return subprocess.run(_git_cmd(args, hooks), cwd=str(cwd), env=env, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=GIT_TIMEOUT, check=False)
+
+
+# ----------------------------------------------------------------------------- owner rule: commit identity gate
+@dataclass(frozen=True)
+class CommitPolicy:
+    """What every pushed commit must satisfy (AGENTS.md invariant 11): authored and committed by ``email`` - the
+    configured identity of ``provider`` - and free of AI attribution. The range is what the push would publish:
+    every commit of the head that no branch of the remote reaches yet (read from the remote just before the push),
+    up to ``MAX_CHECKED_COMMITS`` (more is refused, fail closed)."""
+
+    provider: str
+    email: str
+
+    def __repr__(self) -> str:  # never print the address
+        return f"CommitPolicy(provider={self.provider!r})"
+
+
+def commit_policy(session: Session, run: WorkerRun, provider: str, *, action: str) -> CommitPolicy:
+    """The push gate for *provider*, or ``PolicyDenied(COMMIT_IDENTITY_MISSING)`` (audited) when the owner has no
+    valid identity configured for it - checked before any grant is consumed or credential read."""
+    from aeos.core.config import get_settings
+
+    ident = cid.resolve(get_settings(), provider)
+    if not ident.configured:
+        message = cid.missing_message(ident)
+        audit.record(session, actor_type="service", actor_id="broker", action=action, result="DENIED",
+                     target_type="run", target_id=run.id, project_id=run.project_id, domain=run.domain,
+                     reason=message, details={"code": cid.CODE_MISSING, "provider": provider,
+                                              "config_key": ident.key, "status": ident.status})
+        raise PolicyDenied(message, code=cid.CODE_MISSING,
+                           details={"provider": provider, "config_key": ident.key, "status": ident.status})
+    return CommitPolicy(provider=provider, email=ident.email or "")
+
+
+# The remote's branches as the broker read them just before the push; a private namespace of the throw-away mirror
+# that is never pushed (the push refspec names the head sha and the task branch only).
+REMOTE_REFS = "refs/aeos-remote/heads"
+
+
+def _read_remote_branches(mirror: Path, remote_url: str, env: dict[str, str], hooks: Path) -> str | None:
+    """Fetch every branch of the remote into ``REMOTE_REFS`` (an empty remote has none). What they reach is already
+    on the code host; everything else of the head is what the push would publish. Returns why the remote could not
+    be read (None = read)."""
+    proc = _git(["fetch", "--no-tags", "--no-recurse-submodules", "--quiet", remote_url,
+                 f"+refs/heads/*:{REMOTE_REFS}/*"], cwd=mirror, env=env, hooks=hooks)
+    if proc.returncode == 0:
+        return None
+    out = redact_text((proc.stdout or "") + (proc.stderr or ""))[:400]
+    observe_git_failure(remote_url, out, operation="FETCH")
+    return out or f"git fetch exited {proc.returncode}"
+
+
+def _pushed_commit_problems(mirror: Path, env: dict[str, str], hooks: Path, head: str,
+                            policy: CommitPolicy) -> list[dict[str, str]]:
+    """Check every commit the push would publish: the head's commits that no branch of the remote reaches
+    (``_read_remote_branches`` ran first) - the run's own commits, and any commit below the run's base that is not on
+    the remote yet. Raw objects are read with ``cat-file --batch`` (exact sizes), so a crafted message cannot forge
+    another commit's identity."""
+    listed = _git(["rev-list", f"--max-count={cid.MAX_CHECKED_COMMITS + 1}", head, "--not", f"--glob={REMOTE_REFS}"],
+                  cwd=mirror, env=env, hooks=hooks)
+    if listed.returncode != 0:
+        return [{"sha": head, "code": cid.CODE_RANGE, "detail": "the commit range could not be read"}]
+    shas = listed.stdout.split()
+    if len(shas) > cid.MAX_CHECKED_COMMITS or not all(cid.valid_sha(s) for s in shas):
+        return [{"sha": head, "code": cid.CODE_RANGE,
+                 "detail": f"more than {cid.MAX_CHECKED_COMMITS} commits that are not on the remote yet (push the "
+                           "existing history yourself first)" if len(shas) > cid.MAX_CHECKED_COMMITS
+                           else "unexpected rev-list output"}]
+    if not shas:
+        return []
+    proc = subprocess.run(_git_cmd(["cat-file", "--batch"], hooks), cwd=str(mirror), env=env,
+                          input=("\n".join(shas) + "\n").encode("ascii"), capture_output=True, timeout=GIT_TIMEOUT,
+                          check=False)
+    try:
+        if proc.returncode != 0:
+            raise ValueError("cat-file failed")
+        commits = cid.parse_cat_file_batch(proc.stdout)
+    except ValueError:
+        return [{"sha": head, "code": cid.CODE_RANGE, "detail": "the pushed commits could not be read"}]
+    if [c.sha for c in commits] != shas:
+        return [{"sha": head, "code": cid.CODE_RANGE, "detail": "the pushed commits could not be read"}]
+    return cid.commit_problems(commits, provider=policy.provider, expected_email=policy.email)
+
+
+def refuse_push(session: Session, run: WorkerRun, se: BrokerSideEffect, res: dict[str, Any], *, action: str,
+                provider: str) -> None:
+    """A push the commit gate refused: nothing reached the remote. The outbox row is FAILED, the refusal audited,
+    and ``PolicyDenied`` raised with the gate's code (the caller commits before re-raising, like delivery does)."""
+    problems = list(res.get("problems") or [])[:20]
+    se.status = "FAILED"
+    se.commit_sha = res.get("commit")
+    se.result_summary = str(res.get("error") or "")[:500]
+    audit.record(session, actor_type="service", actor_id="broker", action=action, result="DENIED", target_type="run",
+                 target_id=run.id, project_id=run.project_id, domain=run.domain, reason=str(res.get("error", ""))[:500],
+                 details={"code": res.get("code"), "provider": provider, "commit": res.get("commit"),
+                          "problems": problems})
+    events.emit(session, source="broker", kind="run.side_effect", entity_type="run", entity_id=run.id, run_id=run.id,
+                project_id=run.project_id, domain=run.domain,
+                payload={"kind": "PUSH_BRANCH", "status": "REFUSED", "code": res.get("code"), "provider": provider,
+                         "commit": res.get("commit")})
+    raise PolicyDenied(str(res.get("error") or "push refused"), code=str(res.get("code") or cid.CODE_IDENTITY_MISMATCH),
+                       details={"side_effect_id": se.id, "provider": provider, "problems": problems})
+
+
+def guard_outbound_text(session: Session, run: WorkerRun, *, action: str, where: str, texts: dict[str, str]) -> None:
+    """Refuse (``AI_ATTRIBUTION_IN_TEXT``, audited) a PR title/body that carries AI attribution - never stripped,
+    the owner removes it. Checked before any credential is read or request sent."""
+    for field_name, text in texts.items():
+        findings = find_ai_attribution(text)
+        if not findings:
+            continue
+        message = refusal_message(f"{where} {field_name}", findings)
+        details = {"where": where, "field": field_name, "findings": [f.as_dict() for f in findings[:10]]}
+        audit.record(session, actor_type="service", actor_id="broker", action=action, result="DENIED",
+                     target_type="run", target_id=run.id, project_id=run.project_id, domain=run.domain,
+                     reason=message[:500], details={"code": "AI_ATTRIBUTION_IN_TEXT", **details})
+        raise PolicyDenied(message, code="AI_ATTRIBUTION_IN_TEXT", details=details)
 
 
 def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: str | None, work_root: Path,
-                     expected_head: str | None = None, basic_user: str = GITHUB_GIT_USER) -> dict[str, Any]:
+                     commit_policy: CommitPolicy, expected_head: str | None = None,
+                     basic_user: str = GITHUB_GIT_USER) -> dict[str, Any]:
     """Fetch the task branch from the untrusted candidate into a private bare mirror and push it.
 
     With ``expected_head`` the push is sha-pinned (``<sha>:refs/heads/<branch>``, never forced): exactly
-    the verified commit is published even if the branch tip moved between fetch and push."""
+    the verified commit is published even if the branch tip moved between fetch and push. ``commit_policy`` is
+    required: every commit of the pushed range is checked in the mirror before the push (owner rule); a violation
+    returns ``refused`` with its ``code`` and nothing is pushed."""
     src, dst = validate_refspec(f"refs/heads/{branch}:refs/heads/{branch}")
     validate_remote_url(remote_url)
     if token:
@@ -338,9 +470,24 @@ def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: 
         if expected_head and head != expected_head:
             return {"ok": False, "stage": "verify", "commit": head,
                     "error": "task branch head differs from the runtime-recorded head"}
+        # Owner rule: the gate checks exactly what the push would publish, so the remote's branches are read first
+        # (same credential, same child-only environment as the push). An unreadable remote is a failed push -
+        # nothing was sent - never a push of an unchecked range.
+        stage = "remote_read"
+        env = git_auth_env(remote_url, token, empty_global=empty_global, basic_user=basic_user)
+        unread = _read_remote_branches(mirror, remote_url, env, hooks)
+        if unread is not None:
+            return {"ok": False, "stage": stage, "commit": head,
+                    "error": f"the remote's branches could not be read, so the pushed range is unknown: {unread}"}
+        stage = "commit_policy"
+        problems = _pushed_commit_problems(mirror, base_env, hooks, head, commit_policy)
+        if problems:
+            code = cid.refusal_code(problems)
+            detail = "; ".join(f"{p['sha'][:12]} {p['detail']}" for p in problems[:3])
+            return {"ok": False, "stage": stage, "commit": head, "refused": True, "code": code, "problems": problems,
+                    "error": f"{code}: push refused - {detail}"[:800]}
         stage = "push"
         pinned_src, _ = validate_refspec(f"{head}:{dst}") if _SHA_RE.match(head or "") else (src, dst)
-        env = git_auth_env(remote_url, token, empty_global=empty_global, basic_user=basic_user)
         push = _git(["push", "--porcelain", "--no-verify", remote_url, f"{pinned_src}:{dst}"], cwd=mirror, env=env,
                     hooks=hooks)
         out = redact_text((push.stdout or "") + (push.stderr or ""))[:800]
@@ -409,6 +556,8 @@ def push_task_branch(
     if expected_head and expected_head != run.head_commit:
         raise PolicyDenied("expected head differs from the runtime-recorded head", code="HEAD_MISMATCH")
     expected_head = run.head_commit
+    # Owner rule (AGENTS.md invariant 11): no push without the owner's GitHub identity configured.
+    policy = commit_policy(session, run, cid.GITHUB, action="broker.git.push_branch")
     # Fetch from the trusted git dir recorded by the runtime; the candidate's own ``.git`` pointer
     # is worker-editable and never followed (ADR-0054).
     source = Path(run.git_dir_ref) if run.git_dir_ref and Path(run.git_dir_ref).is_dir() else Path(worktree)
@@ -431,7 +580,9 @@ def push_task_branch(
     work_root = get_settings().layout.root / "broker" / "git"
     work_root.mkdir(parents=True, exist_ok=True)
     res = push_from_mirror(source_repo=source, branch=branch, remote_url=url, token=token, work_root=work_root,
-                           expected_head=expected_head)
+                           expected_head=expected_head, commit_policy=policy)
+    if res.get("refused"):
+        refuse_push(session, run, se, res, action="broker.git.push_branch", provider=cid.GITHUB)
     se.status = "SUCCEEDED" if res["ok"] else ("UNKNOWN" if res.get("unknown") else "FAILED")
     se.commit_sha = res.get("commit")
     se.result_summary = (res.get("output") or res.get("error") or "")[:500]
@@ -503,6 +654,9 @@ def create_pull_request(
     if run.branch and head != run.branch:
         raise PolicyDenied("PR head does not belong to this run", code="BRANCH_NOT_ALLOWED")
     _require_publishable(session, run, "github.create_pr")
+    # Owner rule (AGENTS.md invariant 11): no AI attribution in what lands on GitHub - refused, never stripped.
+    guard_outbound_text(session, run, action="broker.github.create_pr", where="GitHub pull request",
+                        texts={"title": title, "body": body})
     target = {"repo": repo_full_name, "head": head, "base": base}
     grant = _require_grant(session, run, "PR_CREATE", target)
     _interlock(session, run, provider="github-repo", operation="create_pr", target=target, grant=grant)

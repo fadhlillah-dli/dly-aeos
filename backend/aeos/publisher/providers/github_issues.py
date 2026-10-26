@@ -29,6 +29,7 @@ from aeos.publisher.providers.base import (
     ProviderBlocked,
     ProviderError,
     classify_http_error,
+    refuse_ai_attribution,
     send,
 )
 from aeos.secrets import facade as secrets
@@ -94,6 +95,7 @@ class GitHubIssuesProvider:
 
     def _ensure_label(self, ctx: OpContext) -> OpResult:
         name = ctx.payload["name"]
+        refuse_ai_attribution("GitHub label", {"name": name, "description": ctx.payload.get("description", "")})
         existing = self._get_label(name)
         if existing is not None:
             return OpResult(external_id=name, external_url=existing.get("url"), kind="label",
@@ -112,8 +114,11 @@ class GitHubIssuesProvider:
         body = ctx.payload.get("body", "")
         if marker(ctx.logical_id) not in body:
             body = f"{body}\n\n{marker(ctx.logical_id)}\n{project_marker(ctx.project_id)}\n"
+        title = ctx.payload.get("title") or ctx.title
+        # owner rule (AGENTS.md invariant 11): nothing with AI attribution lands on GitHub (refused, not stripped)
+        refuse_ai_attribution("GitHub issue", {"title": title, "body": body})
         resp = send(self.client, "POST", self._url("/issues"), write=True, what="github create issue",
-                    headers=self._headers(), json={"title": ctx.payload.get("title") or ctx.title, "body": body,
+                    headers=self._headers(), json={"title": title, "body": body,
                                                    "labels": list(ctx.payload.get("labels", []))})
         if resp.status_code != 201:
             raise classify_http_error(resp, write=True, what="github create issue")

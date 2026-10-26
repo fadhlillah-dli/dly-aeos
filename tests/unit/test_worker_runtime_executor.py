@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
+from aeos.core.attribution import find_ai_attribution
 from aeos.core.db import session_factory
 from aeos.models.broker_ext import BrokerRequest
 from aeos.models.evidence import EvidenceArtifact
@@ -225,7 +226,8 @@ def test_exit_zero_goes_to_review_never_done(settings, setup):
         assert {(e.kind, e.trusted) for e in evs} == {("DIFF", True), ("LOG", False)}  # worker log untrusted
     repo = Path(run.workspace_ref)
     log = subprocess.run(["git", "log", "-1", "--format=%an"], cwd=repo, capture_output=True, text=True).stdout.strip()
-    assert log == "AEOS Runtime"
+    assert log == "Test"  # the github identity the test owner configured (tests/conftest.py), never the runtime's
+    assert run.caps["commit_identity"]["pushable"] is True
     assert not (Path(run.sandbox_ref) / "config" / "opencode.json").exists()  # token file removed
 
 
@@ -884,27 +886,69 @@ def test_attachment_cannot_change_the_route_or_add_a_fallback(settings, setup):
 
 
 def test_candidate_commit_uses_the_owners_configured_identity(settings, setup):
-    """§06 'legitimate identity ... linked to the user's account or noreply address'."""
+    """§06 'legitimate identity ... linked to the user's account or noreply address' + owner rule (AGENTS.md
+    invariant 11): the code host's identity is author AND committer, and the commit names no agent/route/model."""
     make, _ = setup
     run_id, task_id = make("ok")
-    owner = settings.model_copy(update={"commit_author_name": "Owner Name",
-                                        "commit_author_email": "123+owner@users.noreply.github.com"})
+    owner = settings.model_copy(update={"commit_identities": {
+        "github": {"name": "Owner Name", "email": "123+owner@users.noreply.github.com"},
+        "bitbucket": {"name": "Owner Name", "email": "owner@company.example.com"}}})
     executor.execute_run(owner, run_id, heartbeat_seconds=0.2)
     run, _te = _load(run_id, task_id)
     out = subprocess.run(["git", "log", "-1", "--format=%an|%ae|%cn|%ce%n%B"], cwd=run.workspace_ref,
                          capture_output=True, text=True).stdout
     assert out.startswith("Owner Name|123+owner@users.noreply.github.com|Owner Name|123+owner@users.noreply.github.com")
-    assert f"AEOS-Run-Id: {run_id}" in out and "AEOS-Route: worker.test-free" in out
-    assert run.caps["commit_identity"]["source"] == "owner-configured"
+    # provenance stays in the run record, never in a commit that can reach the code host
+    assert f"run {run_id[:8]}" in out
+    for leaked in ("AEOS-Agent", "AEOS-Route", "AEOS-Engine", "AEOS-Prompt-Revision", "worker.test-free", "opencode",
+                   run.agent_key or "<no agent>"):
+        assert leaked not in out, leaked
+    assert find_ai_attribution(out) == []
+    assert run.model_route_key == "worker.test-free" and run.caps["prompt_revision"]
+    ident = run.caps["commit_identity"]
+    assert ident["source"] == "owner-configured" and ident["provider"] == "github"
+    assert ident["config_key"] == "commit_identities.github" and ident["pushable"] is True
     assert "123+owner@users.noreply.github.com" not in json.dumps(run.caps)  # PII stays in the commit only
 
 
-def test_default_commit_identity_is_reported_as_not_linked(settings, setup):
+def test_github_identity_falls_back_to_the_legacy_commit_author_keys(settings, setup):
     make, _ = setup
     run_id, task_id = make("ok")
-    executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    legacy = settings.model_copy(update={"commit_identities": {}, "commit_author_name": "Owner Name",
+                                         "commit_author_email": "123+owner@users.noreply.github.com"})
+    executor.execute_run(legacy, run_id, heartbeat_seconds=0.2)
     run, _te = _load(run_id, task_id)
-    assert run.caps["commit_identity"]["source"].startswith("runtime-default")
+    out = subprocess.run(["git", "log", "-1", "--format=%ae|%ce"], cwd=run.workspace_ref, capture_output=True,
+                         text=True).stdout.strip()
+    assert out == "123+owner@users.noreply.github.com|123+owner@users.noreply.github.com"
+    assert run.caps["commit_identity"]["source"] == "owner-configured" and run.caps["commit_identity"]["pushable"]
+
+
+def test_default_commit_identity_is_reported_as_not_linked_and_not_pushable(settings, setup):
+    """Owner rule: without the code host's identity the candidate is still committed locally (runtime identity) but
+    marked not pushable - the broker refuses its push (fail closed)."""
+    make, _ = setup
+    run_id, task_id = make("ok")
+    unset = settings.model_copy(update={"commit_identities": {}})
+    executor.execute_run(unset, run_id, heartbeat_seconds=0.2)
+    run, _te = _load(run_id, task_id)
+    ident = run.caps["commit_identity"]
+    assert ident["source"].startswith("runtime-default") and ident["status"] == "MISSING"
+    assert ident["pushable"] is False and "commit_identities.github" in ident["not_pushable_reason"]
+    assert run.head_commit and run.execution_status == "REVIEW"  # the local candidate still exists
+
+
+def test_an_ai_identity_is_never_used_for_a_candidate_commit(settings, setup):
+    make, _ = setup
+    run_id, task_id = make("ok")
+    ai = settings.model_copy(update={"commit_identities": {"github": {"name": "Claude",
+                                                                      "email": "noreply@anthropic.com"}}})
+    executor.execute_run(ai, run_id, heartbeat_seconds=0.2)
+    run, _te = _load(run_id, task_id)
+    out = subprocess.run(["git", "log", "-1", "--format=%an <%ae>"], cwd=run.workspace_ref, capture_output=True,
+                         text=True).stdout.strip()
+    assert out == "AEOS Runtime <aeos-runtime@localhost>"
+    assert run.caps["commit_identity"]["status"] == "INVALID" and run.caps["commit_identity"]["pushable"] is False
 
 
 def test_container_sandbox_run_end_to_end_with_scripted_docker(settings, setup, monkeypatch, tmp_path):

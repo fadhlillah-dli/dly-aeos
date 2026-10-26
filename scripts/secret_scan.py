@@ -43,8 +43,10 @@ def tracked_files() -> list[str]:
 # data. Personal identifiers (aeos.core.pii) and tenant/company hosts there fail G1 unless allow-listed.
 PII_SCOPES = ("blueprints/", "contracts/", "docs/")
 TENANT_HOST = re.compile(r"(?i)\b[a-z0-9-]+\.(?:atlassian\.net|jira\.com|bitbucket\.org/[a-z0-9-]+|sharepoint\.com)\b")
+# No AI-assistant attribution address is allowed: commits and files carry no attribution lines
+# (tests/unit/test_repository_hygiene.py), so such an address in the scanned trees is a finding.
 PII_ALLOW_VALUES = ("example.com", "example.org", "example.net", "example.invalid", "@users.noreply.github.com",
-                    "noreply@anthropic.com", "your-tenant.atlassian.net", "<tenant>.atlassian.net",
+                    "your-tenant.atlassian.net", "<tenant>.atlassian.net",
                     "company.atlassian.net", "example.atlassian.net")
 
 

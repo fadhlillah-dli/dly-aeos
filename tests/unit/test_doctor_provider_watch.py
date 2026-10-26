@@ -329,7 +329,8 @@ def test_a_403_on_a_broker_push_marks_the_github_checks_stale(settings, db, watc
     monkeypatch.setattr(git_broker, "_git", fake_git)
     res = git_broker.push_from_mirror(source_repo=tmp_path, branch="aeos/t1-attempt-1",
                                       remote_url="https://github.com/o/r.git", token="ghp_" + "y" * 36,
-                                      work_root=tmp_path)
+                                      work_root=tmp_path,
+                                      commit_policy=git_broker.CommitPolicy(provider="github", email="t@example.invalid"))
     assert res["ok"] is False and res["stage"] == "push"
     assert [inv for inv, _ in watch.pending()] == ["secret:personal/github"]
     assert "GIT PUSH" in watch.pending()[0][1] and "ghp_" not in watch.pending()[0][1]

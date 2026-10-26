@@ -108,7 +108,9 @@ RULES: dict[Capability, CapRule] = {
         description="Pengawas native Max; kuota habis berarti menunggu, bukan fallback."),
     Capability.CAN_PREPARE_PR: CapRule(
         "Menyiapkan PR (merge tetap manusia)",
-        (*BASE, "repo.origin", "adapter.github_token", "evidence.verifier", "delivery.ci_workflow"),
+        # owner rule (AGENTS.md invariant 11): the broker refuses every push without the owner's GitHub identity
+        (*BASE, "repo.origin", "adapter.github_token", "evidence.verifier", "delivery.ci_workflow",
+         "git.commit_identity.github"),
         required=("repo.state", "adapter.github_token", "evidence.acceptance_suite"),
         guard=("evidence.acceptance_invalidation", "repo.domain"),
         advisory=("delivery.branch_protection", "repo.hooks"), domain="PERSONAL",

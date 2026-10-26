@@ -1,0 +1,97 @@
+name: "Laporan bug / Bug report"
+description: "Sesuatu tidak bekerja seperti seharusnya. / Something does not work as it should."
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Kerentanan keamanan jangan dilaporkan di sini.** Gunakan pelaporan privat (lihat SECURITY.md).
+        **Do not report security vulnerabilities here.** Use private vulnerability reporting (see SECURITY.md):
+        https://github.com/fadhlillah-dli/dly-aeos/security/advisories/new
+
+        Issue ini publik. Jangan sertakan secret, token, kata sandi, data pribadi, nama perusahaan atau alamat tenant.
+        This issue is public. Do not include secrets, tokens, passwords, personal data, company names or tenant addresses.
+  - type: input
+    id: version
+    attributes:
+      label: "Versi atau commit / Version or commit"
+      description: "Tag rilis atau id commit (`git rev-parse --short HEAD`). / Release tag or commit id."
+      placeholder: "v0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: "Host"
+      options:
+        - "Windows (PowerShell)"
+        - "Windows (Command Prompt / aeos.cmd)"
+        - "macOS Apple Silicon (arm64)"
+        - "macOS Intel (x86_64)"
+        - "Lainnya (tidak didukung) / Other (not supported)"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Area"
+      options:
+        - "Bootstrap / setup"
+        - "Readiness Doctor"
+        - "Control Center (UI)"
+        - "CLI"
+        - "Planning / Claude bridge"
+        - "Workforce / worker runtime / sandbox"
+        - "Verifier / delivery"
+        - "Publisher / docs engine"
+        - "Operations (backup, release, SLI)"
+        - "Lainnya / Other"
+    validations:
+      required: true
+  - type: dropdown
+    id: domain
+    attributes:
+      label: "Domain"
+      options:
+        - "PERSONAL"
+        - "OFFICE"
+        - "Tidak spesifik domain / Not domain-specific"
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: "Apa yang terjadi / What happened"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Yang diharapkan / Expected behaviour"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Langkah reproduksi / Steps to reproduce"
+      placeholder: |
+        1. ./aeos doctor
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: "Output Doctor atau log (sudah disensor) / Doctor output or logs (redacted)"
+      description: "Hapus secret dan data pribadi terlebih dahulu. / Remove secrets and personal data first."
+      render: text
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: "Konfirmasi / Confirmation"
+      options:
+        - label: "Saya sudah menghapus secret, token, data pribadi dan detail perusahaan/tenant. / I removed secrets, tokens, personal data and company/tenant details."
+          required: true
+        - label: "Ini bukan kerentanan keamanan. / This is not a security vulnerability."
+          required: true

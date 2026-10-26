@@ -148,8 +148,9 @@ export interface RouteItem {
   reviewed_tool_set?: string[] | null;
   runtime_binding?: RuntimeBinding;
   execution_path?: { status: string; note: string };
-  /** which evaluation can produce results for this route (EVAL_ONLY for arena: eval-bound tasks only; NOT_WIRED for comparator/local: DESIGN, NOT-PROVEN) */
-  evaluation_path?: { status: string; note: string };
+  /** which evaluation can produce results for this route: EVAL_RUN (worker pools), PLANNING_BASELINE (supervisor),
+   * EVAL_ONLY (arena: eval-bound tasks only), NOT_WIRED (comparator/local: DESIGN, NOT-PROVEN). A path is never a result. */
+  evaluation_path?: { status: "EVAL_RUN" | "EVAL_ONLY" | "PLANNING_BASELINE" | "NOT_WIRED" | string; note: string };
   /** the exact upstream request the broker would build (E1 documentation shape until a probe records E3) */
   upstream_request?: UpstreamRequest | null;
   /** provider rule on which client may call the route (S07: free-tier Zen models require OpenCode) */

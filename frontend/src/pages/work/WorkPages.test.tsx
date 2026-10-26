@@ -229,6 +229,39 @@ describe("Run detail page", () => {
     expect(screen.getByText("Ringkasan AI (bukan bukti)")).toBeInTheDocument();
     expect(screen.getByText(/Belum ada review atau acceptance/)).toBeInTheDocument();
   });
+
+  it("shows the TaskSpec verifier_policy read-only, and an older server's missing field as not stated", async () => {
+    const spec = {
+      task_key: "a", title: "API login", goal: "Login API", feature_key: null, acceptance_criteria: ["AC1"], expected_outputs: ["code"],
+      allowed_paths: ["src/**"], forbidden_paths: [], tools_allowed: [], egress_allowed: [], limits: {}, stop_conditions: [],
+      evidence_requirements: [], risk_class: "R2", data_classification: "INTERNAL", depends_on: [], spec_hash: "sha256:aaaa",
+      plan_version_id: "pv1", plan_version_hash: "sha256:bbbb", base_commit: null, capability_ttl_seconds: 600,
+      verifier_policy: { required: true, suites: ["unit"], integration_tests: "required", contract_breaking: "approved" },
+    };
+    const detail = {
+      ...row, mode: "LIVE", checked_at: new Date().toISOString(), quarantined: false, quarantine_reasons: [], task_spec: spec,
+      task_execution: null, base_commit: "aaaaaaaaaaaa", head_commit: null, branch: "aeos/demo-1",
+      workspace: { sandbox_kind: "process", strategy: "worktree", present: true }, lease: null, diff_summary: {}, actions: [],
+      attempts: [], evidence: [], reviews: [], acceptance: [], decisions: [], side_effects: [], model_calls: [], error: "", block_reason: "",
+    };
+    responses[`/api/runs/${row.run_id}`] = detail;
+    const { unmount } = wrap(<RunDetailPage />, `/runs/${row.run_id}`);
+    const facts = await screen.findByRole("group", { name: "Kebijakan verifier (hanya baca)" });
+    expect(screen.getByText("Kebijakan verifier")).toBeInTheDocument();
+    expect(facts).toHaveTextContent("wajib (required)");
+    expect(facts).toHaveTextContent("disetujui (dinyatakan, tidak memblokir)");
+    expect(facts).toHaveTextContent("suite: unit");
+    // read-only: the immutable TaskSpec offers no control to change its policy
+    expect(facts.querySelector("button, input, select, textarea")).toBeNull();
+    unmount();
+
+    const { verifier_policy: _omitted, ...older } = spec;
+    void _omitted;
+    responses[`/api/runs/${row.run_id}`] = { ...detail, task_spec: older };
+    wrap(<RunDetailPage />, `/runs/${row.run_id}`);
+    expect(await screen.findByText("tidak dinyatakan API")).toBeInTheDocument();
+    expect(screen.queryByText("wajib (required)")).not.toBeInTheDocument();
+  });
 });
 
 describe("Run detail quarantine release and reconciliation", () => {

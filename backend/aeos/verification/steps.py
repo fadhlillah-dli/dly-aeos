@@ -71,6 +71,10 @@ class StepContext:
     # verifier only; a context built without them (unit tests with a scripted runner) runs steps unsealed and unnamed.
     seal_step: Callable[[str], Any] | None = None
     check_seal: Callable[..., Any] | None = None
+    # ``check_driver_seal(step_seal, res, out_dir=...)``: the payload a verifier-owned driver (pack) sealed at its very
+    # end, with the digests of the outputs it wrote under *out_dir* checked again; None when the seal is missing or
+    # forged (recorded on the verification; forgery is a tamper finding). Set by the verifier only.
+    check_driver_seal: Callable[..., dict[str, Any] | None] | None = None
 
 
 def run_named(ctx: StepContext, name: str, args: list[str], *, pythonpath: Path, autoload: bool,
@@ -80,6 +84,34 @@ def run_named(ctx: StepContext, name: str, args: list[str], *, pythonpath: Path,
     kw: dict[str, Any] = {"step": name} if ctx.seal_step is not None else {}
     return cast(ProcResult, ctx.runner.python(args, pythonpath=pythonpath, autoload=autoload,
                                               timeout=ctx.timeout if timeout is None else timeout, **kw))
+
+
+@dataclass
+class DriverRun:
+    """One verifier-owned driver step: the process result, the payload the host may use and whether it was sealed."""
+
+    res: ProcResult
+    data: dict[str, Any]
+    sealed: bool
+    seal_missing: bool = False  # sealed step without a usable sealed result (missing or forged): *data* is empty
+
+
+def run_driver(ctx: StepContext, name: str, args: list[str], *, pythonpath: Path, autoload: bool,
+               timeout: float | None = None, out_dir: Path | None = None, runner: Any = None) -> DriverRun:
+    """A verifier-owned driver (``packs/*``, ``python -c <source>``) through the runner, named in the step list and -
+    when the verifier provides its result seal - sealed: the payload is then only what the driver sealed at its very
+    end (the outputs it digested under *out_dir* re-checked), never a line printed by candidate code it imported. A
+    context without the verifier's seal (unit tests with a scripted runner) gets the last JSON line of stdout."""
+    rn = runner if runner is not None else ctx.runner
+    limit = ctx.timeout if timeout is None else timeout
+    if ctx.seal_step is None or ctx.check_driver_seal is None:
+        res = cast(ProcResult, rn.python(args, pythonpath=pythonpath, autoload=autoload, timeout=limit))
+        return DriverRun(res, last_json_line(res.stdout), sealed=False)
+    step_seal = ctx.seal_step(name)
+    res = cast(ProcResult, rn.python(args, pythonpath=pythonpath, autoload=autoload, timeout=limit, seal=step_seal,
+                                     step=name))
+    data = ctx.check_driver_seal(step_seal, res, out_dir=out_dir)
+    return DriverRun(res, dict(data) if data is not None else {}, sealed=True, seal_missing=data is None)
 
 
 def run_pytest(ctx: StepContext, name: str, args: list[str], *, pythonpath: Path, autoload: bool, junit: Path,

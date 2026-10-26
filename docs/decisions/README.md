@@ -23,7 +23,7 @@ SUPERSEDED on ADR-0003 also revokes the decisions its `owner:ADR-0003` actor hol
 |---|---|---|
 | [ADR-0001](ADR-0001-master-architecture-baseline.md) | Master architecture is the platform baseline; MCI alignment UNVERIFIED | ACCEPTED |
 | [ADR-0002](ADR-0002-stack-and-cross-platform-runtime.md) | Stack and cross-platform local runtime (Windows + macOS) | ACCEPTED |
-| [ADR-0003](ADR-0003-seed-build-authority.md) | Seed build by native Claude; owner-authorised commit/push/merge for the platform repo | ACCEPTED |
+| [ADR-0003](ADR-0003-seed-build-authority.md) | Seed build authority: owner-authorised commit/push/merge for the platform repo | ACCEPTED |
 | [ADR-0004](ADR-0004-first-admin-bootstrap-hardening.md) | First-admin bootstrap hardening and local single-use recovery | PROPOSED |
 | [ADR-0010](ADR-0010-install-manifest-component-catalog.md) | InstallManifest as the reviewed component catalog (DESIGN lens) | ACCEPTED |
 | [ADR-0011](ADR-0011-readiness-doctor-capability-gates.md) | Readiness Doctor checks, fingerprints and capability gates | ACCEPTED |
@@ -72,3 +72,4 @@ SUPERSEDED on ADR-0003 also revokes the decisions its `owner:ADR-0003` actor hol
 | [ADR-0114](ADR-0114-platform-docs-readiness-and-evidence-producers.md) | Platform, documentation readiness and real evidence producers (K4 audit closure) | PROPOSED |
 | [ADR-0115](ADR-0115-public-repository-on-github-free.md) | Platform repository public on GitHub Free: free CI on all three OSes, ruleset on main, free security features | ACCEPTED |
 | [ADR-0120](ADR-0120-verifier-impact-selected-steps.md) | Verifier v4: impact-selected executed checks, per-candidate environments, UI/a11y evidence, project test baseline | PROPOSED |
+| [ADR-0121](ADR-0121-code-host-identity-and-no-ai-attribution.md) | Owner identity per code host (local `aeos.yaml`), broker push gate, outbound attribution guard, neutral labels; provenance stays in AEOS | ACCEPTED |

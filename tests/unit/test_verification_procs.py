@@ -203,6 +203,55 @@ def test_a_contained_step_is_not_stalled_by_a_descendant_holding_its_output(tmp_
     assert res.duration_s < 45 and len(res.survivors) >= 1, (res.duration_s, res.survivors)
 
 
+# A step whose main process returns while a helper it started is still finishing (esbuild's service process ends when
+# its parent's pipe closes): the helper here lingers HELPER_SECONDS, longer than the default survivor grace.
+HELPER_SECONDS = 3.5
+LINGERING_HELPER = r'''
+import os, subprocess, sys
+kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
+if os.name == "nt":
+    kw["creationflags"] = 0x00000008  # DETACHED_PROCESS: no console host of its own (still in the step's job)
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(float(__import__('sys').argv[1]))", sys.argv[1]], **kw)
+'''
+
+
+def _helper_names() -> frozenset[str]:
+    """The allow-list naming this interpreter (the lingering helper of the tests is a child of the same executable)."""
+    import psutil
+
+    from aeos.verification.procgroup import helper_key
+
+    return frozenset({helper_key(psutil.Process().name()), helper_key(Path(sys.executable).name)})
+
+
+def _contained(tmp_path: Path, seconds: float, **kw):
+    env = procs.scrubbed_env(pythonpath=[tmp_path], home=tmp_path / "h", tmp=tmp_path / "t", data_dir=tmp_path / "d",
+                             disable_plugin_autoload=True)
+    return procs.run_process([sys.executable, "-c", LINGERING_HELPER, str(seconds)], cwd=tmp_path, env=env,
+                             timeout=60, contain=True, **kw)
+
+
+def test_an_allow_listed_build_tool_helper_that_exits_within_its_grace_is_no_survivor(tmp_path: Path):
+    """An honest build step is not quarantined: an allow-listed helper process still finishing after its parent got
+    the helper grace, ended inside it (while the tamper window was open) and is listed, not hidden."""
+    res = _contained(tmp_path, HELPER_SECONDS, helpers=_helper_names(), helper_grace=15.0)
+    assert res.returncode == 0 and not res.timed_out
+    assert res.survivors == [], res.survivors
+    assert res.helper_exits and all(s.get("pid") for s in res.helper_exits), res.helper_exits
+    assert res.duration_s < 15
+
+
+def test_the_same_lingering_process_is_a_survivor_when_it_is_not_allow_listed(tmp_path: Path):
+    res = _contained(tmp_path, HELPER_SECONDS)
+    assert res.returncode == 0 and len(res.survivors) >= 1 and res.helper_exits == [], res.survivors
+
+
+def test_an_allow_listed_helper_still_alive_after_its_grace_is_a_survivor(tmp_path: Path):
+    res = _contained(tmp_path, 60, helpers=_helper_names(), helper_grace=1.0)
+    assert res.returncode == 0 and len(res.survivors) >= 1, res.survivors
+    assert res.duration_s < 30  # listed and killed, never waited for
+
+
 def test_a_contained_step_without_descendants_has_no_survivors(tmp_path: Path):
     env = procs.scrubbed_env(pythonpath=[tmp_path], home=tmp_path / "h", tmp=tmp_path / "t", data_dir=tmp_path / "d",
                              disable_plugin_autoload=True)
@@ -279,3 +328,55 @@ def test_branch_head_reads_only_local_branches(tmp_path: Path):
         reader.branch_head("aeos/missing")
     with pytest.raises(procs.GitError):
         reader.branch_head("--output=/tmp/x")
+
+
+# ---------------------------------------------------------------- survivors that detach or appear late (POSIX sweep)
+def _scripted_group(monkeypatch, scans, detached_pids=()):
+    """A StepGroup whose sweeps return *scans* in turn (the last one repeats) - no real processes involved."""
+    from aeos.verification import procgroup
+
+    g = procgroup.StepGroup(method="process-group", pid=4242, started=0.0)
+    calls = {"n": 0, "killed": 0}
+
+    def members():
+        i = min(calls["n"], len(scans) - 1)
+        calls["n"] += 1
+        return list(scans[i])
+
+    monkeypatch.setattr(g, "_members", members)
+    monkeypatch.setattr(g, "_left_group", lambda pid: pid in detached_pids)
+    monkeypatch.setattr(g, "kill_all", lambda: calls.__setitem__("killed", calls["killed"] + 1))
+    monkeypatch.setattr(procgroup, "_describe", lambda pid: {"pid": pid, "name": "python"})
+    monkeypatch.setattr(procgroup.psutil, "wait_procs", lambda procs, timeout=None: ([], []))
+    monkeypatch.setattr(procgroup.psutil, "Process", lambda pid: object())
+    return g, calls
+
+
+def test_a_member_that_left_the_group_is_a_survivor_at_once_without_grace(monkeypatch):
+    """macOS CI: a grandchild that left the step's session was seen, got the 2 s grace, did its work and exited inside
+    it - and was then not reported. A detached member is an escape, not an exiting child: no grace, killed now."""
+    import time
+
+    g, calls = _scripted_group(monkeypatch, scans=[[777], [], []], detached_pids={777})
+    start = time.monotonic()
+    survivors = g.reap(grace=2.0)
+    assert [s["pid"] for s in survivors] == [777] and survivors[0]["detached"] is True
+    assert calls["killed"] == 1 and time.monotonic() - start < 1.0  # no grace was waited
+
+
+def test_an_ordinary_member_still_gets_the_grace_to_finish_exiting(monkeypatch):
+    g, calls = _scripted_group(monkeypatch, scans=[[555], [555], []])
+    assert g.reap(grace=2.0) == [] and calls["killed"] == 0  # exited inside the grace: not a survivor
+
+
+def test_an_empty_first_sweep_is_repeated_before_the_group_counts_as_empty(monkeypatch):
+    """A descendant spawned in the step's last moments may not be readable on the first sweep (macOS)."""
+    g, calls = _scripted_group(monkeypatch, scans=[[], [], [888], [888]], detached_pids={888})
+    survivors = g.reap(grace=2.0)
+    assert [s["pid"] for s in survivors] == [888] and calls["n"] >= 3 and calls["killed"] == 1
+
+
+def test_the_job_object_needs_no_settle_window(monkeypatch):
+    g, calls = _scripted_group(monkeypatch, scans=[[], [999]])
+    g.method = "job-object"
+    assert g.reap(grace=0.0) == [] and calls["n"] == 1  # the job's own accounting is exact

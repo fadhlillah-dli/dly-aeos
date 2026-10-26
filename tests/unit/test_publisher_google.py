@@ -30,9 +30,14 @@ from tests.unit.test_publisher_support import (
     seed_personal_secrets,
 )
 
-TOKEN = json.dumps({"token": "ya29.unit-test-access-token-0123456789", "refresh_token": "1//unit-refresh-0123456789abc",
-                    "client_id": "cid", "client_secret": "csecret-value", "token_uri": gg.DEFAULT_TOKEN_URI,
-                    "scopes": [gg.DRIVE_FILE_SCOPE], "expiry": (utcnow() + timedelta(hours=1)).isoformat()})
+
+def _token() -> str:
+    """A stored OAuth token that is valid when the test uses it (computed then, never at import: a suite running
+    longer than the token lifetime must not see it expire)."""
+    return json.dumps({"token": "ya29.unit-test-access-token-0123456789",
+                       "refresh_token": "1//unit-refresh-0123456789abc", "client_id": "cid",
+                       "client_secret": "csecret-value", "token_uri": gg.DEFAULT_TOKEN_URI,
+                       "scopes": [gg.DRIVE_FILE_SCOPE], "expiry": (utcnow() + timedelta(hours=1)).isoformat()})
 
 
 def _ctx(**kw) -> OpContext:
@@ -43,9 +48,10 @@ def _ctx(**kw) -> OpContext:
     return OpContext(**base)
 
 
-def _provider(token: str = TOKEN, root: str | None = None) -> gg.GoogleDriveDocsProvider:
+def _provider(token: str | None = None, root: str | None = None) -> gg.GoogleDriveDocsProvider:
     client = httpx.Client()
-    return gg.GoogleDriveDocsProvider(client=client, auth=gg.GoogleAuth(client, token_json=token), root_folder_id=root)
+    return gg.GoogleDriveDocsProvider(client=client, auth=gg.GoogleAuth(client, token_json=token or _token()),
+                                      root_folder_id=root)
 
 
 # ---------------------------------------------------------------------------------------------- OAuth
@@ -62,7 +68,7 @@ def test_only_drive_file_scope_is_ever_requested(tmp_path, secrets_memory):
 
     class Creds:
         def to_json(self):
-            return TOKEN
+            return _token()
 
     class Flow:
         def run_local_server(self, **kw):
@@ -103,9 +109,19 @@ def test_google_status_without_store_is_blocked():
     assert st["status"] == "BLOCKED" and "remedy" in st
 
 
+def test_the_test_token_is_valid_whenever_a_test_uses_it(monkeypatch):
+    """Test hygiene: the token expiry is computed when a test uses it, not when the module is imported - a suite
+    running longer than the token lifetime (one hour) must not hand later tests an expired token."""
+    from datetime import datetime
+
+    later = utcnow() + timedelta(hours=3)
+    monkeypatch.setattr(f"{__name__}.utcnow", lambda: later)
+    assert datetime.fromisoformat(json.loads(_token())["expiry"]) > later
+
+
 @respx.mock
 def test_expired_token_is_refreshed_in_process(secrets_memory):
-    expired = json.loads(TOKEN) | {"expiry": (utcnow() - timedelta(minutes=5)).isoformat()}
+    expired = json.loads(_token()) | {"expiry": (utcnow() - timedelta(minutes=5)).isoformat()}
     route = respx.post(gg.DEFAULT_TOKEN_URI).mock(return_value=httpx.Response(200, json={
         "access_token": "ya29.refreshed-access-token-abcdefghij", "expires_in": 3600, "scope": gg.DRIVE_FILE_SCOPE}))
     create = respx.post(f"{gg.DRIVE_API}/files").mock(return_value=httpx.Response(200, json={"id": "F1"}))

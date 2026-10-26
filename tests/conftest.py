@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -16,6 +17,10 @@ from aeos.core.enums import Domain, Role
 
 ADMIN_PW = "correct-horse-battery-staple"
 VIEWER_PW = "read-only-observer-pass-77"
+# The git identity of the test repositories (tests/unit/test_workforce_support.init_git_repo) and the code-host
+# commit identity the test owner configured (placeholder addresses only: the repository is public).
+TEST_GIT_NAME = "Test"
+TEST_GIT_EMAIL = "test@example.invalid"
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +57,11 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[config
         if k not in os.environ:
             monkeypatch.setenv(k, "")
             monkeypatch.delenv(k)
+    # Owner rule (AGENTS.md invariant 11): the broker pushes only commits authored AND committed by the configured
+    # code-host identity. Tests run as an owner who configured one for both hosts - the identity the test git
+    # repositories commit with (init_git_repo); tests of the unset/invalid/mismatch cases override it explicitly.
+    monkeypatch.setenv("AEOS_COMMIT_IDENTITIES", json.dumps({h: {"name": TEST_GIT_NAME, "email": TEST_GIT_EMAIL}
+                                                             for h in ("github", "bitbucket")}))
     config_mod.reset_settings_cache()
     _reset_process_caches()
     s = config_mod.get_settings()

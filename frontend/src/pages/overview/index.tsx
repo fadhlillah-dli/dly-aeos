@@ -3,6 +3,7 @@ import { RefreshCw } from "lucide-react";
 import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { Button, ErrorBox, Loading, Notice, PageHeader } from "../../components/ui";
+import { IntegrityHoldBanner } from "../work/IntegrityHold";
 import { ActivityFeed } from "./ActivityFeed";
 import { IntegrationsCard } from "./IntegrationsCard";
 import { OverviewView } from "./OverviewView";
@@ -43,6 +44,7 @@ export default function Page() {
           </Button>
         }
       />
+      {domain && <IntegrityHoldBanner />}
       {!domain ? (
         <NoDomainNotice />
       ) : q.isLoading ? (

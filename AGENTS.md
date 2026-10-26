@@ -22,7 +22,8 @@ a decision — do not silently pick one.
 | `docs/` | architecture, ADRs (`docs/decisions`), runbooks, coverage matrix |
 
 Runtime state never lives in the repo: data dir is `%LOCALAPPDATA%\DLY-AEOS` (Windows),
-`~/Library/Application Support/DLY-AEOS` (macOS), `$XDG_DATA_HOME/DLY-AEOS` (Linux) (§06).
+`~/Library/Application Support/DLY-AEOS` (macOS), `$XDG_DATA_HOME/DLY-AEOS` (Linux, not a tested
+host) (§06).
 
 ## Invariants (never break these)
 
@@ -46,6 +47,17 @@ Runtime state never lives in the repo: data dir is `%LOCALAPPDATA%\DLY-AEOS` (Wi
 9. **OFFICE default deny** (§23): `external_worker_allowed=false`, `approved_worker_routes=[]`
    until a recorded company authorisation exists. Office data never flows into Personal views.
 10. **Localhost only** (§06): bind 127.0.0.1; never 0.0.0.0; never disable auth/CSRF/origin checks.
+11. **Owner identity on code hosts, no AI attribution** (owner rule 2026-10-26, ADR-0121; applies to DLY AEOS
+    and to every project it creates or manages): every GitHub activity (commits as author AND committer, pushes, PRs,
+    issues, comments) uses the owner's GitHub identity; every Bitbucket activity the owner's company identity (two
+    different addresses, configured only in the gitignored `aeos.yaml` as `commit_identities`, never committed).
+    No AI may appear on GitHub, Bitbucket or the company's Jira/Confluence: not as author, committer, co-author
+    or contributor, and not in any attribution line (`Co-Authored-By:` naming an AI or a bot, "Generated
+    with/by <AI tool>" footers, robot emoji, AI vendor noreply addresses, model/route/agent names). Provenance
+    (run, agent, route, model) stays in DLY AEOS records. Every outbound text goes through
+    `aeos.core.attribution` (refused, never silently stripped); the broker refuses any push whose commits do not
+    match the configured identity of the provider (`aeos.core.commit_identity`). The repository is public:
+    placeholders only (`you@example.com`), never a real address.
 
 ## Protected paths (self-build, §09)
 
@@ -87,7 +99,11 @@ quarantined as well.
   evidence stays per claim (`evidence_ids`/`evidence_level` on the record, never a page-wide level).
   `tests/unit/test_api_envelope_contract.py` enforces this.
 * Cross-platform: `pathlib`, no shell=True, no POSIX-only calls without a Windows path (and vice
-  versa); `psutil` for process trees. CI runs Windows, macOS and Linux.
+  versa); `psutil` for process trees. Host platforms are Windows, macOS arm64 and macOS Intel
+  (ADR-0115): CI runs the backend suite and the bootstrap on `windows-latest`, `macos-latest` (arm64)
+  and `macos-26-intel`, and mypy for `--platform darwin` and `--platform win32`. `ubuntu-latest`
+  runners are used only for the platform-neutral frontend, browser e2e and supply-chain jobs. Linux
+  host support is NOT-PROVEN: its code paths stay but no CI job runs them.
 * Tests: `pytest` (`tests/`), isolated data dir via fixtures in `tests/conftest.py`. Tests that
   need real tools (claude, opencode, openbao, docker, network) are marked `integration`/`network`
   and skip cleanly when the tool is absent.
@@ -97,7 +113,7 @@ quarantined as well.
 ## Commands
 
 ```
-./aeos.ps1 <cmd>   (Windows)      ./aeos <cmd>   (macOS/Linux)
+./aeos.ps1 <cmd>   (Windows PowerShell)   aeos.cmd <cmd>   (Command Prompt)   ./aeos <cmd>   (macOS)
 aeos doctor        bootstrap readiness (no LLM)
 aeos serve         http://127.0.0.1:8787
 aeos admin create  first SUPER_ADMIN (no default credentials)

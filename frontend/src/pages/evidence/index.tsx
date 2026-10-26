@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useAuth } from "../../auth/AuthContext";
 import { PageHeader, Tabs } from "../../components/ui";
 import { useEventStream, type AeosEvent } from "../../lib/events";
@@ -11,6 +12,7 @@ import { EvidenceLedger } from "./EvidenceLedger";
 import { GatesPanel } from "./GatesPanel";
 import { ReviewsPanel } from "./ReviewsPanel";
 import { RunStatusPanel } from "./RunStatusPanel";
+import { ScreenshotsPanel } from "./ScreenshotsPanel";
 
 const LIVE_KINDS = /^(evidence\.|verification\.|review\.|acceptance\.|delivery\.|governance\.)/;
 
@@ -23,8 +25,10 @@ export default function EvidencePage() {
   const { domain } = useAuth();
   const qc = useQueryClient();
   const [taskId, setTaskId] = useState<string | null>(null);
-  // Tabs keeps its own active state; bumping `jump` remounts it on the requested tab.
-  const [nav, setNav] = useState({ tab: "status", jump: 0 });
+  // Tabs keeps its own active state; bumping `jump` remounts it on the requested tab. A deep link
+  // /evidence?id=<evidence id> (Live Work "Bukti", project baseline) lands on the ledger, which opens that record.
+  const [params] = useSearchParams();
+  const [nav, setNav] = useState({ tab: params.get("id") ? "ledger" : "status", jump: 0 });
   const head = useQuery({ queryKey: ["evidence", domain, { header: true }], queryFn: () => evidenceApi.list({}) });
   const onEvent = useCallback(
     (e: AeosEvent) => {
@@ -64,6 +68,7 @@ export default function EvidencePage() {
           { id: "acceptance", label: "Penerimaan", content: <AcceptancePanel /> },
           { id: "gates", label: "Gate delivery", content: <GatesPanel taskId={taskId} /> },
           { id: "delivery", label: "PR & provider", content: <DeliveryPanel /> },
+          { id: "screenshots", label: "Tangkapan layar UI", content: <ScreenshotsPanel /> },
           { id: "asvs", label: "Kontrol keamanan (ASVS)", content: <AsvsPanel /> },
         ]}
       />

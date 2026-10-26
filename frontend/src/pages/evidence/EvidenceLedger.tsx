@@ -10,7 +10,8 @@ import { EvidenceDrawer } from "./EvidenceDrawer";
 import { LEVEL_SHORT, LevelBadge, Status, TrustBadge } from "./labels";
 
 const KINDS = ["VERIFICATION_REPORT", "TEST_REPORT", "SCOPE_CHECK", "DIFF", "LINT_REPORT", "SECRET_SCAN", "CI_STATUS",
-  "PROVIDER_CAPABILITY", "REVIEW_PACKAGE", "PR_BUNDLE", "GOVERNANCE_HANDOFF", "PROBE", "LOG"];
+  "PROVIDER_CAPABILITY", "REVIEW_PACKAGE", "PR_BUNDLE", "GOVERNANCE_HANDOFF", "PROBE", "LOG", "SCREENSHOT",
+  "RUNTIME_OBSERVATION", "SMOKE_TEST", "ARTIFACT_DIGEST", "PROVIDER_ENFORCEMENT_TEST"];
 
 export function EvidenceLedger({ runId }: { runId?: string }) {
   const { domain } = useAuth();

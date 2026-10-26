@@ -14,6 +14,8 @@ build — real tenant behaviour is NOT-PROVEN (§51 P2).
 * Content uses the storage format; images go as page attachments; raw Mermaid is never assumed to
   render (source is shown as a code block next to a "visual pending" note).
 * Bitbucket is read-only here (repository/PR references). There is no merge operation (U-09).
+* Owner rule (AGENTS.md invariant 11): Jira/Confluence are the company's systems - a title or body carrying AI
+  attribution is refused before it is sent (``AI_ATTRIBUTION_IN_TEXT``), never stripped.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from aeos.publisher.providers.base import (
     ProviderConflict,
     ProviderError,
     classify_http_error,
+    refuse_ai_attribution,
     send,
 )
 from aeos.secrets import facade as secrets
@@ -372,6 +375,7 @@ class ConfluenceProvider:
         self._ensure_ready()
         if ctx.operation == "create_folder":
             parent = ctx.parent_external_id or self.cfg.parent_id
+            refuse_ai_attribution("Confluence folder", {"title": self.title_for(ctx)})
             resp = send(self.client, "POST", self._v2("/folders"), write=True, what="confluence create folder",
                         headers=self._h({"Content-Type": "application/json"}),
                         json={"spaceId": self.cfg.space_id, "title": self.title_for(ctx), "parentId": parent})
@@ -382,6 +386,8 @@ class ConfluenceProvider:
             return OpResult(external_id=str(data["id"]), external_url=_link(self.cfg, data), kind="folder",
                             response={"marker_property": prop})
         if ctx.operation == "create_doc":
+            refuse_ai_attribution("Confluence page", {"title": self.title_for(ctx),
+                                                      "body": ctx.payload.get("markdown", "")})
             storage = markdown_to_storage(ctx.payload.get("markdown", ""),
                                           rendered_images=set(ctx.payload.get("rendered_visuals", [])))
             resp = send(self.client, "POST", self._v2("/pages"), write=True, what="confluence create page",
@@ -436,6 +442,8 @@ class ConfluenceProvider:
         except human_sections.HumanContentUnlocatable as exc:
             raise ProviderConflict(str(exc), expected_revision=ctx.existing_revision, observed_revision=str(number),
                                    current_text=current_text[:100_000]) from exc
+        # the new body includes HUMAN_GOVERNED text kept from the page: refused as a whole, never edited by AEOS
+        refuse_ai_attribution("Confluence page", {"title": self.title_for(ctx), "body": markdown})
         storage = markdown_to_storage(markdown, rendered_images=set(ctx.payload.get("rendered_visuals", [])))
         resp = send(self.client, "PUT", self._v2(f"/pages/{quote(pid, safe='')}"), write=True,
                     what="confluence update page", headers=self._h({"Content-Type": "application/json"}),
@@ -576,6 +584,8 @@ class JiraProvider:
         if ctx.operation != "create_issue":
             raise ProviderError(f"jira adapter does not support operation {ctx.operation!r}")
         label = jira_marker_label(ctx.project_id, ctx.logical_id)
+        refuse_ai_attribution("Jira issue", {"summary": ctx.payload.get("title") or ctx.title,
+                                             "description": ctx.payload.get("body", "")})
         fields = {"project": {"key": self.cfg.project_key}, "summary": (ctx.payload.get("title") or ctx.title)[:250],
                   "issuetype": {"name": self.cfg.issue_type}, "labels": ["aeos", label],
                   "description": _adf(ctx.payload.get("body", ""))}

@@ -264,6 +264,10 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   or when a runtime configuration file of the candidate (env files, `config/`, settings, compose/k8s/helm)
   names the migration reference. With no deployment target the check is NOT_APPLICABLE (local runtime);
   a target that names only one reference is NOT_PROVEN until you add the other.
+* **Verifier v5 (wave 7b):** the per-candidate environment's `dependency_set_hash` covers only the
+  candidate's installed packages, and the venv and pip steps run isolated in their own kill groups. A
+  verification made by v4 is never reused as a v5 result: acceptance recorded under v4 shows STALE and a v4
+  report cannot be accepted, so re-run the verification (ADR-0120 integration note).
 * **Impact-selected verifier checks (§22, §31, verifier v4):** every VERIFICATION_REPORT carries
   `impact_checks` - per impact category the checks it selected (`aeos.verification.impact`) and which
   executed. API/auth changes execute the change's own refusal tests (found in the test syntax tree, never
@@ -420,7 +424,8 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
 | `aeos worker containment --kind container [--domain OFFICE]` | the 20-check suite INSIDE the worker image (build it first: see `sandbox/README.md`); a fresh PASS for the current image is what lets admission select the container sandbox |
 | `aeos worker contract-test` | real OpenCode against a scripted loopback model with a hostile repository `opencode.json`: request contract, output cap, tool list, project config ignored, outside-file denied, patch-only, watchdog, kill. Records `WORKER_CONTRACT_TEST` evidence (Doctor `worker.contract`); a real route's model behaviour stays NOT_PROVEN |
 | `aeos worker reap` | remove worker containers whose run is no longer active (after a controller crash) |
-| `commit_author_name` / `commit_author_email` (`aeos.yaml` in the OS config dir, see `config/aeos.example.yaml`, or `AEOS_COMMIT_AUTHOR_NAME` / `AEOS_COMMIT_AUTHOR_EMAIL`) | §06 attribution of candidate commits: set the owner's GitHub noreply address (`<id>+<user>@users.noreply.github.com`). Unset, commits use `AEOS Runtime <aeos-runtime@localhost>` and the run records `commit_identity.source = runtime-default (not linked to an account)` (the run record keeps the address minimised; it is in the commit only). Every candidate commit carries `AEOS-Run-Id`, `AEOS-Task`, `AEOS-Agent`, `AEOS-Route`, `AEOS-Engine` and `AEOS-Prompt-Revision` trailers |
+| `commit_identities` (`aeos.yaml` in the OS config dir, see `config/aeos.example.yaml`, or `AEOS_COMMIT_IDENTITIES` as JSON) | §06 + owner rule (AGENTS.md invariant 11): the identity of each code host - `github` (your GitHub identity, e.g. `<id>+<user>@users.noreply.github.com`) and `bitbucket` (your company identity). Candidates of a project are committed with the identity of its code host (PERSONAL -> github, OFFICE or a registered Bitbucket repository -> bitbucket) as author AND committer. Unset (or invalid, or an AI/bot identity) for that host: the commit uses `AEOS Runtime <aeos-runtime@localhost>`, the run records `commit_identity.pushable = false` with the reason, and the broker refuses the push. The run record keeps the address minimised; it is in the commit only. See "Commit identity and no AI attribution" below |
+| `commit_author_name` / `commit_author_email` (`AEOS_COMMIT_AUTHOR_NAME` / `AEOS_COMMIT_AUTHOR_EMAIL`) | backward-compatible fallback for the **github** identity only; `commit_identities.github` wins when both are set. Bitbucket never falls back |
 
 Worker rules enforced by the runtime (ADR-0051 amendment 2026-10-19): no shell and no egress TaskSpec under
 the process sandbox; R3 under the process sandbox only when the owner's exception lists
@@ -456,7 +461,10 @@ Wave 7 additions:
   hold: `aeos policy decide --kind RISK_ACCEPTANCE --target-type worker_integrity_hold --target-id <hold id> --as
   <SUPER_ADMIN> --domain <PERSONAL|OFFICE> --days 1 --rationale "<what you checked>"` (your explicit choice of
   domain; the hold is host-wide). A later finding needs a new one. A domain's views show the hold, but another
-  domain's run id and findings only as a count (`aeos worker status --domain <that domain>` shows them).
+  domain's run id and findings only as a count (`aeos worker status --domain <that domain>` shows them). In the
+  Control Center the hold is a red panel on **Pekerjaan Live** (and a banner on **Ringkasan**) with the findings,
+  the command above and, for a SUPER_ADMIN, **Catat rekonsiliasi** - the same RISK_ACCEPTANCE through
+  `POST /api/decisions`, bound to the hold id, in the domain of the session (two explicit steps, 1-day expiry).
 * **CPU cap**: `limits.max_cpus` is a Windows Job Object CPU-rate hard cap in the process sandbox (`run.caps.cpu_cap`
   records the rate in force); on macOS/Linux it stays a reservation only. `limits.max_processes` is part of every
   TaskSpec (256), the same cap for both sandboxes.
@@ -471,8 +479,69 @@ Wave 7 additions:
 * **Doctor `worker.route_behaviour`**: per APPROVED/TRIAL worker route, the §43 measure `tool_schema_failures` of a
   trusted evaluation on the route's current configuration (+ verified runs). UNKNOWN until such runs exist, STALE
   after a configuration/engine change; FAILED only above the owner's threshold - a POLICY decision with target
-  `worker_route_behaviour:tool_schema_failures` and `details.max_failure_rate` (0..1, `POST /api/decisions`).
+  `worker_route_behaviour:tool_schema_failures` and `details.max_failure_rate` (0..1, `POST /api/decisions`; in
+  the Control Center: Kesiapan -> the check -> **Tetapkan ambang pemilik**, PERSONAL session, entered as a percentage).
   Without it, measured failures are reported, never judged.
+
+## Commit identity and no AI attribution (owner rule, AGENTS.md invariant 11)
+
+The owner's standing rule for DLY AEOS and every project it creates or manages: every GitHub activity (commits as
+author AND committer, pushes, PRs, issues, comments) uses the owner's GitHub identity; every Bitbucket activity
+uses the owner's company identity. No AI appears on GitHub, Bitbucket or the company's Jira/Confluence - not as
+author, committer, co-author or contributor, and not in any attribution line. Provenance (run id, agent, route,
+model) stays in DLY AEOS records (run rows, EvidenceArtifact); it is not written to the code host.
+
+**Owner step (required before any push, PR, issue or page goes out):**
+
+1. Open your local `aeos.yaml` (OS config dir: `%LOCALAPPDATA%\DLY-AEOS\aeos.yaml` on Windows,
+   `~/Library/Application Support/DLY-AEOS/aeos.yaml` on macOS, or the file `AEOS_CONFIG` names) and set both
+   identities. The real addresses live only there. The repository is public and never contains them, so never
+   copy this file into the checkout (`/aeos.yaml` and `config/aeos.yaml` are gitignored as a guard). Replace the
+   placeholders; a name or address left as `<...>` is refused (FAILED in Doctor), so an unedited copy is never
+   CONFIGURED:
+
+   ```yaml
+   commit_identities:
+     github:
+       name: <Your Name>
+       email: <id>+<username>@users.noreply.github.com   # your GitHub identity (noreply address recommended)
+     bitbucket:
+       name: <Your Name>
+       email: <you>@<company-domain>                     # your company identity (a different address)
+   ```
+
+2. Run `aeos doctor` (or open Kesiapan in the Control Center). `git.commit_identity.github` must show
+   **CONFIGURED**, and so must `git.commit_identity.bitbucket` once a Bitbucket repository is registered (until
+   then it is NOT_APPLICABLE). MISSING means the key is absent (the remedy names the key, never an address);
+   FAILED means the entry is invalid, including an AI or bot identity.
+3. Until `git.commit_identity.github` is CONFIGURED, `CAN_PREPARE_PR` is **BLOCKED** and the broker refuses every
+   push with `COMMIT_IDENTITY_MISSING`. OFFICE delivery readiness lists a missing or invalid company identity as a
+   reason, and the Bitbucket broker refuses the push the same way.
+
+CONFIGURED is not VERIFIED: reading `aeos.yaml` does not prove the address is linked to the account. Candidates
+committed before this rule still carry the old `AEOS-Agent`/`AEOS-Route`/`AEOS-Engine` trailers and are refused at
+push (`AI_ATTRIBUTION_IN_COMMIT`); re-run those tasks. The decision is recorded in
+[ADR-0121](decisions/ADR-0121-code-host-identity-and-no-ai-attribution.md).
+
+What enforces it:
+
+| Where | Rule | Refusal code |
+|---|---|---|
+| Worker candidate commit (`worker_runtime`) | author = committer = the identity of the project's code host; the commit message names no agent, route, engine, model or prompt revision (no `AEOS-*` provenance trailers; the subject keeps `run <id8>`). Without a valid identity the runtime identity commits locally and `caps.commit_identity.pushable = false` (with the reason); a worker-made commit with another identity or AI attribution also marks it not pushable | - (recorded on the run) |
+| Broker push (`git_broker` GitHub, `bitbucket_broker` Bitbucket) | before any push the broker reads the remote's branches into its own mirror (same credential as the push) and checks every commit the push would publish - every commit of the head that no remote branch reaches yet, so unpushed history below the run's base counts too, while history already on the remote (colleagues' commits) does not: author e-mail = committer e-mail = the configured identity, no AI/bot identity, no AI attribution in the message. More than 1000 such commits is refused (push the existing history yourself first). Refusals are audited (`DENIED`), the outbox row is FAILED, nothing reaches the remote. A remote whose branches cannot be read fails the push (FAILED, nothing sent) | `COMMIT_IDENTITY_MISSING`, `COMMIT_IDENTITY_MISMATCH`, `AI_ATTRIBUTION_IN_COMMIT`, `COMMIT_RANGE_UNBOUNDED` |
+| PR title/body (delivery + broker, GitHub and Bitbucket) | checked before the branch is pushed and again before any credential is read | `AI_ATTRIBUTION_IN_TEXT` |
+| Publisher GitHub Issues/labels, Jira issues, Confluence pages/folders | checked before the request; the operation is FAILED with the reason | `AI_ATTRIBUTION_IN_TEXT` |
+
+The guard (`aeos.core.attribution`) refuses, it never strips: remove the attribution and send it again. It looks for
+attribution, not for mentions: `Co-Authored-By:`/`Assisted-By:`/`Signed-off-by:`... naming an AI or a bot, `AEOS-Agent:`
+/`AEOS-Route:`/`AEOS-Engine:`/`AEOS-Model:` trailers, `Model:`/`Route:`/`Reviewer:` trailers naming an AI, "Generated
+with/by", "written with the help of", "AI-generated", the robot emoji, AI vendor and bot noreply addresses. A commit
+subject such as `fix(claude_bridge): ...` or "route deepseek requests through the broker" is ordinary text. A
+trailer naming a human called Claude is refused too (fail closed; reword it), and so is a co-author named with generic
+AI wording ("AI Assistant", "an LLM"). Invisible characters, fullwidth forms and look-alike Cyrillic/Greek letters are
+folded before matching, so an AI name split by a zero-width space is still found. The PR evidence bundle renders neutral
+roles ("supervisor review", "worker run", "independent verifier"); the reviewer tool and model stay in the review
+record and the bundle data.
 
 ## Scenarios tested as normal operations (§33)
 

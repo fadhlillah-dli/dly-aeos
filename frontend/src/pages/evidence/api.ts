@@ -163,10 +163,32 @@ export interface PRItem {
   bundle_hash: string;
 }
 
+/** §31 build once / digest / promotion (GET /api/delivery/gates "promotion"); promotion stays a human action. */
+export interface PromotionTarget {
+  integration_id: string;
+  observation_id: string | null;
+  reported_digest: string | null;
+  status: string; // NO_OBSERVATION | NOT_REPORTED | NOT_RECORDED | MATCH | MISMATCH
+}
+
+export interface PromotionStatus {
+  status: string; // PASS | FAIL | NOT_PROVEN | PENDING
+  authority: "HUMAN_ONLY";
+  reasons: string[];
+  targets: Partial<Record<"staging" | "production", PromotionTarget>>;
+  merge_commit: string | null;
+  recorded_digests: string[];
+  digest_evidence_id: string | null;
+  source?: string;
+}
+
 export interface GatesResponse {
   task_id: string;
   task_key: string;
   title: string;
+  project_id?: string;
+  domain?: string;
+  promotion?: PromotionStatus;
   run_id: string | null;
   head_commit: string | null;
   gates: GateItem[];
@@ -209,10 +231,73 @@ export interface ProviderCaps {
   checks: CapabilityCheck[];
   required_status_checks: string[];
   merge_gate: string;
+  /** VERIFIED (bound provider refusal) | STALE (ruleset changed since) | CLAIMED (owner attestation) | NOT-PROVEN */
   enforcement_tested: string;
+  /** The provider-side bypass test this capability is bound to; empty = never observed. */
+  enforcement_test?: {
+    evidence_id?: string;
+    rulesets?: { id?: number | string; updated_at?: string | null }[];
+    observed_on_branch?: string | null;
+    observed_at?: string | null;
+    recorded_at?: string | null;
+    reason?: string;
+    label?: string;
+  };
+  entitlement?: string;
   residual_risks: string[];
   source: string;
   mode: string;
+  project_id?: string;
+}
+
+/** POST /api/delivery/enforcement/observe: the provider's ruleset evaluation history (GET only). */
+export interface EnforcementObservation {
+  repo: string;
+  branch: string;
+  status: string; // OBSERVED | NOT_OBSERVED | UNKNOWN
+  checked_at: string;
+  time_period: string;
+  refusals: { rule_suite_id?: number; actor_name?: string; pushed_at?: string; rulesets?: { ruleset_id?: number; ruleset_name?: string }[] }[];
+  rulesets: { id?: number; name?: string; enforcement?: string; updated_at?: string }[];
+  error: string | null;
+  source: string;
+  evidence_id: string | null;
+}
+
+/** POST /api/delivery/enforcement/attest: the owner's own statement, an untrusted HUMAN claim (never VERIFIED). */
+export interface EnforcementAttestation {
+  evidence_id: string;
+  trusted: boolean;
+  evidence_level: string;
+  label: string;
+  enforcement_tested: "CLAIMED";
+  source: string;
+  checked_at: string | null;
+}
+
+/** POST /api/delivery/artifacts/record: provider-CI artifact digests of one commit (build once, §31). */
+export interface ArtifactDigests {
+  repo: string;
+  sha: string;
+  status: string; // RECORDED | NO_ARTIFACTS | UNKNOWN
+  runs: Record<string, unknown>[];
+  artifacts: {
+    id?: number;
+    name?: string;
+    run_id?: number;
+    digest?: string | null;
+    eligible?: boolean;
+    expired?: boolean;
+    /** PRESENT_UNVERIFIED: the provider holds an attestation, its signature is NOT verified by AEOS. */
+    attestation?: { status?: string; count?: number; signature_verified?: boolean };
+  }[];
+  checked_at: string;
+  error: string | null;
+  truncated: boolean;
+  source: string;
+  note: string;
+  eligible_digests: string[];
+  evidence_id: string | null;
 }
 
 export interface ListEnvelope<T> {
@@ -297,4 +382,10 @@ export const evidenceApi = {
   handoff: (taskId: string) => post<{ output: { result: string } }>(`/api/delivery/governance/${encodeURIComponent(taskId)}/handoff`, {}),
   syncPr: (id: string) => post<{ notes: string[] }>(`/api/delivery/prs/${encodeURIComponent(id)}/sync`),
   recordCapabilities: () => post<ProviderCaps>("/api/delivery/provider-capabilities/record", {}),
+  observeEnforcement: (body: { repo?: string; branch?: string; time_period: string }) =>
+    post<EnforcementObservation>("/api/delivery/enforcement/observe", body),
+  attestEnforcement: (body: { repo?: string; branch?: string; statement: string }) =>
+    post<EnforcementAttestation>("/api/delivery/enforcement/attest", body),
+  recordArtifacts: (body: { project_id: string; sha: string; repo?: string }) =>
+    post<ArtifactDigests>("/api/delivery/artifacts/record", body),
 };
