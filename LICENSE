@@ -1,0 +1,49 @@
+DLY AEOS - DLY AI Engineering Operating System
+Copyright (c) 2026 Fadhlillah. All rights reserved.
+
+PROPRIETARY SOURCE-AVAILABLE NOTICE
+
+1. Ownership. This software, including its source code, documentation, architecture,
+   designs, configuration, tests and every other file in this repository (the
+   "Software"), is the property of the copyright holder named above and is protected by
+   copyright law and international treaties.
+
+2. No licence is granted. The Software is published so that it can be read. Publishing it
+   does not grant any licence. Except as stated in section 3, no one may use, run, copy,
+   reproduce, modify, adapt, translate, merge, publish, distribute, sublicense, sell, rent,
+   lease, offer as a hosted service, or create derivative works of the Software, in whole
+   or in part, without the prior written permission of the copyright holder.
+
+3. Permitted access on GitHub. Because this repository is public on GitHub, users may view
+   it and fork it through GitHub's own functionality, to the extent the GitHub Terms of
+   Service require. A fork confers no rights beyond those terms. In particular, it confers
+   no right to use, modify or distribute the Software outside GitHub.
+
+4. Attribution and claims. No one may remove or alter this notice, any copyright notice, or
+   any authorship information in the Software or in its version history. No one may present
+   the Software, or any part of it, as their own work.
+
+5. Third-party components. Dependencies listed in requirements.lock, pyproject.toml,
+   frontend/package.json and frontend/package-lock.json, and the container base images named
+   in sandbox/, are not part of the Software. They are obtained from their upstream sources
+   under their own licences. Nothing in this notice restricts any right granted by those
+   licences.
+
+6. Contributions. The copyright holder does not accept external contributions (see
+   CONTRIBUTING.md). Anything submitted anyway, such as a pull request, patch or suggestion,
+   grants the copyright holder a perpetual, irrevocable, worldwide, royalty-free right to
+   use, modify and incorporate it without obligation.
+
+7. Disclaimer. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+   PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE
+   FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OF OR OTHER
+   DEALINGS IN THE SOFTWARE.
+
+8. Permission requests. To ask for permission to use the Software, open an issue in this
+   repository titled "Licence request". Do not include confidential information in the
+   issue. Any permission must be given in writing by the copyright holder and applies only
+   to its stated scope.
+
+SPDX-License-Identifier: LicenseRef-DLY-AEOS-Proprietary

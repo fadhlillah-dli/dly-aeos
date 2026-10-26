@@ -1,5 +1,11 @@
 # DLY AEOS — DLY AI Engineering Operating System
 
+[![CI](https://github.com/fadhlillah-dli/dly-aeos/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fadhlillah-dli/dly-aeos/actions/workflows/ci.yml?query=branch%3Amain)
+[![Licence: All rights reserved](https://img.shields.io/badge/licence-All%20rights%20reserved-red.svg)](LICENSE)
+[![Platforms: Windows | macOS](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS-blue.svg)](#quick-start)
+
+> Proprietary and source-available for viewing only. All rights reserved: see [Licence](#licence).
+
 DLY AEOS is a **local-first control plane for AI-assisted software engineering**. It runs on your
 own machine (Windows or macOS) from a clone of this repository, serves one dashboard on
 `http://127.0.0.1:8787`, and keeps humans in charge:
@@ -181,3 +187,36 @@ CI (`.github/workflows/ci.yml`) runs the full suite and the bootstrap on Windows
 macOS on Intel. Linux is not a tested host for now: the code paths remain, but nothing proves them. Dependency pins:
 [requirements.lock](requirements.lock) (universal, regenerated as described in
 [docs/OPERATIONS.md](docs/OPERATIONS.md#dependency-lockfile)).
+
+Changes per release are in [CHANGELOG.md](CHANGELOG.md), and the release notes are in
+[docs/releases](docs/releases/v0.1.0.md).
+
+## Licence
+
+Copyright (c) 2026 Fadhlillah. **All rights reserved.**
+
+DLY AEOS is proprietary and source-available for viewing only. Publishing it on GitHub grants no
+licence. You may view it on GitHub, and fork it there only as far as the GitHub Terms of Service
+require. Using, running, copying, modifying or distributing any part of it needs the copyright
+holder's prior written permission. The installation steps in this README are for the copyright
+holder and for anyone who has that permission.
+
+The full terms are in [LICENSE](LICENSE). To ask for permission, open a
+[Licence request](https://github.com/fadhlillah-dli/dly-aeos/issues/new?template=licence_request.yml)
+issue. Third-party dependencies keep their own licences. To refer to DLY AEOS, use
+[CITATION.cff](CITATION.cff).
+
+## Security
+
+Report vulnerabilities privately through GitHub private vulnerability reporting
+(**Security → Report a vulnerability**), never in a public issue. See [SECURITY.md](SECURITY.md).
+
+## Contributing
+
+External pull requests are not accepted. Bug reports and feature ideas are welcome as issues; use
+the issue forms. See [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+---
+
+Copyright (c) 2026 Fadhlillah. All rights reserved.
