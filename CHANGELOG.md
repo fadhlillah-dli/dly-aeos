@@ -12,11 +12,15 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ### Fixed
 
-- **Data directory private on macOS.** The data layout was created with the default umask (0755), so other
-  OS users could read the database and the PERSONAL/OFFICE partitions, and the Doctor reported
-  `evidence.dir_permissions` FAILED on every fresh Mac. The layout is now created as 0700 on POSIX, and a
-  directory left open by an older bootstrap is tightened at the next start. Unit tests cover both cases
-  (skipped on Windows, where the Doctor checks ACLs instead).
+- **Data directory private on POSIX (#14).** The data layout was created with the process umask (0755
+  under the usual 022), so the Doctor reported `evidence.dir_permissions` FAILED on every fresh Mac. On the
+  default macOS path the 0700 `~/Library` already kept other users out, but a data directory configured
+  elsewhere (`AEOS_DATA_DIR`) or the Linux path was readable by other OS users. On POSIX the layout is now
+  created as 0700, and a directory left open by an older bootstrap is tightened at the next start. Windows
+  keeps its inherited ACLs: Python 3.13 turns a 0o700 `mkdir` into a protected DACL there. Unit tests on CI
+  (E2) cover POSIX tightening and the Windows mode; on the owner's Mac (arm64) the Doctor reported
+  `evidence.dir_permissions` VERIFIED after the fix (E3, that host only). A real Windows run of the
+  unchanged path is covered by the existing Windows CI suite only.
 
 ## [0.1.0] - 2026-10-26
 

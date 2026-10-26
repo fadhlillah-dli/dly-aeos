@@ -754,8 +754,14 @@ def test_a_replaced_project_repository_makes_the_project_result_stale(settings, 
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows ACLs are tested above")
-def test_evidence_dir_permissions_verified_on_a_fresh_posix_layout(settings, db):
-    """A layout created by bootstrap under umask 022 must not leave the partitions readable by other users."""
+def test_evidence_dir_permissions_verified_after_ensure_tightens_open_partitions(settings, db):
+    """Partitions left 0755 by an older bootstrap (umask 022) are private again after the next start."""
+    from aeos.core.enums import Domain
+
+    for d in Domain:
+        settings.layout.domain_root(d).chmod(0o755)  # independent of the umask of the test host
+    assert check("evidence.dir_permissions", _ctx(settings, db, base_runner())).status == "FAILED"
+    settings.layout.ensure()
     res = check("evidence.dir_permissions", _ctx(settings, db, base_runner()))
     assert res.status == "VERIFIED", res.summary
     assert "other_access" not in res.observed_evidence
