@@ -264,6 +264,10 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   or when a runtime configuration file of the candidate (env files, `config/`, settings, compose/k8s/helm)
   names the migration reference. With no deployment target the check is NOT_APPLICABLE (local runtime);
   a target that names only one reference is NOT_PROVEN until you add the other.
+* **Verifier v5 (wave 7b):** the per-candidate environment's `dependency_set_hash` covers only the
+  candidate's installed packages, and the venv and pip steps run isolated in their own kill groups. A
+  verification made by v4 is never reused as a v5 result: acceptance recorded under v4 shows STALE and a v4
+  report cannot be accepted, so re-run the verification (ADR-0120 integration note).
 * **Impact-selected verifier checks (§22, §31, verifier v4):** every VERIFICATION_REPORT carries
   `impact_checks` - per impact category the checks it selected (`aeos.verification.impact`) and which
   executed. API/auth changes execute the change's own refusal tests (found in the test syntax tree, never

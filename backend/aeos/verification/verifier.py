@@ -98,8 +98,14 @@ log = logging.getLogger("aeos.verification.verifier")
 # the candidate lockfile, frontend step (npm ci --ignore-scripts, vitest with the verifier's config, type check,
 # build) + UI states/a11y probe, seeded backup/restore + rollback-with-data in the migration round-trip,
 # migration/runtime credential split.
+# v5 (wave 7b, ADR-0120 integration note): dependency_set_hash of the per-candidate environment covers only the
+# candidate's installed distributions, read by the verifier from their metadata (no candidate process lists them;
+# the trusted harness is recorded separately); the venv creation and the pip install run the controller
+# interpreter in isolated mode (-I) in their own kill groups; the frontend tool steps run in kill groups; the
+# OpenAPI dump and the UI driver are sealed with the digests of the files they write. A v4 report's hashes mean
+# something else, so it is never reused as a v5 result: the version is part of the config hash.
 # A new version makes earlier acceptance STALE.
-VERIFIER_VERSION = "4"
+VERIFIER_VERSION = "5"
 ORIGIN = "verifier"
 MARK_EXPR = "not integration and not network"
 PASSING = "PASS"

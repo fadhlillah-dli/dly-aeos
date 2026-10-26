@@ -168,6 +168,42 @@ def test_verification_under_an_older_grader_is_not_accepted(db, wf, monkeypatch)
     assert wf.of("mark_accepted") == []
 
 
+def test_a_version_4_report_is_never_taken_as_a_version_5_result(db, wf, monkeypatch):
+    """Wave 7b: dependency_set_hash changed meaning (candidate-only packages; isolated venv/pip steps), so the
+    verifier is version 5 and a report made by version 4 cannot be accepted (re-verify)."""
+    from aeos.verification import verifier
+
+    assert verifier.VERIFIER_VERSION == "5" and "+v5 " in verifier.verifier_identity()
+    w = make_world(db)
+    monkeypatch.setattr(verifier, "VERIFIER_VERSION", "4")
+    v4_hash = verifier.current_config_hash(w.task)
+    monkeypatch.setattr(verifier, "VERIFIER_VERSION", "5")
+    assert v4_hash is not None and v4_hash != verifier.current_config_hash(w.task)
+    report = record_verification(db, w, config_hash=v4_hash)
+    make_review(db, w, report)
+    rec = acceptance.evaluate_acceptance(db, w.run.id)
+    assert rec.acceptance_status == "REJECTED"
+    assert any("another grader/lint/verifier" in r for r in rec.reasons)
+    assert wf.of("mark_accepted") == []
+
+
+def test_acceptance_recorded_under_version_4_is_stale_under_version_5(db, wf, monkeypatch):
+    from aeos.verification import verifier
+
+    w = make_world(db)
+    monkeypatch.setattr(verifier, "VERIFIER_VERSION", "4")
+    report = record_verification(db, w)
+    make_review(db, w, report)
+    rec = acceptance.evaluate_acceptance(db, w.run.id)
+    db.commit()
+    assert rec.acceptance_status == "ACCEPTED"
+    monkeypatch.setattr(verifier, "VERIFIER_VERSION", "5")
+    assert any("verifier configuration changed" in s for s in acceptance.staleness(db, rec))
+    assert not facade.acceptance_is_valid(db, w.task.id)
+    acceptance.recheck(db, rec.id, actor="t")
+    assert rec.acceptance_status == "STALE"
+
+
 def test_unknown_current_config_is_not_accepted(db, wf, monkeypatch):
     w = make_world(db)
     report = record_verification(db, w)

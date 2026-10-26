@@ -82,7 +82,11 @@ inconsistent result FAILs the step and QUARANTINES the run), the migration pack 
 per-candidate interpreter's steps are recorded in the verifier runner's kill-group list.
 
 The gaps this note first stated (OpenAPI dump, UI driver and distribution listing unsealed; npm/vitest/tsc/vite and
-the pip install outside a kill group; the project baseline outside both) were closed in wave 7b (2026-10-26):
+the pip install outside a kill group; the project baseline outside both) were closed in wave 7b (2026-10-26).
+These changes landed as `VERIFIER_VERSION` 5: `dependency_set_hash` now means something else (candidate-only
+distributions, read from metadata), and the venv and pip steps run isolated. The version is part of every
+verification's config hash, so a version 4 report is never taken as a version 5 result: acceptance recorded under
+version 4 is STALE and a version 4 report cannot be accepted (re-verify). What was closed:
 
 * **Kill groups for the tool steps.** The frontend's `npm ci`, vitest, `tsc -b --noEmit` and `vite build`
   (`frontend_install`, `frontend_vitest`, `frontend_typecheck`, `frontend_build`) and the per-candidate venv
