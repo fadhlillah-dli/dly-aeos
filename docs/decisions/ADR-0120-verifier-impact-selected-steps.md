@@ -88,7 +88,10 @@ the pip install outside a kill group; the project baseline outside both) were cl
   (`frontend_install`, `frontend_vitest`, `frontend_typecheck`, `frontend_build`) and the per-candidate venv
   creation and pip install (`dependency_env_venv`, `dependency_env_install`) run in their own kill groups and are
   recorded in the runner's step list (`ProcessRunner.tool`): a process left behind is a survivor and the run is
-  QUARANTINED. The venv creation runs only the controller's stdlib and is a trusted-only step. `npm ci
+  QUARANTINED. The venv creation runs only the controller's stdlib and is a trusted-only step. It and the pip
+  install run the controller interpreter in isolated mode (`-I`: no `PYTHONPATH`, no working directory on
+  `sys.path`). Without it, a `venv.py` that an earlier candidate step left in the run directory replaced the stdlib
+  `venv` inside that trusted-only step (reproduced in review). `npm ci
   --ignore-scripts` and the hash-pinned wheel install run no candidate code, but they install candidate-chosen
   packages, so they are not trusted-only (fail closed). Honest runs are not quarantined: every member keeps the
   2 s grace it already had. Only the allow-listed build-tool helper `esbuild` (esbuild's service process ends when its
@@ -120,7 +123,9 @@ the pip install outside a kill group; the project baseline outside both) were cl
   degraded kill group leaves the tamper status UNKNOWN. A project whose import path ships a top-level module that
   would shadow the test runner, the seal plugin or the standard library is not run (NOT_RUN, stated), the same
   rule the verifier applies to candidates. Not applied by the baseline: the verifier's automatic neutralisation of
-  foreign trust-table rows and its admission integrity hold. The baseline reports and audits such rows only.
+  foreign trust-table rows and its admission integrity hold. The baseline reports and audits such rows only, and
+  says so on every report (`stated`). The summary the inventory cites carries the tamper window's verdict beside
+  the measurement (`integrity`), so a PASS baseline whose integrity is UNKNOWN is shown as UNKNOWN, not as a pass.
 
 Still not covered (stated):
 
@@ -131,5 +136,6 @@ Still not covered (stated):
   working directory, which `python -c` / `python -m` put first on `sys.path`, the seal plugin file itself, or the
   base-commit export. For steps that import candidate code this reaches no further than the stated in-interpreter
   subversion of the seal. For trusted-only steps it is an additional gap: only the trusted-suite copy is
-  hash-checked before and after. The container runner mounts these read-only and gives each step its own tmpfs
-  working directory.
+  hash-checked before and after. The venv creation is the exception, because isolated mode imports nothing from
+  the run directory. The container runner mounts these read-only and gives each step its own tmpfs working
+  directory.

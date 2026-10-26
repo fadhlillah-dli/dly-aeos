@@ -70,6 +70,10 @@ def test_project_baseline_runs_the_repos_tests_at_the_inventory_commit(personal_
     # the same step discipline as the verifier: the pytest step is sealed and ran in its own kill group
     assert data["python"]["result_seal"]["status"] == "PASS", data["python"]["result_seal"]
     assert data["tamper"]["step_containment"]["survivors"] == []
+    # the integrity verdict travels with the measurement, and what the baseline does not do is on the report
+    assert out["integrity"] == data["tamper"]["status"]
+    assert all(limit in data["stated"] for limit in project_baseline.STATED_LIMITS)
+    assert (project_baseline.INTEGRITY_UNKNOWN in data["stated"]) == (data["tamper"]["status"] == "UNKNOWN")
     # the inventory (and so planning's repo_inventory) now cites the baseline for exactly this commit
     inv2 = inventory_for_project(db, p["id"], commit=commit)
     db.commit()
@@ -137,7 +141,7 @@ def test_a_process_left_behind_by_the_project_tests_makes_the_baseline_tampered(
     db.commit()
     out = project_baseline.run_project_baseline(db, p["id"], actor="tester")
     db.commit()
-    assert out["status"] == "TAMPERED", out
+    assert out["status"] == "TAMPERED" and out["integrity"] == "FAIL", out
     data = collector.read_json(db.get(EvidenceArtifact, out["evidence_id"]))
     assert data["tamper"]["status"] == "FAIL"
     survivors = data["tamper"]["step_containment"]["survivors"]
@@ -169,3 +173,95 @@ def test_a_project_shadowing_the_test_runner_or_stdlib_is_not_run_under_the_seal
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text("", encoding="utf-8")
     assert project_baseline.shadowing_modules(root) == ["pytest"]
+
+
+# A project test that forges the junit report after pytest wrote it (an atexit hook: after the sealed session end).
+FORGING_TEST = '''import atexit, sys
+from demo.calc import add
+
+
+def _forge():
+    path = sys.argv[sys.argv.index("--junitxml") + 1]
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write('<testsuites><testsuite name="pytest" tests="1" errors="0" failures="0" skipped="0">'
+                 '<testcase classname="tests.test_calc" name="test_add"/></testsuite></testsuites>')
+
+
+atexit.register(_forge)
+
+
+def test_add():
+    assert add(1, 2) == 3
+
+
+def test_known_bug():
+    assert add(0.1, 0.2) == 0.3
+'''
+
+
+@needs_git
+def test_a_project_test_that_forges_its_junit_report_makes_the_baseline_tampered(personal_client: AuthedClient, db,
+                                                                                 tmp_path: Path):
+    """The pytest step is sealed like the verifier's: a report rewritten after pytest's sealed session end is result
+    tampering - never a measurement (the forged report claimed one passing test and hid the failing one)."""
+    from aeos.models.audit import AuditEvent
+    from aeos.portfolio.inventory import inventory_for_project
+
+    p, _repo, _rid = _project(personal_client, tmp_path, name="Baseline Forge",
+                              files={**FILES, "tests/test_calc.py": FORGING_TEST})
+    inventory_for_project(db, p["id"])
+    db.commit()
+    out = project_baseline.run_project_baseline(db, p["id"], actor="tester")
+    db.commit()
+    assert out["status"] == "TAMPERED", out
+    ev = db.get(EvidenceArtifact, out["evidence_id"])
+    data = collector.read_json(ev)
+    assert data["python"]["status"] == "TAMPERED" and data["python"]["result_seal"]["status"] == "FAIL"
+    assert any("junit report changed" in p for p in data["python"]["result_seal"]["problems"]), data["python"]
+    assert "passing" not in data["python"] and ev.evidence_level == "E1"  # no ids taken from the forged report
+    alert = db.query(AuditEvent).filter(AuditEvent.action == "verification.controller_modified").one()
+    assert "forged or broke its sealed test result" in (alert.reason or "")
+
+
+@needs_git
+def test_a_project_test_run_without_a_sealed_session_end_is_no_measurement(personal_client: AuthedClient, db,
+                                                                           tmp_path: Path):
+    """A test process that leaves before pytest finished its session (os._exit) leaves no sealed end: the Python part
+    is NOT_RUN - no trusted measurement - and never read from whatever report exists."""
+    from aeos.portfolio.inventory import inventory_for_project
+
+    leaving = "import os\n\n\ndef test_leaves_before_the_session_ends():\n    os._exit(0)\n"
+    p, _repo, _rid = _project(personal_client, tmp_path, name="Baseline Exit",
+                              files={**FILES, "tests/test_calc.py": leaving})
+    inventory_for_project(db, p["id"])
+    db.commit()
+    out = project_baseline.run_project_baseline(db, p["id"], actor="tester")
+    db.commit()
+    assert out["status"] == "NOT_RUN", out
+    ev = db.get(EvidenceArtifact, out["evidence_id"])
+    data = collector.read_json(ev)
+    assert data["python"]["status"] == "NOT_RUN" and data["python"]["result_seal"]["status"] == "MISSING"
+    assert "no trusted measurement" in data["python"]["summary"] and ev.evidence_level == "E1"
+
+
+class _KillGroups:
+    """A runner's kill-group record as ``_Guard.close`` reads it."""
+
+    def __init__(self, survivors: list[dict], gaps: list[str]):
+        self._survivors, self._gaps = survivors, gaps
+
+    def survivors(self) -> list[dict]:
+        return self._survivors
+
+    def containment_gaps(self) -> list[str]:
+        return self._gaps
+
+
+def test_a_degraded_kill_group_leaves_the_baseline_integrity_unknown_and_a_survivor_fails_it(db):
+    """UNKNOWN is never a PASS: a kill group weaker than the platform's cannot prove that nothing outlived a step."""
+    degraded = project_baseline._Guard(db).close(_KillGroups([], ["project_baseline: kill group marker-sweep"]))
+    assert degraded["status"] == "UNKNOWN", degraded
+    assert degraded["step_containment"]["gaps"] == ["project_baseline: kill group marker-sweep"]
+    survivor = [{"step": "project_baseline", "survivors": [{"pid": 4242, "name": "python"}]}]
+    leaked = project_baseline._Guard(db).close(_KillGroups(survivor, ["project_baseline: kill group marker-sweep"]))
+    assert leaked["status"] == "FAIL" and leaked["step_containment"]["survivors"] == survivor

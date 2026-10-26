@@ -175,7 +175,8 @@ def helper_key(name: str) -> str:
 
 
 # Windows console hosts: a console helper the step started without a console of its own gets one, which lives exactly
-# as long as its last client. It waits with the allow-listed helpers (never on its own: a non-helper keeps it alive).
+# as long as its last client. It counts as a helper for the extra grace: alongside a non-helper there is no extra
+# grace at all, and a console host still alive when the grace ends is a survivor like any other process.
 CONSOLE_HOSTS = frozenset({"conhost"})
 
 

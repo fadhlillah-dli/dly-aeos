@@ -24,8 +24,10 @@ TEST_REPORT the inventory and planning can cite (``inventory.tests.baseline`` ->
   failing and skipped test ids, the runner and its residual risks. A step that cannot run is NOT_RUN with the
   concrete reason; a failing test in the baseline is recorded as such (a measurement, not a verdict).
 
-Not done here (stated): foreign trust-table rows found in the window are reported and audited, not neutralised
-automatically as the verifier does; the baseline does not pause worker admission.
+Not done here, stated on every report (``stated``, ``STATED_LIMITS``): foreign trust-table rows found in the window
+are reported and audited, not neutralised automatically as the verifier does; the baseline does not pause worker
+admission. A tamper window that cannot prove integrity (UNKNOWN) is stated too, and the summary the inventory cites
+carries it beside the measurement (``integrity``): a PASS baseline is never an integrity PASS by omission.
 
 Provider CI check-runs for that commit are not imported here (the delivery gates read provider CI on PR heads).
 """
@@ -74,6 +76,18 @@ NOT_RUN_REASON = ("the project's tests have not been run at this commit; run the
                   "(aeos verify project-baseline <project id> / POST /api/projects/{id}/test-baseline)")
 PYTHON_STEP = "project_baseline"  # the sealed pytest step (runner step list, result seal)
 JS_STEP_PREFIX = "project_baseline_"  # kill-group step names of the npm ci / vitest steps
+# what this baseline does not do, stated on every report (``stated``)
+STATED_LIMITS = (
+    "the project's own pytest configuration is not used: the verifier-owned ini selects "
+    f"-m \"{MARK_EXPR}\"",
+    "vitest comes from the project's lockfile: its report is the project toolchain's own and is not sealed by the "
+    "verifier",
+    "foreign trust-table rows written during the run are reported and audited only: unlike the verifier, the "
+    "baseline does not neutralise them automatically and does not pause worker admission",
+)
+INTEGRITY_UNKNOWN = ("the tamper window could not prove that the project's code left the controller and the "
+                     "control plane untouched (integrity UNKNOWN): the measurement is recorded, its integrity is "
+                     "not proven")
 
 
 def _identity(snapshot: Path, dirs: list[str]) -> dict[str, Any]:
@@ -164,7 +178,11 @@ def baseline_summary(session: Session, project_id: str, commit: str | None) -> d
             continue
         data = collector.read_json(ev) or {}
         py = data.get("python") or {}
+        # the tamper window's verdict beside the measurement: UNKNOWN (a degraded kill group, an unreadable trust-table
+        # check, a run that never opened the window) is shown as such - a PASS baseline is not an integrity PASS
+        integrity = str((data.get("tamper") or {}).get("status") or "UNKNOWN")
         return {"status": data.get("status", "UNKNOWN"), "commit": commit, "evidence_id": ev.id,
+                "integrity": integrity,
                 "evidence_level": ev.evidence_level, "checked_at": ev.created_at.isoformat(),
                 "suite_identity": data.get("suite_identity"), "passed": py.get("passed"), "failed": py.get("failed"),
                 "skipped": py.get("skipped"), "failing_sample": (py.get("failing") or [])[:20],
@@ -297,7 +315,8 @@ def run_project_baseline(session: Session, project_id: str, *, actor: str, actor
         raise Blocked(f"the inventory commit cannot be read: {exc}", code="COMMIT_UNRESOLVED") from exc
     workdir = runner.new_workdir()
     content: dict[str, Any] = {"suite": SUITE, "commit": sha, "repository": {"id": repo.id, "provider": repo.provider,
-                                                                            "full_name": repo.full_name}}
+                                                                            "full_name": repo.full_name},
+                               "stated": list(STATED_LIMITS)}
     status = "NOT_RUN"
     level = "E1"
     rn: Any = None
@@ -337,6 +356,8 @@ def run_project_baseline(session: Session, project_id: str, *, actor: str, actor
                 content["javascript"] = {"status": "NOT_RUN", "summary": "no package with vitest + package-lock.json"}
         finally:
             content["tamper"] = guard.close(rn)
+        if content["tamper"]["status"] == "UNKNOWN":
+            content["stated"].append(INTEGRITY_UNKNOWN)
         parts = [content["python"].get("status"), content["javascript"].get("status")]
         if content["tamper"]["status"] == "FAIL" or "TAMPERED" in parts:
             status = "TAMPERED"

@@ -619,3 +619,42 @@ def test_installed_dependency_listing_and_startup_hooks_are_read_by_the_verifier
     assert envs.startup_hooks([site]) == [{"file": "a1_hook.pth", "executes_code": True},
                                           {"file": "paths.pth", "executes_code": False}]
     assert all(d.name == "site-packages" for d in envs.site_dirs(tmp_path / "ve"))
+
+
+def test_a_byte_order_mark_does_not_hide_a_startup_hook(tmp_path: Path):
+    """The interpreter strips a UTF-8 byte-order mark before it runs a .pth file's import lines: so does the listing."""
+    (tmp_path / "bom.pth").write_bytes(b"\xef\xbb\xbfimport os\n")
+    assert envs.startup_hooks([tmp_path]) == [{"file": "bom.pth", "executes_code": True}]
+
+
+def test_the_venv_and_install_steps_import_nothing_from_the_run_directory(tmp_path: Path):
+    """The venv creation is a trusted-only step (a process it leaves behind is not blamed on the candidate): a
+    ``venv.py`` or ``pip.py`` an earlier candidate step left in the run directory - the step's working directory or
+    the PYTHONPATH entry it is given - must never stand in for the controller's stdlib venv or its pip."""
+    import sys
+
+    from aeos.verification import procs, runner
+
+    wd = tmp_path / "w"
+    (wd / "c").mkdir(parents=True)
+    marker = tmp_path / "planted-module-ran"
+    for d in (wd, wd / "c"):
+        for mod in ("venv.py", "pip.py"):
+            (d / mod).write_text(f"open({str(marker)!r}, 'w').write({mod!r})\n", encoding="utf-8")
+    env = procs.scrubbed_env(pythonpath=[wd / "c"], home=wd / "h", tmp=wd / "t", data_dir=wd / "d",
+                             disable_plugin_autoload=True)
+    rn = runner.ProcessRunner(workdir=wd)
+    ve = wd / "ve"
+    cmd = envs.venv_command(ve)
+    assert cmd[:4] == [sys.executable, "-I", "-m", "venv"]
+    mk = rn.tool(cmd, cwd=wd, env=env, timeout=300, step="dependency_env_venv")
+    py = envs._venv_python(ve)
+    assert mk.returncode == 0 and py.is_file(), mk.tail(800)
+    assert not marker.exists(), marker.read_text(encoding="utf-8")
+    # the install step (pip's help: no index needed) with an empty PYTHONPATH, as the verifier runs it
+    pip = rn.tool(envs.pip_command(py, ["--help"]), cwd=wd, env={**env, "PYTHONPATH": ""}, timeout=300,
+                  step="dependency_env_install")
+    assert pip.returncode == 0 and "--require-hashes" in pip.stdout, pip.tail(800)
+    assert not marker.exists(), marker.read_text(encoding="utf-8")
+    assert [s["step"] for s in rn.steps] == ["dependency_env_venv", "dependency_env_install"]
+    assert all(s["survivors"] == [] for s in rn.steps)

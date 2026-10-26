@@ -20,7 +20,10 @@ in the verifier's private run directory from the **candidate's own lockfile**:
 
 The venv creation, the install and the suite each run in their own kill group and are recorded in the verifier
 runner's step list (``dependency_env_venv`` - the controller's own stdlib, a trusted-only step -,
-``dependency_env_install``, ``dependency_env``): a process left behind is a survivor (QUARANTINED).
+``dependency_env_install``, ``dependency_env``): a process left behind is a survivor (QUARANTINED). The venv
+creation and the install run the controller interpreter in isolated mode (``-I``: no ``PYTHONPATH``, no working
+directory on ``sys.path``), so a module an earlier candidate step left in the run directory cannot replace ``venv``
+or ``pip`` - the trusted-only classification of the venv step holds whatever the run directory contains.
 
 The container runner keeps the verifier image's dependency set (no per-candidate environment there): NOT_RUN,
 stated. Lockfiles without hashes, non-pip lock formats and failed installs are NOT_RUN with the reason - the
@@ -170,6 +173,20 @@ def _venv_python(ve: Path) -> Path:
                                                                      else "python")
 
 
+def venv_command(ve: Path) -> list[str]:
+    """The venv creation: the controller's own stdlib ``venv`` in isolated mode (``-I`` ignores ``PYTHONPATH`` and
+    keeps the working directory off ``sys.path``: nothing in the run directory is imported - a trusted-only step)."""
+    return [sys.executable, "-I", "-m", "venv", "--without-pip", str(ve)]
+
+
+def pip_command(py: Path, reqs: list[str]) -> list[str]:
+    """The install: the controller's pip in isolated mode (no module of the run directory can stand in for pip),
+    hash-pinned wheels only, no dependency resolution beyond the lockfile."""
+    return [sys.executable, "-I", "-m", "pip", "--python", str(py), "install", "--isolated", "--no-input",
+            "--disable-pip-version-check", "--no-cache-dir", "--require-hashes", "--only-binary=:all:", "--no-deps",
+            *PIP_INDEX_ARGS, *reqs]
+
+
 def site_dirs(ve: Path) -> list[Path]:
     """The ``site-packages`` directories of a venv this interpreter created (``venv`` install scheme)."""
     base = {"base": str(ve), "platbase": str(ve), "installed_base": str(ve), "installed_platbase": str(ve)}
@@ -220,7 +237,8 @@ def startup_hooks(dirs: list[Path]) -> list[dict[str, Any]]:
             continue
         for pth in sorted(d.glob("*.pth")):
             try:
-                lines = pth.read_bytes()[:MAX_METADATA_BYTES].decode("utf-8", errors="replace").splitlines()
+                # utf-8-sig: the interpreter strips a byte-order mark before it looks for ``import`` lines
+                lines = pth.read_bytes()[:MAX_METADATA_BYTES].decode("utf-8-sig", errors="replace").splitlines()
             except OSError:
                 lines = ["import ?"]  # unreadable: assume it runs code (fail closed)
             runs = any(ln.startswith(("import ", "import\t")) for ln in lines)
@@ -254,18 +272,16 @@ def run(ctx: StepContext, python_pins_changed: bool) -> StepResult | None:
     rn = ctx.runner
     base_env = scrubbed_env(pythonpath=[wd / "c"], home=wd / "h", tmp=wd / "t", data_dir=wd / "d",
                             disable_plugin_autoload=True)
-    # the venv (controller stdlib) and the install run in their own kill groups, recorded in the runner's step list
-    mk = rn.tool([sys.executable, "-m", "venv", "--without-pip", str(ve)], cwd=wd, env=base_env, timeout=300,
-                 step="dependency_env_venv")
+    # the venv (controller stdlib, isolated mode) and the install run in their own kill groups, recorded in the
+    # runner's step list
+    mk = rn.tool(venv_command(ve), cwd=wd, env=base_env, timeout=300, step="dependency_env_venv")
     py = _venv_python(ve)
     if mk.returncode != 0 or not py.is_file():
         return not_run(f"python -m venv failed (exit {mk.returncode}): {mk.tail(300)}")
     install_env = {k: v for k, v in base_env.items() if k not in _PROXY_KEYS}  # the install step's registry egress
     install_env["PYTHONPATH"] = ""
     reqs = [a for p in pip_files for a in ("-r", str(ctx.snapshot.joinpath(*p.split("/"))))]
-    pip = rn.tool([sys.executable, "-m", "pip", "--python", str(py), "install", "--isolated", "--no-input",
-                   "--disable-pip-version-check", "--no-cache-dir", "--require-hashes", "--only-binary=:all:",
-                   "--no-deps", *PIP_INDEX_ARGS, *reqs], cwd=wd, env=install_env, timeout=INSTALL_TIMEOUT,
+    pip = rn.tool(pip_command(py, reqs), cwd=wd, env=install_env, timeout=INSTALL_TIMEOUT,
                   step="dependency_env_install")
     if pip.timed_out or pip.returncode != 0:
         return not_run(f"pip install --require-hashes failed (exit {pip.returncode}, timed out {pip.timed_out}): "

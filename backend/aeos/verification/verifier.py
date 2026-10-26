@@ -148,7 +148,8 @@ _MODULE_SUFFIXES = (".py", ".pyc", ".pyo", ".pyd", ".so", ".dylib")
 # outliving any OTHER step - every step that executes candidate code, and any unnamed or future step (fail closed) -
 # is tampering (see _guard_close). The frontend's npm ci and the per-candidate pip install execute no candidate code
 # (install scripts off, hash-pinned wheels only) but install candidate-chosen packages: not trusted-only (fail closed).
-# The per-candidate venv is created by the controller's own interpreter (stdlib ``venv``) before anything is installed.
+# The per-candidate venv is created by the controller's own interpreter (stdlib ``venv``, isolated mode ``-I``: nothing
+# of the run directory is importable) before anything is installed (``envs.venv_command``).
 TRUSTED_ONLY_STEPS = frozenset({"collect_expected", "baseline", "contract_openapi_base", "dependency_env_venv"})
 
 _PREFLIGHT = (
