@@ -424,8 +424,9 @@ MAX_CANDIDATE_COMMITS = 50
 
 def candidate_commits(ws: Workspace, head: str) -> list[Any]:
     """The commits ``base..head`` of the candidate (the runtime's commit plus any the worker made itself), read
-    through the trusted git dir as ``aeos.core.commit_identity.CommitRecord`` - what the broker will check before
-    a push. More than ``MAX_CANDIDATE_COMMITS`` raises (the caller marks the candidate not pushable)."""
+    through the trusted git dir as ``aeos.core.commit_identity.CommitRecord`` - the run's part of what the broker
+    checks before a push (the broker also checks any history below the base that is not on the remote yet). More
+    than ``MAX_CANDIDATE_COMMITS`` raises (the caller marks the candidate not pushable)."""
     from aeos.core.commit_identity import parse_commit_object, valid_sha
 
     verify_control_files(ws)

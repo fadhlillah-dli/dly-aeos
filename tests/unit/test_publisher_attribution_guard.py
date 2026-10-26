@@ -84,3 +84,19 @@ def test_confluence_page_and_folder_with_ai_attribution_are_refused():
     assert err.details["field"] == "body" and "Confluence page" in err.message
     folder = _ctx(provider="confluence", operation="create_folder", logical_id="root", title="Written by Claude")
     _refused(lambda: _conf().execute(folder))
+
+
+def test_confluence_page_update_with_ai_attribution_is_refused_before_the_put():
+    """An update re-reads the page (read-only) and refuses the new body - including any HUMAN_GOVERNED text kept from
+    the page - before the PUT: nothing is written, nothing is stripped."""
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+        mock.get(f"{BASE}/wiki/api/v2/pages/P1").mock(return_value=httpx.Response(200, json={
+            "id": "P1", "version": {"number": 3}, "body": {"storage": {"value": "<p>lama</p>"}}}))
+        put = mock.put(f"{BASE}/wiki/api/v2/pages/P1").mock(return_value=httpx.Response(200, json={
+            "id": "P1", "version": {"number": 4}}))
+        with pytest.raises(ProviderBlocked) as e:
+            _conf().execute(_ctx(provider="confluence", operation="update_doc", logical_id="doc:prd", title="PRD",
+                                 existing_external_id="P1", existing_revision="3",
+                                 payload={"markdown": "# PRD\n\nIsi baru." + FOOTER}))
+        assert not put.called
+    assert e.value.code == "AI_ATTRIBUTION_IN_TEXT" and e.value.details["field"] == "body"

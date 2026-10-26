@@ -12,11 +12,12 @@ Boundary rules (each tested):
 * every operation needs an ACTIVE run-bound capability grant (GIT_BRANCH / PR_CREATE) and, for a
   remote write, the external-write interlock (§26);
 * the broker has no capability to integrate a PR into any branch: human-only (U-09, §31);
-* owner rule (AGENTS.md invariant 11): before any push every commit of the pushed range is authored
-  AND committed by the configured identity of the provider (``commit_identities.github`` /
-  ``.bitbucket``) and carries no AI attribution - otherwise ``COMMIT_IDENTITY_MISSING`` /
-  ``COMMIT_IDENTITY_MISMATCH`` / ``AI_ATTRIBUTION_IN_COMMIT``, audited, nothing pushed; PR titles/bodies with AI
-  attribution are refused (``AI_ATTRIBUTION_IN_TEXT``) before any credential is read.
+* owner rule (AGENTS.md invariant 11): before any push every commit of the pushed range (every commit of the
+  head that no branch of the remote reaches yet) is authored AND committed by the configured identity of the
+  provider (``commit_identities.github`` / ``.bitbucket``) and carries no AI attribution - otherwise
+  ``COMMIT_IDENTITY_MISSING`` / ``COMMIT_IDENTITY_MISMATCH`` / ``AI_ATTRIBUTION_IN_COMMIT``, audited, nothing
+  pushed; PR titles/bodies with AI attribution are refused (``AI_ATTRIBUTION_IN_TEXT``) before any credential is
+  read.
 
 OFFICE runs (and registered Bitbucket repositories) are handed to ``aeos.broker.bitbucket_broker``
 before any GitHub validation or credential read (``is_bitbucket_run``, ADR-0111).
@@ -322,15 +323,15 @@ def _git(args: list[str], *, cwd: Path, env: dict[str, str], hooks: Path) -> sub
 @dataclass(frozen=True)
 class CommitPolicy:
     """What every pushed commit must satisfy (AGENTS.md invariant 11): authored and committed by ``email`` - the
-    configured identity of ``provider`` - and free of AI attribution. ``base_commit`` (the run's recorded base)
-    bounds the range; without it the whole history up to ``MAX_CHECKED_COMMITS`` is checked (fail closed)."""
+    configured identity of ``provider`` - and free of AI attribution. The range is what the push would publish:
+    every commit of the head that no branch of the remote reaches yet (read from the remote just before the push),
+    up to ``MAX_CHECKED_COMMITS`` (more is refused, fail closed)."""
 
     provider: str
     email: str
-    base_commit: str | None = None
 
     def __repr__(self) -> str:  # never print the address
-        return f"CommitPolicy(provider={self.provider!r}, base_commit={self.base_commit!r})"
+        return f"CommitPolicy(provider={self.provider!r})"
 
 
 def commit_policy(session: Session, run: WorkerRun, provider: str, *, action: str) -> CommitPolicy:
@@ -347,26 +348,43 @@ def commit_policy(session: Session, run: WorkerRun, provider: str, *, action: st
                                               "config_key": ident.key, "status": ident.status})
         raise PolicyDenied(message, code=cid.CODE_MISSING,
                            details={"provider": provider, "config_key": ident.key, "status": ident.status})
-    return CommitPolicy(provider=provider, email=ident.email or "", base_commit=run.base_commit)
+    return CommitPolicy(provider=provider, email=ident.email or "")
+
+
+# The remote's branches as the broker read them just before the push; a private namespace of the throw-away mirror
+# that is never pushed (the push refspec names the head sha and the task branch only).
+REMOTE_REFS = "refs/aeos-remote/heads"
+
+
+def _read_remote_branches(mirror: Path, remote_url: str, env: dict[str, str], hooks: Path) -> str | None:
+    """Fetch every branch of the remote into ``REMOTE_REFS`` (an empty remote has none). What they reach is already
+    on the code host; everything else of the head is what the push would publish. Returns why the remote could not
+    be read (None = read)."""
+    proc = _git(["fetch", "--no-tags", "--no-recurse-submodules", "--quiet", remote_url,
+                 f"+refs/heads/*:{REMOTE_REFS}/*"], cwd=mirror, env=env, hooks=hooks)
+    if proc.returncode == 0:
+        return None
+    out = redact_text((proc.stdout or "") + (proc.stderr or ""))[:400]
+    observe_git_failure(remote_url, out, operation="FETCH")
+    return out or f"git fetch exited {proc.returncode}"
 
 
 def _pushed_commit_problems(mirror: Path, env: dict[str, str], hooks: Path, head: str,
                             policy: CommitPolicy) -> list[dict[str, str]]:
-    """Check every commit the push would publish (``base..head`` in the broker's own mirror; the whole history when
-    the base is unknown or not an ancestor). Raw objects are read with ``cat-file --batch`` (exact sizes), so a
-    crafted message cannot forge another commit's identity."""
-    base = policy.base_commit or ""
-    bounded = bool(_SHA_RE.match(base)) and _git(["merge-base", "--is-ancestor", base, head], cwd=mirror, env=env,
-                                                   hooks=hooks).returncode == 0
-    rng = [head, "--not", base] if bounded else [head]
-    listed = _git(["rev-list", f"--max-count={cid.MAX_CHECKED_COMMITS + 1}", *rng], cwd=mirror, env=env, hooks=hooks)
+    """Check every commit the push would publish: the head's commits that no branch of the remote reaches
+    (``_read_remote_branches`` ran first) - the run's own commits, and any commit below the run's base that is not on
+    the remote yet. Raw objects are read with ``cat-file --batch`` (exact sizes), so a crafted message cannot forge
+    another commit's identity."""
+    listed = _git(["rev-list", f"--max-count={cid.MAX_CHECKED_COMMITS + 1}", head, "--not", f"--glob={REMOTE_REFS}"],
+                  cwd=mirror, env=env, hooks=hooks)
     if listed.returncode != 0:
         return [{"sha": head, "code": cid.CODE_RANGE, "detail": "the commit range could not be read"}]
     shas = listed.stdout.split()
     if len(shas) > cid.MAX_CHECKED_COMMITS or not all(cid.valid_sha(s) for s in shas):
         return [{"sha": head, "code": cid.CODE_RANGE,
-                 "detail": f"more than {cid.MAX_CHECKED_COMMITS} commits to check (the run's base commit does not "
-                           "bound the range)" if len(shas) > cid.MAX_CHECKED_COMMITS else "unexpected rev-list output"}]
+                 "detail": f"more than {cid.MAX_CHECKED_COMMITS} commits that are not on the remote yet (push the "
+                           "existing history yourself first)" if len(shas) > cid.MAX_CHECKED_COMMITS
+                           else "unexpected rev-list output"}]
     if not shas:
         return []
     proc = subprocess.run(_git_cmd(["cat-file", "--batch"], hooks), cwd=str(mirror), env=env,
@@ -452,6 +470,15 @@ def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: 
         if expected_head and head != expected_head:
             return {"ok": False, "stage": "verify", "commit": head,
                     "error": "task branch head differs from the runtime-recorded head"}
+        # Owner rule: the gate checks exactly what the push would publish, so the remote's branches are read first
+        # (same credential, same child-only environment as the push). An unreadable remote is a failed push -
+        # nothing was sent - never a push of an unchecked range.
+        stage = "remote_read"
+        env = git_auth_env(remote_url, token, empty_global=empty_global, basic_user=basic_user)
+        unread = _read_remote_branches(mirror, remote_url, env, hooks)
+        if unread is not None:
+            return {"ok": False, "stage": stage, "commit": head,
+                    "error": f"the remote's branches could not be read, so the pushed range is unknown: {unread}"}
         stage = "commit_policy"
         problems = _pushed_commit_problems(mirror, base_env, hooks, head, commit_policy)
         if problems:
@@ -461,7 +488,6 @@ def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: 
                     "error": f"{code}: push refused - {detail}"[:800]}
         stage = "push"
         pinned_src, _ = validate_refspec(f"{head}:{dst}") if _SHA_RE.match(head or "") else (src, dst)
-        env = git_auth_env(remote_url, token, empty_global=empty_global, basic_user=basic_user)
         push = _git(["push", "--porcelain", "--no-verify", remote_url, f"{pinned_src}:{dst}"], cwd=mirror, env=env,
                     hooks=hooks)
         out = redact_text((push.stdout or "") + (push.stderr or ""))[:800]

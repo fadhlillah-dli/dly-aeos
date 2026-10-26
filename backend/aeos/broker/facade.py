@@ -81,9 +81,10 @@ def push_task_branch(
     The result always carries ``head_sha`` and ``status`` PUSHED | FAILED | UNKNOWN (FAILED/UNKNOWN are
     returned, not raised: reconcile an UNKNOWN with ``reconcile_side_effect`` before any retry).
 
-    Owner rule (additive, 2026-10-26, AGENTS.md invariant 11): every commit of the pushed range must be authored
-    and committed by the configured identity of the provider (``commit_identities.github`` / ``.bitbucket``) and
-    carry no AI attribution. Otherwise ``PolicyDenied`` with ``COMMIT_IDENTITY_MISSING`` (before any grant or
+    Owner rule (additive, 2026-10-26, AGENTS.md invariant 11): every commit the push would publish (every commit of
+    the head that no branch of the remote reaches yet, read just before the push) must be authored and committed by
+    the configured identity of the provider (``commit_identities.github`` / ``.bitbucket``) and carry no AI
+    attribution. A remote whose branches cannot be read is a FAILED push (nothing sent). Otherwise ``PolicyDenied`` with ``COMMIT_IDENTITY_MISSING`` (before any grant or
     credential), ``COMMIT_IDENTITY_MISMATCH``, ``AI_ATTRIBUTION_IN_COMMIT`` or ``COMMIT_RANGE_UNBOUNDED``; the
     refusal is audited and the outbox row FAILED (nothing reached the remote)."""
     from aeos.broker.git_broker import push_task_branch as impl

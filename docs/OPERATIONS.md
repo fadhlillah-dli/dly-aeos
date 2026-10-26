@@ -507,7 +507,7 @@ What enforces it:
 | Where | Rule | Refusal code |
 |---|---|---|
 | Worker candidate commit (`worker_runtime`) | author = committer = the identity of the project's code host; the commit message names no agent, route, engine, model or prompt revision (no `AEOS-*` provenance trailers; the subject keeps `run <id8>`). Without a valid identity the runtime identity commits locally and `caps.commit_identity.pushable = false` (with the reason); a worker-made commit with another identity or AI attribution also marks it not pushable | - (recorded on the run) |
-| Broker push (`git_broker` GitHub, `bitbucket_broker` Bitbucket) | before any push, every commit `base..head` (the run's recorded base; the whole history when the base is unknown) is read from the broker's own mirror: author e-mail = committer e-mail = the configured identity, no AI/bot identity, no AI attribution in the message. Refusals are audited (`DENIED`), the outbox row is FAILED, nothing reaches the remote | `COMMIT_IDENTITY_MISSING`, `COMMIT_IDENTITY_MISMATCH`, `AI_ATTRIBUTION_IN_COMMIT`, `COMMIT_RANGE_UNBOUNDED` |
+| Broker push (`git_broker` GitHub, `bitbucket_broker` Bitbucket) | before any push the broker reads the remote's branches into its own mirror (same credential as the push) and checks every commit the push would publish - every commit of the head that no remote branch reaches yet, so unpushed history below the run's base counts too, while history already on the remote (colleagues' commits) does not: author e-mail = committer e-mail = the configured identity, no AI/bot identity, no AI attribution in the message. More than 1000 such commits is refused (push the existing history yourself first). Refusals are audited (`DENIED`), the outbox row is FAILED, nothing reaches the remote. A remote whose branches cannot be read fails the push (FAILED, nothing sent) | `COMMIT_IDENTITY_MISSING`, `COMMIT_IDENTITY_MISMATCH`, `AI_ATTRIBUTION_IN_COMMIT`, `COMMIT_RANGE_UNBOUNDED` |
 | PR title/body (delivery + broker, GitHub and Bitbucket) | checked before the branch is pushed and again before any credential is read | `AI_ATTRIBUTION_IN_TEXT` |
 | Publisher GitHub Issues/labels, Jira issues, Confluence pages/folders | checked before the request; the operation is FAILED with the reason | `AI_ATTRIBUTION_IN_TEXT` |
 
@@ -516,7 +516,9 @@ attribution, not for mentions: `Co-Authored-By:`/`Assisted-By:`/`Signed-off-by:`
 /`AEOS-Route:`/`AEOS-Engine:`/`AEOS-Model:` trailers, `Model:`/`Route:`/`Reviewer:` trailers naming an AI, "Generated
 with/by", "written with the help of", "AI-generated", the robot emoji, AI vendor and bot noreply addresses. A commit
 subject such as `fix(claude_bridge): ...` or "route deepseek requests through the broker" is ordinary text. A
-trailer naming a human called Claude is refused too (fail closed; reword it). The PR evidence bundle renders neutral
+trailer naming a human called Claude is refused too (fail closed; reword it), and so is a co-author named with generic
+AI wording ("AI Assistant", "an LLM"). Invisible characters, fullwidth forms and look-alike Cyrillic/Greek letters are
+folded before matching, so an AI name split by a zero-width space is still found. The PR evidence bundle renders neutral
 roles ("supervisor review", "worker run", "independent verifier"); the reviewer tool and model stay in the review
 record and the bundle data.
 

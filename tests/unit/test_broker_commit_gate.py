@@ -141,9 +141,10 @@ def test_a_worker_commit_below_the_runtime_head_is_checked_too(db, env):
     assert e.value.code == "AI_ATTRIBUTION_IN_COMMIT" and _remote_refs(env) == ""
 
 
-def test_the_range_is_bounded_by_the_runs_base_commit(db, env, tmp_path):
-    """The project's existing history below the run's base is not the run's to check; without a recorded base the
-    whole history is checked (fail closed)."""
+def test_the_range_is_what_the_push_would_publish_not_the_runs_base(db, env, tmp_path):
+    """The gate checks every commit no branch of the remote reaches yet: history below the run's base that is not on
+    the remote would be published by this push and is checked too; history already on the remote (another
+    contributor's commits) is not the push's to check."""
     src = tmp_path / "older"
     src.mkdir()
     _git(src, "init", "-q", "-b", "main")
@@ -151,13 +152,31 @@ def test_the_range_is_bounded_by_the_runs_base_commit(db, env, tmp_path):
     _git(src, "checkout", "-q", "-b", BRANCH)
     head = _commit(src, TEST_GIT_NAME, TEST_GIT_EMAIL, "aeos: candidate")
     env = {**env, "src": src}
-    unbounded = _run(db, env, head)
-    with pytest.raises(PolicyDenied) as e:
-        _push(db, env, unbounded)
+    with pytest.raises(PolicyDenied) as e:  # the remote is empty: "init" would reach it with this push
+        _push(db, env, _run(db, env, head, base=base))
     assert e.value.code == "COMMIT_IDENTITY_MISMATCH"
-    bounded = _run(db, env, head, base=base)
-    res = _push(db, env, bounded)
-    assert res["ok"] and res["status"] == "PUSHED" and _git(env["bare"], "rev-parse", f"refs/heads/{BRANCH}") == head
+    assert [p["sha"] for p in e.value.details["problems"]] == [base]  # the run's own commit is fine
+    assert _remote_refs(env) == ""
+    _git(src, "push", "-q", str(env["bare"]), "main:refs/heads/main")  # the existing history is on the remote now
+    for recorded_base in (base, None):  # the remote decides the range, not the run's recorded base
+        res = _push(db, env, _run(db, env, head, base=recorded_base))
+        assert res["ok"] and res["status"] == "PUSHED", res
+    assert _git(env["bare"], "rev-parse", f"refs/heads/{BRANCH}") == head
+
+
+def test_an_unreadable_remote_fails_the_push_and_sends_nothing(env, tmp_path):
+    """Without the remote's branches the pushed range is unknown: the push FAILS (nothing sent), it is never made
+    with an unchecked range."""
+    head = _commit(env["src"], TEST_GIT_NAME, TEST_GIT_EMAIL, "aeos: candidate")
+    work = tmp_path / "broker-work"
+    work.mkdir()
+    not_a_repository = tmp_path / "not-a-repository"
+    not_a_repository.mkdir()
+    res = git_broker.push_from_mirror(source_repo=env["src"], branch=BRANCH, remote_url=str(not_a_repository),
+                                      token=None, work_root=work, expected_head=head,
+                                      commit_policy=git_broker.CommitPolicy(provider="github", email=TEST_GIT_EMAIL))
+    assert res["ok"] is False and res["stage"] == "remote_read" and not res.get("refused") and not res.get("unknown")
+    assert "pushed range is unknown" in res["error"]
 
 
 def test_a_matching_identity_pushes(db, env):
