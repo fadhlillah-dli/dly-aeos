@@ -19,7 +19,9 @@ from aeos.core.timeutil import utcnow
 
 class AuditEvent(Base):
     __tablename__ = "audit_events"
-    __table_args__ = (Index("ix_audit_target", "target_type", "target_id"), Index("ix_audit_project", "project_id"))
+    # (action, at): the OpenRouter free-model count reads the probes of the last minute / UTC day (decision C, 0010)
+    __table_args__ = (Index("ix_audit_target", "target_type", "target_id"), Index("ix_audit_project", "project_id"),
+                      Index("ix_audit_action_at", "action", "at"))
 
     seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_id: Mapped[str] = mapped_column(String(36), unique=True, default=new_id)

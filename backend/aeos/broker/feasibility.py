@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
 from aeos.broker.facade import PROBE_POOLS
-from aeos.core.errors import AeosError, NotFound, PolicyDenied
+from aeos.core.errors import AeosError, Blocked, NotFound, PolicyDenied
 from aeos.core.redaction import redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.routing import ModelRoute
@@ -153,76 +153,88 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     retry_after: int | None = None
     rate_limit: dict[str, Any] = {}
     sent = False  # whether the request reached the upstream (counted against an OpenRouter :free limit, decision C)
-    own = client is None
-    http = client or httpx.Client(timeout=PROBE_TIMEOUT, follow_redirects=False, trust_env=False)
     try:
-        # a probe is its own one-request conversation: its own opaque x-opencode-session on OpenCode Go
-        resp = http.post(upstream.url, json=body,
-                         headers=_upstream_headers(upstream, run_id=f"probe:{route_key}:{uuid.uuid4().hex}"))
-        status = resp.status_code
-        sent = True
-        if status == 200:
-            try:
-                parsed = resp.json()
-                data = parsed if isinstance(parsed, dict) else {}
-            except ValueError:
-                error, status = "invalid upstream JSON", 502
-        elif status == 429:
-            retry_after = _retry_after(resp)
-            rate_limit = rate_limit_info(resp)
-    except httpx.TimeoutException as exc:
-        error = "timeout"
-        sent = not isinstance(exc, NOT_SENT_ERRORS)  # a read/write timeout: the request was sent
-    except httpx.HTTPError as exc:
-        error = type(exc).__name__
-        sent = not isinstance(exc, NOT_SENT_ERRORS)
-    finally:
-        if own:
-            http.close()
-    latency_ms = int((time.monotonic() - started) * 1000)
-    outcome = _outcome(status, error if error != "invalid upstream JSON" else None)
-    prompt, completion, cost, model_resolved = _usage_of(data)
-    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
-    answered = bool(choices and isinstance(choices[0], dict)
-                    and str(((choices[0].get("message") or {}).get("content")) or "").strip())
-    result: dict[str, Any] = {
-        "route_key": route_key, "pool": route.pool, "provider": upstream.provider, "model_id": upstream.model_id,
-        "catalog_model_id": route.model_id, "upstream_url": upstream.url,
-        "reasoning_effort": upstream.reasoning_effort or "NOT_SENT",
-        "config_hash": route.config_hash, "outcome": outcome, "http_status": status, "latency_ms": latency_ms,
-        "answered": answered, "model_resolved": model_resolved, "prompt_tokens": prompt,
-        "completion_tokens": completion, "cost_usd": cost if cost is not None else "UNKNOWN",
-        "retry_after_seconds": retry_after, "error": redact_text(error or "")[:200],
-        "probe": {"prompt": PROBE_PROMPT, "data_class": "PUBLIC", "max_tokens": PROBE_MAX_TOKENS, "fallback": "NONE"},
-        "checked_at": utcnow().isoformat(),
-        "note": "feasibility observation only: route status and eligibility are unchanged (owner decision)",
-    }
-    billing = _billing_of(data)
-    if cost and not subscription:
-        result["note"] += "; a free route reported a cost - review its pricing before any activation"
-    if prompt is None and completion is None:
-        billing["charged_tokens"] = PROBE_TOKEN_BOUND  # the probe's own upper bound, never a guess
-    ledger, facts = _ledger(session, upstream, route_key, prompt, completion, cost, model_resolved, outcome, billing)
-    if subscription:
-        result["billing"] = {"billing": "SUBSCRIPTION", "allowance_usd": facts.get("allowance_usd") or "UNKNOWN",
-                             "allowance_basis": facts.get("allowance_basis") or "UNKNOWN",
-                             "billing_source": billing.get("billing_source") or "UNKNOWN",
-                             "beyond_plan_usd": facts.get("beyond_plan_usd")}
-        if facts.get("beyond_plan_usd") is not None:
-            result["note"] += ("; the subscription route billed this probe beyond the plan (provider-side paid "
-                               "fallback: is Extra Usage ON?) - the route is refused (SUBSCRIPTION_BEYOND_PLAN) until "
-                               "you re-activate it")
-    if outcome == "RATE_LIMITED":
-        _quota(session, upstream, route_key, retry_after, rate_limit)
-    result["ledger"] = ledger
-    ev = _evidence(session, route, result)
-    result["evidence_id"] = ev
-    audit.record(session, actor_type="user" if actor.startswith("user:") else "service", actor_id=actor,
-                 action="broker.route_feasibility.probe", result="SUCCESS" if outcome == "REACHABLE" else "FAILED",
-                 target_type="model_route", target_id=route_key, domain="PERSONAL", reason=outcome,
-                 details={"pool": route.pool, "http_status": status, "latency_ms": latency_ms, "evidence_id": ev,
-                          "ledger": ledger, "upstream": "SENT" if sent else "NOT_SENT"})
-    return result
+        own = client is None
+        http = client or httpx.Client(timeout=PROBE_TIMEOUT, follow_redirects=False, trust_env=False)
+        try:
+            # a probe is its own one-request conversation: its own opaque x-opencode-session on OpenCode Go
+            resp = http.post(upstream.url, json=body,
+                             headers=_upstream_headers(upstream, run_id=f"probe:{route_key}:{uuid.uuid4().hex}"))
+            status = resp.status_code
+            sent = True
+            if status == 200:
+                try:
+                    parsed = resp.json()
+                    data = parsed if isinstance(parsed, dict) else {}
+                except ValueError:
+                    error, status = "invalid upstream JSON", 502
+            elif status == 429:
+                retry_after = _retry_after(resp)
+                rate_limit = rate_limit_info(resp)
+        except httpx.TimeoutException as exc:
+            error = "timeout"
+            sent = not isinstance(exc, NOT_SENT_ERRORS)  # a read/write timeout: the request was sent
+        except httpx.HTTPError as exc:
+            error = type(exc).__name__
+            sent = not isinstance(exc, NOT_SENT_ERRORS)
+        finally:
+            if own:
+                http.close()
+        latency_ms = int((time.monotonic() - started) * 1000)
+        outcome = _outcome(status, error if error != "invalid upstream JSON" else None)
+        prompt, completion, cost, model_resolved = _usage_of(data)
+        choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+        answered = bool(choices and isinstance(choices[0], dict)
+                        and str(((choices[0].get("message") or {}).get("content")) or "").strip())
+        result: dict[str, Any] = {
+            "route_key": route_key, "pool": route.pool, "provider": upstream.provider, "model_id": upstream.model_id,
+            "catalog_model_id": route.model_id, "upstream_url": upstream.url,
+            "reasoning_effort": upstream.reasoning_effort or "NOT_SENT",
+            "config_hash": route.config_hash, "outcome": outcome, "http_status": status, "latency_ms": latency_ms,
+            "answered": answered, "model_resolved": model_resolved, "prompt_tokens": prompt,
+            "completion_tokens": completion, "cost_usd": cost if cost is not None else "UNKNOWN",
+            "retry_after_seconds": retry_after, "error": redact_text(error or "")[:200],
+            "probe": {"prompt": PROBE_PROMPT, "data_class": "PUBLIC", "max_tokens": PROBE_MAX_TOKENS, "fallback": "NONE"},
+            "checked_at": utcnow().isoformat(),
+            "note": "feasibility observation only: route status and eligibility are unchanged (owner decision)",
+        }
+        billing = _billing_of(data)
+        if cost and not subscription:
+            result["note"] += "; a free route reported a cost - review its pricing before any activation"
+        if prompt is None and completion is None:
+            billing["charged_tokens"] = PROBE_TOKEN_BOUND  # the probe's own upper bound, never a guess
+        ledger, facts = _ledger(session, upstream, route_key, prompt, completion, cost, model_resolved, outcome, billing)
+        if subscription:
+            result["billing"] = {"billing": "SUBSCRIPTION", "allowance_usd": facts.get("allowance_usd") or "UNKNOWN",
+                                 "allowance_basis": facts.get("allowance_basis") or "UNKNOWN",
+                                 "billing_source": billing.get("billing_source") or "UNKNOWN",
+                                 "beyond_plan_usd": facts.get("beyond_plan_usd")}
+            if facts.get("beyond_plan_usd") is not None:
+                result["note"] += ("; the subscription route billed this probe beyond the plan (provider-side paid "
+                                   "fallback: is Extra Usage ON?) - the route is refused (SUBSCRIPTION_BEYOND_PLAN) until "
+                                   "you re-activate it")
+        if outcome == "RATE_LIMITED":
+            _quota(session, upstream, route_key, retry_after, rate_limit)
+        result["ledger"] = ledger
+        ev = _evidence(session, route, result)
+        result["evidence_id"] = ev
+        audit.record(session, actor_type="user" if actor.startswith("user:") else "service", actor_id=actor,
+                     action="broker.route_feasibility.probe", result="SUCCESS" if outcome == "REACHABLE" else "FAILED",
+                     target_type="model_route", target_id=route_key, domain="PERSONAL", reason=outcome,
+                     details={"pool": route.pool, "http_status": status, "latency_ms": latency_ms, "evidence_id": ev,
+                              "ledger": ledger, "upstream": "SENT" if sent else "NOT_SENT"})
+        return result
+    except AeosError:
+        raise
+    except Exception as exc:
+        # whatever failed after the attempt, the probe that reached the upstream still counts against an OpenRouter
+        # free-model limit (decision C): the marker is recorded and the error is an AeosError, which the callers commit
+        audit.record(session, actor_type="user" if actor.startswith("user:") else "service", actor_id=actor,
+                     action="broker.route_feasibility.probe", result="FAILED", target_type="model_route",
+                     target_id=route_key, domain="PERSONAL", reason=f"PROBE_BOOKKEEPING_FAILED: {type(exc).__name__}",
+                     details={"pool": route.pool, "http_status": status, "upstream": "SENT" if sent else "NOT_SENT"})
+        raise Blocked(f"the probe result could not be recorded ({type(exc).__name__}); the attempt is audited and "
+                      "counted", code="PROBE_BOOKKEEPING_FAILED") from exc
 
 
 def _ledger(session: Session, upstream: Any, route_key: str, prompt: int | None, completion: int | None,

@@ -16,7 +16,7 @@ import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from aeos.api.routers import MODULE_ROUTERS
 from aeos.broker import facade as broker
@@ -55,6 +55,7 @@ CATALOG = {"data": [
 UPSTREAM = "https://openrouter.ai/api/v1/chat/completions"
 KEY = "sk-or-v1-" + "f" * 48
 FREE_PRICING = {"prompt": "0", "completion": "0", "basis": "OpenRouter catalog", "unit": "USD per token"}
+OVERFLOW_DATE = "Mon, 01 Jan 2026 99999999999999999999:00:00 GMT"  # an HTTP date no datetime can hold
 
 
 @pytest.fixture(autouse=True)
@@ -640,9 +641,22 @@ def test_a_quota_stop_never_uses_up_an_attempt_and_the_task_returns_after_the_re
     assert te.state == "BLOCKED" and te.reason_code == "NEEDS_DECISION" and "provider quota" in te.reason
     with pytest.raises(Blocked):
         scheduler.retry_task(db, spec.id, actor="user:o")
-    te = scheduler.retry_task(db, spec.id, actor="user:o", extra_attempts=1, rationale="the quota has reset",
-                              actor_user_id=make_owner(db))
-    assert te.state == "READY" and te.attempts_used == 0
+    owner = make_owner(db)
+    te = scheduler.retry_task(db, spec.id, actor="user:o", extra_attempts=3, rationale="the quota has reset",
+                              actor_user_id=owner)
+    # the decision resets the quota-stop count; it never raises the normal attempt cap
+    assert te.state == "READY" and te.attempts_used == 0 and te.extra_attempts == 0
+    assert scheduler.max_attempts(db.get(TaskSpec, spec.id), te) == 2
+    for _ in range(2):  # exactly QUOTA_STOPS_MAX (3 here) more per owner decision, not 3 x (1 + extra attempts)
+        quota_stop()
+        db.query(QuotaState).filter_by(scope="worker.test-free").delete()
+        scheduler.refresh_readiness(db, pv.id)
+        assert scheduler.get_te(db, spec.id).state == "READY"
+    quota_stop()
+    db.query(QuotaState).filter_by(scope="worker.test-free").delete()
+    scheduler.refresh_readiness(db, pv.id)
+    te = scheduler.get_te(db, spec.id)
+    assert te.state == "BLOCKED" and te.reason_code == "NEEDS_DECISION" and "since the last owner retry" in te.reason
 
 
 def test_the_executor_stops_a_run_only_on_consecutive_rate_limits(db):
@@ -740,7 +754,8 @@ def test_retry_after_parsing_is_shared_and_never_raises():
     from aeos.broker import model_proxy
 
     for raw, expected in (("120", 120), ("inf", None), ("-inf", None), ("nan", None), ("soon", None), ("", None),
-                          (None, None), ("1e30", 86400), ("0", 1)):
+                          (None, None), ("1e30", 86400), ("0", 1), ("-30", None), (OVERFLOW_DATE, None),
+                          ("Mon, 01 Jan 99999999 10:00:00 GMT", None), ("Mon, 01 Jan 2026 10:00:00 +99999999", None)):
         assert model_proxy.parse_retry_after(raw) == expected, raw
     for raw in ("inf", "nan", "soon"):
         assert model_proxy._retry_after(httpx.Response(429, headers={"retry-after": raw})) == model_proxy.DEFAULT_RETRY_AFTER
@@ -800,3 +815,103 @@ def test_concurrent_free_requests_cannot_both_take_the_last_slot(proxy, db, monk
     refused = [r for r in results if isinstance(r, model_proxy.ProxyError)]
     assert len(results) == 2 and len(refused) == 1, results
     assert refused[0].status == 429 and refused[0].code == "FREE_TIER_LIMIT_REACHED"
+
+
+# ------------------------------------------------------------------ delta verification fixes (2026-10-27)
+
+
+def test_a_429_with_an_unparseable_retry_after_is_still_recorded_as_a_rate_limit(proxy, db):
+    with respx.mock(assert_all_mocked=True) as mock:
+        up = mock.post(UPSTREAM).mock(return_value=httpx.Response(429, headers={"retry-after": OVERFLOW_DATE},
+                                                                  json={"error": {"code": 429}}))
+        r = _call(proxy)
+        assert r.status_code == 429 and r.json()["error"]["code"] == "UPSTREAM_RATE_LIMITED" and up.call_count == 1
+    db.expire_all()
+    req = db.scalar(select(BrokerRequest).where(BrokerRequest.upstream_model.is_not(None)))
+    assert req.outcome == "RATE_LIMITED"  # never left PENDING by a header the parser could not read
+    assert db.scalar(select(QuotaState).where(QuotaState.provider == "openrouter", QuotaState.scope == FREE)) is not None
+    assert db.scalar(select(QuotaState).where(QuotaState.scope == "free-rpm")).state == "EXHAUSTED"
+
+
+def test_a_probe_that_reached_openrouter_is_counted_even_when_its_bookkeeping_fails(proxy, db, monkeypatch):
+    from aeos.broker import feasibility
+
+    real_evidence = feasibility._evidence
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(UPSTREAM).mock(return_value=httpx.Response(503))
+        monkeypatch.setattr(feasibility, "_evidence", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full")))
+        with pytest.raises(Blocked) as ei:
+            broker.probe_route(db, route_key=FREE, actor="user:owner")
+        assert ei.value.code == "PROBE_BOOKKEEPING_FAILED"
+        failed = db.scalars(select(AuditEvent).where(AuditEvent.action == free_tier.PROBE_ACTION)
+                            .order_by(AuditEvent.seq.desc())).first()
+        assert failed.details["upstream"] == "SENT" and "PROBE_BOOKKEEPING_FAILED" in failed.reason
+        monkeypatch.setattr(feasibility, "_evidence", real_evidence)
+        mock.post(UPSTREAM).mock(return_value=httpx.Response(429, headers={"retry-after": OVERFLOW_DATE}))
+        assert broker.probe_route(db, route_key=FREE, actor="user:owner")["outcome"] == "RATE_LIMITED"
+    db.flush()
+    assert free_tier.usage(db)["day"] == 2  # both reached OpenRouter: both count
+
+
+def test_negative_retry_after_falls_back_to_the_rate_limit_reset_header(routes):
+    from aeos.broker import model_proxy
+
+    reset = int((utcnow() + timedelta(minutes=20)).timestamp() * 1000)
+    info = model_proxy.rate_limit_info(httpx.Response(429, headers={"retry-after": "-30",
+                                                                    "x-ratelimit-reset": str(reset)}))
+    assert info["retry_after"] is None
+    out = free_tier.note_rate_limited(routes, route_key=FREE, retry_after_seconds=info["retry_after"],
+                                      headers=info["headers"])
+    assert out["basis"] == "x-ratelimit-reset"
+
+
+def test_the_seed_end_date_of_a_free_route_survives_a_catalog_refresh(routes, monkeypatch):
+    """The seeded Laguna S 2.1 end date comes from the research source (S11), not from the catalog: a catalog that
+    lists the model free without an expiration_date never clears it, and decision C refuses the route after it."""
+    install_fakes(monkeypatch)
+    laguna = "openrouter/poolside/laguna-s-2.1:free"
+    seeded = service.get_route(routes, laguna).free_until
+    assert seeded is not None and "S11" in service.get_route(routes, laguna).expires_note
+    listing = {"data": [{"id": "poolside/laguna-s-2.1:free", "name": "Poolside: Laguna S 2.1 (free)",
+                         "context_length": 262144, "pricing": {"prompt": "0", "completion": "0"},
+                         "supported_parameters": ["tools"]}]}
+    _discover(routes, listing)
+    r = service.get_route(routes, laguna)
+    assert r.free_until == seeded and "S11" in r.expires_note
+    after = datetime(2026, 11, 2, 12, tzinfo=UTC)
+    assert any("free period ended" in p for p in free_tier.decision_c_problems(r, now=after))
+
+
+def test_a_busy_count_lock_refuses_with_503_and_sends_nothing(proxy, db, settings):
+    import sqlite3
+
+    before = db.scalar(select(func.count()).select_from(BrokerRequest))
+    holder = sqlite3.connect(str(settings.layout.db_path), isolation_level=None, timeout=1)
+    holder.execute("BEGIN IMMEDIATE")  # another writer holds the SQLite write lock beyond the busy timeout
+    try:
+        with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+            up = mock.post(UPSTREAM).mock(return_value=httpx.Response(200, json=_ok()))
+            r = _call(proxy)
+            assert r.status_code == 503 and r.json()["error"]["code"] == "FREE_TIER_LOCK_UNAVAILABLE"
+            assert up.call_count == 0
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(BrokerRequest)) == before
+
+
+def test_the_worker_agent_can_be_enabled_with_a_public_only_free_route(routes, monkeypatch):
+    from aeos.workforce import agents
+    from tests.unit.test_workforce_support import seed_and_enable_implementer
+
+    install_fakes(monkeypatch)
+    agent = seed_and_enable_implementer(routes)
+    no_route = "no APPROVED worker route is eligible for this domain"
+    assert no_route in agents.prerequisites(routes, agent, domain="PERSONAL")["reasons"]
+    _worker(routes)  # only a decision C route (PUBLIC) is activated
+    assert no_route not in agents.prerequisites(routes, agent, domain="PERSONAL")["reasons"]
+    assert no_route in agents.prerequisites(routes, agent, domain="OFFICE")["reasons"]  # OFFICE stays denied
+    with pytest.raises(Blocked) as ei:
+        select_route(routes, task=task(classification="INTERNAL"))
+    assert ei.value.code == "NO_ELIGIBLE_ROUTE" and FREE in ei.value.details["rejected"]

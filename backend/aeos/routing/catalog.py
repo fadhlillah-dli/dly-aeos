@@ -57,6 +57,8 @@ HTTP_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 # S12 (documentation, E1): free-model daily request caps depend on purchased credits.
 FREE_DAILY_LIMIT_NO_CREDITS = 50
 FREE_DAILY_LIMIT_WITH_CREDITS = 1000
+# expires_note prefix of a free_until the OpenRouter catalog itself stated (its provenance; see _apply_openrouter)
+CATALOG_EXPIRY_NOTE = "catalog expiration_date"
 
 
 def _is_zero(v: Any) -> bool:
@@ -107,10 +109,12 @@ def _apply_openrouter(route: ModelRoute, m: dict[str, Any], now: datetime) -> No
     expiry = _parse_date(m.get("expiration_date"))
     if expiry is not None:
         route.free_until = expiry if route.is_free == "YES" else route.free_until
-        route.expires_note = f"catalog expiration_date {m.get('expiration_date')}"
-    elif route.is_free == "YES" and route.free_until is not None and m.get("expiration_date") in (None, ""):
-        # the catalog lists the model as free with no end date any more: the stored end date is not the provider's
-        # (a configuration change - free_until is part of the identity - so an activation bound to it stops applying)
+        route.expires_note = f"{CATALOG_EXPIRY_NOTE} {m.get('expiration_date')}"
+    elif (route.is_free == "YES" and route.free_until is not None and m.get("expiration_date") in (None, "")
+          and str(route.expires_note or "").startswith(CATALOG_EXPIRY_NOTE)):
+        # the end date came from this catalog (expires_note says so) and the catalog no longer states one: clear it (a
+        # configuration change - free_until is part of the identity - so an activation bound to it stops applying). A
+        # date from another source (the seed's research reading, e.g. S11) is kept until the owner changes it.
         route.free_until = None
         route.expires_note = f"catalog lists no expiration_date (checked {now.date().isoformat()})"
     raw_top = m.get("top_provider")

@@ -459,7 +459,7 @@ Activating a route is your explicit decision. Nothing is active by default.
     | Code | Shown as | What to do |
     |---|---|---|
     | `FREE_TIER_LIMIT_REACHED` | WAITING_QUOTA | Nothing: it clears after a minute, after the Retry-After or at 00:00 UTC. After you buy credits: step 3. |
-    | `NEEDS_DECISION` naming "provider quota" | BLOCKED | The task was stopped at a quota 6 times: it does not fit the limit. Retry it with extra attempts (*Pekerjaan Live* -> retry) once the limit allows it, or plan it on another route. |
+    | `NEEDS_DECISION` naming "provider quota" | BLOCKED | The task was stopped at a quota 6 times since your last retry decision: it does not fit the limit. Retry it with a rationale (*Pekerjaan Live* -> retry) once the limit allows it: that allows 6 more quota stops and adds no attempts. Or plan it on another route. |
     | `FREE_WORKER_ROUTE_INELIGIBLE` | BLOCKED (broker 403) | The route is no longer free, or the task is not PUBLIC. Run `./aeos routes refresh` and check the route. Move a paid one back with `./aeos routes set-pool <route_key> --pool ARENA --as <admin> --rationale "<why>"` or `./aeos routes disable <route_key> --reason "<why>"`. |
     | `ROUTE_INELIGIBLE` naming the TRIAL | BLOCKED | The TRIAL expired or the configuration changed: step 7. |
 

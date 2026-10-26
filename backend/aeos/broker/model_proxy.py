@@ -465,7 +465,9 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
         # The count and this request's PENDING row are one atomic step: the SQLite write lock is taken first and held
         # until the commit below, so concurrent requests cannot all pass the same count.
         if _is_free_model(s, models[exposed]):
-            s.commit()  # end the read snapshot (WAL): the lock is the first statement of the next transaction
+            # end this transaction's reads first: under WAL a transaction that read before another writer committed
+            # cannot take the write lock (SQLITE_BUSY_SNAPSHOT); the lock is the first statement of the next one
+            s.commit()
             if not _free_count_lock(s):  # nothing is written: the database is busy beyond the timeout
                 s.rollback()
                 raise ProxyError(503, "FREE_TIER_LOCK_UNAVAILABLE", "the free-model request count is busy; retry",
@@ -778,8 +780,9 @@ def rate_limit_info(resp: httpx.Response) -> dict[str, Any]:
 
 
 def parse_retry_after(raw: str | None, *, cap: int = 86400) -> int | None:
-    """A ``Retry-After`` value as seconds (1..*cap*): delta-seconds or an HTTP date (RFC 9110); None when it is absent
-    or unreadable ("inf", "nan", text, a date in the past is 1 s)."""
+    """A ``Retry-After`` value as seconds (1..*cap*): delta-seconds or an HTTP date (RFC 9110). None when it is absent
+    or unreadable: text, ``inf``/``nan``, a negative delta, or a date no datetime can hold (a huge year, hour or offset
+    - never an exception: a 429 is always recorded as one). A date in the past is 1 s."""
     value = (raw or "").strip()
     if not value:
         return None
@@ -788,11 +791,14 @@ def parse_retry_after(raw: str | None, *, cap: int = 86400) -> int | None:
     except ValueError:
         try:
             when = parsedate_to_datetime(value)
-        except (TypeError, ValueError, IndexError):
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=UTC)
+            seconds = (when - utcnow()).total_seconds()
+        except (TypeError, ValueError, IndexError, ArithmeticError):  # ArithmeticError includes OverflowError
             return None
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=UTC)
-        seconds = (when - utcnow()).total_seconds()
+    else:
+        if seconds < 0:  # delta-seconds is a non-negative number: a negative one is not a readable hint
+            return None
     if not math.isfinite(seconds):
         return None
     return max(1, min(int(seconds), cap))

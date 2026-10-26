@@ -250,7 +250,7 @@ def test_finished_model_request_is_last_used_not_an_active_session(personal_clie
     token = _grant(db, run.id, w["project"]["id"], {"m": WORKER_ROUTE})
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
         router.post(f"{OPENROUTER}/chat/completions").respond(200, json={
-            "id": "c1", "object": "chat.completion", "model": "vendor/acc-model:free",
+            "id": "c1", "object": "chat.completion", "model": "vendor/acc-model",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 12, "completion_tokens": 3, "cost": 0}})
         assert _worker_call(personal_client, token).status_code == 200

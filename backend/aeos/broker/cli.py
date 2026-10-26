@@ -54,7 +54,11 @@ def probe_route_cmd(route_key: str = typer.Argument(..., help="Route key (ARENA/
     ensure_database()
     try:
         with session_scope() as s:
-            out = probe_route(s, route_key, actor="cli:local-operator")
+            try:
+                out = probe_route(s, route_key, actor="cli:local-operator")
+            except AeosError:
+                s.commit()  # keep the DENIED/FAILED audit record (a probe that reached OpenRouter still counts)
+                raise
     except AeosError as exc:
         _out(f"{exc.code}: {exc.message}")
         raise typer.Exit(2) from exc

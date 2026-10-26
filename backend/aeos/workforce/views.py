@@ -86,7 +86,10 @@ def _owner_requirements(run: WorkerRun, te: TaskExecution | None) -> list[str]:
     if run.quarantined:
         req.append("Patch dikarantina: review khusus diperlukan sebelum promosi")
     if te is not None and te.reason_code == "NEEDS_DECISION":
-        req.append("Batas attempt tercapai: keputusan pemilik diperlukan")
+        if "provider quota" in (te.reason or ""):  # scheduler.quota_stop_problem
+            req.append("Batas penghentian kuota provider tercapai: keputusan pemilik (retry) diperlukan")
+        else:
+            req.append("Batas attempt tercapai: keputusan pemilik diperlukan")
     if run.caps and run.caps.get("sandbox_decision_id"):
         req.append("Berjalan dengan pengecualian process sandbox (lihat keputusan)")
     return req

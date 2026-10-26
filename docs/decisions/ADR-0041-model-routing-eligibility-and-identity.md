@@ -650,8 +650,10 @@ behaviour is NOT-PROVEN until a probe or a TRIAL run records it.
    billed again; the run's $0 grant cap stops that run at once).
 3. **Catalog refresh**: a known route keeps its pool; a repriced model becomes `is_free=NO` with its price (a
    configuration change: its TRIAL stops applying, decision C refuses it); a model no longer listed becomes MISSING; a
-   model listed free with no `expiration_date` any more gets `free_until` cleared (a configuration change too: the
-   activation bound to the old end date stops applying). An end date the catalog states but AEOS cannot read is kept.
+   model listed free with no `expiration_date` any more gets `free_until` cleared - only when that end date came from
+   the catalog itself (`expires_note` "catalog expiration_date ..."; a configuration change too: the activation bound
+   to the old end date stops applying). An end date from another source (the seeded Laguna S 2.1 date from S11) is
+   kept until the owner changes it, and so is one the catalog states but AEOS cannot read.
 4. **Free first.** `rank` puts an eligible, effectively free OpenRouter WORKER route ahead of every other eligible route
    (the Go subscription routes included, even with an eval score); within that tier the existing order applies (eval,
    priority, key). It is eligible for PUBLIC only, so INTERNAL tasks rank as before.
@@ -669,7 +671,8 @@ behaviour is NOT-PROVEN until a probe or a TRIAL run records it.
    midnight; a later key refresh that reports requests left clears that block (e.g. after the credit purchase). AEOS
    counts its own requests to `:free` models: forwarded broker requests (any outcome the upstream saw, 429 included;
    worker and evaluation calls) and every feasibility probe that reached OpenRouter (its audit event says
-   `upstream: SENT`; a 5xx or a read timeout counts, a refused connection does not), over the last 60 s and the current
+   `upstream: SENT`; a 5xx or a read timeout counts, a refused connection does not; a probe whose bookkeeping fails
+   after the request still records that audit event and fails with `PROBE_BOOKKEEPING_FAILED`), over the last 60 s and the current
    UTC day. On the broker the count and the request's PENDING row are one atomic step: the SQLite write lock (row
    `openrouter-free` of `cost_admission_lock`, as the cost module's admission lock) is taken before counting and held
    until the commit, so concurrent requests cannot all pass the same count (a busy lock: 503
@@ -678,19 +681,22 @@ behaviour is NOT-PROVEN until a probe or a TRIAL run records it.
    `route_quota_exhausted`), on every broker request (429 + Retry-After before the request counts against the grant,
    recorded `RATE_LIMITED` without an upstream model so the executor's quota stop sees it and the counter does not) and
    in the probe (`PolicyDenied FREE_TIER_LIMIT_REACHED`). Migration `0009_dc_broker_request_created` adds the index
-   `ix_broker_requests_created` (downgrade drops it), so the count does not scan the whole table.
+   `ix_broker_requests_created` and migration `0010_dc_audit_action_time` the index `ix_audit_action_at` on
+   `audit_events (action, at)` (downgrades drop them), so neither count scans a whole table or a route's history.
    **A quota stop is not a failed attempt.** When the executor stops a run at a provider quota (`QUOTA_EXHAUSTED`:
    3 consecutive rate-limit refusals - an answered request in between resets the count), the attempt is given back in
    the same row-version-guarded transition, and the task waits for the quota, then runs again. This holds for every
-   provider quota stop (an OpenCode Go 429 too). `scheduler.QUOTA_STOPS_MAX` (6 per owner-granted attempt round) bounds
-   it: a task stopped that often needs an owner decision (`NEEDS_DECISION`, retry with extra attempts), so a task that
-   never fits the limit cannot loop. Enabling the worker agent accepts a route eligible for PUBLIC data only, so a
+   provider quota stop (an OpenCode Go 429 too). `scheduler.QUOTA_STOPS_MAX` bounds it: after 6 quota stops since the
+   owner's last retry decision the task needs a new one (`NEEDS_DECISION`), so a task that never fits the limit cannot
+   loop. Each owner retry allows exactly 6 more; a retry for the quota-stop bound alone never raises the attempt cap
+   (extra attempts are granted only when the attempt cap was reached). Enabling the worker agent accepts a route eligible for PUBLIC data only, so a
    free WORKER route alone is enough for PUBLIC work.
 7. **429 from OpenRouter** for a `:free` model: recorded RATE_LIMITED as before (route-scoped quota state, audit FAILED,
    no ledger entry, no other route tried) and additionally account-wide (`openrouter/free-rpm` or `free-daily`). Which
    limit: `X-RateLimit-Limit` (at most the documented 20 = per minute, else daily); without it, a reset more than an
    hour away is the daily limit. The reset: `Retry-After` (seconds or an HTTP date, one parser for every broker use;
-   `inf`/`nan`/text are unreadable, never an error); else `X-RateLimit-Reset` (epoch ms or s, trusted up to 48 h
+   `inf`/`nan`, a negative delta, text or a date no datetime can hold are unreadable, never an error); else
+   `X-RateLimit-Reset` (epoch ms or s, trusted up to 48 h
    ahead); else the next UTC midnight for the daily limit (or when this instance's daily count reached the cap), else
    one minute. A longer or indefinite block already recorded for that scope is kept, never shortened. The
    `X-RateLimit-*` values are kept on the quota state.
