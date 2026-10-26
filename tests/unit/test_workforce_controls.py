@@ -273,7 +273,7 @@ def _seeded(db):
     db.commit()
 
 
-def test_enable_lists_every_unmet_prerequisite_and_audits_the_refusal(personal_client, db):
+def test_enable_lists_every_unmet_prerequisite_and_audits_the_refusal(personal_client, db, opencode_absent):
     from aeos.workforce import seed
 
     seed.run(db)
@@ -357,7 +357,7 @@ def _cli():
     return app
 
 
-def test_cli_agent_enable_needs_the_owners_password_and_reports_prerequisites(db, monkeypatch):
+def test_cli_agent_enable_needs_the_owners_password_and_reports_prerequisites(db, monkeypatch, opencode_absent):
     _seeded(db)
     create_admin(db)
     r = runner.invoke(_cli(), ["work", "agent-enable", "opencode-implementer", "--as", "owner", "--domain", "PERSONAL",
