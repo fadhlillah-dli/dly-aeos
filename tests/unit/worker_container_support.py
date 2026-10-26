@@ -2,7 +2,8 @@
 
 It implements only what ``aeos.worker_runtime.container`` calls: image/network/container inspect, network
 create/connect, ``run -d`` (gateway), attached ``run`` (worker / probe / cancel probe), ``ps`` by label and
-``rm -f``. Every call's argv is appended to ``calls.jsonl`` so tests can assert the exact hardening flags.
+``rm -f``. Every call's argv is recorded (one file per call under ``calls/``) so tests can assert the exact
+hardening flags.
 The probe answer is configured per test (compliant or leaky). This proves the AEOS side of the container
 sandbox (argv, lifecycle, teardown, verdict logic) - NOT the isolation of a real Docker host, which only
 ``aeos worker containment --kind container`` on such a host can prove.
@@ -20,8 +21,13 @@ import json, os, pathlib, sys, time, uuid
 st = pathlib.Path(os.environ["FAKE_DOCKER_STATE"])
 cfg = json.loads((st / "config.json").read_text(encoding="utf-8"))
 args = sys.argv[1:]
-with open(st / "calls.jsonl", "a", encoding="utf-8") as fh:
-    fh.write(json.dumps(args) + "\n")
+# one file per call, written aside and renamed into place: fake docker processes run concurrently (the detached
+# gateway/probe next to inspect/ps calls), and appends to one shared file race on Windows (two writers seek to the
+# same end and one overwrites the other's line, leaving a torn line the reader cannot parse)
+(st / "calls").mkdir(exist_ok=True)
+_name = f"{time.time_ns():020d}-{os.getpid():08d}-{uuid.uuid4().hex[:8]}"
+(st / "calls" / f"{_name}.tmp").write_text(json.dumps(args), encoding="utf-8")
+os.replace(st / "calls" / f"{_name}.tmp", st / "calls" / f"{_name}.json")
 for d in ("networks", "gateways", "containers"):
     (st / d).mkdir(exist_ok=True)
 
@@ -202,8 +208,8 @@ class FakeDocker:
         (self.state / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
 
     def calls(self) -> list[list[str]]:
-        f = self.state / "calls.jsonl"
-        return [json.loads(x) for x in f.read_text(encoding="utf-8").splitlines()] if f.exists() else []
+        d = self.state / "calls"  # one complete file per call, named in call order (time, pid, nonce)
+        return [json.loads(f.read_text(encoding="utf-8")) for f in sorted(d.glob("*.json"))] if d.exists() else []
 
     def containers(self) -> list[str]:
         return [f.stem for f in (self.state / "containers").glob("*.json")] if (self.state / "containers").exists() else []
