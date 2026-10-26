@@ -19,7 +19,7 @@ export function VerifierPolicyFacts({ policy }: { policy: Record<string, unknown
   const isolated = str(policy.isolated_runner);
   const suites = Array.isArray(policy.suites) ? policy.suites.map(String) : [];
   return (
-    <div className="flex flex-col gap-1 text-xs" aria-label="Kebijakan verifier (hanya baca)">
+    <div role="group" className="flex flex-col gap-1 text-xs" aria-label="Kebijakan verifier (hanya baca)">
       <span className="flex flex-wrap items-center gap-1">
         <span className="text-ink-3">integration_tests</span>
         {integration === "required" ? (

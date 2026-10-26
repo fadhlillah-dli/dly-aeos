@@ -79,9 +79,12 @@ const REPORT = {
   },
   reasons: [],
   not_proven: ["impact categories without an executed verifier check: frontend (see impact_checks on the report)"],
+  // the report's tamper section as the verifier writes it: no status key of its own
   tamper: {
-    status: "FAIL",
     findings: [{ kind: "db", path: "decisions:d-9", change: "added" }],
+    controller: { changed: [], checked_files: 120 },
+    trust_tables: { status: "FAIL", foreign: [{ table: "decisions", id: "d-9", change: "added" }] },
+    step_containment: { survivors: [] },
     neutralized: {
       actions: [{ table: "decisions", id: "d-9", change: "added", action: "INVALIDATED" }],
       manual: [{ table: "users", id: "u-1", change: "modified", remedy: "review the owner's role and scope" }],
@@ -161,6 +164,7 @@ describe("verification report view (E1 impact checks, E2 tamper + seals)", () =>
     const report = await screen.findByTestId("verification-report");
     const tamper = within(report).getByRole("region", { name: "Tamper & netralisasi (E2)" });
     expect(within(tamper).getByRole("alert")).toHaveTextContent(/admisi run worker baru DIJEDA/);
+    expect(within(tamper).getByText("Tamper terdeteksi")).toBeInTheDocument();
     expect(within(tamper).getByText("1 temuan tamper")).toBeInTheDocument();
     expect(within(tamper).getByText("decisions:d-9")).toBeInTheDocument();
     expect(within(tamper).getByText("policy file changed: compare it with git")).toBeInTheDocument();
@@ -193,6 +197,29 @@ describe("verification report view (E1 impact checks, E2 tamper + seals)", () =>
     expect(within(a11y).getByText("colour contrast")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /Kembali/ }));
     expect(await screen.findByTestId("verification-report")).toBeInTheDocument();
+  });
+
+  it("derives the tamper status from the report (no finding: write check result, an unevaluable check is not a pass)", async () => {
+    const { tamperStatus } = await import("./ReportViews");
+    expect(tamperStatus({ findings: [], controller: { changed: [] }, trust_tables: { status: "PASS" } }).status).toBe("PASS");
+    expect(tamperStatus({ findings: [], controller: { changed: [] }, trust_tables: { status: "UNKNOWN" } }).status).toBe("NOT_PROVEN");
+    expect(tamperStatus({ findings: [], trust_tables: { status: "PASS" } }).status).toBe("NOT_PROVEN"); // controller check missing
+    expect(tamperStatus({ findings: [{ kind: "result" }] }).status).toBe("TAMPERED");
+    respond({
+      "/api/evidence/ev-rep": { ...evidence({ id: "ev-rep" }), inline: {}, integrity: "VERIFIED", content: "{}", content_note: null,
+        content_json: { ...REPORT, tamper: { findings: [], controller: { changed: [] }, trust_tables: { status: "UNKNOWN" }, neutralized: {} } } },
+    });
+    wrap(<EvidenceDrawer id="ev-rep" onClose={() => {}} />);
+    const tamper = await screen.findByRole("region", { name: "Tamper & netralisasi (E2)" });
+    expect(within(tamper).getByText("Pemeriksaan tamper tidak dapat dievaluasi")).toBeInTheDocument();
+    expect(within(tamper).queryByText("Lulus")).not.toBeInTheDocument();
+  });
+
+  it("does not render the structured view of an untrusted record (a claim is never shown as the verifier's result)", async () => {
+    respond({ "/api/evidence/ev-rep": { ...evidence({ id: "ev-rep", trusted: false, origin: "worker" }), inline: {}, integrity: "VERIFIED", content: "{}", content_json: REPORT, content_note: null } });
+    wrap(<EvidenceDrawer id="ev-rep" onClose={() => {}} />);
+    expect(await screen.findByText(/bukan dari kolektor tepercaya/)).toBeInTheDocument();
+    expect(screen.queryByTestId("verification-report")).not.toBeInTheDocument();
   });
 
   it("does not render the structured view when the stored content no longer matches its hash", async () => {
@@ -229,6 +256,27 @@ describe("UI-state screenshots (Evidence → Tangkapan layar UI)", () => {
     expect(within(page).getByText("bbbbbbbbbb")).toBeInTheDocument();
   });
 
+  it("a state opens from the keyboard; an untrusted SCREENSHOT is a claim, never 'no script error'", async () => {
+    const claim = evidence({ id: "s9", kind: "SCREENSHOT", trusted: false, origin: "worker", evidence_level: "E0", claim: "worker says it rendered",
+      environment: { ui_state: "error", viewport: "mobile", render_error: false } });
+    respond({
+      "/api/docs/visuals/status": visuals,
+      "/api/evidence/s9": { ...claim, inline: {}, integrity: "VERIFIED", content: null, content_note: null },
+      "/api/evidence": { ...list, items: [claim] },
+    });
+    wrap(<ScreenshotsPanel />);
+    const open = await screen.findByRole("button", { name: "Buka detail tangkapan layar error" });
+    const row = open.closest("tr")!;
+    expect(within(row).getByText("Klaim — tidak dihitung")).toBeInTheDocument();
+    expect(within(row).queryByText("Tanpa error skrip")).not.toBeInTheDocument();
+    open.focus();
+    await userEvent.keyboard("{Enter}");
+    const dialog = await screen.findByRole("dialog", { name: "Detail bukti" });
+    const facts = await within(dialog).findByTestId("screenshot-facts");
+    expect(within(facts).getByText(/Klaim tidak tepercaya/)).toBeInTheDocument();
+    expect(within(facts).queryByText(/Render tanpa error skrip/)).not.toBeInTheDocument();
+  });
+
   it("opens a render-error screenshot with a clear 'bukan bukti state' statement", async () => {
     respond({
       "/api/docs/visuals/status": visuals,
@@ -253,7 +301,8 @@ describe("UI-state screenshots (Evidence → Tangkapan layar UI)", () => {
     wrap(<ScreenshotsPanel />);
     await userEvent.click(await screen.findByRole("button", { name: "Laporan ui-a11y" }));
     expect(await screen.findByTestId("ui-a11y-report")).toBeInTheDocument();
-    expect(calls.some((c) => c.url.includes("kind=VERIFICATION_REPORT") && c.url.includes("run_id=run-1"))).toBe(true);
+    // only the verifier's own (trusted) report names the ui-a11y report
+    expect(calls.some((c) => c.url.includes("kind=VERIFICATION_REPORT") && c.url.includes("run_id=run-1") && c.url.includes("trusted=true"))).toBe(true);
   });
 
   it("the Evidence page opens a deep-linked record (?id=) on the ledger tab", async () => {
@@ -319,6 +368,12 @@ describe("provider enforcement test and delivery actions (PR & provider)", () =>
     await userEvent.type(screen.getByLabelText(/Pernyataan/), "push ke main ditolak GH013");
     await userEvent.click(review);
     expect(posts("/api/delivery/enforcement/attest")).toHaveLength(0); // nothing is recorded before the confirmation
+    expect(within(screen.getByRole("group", { name: "Konfirmasi atestasi" })).getByText("push ke main ditolak GH013")).toBeInTheDocument();
+    // an edit after the review closes the confirmation: what is confirmed is what was reviewed
+    await userEvent.type(screen.getByLabelText(/Pernyataan/), "!");
+    expect(screen.queryByRole("group", { name: "Konfirmasi atestasi" })).not.toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText(/Pernyataan/), "{Backspace}");
+    await userEvent.click(screen.getByRole("button", { name: /Tinjau atestasi/ }));
     await userEvent.click(within(screen.getByRole("group", { name: "Konfirmasi atestasi" })).getByRole("button", { name: /Konfirmasi/ }));
     await waitFor(() => expect(posts("/api/delivery/enforcement/attest")).toHaveLength(1));
     expect(posts("/api/delivery/enforcement/attest")[0].body).toEqual({ repo: "octo/app", branch: "main", statement: "push ke main ditolak GH013" });

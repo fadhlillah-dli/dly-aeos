@@ -52,7 +52,7 @@ const project = { id: "p1", domain: "PERSONAL", repositories: [] } as unknown as
 function integration(over: Partial<IntegrationView>): IntegrationView {
   return {
     id: "i-stg", project_id: "p1", domain: "PERSONAL", provider: "deployment-target", purpose: "staging", tenant_id: null,
-    root_id: "https://staging.contoh.id", root_id_name: "DEPLOYMENT_TARGET_URL", credential_ref: null, config: {},
+    root_id: "https://staging.proyek.example", root_id_name: "DEPLOYMENT_TARGET_URL", credential_ref: null, config: {},
     capability_status: { configuration: "CONFIGURED", credential: { status: "MISSING" } }, last_verified_at: null,
     updated_at: "2026-10-25T08:00:00Z", target_url: null, ...over,
   } as IntegrationView;
@@ -62,7 +62,7 @@ function target(over: Partial<TargetView> = {}): TargetView {
   return {
     integration_id: "i-stg", project_id: "p1", domain: "PERSONAL", environment: "staging",
     settings: {
-      integration_id: "i-stg", base_url: "https://staging.contoh.id", health_path: "/api/health",
+      integration_id: "i-stg", base_url: "https://staging.proyek.example", health_path: "/api/health",
       smoke_checks: [{ name: "status", path: "/api/status", expect_status: 200, json_keys: ["ok"], kind: "smoke" }],
       sli_checks: [{ name: "p95", path: "/metrics", json_key: "latency.p95_ms", max: null, min: null }],
       rollback_on: [], rollback_criteria: "UNDECIDED", require_artifact_digest: false,
@@ -115,6 +115,28 @@ describe("checksBody (PUT /api/delivery/targets/{id}/checks)", () => {
     expect(text).toMatch(/SLI 1: path/);
     expect(text).toMatch(/SLI 1: kunci JSON/);
     expect(text).toMatch(/SLI 1: min di atas max/);
+  });
+
+  it("an unnamed check whose backend default name would be invalid asks for a name", async () => {
+    const { checksBody } = await import("./TargetChecksEditor");
+    const { problems } = checksBody({
+      health_path: "",
+      // the backend names an unnamed check after its path (".well-known-health") or json_key ("_p95"): both refused
+      smoke: [{ name: "", path: "/.well-known/health", expect_status: "200", json_keys: "", kind: "smoke" }],
+      sli: [{ name: "", path: "/metrics", json_key: "_p95", min: "", max: "" }],
+      rollback_on: [],
+      require_artifact_digest: false,
+    });
+    expect(problems.join(" | ")).toMatch(/Smoke check 1: path ini tidak menghasilkan nama yang valid/);
+    expect(problems.join(" | ")).toMatch(/SLI 1: kunci ini tidak menjadi nama yang valid/);
+    const named = checksBody({
+      health_path: "",
+      smoke: [{ name: "well-known", path: "/.well-known/health", expect_status: "200", json_keys: "", kind: "smoke" }],
+      sli: [{ name: "p95", path: "/metrics", json_key: "_p95", min: "", max: "" }],
+      rollback_on: [],
+      require_artifact_digest: false,
+    });
+    expect(named.problems).toEqual([]);
   });
 });
 
@@ -178,6 +200,7 @@ describe("deployment targets panel (G6/G8, observe-only)", () => {
     await userEvent.click(await within(stg).findByRole("button", { name: /Ubah pemeriksaan target/ }));
     const form = within(stg).getByRole("form", { name: "Pemeriksaan target staging" });
     fireEvent.change(within(form).getByLabelText(/Path health\/version/), { target: { value: "@other.host/health" } });
+    expect(within(form).getByLabelText(/Path health\/version/)).toHaveAttribute("aria-invalid", "true");
     expect(within(form).getByRole("button", { name: /Simpan pemeriksaan staging/ })).toBeDisabled();
     expect(within(form).getByText(/Path health harus path absolut/)).toBeInTheDocument();
   });
@@ -185,14 +208,14 @@ describe("deployment targets panel (G6/G8, observe-only)", () => {
   it("observes the target read-only and shows parts, digest and the human post-release response", async () => {
     const result = {
       status: "FAIL", reason: "target serves commit 1234567890ab and reports healthy; checks not passing: status", evidence_id: "ev-o2",
-      target: "https://staging.contoh.id/api/health", environment: "production",
+      target: "https://staging.proyek.example/api/health", environment: "production",
       checks: [{ name: "status", kind: "smoke", path: "/api/status", status: "FAIL", reason: "HTTP 500, expected 200", http_status: 500, evidence_id: "ev-c1" }],
       slis: [{ name: "p95", status: "NO_TARGET", reason: "no owner threshold recorded", value: 120, evidence_id: "ev-s1" }],
       artifact: { status: "NOT_RECORDED", reported_digest: "sha256:" + "9".repeat(64), recorded_digests: [] },
       failure_conditions: ["smoke_fail"],
       post_release: { alert_id: "al-1", incident_id: "inc-1", decision_request_id: "dr-1", recommendation: { status: "UNDECIDED", summary: "Kriteria rollback belum ditetapkan pemilik" }, runbook: "docs/runbooks/post-release-failure.md" },
     };
-    const prod = target({ integration_id: "i-prd", environment: "production", settings: { ...target().settings, integration_id: "i-prd", base_url: "https://app.contoh.id" } });
+    const prod = target({ integration_id: "i-prd", environment: "production", settings: { ...target().settings, integration_id: "i-prd", base_url: "https://app.proyek.example" } });
     mockFetch((url, method) => {
       if (url.startsWith("/api/delivery/targets/observe") && method === "POST") return result;
       if (url.startsWith("/api/delivery/targets?")) return { items: [prod] };
@@ -200,7 +223,7 @@ describe("deployment targets panel (G6/G8, observe-only)", () => {
       return {};
     });
     const { DeploymentTargetsPanel } = await import("./DeploymentTargetsPanel");
-    wrap(<DeploymentTargetsPanel project={project} integrations={[integration({ id: "i-prd", purpose: "production", root_id: "https://app.contoh.id" })]} isAdmin />);
+    wrap(<DeploymentTargetsPanel project={project} integrations={[integration({ id: "i-prd", purpose: "production", root_id: "https://app.proyek.example" })]} isAdmin />);
     const region = await screen.findByRole("region", { name: "Lingkungan Produksi" });
     const sha = await within(region).findByLabelText(/Commit yang seharusnya berjalan/);
     fireEvent.change(sha, { target: { value: "xyz" } });
@@ -231,19 +254,20 @@ describe("environment owner decisions (POST /api/decisions, kind POLICY)", () =>
   async function form(env: "staging" | "production", targetUrl: string | null, items: unknown[] = []) {
     mockFetch((url, method, body) => (method === "POST" ? { id: "d-new", ...(body as object) } : url.startsWith("/api/decisions?") ? { items } : {}));
     const { EnvironmentDecisionForm } = await import("../decisions/EnvironmentDecisionForm");
-    wrap(<EnvironmentDecisionForm projectId="p1" environment={env} targetUrl={targetUrl} isAdmin={auth.isAdmin} />);
+    wrap(<EnvironmentDecisionForm projectId="p1" environment={env} targetUrl={targetUrl} isAdmin={auth.isAdmin} domain="PERSONAL" />);
     return screen.findByTestId(`env-decision-${env}`);
   }
 
   it("authorises staging deploys to the exact registered target only after an explicit confirmation", async () => {
-    const box = await form("staging", "https://staging.contoh.id/");
+    const box = await form("staging", "https://staging.proyek.example/");
     expect(await within(box).findByText(/Belum ada keputusan aktif/)).toBeInTheDocument();
     const review = within(box).getByRole("button", { name: "Tinjau keputusan" });
     expect(review).toBeDisabled();
     await userEvent.type(within(box).getByLabelText(/Rationale/), "staging dipakai untuk uji G6");
     await userEvent.click(review);
     const confirm = within(box).getByRole("group", { name: "Konfirmasi keputusan staging" });
-    expect(within(confirm).getByText("staging=AUTHORISED, target=https://staging.contoh.id")).toBeInTheDocument();
+    expect(within(confirm).getByText("staging=AUTHORISED, target=https://staging.proyek.example")).toBeInTheDocument();
+    expect(within(confirm).getByText(/tanpa kedaluwarsa/)).toBeInTheDocument();
     expect(sent("POST", "/api/decisions")).toHaveLength(0);
     await userEvent.click(within(confirm).getByRole("button", { name: /Konfirmasi & catat keputusan/ }));
     await waitFor(() => expect(sent("POST", "/api/decisions")).toHaveLength(1));
@@ -252,7 +276,7 @@ describe("environment owner decisions (POST /api/decisions, kind POLICY)", () =>
       target_type: "staging_environment",
       target_id: "p1",
       project_id: "p1",
-      auth_scope: { staging: "AUTHORISED", target: "https://staging.contoh.id" },
+      auth_scope: { staging: "AUTHORISED", target: "https://staging.proyek.example" },
       allowed_operations: [],
       rationale: "staging dipakai untuk uji G6",
     });
@@ -272,10 +296,11 @@ describe("environment owner decisions (POST /api/decisions, kind POLICY)", () =>
   });
 
   it("production=NONE and the active decision with its scope", async () => {
-    const active = { id: "d1", kind: "POLICY", status: "ACTIVE", target_type: "production_environment", target_id: "p1", auth_scope: { production: "NONE" }, actor: "owner", created_at: "2026-10-20T10:00:00Z", expires_at: null };
+    const active = { id: "d1", kind: "POLICY", status: "ACTIVE", target_type: "production_environment", target_id: "p1", auth_scope: { production: "NONE" }, actor: "owner", actor_kind: "HUMAN", domain: "PERSONAL", created_at: "2026-10-20T10:00:00Z", expires_at: null };
     const box = await form("production", null, [active]);
     expect(await within(box).findByText("production=NONE")).toBeInTheDocument();
     expect(within(box).getByText("Aktif")).toBeInTheDocument();
+    expect(within(box).queryByText(/tidak menghitungnya/)).not.toBeInTheDocument();
     await userEvent.type(within(box).getByLabelText(/Rationale/), "tidak ada produksi");
     await userEvent.click(within(box).getByRole("button", { name: "Tinjau keputusan" }));
     await userEvent.click(within(box).getByRole("button", { name: /Konfirmasi & catat keputusan/ }));
@@ -284,9 +309,27 @@ describe("environment owner decisions (POST /api/decisions, kind POLICY)", () =>
   });
 
   it("warns when the active staging authorisation names another target than the registered one", async () => {
-    const active = { id: "d2", kind: "POLICY", status: "ACTIVE", target_type: "staging_environment", target_id: "p1", auth_scope: { staging: "AUTHORISED", target: "https://old.contoh.id" }, actor: "owner", created_at: "2026-10-20T10:00:00Z" };
-    const box = await form("staging", "https://staging.contoh.id", [active]);
+    const active = { id: "d2", kind: "POLICY", status: "ACTIVE", target_type: "staging_environment", target_id: "p1", auth_scope: { staging: "AUTHORISED", target: "https://old.proyek.example" }, actor: "owner", actor_kind: "HUMAN", domain: "PERSONAL", created_at: "2026-10-20T10:00:00Z" };
+    const box = await form("staging", "https://staging.proyek.example", [active]);
     expect(await within(box).findByText(/mengotorisasi target lain/)).toBeInTheDocument();
+  });
+
+  it("an active decision the gate does not count (not HUMAN, or another domain) is stated as such", async () => {
+    const active = { id: "d3", kind: "POLICY", status: "ACTIVE", target_type: "staging_environment", target_id: "p1", auth_scope: { staging: "NONE" }, actor: "system", actor_kind: "SYSTEM", domain: "PERSONAL", created_at: "2026-10-20T10:00:00Z" };
+    const box = await form("staging", null, [active]);
+    expect(await within(box).findByText(/tidak menghitungnya/)).toBeInTheDocument();
+  });
+
+  it("an edit after the review closes the confirmation, so only the reviewed binding can be recorded", async () => {
+    const box = await form("staging", "https://staging.proyek.example");
+    await userEvent.type(await within(box).findByLabelText(/Rationale/), "staging dipakai untuk uji G6");
+    await userEvent.click(within(box).getByRole("button", { name: "Tinjau keputusan" }));
+    expect(within(box).getByRole("group", { name: "Konfirmasi keputusan staging" })).toBeInTheDocument();
+    await userEvent.click(within(box).getByRole("radio", { name: /tanpa lingkungan staging/ }));
+    expect(within(box).queryByRole("group", { name: "Konfirmasi keputusan staging" })).not.toBeInTheDocument();
+    await userEvent.click(within(box).getByRole("button", { name: "Tinjau keputusan" }));
+    expect(within(box).getByText("staging=NONE")).toBeInTheDocument();
+    expect(sent("POST", "/api/decisions")).toHaveLength(0);
   });
 });
 
@@ -307,7 +350,7 @@ describe("integration settings: credential references and health_path clearing",
     const { IntegrationsPanel } = await import("./IntegrationsPanel");
     wrap(<IntegrationsPanel project={project} isAdmin />);
     const form = await screen.findByRole("form", { name: /Staging — Deployment target/ });
-    fireEvent.change(within(form).getByLabelText(/URL dasar target/), { target: { value: "https://staging.contoh.id" } });
+    fireEvent.change(within(form).getByLabelText(/URL dasar target/), { target: { value: "https://staging.proyek.example" } });
     const migration = within(form).getByLabelText(/Referensi credential migrasi/);
     fireEvent.change(migration, { target: { value: "postgres://user:pw@db" } });
     const save = within(form).getByRole("button", { name: /Simpan Deployment target \(Staging\)/ });
@@ -320,7 +363,7 @@ describe("integration settings: credential references and health_path clearing",
     expect(sent("PUT", "/api/projects/p1/integrations")[0]).toEqual({
       provider: "deployment-target",
       purpose: "staging",
-      root_id: "https://staging.contoh.id",
+      root_id: "https://staging.proyek.example",
       config: { migration_credential_ref: "projects/p1/db-migrator", runtime_credential_ref: "projects/p1/db-app" },
     });
   });
@@ -340,7 +383,7 @@ describe("integration settings: credential references and health_path clearing",
     expect(sent("PUT", "/api/projects/p1/integrations")[0]).toEqual({
       provider: "deployment-target",
       purpose: "staging",
-      root_id: "https://staging.contoh.id",
+      root_id: "https://staging.proyek.example",
       config: { health_path: "", require_artifact_digest: true },
     });
   });
@@ -385,6 +428,14 @@ describe("project test baseline (§05 step 6)", () => {
     await userEvent.click(within(screen.getByRole("group", { name: "Konfirmasi baseline tes" })).getByRole("button", { name: /Konfirmasi & jalankan/ }));
     await waitFor(() => expect(sent("POST", "/api/projects/p1/test-baseline")).toHaveLength(1));
     expect(await screen.findByText("Baseline tercatat: PASS.")).toBeInTheDocument();
+  });
+
+  it("without an inventoried commit the admin run action is disabled and says why", async () => {
+    mockFetch(() => ({ status: "NOT_RUN", commit: null, reason: "inventory has no commit" }));
+    const { TestBaselinePanel } = await import("./TestBaselinePanel");
+    wrap(<TestBaselinePanel projectId="p1" isAdmin />);
+    expect(await screen.findByText(/Inventaris repository dulu/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Jalankan baseline tes/ })).toBeDisabled();
   });
 
   it("NOT_RUN states the reason; VIEWER has no run action", async () => {

@@ -39,12 +39,15 @@ export function EnvironmentDecisionForm({
   environment,
   targetUrl,
   isAdmin,
+  domain,
 }: {
   projectId: string;
   environment: EnvironmentName;
   /** the registered deployment-target base URL of this environment (null = none registered) */
   targetUrl: string | null;
   isAdmin: boolean;
+  /** the project's domain: the gates count only a HUMAN decision of exactly this domain */
+  domain?: string;
 }) {
   const qc = useQueryClient();
   const targetType = ENVIRONMENT_DECISION_TARGET[environment];
@@ -61,6 +64,11 @@ export function EnvironmentDecisionForm({
   const [rationale, setRationale] = useState("");
   const [expires, setExpires] = useState("");
   const [confirming, setConfirming] = useState(false);
+  // any edit after "Tinjau" closes the confirmation: what is confirmed is always what was reviewed
+  const edit = <T,>(set: (v: T) => void) => (v: T) => {
+    setConfirming(false);
+    set(v);
+  };
   const groupId = useId();
   const effectiveChoice: Choice = environment === "staging" && choice === "AUTHORISED" && targetUrl ? "AUTHORISED" : "NONE";
   const scope = environmentScope(environment, effectiveChoice, targetUrl);
@@ -86,6 +94,8 @@ export function EnvironmentDecisionForm({
   });
   const label = environment === "staging" ? "staging" : "produksi";
   const activeTarget = active ? String(active.auth_scope?.target ?? "").replace(/\/+$/, "") : "";
+  // backend gates.environment_decision: the newest ACTIVE decision counts only when a HUMAN recorded it in the project's domain
+  const notCounted = !!active && (active.actor_kind !== "HUMAN" || (!!domain && (active.domain ?? "") !== domain));
   const mismatch =
     environment === "staging" &&
     !!active &&
@@ -117,6 +127,12 @@ export function EnvironmentDecisionForm({
           Belum ada keputusan aktif. {environment === "staging" ? "G6" : "G8"} tidak pernah menjadi NOT_APPLICABLE tanpa keputusan pemilik.
         </p>
       )}
+      {notCounted && (
+        <Notice tone="warn">
+          Keputusan aktif terbaru bukan keputusan manusia di domain proyek ini ({active?.actor_kind ?? "?"}/{active?.domain ?? "global"}): gate
+          tidak menghitungnya.
+        </Notice>
+      )}
       {mismatch && (
         <Notice tone="warn">
           Keputusan aktif mengotorisasi target lain (<Mono>{activeTarget}</Mono>), bukan target terdaftar <Mono>{targetUrl}</Mono>: G6 tidak menganggapnya.
@@ -138,7 +154,7 @@ export function EnvironmentDecisionForm({
                   className="mt-1"
                   checked={effectiveChoice === "AUTHORISED"}
                   disabled={!targetUrl}
-                  onChange={() => setChoice("AUTHORISED")}
+                  onChange={() => edit(setChoice)("AUTHORISED")}
                 />
                 <span>
                   Deploy staging (oleh manusia) ke target persis ini diotorisasi:{" "}
@@ -147,7 +163,7 @@ export function EnvironmentDecisionForm({
               </label>
             )}
             <label className="flex items-start gap-2">
-              <input type="radio" name={`${groupId}-choice`} className="mt-1" checked={effectiveChoice === "NONE"} onChange={() => setChoice("NONE")} />
+              <input type="radio" name={`${groupId}-choice`} className="mt-1" checked={effectiveChoice === "NONE"} onChange={() => edit(setChoice)("NONE")} />
               <span>
                 Proyek ini tanpa lingkungan {label} ({environment}=NONE
                 {environment === "staging" ? "; G6 tidak berlaku" : "; G8 tidak berlaku"})
@@ -156,10 +172,10 @@ export function EnvironmentDecisionForm({
             </label>
           </fieldset>
           <Field label="Rationale (wajib, min. 10 karakter)">
-            <textarea className={inputClass} rows={2} value={rationale} onChange={(e) => setRationale(e.target.value)} maxLength={5000} />
+            <textarea className={inputClass} rows={2} value={rationale} onChange={(e) => edit(setRationale)(e.target.value)} maxLength={5000} />
           </Field>
           <Field label="Berlaku sampai (opsional)">
-            <input type="datetime-local" className={inputClass} value={expires} onChange={(e) => setExpires(e.target.value)} />
+            <input type="datetime-local" className={inputClass} value={expires} onChange={(e) => edit(setExpires)(e.target.value)} />
           </Field>
           {!confirming ? (
             <Button disabled={rationale.trim().length < 10} onClick={() => setConfirming(true)}>
@@ -175,6 +191,7 @@ export function EnvironmentDecisionForm({
                 <li>
                   Scope <Mono>{scopeText(scope)}</Mono>
                 </li>
+                <li>Berlaku sampai: {expires ? absoluteTime(new Date(expires).toISOString()) : "tanpa kedaluwarsa (sampai dicabut atau digantikan)"}</li>
               </ul>
               <div className="flex flex-wrap gap-2">
                 <Button variant="primary" busy={save.isPending} onClick={() => save.mutate()}>

@@ -96,6 +96,9 @@ export function checksBody(st: ChecksState): { body: Record<string, unknown>; pr
     const keys = keyList(r.json_keys);
     if (!targetPathOk(path)) problems.push(`Smoke check ${n}: path harus absolut, mis. /api/status.`);
     if (name && !CHECK_NAME.test(name)) problems.push(`Smoke check ${n}: nama hanya huruf, angka, spasi, . _ -.`);
+    // without a name the backend names the check after its path; that name must pass the same rule
+    else if (!name && targetPathOk(path) && !CHECK_NAME.test(smokeDefaultName(path)))
+      problems.push(`Smoke check ${n}: path ini tidak menghasilkan nama yang valid; isi nama (diawali huruf/angka).`);
     if (!Number.isInteger(status) || status < 100 || status > 599) problems.push(`Smoke check ${n}: status HTTP harus 100-599.`);
     if (keys.length > MAX_JSON_KEYS) problems.push(`Smoke check ${n}: maksimal ${MAX_JSON_KEYS} kunci JSON.`);
     if (keys.some((k) => !JSON_KEY.test(k))) problems.push(`Smoke check ${n}: kunci JSON tidak valid (boleh bertitik, mis. data.items).`);
@@ -111,6 +114,8 @@ export function checksBody(st: ChecksState): { body: Record<string, unknown>; pr
     if (!targetPathOk(path)) problems.push(`SLI ${n}: path harus absolut, mis. /metrics.`);
     if (name && !CHECK_NAME.test(name)) problems.push(`SLI ${n}: nama hanya huruf, angka, spasi, . _ -.`);
     if (!JSON_KEY.test(key)) problems.push(`SLI ${n}: kunci JSON angka wajib (boleh bertitik, mis. latency.p95_ms).`);
+    // without a name the backend names the SLI after its json_key; that name must pass the same rule
+    else if (!name && !CHECK_NAME.test(key.slice(0, 64))) problems.push(`SLI ${n}: kunci ini tidak menjadi nama yang valid; isi nama (diawali huruf/angka).`);
     if (min === "invalid" || max === "invalid") problems.push(`SLI ${n}: ambang harus angka atau kosong.`);
     if (typeof min === "number" && typeof max === "number" && min > max) problems.push(`SLI ${n}: min di atas max.`);
     return { ...(name ? { name } : {}), path, json_key: key, min: typeof min === "number" ? min : null, max: typeof max === "number" ? max : null };
@@ -168,6 +173,7 @@ export function TargetChecksEditor({ target, onSaved }: { target: TargetView; on
         <input
           className={`${inputClass} mono`}
           value={st.health_path}
+          aria-invalid={(!!st.health_path.trim() && !targetPathOk(st.health_path.trim())) || undefined}
           onChange={(e) => setSt({ ...st, health_path: e.target.value })}
           placeholder="/health"
         />

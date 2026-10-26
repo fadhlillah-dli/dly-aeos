@@ -64,10 +64,9 @@ function A11yReportButton({ runId, onOpen }: { runId: string; onOpen: (id: strin
     setMsg("");
     setError(null);
     try {
-      const list = await qc.fetchQuery({
-        queryKey: ["evidence", domain, { kind: "VERIFICATION_REPORT", run_id: runId }],
-        queryFn: () => evidenceApi.list({ kind: "VERIFICATION_REPORT", run_id: runId }),
-      });
+      // only the verifier's own (trusted) reports: a claim never names the report
+      const filters = { kind: "VERIFICATION_REPORT", run_id: runId, trusted: true };
+      const list = await qc.fetchQuery({ queryKey: ["evidence", domain, filters], queryFn: () => evidenceApi.list(filters) });
       const newest = list.items[0];
       if (!newest) {
         setMsg("Run ini belum punya laporan verifikasi.");
@@ -101,6 +100,23 @@ function A11yReportButton({ runId, onOpen }: { runId: string; onOpen: (id: strin
   );
 }
 
+/** The first cell opens the record with the keyboard too (the row click is a pointer convenience only). */
+function OpenCell({ label, onOpen }: { label: string; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      className="mono rounded text-left text-accent underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      aria-label={`Buka detail tangkapan layar ${label}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen();
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 function UiStateTable({ rows, onOpen }: { rows: EvidenceItem[]; onOpen: (id: string) => void }) {
   return (
     <Table<EvidenceItem>
@@ -108,18 +124,21 @@ function UiStateTable({ rows, onOpen }: { rows: EvidenceItem[]; onOpen: (id: str
       rowKey={(r) => r.id}
       onRowClick={(r) => onOpen(r.id)}
       columns={[
-        { header: "State", cell: (r) => <Mono>{String(env(r, "ui_state") ?? "?")}</Mono> },
+        { header: "State", cell: (r) => <OpenCell label={String(env(r, "ui_state") ?? "?")} onOpen={() => onOpen(r.id)} /> },
         { header: "Viewport", cell: (r) => <span className="text-xs">{String(env(r, "viewport") ?? "—")}</span> },
         { header: "API dijawab", cell: (r) => <span className="text-xs">{String(env(r, "answered_by") ?? "verifier")}</span> },
         {
           header: "Render",
           cell: (r) =>
-            env(r, "render_error") === true ? (
+            !r.trusted ? (
+              <StatusBadge status="UNVERIFIED" label="Klaim — tidak dihitung" />
+            ) : env(r, "render_error") === true ? (
               <StatusBadge status="FAILED" label="Error skrip — bukan bukti state" />
             ) : (
               <StatusBadge status="CONFIGURED" label="Tanpa error skrip" />
             ),
         },
+        { header: "Asal", cell: (r) => <TrustBadge trusted={r.trusted} /> },
         { header: "Level", cell: (r) => <LevelBadge level={r.evidence_level} explanation={r.level_explanation} /> },
         { header: "Hash", cell: (r) => <Mono>{shortHash(r.content_hash, 10)}</Mono> },
       ]}
@@ -171,11 +190,11 @@ export function ScreenshotsPanel() {
             </>
           }
         >
-          {rows.some((r) => env(r, "render_error") === true) && (
+          {rows.some((r) => r.trusted && env(r, "render_error") === true) && (
             <div className="mb-2">
               <Notice tone="bad">
-                {rows.filter((r) => env(r, "render_error") === true).length} render memunculkan error skrip: tangkapan layar itu bukan bukti state yang
-                dimaksud.
+                {rows.filter((r) => r.trusted && env(r, "render_error") === true).length} render memunculkan error skrip: tangkapan layar itu bukan
+                bukti state yang dimaksud.
               </Notice>
             </div>
           )}
@@ -190,7 +209,7 @@ export function ScreenshotsPanel() {
             onRowClick={(r) => setOpen(r.id)}
             columns={[
               { header: "Lingkungan", cell: (r) => <span className="text-xs">{String(env(r, "name") ?? "—")}</span> },
-              { header: "Rute", cell: (r) => <Mono>{String(env(r, "route") ?? "—")}</Mono> },
+              { header: "Rute", cell: (r) => <OpenCell label={String(env(r, "route") ?? "—")} onOpen={() => setOpen(r.id)} /> },
               { header: "Commit", cell: (r) => <Mono>{shortHash(String(env(r, "commit") ?? "") || null, 10)}</Mono> },
               { header: "Viewport", cell: (r) => <span className="text-xs">{String(env(r, "viewport") ?? "—")}</span> },
               { header: "Asal", cell: (r) => <TrustBadge trusted={r.trusted} /> },

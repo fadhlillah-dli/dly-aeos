@@ -137,9 +137,15 @@ export function TestBaselinePanel({ projectId, isAdmin }: { projectId: string; i
         {isAdmin && (
           <div className="space-y-2">
             {!confirming ? (
-              <Button onClick={() => setConfirming(true)} disabled={run.isPending}>
-                <FlaskConical className="h-4 w-4" aria-hidden /> Jalankan baseline tes
-              </Button>
+              <>
+                {/* the baseline runs at the inventoried commit: without a known commit there is nothing to confirm */}
+                <Button onClick={() => setConfirming(true)} disabled={run.isPending || !q.data?.commit}>
+                  <FlaskConical className="h-4 w-4" aria-hidden /> Jalankan baseline tes
+                </Button>
+                {q.data && !q.data.commit && (
+                  <p className="text-xs text-warn">Inventaris repository dulu: baseline berjalan pada commit inventaris.</p>
+                )}
+              </>
             ) : (
               <div role="group" aria-label="Konfirmasi baseline tes" className="space-y-2 rounded-md bg-surface-2 p-2 text-xs">
                 <p>

@@ -96,7 +96,7 @@ export function EvidenceDrawer({ id, onClose }: { id: string; onClose: () => voi
             {d.kind === "SCREENSHOT" && (
               <section>
                 <h3 className="mb-1 text-sm font-semibold">Tangkapan layar</h3>
-                <ScreenshotFacts env={d.environment ?? {}} />
+                <ScreenshotFacts env={d.environment ?? {}} trusted={d.trusted} />
               </section>
             )}
             {Object.keys(d.environment ?? {}).length > 0 && (
@@ -125,9 +125,13 @@ export function EvidenceDrawer({ id, onClose }: { id: string; onClose: () => voi
                 pernah dihitung sebagai kelulusan.
               </Notice>
             )}
-            {structured && d.integrity === "VERIFIED" && structured}
+            {/* a structured view reads as the verifier's result: only for intact content from a trusted collector */}
+            {structured && d.integrity === "VERIFIED" && d.trusted && structured}
             {structured && d.integrity !== "VERIFIED" && (
               <Notice tone="warn">Tampilan terstruktur tidak ditampilkan: isi bukti ini tidak terverifikasi terhadap hash-nya.</Notice>
+            )}
+            {structured && d.integrity === "VERIFIED" && !d.trusted && (
+              <Notice tone="warn">Tampilan terstruktur tidak ditampilkan: catatan ini bukan dari kolektor tepercaya (klaim, tidak dihitung).</Notice>
             )}
             <section>
               <h3 className="mb-1 text-sm font-semibold">Isi (sudah diredaksi)</h3>

@@ -144,6 +144,12 @@ function ObserveForm({ target }: { target: TargetView }) {
       {target.environment === "staging" && (
         <p className="text-xs text-ink-3">Observasi staging hanya berjalan saat kapabilitas CAN_VALIDATE_STAGING READY untuk proyek ini (selain itu ditolak).</p>
       )}
+      {target.environment === "production" && (
+        <p className="text-xs text-ink-3">
+          Observasi produksi yang FAIL membuka alert pasca-rilis, insiden dan satu permintaan keputusan di antrean (rollback/forward-fix/terima risiko
+          diputuskan manusia).
+        </p>
+      )}
       <ErrorBox error={m.error} />
       <div aria-live="polite">{m.data && <ObserveResultView r={m.data} />}</div>
     </div>
@@ -290,7 +296,7 @@ export function DeploymentTargetsPanel({ project, integrations, isAdmin }: { pro
                   keputusan bahwa proyek ini tanpa {env}.
                 </p>
               )}
-              <EnvironmentDecisionForm projectId={project.id} environment={env} targetUrl={url} isAdmin={isAdmin} />
+              <EnvironmentDecisionForm projectId={project.id} environment={env} targetUrl={url} isAdmin={isAdmin} domain={project.domain} />
             </section>
           );
         })}

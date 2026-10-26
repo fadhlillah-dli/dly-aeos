@@ -76,7 +76,8 @@ export function InventoryFacts({ inv }: { inv: InventoryView }) {
               {inv.tests.directories.length > 0 && <span className="text-ink-3">· direktori {inv.tests.directories.slice(0, 4).join(", ")}</span>}
             </span>,
           ],
-          ["Baseline tes", inv.tests.baseline ? <BaselineFacts key="b" b={inv.tests.baseline} /> : <StatusBadge key="b" status="NOT_TESTED" label="Baseline belum dijalankan" />],
+          // recorded with the inventory (a later run shows on the project's "Baseline tes proyek" card)
+          ["Baseline tes (saat inventaris)", inv.tests.baseline ? <BaselineFacts key="b" b={inv.tests.baseline} /> : <StatusBadge key="b" status="NOT_TESTED" label="Baseline belum dijalankan" />],
           ["Kondisi working tree", inv.working_tree.dirty === null ? "UNKNOWN" : inv.working_tree.dirty ? `dirty (${inv.working_tree.entries} entri)` : "bersih"],
         ]}
       />

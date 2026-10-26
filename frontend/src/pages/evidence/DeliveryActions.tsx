@@ -119,7 +119,16 @@ function AttestEnforcement({ caps, onDone }: { caps: ProviderCaps; onDone: () =>
         Pernyataan Anda dicatat sebagai klaim manusia (E0, tidak tepercaya): status penegakan menjadi <strong>CLAIMED</strong>, tidak pernah VERIFIED.
       </Notice>
       <Field label="Pernyataan (min. 10 karakter)" hint="Mis. push langsung ke main dengan credential non-bypass ditolak dengan GH013 pada tanggal …">
-        <textarea className={inputClass} rows={2} value={statement} onChange={(e) => setStatement(e.target.value)} maxLength={2000} />
+        <textarea
+          className={inputClass}
+          rows={2}
+          value={statement}
+          onChange={(e) => {
+            setConfirming(false); // an edited statement is reviewed again before it is recorded
+            setStatement(e.target.value);
+          }}
+          maxLength={2000}
+        />
       </Field>
       {!confirming ? (
         <Button disabled={!ok} onClick={() => setConfirming(true)}>
@@ -130,7 +139,8 @@ function AttestEnforcement({ caps, onDone }: { caps: ProviderCaps; onDone: () =>
           <p>
             Catat pernyataan Anda untuk <Mono>{`${caps.repo}@${caps.branch ?? "default"}`}</Mono> sebagai klaim pemilik?
           </p>
-          <div className="flex gap-2">
+          <blockquote className="border-l-2 border-line pl-2 text-ink-2 wrap-anywhere">{statement.trim()}</blockquote>
+          <div className="flex flex-wrap gap-2">
             <Button variant="primary" busy={m.isPending} onClick={() => m.mutate()}>
               Konfirmasi &amp; catat klaim
             </Button>

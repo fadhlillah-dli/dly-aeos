@@ -40,10 +40,10 @@ function Lines({ items, tone = "text-ink-2" }: { items: string[]; tone?: string 
   );
 }
 
-function EvidenceButton({ id, onOpen, label = "Buka bukti" }: { id: string; onOpen?: (id: string) => void; label?: string }) {
+function EvidenceButton({ id, onOpen, label = "Buka bukti", of }: { id: string; onOpen?: (id: string) => void; label?: string; of?: string }) {
   if (!onOpen) return <Mono>{shortHash(id, 8)}</Mono>;
   return (
-    <Button variant="ghost" className="px-1.5 py-0.5 text-xs" onClick={() => onOpen(id)} title={id}>
+    <Button variant="ghost" className="px-1.5 py-0.5 text-xs" onClick={() => onOpen(id)} title={id} aria-label={of ? `${label}: ${of}` : undefined}>
       <ExternalLink className="h-3 w-3" aria-hidden /> {label}
     </Button>
   );
@@ -118,6 +118,19 @@ function RowList({ rows, cols }: { rows: Obj[]; cols: [string, string][] }) {
   );
 }
 
+/**
+ * The report's tamper section carries no status of its own ({findings, controller, trust_tables, step_containment,
+ * result_seal, neutralized}): it is derived like the verifier's CONTAINMENT_TEST - any finding is tamper; otherwise
+ * the DB trust-table check decides between "no write detected" and "not evaluable" (never a silent pass).
+ */
+export function tamperStatus(tamper: Obj): { status: string; label: string } {
+  if (arr(tamper.findings).length > 0) return { status: "TAMPERED", label: "Tamper terdeteksi" };
+  const db = isObj(tamper.trust_tables) ? str(tamper.trust_tables.status).toUpperCase() : "";
+  const controller = isObj(tamper.controller);
+  if (db === "PASS" && controller) return { status: "PASS", label: "Tidak ada perubahan tulis terdeteksi (pembacaan tidak terdeteksi)" };
+  return { status: "NOT_PROVEN", label: "Pemeriksaan tamper tidak dapat dievaluasi" };
+}
+
 /** E2 tamper.neutralized: what the verifier neutralised, what needs the owner, and the integrity hold. */
 export function TamperView({ tamper }: { tamper: Obj }) {
   const n = isObj(tamper.neutralized) ? tamper.neutralized : {};
@@ -126,10 +139,11 @@ export function TamperView({ tamper }: { tamper: Obj }) {
   const failed = arr(n.failed).filter(isObj);
   const hold = isObj(n.integrity_hold) ? n.integrity_hold : null;
   const findings = arr(tamper.findings).filter(isObj);
+  const derived = tamperStatus(tamper);
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <Status status={str(tamper.status) || null} />
+        <Outcome status={derived.status} label={derived.label} />
         <span className="text-xs text-ink-2">{findings.length} temuan tamper</span>
         {Number(n.not_listed) > 0 && <span className="text-xs text-warn">+{str(n.not_listed)} baris tidak didaftar</span>}
       </div>
@@ -235,7 +249,14 @@ export function VerificationReportView({ report, onOpen }: { report: Obj; onOpen
               <li key={name} className="rounded-md border border-line p-2">
                 <div className="flex flex-wrap items-center gap-2">
                   <CheckBadge name={name} status={c.status} />
-                  {str(c.evidence_id) && <EvidenceButton id={str(c.evidence_id)} onOpen={onOpen} label={name === "ui_a11y" ? "Buka laporan ui-a11y" : "Buka bukti"} />}
+                  {str(c.evidence_id) && (
+                    <EvidenceButton
+                      id={str(c.evidence_id)}
+                      onOpen={onOpen}
+                      label={name === "ui_a11y" ? "Buka laporan ui-a11y" : "Buka bukti"}
+                      of={CHECK_LABELS[name] ?? name}
+                    />
+                  )}
                 </div>
                 {str(c.summary) && <p className="mt-1 text-xs text-ink-2 wrap-anywhere">{str(c.summary)}</p>}
               </li>
@@ -323,11 +344,17 @@ export function UiA11yReportView({ report }: { report: Obj }) {
   );
 }
 
-/** SCREENSHOT evidence: a verifier UI-state render (ui_state/viewport/answered_by/render_error) or a target page. */
-export function ScreenshotFacts({ env }: { env: Obj }) {
+/**
+ * SCREENSHOT evidence: a verifier UI-state render (ui_state/viewport/answered_by/render_error) or a target page. An
+ * untrusted record (e.g. a worker claim) states nothing about the render: its environment is the claimant's own text.
+ */
+export function ScreenshotFacts({ env, trusted = true }: { env: Obj; trusted?: boolean }) {
   const uiState = str(env.ui_state);
   return (
     <div className="space-y-2" data-testid="screenshot-facts">
+      {!trusted && (
+        <StatusBadge status="UNVERIFIED" label="Klaim tidak tepercaya: bukan bukti tampilan maupun state" />
+      )}
       {uiState ? (
         <>
           <KeyValue
@@ -346,9 +373,9 @@ export function ScreenshotFacts({ env }: { env: Obj }) {
                 membuktikan state <Mono>{uiState}</Mono>.
               </span>
             </div>
-          ) : (
+          ) : trusted ? (
             <StatusBadge status="CONFIGURED" label="Render tanpa error skrip (bukti tampilan, bukan kelulusan)" />
-          )}
+          ) : null}
         </>
       ) : (
         <KeyValue
