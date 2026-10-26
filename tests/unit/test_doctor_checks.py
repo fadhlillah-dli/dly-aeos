@@ -298,6 +298,35 @@ def test_github_token_privilege_is_reported_from_scopes(settings, db, secrets_me
     assert "residual_risks" not in res.observed_evidence
 
 
+def test_public_repositories_a_fine_grained_pat_can_read_are_not_a_breach(settings, db, secrets_memory, monkeypatch):
+    """GitHub lists every public repository for a fine-grained PAT ("Also includes public repositories
+    (read-only)"), so an unregistered public repository is no breach but does not prove the selection either (None);
+    an unregistered private one (or one whose visibility is not reported) still is."""
+    from aeos.doctor.checks import adapters as adapters_mod
+
+    slug = settings.platform_repo_slug
+    url = f"https://api.github.com/repos/{slug}"
+    repos_url = "https://api.github.com/user/repos?per_page=100"
+    secrets_memory.put("personal/github", "github_pat_" + "y" * 40, actor="test")
+    monkeypatch.setattr(adapters_mod, "_administration_grant", lambda ctx, slug, branch: "NOT_GRANTED")
+    r = base_runner()
+    r.http[url] = HttpResult(200, {"private": False, "default_branch": "main", "id": 1,
+                                   "permissions": {"admin": True, "push": True}})
+    r.http[repos_url] = HttpResult(200, [{"full_name": slug, "private": False},
+                                         {"full_name": "owner/other-public", "private": False}])
+    res = check("adapter.github_token", _ctx(settings, db, r, functional=True))
+    priv = res.observed_evidence["token_privilege"]
+    assert res.status == "CONNECTED" and priv["least_privilege"] is None and "residual_risks" not in res.observed_evidence
+    assert priv["beyond_registered_public"] == ["owner/other-public"] and priv["beyond_registered"] == []
+    r.http[repos_url] = HttpResult(200, [{"full_name": slug, "private": False},
+                                         {"full_name": "owner/secret-stuff", "private": True}])
+    priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is False and "private" in priv["risk"]
+    r.http[repos_url] = HttpResult(200, [{"full_name": slug, "private": False}])
+    priv = check("adapter.github_token", _ctx(settings, db, r, functional=True)).observed_evidence["token_privilege"]
+    assert priv["least_privilege"] is True
+
+
 def test_github_token_expiry_is_read_and_warned_two_weeks_ahead(settings, db, secrets_memory):
     """A fine-grained PAT reports its expiry in GitHub-Authentication-Token-Expiration (``... UTC`` or ``... +0700``);
     the Doctor records it and warns GITHUB_EXPIRY_WARN_DAYS ahead without turning the check red."""
