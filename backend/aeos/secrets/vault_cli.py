@@ -5,13 +5,16 @@ install  shows the plan (official release, asset, checksum, target, privilege, c
 start    generated loopback-only config, detached server, pid recorded.
 stop     stops the recorded server process.
 status   health/sealed/initialised, AppRole presence, interim mode.
-init     init + unseal + KV v2 + policies + AppRole; prints unseal key(s) and root token ONCE.
+init     init + unseal + KV v2 + policies + AppRole; shows the unseal key(s) ONCE, on a temporary terminal
+         screen when interactive; the root token only when setup is incomplete (otherwise it is revoked).
 unseal   applies unseal keys (prompted, or from the OS keyring when the owner stored them there).
 """
 
 from __future__ import annotations
 
 import getpass
+import os
+import sys
 import time
 
 import httpx
@@ -19,9 +22,53 @@ import typer
 
 app = typer.Typer(help="Local OpenBao vault (install/start/stop/status/init/unseal).", no_args_is_help=True)
 
+# Alternate screen buffer (xterm/VT): what is written there never reaches the scrollback, so the unseal
+# material cannot be copied later together with the rest of the terminal output.
+ALT_SCREEN_ON = "\x1b[?1049h\x1b[H\x1b[2J"
+ALT_SCREEN_OFF = "\x1b[2J\x1b[?1049l"
+STORED_WORD = "stored"
+
 
 def _err(msg: str) -> None:
     typer.secho(msg, fg="red", err=True)
+
+
+def _vt_terminal() -> bool:
+    """True when stdin and stdout are an interactive terminal that understands VT sequences."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_ulong()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        return bool(kernel32.SetConsoleMode(handle, mode.value | 0x0004))  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    return os.environ.get("TERM", "") != "dumb"
+
+
+def _show_on_temporary_screen(lines: list[str]) -> bool | None:
+    """Show `lines` on the alternate screen until the owner types STORED_WORD.
+
+    None: no VT terminal, nothing shown. True: confirmed. False: the screen closed before confirmation
+    (Ctrl+C or end of input); the material is gone from the screen either way."""
+    if not _vt_terminal():
+        return None
+    typer.echo(ALT_SCREEN_ON, nl=False, color=True)  # color=True: never strip the sequence
+    try:
+        for line in lines:
+            typer.echo(line)
+        while True:
+            answer = typer.prompt(f"Type '{STORED_WORD}' after you have stored the key(s) offline",
+                                  default="", show_default=False)
+            if answer.strip().lower() == STORED_WORD:
+                return True
+    except (typer.Abort, EOFError, KeyboardInterrupt):
+        return False
+    finally:
+        typer.echo(ALT_SCREEN_OFF, nl=False, color=True)
 
 
 def _settings():
@@ -250,19 +297,31 @@ def init_cmd(
     for k in res.keys:
         register_secret(k)
     register_secret(res.root_token)
+    banner = ["=" * 72,
+              "SHOWN ONCE - store the unseal key(s) OFFLINE (password manager / paper). Never put them in the",
+              "repo, a config file, a chat or an AI assistant, and never take a screenshot of them:"]
+    banner += [f"  Unseal key {i}: {k}" for i, k in enumerate(res.keys, 1)]
+    # a revoked root token is useless; it is shown only while setup is incomplete and the owner still needs it
+    if not res.root_revoked:
+        banner.append(f"  Root token  : {res.root_token}  (NOT revoked: setup is incomplete; revoke it when done)")
+    banner += [f"  ({threshold} of {shares} keys are needed after every restart: aeos vault unseal)", "=" * 72]
+    shown = _show_on_temporary_screen(banner)
     typer.echo("")
-    typer.echo("=" * 72)
-    typer.echo("SHOWN ONCE - store the unseal key(s) OFFLINE (password manager / paper), never in the repo or "
-               "config:")
-    for i, k in enumerate(res.keys, 1):
-        typer.echo(f"  Unseal key {i}: {k}")
-    # the root token is revoked at the end of a complete setup; it stays valid only when setup is incomplete
-    typer.echo(f"  Root token  : {res.root_token}  (revoked when setup completes; needed only if it is incomplete)")
-    typer.echo(f"  ({threshold} of {shares} keys are needed after every restart: aeos vault unseal)")
-    typer.echo("=" * 72)
+    if shown is None:
+        for line in banner:
+            typer.echo(line)
+        typer.secho("Clear or close this terminal after storing the key(s); never copy this output.", fg="yellow")
+    else:
+        typer.echo("The unseal key(s) were shown on a temporary screen and are not in this terminal's scrollback.")
     for step in res.steps:
         typer.echo(f"  done: {step}")
     reset_provider_cache()
+    if shown is False:
+        from aeos.secrets import server
+
+        _err("The key screen closed before you typed 'stored'. If the key(s) are not stored offline, reset the "
+             f"still empty vault: aeos vault stop, delete {server.server_dir(settings) / 'raft'}, aeos vault start, "
+             "aeos vault init.")
     if res.error:
         _err(f"setup incomplete: {res.error}")
         _err("The root token was NOT revoked so you can finish/retry; revoke it when done.")
@@ -271,6 +330,8 @@ def init_cmd(
     if res.unseal_stored:
         typer.secho("Unseal keys are also in the OS keyring (your choice): anyone with your OS account can unseal.",
                     fg="yellow")
+    if shown is False:
+        raise typer.Exit(1)
 
 
 @app.command("unseal")

@@ -19,7 +19,7 @@ from aeos.cli import app
 from aeos.core.db import session_factory
 from aeos.models.audit import AuditEvent
 from aeos.models.decisions import Decision
-from aeos.secrets import installer, server
+from aeos.secrets import installer, server, vault_cli
 from aeos.secrets.provider import bootstrap_store, reset_provider_cache
 from tests.unit.test_routing_fakes import memory_keyring  # noqa: F401 - fixture
 
@@ -195,6 +195,9 @@ def test_vault_init_full_flow(settings, memory_keyring):  # noqa: F811
         r = runner.invoke(app, ["vault", "init", "--shares", "3", "--threshold", "2", "--yes"])
     assert r.exit_code == 0, r.output
     assert "SHOWN ONCE" in r.output and "b1b1" in r.output and "Root token revoked" in r.output
+    assert "s." + "R" * 26 not in r.output  # revoked root token is never shown
+    assert "AI assistant" in r.output and "never copy this output" in r.output
+    assert vault_cli.ALT_SCREEN_ON not in r.output  # not a terminal: plain output
     assert calls["policies"].call_count == 5 and calls["revoke"].called
     role_body = json.loads(calls["role"].calls.last.request.content)
     assert "aeos-office" not in role_body["token_policies"] and role_body["token_ttl"] == "1h"
@@ -211,7 +214,34 @@ def test_vault_init_failure_keeps_root_and_shows_keys(settings, memory_keyring):
         r = runner.invoke(app, ["vault", "init", "--shares", "3", "--threshold", "2", "--yes"])
     assert r.exit_code == 1
     assert "SHOWN ONCE" in r.output and "b1b1" in r.output and "NOT revoked" in r.output
+    assert "s." + "R" * 26 in r.output  # still needed to finish the setup
     assert not calls["revoke"].called
+
+
+def test_vault_init_shows_keys_only_on_the_temporary_screen(settings, memory_keyring, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(vault_cli, "_vt_terminal", lambda: True)
+    with respx.mock(assert_all_called=False) as m:
+        _mock_init(m)
+        r = runner.invoke(app, ["vault", "init", "--shares", "3", "--threshold", "2", "--yes"],
+                          input="ok\nstored\n")
+    assert r.exit_code == 0, r.output
+    on, off = r.output.index(vault_cli.ALT_SCREEN_ON), r.output.index(vault_cli.ALT_SCREEN_OFF)
+    assert on < r.output.index("b1b1") < off
+    after = r.output[off:]
+    assert "b1b1" not in after and "SHOWN ONCE" not in after and "s." + "R" * 26 not in r.output
+    assert r.output.count(f"Type '{vault_cli.STORED_WORD}'") == 2  # asked again until the owner confirms
+    assert "not in this terminal's scrollback" in after and "Root token revoked" in after
+
+
+def test_vault_init_temporary_screen_closed_early_warns_and_fails(settings, memory_keyring, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(vault_cli, "_vt_terminal", lambda: True)
+    with respx.mock(assert_all_called=False) as m:
+        calls = _mock_init(m)
+        r = runner.invoke(app, ["vault", "init", "--shares", "3", "--threshold", "2", "--yes"], input="")
+    assert r.exit_code == 1
+    after = r.output[r.output.index(vault_cli.ALT_SCREEN_OFF):]
+    assert "b1b1" not in after and "before you typed 'stored'" in after and "aeos vault init" in after
+    assert calls["revoke"].called  # the setup itself completed
 
 
 def test_vault_unseal_from_keyring(settings, memory_keyring):  # noqa: F811

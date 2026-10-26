@@ -10,6 +10,15 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ## [Unreleased]
 
+### Security
+
+- **Unseal keys no longer stay in the terminal.** `aeos vault init` shows the unseal key(s) on a temporary
+  (alternate) terminal screen that closes when the owner types `stored`, so the keys never reach the
+  scrollback and cannot be copied with the rest of the output. A revoked root token is no longer shown at
+  all. The banner and the docs say never to paste the output into a chat or an AI assistant, and the unseal
+  runbook covers an exposed key. Unit tests drive both paths; a macOS pty run showed the alternate
+  screen. A real Windows console run is NOT-PROVEN.
+
 ## [0.1.0] - 2026-10-26
 
 First release of the local-first control plane. It contains pull requests #1 to #13 (#8 was

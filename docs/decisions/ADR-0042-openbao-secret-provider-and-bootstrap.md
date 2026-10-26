@@ -117,3 +117,22 @@ together; the provider contract is unchanged, the callers were reconciled with i
   status read (bootstrap doctor before `aeos init`, §08/§50 "Dependency inti belum terpasang").
   When the database file does not exist yet no exception can exist, so it now returns `None`
   without opening a session.
+
+## Amendment 2026-10-26 (init material on a temporary screen)
+
+During the first Mac setup the unseal key reached a chat because the whole terminal output was copied to
+prove the step (the vault was still empty and was re-initialised). The scrollback was the leak path, so the
+presentation changed:
+
+* In an interactive terminal (stdin and stdout are a TTY with VT support; on Windows the console's virtual
+  terminal mode is switched on first), `init` shows the material on the alternate screen and asks the owner
+  to type `stored`. The screen then closes and the keys are not in the scrollback. Ctrl+C or end of input
+  also closes it; `init` then exits 1 and names the reset of the still empty vault. Without such a terminal
+  (pipes, tests, `TERM=dumb`) the material is printed as before, with a warning to clear the terminal.
+* The root token is shown only when setup is incomplete. After a complete setup it is already revoked, so
+  showing it added exposure and no use.
+* The banner, OWNER_ACTIONS 1.7, the setup guides and the unseal runbook say never to paste or screenshot
+  the output into a chat or an AI assistant, and how to reset or rotate after an exposure.
+
+Proof: unit tests drive both paths through the CLI, and a pty run on macOS arm64 showed the alternate screen
+sequences and the repeated prompt. A real Windows console run is NOT-PROVEN.
