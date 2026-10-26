@@ -1011,8 +1011,8 @@ def role_eligibility(session: Session, task: TaskSpec) -> dict[str, Any]:
         out["eligibility_basis"] = "PILOT_THRESHOLD_UNEVALUATED"
         out["note"] = (f"Role {task.role_key} belum dievaluasi ({evaluation['status']}); risiko {risk} di bawah ambang "
                        f"{threshold}, jadi diizinkan oleh mode pilot - BUKAN dari hasil evaluasi. Fixture/grader kasus "
-                       "suite role disusun pemilik (ADR-0060); ambang dapat diperketat lewat "
-                       "POST /api/workforce/role-eval-threshold.")
+                       "suite role disusun pemilik (ADR-0060); ambang dapat diperketat pemilik di Organisasi & Peran "
+                       "-> Ambang evaluasi peran, atau aeos work role-eval-threshold <R0-R4> --as <admin> ...")
     return out
 
 
@@ -1101,6 +1101,17 @@ def adopt_role_result(session: Session, *, role_key: str, eval_run_id: str, acto
                 entity_id=role_key, payload={"decision_id": d.id, "eval_run_id": eval_run_id})
     return {"role_key": role_key, "decision_id": d.id, "eval_run_id": eval_run_id, "role_revision_hash": revision,
             "scope": clean_scope}
+
+
+def role_eval_threshold(session: Session) -> dict[str, Any]:
+    """The risk class from which admission requires a PASS role evaluation (or an owner EXCEPTION), as
+    ``role_eligibility`` reads it: ``source`` DEFAULT (pilot R4, never set) or OWNER_SETTING."""
+    raw = _setting(session, KEY_ROLE_EVAL_FROM, None)
+    value = str(raw) if raw is not None and str(raw) in RISK_ORDER else None
+    return {"required_from": value or DEFAULT_ROLE_EVAL_FROM, "default": DEFAULT_ROLE_EVAL_FROM,
+            "source": "OWNER_SETTING" if value else "DEFAULT", "risk_classes": list(RISK_ORDER),
+            "requires_evaluation": list(RISK_ORDER[RISK_ORDER.index(value or DEFAULT_ROLE_EVAL_FROM):]),
+            "setting": KEY_ROLE_EVAL_FROM}
 
 
 def set_role_eval_threshold(session: Session, *, risk_class: str, actor: str, rationale: str) -> dict[str, Any]:

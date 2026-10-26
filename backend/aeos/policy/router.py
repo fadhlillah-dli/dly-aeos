@@ -123,9 +123,13 @@ def decision_shapes(_principal: CurrentPrincipal, domain: ActiveDomain) -> dict[
                                  "data_classes": list(office_scope.DATA_CLASSES),
                                  "identity_refs": list(office_scope.IDENTITY_REFS)},
         "policy_presets": {name: {"kind": "POLICY", "target_type": p.target_type, "target_id": p.target_id,
-                                  "domains": list(p.domains), "details": {p.detail_key: p.value},
-                                  "consumer": p.consumer, "label": p.label, "expiry_required": True,
-                                  "evidence_level": "E0", "available": domain.value in p.domains}
+                                  "domains": list(p.domains),
+                                  "details": {p.detail_key: list(p.choices) if p.choices else p.value},
+                                  "choices": list(p.choices), "scope_key": p.scope_key,
+                                  "scope_required_for": list(p.scope_required_for),
+                                  "consumer": p.consumer, "label": p.label, "expiry_required": p.attestation,
+                                  "attestation": p.attestation, "evidence_level": "E0" if p.attestation else None,
+                                  "available": domain.value in p.domains}
                            for name, p in catalog.POLICY_PRESETS.items()},
         "adr": {"kind": "ADR", "target_type": catalog.TARGET_ADR, "outcomes": list(catalog.ADR_OUTCOMES),
                 "endpoint": catalog.DEDICATED_TARGETS[catalog.TARGET_ADR]},
@@ -171,7 +175,7 @@ class DecisionIn(BaseModel):
     exception: Literal["secret_store_interim_keyring", "worker_sandbox_process"] | None = None
     allow_bash: bool | None = None
     # POLICY owner attestations with the exact target shape their consumer reads (catalog.POLICY_PRESETS)
-    policy_preset: Literal["claude_extra_usage_off"] | None = None
+    policy_preset: Literal["claude_extra_usage_off", "screenshot_authenticated_capture"] | None = None
     request_id: str | None = None
 
 

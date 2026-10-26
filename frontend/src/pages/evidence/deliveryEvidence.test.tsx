@@ -256,6 +256,28 @@ describe("UI-state screenshots (Evidence → Tangkapan layar UI)", () => {
     expect(within(page).getByText("bbbbbbbbbb")).toBeInTheDocument();
   });
 
+  it("links an UNDECIDED capture to the owner preset, and states an ALLOWED decision without claiming a login", async () => {
+    respond({ "/api/docs/visuals/status": visuals, "/api/evidence": list });
+    const first = wrap(<ScreenshotsPanel />);
+    const open = await screen.findByTestId("authenticated-capture");
+    expect(within(open).getByRole("link", { name: /Catat keputusan pemilik/ })).toHaveAttribute("href", "/decisions?preset=screenshot_authenticated_capture");
+    first.unmount();
+    const allowed = {
+      screenshot_collector: {
+        available: true,
+        authenticated_capture: { status: "ALLOWED", decision_id: "dec-7", scope: "rute Control Center", capture_mode: "UNAUTHENTICATED", preset: "screenshot_authenticated_capture", note: "Belum dibangun." },
+      },
+    };
+    respond({ "/api/docs/visuals/status": allowed, "/api/evidence": list });
+    wrap(<ScreenshotsPanel />);
+    const notice = await screen.findByTestId("authenticated-capture");
+    expect(within(notice).getByText(/ALLOWED oleh pemilik \(jalur capture terautentikasi belum dibangun\)/)).toBeInTheDocument();
+    expect(within(notice).getByText(/mode kolektor: tanpa login/)).toBeInTheDocument();
+    expect(within(notice).getByRole("link", { name: "dec-7" })).toHaveAttribute("href", "/decisions?decision=dec-7");
+    expect(within(notice).getByText(/scope: rute Control Center/)).toBeInTheDocument();
+    expect(within(notice).getByRole("link", { name: /Ubah keputusan pemilik/ })).toBeInTheDocument();
+  });
+
   it("a state opens from the keyboard; an untrusted SCREENSHOT is a claim, never 'no script error'", async () => {
     const claim = evidence({ id: "s9", kind: "SCREENSHOT", trusted: false, origin: "worker", evidence_level: "E0", claim: "worker says it rendered",
       environment: { ui_state: "error", viewport: "mobile", render_error: false } });

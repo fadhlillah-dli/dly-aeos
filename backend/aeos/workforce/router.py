@@ -59,6 +59,8 @@ def workforce_summary(principal: CurrentPrincipal, domain: ActiveDomain, db: DB)
 def workforce_roles(principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
     data = views.roles_view(db, domain=domain.value, project_ids=principal.allowed_project_ids)
     return {"items": data["groups"], "note": data["note"], "source": "RoleSkillPack catalog (seed, DESIGN)",
+            # §46: from which risk class admission needs a PASS role evaluation (owner setting, pilot default R4)
+            "role_eval_threshold": scheduler.role_eval_threshold(db),
             "checked_at": utcnow().isoformat(), "mode": "DESIGN"}
 
 

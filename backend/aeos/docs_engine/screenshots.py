@@ -16,7 +16,9 @@ Fail closed, observe-only:
 * A staging capture is a staging validation operation: it runs only while ``CAN_VALIDATE_STAGING`` is READY for
   the project (``Blocked`` CAPABILITY_NOT_READY otherwise, §08).
 * Each page is loaded with one headless browser GET (no login, no form input, no clicks). A final URL on
-  another origin (redirect) is refused, and so is an error page (HTTP 4xx/5xx or no main response).
+  another origin (redirect) is refused, and so is an error page (HTTP 4xx/5xx or no main response). Whether an
+  authenticated, read-only capture is allowed is the owner's POLICY decision (``authenticated_capture_status``);
+  this build has no authenticated capture path, so the collector never logs in whatever the decision says.
 * The page text - with the values of visible form fields, placeholders and image alt text - is checked before the
   image is stored: a credential pattern or personal data refuses the capture (``PolicyDenied``). An image cannot
   be redacted, so it is never stored in that case. Text drawn inside images is not examined (no OCR).
@@ -53,13 +55,34 @@ _SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _ROUTE = re.compile(r"^/(?!/)[A-Za-z0-9._~/%-]{0,200}$")
 INSTALL_REMEDY = "python -m pip install playwright==1.64.0 && python -m playwright install chromium"
 # The collector never logs in: pages behind a login (e.g. DLY AEOS' own Control Center routes) would only show the
-# login page. Whether an authenticated, read-only capture is allowed is an owner decision that is not recorded.
-AUTHENTICATED_CAPTURE = {
-    "status": "UNDECIDED",
-    "note": "Collector tidak pernah login: halaman di balik login (mis. rute Control Center DLY AEOS) hanya akan "
-            "menampilkan halaman login. Capture terautentikasi read-only memerlukan KEPUTUSAN pemilik yang belum "
-            "tercatat; sampai itu hanya halaman publik target yang dapat menjadi bukti SCREENSHOT.",
+# login page. Whether an authenticated, read-only capture is allowed is the owner's POLICY decision (preset
+# screenshot_authenticated_capture, read through the policy facade). This build has no authenticated capture path, so
+# every status - ALLOWED included - captures unauthenticated (``capture_mode``); UNDECIDED/DENIED stay so by rule.
+CAPTURE_MODE = "UNAUTHENTICATED"
+_RECORD_HINT = ("Catat di Keputusan -> Catat keputusan manusia -> POLICY -> preset 'Capture screenshot terautentikasi "
+                "read-only', atau: aeos policy decide --kind POLICY --authenticated-capture ALLOWED|DENIED "
+                "--capture-scope \"<halaman>\" --domain PERSONAL --as <admin> --rationale \"<alasan>\".")
+_CAPTURE_NOTES = {
+    "UNDECIDED": "Collector tidak pernah login: halaman di balik login (mis. rute Control Center DLY AEOS) hanya akan "
+                 "menampilkan halaman login. Capture terautentikasi read-only memerlukan KEPUTUSAN pemilik yang belum "
+                 "tercatat; sampai itu hanya halaman publik target yang dapat menjadi bukti SCREENSHOT.",
+    "DENIED": "Pemilik memutuskan DENIED: collector tidak login; hanya halaman publik target yang dapat menjadi bukti "
+              "SCREENSHOT.",
+    "ALLOWED": "Pemilik mengizinkan capture terautentikasi read-only untuk scope yang tercatat, tetapi build ini belum "
+               "punya jalur capture terautentikasi: collector tetap tidak login (NOT_BUILT), jadi halaman di balik "
+               "login belum dapat menjadi bukti SCREENSHOT.",
 }
+
+
+def authenticated_capture_status(session: Session | None, domain: str | None) -> dict[str, Any]:
+    """The owner's decision on authenticated, read-only capture (ALLOWED / DENIED / UNDECIDED) and what the collector
+    actually does: always ``capture_mode`` UNAUTHENTICATED in this build (fail closed)."""
+    from aeos.policy import facade as policy
+
+    decision = policy.authenticated_screenshot_capture(session, domain)
+    status = str(decision["status"])
+    return {**decision, "capture_mode": CAPTURE_MODE, "authenticated_capture_built": False,
+            "note": _CAPTURE_NOTES.get(status, _CAPTURE_NOTES["UNDECIDED"]), "record_hint": _RECORD_HINT}
 
 
 @dataclass(frozen=True)
@@ -222,5 +245,9 @@ def capture_screenshots(session: Session, project: Project, *, environment: str,
     audit.record(session, actor_type=actor_type, actor_id=actor, action="docs.screenshot.capture", result="SUCCESS",
                  target_type="integration", target_id=target["integration_id"], project_id=project.id,
                  domain=project.domain, details={"environment": environment, "commit": commit.lower(),
-                                                 "routes": clean, "evidence_ids": [o["evidence_id"] for o in out]})
+                                                 "routes": clean, "evidence_ids": [o["evidence_id"] for o in out],
+                                                 # the owner's decision as it stood, and what the collector did
+                                                 "authenticated_capture": authenticated_capture_status(
+                                                     session, project.domain)["status"],
+                                                 "capture_mode": CAPTURE_MODE})
     return out

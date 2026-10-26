@@ -9,7 +9,7 @@ import type { DecisionView, QueueItem } from "../../components/planning/types";
 import { Button, Card, ErrorBox, inputClass, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { useEventStream } from "../../lib/events";
 import { relativeTime, shortHash } from "../../lib/format";
-import { DecisionForm, type DecisionKind } from "./DecisionForm";
+import { DecisionForm, POLICY_PRESETS, type DecisionKind } from "./DecisionForm";
 import { AdrList, MciBanner, OfficePolicyCard, SnapshotCard, WriteEnablementCard } from "./PolicyPanels";
 import { QueueList } from "./QueueList";
 
@@ -149,7 +149,11 @@ export default function DecisionsPage() {
   const { isAdmin, domain } = useAuth();
   const qc = useQueryClient();
   const [params] = useSearchParams();
-  const [form, setForm] = useState<{ kind?: DecisionKind; requestId?: string } | null>(null);
+  // ?preset=<POLICY preset> opens the form on that preset (e.g. from Bukti -> Tangkapan layar UI)
+  const linkedPreset = params.get("preset");
+  const [form, setForm] = useState<{ kind?: DecisionKind; requestId?: string; policyPreset?: string } | null>(() =>
+    linkedPreset && POLICY_PRESETS[linkedPreset] ? { kind: "POLICY", policyPreset: linkedPreset } : null,
+  );
   const queue = useQuery({ queryKey: ["decision-queue", domain], queryFn: () => get<QueueView>("/api/decisions/queue") });
   const decline = useMutation({
     mutationFn: ({ id, note }: { id: string; note: string }) => post(`/api/decision-requests/${id}/decline`, { note }),
@@ -181,7 +185,7 @@ export default function DecisionsPage() {
       />
       <MciBanner />
       {!isAdmin && <Notice tone="info">Peran VIEWER dapat melihat antrean dan riwayat, tetapi tidak dapat mencatat atau mencabut keputusan.</Notice>}
-      {form && isAdmin && domain && <DecisionForm domain={domain} initialKind={form.kind} requestId={form.requestId} onDone={() => setForm(null)} />}
+      {form && isAdmin && domain && <DecisionForm domain={domain} initialKind={form.kind} initialPolicyPreset={form.policyPreset} requestId={form.requestId} onDone={() => setForm(null)} />}
 
       <Card title={`Antrean keputusan manusia${queue.data ? ` (${queue.data.items.length})` : ""}`}>
         {queue.isLoading && <Loading />}
