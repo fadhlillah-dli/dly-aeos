@@ -90,8 +90,11 @@ def product1_structure(_principal: CurrentPrincipal) -> dict[str, Any]:
 
 
 @router.get("/api/docs/visuals/status")
-def visuals_status(_principal: CurrentPrincipal) -> dict[str, Any]:
+def visuals_status(principal: CurrentPrincipal, db: DB) -> dict[str, Any]:
     info = visuals.detect_mmdc()
+    # the owner's decision of the session's domain (a domain without one, or OFFICE, stays UNDECIDED: fail closed)
+    active = principal.active_domain.value if principal.active_domain is not None else None
+    authenticated = screenshots.authenticated_capture_status(db, active)
     import importlib.util
 
     browser = importlib.util.find_spec("playwright") is not None
@@ -101,7 +104,7 @@ def visuals_status(_principal: CurrentPrincipal) -> dict[str, Any]:
             "screenshot_collector": {"available": browser, "command": "aeos docs screenshot",
                                      "remedy": None if browser else screenshots.INSTALL_REMEDY,
                                      "note": "browser engine presence only; Chromium is checked when a capture runs",
-                                     "authenticated_capture": screenshots.AUTHENTICATED_CAPTURE},
+                                     "authenticated_capture": authenticated},
             "screenshot_note": "documents reference trusted SCREENSHOT EvidenceArtifacts (commit recorded) only after "
                                "the screenshot collector stored them for a registered deployment target",
             "diagram_verification": "UNVERIFIED unless checked against the project's own references at a recorded "

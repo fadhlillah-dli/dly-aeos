@@ -377,7 +377,10 @@ def worker_route_behaviour(ctx: CheckContext) -> Outcome:
                        remedy=Remedy(
                            operation="Pemilik menetapkan ambang: keputusan POLICY target_type "
                                      f"{ROUTE_BEHAVIOUR_TARGET[0]}, target_id {ROUTE_BEHAVIOUR_TARGET[1]}, "
-                                     "details.max_failure_rate (0..1) lewat POST /api/decisions (Control Center)",
+                                     "details.max_failure_rate (0..1) di Kesiapan -> worker.route_behaviour -> "
+                                     "Tetapkan ambang pemilik, atau lewat CLI",
+                           command=aeos_cmd("policy route-threshold --max-failure-rate <0..1> --domain PERSONAL "
+                                            "--as <admin> --rationale \"<alasan>\""),
                            privilege="SUPER_ADMIN", evidence_to_collect="worker.route_behaviour")
                        if undecided else remedy)
     if worst == "STALE":

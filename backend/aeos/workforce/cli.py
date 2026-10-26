@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import typer
 from rich.console import Console
 from rich.markup import escape
 
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
 app = typer.Typer(help="Workforce scheduler: status, run-once, pause/resume, cancel, demo fixtures; owner actions: "
-                       "agent enable/disable, execute an approved plan, role adoption, concurrency mode, "
+                       "agent enable/disable, execute an approved plan, role adoption, role-evaluation threshold, "
+                       "concurrency mode, "
                        "two-worker experiment grant, investigation choice.",
                   no_args_is_help=True)
 console = Console()
@@ -282,6 +288,36 @@ def adopt_role(role_key: str = typer.Argument(..., help="Executor role key, e.g.
                                                            "invalidate_if": invalidate_if})
         _out(f"role {role_key}: adopted EvalRun {out['eval_run_id']} (decision {out['decision_id']}, "
              f"scope {out['scope'] or 'every task of this role'})")
+
+    _owner_action(act)
+
+
+@app.command("role-eval-threshold")
+def role_eval_threshold(risk_class: str = typer.Argument(..., help="R0..R4: from this risk class up, admission needs "
+                                                                     "a PASS role evaluation or an owner EXCEPTION"),
+                        as_user: str = AS_OPTION,
+                        rationale: str = typer.Option(..., help="Why (min 5 chars; stored in the audit trail)")) -> None:
+    """Set from which risk class admission requires a PASS role evaluation (master s46; pilot default R4).
+
+    A lower class tightens admission (R2 = R2, R3 and R4 need an evaluated role). Same rule as Organisasi & Peran ->
+    'Ambang evaluasi peran' and POST /api/workforce/role-eval-threshold; the change is audited and emitted."""
+    from aeos.core.errors import ValidationFailed
+    from aeos.workforce import scheduler
+
+    value = (risk_class or "").strip().upper()
+    if value not in scheduler.RISK_ORDER:
+        raise typer.BadParameter(f"risk class must be one of {', '.join(scheduler.RISK_ORDER)}")
+
+    def act(s: Session) -> None:
+        current = scheduler.role_eval_threshold(s)
+        _out(f"Role evaluation required from {current['required_from']} ({current['source']}) now; you set {value}: "
+             f"tasks of {', '.join(scheduler.RISK_ORDER[scheduler.RISK_ORDER.index(value):])} need a PASS role "
+             "evaluation (or an owner EXCEPTION)")
+        uid = _human(s, as_user)
+        if len((rationale or "").strip()) < 5:
+            raise ValidationFailed("rationale is required (min 5 chars)", code="RATIONALE_REQUIRED")
+        out = scheduler.set_role_eval_threshold(s, risk_class=value, actor=f"user:{uid}", rationale=rationale)
+        _out(f"role evaluation threshold {out['previous']} -> {out['threshold']} (audited: workforce.role_eval_threshold)")
 
     _owner_action(act)
 

@@ -37,13 +37,39 @@ export const PLANNING_STAGES: { stage: string; family: string }[] = [
   { stage: "FINAL_REVIEW", family: "fable" },
 ];
 
-/** POLICY owner attestations with the exact target shape their consumer reads (PERSONAL only, expiry required). */
-export const POLICY_PRESETS: Record<string, { label: string; target: string; consumer: string; note: string }> = {
+/**
+ * POLICY presets with the exact target shape their consumer reads (PERSONAL only; backend catalog.POLICY_PRESETS). An
+ * attestation (expiry required) states a setting AEOS cannot read; a choice preset records one of `choices` in
+ * `details[detailKey]` with a scope (`details.scope`, required for `scopeRequiredFor`), expiry optional.
+ */
+export interface PolicyPresetSpec {
+  label: string;
+  target: string;
+  consumer: string;
+  note: string;
+  attestation: boolean;
+  detailKey?: string;
+  choices?: string[];
+  scopeRequiredFor?: string[];
+}
+
+export const POLICY_PRESETS: Record<string, PolicyPresetSpec> = {
   claude_extra_usage_off: {
     label: "Atestasi pemilik: extra usage berbayar Claude NONAKTIF di pengaturan akun claude.ai",
     target: "claude_extra_usage/PERSONAL",
     consumer: "Doctor claude.extra_billing dan ClaudeNativeBridge",
     note: "AEOS tidak dapat membaca pengaturan akun ini: ditampilkan sebagai atestasi pemilik (bukti E0, CONFIGURED), tidak pernah VERIFIED. Matikan dulu di claude.ai (Settings → Usage).",
+    attestation: true,
+  },
+  screenshot_authenticated_capture: {
+    label: "Capture screenshot terautentikasi read-only (halaman di balik login, mis. rute Control Center)",
+    target: "screenshot_capture/PERSONAL",
+    consumer: "kolektor screenshot (Bukti → Tangkapan layar UI)",
+    note: "Keputusan pemilik: ALLOWED dengan scope halaman, atau DENIED. Build ini belum punya jalur capture terautentikasi: kolektor tetap tidak login apa pun keputusannya, dan UNDECIDED/DENIED selalu tanpa login (fail closed).",
+    attestation: false,
+    detailKey: "authenticated_capture",
+    choices: ["ALLOWED", "DENIED"],
+    scopeRequiredFor: ["ALLOWED"],
   },
 };
 
@@ -88,7 +114,19 @@ export function parseScope(text: string): Record<string, unknown> {
   return out;
 }
 
-export function DecisionForm({ domain, requestId, initialKind, onDone }: { domain: Domain; requestId?: string | null; initialKind?: DecisionKind; onDone: () => void }) {
+export function DecisionForm({
+  domain,
+  requestId,
+  initialKind,
+  initialPolicyPreset,
+  onDone,
+}: {
+  domain: Domain;
+  requestId?: string | null;
+  initialKind?: DecisionKind;
+  initialPolicyPreset?: string;
+  onDone: () => void;
+}) {
   const qc = useQueryClient();
   const [kind, setKind] = useState<DecisionKind>(initialKind ?? "EXCEPTION");
   const [targetType, setTargetType] = useState("");
@@ -109,7 +147,10 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
   const [approvedClasses, setApprovedClasses] = useState<string[]>([]);
   const [approvedIdentities, setApprovedIdentities] = useState("");
   const [preset, setPreset] = useState<string>("");
-  const [policyPreset, setPolicyPreset] = useState<string>("");
+  const [policyPreset, setPolicyPreset] = useState<string>(initialPolicyPreset && POLICY_PRESETS[initialPolicyPreset] ? initialPolicyPreset : "");
+  // a choice preset: the owner's choice (no default) and the scope it covers
+  const [presetChoice, setPresetChoice] = useState("");
+  const [presetScope, setPresetScope] = useState("");
   const [allowBash, setAllowBash] = useState(false);
   // §41/§43 system change: a POLICY on a policy/model/tool/hook/prompt/memory/fallback/context target needs
   // COMPLETED all-gates-PASS evaluation runs and the rollback target it replaces (backend SYSTEM_CHANGE_TARGET_TYPES)
@@ -124,6 +165,7 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
   const [localError, setLocalError] = useState<string | null>(null);
   const usePreset = kind === "EXCEPTION" && domain === "PERSONAL" && !!preset;
   const usePolicyPreset = kind === "POLICY" && domain === "PERSONAL" && !!policyPreset;
+  const presetSpec: PolicyPresetSpec | null = usePolicyPreset ? POLICY_PRESETS[policyPreset] : null;
 
   const save = useMutation({
     mutationFn: (body: Record<string, unknown>) => post("/api/decisions", body),
@@ -168,6 +210,17 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
       if (preset === "worker_sandbox_process") body.allow_bash = allowBash;
     } else if (usePolicyPreset) {
       body.policy_preset = policyPreset;
+      if (presetSpec?.choices && presetSpec.detailKey) {
+        if (!presetSpec.choices.includes(presetChoice)) {
+          setLocalError(`Pilih keputusan: ${presetSpec.choices.join(" atau ")}.`);
+          return;
+        }
+        if ((presetSpec.scopeRequiredFor ?? []).includes(presetChoice) && presetScope.trim().length < 5) {
+          setLocalError(`${presetChoice} wajib menyebut scope halaman/target (min. 5 karakter).`);
+          return;
+        }
+        body.details = { [presetSpec.detailKey]: presetChoice, ...(presetScope.trim() ? { scope: presetScope.trim() } : {}) };
+      }
     } else if (kind === "POLICY" && domain === "OFFICE" && (officeAuth || overrides)) {
       body.office_authorization = officeAuth;
       if (officeAuth) {
@@ -212,7 +265,7 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
   const needsTarget = kind !== "WRITE_ENABLEMENT" && !usePreset && !usePolicyPreset && !officePolicy && !(kind === "POLICY" && stagePin);
   // an owner attestation preset has its fixed target and is no system change: no evaluation/pin fields for it
   const systemChange = kind === "POLICY" && !officePolicy && !usePolicyPreset;
-  const expiryRequired = kind === "EXCEPTION" || kind === "RISK_ACCEPTANCE" || usePolicyPreset;
+  const expiryRequired = kind === "EXCEPTION" || kind === "RISK_ACCEPTANCE" || (presetSpec?.attestation ?? false);
   return (
     <Card title="Catat keputusan manusia">
       <div className="grid gap-3">
@@ -287,11 +340,31 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
                 ))}
               </select>
             </Field>
-            {usePolicyPreset && (
+            {presetSpec && (
               <Notice tone="warn">
-                Target <strong>{POLICY_PRESETS[policyPreset].target}</strong> (dibaca oleh {POLICY_PRESETS[policyPreset].consumer}). {POLICY_PRESETS[policyPreset].note} Wajib
-                berlaku sampai tanggal tertentu.
+                Target <strong>{presetSpec.target}</strong> (dibaca oleh {presetSpec.consumer}). {presetSpec.note}{" "}
+                {presetSpec.attestation ? "Wajib berlaku sampai tanggal tertentu." : "Masa berlaku opsional."}
               </Notice>
+            )}
+            {presetSpec?.choices && (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Keputusan" hint="Tidak ada nilai bawaan: tanpa keputusan statusnya UNDECIDED.">
+                  <select aria-label="Keputusan preset" className={inputClass} value={presetChoice} onChange={(e) => setPresetChoice(e.target.value)}>
+                    <option value="">Pilih…</option>
+                    {presetSpec.choices.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field
+                  label={(presetSpec.scopeRequiredFor ?? []).includes(presetChoice) ? "Scope (wajib)" : "Scope (opsional)"}
+                  hint="Halaman/target yang dicakup, mis. rute Control Center DLY AEOS, hanya-baca."
+                >
+                  <textarea aria-label="Scope preset" className={inputClass} rows={2} value={presetScope} onChange={(e) => setPresetScope(e.target.value)} />
+                </Field>
+              </div>
             )}
           </div>
         )}

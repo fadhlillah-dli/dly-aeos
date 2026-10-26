@@ -125,13 +125,15 @@ holds the bootstrap identity used to reach OpenBao.
 ```powershell
 .\aeos.ps1 vault install     # the install-manifest approved_pin; while it is null: --version X.Y.Z (reviewed)
 .\aeos.ps1 vault start
-.\aeos.ps1 vault init        # prints unseal keys + root token ONCE
+.\aeos.ps1 vault init        # prints unseal keys ONCE; the root token is revoked when setup completes
 .\aeos.ps1 vault unseal      # after every restart of OpenBao
 ```
 
-Store the unseal keys and root token **offline** (password manager entry or paper), never in the
-repository, config files, chat, screenshots or the AEOS database. They are deliberately excluded
-from AEOS backups (§33). Official downloads: https://openbao.org/downloads/.
+Store the unseal keys **offline** (password manager entry or paper), never in the repository,
+config files, chat, screenshots or the AEOS database. They are deliberately excluded from AEOS
+backups (§33). Init revokes the root token when setup completes (the controller uses AppRole), so
+there is no root token to keep; only when init reports `setup incomplete` is it left valid so you
+can finish, and then you revoke it. Official downloads: https://openbao.org/downloads/.
 
 **Evidence:** `GET /api/ops/services` (or the bootstrap list) shows OpenBao `unsealed`; the doctor's
 secret checks pass. Recovery: [runbooks/openbao-unseal-recovery.md](runbooks/openbao-unseal-recovery.md).

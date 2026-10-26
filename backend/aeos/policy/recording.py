@@ -11,6 +11,11 @@ consumer honours it:
   ``details.secret_store_interim_keyring = true`` (read by ``aeos.secrets.provider``) and
   ``worker_sandbox/process`` with ``details.allow_process_sandbox = true`` (+ optional ``allow_bash``)
   (read by ``aeos.worker_runtime.sandbox``), PERSONAL only, with an explicit expiry;
+* ``POLICY`` presets (``catalog.POLICY_PRESETS``): the owner attestation ``claude_extra_usage/PERSONAL`` (E0, explicit
+  expiry) and the owner choice ``screenshot_capture/PERSONAL`` with ``details.authenticated_capture`` ALLOWED|DENIED
+  and ``details.scope`` (read by ``aeos.docs_engine.screenshots`` through the policy facade); the Doctor
+  ``worker.route_behaviour`` threshold ``worker_route_behaviour/tool_schema_failures`` needs
+  ``details.max_failure_rate`` in 0..1;
 * OFFICE company authorisation → ``POLICY`` on ``office_policy/OFFICE`` with ``office_authorization``,
   ``company_reference`` and explicit ``allowed_providers`` (read by ``aeos.policy.office``), plus the optional
   structured scope ``approved_targets`` / ``approved_data_classes`` / ``approved_identities``
@@ -216,9 +221,10 @@ def _policy_preset_shape(domain: Domain, *, preset: str | None, target_type: str
 
     A decision on a preset's target always gets the preset's exact shape (the consumer reads exactly that), and the
     consumer-read detail key is refused anywhere else, so an attestation can never look effective by accident."""
-    name = preset or catalog.policy_preset_for_target(target_type, target_id)
-    if name is None and target_type == catalog.TARGET_CLAUDE_EXTRA_USAGE:
-        name = "claude_extra_usage_off"  # the only shape its consumers read (target id PERSONAL)
+    # a preset's target type always takes the preset's exact shape: another target id there is a mismatch, never a
+    # decision recorded where no consumer reads it (e.g. claude_extra_usage/OFFICE, screenshot_capture/OFFICE)
+    name = preset or catalog.policy_preset_for_target(target_type, target_id) \
+        or catalog.policy_preset_for_target_type(target_type)
     if name is None:
         stray = sorted(set(details) & catalog.POLICY_PRESET_DETAIL_KEYS)
         if stray:
@@ -234,6 +240,8 @@ def _policy_preset_shape(domain: Domain, *, preset: str | None, target_type: str
     if domain.value not in spec.domains:
         raise ValidationFailed(f"policy preset {name} can only be recorded in {list(spec.domains)}",
                                code="POLICY_PRESET_DOMAIN_DENIED")
+    if spec.choices:
+        return spec.target_type, spec.target_id, _policy_choice_details(name, spec, details)
     given = details.get(spec.detail_key, spec.value)
     if not isinstance(given, bool):
         raise ValidationFailed(f"details.{spec.detail_key} must be true/false", code="POLICY_PRESET_DETAILS_INVALID")
@@ -243,6 +251,43 @@ def _policy_preset_shape(domain: Domain, *, preset: str | None, target_type: str
     out = {**details, spec.detail_key: given, "policy_preset": name, "consumer": spec.consumer,
            "evidence_level": "E0", "attestation": "owner statement; AEOS cannot read this setting"}
     return spec.target_type, spec.target_id, out
+
+
+def _policy_choice_details(name: str, spec: catalog.PolicyPreset, details: dict[str, Any]) -> dict[str, Any]:
+    """The details of a choice preset: exactly one of ``spec.choices`` (no default: an absent choice is refused) and the
+    free-text scope it covers, required for the choices in ``spec.scope_required_for``."""
+    raw = details.get(spec.detail_key)
+    choice = raw.strip().upper() if isinstance(raw, str) else None
+    if choice not in spec.choices:
+        raise ValidationFailed(f"policy preset {name} needs details.{spec.detail_key} = one of {list(spec.choices)}",
+                               code="POLICY_PRESET_DETAILS_INVALID", details={"choices": list(spec.choices)})
+    out = {**details, spec.detail_key: choice, "policy_preset": name, "consumer": spec.consumer}
+    if spec.scope_key:
+        scope = details.get(spec.scope_key)
+        if scope is not None and not isinstance(scope, str):
+            raise ValidationFailed(f"details.{spec.scope_key} must be text", code="POLICY_PRESET_DETAILS_INVALID")
+        text = (scope or "").strip()
+        if len(text) > catalog.POLICY_PRESET_SCOPE_MAX:
+            raise ValidationFailed(f"details.{spec.scope_key} is longer than {catalog.POLICY_PRESET_SCOPE_MAX} "
+                                   "characters", code="POLICY_PRESET_DETAILS_INVALID")
+        if choice in spec.scope_required_for and len(text) < catalog.POLICY_PRESET_SCOPE_MIN:
+            raise ValidationFailed(f"{name} = {choice} needs details.{spec.scope_key}: the pages/targets it covers "
+                                   f"(at least {catalog.POLICY_PRESET_SCOPE_MIN} characters)",
+                                   code="POLICY_PRESET_SCOPE_REQUIRED")
+        out[spec.scope_key] = text or None
+    return out
+
+
+def _route_behaviour_check(target_type: str | None, target_id: str | None, details: dict[str, Any]) -> None:
+    """The Doctor ``worker.route_behaviour`` threshold is read only as a number 0..1 in ``details.max_failure_rate``:
+    any other value would sit in the registry looking decided while the check stays UNDECIDED, so it is refused."""
+    if (target_type, target_id) != catalog.TARGET_ROUTE_BEHAVIOUR:
+        return
+    raw = details.get(catalog.ROUTE_BEHAVIOUR_DETAIL_KEY)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0.0 <= float(raw) <= 1.0:
+        raise ValidationFailed(f"the worker.route_behaviour threshold needs details.{catalog.ROUTE_BEHAVIOUR_DETAIL_KEY}"
+                               " = a number from 0 to 1 (e.g. 0.05 = at most 5% failing samples)",
+                               code="ROUTE_BEHAVIOUR_THRESHOLD_INVALID")
 
 
 def _mci_pack_mapping_check(target_id: str | None, target_hash: str | None) -> None:
@@ -412,7 +457,8 @@ def record_generic_decision(
                                                           target_id=target_id, details=details)
         if shaped is not None:
             target_type, target_id, details = shaped
-            if expires_at is None:
+            spec = catalog.POLICY_PRESETS[str(details["policy_preset"])]
+            if spec.attestation and expires_at is None:
                 raise ValidationFailed("an owner attestation needs an explicit expiry (expires_at)",
                                        code="POLICY_PRESET_EXPIRY_REQUIRED")
             supersede = list(session.scalars(select(Decision).where(
@@ -447,6 +493,7 @@ def record_generic_decision(
             target_type, target_id = catalog.TARGET_OFFICE_POLICY, Domain.OFFICE.value
         else:
             target_type, target_id = _require_target(kind, target_type, target_id)
+            _route_behaviour_check(target_type, target_id, details)
             if target_type == catalog.TARGET_MCI_PACK_MAPPING:
                 if domain != Domain.PERSONAL:
                     raise ValidationFailed("platform MCI pack mappings are recorded in the PERSONAL (platform) domain",

@@ -252,10 +252,12 @@ def init_cmd(
     register_secret(res.root_token)
     typer.echo("")
     typer.echo("=" * 72)
-    typer.echo("SHOWN ONCE - store these OFFLINE (password manager / paper), never in the repo or config:")
+    typer.echo("SHOWN ONCE - store the unseal key(s) OFFLINE (password manager / paper), never in the repo or "
+               "config:")
     for i, k in enumerate(res.keys, 1):
         typer.echo(f"  Unseal key {i}: {k}")
-    typer.echo(f"  Root token  : {res.root_token}")
+    # the root token is revoked at the end of a complete setup; it stays valid only when setup is incomplete
+    typer.echo(f"  Root token  : {res.root_token}  (revoked when setup completes; needed only if it is incomplete)")
     typer.echo(f"  ({threshold} of {shares} keys are needed after every restart: aeos vault unseal)")
     typer.echo("=" * 72)
     for step in res.steps:

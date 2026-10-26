@@ -17,11 +17,19 @@ function role(over: Record<string, unknown>) {
   };
 }
 
-function respond(roles: unknown[], agents: unknown[]) {
-  globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+const THRESHOLD = { required_from: "R4", default: "R4", source: "DEFAULT", risk_classes: ["R0", "R1", "R2", "R3", "R4"], requires_evaluation: ["R4"] };
+let posted: { url: string; body: unknown }[] = [];
+
+function respond(roles: unknown[], agents: unknown[], threshold: unknown = THRESHOLD) {
+  posted = [];
+  globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if ((init?.method ?? "GET").toUpperCase() === "POST") {
+      posted.push({ url, body: JSON.parse(String(init?.body)) });
+      return new Response(JSON.stringify({ previous: "R4", threshold: "R2" }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
     const body = url.includes("/api/workforce/roles")
-      ? { items: [{ key: "build", label: "Build", roles }], note: "catatan", source: "RoleSkillPack catalog", checked_at: new Date().toISOString(), mode: "DESIGN" }
+      ? { items: [{ key: "build", label: "Build", roles }], note: "catatan", source: "RoleSkillPack catalog", role_eval_threshold: threshold, checked_at: new Date().toISOString(), mode: "DESIGN" }
       : { items: agents, checked_at: new Date().toISOString() };
     return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
@@ -94,5 +102,40 @@ describe("Organization 'impact' and 'Usulkan perubahan' (W6-109)", () => {
     await user.click(screen.getByRole("button", { name: /Usulkan perubahan/ }));
     expect(screen.getByRole("link", { name: "Usulkan perubahan peran/agent" })).toHaveAttribute(
       "href", "/proposals?kind=UPGRADE&component=workforce-scheduler");
+  });
+});
+
+describe("Organization role-evaluation threshold (§46, owner action with a review step)", () => {
+  afterEach(() => {
+    auth.isAdmin = true;
+  });
+
+  it("shows the pilot default and posts the new class only after the owner reviewed and confirmed it", async () => {
+    respond([role({ role_key: "impl", name: "Implementer" })], []);
+    wrap();
+    const user = userEvent.setup();
+    const box = await screen.findByTestId("role-eval-threshold");
+    expect(box.textContent).toContain("Evaluasi peran wajib mulai risiko R4");
+    expect(screen.getByText("Bawaan pilot (R4)")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Ubah ambang evaluasi peran/ }));
+    const review = screen.getByRole("button", { name: "Tinjau perubahan" });
+    expect(review).toBeDisabled(); // same class as now and no reason yet
+    await user.selectOptions(screen.getByLabelText("Evaluasi peran wajib mulai risiko"), "R2");
+    await user.type(screen.getByLabelText("Alasan ambang evaluasi peran"), "perketat sebelum pilot R2");
+    await user.click(review);
+    expect(screen.getByText("R2, R3, R4")).toBeInTheDocument(); // what the decision covers, before it is sent
+    expect(posted).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "Konfirmasi ambang R2" }));
+    expect(await screen.findByText(/Ambang tercatat: R4 → R2/)).toBeInTheDocument();
+    expect(posted).toEqual([{ url: "/api/workforce/role-eval-threshold", body: { risk_class: "R2", rationale: "perketat sebelum pilot R2" } }]);
+  });
+
+  it("is read-only for a VIEWER", async () => {
+    auth.isAdmin = false;
+    respond([role({ role_key: "impl", name: "Implementer" })], [], { ...THRESHOLD, required_from: "R3", source: "OWNER_SETTING", requires_evaluation: ["R3", "R4"] });
+    wrap();
+    await screen.findByTestId("role-eval-threshold");
+    expect(screen.getByText("Ditetapkan pemilik")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Ubah ambang evaluasi peran/ })).toBeDisabled();
   });
 });

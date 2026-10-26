@@ -467,16 +467,34 @@ the UI shows UNDECIDED / NO_TARGET and G6/G8 stay NOT_PROVEN. Registering a real
 ### 2.5 `worker.route_behaviour` failure-rate threshold [per machine]
 
 Record: in a PERSONAL session, *Kesiapan (Doctor)* → check `worker.route_behaviour` → *Tetapkan ambang
-pemilik*. The form shows the exact `max_failure_rate` before you confirm. There is no CLI flag for it.
+pemilik*. The form shows the exact `max_failure_rate` before you confirm. CLI alternative, the same POLICY decision
+(target `worker_route_behaviour:tool_schema_failures`); it prints the exact value before it asks for your password:
 
-### 2.6 Authenticated screenshot capture
+```bash
+./aeos policy route-threshold --max-failure-rate 0.05 --domain PERSONAL --as <admin> --rationale "<why>"   # 0..1, 0.05 = 5%
+```
+
+A newer decision replaces the threshold. It never makes a route pass without trusted evaluation.
+
+### 2.6 Authenticated screenshot capture [per machine]
 
 Decide whether the screenshot collector may make an authenticated, read-only capture of pages behind a login,
-such as the Control Center's own routes. The status is shown on *Bukti* → *Tangkapan layar UI*.
+such as the Control Center's own routes. The status (UNDECIDED until you decide) is shown on *Bukti* →
+*Tangkapan layar UI*.
 
-Record: tell the builder, who records it as an ADR. There is no in-app control: the status is fixed in code
-(`docs_engine/screenshots.py`) and changes only with a build change. Until then only a target's public pages can
-become SCREENSHOT evidence.
+Record: *Bukti* → *Tangkapan layar UI* → *Catat keputusan pemilik (ALLOWED/DENIED)*, which opens *Keputusan* on the
+preset "Capture screenshot terautentikasi read-only". Choose ALLOWED with the scope it covers (for example "Control
+Center routes, read-only"), or DENIED. Or run:
+
+```bash
+./aeos policy decide --kind POLICY --authenticated-capture ALLOWED --capture-scope "<pages it covers>" --domain PERSONAL --as <admin> --rationale "<why>"
+./aeos policy decide --kind POLICY --authenticated-capture DENIED --domain PERSONAL --as <admin> --rationale "<why>"
+```
+
+It is PERSONAL only, and `--days` is optional. Either way the collector stays unauthenticated in this build:
+authenticated capture is not built yet, so ALLOWED records your decision and the status says so (capture mode
+"tanpa login"). Until it is built, only a target's public pages can become SCREENSHOT evidence. UNDECIDED and DENIED
+never log in.
 
 ### 2.7 Process-sandbox exception [per machine]
 
@@ -533,8 +551,9 @@ When you judge the build done (M4 delivery enforcement reached), revoke it.
 Record: open *Keputusan* (`/decisions`) with PERSONAL selected. The queue item "Delegasi owner:ADR-0003 masih
 aktif" links to the EXCEPTION row (actor `owner:ADR-0003`). Press *Cabut* with a reason such as "seed reached M4".
 
-CLI alternative: `./aeos policy revoke <decision_id> --as <admin> --reason "seed reached M4"`. Copy the id from the
-`?decision=` part of that link, because `./aeos policy decisions` does not print ids. A re-seed does not re-create a
+CLI alternative: find the id with `./aeos policy decisions --kind EXCEPTION --status ACTIVE` (each row starts with
+the decision id; the delegation row shows `actor=owner:ADR-0003`), then run
+`./aeos policy revoke <decision_id> --as <admin> --reason "seed reached M4"`. A re-seed does not re-create a
 revoked delegation. A REJECTED or SUPERSEDED decision on ADR-0003 (2.8) also revokes it.
 
 ### 2.10 Claude extra usage disabled [per machine]
@@ -606,8 +625,10 @@ Each item below is recorded either as an ADR, through the builder, or with the c
 * **Role eligibility.** Decide whether a role becomes eligible only after a PASS evaluation:
   * Adopt a role's PASS run with `./aeos work adopt-role <role_key> --eval-run <id> --as <admin> --rationale "<why>" --option "<a>" --option "<b>" --goal "<goal>" --tradeoff "<tradeoff>" --invalidate-if "<condition>"`,
     or on *Organisasi & Peran*.
-  * Tightening the default R4 pilot threshold has no UI or CLI control yet. It is API-only:
-    `POST /api/workforce/role-eval-threshold`.
+  * Tighten the default R4 pilot threshold on *Organisasi & Peran* → "Ambang evaluasi peran (§46)" → *Ubah ambang
+    evaluasi peran*, which shows the risk classes it covers before you confirm, or with
+    `./aeos work role-eval-threshold R2 --as <admin> --rationale "<why>"`. R2 means R2, R3 and R4 tasks need an
+    adopted PASS evaluation or an owner EXCEPTION.
 * **Memory acceptance.** Decide whether memory acceptance must require EVALUATED. Author the memory fixture suite
   first (ADR-0060, ADR-0081).
 * **Verifier coverage:**

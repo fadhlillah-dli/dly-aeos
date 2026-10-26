@@ -184,6 +184,58 @@ describe("DecisionForm exact target shapes (ADR-0042/0051)", () => {
     expect(body.expires_at).toBeTruthy();
   });
 
+  it("records the authenticated screenshot capture choice as a POLICY preset (ALLOWED needs a scope, expiry optional)", async () => {
+    const fn = renderForm("PERSONAL");
+    fireEvent.change(screen.getByLabelText("Jenis keputusan"), { target: { value: "POLICY" } });
+    fireEvent.change(screen.getByLabelText("Jenis kebijakan"), { target: { value: "screenshot_authenticated_capture" } });
+    expect(screen.getByText("screenshot_capture/PERSONAL")).toBeInTheDocument();
+    expect(screen.getByText(/kolektor tetap tidak login apa pun keputusannya/)).toBeInTheDocument();
+    expect(screen.getByText("Berlaku sampai (opsional)")).toBeInTheDocument();
+    expect(screen.queryByText("Jenis target")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/ID EvalRun bukti/)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/Scope eksplisit/), { target: { value: "kolektor=screenshot" } });
+    fireEvent.change(screen.getByLabelText(/Rationale/), { target: { value: "rute Control Center boleh ditangkap read-only" } });
+    // no default: a choice is required, and ALLOWED is refused without the pages it covers
+    fireEvent.click(screen.getByRole("button", { name: "Catat keputusan" }));
+    expect(await screen.findByText(/Pilih keputusan: ALLOWED atau DENIED/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Keputusan preset"), { target: { value: "ALLOWED" } });
+    expect(screen.getByText("Scope (wajib)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Catat keputusan" }));
+    expect(await screen.findByText(/ALLOWED wajib menyebut scope/)).toBeInTheDocument();
+    expect(fn).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Scope preset"), { target: { value: "rute Control Center, hanya-baca" } });
+    fireEvent.click(screen.getByRole("button", { name: "Catat keputusan" }));
+    await waitFor(() => expect(fn).toHaveBeenCalled());
+    const body = JSON.parse(String(fn.mock.calls[0][1]!.body));
+    expect(body).toMatchObject({
+      kind: "POLICY",
+      policy_preset: "screenshot_authenticated_capture",
+      details: { authenticated_capture: "ALLOWED", scope: "rute Control Center, hanya-baca" },
+    });
+    expect(body.target_type).toBeUndefined();
+    expect(body.expires_at).toBeUndefined();
+  });
+
+  it("opens on a linked preset and records DENIED without a scope", async () => {
+    const fn = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response("{}", { status: 201, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fn);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <DecisionForm domain="PERSONAL" initialKind="POLICY" initialPolicyPreset="screenshot_authenticated_capture" onDone={() => undefined} />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByLabelText("Jenis kebijakan")).toHaveValue("screenshot_authenticated_capture");
+    fireEvent.change(screen.getByLabelText("Keputusan preset"), { target: { value: "DENIED" } });
+    expect(screen.getByText("Scope (opsional)")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/Scope eksplisit/), { target: { value: "kolektor=screenshot" } });
+    fireEvent.change(screen.getByLabelText(/Rationale/), { target: { value: "tidak ada capture di balik login" } });
+    fireEvent.click(screen.getByRole("button", { name: "Catat keputusan" }));
+    await waitFor(() => expect(fn).toHaveBeenCalled());
+    const body = JSON.parse(String(fn.mock.calls[0][1]!.body));
+    expect(body.details).toEqual({ authenticated_capture: "DENIED" });
+  });
+
   it("does not offer the PERSONAL-only presets in OFFICE", () => {
     renderForm("OFFICE");
     expect(screen.queryByLabelText("Jenis pengecualian")).not.toBeInTheDocument();
