@@ -229,7 +229,8 @@ def _markdown(d: dict[str, Any], bundle_hash: str) -> str:
         "### Supervisor review (read-only)",
         f"- Verdict: **{_cell(r['verdict'])}** (requested: {_cell(r['verdict_requested'])}) — supervisor review "
         f"`{_cell(r['id'])}`",
-        *([f"- [{_cell(f['severity'])}] {_cell(f['title'])}" for f in r["findings"]] or ["- No findings recorded."]),
+        # finding titles are the supervisor's own output (like its unknowns): its tool name becomes the neutral role
+        *([f"- [{_cell(f['severity'])}] {_neutral(f['title'])}" for f in r["findings"]] or ["- No findings recorded."]),
         "",
         "### Acceptance",
         f"- `{d['acceptance']['id']}`: **{d['acceptance']['status']}**, decided by `{_cell(d['acceptance']['decided_by'])}` "
