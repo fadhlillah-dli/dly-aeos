@@ -7,9 +7,11 @@ and remain blocked by the OFFICE default-deny policy even when configured.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from aeos.core.enums import Domain
+from aeos.core.timeutil import ensure_aware
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import secret_ref_status, set_secret_remedy
 from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
@@ -24,6 +26,7 @@ GOOGLE_REF = GOOGLE_TOKEN_REF  # kept for callers of the earlier single-ref cont
 ATLASSIAN_REF = "office/atlassian"
 BITBUCKET_REF = "office/bitbucket"
 GITHUB_API = "https://api.github.com"
+GITHUB_EXPIRY_WARN_DAYS = 14  # warn this many days before the token expires
 # secrets facade contract: purpose "<namespace>:<use>" with the namespace of the reference (§26)
 GITHUB_PURPOSE = "personal:doctor.github-readonly-probe"
 # The PERSONAL publication providers of the one provider vocabulary (aeos.portfolio.providers): Google Docs
@@ -71,7 +74,7 @@ ADMINISTRATION_UNKNOWN, ADMINISTRATION_NOT_POSSIBLE = "UNKNOWN", "NOT_POSSIBLE"
 
 def _fine_grained_privilege(permissions: dict[str, Any] | None, reachable: list[str] | None,
                             allowed_repos: list[str] | None, truncated: bool,
-                            administration: str | None = None) -> dict[str, Any]:
+                            administration: str | None = None, public: list[str] | None = None) -> dict[str, Any]:
     """A fine-grained PAT is only least privilege when what it can actually reach is observed: no repository
     beyond the ones AEOS registered (a token created for "All repositories" lists them all) and no Administration
     permission on the token itself.
@@ -81,19 +84,28 @@ def _fine_grained_privilege(permissions: dict[str, Any] | None, reachable: list[
     token may carry no Administration at all. So it is never read as the token's grant: with an admin account role
     the token's Administration permission must be observed (``administration``: GRANTED / NOT_GRANTED, see
     ``_administration_grant``) or least privilege stays NOT proven (None, never True and never a false "has
-    Administration" claim). The Workflows permission is not observable through the API."""
+    Administration" claim). The Workflows permission is not observable through the API.
+
+    GitHub gives every fine-grained PAT read-only access to all public repositories ("Also includes public
+    repositories (read-only)"), so ``GET /user/repos`` lists them even for "Only select repositories". An unregistered
+    *public* repository is therefore no breach, but it also does not prove the selection: least privilege stays NOT
+    proven (None). Only an unregistered private repository shows a broader selection."""
     allowed = {a.lower() for a in allowed_repos or []}
     admin_role = bool((permissions or {}).get("admin"))
     grant = (administration or ADMINISTRATION_UNKNOWN) if admin_role else ADMINISTRATION_NOT_POSSIBLE
     problems: list[str] = []
     if grant == ADMINISTRATION_GRANTED:
         problems.append("token membawa izin Administration pada repo platform (GET branch protection diizinkan)")
+    public_names = {p.lower() for p in public or []}
     extra = sorted(r for r in reachable or [] if r.lower() not in allowed)
-    if extra:
-        problems.append(f"token menjangkau {len(extra)} repo di luar repo terdaftar AEOS (pemilihan 'All repositories'?):"
-                        " " + ", ".join(extra[:5]) + (" ..." if len(extra) > 5 else ""))
+    extra_private = [r for r in extra if r.lower() not in public_names]
+    extra_public = [r for r in extra if r.lower() in public_names]
+    if extra_private:
+        problems.append(f"token menjangkau {len(extra_private)} repo private di luar repo terdaftar AEOS (pemilihan "
+                        "'All repositories'?): " + ", ".join(extra_private[:5]) + (" ..." if len(extra_private) > 5 else ""))
     out: dict[str, Any] = {"kind": "fine-grained", "scopes": [], "reachable_repositories": len(reachable or []),
-                           "beyond_registered": extra[:20], "admin": admin_role, "administration_permission": grant,
+                           "beyond_registered": extra_private[:20], "beyond_registered_public": extra_public[:20],
+                           "admin": admin_role, "administration_permission": grant,
                            "workflows_permission": "NOT_OBSERVABLE"}
     if problems:
         return {**out, "least_privilege": False,
@@ -102,6 +114,11 @@ def _fine_grained_privilege(permissions: dict[str, Any] | None, reachable: list[
         return {**out, "least_privilege": None,
                 "note": "pemilihan repo token belum terbaca (GET /user/repos gagal atau terpotong) - least privilege "
                         "belum terbukti"}
+    if extra_public:
+        return {**out, "least_privilege": None,
+                "note": f"{len(extra_public)} repo public di luar repo terdaftar terbaca (akses baca public yang GitHub "
+                        "berikan ke setiap fine-grained PAT); tidak ada repo private di luar daftar, tetapi pemilihan "
+                        "'Only select repositories' tidak dapat dibuktikan dari daftar ini"}
     if grant == ADMINISTRATION_UNKNOWN:
         return {**out, "least_privilege": None,
                 "note": "akun pemilik token berperan admin pada repo; izin Administration token itu sendiri tidak "
@@ -113,14 +130,15 @@ def _fine_grained_privilege(permissions: dict[str, Any] | None, reachable: list[
 
 def github_token_privilege(kind: str, scopes_header: str | None, *, permissions: dict[str, Any] | None = None,
                            reachable: list[str] | None = None, allowed_repos: list[str] | None = None,
-                           truncated: bool = False, administration: str | None = None) -> dict[str, Any]:
+                           truncated: bool = False, administration: str | None = None,
+                           public: list[str] | None = None) -> dict[str, Any]:
     """Least-privilege verdict from the token kind and GitHub's ``X-OAuth-Scopes`` header (classic tokens) or,
     for a fine-grained PAT, from what it observably reaches (``reachable`` repositories vs the registered ones, the
     observed ``administration`` grant). A classic/OAuth token (e.g. ``gh auth token``) with ``repo`` reaches every
     repository of the account — a residual risk the owner sees."""
     scopes = sorted({s.strip() for s in (scopes_header or "").split(",") if s.strip()})
     if kind == "fine-grained":
-        return _fine_grained_privilege(permissions, reachable, allowed_repos, truncated, administration)
+        return _fine_grained_privilege(permissions, reachable, allowed_repos, truncated, administration, public)
     if scopes_header is None:
         return {"kind": kind, "scopes": [], "least_privilege": None,
                 "note": "jenis/scope token tidak terbaca — least privilege belum terbukti"}
@@ -162,17 +180,19 @@ def _record_probe(ctx: CheckContext, providers: tuple[str, ...], root_id: str, c
 REACHABLE_PAGE = 100
 
 
-def _reachable_repos(ctx: CheckContext) -> tuple[list[str] | None, bool]:
-    """Repositories the stored token can reach (read-only ``GET /user/repos``; a fine-grained PAT lists only its
-    selected repositories). (None, False) when unreadable; truncated when a full page came back."""
+def _reachable_repos(ctx: CheckContext) -> tuple[list[str] | None, bool, list[str]]:
+    """Repositories the stored token can reach (read-only ``GET /user/repos``: a fine-grained PAT lists its selected
+    repositories plus every public one), whether a full page came back (truncated), and which of them are public.
+    (None, False, []) when unreadable."""
     try:
         hr = github_get(ctx, f"/user/repos?per_page={REACHABLE_PAGE}")
     except Exception:
-        return None, False
+        return None, False, []
     if getattr(hr, "status", None) != 200 or not isinstance(getattr(hr, "body", None), list):
-        return None, False
-    names = [str(r.get("full_name")) for r in hr.body if isinstance(r, dict) and r.get("full_name")]
-    return names, len(hr.body) >= REACHABLE_PAGE
+        return None, False, []
+    repos = [r for r in hr.body if isinstance(r, dict) and r.get("full_name")]
+    public = [str(r["full_name"]) for r in repos if r.get("private") is False]
+    return [str(r["full_name"]) for r in repos], len(hr.body) >= REACHABLE_PAGE, public
 
 
 def _administration_grant(ctx: CheckContext, slug: str, branch: str) -> str:
@@ -212,6 +232,29 @@ def _registered_github_repos(ctx: CheckContext) -> list[str]:
         return []
 
 
+def _github_token_expiry(headers: dict[str, str] | None) -> datetime | None:
+    """Expiry GitHub reports for the token (``GitHub-Authentication-Token-Expiration``, ``2027-01-24 10:57:27 UTC``
+    or ``... +0700``); None when the header is absent (no expiry) or unreadable."""
+    raw = (headers or {}).get("github-authentication-token-expiration")
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw.strip().replace(" UTC", " +0000"), "%Y-%m-%d %H:%M:%S %z")
+    except ValueError:
+        return None
+
+
+def _github_expiry_warning(expires: datetime | None, now: datetime) -> str | None:
+    """Text for a token that expires within GITHUB_EXPIRY_WARN_DAYS; None otherwise."""
+    if expires is None:
+        return None
+    days = (expires - ensure_aware(now)).total_seconds() / 86400
+    if days > GITHUB_EXPIRY_WARN_DAYS:
+        return None
+    return (f"Token GitHub kedaluwarsa {expires.date().isoformat()} ({max(0, int(days))} hari lagi): buat token baru "
+            f"dengan izin yang sama, lalu {aeos_cmd(f'secrets set {GITHUB_REF} --expires-at <YYYY-MM-DD>')}.")
+
+
 def _scopes(headers: dict[str, str] | None) -> list[str] | str:
     """Token scopes GitHub reports for classic tokens (``X-OAuth-Scopes``); fine-grained tokens expose none."""
     raw = (headers or {}).get("x-oauth-scopes")
@@ -238,9 +281,14 @@ def adapter_github(ctx: CheckContext) -> Outcome:
     if state == "ABSENT":
         return Outcome("MISSING", f"Token {GITHUB_REF} belum disimpan.", evidence=evidence, error_code="GITHUB_TOKEN_MISSING",
                        remedy=set_secret_remedy(GITHUB_REF, "GitHub (fine-grained, repo terpilih saja)"))
+    recorded = evidence.get("expires_at")
+    recorded_expiry = ensure_aware(datetime.fromisoformat(recorded)) if isinstance(recorded, str) else None
     if not ctx.functional:
-        return Outcome("CONFIGURED", f"Token {GITHUB_REF} tersimpan; akses repo belum diprobe (gunakan --functional).",
-                       evidence=evidence, target_identity=f"github:{slug}")
+        summary = f"Token {GITHUB_REF} tersimpan; akses repo belum diprobe (gunakan --functional)."
+        warning = _github_expiry_warning(recorded_expiry, ctx.now)
+        return Outcome("CONFIGURED", summary + (" " + warning if warning else ""), evidence=evidence,
+                       target_identity=f"github:{slug}",
+                       remedy=set_secret_remedy(GITHUB_REF, "GitHub (token baru sebelum kedaluwarsa)") if warning else None)
     try:
         hr = github_get(ctx, f"/repos/{slug}")
     except Exception as exc:  # store/network failure: never green
@@ -253,27 +301,35 @@ def adapter_github(ctx: CheckContext) -> Outcome:
                          "permissions": {k: perms.get(k) for k in ("admin", "maintain", "push", "pull") if k in perms},
                          "repo_id": hr.body.get("id"),
                          "token_scopes": _scopes(getattr(hr, "headers", None))})
+        reported_expiry = _github_token_expiry(getattr(hr, "headers", None))
+        evidence["token_expires_at"] = reported_expiry.isoformat() if reported_expiry else None
+        expiry = min((e for e in (reported_expiry, recorded_expiry) if e is not None), default=None)
         kind = _token_kind()
-        reachable, truncated = _reachable_repos(ctx) if kind == "fine-grained" else (None, False)
+        reachable, truncated, public = _reachable_repos(ctx) if kind == "fine-grained" else (None, False, [])
         # the account's admin role does not show the token's own grant: observe it (fine-grained only)
         administration = (_administration_grant(ctx, slug, str(hr.body.get("default_branch") or "main"))
                           if kind == "fine-grained" and isinstance(perms, dict) and perms.get("admin") else None)
         privilege = github_token_privilege(kind, (getattr(hr, "headers", None) or {}).get("x-oauth-scopes"),
                                            permissions=perms if isinstance(perms, dict) else {}, reachable=reachable,
                                            allowed_repos=[slug, *_registered_github_repos(ctx)], truncated=truncated,
-                                           administration=administration)
+                                           administration=administration, public=public)
         evidence["token_privilege"] = privilege
         summary = f"Repo github:{slug} terbaca dengan token (read-only); izin tulis/enforcement belum diverifikasi."
+        warning = _github_expiry_warning(expiry, ctx.now)
+        if warning:
+            evidence["residual_risks"] = [warning]
+            summary = warning + " " + summary
         if privilege["least_privilege"] is False:
-            evidence["residual_risks"] = [privilege["risk"]]
+            evidence.setdefault("residual_risks", []).append(privilege["risk"])
             summary += " " + privilege["risk"]
         elif privilege["least_privilege"] is None:
             summary += " Least privilege token belum terbukti: " + str(privilege.get("note") or "")
         _record_probe(ctx, ("github-repo", "github-issues"), slug, "CONNECTED")
-        return Outcome("CONNECTED", summary, evidence=evidence, target_identity=f"github:{slug}",
-                       remedy=None if privilege["least_privilege"] is not False else set_secret_remedy(
-                           GITHUB_REF, "GitHub fine-grained PAT, hanya repo platform: Issues RW, Pull requests RW, "
-                                       "Contents RW (push aeos/*), Metadata R"))
+        remedy = None
+        if privilege["least_privilege"] is False or warning:
+            remedy = set_secret_remedy(GITHUB_REF, "GitHub fine-grained PAT, hanya repo platform: Issues RW, Pull "
+                                                   "requests RW, Contents RW (push aeos/*), Metadata R")
+        return Outcome("CONNECTED", summary, evidence=evidence, target_identity=f"github:{slug}", remedy=remedy)
     if hr.status == 401:
         _record_probe(ctx, ("github-repo", "github-issues"), slug, "EXPIRED")
         return Outcome("EXPIRED", "Token GitHub ditolak (kedaluwarsa/dicabut).", evidence=evidence,
