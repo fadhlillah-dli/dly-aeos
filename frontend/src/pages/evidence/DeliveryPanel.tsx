@@ -5,7 +5,9 @@ import { ApiError } from "../../api/client";
 import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, Loading, Mono, Table } from "../../components/ui";
 import { shortHash } from "../../lib/format";
 import { evidenceApi, type PRItem, type ProviderCaps } from "./api";
+import { DeliveryActions, EnforcementTestFacts } from "./DeliveryActions";
 import { Status } from "./labels";
+import { Outcome } from "./outcomes";
 
 /** The code host of the capability probe: Bitbucket (OFFICE) or GitHub (PERSONAL); never a fixed "GitHub" title. */
 export function providerLabel(provider: string | undefined, domain: string | null | undefined): string {
@@ -87,7 +89,7 @@ export function DeliveryPanel() {
                 ["Visibilitas / paket", `${caps.data.visibility ?? "UNKNOWN"} / ${caps.data.plan ?? "UNKNOWN"}`],
                 ["Credential", caps.data.credential],
                 ["Gate merge", <Status key="g" status={caps.data.merge_gate} />],
-                ["Penegakan diuji", <Status key="e" status={caps.data.enforcement_tested} />],
+                ["Penegakan diuji", <Outcome key="e" status={caps.data.enforcement_tested} />],
                 ["Required checks", caps.data.required_status_checks.join(", ") || "—"],
               ]}
             />
@@ -98,6 +100,8 @@ export function DeliveryPanel() {
                 </li>
               ))}
             </ul>
+            <EnforcementTestFacts caps={caps.data} />
+            <DeliveryActions caps={caps.data} />
           </div>
         )}
         <ErrorBox error={record.error} />
