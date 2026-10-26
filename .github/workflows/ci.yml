@@ -401,6 +401,25 @@ jobs:
           fi
           test ! -e relative-data-dir
 
+  # Conventional Commits subjects of the pull request's own commits (scripts/commit_subject.py). Needs the full
+  # history (fetch-depth: 0 here only) to walk base..head and to find the baseline below which nothing is checked.
+  # Stdlib only, so there is no Python setup step. Not run for pushes to main: those arrive through merged pull requests.
+  commit-subjects:
+    name: commit subjects [G1]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: G1 static — commit subjects (Conventional Commits, merge commits exempt)
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/commit_subject.py "$BASE_SHA..$HEAD_SHA"
+
   supply-chain:
     name: supply-chain report [NO-GATE] (SBOM, licences, vulnerabilities, SAST)
     runs-on: ubuntu-latest

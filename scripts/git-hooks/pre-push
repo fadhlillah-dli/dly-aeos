@@ -1,0 +1,12 @@
+#!/bin/sh
+# git pre-push hook: runs CI's static gates on every commit about to be pushed (scripts/gates.py --hook).
+# Install once per clone: git config core.hooksPath scripts/git-hooks
+root=$(git rev-parse --show-toplevel) || exit 1
+if [ -x "$root/.venv/bin/python" ]; then
+  py="$root/.venv/bin/python"
+elif [ -x "$root/.venv/Scripts/python.exe" ]; then
+  py="$root/.venv/Scripts/python.exe"
+else
+  py=python3
+fi
+exec "$py" "$root/scripts/gates.py" --hook "$@"
