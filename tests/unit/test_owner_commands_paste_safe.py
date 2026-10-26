@@ -23,7 +23,8 @@ SHELL_LANGS = frozenset({"bash", "sh", "zsh", "shell", "console"})
 OPT_OUT = "<!-- paste-safe: file-content -->"
 # CommonMark fence: any number of blockquote markers and list markers (nested lists, a list inside a quote and a
 # quote inside a list), then 3+ backticks or tildes.
-FENCE = re.compile(r"^[ \t]*(?:(?:>[ \t]?|(?:[-*+]|\d{1,9}[.)])[ \t]+)[ \t]*)*(`{3,}|~{3,})[ \t]*(.*)$")
+# Each repetition starts with '>' or a list marker (never with whitespace), so the match is linear (no ReDoS).
+FENCE = re.compile(r"^[ \t]*(?:(?:>|(?:[-*+]|\d{1,9}[.)])(?=[ \t]))[ \t]*)*(`{3,}|~{3,})[ \t]*(.*)$")
 CLOSE_PREFIX = re.compile(r"^[ \t]*(?:>[ \t]?)*[ \t]*")
 PROMPT = re.compile(r"^\s*[$%] ")
 HEREDOC = re.compile(r"<<(-?)[ \t]*([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
@@ -307,3 +308,13 @@ def test_console_continuation_lines_are_commands():
 def test_console_output_after_a_finished_command_stays_exempt():
     text = _block("$ ./aeos doctor \\\n  --x\nchecks [ok] * done # fine", "console")
     assert paste_problems(text) == []
+
+
+@pytest.mark.parametrize("hostile", [">" + "\t>" * 40 + "x", "*" + "\t\t*" * 40 + "x"])
+def test_fence_regex_is_linear_on_hostile_prefixes(hostile: str) -> None:
+    """CodeQL py/redos on the earlier FENCE regex: these inputs backtracked exponentially."""
+    import time
+
+    start = time.perf_counter()
+    assert FENCE.match(hostile) is None
+    assert time.perf_counter() - start < 0.5
