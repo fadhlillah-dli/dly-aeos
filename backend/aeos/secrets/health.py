@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from aeos.core.config import Settings
@@ -24,9 +25,15 @@ from aeos.secrets.refs import KNOWN_REFS, known
 VERIFY_MAX_AGE = timedelta(days=7)
 
 
-def _remedies(bao: dict[str, Any], binary_installed: bool, approle: bool | None) -> list[dict[str, str]]:
+def _remedies(bao: dict[str, Any], binary_installed: bool, approle: bool | None,
+              rejected: str | None = None) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
-    if not binary_installed:
+    if not binary_installed and rejected:
+        # the openbao_binary setting wins over <data>/bin, so installing would not help
+        out.append({"command": "aeos vault status",
+                    "why": f"Setting openbao_binary={rejected} bukan file eksekutabel; perbaiki atau hapus setting itu "
+                           "di aeos.yaml (aeos vault install tidak membantu selama setting ini ada)"})
+    elif not binary_installed:
         from aeos.secrets.installer import install_command
 
         cmd = install_command()
@@ -48,7 +55,8 @@ def _remedies(bao: dict[str, Any], binary_installed: bool, approle: bool | None)
 def store_health(settings: Settings) -> dict[str, Any]:
     sel = select_backend(settings)
     bao = dict(sel.openbao)
-    binary = server.bin_path(settings)
+    lookup = server.bin_lookup(settings)
+    binary = Path(lookup.path) if lookup.path else None
     srv = server.running(settings)
     kr_ok, kr_name = keyring_backend()
     approle: bool | None = None
@@ -76,7 +84,7 @@ def store_health(settings: Settings) -> dict[str, Any]:
         except ValueError:
             old = True
         verify["stale"] = bool(sel.backend != "openbao" or old)
-    remedies = [] if sel.backend == "openbao" else _remedies(bao, binary is not None, approle)
+    remedies = [] if sel.backend == "openbao" else _remedies(bao, binary is not None, approle, lookup.rejected)
     if sel.backend == "openbao" and not (verify and verify.get("status") == "VERIFIED" and not verify["stale"]):
         remedies.append({"command": "aeos vault status --verify",
                          "why": "Buktikan tulis/baca/hapus dengan token AppRole (CONNECTED belum VERIFIED)"})

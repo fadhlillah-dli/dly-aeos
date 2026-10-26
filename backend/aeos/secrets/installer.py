@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from aeos.core.binaries import data_bin_dir, exe_name
 from aeos.core.config import Settings
 
 GITHUB_API = "https://api.github.com/repos/openbao/openbao/releases"
@@ -66,11 +67,11 @@ def asset_name(version: str, os_name: str, arch: str) -> str:
 
 
 def binary_name() -> str:
-    return "bao.exe" if sys.platform == "win32" else "bao"
+    return exe_name("bao")
 
 
 def install_dir(settings: Settings) -> Path:
-    return settings.data_dir / "bin"
+    return data_bin_dir(settings.data_dir)
 
 
 @dataclass
