@@ -7,6 +7,7 @@ import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputClass, KeyVa
 import { shortHash } from "../../lib/format";
 import { ModuleBadge } from "./badges";
 import { InventoryFacts } from "./InventoryFacts";
+import { TestBaselinePanel } from "./TestBaselinePanel";
 import { CODE_PROVIDER, type ProjectView, type RepositoryDetail, type RepositoryView } from "./types";
 
 /** A provider/stored URL is rendered as a link only when it is https (never javascript:/data:/http:). */
@@ -373,6 +374,7 @@ export function RepositoriesPanel({ project, isAdmin }: { project: ProjectView; 
       ) : (
         project.repositories.map((r) => <RepoCard key={r.id} repo={r} isAdmin={isAdmin} onChanged={refresh} />)
       )}
+      {project.repositories.length > 0 && <TestBaselinePanel projectId={project.id} isAdmin={isAdmin} />}
       {isAdmin && <AddRepository project={project} onChanged={refresh} />}
     </div>
   );

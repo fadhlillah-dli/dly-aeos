@@ -5,6 +5,7 @@ import { Button, Card, EmptyState, ErrorBox, Freshness, KeyValue, Loading, Mono,
 import { shortHash } from "../../lib/format";
 import { evidenceApi, type GateItem, type SeparateStatus } from "./api";
 import { GATE_HELP, Status } from "./labels";
+import { PromotionCard } from "./PromotionCard";
 
 const SPECIALIST_LABELS: Record<string, string> = {
   A11Y: "Aksesibilitas/UX",
@@ -146,6 +147,7 @@ export function GatesPanel({ taskId }: { taskId: string | null }) {
           { header: "Bukti", cell: (g) => <span className="mono text-xs">{g.evidence_refs.map((r) => shortHash(r, 8)).join(", ") || "—"}</span> },
         ]}
       />
+      <PromotionCard gates={d} />
       <Card title="Status terpisah (§35)">
         <SeparateFields s={d.separate_status} />
       </Card>

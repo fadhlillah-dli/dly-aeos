@@ -265,6 +265,8 @@ export interface DagNode {
   data_classification: string;
   quarantine: boolean;
   acceptance_criteria: string[];
+  /** TaskSpec verifier_policy as stored (read-only): opt-ins such as integration_tests and contract_breaking. */
+  verifier_policy?: Record<string, unknown>;
   /** TaskSpec provenance (LIVE | MOCK | DEMO). */
   mode?: string;
   runtime: { state: string; reason: string; attempts_used: number; active_run_id: string | null; updated_at?: string };

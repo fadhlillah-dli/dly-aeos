@@ -1,5 +1,6 @@
 // API shapes of the Gateway & Portfolio, Intake and Knowledge modules (backend aeos.portfolio/intake/knowledge).
 import type { Domain } from "../../auth/AuthContext";
+import type { TestBaseline } from "./TestBaselinePanel";
 
 export interface Finding {
   kind: "SECRET" | "UNTRUSTED_INSTRUCTION" | "UNSCANNED" | string;
@@ -26,7 +27,8 @@ export interface InventoryView {
   languages: { language: string; files: number; bytes: number }[];
   dependency_manifests: { path: string; ecosystem: string; lockfiles: string[]; lockfile_status: string }[];
   lockfiles: string[];
-  tests: { directories: string[]; files_sample: string[]; frameworks: string[]; baseline: { status: string; reason: string } };
+  /** baseline: the verifier's project test baseline at exactly this commit (or NOT_RUN with the reason). */
+  tests: { directories: string[]; files_sample: string[]; frameworks: string[]; baseline?: TestBaseline };
   ci: Record<string, string[]>;
   deployment: Record<string, string[]>;
   contracts: Record<string, string[]>;

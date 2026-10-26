@@ -7,6 +7,8 @@ import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputClass, Loadi
 import { absoluteTime } from "../../lib/format";
 import { GATE_HELP } from "../evidence/labels";
 import { ModuleBadge } from "./badges";
+import { DeploymentTargetsPanel } from "./DeploymentTargetsPanel";
+import { targetPathOk } from "./deliveryTypes";
 import type { IntegrationView, ListResponse, ProjectView } from "./types";
 
 const PURPOSE_LABEL: Record<string, string> = {
@@ -43,8 +45,12 @@ const ROOT_HINT: Record<string, string> = {
 };
 /** Gates a project's pipeline reference maps (backend delivery.provider.PIPELINE_GATES). */
 export const PIPELINE_GATES = ["G1", "G2", "G3", "G5"] as const;
-/** Same rule as the backend deployment observer (delivery.deployment.health_path_ok). */
-export const HEALTH_PATH = /^\/[A-Za-z0-9._~/-]{0,200}$/;
+/** Same rule as the backend deployment observer (delivery.deployment.health_path_ok): no '//' host, no '..'. */
+export const HEALTH_PATH = /^\/(?!\/)(?!(?:.*\/)?\.\.(?:\/|$))[A-Za-z0-9._~/-]{0,200}$/;
+/** A PERSONAL secret-store reference (personal/... or projects/<project>/...), never a value; the backend re-validates. */
+export const PERSONAL_CREDENTIAL_REF = /^(?!.*\.\.)(?:personal\/[A-Za-z0-9._-][A-Za-z0-9._/-]{0,190}|projects\/[A-Za-z0-9._-]+\/[A-Za-z0-9._/-]{1,190})$/;
+/** deployment-target config keys the Integration Registry keeps when a PUT omits them (an explicit "" clears). */
+const KEPT_WHEN_OMITTED = new Set(["health_path", "smoke_checks", "sli_checks", "rollback_on", "require_artifact_digest"]);
 
 interface IntegrationList extends ListResponse<IntegrationView> {
   allowed_providers: Record<string, string[]>;
@@ -114,7 +120,7 @@ function IntegrationRow({ i }: { i: IntegrationView }) {
             <dt className="text-ink-3">Konfigurasi</dt>
             <dd className="flex flex-wrap gap-2">
               {Object.entries(i.config ?? {}).map(([k, v]) => (
-                <Mono key={k}>{`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`}</Mono>
+                <Mono key={k}>{`${k}=${typeof v === "string" ? v : Array.isArray(v) && KEPT_WHEN_OMITTED.has(k) ? `[${v.length}]` : JSON.stringify(v)}`}</Mono>
               ))}
             </dd>
           </>
@@ -174,6 +180,8 @@ interface FieldSpec {
   /** Client-side convenience only; the backend validates with the same rule and stays authoritative. */
   pattern?: RegExp;
   patternHint?: string;
+  /** The backend keeps this key when a PUT omits it: an emptied field sends "" to clear the stored value. */
+  clearable?: boolean;
 }
 
 export interface SectionSpec {
@@ -224,10 +232,27 @@ function deploymentTarget(purpose: "staging" | "production"): SectionSpec {
         hint: "Satu GET read-only ke URL dasar + path ini; respons harus menyebut commit yang berjalan. Kosong = /health.",
         placeholder: "/health",
         pattern: HEALTH_PATH,
-        patternHint: "harus diawali / dan hanya berisi huruf, angka, . _ ~ / -",
+        patternHint: "harus diawali / dan hanya berisi huruf, angka, . _ ~ / - (tanpa // atau ..)",
+        clearable: true,
+      },
+      {
+        key: "config.migration_credential_ref",
+        label: "Referensi credential migrasi (opsional)",
+        hint: "Referensi secret store untuk migrasi skema (mis. projects/<proyek>/db-migrator), bukan nilai. Verifier memeriksa bahwa ia terpisah dari credential runtime.",
+        placeholder: "projects/<proyek>/db-migrator",
+        pattern: PERSONAL_CREDENTIAL_REF,
+        patternHint: "harus referensi personal/… atau projects/<proyek>/…, bukan nilai secret",
+      },
+      {
+        key: "config.runtime_credential_ref",
+        label: "Referensi credential runtime (opsional)",
+        hint: "Referensi secret store yang dipakai aplikasi saat berjalan (mis. projects/<proyek>/db-app), bukan nilai.",
+        placeholder: "projects/<proyek>/db-app",
+        pattern: PERSONAL_CREDENTIAL_REF,
+        patternHint: "harus referensi personal/… atau projects/<proyek>/…, bukan nilai secret",
       },
     ],
-    defaults: { root_id: "", "config.health_path": "" },
+    defaults: { root_id: "", "config.health_path": "", "config.migration_credential_ref": "", "config.runtime_credential_ref": "" },
     info:
       purpose === "staging"
         ? "Hanya diamati (gate G6, tangkapan layar dokumen): AEOS tidak pernah men-deploy. Deploy ke target ini tetap tindakan manusia."
@@ -376,6 +401,8 @@ export function integrationBody(spec: SectionSpec, values: Values, existingConfi
       const name = f.key.slice("config.".length);
       if (f.checkbox) config[name] = raw === true;
       else if (typeof raw === "string" && raw.trim()) config[name] = raw.trim();
+      // a key the backend keeps when omitted is cleared explicitly with "" (only when a value is stored)
+      else if (f.clearable && existingConfig && name in existingConfig) config[name] = "";
       else delete config[name];
     } else {
       body[f.key] = typeof raw === "string" && raw.trim() ? raw.trim() : null;
@@ -501,6 +528,7 @@ function IntegrationForm({ project, allowed, integrations, onSaved }: { project:
   const [rootId, setRootId] = useState("");
   const [tenantId, setTenantId] = useState("");
   const [credentialRef, setCredentialRef] = useState("");
+  const [healthPath, setHealthPath] = useState("");
   useEffect(() => {
     setPurpose(allowed[provider]?.[0] ?? "");
   }, [provider, allowed]);
@@ -515,8 +543,19 @@ function IntegrationForm({ project, allowed, integrations, onSaved }: { project:
     setRootId(existing?.root_id ?? "");
     setTenantId(existing?.tenant_id ?? "");
     setCredentialRef(existing?.credential_ref ?? "");
+    setHealthPath(typeof existing?.config?.health_path === "string" ? existing.config.health_path : "");
   }
   const keptConfig = editableConfig(existing?.config);
+  const isTarget = provider === "deployment-target";
+  const storedHealth = typeof existing?.config?.health_path === "string" ? existing.config.health_path : null;
+  const healthOk = !healthPath.trim() || targetPathOk(healthPath.trim());
+  // health_path is kept by the backend when omitted: a typed value replaces it, an emptied field sends "" to clear it
+  const sentConfig: Record<string, unknown> = { ...keptConfig };
+  if (isTarget) {
+    if (healthPath.trim()) sentConfig.health_path = healthPath.trim();
+    else if (storedHealth !== null) sentConfig.health_path = "";
+    else delete sentConfig.health_path;
+  }
   const save = useMutation({
     mutationFn: () =>
       put(`/api/projects/${project.id}/integrations`, {
@@ -525,7 +564,7 @@ function IntegrationForm({ project, allowed, integrations, onSaved }: { project:
         root_id: rootId.trim() || null,
         tenant_id: tenantId.trim() || null,
         credential_ref: credentialRef.trim() || null,
-        config: keptConfig,
+        config: sentConfig,
       }),
     onSuccess: onSaved,
   });
@@ -565,10 +604,22 @@ function IntegrationForm({ project, allowed, integrations, onSaved }: { project:
         <Field label="Referensi credential" hint={project.domain === "OFFICE" ? "office/… atau projects/…" : "personal/… atau projects/… (bukan nilai secret)"}>
           <input className={inputClass} value={credentialRef} onChange={(e) => setCredentialRef(e.target.value)} placeholder="personal/github" />
         </Field>
+        {isTarget && (
+          <Field label="Path health/version (opsional)" hint="Kosong = /health. Mengosongkan path tersimpan mengirim nilai kosong agar kembali ke /health.">
+            <input
+              className={`${inputClass} mono`}
+              value={healthPath}
+              aria-invalid={!healthOk || undefined}
+              onChange={(e) => setHealthPath(e.target.value)}
+              placeholder="/health"
+            />
+          </Field>
+        )}
         <div className="text-xs text-ink-3 sm:col-span-2">
-          {Object.keys(keptConfig).length > 0 ? (
+          {Object.keys(keptConfig).filter((k) => !(isTarget && k === "health_path")).length > 0 ? (
             <>
-              Konfigurasi tersimpan dipertahankan apa adanya: <Mono>{Object.keys(keptConfig).join(", ")}</Mono>. Ubah lewat bagian pengaturan di atas.
+              Konfigurasi tersimpan dipertahankan apa adanya:{" "}
+              <Mono>{Object.keys(keptConfig).filter((k) => !(isTarget && k === "health_path")).join(", ")}</Mono>. Ubah lewat bagian pengaturan di atas.
             </>
           ) : (
             "Belum ada konfigurasi tersimpan untuk provider + tujuan ini."
@@ -580,9 +631,12 @@ function IntegrationForm({ project, allowed, integrations, onSaved }: { project:
           </div>
         ) : null}
         <div className="sm:col-span-2">
-          <Button type="submit" variant="primary" busy={save.isPending} disabled={!provider || !purpose}>
+          <Button type="submit" variant="primary" busy={save.isPending} disabled={!provider || !purpose || !healthOk}>
             Simpan konfigurasi
           </Button>
+          <span aria-live="polite" className="ml-2 text-xs text-bad">
+            {!healthOk ? "Path health harus path absolut seperti /health (tanpa host, query, // atau ..)." : ""}
+          </span>
         </div>
       </form>
     </Card>
@@ -623,6 +677,7 @@ export function IntegrationsPanel({ project, isAdmin }: { project: ProjectView; 
       ) : (
         items.map((i) => <IntegrationRow key={i.id} i={i} />)
       )}
+      {project.domain === "PERSONAL" && q.data && <DeploymentTargetsPanel project={project} integrations={items} isAdmin={isAdmin} />}
       {isAdmin && q.data && <IntegrationSettings project={project} integrations={items} onSaved={refresh} />}
       {isAdmin && q.data && <IntegrationForm project={project} allowed={q.data.allowed_providers} integrations={items} onSaved={refresh} />}
     </div>
