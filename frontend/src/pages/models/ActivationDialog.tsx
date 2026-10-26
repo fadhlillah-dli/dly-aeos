@@ -214,6 +214,13 @@ export function ActivationDialog({ route, onClose }: { route: RouteItem; onClose
               {!clientDecided && <p className="mt-1 text-xs text-warn">Tanpa keputusan ini rute tidak dapat diaktifkan.</p>}
             </fieldset>
           )}
+          {route.client_restriction?.status === "OWNER_ACCEPTED" && (
+            <Notice tone="info">
+              Syarat klien penyedia sudah Anda putuskan pada konfigurasi ini
+              {route.client_restriction.owner_note ? ` (catatan: ${route.client_restriction.owner_note})` : ""}; keputusan itu bagian dari hash
+              yang diikat aktivasi ini. Apakah penyedia menerima panggilan broker tetap NOT-PROVEN sampai probe kelayakan.
+            </Notice>
+          )}
           {termsUnknown && (
             <fieldset className="rounded border border-line p-3">
               <legend className="px-1 text-sm font-medium">Terms belum diketahui: catat bacaan Anda</legend>
