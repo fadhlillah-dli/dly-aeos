@@ -3,6 +3,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Freshness, KeyValue, Mono } from "../../components/ui";
 import { shortHash } from "../../lib/format";
 import { formatBytes } from "./badges";
+import { BaselineFacts } from "./TestBaselinePanel";
 import type { InventoryView } from "./types";
 
 function Group({ title, data }: { title: string; data: Record<string, string[]> }) {
@@ -73,9 +74,9 @@ export function InventoryFacts({ inv }: { inv: InventoryView }) {
             <span key="t" className="flex flex-wrap items-center gap-2">
               {inv.tests.frameworks.length ? inv.tests.frameworks.join(", ") : "framework tidak terdeteksi"}
               {inv.tests.directories.length > 0 && <span className="text-ink-3">· direktori {inv.tests.directories.slice(0, 4).join(", ")}</span>}
-              <StatusBadge status="NOT_TESTED" label="Baseline belum dijalankan" />
             </span>,
           ],
+          ["Baseline tes", inv.tests.baseline ? <BaselineFacts key="b" b={inv.tests.baseline} /> : <StatusBadge key="b" status="NOT_TESTED" label="Baseline belum dijalankan" />],
           ["Kondisi working tree", inv.working_tree.dirty === null ? "UNKNOWN" : inv.working_tree.dirty ? `dirty (${inv.working_tree.entries} entri)` : "bersih"],
         ]}
       />
