@@ -761,6 +761,8 @@ def dag_view(session: Session, plan: Plan, version: PlanVersion) -> dict[str, An
             "quarantine": bool((s.reviewer_policy or {}).get("quarantine_special_review")),
             "acceptance_criteria": s.acceptance_criteria or [], "mode": s.mode or "LIVE",
             "expected_outputs": s.expected_outputs or [], "role_revision_hash": s.role_revision_hash,
+            # read-only: the verifier's opt-ins (integration_tests, contract_breaking, ...) as the TaskSpec states them
+            "verifier_policy": dict(s.verifier_policy or {}),
         } for s in specs]
     else:
         project = session.get(Project, version.project_id)
@@ -779,6 +781,7 @@ def dag_view(session: Session, plan: Plan, version: PlanVersion) -> dict[str, An
                 "quarantine": bool((f.get("reviewer_policy") or {}).get("quarantine_special_review")),
                 "acceptance_criteria": f.get("acceptance_criteria", []), "mode": f.get("mode", version.mode or "LIVE"),
                 "expected_outputs": f.get("expected_outputs", []), "role_revision_hash": None,
+                "verifier_policy": dict(f.get("verifier_policy") or {}),
             })
     keys = {t["key"] for t in tasks}
     by_key = {t["key"]: t for t in tasks}

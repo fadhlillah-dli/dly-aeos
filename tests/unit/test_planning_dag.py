@@ -209,6 +209,22 @@ def test_dag_view_keeps_mock_provenance(db):
     assert dag.dag_view(db, _plan2, live)["data_mode"] == "LIVE"
 
 
+def test_dag_view_states_the_task_verifier_policy_read_only(db):
+    """The Control Center shows a TaskSpec's verifier opt-ins (integration_tests, contract_breaking) read-only; the
+    planner's contract v1 cannot set them, so a planner-compiled task states neither."""
+    project = make_project(db)
+    plan, v = _version(db, project, sample_content())
+    preview = {n["key"]: n for n in dag.dag_view(db, plan, v)["nodes"]}
+    assert all(n["verifier_policy"]["required"] is True for n in preview.values())
+    dag.compile_version(db, v, actor="tester")
+    db.commit()
+    spec = db.scalars(select(TaskSpec).where(TaskSpec.plan_version_id == v.id)).first()
+    nodes = {n["key"]: n for n in dag.dag_view(db, plan, v)["nodes"]}
+    policy = nodes[spec.task_key]["verifier_policy"]
+    assert policy == spec.verifier_policy
+    assert "integration_tests" not in policy and "contract_breaking" not in policy
+
+
 @pytest.mark.parametrize(("a", "b", "overlap"), [
     ("src/a/**", "src/a/x.py", True), ("src/a/**", "src/b/**", False), ("src/**", "src/b/c.py", True),
     ("**", "anything", True), ("docs/x.md", "docs/x.md", True), ("./src\\a", "src/a/b", True),

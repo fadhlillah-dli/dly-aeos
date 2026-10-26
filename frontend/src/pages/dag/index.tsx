@@ -5,6 +5,7 @@ import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import type { DagView, PlanSummary } from "../../components/planning/types";
 import { StatusBadge } from "../../components/StatusBadge";
+import { PLANNER_CONTRACT_NOTE, VerifierPolicyFacts } from "../../components/planning/VerifierPolicy";
 import { Card, EmptyState, ErrorBox, inputClass, Loading, Mono, Notice, PageHeader, Table, Tabs } from "../../components/ui";
 import { useEventStream } from "../../lib/events";
 import { relativeTime, shortHash } from "../../lib/format";
@@ -69,6 +70,7 @@ function TaskTable({ view, highlight }: { view: DagView; highlight: string | nul
             ),
         },
         { header: "Path tulis", cell: (n) => <div className="text-xs">{n.allowed_paths.join(", ") || "—"}</div> },
+        { header: "Kebijakan verifier", cell: (n) => <VerifierPolicyFacts policy={n.verifier_policy} /> },
         { header: "Konflik tulis", cell: (n) => (n.conflicts_with.length ? <span className="text-warn">{n.conflicts_with.join(", ")}</span> : "—") },
       ]}
     />
@@ -219,7 +221,16 @@ export default function DagPage() {
                     </Suspense>
                   ),
                 },
-                { id: "table", label: "Tabel", content: <TaskTable view={view} highlight={highlight} /> },
+                {
+                  id: "table",
+                  label: "Tabel",
+                  content: (
+                    <div className="space-y-2">
+                      <Notice tone="info">{PLANNER_CONTRACT_NOTE} Kebijakan verifier TaskSpec hanya-baca (terikat hash TaskSpec).</Notice>
+                      <TaskTable view={view} highlight={highlight} />
+                    </div>
+                  ),
+                },
                 { id: "blockers", label: "Blocker & konflik", content: <BlockersAndConflicts view={view} /> },
               ]}
               initial={highlight ? "table" : "graph"}
