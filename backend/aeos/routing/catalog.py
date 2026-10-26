@@ -108,6 +108,11 @@ def _apply_openrouter(route: ModelRoute, m: dict[str, Any], now: datetime) -> No
     if expiry is not None:
         route.free_until = expiry if route.is_free == "YES" else route.free_until
         route.expires_note = f"catalog expiration_date {m.get('expiration_date')}"
+    elif route.is_free == "YES" and route.free_until is not None and m.get("expiration_date") in (None, ""):
+        # the catalog lists the model as free with no end date any more: the stored end date is not the provider's
+        # (a configuration change - free_until is part of the identity - so an activation bound to it stops applying)
+        route.free_until = None
+        route.expires_note = f"catalog lists no expiration_date (checked {now.date().isoformat()})"
     raw_top = m.get("top_provider")
     top: dict[str, Any] = raw_top if isinstance(raw_top, dict) else {}
     terms = dict(route.data_terms or {})
@@ -266,14 +271,18 @@ def refresh_openrouter_key_info(session: Session, client: httpx.Client) -> dict[
     credits.observed_at = now
     credits.details = {k: v for k, v in info.items() if k != "credit_state"} | {"secret_ref": ref}
     observed = info.get("free_model_daily_requests") or {}
-    if isinstance(observed.get("remaining"), int) and observed["remaining"] <= 0:
+    remaining = observed.get("remaining")
+    if isinstance(remaining, int) and remaining <= 0:
         # the key endpoint reports the free-model daily requests used up (decision C): every free route waits until
         # the next UTC midnight - never a fallback to another route
         daily.state, daily.source, daily.observed_at = "EXHAUSTED", "official-key-endpoint", now
         daily.resets_at = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         daily.details = {"free_model_daily_requests": observed,
                          "note": "free-model requests of the current UTC day used up per the key endpoint"}
-    elif daily.state != "EXHAUSTED" or (daily.resets_at is not None and ensure_aware(daily.resets_at) <= now):
+    elif daily.state != "EXHAUSTED" or (daily.resets_at is not None and ensure_aware(daily.resets_at) <= now) \
+            or (isinstance(remaining, int) and remaining > 0):
+        # cleared when it reset, and when the key endpoint now reports free-model requests left (e.g. after the credit
+        # purchase raised the daily limit): the official count of the current UTC day wins over an older block
         daily.state = "UNKNOWN"
         daily.source = "documented-limit"
         daily.observed_at = now

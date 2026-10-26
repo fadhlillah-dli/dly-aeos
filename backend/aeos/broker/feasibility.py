@@ -48,6 +48,9 @@ PROBE_MAX_TOKENS = 16
 # margin for the chat template): what a subscription route's allowance estimate counts (ADR-0080 amendment 2026-10-26).
 PROBE_TOKEN_BOUND = len(PROBE_PROMPT) + PROBE_MAX_TOKENS + 64
 PROBE_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
+# Errors raised before the request left this host: such a probe never reached the upstream and is not counted against
+# an OpenRouter free-model limit; every other outcome (an answer, a read timeout, a broken response) is counted.
+NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.UnsupportedProtocol)
 
 
 def _spend_problem(session: Session, route: ModelRoute, base_url: str) -> tuple[str, str] | None:
@@ -149,6 +152,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     data: dict[str, Any] = {}
     retry_after: int | None = None
     rate_limit: dict[str, Any] = {}
+    sent = False  # whether the request reached the upstream (counted against an OpenRouter :free limit, decision C)
     own = client is None
     http = client or httpx.Client(timeout=PROBE_TIMEOUT, follow_redirects=False, trust_env=False)
     try:
@@ -156,6 +160,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
         resp = http.post(upstream.url, json=body,
                          headers=_upstream_headers(upstream, run_id=f"probe:{route_key}:{uuid.uuid4().hex}"))
         status = resp.status_code
+        sent = True
         if status == 200:
             try:
                 parsed = resp.json()
@@ -165,10 +170,12 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
         elif status == 429:
             retry_after = _retry_after(resp)
             rate_limit = rate_limit_info(resp)
-    except httpx.TimeoutException:
+    except httpx.TimeoutException as exc:
         error = "timeout"
+        sent = not isinstance(exc, NOT_SENT_ERRORS)  # a read/write timeout: the request was sent
     except httpx.HTTPError as exc:
         error = type(exc).__name__
+        sent = not isinstance(exc, NOT_SENT_ERRORS)
     finally:
         if own:
             http.close()
@@ -214,7 +221,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
                  action="broker.route_feasibility.probe", result="SUCCESS" if outcome == "REACHABLE" else "FAILED",
                  target_type="model_route", target_id=route_key, domain="PERSONAL", reason=outcome,
                  details={"pool": route.pool, "http_status": status, "latency_ms": latency_ms, "evidence_id": ev,
-                          "ledger": ledger})
+                          "ledger": ledger, "upstream": "SENT" if sent else "NOT_SENT"})
     return result
 
 

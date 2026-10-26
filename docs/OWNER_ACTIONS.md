@@ -442,9 +442,10 @@ Activating a route is your explicit decision. Nothing is active by default.
 
   **What AEOS does with a free WORKER route:**
 
-  * **Limits.** AEOS counts the requests it sent to `:free` models (workers, evaluations, probes): at most 20 in a
-    minute and the daily cap per UTC day. A 429 from OpenRouter stops every free route of the account until its
-    Retry-After (or one minute, or 00:00 UTC when the daily count is used up). Your own use of the same account
+  * **Limits.** AEOS counts the requests it sent to `:free` models (workers, evaluations, every probe that reached
+    OpenRouter): at most 20 in a minute and the daily cap per UTC day. A 429 from OpenRouter stops every free route of
+    the account until its Retry-After or `X-RateLimit-Reset` (else one minute, or 00:00 UTC for the daily limit). A run
+    stopped at a quota does not use up an attempt; the task runs again after the reset. Your own use of the same account
     elsewhere is invisible to AEOS, so OpenRouter can refuse earlier; its 429 stays authoritative and is never a
     success.
   * **No paid fallback.** A task never moves from the free route to a Go route or any other paid route. Over the limit
@@ -458,6 +459,7 @@ Activating a route is your explicit decision. Nothing is active by default.
     | Code | Shown as | What to do |
     |---|---|---|
     | `FREE_TIER_LIMIT_REACHED` | WAITING_QUOTA | Nothing: it clears after a minute, after the Retry-After or at 00:00 UTC. After you buy credits: step 3. |
+    | `NEEDS_DECISION` naming "provider quota" | BLOCKED | The task was stopped at a quota 6 times: it does not fit the limit. Retry it with extra attempts (*Pekerjaan Live* -> retry) once the limit allows it, or plan it on another route. |
     | `FREE_WORKER_ROUTE_INELIGIBLE` | BLOCKED (broker 403) | The route is no longer free, or the task is not PUBLIC. Run `./aeos routes refresh` and check the route. Move a paid one back with `./aeos routes set-pool <route_key> --pool ARENA --as <admin> --rationale "<why>"` or `./aeos routes disable <route_key> --reason "<why>"`. |
     | `ROUTE_INELIGIBLE` naming the TRIAL | BLOCKED | The TRIAL expired or the configuration changed: step 7. |
 

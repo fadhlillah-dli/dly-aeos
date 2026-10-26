@@ -22,15 +22,18 @@ only after a new hash-bound human activation.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from aeos.core.timeutil import ensure_aware, utcnow
+from aeos.models.audit import AuditEvent
 from aeos.models.broker_ext import BrokerRequest
-from aeos.models.cost import QuotaState, UsageLedgerEntry
+from aeos.models.cost import CostAdmissionLock, QuotaState, UsageLedgerEntry
 from aeos.models.decisions import Decision
 from aeos.models.routing import ModelRoute
 
@@ -52,7 +55,16 @@ QUOTA_SCOPES = (SCOPE_DAILY, SCOPE_RPM)
 MINUTE = timedelta(seconds=60)
 # Broker request outcomes that never reached the upstream (refused by the broker itself)
 NOT_FORWARDED = ("DENIED", "CAP_EXCEEDED", "UNKNOWN_MODEL")
-PROBE_SOURCE = "broker-feasibility"
+# A feasibility probe that reached OpenRouter: its audit event (PROBE_ACTION) carries ``upstream: SENT``.
+PROBE_ACTION = "broker.route_feasibility.probe"
+PROBE_SENT = "SENT"
+# OpenRouter documents 20 requests/minute for :free models; an X-RateLimit-Limit at or below it names the
+# per-minute limit, a larger one the daily limit (50 or 1000).
+DOCUMENTED_RPM = 20
+MAX_RESET_AHEAD = timedelta(hours=48)  # a provider reset further away than this is not a reset time we trust
+# Single-row SQLite write lock (``cost_admission_lock``, as the cost module's admission lock): taken before the count
+# of a :free request so the count and the request's PENDING row are one atomic step across workers.
+COUNT_LOCK = "openrouter-free"
 ACTIVATION_KINDS = ("TRIAL", "ROUTE_ACTIVATION")
 
 
@@ -197,8 +209,8 @@ def _free_route_keys(session: Session) -> list[str]:
 
 def usage(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
     """Requests this AEOS instance sent to OpenRouter ``:free`` models in the last minute and in the current UTC day:
-    forwarded broker requests (any outcome the upstream saw, a 429 included) and feasibility probes recorded in the
-    ledger. Requests the broker refused itself never reached OpenRouter and are not counted."""
+    forwarded broker requests (any outcome the upstream saw, a 429 included) and feasibility probes that reached
+    OpenRouter (their audit event). Requests the broker refused itself never reached OpenRouter and are not counted."""
     current = ensure_aware(now or utcnow())
     assert current is not None
     minute_start = current - MINUTE
@@ -207,9 +219,10 @@ def usage(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
         BrokerRequest.provider == PROVIDER, BrokerRequest.upstream_model.like(f"%{FREE_SUFFIX}"),
         BrokerRequest.outcome.not_in(NOT_FORWARDED), BrokerRequest.created_at >= since))]
     keys = _free_route_keys(session)
-    probes = [ensure_aware(t) for t in session.scalars(select(UsageLedgerEntry.at).where(
-        UsageLedgerEntry.source == PROBE_SOURCE, UsageLedgerEntry.provider == PROVIDER,
-        UsageLedgerEntry.route_key.in_(keys), UsageLedgerEntry.at >= since))] if keys else []
+    # every probe that reached OpenRouter, whatever it answered (a 5xx, a 429, a timeout after the request was sent)
+    probes = [ensure_aware(t) for t in session.scalars(select(AuditEvent.at).where(
+        AuditEvent.action == PROBE_ACTION, AuditEvent.target_type == "model_route", AuditEvent.target_id.in_(keys),
+        AuditEvent.details["upstream"].as_string() == PROBE_SENT, AuditEvent.at >= since))] if keys else []
     stamps = [t for t in (*broker, *probes) if t is not None]
     in_minute = sorted(t for t in stamps if t >= minute_start)
     day = sum(1 for t in stamps if t >= _day_start(current))
@@ -266,25 +279,88 @@ def route_limit_problem(session: Session, route: ModelRoute, *, now: datetime | 
     return limit_problem(session, now=now, observed=observed) if is_free_model_route(route) else None
 
 
+def acquire_count_lock(session: Session) -> bool:
+    """Take the SQLite write lock before counting a ``:free`` request (the caller's transaction then inserts the
+    request's PENDING row and commits, releasing it). Concurrent requests serialise here, so they cannot all pass the
+    same count. False when the lock cannot be taken (busy beyond the timeout): the caller refuses (fail closed)."""
+    stmt = sqlite_insert(CostAdmissionLock).values(name=COUNT_LOCK, seq=1, updated_at=utcnow())
+    stmt = stmt.on_conflict_do_update(index_elements=["name"],
+                                      set_={"seq": CostAdmissionLock.seq + 1, "updated_at": utcnow()})
+    try:
+        session.execute(stmt)
+    except OperationalError:
+        return False
+    return True
+
+
+def _int(value: Any) -> int | None:
+    try:
+        f = float(str(value).strip())
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return int(f) if math.isfinite(f) else None
+
+
+def _header_reset(value: Any, now: datetime) -> datetime | None:
+    """``X-RateLimit-Reset`` as a time: epoch milliseconds (a large value) or seconds; only a time in the future and at
+    most 48 hours ahead is trusted (the format is not documented)."""
+    raw = _int(value)
+    if raw is None or raw <= 0:
+        return None
+    seconds = raw / 1000 if raw > 10**11 else raw
+    try:
+        at = datetime.fromtimestamp(seconds, UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return at if now < at <= now + MAX_RESET_AHEAD else None
+
+
+def _limit_kind(headers: dict[str, str]) -> str | None:
+    """Which limit a 429 names (``X-RateLimit-Limit``): the per-minute one (at most the documented 20) or the daily one;
+    None when the header is absent or unreadable."""
+    limit = _int(headers.get("x-ratelimit-limit"))
+    if limit is None or limit <= 0:
+        return None
+    return SCOPE_RPM if limit <= DOCUMENTED_RPM else SCOPE_DAILY
+
+
 def note_rate_limited(session: Session, *, route_key: str, retry_after_seconds: int | None,
                       headers: dict[str, str] | None = None, run_id: str | None = None,
                       source: str = "observed-429", now: datetime | None = None) -> dict[str, Any]:
     """Record a 429 OpenRouter answered for a ``:free`` model as an account-wide quota state, so every free route
-    waits (the limits are shared by every ``:free`` model). The reset: the provider's Retry-After when it sent one;
-    otherwise the next UTC midnight when this instance's daily count has reached the cap, else one minute (the
-    per-minute window). Which limit a 429 without Retry-After hit is not documented (NOT-PROVEN)."""
+    waits (the limits are shared by every ``:free`` model).
+
+    * Which limit: ``X-RateLimit-Limit`` (<= 20 per minute, else daily); without it, a reset more than an hour away is
+      the daily limit.
+    * The reset: the provider's ``Retry-After`` (seconds or an HTTP date, parsed by the broker); else
+      ``X-RateLimit-Reset`` (epoch ms or s); else the next UTC midnight for the daily limit (or when this instance's
+      daily count reached the cap), else one minute (the per-minute window).
+    * A longer block already recorded for that scope is kept (an indefinite one too); the 429 never shortens it.
+    The header formats are not documented (NOT-PROVEN)."""
     current = ensure_aware(now or utcnow())
     assert current is not None
+    hdrs = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+    kind = _limit_kind(hdrs)
+    resets: datetime | None
     if retry_after_seconds is not None:
-        wait = max(1, int(retry_after_seconds))
-        resets, basis = current + timedelta(seconds=wait), "retry-after"
-        scope = SCOPE_RPM if wait <= int(MINUTE.total_seconds()) else SCOPE_DAILY
-    elif usage(session, now=current)["day"] >= limits(session)["daily"]:
-        resets, basis, scope = next_utc_midnight(current), "daily-cap-counted", SCOPE_DAILY
+        resets, basis = current + timedelta(seconds=max(1, int(retry_after_seconds))), "retry-after"
+    elif (reset := _header_reset(hdrs.get("x-ratelimit-reset"), current)) is not None:
+        resets, basis = reset, "x-ratelimit-reset"
+    elif kind == SCOPE_DAILY:
+        resets, basis = next_utc_midnight(current), "daily-limit-header"
+    elif kind is None and usage(session, now=current)["day"] >= limits(session)["daily"]:
+        resets, basis, kind = next_utc_midnight(current), "daily-cap-counted", SCOPE_DAILY
     else:
-        resets, basis, scope = current + MINUTE, "per-minute-window", SCOPE_RPM
+        resets, basis = current + MINUTE, "per-minute-window"
+    scope = kind or (SCOPE_DAILY if resets - current > timedelta(hours=1) else SCOPE_RPM)
+    existing = session.scalar(select(QuotaState).where(QuotaState.provider == PROVIDER, QuotaState.scope == scope))
+    if existing is not None and existing.state == "EXHAUSTED":
+        held = ensure_aware(existing.resets_at)
+        if held is None or held > resets:  # an indefinite or a longer block stays
+            return {"recorded": False, "scope": scope, "kept": True,
+                    "resets_at": held.isoformat() if held else None, "basis": "existing-longer-block"}
     details = {"status": 429, "route_key": route_key, "run_id": run_id, "reset_basis": basis,
-               "rate_limit_headers": dict(headers or {}),
+               "rate_limit_headers": {k: v for k, v in hdrs.items() if k.startswith("x-ratelimit-")},
                "note": "account-wide: every OpenRouter :free route waits; no fallback to another route"}
     try:
         from aeos.cost import facade as cost
@@ -292,7 +368,7 @@ def note_rate_limited(session: Session, *, route_key: str, retry_after_seconds: 
         cost.set_quota_state(session, provider=PROVIDER, state="EXHAUSTED", source=source, scope=scope,
                              details=details, observed_at=current, resets_at=resets)
     except ImportError:  # the cost module owns quota state; without it the 429 stays on the route scope only
-        return {"recorded": False, "scope": scope, "resets_at": resets.isoformat()}
+        return {"recorded": False, "scope": scope, "resets_at": resets.isoformat(), "basis": basis}
     return {"recorded": True, "scope": scope, "resets_at": resets.isoformat(), "basis": basis}
 
 

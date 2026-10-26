@@ -19,7 +19,8 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
   at the move, at activation, in routing and on every broker request (an INTERNAL run is refused). They rank first for
   PUBLIC tasks; at the account's free-model limit (`openrouter_free_rpm_limit` 20, `openrouter_free_daily_limit` 50,
   1000 after credits) the task waits (`FREE_TIER_LIMIT_REACHED`), never a Go/paid fallback; a 429 is recorded
-  account-wide. Migration 0009 indexes `broker_requests.created_at`. E2 (respx); live NOT-PROVEN.
+  account-wide. Migration 0009 indexes `broker_requests.created_at`. A run stopped at a provider quota no longer uses up
+  a task attempt (bounded: 6 quota stops, then an owner decision). E2 (respx); live NOT-PROVEN.
 
 - **OpenCode Go WORKER routes (owner decision A).** The owner chose option A of ADR-0041 on 2026-10-26: OpenCode Go,
   a $10/month subscription, for broker-served worker routes. Part 1 adds the routes and the code paths. Part 2 adds the

@@ -133,3 +133,11 @@ def note_free_tier_rate_limited(session: Session, *, route_key: str, retry_after
 
     return impl(session, route_key=route_key, retry_after_seconds=retry_after_seconds, headers=headers, run_id=run_id,
                 source=source)
+
+
+def free_tier_count_lock(session: Session) -> bool:
+    """Take the write lock that makes counting an OpenRouter ``:free`` request and recording it one atomic step (held
+    until the caller commits; additive, decision C). False when it cannot be taken: the caller refuses."""
+    from aeos.routing.free_tier import acquire_count_lock as impl
+
+    return impl(session)

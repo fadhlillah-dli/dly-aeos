@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import copy
 import importlib
-from datetime import timedelta
+import threading
+import time
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 
 import httpx
 import pytest
@@ -52,6 +55,27 @@ CATALOG = {"data": [
 UPSTREAM = "https://openrouter.ai/api/v1/chat/completions"
 KEY = "sk-or-v1-" + "f" * 48
 FREE_PRICING = {"prompt": "0", "completion": "0", "basis": "OpenRouter catalog", "unit": "USD per token"}
+
+
+@pytest.fixture(autouse=True)
+def _midday_utc(monkeypatch):
+    """The free-model limits count per UTC day: every test runs at 12:00 UTC of the current date (the clock still
+    advances in real time), so 'now - a few minutes' is always the same UTC day, whatever the wall clock says. Every
+    AEOS timestamp comes from ``timeutil.utcnow``, which reads this clock."""
+    from aeos.core import timeutil
+
+    real = timeutil.datetime
+    started = real.now(UTC)
+    noon = started.replace(hour=12, minute=0, second=0, microsecond=0)
+
+    class _MiddayClock(real):  # type: ignore[valid-type,misc]
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            at = noon + (real.now(UTC) - started)
+            return at if tz is None or tz is UTC else at.astimezone(tz)
+
+    monkeypatch.setattr(timeutil, "datetime", _MiddayClock)
+    assert utcnow().hour in (12, 13)
 
 
 @pytest.fixture
@@ -559,3 +583,220 @@ def test_cli_set_pool_needs_the_admin_password_and_prints_ascii(routes, monkeypa
     assert bad.exit_code == 1 and "ROUTE_POOL_MOVE_UNSUPPORTED" in bad.output
     routes.expire_all()
     assert routes.query(AuditEvent).filter_by(action="route.set_pool", target_id=FREE).count() == 1
+
+
+# ------------------------------------------------------------------ review fixes (2026-10-27)
+
+
+def test_a_quota_stop_never_uses_up_an_attempt_and_the_task_returns_after_the_reset(db, monkeypatch):
+    """A run the executor stops at a provider quota gives its attempt back; the task waits for the quota and is READY
+    again after the reset. A bound on quota stops (per owner-granted round) keeps a task that never fits from looping."""
+    from aeos.models.planning import TaskSpec
+    from aeos.worker_runtime import executor
+    from tests.unit.test_workforce_support import (
+        make_owner,
+        process_sandbox_exception,
+        seed_and_enable_implementer,
+    )
+
+    fakes = FakeModules().install(monkeypatch)
+    project = make_project(db)
+    plan, pv, (spec,) = make_plan(db, project, [{"task_key": "a"}])
+    fakes.approved[plan.id] = pv.id
+    make_route(db)
+    fakes.route_key = "worker.test-free"
+    seed_and_enable_implementer(db)
+    process_sandbox_exception(db)
+    scheduler.ensure_executions(db, pv.id, actor="test", requested_by="owner")
+    scheduler.refresh_readiness(db, pv.id)
+    monkeypatch.setattr(scheduler, "QUOTA_STOPS_MAX", 3)
+
+    def quota_stop() -> None:
+        run = scheduler.acquire_lease(db, spec.id, actor="t")
+        assert scheduler.get_te(db, spec.id).attempts_used == 1
+        scheduler.transition_task(db, spec.id, "RUNNING", reason="bound", actor="t")
+        te = scheduler.get_te(db, spec.id)
+        out = executor._decide(db, run, db.get(TaskSpec, spec.id), te, exit_code=None, stop_reason="QUOTA_EXHAUSTED",
+                               violations=[], protected_hits=[])
+        assert out == "STOPPED"
+        db.add(QuotaState(provider="openrouter", scope="worker.test-free", state="EXHAUSTED", source="observed-429",
+                          resets_at=utcnow() + timedelta(minutes=5)))  # what the broker recorded on the 429s
+        db.flush()
+
+    for _ in range(2):
+        quota_stop()
+        te = scheduler.get_te(db, spec.id)
+        assert te.state == "BLOCKED" and te.reason_code == "QUOTA_EXHAUSTED" and te.attempts_used == 0
+        scheduler.refresh_readiness(db, pv.id)
+        assert scheduler.get_te(db, spec.id).state == "BLOCKED"  # waits while the quota holds
+        db.query(QuotaState).filter_by(scope="worker.test-free").delete()  # the provider reset
+        scheduler.refresh_readiness(db, pv.id)
+        te = scheduler.get_te(db, spec.id)
+        assert te.state == "READY" and te.attempts_used == 0
+    quota_stop()  # the third quota stop reaches the bound (3): an owner decision, never an endless loop
+    db.query(QuotaState).filter_by(scope="worker.test-free").delete()
+    scheduler.refresh_readiness(db, pv.id)
+    te = scheduler.get_te(db, spec.id)
+    assert te.state == "BLOCKED" and te.reason_code == "NEEDS_DECISION" and "provider quota" in te.reason
+    with pytest.raises(Blocked):
+        scheduler.retry_task(db, spec.id, actor="user:o")
+    te = scheduler.retry_task(db, spec.id, actor="user:o", extra_attempts=1, rationale="the quota has reset",
+                              actor_user_id=make_owner(db))
+    assert te.state == "READY" and te.attempts_used == 0
+
+
+def test_the_executor_stops_a_run_only_on_consecutive_rate_limits(db):
+    from aeos.worker_runtime import executor
+
+    def req(outcome: str, seconds: int) -> None:
+        db.add(BrokerRequest(grant_id="g", run_id="r1", project_id="p", domain="PERSONAL", outcome=outcome,
+                             created_at=utcnow() - timedelta(seconds=100 - seconds)))
+        db.flush()
+
+    for i, outcome in enumerate(("RATE_LIMITED", "RATE_LIMITED", "OK", "RATE_LIMITED", "RATE_LIMITED")):
+        req(outcome, i)
+    assert executor._rate_limited_count(db, "r1") == 2  # the answered request in between reset the run of refusals
+    req("RATE_LIMITED", 10)
+    assert executor._rate_limited_count(db, "r1") == 3 == executor.QUOTA_STOP_AFTER
+
+
+def test_catalog_clears_free_until_when_the_free_model_has_no_end_date_any_more(routes, monkeypatch):
+    install_fakes(monkeypatch)
+    dated = copy.deepcopy(CATALOG)
+    dated["data"][0]["expiration_date"] = "2026-12-31"
+    _discover(routes, dated)
+    r = service.get_route(routes, FREE)
+    assert r.free_until is not None and "2026-12-31" in r.expires_note
+    garbled = copy.deepcopy(CATALOG)
+    garbled["data"][0]["expiration_date"] = "soon"
+    _discover(routes, garbled)  # an end date the catalog states but AEOS cannot read is kept (fail closed)
+    assert service.get_route(routes, FREE).free_until is not None
+    out = _discover(routes)  # listed free, no expiration_date
+    r = service.get_route(routes, FREE)
+    assert r.free_until is None and "no expiration_date" in r.expires_note and FREE in out["config_changed"]
+
+
+def test_every_probe_that_reached_openrouter_counts_against_the_free_limit(proxy, db):
+    with respx.mock(assert_all_mocked=True) as mock:
+        up = mock.post(UPSTREAM)
+        up.side_effect = [httpx.Response(503, json={"error": "upstream down"}),
+                          httpx.ReadTimeout("no answer"), httpx.ConnectError("refused")]
+        for expected in ("UPSTREAM_ERROR", "TIMEOUT", "UNREACHABLE"):
+            assert broker.probe_route(db, route_key=FREE, actor="user:owner")["outcome"] == expected
+    db.flush()
+    assert free_tier.usage(db)["day"] == 2  # the 503 and the read timeout were sent; the refused connection was not
+    marks = [e.details.get("upstream") for e in db.scalars(select(AuditEvent).where(
+        AuditEvent.action == free_tier.PROBE_ACTION).order_by(AuditEvent.seq))]
+    assert marks == ["SENT", "SENT", "NOT_SENT"]
+
+
+def test_a_429_without_retry_after_is_classified_from_the_rate_limit_headers(routes):
+    from aeos.broker import model_proxy
+
+    now = utcnow()
+    reset = int((now + timedelta(hours=3)).timestamp() * 1000)  # epoch milliseconds
+    out = free_tier.note_rate_limited(routes, route_key=FREE, retry_after_seconds=None,
+                                      headers={"X-RateLimit-Limit": "1000", "X-RateLimit-Remaining": "0",
+                                               "X-RateLimit-Reset": str(reset)})
+    assert out["scope"] == "free-daily" and out["basis"] == "x-ratelimit-reset"
+    assert abs(datetime.fromisoformat(out["resets_at"]) - (now + timedelta(hours=3))) < timedelta(seconds=2)
+    out = free_tier.note_rate_limited(routes, route_key=FREE, retry_after_seconds=None,
+                                      headers={"x-ratelimit-limit": "20", "x-ratelimit-remaining": "0"})
+    assert out["scope"] == "free-rpm" and out["basis"] == "per-minute-window"
+    routes.query(QuotaState).delete()
+    out = free_tier.note_rate_limited(routes, route_key=FREE, retry_after_seconds=None,
+                                      headers={"x-ratelimit-limit": "50", "x-ratelimit-remaining": "0"})
+    assert out["scope"] == "free-daily" and out["basis"] == "daily-limit-header"  # the header names the daily limit
+    assert out["resets_at"] == free_tier.next_utc_midnight(now).isoformat()
+    routes.query(QuotaState).delete()
+    out = free_tier.note_rate_limited(routes, route_key=FREE, retry_after_seconds=7200,
+                                      headers={"x-ratelimit-limit": "20"})
+    assert out["scope"] == "free-rpm"  # the header, not the length of the wait, names the limit
+    seconds = int((now + timedelta(seconds=30)).timestamp())  # epoch seconds
+    assert free_tier._header_reset(str(seconds), now) is not None
+    assert free_tier._header_reset(str(seconds + 10 * 24 * 3600), now) is None  # beyond 48 h: not trusted
+    http_date = format_datetime(now + timedelta(seconds=90), usegmt=True)
+    assert 85 <= (model_proxy.parse_retry_after(http_date) or 0) <= 90
+
+
+def test_a_429_never_shortens_a_longer_or_indefinite_block(routes):
+    long_reset = utcnow() + timedelta(minutes=10)
+    routes.add(QuotaState(provider="openrouter", scope="free-rpm", state="EXHAUSTED", source="observed-429",
+                          resets_at=long_reset))
+    routes.flush()
+    out = free_tier.note_rate_limited(routes, route_key=FREE, retry_after_seconds=30)
+    row = routes.scalar(select(QuotaState).where(QuotaState.provider == "openrouter", QuotaState.scope == "free-rpm"))
+    assert out["kept"] is True and abs(row.resets_at - long_reset) < timedelta(seconds=1)
+    row.resets_at = None  # an indefinite block
+    routes.flush()
+    out = free_tier.note_rate_limited(routes, route_key=FREE, retry_after_seconds=30)
+    assert out["kept"] is True and routes.scalar(select(QuotaState).where(QuotaState.scope == "free-rpm")).resets_at is None
+    row.resets_at = utcnow() - timedelta(seconds=1)  # an expired block is replaced
+    routes.flush()
+    assert free_tier.note_rate_limited(routes, route_key=FREE, retry_after_seconds=30)["recorded"] is True
+
+
+def test_retry_after_parsing_is_shared_and_never_raises():
+    from aeos.broker import model_proxy
+
+    for raw, expected in (("120", 120), ("inf", None), ("-inf", None), ("nan", None), ("soon", None), ("", None),
+                          (None, None), ("1e30", 86400), ("0", 1)):
+        assert model_proxy.parse_retry_after(raw) == expected, raw
+    for raw in ("inf", "nan", "soon"):
+        assert model_proxy._retry_after(httpx.Response(429, headers={"retry-after": raw})) == model_proxy.DEFAULT_RETRY_AFTER
+    assert model_proxy._retry_after(httpx.Response(429, headers={"retry-after": "7200"})) == 3600
+    assert model_proxy.reported_retry_after(httpx.Response(429, headers={"retry-after": "7200"})) == 7200
+
+
+@respx.mock
+def test_a_later_key_refresh_with_requests_left_clears_the_daily_block(routes, secrets_memory):
+    secrets_memory.put("workers/openrouter", KEY, actor="test")
+    used_up = {"data": {"limit": None, "usage": 0.0, "is_free_tier": True,
+                        "free_model_daily_requests": {"used": 50, "limit": 50, "remaining": 0}}}
+    after_purchase = {"data": {"limit": None, "usage": 10.0, "is_free_tier": False,
+                               "free_model_daily_requests": {"used": 50, "limit": 1000, "remaining": 950}}}
+    key = respx.get(catalog.OPENROUTER_KEY_URL)
+    key.side_effect = [httpx.Response(200, json=used_up), httpx.Response(200, json=after_purchase)]
+    for expected in ("EXHAUSTED", "UNKNOWN"):
+        with httpx.Client() as c:
+            catalog.refresh_openrouter_key_info(routes, c)
+        daily = routes.scalar(select(QuotaState).where(QuotaState.provider == "openrouter",
+                                                       QuotaState.scope == "free-daily"))
+        assert daily.state == expected
+    assert free_tier.limit_problem(routes) is None
+
+
+def test_concurrent_free_requests_cannot_both_take_the_last_slot(proxy, db, monkeypatch):
+    """The count and the PENDING row are one atomic step: with 19 of 20 per-minute requests used, two concurrent
+    requests never both pass (the second waits for the write lock, then counts the first)."""
+    from aeos.broker import model_proxy
+    from aeos.routing import facade as routing_facade
+
+    _forwarded(db, 19)
+    db.commit()
+    real = routing_facade.free_tier_limit_problem
+
+    def slow(session, route):
+        out = real(session, route)
+        time.sleep(0.4)  # widen the window between the count and the PENDING row
+        return out
+
+    monkeypatch.setattr(routing_facade, "free_tier_limit_problem", slow)
+    headers = {"authorization": f"Bearer {proxy['PUBLIC']['token']}"}
+    body = {"model": "free", "messages": [{"role": "user", "content": "hi"}]}
+    results: list[object] = []
+
+    def call() -> None:
+        try:
+            results.append(model_proxy._prepare(headers, {}, body))
+        except model_proxy.ProxyError as exc:
+            results.append(exc)
+
+    threads = [threading.Thread(target=call) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    refused = [r for r in results if isinstance(r, model_proxy.ProxyError)]
+    assert len(results) == 2 and len(refused) == 1, results
+    assert refused[0].status == 429 and refused[0].code == "FREE_TIER_LIMIT_REACHED"

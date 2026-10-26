@@ -706,8 +706,15 @@ def _abort_before_start(run_id: str, code: str, message: str) -> None:
 
 
 def _rate_limited_count(s: Any, run_id: str) -> int:
-    return int(s.scalar(select(func.count()).select_from(BrokerRequest).where(
-        BrokerRequest.run_id == run_id, BrokerRequest.outcome == "RATE_LIMITED")) or 0)
+    """Consecutive rate-limit refusals of this run: the RATE_LIMITED requests since its last answered (OK) request. A
+    run that got answers between short per-minute waits is not stopped for refusals it already recovered from."""
+    last_ok = s.scalar(select(func.max(BrokerRequest.created_at)).where(
+        BrokerRequest.run_id == run_id, BrokerRequest.outcome == "OK"))
+    q = select(func.count()).select_from(BrokerRequest).where(
+        BrokerRequest.run_id == run_id, BrokerRequest.outcome == "RATE_LIMITED")
+    if last_ok is not None:
+        q = q.where(BrokerRequest.created_at > last_ok)
+    return int(s.scalar(q) or 0)
 
 
 def _collect_evidence(s: Any, run: WorkerRun, *, kind: str, origin: str, claim: str, content: Any,
@@ -954,8 +961,11 @@ def _decide(s: Any, run: WorkerRun, task: TaskSpec, te: TaskExecution | None, *,
         scheduler.set_run_status(s, run, S.FAILED.value, reason=f"stopped: {stop_reason}", actor=ACTOR,
                                  outcome_code=stop_reason)
         if te.state == S.RUNNING.value:
+            # a provider quota stop is not a failed attempt: the attempt is given back in the same row-version-guarded
+            # transition (the task waits for the quota and then runs again); scheduler.QUOTA_STOPS_MAX bounds how often
+            refund = {"attempts_used": scheduler.attempt_refund()} if stop_reason == "QUOTA_EXHAUSTED" else {}
             scheduler.transition_task(s, te.task_id, S.BLOCKED.value, reason=f"run stopped: {stop_reason}",
-                                      actor=ACTOR, reason_code=code, expected_from=S.RUNNING.value)
+                                      actor=ACTOR, reason_code=code, expected_from=S.RUNNING.value, **refund)
         return "STOPPED"
     if run.run_type == "INVESTIGATION":
         # §19 one hypothesis investigated: next hypothesis (READY) or the integrator's choice (REVIEW); never DONE

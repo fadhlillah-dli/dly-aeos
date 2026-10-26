@@ -43,7 +43,8 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -460,7 +461,15 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
             _deny(s, grant, "CAP_EXCEEDED", "cost cap exhausted")
             raise ProxyError(403, "CAP_EXCEEDED", "cost cap for this run is exhausted")
         # decision C (ADR-0041 amendment 2026-10-26), before the request counts against the grant: a free OpenRouter
-        # WORKER route serves PUBLIC tasks only, and every OpenRouter :free call respects the account's free-model limits
+        # WORKER route serves PUBLIC tasks only, and every OpenRouter :free call respects the account's free-model limits.
+        # The count and this request's PENDING row are one atomic step: the SQLite write lock is taken first and held
+        # until the commit below, so concurrent requests cannot all pass the same count.
+        if _is_free_model(s, models[exposed]):
+            s.commit()  # end the read snapshot (WAL): the lock is the first statement of the next transaction
+            if not _free_count_lock(s):  # nothing is written: the database is busy beyond the timeout
+                s.rollback()
+                raise ProxyError(503, "FREE_TIER_LOCK_UNAVAILABLE", "the free-model request count is busy; retry",
+                                 retry_after=1)
         refused = free_tier_refusal(s, grant, models[exposed])
         if refused is not None:
             status, code, message, retry = refused
@@ -516,6 +525,21 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
 
 
 FREE_WORKER_INELIGIBLE = "FREE_WORKER_ROUTE_INELIGIBLE"
+
+
+def _is_free_model(s: Any, route_key: str) -> bool:
+    """Whether *route_key* is an OpenRouter ``:free`` model (its calls count against the account's free limits)."""
+    route = s.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
+    return route is not None and route.provider == "openrouter" and str(route.model_id or "").endswith(":free")
+
+
+def _free_count_lock(s: Any) -> bool:
+    try:
+        from aeos.routing import facade as routing
+
+        return bool(routing.free_tier_count_lock(s))
+    except (ImportError, AttributeError):  # routing unavailable: the count cannot be serialised (fail closed)
+        return False
 
 
 def free_tier_refusal(s: Any, grant: CapabilityGrant, route_key: str) -> tuple[int, str, str, int | None] | None:
@@ -739,14 +763,8 @@ def _record_quota(s: Any, p: Prepared, retry_after: int, rate_limit: dict[str, A
 
 
 def reported_retry_after(resp: httpx.Response) -> int | None:
-    """The Retry-After the upstream sent (seconds, 1..86400), or None when it sent none (or nothing readable)."""
-    raw = (resp.headers.get("retry-after") or "").strip()
-    if not raw:
-        return None
-    try:
-        return max(1, min(int(float(raw)), 86400))
-    except (ValueError, OverflowError):  # "nan", "inf" or text: not a readable Retry-After
-        return None
+    """The Retry-After the upstream sent (seconds or an HTTP date, 1..86400), or None when it sent none readable."""
+    return parse_retry_after(resp.headers.get("retry-after"))
 
 
 def rate_limit_info(resp: httpx.Response) -> dict[str, Any]:
@@ -759,12 +777,31 @@ def rate_limit_info(resp: httpx.Response) -> dict[str, Any]:
     return {"retry_after": reported_retry_after(resp), "headers": headers}
 
 
-def _retry_after(resp: httpx.Response) -> int:
-    raw = resp.headers.get("retry-after", "")
+def parse_retry_after(raw: str | None, *, cap: int = 86400) -> int | None:
+    """A ``Retry-After`` value as seconds (1..*cap*): delta-seconds or an HTTP date (RFC 9110); None when it is absent
+    or unreadable ("inf", "nan", text, a date in the past is 1 s)."""
+    value = (raw or "").strip()
+    if not value:
+        return None
     try:
-        return max(1, min(int(float(raw)), 3600))
+        seconds = float(value)
     except ValueError:
-        return DEFAULT_RETRY_AFTER
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - utcnow()).total_seconds()
+    if not math.isfinite(seconds):
+        return None
+    return max(1, min(int(seconds), cap))
+
+
+def _retry_after(resp: httpx.Response) -> int:
+    """The Retry-After to hand back to the worker (capped at an hour), else the default."""
+    parsed = parse_retry_after(resp.headers.get("retry-after"), cap=3600)
+    return parsed if parsed is not None else DEFAULT_RETRY_AFTER
 
 
 def request_token_bound(body: dict[str, Any], token_cap: int | None = None) -> int | None:
