@@ -19,7 +19,32 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
   tests cover both header formats, an unreadable header, the recorded date and the header filter (E2); a live
   GitHub response with the header was observed on the owner's Mac (E3, that host only).
 
+### Changed
+
+- **CI in about ten minutes, with the same tests.** On each host OS the backend suite now runs as 2 shards in
+  parallel, each with one pytest-xdist worker per logical CPU. Shards split by test file (`pytest --shard K/N`
+  in `tests/conftest.py`), packed from measured seconds in `tests/ci_durations.json`. Every collected file lands
+  in exactly one shard, so every test still runs on Windows, macOS arm64 and macOS Intel (ADR-0115). G1 static
+  checks run once per OS in shard 1. The real trusted-suite verifier run has its own `macos-latest` job. The
+  required check names `backend [G1,G2] (<os>)` are now aggregator jobs: each passes only when every backend
+  job of its OS succeeded, and a skipped or cancelled job fails it. The pip, npm and Playwright browser downloads
+  are cached. Every CI job now has a `timeout-minutes` (the default is 360, and a hung macOS job would block one
+  of the 5 macOS slots of GitHub Free). Each shard uploads its JUnit XML, and `scripts/ci_durations.py` rebuilds the weights from those
+  reports. `pytest-xdist` 3.8.0 (with `execnet` 2.1.2) joins the dev extra, and `requirements.lock` was
+  regenerated (ADR-0093 amendment). Proven locally (E2, Apple Silicon, `-n 4`): shards 1/2 and 2/2 ran
+  disjoint sets of tests whose union is the full collection (4,325 tests). They took 246 s and 203 s, and
+  4,309 tests passed with 7 skipped. The 9 failures depend on the build host: the tests reached a live local
+  OpenBao and a GitHub credential, and the same 9 fail on the unchanged code there. Unit tests cover the
+  assignment, the workflow wiring and the aggregator behaviour. The expected wall clock of about 10-12
+  minutes is NOT-PROVEN until the first CI run, and so is parallel safety on Windows and Intel macOS.
+
 ### Fixed
+
+- **A push run on `main` is no longer cancelled by the next merge.** The single concurrency group with
+  `cancel-in-progress` cancelled the run of PR #14's merge commit, so that commit never got a CI PASS for
+  `aeos ops release accept`. Only pull-request runs are cancelled now, and every push run has its own group.
+  Pinned by `tests/unit/test_ci_gates.py` (E1, static). The behaviour on GitHub is NOT-PROVEN until two merges
+  land in close succession.
 
 - **Advisory matching in multi-package repositories (#18).** The TRIAL/PROMOTE admission gate compared a candidate's pin
   with the vulnerable ranges of every package a repository publishes, so `langgraph` 1.2.14 was refused for

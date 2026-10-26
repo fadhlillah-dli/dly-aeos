@@ -79,3 +79,86 @@ available to public repositories on the Free plan.
    e2e and supply-chain jobs stay on `ubuntu-latest` runners. They check platform-neutral artifacts, not
    Linux host support, and finish fastest there. The CI wall clock is set by the slowest job, the Windows
    suite, so removing the Linux jobs saves runner time rather than waiting time.
+
+## Amendment 2026-10-26 (2) — CI in about ten minutes: shards, parallel workers and aggregator checks
+
+**Context (measured 2026-10-26).** The critical path of every CI run was the serial backend pytest step:
+2,751-2,790 s on `windows-latest`, 2,535-2,722 s on `macos-26-intel` and 1,824 s on `macos-latest`, where the
+real trusted-suite verifier step added another 470 s in the same job. Installs took 49-146 s without a pip cache,
+and the Playwright browser install took up to 876 s once (no cache). A run took 47-66 minutes. macOS queue waits of
+16-40 minutes came from several pull-request runs competing for the 5 concurrent macOS jobs of GitHub Free. Locally
+(Apple Silicon) the suite took 1,053 s serially and 340 s with pytest-xdist `-n 4` (4,047 passed, 0 failed, 3.1x),
+so it is parallel-safe on macOS. The concurrency group `ci-${{ github.ref }}` with `cancel-in-progress: true`
+cancelled a push run on `main` when the next merge landed: the merge commit of PR #14 never got a CI PASS, and
+`aeos ops release accept` needs one for each `main` commit.
+
+**Decision.**
+
+1. **Policy unchanged.** Every pull request and every push to `main` still runs the full backend suite on all
+   three host OSes. Sharding splits the suite and selects nothing. On each OS, two shard jobs run
+   `pytest -m "not integration and not network" --shard K/2`, the selection the single job ran. Together they
+   run every test exactly once. `--shard K/N` (`tests/conftest.py`, also the `AEOS_TEST_SHARD` variable) assigns
+   whole test files. It packs the files collected for the run into N shards with greedy longest-processing-time
+   by measured seconds (`tests/ci_durations.json`). A file without a measured time gets the median weight. Ties
+   are broken by a SHA-256 of the path, so the split does not depend on the OS, the input order or
+   `PYTHONHASHSEED`. Every collected file lands in exactly one shard, and a collection error fails both shards.
+   The code lives in `tests/conftest.py` because the verifier's copy of the trusted suite carries only
+   `tests/__init__.py`, `tests/conftest.py` and `tests/acceptance` (`aeos.verification.suite`). Without
+   `--shard` it changes nothing. It does change the trusted suite hash, as any change to that file does.
+2. **Parallel workers.** `pytest-xdist` joins the dev extra (ADR-0093 amendment 2026-10-26). Each shard runs with
+   `-n logical`, one worker per logical CPU. The plain `-n auto` counts physical cores when psutil is installed
+   (it is a runtime dependency), which is half the vCPUs of the 4-vCPU Windows runner.
+3. **G1 static checks once per OS.** ruff and the secret/PII scan run in shard 1 of each OS. mypy runs
+   `--platform darwin` and `--platform win32` in shard 1 on `macos-latest`. The gate tag comes from the matrix:
+   shard 1 is named `backend shard 1/2 [G1,G2] (<os>)` and shard 2 `backend shard 2/2 [G2] (<os>)`. A G1 step runs
+   only where the name claims G1 (`if: contains(matrix.gates, 'G1')`).
+4. **The real trusted-suite verifier run** has its own job, `backend verifier [G2] (macos-latest)`, so it runs
+   next to the shards instead of after the suite.
+5. **The required check names stay.** The ruleset on `main` keeps its 8 required contexts: the three
+   `backend [G1,G2] (<os>)` names, the three `bootstrap [G2] (<os>)` names, `browser e2e + a11y smoke [G3]` and
+   `frontend [G1,G3]`. Each `backend [G1,G2] (<os>)` is now an aggregator job on `ubuntu-latest`. It `needs` every
+   backend job of its OS: both shards, and on `macos-latest` also the verifier job. It runs with `if: always()`
+   and passes only when every needed job ended in `success`. A failed, skipped or cancelled job fails it, so the
+   required name can never pass on a partial run. The aggregator runs no test itself. The bootstrap, frontend,
+   browser e2e and supply-chain jobs keep their names. `tests/unit/test_ci_gates.py` pins all of this. It checks
+   that each required name is reported by exactly one job, the aggregator wiring and behaviour, that the shards
+   1..N exist per OS with the same selection and identical steps, the G1 placement, the verifier job, the
+   concurrency rule and the caches.
+6. **Concurrency.** `cancel-in-progress` is true only for `pull_request` runs. Every push run gets a group of its
+   own (`github.run_id`), so a `main` run is never cancelled, and never replaced while pending, which a shared
+   group would do even without cancel-in-progress.
+7. **Caches** hold public downloads only. They hold no token, no data directory and no `.venv`. The pip cache of
+   `actions/setup-python` is keyed on `requirements.lock` in every Python job, including the bootstrap, whose own
+   `.venv` pip reads the same user-level cache. The npm cache of `actions/setup-node` is keyed on
+   `frontend/package-lock.json` wherever `npm ci` runs, including the bootstrap. The Playwright browsers
+   (`~/.cache/ms-playwright`) are cached by the installed Playwright version through `actions/cache`. The
+   bootstrap still installs everything from the lockfiles, so a cache changes download time only.
+8. **Rebalancing.** Each shard uploads its JUnit XML as the artifact `junit-backend-<os>-shard-<k>`, kept for
+   14 days. `python scripts/ci_durations.py <reports...>` rebuilds `tests/ci_durations.json` from them, summing
+   seconds per file. The committed weights come from the local 2026-10-26 run (Apple Silicon, `-n 4`). They
+   should be replaced with the first CI run's reports, normally both `windows-latest` shards.
+9. **Job timeouts.** Every job sets `timeout-minutes` (backend shards 25, macOS verifier 20, aggregators 5,
+   bootstrap 15, frontend 15, browser e2e 20, supply-chain 20). The default is 360 minutes, and a hung macOS job
+   would hold one of GitHub Free's 5 account-wide macOS slots for hours. `tests/unit/test_ci_gates.py` requires
+   the key on every job.
+10. **New action pins** (full commit SHAs of released tags, both older than two weeks):
+   `actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9` (v7.0.2, released 2026-10-07) and
+   `actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9` (v6.1.0, released 2026-06-26). The other pins
+   are unchanged.
+
+**Expected timings (NOT-PROVEN until the first CI run on the new layout).** These are estimates. Each shard
+carries half the measured serial time, about 1,390 s on Windows and 1,270-1,360 s on Intel macOS. With 4 workers
+at the local 3.1x speed-up that is about 450 s per shard. On `macos-latest` (3 vCPU) it is 912 s / ~2.5, about
+370 s. A warm pip cache adds about 60-90 s of install. The verifier job is about 470 s plus install. The
+aggregators add about 10-20 s plus an ubuntu queue slot. With free runners, a pull-request run should therefore
+take about 10 minutes. Caveats:
+
+* A run now has 7 macOS jobs (4 shards, the verifier and 2 bootstraps) against GitHub Free's 5 concurrent macOS
+  jobs, so up to 2 of them wait for a free slot. The bootstraps take 1-3 minutes, so expect 10-12 minutes. macOS
+  runner time per run roughly halves, which also shortens the queue when several runs compete.
+* The first run after a change to `requirements.lock`, `frontend/package-lock.json` or the Playwright version has
+  cold caches.
+* Parallel safety is proven only on macOS. On Windows and Intel macOS it is NOT-PROVEN until the first run. If a
+  test turns out to share state across workers, the fallbacks are `--dist loadfile` for that OS or a third shard.
+* Branch protection is owner configuration. This change does not touch the ruleset: the required names keep
+  existing, now reported by the aggregators.

@@ -1,11 +1,18 @@
-"""Shared test fixtures. Every test gets an isolated data directory and database."""
+"""Shared test fixtures. Every test gets an isolated data directory and database.
+
+Also the CI shard option ``--shard K/N`` (see the section at the end of this file)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
-from collections.abc import Iterator
+import re
+import statistics
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -225,3 +232,150 @@ def absent_modules(monkeypatch: pytest.MonkeyPatch):
             monkeypatch.setitem(sys.modules, name, None)
 
     return _absent
+
+
+# ------------------------------------------------------------------ CI shards (ADR-0115 amendment 2026-10-26)
+# ``pytest --shard K/N`` (or AEOS_TEST_SHARD=K/N) keeps only the test files of shard K of N. The files collected
+# for the run are packed into N shards by their measured seconds (tests/ci_durations.json, rebuilt from CI JUnit
+# XML by scripts/ci_durations.py) with greedy longest-processing-time: heaviest file first, each onto the lightest
+# shard so far; equal weights are ordered by a SHA-256 of the path, so the split depends on nothing but the file
+# list and the weights (not on the OS, the input order or PYTHONHASHSEED). Every collected file lands in exactly one
+# shard: running shards 1..N with the same arguments runs every selected test exactly once. Without --shard nothing
+# changes. The code lives in this file because the verifier's copy of the trusted suite carries only
+# tests/__init__.py, tests/conftest.py and tests/acceptance (aeos.verification.suite).
+
+SHARD_ENV = "AEOS_TEST_SHARD"
+SHARD_WEIGHTS = Path(__file__).resolve().parent / "ci_durations.json"
+_SHARD_RE = re.compile(r"\s*(\d+)\s*/\s*(\d+)\s*")
+_SHARD_SPEC = pytest.StashKey[tuple[int, int, dict[str, float]]]()
+_SHARD_LINE = pytest.StashKey[str]()
+_SHARD_INPUT = "aeos_shard"  # xdist workerinput/workeroutput key
+
+
+def parse_shard(text: str) -> tuple[int, int]:
+    """``"K/N"`` -> (K, N) with 1 <= K <= N."""
+    m = _SHARD_RE.fullmatch(text or "")
+    if not m:
+        raise ValueError(f"expected K/N with 1 <= K <= N (for example 1/2), got {text!r}")
+    k, n = int(m.group(1)), int(m.group(2))
+    if not 1 <= k <= n:
+        raise ValueError(f"expected K/N with 1 <= K <= N (for example 1/2), got {text!r}")
+    return k, n
+
+
+def load_shard_weights(path: Path = SHARD_WEIGHTS) -> dict[str, float]:
+    """Seconds per test file (repository-relative, forward slashes) from the weights file."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, dict):
+        raise ValueError(f"{path.name} has no 'files' mapping")
+    weights: dict[str, float] = {}
+    for rel, sec in files.items():
+        if (not isinstance(rel, str) or not rel or isinstance(sec, bool) or not isinstance(sec, int | float)
+                or not math.isfinite(sec) or sec < 0):
+            raise ValueError(f"{path.name}: invalid weight {sec!r} for {rel!r}")
+        weights[rel.replace("\\", "/")] = float(sec)
+    return weights
+
+
+def default_shard_weight(weights: Mapping[str, float]) -> float:
+    """Weight of a file without a measured time (a new test file): the median measured file, 1.0 if none."""
+    return float(statistics.median(weights.values())) if weights else 1.0
+
+
+def assign_shards(files: Iterable[str], total: int, weights: Mapping[str, float],
+                  default: float | None = None) -> list[list[str]]:
+    """Pack *files* into *total* shards (greedy LPT). Returns the sorted file list of each shard (index 0 = shard 1)."""
+    if total < 1:
+        raise ValueError("at least one shard")
+    fallback = default_shard_weight(weights) if default is None else default
+    unique = sorted({f.replace("\\", "/") for f in files})
+
+    def weight(rel: str) -> float:
+        return weights.get(rel, fallback)
+
+    order = sorted(unique, key=lambda rel: (-weight(rel), hashlib.sha256(rel.encode("utf-8")).hexdigest(), rel))
+    loads = [0.0] * total
+    shards: list[list[str]] = [[] for _ in range(total)]
+    for rel in order:
+        lightest = min(range(total), key=lambda i: (loads[i], i))
+        shards[lightest].append(rel)
+        loads[lightest] += weight(rel)
+    return [sorted(s) for s in shards]
+
+
+def _item_file(item: pytest.Item) -> str:
+    """The test file of *item*, relative to the rootdir with forward slashes (the node id prefix)."""
+    return item.nodeid.split("::", 1)[0]
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption("--shard", action="store", default=None, metavar="K/N",
+                     help="run only the test files of shard K of N, packed by measured seconds "
+                          f"(tests/ci_durations.json); also read from {SHARD_ENV}")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    workerinput = getattr(config, "workerinput", None)  # pytest-xdist worker: the controller resolved the shard
+    if isinstance(workerinput, dict) and workerinput.get(_SHARD_INPUT):
+        requested = str(workerinput[_SHARD_INPUT])
+    else:
+        # read once and removed: pytest processes that tests start themselves are never sharded
+        requested = config.getoption("shard", None) or os.environ.pop(SHARD_ENV, "")
+    os.environ.pop(SHARD_ENV, None)
+    if not requested.strip():
+        return
+    try:
+        k, n = parse_shard(requested)
+        weights = load_shard_weights()
+    except (OSError, ValueError) as exc:
+        raise pytest.UsageError(f"--shard {requested}: {exc}") from exc
+    config.stash[_SHARD_SPEC] = (k, n, weights)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node: Any) -> None:
+    """pytest-xdist controller: hand the resolved shard to every worker (the environment variable is gone)."""
+    spec = node.config.stash.get(_SHARD_SPEC, None)
+    if spec is not None:
+        node.workerinput[_SHARD_INPUT] = f"{spec[0]}/{spec[1]}"
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Runs after the -m/-k deselection: the shards split the files that still have selected tests."""
+    spec = config.stash.get(_SHARD_SPEC, None)
+    if spec is None:
+        return
+    k, n, weights = spec
+    files = sorted({_item_file(i) for i in items})
+    mine = set(assign_shards(files, n, weights)[k - 1])
+    kept = [i for i in items if _item_file(i) in mine]
+    dropped = [i for i in items if _item_file(i) not in mine]
+    fallback = default_shard_weight(weights)
+    unmeasured = sorted(f for f in mine if f not in weights)
+    line = (f"AEOS test shard {k}/{n}: {len(mine)} of {len(files)} files, {len(kept)} of {len(items)} tests, "
+            f"weight {sum(weights.get(f, fallback) for f in mine):.1f} of "
+            f"{sum(weights.get(f, fallback) for f in files):.1f} s ({len(unmeasured)} files without a measured "
+            f"weight counted as {fallback:.2f} s; tests/ci_durations.json)")
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+    items[:] = kept
+    config.stash[_SHARD_LINE] = line
+    workeroutput = getattr(config, "workeroutput", None)
+    if isinstance(workeroutput, dict):
+        workeroutput[_SHARD_INPUT] = line
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: Any, error: object) -> None:
+    """pytest-xdist controller: every worker computed the same shard; keep its summary line."""
+    line = (getattr(node, "workeroutput", None) or {}).get(_SHARD_INPUT)
+    if line:
+        node.config.stash[_SHARD_LINE] = line
+
+
+def pytest_terminal_summary(terminalreporter: Any, config: pytest.Config) -> None:
+    line = config.stash.get(_SHARD_LINE, None)
+    if line:
+        terminalreporter.write_line(line)
