@@ -570,7 +570,8 @@ def test_provider_credentials_only_go_to_the_providers_own_host(world, db):
         go.endpoint = endpoint
         shape = broker.upstream_request_shape(go)
         assert shape["code"] == "ROUTE_ENDPOINT", endpoint
-        assert "https://opencode.ai" in shape["problem"] or "must be https" in shape["problem"], endpoint
+        assert shape["problem"] in ("the opencode-go credential is only sent to https://opencode.ai",
+                                    "route endpoint must be https (or loopback http) without credentials"), endpoint
     assert any("ROUTE_ENDPOINT" in x for x in service.request_shape_rejections(go))
 
 
