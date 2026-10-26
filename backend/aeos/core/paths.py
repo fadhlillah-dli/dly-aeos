@@ -13,6 +13,7 @@ Defaults:
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -114,6 +115,12 @@ class DataLayout:
         return self.project_root(domain, project_key) / "publications"
 
     def ensure(self) -> None:
+        """Create the layout private to the OS user on POSIX (0700), so other users cannot read the database or the
+        PERSONAL/OFFICE partitions, and tighten a directory an older bootstrap left open. A directory that cannot be
+        changed keeps its mode; the Doctor check evidence.dir_permissions covers the PERSONAL/OFFICE partitions only.
+        Windows keeps the inherited ACLs: there Python 3.13 turns mode 0o700 into a protected DACL (SYSTEM,
+        Administrators, OWNER RIGHTS), which can lock a non-elevated run out of a layout created while elevated."""
+        private = sys.platform != "win32"
         for p in (
             self.root,
             self.backups,
@@ -124,7 +131,12 @@ class DataLayout:
             self.domain_root(Domain.PERSONAL),
             self.domain_root(Domain.OFFICE),
         ):
-            p.mkdir(parents=True, exist_ok=True)
+            p.mkdir(parents=True, exist_ok=True, mode=0o700 if private else 0o777)
+            if private and p.stat().st_mode & 0o077:
+                try:
+                    p.chmod(0o700)
+                except OSError:
+                    pass
 
 
 def repo_root() -> Path:
