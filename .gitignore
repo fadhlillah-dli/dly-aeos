@@ -42,6 +42,10 @@ mci-pack-mapping.yaml
 !.env.example
 config/local*.yaml
 config/*.local.yaml
+# the owner's aeos.yaml (commit_identities = real addresses, AGENTS.md invariant 11) lives in the OS config dir;
+# these patterns only guard against a copy placed in the checkout by mistake (config/aeos.example.yaml is tracked)
+/aeos.yaml
+config/aeos.yaml
 client_secret*.json
 credentials*.json
 oauth-token*.json

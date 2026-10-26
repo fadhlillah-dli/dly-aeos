@@ -79,7 +79,13 @@ def push_task_branch(
     Sha-pinned: the broker pushes ``<runtime head sha>:refs/heads/<branch>``. ``expected_head_sha``
     (additive, integration 2026-10-18) must equal that head or the push is refused (HEAD_MISMATCH).
     The result always carries ``head_sha`` and ``status`` PUSHED | FAILED | UNKNOWN (FAILED/UNKNOWN are
-    returned, not raised: reconcile an UNKNOWN with ``reconcile_side_effect`` before any retry)."""
+    returned, not raised: reconcile an UNKNOWN with ``reconcile_side_effect`` before any retry).
+
+    Owner rule (additive, 2026-10-26, AGENTS.md invariant 11): every commit of the pushed range must be authored
+    and committed by the configured identity of the provider (``commit_identities.github`` / ``.bitbucket``) and
+    carry no AI attribution. Otherwise ``PolicyDenied`` with ``COMMIT_IDENTITY_MISSING`` (before any grant or
+    credential), ``COMMIT_IDENTITY_MISMATCH``, ``AI_ATTRIBUTION_IN_COMMIT`` or ``COMMIT_RANGE_UNBOUNDED``; the
+    refusal is audited and the outbox row FAILED (nothing reached the remote)."""
     from aeos.broker.git_broker import push_task_branch as impl
 
     return impl(session, run_id=run_id, worktree=worktree, branch=branch, repo_full_name=repo_full_name,
@@ -89,6 +95,8 @@ def push_task_branch(
 def create_pull_request(
     session: Session, *, run_id: str, repo_full_name: str, head: str, base: str, title: str, body: str
 ) -> dict[str, Any]:
+    """Open a draft PR (GitHub, or Bitbucket for OFFICE). A title/body with AI attribution is refused with
+    ``PolicyDenied(AI_ATTRIBUTION_IN_TEXT)`` before any credential is read (additive, 2026-10-26)."""
     from aeos.broker.git_broker import create_pull_request as impl
 
     return impl(session, run_id=run_id, repo_full_name=repo_full_name, head=head, base=base, title=title, body=body)

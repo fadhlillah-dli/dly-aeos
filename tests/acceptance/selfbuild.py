@@ -134,7 +134,12 @@ def self_build(client: AuthedClient, db: Session, monkeypatch: Any, tmp_path: Pa
                         protected=PLATFORM_PROTECTED_PATHS)
     if not bypass_runtime_scope:
         assert not scope.violations, f"the runtime would fail this attempt (SCOPE_VIOLATION): {scope.violations}"
-    head = wsmod.commit_candidate(ws, f"aeos: {run.task_key}")
+    # the runtime commits with the owner's identity of the project's code host (executor._commit_identity_record,
+    # AGENTS.md invariant 11); without one it would commit as itself and the broker would refuse the push
+    from aeos.worker_runtime import executor as runtime_executor
+
+    ident = runtime_executor._commit_identity_record(db, settings, project)
+    head = wsmod.commit_candidate(ws, f"aeos: {run.task_key}", identity=(ident.pop("_name"), ident.pop("_email")))
     # what the runtime records after the worker exited 0 (executor._finalize)
     run.workspace_ref, run.git_dir_ref = str(ws.repo), str(ws.git_dir)
     run.base_commit, run.head_commit, run.branch = ws.base_commit, head, ws.branch

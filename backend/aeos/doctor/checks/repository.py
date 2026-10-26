@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from aeos.doctor.checks import check
-from aeos.doctor.checks._common import file_fingerprint
+from aeos.doctor.checks._common import Fingerprint, file_fingerprint
 from aeos.doctor.model import CheckContext, Outcome, Remedy, npm_cmd, shell_chain
 from aeos.inventory import scope as scope_reader
 from aeos.inventory.probes import github_slug_from_remote, strip_url_credentials
@@ -112,6 +112,102 @@ def repo_domain(ctx: CheckContext) -> Outcome:
                        "terdaftar sebagai proyek (domain PERSONAL ditetapkan saat pendaftaran).", evidence=evidence)
     return Outcome("VERIFIED", "Repo platform milik proyek PERSONAL dan remote origin bukan host OFFICE.",
                    evidence=evidence, target_identity=f"github:{ctx.settings.platform_repo_slug}")
+
+
+# ----------------------------------------------------------------------------- owner rule: commit identity
+# AGENTS.md invariant 11: every commit DLY AEOS can push is authored and committed by the owner's identity
+# of that code host (GitHub: the owner's GitHub identity; Bitbucket: the company identity). The check reads aeos.yaml
+# only: it reports CONFIGURED / MISSING / FAILED (invalid) and never shows an address - the remedy names the key.
+CONFIG_DIR_HINT = ("aeos.yaml di direktori konfigurasi OS (Windows: %LOCALAPPDATA%\\DLY-AEOS, macOS: "
+                   "~/Library/Application Support/DLY-AEOS) atau file AEOS_CONFIG")
+
+
+def _identity_fp(provider: str) -> Fingerprint:
+    def fp(ctx: CheckContext) -> dict[str, Any]:
+        from aeos.core import commit_identity as cid
+        from aeos.core.hashing import sha256_text
+
+        ident = cid.resolve(ctx.settings, provider)
+        material = f"{ident.status}|{ident.source}|{ident.name or ''}|{ident.email or ''}|{ident.problem}"
+        return {"provider": provider, "identity": sha256_text(material)}  # the address itself is never stored
+
+    return fp
+
+
+def _bitbucket_registered(ctx: CheckContext) -> bool | None:
+    """Whether any project registered Bitbucket as its code host (None = cannot be read)."""
+    if ctx.session is None:
+        return False  # no database yet: nothing can be registered
+    from sqlalchemy import func, select
+
+    from aeos.models.portfolio import ProjectIntegration, RepositoryReference
+
+    try:
+        repos = ctx.session.scalar(select(func.count()).select_from(RepositoryReference).where(
+            func.upper(RepositoryReference.provider) == "BITBUCKET")) or 0
+        integ = ctx.session.scalar(select(func.count()).select_from(ProjectIntegration).where(
+            ProjectIntegration.provider == "bitbucket", ProjectIntegration.purpose == "code")) or 0
+    except Exception:  # unreadable registry: UNKNOWN, never a pass
+        return None
+    return bool(repos or integ)
+
+
+def _identity_outcome(ctx: CheckContext, provider: str, *, applicable: bool | None) -> Outcome:
+    from aeos.core import commit_identity as cid
+    from aeos.doctor.model import aeos_cmd
+
+    ident = cid.resolve(ctx.settings, provider)
+    evidence: dict[str, Any] = {"provider": provider, "config_key": ident.key, "status": ident.status,
+                                "source": ident.source or None, "address_shown": False}
+    host = "GitHub" if provider == cid.GITHUB else "Bitbucket"
+    owner = "identitas GitHub owner" if provider == cid.GITHUB else "identitas perusahaan owner"
+    remedy = Remedy(
+        operation=f"Isi {ident.key} (name, email = {owner}) di {CONFIG_DIR_HINT}; contoh berplaceholder ada di "
+                  "config/aeos.example.yaml. Alamat asli tidak pernah di-commit ke repo.",
+        source="config/aeos.example.yaml", target=f"aeos.yaml: {ident.key}", privilege="pengguna lokal",
+        rollback=f"hapus {ident.key} dari aeos.yaml",
+        evidence_to_collect=f"{aeos_cmd('doctor')}: {('git.commit_identity.' + provider)} CONFIGURED")
+    if ident.status == cid.INVALID:
+        return Outcome("FAILED", f"Identitas commit {host} tidak valid ({ident.problem}); broker menolak setiap push "
+                       f"ke {host} sampai {ident.key} diperbaiki.", evidence={**evidence, "problem": ident.problem},
+                       error_code="COMMIT_IDENTITY_INVALID", target_identity=f"{provider}:{ident.key}", remedy=remedy)
+    if ident.configured:
+        if provider == cid.GITHUB:
+            evidence["noreply"] = (ident.email or "").lower().endswith("@users.noreply.github.com")
+        return Outcome("CONFIGURED", f"Identitas commit {host} terkonfigurasi ({ident.source}); author dan committer "
+                       f"setiap commit yang di-push ke {host} wajib sama dengan identitas ini (alamat tidak "
+                       "ditampilkan). Keterkaitan ke akun tidak dibuktikan oleh pemeriksaan ini.", evidence=evidence,
+                       target_identity=f"{provider}:{ident.key}")
+    if applicable is None:
+        return Outcome("UNKNOWN", f"Registry proyek tidak dapat dibaca; apakah {host} dipakai belum diketahui dan "
+                       f"{ident.key} belum diisi.", evidence=evidence, error_code="REGISTRY_UNREADABLE")
+    if not applicable:
+        return Outcome("NOT_APPLICABLE", f"Belum ada repository {host} terdaftar; {ident.key} belum diisi (wajib "
+                       f"sebelum push pertama ke {host}).", evidence=evidence)
+    return Outcome("MISSING", f"{ident.key} belum diisi: kandidat worker tetap di-commit lokal dengan identitas "
+                   f"runtime tetapi ditandai tidak dapat di-push, dan broker menolak push ke {host} "
+                   "(COMMIT_IDENTITY_MISSING).", evidence=evidence, error_code="COMMIT_IDENTITY_MISSING",
+                   target_identity=f"{provider}:{ident.key}", remedy=remedy)
+
+
+@check("git.commit_identity.github", "REPOSITORY", "Identitas commit GitHub (owner, tanpa AI)", component_id="git",
+       ttl_seconds=86400, ok={"CONFIGURED", "VERIFIED"}, severity_fail="HIGH", fingerprint=_identity_fp("github"),
+       observation="configuration",
+       description="Aturan owner (AGENTS.md invariant 11): setiap commit yang di-push ke GitHub memakai identitas "
+                   "GitHub owner sebagai author DAN committer (commit_identities.github di aeos.yaml; fallback "
+                   "commit_author_name/commit_author_email). Tanpa itu broker menolak push. Alamat tidak ditampilkan.")
+def git_commit_identity_github(ctx: CheckContext) -> Outcome:
+    return _identity_outcome(ctx, "github", applicable=True)  # the platform repository is on GitHub (§09)
+
+
+@check("git.commit_identity.bitbucket", "REPOSITORY", "Identitas commit Bitbucket (perusahaan, tanpa AI)",
+       component_id="git", ttl_seconds=86400, ok={"CONFIGURED", "VERIFIED", "NOT_APPLICABLE"}, severity_fail="HIGH",
+       fingerprint=_identity_fp("bitbucket"), invalidators=("integration:*",), observation="configuration",
+       description="Aturan owner (AGENTS.md invariant 11): setiap commit yang di-push ke Bitbucket memakai identitas "
+                   "perusahaan owner sebagai author DAN committer (commit_identities.bitbucket; tanpa fallback). "
+                   "NOT_APPLICABLE selama belum ada repository Bitbucket terdaftar.")
+def git_commit_identity_bitbucket(ctx: CheckContext) -> Outcome:
+    return _identity_outcome(ctx, "bitbucket", applicable=_bitbucket_registered(ctx))
 
 
 @check("repo.state", "REPOSITORY", "Branch, base commit dan status dirty", component_id="dly-aeos-platform-repo",

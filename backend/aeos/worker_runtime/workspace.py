@@ -380,23 +380,28 @@ def collect_changes(ws: Workspace) -> dict[str, Any]:
             "patch_truncated": truncated, "symlinks_escaping": escaping}
 
 
-_EMAIL = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
-_NAME = re.compile(r"^[^<>\n\r\x00]{1,100}$")
+RUNTIME_SOURCE = "runtime-default (not linked to an account)"
 
 
 def commit_identity(name: str | None, email: str | None) -> tuple[str, str, str]:
     """(name, email, source) for candidate commits (§06 "legitimate identity ... linked to the user's account
-    or noreply address"). The owner configures ``commit_author_name``/``commit_author_email`` (e.g. the
-    GitHub noreply address); without it the runtime identity is used and reported as NOT linked."""
-    if name and email and _NAME.match(name.strip()) and _EMAIL.match(email.strip()):
+    or noreply address"). A valid owner identity (``aeos.core.commit_identity.validate_identity``: no AI/bot
+    identity) is used as-is; otherwise the runtime identity, reported as NOT linked (and never pushable)."""
+    from aeos.core.commit_identity import validate_identity
+
+    if name and email and validate_identity(name, email) is None:
         return name.strip(), email.strip(), "owner-configured"
-    return RUNTIME_IDENTITY[0], RUNTIME_IDENTITY[1], "runtime-default (not linked to an account)"
+    return RUNTIME_IDENTITY[0], RUNTIME_IDENTITY[1], RUNTIME_SOURCE
 
 
 def commit_candidate(ws: Workspace, message: str, *, identity: tuple[str, str] | None = None,
                      trailers: dict[str, str] | None = None) -> str | None:
     """Commit the staged candidate on the task branch; returns head sha. Author and committer are the owner's
-    configured identity (or the runtime identity); trailers name the run/agent/route that produced it."""
+    identity for the project's code host (or the runtime identity, never pushable). Commits can reach a code host,
+    so the message carries no AI attribution and no agent/route/model trailers (owner rule, AGENTS.md invariant
+    11): that provenance stays in the run record. A message that would carry it is refused."""
+    from aeos.core.attribution import find_ai_attribution
+
     verify_control_files(ws)
     status = cand_git(ws, ["diff", "--cached", "--quiet", "--no-ext-diff"], check=False)
     if status.returncode == 0:
@@ -405,9 +410,35 @@ def commit_candidate(ws: Workspace, message: str, *, identity: tuple[str, str] |
     lines = [f"{k}: {str(v).splitlines()[0][:200]}" for k, v in (trailers or {}).items() if v]
     if lines:
         message = message.rstrip() + "\n\n" + "\n".join(lines)
+    findings = find_ai_attribution(message)
+    if findings:
+        raise WorkspaceError("candidate commit message carries AI attribution (refused, owner rule): "
+                             + "; ".join(f.describe() for f in findings[:3]))
     cand_git(ws, ["-c", f"user.name={name}", "-c", f"user.email={email}", "-c", "commit.gpgsign=false",
                   "commit", "--quiet", "--no-verify", "-m", message])
     return cand_git(ws, ["rev-parse", "HEAD"]).stdout.strip()
+
+
+MAX_CANDIDATE_COMMITS = 50
+
+
+def candidate_commits(ws: Workspace, head: str) -> list[Any]:
+    """The commits ``base..head`` of the candidate (the runtime's commit plus any the worker made itself), read
+    through the trusted git dir as ``aeos.core.commit_identity.CommitRecord`` - what the broker will check before
+    a push. More than ``MAX_CANDIDATE_COMMITS`` raises (the caller marks the candidate not pushable)."""
+    from aeos.core.commit_identity import parse_commit_object, valid_sha
+
+    verify_control_files(ws)
+    shas = cand_git(ws, ["rev-list", f"--max-count={MAX_CANDIDATE_COMMITS + 1}", head, "--not",
+                         ws.base_commit]).stdout.split()
+    if len(shas) > MAX_CANDIDATE_COMMITS:
+        raise WorkspaceError(f"more than {MAX_CANDIDATE_COMMITS} commits on the task branch")
+    out = []
+    for sha in shas:
+        if not valid_sha(sha):
+            raise WorkspaceError("unexpected rev-list output")
+        out.append(parse_commit_object(sha, cand_git(ws, ["cat-file", "commit", sha]).stdout))
+    return out
 
 
 def agent_config_files(repo: Path) -> list[str]:
