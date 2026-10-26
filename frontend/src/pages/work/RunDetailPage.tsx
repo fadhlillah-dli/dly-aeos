@@ -6,6 +6,7 @@ import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Card, EmptyState, ErrorBox, Field, Freshness, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
+import { VerifierPolicyFacts } from "../../components/planning/VerifierPolicy";
 import { ConfirmAction } from "../../components/workforce/ConfirmAction";
 import { InvestigationPanel } from "../../components/workforce/InvestigationPanel";
 import { ExecState, ModeBadge, SeparateStatuses, costText, shortId } from "../../components/workforce/status";
@@ -305,6 +306,7 @@ export default function RunDetailPage() {
                     ["Stop conditions", <List key="sc" items={r.task_spec.stop_conditions} />],
                     ["Risiko / klasifikasi", `${r.task_spec.risk_class} · ${r.task_spec.data_classification}`],
                     ["Dependency", r.task_spec.depends_on.join(", ") || "—"],
+                    ["Kebijakan verifier", <VerifierPolicyFacts key="vp" policy={r.task_spec.verifier_policy} />],
                     ["Hash spec / versi rencana", <span key="h"><Mono>{shortHash(r.task_spec.spec_hash)}</Mono> · <Mono>{shortHash(r.task_spec.plan_version_hash)}</Mono></span>],
                   ]}
                 />

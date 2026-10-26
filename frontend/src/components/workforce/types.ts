@@ -238,6 +238,8 @@ export interface RunDetail extends RunRow {
     plan_version_hash: string;
     base_commit: string | null;
     capability_ttl_seconds: number;
+    /** TaskSpec verifier_policy as stored (read-only); absent on an older server. */
+    verifier_policy?: Record<string, unknown>;
   } | null;
   task_execution: {
     state: string;

@@ -244,6 +244,8 @@ def run_detail(session: Session, run: WorkerRun) -> dict[str, Any]:
             "depends_on": task.depends_on, "spec_hash": task.spec_hash, "plan_version_id": task.plan_version_id,
             "plan_version_hash": task.plan_version_hash, "base_commit": task.base_commit,
             "capability_ttl_seconds": task.capability_ttl_seconds,
+            # read-only: the verifier's opt-ins (integration_tests, contract_breaking, ...) as the TaskSpec states them
+            "verifier_policy": dict(task.verifier_policy or {}),
         }
     return {
         **row,

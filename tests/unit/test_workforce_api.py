@@ -93,6 +93,7 @@ def test_run_detail_has_separate_status_fields(personal_client, db, fakes):
     d = r.json()
     assert set(d["statuses"]) == {"worker_reported", "verifier", "review", "acceptance", "merged"}
     assert d["task_spec"]["allowed_paths"] == ["src/**"] and d["task_execution"]["state"] == "LEASED"
+    assert d["task_spec"]["verifier_policy"] == {}  # no opt-ins: stated as an empty policy, never omitted
     assert d["lease"]["state"] == "ACTIVE" and any(a["kind"] == "run.state_changed" for a in d["actions"])
     assert d["owner_requirements"]
     adm = personal_client.get(f"/api/tasks/{specs[0].id}/admission").json()
@@ -101,6 +102,24 @@ def test_run_detail_has_separate_status_fields(personal_client, db, fakes):
     c = personal_client.post(f"/api/runs/{run.id}/cancel", json={"reason": "stop"})
     assert c.status_code == 200 and c.json()["execution_state"] == "CANCELLED"
     assert "tidak dibatalkan otomatis" in c.json()["note"]
+
+
+def test_run_detail_states_the_task_verifier_policy_read_only(personal_client, db, fakes):
+    p = make_project(db)
+    policy = {"required": True, "suites": ["unit"], "negative_tests_required": True,
+              "integration_tests": "run", "contract_breaking": "approved"}
+    plan, pv, specs = make_plan(db, p, [{"task_key": "a", "allowed_paths": ["src/**"], "verifier_policy": policy}])
+    fakes.approved[plan.id] = pv.id
+    make_route(db)
+    fakes.route_key = "worker.test-free"
+    seed_and_enable_implementer(db)
+    process_sandbox_exception(db)
+    scheduler.ensure_executions(db, pv.id, actor="t")
+    scheduler.refresh_readiness(db, pv.id)
+    run = scheduler.acquire_lease(db, specs[0].id, actor="t")
+    db.commit()
+    d = personal_client.get(f"/api/runs/{run.id}").json()
+    assert d["task_spec"]["verifier_policy"] == policy
 
 
 def test_viewer_is_read_only(client, db):
