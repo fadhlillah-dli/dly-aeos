@@ -206,6 +206,29 @@ python scripts/ci_durations.py junit-shard-1.xml junit-shard-2.xml --source "CI 
 Commit the rewritten `tests/ci_durations.json`. The weights only move files between shards: no test
 is added or dropped.
 
+### Developer tools
+
+Two standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the verdict):
+
+- **`scripts/worktree.py`** makes git worktrees safe. `python scripts/worktree.py add <name> <branch> [<base>]`
+  creates `<main checkout>-wt-<name>` on a new branch, marks it as created by the tool and prints the
+  interpreter of the main checkout (`.venv` there) and the `PYTHONPATH=backend` hint. Never put a `.venv`
+  symlink or junction inside a worktree: `git worktree remove` can follow the link and delete the real
+  environment. `list` shows every worktree with merged, pushed, marker and LINKS columns. `remove <name>`
+  refuses a worktree that holds a link, has no marker (`--foreign`), has uncommitted changes, or whose branch is
+  neither merged into origin/main nor pushed (`--force`); `--unlink-links` removes only the link entries, then
+  scans again. Merged and pushed come from the remote-tracking refs of the last `git fetch`.
+- **`scripts/ci_status.py`** gives one verdict for one exact commit: `--sha <40-hex>`, `--pr <n>`
+  (`--expect-sha <sha>` exits 1 if the pull request points at another commit) or `--after-merge <n>` (the merge
+  commit on `main`). It reads the check runs with `gh api` and the required contexts from the repository
+  rulesets. An empty or incomplete list is PENDING, never GREEN. `--wait --deadline <minutes>` polls (30 s
+  or more) and ends with `CI: TIMEOUT` (exit 2) at the deadline; `--report <path.json>` saves the result.
+  Exit codes: 0 GREEN, 1 RED, SUPERSEDED or sha mismatch, 2 TIMEOUT or ERROR, 3 PENDING without `--wait`. The
+  last line is always `CI: <VERDICT> <sha>`.
+
+Both have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`): a violating
+fixture is red and a near-miss legitimate one is green. The junction test runs only on Windows.
+
 ### Rules for every change
 
 - **NOT-PROVEN stays visible.** A pull request says what is proven, at which evidence level, and
