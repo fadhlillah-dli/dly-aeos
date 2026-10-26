@@ -19,7 +19,7 @@ from aeos.identity.facade import Principal
 from aeos.models.cost import QuotaState, UsageLedgerEntry
 from aeos.models.decisions import Decision
 from aeos.models.routing import ModelRoute
-from aeos.routing import catalog, service
+from aeos.routing import catalog, free_tier, service
 
 router = APIRouter(tags=["routing"])
 
@@ -225,7 +225,23 @@ def route_view(session: Session, r: ModelRoute, principal: Principal,
         "billing": _billing(r) if r.pool != "SUPERVISOR" else None,  # native supervisor: Max plan, §42
         "budget_note": (service.budget_label(r) if service.needs_budget(r) and r.pool != "SUPERVISOR" else None),
         "subscription": _subscription_view(session, r, principal),
+        "free_tier": _free_tier_view(session, r),
     }
+
+
+def _free_tier_view(session: Session, r: ModelRoute) -> dict[str, Any] | None:
+    """Decision C (ADR-0041 amendment 2026-10-26): an OpenRouter ``:free`` route's account-wide free-model limits and
+    this AEOS instance's count; for a route in WORKER also the decision C eligibility. None for any other route."""
+    if not free_tier.is_free_model_route(r):
+        return None
+    view = free_tier.status(session)
+    if free_tier.is_decision_c_route(r):
+        problems = free_tier.worker_problems(session, r)
+        view["decision_c"] = {"status": "INELIGIBLE" if problems else "ELIGIBLE_IF_ACTIVATED", "problems": problems,
+                              "data_classes": ["PUBLIC"], "domains": ["PERSONAL"],
+                              "note": "Rute OpenRouter gratis di pool WORKER (keputusan C): hanya data PUBLIC, PERSONAL, "
+                                      "selama gratis; peringkat pertama untuk task PUBLIC; tanpa fallback berbayar."}
+    return view
 
 
 @router.get("/api/routes")
@@ -402,6 +418,30 @@ def set_endpoint(route_key: str, body: EndpointBody, db: DB, principal: AdminPri
                           "needs_new_trial": change["needs_new_trial"]})
     emit(db, source="routing", kind="route.endpoint_set", entity_type=service.TARGET_TYPE, entity_id=route.route_key,
          entity_version=route.config_hash, payload={"endpoint": route.endpoint, "config_changed": change["config_changed"]})
+    db.commit()
+    return {"route": route_view(db, route, principal), "config_changed": change["config_changed"],
+            "needs_new_trial": change["needs_new_trial"]}
+
+
+class PoolBody(BaseModel):
+    """Owner move of an OpenRouter route between ARENA and WORKER (decision C, ADR-0041 amendment 2026-10-26)."""
+
+    pool: Literal["ARENA", "WORKER"]
+    rationale: str = Field(min_length=10, max_length=2000)
+
+
+@router.post("/api/routes/{route_key:path}/pool")
+def set_pool(route_key: str, body: PoolBody, db: DB, principal: AdminPrincipal) -> dict[str, Any]:
+    """A configuration change: every decision bound to the route is invalidated; the owner activates a new TRIAL."""
+    route, change = service.set_route_pool(db, route_key, pool=body.pool, rationale=body.rationale)
+    audit.record(db, actor_type="user", actor_id=principal.user.id, action="route.set_pool",
+                 target_type=service.TARGET_TYPE, target_id=route.route_key, domain=Domain.PERSONAL.value,
+                 reason=body.rationale[:500],
+                 details={"pool": route.pool, "previous_pool": change["previous"]["pool"],
+                          "previous_config_hash": change["previous"]["config_hash"], "config_hash": route.config_hash,
+                          "needs_new_trial": change["needs_new_trial"]})
+    emit(db, source="routing", kind="route.pool_set", entity_type=service.TARGET_TYPE, entity_id=route.route_key,
+         entity_version=route.config_hash, payload={"pool": route.pool, "previous_pool": change["previous"]["pool"]})
     db.commit()
     return {"route": route_view(db, route, principal), "config_changed": change["config_changed"],
             "needs_new_trial": change["needs_new_trial"]}

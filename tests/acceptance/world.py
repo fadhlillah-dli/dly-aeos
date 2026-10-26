@@ -38,18 +38,30 @@ def checks_by_id(client: AuthedClient) -> dict[str, dict[str, Any]]:
     return {c["check_id"]: c for c in r.json()["items"]}
 
 
-def register_free_route(db: Session, key: str, *, model_id: str = "vendor/acc-model:free", provider: str = "openrouter",
+# A free worker route under the general routing rules (PUBLIC and INTERNAL work), and an OpenRouter ":free" model:
+# the owner's decision C (ADR-0041 amendment 2026-10-26) lets such a WORKER route serve PUBLIC data only, at a catalog
+# price of exactly zero, within the account's free-model limits.
+GENERAL_FREE_MODEL = "vendor/acc-model"
+FREE_TIER_MODEL = "vendor/acc-model:free"
+
+
+def register_free_route(db: Session, key: str, *, model_id: str = GENERAL_FREE_MODEL, provider: str = "openrouter",
                         endpoint: str | None = None, fallback_chain: list[str] | None = None, is_free: str = "YES",
                         pricing: dict[str, Any] | None = None) -> Any:
-    """A worker route as a catalog import registers it: CANDIDATE, never routable until a human activates it."""
+    """A worker route as a catalog import registers it: CANDIDATE, never routable until a human activates it. An
+    OpenRouter ":free" model is registered as decision C requires it (catalog price exactly zero, PUBLIC only)."""
     from aeos.models.routing import ModelRoute
     from aeos.routing.service import compute_config_hash
 
     now = utcnow()
+    decision_c = provider == "openrouter" and model_id.endswith(":free")
+    if decision_c and pricing is None:
+        pricing = {"prompt": "0", "completion": "0"}
     # terms as the owner recorded them when registering the route (known, not restricted): data classes above
     # PUBLIC are only ever allowed on known training/trial terms (§23)
     r = ModelRoute(route_key=key, pool="WORKER", provider=provider, model_id=model_id, endpoint=endpoint,
-                   status="CANDIDATE", eligible_domains=["PERSONAL"], allowed_data_classes=["PUBLIC", "INTERNAL"],
+                   status="CANDIDATE", eligible_domains=["PERSONAL"],
+                   allowed_data_classes=["PUBLIC"] if decision_c else ["PUBLIC", "INTERNAL"],
                    supports_tools="YES", is_free=is_free, pricing=pricing or {}, context_window=131072,
                    data_terms={"may_use_inputs_for_training": False, "trial_only_no_confidential": False},
                    pricing_checked_at=now, terms_checked_at=now, availability="AVAILABLE", mode="LIVE",
@@ -354,18 +366,20 @@ WORKER_ROUTE = "worker.acc-free"
 
 def worker_ready(client: AuthedClient, db: Session, monkeypatch: Any, *, tasks: list[dict[str, Any]] | None = None,
                  project_name: str = "Worker App", platform: bool = False, responder: Any = None,
-                 targets: list[dict[str, Any]] | None = None, cover_r3: bool = False) -> dict[str, Any]:
+                 targets: list[dict[str, Any]] | None = None, cover_r3: bool = False,
+                 free_tier: bool = False) -> dict[str, Any]:
     """Approved plan with compiled TaskSpecs and every admission prerequisite decided by the owner:
     an activated free worker route, the ADR-0051 process-sandbox exception, the implementer agent
     enabled through the API, and the plan executed (tasks QUEUED -> READY). ``platform`` plans on the
     seeded DLY AEOS self-build project (§09) instead of a new project. ``targets`` are the exact targets
     the owner's plan approval binds (e.g. ``{"provider": "github-repo", "repo": owner/name}``: delivery of
-    an accepted task as a PR is authorised only by an APPROVAL whose operations include ``create_pr``)."""
+    an accepted task as a PR is authorised only by an APPROVAL whose operations include ``create_pr``).
+    ``free_tier``: the worker route is an OpenRouter ":free" model (decision C: the tasks must be PUBLIC)."""
     from aeos.core.enums import Capability
 
     seed_catalog(db)
     fake_opencode(monkeypatch)
-    register_free_route(db, WORKER_ROUTE)
+    register_free_route(db, WORKER_ROUTE, model_id=FREE_TIER_MODEL if free_tier else GENERAL_FREE_MODEL)
     activate_route(client, WORKER_ROUTE)
     # ``cover_r3``: the owner's exception explicitly covers R3 (protected-path) work under the process sandbox
     # (ADR-0051 amendment 2026-10-19); without it R3 waits for the container sandbox.
@@ -386,7 +400,8 @@ def worker_ready(client: AuthedClient, db: Session, monkeypatch: Any, *, tasks: 
         assert p is not None, "aeos seed registers the DLY AEOS platform project"
         project = client.get(f"/api/projects/{p.id}").json()["project"]
     else:
-        project = create_project(client, name=project_name)
+        # a project's data class is the floor of its tasks' (planning.dag): free-tier work is a PUBLIC project
+        project = create_project(client, name=project_name, **({"data_classification": "PUBLIC"} if free_tier else {}))
     approved = approved_plan(client, monkeypatch, project["id"], content=plan_content(tasks=tasks),
                              responder=responder, targets=targets)
     plan = approved["plan"]

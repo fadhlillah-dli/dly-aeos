@@ -100,6 +100,11 @@ function OperatorActions({ run, isAdmin, onDone }: { run: RunDetail; isAdmin: bo
   const agents = useQuery({ queryKey: ["workforce-agents"], queryFn: () => get<{ items: AgentDef[] }>("/api/workforce/agents"), enabled: isAdmin });
   const implementers = (agents.data?.items ?? []).filter((a) => a.harness === "opencode");
   const needsDecision = te?.reason_code === "NEEDS_DECISION";
+  // The quota-stop bound (scheduler.quota_stop_problem, ADR-0041 decision C) is reset by the owner's retry decision
+  // itself: the backend grants no extra attempts for it, so the dialog asks for none.
+  const reasonText = te?.reason ?? "";
+  const quotaStopOnly = needsDecision && reasonText.includes("provider quota") && !reasonText.includes("attempt cap reached");
+  const attemptDecision = needsDecision && !quotaStopOnly;
   return (
     <Card title="Kontrol operator">
       <div className="flex flex-wrap items-start gap-3">
@@ -123,19 +128,21 @@ function OperatorActions({ run, isAdmin, onDone }: { run: RunDetail; isAdmin: bo
             isAdmin={isAdmin}
             requireReason={needsDecision}
             confirmText={
-              needsDecision
-                ? "Batas attempt tercapai. Menambah attempt adalah keputusan pemilik (EXCEPTION) yang terikat ke hash TaskSpec."
-                : "Repair dikerjakan attempt baru oleh implementer (bukan reviewer), tetap dalam batas attempt."
+              quotaStopOnly
+                ? "Batas penghentian kuota provider tercapai. Keputusan pemilik (EXCEPTION) mengizinkan 6 penghentian kuota lagi; tidak menambah attempt."
+                : attemptDecision
+                  ? "Batas attempt tercapai. Menambah attempt adalah keputusan pemilik (EXCEPTION) yang terikat ke hash TaskSpec."
+                  : "Repair dikerjakan attempt baru oleh implementer (bukan reviewer), tetap dalam batas attempt."
             }
             extra={
-              needsDecision ? (
+              attemptDecision ? (
                 <Field label="Tambahan attempt (keputusan pemilik)">
                   <input type="number" min={1} max={3} className={inputClass} value={extra} onChange={(e) => setExtra(Number(e.target.value))} />
                 </Field>
               ) : undefined
             }
             onConfirm={async (reason) => {
-              await post(`/api/tasks/${run.task.id}/retry`, { extra_attempts: needsDecision ? extra : 0, rationale: reason });
+              await post(`/api/tasks/${run.task.id}/retry`, { extra_attempts: attemptDecision ? extra : 0, rationale: reason });
               onDone();
             }}
           />

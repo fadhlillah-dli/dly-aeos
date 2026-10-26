@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -57,12 +57,14 @@ WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CO
                         "MODULE_UNAVAILABLE", "VERIFIER_UNAVAILABLE", "SIDE_EFFECT_UNRECONCILED",
                         "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED", "DOCS_NOT_READY",
                         "DOCS_READINESS_UNVERIFIED", "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
-                        "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "SUBSCRIPTION_BEYOND_PLAN"})
+                        "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "SUBSCRIPTION_BEYOND_PLAN", "FREE_TIER_LIMIT_REACHED"})
 # ADR-0080 amendment 2026-10-26, flat-fee routes: SUBSCRIPTION_ALLOWANCE_EXHAUSTED (the 5h window used up) and
 # SUBSCRIPTION_ALLOWANCE_UNKNOWN (an uncountable call in it, at most 5 hours) clear with time, like a quota;
 # SUBSCRIPTION_BEYOND_PLAN (a call billed beyond the plan) clears only when the owner re-activates the route.
+# ADR-0041 amendment 2026-10-26, decision C: FREE_TIER_LIMIT_REACHED (the free OpenRouter WORKER route is at the
+# account's requests/minute or requests/UTC-day limit) clears with time; the task never moves to a route that is not free.
 QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED", "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
-                         "SUBSCRIPTION_ALLOWANCE_UNKNOWN"})
+                         "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "FREE_TIER_LIMIT_REACHED"})
 # BLOCKED reason codes that only an owner action clears (retry_task / quarantine release), never a tick.
 HUMAN_BLOCK_CODES = frozenset({"QUARANTINED", "REVIEW_BLOCKED", "WORKER_BLOCKER"})
 
@@ -123,6 +125,50 @@ def max_attempts(task: TaskSpec, te: TaskExecution | None = None) -> int:
     except (TypeError, ValueError):
         base = DEFAULT_MAX_ATTEMPTS
     return max(1, base) + (te.extra_attempts if te else 0)
+
+
+# A run the executor stopped at a provider quota (QUOTA_EXHAUSTED: repeated upstream 429s or the OpenRouter free-model
+# limit, decision C) does not use up an attempt - the attempt is refunded and the task waits for the quota. This bound
+# keeps a task that never fits the quota from looping: after QUOTA_STOPS_MAX such stops since the owner's last retry
+# decision the task needs a new owner decision (retry_task); each decision allows exactly QUOTA_STOPS_MAX more, and a
+# quota-stop retry never raises the task's attempt cap.
+QUOTA_STOPS_MAX = 6
+QUOTA_STOP_CODE = "QUOTA_EXHAUSTED"
+
+
+def attempt_refund() -> Any:
+    """SQL value that gives back the attempt a quota-stopped run took (never below 0), for the stop transition."""
+    return case((TaskExecution.attempts_used > 0, TaskExecution.attempts_used - 1), else_=0)
+
+
+def _last_retry_decision_at(session: Session, task_id: str) -> Any:
+    """When the owner last decided a retry of this task: its newest ACTIVE human EXCEPTION decision allowing the
+    ``retry`` operation, else None. A revoked or invalidated decision never resets the quota-stop count."""
+    rows = session.scalars(select(Decision).where(
+        Decision.kind == "EXCEPTION", Decision.target_type == "task", Decision.target_id == task_id,
+        Decision.status == "ACTIVE", func.coalesce(Decision.actor_kind, "HUMAN") == "HUMAN")
+        .order_by(Decision.created_at.desc()))
+    return next((d.created_at for d in rows if "retry" in (d.allowed_operations or [])), None)
+
+
+def quota_stops(session: Session, task_id: str) -> int:
+    """Runs of this task the executor stopped at a provider quota since the owner's last retry decision."""
+    q = select(func.count()).select_from(WorkerRun).where(WorkerRun.task_id == task_id,
+                                                          WorkerRun.outcome_code == QUOTA_STOP_CODE)
+    since = _last_retry_decision_at(session, task_id)
+    if since is not None:
+        q = q.where(WorkerRun.created_at > since)
+    return int(session.scalar(q) or 0)
+
+
+def quota_stop_problem(session: Session, task: TaskSpec, te: TaskExecution) -> str | None:
+    """Why the task needs an owner decision after too many quota stops (None = within the bound)."""
+    stops = quota_stops(session, task.id)
+    if stops < QUOTA_STOPS_MAX:
+        return None
+    return (f"{stops} runs of this task were stopped at a provider quota since the last owner retry decision (bound "
+            f"{QUOTA_STOPS_MAX}): it does not fit the provider limit (e.g. the OpenRouter free-model limit); an owner "
+            "decision is required (retry once the limit allows it, or another route through a new plan version)")
 
 
 def lease_ttl(session: Session) -> int:
@@ -729,6 +775,9 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
                                         "nothing; the task needs a new plan version with a catalog role)"))
     if te.attempts_used >= max_attempts(task, te):
         reasons.append(("NEEDS_DECISION", f"attempt cap reached ({te.attempts_used}/{max_attempts(task, te)})"))
+    quota_bound = quota_stop_problem(session, task, te)
+    if quota_bound:
+        reasons.append(("NEEDS_DECISION", quota_bound))
     alive = _previous_worker_alive(session, task.id)
     if alive is not None:
         reasons.append(("LEASE_LOST_PROCESS_ALIVE", f"previous worker of run {alive.id} (pid {alive.pid}) is still alive"))
@@ -749,8 +798,9 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
 
 
 def route_quota_exhausted(session: Session, route_key: str | None) -> str | None:
-    """Observed quota exhaustion (e.g. upstream 429 recorded by the broker) that has not reset yet.
-    §22/§42: wait/back off on the same approved route — never switch to a paid/unapproved one."""
+    """Observed quota exhaustion (e.g. upstream 429 recorded by the broker) that has not reset yet, or - for an
+    OpenRouter ``:free`` model - the account's free-model limit (decision C: requests/minute, requests/UTC day, a 429
+    recorded account-wide). §22/§42: wait/back off on the same approved route — never switch to a paid/unapproved one."""
     from aeos.models.cost import QuotaState
 
     if not route_key:
@@ -762,7 +812,8 @@ def route_quota_exhausted(session: Session, route_key: str | None) -> str | None
         if resets is None or resets > now:
             until = resets.isoformat() if resets else "UNKNOWN (no reset time reported)"
             return f"quota for {route_key} exhausted until {until}"
-    return None
+    route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
+    return ext.free_tier_limit(session, route) if route is not None else None
 
 
 def _quota_wait(session: Session, te: TaskExecution) -> str | None:
@@ -1419,6 +1470,9 @@ def admission_check(session: Session, task_id: str) -> Admission:
             adm.waits.append(("DEPENDENCY_NOT_ACCEPTED", f"dependency {dep_key} not DONE with valid acceptance"))
     if te.attempts_used >= max_attempts(task, te):
         adm.blocks.append(("ATTEMPTS_EXHAUSTED", f"{te.attempts_used}/{max_attempts(task, te)} attempts used"))
+    quota_bound = quota_stop_problem(session, task, te)
+    if quota_bound:
+        adm.blocks.append(("QUOTA_STOPS_EXHAUSTED", quota_bound))
     fan = _fan_out_problem(task)
     if fan:
         adm.blocks.append(("FAN_OUT_FORBIDDEN", fan))
@@ -1503,14 +1557,14 @@ def admission_check(session: Session, task_id: str) -> Admission:
         if vp["suite"].get("code") in ("TRUSTED_SUITE_TAMPERED", "TRUSTED_SUITE_MISSING"):
             # a registered suite that no longer verifies would end every attempt BLOCKED after spending budget
             adm.waits.append(("VERIFIER_UNAVAILABLE", f"trusted suite {vp['suite']['code']}: {vp['suite'].get('reason')}"))
-    route, rreasons = ext.select_route(session, task)
+    route, rreasons, rcode = ext.select_route_detail(session, task)
     implementer = agent if agent is not None and agent.harness == "opencode" and \
         agent.agent_key not in REVIEWER_AGENT_KEYS else None
     eval_route = route is not None and route.pool != "WORKER" and ext.eval_served(session, task, route)
     for code, why in agent_configuration_problems(implementer, task, route, eval_route=eval_route):
         adm.blocks.append((code, why))
     if route is None:
-        adm.waits.append(("ROUTE_INELIGIBLE", "; ".join(rreasons)))
+        adm.waits.append((rcode, "; ".join(rreasons)))  # ROUTE_INELIGIBLE, or a free-tier quota wait (decision C)
     else:
         adm.route = route
         if task.domain == "OFFICE":
@@ -2064,16 +2118,23 @@ def retry_task(session: Session, task_id: str, *, actor: str, extra_attempts: in
         raise Conflict(f"nothing to retry: task is {te.state}"
                        + ("; terminal states need a new plan version" if te.state in
                           {s.value for s in TERMINAL_EXECUTION_STATES} else ""), code="NOT_RETRYABLE")
-    if te.attempts_used >= max_attempts(task, te):
-        if extra_attempts < 1 or not rationale.strip() or not actor_user_id:
-            raise Blocked("attempt cap reached: an owner decision (extra_attempts + rationale) is required",
+    attempts_out = te.attempts_used >= max_attempts(task, te)
+    quota_out = quota_stop_problem(session, task, te) is not None
+    if attempts_out or quota_out:
+        if not rationale.strip() or not actor_user_id or (attempts_out and extra_attempts < 1):
+            raise Blocked("attempt cap (or quota-stop bound) reached: an owner decision is required (rationale, and "
+                          "extra_attempts when the attempt cap is reached)",
                           code="NEEDS_DECISION", details={"reasons": [te.reason]})
+        # a quota-stop bound alone is reset by the decision itself (quota_stops counts from it): it never raises the
+        # task's attempt cap; extra attempts are granted only when the attempt cap is what was reached
+        granted = int(min(extra_attempts, 3)) if attempts_out else 0
         d = ext.record_decision(session, kind="EXCEPTION", actor_user_id=actor_user_id, target_type="task",
                                 target_id=task_id, target_hash=task.spec_hash, allowed_operations=["retry"],
                                 project_id=task.project_id, domain=task.domain, rationale=rationale,
-                                details={"extra_attempts": int(extra_attempts)})
-        te.extra_attempts = (te.extra_attempts or 0) + int(min(extra_attempts, 3))
-        te.extra_attempts_decision_id = d.id
+                                details={"extra_attempts": granted, "quota_stops_reset": quota_out})
+        if granted:
+            te.extra_attempts = (te.extra_attempts or 0) + granted
+            te.extra_attempts_decision_id = d.id
         session.flush()
     if te.reason_code in HUMAN_BLOCK_CODES:
         # The owner explicitly asks for a new attempt instead of the pending special review / decision.

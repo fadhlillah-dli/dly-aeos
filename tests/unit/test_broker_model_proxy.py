@@ -248,7 +248,9 @@ def real_routing(settings, db, secrets_memory, monkeypatch):
     fk = FakeModules().install(monkeypatch, skip=("aeos.routing.service",))
     secrets_memory.put("workers/openrouter", KEY, actor="test")
     p = make_project(db)
-    route = make_route(db, key="worker.free-a", model_id="vendor/model-a:free")
+    # not a ':free' model: an OpenRouter ':free' WORKER route is a decision C route (catalog price, PUBLIC task), tested
+    # in test_routing_free_worker.py; this fixture tests the general per-request approval rule
+    route = make_route(db, key="worker.free-a", model_id="vendor/model-a")
     run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="RUNNING", model_route_key="worker.free-a")
     db.add(run)
     db.flush()

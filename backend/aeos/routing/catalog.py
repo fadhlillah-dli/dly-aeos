@@ -8,7 +8,11 @@
   matching, eval baselines are not inherited and ``config:routes`` Doctor checks go STALE.
 * Key info: GET /api/v1/key with the key from secret ref ``workers/openrouter`` (falls back to
   ``personal/openrouter``); no key -> quota UNKNOWN. The response ``label`` (it can contain a key
-  fragment) is never stored.
+  fragment) is never stored. ``free_model_daily_requests`` (used/limit/remaining of the UTC day), when reported,
+  lowers the free-model daily cap and marks ``free-daily`` EXHAUSTED when none remain (decision C).
+* The pool of a known route is never changed here (decision C, ADR-0041 amendment 2026-10-26): an OpenRouter route the
+  owner moved into WORKER stays there; a repriced model becomes ``is_free=NO`` with its catalog price (a configuration
+  change: its activation stops applying and decision C refuses it), a model no longer listed becomes MISSING.
 * OpenCode Go (ADR-0041 amendment 2026-10-26): GET the documented Go model list with the key from
   ``workers/opencode-go``; it only sets the availability of the seeded ``opencode-go/*`` routes. Anything but a
   list that was actually read (no key, rejected key, unreachable, unexpected answer) is UNKNOWN, never MISSING.
@@ -21,7 +25,7 @@ import logging
 import shutil
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -33,7 +37,7 @@ from aeos.claude_bridge.env import child_env
 from aeos.core.config import Settings, get_settings
 from aeos.core.errors import AeosError
 from aeos.core.redaction import redact_text
-from aeos.core.timeutil import utcnow
+from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.cost import QuotaState
 from aeos.models.routing import ModelRoute
 from aeos.models.routing_ext import CatalogRefresh
@@ -53,6 +57,10 @@ HTTP_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 # S12 (documentation, E1): free-model daily request caps depend on purchased credits.
 FREE_DAILY_LIMIT_NO_CREDITS = 50
 FREE_DAILY_LIMIT_WITH_CREDITS = 1000
+# expires_note text of a free_until the OpenRouter catalog itself stated (for the owner; the provenance itself is
+# data_terms.catalog.free_until_from_catalog, see _apply_openrouter)
+CATALOG_EXPIRY_NOTE = "catalog expiration_date"
+FREE_UNTIL_FROM_CATALOG = "free_until_from_catalog"
 
 
 def _is_zero(v: Any) -> bool:
@@ -100,15 +108,30 @@ def _apply_openrouter(route: ModelRoute, m: dict[str, Any], now: datetime) -> No
     params = m.get("supported_parameters")
     if isinstance(params, list):
         route.supports_tools = "YES" if "tools" in params else "NO"
+    # Provenance of free_until (decision C): whether the stored end date was taken from this catalog. It lives in
+    # data_terms.catalog (outside the configuration identity), never parsed from the human expires_note. Only a date the
+    # catalog itself set is cleared when the catalog stops stating one; a date from another source (the seed's research
+    # reading, e.g. S11 for Laguna S 2.1) is kept until the owner changes it.
+    from_catalog = bool(((route.data_terms or {}).get("catalog") or {}).get(FREE_UNTIL_FROM_CATALOG))
     expiry = _parse_date(m.get("expiration_date"))
-    if expiry is not None:
-        route.free_until = expiry if route.is_free == "YES" else route.free_until
-        route.expires_note = f"catalog expiration_date {m.get('expiration_date')}"
+    if expiry is not None and route.is_free == "YES":
+        route.free_until = expiry
+        route.expires_note = f"{CATALOG_EXPIRY_NOTE} {m.get('expiration_date')}"
+        from_catalog = True
+    elif (expiry is None and from_catalog and route.is_free == "YES" and route.free_until is not None
+          and m.get("expiration_date") in (None, "")):
+        # the catalog set this end date and no longer states one: clear it (a configuration change - free_until is part
+        # of the identity - so an activation bound to the old date stops applying)
+        route.free_until = None
+        route.expires_note = f"catalog lists no expiration_date (checked {now.date().isoformat()})"
+        from_catalog = False
+    # a priced or unknown-price model's expiration_date is not taken: free_until, expires_note and provenance unchanged
     raw_top = m.get("top_provider")
     top: dict[str, Any] = raw_top if isinstance(raw_top, dict) else {}
     terms = dict(route.data_terms or {})
     # Not a data-terms review: the catalog only exposes moderation; terms_checked_at is unchanged.
-    terms["catalog"] = {"checked_at": now.isoformat(), "is_moderated": top.get("is_moderated")}
+    terms["catalog"] = {"checked_at": now.isoformat(), "is_moderated": top.get("is_moderated"),
+                        FREE_UNTIL_FROM_CATALOG: from_catalog}
     route.data_terms = terms
     route.availability = "AVAILABLE"
     route.availability_checked_at = now
@@ -220,7 +243,19 @@ def parse_key_info(payload: Any) -> dict[str, Any]:
         "is_provisioning_key": data.get("is_provisioning_key"),
         "free_model_daily_limit_documented": (FREE_DAILY_LIMIT_NO_CREDITS if is_free_tier is True
                                               else FREE_DAILY_LIMIT_WITH_CREDITS if is_free_tier is False else None),
+        "free_model_daily_requests": _free_daily_requests(data.get("free_model_daily_requests")),
     }
+
+
+def _free_daily_requests(value: Any) -> dict[str, int] | None:
+    """``free_model_daily_requests`` of the key endpoint (E1, OpenRouter limits page read 2026-10-26: ``used``,
+    ``limit`` and ``remaining`` free-model requests of the current UTC day; the per-minute limit is not reported).
+    Only non-negative integers are kept; anything else is not an observation (None)."""
+    if not isinstance(value, dict):
+        return None
+    out = {k: value[k] for k in ("used", "limit", "remaining")
+           if isinstance(value.get(k), int) and not isinstance(value.get(k), bool) and value[k] >= 0}
+    return out or None
 
 
 def refresh_openrouter_key_info(session: Session, client: httpx.Client) -> dict[str, Any]:
@@ -249,14 +284,27 @@ def refresh_openrouter_key_info(session: Session, client: httpx.Client) -> dict[
     credits.source = "official-key-endpoint"
     credits.observed_at = now
     credits.details = {k: v for k, v in info.items() if k != "credit_state"} | {"secret_ref": ref}
-    if daily.state != "EXHAUSTED" or (daily.resets_at is not None and daily.resets_at <= now):
+    observed = info.get("free_model_daily_requests") or {}
+    remaining = observed.get("remaining")
+    if isinstance(remaining, int) and remaining <= 0:
+        # the key endpoint reports the free-model daily requests used up (decision C): every free route waits until
+        # the next UTC midnight - never a fallback to another route
+        daily.state, daily.source, daily.observed_at = "EXHAUSTED", "official-key-endpoint", now
+        daily.resets_at = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        daily.details = {"free_model_daily_requests": observed,
+                         "note": "free-model requests of the current UTC day used up per the key endpoint"}
+    elif daily.state != "EXHAUSTED" or (daily.resets_at is not None and ensure_aware(daily.resets_at) <= now) \
+            or (isinstance(remaining, int) and remaining > 0):
+        # cleared when it reset, and when the key endpoint now reports free-model requests left (e.g. after the credit
+        # purchase raised the daily limit): the official count of the current UTC day wins over an older block
         daily.state = "UNKNOWN"
         daily.source = "documented-limit"
         daily.observed_at = now
         daily.resets_at = None
         daily.details = {"documented_daily_limit": info["free_model_daily_limit_documented"],
-                         "note": "remaining free-model requests are not reported by the API; becomes EXHAUSTED "
-                                 "after an observed 429 (S12)"}
+                         "free_model_daily_requests": observed or None,
+                         "note": "AEOS counts its own free-model requests (decision C); this state becomes EXHAUSTED "
+                                 "after an observed 429 or when the key endpoint reports none remaining (S12)"}
     session.flush()
     return {"status": "OK", "checked_at": now.isoformat(), "credit_state": credits.state, "secret_ref": ref,
             "is_free_tier": info["is_free_tier"], "documented_free_daily_limit": info["free_model_daily_limit_documented"]}

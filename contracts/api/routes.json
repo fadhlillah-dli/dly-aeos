@@ -269,6 +269,7 @@
     "POST /api/routes/{route_key}/activate",
     "POST /api/routes/{route_key}/disable",
     "POST /api/routes/{route_key}/endpoint",
+    "POST /api/routes/{route_key}/pool",
     "POST /api/runs/{run_id}/acceptance/evaluate",
     "POST /api/runs/{run_id}/cancel",
     "POST /api/runs/{run_id}/quarantine-release",

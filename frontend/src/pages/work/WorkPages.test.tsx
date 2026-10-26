@@ -264,6 +264,54 @@ describe("Run detail page", () => {
   });
 });
 
+describe("Run detail retry decision", () => {
+  const blocked = (reason: string) => ({
+    ...row, mode: "LIVE", execution_state: "FAILED", ui_state: "BLOCKED", checked_at: new Date().toISOString(),
+    task: { ...row.task, id: "task-1" }, quarantined: false, quarantine_reasons: [], task_spec: null,
+    task_execution: { state: "BLOCKED", reason, reason_code: "NEEDS_DECISION", attempts_used: 0, max_attempts: 2, row_version: 3,
+      pending_findings: [], assigned_agent_key: "opencode-implementer" },
+    base_commit: "aaaaaaaaaaaa", head_commit: null, branch: "aeos/demo-1", workspace: { sandbox_kind: "process", strategy: "worktree", present: true },
+    lease: null, diff_summary: {}, actions: [], attempts: [], evidence: [], reviews: [], acceptance: [], decisions: [], side_effects: [],
+    model_calls: [], error: "", block_reason: "",
+  });
+
+  it("asks for no extra attempts when the quota-stop bound is the reason (ADR-0041 decision C)", async () => {
+    auth.isAdmin = true;
+    responses["/api/workforce/agents"] = { items: [] };
+    try {
+      vi.mocked(post).mockClear();
+      responses[`/api/runs/${row.run_id}`] = blocked(
+        "6 runs of this task were stopped at a provider quota since the last owner retry decision (bound 6)");
+      const user = userEvent.setup({ delay: null });
+      wrap(<RunDetailPage />, `/runs/${row.run_id}`);
+      await user.click(await screen.findByRole("button", { name: /Coba lagi/ }));
+      expect(screen.getByText(/Batas penghentian kuota provider tercapai/)).toBeInTheDocument();
+      expect(screen.queryByText(/Tambahan attempt/)).not.toBeInTheDocument();
+      await user.type(screen.getByRole("textbox"), "the free-model limit reset at 00:00 UTC");
+      await user.click(screen.getByRole("button", { name: "Konfirmasi" }));
+      await waitFor(() => expect(vi.mocked(post)).toHaveBeenCalledWith("/api/tasks/task-1/retry",
+        { extra_attempts: 0, rationale: "the free-model limit reset at 00:00 UTC" }));
+    } finally {
+      auth.isAdmin = false;
+    }
+  });
+
+  it("still asks for extra attempts when the attempt cap is the reason", async () => {
+    auth.isAdmin = true;
+    responses["/api/workforce/agents"] = { items: [] };
+    try {
+      responses[`/api/runs/${row.run_id}`] = blocked("attempt cap reached (2/2)");
+      const user = userEvent.setup({ delay: null });
+      wrap(<RunDetailPage />, `/runs/${row.run_id}`);
+      await user.click(await screen.findByRole("button", { name: /Coba lagi/ }));
+      expect(screen.getByText(/Batas attempt tercapai/)).toBeInTheDocument();
+      expect(screen.getByText(/Tambahan attempt/)).toBeInTheDocument();
+    } finally {
+      auth.isAdmin = false;
+    }
+  });
+});
+
 describe("Run detail quarantine release and reconciliation", () => {
   const base = {
     ...row,

@@ -115,18 +115,49 @@ def eval_served(session: Session, task: TaskSpec, route: ModelRoute) -> bool:
     return evaluation.eval_serving(session, task=task, route_key=route.route_key).get("status") == "SERVED"
 
 
+# Routing refusals that are a quota wait, not an ineligible route (decision C, ADR-0041 amendment 2026-10-26): the
+# free OpenRouter WORKER route is at its account-wide rate/daily limit and the task waits for it (no paid fallback).
+QUOTA_ROUTE_CODES = frozenset({"FREE_TIER_LIMIT_REACHED"})
+
+
 def select_route(session: Session, task: TaskSpec) -> tuple[ModelRoute | None, list[str]]:
+    route, reasons, _code = select_route_detail(session, task)
+    return route, reasons
+
+
+def select_route_detail(session: Session, task: TaskSpec) -> tuple[ModelRoute | None, list[str], str]:
+    """``select_route`` plus the admission wait code when no route is returned: ``ROUTE_INELIGIBLE``, or a routing
+    quota code (``QUOTA_ROUTE_CODES``) when the task waits for a rate-limited free route."""
     from aeos.routing import facade as routing
 
     try:
         decision = routing.select_route(session, task=task)
     except ImportError as exc:
-        return None, [_unavailable("routing", exc)]
+        return None, [_unavailable("routing", exc)], "ROUTE_INELIGIBLE"
     except Blocked as exc:
-        return None, [exc.message, *[str(r) for r in exc.details.get("reasons", [])]]
-    route = decision.route
+        code = exc.code if exc.code in QUOTA_ROUTE_CODES else "ROUTE_INELIGIBLE"
+        return None, [exc.message, *[str(r) for r in exc.details.get("reasons", [])]], code
+    route, problems = _checked_route(session, task, decision.route, decision.reason)
+    return route, problems, "ROUTE_INELIGIBLE"
+
+
+def free_tier_limit(session: Session, route: ModelRoute) -> str | None:
+    """The account-wide OpenRouter free-model limit that keeps *route* waiting now (None = none, or not a free
+    OpenRouter model). Routing unavailable -> an OpenRouter route waits (fail closed)."""
+    try:
+        from aeos.routing import facade as routing
+
+        limit = routing.free_tier_limit_problem(session, route)
+    except (ImportError, AttributeError) as exc:
+        free = route.provider == "openrouter" and str(route.model_id or "").endswith(":free")
+        return _unavailable("routing", exc) if free else None
+    return str(limit.get("reason") or "free-model limit reached") if limit else None
+
+
+def _checked_route(session: Session, task: TaskSpec, route: ModelRoute | None,
+                   reason: str) -> tuple[ModelRoute | None, list[str]]:
     if route is None:
-        return None, [decision.reason or "no eligible approved route"]
+        return None, [reason or "no eligible approved route"]
     problems: list[str] = []
     # Defence in depth (§12, §23): the worker pool never uses the Claude Max supervisor route, and
     # the route must explicitly list the task's domain. A non-WORKER route is accepted only as the exact route of a
