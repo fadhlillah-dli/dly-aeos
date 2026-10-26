@@ -54,7 +54,7 @@ def test_roles_grouped_and_inactive_not_working(personal_client, db):
     assert {a["agent_key"]: a["availability"] for a in agents}["opencode-implementer"] == "DISABLED"
 
 
-def test_enable_agent_blocked_until_prerequisites(personal_client, db):
+def test_enable_agent_blocked_until_prerequisites(personal_client, db, opencode_absent):
     seed.run(db)
     db.commit()
     r = personal_client.post("/api/workforce/agents/opencode-implementer/enable", json={"reason": "go"})
