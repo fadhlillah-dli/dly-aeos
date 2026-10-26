@@ -75,9 +75,10 @@ def test_baseline_only_lists_crossings_that_still_exist():
 # through knowledge.facade). 2026-10-26 (W6-037): -> 111 after the consumers of
 # names the facades already export (identity Principal/verify_password/bootstrap_complete, docs_engine for the
 # publisher, policy office_policy, knowledge, verification read_json, proposals create_proposal) were moved onto the
-# facades. Lower this number when crossings are removed; raising it means a reviewed change ADDS internal
-# crossings, which this ratchet exists to prevent.
-MAX_CROSSINGS = 111
+# facades. Wave 7 integration: 110 (both reductions together; the merged clusters' new imports of facade names go
+# through the facades). Lower this number when crossings are removed; raising it means a reviewed change ADDS
+# internal crossings, which this ratchet exists to prevent.
+MAX_CROSSINGS = 110
 
 # A module alias used only for names its facade exports, kept on the internal module for a stated reason.
 FACADE_ALIAS_EXCEPTIONS = {

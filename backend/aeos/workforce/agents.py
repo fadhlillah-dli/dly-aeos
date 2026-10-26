@@ -45,7 +45,7 @@ def _engine_reasons(sandbox: dict[str, Any]) -> list[str]:
         except Exception as exc:  # docker CLI missing/unreachable: never a pass
             return [f"worker image UNKNOWN ({type(exc).__name__}); container sandbox cannot start the engine"]
         return [] if img.get("present") else [f"worker image {img.get('tag')} missing: {img.get('evidence')}"]
-    from aeos.worker_runtime.opencode import opencode_status
+    from aeos.worker_runtime.facade import opencode_status
 
     st = opencode_status()
     return [] if st["status"] == "INSTALLED" else [f"OpenCode {st['status']}: {st['evidence']}"]
@@ -53,7 +53,7 @@ def _engine_reasons(sandbox: dict[str, Any]) -> list[str]:
 
 def prerequisites(session: Session, agent: AgentDefinition, *, domain: str) -> dict[str, Any]:
     """{"ready": bool, "reasons": [...], "sandbox": {...}} - what still blocks enabling *agent* (read-only)."""
-    from aeos.worker_runtime.sandbox import sandbox_readiness
+    from aeos.worker_runtime.facade import sandbox_readiness
     from aeos.workforce import integrations as ext
 
     reasons: list[str] = []

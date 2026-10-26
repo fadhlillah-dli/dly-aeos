@@ -124,7 +124,7 @@ def _grant(session: Session, row_id: str, reason: str) -> str:
 
 
 def _user(session: Session, row_id: str, reason: str, change: str) -> str:
-    from aeos.identity import service as identity
+    from aeos.identity import facade as identity
     from aeos.models.identity import User
 
     u = session.get(User, row_id, populate_existing=True)

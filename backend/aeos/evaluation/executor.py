@@ -162,7 +162,8 @@ def eval_only_problems(session: Session, run: EvalRun, route: Any, *, domain: st
     ACTIVE human decision bound to the route's current configuration hash; free (an eval-only route has no budget
     path - no silent paid spend, §42); the workload's data classification allowed by the route's terms (§40)."""
     from aeos.evaluation import definitions as D
-    from aeos.routing.service import is_effectively_free, route_use_problem, terms_eligibility
+    from aeos.routing.facade import route_use_problem, terms_eligibility
+    from aeos.routing.service import is_effectively_free
 
     problems: list[str] = []
     if (domain or run.submitted_domain or "PERSONAL") != "PERSONAL" or run.submitted_domain not in (None, "PERSONAL"):

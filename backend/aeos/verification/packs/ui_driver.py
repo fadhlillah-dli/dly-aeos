@@ -158,7 +158,7 @@ class _LiveApp:
         from aeos.api.app import create_app
         from aeos.core import config as config_mod
         from aeos.core.db import create_all, init_engine, session_factory
-        from aeos.identity import service as identity
+        from aeos.identity import facade as identity
 
         config_mod.reset_settings_cache()
         settings = config_mod.get_settings()

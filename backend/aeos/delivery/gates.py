@@ -36,7 +36,7 @@ from aeos.models.planning import PlanVersion, TaskSpec
 from aeos.models.portfolio import Project
 from aeos.models.workforce import TaskExecution, WorkerRun
 from aeos.verification import acceptance as acceptance_mod
-from aeos.verification import collector
+from aeos.verification import facade as verification
 from aeos.verification.integration import call
 from aeos.verification.review import (
     NON_REGRESSION_SCOPE,
@@ -96,7 +96,7 @@ def ci_gate_status(ev: EvidenceArtifact | None, gate: str) -> tuple[str, list[st
 
     if ev is None:
         return "NO_EVIDENCE", []
-    data = collector.read_json(ev) or {}
+    data = verification.read_json(ev) or {}
     runs = [CheckRunView(name=str(r.get("name") or ""), status=str(r.get("status") or "unknown"),
                          conclusion=r.get("conclusion"), app=r.get("app"), url=r.get("url"),
                          started_at=r.get("started_at"), completed_at=r.get("completed_at"),
@@ -364,7 +364,7 @@ def promotion_status(session: Session, project: Project, pr: PullRequestRecord |
         if target is None:
             continue
         ev = deployment.latest_observation(session, project, [pr.merge_commit_sha], env)
-        data = collector.read_json(ev) if ev is not None else None
+        data = verification.read_json(ev) if ev is not None else None
         reported = ((data or {}).get("artifact") or {}).get("reported_digest") if isinstance(data, dict) else None
         if ev is None:
             state = "NO_OBSERVATION"
@@ -428,7 +428,7 @@ def governance_status(session: Session, task: TaskSpec, acc: Any) -> dict[str, A
     ev = session.scalar(select(EvidenceArtifact).where(EvidenceArtifact.task_id == task.id,
                                                        EvidenceArtifact.kind == "GOVERNANCE_HANDOFF")
                         .order_by(EvidenceArtifact.created_at.desc()).limit(1))
-    data = (collector.read_json(ev) or {}) if ev is not None else {}
+    data = (verification.read_json(ev) or {}) if ev is not None else {}
     output = data.get("output") or {}
     bound = bool(ev is not None and acc is not None and (ev.environment or {}).get("artifact_hash") == acc.artifact_hash)
     configured = adapter.name != governance.NullGovernanceHarness.name
@@ -450,7 +450,7 @@ def governance_status(session: Session, task: TaskSpec, acc: Any) -> dict[str, A
 
 def _changed_files(session: Session, report: EvidenceArtifact | None) -> list[str]:
     scope_ev = related_evidence(session, report, "SCOPE_CHECK")
-    return list((collector.read_json(scope_ev) or {}).get("changed_files") or [])
+    return list((verification.read_json(scope_ev) or {}).get("changed_files") or [])
 
 
 def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
@@ -620,7 +620,7 @@ def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
                                                    "terlindungi pada merged state belum terbukti (sync PR)",
                                "provider commit files", [pr.id, ci_merge.id]))
         else:
-            data = collector.read_json(ci_merge) or {}
+            data = verification.read_json(ci_merge) or {}
             overall = str(data.get("overall") or "UNKNOWN")
             status = {"PASS": "PASS", "FAIL": "FAIL", "PENDING": "PENDING"}.get(overall, "NOT_PROVEN")
             gates.append(_gate("G5", status, f"CI pada merge commit {(pr.merge_commit_sha or '')[:12]}: {overall}; "
