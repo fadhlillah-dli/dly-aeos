@@ -302,6 +302,18 @@ def test_vault_status_and_start_without_binary(settings, memory_keyring, monkeyp
     assert r.exit_code == 1 and "aeos vault install" in r.output
 
 
+def test_vault_start_with_an_unusable_openbao_binary_setting_does_not_advise_install(settings, tmp_path,
+                                                                                    monkeypatch):
+    """The settings override wins over <data>/bin, so `aeos vault install` would change nothing."""
+    a_directory = tmp_path / "bao-dir"
+    a_directory.mkdir()
+    monkeypatch.setattr(settings, "openbao_binary", str(a_directory))
+    r = runner.invoke(app, ["vault", "start"])
+    assert r.exit_code == 1
+    assert f"settings openbao_binary={a_directory} is not an executable file; fix the setting or remove it" in r.output
+    assert "aeos vault install" not in r.output
+
+
 def test_generated_server_config_is_loopback_only(settings):
     text = server.config_text(settings)
     assert 'address         = "127.0.0.1:8200"' in text and "tls_disable     = true" in text and "ui = false" in text
@@ -462,3 +474,18 @@ def test_install_remedies_never_suggest_a_command_the_cli_refuses(settings, monk
     monkeypatch.setattr(installer, "manifest_pin", lambda root=None: "2.7.1")
     assert vault_remedy("install").command.endswith("vault install")
     assert _remedies({}, False, None)[0]["command"] == "aeos vault install"
+
+
+def test_vault_health_does_not_advise_install_when_the_binary_setting_is_unusable(settings, tmp_path):
+    """The openbao_binary setting wins over <data>/bin, so an install would not help: say to fix the setting."""
+    from aeos.secrets.health import _remedies, store_health
+
+    bad = tmp_path / "not-a-binary"
+    bad.mkdir()
+    settings.openbao_binary = str(bad)
+    remedies = store_health(settings)["remedies"]
+    commands = [r["command"] for r in remedies]
+    assert "aeos vault install" not in commands and not any(c.startswith("aeos vault install ") for c in commands)
+    assert any(str(bad) in r["why"] and "openbao_binary" in r["why"] for r in remedies)
+    near_miss = _remedies({}, False, None, None)
+    assert near_miss[0]["command"].startswith("aeos vault install")

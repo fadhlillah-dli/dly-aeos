@@ -94,6 +94,25 @@ describe("Costs & Quotas page (§42)", () => {
     expect(screen.getByRole("link", { name: /Usulkan koreksi/ }).getAttribute("href")).toMatch(/^\/proposals\?kind=COMPARE&source=/);
   });
 
+  it("shows a beyond-plan subscription and hides window figures that span other domains", async () => {
+    const base = { route_key: "opencode-go/glm-5.3-flash", provider: "opencode-go", status: "TRIAL", billing: "SUBSCRIPTION", plan: "OpenCode Go", currency: "USD",
+      monthly_fee_usd: 10, allowance_usd_month: 60, basis: "b", counted_scope: "THIS_AEOS_INSTANCE", checked_at: "2026-10-18T00:00:00Z" };
+    const beyond = { ...base, state: "BEYOND_PLAN", windows: [], problems: [], warnings: [], beyond_plan_usd: 0.31, beyond_plan_unknown_requests: 2,
+      beyond_plan: { entry_id: "e1", at: "2026-10-18T10:00:00+00:00", amount_usd: "0.31", billing_source: "balance", activated_at: null, remedy: "Pastikan Extra Usage OFF." } };
+    const hidden = { ...base, route_key: "opencode-go/hy3", state: "OK", windows: null, spend_hidden: true, spend_note: "Allowance rute mencakup domain lain." };
+    mockApi({
+      "/api/costs/summary": { ...summary, subscriptions: [beyond, hidden] },
+      "/api/budgets": { items: [budget] },
+      "/api/costs/ledger": { items: [], checked_at: null },
+      "/api/quotas": { items: [], note: "n" },
+    });
+    renderPage(<CostsPage />);
+    expect(await screen.findByText("Di luar paket (Extra Usage) — ditolak")).toBeInTheDocument();
+    expect(screen.getByText(/Dibayar di luar paket: \$0\.3100 \+ 2 panggilan berjumlah UNKNOWN/)).toBeInTheDocument();
+    expect(screen.getByText(/Ditolak \(SUBSCRIPTION_BEYOND_PLAN\) sejak 2026-10-18T10:00:00\+00:00: Pastikan Extra Usage OFF\./)).toBeInTheDocument();
+    expect(screen.getByText(/Allowance disembunyikan: Allowance rute mencakup domain lain\./)).toBeInTheDocument();
+  });
+
   it("offers the budget form only to SUPER_ADMIN", async () => {
     mockApi(
       {

@@ -1,4 +1,5 @@
 // API shapes for /api/claude/* and /api/routes/* (backend: aeos.claude_bridge.router, aeos.routing.router).
+import type { SubscriptionStatus } from "../../components/SubscriptionBlock";
 
 export interface AuthSummary {
   status: string;
@@ -157,6 +158,12 @@ export interface RouteItem {
   client_restriction?: ClientRestriction | null;
   /** false for a free route or a loopback LOCAL route (no BUDGET decision needed) */
   budget_required?: boolean;
+  /** how the route is paid; null for the native supervisor (Max plan, §42). SUBSCRIPTION = flat plan fee + allowance */
+  billing?: "SUBSCRIPTION" | "FREE" | "METERED" | "UNKNOWN" | null;
+  /** what the BUDGET decision covers (a subscription route: the monthly plan fee, not per-token spend) */
+  budget_note?: string | null;
+  /** plan + allowance per window of a SUBSCRIPTION route (cost module); null for any other route */
+  subscription?: SubscriptionStatus | null;
 }
 
 export interface UpstreamRequest {

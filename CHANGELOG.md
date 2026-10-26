@@ -75,9 +75,10 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
     - **Views.** `aeos cost summary`, `GET /api/costs/summary` (`subscriptions`, `by_route[].billing`), the route view
       and the task admission answer show the plan and the allowance per window (advisory windows marked), never
       per-token spend; the figures are hidden from a principal who cannot see every domain, also in
-      `GET /api/tasks/{id}/admission`. `aeos routes list` only flags `billing=SUBSCRIPTION`; the Control Center pages
-      do not show the allowance windows yet (UI gap). Doctor `route.registry` lists `subscription_candidates` apart
-      from paid or unknown-price candidates.
+      `GET /api/tasks/{id}/admission`. `aeos routes list` only flags `billing=SUBSCRIPTION`; the Costs page ("Langganan
+      worker") and the route drawer show the plan, the allowance per window and the beyond-plan state (UI contract
+      fixtures refreshed). Doctor `route.registry` lists `subscription_candidates` apart from paid or unknown-price
+      candidates.
     - **No migration.** Existing JSON columns hold the new figures.
     - **Evidence.** E2: unit tests with mocked upstreams cover allowance recording (reported, estimated, upper bound,
       stream), the blocking 5h window, the advisory week/month windows, the beyond-plan refusal and its clearing by
@@ -101,7 +102,61 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
   tests cover both header formats, an unreadable header, the recorded date and the header filter (E2); a live
   GitHub response with the header was observed on the owner's Mac (E3, that host only).
 
+- **Local gate runner, pre-push hook and commit-subject gate.** `python scripts/gates.py` runs the G1 static
+  commands of `ci.yml` (ruff, mypy darwin and win32, secret scan) plus frontend gates when `frontend/` changed.
+  `scripts/git-hooks/pre-push` (`git config core.hooksPath scripts/git-hooks`) runs them on the tip commit of each pushed
+  ref in a temporary worktree outside the repo (intermediate commits get only the message check; the hook finds
+  the main checkout's `.venv` from a linked worktree, or `AEOS_GATES_PYTHON`). `scripts/commit_subject.py` and a `commit subjects [G1]` job (pull
+  requests only) enforce Conventional Commits and the no-attribution rule after a baseline (reverts accepted); `.editorconfig` added. A drift test pins
+  `gates.py` to `ci.yml`. Proven by static checks and unit runs on macOS arm64 (E1/E2); the hook, the CI job and
+  every Windows path are NOT-PROVEN until a real push and a CI run.
+
+### Changed
+
+- **CI in about ten minutes, with the same tests.** On each host OS the backend suite now runs as 2 shards in
+  parallel, each with one pytest-xdist worker per logical CPU. Shards split by test file (`pytest --shard K/N`
+  in `tests/conftest.py`), packed from measured seconds in `tests/ci_durations.json`. Every collected file lands
+  in exactly one shard, so every test still runs on Windows, macOS arm64 and macOS Intel (ADR-0115). G1 static
+  checks run once per OS in shard 1. The real trusted-suite verifier run has its own `macos-latest` job. The
+  required check names `backend [G1,G2] (<os>)` are now aggregator jobs: each passes only when every backend
+  job of its OS succeeded, and a skipped or cancelled job fails it. The pip, npm and Playwright browser downloads
+  are cached. Every CI job now has a `timeout-minutes` (the default is 360, and a hung macOS job would block one
+  of the 5 macOS slots of GitHub Free). Each shard uploads its JUnit XML, and `scripts/ci_durations.py` rebuilds the weights from those
+  reports. `pytest-xdist` 3.8.0 (with `execnet` 2.1.2) joins the dev extra, and `requirements.lock` was
+  regenerated (ADR-0093 amendment). Proven locally (E2, Apple Silicon, `-n 4`): shards 1/2 and 2/2 ran
+  disjoint sets of tests whose union is the full collection (4,325 tests). They took 246 s and 203 s, and
+  4,309 tests passed with 7 skipped. The 9 failures depend on the build host: the tests reached a live local
+  OpenBao and a GitHub credential, and the same 9 fail on the unchanged code there. Unit tests cover the
+  assignment, the workflow wiring and the aggregator behaviour. The expected wall clock of about 10-12
+  minutes is NOT-PROVEN until the first CI run, and so is parallel safety on Windows and Intel macOS.
+
 ### Fixed
+
+- **A push run on `main` is no longer cancelled by the next merge.** The single concurrency group with
+  `cancel-in-progress` cancelled the run of PR #14's merge commit, so that commit never got a CI PASS for
+  `aeos ops release accept`. Only pull-request runs are cancelled now, and every push run has its own group.
+  Pinned by `tests/unit/test_ci_gates.py` (E1, static). The behaviour on GitHub is NOT-PROVEN until two merges
+  land in close succession.
+
+- **Advisory matching in multi-package repositories (#18).** The TRIAL/PROMOTE admission gate compared a candidate's pin
+  with the vulnerable ranges of every package a repository publishes, so `langgraph` 1.2.14 was refused for
+  advisories of `langgraph-checkpoint` 4.x (a different version line). Advisories that only name other packages
+  are now skipped, but only when the repository's advisories name the candidate's package (from `pkg==version`
+  in the pin, else the repository name); otherwise every advisory still counts. Skipped advisories are listed.
+  Unit tests (E2) and the owner's stored advisory records (E3, that host only: LangGraph 1.2.14 passes,
+  ToolHive v0.51.4 and Deep Agents 0.7.24 stay blocked, their patched pins pass).
+
+- **OpenBao found in the data bin; a binary that cannot run is UNKNOWN.** The inventory, the Doctor and the vault
+  runtime now find binaries through one resolver (`aeos.core.binaries`): settings override (`~` expanded),
+  `<data>/bin` (OpenBao only), PATH; a candidate counts only as a regular executable file, so the Doctor and the
+  inventory agree for every binary (`claude`, `opencode`, `node`, `docker` too) and `aeos vault start` names an
+  unusable `openbao_binary` setting instead of advising `aeos vault install`. A located binary that times out, fails
+  to start, is killed by a signal or (Windows) crashes with an NTSTATUS code is UNKNOWN, no longer INSTALLED, also
+  for the REQUIRED `claude`, `git` and `opencode` (before, a TIMEOUT/OS_ERROR was reported INSTALLED; intentional
+  evidence honesty). An UNKNOWN installation also leaves an open version/digest drift finding OPEN (not evaluated,
+  never resolved).
+  Evidence: OpenBao lookup E3 on the owner's Mac arm64 only (reconcile observed INSTALLED 2.7.1); the rest E2 unit
+  tests. Windows `bao.exe` and the NTSTATUS path: NOT-PROVEN.
 
 - **Data directory private on POSIX (#14).** The data layout was created with the process umask (0755
   under the usual 022), so the Doctor reported `evidence.dir_permissions` FAILED on every fresh Mac. On the

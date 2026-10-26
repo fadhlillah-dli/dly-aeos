@@ -563,8 +563,8 @@ A Go route could be activated but could not run honestly.
    * `GET /api/costs/summary` adds `subscriptions` and `by_route[].billing` / `allowance_usd`; the route view adds
      `subscription`; `GET /api/tasks/{id}/admission` adds `answers.subscription`.
    * In ledger entries, `cost_kind` is SUBSCRIPTION for a $0 call within the plan.
-   * `aeos routes list` only flags `billing=SUBSCRIPTION`. The Control Center pages do not show the allowance windows
-     yet (UI gap, NOT-PROVEN in the UI).
+   * `aeos routes list` only flags `billing=SUBSCRIPTION`. The Costs page and the route drawer show the plan, the
+     allowance per window and the beyond-plan state (component tests on the contract fixtures; not exercised in a browser).
    * Window figures span domains, so they follow the GLOBAL/ROUTE budget visibility rule in all three API answers.
 6. **Doctor.** `route.registry` lists SUBSCRIPTION candidates apart as `subscription_candidates`, never as free and
    never as `paid_or_unknown_price_candidates`. The latter keeps routes with incomplete terms. `requires_paid_write`

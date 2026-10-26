@@ -54,6 +54,9 @@ DRIFT_LABELS = {
     "obsolete-reference": "Referensi usang",
 }
 COMPONENT_CLASSES = frozenset(DRIFT_CLASSES[:4])
+# findings derived from the installation observation (pin / reviewed digest): they are only evaluated while that
+# observation is INSTALLED. An UNKNOWN installation (the binary did not run) is "not evaluated", never "resolved".
+INSTALLATION_MISMATCH_KEYS = frozenset({"version", "digest"})
 MISSING_STATES = frozenset({"NOT_INSTALLED", "REMOVED", "INSTALL_FAILED"})
 SEVERITIES = ("INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL")
 POLICY_REL = "policy/inventory-drift.yaml"
@@ -333,11 +336,16 @@ def persist_drift(session: Session, items: list[DriftItem], *, run_id: str | Non
             row.severity, row.summary, row.detail = it.severity, it.summary, it.detail
             row.last_detected_at, row.last_run_id = now, run_id
     resolved = 0
+    latest_inst = latest_observations(session, list({r.component_id for r in open_rows}), ("installation",))
     for key, row in index.items():
         if key in seen:
             continue
         if evaluated is not None and (row.component_id not in evaluated or row.drift_class not in COMPONENT_CLASSES):
             continue
+        inst = latest_inst.get((row.component_id, "installation"))
+        if row.drift_class == "resolved-version-mismatch" and row.finding_key in INSTALLATION_MISMATCH_KEYS \
+                and inst is not None and inst.status == "UNKNOWN":
+            continue  # not evaluated (evidence honesty): the mismatch is not proven gone, so it stays OPEN unchanged
         row.status, row.resolved_at = "RESOLVED", now
         resolved += 1
         events.emit(session, source="inventory", kind="inventory.drift.resolved", entity_type="component",

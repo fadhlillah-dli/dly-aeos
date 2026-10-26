@@ -133,7 +133,10 @@
     "note": "Broker AEOS memanggil upstream sebagai klien HTTP sendiri, bukan OpenCode. Rute ini tidak dapat diaktifkan atau diproksikan sampai pemilik memutuskan: OpenCode Go, rute berbayar dengan keputusan BUDGET, atau keputusan syarat-klien eksplisit saat aktivasi (ADR-0041)."
   },
   "budget_required": false,
+  "billing": "FREE",
+  "budget_note": null,
   "free_tier": null,
+  "subscription": null,
   "config": {
     "route_key": "opencode-zen/longcat-2.5-preview-free",
     "pool": "ARENA",

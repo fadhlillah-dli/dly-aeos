@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from aeos.core.binaries import is_executable_file, locate_binary
 from aeos.doctor.model import CheckContext, Outcome, Remedy
 from aeos.inventory.probes import (
     clean_output,
@@ -24,11 +25,16 @@ Fingerprint = Callable[[CheckContext], dict[str, Any]]
 
 
 def resolve_binary(ctx: CheckContext, name: str, override_attr: str | None = None) -> tuple[str | None, str]:
-    """Return (path, lookup) using an explicit settings override first, then PATH."""
-    configured = getattr(ctx.settings, override_attr, None) if override_attr else None
-    if configured:
-        return (str(configured) if ctx.runner.stat(str(configured)) else None), "settings"
-    return ctx.runner.which(name), "PATH"
+    """Return (path, lookup) by the one rule the reconciler also uses (``aeos.core.binaries``): an explicit settings
+    override (``~`` expanded, authoritative), then PATH; a regular executable file only, never a directory."""
+    return _locate(ctx, name, getattr(ctx.settings, override_attr, None) if override_attr else None, None)
+
+
+def _locate(ctx: CheckContext, name: str, configured: Any, data_dir: Path | None) -> tuple[str | None, str]:
+    found = locate_binary(name, configured=configured, data_dir=data_dir,
+                          is_executable=getattr(ctx.runner, "is_executable", is_executable_file),
+                          which=ctx.runner.which)
+    return found.path, found.lookup
 
 
 def binary_fingerprint(name: str, override_attr: str | None = None, resolver: Resolver | None = None) -> Fingerprint:
@@ -95,17 +101,9 @@ def module_present(name: str) -> tuple[bool, bool]:
 
 
 def resolve_openbao(ctx: CheckContext) -> tuple[str | None, str]:
-    """(path, lookup) of the OpenBao binary with the same precedence as ``aeos vault`` (settings
-    override, then the user-level install in ``<data>/bin`` made by ``aeos vault install``, then PATH)."""
-    import sys
-
-    configured = getattr(ctx.settings, "openbao_binary", None)
-    if configured:
-        return (str(configured) if ctx.runner.stat(str(configured)) else None), "settings"
-    local = ctx.data_dir / "bin" / ("bao.exe" if sys.platform == "win32" else "bao")
-    if ctx.runner.stat(str(local)):
-        return str(local), "data-dir"
-    return ctx.runner.which("bao"), "PATH"
+    """(path, lookup) of the OpenBao binary by the one rule the reconciler and ``aeos vault`` also use
+    (``aeos.core.binaries``): settings override, then ``<data>/bin``, then PATH; a regular executable file only."""
+    return _locate(ctx, "bao", getattr(ctx.settings, "openbao_binary", None), ctx.data_dir)
 
 
 def secret_ref_status(ref: str) -> tuple[str, dict[str, Any]]:

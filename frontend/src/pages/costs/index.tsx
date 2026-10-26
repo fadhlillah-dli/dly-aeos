@@ -7,6 +7,7 @@ import { BUDGET_STATE, COST_KIND, MappedBadge, QUOTA_STATE } from "../../compone
 import { decisionHref } from "../../components/proposals/PageLinks";
 import { Link } from "react-router-dom";
 import { StatusBadge } from "../../components/StatusBadge";
+import { SubscriptionStatusBlock, type SubscriptionStatus } from "../../components/SubscriptionBlock";
 import { Button, Card, EmptyState, ErrorBox, Field, Freshness, inputBase, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { absoluteTime, shortHash, usd } from "../../lib/format";
 
@@ -66,7 +67,9 @@ interface Summary {
   totals: { actual_usd: number; estimate_usd: number; unknown_count: number; entries: number; note: string };
   by_category: CategoryRow[];
   by_project: (Bucket & { project_id: string | null; project_name: string })[];
-  by_route: (Bucket & { route_key: string })[];
+  by_route: (Bucket & { route_key: string; billing?: "SUBSCRIPTION" | "FREE" | "METERED" | "UNKNOWN"; plan?: string | null; allowance_usd?: number })[];
+  /** ADR-0080 amendment: flat-fee worker routes as plan + allowance per window (absent on older servers) */
+  subscriptions?: SubscriptionStatus[];
   native_subscription: {
     billing: string;
     dollar_cost: null;
@@ -371,6 +374,22 @@ export default function CostsPage() {
                 ]}
               />
               <p className="mt-2 text-xs text-ink-3">{s.operations.note}</p>
+            </Card>
+          )}
+
+          {s.subscriptions && s.subscriptions.length > 0 && (
+            <Card title="Langganan worker (paket + allowance)">
+              <div className="space-y-4">
+                <Notice>
+                  Biaya paket tercatat sebagai keputusan BUDGET; pemakaian dihitung sebagai allowance per jendela provider, bukan biaya per token.
+                  Hanya panggilan lewat instance AEOS ini yang terhitung.
+                </Notice>
+                {s.subscriptions.map((sub) => (
+                  <div key={sub.route_key} className="border-t border-line pt-3 first:border-t-0 first:pt-0">
+                    <SubscriptionStatusBlock s={sub} showRoute />
+                  </div>
+                ))}
+              </div>
             </Card>
           )}
 
