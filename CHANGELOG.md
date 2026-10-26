@@ -21,6 +21,14 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ### Fixed
 
+- **Inventory sees OpenBao and admitted trials.** The reconciler looked for `bao` on PATH only, so the binary
+  that `aeos vault install` puts in `<data>/bin` showed NOT_INSTALLED (drift `planned-but-missing`) next to
+  CONNECTED/VERIFIED; it now looks in settings, then `<data>/bin` (`bao.exe` on Windows), then PATH, and reports the
+  observed version and digest. Candidates are probed (read-only `--version`) once a TRIAL_APPROVED/APPROVED
+  decision exists, never before; `rtk` and `ccusage` gained that probe, Serena and Context7 stay UNKNOWN with an
+  honest reason (no local binary). Unit tests (E2); observed on the owner's Mac arm64 only (E3); Windows path
+  NOT-PROVEN. An existing database needs `aeos seed --only aeos.inventory.seed` to pick up the new probes.
+
 - **Data directory private on POSIX (#14).** The data layout was created with the process umask (0755
   under the usual 022), so the Doctor reported `evidence.dir_permissions` FAILED on every fresh Mac. On the
   default macOS path the 0700 `~/Library` already kept other users out, but a data directory configured

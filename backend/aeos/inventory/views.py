@@ -41,7 +41,7 @@ from aeos.inventory.observations import (
     latest_observations,
 )
 from aeos.inventory.pins import select_digest
-from aeos.inventory.reconcile import is_probeable, latest_run, run_view
+from aeos.inventory.reconcile import PROBE_ADMISSIONS, latest_run, probe_skip_reason, run_view
 from aeos.models.inventory import CheckResult, ComponentObservation, ComponentReference, ComponentRelation
 from aeos.models.inventory_ext import DriftFinding
 
@@ -222,8 +222,8 @@ def dimension_values(comp: ComponentReference, latest: dict[tuple[str, str], Com
         out["installation"] = _dim_from_obs(inst, now)
     elif str(probe.get("type")) == "none" and probe.get("local_install") is False:
         out["installation"] = _dim("NOT_APPLICABLE", "layanan eksternal/rujukan; tidak dipasang lokal", "manifest")
-    elif not is_probeable(comp):
-        out["installation"] = _dim("UNKNOWN", str(probe.get("reason") or "tidak diprobe"), "manifest")
+    elif (skip := probe_skip_reason(comp, out["admission"]["value"] in PROBE_ADMISSIONS)) is not None:
+        out["installation"] = _dim("UNKNOWN", skip, "manifest")
     else:
         out["installation"] = _dim("UNKNOWN", "belum diprobe; jalankan aeos inventory reconcile", "belum ada observasi")
     for dim, missing, reason in (
@@ -273,7 +273,8 @@ def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift
                    f"/proposals?component={comp.component_id}")
     if "planned-but-missing" in classes:
         return act("INSTALL_MANUALLY", "Pasang sesuai remedy Readiness (manual, tanpa auto-install)", link="/readiness")
-    if is_probeable(comp) and inst["observation_id"] is None:
+    if probe_skip_reason(comp, dims["admission"]["value"] in PROBE_ADMISSIONS) is None \
+            and inst["observation_id"] is None:
         return act("RUN_RECONCILE", "Jalankan aeos inventory reconcile", "aeos inventory reconcile")
     if inst.get("stale"):
         return act("REFRESH", "Segarkan observasi (kedaluwarsa)", "aeos inventory reconcile")
@@ -478,9 +479,11 @@ def coverage(session: Session, *, domain: str | None, compact: bool = False,
         usage = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)[0]
     observed_ids = {cid for (cid, dim), o in latest.items() if dim in OBSERVED_DIMENSIONS and not is_stale(o, now)}
     stale_ids = {cid for (cid, dim), o in latest.items() if dim in OBSERVED_DIMENSIONS and is_stale(o, now)}
-    probeable = [c for c in comps.values() if is_probeable(c)]
+    states = decision_states(session, comps, domain=domain)
+    probeable = [c for c in comps.values()
+                 if probe_skip_reason(c, states[c.component_id].admission in PROBE_ADMISSIONS) is None]
     never = [c.component_id for c in probeable if not any((c.component_id, d) in latest for d in OBSERVED_DIMENSIONS)]
-    not_probed = [c for c in comps.values() if not is_probeable(c)]
+    not_probed = [c for c in comps.values() if c not in probeable]
     external = [c for c in not_probed if (c.probe or {}).get("local_install") is False]
     candidates = [c for c in not_probed if c not in external]
     usage_seen = any(dim == "usage" for (_cid, dim) in latest) or any(cid in comps for cid in usage)

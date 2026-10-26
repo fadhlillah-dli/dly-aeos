@@ -1851,7 +1851,7 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    probe: {type: none, reason: "Server MCP tanpa binary lokal yang dipasang AEOS; probe read-only belum didefinisikan (UNKNOWN, bukan tidak terpasang).", local_install: true}
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -1882,7 +1882,7 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    probe: {type: none, reason: "Server MCP tanpa binary lokal yang dipasang AEOS; probe read-only belum didefinisikan (UNKNOWN, bukan tidak terpasang).", local_install: true}
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -1943,7 +1943,7 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat eksperimen; tidak diprobe sebelum admission.", local_install: true}
+    probe: {type: binary, binaries: [{name: rtk, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}], timeout_seconds: 10, ttl_seconds: 3600, reason: "Kandidat eksperimen; tidak diprobe sebelum admission.", local_install: true}
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: "Tidak menjamin penghematan.", source: "S31"}
@@ -1974,7 +1974,7 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat eksperimen; tidak diprobe sebelum admission.", local_install: true}
+    probe: {type: binary, binaries: [{name: ccusage, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}], timeout_seconds: 10, ttl_seconds: 3600, reason: "Kandidat eksperimen; tidak diprobe sebelum admission.", local_install: true}
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: "Angka bukan tagihan resmi.", source: "S31"}

@@ -23,7 +23,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -43,6 +43,7 @@ from aeos.core.redaction import redact_text
 from aeos.core.timeutil import utcnow
 from aeos.inventory import dependencies as dep_reader
 from aeos.inventory import scope as scope_reader
+from aeos.inventory.decisions import decision_states
 from aeos.inventory.drift import compute_drift, persist_drift
 from aeos.inventory.manifest import MANIFEST_REL, apply_manifest, current_manifest
 from aeos.inventory.observations import UNREGISTERED_PREFIX, component_domain, record_observation
@@ -67,6 +68,11 @@ from aeos.models.inventory_ext import ReconciliationRun
 
 OBSERVER = "reconciler"
 CORE_REQUIREMENTS = frozenset({"REQUIRED", "OPTIONAL"})
+# A CANDIDATE with a probe definition is observed only once a human admission decision exists (§39/§40).
+PROBE_ADMISSIONS = frozenset({"TRIAL_APPROVED", "APPROVED"})
+BLOCKING_ADMISSIONS = frozenset({"SUSPENDED", "REJECTED"})
+# Executables that an ``aeos ... install`` command places user-level in ``<data>/bin`` (never on PATH).
+DATA_BIN_BINARIES = frozenset({"bao"})
 DEFAULT_TTL = 3600
 DECLARATION_TTL = 86400
 
@@ -117,6 +123,21 @@ def _obs(dimension: str, status: str, *, version: str | None = None, identity: s
 # ---------------------------------------------------------------- per-type probes
 
 
+def _locate_binary(ctx: ReconcileContext, b: dict[str, Any]) -> tuple[str | None, str]:
+    """(path, lookup) with the precedence of ``aeos vault`` and the Doctor: settings override, then the
+    user-level install in ``<data>/bin``, then PATH."""
+    name = b["name"]
+    override = b.get("settings_override")
+    configured = getattr(ctx.settings, override, None) if override else None
+    if configured:
+        return (str(configured) if ctx.runner.stat(str(configured)) else None), "settings"
+    if name in DATA_BIN_BINARIES:
+        local = ctx.data_dir / "bin" / (name + (".exe" if sys.platform == "win32" else ""))
+        if ctx.runner.stat(str(local)):
+            return str(local), "data-dir"
+    return ctx.runner.which(name), "PATH"
+
+
 def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[str, Any]) -> list[Spec]:
     ttl = int(probe.get("ttl_seconds") or DEFAULT_TTL)
     timeout = float(probe.get("timeout_seconds") or 10)
@@ -125,14 +146,7 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
     missing: list[str] = []
     for b in probe.get("binaries") or []:
         name = b["name"]
-        override = b.get("settings_override")
-        configured = getattr(ctx.settings, override, None) if override else None
-        path: str | None
-        lookup = "settings" if configured else "PATH"
-        if configured:
-            path = str(configured) if ctx.runner.stat(str(configured)) else None
-        else:
-            path = ctx.runner.which(name)
+        path, lookup = _locate_binary(ctx, b)
         if not path:
             missing.append(name)
             continue
@@ -153,7 +167,7 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
     specs: list[Spec] = []
     if missing:
         specs.append(_obs("installation", "NOT_INSTALLED", ttl=ttl, missing=missing,
-                          operation_ref="which " + " ".join(missing), lookup="PATH/settings", found=found or None))
+                          operation_ref="which " + " ".join(missing), lookup="settings/data-dir/PATH", found=found or None))
     elif found:
         versions = [f"{f['name']} {f['version']}" if len(found) > 1 else f["version"] for f in found]
         version = "; ".join(v for v in versions if v) or None
@@ -435,9 +449,34 @@ def is_probeable(comp: ComponentReference) -> bool:
     return str((comp.probe or {}).get("type") or "none") in PROBES
 
 
-def core_targets(components: Iterable[ComponentReference]) -> list[ComponentReference]:
+def admitted_candidates(session: Session, comps: dict[str, ComponentReference]) -> set[str]:
+    """Probeable CANDIDATE ids that a human admission decision (TRIAL_APPROVED/APPROVED) allows to be observed.
+
+    The Decision registry is the only authority (``decision_states``). A probe reads nothing domain-specific, so a
+    decision in any domain counts, but a SUSPENDED/REJECTED one in any domain blocks (fail closed)."""
+    cands = {cid: c for cid, c in comps.items() if c.requirement == "CANDIDATE" and is_probeable(c)}
+    seen: dict[str, set[str]] = {}
+    for domain in ((None, "PERSONAL", "OFFICE") if cands else ()):
+        for cid, st in decision_states(session, cands, domain=domain).items():
+            seen.setdefault(cid, set()).add(st.admission)
+    return {cid for cid, a in seen.items() if a & PROBE_ADMISSIONS and not a & BLOCKING_ADMISSIONS}
+
+
+def probe_skip_reason(comp: ComponentReference, admitted: bool) -> str | None:
+    """Why *comp* is not probed now (None = probe it): no probe definition, or a candidate not yet admitted."""
+    probe = comp.probe or {}
+    if not is_probeable(comp):
+        return str(probe.get("reason") or "tanpa probe")
+    if comp.requirement == "CANDIDATE" and not admitted:
+        return str(probe.get("reason") or "Kandidat; tidak diprobe sebelum admission.")
+    return None
+
+
+def core_targets(components: Iterable[ComponentReference], admitted: Collection[str] = ()
+                 ) -> list[ComponentReference]:
     return [c for c in components
-            if c.tombstoned_at is None and c.requirement in CORE_REQUIREMENTS and is_probeable(c)]
+            if c.tombstoned_at is None and is_probeable(c)
+            and (c.requirement in CORE_REQUIREMENTS or (c.requirement == "CANDIDATE" and c.component_id in admitted))]
 
 
 # ---------------------------------------------------------------- managed-scope sources
@@ -743,6 +782,7 @@ def _reconcile(
 
     manifest_hash = _ensure_desired(session, actor)
     comps = {c.component_id: c for c in session.scalars(select(ComponentReference))}
+    admitted = admitted_candidates(session, comps)
     if component_id is not None:
         comp = comps.get(component_id)
         if comp is None:
@@ -752,7 +792,7 @@ def _reconcile(
         targets = [comp]
         scope: dict[str, Any] = {"component_id": component_id}
     else:
-        targets = core_targets(comps.values())
+        targets = core_targets(comps.values(), admitted)
         scope = {"set": "core", "requirements": sorted(CORE_REQUIREMENTS)}
     ctx = ReconcileContext(settings=settings, runner=runner or get_runner(), repo=repo or repo_root(), session=session)
     run = ReconciliationRun(trigger=trigger, actor=actor, scope=scope, status="RUNNING", manifest_hash=manifest_hash,
@@ -766,9 +806,9 @@ def _reconcile(
     for comp in targets:
         cid = comp.component_id
         at = utcnow().isoformat()
-        if not is_probeable(comp):
-            component_status[cid] = {"status": "SKIPPED", "at": at,
-                                     "reason": str((comp.probe or {}).get("reason") or "tanpa probe")}
+        skip = probe_skip_reason(comp, cid in admitted)
+        if skip is not None:
+            component_status[cid] = {"status": "SKIPPED", "at": at, "reason": skip}
             continue
         try:
             specs = probe_component(ctx, comp)
