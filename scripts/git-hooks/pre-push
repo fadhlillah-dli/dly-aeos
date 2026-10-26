@@ -1,12 +1,41 @@
 #!/bin/sh
-# git pre-push hook: runs CI's static gates on every commit about to be pushed (scripts/gates.py --hook).
+# git pre-push hook: runs CI's static gates (scripts/gates.py --hook) on the tip commit of each pushed ref, and the
+# commit-message check over base..tip. Intermediate commits get only the message check, not the static gates.
 # Install once per clone: git config core.hooksPath scripts/git-hooks
+# Interpreter, first match wins: $AEOS_GATES_PYTHON; the venv of this checkout; the venv of the main checkout (a
+# linked worktree has none of its own); python3; python. Never link a venv into a worktree.
 root=$(git rev-parse --show-toplevel) || exit 1
-if [ -x "$root/.venv/bin/python" ]; then
-  py="$root/.venv/bin/python"
-elif [ -x "$root/.venv/Scripts/python.exe" ]; then
-  py="$root/.venv/Scripts/python.exe"
-else
-  py=python3
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
+main=
+[ -n "$common" ] && main=$(dirname "$common")
+py=
+if [ -n "${AEOS_GATES_PYTHON:-}" ]; then
+  if [ -f "$AEOS_GATES_PYTHON" ] && [ -x "$AEOS_GATES_PYTHON" ]; then
+    py=$AEOS_GATES_PYTHON
+  else
+    echo "pre-push: AEOS_GATES_PYTHON is not an existing executable file: $AEOS_GATES_PYTHON" >&2
+    exit 1
+  fi
+fi
+if [ -z "$py" ]; then
+  for base in "$root" "$main"; do
+    [ -n "$base" ] || continue
+    for cand in "$base/.venv/bin/python" "$base/.venv/Scripts/python.exe"; do
+      if [ -x "$cand" ]; then py=$cand; break 2; fi
+    done
+  done
+fi
+if [ -z "$py" ]; then
+  for cand in python3 python; do
+    if command -v "$cand" >/dev/null 2>&1; then
+      py=$cand
+      echo "pre-push: warning: no project .venv found, using $cand from PATH; mypy and ruff may be missing (set AEOS_GATES_PYTHON)" >&2
+      break
+    fi
+  done
+fi
+if [ -z "$py" ]; then
+  echo "pre-push: no Python found (no project .venv, no python3 or python on PATH); set AEOS_GATES_PYTHON" >&2
+  exit 1
 fi
 exec "$py" "$root/scripts/gates.py" --hook "$@"

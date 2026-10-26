@@ -5,6 +5,10 @@
     python scripts/gates.py --json         machine-readable results
     python scripts/gates.py --hook         git pre-push mode, see scripts/git-hooks/pre-push
 
+In hook mode the static gates run on the tip commit of each pushed ref only; the commit-message check covers
+base..tip, so intermediate commits get that check and nothing else. Run with the project .venv (or set
+AEOS_GATES_PYTHON for the hook): ruff and mypy must be installed for sys.executable, else their gates FAIL.
+
 The static gate list is the G1 step of .github/workflows/ci.yml; tests/unit/test_dev_gates.py fails when the two
 diverge. Stdlib only, ASCII-only output. A gate that did not run is SKIPPED with its reason, never PASS.
 Exit code 1 when any gate FAILs."""
@@ -57,6 +61,10 @@ STATIC_GATES: tuple[Gate, ...] = (
     Gate("mypy-win32", ("python", "-m", "mypy", "--platform", "win32")),
     Gate("secret-scan", ("python", "scripts/secret_scan.py")),
 )
+
+# Gates run as `python -m <tool>` for these tools are checked for installation first, so a wrong interpreter gives a
+# clear FAIL (never SKIPPED: a hook that skips mypy lets a type error through) instead of "No module named".
+PYTHON_TOOLS = ("ruff", "mypy")
 
 # The typecheck and unit steps of the frontend job in ci.yml. Its build step is not a gate here: it is slow and
 # adds nothing a typecheck and the unit tests do not already show.
@@ -131,10 +139,25 @@ def resolve_argv(gate: Gate) -> list[str] | None:
     return [found, *gate.argv[1:]] if found else None
 
 
+def missing_python_tool(gate: Gate) -> str | None:
+    """The tool of a `python -m <tool>` gate that is not installed for sys.executable, else None."""
+    if gate.argv[:2] == ("python", "-m") and len(gate.argv) > 2 and gate.argv[2] in PYTHON_TOOLS:
+        try:
+            if importlib.util.find_spec(gate.argv[2]) is None:
+                return gate.argv[2]
+        except (ImportError, ValueError):
+            return gate.argv[2]
+    return None
+
+
 def run_gate(gate: Gate, checkout: Path, env: Mapping[str, str], ref: str = "") -> Result:
     argv = resolve_argv(gate)
     if argv is None:
         return Result(gate.name, SKIPPED, 0.0, f"{gate.argv[0]} is not on PATH", gate.command, ref)
+    tool = missing_python_tool(gate)
+    if tool:
+        return Result(gate.name, FAIL, 0.0, f"{tool} is not installed for {sys.executable}; use the project .venv "
+                      "or set AEOS_GATES_PYTHON", gate.command, ref)
     started = time.perf_counter()
     try:
         proc = _run(argv, checkout / gate.cwd, env)

@@ -8,7 +8,10 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -37,17 +40,19 @@ gates = _load("gates")
 
 
 # ------------------------------------------------------------------ throwaway repositories
-def _git(repo: Path, *args: str) -> str:
+def _git(repo: Path, *args: str, **identity: str) -> str:
+    """Git on a throwaway repo. The identity comes from the environment, never from a global or system git config."""
     env = gates.clean_env()
     env.update(GIT_AUTHOR_NAME="Dev", GIT_AUTHOR_EMAIL="dev@example.com",
                GIT_COMMITTER_NAME="Dev", GIT_COMMITTER_EMAIL="dev@example.com")
+    env.update({k.upper(): v for k, v in identity.items()})  # git_author_email="x" -> GIT_AUTHOR_EMAIL
     proc = subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", *args],
                           cwd=repo, env=env, capture_output=True, text=True, encoding="utf-8", check=True)
     return proc.stdout.strip()
 
 
-def _commit(repo: Path, subject: str) -> str:
-    _git(repo, "commit", "--allow-empty", "-m", subject)
+def _commit(repo: Path, subject: str, **identity: str) -> str:
+    _git(repo, "commit", "--allow-empty", "-m", subject, **identity)
     return _git(repo, "rev-parse", "HEAD")
 
 
@@ -418,9 +423,9 @@ def test_the_commit_subject_job_runs_on_pull_requests_only_with_full_history():
 def test_the_pre_push_hook_is_a_short_executable_posix_sh_file():
     path = ROOT / "scripts" / "git-hooks" / "pre-push"
     text = path.read_bytes().decode("utf-8")
-    assert text.startswith("#!/bin/sh\n") and "\r" not in text and len(text.splitlines()) <= 20
-    for needle in ("git rev-parse --show-toplevel", ".venv/bin/python", ".venv/Scripts/python.exe", "python3",
-                   'exec "$py" "$root/scripts/gates.py" --hook "$@"'):
+    assert text.startswith("#!/bin/sh\n") and "\r" not in text and len(text.splitlines()) <= 45
+    for needle in ("git rev-parse --show-toplevel", "--git-common-dir", "AEOS_GATES_PYTHON", ".venv/bin/python",
+                   ".venv/Scripts/python.exe", "python3", 'exec "$py" "$root/scripts/gates.py" --hook "$@"'):
         assert needle in text, needle
     try:
         index = subprocess.run(["git", "ls-files", "-s", "scripts/git-hooks/pre-push"], cwd=ROOT, capture_output=True,
@@ -433,4 +438,194 @@ def test_the_pre_push_hook_is_a_short_executable_posix_sh_file():
 
 def test_contributing_documents_the_one_line_install_and_the_runner():
     text = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "AEOS_GATES_PYTHON" in text
     assert "git config core.hooksPath scripts/git-hooks" in text and "python scripts/gates.py" in text
+
+
+# ------------------------------------------------------------------ revert subjects
+def test_a_revert_of_a_valid_subject_is_accepted():
+    assert cs.check_subject('Revert "feat(core): add a thing"') is None
+    assert cs.check_subject('Revert "Revert "fix: x""') is None
+    long_wrapper = 'Revert "fix: ' + "x" * 90 + '"'  # the wrapper may pass 100 characters, the quoted subject may not
+    assert len(long_wrapper) > cs.MAX_LENGTH and cs.check_subject(long_wrapper) is None
+
+
+def test_a_revert_of_an_invalid_subject_is_rejected():
+    for subject in ('Revert "Update README"', 'Revert ""', 'Revert "fix: ' + "x" * 100 + '"', 'Revert fix: x',
+                    'revert "feat: x"'):
+        assert cs.check_subject(subject) is not None, subject
+    assert "reverted subject" in (cs.check_subject('Revert "Update README"') or "")
+
+
+# ------------------------------------------------------------------ no attribution in commits
+TRAILER = "Co-authored-by"
+
+
+def _bad(repo: Path, base: str) -> list[tuple[str, str, str]]:
+    return cs.violations(f"{base}..HEAD", str(repo), baseline=None)
+
+
+@pytest.mark.parametrize("body", [
+    f"{TRAILER}: Claude <noreply@anthropic.com>",
+    f"{TRAILER.lower()}: Some Name <helper@openai.com>",
+    f"{TRAILER.upper()}: Copilot <copilot@users.noreply.github.com>",
+    f"{TRAILER}: Gemini <x@example.com>",
+    "Generated with [Claude Code](https://claude.com/claude-code)",
+    "generated with ChatGPT",
+    "see https://claude.ai/code/session_1",
+])
+def test_attribution_in_the_message_is_rejected(repo: Path, body: str):
+    base = _commit(repo, "feat: root")
+    sha = _commit(repo, f"fix(core): fine subject\n\nWhat changed.\n\n{body}")
+    found = _bad(repo, base)
+    assert [f[0] for f in found] == [sha]
+    assert cs.check_subject("fix(core): fine subject") is None and found[0][2]  # only the attribution is the reason
+
+
+def test_attribution_in_a_merge_commit_message_is_rejected_but_the_merge_subject_is_exempt(repo: Path):
+    base = _commit(repo, "feat: root")
+    _git(repo, "checkout", "-q", "-b", "side")
+    _commit(repo, "fix: side work")
+    _git(repo, "checkout", "-q", "main")
+    _commit(repo, "fix: main work")
+    _git(repo, "merge", "--no-ff", "-m", f"Merge pull request #1\n\n{TRAILER}: Claude <noreply@anthropic.com>", "side")
+    found = _bad(repo, base)
+    assert len(found) == 1 and found[0][1] == "Merge pull request #1" and "co-author" in found[0][2]
+
+
+def test_a_clean_merge_commit_and_a_human_co_author_pass(repo: Path):
+    base = _commit(repo, "feat: root")
+    _git(repo, "checkout", "-q", "-b", "side")
+    _commit(repo, f"fix: pair work\n\n{TRAILER}: Ada Lovelace <ada@example.com>")
+    _git(repo, "checkout", "-q", "main")
+    _commit(repo, "fix: main work")
+    _git(repo, "merge", "--no-ff", "-m", "Merge pull request #2 from someone/side", "side")
+    assert _bad(repo, base) == []
+
+
+@pytest.mark.parametrize("who", ["git_author_email", "git_committer_email"])
+@pytest.mark.parametrize("email", ["noreply@anthropic.com", "Bot@Mail.OpenAI.com"])
+def test_an_ai_vendor_author_or_committer_email_is_rejected(repo: Path, who: str, email: str):
+    base = _commit(repo, "feat: root")
+    sha = _commit(repo, "feat: from a tool", **{who: email})
+    found = _bad(repo, base)
+    assert [f[0] for f in found] == [sha] and "e-mail" in found[0][2]
+
+
+def test_similar_but_unrelated_emails_and_words_pass(repo: Path):
+    base = _commit(repo, "feat: root")
+    _commit(repo, "feat: cursors and geminis\n\nThe cursor moves; generated with care.",
+            git_author_email="me@notanthropic.com")
+    assert _bad(repo, base) == []
+
+
+def test_the_cli_prints_per_commit_ascii_reasons_for_attribution(repo: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                 capsys: pytest.CaptureFixture[str]):
+    base = _commit(repo, "feat: root")
+    _commit(repo, f"feat: caf\u00e9\n\n{TRAILER}: Claude <noreply@anthropic.com>")
+    monkeypatch.chdir(repo)
+    assert cs.main([f"{base}..HEAD", "--baseline", "none"]) == 1
+    out = capsys.readouterr().out
+    assert out.isascii() and "FAIL" in out and "co-author trailer" in out and "1 of 1" in out
+
+
+def test_attribution_patterns_live_in_one_tuple_and_the_job_name_is_unchanged():
+    assert isinstance(cs.ATTRIBUTION_PATTERNS, tuple) and len(cs.ATTRIBUTION_PATTERNS) >= 3
+    assert yaml.safe_load(CI_TEXT)["jobs"]["commit-subjects"]["name"] == "commit subjects [G1]"
+
+
+# ------------------------------------------------------------------ a missing tool is a FAIL, never a skip
+@pytest.mark.parametrize("tool, gate", [("mypy", "mypy-darwin"), ("mypy", "mypy-win32"), ("ruff", "ruff")])
+def test_a_missing_python_tool_is_a_fail_with_a_clear_reason(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                             tool: str, gate: str):
+    real = importlib.util.find_spec
+    monkeypatch.setattr(gates.importlib.util, "find_spec", lambda name, *a: None if name == tool else real(name, *a))
+    chosen = next(g for g in gates.STATIC_GATES if g.name == gate)
+    result = gates.run_gate(chosen, tmp_path, gates.clean_env())
+    assert result.status == gates.FAIL
+    assert result.detail == (f"{tool} is not installed for {sys.executable}; use the project .venv "
+                             "or set AEOS_GATES_PYTHON")
+    assert "No module named" not in result.detail
+
+
+def test_a_gate_that_is_not_a_python_tool_is_unaffected_by_the_tool_check(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setattr(gates.importlib.util, "find_spec", lambda name, *a: None)
+    ok = gates.run_gate(gates.Gate("ok", ("python", "-c", "pass")), tmp_path, gates.clean_env())
+    assert ok.status == gates.PASS
+
+
+# ------------------------------------------------------------------ pre-push interpreter selection
+HOOK = ROOT / "scripts" / "git-hooks" / "pre-push"
+needs_sh = pytest.mark.skipif(shutil.which("sh") is None, reason="the pre-push hook is a POSIX sh script; no sh on this host")
+
+
+def _stub(path: Path, label: str) -> Path:
+    """A small executable FILE (never a symlink) that reports which interpreter the hook chose."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\necho \"CHOSEN={label} ARGS=$*\"\n", encoding="utf-8", newline="\n")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return path
+
+
+@pytest.fixture()
+def linked(tmp_path: Path) -> tuple[Path, Path]:
+    """(main checkout, linked worktree), both under directories with a space in the name; neither has a .venv."""
+    main = tmp_path / "main checkout"
+    main.mkdir()
+    _git(main, "init", "-q")
+    _commit(main, "feat: root")
+    wt = tmp_path / "linked wt"
+    _git(main, "worktree", "add", "-q", "--detach", str(wt))
+    return main, wt
+
+
+def _run_hook_script(cwd: Path, env_extra: dict[str, str] | None = None, path_prefix: Path | None = None):
+    env = gates.clean_env()
+    env.pop("AEOS_GATES_PYTHON", None)
+    if path_prefix:
+        env["PATH"] = str(path_prefix) + os.pathsep + env["PATH"]
+    env.update(env_extra or {})
+    return subprocess.run(["sh", str(HOOK), "origin", "url"], cwd=cwd, env=env, capture_output=True, text=True,
+                          encoding="utf-8", input="", check=False)
+
+
+@needs_sh
+def test_hook_uses_the_main_checkout_venv_from_a_linked_worktree(linked: tuple[Path, Path]):
+    main, wt = linked
+    _stub(main / ".venv" / "bin" / "python", "main-venv")
+    proc = _run_hook_script(wt)
+    assert proc.returncode == 0, proc.stderr
+    assert "CHOSEN=main-venv" in proc.stdout and "--hook origin url" in proc.stdout and "warning" not in proc.stderr
+
+
+@needs_sh
+def test_hook_prefers_the_checkouts_own_venv_over_the_main_one(linked: tuple[Path, Path]):
+    main, wt = linked
+    _stub(main / ".venv" / "bin" / "python", "main-venv")
+    _stub(wt / ".venv" / "bin" / "python", "own-venv")
+    assert "CHOSEN=own-venv" in _run_hook_script(wt).stdout
+
+
+@needs_sh
+def test_aeos_gates_python_wins_and_a_bad_value_is_an_error(linked: tuple[Path, Path], tmp_path: Path):
+    main, wt = linked
+    _stub(main / ".venv" / "bin" / "python", "main-venv")
+    chosen = _stub(tmp_path / "my tools" / "py", "override")
+    proc = _run_hook_script(wt, {"AEOS_GATES_PYTHON": str(chosen)})
+    assert proc.returncode == 0 and "CHOSEN=override" in proc.stdout
+    bad = _run_hook_script(wt, {"AEOS_GATES_PYTHON": str(tmp_path / "missing" / "python")})
+    assert bad.returncode == 1 and "AEOS_GATES_PYTHON" in bad.stderr and bad.stderr.isascii() and not bad.stdout
+    not_exec = tmp_path / "plain.txt"
+    not_exec.write_text("x", encoding="utf-8")
+    not_exec.chmod(0o644)
+    assert _run_hook_script(wt, {"AEOS_GATES_PYTHON": str(not_exec)}).returncode == 1
+
+
+@needs_sh
+def test_hook_falls_back_to_path_python_with_an_ascii_warning(linked: tuple[Path, Path], tmp_path: Path):
+    _, wt = linked
+    fake_bin = tmp_path / "fakebin"
+    _stub(fake_bin / "python3", "path-python3")
+    proc = _run_hook_script(wt, path_prefix=fake_bin)
+    assert proc.returncode == 0 and "CHOSEN=path-python3" in proc.stdout
+    assert "warning" in proc.stderr and "python3" in proc.stderr and proc.stderr.isascii()
