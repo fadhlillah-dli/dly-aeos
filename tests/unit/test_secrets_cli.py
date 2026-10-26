@@ -474,3 +474,18 @@ def test_install_remedies_never_suggest_a_command_the_cli_refuses(settings, monk
     monkeypatch.setattr(installer, "manifest_pin", lambda root=None: "2.7.1")
     assert vault_remedy("install").command.endswith("vault install")
     assert _remedies({}, False, None)[0]["command"] == "aeos vault install"
+
+
+def test_vault_health_does_not_advise_install_when_the_binary_setting_is_unusable(settings, tmp_path):
+    """The openbao_binary setting wins over <data>/bin, so an install would not help: say to fix the setting."""
+    from aeos.secrets.health import _remedies, store_health
+
+    bad = tmp_path / "not-a-binary"
+    bad.mkdir()
+    settings.openbao_binary = str(bad)
+    remedies = store_health(settings)["remedies"]
+    commands = [r["command"] for r in remedies]
+    assert "aeos vault install" not in commands and not any(c.startswith("aeos vault install ") for c in commands)
+    assert any(str(bad) in r["why"] and "openbao_binary" in r["why"] for r in remedies)
+    near_miss = _remedies({}, False, None, None)
+    assert near_miss[0]["command"].startswith("aeos vault install")
