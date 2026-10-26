@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 import { get, post } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { RemedyPanel } from "../../components/doctor/RemedyPanel";
+import { RouteBehaviourEvidence } from "../../components/doctor/RouteBehaviourEvidence";
 import { isOk } from "../../components/doctor/status";
 import type { CapabilitiesResponse, CapabilityItem, CheckItem, ChecksResponse, HistoryResponse } from "../../components/doctor/types";
 import { Badge, SeverityBadge } from "../../components/inventory/labels";
@@ -214,6 +215,7 @@ function CheckDetail({ check, onClose }: { check: CheckItem; onClose: () => void
             ["Kritis untuk", check.critical_for.length ? check.critical_for.join(", ") : "—"],
           ]}
         />
+        {check.check_id === "worker.route_behaviour" && <RouteBehaviourEvidence evidence={check.observed_evidence ?? {}} />}
         {evidence.length > 0 && (
           <div>
             <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-3">Bukti teramati (teredaksi)</div>

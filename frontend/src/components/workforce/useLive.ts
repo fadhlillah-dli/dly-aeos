@@ -2,7 +2,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { useEventStream, type AeosEvent } from "../../lib/events";
 
-const RELEVANT = /^(run\.|task\.|scheduler\.|broker\.grant)/;
+// worker_runtime.alert (DB_TRUST_TAMPER / INTEGRITY_HOLD / CONTROLLER_MODIFIED, HIGH) changes admission and run state
+const RELEVANT = /^(run\.|task\.|scheduler\.|broker\.grant|worker_runtime\.)/;
 
 /**
  * Invalidate the given query keys when a persisted workforce event arrives (debounced). The event

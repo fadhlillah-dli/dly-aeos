@@ -11,6 +11,7 @@ import { ExecState, ModeBadge, SeparateStatuses, costText, shortId } from "../..
 import type { RunList, RunRow, WorkforceSummary } from "../../components/workforce/types";
 import { useLiveInvalidation } from "../../components/workforce/useLive";
 import { absoluteTime, relativeTime } from "../../lib/format";
+import { IntegrityHoldPanel, isIntegrityHold } from "./IntegrityHold";
 
 const STATE_ORDER = ["QUEUED", "READY", "LEASED", "RUNNING", "REVIEW", "BLOCKED", "DONE", "FAILED", "CANCELLED"];
 
@@ -74,7 +75,10 @@ function SummaryCards({ s }: { s: WorkforceSummary }) {
       </Card>
       <Card title="Sandbox & engine">
         <div className="flex flex-wrap gap-1.5">
-          <StatusBadge status={s.sandbox.status} label={`Sandbox: ${s.sandbox.status === "READY" ? `siap (${s.sandbox.kind})` : "terblokir"}`} />
+          <StatusBadge
+            status={s.sandbox.status}
+            label={`Sandbox: ${s.sandbox.status === "READY" ? `siap (${s.sandbox.kind})` : isIntegrityHold(s.sandbox) ? "terblokir (integrity hold)" : "terblokir"}`}
+          />
           <StatusBadge status={s.engine.status === "INSTALLED" ? "INSTALLED" : s.engine.status} label={`OpenCode: ${s.engine.status}${s.engine.version ? ` ${s.engine.version}` : ""}`} />
           <StatusBadge status="NOT-PROVEN" label="Fungsi engine: belum terbukti" />
         </div>
@@ -203,6 +207,9 @@ export default function WorkPage() {
         </Notice>
       )}
 
+      {/* wave 7: the host-wide integrity hold blocks every worker in every domain - shown first, before the counters */}
+      {summary.data && isIntegrityHold(summary.data.sandbox) && <IntegrityHoldPanel sandbox={summary.data.sandbox} />}
+
       {summary.isLoading ? <Loading /> : summary.error ? <ErrorBox error={summary.error} /> : summary.data && <SummaryCards s={summary.data} />}
 
       <ConcurrencyPanel domain={domain} isAdmin={isAdmin} />
@@ -222,7 +229,7 @@ export default function WorkPage() {
         </Card>
       )}
 
-      {summary.data && summary.data.sandbox.status !== "READY" && (
+      {summary.data && summary.data.sandbox.status !== "READY" && !isIntegrityHold(summary.data.sandbox) && (
         <Notice tone="warn">
           <span className="inline-flex items-center gap-1 font-medium">
             <ShieldAlert className="h-4 w-4" aria-hidden /> Worker tidak dapat berjalan: sandbox yang disyaratkan belum tersedia.
@@ -373,6 +380,11 @@ export default function WorkPage() {
                 cell: (r) => (
                   <div className="max-w-40 text-xs">
                     {capsText(r)}
+                    {r.caps?.integrity_hold === true && (
+                      <div className="mt-0.5">
+                        <StatusBadge status="BLOCKED" label="Memicu integrity hold" />
+                      </div>
+                    )}
                     {r.capability && (
                       <div className="mt-0.5">
                         <StatusBadge

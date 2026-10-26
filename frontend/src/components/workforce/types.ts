@@ -113,8 +113,93 @@ export interface WorkforceSummary {
     cost_status: string;
     quota: { provider: string; scope: string; state: string; source: string; observed_at: string | null; resets_at: string | null }[];
   };
-  sandbox: { status: string; kind: string | null; reasons: string[]; remedies: string[]; residual_risks: string[] };
+  sandbox: SandboxReadiness;
   engine: { status: string; version: string | null; pinned_version: string; functional: string; evidence: string; checked_at: string };
+}
+
+/** One finding of the host-wide integrity hold (backend worker_runtime.integrity; this domain's findings only). */
+export interface IntegrityFinding {
+  kind?: string;
+  path?: string;
+  change?: string;
+  detail?: string;
+  source?: string;
+  subject_id?: string | null;
+  domain?: string | null;
+}
+
+/** Wave 7 (W6-000/005): a controller/config/bytecode/DB tamper finding holds every worker in every domain. */
+export interface IntegrityHold {
+  id: string | null;
+  detected_at: string | null;
+  source: string | null;
+  /** null when the run/verification that raised it belongs to another domain (invariant 9) */
+  subject_id: string | null;
+  findings: IntegrityFinding[];
+  /** findings raised in another domain: shown only as a count */
+  other_domain_findings: number;
+}
+
+/** Sandbox readiness (/api/workforce/summary .sandbox and /api/worker-runtime/sandbox). */
+export interface SandboxReadiness {
+  status: string;
+  kind: string | null;
+  reasons: string[];
+  remedies: string[];
+  residual_risks: string[];
+  /** INTEGRITY_HOLD while the host-wide hold is active (absent on older servers) */
+  code?: string | null;
+  integrity_hold?: IntegrityHold | null;
+}
+
+/** WorkerRun.caps keys the runtime records (backend worker_runtime.executor); absent = not recorded. */
+export interface RunRuntimeCaps {
+  integrity_hold?: boolean;
+  db_trust_window?: {
+    status?: string;
+    foreign_count?: number;
+    tolerated_count?: number;
+    tables?: number;
+    rows?: number;
+    own_writes?: number;
+    error?: string;
+    note?: string;
+  };
+  cpu_cap?: { enforced?: boolean; by?: string; max_cpus?: number | null; job_cpu_rate?: number | null };
+  command_logs?: {
+    present?: boolean;
+    files?: number;
+    bytes?: number;
+    truncated?: boolean;
+    skipped?: number;
+    removed_from_candidate?: boolean;
+    evidence_ref?: string;
+    rejected?: string;
+    ignored?: string;
+  };
+  controller_integrity?: { checked_files?: number; changed?: number };
+  context_pack?: {
+    used?: boolean;
+    reason?: string;
+    freshness?: string;
+    pack_id?: string;
+    pack_hash?: string;
+    items?: number;
+    token_budget?: number | null;
+    artifacts_in_pack?: boolean;
+    artifacts_omitted?: number;
+    build?: {
+      built?: boolean;
+      reason?: string;
+      context_pack_id?: string;
+      pack_hash?: string;
+      items?: number;
+      token_budget?: number | null;
+      token_estimate?: number | null;
+      omitted?: number;
+      warnings?: string[];
+    } | null;
+  };
 }
 
 export interface ActionEvent {
@@ -178,7 +263,21 @@ export interface RunDetail extends RunRow {
   acceptance: { id: string; status: string; review_verdict: string | null; base_commit: string | null; head_commit: string | null; invalidated_reason: string | null; created_at: string | null }[];
   decisions: { id: string; kind: string; target_type: string; target_id: string; target_hash?: string | null; status: string; rationale: string; created_at: string | null }[];
   side_effects: { id: string; kind: string; status: string; target: Record<string, unknown>; external_url: string | null; commit_sha: string | null; updated_at: string | null; note: string }[];
-  model_calls: { at: string | null; route_key: string | null; outcome: string; status: number | null; prompt_tokens: number | null; completion_tokens: number | null; cost_usd: number | "UNKNOWN"; model_resolved: string | null; latency_ms: number | null }[];
+  model_calls: {
+    at: string | null;
+    route_key: string | null;
+    outcome: string;
+    status: number | null;
+    prompt_tokens: number | null;
+    completion_tokens: number | null;
+    cost_usd: number | "UNKNOWN";
+    model_resolved: string | null;
+    latency_ms: number | null;
+    /** level the broker sent upstream (NOT_SENT = provider default); null = recorded before the column existed */
+    reasoning_effort?: string | null;
+    /** level the worker asked for, dropped and never forwarded (a known level or UNRECOGNISED); null = none */
+    reasoning_requested?: string | null;
+  }[];
   error: string;
   block_reason: string;
 }

@@ -12,6 +12,7 @@ import { ExecState, ModeBadge, SeparateStatuses, costText, shortId } from "../..
 import type { ActionEvent, AgentDef, RunDetail } from "../../components/workforce/types";
 import { useLiveInvalidation } from "../../components/workforce/useLive";
 import { absoluteTime, relativeTime, shortHash } from "../../lib/format";
+import { alertText, isHighAlert, QuarantineReason, reasoningRequestedLabel, reasoningSentLabel, RuntimeIntegrity } from "./runtimeCaps";
 
 function List({ items }: { items: unknown[] | undefined }) {
   if (!items || items.length === 0) return <span className="text-ink-3">—</span>;
@@ -39,7 +40,15 @@ function actionText(a: ActionEvent): string {
   const p = a.payload as Record<string, unknown>;
   if (typeof p.label === "string") return p.label + (typeof p.detail === "string" && p.detail ? ` — ${p.detail}` : "");
   if (a.kind === "run.state_changed") return `State run: ${String(p.from ?? "—")} → ${String(p.to ?? "—")} ${p.reason ? `(${String(p.reason)})` : ""}`;
-  if (a.kind === "run.model_call") return `Panggilan model via broker: ${String(p.outcome)} · ${String(p.prompt_tokens ?? "?")}+${String(p.completion_tokens ?? "?")} token · biaya ${String(p.cost_usd)}`;
+  if (a.kind === "run.model_call") {
+    const base = `Panggilan model via broker: ${String(p.outcome)} · ${String(p.prompt_tokens ?? "?")}+${String(p.completion_tokens ?? "?")} token · biaya ${String(p.cost_usd)}`;
+    // ADR-0041 amendment 2026-10-25: the level the broker sent, and the worker's requested level it dropped
+    if (!("reasoning_effort" in p)) return base;
+    const sent = reasoningSentLabel(p.reasoning_effort as string | null).label;
+    const dropped = p.reasoning_requested_dropped ? ` · permintaan reasoning pekerja dibuang: ${String(p.reasoning_requested_dropped)}` : "";
+    return `${base} · reasoning: ${sent}${dropped}`;
+  }
+  if (a.kind === "worker_runtime.alert") return `Peringatan ${String(p.severity ?? "")}: ${alertText(p)}`;
   if (a.kind === "run.heartbeat") return "Heartbeat (liveness, bukan kemajuan)";
   if (a.kind === "run.stale_event") return `Event lama ditolak: ${String(p.rejected)} (${String(p.why)})`;
   if (a.kind === "run.side_effect") return `Efek eksternal: ${String(p.kind)} ${String(p.status)}`;
@@ -60,12 +69,17 @@ function Timeline({ actions }: { actions: ActionEvent[] }) {
         <ol className="space-y-1.5 text-sm">
           {shown.map((a) => {
             const narration = a.label.startsWith("summary");
+            const alert = isHighAlert(a.kind, a.payload);
             return (
               <li key={a.seq} className="flex flex-wrap items-start gap-2 border-b border-line pb-1.5 last:border-0">
                 <span className="w-24 shrink-0 text-xs text-ink-3" title={absoluteTime(a.at)}>
                   {relativeTime(a.at)}
                 </span>
-                <StatusBadge status={narration ? "ESTIMATE" : "CONFIGURED"} label={narration ? "Ringkasan AI (bukan bukti)" : "Aksi alat teramati"} />
+                {alert ? (
+                  <StatusBadge status="BLOCKED" label={`Peringatan HIGH: ${String(a.payload.code ?? "UNKNOWN")}`} />
+                ) : (
+                  <StatusBadge status={narration ? "ESTIMATE" : "CONFIGURED"} label={narration ? "Ringkasan AI (bukan bukti)" : "Aksi alat teramati"} />
+                )}
                 {a.mode !== "LIVE" && <StatusBadge status={a.mode} />}
                 <span className={narration ? "italic text-ink-2" : ""}>{actionText(a)}</span>
                 <span className="text-xs text-ink-3">· {a.source}</span>
@@ -166,7 +180,7 @@ function QuarantineNotice({ run, isAdmin, onDone }: { run: RunDetail; isAdmin: b
       <ul className="mt-1 list-disc pl-5">
         {run.quarantine_reasons.map((q2, i) => (
           <li key={i}>
-            <Mono>{q2.path}</Mono> — {q2.rule} {q2.detail ? `(${q2.detail})` : ""}
+            <QuarantineReason q={q2} />
           </li>
         ))}
       </ul>
@@ -299,6 +313,10 @@ export default function RunDetailPage() {
               )}
             </Card>
           </div>
+
+          <Card title="Integritas runtime & batas (dicatat controller, bukan klaim worker)">
+            <RuntimeIntegrity caps={r.caps ?? {}} />
+          </Card>
 
           <Card title="Linimasa aksi teramati">
             <Timeline actions={r.actions} />
@@ -443,6 +461,20 @@ export default function RunDetailPage() {
                   { header: "Token", cell: (c) => `${c.prompt_tokens ?? "?"}+${c.completion_tokens ?? "?"}` },
                   { header: "Biaya", cell: (c) => costText(c.cost_usd) },
                   { header: "Model teramati", cell: (c) => <span className="text-xs">{c.model_resolved ?? "UNKNOWN"}</span> },
+                  {
+                    header: "Reasoning dikirim",
+                    cell: (c) => {
+                      const s = reasoningSentLabel(c.reasoning_effort);
+                      return <StatusBadge status={s.status} label={s.label} />;
+                    },
+                  },
+                  {
+                    header: "Diminta pekerja",
+                    cell: (c) => {
+                      const s = reasoningRequestedLabel(c.reasoning_effort, c.reasoning_requested);
+                      return <StatusBadge status={s.status} label={s.label} />;
+                    },
+                  },
                 ]}
               />
             </Card>
