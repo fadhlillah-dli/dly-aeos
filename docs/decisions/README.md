@@ -23,7 +23,7 @@ SUPERSEDED on ADR-0003 also revokes the decisions its `owner:ADR-0003` actor hol
 |---|---|---|
 | [ADR-0001](ADR-0001-master-architecture-baseline.md) | Master architecture is the platform baseline; MCI alignment UNVERIFIED | ACCEPTED |
 | [ADR-0002](ADR-0002-stack-and-cross-platform-runtime.md) | Stack and cross-platform local runtime (Windows + macOS) | ACCEPTED |
-| [ADR-0003](ADR-0003-seed-build-authority.md) | Seed build by native Claude; owner-authorised commit/push/merge for the platform repo | ACCEPTED |
+| [ADR-0003](ADR-0003-seed-build-authority.md) | Seed build authority: owner-authorised commit/push/merge for the platform repo | ACCEPTED |
 | [ADR-0004](ADR-0004-first-admin-bootstrap-hardening.md) | First-admin bootstrap hardening and local single-use recovery | PROPOSED |
 | [ADR-0010](ADR-0010-install-manifest-component-catalog.md) | InstallManifest as the reviewed component catalog (DESIGN lens) | ACCEPTED |
 | [ADR-0011](ADR-0011-readiness-doctor-capability-gates.md) | Readiness Doctor checks, fingerprints and capability gates | ACCEPTED |

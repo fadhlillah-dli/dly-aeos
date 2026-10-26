@@ -76,14 +76,15 @@ def _record_seed_exception(session: Session) -> str:
         auth_scope={
             "repository": repo,
             "branch": "main",
-            "delegate": "official Claude Code (owner's Max login) in the owner's trusted clone",
+            "delegate": "the owner's development tooling in the owner's trusted clone, under the owner's identity",
             "scope": "seed build of DLY AEOS (M0-M4 code)",
             "not_for": ["AEOS workers", "broker", "publisher", "any non-platform repository"],
         },
         project_id=platform.id if platform is not None and platform.domain == Domain.PERSONAL.value else None,
         domain=Domain.PERSONAL.value,
         rationale=(
-            "Owner instruction 2026-10-18 recorded in ADR-0003: Claude may commit, push, open and merge PRs for "
+            "Owner instruction 2026-10-18 recorded in ADR-0003: the owner's development tooling may commit, push, "
+            "open and merge PRs for "
             "fadhlillah-dli/dly-aeos while building the seed. Plan approval, publication approval, risk "
             "acceptance, budgets, production, OFFICE data and credentials are NOT delegated."
         ),
