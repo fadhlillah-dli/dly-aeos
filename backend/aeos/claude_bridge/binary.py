@@ -163,9 +163,16 @@ def publisher_signature(path: Path | None, *, fingerprint_value: str | None = No
                       "reason": "no OS code-signature check on this platform"}
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         result = {"method": None, "signer": None, "status": "UNKNOWN", "reason": type(exc).__name__}
-    pin = approved_publisher()
-    result["publisher_pin"] = (f"{pin} (owner-pinned in the install-manifest; see the authenticity gate)" if pin else
-                               "NONE (install-manifest has no approved pin; authenticity UNVERIFIED)")
+    pin_info = publisher_pin()
+    pin = pin_info.get("signer")
+    if pin:
+        result["publisher_pin"] = f"{pin} (owner-pinned in the install-manifest; see the authenticity gate)"
+    elif pin_error(pin_info):
+        # an unreadable/invalid install-manifest is not "no pin": whether one exists is UNKNOWN and the gate blocks
+        result["publisher_pin"] = (f"UNKNOWN (install-manifest unreadable: {pin_error(pin_info)}; authenticity "
+                                   "UNVERIFIED, the authenticity gate blocks)")[:300]
+    else:
+        result["publisher_pin"] = "NONE (install-manifest has no approved pin; authenticity UNVERIFIED)"
     if run is None:
         _SIG_CACHE[key] = result
     return result

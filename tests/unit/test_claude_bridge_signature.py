@@ -294,6 +294,9 @@ def test_an_unreadable_manifest_is_an_unknown_pin_and_blocks_never_unpinned(sett
     assert pin["status"] == "UNREADABLE" and pin["signer"] is None and "MANIFEST_INVALID" in pin["reason"]
     valid = {"status": "VALID", "signer": REAL_WINDOWS}
     assert binmod.signature_gate(valid, None, pin_problem=binmod.pin_error(pin))[0] == "BLOCKED"
+    # the OS signature report says the pin is UNKNOWN, never that none exists (integration of G with main's codesign fix)
+    text = binmod.publisher_signature(Path("claude-unreadable-pin"), run=lambda argv, timeout=30: (1, "", ""))
+    assert text["publisher_pin"].startswith("UNKNOWN (install-manifest unreadable") and "NONE" not in text["publisher_pin"]
 
     called: list[int] = []
     monkeypatch.setattr(bridge, "run_process", lambda *a, **k: called.append(1))
