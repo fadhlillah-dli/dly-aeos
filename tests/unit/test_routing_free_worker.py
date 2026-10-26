@@ -134,7 +134,6 @@ def test_owner_moves_a_discovered_free_route_into_worker_and_must_reactivate(rou
 
 
 @pytest.mark.parametrize(("edit", "needle"), [
-    (lambda r: setattr(r, "model_id", "cohere/north-mini-code"), "does not end with ':free'"),
     (lambda r: setattr(r, "pricing", {"prompt": "0.0000001", "completion": "0"}), "not exactly zero"),
     (lambda r: setattr(r, "pricing", {"completion": "0"}), "'prompt' not observed"),
     (lambda r: setattr(r, "pricing", {**FREE_PRICING, "request": "0.001"}), "'request'"),
@@ -155,11 +154,15 @@ def test_pool_move_into_worker_refuses_a_route_outside_decision_c(routes, monkey
     assert r.pool == "ARENA"
 
 
-def test_only_openrouter_routes_move_and_only_between_arena_and_worker(routes, monkeypatch):
+def test_only_openrouter_free_routes_move_and_only_between_arena_and_worker(routes, monkeypatch):
     install_fakes(monkeypatch)
     _discover(routes)
+    paid = ModelRoute(route_key="openrouter/vendor/pro", pool="ARENA", provider="openrouter", model_id="vendor/pro",
+                      is_free="NO", eligible_domains=["PERSONAL"], allowed_data_classes=["PUBLIC"])
+    routes.add(paid)
+    routes.flush()
     for key, pool in (("opencode-zen/mimo-v2.6-flash-free", "WORKER"), (FREE, "LOCAL"), (FREE, "WATCHLIST"),
-                      (GO_GLM, "ARENA")):
+                      (GO_GLM, "ARENA"), (paid.route_key, "WORKER")):
         with pytest.raises(ValidationFailed) as ei:
             service.set_route_pool(routes, key, pool=pool, rationale="trying to move another route")
         assert ei.value.code == "ROUTE_POOL_MOVE_UNSUPPORTED"
@@ -211,6 +214,38 @@ def test_a_stored_edit_outside_decision_c_is_rejected_by_routing_and_per_request
         r.free_until, r.allowed_data_classes, r.eligible_domains = saved
         approve(routes, FREE, kind="TRIAL")
         assert service.route_use_problem(routes, r) is None
+
+
+def test_a_non_free_openrouter_worker_route_keeps_the_existing_rules(routes, monkeypatch):
+    """Decision C governs OpenRouter ':free' models only: a paid OpenRouter WORKER route is judged by the existing rules
+    (BUDGET decision, data-class and terms rules) - no PUBLIC-only rule, no free-tier limit, no free-first rank."""
+    install_fakes(monkeypatch)
+    key = "openrouter/vendor/pro"
+    paid = ModelRoute(route_key=key, pool="WORKER", provider="openrouter", model_id="vendor/pro",
+                      endpoint="https://openrouter.ai/api/v1", is_free="NO",
+                      pricing={"prompt": "0.000001", "completion": "0.000002", "basis": "OpenRouter catalog"},
+                      eligible_domains=["PERSONAL"], allowed_data_classes=["PUBLIC", "INTERNAL"], supports_tools="YES",
+                      context_window=131072, harness="opencode", tool_set=list(service.REVIEWED_WORKER_TOOLS),
+                      data_terms={"may_use_inputs_for_training": False, "trial_only_no_confidential": False},
+                      status="CANDIDATE", mode="LIVE")
+    routes.add(paid)
+    routes.flush()
+    assert not free_tier.is_decision_c_route(paid) and free_tier.decision_c_problems(paid)  # it is not a free route
+    approve(routes, key, kind="TRIAL")
+    d = eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL")
+    assert any("paid route" in x for x in d.rejected[key]) and not any("decision C" in x for x in d.rejected[key])
+    budget = human_decision(routes, kind="BUDGET", target_type="model_route", target_id=key)
+    approve(routes, key, kind="TRIAL", details={"budget_decision_id": budget.id})
+    _forwarded(routes, 60)  # the account's :free count is used up: not this route's limit
+    assert eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL").eligible == [key]
+    assert select_route(routes, task=task(classification="INTERNAL")).route.route_key == key
+    assert service.route_use_problem(routes, paid) is None
+    assert service.free_worker_problem(routes, paid, run_id="no-such-run") is None  # no PUBLIC-only TaskSpec rule
+    assert free_tier.route_limit_problem(routes, paid) is None and not service.free_first(paid)
+    paid.eligible_domains = ["OFFICE"]  # the company OFFICE path decides, not decision C
+    reasons = service.route_rejections(routes, paid, domain="OFFICE", data_classification="INTERNAL",
+                                       needs_tools=True, min_context=None)
+    assert any("OFFICE denied" in x for x in reasons) and not any("decision C" in x for x in reasons)
 
 
 # ------------------------------------------------------------------ catalog refresh

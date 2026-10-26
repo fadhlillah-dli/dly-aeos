@@ -232,7 +232,7 @@ def route_view(session: Session, r: ModelRoute, principal: Principal,
 def _free_tier_view(session: Session, r: ModelRoute) -> dict[str, Any] | None:
     """Decision C (ADR-0041 amendment 2026-10-26): an OpenRouter ``:free`` route's account-wide free-model limits and
     this AEOS instance's count; for a route in WORKER also the decision C eligibility. None for any other route."""
-    if not free_tier.is_free_model_route(r) and not free_tier.is_decision_c_route(r):
+    if not free_tier.is_free_model_route(r):
         return None
     view = free_tier.status(session)
     if free_tier.is_decision_c_route(r):

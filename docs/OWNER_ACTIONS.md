@@ -382,9 +382,10 @@ Activating a route is your explicit decision. Nothing is active by default.
     route view and the task admission answer (`GET /api/tasks/<id>/admission`) carry the same figures for a user who
     may see every domain. `./aeos routes list` only flags `billing=SUBSCRIPTION`, and the Control Center pages do not
     show the windows yet.
-* **Free OpenRouter WORKER routes (decision C, ADR-0041 amendment 2026-10-26).** Free OpenRouter models may serve
-  worker tasks for **PUBLIC data only**, PERSONAL only. INTERNAL data stays on the OpenCode Go routes; CONFIDENTIAL
-  never goes to a worker route. A free route ranks first for PUBLIC tasks. When the free tier is at its limit, the
+* **Free OpenRouter WORKER routes (decision C, ADR-0041 amendment 2026-10-26).** Free OpenRouter models (ids ending in
+  `:free`) may serve worker tasks for **PUBLIC data only**, PERSONAL only. INTERNAL data stays on the OpenCode Go routes;
+  CONFIDENTIAL never goes to a worker route. Other OpenRouter routes keep the rules above (a paid route needs a BUDGET
+  decision); `set-pool` moves only `:free` routes. A free route ranks first for PUBLIC tasks. When the free tier is at its limit, the
   task waits (`FREE_TIER_LIMIT_REACHED`, shown as WAITING_QUOTA); it never moves to a Go route or to any paid route. Do
   these steps in order:
   1. **Credits (once, on openrouter.ai).** Buy at least $10 of credits. This raises the free-model daily cap of the
@@ -417,6 +418,7 @@ Activating a route is your explicit decision. Nothing is active by default.
 
   6. **Decision C, the move into WORKER.** For each route you want as a worker, move it. The move is a new
      configuration: its ARENA TRIAL from step 5 stops applying, and it does not come back if you move the route back.
+     Only a `:free` OpenRouter route moves (`ROUTE_POOL_MOVE_UNSUPPORTED` otherwise).
 
      ```bash
      ./aeos routes set-pool openrouter/cohere/north-mini-code:free --pool WORKER --as <admin> --rationale "Decision C: free worker tier for PUBLIC data"
@@ -424,8 +426,8 @@ Activating a route is your explicit decision. Nothing is active by default.
      ```
 
      The line of the route must show `decision-c=PUBLIC-ONLY`. Copy its new hash. A move is refused
-     (`FREE_WORKER_ROUTE_INELIGIBLE`) for a model id without `:free`, a catalog price that is not exactly zero, an
-     ended free period, data classes other than PUBLIC alone, or an OFFICE domain.
+     (`FREE_WORKER_ROUTE_INELIGIBLE`) for a catalog price that is not exactly zero, an ended free period, data classes
+     other than PUBLIC alone, or an OFFICE domain.
   7. **Re-activate the WORKER configuration.** **A WORKER TRIAL is eligible for real PUBLIC worker tasks at once, ahead
      of the Go routes.** If you want the probe (step 8) first, pause scheduling around it
      (`./aeos work pause --reason "OpenRouter probe"`, then `./aeos work resume`).

@@ -604,7 +604,8 @@ A Go route could be activated but could not run honestly.
 ## Amendment 2026-10-26 (decision C: free OpenRouter WORKER routes for PUBLIC data)
 
 Status of this amendment: the owner decided on 2026-10-26 ("G2 / option C") that free OpenRouter models may serve as a
-first-tier WORKER for PUBLIC data only (this repository is public). INTERNAL data stays on OpenCode Go (decision A);
+first-tier WORKER for PUBLIC data only (this repository is public). The decision covers OpenRouter `:free` models only;
+every other OpenRouter route keeps the existing rules. INTERNAL data stays on OpenCode Go (decision A);
 CONFIDENTIAL never goes to a worker route. This amendment records that decision and implements the code path. Moving a
 route, activating it, the terms review and the daily cap stay the owner's actions in the app; nothing is moved or
 activated automatically. Evidence: E1 (OpenRouter documentation) and E2 (unit tests against respx mocks). Every live
@@ -631,14 +632,14 @@ behaviour is NOT-PROVEN until a probe or a TRIAL run records it.
 1. **Shape: an owner pool move, then a new activation** (option (a); nothing equivalent was latent in the code). New
    `aeos routes set-pool <route_key> --pool WORKER|ARENA --as <admin> --rationale ...` (password-confirmed like
    `set-endpoint`) and `POST /api/routes/{route_key}/pool` (SUPER_ADMIN) call `routing.service.set_route_pool`. Only an
-   OpenRouter route moves, only ARENA <-> WORKER (`ROUTE_POOL_MOVE_UNSUPPORTED`). The pool is part of the configuration
+   OpenRouter `:free` route moves, only ARENA <-> WORKER (`ROUTE_POOL_MOVE_UNSUPPORTED`). The pool is part of the configuration
    identity, so the move reuses the existing path: `refresh_config_hash` invalidates every decision bound to the route
    (the G1 ARENA TRIAL never carries over; moving back to ARENA restores the old hash but not the INVALIDATED decision),
    eval results are not inherited, readiness of the old and the new pool goes STALE, `route.config_changed` and
    `route.pool_set` are emitted and the move is audited. The owner then activates the WORKER configuration as a new
    TRIAL (the existing hash-bound human decision). The catalog refresh and `aeos seed` never change a pool.
-2. **Eligibility (`routing/free_tier.py`, `decision_c_problems`)** for any OpenRouter route in WORKER: provider
-   `openrouter`; model id ends with `:free`; `is_free=YES`; catalog price `prompt` and `completion` observed and exactly
+2. **Eligibility (`routing/free_tier.py`, `decision_c_problems`)** for every OpenRouter `:free` route in WORKER
+   (`is_decision_c_route`; a repriced `:free` route stays one, so it is refused, never billed): `is_free=YES`; catalog price `prompt` and `completion` observed and exactly
    zero (and any other listed component zero); `allowed_data_classes` exactly `[PUBLIC]`; `eligible_domains` exactly
    `[PERSONAL]`; `free_until` not passed. After `free_until` the route is treated as paid (the existing BUDGET rule
    applies too), and decision C covers free routes only, so it is refused (`FREE_WORKER_ROUTE_INELIGIBLE`). Checked at
@@ -670,7 +671,8 @@ behaviour is NOT-PROVEN until a probe or a TRIAL run records it.
    QUOTA wait shown as WAITING_QUOTA; a task the executor stopped for repeated rate limits keeps waiting through
    `route_quota_exhausted`), on every broker request (429 + Retry-After before the request counts against the grant,
    recorded `RATE_LIMITED` without an upstream model so the executor's quota stop sees it and the counter does not) and
-   in the probe (`PolicyDenied FREE_TIER_LIMIT_REACHED`).
+   in the probe (`PolicyDenied FREE_TIER_LIMIT_REACHED`). Migration `0009_dc_broker_request_created` adds the index
+   `ix_broker_requests_created` (downgrade drops it), so the count does not scan the whole table.
 7. **429 from OpenRouter** for a `:free` model: recorded RATE_LIMITED as before (route-scoped quota state, audit FAILED,
    no ledger entry, no other route tried) and additionally account-wide (`openrouter/free-rpm` or `free-daily`): reset
    at the provider's Retry-After when sent; otherwise at the next UTC midnight when this instance's daily count reached
@@ -687,12 +689,13 @@ behaviour is NOT-PROVEN until a probe or a TRIAL run records it.
 * **PUBLIC tasks wait when the free tier is used up**, even if a Go route has allowance (no paid fallback). With the
   1000/day cap used up, PUBLIC work waits until 00:00 UTC. Routing PUBLIC work to Go in that case would loosen the
   fallback rule and is not implemented; it needs its own owner decision.
-* **Every OpenRouter route in WORKER is a decision C route** (the fail-closed reading of "provider openrouter"). A paid
-  OpenRouter WORKER route (free period over, or repriced) is not served, even with a BUDGET decision; the owner moves
-  it back to ARENA or disables it. An OpenRouter WORKER route made OFFICE-eligible through the company path
-  (`policy.office_routes`) is refused as well (PERSONAL only). Neither existed through the seed or the catalog before;
-  two tests that used an OpenRouter WORKER route as a generic example now use another provider. Allowing a paid or an
-  OFFICE OpenRouter worker route needs its own owner decision.
+* **Scope: OpenRouter `:free` models only.** A `:free` route whose free period ended, or that was repriced, stays a
+  decision C route and is refused, even with a BUDGET decision; the owner moves it back to ARENA or disables it. A
+  `:free` WORKER route made OFFICE-eligible through the company path (`policy.office_routes`) is refused as well
+  (PERSONAL only). Any other OpenRouter WORKER route (a paid model, or an OFFICE route through the company path) keeps
+  the existing rules: BUDGET decision, data-class and terms rules, the OFFICE path; no PUBLIC-only rule, no free-tier
+  limit, no free-first rank. Three existing tests used a `:free` OpenRouter WORKER route as a generic example with
+  INTERNAL data, an OFFICE domain or no catalog price; they now use a non-`:free` model id.
 * Two machines (or other clients) on the same OpenRouter account are invisible to each AEOS instance: each counts only
   its own requests; OpenRouter's 429 stays authoritative. On two Macs the owner may split the daily cap.
 * The count is read before the request is forwarded, not reserved: concurrent requests can exceed the cap by the

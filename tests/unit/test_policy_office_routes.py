@@ -30,11 +30,10 @@ def _owner(db) -> str:
 
 
 def _route(db) -> ModelRoute:
-    # not an OpenRouter route: an OpenRouter WORKER route is a decision C route, PERSONAL and PUBLIC only, never OFFICE
-    # (ADR-0041 amendment 2026-10-26, test_routing_free_worker.py)
-    r = ModelRoute(route_key=ROUTE, pool="WORKER", provider="example-llm", model_id="vendor/model",
-                   endpoint="https://llm.example.invalid/v1", status="CANDIDATE", eligible_domains=["PERSONAL"],
-                   is_free="YES", mode_params={})
+    # not a ':free' model: an OpenRouter ':free' WORKER route is PERSONAL and PUBLIC only (decision C, ADR-0041 amendment
+    # 2026-10-26); any other OpenRouter route keeps the company OFFICE path
+    r = ModelRoute(route_key=ROUTE, pool="WORKER", provider="openrouter", model_id="vendor/model",
+                   status="CANDIDATE", eligible_domains=["PERSONAL"], is_free="YES", mode_params={})
     db.add(r)
     db.flush()
     r.config_hash = routing.compute_config_hash(r)

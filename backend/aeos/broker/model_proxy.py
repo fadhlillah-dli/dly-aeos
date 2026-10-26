@@ -28,8 +28,8 @@ Guarantees:
   prompt size - when the provider reports no usage) - never the reservation as dollars. A provider dollar figure above
   ``MAX_PROVIDER_USD`` is unreported. A call billed beyond the plan (a charge, a non-plan ``billing_source``) refuses
   the route on every later request until the owner re-activates it (``SUBSCRIPTION_BEYOND_PLAN``, fail closed);
-* a free OpenRouter WORKER route (owner decision C, ADR-0041 amendment 2026-10-26) serves only a run whose TaskSpec is
-  PUBLIC and only while it meets decision C (``FREE_WORKER_ROUTE_INELIGIBLE``, 403); a call of any OpenRouter ``:free``
+* an OpenRouter ``:free`` WORKER route (owner decision C, ADR-0041 amendment 2026-10-26) serves only a run whose
+  TaskSpec is PUBLIC and only while it meets decision C (``FREE_WORKER_ROUTE_INELIGIBLE``, 403); a call of any ``:free``
   model over the account's free-model limit (requests/minute, requests/UTC day, a recorded 429) is refused with 429 +
   Retry-After (``FREE_TIER_LIMIT_REACHED``) before it counts against the grant - never sent upstream, never another
   route. An upstream 429 of a ``:free`` model is also recorded account-wide (every free route waits).
@@ -523,7 +523,7 @@ def free_tier_refusal(s: Any, grant: CapabilityGrant, route_key: str) -> tuple[i
     2026-10-26). A free OpenRouter WORKER route must still meet its eligibility rules and the run's TaskSpec must be
     PUBLIC (403 ``FREE_WORKER_ROUTE_INELIGIBLE``); a call of an OpenRouter ``:free`` model over the account's
     free-model limit is refused with 429 + Retry-After (``FREE_TIER_LIMIT_REACHED``) - never sent upstream, never
-    another route. Routing unavailable -> an OpenRouter route is refused (fail closed)."""
+    another route. Routing unavailable -> an OpenRouter ``:free`` route is refused (fail closed)."""
     route = s.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
     if route is None:
         return None  # resolve_upstream refuses it (ROUTE_UNKNOWN)
@@ -533,9 +533,9 @@ def free_tier_refusal(s: Any, grant: CapabilityGrant, route_key: str) -> tuple[i
         problem = routing.free_worker_problem(s, route, run_id=grant.run_id)
         limit = None if problem else routing.free_tier_limit_problem(s, route)
     except (ImportError, AttributeError):
-        if route.provider == "openrouter":
+        if route.provider == "openrouter" and str(route.model_id or "").endswith(":free"):
             return 403, FREE_WORKER_INELIGIBLE, "routing module unavailable: decision C cannot be checked", None
-        return None
+        return None  # any other route: resolve_upstream's per-request check fails closed on its own
     if problem:
         return 403, FREE_WORKER_INELIGIBLE, f"free OpenRouter WORKER route refused: {problem}", None
     if limit:

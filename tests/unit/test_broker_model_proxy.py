@@ -20,7 +20,7 @@ from aeos.models.cost import QuotaState, UsageLedgerEntry
 from aeos.models.routing import CapabilityGrant
 from aeos.models.workforce import WorkerRun
 from tests.conftest import ADMIN_PW, create_admin, make_app
-from tests.unit.test_workforce_support import FakeModules, make_plan, make_project, make_route
+from tests.unit.test_workforce_support import FakeModules, make_project, make_route
 
 # The real routers (and the services they import at module level) load before FakeModules replaces
 # implementation modules in sys.modules, so this file also runs on its own (not only after other tests).
@@ -28,7 +28,6 @@ for _mod in MODULE_ROUTERS:
     importlib.import_module(_mod)
 
 UPSTREAM = "https://openrouter.ai/api/v1/chat/completions"
-FREE_PRICING = {"prompt": "0", "completion": "0"}  # what the catalog refresh records for a :free model
 KEY = "sk-or-v1-" + "k" * 48
 
 
@@ -249,13 +248,10 @@ def real_routing(settings, db, secrets_memory, monkeypatch):
     fk = FakeModules().install(monkeypatch, skip=("aeos.routing.service",))
     secrets_memory.put("workers/openrouter", KEY, actor="test")
     p = make_project(db)
-    # an OpenRouter WORKER route is a decision C route (ADR-0041 amendment 2026-10-26): free per the catalog, PUBLIC
-    # only, and the run's TaskSpec is PUBLIC
-    route = make_route(db, key="worker.free-a", model_id="vendor/model-a:free", pricing=dict(FREE_PRICING),
-                       data_classes=["PUBLIC"])
-    _plan, _pv, (spec,) = make_plan(db, p, [{"task_key": "t1", "data_classification": "PUBLIC"}])
-    run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="RUNNING", model_route_key="worker.free-a",
-                    task_id=spec.id)
+    # not a ':free' model: an OpenRouter ':free' WORKER route is a decision C route (catalog price, PUBLIC task), tested
+    # in test_routing_free_worker.py; this fixture tests the general per-request approval rule
+    route = make_route(db, key="worker.free-a", model_id="vendor/model-a")
+    run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="RUNNING", model_route_key="worker.free-a")
     db.add(run)
     db.flush()
     raw, grant = broker.issue_grant(db, run_id=run.id, project_id=p.id, domain="PERSONAL", kind="MODEL_PROXY",
@@ -280,13 +276,10 @@ def test_inflight_grant_stops_when_the_route_approval_no_longer_holds(real_routi
         route.is_free, route.pricing = "NO", {"prompt": "0.000002", "completion": "0.000008"}
         db.commit()
         r = _post(real_routing)
-        # an OpenRouter WORKER route is a decision C route: the repriced model is refused by name before the
-        # (equally failing) hash-bound approval check (ADR-0041 amendment 2026-10-26)
-        assert r.status_code == 403 and r.json()["error"]["code"] == "FREE_WORKER_ROUTE_INELIGIBLE", r.text
-        assert "not exactly zero" in r.json()["error"]["message"]
+        assert r.status_code == 403 and r.json()["error"]["code"] == "ROUTE_APPROVAL_INVALID", r.text
         assert len(mock.calls) == 1, "nothing was forwarded after the approval stopped matching"
     # back to the approved configuration, but the human decision is revoked
-    route.is_free, route.pricing = "YES", dict(FREE_PRICING)
+    route.is_free, route.pricing = "YES", {}
     d = db.scalar(select(Decision).where(Decision.target_id == "worker.free-a", Decision.kind == "ROUTE_ACTIVATION"))
     d.status = "INVALIDATED"
     db.commit()

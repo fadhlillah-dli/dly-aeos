@@ -275,7 +275,7 @@ def _free_tier_limit(session: Session, route: ModelRoute) -> tuple[str, str] | N
 
         limit = routing.free_tier_limit_problem(session, route)
     except (ImportError, AttributeError):
-        if route.provider == "openrouter":
+        if route.provider == "openrouter" and str(route.model_id or "").endswith(":free"):
             return "FREE_TIER_LIMIT_REACHED", "routing unavailable: the free-model limit cannot be checked (fail closed)"
         return None
     if limit:

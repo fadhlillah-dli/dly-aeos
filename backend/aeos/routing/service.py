@@ -19,10 +19,11 @@ Stage 2 (selection): recorded eval results for the task role whose config hash m
   never selects itself; TaskSpec route policy can only narrow.
 Fallback: only along the failed route's ``fallback_chain``, only to routes that are themselves
   eligible, same pool, free — never a paid fallback and never a supervisor downgrade.
-Decision C (ADR-0041 amendment 2026-10-26): an OpenRouter ``:free`` route the owner moved into WORKER
-  (``set_route_pool``) and re-activated serves PUBLIC PERSONAL worker tasks while it is free (``free_tier``), ranks ahead
-  of every other eligible route, and when only its account-wide rate/daily limit keeps it out, a selection that would
-  land on a route that is not free waits (``FREE_TIER_LIMIT_REACHED``) instead.
+Decision C (ADR-0041 amendment 2026-10-26, OpenRouter ``:free`` models only): a ``:free`` route the owner
+  moved into WORKER (``set_route_pool``) and re-activated serves PUBLIC PERSONAL worker tasks while it is free
+  (``free_tier``), ranks ahead of every other eligible route, and when only its account-wide rate/daily limit keeps it
+  out, a selection that would land on a route that is not free waits (``FREE_TIER_LIMIT_REACHED``) instead. Any other
+  OpenRouter route keeps the rules above.
 """
 
 from __future__ import annotations
@@ -403,7 +404,8 @@ def _quota_rows(session: Session, route: ModelRoute) -> list[QuotaState]:
         scopes.add(route.alias)
     if is_effectively_free(route):
         scopes.add("free-daily")
-        scopes.add(free_tier.SCOPE_RPM)  # an account-wide per-minute 429 (OpenRouter :free models, decision C)
+        if free_tier.is_free_model_route(route):
+            scopes.add(free_tier.SCOPE_RPM)  # an account-wide per-minute 429 (OpenRouter :free models, decision C)
     scopes.add("credits")
     return list(session.scalars(select(QuotaState).where(QuotaState.provider == route.provider,
                                                          QuotaState.scope.in_(sorted(scopes)))))
@@ -1608,9 +1610,9 @@ POOL_MOVES = frozenset({("ARENA", "WORKER"), ("WORKER", "ARENA")})
 
 
 def set_route_pool(session: Session, route_key: str, *, pool: str, rationale: str) -> tuple[ModelRoute, dict[str, Any]]:
-    """Owner path for decision C (ADR-0041 amendment 2026-10-26): move an OpenRouter route between ARENA (evaluation
-    only) and WORKER (serves worker tasks). Into WORKER only when decision C's rules hold (``:free`` model id, catalog
-    price exactly zero, free period not over, data classes exactly PUBLIC, PERSONAL only). The pool is part of the
+    """Owner path for decision C (ADR-0041 amendment 2026-10-26): move an OpenRouter ``:free`` route between ARENA
+    (evaluation only) and WORKER (serves worker tasks). Into WORKER only when decision C's rules hold (catalog price
+    exactly zero, free period not over, data classes exactly PUBLIC, PERSONAL only). The pool is part of the
     configuration identity, so a move is a new configuration: every decision bound to the route is invalidated (an
     ARENA TRIAL never carries over, and moving back does not revive it), eval results are not inherited and readiness
     goes STALE; the owner activates the new configuration with a new TRIAL. Nothing is moved automatically: the
@@ -1621,10 +1623,10 @@ def set_route_pool(session: Session, route_key: str, *, pool: str, rationale: st
     route = get_route(session, route_key)
     if route.mode in {"MOCK", "DEMO"}:
         raise ValidationFailed("fixture routes cannot be configured")
-    if route.provider != free_tier.PROVIDER or (route.pool, target) not in POOL_MOVES:
-        raise ValidationFailed(f"only an OpenRouter route moves, and only between ARENA and WORKER (decision C); "
-                               f"route {route.route_key} is {route.provider} in {route.pool}, target {target or '-'}",
-                               code="ROUTE_POOL_MOVE_UNSUPPORTED")
+    if not free_tier.is_free_model_route(route) or (route.pool, target) not in POOL_MOVES:
+        raise ValidationFailed(f"only an OpenRouter ':free' route moves, and only between ARENA and WORKER (decision C);"
+                               f" route {route.route_key} is {route.provider} {route.model_id} in {route.pool}, target "
+                               f"{target or '-'}", code="ROUTE_POOL_MOVE_UNSUPPORTED")
     if target in free_tier.WORKER_POOLS:
         problems = free_tier.decision_c_problems(route)
         if problems:

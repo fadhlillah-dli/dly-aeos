@@ -149,7 +149,8 @@ def free_tier_limit(session: Session, route: ModelRoute) -> str | None:
 
         limit = routing.free_tier_limit_problem(session, route)
     except (ImportError, AttributeError) as exc:
-        return _unavailable("routing", exc) if route.provider == "openrouter" else None
+        free = route.provider == "openrouter" and str(route.model_id or "").endswith(":free")
+        return _unavailable("routing", exc) if free else None
     return str(limit.get("reason") or "free-model limit reached") if limit else None
 
 

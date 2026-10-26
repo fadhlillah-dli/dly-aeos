@@ -1,9 +1,11 @@
 """Free OpenRouter WORKER routes for PUBLIC data (ADR-0041 amendment 2026-10-26, owner decision C).
 
 Decision C: an OpenRouter ``:free`` route may serve worker tasks (pool WORKER) for PUBLIC data, PERSONAL only, while it
-is free. INTERNAL data stays on the OpenCode Go routes; CONFIDENTIAL never reaches a worker route. Nothing here moves or
-activates a route: the route reaches WORKER only through the owner's pool move (``service.set_route_pool``, a
-configuration change that voids every earlier decision) and serves only after a new hash-bound human activation.
+is free. It governs OpenRouter ``:free`` models only; any other OpenRouter route keeps the existing rules (BUDGET
+decision, data-class and terms rules, the OFFICE path). INTERNAL data stays on the OpenCode Go routes; CONFIDENTIAL
+never reaches a worker route. Nothing here moves or activates a route: the route reaches WORKER only through the
+owner's pool move (``service.set_route_pool``, a configuration change that voids every earlier decision) and serves
+only after a new hash-bound human activation.
 
 * ``decision_c_problems`` / ``worker_problems``: the eligibility rules, checked at the pool move, at activation, in the
   routing hard filter and on every broker request (fail closed). A route that fails them is never selected or proxied.
@@ -63,8 +65,10 @@ def is_free_model_route(route: ModelRoute) -> bool:
 
 
 def is_decision_c_route(route: ModelRoute) -> bool:
-    """An OpenRouter route in the worker pool: decision C's rules apply to it, whatever its model id says."""
-    return route.provider == PROVIDER and route.pool in WORKER_POOLS
+    """An OpenRouter ``:free`` model in the worker pool: decision C's rules apply to it (also once it is repriced - it
+    is then refused, never billed). Any other OpenRouter route keeps the existing rules (BUDGET decision, data-class
+    and terms rules, the OFFICE path)."""
+    return is_free_model_route(route) and route.pool in WORKER_POOLS
 
 
 def _zero(value: Any) -> bool:
