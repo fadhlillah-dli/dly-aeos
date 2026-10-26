@@ -9,12 +9,23 @@ TEST_REPORT the inventory and planning can cite (``inventory.tests.baseline`` ->
 * candidate-style isolation applies: the same runner selection as the verifier (``runner.select_runner``: the
   container when its boundary is proven, else WEAK; OFFICE requires the container and is BLOCKED without it) and
   the same tamper window (controller checkout/interpreter + DB trust tables) around the project's code;
+* the same step discipline as the verifier: every step runs in its own kill group (process runner) and a process
+  that outlives its step is killed and makes the baseline TAMPERED (it could act after the window closed); a
+  degraded kill group leaves the tamper status UNKNOWN; the pytest step runs under the verifier's result seal
+  (``aeos.verification.seal``: a forged or inconsistent junit/exit code is TAMPERED, a missing sealed session end
+  leaves the Python part NOT_RUN - no trusted measurement), and a project whose import path ships a top-level
+  module that would shadow the test runner, the seal plugin or the standard library is not run under it (NOT_RUN,
+  stated - the verifier refuses such candidates the same way);
 * Python tests (the inventory's test directories) run with pytest under the verifier-owned ini
   (``-m "not integration and not network"``; the project's own pytest configuration is not used - stated), a
-  package with vitest runs ``npm ci --ignore-scripts`` + vitest with the verifier's config (process runner only);
+  package with vitest runs ``npm ci --ignore-scripts`` + vitest with the verifier's config (process runner only;
+  vitest comes from the project's lockfile, so its report is the project toolchain's own and is not sealed);
 * the report stores the commit, the suite identity (selection + hash of the selected test files), the passing,
   failing and skipped test ids, the runner and its residual risks. A step that cannot run is NOT_RUN with the
   concrete reason; a failing test in the baseline is recorded as such (a measurement, not a verdict).
+
+Not done here (stated): foreign trust-table rows found in the window are reported and audited, not neutralised
+automatically as the verifier does; the baseline does not pause worker admission.
 
 Provider CI check-runs for that commit are not imported here (the delivery gates read provider CI on PR heads).
 """
@@ -22,6 +33,7 @@ Provider CI check-runs for that commit are not imported here (the delivery gates
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +46,7 @@ from aeos.core.errors import Blocked
 from aeos.core.hashing import content_hash, file_sha256
 from aeos.events import service as events
 from aeos.models.evidence import EvidenceArtifact
-from aeos.verification import collector, runner, tamper
+from aeos.verification import collector, runner, seal, tamper
 from aeos.verification.procs import GitError, GitReader, SnapshotError
 from aeos.verification.steps import parse_report
 
@@ -60,6 +72,8 @@ filterwarnings =
 _PY_TEST_GLOBS = ("test_*.py", "*_test.py")
 NOT_RUN_REASON = ("the project's tests have not been run at this commit; run the project test baseline "
                   "(aeos verify project-baseline <project id> / POST /api/projects/{id}/test-baseline)")
+PYTHON_STEP = "project_baseline"  # the sealed pytest step (runner step list, result seal)
+JS_STEP_PREFIX = "project_baseline_"  # kill-group step names of the npm ci / vitest steps
 
 
 def _identity(snapshot: Path, dirs: list[str]) -> dict[str, Any]:
@@ -102,6 +116,19 @@ def _pythonpath(snapshot: Path) -> Path:
         if (snapshot / cand).is_dir():
             return snapshot / cand
     return snapshot
+
+
+def shadowing_modules(import_root: Path) -> list[str]:
+    """Top-level modules on the project's import path that would replace the test runner, the verifier's seal plugin
+    (and what they import before the seal reads its key) or a standard-library module. The project's own test
+    packages (``tests``/``test``, ``conftest``: the conventional test directories this baseline runs, never imported
+    by pytest's start-up) are expected there and are not counted."""
+    from aeos.verification.verifier import HARNESS_MODULES, top_level_modules
+
+    own_tests = {"tests", "test", "conftest"}
+    harness = HARNESS_MODULES - own_tests - {"ruff", "xdist"}
+    return [n for n in top_level_modules(import_root) if n not in own_tests
+            and (n in harness or n in sys.stdlib_module_names or n in sys.builtin_module_names)]
 
 
 def _vitest_package(snapshot: Path) -> Path | None:
@@ -164,7 +191,10 @@ class _Guard:
         engine = bind.engine if isinstance(bind, Connection) else bind
         self.window = tamper.Window(engine)
 
-    def close(self) -> dict[str, Any]:
+    def close(self, rn: Any = None) -> dict[str, Any]:
+        """The window's verdict, with the runner's kill groups: a process that outlived its step (killed when the
+        step ended) could have acted after the window closed - FAIL like a write; a degraded kill group cannot
+        prove that none did - UNKNOWN."""
         from aeos.worker_runtime import facade as worker
 
         if self.before is None:
@@ -175,25 +205,64 @@ class _Guard:
             except Exception as exc:
                 changed = [{"path": "*", "change": f"integrity check failed ({type(exc).__name__})"}]
         db = self.window.close()
+        survivors = list(rn.survivors()) if rn is not None else []
+        gaps = list(rn.containment_gaps()) if rn is not None else []
         return {"controller_changed": changed[:50], "trust_tables": db,
-                "status": "FAIL" if changed or db.get("status") == "FAIL" else
-                ("UNKNOWN" if db.get("status") == "UNKNOWN" else "PASS")}
+                "step_containment": {"survivors": survivors[:20], "gaps": gaps[:20]},
+                "status": "FAIL" if changed or db.get("status") == "FAIL" or survivors else
+                ("UNKNOWN" if db.get("status") == "UNKNOWN" or gaps else "PASS")}
+
+
+def _tamper_reason(content: dict[str, Any]) -> str:
+    t = content.get("tamper") or {}
+    what = [w for cond, w in (
+        (t.get("controller_changed"), "changed the controller checkout/interpreter"),
+        ((t.get("trust_tables") or {}).get("status") == "FAIL", "wrote control-plane records"),
+        ((t.get("step_containment") or {}).get("survivors"), "left processes running after its step (killed)"),
+        ((content.get("python") or {}).get("status") == "TAMPERED", "forged or broke its sealed test result"))
+        if cond]
+    return f"project code {' / '.join(what) or 'tampered'} during the baseline run"
 
 
 def _run_python(rn: Any, snapshot: Path, workdir: Path, dirs: list[str], timeout: float) -> dict[str, Any]:
+    import_root = _pythonpath(snapshot)
+    shadowed = shadowing_modules(import_root)
+    if shadowed:
+        rel = import_root.relative_to(snapshot).as_posix() or "."
+        return {"status": "NOT_RUN", "shadowed_modules": shadowed[:20],
+                "summary": f"{rel} ships top-level module(s) {', '.join(shadowed[:5])} that would replace the test "
+                           "runner, the verifier's result seal or the standard library: the tests are not run "
+                           "(no sealed measurement)"}
     ini = workdir / "pytest.ini"
     ini.write_text(PYTEST_INI, encoding="utf-8")
     junit = workdir / "r" / "project-baseline.xml"
     junit.parent.mkdir(parents=True, exist_ok=True)
-    args = ["-m", "pytest", *[str(snapshot / d) for d in dirs], "-c", str(ini), "--rootdir", str(snapshot),
-            "--confcutdir", str(snapshot), "-p", "no:cacheprovider", "-q", "--junitxml", str(junit), "-m", MARK_EXPR,
-            "--basetemp", rn.basetemp("pb")]
-    res = rn.python(args, pythonpath=_pythonpath(snapshot), autoload=True, timeout=timeout)
+    # the verifier's result seal, loaded with -p before the project's conftest files and test modules are imported
+    seal.install_plugin(workdir)
+    step_seal = seal.StepSeal.new(workdir, PYTHON_STEP)
+    args = ["-m", "pytest", "-p", seal.PLUGIN_MODULE, *[str(snapshot / d) for d in dirs], "-c", str(ini),
+            "--rootdir", str(snapshot), "--confcutdir", str(snapshot), "-p", "no:cacheprovider", "-q", "--junitxml",
+            str(junit), "-m", MARK_EXPR, "--basetemp", rn.basetemp("pb")]
+    res = rn.python(args, pythonpath=import_root, autoload=True, timeout=timeout,
+                    seal=step_seal, step=PYTHON_STEP)
     report, parse_error = parse_report(junit)
+    consumed = step_seal.discard()
+    sealed = seal.check_pytest(step_seal, stdout=res.stdout, returncode=res.returncode, timed_out=res.timed_out,
+                               junit_path=junit, report=report, key_consumed=consumed, channel=res.channel)
+    if sealed.status == "MISSING" and res.timed_out:
+        sealed.problems = []  # the timeout is the finding; a killed session never ends sealed
     out: dict[str, Any] = {"exit_code": res.returncode, "timed_out": res.timed_out, "duration_s": res.duration_s,
-                           "parse_error": parse_error, "output_tail": res.tail(3000)}
+                           "parse_error": parse_error, "output_tail": res.tail(3000), "result_seal": sealed.to_dict()}
     if res.timed_out:
         out.update(status="TIMED_OUT", summary=f"project tests timed out after {timeout:.0f}s")
+        return out
+    if sealed.status == "FAIL":
+        out.update(status="TAMPERED", summary="result integrity: " + "; ".join(sealed.problems)[:500])
+        return out
+    if sealed.status != "PASS":
+        out.update(status="NOT_RUN", summary="the verifier's result seal has no trustworthy sealed session end ("
+                                             + "; ".join(sealed.problems)[:300] + "): no trusted measurement")
+        return out
     if report is None:
         out.setdefault("status", "NOT_RUN")
         out.setdefault("summary", f"pytest produced no report ({parse_error}; exit {res.returncode})")
@@ -260,16 +329,16 @@ def run_project_baseline(session: Session, project_id: str, *, actor: str, actor
             if pkg is not None:
                 from aeos.verification import frontend
 
-                js = frontend.run_package_tests(rn, pkg, workdir)
+                js = frontend.run_package_tests(rn, pkg, workdir, prefix=JS_STEP_PREFIX)
                 js["package_root"] = pkg.relative_to(snapshot).as_posix() or "."
                 js.pop("tests", None)
                 content["javascript"] = js
             else:
                 content["javascript"] = {"status": "NOT_RUN", "summary": "no package with vitest + package-lock.json"}
         finally:
-            content["tamper"] = guard.close()
+            content["tamper"] = guard.close(rn)
         parts = [content["python"].get("status"), content["javascript"].get("status")]
-        if content["tamper"]["status"] == "FAIL":
+        if content["tamper"]["status"] == "FAIL" or "TAMPERED" in parts:
             status = "TAMPERED"
         elif "TIMED_OUT" in parts:
             status = "TIMED_OUT"
@@ -302,8 +371,9 @@ def run_project_baseline(session: Session, project_id: str, *, actor: str, actor
     if status == "TAMPERED":
         audit.record(session, actor_type="system", actor_id=ORIGIN, action="verification.controller_modified",
                      result="FAILED", target_type="repository", target_id=repo.id, project_id=project.id,
-                     domain=project.domain, reason="project code changed the controller or control-plane records "
-                                                   "during the baseline run", details={"evidence_id": ev.id})
+                     domain=project.domain, reason=_tamper_reason(content),
+                     details={"evidence_id": ev.id, "survivors": ((content.get("tamper") or {}).get(
+                         "step_containment") or {}).get("survivors", [])[:20]})
     audit.record(session, actor_type=actor_type, actor_id=actor, action="verification.project_baseline",
                  result="FAILED" if status in ("BLOCKED", "TAMPERED") else "SUCCESS", target_type="repository",
                  target_id=repo.id, project_id=project.id, domain=project.domain,
