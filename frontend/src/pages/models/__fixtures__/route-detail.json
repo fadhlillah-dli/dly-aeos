@@ -2,7 +2,7 @@
   "route_key": "opencode-zen/longcat-2.5-preview-free",
   "pool": "ARENA",
   "provider": "opencode-zen",
-  "endpoint": "https://opencode.ai/zen",
+  "endpoint": "https://opencode.ai/inference/openai/v1",
   "model_id": "opencode/longcat-2.5-preview-free",
   "alias": null,
   "display_name": "LongCat 2.5 Preview Free",
@@ -107,13 +107,37 @@
   },
   "execution_path": {
     "status": "FEASIBILITY_PROBE_ONLY",
-    "note": "Pool ARENA: tidak melayani task worker. Uji kelayakan lewat probe broker (satu prompt sintetis PUBLIC, route gratis berstatus TRIAL/APPROVED oleh pemilik): POST /api/broker/routes/opencode-zen/longcat-2.5-preview-free/feasibility atau aeos broker probe-route (ADR-0111). EvalRun ke pool ini belum tersambung."
+    "note": "Pool ARENA: tidak melayani task worker. Uji kelayakan lewat probe broker (satu prompt sintetis PUBLIC, route gratis berstatus TRIAL/APPROVED oleh pemilik): POST /api/broker/routes/opencode-zen/longcat-2.5-preview-free/feasibility atau aeos broker probe-route (ADR-0111). EvalRun hanya lewat jalur khusus evaluasi (lihat Jalur evaluasi)."
   },
+  "evaluation_path": {
+    "status": "EVAL_ONLY",
+    "note": "Pool ARENA: EvalRun lewat jalur khusus evaluasi saja - hanya task yang terikat EvalRun RUNNING untuk rute ini (grant broker ber-scope evaluasi; PERSONAL, gratis, TRIAL/APPROVED oleh pemilik), tidak pernah task biasa. Hasil pada rute nyata dan scorecard perbandingan arena (M6) NOT-PROVEN sampai dijalankan."
+  },
+  "upstream_request": {
+    "url": "https://opencode.ai/inference/openai/v1/chat/completions",
+    "model": "longcat-2.5-preview-free",
+    "catalog_model_id": "opencode/longcat-2.5-preview-free",
+    "api": "openai.chat_completions",
+    "reasoning_effort": "NOT_SENT",
+    "code": null,
+    "problem": null,
+    "status": "READY_SHAPE",
+    "note": "Bentuk permintaan sesuai dokumentasi provider (E1); belum dibuktikan dengan panggilan nyata sampai probe kelayakan mencatat bukti E3."
+  },
+  "client_restriction": {
+    "status": "OWNER_DECISION_REQUIRED",
+    "statement": "Free-tier chat models require OpenCode; use paid models or Go from other clients.",
+    "source": "S07 (https://opencode.ai/docs/zen/ and https://opencode.ai/v2/docs/console/models/, read 2026-10-25)",
+    "applies_to": "broker-proxied calls: the AEOS broker calls the upstream as its own HTTP client, not OpenCode",
+    "owner_note": null,
+    "note": "Broker AEOS memanggil upstream sebagai klien HTTP sendiri, bukan OpenCode. Rute ini tidak dapat diaktifkan atau diproksikan sampai pemilik memutuskan: OpenCode Go, rute berbayar dengan keputusan BUDGET, atau keputusan syarat-klien eksplisit saat aktivasi (ADR-0041)."
+  },
+  "budget_required": false,
   "config": {
     "route_key": "opencode-zen/longcat-2.5-preview-free",
     "pool": "ARENA",
     "provider": "opencode-zen",
-    "endpoint": "https://opencode.ai/zen",
+    "endpoint": "https://opencode.ai/inference/openai/v1",
     "model_id": "opencode/longcat-2.5-preview-free",
     "alias": null,
     "resolved_version": null,
