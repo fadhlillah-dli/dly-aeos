@@ -51,7 +51,7 @@ python -m ruff check backend tests scripts
 python -m mypy --platform darwin
 python -m mypy --platform win32
 python scripts/secret_scan.py
-python -m pytest -q -m "not integration and not network"
+python -m pytest -q -n auto -m "not integration and not network"
 cd frontend && npm ci && npx tsc -b --noEmit && npm test && npm run build
 ```
 
@@ -59,6 +59,56 @@ On Windows, run `python` from `.venv\Scripts\python.exe` and use `npx.cmd`/`npm.
 execution is blocked. mypy must report no errors for `--platform darwin` and `--platform win32`;
 `pyproject.toml` exempts no module (no `ignore_errors` override may be added).
 `tests/unit/test_repository_hygiene.py` keeps the licence, version and repository files consistent.
+
+`-n auto` runs the suite on parallel workers (pytest-xdist, part of the `dev` extra). It starts one
+worker per physical core, and `-n logical` one per logical CPU. Parallel runs are proven on macOS
+Apple Silicon only (locally, about three times faster with 4 workers). On Windows and Intel macOS they are
+NOT-PROVEN until the first CI run of the sharded layout (ADR-0115 amendment). Leave out `-n` to run it serially,
+for example to debug a single test.
+
+### CI layout
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs these jobs for every pull request and every
+push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-free.md), amendment
+"CI in about ten minutes"):
+
+- **Backend shards.** On each host OS (`windows-latest`, `macos-latest`, `macos-26-intel`) the full
+  backend suite is split by test file into 2 shards: `backend shard 1/2 [G1,G2] (<os>)` and
+  `backend shard 2/2 [G2] (<os>)`. Each shard runs `pytest -n logical --shard K/2`. Shard 1 also runs
+  the G1 static checks (ruff and the secret scan, plus mypy on `macos-latest`). Each shard uploads its
+  JUnit XML as the artifact `junit-backend-<os>-shard-<k>`.
+- **Verifier.** `backend verifier [G2] (macos-latest)` runs the real trusted-suite verifier test.
+- **Required names are aggregators.** The ruleset on `main` requires `backend [G1,G2] (<os>)` for each
+  OS. These are small jobs on `ubuntu-latest` that wait for every backend job of their OS. They pass only
+  when each of those jobs succeeded: a failed, skipped or cancelled job fails them. The other required
+  checks are real jobs: `bootstrap [G2] (<os>)`, `frontend [G1,G3]` and
+  `browser e2e + a11y smoke [G3]`. The supply-chain report is `[NO-GATE]`. Keep these names when you
+  change the workflow; `tests/unit/test_ci_gates.py` checks them.
+- **Concurrency.** A new push to a pull request cancels that pull request's older run. Runs on `main`
+  are never cancelled, so every merge commit gets its own CI result.
+- **Caches.** The pip, npm and Playwright browser downloads are cached, keyed on `requirements.lock`,
+  `frontend/package-lock.json` and the Playwright version.
+
+To run one CI shard locally, use the same arguments: the shards of a run never overlap and together
+cover every collected test.
+
+```bash
+python -m pytest -q -n auto -m "not integration and not network" --shard 1/2
+python -m pytest -q -n auto -m "not integration and not network" --shard 2/2
+```
+
+`--shard K/N` can also come from the `AEOS_TEST_SHARD` environment variable, and the command-line flag
+wins if both are set. Shards are packed from measured seconds per test file in
+[tests/ci_durations.json](tests/ci_durations.json). A test file that is not listed there gets the
+median weight. To rebalance from real CI times, download the `junit-backend-<os>-shard-*` artifacts of
+one run (normally `windows-latest`, the slowest OS) and run:
+
+```bash
+python scripts/ci_durations.py junit-shard-1.xml junit-shard-2.xml --source "CI run <id>, windows-latest"
+```
+
+Commit the rewritten `tests/ci_durations.json`. The weights only move files between shards: no test
+is added or dropped.
 
 ### Rules for every change
 

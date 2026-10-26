@@ -307,10 +307,17 @@ def compute_candidate(session: Session, p: ChangeProposal, children: list[Change
 # --------------------------------------------------------------------------- items
 
 
+def repo_name(identity: str | None) -> str | None:
+    """``github:owner/repo`` -> ``repo`` (the default package name of a repository)."""
+    if not identity or ":" not in identity or "/" not in identity:
+        return None
+    return identity.rsplit("/", 1)[-1] or None
+
+
 def _advisory(e: ResearchEntry | None, pin: str | None) -> dict[str, Any]:
     if e is None:
         return advisories.summary(None, pin)
-    return advisories.summary(e.upstream or {}, pin or e.source_version)
+    return advisories.summary(e.upstream or {}, pin or e.source_version, package=repo_name(e.identity))
 
 
 def _source_identity(session: Session, p: ChangeProposal) -> list[dict[str, Any]]:

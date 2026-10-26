@@ -46,6 +46,8 @@ cryptography==50.0.2
     # via
     #   google-auth
     #   secretstorage
+execnet==2.1.2
+    # via pytest-xdist
 fastapi==0.143.5
     # via dly-aeos (pyproject.toml)
 filetype==1.2.0
@@ -156,7 +158,10 @@ pytest==9.1.1
     # via
     #   dly-aeos (pyproject.toml)
     #   pytest-cov
+    #   pytest-xdist
 pytest-cov==7.1.0
+    # via dly-aeos (pyproject.toml)
+pytest-xdist==3.8.0
     # via dly-aeos (pyproject.toml)
 python-docx==1.2.0
     # via dly-aeos (pyproject.toml)
