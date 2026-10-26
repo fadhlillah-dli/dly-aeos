@@ -21,13 +21,28 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ### Fixed
 
-- **Inventory sees OpenBao and admitted trials.** The reconciler looked for `bao` on PATH only, so the binary
-  that `aeos vault install` puts in `<data>/bin` showed NOT_INSTALLED (drift `planned-but-missing`) next to
-  CONNECTED/VERIFIED; it now looks in settings, then `<data>/bin` (`bao.exe` on Windows), then PATH, and reports the
-  observed version and digest. Candidates are probed (read-only `--version`) once a TRIAL_APPROVED/APPROVED
-  decision exists, never before; `rtk` and `ccusage` gained that probe, Serena and Context7 stay UNKNOWN with an
-  honest reason (no local binary). Unit tests (E2); observed on the owner's Mac arm64 only (E3); Windows path
-  NOT-PROVEN. An existing database needs `aeos seed --only aeos.inventory.seed` to pick up the new probes.
+- **Inventory finds OpenBao in the data bin.** The reconciler looked for `bao` on PATH only, so the binary that
+  `aeos vault install` puts in `<data>/bin` showed NOT_INSTALLED (drift `planned-but-missing`) next to
+  CONNECTED/VERIFIED. It now looks in settings, then `<data>/bin` (`bao.exe` on Windows), then PATH, and accepts a
+  candidate only if it is a regular file that is executable (same rule as `shutil.which` and the vault runtime); a
+  directory or a file without the execute bit falls through to PATH. A located binary that fails to run is
+  UNKNOWN with its evidence, never INSTALLED. Evidence: unit tests (E2: precedence, directory, non-executable,
+  failing run); reconcile observed INSTALLED 2.7.1 on the owner's Mac arm64 only (E3). Windows `bao.exe`:
+  NOT-PROVEN.
+
+- **Inventory probes admitted candidates.** A CANDIDATE with a probe definition is now probed (read-only
+  `--version`) once a human TRIAL_APPROVED/APPROVED decision exists, never before; `rtk` and `ccusage` gained that
+  probe, Serena and Context7 stay UNKNOWN with an honest reason (no local binary). The poll loop and the views use
+  the same rule. Evidence: unit tests and a throwaway copy of the owner's database (E2). NOT-PROVEN on the real
+  database until the new manifest is stored: run `./aeos seed --only aeos.inventory.seed` once after upgrading.
+
+- **Candidate admission is per domain.** A probe runs when the candidate's own admission in at least one of
+  platform / PERSONAL / OFFICE is TRIAL_APPROVED/APPROVED; a SUSPENDED or REJECTED decision in one domain only
+  removes that domain and no longer blocks another. The observation of a candidate admitted in exactly one domain
+  carries that domain in its scope (the existing domain-tagged observation convention), so the other domain neither
+  sees the observation, its drift findings (now filtered per viewer on the component views too), nor a
+  "not yet probed" prompt: it keeps the honest skip reason. Reconcile, the poll loop and the views share one
+  authority (`probe_domains`). Unit tests (E2); no run on a real database (NOT-PROVEN).
 
 - **Data directory private on POSIX (#14).** The data layout was created with the process umask (0755
   under the usual 022), so the Doctor reported `evidence.dir_permissions` FAILED on every fresh Mac. On the

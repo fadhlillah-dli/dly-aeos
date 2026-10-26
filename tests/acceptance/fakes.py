@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from aeos.inventory.probes import HttpResult, ProbeRefused, RunResult, is_loopback_url
+from aeos.inventory.probes import HttpResult, ProbeRefused, RunResult, is_executable_file, is_loopback_url
 
 FAKE_BIN = "/opt/acceptance-fake/bin"
 
@@ -96,6 +96,9 @@ class FakeHost:
             st = p.stat()
             return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
         return None
+
+    def is_executable(self, path: str) -> bool:
+        return str(path) in self.stats or str(path) in self.binaries.values() or is_executable_file(path)
 
 
 def git_answers(head: str = "a" * 40, remote: str = "https://github.com/fadhlillah-dli/dly-aeos.git"

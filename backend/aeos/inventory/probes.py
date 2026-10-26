@@ -82,6 +82,8 @@ class ProbeRunner(Protocol):
 
     def stat(self, path: str) -> dict[str, Any] | None: ...
 
+    def is_executable(self, path: str) -> bool: ...
+
 
 def is_loopback_url(url: str) -> bool:
     try:
@@ -105,6 +107,13 @@ def _kill_tree(pid: int) -> None:
         psutil.wait_procs([*children, parent], timeout=3)
     except Exception:  # pragma: no cover - best effort; the caller still reports TIMEOUT
         log.warning("could not kill process tree %s after probe timeout", pid)
+
+
+def is_executable_file(path: str | os.PathLike[str]) -> bool:
+    """A regular file that can be run: what ``shutil.which`` and the vault runtime accept (a directory, or off
+    Windows a file without the execute bit, is not a binary)."""
+    p = Path(path)
+    return p.is_file() and (sys.platform == "win32" or os.access(p, os.X_OK))
 
 
 class SystemProbeRunner:
@@ -177,6 +186,9 @@ class SystemProbeRunner:
         # inode/ctime make an in-place replacement visible even when size and mtime were preserved
         return {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "ino": getattr(st, "st_ino", 0),
                 "ctime_ns": getattr(st, "st_ctime_ns", 0)}
+
+    def is_executable(self, path: str) -> bool:
+        return is_executable_file(path)
 
 
 def _decode(data: bytes | None) -> str:

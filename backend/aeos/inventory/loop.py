@@ -59,12 +59,12 @@ def set_poll_enabled(session: Session, enabled: bool, *, actor: str, reason: str
 def due_components(session: Session, *, now: Any = None, limit: int = MAX_PER_TICK) -> list[str]:
     """Core components whose latest reconciler observation expired (per-component probe TTL), oldest first."""
     from aeos.inventory.observations import latest_observations
-    from aeos.inventory.reconcile import OBSERVER, admitted_candidates, core_targets
+    from aeos.inventory.reconcile import OBSERVER, core_targets, probe_domains
     from aeos.models.inventory import ComponentReference
 
     now = now or utcnow()
     every = {c.component_id: c for c in session.scalars(select(ComponentReference))}
-    comps = core_targets(every.values(), admitted_candidates(session, every))
+    comps = core_targets(every.values(), probe_domains(session, every))
     latest = latest_observations(session, [c.component_id for c in comps], ("installation",))
     due: list[tuple[Any, str]] = []
     for c in comps:
