@@ -7,8 +7,13 @@ check fail-closed behaviour simply do not install them.
 
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import types
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -306,7 +311,23 @@ def process_sandbox_exception(db: Session, *, domain: str = "PERSONAL", allow: b
     return d
 
 
-def init_git_repo(path: Path, files: dict[str, str] | None = None) -> str:
+_GIT_TEMPLATES: dict[tuple[tuple[str, str], ...], tuple[Path, str]] = {}
+
+
+def _rmtree_writable(path: Path) -> None:
+    """Remove a template repo; git objects are read-only, which Windows refuses to delete."""
+
+    def onerror(func: Any, name: str, _exc: Any) -> None:
+        try:
+            os.chmod(name, stat.S_IWRITE)
+            func(name)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onerror=onerror)
+
+
+def _init_git_repo_uncached(path: Path, files: dict[str, str]) -> str:
     path.mkdir(parents=True, exist_ok=True)
 
     def g(*args: str) -> str:
@@ -316,13 +337,30 @@ def init_git_repo(path: Path, files: dict[str, str] | None = None) -> str:
     g("config", "user.email", "test@example.invalid")
     g("config", "user.name", "Test")
     g("config", "commit.gpgsign", "false")
-    for rel, text in (files or {"README.md": "hello\n"}).items():
+    for rel, text in files.items():
         f = path / rel
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(text, encoding="utf-8")
     g("add", "-A")
     g("commit", "-q", "-m", "init")
     return g("rev-parse", "HEAD")
+
+
+def init_git_repo(path: Path, files: dict[str, str] | None = None) -> str:
+    """One real ``git init`` + commit per distinct file set and process, then a plain directory copy per call
+    (same files, same ``init`` commit and identity; the copy is a normal ``.git`` directory, never a link)."""
+    files = files or {"README.md": "hello\n"}
+    if path.exists() and any(path.iterdir()):
+        return _init_git_repo_uncached(path, files)
+    key = tuple(sorted(files.items()))
+    if key not in _GIT_TEMPLATES:
+        template = Path(tempfile.mkdtemp(prefix="aeos-gittpl-"))
+        _GIT_TEMPLATES[key] = (template, _init_git_repo_uncached(template, files))
+        atexit.register(_rmtree_writable, template)
+    template, sha = _GIT_TEMPLATES[key]
+    path.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(template, path, dirs_exist_ok=True)
+    return sha
 
 
 def attach_repo(db: Session, project: Project, repo: Path) -> RepositoryReference:

@@ -5,6 +5,7 @@ ada child process', 'Free quota habis / 429', 'Worker membaca vault/SSH' (env)."
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
@@ -22,7 +23,7 @@ from aeos.models.broker_ext import BrokerRequest
 from aeos.models.evidence import EvidenceArtifact
 from aeos.models.routing import CapabilityGrant
 from aeos.models.workforce import Lease, TaskExecution, WorkerRun
-from aeos.worker_runtime import executor, opencode, processes
+from aeos.worker_runtime import executor, integrity, opencode, processes
 from aeos.workforce import scheduler
 from tests.unit.test_workforce_support import (
     FakeModules,
@@ -34,6 +35,20 @@ from tests.unit.test_workforce_support import (
     process_sandbox_exception,
     seed_and_enable_implementer,
 )
+
+_REAL_SNAPSHOT = integrity.snapshot
+_PASS_REPORT: dict = {}
+
+
+def _passing_report() -> dict:
+    """The scripted-docker containment PASS report. Computed live (about 1 s of probes) by the first test that needs
+    it in this process and handed out as a private copy (``record_containment_report`` mutates what it is given)."""
+    if "rep" not in _PASS_REPORT:
+        from aeos.worker_runtime.containment import containment_report
+
+        _PASS_REPORT["rep"] = copy.deepcopy(containment_report("container"))
+    return copy.deepcopy(_PASS_REPORT["rep"])
+
 
 FAKE_ENGINE = r'''
 import json, os, subprocess, sys, time
@@ -159,8 +174,34 @@ if scenario.startswith("grantusage:") or scenario.startswith("grantforge:"):
 '''
 
 
+@pytest.fixture(scope="session")
+def _tiny_controller(tmp_path_factory):
+    """A two-file stand-in for the controller checkout: fingerprinting the real tree twice per run is the
+    dominant cost of these tests and is not what they check (the untouched-checkout test below, and the
+    controller-tamper tests that bring their own checkout, still fingerprint for real)."""
+    root = tmp_path_factory.mktemp("controller")
+    (root / "policy").mkdir()
+    (root / "policy" / "office.yaml").write_text("version: 1\n", encoding="utf-8")
+    (root / "backend").mkdir()
+    (root / "backend" / "x.py").write_text("X = 1\n", encoding="utf-8")
+    return root
+
+
 @pytest.fixture
-def setup(settings, monkeypatch, tmp_path):
+def setup(settings, monkeypatch, tmp_path, _tiny_controller):
+    from aeos.core import paths
+
+    real_root = paths.repo_root().resolve()
+
+    def small_snapshot(root=None, patterns=integrity.CONTROLLER_PATTERNS, **kw):
+        if root is None and paths.repo_root().resolve() == real_root:  # a test with its own controller falls through
+            kw.setdefault("interpreter", True)
+            kw.setdefault("pycache_prefix", integrity.pycache_prefix_root())
+            kw.setdefault("config_path", integrity.config_file())
+            root = _tiny_controller
+        return _REAL_SNAPSHOT(root, patterns, **kw)
+
+    monkeypatch.setattr(integrity, "snapshot", small_snapshot)
     fakes = FakeModules().install(monkeypatch)
     engine = tmp_path / "fake_engine.py"
     engine.write_text(FAKE_ENGINE, encoding="utf-8")
@@ -285,7 +326,7 @@ def test_nonzero_exit_on_last_attempt_fails_task(settings, setup):
 
 def test_timeout_kills_worker(settings, setup):
     make, _ = setup
-    run_id, task_id = make("sleep", task={"limits": {"timeout_seconds": 2}})
+    run_id, task_id = make("sleep", task={"limits": {"timeout_seconds": 1}})
     t0 = time.monotonic()
     executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, _te = _load(run_id, task_id)
@@ -336,7 +377,12 @@ def test_upstream_quota_stops_run_without_burning_into_failure(settings, setup):
     run_id, task_id = make("sleep")
 
     def flood():
-        time.sleep(1.0)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            r, _ = _load(run_id, task_id)
+            if r.execution_status == "RUNNING":
+                break
+            time.sleep(0.2)
         with session_factory()() as s:
             run = s.get(WorkerRun, run_id)
             for _ in range(3):
@@ -472,8 +518,9 @@ def test_out_of_scope_edit_stops_the_run_at_once(settings, setup):
     assert te.state == "REVIEW" and te.reason_code == "ATTEMPT_FAILED"
 
 
-def test_memory_cap_stops_the_worker(settings, setup):
+def test_memory_cap_stops_the_worker(settings, setup, monkeypatch):
     """§21 'batas waktu/resource' / §25 'process/resource/time cap' on the process sandbox."""
+    monkeypatch.setattr(executor, "USAGE_CHECK_SECONDS", 0.2)  # sample the tree more often; the cap is unchanged
     make, _ = setup
     run_id, task_id = make("hog", task={"limits": {"timeout_seconds": 60, "max_memory_mb": 80}})
     t0 = time.monotonic()
@@ -745,7 +792,8 @@ def test_worker_writing_the_controller_checkout_fails_and_is_quarantined(setting
         assert sandbox.sandbox_readiness(s, domain="PERSONAL")["code"] == "INTEGRITY_HOLD"
 
 
-def test_untouched_controller_checkout_passes_the_integrity_check(settings, setup):
+def test_untouched_controller_checkout_passes_the_integrity_check(settings, setup, monkeypatch):
+    monkeypatch.setattr(integrity, "snapshot", _REAL_SNAPSHOT)  # the one end-to-end fingerprint of the real checkout
     make, _ = setup
     run_id, task_id = make("ok")
     executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
@@ -963,6 +1011,7 @@ def test_container_sandbox_run_end_to_end_with_scripted_docker(settings, setup, 
     with session_factory()() as s:
         rep = containment_report("container")
         assert rep["overall"] == "PASS"
+        _PASS_REPORT.setdefault("rep", copy.deepcopy(rep))  # before record_containment_report mutates it
         record_containment_report(s, rep, actor="cli:test")
         s.commit()
     make, _ = setup
@@ -993,12 +1042,12 @@ def test_runner_command_logs_are_taken_out_of_the_candidate_and_kept_as_evidence
     """W6-117 §42 "simpan log asli": the complete output the AEOS shell runner kept in .aeos/cmdlog/ never enters
     the candidate diff; it is stored as untrusted (E0) evidence. (Container run with a granted shell, scripted
     docker CLI.)"""
-    from aeos.worker_runtime.containment import containment_report, record_containment_report
+    from aeos.worker_runtime.containment import record_containment_report
     from tests.unit.worker_container_support import install_fake_docker
 
     install_fake_docker(monkeypatch, tmp_path, worker_cmdlog=True)
     with session_factory()() as s:
-        record_containment_report(s, containment_report("container"), actor="cli:test")
+        record_containment_report(s, _passing_report(), actor="cli:test")
         s.commit()
     stored: dict = {}
     original = executor._collect_evidence
@@ -1071,13 +1120,12 @@ def test_container_run_with_a_granted_shell_allows_only_the_aeos_runner(settings
     permission rules (everything else denied), the runner is placed in the read-only per-run config dir and the
     prompt tells the worker to use it. (Scripted docker CLI: proves the AEOS side only.)"""
     from aeos.worker_runtime import container
-    from aeos.worker_runtime.containment import containment_report, record_containment_report
+    from aeos.worker_runtime.containment import record_containment_report
     from tests.unit.worker_container_support import install_fake_docker
 
     docker = install_fake_docker(monkeypatch, tmp_path)
     with session_factory()() as s:
-        rep = containment_report("container")
-        record_containment_report(s, rep, actor="cli:test")
+        record_containment_report(s, _passing_report(), actor="cli:test")
         s.commit()
     make, _ = setup
     run_id, task_id = make("ok", task={"tools_allowed": ["read", "edit", "bash:npm test*"]})

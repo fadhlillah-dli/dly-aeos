@@ -43,6 +43,9 @@ from tests.unit.test_publisher_support import (
 def env(settings, db, secrets_memory, monkeypatch):
     policy = install_fakes(monkeypatch)
     fakes = use_fake_providers(monkeypatch)
+    # FakeProvider ignores ctx.attachments; real DOCX conversion in the publish loop is covered by
+    # test_publisher_jobs.py and test_publisher_gaps.py::test_oversized_docx_is_refused_before_any_request.
+    monkeypatch.setattr(jobs, "markdown_to_docx", lambda md, **kw: b"PK\x03\x04stub")
     seed_personal_secrets(secrets_memory)
     project = make_project(db)
     plan, version = make_plan(db, project)

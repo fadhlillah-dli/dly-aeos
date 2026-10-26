@@ -46,6 +46,9 @@ from tests.unit.test_publisher_support import (
 def env(settings, db, secrets_memory, monkeypatch):
     policy = install_fakes(monkeypatch)
     fakes = use_fake_providers(monkeypatch)
+    # FakeProvider never reads ctx.attachments; real DOCX conversion in the publish loop is covered by
+    # test_documents_marked_published_with_external_links below, test_publisher_gaps and test_docs_engine_*.
+    monkeypatch.setattr(jobs, "markdown_to_docx", lambda markdown, **kw: b"PK\x03\x04docx")
     seed_personal_secrets(secrets_memory)
     project = make_project(db)
     plan, version = make_plan(db, project)
@@ -409,7 +412,10 @@ def test_interlock_revocation_mid_run_stops_writes(env):
     assert db.get(Plan, env["plan"].id).state == "PUBLICATION_FAILED"
 
 
-def test_documents_marked_published_with_external_links(env):
+def test_documents_marked_published_with_external_links(env, monkeypatch):
+    from aeos.docs_engine import facade as docs_facade
+
+    monkeypatch.setattr(jobs, "markdown_to_docx", docs_facade.markdown_to_docx)  # one real end-to-end conversion
     db = env["db"]
     pub = _preview(env)
     _execute(env, pub)

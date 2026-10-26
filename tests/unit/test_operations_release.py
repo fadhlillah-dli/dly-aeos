@@ -12,10 +12,14 @@
 
 from __future__ import annotations
 
+import atexit
 import io
+import os
 import shutil
 import sqlite3
+import stat
 import subprocess
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -56,7 +60,23 @@ def git_repo(tmp_path: Path) -> Path:
     return make_git_repo(tmp_path)
 
 
-def make_git_repo(tmp_path: Path) -> Path:
+_REPO_TEMPLATE: list[Path] = []
+
+
+def _rmtree_writable(path: Path) -> None:
+    """Remove the template repo; git objects are read-only, which Windows refuses to delete."""
+
+    def onerror(func, name, _exc):
+        try:
+            os.chmod(name, stat.S_IWRITE)
+            func(name)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onerror=onerror)
+
+
+def _make_git_repo_uncached(tmp_path: Path) -> Path:
     repo = tmp_path / "platform"
     (repo / "backend").mkdir(parents=True)
     shutil.copytree(repo_root() / "backend" / "aeos", repo / "backend" / "aeos",
@@ -65,6 +85,16 @@ def make_git_repo(tmp_path: Path) -> Path:
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "release base")
     return repo
+
+
+def make_git_repo(tmp_path: Path) -> Path:
+    """The real ``git init`` + commit of the shipped backend runs once per process; each test gets its own
+    plain copy of that repository (same files, message and identity; never a link)."""
+    if not _REPO_TEMPLATE:
+        base = Path(tempfile.mkdtemp(prefix="aeos-reltpl-"))
+        atexit.register(_rmtree_writable, base)
+        _REPO_TEMPLATE.append(_make_git_repo_uncached(base))
+    return Path(shutil.copytree(_REPO_TEMPLATE[0], tmp_path / "platform"))
 
 
 def _commit_change(repo: Path, name: str = "CHANGELOG.txt", text: str = "next\n") -> None:

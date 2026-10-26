@@ -6,6 +6,7 @@ is deterministic (the shard jobs of one OS compute it independently) and balance
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import importlib.util
 import json
@@ -161,16 +162,21 @@ def _collected(out: str) -> set[str]:
     return {ln.strip() for ln in out.splitlines() if "::" in ln and not ln.startswith(("ERROR", "FAILED"))}
 
 
+@functools.cache
+def _collect_only(*extra: str) -> str:
+    """stdout of ``pytest --collect-only -q <extra> FAST_FILES`` (one subprocess per distinct argument list)."""
+    res = _pytest("--collect-only", "-q", *extra, *FAST_FILES)
+    assert res.returncode == 0, res.stdout + res.stderr
+    return res.stdout
+
+
 def test_shards_of_a_real_collection_are_disjoint_and_add_up_to_the_whole_run():
-    full = _pytest("--collect-only", "-q", *FAST_FILES)
-    assert full.returncode == 0, full.stdout + full.stderr
-    everything = _collected(full.stdout)
+    everything = _collected(_collect_only())
     parts = []
     for k in (1, 2):
-        res = _pytest("--collect-only", "-q", "--shard", f"{k}/2", *FAST_FILES)
-        assert res.returncode == 0, res.stdout + res.stderr
-        assert f"AEOS test shard {k}/2: " in res.stdout
-        parts.append(_collected(res.stdout))
+        out = _collect_only("--shard", f"{k}/2")
+        assert f"AEOS test shard {k}/2: " in out
+        parts.append(_collected(out))
     assert parts[0] and parts[1] and not parts[0] & parts[1]
     assert parts[0] | parts[1] == everything
     files = [{n.split("::", 1)[0] for n in p} for p in parts]
@@ -185,20 +191,27 @@ def test_the_environment_variable_selects_the_shard_and_is_not_inherited_by_test
                      f"{SHARD_ENV!r})))\n", encoding="utf-8")
     out = tmp_path / "seen.txt"
     pythonpath = os.pathsep.join([str(tmp_path), os.environ.get("PYTHONPATH", "")])
-    by_flag = _pytest("--collect-only", "-q", "--shard", "2/2", *FAST_FILES)
+    by_flag = _collect_only("--shard", "2/2")
     res = _pytest("--collect-only", "-q", "-p", "aeos_shard_env_probe", *FAST_FILES,
                   env_extra={SHARD_ENV: "2/2", "SHARD_PROBE_OUT": str(out), "PYTHONPATH": pythonpath})
     assert res.returncode == 0, res.stdout + res.stderr
     assert "AEOS test shard 2/2: " in res.stdout
-    assert _collected(res.stdout) == _collected(by_flag.stdout)
+    assert _collected(res.stdout) == _collected(by_flag)
     assert out.read_text(encoding="utf-8") == "None"
 
 
 @pytest.mark.parametrize("shard", ["0/2", "3/2", "two"])
-def test_an_invalid_shard_is_a_usage_error_never_a_silent_full_or_empty_run(shard: str):
-    res = _pytest("--collect-only", "-q", "--shard", shard, FAST_FILES[0])
-    assert res.returncode == pytest.ExitCode.USAGE_ERROR, res.stdout + res.stderr
-    assert "K/N" in res.stderr
+def test_an_invalid_shard_is_a_usage_error_never_a_silent_full_or_empty_run(shard: str, capsys, monkeypatch):
+    """Runs pytest in this process (pytest.main loads tests/conftest.py's real hooks; no fresh interpreter)."""
+    monkeypatch.chdir(ROOT)
+    monkeypatch.delenv(SHARD_ENV, raising=False)
+    monkeypatch.setattr(sys, "path", list(sys.path))  # the nested session's sys.path edits stay local
+    # no:faulthandler: the nested session's pytest_unconfigure would otherwise disable faulthandler in this process
+    code = pytest.main(["-p", "no:cacheprovider", "-p", "no:faulthandler", "--collect-only", "-q", "--shard", shard,
+                        FAST_FILES[0]])
+    out, err = capsys.readouterr()
+    assert code == pytest.ExitCode.USAGE_ERROR, out + err
+    assert "K/N" in err
 
 
 def _junit_key(classname: str, name: str) -> str:
@@ -240,9 +253,7 @@ def _run_shard_with_junit(tmp_path: Path, k: int, *, by_env: bool) -> set[str]:
 
 def _assert_shards_partition_the_full_collection(tmp_path: Path, *, by_env: bool) -> None:
     pytest.importorskip("xdist")
-    full = _pytest("--collect-only", "-q", *FAST_FILES)
-    assert full.returncode == 0, full.stdout + full.stderr
-    everything = _collected_junit_keys(full.stdout)
+    everything = _collected_junit_keys(_collect_only())
     first, second = (_run_shard_with_junit(tmp_path, k, by_env=by_env) for k in (1, 2))
     assert not first & second, "a test ran in both shards"
     assert first | second == everything, "a collected test ran in no shard (or an uncollected one ran)"
