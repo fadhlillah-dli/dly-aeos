@@ -113,7 +113,7 @@ model becomes a route only through a recorded ROUTE_ACTIVATION decision. Then ru
 ./aeos vault install     # the install-manifest approved_pin; while it is null: --version X.Y.Z (a version you reviewed)
                          # alternative: brew install openbao
 ./aeos vault start
-./aeos vault init        # prints unseal keys ONCE - store them offline; the root token is revoked when setup completes
+./aeos vault init        # shows unseal keys ONCE on a temporary screen - store them offline, then type "stored"
 ./aeos vault unseal      # after every restart of OpenBao
 ```
 

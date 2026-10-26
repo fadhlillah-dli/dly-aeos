@@ -21,11 +21,32 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ### Fixed
 
+- **Data directory private on POSIX (#14).** The data layout was created with the process umask (0755
+  under the usual 022), so the Doctor reported `evidence.dir_permissions` FAILED on every fresh Mac. On the
+  default macOS path the 0700 `~/Library` already kept other users out, but a data directory configured
+  elsewhere (`AEOS_DATA_DIR`) or the Linux path was readable by other OS users. On POSIX the layout is now
+  created as 0700, and a directory left open by an older bootstrap is tightened at the next start. Windows
+  keeps its inherited ACLs: Python 3.13 turns a 0o700 `mkdir` into a protected DACL there. Unit tests on CI
+  (E2) cover POSIX tightening and the Windows mode; on the owner's Mac (arm64) the Doctor reported
+  `evidence.dir_permissions` VERIFIED after the fix (E3, that host only). A real Windows run of the
+  unchanged path is covered by the existing Windows CI suite only.
+
 - **Public repositories no longer count as a fine-grained PAT breach (#16).** GitHub lists every public
   repository for a fine-grained PAT ("Also includes public repositories (read-only)"), so `adapter.github_token`
   reported a correctly scoped token as exceeding least privilege. Unregistered public repositories now leave
   least privilege NOT proven, with a note; an unregistered private repository, or one whose visibility is not
   reported, is still a breach. Unit tests (E2) and the owner's token on the Mac (E3, that host only).
+
+### Security
+
+- **Unseal keys no longer stay in the terminal (#15).** `aeos vault init` shows the unseal key(s) on a
+  temporary (alternate) terminal screen that closes when the owner types `stored`, without erase-in-display or
+  scrolling, so the keys are not written to the scrollback and cannot be copied with the rest of the output.
+  Outside a terminal it refuses before touching OpenBao unless `--plain-output` is passed. A revoked root token
+  is no longer shown; an incomplete setup asks to store it too. The banner and the docs say never to paste the
+  output into a chat or an AI assistant, and the unseal runbook covers an exposed key. Unit tests drive every
+  path (E2) and a macOS pty run showed the byte sequence; real iTerm2, Terminal.app and Windows console runs
+  are NOT-PROVEN.
 
 ## [0.1.0] - 2026-10-26
 
