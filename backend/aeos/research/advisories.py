@@ -4,6 +4,11 @@
 ``ResearchEntry.upstream["advisories"]`` with the date they were read. This module only interprets
 that stored record: whether a pinned version falls inside a vulnerable range. A range or version that
 cannot be parsed is UNKNOWN, never "not affected".
+
+A repository can publish several packages with their own version lines (a monorepo: ``langgraph`` 1.x next to
+``langgraph-checkpoint`` 4.x). The candidate's package is the one named in the pin (``langgraph==1.2.14``) or the
+repository name. Advisories that only name other packages are skipped, but only when at least one advisory of the
+repository names the candidate's package (so the naming scheme is known); otherwise every advisory counts.
 """
 
 from __future__ import annotations
@@ -58,8 +63,30 @@ def affects(vulnerable_range: str | None, version: str | None) -> bool | None:
     return True
 
 
-def summary(upstream: dict[str, Any] | None, pin: str | None) -> dict[str, Any]:
-    """Interpretation of the stored advisory record for the pinned/candidate version."""
+_PIN_PACKAGE = re.compile(r"^\s*([A-Za-z0-9_.\-/@]+?)\s*(?:==|@)\s*(v?[0-9][^\s]*)\s*$")
+
+
+def _norm(name: str) -> str:
+    return name.strip().lower().replace("_", "-")
+
+
+def _names(name: str) -> set[str]:
+    """``github.com/org/tool`` -> {"github.com/org/tool", "tool"}; ``@scope/pkg`` -> {"@scope/pkg", "pkg"}."""
+    n = _norm(name)
+    return {n, n.rsplit("/", 1)[-1]}
+
+
+def split_pin(pin: str | None) -> tuple[str | None, str | None]:
+    """``langgraph==1.2.14`` / ``pkg@1.2.14`` -> ("langgraph", "1.2.14"); a bare version -> (None, version)."""
+    m = _PIN_PACKAGE.match(pin or "")
+    if m and not m.group(1)[0].isdigit():
+        return m.group(1), m.group(2)
+    return None, pin
+
+
+def summary(upstream: dict[str, Any] | None, pin: str | None, package: str | None = None) -> dict[str, Any]:
+    """Interpretation of the stored advisory record for the pinned/candidate version. *package* (e.g. the repository
+    name) narrows a multi-package repository to the candidate's package; a package in the pin wins."""
     rec = (upstream or {}).get("advisories")
     if not isinstance(rec, dict):
         return {"status": "NOT_CHECKED", "affected": [], "unknown": [], "count": 0, "checked_at": None,
@@ -69,11 +96,24 @@ def summary(upstream: dict[str, Any] | None, pin: str | None) -> dict[str, Any]:
         return base | {"status": "ERROR", "affected": [], "unknown": [], "count": 0,
                        "note": f"Advisory tidak terbaca ({rec.get('status')}); status UNKNOWN."}
     items = [i for i in rec.get("items") or [] if isinstance(i, dict) and not i.get("withdrawn_at")]
+    pin_package, pin = split_pin(pin)
+    target = pin_package or package
+    want = _names(target) if target else set()
+    named = [str(v.get("package")) for i in items for v in i.get("vulnerabilities") or []
+             if isinstance(v, dict) and v.get("package")]
+    narrow = bool(want) and any(_names(n) & want for n in named)
     affected: list[str] = []
     unknown: list[str] = []
+    skipped: list[str] = []
     for item in items:
         gid = str(item.get("ghsa_id") or item.get("id") or "?")
         vulns = [x for x in item.get("vulnerabilities") or [] if isinstance(x, dict)]
+        if narrow:
+            mine = [x for x in vulns if not x.get("package") or _names(str(x["package"])) & want]
+            if vulns and not mine:
+                skipped.append(gid)
+                continue
+            vulns = mine
         results = [affects(x.get("vulnerable_version_range"), pin) for x in vulns]
         if any(r is True for r in results):
             affected.append(gid)
@@ -87,7 +127,9 @@ def summary(upstream: dict[str, Any] | None, pin: str | None) -> dict[str, Any]:
         status = "NOT_AFFECTED"
     else:
         status = "NONE"
-    return base | {"status": status, "affected": affected, "unknown": unknown, "count": len(items),
+    if narrow:
+        base = base | {"package": sorted(want)[0] if len(want) == 1 else sorted(want), "other_packages_skipped": skipped}
+    return base | {"status": status, "affected": affected, "unknown": unknown, "count": len(items) - len(skipped),
                    "note": {"AFFECTED": "Versi kandidat berada dalam rentang rentan advisory yang dipublikasikan.",
                             "UNKNOWN": "Rentang/versi tidak dapat dievaluasi; dampak advisory UNKNOWN.",
                             "NOT_AFFECTED": "Advisory yang dipublikasikan tidak mencakup versi ini.",

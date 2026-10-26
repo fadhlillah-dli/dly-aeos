@@ -12,6 +12,16 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ### Fixed
 
+- **Advisory matching in multi-package repositories.** The TRIAL/PROMOTE admission gate compared a candidate's pin
+  with the vulnerable ranges of every package a repository publishes, so `langgraph` 1.2.14 was refused for
+  advisories of `langgraph-checkpoint` 4.x (a different version line). Advisories that only name other packages
+  are now skipped, but only when the repository's advisories name the candidate's package (from `pkg==version`
+  in the pin, else the repository name); otherwise every advisory still counts. Skipped advisories are listed.
+  Unit tests (E2) and the owner's stored advisory records (E3, that host only: LangGraph 1.2.14 passes,
+  ToolHive v0.51.4 and Deep Agents 0.7.24 stay blocked, their patched pins pass).
+
+### Fixed
+
 - **Data directory private on POSIX (#14).** The data layout was created with the process umask (0755
   under the usual 022), so the Doctor reported `evidence.dir_permissions` FAILED on every fresh Mac. On the
   default macOS path the 0700 `~/Library` already kept other users out, but a data directory configured
