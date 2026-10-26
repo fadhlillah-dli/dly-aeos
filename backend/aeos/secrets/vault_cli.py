@@ -171,7 +171,12 @@ def start_cmd(wait: float = typer.Option(10.0, help="Seconds to wait for the lis
     settings = _settings()
     binary = server.bin_path(settings)
     if binary is None:
-        _err("OpenBao binary not found. Run: aeos vault install")
+        found = server.bin_lookup(settings)
+        if found.rejected:
+            # the settings override wins over <data>/bin, so `aeos vault install` would not change anything
+            _err(f"settings openbao_binary={found.rejected} is not an executable file; fix the setting or remove it")
+        else:
+            _err("OpenBao binary not found. Run: aeos vault install")
         raise typer.Exit(1)
     try:
         info = server.start(settings, binary)

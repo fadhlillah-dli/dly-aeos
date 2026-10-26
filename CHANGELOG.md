@@ -136,6 +136,18 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
   Unit tests (E2) and the owner's stored advisory records (E3, that host only: LangGraph 1.2.14 passes,
   ToolHive v0.51.4 and Deep Agents 0.7.24 stay blocked, their patched pins pass).
 
+- **OpenBao found in the data bin; a binary that cannot run is UNKNOWN.** The inventory, the Doctor and the vault
+  runtime now find binaries through one resolver (`aeos.core.binaries`): settings override (`~` expanded),
+  `<data>/bin` (OpenBao only), PATH; a candidate counts only as a regular executable file, so the Doctor and the
+  inventory agree for every binary (`claude`, `opencode`, `node`, `docker` too) and `aeos vault start` names an
+  unusable `openbao_binary` setting instead of advising `aeos vault install`. A located binary that times out, fails
+  to start, is killed by a signal or (Windows) crashes with an NTSTATUS code is UNKNOWN, no longer INSTALLED, also
+  for the REQUIRED `claude`, `git` and `opencode` (before, a TIMEOUT/OS_ERROR was reported INSTALLED; intentional
+  evidence honesty). An UNKNOWN installation also leaves an open version/digest drift finding OPEN (not evaluated,
+  never resolved).
+  Evidence: OpenBao lookup E3 on the owner's Mac arm64 only (reconcile observed INSTALLED 2.7.1); the rest E2 unit
+  tests. Windows `bao.exe` and the NTSTATUS path: NOT-PROVEN.
+
 - **Data directory private on POSIX (#14).** The data layout was created with the process umask (0755
   under the usual 022), so the Doctor reported `evidence.dir_permissions` FAILED on every fresh Mac. On the
   default macOS path the 0700 `~/Library` already kept other users out, but a data directory configured

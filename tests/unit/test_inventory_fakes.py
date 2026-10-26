@@ -8,7 +8,14 @@ from typing import Any
 
 import pytest
 
-from aeos.inventory.probes import HttpResult, ProbeRefused, RunResult, is_loopback_url, set_runner_override
+from aeos.core.binaries import is_executable_file
+from aeos.inventory.probes import (
+    HttpResult,
+    ProbeRefused,
+    RunResult,
+    is_loopback_url,
+    set_runner_override,
+)
 
 FAKE_BIN = "/opt/fake/bin"
 
@@ -89,6 +96,10 @@ class FakeRunner:
             st = p.stat()
             return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
         return None
+
+    def is_executable(self, path: str) -> bool:
+        # simulated binaries/stat entries are executable by construction; real tmp files get the real check
+        return str(path) in self.stats or str(path) in self.binaries.values() or is_executable_file(path)
 
 
 def git_handler(*, remote: str | None = "https://github.com/fadhlillah-dli/dly-aeos.git", head: str = "a" * 40,

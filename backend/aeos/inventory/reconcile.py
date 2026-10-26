@@ -34,6 +34,7 @@ import yaml
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from aeos.core.binaries import BinaryLookup, locate_binary
 from aeos.core.config import LOOPBACK_HOSTS, Settings
 from aeos.core.errors import Conflict, NotFound
 from aeos.core.hashing import content_hash
@@ -50,6 +51,7 @@ from aeos.inventory.probes import (
     PROVIDER_ENV_PREFIXES,
     ProbeRefused,
     ProbeRunner,
+    RunResult,
     clean_output,
     file_digest,
     file_is_placeholder,
@@ -66,6 +68,12 @@ from aeos.models.inventory import ComponentObservation, ComponentReference
 from aeos.models.inventory_ext import ReconciliationRun
 
 OBSERVER = "reconciler"
+# Executables that an ``aeos ... install`` command places user-level in ``<data>/bin`` (never on PATH).
+DATA_BIN_BINARIES = frozenset({"bao"})
+# Windows NTSTATUS error severity range: a process that crashed (e.g. 0xC0000135 STATUS_DLL_NOT_FOUND) exits with a
+# code in it. 0xFFFFFFFF (a plain ``exit -1``) and the rest above are ordinary exit codes, not crashes.
+NTSTATUS_ERROR_MIN = 0xC0000000
+NTSTATUS_ERROR_MAX = 0xCFFFFFFF
 CORE_REQUIREMENTS = frozenset({"REQUIRED", "OPTIONAL"})
 DEFAULT_TTL = 3600
 DECLARATION_TTL = 86400
@@ -117,27 +125,53 @@ def _obs(dimension: str, status: str, *, version: str | None = None, identity: s
 # ---------------------------------------------------------------- per-type probes
 
 
+def _locate_binary(ctx: ReconcileContext, b: dict[str, Any]) -> BinaryLookup:
+    """(path, lookup, rejected settings path) by the one shared rule (``aeos.core.binaries``: settings override, then the user-level install
+    in ``<data>/bin`` for binaries an ``aeos ... install`` places there, then PATH). Existence checks go through the
+    runner so a fake runner keeps tests hermetic."""
+    override = b.get("settings_override")
+    name = b["name"]
+    return locate_binary(
+        name,
+        configured=getattr(ctx.settings, override, None) if override else None,
+        data_dir=ctx.data_dir if name in DATA_BIN_BINARIES else None,
+        is_executable=ctx.runner.is_executable,
+        which=ctx.runner.which,
+    )
+
+
+def _did_not_run(rr: RunResult) -> bool:
+    """The located binary did not complete normally: the call failed (timeout, OS error), there is no exit status,
+    it was killed by a signal (negative status, e.g. SIGKILL from code signing on macOS) or on Windows it crashed with
+    an NTSTATUS error code (0xC0000000-0xCFFFFFFF, e.g. STATUS_DLL_NOT_FOUND). A non-zero but normal exit is not this case."""
+    rc = rr.returncode
+    return (rr.error is not None or rc is None or rc < 0
+            or (sys.platform == "win32" and NTSTATUS_ERROR_MIN <= rc <= NTSTATUS_ERROR_MAX))
+
+
 def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[str, Any]) -> list[Spec]:
     ttl = int(probe.get("ttl_seconds") or DEFAULT_TTL)
     timeout = float(probe.get("timeout_seconds") or 10)
     env = scrubbed_env(ctx.runner.environ(), prefixes=probe.get("scrub_env_prefixes") or PROVIDER_ENV_PREFIXES)
     found: list[dict[str, Any]] = []
     missing: list[str] = []
+    failed: list[str] = []
+    lookups: dict[str, str] = {}  # missing binary -> the lookup step that decided
+    rejected: dict[str, str] = {}  # missing binary -> the unusable settings path
     for b in probe.get("binaries") or []:
         name = b["name"]
-        override = b.get("settings_override")
-        configured = getattr(ctx.settings, override, None) if override else None
-        path: str | None
-        lookup = "settings" if configured else "PATH"
-        if configured:
-            path = str(configured) if ctx.runner.stat(str(configured)) else None
-        else:
-            path = ctx.runner.which(name)
+        path, lookup, rejected_path = _locate_binary(ctx, b)
         if not path:
             missing.append(name)
+            lookups[name] = lookup
+            if rejected_path:
+                rejected[name] = ctx.logical(rejected_path) or rejected_path
             continue
         argv = [path, *b.get("version_args", [])]
         rr = ctx.runner.run(argv, timeout=timeout, env=env, cwd=ctx.probe_cwd)
+        did_not_run = _did_not_run(rr)
+        if did_not_run:
+            failed.append(name)
         version = None
         if rr.returncode == 0 and rr.error is None:
             version = parse_version(f"{rr.stdout}\n{rr.stderr}", b.get("version_regex"))
@@ -148,12 +182,25 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
             "operation_ref": " ".join([name, *b.get("version_args", [])]),
             # §37: the installed executable is its own identity (distinct from source repo / release asset):
             # a replaced binary that prints the same --version is visible as a changed digest.
+            # (also for a located binary that did not run: the file's hash is a fact, but it is no identity of a
+            # working executable, so the UNKNOWN observation below never copies it to observed_identity)
             "digest": file_digest(path),
         })
     specs: list[Spec] = []
     if missing:
         specs.append(_obs("installation", "NOT_INSTALLED", ttl=ttl, missing=missing,
-                          operation_ref="which " + " ".join(missing), lookup="PATH/settings", found=found or None))
+                          operation_ref="which " + " ".join(missing), lookup=", ".join(dict.fromkeys(lookups.values())),
+                          lookups=lookups if len(set(lookups.values())) > 1 else None, rejected=rejected or None,
+                          found=found or None))
+    elif failed:
+        # located but it did not run to completion: never INSTALLED, no version, no observed identity (the file
+        # digest stays in binaries[].digest as a fact); location/operation_ref name a binary that failed
+        first_failed = next(f for f in found if f["name"] in failed)
+        specs.append(_obs("installation", "UNKNOWN", ttl=ttl, failed=failed, binaries=found,
+                          location=first_failed["location"], operation_ref=first_failed["operation_ref"],
+                          reason="binary ditemukan tetapi tidak berjalan normal: " + ", ".join(
+                              f"{f['name']} ({f['error'] or 'exit ' + str(f['exit_code'])})"
+                              for f in found if f["name"] in failed)))
     elif found:
         versions = [f"{f['name']} {f['version']}" if len(found) > 1 else f["version"] for f in found]
         version = "; ".join(v for v in versions if v) or None

@@ -31,6 +31,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from aeos.core.binaries import is_executable_file
 from aeos.core.hashing import sha256_text
 from aeos.core.redaction import redact_text
 
@@ -81,6 +82,8 @@ class ProbeRunner(Protocol):
     def environ(self) -> Mapping[str, str]: ...
 
     def stat(self, path: str) -> dict[str, Any] | None: ...
+
+    def is_executable(self, path: str) -> bool: ...
 
 
 def is_loopback_url(url: str) -> bool:
@@ -177,6 +180,9 @@ class SystemProbeRunner:
         # inode/ctime make an in-place replacement visible even when size and mtime were preserved
         return {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "ino": getattr(st, "st_ino", 0),
                 "ctime_ns": getattr(st, "st_ctime_ns", 0)}
+
+    def is_executable(self, path: str) -> bool:
+        return is_executable_file(path)
 
 
 def _decode(data: bytes | None) -> str:
