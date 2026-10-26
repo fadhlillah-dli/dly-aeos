@@ -4,6 +4,7 @@ home/temp redirected, keyring disabled, timeouts kill the whole process tree."""
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -380,3 +381,125 @@ def test_the_job_object_needs_no_settle_window(monkeypatch):
     g, calls = _scripted_group(monkeypatch, scans=[[], [999]])
     g.method = "job-object"
     assert g.reap(grace=0.0) == [] and calls["n"] == 1  # the job's own accounting is exact
+
+
+# ---------------------------------------------------------------- a process that cannot be read during a sweep (POSIX)
+# What psutil raises on macOS when it reads the environment of a process the kernel is tearing down
+# (sysctl(KERN_PROCARGS2) fails with errno 0): seen in about 1 of 300 000 reads under heavy process churn.
+TORN_DOWN = "<built-in function proc_environ> returned a result with an exception set"
+posix_sweep = pytest.mark.skipif(sys.platform == "win32", reason="POSIX sweep; Windows reads its Job Object")
+
+# A step that starts a detached grandchild (own session: found through the step's marker only) named by argv[1].
+DETACHED_SLEEPER = r'''
+import subprocess, sys
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", sys.argv[1]], stdin=subprocess.DEVNULL,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+'''
+
+
+def _outside_sleeper():
+    """A live process that is not in any step's group (a child of the test process, no step marker)."""
+    import subprocess
+
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _step(tmp_path: Path, *args: str):
+    env = procs.scrubbed_env(pythonpath=[tmp_path], home=tmp_path / "h", tmp=tmp_path / "t", data_dir=tmp_path / "d",
+                             disable_plugin_autoload=True)
+    return procs.run_process([sys.executable, *args], cwd=tmp_path, env=env, timeout=60, contain=True)
+
+
+@posix_sweep
+def test_an_unrelated_process_torn_down_while_it_is_read_is_no_survivor(tmp_path: Path, monkeypatch):
+    """Lesson L15 regression (macOS CI on PR #22 and #24, loaded Macs): reading an exiting process made psutil raise
+    SystemError, which escaped the sweep, so the whole group read as unreadable and a step without a single
+    descendant (the import preflight) was QUARANTINED. Reproduced without timing: the read of an unrelated process
+    fails exactly while the kernel tears that process down."""
+    import psutil
+
+    victim = _outside_sleeper()
+    real = psutil.Process.environ
+    torn: list[int] = []
+
+    def environ(self):
+        if self.pid == victim.pid and not torn:
+            victim.kill()
+            victim.wait()  # torn down while it is being read
+            torn.append(self.pid)
+            raise SystemError(TORN_DOWN)
+        return real(self)
+
+    monkeypatch.setattr(psutil.Process, "environ", environ)
+    try:
+        res = _step(tmp_path, "-c", "print('ok')")
+    finally:
+        victim.kill()
+        victim.wait()
+    assert torn == [victim.pid], "the sweep never read the process that was torn down"
+    assert res.returncode == 0 and res.survivors == [], res.survivors
+
+
+@posix_sweep
+def test_an_unrelated_live_process_with_one_failed_read_is_read_again_not_counted(tmp_path: Path, monkeypatch):
+    import psutil
+
+    other = _outside_sleeper()
+    real = psutil.Process.environ
+    failed: list[int] = []
+
+    def environ(self):
+        if self.pid == other.pid and not failed:
+            failed.append(self.pid)
+            raise SystemError(TORN_DOWN)
+        return real(self)
+
+    monkeypatch.setattr(psutil.Process, "environ", environ)
+    try:
+        res = _step(tmp_path, "-c", "print('ok')")
+        assert other.poll() is None, "the process outside the group was killed"
+    finally:
+        other.kill()
+        other.wait()
+    assert failed == [other.pid] and res.survivors == [], res.survivors
+
+
+@posix_sweep
+def test_a_live_descendant_that_stays_unreadable_is_still_a_survivor(tmp_path: Path, monkeypatch):
+    """The other direction: the re-check never hides a process of the step. A detached grandchild (found through the
+    marker only) whose every read fails stays alive through the re-check: a survivor (fail closed), and killed."""
+    import psutil
+
+    from aeos.verification import procgroup
+
+    token = f"aeos-unreadable-{os.getpid()}-{tmp_path.name}"
+    real = psutil.Process.environ
+    reads: set[int] = set()
+
+    def environ(self):
+        try:
+            unreadable = token in self.cmdline()
+        except psutil.Error:
+            unreadable = False
+        if unreadable:
+            reads.add(self.pid)
+            raise SystemError(TORN_DOWN)
+        return real(self)
+
+    monkeypatch.setattr(psutil.Process, "environ", environ)
+    # the grandchild lives 60 s: any re-check bound reaches the same decision, a short one keeps the test fast
+    monkeypatch.setattr(procgroup, "UNREADABLE_RECHECK_SECONDS", 0.3)
+    try:
+        res = _step(tmp_path, "-c", DETACHED_SLEEPER, token)
+        assert res.returncode == 0 and reads, "the grandchild was never read"
+        listed = {s.get("pid"): s for s in res.survivors}
+        assert reads <= set(listed), res.survivors
+        assert all(listed[pid].get("detached") for pid in reads), res.survivors  # no grace for a detached member
+        gone, alive = psutil.wait_procs([psutil.Process(pid) for pid in reads if psutil.pid_exists(pid)], timeout=10)
+        assert not alive, "the unreadable survivor was not killed"
+    finally:
+        for p in psutil.process_iter(["cmdline"]):
+            if token in (p.info.get("cmdline") or []) and p.pid != os.getpid():
+                with contextlib.suppress(psutil.Error):
+                    p.kill()
