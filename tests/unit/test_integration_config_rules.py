@@ -60,6 +60,28 @@ def test_an_invalid_health_path_is_refused_with_the_observer_rule(personal, db, 
     assert db.query(ProjectIntegration).filter_by(project_id=pid, provider="deployment-target").count() == 0
 
 
+def test_the_checks_api_and_the_observer_apply_the_registry_health_path_rule(personal, db):
+    """Wave-7 integration (A with B): the checks API/CLI, the observer and the screenshot collector use the same
+    path rule as the Integration Registry - a '..' path refused at registration is never set or used another way."""
+    from aeos.core.errors import ValidationFailed
+
+    c, pid = personal
+    integ_id = _put(c, pid, {"provider": "deployment-target", "purpose": "staging",
+                             "root_id": "https://staging.example.org"})["integration"]["id"]
+    bad = c.put(f"/api/delivery/targets/{integ_id}/checks", json={"health_path": "/a/../b"})
+    assert bad.status_code == 422 and bad.json()["error"]["code"] == "HEALTH_PATH_INVALID", bad.text
+    smoke = c.put(f"/api/delivery/targets/{integ_id}/checks",
+                  json={"smoke_checks": [{"name": "home", "path": "/app/../admin"}]})
+    assert smoke.status_code == 422, smoke.text
+    # a stored row that names such a path (e.g. written by an older build) is refused before any request is made
+    row = db.get(ProjectIntegration, integ_id)
+    row.config = {**(row.config or {}), "health_path": "/a/../b"}
+    db.commit()
+    with pytest.raises(ValidationFailed) as exc:
+        delivery.deployment_target(db, db.get(Project, pid), "staging")
+    assert exc.value.code == "HEALTH_PATH_INVALID"
+
+
 def test_health_path_belongs_to_deployment_targets_only(personal):
     c, pid = personal
     r = c.put(f"/api/projects/{pid}/integrations", json={

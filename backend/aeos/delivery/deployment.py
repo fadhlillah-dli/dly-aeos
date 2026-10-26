@@ -82,8 +82,10 @@ def _bad(code: str, message: str, **details: Any) -> ValidationFailed:
 
 
 def _path(value: Any, *, code: str, field: str) -> str:
-    if not isinstance(value, str) or not _PATH.match(value.strip()):
-        raise _bad(code, f"{field} must be an absolute URL path such as /health (no host, query or '@')",
+    # the one path rule (``health_path_ok``): the Integration Registry, the checks API/CLI, the observer and the
+    # screenshot collector all refuse the same paths, '..' segments included (wave-7 integration of A with B)
+    if not isinstance(value, str) or not health_path_ok(value.strip()):
+        raise _bad(code, f"{field} must be an absolute URL path such as /health (no host, query, '@' or '..')",
                    field=field)
     return value.strip()
 
@@ -191,8 +193,9 @@ def validate_target_config(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def health_path_ok(path: Any) -> bool:
-    """The one health-path rule: an absolute URL path of safe characters (the Integration Registry validates the
-    owner's ``config.health_path`` with this same rule before it is stored)."""
+    """The one health-path rule: an absolute URL path of safe characters on the target itself, without '..' segments
+    (the Integration Registry validates the owner's ``config.health_path`` with this same rule before it is stored, and
+    ``_path`` applies it to every stored or configured target path before the observer or the collector uses it)."""
     return isinstance(path, str) and bool(_PATH.match(path)) and ".." not in path.split("/")
 
 
