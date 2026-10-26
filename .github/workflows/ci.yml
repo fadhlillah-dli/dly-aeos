@@ -401,9 +401,10 @@ jobs:
           fi
           test ! -e relative-data-dir
 
-  # Conventional Commits subjects of the pull request's own commits (scripts/commit_subject.py). Needs the full
-  # history (fetch-depth: 0 here only) to walk base..head and to find the baseline below which nothing is checked.
-  # Stdlib only, so there is no Python setup step. Not run for pushes to main: those arrive through merged pull requests.
+  # Commit messages of the pull request's own commits (scripts/commit_subject.py): the Conventional Commits subject
+  # format and no AI attribution in the message, author or committer (backend/aeos/core/attribution.py). Needs the
+  # full history (fetch-depth: 0 here only) to walk base..head and to find the baseline below which nothing is
+  # checked. Stdlib only (the script puts backend/ on sys.path itself), so there is no Python setup step. Not run for pushes to main: those arrive through merged pull requests.
   commit-subjects:
     name: commit subjects [G1]
     if: github.event_name == 'pull_request'

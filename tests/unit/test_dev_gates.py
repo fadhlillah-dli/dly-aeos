@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from aeos.core.attribution import find_ai_attribution
 from aeos.core.paths import repo_root
 
 ROOT = repo_root()
@@ -39,10 +40,21 @@ cs = _load("commit_subject")
 gates = _load("gates")
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_git_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No global or system git config (hooksPath, signing, templates) reaches any git call of these tests, nor the
+    scripts under test: an empty file stands in for the global one."""
+    empty = tmp_path / "empty.gitconfig"
+    empty.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
 # ------------------------------------------------------------------ throwaway repositories
 def _git(repo: Path, *args: str, **identity: str) -> str:
     """Git on a throwaway repo. The identity comes from the environment, never from a global or system git config."""
     env = gates.clean_env()
+    env.update(GIT_CONFIG_GLOBAL=os.environ.get("GIT_CONFIG_GLOBAL", os.devnull), GIT_CONFIG_NOSYSTEM="1")
     env.update(GIT_AUTHOR_NAME="Dev", GIT_AUTHOR_EMAIL="dev@example.com",
                GIT_COMMITTER_NAME="Dev", GIT_COMMITTER_EMAIL="dev@example.com")
     env.update({k.upper(): v for k, v in identity.items()})  # git_author_email="x" -> GIT_AUTHOR_EMAIL
@@ -446,40 +458,95 @@ def test_contributing_documents_the_one_line_install_and_the_runner():
 def test_a_revert_of_a_valid_subject_is_accepted():
     assert cs.check_subject('Revert "feat(core): add a thing"') is None
     assert cs.check_subject('Revert "Revert "fix: x""') is None
+    assert cs.check_subject('Reapply "fix: x"') is None
+    assert cs.check_subject('Reapply "Revert "fix: x""') is None
     long_wrapper = 'Revert "fix: ' + "x" * 90 + '"'  # the wrapper may pass 100 characters, the quoted subject may not
     assert len(long_wrapper) > cs.MAX_LENGTH and cs.check_subject(long_wrapper) is None
 
 
+@pytest.mark.parametrize("inner", ["Merge pull request #7 from someone/side", "Merge branch 'side' into main",
+                                   "Merge remote-tracking branch 'origin/main' into side"])
+def test_a_revert_or_reapply_of_a_merge_subject_is_accepted(inner: str):
+    assert cs.check_subject(f'Revert "{inner}"') is None
+    assert cs.check_subject(f'Reapply "{inner}"') is None
+    assert cs.check_subject(f'Revert "Revert "{inner}""') is None
+
+
 def test_a_revert_of_an_invalid_subject_is_rejected():
     for subject in ('Revert "Update README"', 'Revert ""', 'Revert "fix: ' + "x" * 100 + '"', 'Revert fix: x',
-                    'revert "feat: x"'):
+                    'revert "feat: x"', 'Reapply "Update README"', 'Reapply fix: x', 'Revert "Merge stuff"',
+                    'Revert "Merge pull request #x from a/b"', 'Merge pull request #7 from someone/side'):
         assert cs.check_subject(subject) is not None, subject
     assert "reverted subject" in (cs.check_subject('Revert "Update README"') or "")
 
 
+def test_git_revert_of_a_merge_and_of_a_revert_pass_the_gate(repo: Path):
+    def change(name: str, subject: str) -> None:
+        (repo / name).write_text(name, encoding="utf-8")
+        _git(repo, "add", name)
+        _git(repo, "commit", "-m", subject)
+
+    change("root.txt", "feat: root")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "side")
+    change("side.txt", "fix: side work")
+    _git(repo, "checkout", "-q", "main")
+    change("main.txt", "fix: main work")
+    _git(repo, "merge", "--no-ff", "-m", "Merge pull request #7 from someone/side", "side")
+    _git(repo, "revert", "--no-edit", "-m", "1", "HEAD")
+    assert _git(repo, "log", "-1", "--format=%s") == 'Revert "Merge pull request #7 from someone/side"'
+    _git(repo, "revert", "--no-edit", "HEAD")
+    assert _git(repo, "log", "-1", "--format=%s").startswith(("Reapply ", 'Revert "Revert '))
+    assert _bad(repo, base) == []
+
+
 # ------------------------------------------------------------------ no attribution in commits
+# The judgement is the repository's own guard (backend/aeos/core/attribution.py); these tests prove that the gate
+# applies it to the message, the author and the committer, and prints its reasons. Every AI sample is assembled from
+# parts so that the repository-wide hygiene scan has nothing to find in this file.
 TRAILER = "Co-authored-by"
+AI_ADDR = "noreply" + "@" + "anthropic.com"
+GEN = "Generated" + " with"
 
 
 def _bad(repo: Path, base: str) -> list[tuple[str, str, str]]:
     return cs.violations(f"{base}..HEAD", str(repo), baseline=None)
 
 
+def test_the_gate_uses_the_canonical_attribution_guard():
+    assert cs.find_ai_attribution is find_ai_attribution
+    assert not hasattr(cs, "ATTRIBUTION_PATTERNS")
+    assert yaml.safe_load(CI_TEXT)["jobs"]["commit-subjects"]["name"] == "commit subjects [G1]"
+
+
 @pytest.mark.parametrize("body", [
-    f"{TRAILER}: Claude <noreply@anthropic.com>",
+    f"{TRAILER}: Claude <{AI_ADDR}>",
     f"{TRAILER.lower()}: Some Name <helper@openai.com>",
     f"{TRAILER.upper()}: Copilot <copilot@users.noreply.github.com>",
     f"{TRAILER}: Gemini <x@example.com>",
-    "Generated with [Claude Code](https://claude.com/claude-code)",
-    "generated with ChatGPT",
-    "see https://claude.ai/code/session_1",
+    f"{TRAILER}: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+    f"{TRAILER}: aider (gpt-4) <noreply@aider.chat>",
+    f"{TRAILER}: devin-ai-integration[bot] <1+d@users.noreply.github.com>",
+    f"{TRAILER}: Cl​aude <x@example.com>",  # zero-width space inside the name
+    "Co-authored" + " by: Claude",
+    "Signed-off-by: " + "Claude <x@example.com>",
+    "Assisted-by: " + "Claude",
+    "Generated-by: " + "ChatGPT",
+    f"{GEN} [Claude Code](https://claude.com/claude-code)",
+    GEN + " ChatGPT",
+    "Generated" + "  with  " + "Claude",  # double spaces
+    "Created" + " with Claude",
+    "Written" + " by Codex",
+    "Generated" + " using Windsurf",
+    "Dibuat" + " dengan Claude Code",
 ])
 def test_attribution_in_the_message_is_rejected(repo: Path, body: str):
     base = _commit(repo, "feat: root")
     sha = _commit(repo, f"fix(core): fine subject\n\nWhat changed.\n\n{body}")
     found = _bad(repo, base)
     assert [f[0] for f in found] == [sha]
-    assert cs.check_subject("fix(core): fine subject") is None and found[0][2]  # only the attribution is the reason
+    assert cs.check_subject("fix(core): fine subject") is None
+    assert found[0][2].startswith("AI attribution in the message - line 5: ")  # the guard's own reason, not the subject
 
 
 def test_attribution_in_a_merge_commit_message_is_rejected_but_the_merge_subject_is_exempt(repo: Path):
@@ -488,9 +555,9 @@ def test_attribution_in_a_merge_commit_message_is_rejected_but_the_merge_subject
     _commit(repo, "fix: side work")
     _git(repo, "checkout", "-q", "main")
     _commit(repo, "fix: main work")
-    _git(repo, "merge", "--no-ff", "-m", f"Merge pull request #1\n\n{TRAILER}: Claude <noreply@anthropic.com>", "side")
+    _git(repo, "merge", "--no-ff", "-m", f"Merge pull request #1\n\n{TRAILER}: Claude <{AI_ADDR}>", "side")
     found = _bad(repo, base)
-    assert len(found) == 1 and found[0][1] == "Merge pull request #1" and "co-author" in found[0][2]
+    assert len(found) == 1 and found[0][1] == "Merge pull request #1" and "attribution trailer" in found[0][2]
 
 
 def test_a_clean_merge_commit_and_a_human_co_author_pass(repo: Path):
@@ -504,34 +571,101 @@ def test_a_clean_merge_commit_and_a_human_co_author_pass(repo: Path):
 
 
 @pytest.mark.parametrize("who", ["git_author_email", "git_committer_email"])
-@pytest.mark.parametrize("email", ["noreply@anthropic.com", "Bot@Mail.OpenAI.com"])
+@pytest.mark.parametrize("email", [AI_ADDR, "Bot@Mail.OpenAI.com"])
 def test_an_ai_vendor_author_or_committer_email_is_rejected(repo: Path, who: str, email: str):
     base = _commit(repo, "feat: root")
     sha = _commit(repo, "feat: from a tool", **{who: email})
     found = _bad(repo, base)
-    assert [f[0] for f in found] == [sha] and "e-mail" in found[0][2]
+    role = "author" if "author" in who else "committer"
+    assert [f[0] for f in found] == [sha] and f"AI identity as {role}: the e-mail" in found[0][2]
 
 
-def test_similar_but_unrelated_emails_and_words_pass(repo: Path):
+@pytest.mark.parametrize("who", ["git_author_name", "git_committer_name"])
+@pytest.mark.parametrize("name", ["Claude", "Copilot", "claude[bot]", "cursoragent", "dependabot[bot]"])
+def test_an_ai_author_or_committer_name_with_a_normal_email_is_rejected(repo: Path, who: str, name: str):
     base = _commit(repo, "feat: root")
-    _commit(repo, "feat: cursors and geminis\n\nThe cursor moves; generated with care.",
+    sha = _commit(repo, "feat: from a tool", **{who: name})
+    found = _bad(repo, base)
+    role = "author" if "author" in who else "committer"
+    assert [f[0] for f in found] == [sha] and f"AI identity as {role}: the name" in found[0][2]
+
+
+# Ordinary prose about the product that the old private patterns flagged; the canonical guard must let it through.
+PROSE = (
+    "page tokens " + "generated with" + " a keyset cursor",
+    "the file is " + "generated with" + " the Claude bridge",
+    "the schema is " + "generated with" + " the OpenAI-compatible route shape",
+    "The cursor moves; " + "generated with" + " care.",
+)
+
+
+@pytest.mark.parametrize("sentence", PROSE)
+def test_ordinary_prose_that_mentions_tools_or_generation_passes(repo: Path, sentence: str):
+    base = _commit(repo, "feat: root")
+    _commit(repo, f"feat: cursors and geminis\n\n{sentence}\n\n{TRAILER}: Ada Lovelace <ada@example.com>",
             git_author_email="me@notanthropic.com")
+    assert find_ai_attribution(sentence) == []
     assert _bad(repo, base) == []
 
 
 def test_the_cli_prints_per_commit_ascii_reasons_for_attribution(repo: Path, monkeypatch: pytest.MonkeyPatch,
                                                                  capsys: pytest.CaptureFixture[str]):
     base = _commit(repo, "feat: root")
-    _commit(repo, f"feat: caf\u00e9\n\n{TRAILER}: Claude <noreply@anthropic.com>")
+    _commit(repo, f"feat: café\n\n{TRAILER}: Café Claude <x@example.com>")
     monkeypatch.chdir(repo)
     assert cs.main([f"{base}..HEAD", "--baseline", "none"]) == 1
     out = capsys.readouterr().out
-    assert out.isascii() and "FAIL" in out and "co-author trailer" in out and "1 of 1" in out
+    assert out.isascii() and "FAIL" in out and "attribution trailer" in out and "1 of 1" in out
+    assert "caf\\xe9" in out  # non-ASCII is escaped, not dropped
 
 
-def test_attribution_patterns_live_in_one_tuple_and_the_job_name_is_unchanged():
-    assert isinstance(cs.ATTRIBUTION_PATTERNS, tuple) and len(cs.ATTRIBUTION_PATTERNS) >= 3
-    assert yaml.safe_load(CI_TEXT)["jobs"]["commit-subjects"]["name"] == "commit subjects [G1]"
+# ------------------------------------------------------------------ NUL-separated log parsing
+def _commit_message(repo: Path, message: str) -> str:
+    """A commit whose message is written verbatim from a file (control characters survive; git forbids only NUL)."""
+    msg = repo / ".." / "message.txt"
+    msg.write_bytes(message.encode("utf-8"))
+    _git(repo, "commit", "--allow-empty", "--cleanup=verbatim", "-F", str(msg))
+    return _git(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("separator", ["\x1e", "\x1f", "\x1e\x1f", "\x1f\x1e", "\x1e\x1e\x1f\x1f"])
+def test_record_separator_characters_in_a_message_neither_hide_attribution_nor_crash(repo: Path, separator: str):
+    base = _commit(repo, "feat: root")
+    sha = _commit_message(repo, f"fix: x{separator}y\n\nmore{separator}\n\n{TRAILER}: Claude <x@example.com>\n")
+    clean = _commit_message(repo, f"fix: z{separator}\n\nbody{separator}text\n")
+    found = _bad(repo, base)
+    assert [f[0] for f in found] == [sha] and "attribution trailer" in found[0][2]
+    assert [c.sha for c in cs.log(f"{base}..HEAD", str(repo), baseline=None)] == [clean, sha]
+
+
+def test_an_unparseable_git_log_is_exit_2_with_an_ascii_message_never_a_traceback(
+        repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    base = _commit(repo, "feat: root")
+    _commit(repo, "feat: next")
+    monkeypatch.chdir(repo)
+    for garbage in ("a\0b\0c\0", "x" * 40 + "\0" + "\0".join("f" * 5) + "\0", "\x1e\x1f", "not-a-sha\0" + "\0".join("123456")):
+        real = cs._git
+
+        def fake(args, cwd, garbage=garbage, real=real):
+            proc = real(args, cwd)
+            return subprocess.CompletedProcess(proc.args, 0, garbage, "") if args[0] == "log" else proc
+
+        monkeypatch.setattr(cs, "_git", fake)
+        assert cs.main([f"{base}..HEAD", "--baseline", "none"]) == 2
+        out = capsys.readouterr().out
+        assert out.isascii() and out.startswith("commit-subject: error: "), out
+        monkeypatch.setattr(cs, "_git", real)
+
+
+def test_an_empty_range_and_a_missing_git_are_clean_results(repo: Path, monkeypatch: pytest.MonkeyPatch,
+                                                           capsys: pytest.CaptureFixture[str]):
+    _commit(repo, "feat: root")
+    monkeypatch.chdir(repo)
+    assert cs.main(["HEAD..HEAD", "--baseline", "none"]) == 0
+    assert "0 commit(s) checked" in capsys.readouterr().out
+    monkeypatch.setenv("PATH", str(repo))  # no git
+    assert cs.main(["HEAD..HEAD", "--baseline", "none"]) == 2
+    assert capsys.readouterr().out.isascii()
 
 
 # ------------------------------------------------------------------ a missing tool is a FAIL, never a skip
@@ -629,3 +763,23 @@ def test_hook_falls_back_to_path_python_with_an_ascii_warning(linked: tuple[Path
     proc = _run_hook_script(wt, path_prefix=fake_bin)
     assert proc.returncode == 0 and "CHOSEN=path-python3" in proc.stdout
     assert "warning" in proc.stderr and "python3" in proc.stderr and proc.stderr.isascii()
+
+
+@needs_sh
+def test_hook_ignores_a_venv_next_to_a_bare_repository(tmp_path: Path):
+    """git-common-dir of a worktree of a bare repository is not a ".git": its parent is unrelated and is skipped."""
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init", "-q")
+    _commit(source, "feat: root")
+    parent = tmp_path / "bare parent"
+    parent.mkdir()
+    _git(parent, "clone", "-q", "--bare", str(source), "bare.git")
+    wt = parent / "wt"
+    _git(parent / "bare.git", "worktree", "add", "-q", "--detach", str(wt))
+    _stub(parent / ".venv" / "bin" / "python", "unrelated-venv")
+    fake_bin = tmp_path / "fakebin"
+    _stub(fake_bin / "python3", "path-python3")
+    proc = _run_hook_script(wt, path_prefix=fake_bin)
+    assert proc.returncode == 0, proc.stderr
+    assert "CHOSEN=path-python3" in proc.stdout and "unrelated-venv" not in proc.stdout

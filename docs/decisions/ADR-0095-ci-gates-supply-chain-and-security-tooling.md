@@ -90,7 +90,8 @@ bootstrap installs; until then Python dependencies are pinned by exact version (
 
 `scripts/gates.py` runs the commands of the G1 static steps of `ci.yml` (ruff, mypy for darwin and win32, the
 secret scan) before a push, by hand or from the `scripts/git-hooks/pre-push` hook, and `tests/unit/test_dev_gates.py`
-fails when the two lists diverge. `scripts/commit_subject.py` checks Conventional Commits subjects; the
+fails when the two lists diverge. `scripts/commit_subject.py` checks the commit messages: the Conventional Commits subject format and no AI
+attribution in the message, author or committer (the guard of `backend/aeos/core/attribution.py`); the
 `commit subjects [G1]` job runs it on pull requests only, for commits after a recorded baseline. It is not in the
 required checks of the ruleset (owner configuration). `git push --no-verify` stays available: the hook is a
 convenience, CI is the gate.

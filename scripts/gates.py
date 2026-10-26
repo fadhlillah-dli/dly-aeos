@@ -6,11 +6,14 @@
     python scripts/gates.py --hook         git pre-push mode, see scripts/git-hooks/pre-push
 
 In hook mode the static gates run on the tip commit of each pushed ref only; the commit-message check covers
-base..tip, so intermediate commits get that check and nothing else. Run with the project .venv (or set
+base..tip, so intermediate commits get that check and nothing else (and only when a base is known, else it is
+SKIPPED with the reason). Run with the project .venv (or set
 AEOS_GATES_PYTHON for the hook): ruff and mypy must be installed for sys.executable, else their gates FAIL.
 
 The static gate list is the G1 step of .github/workflows/ci.yml; tests/unit/test_dev_gates.py fails when the two
-diverge. Stdlib only, ASCII-only output. A gate that did not run is SKIPPED with its reason, never PASS.
+diverge. Stdlib only, ASCII-only output. A gate that does not apply (frontend gates without changes or without
+node_modules, the commit-message check without a base) is SKIPPED with its reason, never PASS; a missing ruff or
+mypy is a FAIL.
 Exit code 1 when any gate FAILs."""
 
 from __future__ import annotations

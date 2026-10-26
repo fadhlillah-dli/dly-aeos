@@ -89,18 +89,21 @@ git config core.hooksPath scripts/git-hooks
 
 The hook checks out the tip commit of each pushed ref into a temporary detached worktree outside the repository,
 runs the static gates there and removes it. Intermediate commits of the push do not get the static gates; they
-get only the commit-message check over `base..tip`. A failing gate stops the push. Frontend gates are SKIPPED in
+get only the commit-message check over `base..tip`, and only when a base is known (the remote sha, or `origin/main`
+for a new branch); with no base that check is SKIPPED and says so. A failing gate stops the push. Frontend gates are SKIPPED in
 the hook (the temporary worktree has no `node_modules`). `git push --no-verify` skips the hook; CI stays the gate.
 
 The hook picks its Python in this order: `AEOS_GATES_PYTHON` (an existing executable; the hook stops with an error
 if it is not), the `.venv` of the checkout, the `.venv` of the main checkout (a linked worktree has none of its
-own; never link or junction one into a worktree), then `python3` or `python` from `PATH` with a warning. Gates
+own, found only when the common git directory is a `.git`; never link or junction one into a worktree), then `python3` or `python` from `PATH` with a warning. Gates
 that need ruff or mypy report FAIL, not SKIPPED, when the chosen Python does not have them.
 
 Commit subjects follow Conventional Commits, `type(scope)?!?: description` (types `feat`, `fix`, `docs`,
 `test`, `ci`, `build`, `chore`, `refactor`, `perf`, `style`, `revert`, `security`; at most 100 characters;
-merge commits are exempt; `Revert "<subject>"`, as `git revert` and GitHub write it, passes when the quoted
-subject passes, and the quoted subject keeps the 100-character limit). Check a range with `python scripts/commit_subject.py origin/main..HEAD`. Commits
+merge commits are exempt from the format; `Revert "<inner>"` and `Reapply "<inner>"`, as `git revert` writes
+them, pass when the inner subject passes (it keeps the 100-character limit) or is a merge subject such as
+`Merge pull request #7 from ...`). The same check rejects an AI attribution in the message, the author or the
+committer, with the rules of `backend/aeos/core/attribution.py` (AGENTS.md invariant 11). Check a range with `python scripts/commit_subject.py origin/main..HEAD`. Commits
 up to the baseline in that script are not checked; older history does not comply.
 
 ### CI layout

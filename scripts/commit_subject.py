@@ -1,12 +1,14 @@
 """Commit-message gate (CONTRIBUTING.md, "Rules for every change"): the first line is a Conventional Commits subject
-`type(scope)?!?: description`, and no commit carries an AI attribution (co-author trailer, "generated with" line,
-tool author or committer e-mail). Stdlib only, ASCII-only output.
+`type(scope)?!?: description`, and no commit carries an AI attribution in its message, author or committer. The
+attribution rules are the repository's own guard, backend/aeos/core/attribution.py (AGENTS.md invariant 11,
+ADR-0121), not a copy of them. Stdlib only, ASCII-only output.
 
     python scripts/commit_subject.py <base>..<head>      exit 0 ok, 1 violations, 2 usage or git error
 
 Merge commits (two or more parents) are exempt from the subject format but not from the attribution check (GitHub
-writes their message). Commits at or below BASELINE are never checked. `Revert "<subject>"` (what `git revert` and
-GitHub's revert button write) passes when the quoted subject passes."""
+writes their message). Commits at or below BASELINE are never checked. `Revert "<inner>"` and `Reapply "<inner>"`
+(as `git revert` writes them) pass when the inner subject passes or is a merge subject (`git revert -m 1` of a merge
+commit quotes `Merge pull request #7 from ...`)."""
 
 from __future__ import annotations
 
@@ -15,27 +17,18 @@ import dataclasses
 import re
 import subprocess
 import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "backend"))
+
+from aeos.core.attribution import ai_identity_problem, find_ai_attribution  # noqa: E402
 
 TYPES = ("feat", "fix", "docs", "test", "ci", "build", "chore", "refactor", "perf", "style", "revert", "security")
 MAX_LENGTH = 100
 PATTERN = re.compile(rf"^(?:{'|'.join(TYPES)})(?:\([^()\s]+\))?!?: \S.*$")
-REVERT = re.compile(r'^Revert "(.+)"$')
-
-# The repository is public: AI tools must never appear as author, co-author or in an attribution line (owner rule,
-# CONTRIBUTING.md "No attribution lines"). (reason, where, pattern), all case-insensitive; "message" patterns are
-# matched per line of the full message, "email" patterns against the author and the committer e-mail.
-_AI_NAMES = r"claude|anthropic|openai|chatgpt|copilot|gemini|cursor"
-_AI_HOSTS = r"@(?:[\w-]+\.)*(?:anthropic|openai)\.com"
-ATTRIBUTION_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
-    ("co-author trailer naming an AI tool",
-     "message", re.compile(rf"^\s*co-authored-by:.*(?:\b(?:{_AI_NAMES})\b|{_AI_HOSTS})", re.IGNORECASE)),
-    ("'Generated with' line naming an AI tool",
-     "message", re.compile(rf"\bgenerated with\b.*\b(?:{_AI_NAMES}|codex)\b", re.IGNORECASE)),
-    ("link to Claude Code",
-     "message", re.compile(r"claude\.ai/code|claude\.com/claude-code", re.IGNORECASE)),
-    ("author or committer e-mail of an AI vendor",
-     "email", re.compile(rf"{_AI_HOSTS}\s*>?$", re.IGNORECASE)),
-)
+REVERT = re.compile(r'^(?:Revert|Reapply) "(.+)"$')
+MERGE_SUBJECT = re.compile(r"^Merge (?:pull request #\d+ from |branch |remote-tracking branch )")
 
 # Nothing at or below this commit is checked, so the gate is green on the day it landed. It is origin/main as of
 # 2026-10-26 (merge of PR #16). Of the 186 non-merge commits up to it, 30 have a subject over 100 characters and 1
@@ -43,21 +36,28 @@ ATTRIBUTION_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
 # Only commits after it must comply. Moving this constant later only widens what is exempt: do it with the owner.
 BASELINE = "bd54f897198fae6236d9143a5db00cddff923fd2"
 
-_FIELD, _RECORD = "\x1f", "\x1e"
+# git forbids NUL in a commit message, so it is the one separator a message cannot contain (`git log -z`).
+_NUL = "\0"
+_SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+_FIELDS = 7  # %H %an %ae %cn %ce %P %B
+MAX_FINDINGS_SHOWN = 3
 
 
 def ascii_text(text: str) -> str:
-    """Printable ASCII only (legacy Windows consoles): anything else becomes '?'."""
-    return text.encode("ascii", "replace").decode("ascii")
+    """Printable ASCII only (legacy Windows consoles): anything else becomes a \\uXXXX escape, so nothing is lost."""
+    return text.encode("ascii", "backslashreplace").decode("ascii")
 
 
 def check_subject(subject: str) -> str | None:
-    """None when the subject complies, else the reason. `Revert "<subject>"` complies when the quoted subject does
-    (the wrapper is exempt from the length limit, the quoted subject is not)."""
-    revert = REVERT.match(subject)
-    if revert:
-        inner = check_subject(revert.group(1))
-        return None if inner is None else f"reverted subject does not comply: {inner}"
+    """None when the subject complies, else the reason. `Revert "<inner>"` and `Reapply "<inner>"` comply when the
+    inner subject does or is a merge subject (the wrapper is exempt from the length limit, the inner subject is not)."""
+    wrapped = REVERT.match(subject)
+    if wrapped:
+        inner = wrapped.group(1)
+        if MERGE_SUBJECT.match(inner):
+            return None
+        reason = check_subject(inner)
+        return None if reason is None else f"reverted subject does not comply: {reason}"
     if len(subject) > MAX_LENGTH:
         return f"first line is {len(subject)} characters (maximum {MAX_LENGTH})"
     if not PATTERN.match(subject):
@@ -75,14 +75,16 @@ class Commit:
     sha: str
     subject: str  # first line of the message
     message: str
-    emails: tuple[str, str]  # author, committer
+    author: tuple[str, str]  # name, e-mail
+    committer: tuple[str, str]  # name, e-mail
     is_merge: bool
 
 
 def log(range_spec: str, cwd: str | None = None, baseline: str | None = BASELINE) -> list[Commit]:
     """Every commit of the range, merges included, that is not at or below the baseline.
-    Raises RuntimeError when git cannot answer; an unknown baseline is an error, never a silent pass."""
-    args = ["log", f"--format=%H{_FIELD}%P{_FIELD}%ae{_FIELD}%ce{_FIELD}%B{_RECORD}", range_spec]
+    Raises RuntimeError when git cannot answer or its output cannot be parsed; an unknown baseline is an error,
+    never a silent pass."""
+    args = ["log", "-z", "--format=%H%x00%an%x00%ae%x00%cn%x00%ce%x00%P%x00%B", range_spec]
     if baseline:
         if _git(["cat-file", "-e", f"{baseline}^{{commit}}"], cwd).returncode != 0:
             raise RuntimeError(f"baseline commit {baseline[:12]} is not in this clone (fetch the full history)")
@@ -90,14 +92,21 @@ def log(range_spec: str, cwd: str | None = None, baseline: str | None = BASELINE
     proc = _git(args, cwd)
     if proc.returncode != 0:
         raise RuntimeError(f"git log {range_spec} failed: {proc.stderr.strip()}")
+    tokens = proc.stdout.split(_NUL)
+    if tokens and tokens[-1] == "":  # `-z` ends every commit with a NUL
+        tokens.pop()
+    if len(tokens) % _FIELDS:
+        raise RuntimeError(f"git log {range_spec}: unparseable output ({len(tokens)} fields, expected a multiple of "
+                           f"{_FIELDS})")
     found: list[Commit] = []
-    for record in proc.stdout.split(_RECORD):
-        if _FIELD not in record:
-            continue
-        sha, parents, author, committer, message = record.strip("\n").split(_FIELD, 4)
+    for i in range(0, len(tokens), _FIELDS):
+        sha, author, author_email, committer, committer_email, parents, message = tokens[i:i + _FIELDS]
+        sha = sha.strip()
+        if not _SHA.match(sha):
+            raise RuntimeError(f"git log {range_spec}: unparseable output (commit id {sha[:20]!r})")
         message = message.replace("\r\n", "\n")
-        found.append(Commit(sha.strip(), message.split("\n", 1)[0], message, (author.strip(), committer.strip()),
-                            len(parents.split()) > 1))
+        found.append(Commit(sha, message.split("\n", 1)[0], message, (author, author_email),
+                            (committer, committer_email), len(parents.split()) > 1))
     return found
 
 
@@ -107,15 +116,18 @@ def commits(range_spec: str, cwd: str | None = None, baseline: str | None = BASE
 
 
 def attribution_reasons(commit: Commit) -> list[str]:
-    """Why the message, author or committer of the commit carries an AI attribution (empty when it does not)."""
+    """Why the message, author or committer of the commit carries an AI attribution (empty when it does not).
+    The judgement is the repository's guard (aeos.core.attribution); its reasons are passed on as they are."""
     reasons = []
-    for reason, where, pattern in ATTRIBUTION_PATTERNS:
-        if where == "email":
-            hit = any(pattern.search(email) for email in commit.emails)
-        else:
-            hit = any(pattern.search(line) for line in commit.message.split("\n"))
-        if hit:
-            reasons.append(reason)
+    findings = find_ai_attribution(commit.message)
+    if findings:
+        shown = "; ".join(f.describe() for f in findings[:MAX_FINDINGS_SHOWN])
+        more = f" (+{len(findings) - MAX_FINDINGS_SHOWN} more)" if len(findings) > MAX_FINDINGS_SHOWN else ""
+        reasons.append(f"AI attribution in the message - {shown}{more}")
+    for role, (name, email) in (("author", commit.author), ("committer", commit.committer)):
+        problem = ai_identity_problem(name, email)
+        if problem:
+            reasons.append(f"AI identity as {role}: {problem}")
     return reasons
 
 
@@ -143,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         bad = violations(args.range, baseline=baseline)
         total = len(log(args.range, baseline=baseline))
-    except RuntimeError as exc:
+    except (RuntimeError, OSError, ValueError) as exc:  # git missing or unparseable output: exit 2, never a traceback
         print(ascii_text(f"commit-subject: error: {exc}"))
         return 2
     for sha, subject, reason in bad:

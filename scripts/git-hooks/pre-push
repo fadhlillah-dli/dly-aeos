@@ -3,11 +3,12 @@
 # commit-message check over base..tip. Intermediate commits get only the message check, not the static gates.
 # Install once per clone: git config core.hooksPath scripts/git-hooks
 # Interpreter, first match wins: $AEOS_GATES_PYTHON; the venv of this checkout; the venv of the main checkout (a
-# linked worktree has none of its own); python3; python. Never link a venv into a worktree.
+# linked worktree has none of its own; skipped when the common dir is not a ".git", e.g. a bare repository);
+# python3; python. Never link a venv into a worktree.
 root=$(git rev-parse --show-toplevel) || exit 1
 common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
 main=
-[ -n "$common" ] && main=$(dirname "$common")
+[ -n "$common" ] && [ "$(basename "$common")" = ".git" ] && main=$(dirname "$common")
 py=
 if [ -n "${AEOS_GATES_PYTHON:-}" ]; then
   if [ -f "$AEOS_GATES_PYTHON" ] && [ -x "$AEOS_GATES_PYTHON" ]; then
