@@ -24,7 +24,33 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
-OPENCODE_PIN = "1.19.3"  # version observed on npm on 2026-10-18; the install-manifest is authoritative
+OPENCODE_DEFAULT_PIN = "1.19.3"  # worker runtime default (aeos.worker_runtime.opencode.PINNED_VERSION)
+
+
+def manifest_pin(component_id: str, root: Path = ROOT) -> str | None:
+    """The owner-approved ``approved_pin`` of *component_id* in the reviewed install-manifest (None when unset).
+    Standard library only: the component block is located textually (read-only, never guessed)."""
+    try:
+        text = (root / "install-manifest" / "manifest.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    marker = f"- component_id: {component_id}\n"
+    start = text.find(marker)
+    if start < 0:
+        return None
+    end = text.find("- component_id:", start + len(marker))
+    block = text[start:end if end > 0 else len(text)]
+    for line in block.splitlines():
+        key, _, value = line.strip().partition(":")
+        if key == "approved_pin":
+            value = value.split("#", 1)[0].strip().strip("'\"")
+            return value.lstrip("v") or None if value.lower() not in ("", "null", "~") else None
+    return None
+
+
+# Section 07: the reviewed install-manifest pin wins; the runtime default is used (and labelled) only without one.
+OPENCODE_PIN = manifest_pin("opencode") or OPENCODE_DEFAULT_PIN
+OPENCODE_PIN_SOURCE = "install-manifest approved_pin" if manifest_pin("opencode") else "worker runtime default"
 
 HINTS: dict[str, dict[str, str]] = {
     "git": {"win": "winget install --id Git.Git -e", "mac": "xcode-select --install  (or: brew install git)",
@@ -147,7 +173,7 @@ def _docker() -> dict[str, Any]:
 
 def _opencode() -> dict[str, Any]:
     item = _tool("OpenCode (first worker engine)", "opencode", ["--version"], 5, False,
-                 f"bounded worker tasks; pin opencode-ai@{OPENCODE_PIN} (see install-manifest/)")
+                 f"bounded worker tasks; pin opencode-ai@{OPENCODE_PIN} ({OPENCODE_PIN_SOURCE}; see install-manifest/)")
     if item["status"] == "OK" and item.get("version") and OPENCODE_PIN not in str(item["version"]):
         item["warnings"] = [f"installed version differs from the reviewed pin {OPENCODE_PIN}; the doctor will "
                             "report drift until the pin is reviewed"]

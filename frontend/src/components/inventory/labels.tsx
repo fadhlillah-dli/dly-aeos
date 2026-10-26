@@ -8,6 +8,8 @@ const ALIASES: Record<string, { as: string; label: string }> = {
   MISMATCH: { as: "DRIFTED", label: "Berbeda dari pin" },
   MATCH: { as: "VERIFIED", label: "Sesuai pin" },
   NO_PIN: { as: "UNKNOWN", label: "Pin belum disetujui" },
+  NO_APPROVED_DIGEST: { as: "UNKNOWN", label: "Digest belum disetujui untuk platform ini" },
+  INVALID_APPROVED_DIGEST: { as: "FAILED", label: "Digest yang disetujui tidak valid" },
   UNREGISTERED: { as: "UNVERIFIED", label: "Tidak terdaftar" },
   DECLARED: { as: "CONFIGURED", label: "Dideklarasikan (lockfile/konfigurasi)" },
   DISCOVERED: { as: "PENDING", label: "Ditemukan, belum ada keputusan" },

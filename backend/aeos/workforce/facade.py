@@ -104,6 +104,21 @@ def refresh_role_eval_status(session: Session, role_key: str | None = None) -> i
     from aeos.workforce.roles import refresh_role_eval_status as impl
 
     return impl(session, role_key)
+
+
+# ---- additive (wave 7 cluster D, 2026-10-25): §19 read-only INVESTIGATION runs ------------------------------------
+
+
+def investigation_after_run(session: Session, run: Any, te: Any, task: Any, *, exit_code: int | None,
+                            stop_reason: str | None, violations: list[dict[str, str]], actor: str) -> str:
+    """Outcome of one finished hypothesis run (runtime outcome phase): run REVIEW (report) or FAILED, and the task
+    to READY for the next hypothesis or REVIEW (INVESTIGATION_COMPLETE) for the integrator. Never DONE."""
+    from aeos.workforce.investigation import after_run as impl
+
+    return impl(session, run, te, task, exit_code=exit_code, stop_reason=stop_reason, violations=violations,
+                actor=actor)
+
+
 def pause_info(session: Session) -> dict[str, Any]:
     """The scheduler pause record ({paused, reason, by, at}); ``by`` tells who set the current pause."""
     from aeos.workforce.scheduler import pause_info as impl

@@ -11,15 +11,28 @@ fresh connection before the first candidate step and again after the last one. W
 controller process* in that window are journaled by SQLAlchemy
 event hooks (ORM flushes per row id; any other write statement per table), so the controller's own legitimate
 work is not mistaken for tampering. Any other changed row - added, modified or removed - is a foreign write:
-the verification is QUARANTINED and a HIGH alert raised.
+the verification is QUARANTINED, a HIGH alert raised, and the foreign row neutralised where a safe inverse exists
+(``aeos.verification.neutralize``: approvals INVALIDATED, sessions/grants revoked, routes DISABLED, policy snapshots
+deactivated, ...; the rest is listed for the owner's special review). Every process-runner step runs in its own
+kill group (``aeos.verification.procgroup``), so nothing the candidate started survives to write after the window.
 
 Residual risks (stated, not hidden): reads of the DB are not detected; a foreign write that is undone
 before the window closes is not detected; a foreign write to a table this controller process also wrote
 through a non-ORM statement in the same window is masked; a write by *another* AEOS process (a CLI command
 recording a decision during a verification) is reported as foreign (fail closed - re-run the verification);
 the rows of the high-volume append-only logs (``audit_events``, ``events``) are not digested - only their
-guarding triggers are (a drop-modify-recreate inside the window is not detected for those two tables).
-The container runner never mounts the data dir, which is the actual prevention.
+guarding triggers are (a drop-modify-recreate inside the window is not detected for those two tables); the
+activity timestamps ``auth_sessions.last_seen_at`` and ``users.last_login_at`` are not compared (``_VOLATILE_COLUMNS``:
+no trust attribute, rewritten by the server on ordinary use).
+The worker runtime's window (wave 7, opt-in ``CROSS_PROCESS_TOLERATED``) also accepts a grant's usage counters
+growing and a grant or session being revoked, even from another process: a writer making only those changes
+(inflating usage, revoking) is not detected there. A session's ``last_seen_at`` is compared in no window at all
+(``_VOLATILE_COLUMNS``), so a writer that only keeps an owner session from idling out is detected in neither the
+worker's nor the verifier's window (it gains nothing without the session token). On ``capability_grants`` (``CROSS_PROCESS_STRICT``) the controller's own writes mask nothing
+(review wave 7: the in-process broker's usage ``UPDATE`` used to hide the whole table for the rest of a run). On the
+other tables a foreign change to a row this controller process also wrote by ORM in the same window is masked (for
+example the owner's own session row, touched while the owner uses the dashboard). The container runner never
+mounts the data dir, which is the actual prevention.
 """
 
 from __future__ import annotations
@@ -49,7 +62,18 @@ _TRUST = frozenset(TRUST_TABLES)
 # counters other AEOS processes - e.g. a Doctor CLI run - update legitimately). Fixed SQL, no user input.
 _ROW_FILTERS: dict[str, str] = {
     "system_settings": ("key LIKE 'worker_runtime.containment.%' OR key LIKE 'write_enabled.%' "
-                        "OR key LIKE 'flags.%' OR key LIKE 'bootstrap.%'"),
+                        "OR key LIKE 'flags.%' OR key LIKE 'bootstrap.%' "
+                        # wave 7: the worker-admission integrity hold (clearing it would re-admit workers)
+                        "OR key LIKE 'worker_runtime.integrity%'"),
+}
+# Activity timestamps the API server rewrites on ordinary use (a session's last request, at most every 30 s; an
+# account's last sign-in). They are no trust attribute - a changed value grants nothing without the session token or
+# the password - so they are left out of the row digest: an open dashboard during a CLI verification (another AEOS
+# process) is not taken for tampering, and neutralisation never revokes the owner's live session for it. Every other
+# column of these rows (token hash, user, expiry, revocation, password hash, role, scopes, ...) is compared.
+_VOLATILE_COLUMNS: dict[str, frozenset[str]] = {
+    "auth_sessions": frozenset({"last_seen_at"}),
+    "users": frozenset({"last_login_at"}),
 }
 _WRITE_RE = re.compile(r'^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+'
                        r'["`\[]?(\w+)', re.IGNORECASE)
@@ -133,9 +157,52 @@ def install() -> None:
     _installed = True
 
 
-def digest(engine: Engine) -> tuple[dict[str, dict[str, str]], list[str]]:
+# Opt-in (wave 7, worker runs): changes ANOTHER AEOS process makes legitimately while a worker runs, e.g. when the
+# executor runs in the CLI (`aeos work run-once`) and the server process serves the run's model calls: the broker
+# counts usage on the run's capability grant and may deactivate it, and the server touches an owner session's
+# last_seen_at. A modified row whose ONLY changes are these columns, each in its allowed direction, is reported as
+# ``tolerated``, never as foreign. Any other column, an added/removed row, or a change against the direction (a
+# usage counter going down, a grant re-activated, a revocation cleared) stays foreign. The verifier never uses it.
+CROSS_PROCESS_TOLERATED: dict[str, dict[str, str]] = {
+    "capability_grants": {"used_requests": "grow", "used_tokens": "grow", "used_cost_usd": "grow",
+                          "active": "deactivate", "revoked_at": "set_once", "revoked_reason": "set_once"},
+    "auth_sessions": {"last_seen_at": "grow", "revoked_at": "set_once", "revoked_reason": "set_once"},
+}
+# Opt-in strict tables (review wave 7): every change THIS process legitimately makes to them during a run is itself
+# one of the tolerated changes (the broker's usage counters are Core ``UPDATE`` statements, revocation/expiry are ORM
+# updates of active/revoked_*) or an ORM insert of a new grant. So the controller's own writes do NOT mask them: a
+# table-level journal entry (Core statement) never skips the table, and a modified row journaled as this process's
+# own must still change only tolerated columns in their allowed direction. Without this, the in-server broker's
+# first usage UPDATE hid every forged cap or forged grant row for the rest of the run.
+CROSS_PROCESS_STRICT: frozenset[str] = frozenset({"capability_grants"})
+# per tolerated table: row key -> (digest of the row WITHOUT the tolerated columns, {tolerated column: value})
+Tolerated = dict[str, dict[str, tuple[str, dict[str, Any]]]]
+
+
+def _ge(new: Any, old: Any) -> bool:
+    try:
+        return float(new) >= float(old)
+    except (TypeError, ValueError):
+        return str(new) >= str(old)  # ISO timestamps as SQLite stores them compare in time order
+
+
+def _direction_ok(rule: str, old: Any, new: Any) -> bool:
+    if old == new:
+        return True
+    if rule == "grow":
+        return new is not None and (old is None or _ge(new, old))
+    if rule == "deactivate":
+        return bool(old) and not bool(new)
+    if rule == "set_once":
+        return old is None
+    return False
+
+
+def digest(engine: Engine, *, tolerate: dict[str, dict[str, str]] | None = None,
+           tolerated: Tolerated | None = None) -> tuple[dict[str, dict[str, str]], list[str]]:
     """Row digests of every trust table that exists, read through a fresh connection (committed state), and
-    the tables with more rows than ``MAX_ROWS_PER_TABLE`` (only partly compared: never a PASS, fail closed)."""
+    the tables with more rows than ``MAX_ROWS_PER_TABLE`` (only partly compared: never a PASS, fail closed).
+    With ``tolerate`` (see ``CROSS_PROCESS_TOLERATED``) the same row read also fills ``tolerated``."""
     out: dict[str, dict[str, str]] = {}
     truncated: list[str] = []
     sqlite = engine.dialect.name == "sqlite"
@@ -153,14 +220,26 @@ def digest(engine: Engine) -> tuple[dict[str, dict[str, str]], list[str]]:
             # the row key is the primary key, as the controller's own writes are journaled (_after_flush)
             key_col = "id" if "id" in cols else "key" if "key" in cols else None
             key_idx = cols.index(key_col) if key_col is not None else None
+            volatile = _VOLATILE_COLUMNS.get(table, frozenset())
+            keep = [i for i, c in enumerate(cols) if c not in volatile]
+            soft = set((tolerate or {}).get(table) or ()) if tolerated is not None and key_idx is not None else set()
+            soft_rows: dict[str, tuple[str, dict[str, Any]]] = {}
             rows: dict[str, str] = {}
             for i, row in enumerate(res):
                 if i >= MAX_ROWS_PER_TABLE:
                     truncated.append(table)
                     break
                 key = str(row[key_idx]) if key_idx is not None else f"#{i}"
-                rows[key] = hashlib.sha256(repr(tuple(row)).encode("utf-8", "replace")).hexdigest()
+                values = tuple(row) if not volatile else tuple(row[j] for j in keep)
+                rows[key] = hashlib.sha256(repr(values).encode("utf-8", "replace")).hexdigest()
+                if soft:
+                    # the stable part leaves out the volatile columns too, as the row digest above does
+                    stable = tuple(v for c, v in zip(cols, row, strict=True) if c not in soft and c not in volatile)
+                    soft_rows[key] = (hashlib.sha256(repr(stable).encode("utf-8", "replace")).hexdigest(),
+                                      {c: v for c, v in zip(cols, row, strict=True) if c in soft})
             out[table] = rows
+            if soft and tolerated is not None:
+                tolerated[table] = soft_rows
         if sqlite:
             # The schema itself: tables, indexes and the append-only / immutable-binding triggers that guard
             # Decision, AuditEvent, EvidenceArtifact, PlanVersion and TaskSpec rows (AGENTS.md invariant 4).
@@ -178,46 +257,83 @@ def digest(engine: Engine) -> tuple[dict[str, dict[str, str]], list[str]]:
 class Window:
     """Open before the first candidate step, ``close()`` after the last one."""
 
-    def __init__(self, engine: Engine):
+    def __init__(self, engine: Engine, *, tolerate: dict[str, dict[str, str]] | None = None,
+                 strict: frozenset[str] | set[str] | None = None):
+        """``tolerate`` (opt-in, worker runs only): ``CROSS_PROCESS_TOLERATED``-shaped column rules; ``strict``: the
+        tolerated tables whose own writes never mask a change (``CROSS_PROCESS_STRICT``)."""
         install()
         self.engine = engine
         self.journal = Journal()
+        self.tolerate = {t: dict(c) for t, c in (tolerate or {}).items() if t in _TRUST}
+        self.strict = frozenset(t for t in (strict or ()) if t in self.tolerate)
+        self.tolerated_before: Tolerated = {}
         with _lock:
             _windows[id(self)] = self.journal
         self.truncated: set[str] = set()
+        self.foreign_all: list[dict[str, str]] = []
         try:
             self.before: dict[str, dict[str, str]] | None
-            self.before, cut = digest(engine)
+            self.before, cut = digest(engine, tolerate=self.tolerate, tolerated=self.tolerated_before)
             self.truncated.update(cut)
             self.error: str | None = None
         except Exception as exc:  # unreadable: the comparison is UNKNOWN (reported, never PASS)
             self.before, self.error = None, type(exc).__name__
+
+    def _tolerated_change(self, table: str, key: str, after: Tolerated) -> list[str] | None:
+        """The tolerated columns that changed, when they are the ONLY change and each moved in its allowed
+        direction; else None (foreign)."""
+        rules = self.tolerate.get(table)
+        old, new = self.tolerated_before.get(table, {}).get(key), after.get(table, {}).get(key)
+        if not rules or old is None or new is None or old[0] != new[0]:
+            return None
+        changed = sorted(c for c in rules if old[1].get(c) != new[1].get(c))
+        if not changed or not all(_direction_ok(rules[c], old[1].get(c), new[1].get(c)) for c in changed):
+            return None
+        return changed
 
     def close(self) -> dict[str, Any]:
         with _lock:
             _windows.pop(id(self), None)
         if self.before is None:
             return {"status": "UNKNOWN", "error": self.error, "foreign": [], "own_writes": 0}
+        after_tolerated: Tolerated = {}
         try:
-            after, cut = digest(self.engine)
+            after, cut = digest(self.engine, tolerate=self.tolerate, tolerated=after_tolerated)
         except Exception as exc:
             return {"status": "UNKNOWN", "error": type(exc).__name__, "foreign": [], "own_writes": 0}
         self.truncated.update(cut)
         foreign: list[dict[str, str]] = []
+        tolerated: list[dict[str, Any]] = []
         for table in sorted(set(self.before) | set(after)):
-            if table in self.journal.tables:
+            strict = table in self.strict
+            if table in self.journal.tables and not strict:
                 continue
             old, new = self.before.get(table, {}), after.get(table, {})
             for key in sorted(set(old) | set(new)):
-                if old.get(key) == new.get(key) or (table, key) in self.journal.rows:
+                if old.get(key) == new.get(key):
                     continue
                 change = "added" if key not in old else "removed" if key not in new else "modified"
-                foreign.append({"table": table, "id": key[:64], "change": change})
+                own = (table, key) in self.journal.rows
+                if own and not (strict and change == "modified"):
+                    continue  # this process's own ORM write (strict tables: its own insert/delete only)
+                columns = self._tolerated_change(table, key, after_tolerated) if change == "modified" else None
+                if columns is not None:
+                    if not own:
+                        tolerated.append({"table": table, "id": key[:64], "columns": columns})
+                    continue
+                foreign.append({"table": table, "id": key, "change": change})
+        # every foreign row with its full key, for neutralisation (aeos.verification.neutralize): the report below
+        # lists only the first rows with shortened keys - a row beyond them must not stay in effect
+        self.foreign_all = [dict(f) for f in foreign]
+        foreign = [{**f, "id": f["id"][:64]} for f in foreign]
         status = "FAIL" if foreign else ("UNKNOWN" if self.truncated else "PASS")
         result: dict[str, Any] = {
             "status": status, "foreign": foreign[:100], "foreign_count": len(foreign), "tables": len(after),
             "rows": sum(len(v) for v in after.values()), "own_writes": len(self.journal.rows),
             "own_tables": sorted(self.journal.tables)}
+        if self.tolerate:
+            result["tolerated"] = tolerated[:100]
+            result["tolerated_count"] = len(tolerated)
         if self.truncated:
             result["truncated_tables"] = sorted(self.truncated)
             result["error"] = (f"more than {MAX_ROWS_PER_TABLE} rows in {', '.join(sorted(self.truncated))}: "

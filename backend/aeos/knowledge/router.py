@@ -79,7 +79,8 @@ def get_context_pack(pack_id: str, principal: CurrentPrincipal, domain: ActiveDo
     view = packs.pack_view(pack, meta, freshness=freshness)
     if pack.stale != was_stale or meta is not None:
         db.commit()  # persist the observed staleness / check time (monotonic: STALE is sticky)
-    return {"context_pack": view}
+    return {"context_pack": view, "source": "aeos-knowledge (context pack + freshness check on read)",
+            "checked_at": view.get("checked_at"), "generated_at": utcnow().isoformat(), "mode": "LIVE"}
 
 
 # ---------------------------------------------------------------- memory

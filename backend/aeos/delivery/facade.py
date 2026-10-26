@@ -35,16 +35,47 @@ def summarize_check_runs(runs: list[dict[str, Any]]) -> str:
 
 def deployment_target(session: Session, project: Any, environment: str) -> dict[str, Any] | None:
     """The observe-only deployment target registered for *project* and *environment* (staging|production):
-    ``{"integration_id", "base_url", "health_path"}``, or None when none is registered (§04 Integration Registry)."""
-    from aeos.delivery.deployment import DEFAULT_HEALTH_PATH, ENVIRONMENTS, target_for
+    ``{"integration_id", "base_url", "health_path"}``, or None when none is registered (§04 Integration Registry).
+
+    The same checked target the deployment observer uses: a stored ``health_path`` that is not an absolute URL
+    path (e.g. ``@other.host/health``, which would send the health GET to another host) raises
+    ``ValidationFailed`` HEALTH_PATH_INVALID instead of being used."""
+    from aeos.delivery.deployment import ENVIRONMENTS, target_for, target_settings
 
     if environment not in ENVIRONMENTS:
         return None
     target = target_for(session, project, environment)
     if target is None or not target.root_id:
         return None
-    return {"integration_id": target.id, "base_url": target.root_id.rstrip("/"),
-            "health_path": str((target.config or {}).get("health_path") or DEFAULT_HEALTH_PATH)}
+    checked = target_settings(target)
+    return {"integration_id": checked["integration_id"], "base_url": checked["base_url"],
+            "health_path": checked["health_path"]}
+
+
+# deployment-target config keys owned by aeos.delivery (the Integration Registry validates them through
+# validate_deployment_target_config); these keys are kept by a generic integration PUT whose config omits them
+# (an explicit value, even an empty one, replaces them).
+DEPLOYMENT_TARGET_CONFIG_KEYS: tuple[str, ...] = ("health_path", "smoke_checks", "sli_checks", "rollback_on",
+                                                  "require_artifact_digest")
+DEPLOYMENT_TARGET_CHECK_KEYS: tuple[str, ...] = ("health_path", "smoke_checks", "sli_checks", "rollback_on",
+                                                 "require_artifact_digest")
+
+
+def validate_deployment_target_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Additive: validate and normalise the deployment-target keys of an integration config (raises
+    ``ValidationFailed`` HEALTH_PATH_INVALID / SMOKE_CHECKS_INVALID / SLI_CHECKS_INVALID /
+    ROLLBACK_CRITERIA_INVALID / INVALID_CONFIG)."""
+    from aeos.delivery.deployment import validate_target_config
+
+    return validate_target_config(config)
+
+
+def require_staging_gate(session: Session, project: Any) -> None:
+    """Additive (§08): raise ``Blocked`` CAPABILITY_NOT_READY unless CAN_VALIDATE_STAGING is READY for *project*.
+    Every staging validation operation (observation, screenshot capture) asks this first."""
+    from aeos.delivery.deployment import require_staging_gate as impl
+
+    impl(session, project)
 
 
 def classify_deployment_health(sha: str, http_status: int | None, body: Any) -> tuple[str, str, str | None]:
@@ -53,3 +84,19 @@ def classify_deployment_health(sha: str, http_status: int | None, body: Any) -> 
     from aeos.delivery.deployment import classify
 
     return classify(sha, http_status, body)
+
+
+def valid_health_path(path: Any) -> bool:
+    """Additive (W7, 2026-10-25): whether *path* is a valid observe-only health path for a deployment target - the
+    same rule the deployment observer applies before its one GET (``/`` + ``[A-Za-z0-9._~/-]``, max 201 chars)."""
+    from aeos.delivery.deployment import health_path_ok
+
+    return health_path_ok(path)
+
+
+def pipeline_gates() -> tuple[str, ...]:
+    """Additive (W7, 2026-10-25): the gates a project's pipeline reference may map (``config.gate_<G>`` of the CI
+    integration, §31 "pipeline reference per proyek")."""
+    from aeos.delivery.provider import PIPELINE_GATES
+
+    return tuple(PIPELINE_GATES)

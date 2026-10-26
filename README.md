@@ -128,7 +128,7 @@ Status per capability, with evidence level and what is still NOT-PROVEN, is trac
 | M2 Planning & Docs | native Claude bridge, Product 1 renderer, PERSONAL publisher | partial — real publication NOT-PROVEN |
 | M3 Workforce & self-build | sandbox + broker + OpenCode, verifier, live console | partial — container sandbox / OpenCode NOT-PROVEN |
 | M4 Delivery | CI/PR evidence, human-only merge/production enforcement | partial — ruleset on `main` configured (public repo on GitHub Free, ADR-0115); provider bypass test NOT-PROVEN; no deployment target |
-| M5 OFFICE | company-approved adapters/routes, isolated runtime | not started (default deny) |
+| M5 OFFICE | company-approved adapters/routes, isolated runtime | software built (Bitbucket/Confluence/Jira adapters disabled by default; company-authorisation scope: approved targets, data classes, identity); BLOCKED on company authorisation, tenant and OFFICE container proof — live NOT-PROVEN |
 | M6 Optimization & Ops | arena/scorecards, SLO/runbook/restore/incident loop | partial (see coverage matrix) |
 
 Nothing in this repository claims a capability works unless the Readiness Doctor or a recorded test

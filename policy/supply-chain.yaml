@@ -1,0 +1,13 @@
+# Supply-chain scan policy (§31 G1, §45, §48; ADR-0095). OWNER decisions only, none set: while
+# UNDECIDED (or a value is null) scripts/supply_chain.py is REPORT_ONLY. How to decide: ADR-0095.
+status: UNDECIDED
+version: 1
+decision_ref: null
+decided_by: null
+decided_at: null
+licenses: {allow: null}
+vulnerabilities:
+  python: {fail_at_or_above: null}
+  npm: {fail_at_or_above: null}
+sast:
+  bandit: {fail_at_or_above: null, min_confidence: null}

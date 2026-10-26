@@ -272,7 +272,9 @@ def run_contract_test(*, binary: str | None = None) -> dict[str, Any]:
     checked = utcnow().isoformat()
     status = opencode.opencode_status(binary, refresh=True)
     base: dict[str, Any] = {"kind": "WORKER_CONTRACT_TEST", "engine": "opencode", "engine_status": status.get("status"),
-            "engine_version": status.get("version"), "pinned_version": opencode.PINNED_VERSION,
+            "engine_version": status.get("version"),
+            "pinned_version": status.get("pinned_version") or opencode.pinned_version(),
+            "pin_source": status.get("pin_source") or opencode.resolve_pin()["source"],
             "drift": status.get("drift"), "checked_at": checked, "platform": sys.platform,
             "model": "scripted loopback endpoint (no provider, no credential)",
             "scope": {"engine_contract": "see results",
@@ -290,7 +292,7 @@ def run_contract_test(*, binary: str | None = None) -> dict[str, Any]:
         outside = root / "outside-secret.txt"
         outside.write_text(marker + "\n", encoding="utf-8")
         results = [_r("engine_installed", True, f"opencode {status.get('version')} (pinned "
-                      f"{opencode.PINNED_VERSION}, drift={bool(status.get('drift'))})")]
+                      f"{base['pinned_version']} from {base['pin_source']}, drift={bool(status.get('drift'))})")]
         results += _phase_run(str(status["binary"]), root, repo, outside, marker)
         kill_repo = root / "repo-kill"
         _make_repo(kill_repo)

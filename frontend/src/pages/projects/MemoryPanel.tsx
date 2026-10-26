@@ -15,10 +15,24 @@ const SOURCES: [string, string][] = [
   ["adr", "ADR ACCEPTED (proyek platform)"],
 ];
 
+/** "a, b c" -> ["a", "b", "c"] (EvalRun ids). */
+export function parseIds(text: string): string[] {
+  return text
+    .split(/[\s,]+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
 function MemoryRow({ m, isAdmin, onChanged }: { m: MemoryView; isAdmin: boolean; onChanged: () => void }) {
+  // §41/§43: accepting memory is a system change; the owner may cite the evaluation runs that are evidence of
+  // exactly this record (backend: COMPLETED, every gate PASS, every collected sample had the record in its executed
+  // worker context) - else NOT_EVALUATED. Context packs carry ACCEPTED memory only: no run can evidence it yet.
+  const [evalRuns, setEvalRuns] = useState("");
   const act = useMutation({
-    mutationFn: ({ action, rationale }: { action: "accept" | "reject" | "expire"; rationale: string }) =>
-      post(`/api/memory/${m.id}/${action}`, { rationale }),
+    mutationFn: ({ action, rationale }: { action: "accept" | "reject" | "expire"; rationale: string }) => {
+      const ids = action === "accept" ? parseIds(evalRuns) : [];
+      return post(`/api/memory/${m.id}/${action}`, ids.length ? { rationale, eval_run_ids: ids } : { rationale });
+    },
     onSuccess: onChanged,
   });
   const ask = (action: "accept" | "reject" | "expire") => {
@@ -76,6 +90,16 @@ function MemoryRow({ m, isAdmin, onChanged }: { m: MemoryView; isAdmin: boolean;
           <ErrorBox error={act.error} />
         </div>
       ) : null}
+      {isAdmin && m.status === "PROPOSED" && (
+        <div className="mt-2 max-w-xl">
+          <Field
+            label="ID EvalRun system-change (opsional)"
+            hint="Kosongkan bila belum dievaluasi: penerimaan tercatat 'belum dievaluasi'. EvalRun harus COMPLETED dengan semua gate PASS dan setiap sampelnya benar-benar membawa memori ini di konteks worker (bukan sekadar disebut di context_params). Context pack hanya memuat memori ACCEPTED, jadi build ini belum bisa mengevaluasi memori yang diusulkan: perlu suite fixture memori/retrieval dari pemilik."
+          >
+            <input className={inputClass} value={evalRuns} onChange={(e) => setEvalRuns(e.target.value)} placeholder="uuid EvalRun, pisahkan koma" />
+          </Field>
+        </div>
+      )}
       {isAdmin && (m.status === "PROPOSED" || m.status === "ACCEPTED") && (
         <div className="mt-2 flex flex-wrap gap-2">
           {m.status === "PROPOSED" && (

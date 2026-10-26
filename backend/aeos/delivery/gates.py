@@ -8,9 +8,12 @@
 | G3 Product tests | provider CI frontend job for the head commit (NOT_APPLICABLE when no frontend change and no job) |
 | G4 Review | completed Claude checkpoint review bound to the verified artifact **and** independent evidence (G2) |
 | G5 Integration | retest on the merged state: provider CI on the merge commit, after a human merged; the merge brought no protected path beyond the verified change |
-| G6 Staging | NOT_APPLICABLE until the owner registers a staging ``deployment-target``; then trusted runtime evidence for the commit |
+| G6 Staging | the observer's aggregate runtime observation (health + owner smoke/critical-flow/SLI checks, run only while CAN_VALIDATE_STAGING is READY) of the registered staging ``deployment-target`` for the commit, plus the owner's authorisation of staging deploys to that exact target (POLICY ``staging_environment``); NOT_APPLICABLE only with the owner's decision that the project has no staging (``staging=NONE``), never inferred from a missing registration |
 | G7 Human release | merge performed by a human account recorded as authorised release approver (POLICY ``release_approvers``), observed from GitHub ``merged_by`` / Bitbucket ``closed_by`` (never by AEOS) |
-| G8 Post-release | NOT_APPLICABLE until a production ``deployment-target`` is registered; then a runtime observation of the merge commit |
+| G8 Post-release | the aggregate observation of the registered production target for the merge commit; a FAIL links the ``post_release_failure`` alert, incident and decision request (human rollback / forward-fix / accept); NOT_APPLICABLE only with the owner's ``production=NONE`` decision |
+
+``promotion`` (§31 build once / digest / promotion): PASS only with G5 and G7 PASS, a provider-CI artifact digest of the
+merge commit and every registered target reporting that digest; promotion itself stays a human action.
 
 Statuses: PASS | FAIL | PENDING | BLOCKED | NOT_PROVEN | STALE | NOT_APPLICABLE | UNKNOWN. Nothing that is
 UNKNOWN/NOT_PROVEN/PENDING is ever reported as PASS. ``ready_for_human_merge`` is informational: the
@@ -33,7 +36,7 @@ from aeos.models.planning import PlanVersion, TaskSpec
 from aeos.models.portfolio import Project
 from aeos.models.workforce import TaskExecution, WorkerRun
 from aeos.verification import acceptance as acceptance_mod
-from aeos.verification import collector
+from aeos.verification import facade as verification
 from aeos.verification.integration import call
 from aeos.verification.review import (
     NON_REGRESSION_SCOPE,
@@ -93,7 +96,7 @@ def ci_gate_status(ev: EvidenceArtifact | None, gate: str) -> tuple[str, list[st
 
     if ev is None:
         return "NO_EVIDENCE", []
-    data = collector.read_json(ev) or {}
+    data = verification.read_json(ev) or {}
     runs = [CheckRunView(name=str(r.get("name") or ""), status=str(r.get("status") or "unknown"),
                          conclusion=r.get("conclusion"), app=r.get("app"), url=r.get("url"),
                          started_at=r.get("started_at"), completed_at=r.get("completed_at"),
@@ -207,31 +210,195 @@ def release_approvers(session: Session, project: Project) -> tuple[list[str], st
 
 
 def _deployment_target(session: Session, project: Project, purpose: str) -> Any:
+    """The observable target of *purpose*: a deployment-target WITH a base URL (the observer's and the Doctor's
+    rule); a registration without ``root_id`` cannot be observed and counts as not registered."""
     from aeos.delivery.deployment import target_for
 
-    return target_for(session, project, purpose)
+    target = target_for(session, project, purpose)
+    return target if target is not None and target.root_id else None
 
 
-RUNTIME_KINDS = ("SMOKE_TEST", "RUNTIME_OBSERVATION", "PROBE", "HEALTH")
+ENVIRONMENT_DECISION_TARGETS = {"staging": "staging_environment", "production": "production_environment"}
+
+
+def environment_decision(session: Session, project: Project, environment: str) -> tuple[dict[str, Any], str | None]:
+    """The owner's POLICY decision about one environment of *project* (``POST /api/decisions`` kind POLICY,
+    ``target_type=<environment>_environment``, ``target_id=<project id>``):
+
+    * ``auth_scope.<environment> = NONE`` - the project has no such environment (G6/G8 NOT_APPLICABLE);
+    * ``auth_scope.staging = AUTHORISED`` + ``auth_scope.target = <exact base URL>`` - the owner authorised the
+      (human) staging deploys to exactly that target (G6 "deploy staging berizin").
+
+    Human-only AUTH: only a HUMAN decision of the project's own domain counts."""
+    from aeos.policy import facade as policy
+
+    res = call(policy.find_active_decision, session, kind="POLICY",
+               target_type=ENVIRONMENT_DECISION_TARGETS[environment], target_id=project.id)
+    d = res.result if res.ok else None
+    if d is None or d.actor_kind != "HUMAN" or (d.domain or "") != project.domain:
+        return {}, None
+    return {str(k): v for k, v in (d.auth_scope or {}).items()}, d.id
+
+
+def _scope_value(scope: dict[str, Any], key: str) -> str:
+    return str(scope.get(key) or "").strip().upper()
+
+
+def _g6(session: Session, project: Project, shas: list[str | None]) -> GateResult:
+    from aeos.delivery import deployment
+
+    staging = _deployment_target(session, project, "staging")
+    scope, decision_id = environment_decision(session, project, "staging")
+    declared = _scope_value(scope, "staging")
+    if staging is None:
+        local = deployment.local_targets_for(session, project, "staging")
+        if local:
+            return _gate("G6", "NOT_PROVEN", "Target staging lokal terdaftar (" + ", ".join(str(t.root_id) for t in local)
+                         + ") tetapi tidak dapat diobservasi lewat GET; daftarkan deployment-target dengan URL dasar "
+                         "staging", "local-target", [t.id for t in local])
+        if declared == "NONE":
+            return _gate("G6", "NOT_APPLICABLE", "Pemilik memutuskan proyek ini tanpa staging (keputusan POLICY "
+                         "staging_environment)", "decisions", [decision_id])
+        return _gate("G6", "NOT_PROVEN", "Belum ada target staging terdaftar; NOT_APPLICABLE hanya dengan keputusan "
+                     "pemilik bahwa proyek ini tanpa staging (POLICY staging_environment, staging=NONE)", "project",
+                     reasons=["daftarkan deployment-target purpose=staging, atau catat keputusan staging=NONE"])
+    ev = deployment.latest_observation(session, project, shas, "staging")
+    view = deployment.observation_view(ev, staging)
+    authorised = declared == "AUTHORISED" and str(scope.get("target") or "").rstrip("/") == staging.root_id.rstrip("/")
+    refs = [staging.id, view.get("evidence_id"), *view.get("check_evidence_ids", []), decision_id if authorised else None]
+    reasons = [str(view.get("reason") or "")] if view.get("reason") else []
+    if declared == "NONE":
+        reasons.append("keputusan staging=NONE diabaikan: target staging terdaftar")
+    st = view["status"]
+    if st == "FAIL":
+        return _gate("G6", "FAIL", "Observasi runtime staging gagal: " + (", ".join(view["failure_conditions"])
+                     or "health"), "deployment-target + runtime evidence", refs, reasons)
+    if st == "PASS" and authorised:
+        return _gate("G6", "PASS", "Observasi staging lulus (health + check pemilik, dijalankan saat CAN_VALIDATE_STAGING "
+                     "READY) dan deploy staging ke target ini diotorisasi pemilik", "deployment-target + runtime evidence "
+                     "+ decisions", refs, reasons)
+    if st == "PASS":
+        return _gate("G6", "NOT_PROVEN", "Observasi staging lulus, tetapi otorisasi pemilik untuk deploy staging ke target "
+                     f"persis ini belum tercatat (POLICY staging_environment: staging=AUTHORISED, target={staging.root_id})",
+                     "deployment-target + runtime evidence", refs, reasons)
+    if st == "STALE":
+        return _gate("G6", "NOT_PROVEN", "Observasi staging usang: target atau check berubah sejak observasi; observasi "
+                     "ulang", "deployment-target + runtime evidence", refs, reasons)
+    return _gate("G6", "NOT_PROVEN", f"Target staging terdaftar ({staging.root_id}); belum ada observasi runtime yang "
+                 "membuktikan commit ini", "deployment-target + runtime evidence", refs, reasons)
+
+
+def _g8(session: Session, project: Project, pr: PullRequestRecord | None) -> GateResult:
+    from aeos.delivery import deployment
+    from aeos.operations import facade as operations
+
+    production = _deployment_target(session, project, "production")
+    scope, decision_id = environment_decision(session, project, "production")
+    merged = pr is not None and pr.merged
+    if production is None:
+        if _scope_value(scope, "production") == "NONE":
+            return _gate("G8", "NOT_APPLICABLE", "Pemilik memutuskan proyek ini tanpa produksi (keputusan POLICY "
+                         "production_environment)", "decisions", [decision_id])
+        if not merged:
+            return _gate("G8", "PENDING", "Rilis produksi adalah tindakan manusia setelah merge; belum ada target "
+                         "produksi terdaftar", "project")
+        return _gate("G8", "NOT_PROVEN", "Sudah di-merge, tetapi belum ada target produksi terdaftar untuk observasi "
+                     "pasca-rilis (NOT_APPLICABLE hanya dengan keputusan pemilik production=NONE)", "project")
+    if not merged:
+        return _gate("G8", "PENDING", "Rilis produksi adalah tindakan manusia setelah merge", "project", [production.id])
+    assert pr is not None
+    ev = deployment.latest_observation(session, project, [pr.merge_commit_sha], "production")
+    view = deployment.observation_view(ev, production)
+    refs = [production.id, view.get("evidence_id"), *view.get("check_evidence_ids", [])]
+    st = view["status"]
+    if st == "FAIL":
+        post = call(operations.post_release_status, session, project, pr.merge_commit_sha)
+        info = post.result if post.ok and isinstance(post.result, dict) else {}
+        refs += [info.get("alert_id"), info.get("incident_id"), info.get("decision_request_id")]
+        reasons = [f"alert {info.get('alert_id')} ({info.get('alert_status')}), insiden {info.get('incident_id')} "
+                   f"({info.get('incident_status')}), permintaan keputusan {info.get('decision_request_id')} "
+                   f"({info.get('decision_request_status')}); rekomendasi: {info.get('recommendation') or 'UNDECIDED'}; "
+                   f"runbook {info.get('runbook')}"] if info else [
+                       "alert/insiden pasca-rilis tidak terbaca; buka Riwayat -> SLI, alert & flag"]
+        return _gate("G8", "FAIL", "Observasi pasca-rilis produksi gagal (" + (", ".join(view["failure_conditions"])
+                     or "health") + ") - rollback/forward-fix diputuskan dan dilakukan manusia; AEOS tidak melakukan "
+                     "rollback", "deployment-target + runtime evidence + operations", refs, reasons)
+    if st == "PASS":
+        return _gate("G8", "PASS", "Observasi runtime produksi pasca-rilis lulus (health + check pemilik)",
+                     "deployment-target + runtime evidence", refs)
+    if st == "STALE":
+        return _gate("G8", "NOT_PROVEN", "Observasi pasca-rilis usang: target atau check berubah sejak observasi",
+                     "deployment-target + runtime evidence", refs, [str(view.get("reason") or "")])
+    return _gate("G8", "NOT_PROVEN", f"Target produksi terdaftar ({production.root_id}); belum ada observasi "
+                 "pasca-rilis untuk merge commit", "deployment-target + runtime evidence", refs)
+
+
+def promotion_status(session: Session, project: Project, pr: PullRequestRecord | None,
+                     by: dict[str, str]) -> dict[str, Any]:
+    """§31 "Artifact dibangun sekali setelah gate yang relevan, diberi digest/provenance, lalu dipromosikan":
+    PASS only when G5 and G7 PASS, the provider CI recorded an artifact digest for the merge commit and every
+    registered target reports exactly that digest. Promotion stays a human action (AEOS never deploys)."""
+    from aeos.delivery import deployment, provider
+
+    out: dict[str, Any] = {"status": "PENDING", "authority": "HUMAN_ONLY", "reasons": [], "targets": {},
+                           "merge_commit": pr.merge_commit_sha if pr else None, "recorded_digests": [],
+                           "digest_evidence_id": None, "source": "provider-ci ARTIFACT_DIGEST + runtime observations"}
+    if pr is None or not pr.merged or not pr.merge_commit_sha:
+        out["reasons"].append("Belum di-merge; artefak dibangun sekali setelah G5-G7")
+        return out
+    if "FAIL" in (by.get("G5"), by.get("G7")):
+        out.update(status="FAIL")
+        out["reasons"].append(f"G5 {by.get('G5')} / G7 {by.get('G7')}")
+        return out
+    digests, ev_id = provider.recorded_artifact_digests(session, project.id, pr.merge_commit_sha)
+    out.update(recorded_digests=sorted(digests), digest_evidence_id=ev_id)
+    problems: list[str] = []
+    if by.get("G5") != "PASS" or by.get("G7") != "PASS":
+        problems.append(f"G5 {by.get('G5')} dan G7 {by.get('G7')} harus PASS sebelum promosi")
+    if not digests:
+        problems.append("Belum ada digest artefak CI (provider-ci ARTIFACT_DIGEST) untuk merge commit: "
+                        "aeos delivery artifacts <project_id> --sha <merge commit>")
+    mismatch = False
+    for env in deployment.ENVIRONMENTS:
+        target = _deployment_target(session, project, env)
+        if target is None:
+            continue
+        ev = deployment.latest_observation(session, project, [pr.merge_commit_sha], env)
+        data = verification.read_json(ev) if ev is not None else None
+        reported = ((data or {}).get("artifact") or {}).get("reported_digest") if isinstance(data, dict) else None
+        if ev is None:
+            state = "NO_OBSERVATION"
+        elif not reported:
+            state = "NOT_REPORTED"
+        elif not digests:
+            state = "NOT_RECORDED"
+        else:
+            state = "MATCH" if reported in digests else "MISMATCH"
+        mismatch = mismatch or state == "MISMATCH"
+        out["targets"][env] = {"integration_id": target.id, "observation_id": ev.id if ev else None,
+                               "reported_digest": reported, "status": state}
+        if state != "MATCH":
+            problems.append(f"{env}: digest {state}")
+    if not out["targets"]:
+        problems.append("Belum ada target terdaftar yang melaporkan digest artefak")
+    if mismatch:
+        out.update(status="FAIL")
+        out["reasons"] = ["Target menjalankan artefak yang bukan hasil build CI merge commit (digest berbeda)", *problems]
+        return out
+    out.update(status="NOT_PROVEN" if problems else "PASS", reasons=problems)
+    return out
 
 
 def runtime_observation(session: Session, project: Project, shas: list[str | None],
                         environment: str) -> tuple[EvidenceArtifact | None, str]:
-    """Latest trusted runtime observation of *environment* (staging|production) for one of *shas*."""
-    wanted = [s for s in shas if s]
-    if not wanted:
-        return None, "NO_EVIDENCE"
-    rows = session.scalars(select(EvidenceArtifact).where(
-        EvidenceArtifact.project_id == project.id, EvidenceArtifact.kind.in_(RUNTIME_KINDS),
-        EvidenceArtifact.trusted.is_(True), EvidenceArtifact.subject_type == "commit",
-        EvidenceArtifact.subject_id.in_(wanted)).order_by(EvidenceArtifact.created_at.desc()))
-    for ev in rows:
-        if (ev.environment or {}).get("deployment_environment") != environment or ev.mode != "LIVE":
-            continue
-        data = collector.read_json(ev) or collector.evidence_summary(ev)
-        status = str(data.get("status") or "UNKNOWN").upper()
-        return ev, status if status in ("PASS", "FAIL") else "NOT_PROVEN"
-    return None, "NO_EVIDENCE"
+    """Latest aggregate observation of *environment* (staging|production) for one of *shas* and its status for
+    the CURRENT target configuration (PASS | FAIL | STALE | NOT_PROVEN | NO_EVIDENCE). Only the deployment
+    observer's aggregate counts: a single smoke/SLI part never stands for the whole observation."""
+    from aeos.delivery import deployment
+
+    ev = deployment.latest_observation(session, project, shas, environment)
+    view = deployment.observation_view(ev, _deployment_target(session, project, environment))
+    return ev, view["status"]
 
 
 def _merge_delta(pr: PullRequestRecord, accepted_changed: list[str], project: Project) -> tuple[str, list[str]]:
@@ -261,7 +428,7 @@ def governance_status(session: Session, task: TaskSpec, acc: Any) -> dict[str, A
     ev = session.scalar(select(EvidenceArtifact).where(EvidenceArtifact.task_id == task.id,
                                                        EvidenceArtifact.kind == "GOVERNANCE_HANDOFF")
                         .order_by(EvidenceArtifact.created_at.desc()).limit(1))
-    data = (collector.read_json(ev) or {}) if ev is not None else {}
+    data = (verification.read_json(ev) or {}) if ev is not None else {}
     output = data.get("output") or {}
     bound = bool(ev is not None and acc is not None and (ev.environment or {}).get("artifact_hash") == acc.artifact_hash)
     configured = adapter.name != governance.NullGovernanceHarness.name
@@ -283,7 +450,7 @@ def governance_status(session: Session, task: TaskSpec, acc: Any) -> dict[str, A
 
 def _changed_files(session: Session, report: EvidenceArtifact | None) -> list[str]:
     scope_ev = related_evidence(session, report, "SCOPE_CHECK")
-    return list((collector.read_json(scope_ev) or {}).get("changed_files") or [])
+    return list((verification.read_json(scope_ev) or {}).get("changed_files") or [])
 
 
 def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
@@ -453,22 +620,15 @@ def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
                                                    "terlindungi pada merged state belum terbukti (sync PR)",
                                "provider commit files", [pr.id, ci_merge.id]))
         else:
-            data = collector.read_json(ci_merge) or {}
+            data = verification.read_json(ci_merge) or {}
             overall = str(data.get("overall") or "UNKNOWN")
             status = {"PASS": "PASS", "FAIL": "FAIL", "PENDING": "PENDING"}.get(overall, "NOT_PROVEN")
             gates.append(_gate("G5", status, f"CI pada merge commit {(pr.merge_commit_sha or '')[:12]}: {overall}; "
                                              "tidak ada path terlindungi baru", "provider CI", [ci_merge.id]))
 
-    # G6 staging — only once the owner registered a staging target; then trusted runtime evidence decides.
-    staging = _deployment_target(session, project, "staging")
-    if staging is None:
-        gates.append(_gate("G6", "NOT_APPLICABLE", "Belum ada target staging terdaftar untuk proyek ini", "project"))
-    else:
-        ev6, st6 = runtime_observation(session, project, [pr.merge_commit_sha if pr else None, head], "staging")
-        summary6 = {"PASS": "Observasi runtime staging lulus", "FAIL": "Observasi runtime staging gagal"}.get(
-            st6, f"Target staging terdaftar ({staging.root_id}); belum ada observasi runtime untuk commit ini")
-        gates.append(_gate("G6", st6 if st6 in ("PASS", "FAIL") else "NOT_PROVEN", summary6,
-                           "deployment-target + runtime evidence", [staging.id, ev6.id if ev6 else None]))
+    # G6 staging — the registered staging target's aggregate observation + the owner's staging authorisation;
+    # NOT_APPLICABLE only with the owner's "no staging" decision.
+    gates.append(_g6(session, project, [pr.merge_commit_sha if pr else None, head]))
 
     # G7 human release — merge observed from the provider; AEOS has no merge capability.
     approvers, approver_decision = release_approvers(session, project)
@@ -496,21 +656,9 @@ def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
     else:
         gates.append(_gate("G7", "UNKNOWN", "Pelaku merge tidak diketahui", merged_src, [pr.id]))
 
-    # G8 post-release — only with a registered production target and a runtime observation after the merge.
-    production = _deployment_target(session, project, "production")
-    if production is None:
-        gates.append(_gate("G8", "NOT_APPLICABLE", "Belum ada target deployment; tidak ada observasi pasca-rilis",
-                           "project"))
-    elif pr is None or not pr.merged:
-        gates.append(_gate("G8", "PENDING", "Rilis produksi adalah tindakan manusia setelah merge", "project",
-                           [production.id]))
-    else:
-        ev8, st8 = runtime_observation(session, project, [pr.merge_commit_sha], "production")
-        summary8 = {"PASS": "Observasi runtime produksi pasca-rilis lulus",
-                    "FAIL": "Observasi runtime produksi gagal — insiden/rollback oleh manusia"}.get(
-            st8, f"Target produksi terdaftar ({production.root_id}); belum ada observasi pasca-rilis")
-        gates.append(_gate("G8", st8 if st8 in ("PASS", "FAIL") else "NOT_PROVEN", summary8,
-                           "deployment-target + runtime evidence", [production.id, ev8.id if ev8 else None]))
+    # G8 post-release — the registered production target's observation of the merge commit; a FAIL links the
+    # post_release_failure alert, incident and decision request (rollback/forward-fix decided by a human).
+    gates.append(_g8(session, project, pr))
 
     by = {g.gate: g.status for g in gates}
     gov = governance_status(session, task, acc)
@@ -550,6 +698,8 @@ def compute_gates(session: Session, task_id: str) -> dict[str, Any]:
         "pull_request": pr_view(pr) if pr else None,
         "ready_for_human_merge": ready,
         "merge_authority": "HUMAN_ONLY",
+        # §31 build once / digest / promotion (informational; promotion is a human action)
+        "promotion": promotion_status(session, project, pr, by),
         "checked_at": utcnow().isoformat(),
         "source": "task_specs, evidence_artifacts, review_records, acceptance_records, delivery_pull_requests",
         "mode": "LIVE" if (run is None or run.mode == "LIVE") else run.mode,

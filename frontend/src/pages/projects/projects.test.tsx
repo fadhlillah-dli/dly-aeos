@@ -266,7 +266,7 @@ describe("IntegrationsPanel", () => {
     const conf = await screen.findByRole("form", { name: /Confluence/ });
     expect(within(conf).getByRole("button", { name: /Simpan/ })).toBeDisabled();
     fireEvent.change(within(conf).getByPlaceholderText("perusahaan.atlassian.net"), { target: { value: "acme.atlassian.net" } });
-    fireEvent.change(within(conf).getByPlaceholderText("ENG"), { target: { value: "ENG" } });
+    fireEvent.change(within(conf).getByPlaceholderText("98765"), { target: { value: "98765" } }); // numeric v2 space id
     fireEvent.change(within(conf).getByLabelText(/CONFLUENCE_PROJECTS_PARENT_ID/), { target: { value: "123456" } });
     fireEvent.change(within(conf).getByLabelText(/Deployment/), { target: { value: "CLOUD" } });
     await userEvent.click(within(conf).getByRole("button", { name: /Simpan/ }));
@@ -278,7 +278,7 @@ describe("IntegrationsPanel", () => {
       tenant_id: "acme.atlassian.net",
       root_id: "123456",
       credential_ref: "office/atlassian",
-      config: { space_id: "ENG", deployment: "CLOUD", enabled: false },
+      config: { space_id: "98765", deployment: "CLOUD", enabled: false },
     });
     expect(screen.getAllByText(/OFFICE default deny/).length).toBeGreaterThan(0);
   });
@@ -346,8 +346,15 @@ describe("RepositoriesPanel joined repository view (§37)", () => {
               { number: 7, url: "https://github.com/octo/view/pull/7", state: "OPEN", head_ref: "aeos/t1", base_ref: "main", last_synced_at: null },
               { number: 8, url: "javascript:alert(1)", state: "CLOSED", head_ref: null, base_ref: null, last_synced_at: null },
             ],
-            ci: [{ provider: "github-actions", integration_id: "i-ci", configuration: "CONFIGURED" }],
-            docs_targets: [{ provider: "google-drive", root_id: "1AbCdEfGh", integration_id: "i-docs" }],
+            ci: [
+              { provider: "github-actions", integration_id: "i-ci", configuration: "CONFIGURED", pipeline_url: "https://github.com/octo/view/actions", pipeline_url_basis: "repository full_name" },
+              { provider: "bitbucket-pipelines", integration_id: "i-ci2", configuration: "CONFIGURED", pipeline_url: null, pipeline_url_basis: null },
+            ],
+            ci_latest: { evidence_id: "ev-ci", commit: "abcdef1234567890", overall: "PASS", checked_at: new Date().toISOString(), runs: 2, url: "https://github.com/octo/view/actions/runs/42/job/7", integrity: "VERIFIED", mode: "DEMO" },
+            docs_targets: [
+              { provider: "google-drive", root_id: "1AbCdEfGh", integration_id: "i-docs", target_url: "https://drive.google.com/drive/folders/1AbCdEfGh" },
+              { provider: "confluence", root_id: "998877", integration_id: "i-conf", target_url: "javascript:alert(1)" },
+            ],
             capability: {
               write_enablement: [
                 { integration_id: "i-docs", provider: "google-drive", purpose: "docs", decision_id: "d1", status: "ENABLED" },
@@ -374,6 +381,17 @@ describe("RepositoriesPanel joined repository view (§37)", () => {
     expect(within(section).getByRole("link", { name: /#7/ })).toHaveAttribute("href", "https://github.com/octo/view/pull/7");
     expect(within(section).getByText("Terbuka")).toBeInTheDocument();
     expect(within(section).getByText("1AbCdEfGh")).toBeInTheDocument();
+    // W6-110: CI pipeline / latest run / docs folder links from exact identifiers, https only
+    expect(within(section).getByRole("link", { name: /github-actions/ })).toHaveAttribute("href", "https://github.com/octo/view/actions");
+    expect(within(section).queryByRole("link", { name: /bitbucket-pipelines/ })).toBeNull();
+    expect(within(section).getByText(/tanpa tautan pipeline/)).toBeInTheDocument();
+    expect(within(section).getByRole("link", { name: /abcdef123456/ })).toHaveAttribute("href", "https://github.com/octo/view/actions/runs/42/job/7");
+    expect(within(within(section).getByTestId("ci-latest")).getByText("Lulus")).toBeInTheDocument();
+    // a DEMO/MOCK record is labelled, never shown as a real provider run
+    expect(within(within(section).getByTestId("ci-latest")).getByText("DEMO (fixture)")).toBeInTheDocument();
+    expect(within(section).getByRole("link", { name: /1AbCdEfGh/ })).toHaveAttribute("href", "https://drive.google.com/drive/folders/1AbCdEfGh");
+    expect(within(section).queryByRole("link", { name: /998877/ })).toBeNull();
+    expect(within(section).getByText("998877")).toBeInTheDocument();
     // a non-https provider URL is never rendered as a link
     expect(within(section).queryByRole("link", { name: /#8/ })).toBeNull();
     expect(within(section).getByText("#8")).toBeInTheDocument();
@@ -408,6 +426,48 @@ describe("MemoryPanel system change (§41/§43)", () => {
     expect(within(box).getByText("System change belum dievaluasi")).toBeInTheDocument();
     expect(within(box).queryByText("System change dievaluasi")).toBeNull();
     expect(within(box).getByText(/expire memory_record:m1/)).toBeInTheDocument();
+  });
+
+  it("lets the owner cite the system-change evaluation runs when accepting memory (W6-120)", async () => {
+    auth.domain = "PERSONAL";
+    const { MemoryPanel, parseIds } = await import("./MemoryPanel");
+    expect(parseIds(" r1, r2  r3 ")).toEqual(["r1", "r2", "r3"]);
+    const proposed = {
+      id: "m2", project_id: "p1", scope: "PROJECT", content: "Laporan memakai UTC", provenance: { source_type: "human_statement" },
+      classification: "INTERNAL", status: "PROPOSED", auth_decision_id: null, expires_at: null, superseded_by: null, created_at: "2026-10-25T00:00:00Z",
+      system_change: null,
+    };
+    const fn = mockFetch((url) => (url === "/api/projects/p1/memory" ? { items: [proposed] } : { memory: proposed }));
+    vi.spyOn(window, "prompt").mockReturnValue("evaluasi memori selesai");
+    const project = { id: "p1", domain: "PERSONAL", data_classification: "INTERNAL" } as unknown as import("./types").ProjectView;
+    wrap(<MemoryPanel project={project} isAdmin={true} />);
+    fireEvent.change(await screen.findByLabelText(/ID EvalRun system-change/), { target: { value: "run-a, run-b" } });
+    // stated, never implied: a proposed record cannot reach a worker's context in this build
+    expect(screen.getByText(/Context pack hanya memuat memori ACCEPTED/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Terima" }));
+    await waitFor(() => expect(fn.mock.calls.some(([u]) => String(u) === "/api/memory/m2/accept")).toBe(true));
+    const call = fn.mock.calls.find(([u]) => String(u) === "/api/memory/m2/accept")!;
+    expect(JSON.parse(String(call[1]!.body))).toEqual({ rationale: "evaluasi memori selesai", eval_run_ids: ["run-a", "run-b"] });
+    vi.restoreAllMocks();
+  });
+
+  it("accepts memory without evaluation runs as before (stated NOT_EVALUATED by the backend)", async () => {
+    auth.domain = "PERSONAL";
+    const { MemoryPanel } = await import("./MemoryPanel");
+    const proposed = {
+      id: "m3", project_id: "p1", scope: "PROJECT", content: "Zona waktu Asia/Jakarta", provenance: { source_type: "human_statement" },
+      classification: "INTERNAL", status: "PROPOSED", auth_decision_id: null, expires_at: null, superseded_by: null, created_at: "2026-10-25T00:00:00Z",
+      system_change: null,
+    };
+    const fn = mockFetch((url) => (url === "/api/projects/p1/memory" ? { items: [proposed] } : { memory: proposed }));
+    vi.spyOn(window, "prompt").mockReturnValue("fakta sudah diterima");
+    const project = { id: "p1", domain: "PERSONAL", data_classification: "INTERNAL" } as unknown as import("./types").ProjectView;
+    wrap(<MemoryPanel project={project} isAdmin={true} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Terima" }));
+    await waitFor(() => expect(fn.mock.calls.some(([u]) => String(u) === "/api/memory/m3/accept")).toBe(true));
+    const call = fn.mock.calls.find(([u]) => String(u) === "/api/memory/m3/accept")!;
+    expect(JSON.parse(String(call[1]!.body))).toEqual({ rationale: "fakta sudah diterima" });
+    vi.restoreAllMocks();
   });
 });
 

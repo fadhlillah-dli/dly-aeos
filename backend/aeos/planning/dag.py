@@ -45,8 +45,13 @@ MAX_ATTEMPTS_CAP = 2  # §21 pilot cap: at most two implementation attempts per 
 # Fixed by the control plane (never taken from model output); raising them is a recorded human decision.
 RUN_MEMORY_MB = 4096
 RUN_CPUS = 1
+# wave 7 (W6-055): the process-count cap is carried in the TaskSpec too, so both sandboxes enforce the SAME value
+# (before, the runtime defaults differed: 64 in the process sandbox, 256 in the container). 256 is the container's
+# proven --pids-limit (it counts processes AND threads there); in the process sandbox it caps live processes
+# (Windows Job Object ActiveProcessLimit + the cross-platform watchdog).
+RUN_MAX_PROCESSES = 256
 RESOURCE_LIMITS = {"max_active_workers": 1, "nested_fan_out": False, "max_memory_mb": RUN_MEMORY_MB,
-                   "max_cpus": RUN_CPUS}
+                   "max_cpus": RUN_CPUS, "max_processes": RUN_MAX_PROCESSES}
 DEFAULT_TOOLS = ["fs.read", "fs.write:allowed_paths", "tests.run"]
 DEFAULT_STOP_CONDITIONS = [
     "quota exhausted", "deadline/timeout reached", "lease lost", "policy changed", "scope violated (write outside "
@@ -59,14 +64,25 @@ DEFAULT_EVIDENCE = [
 ]
 # §16 role-specific evidence the reviewer asks for (added to the TaskSpec, never removable by the planner):
 # Integration Engineer "contract test provider; target/tenant dan idempotency wajib", UX/UI Designer "desain
-# diverifikasi terhadap AC dan pengguna yang dituju" (states + accessibility).
+# diverifikasi terhadap AC dan pengguna yang dituju" (states + accessibility), Backend/API Engineer "tes negatif",
+# DB/Data Engineer "uji migration/rollback/restore; credential migration dipisah runtime". A line that names a
+# verifier check in parentheses is decided by that check on the verified report (acceptance.evidence_requirements_
+# status, wave 7); the others are reviewer-attested.
 ROLE_EVIDENCE: dict[str, list[str]] = {
     "integration-engineer": [
         "provider contract test of the adapter in the trusted suite",
         "test asserting the explicit target/tenant binding and the idempotency key (no global credential)",
     ],
     "ux-ui-designer": [
-        "loading/error/empty state coverage and an accessibility check mapped to the acceptance criteria",
+        "loading/error/empty state renders and an accessibility probe of the built UI by the verifier (ui_a11y)",
+    ],
+    "backend-api-engineer": [
+        "refusal/negative tests of the changed API surface executed by the verifier (negative_tests)",
+    ],
+    "db-data-engineer": [
+        "migration upgrade/downgrade, seeded backup/restore and rollback with data run by the verifier "
+        "(migration_rollback)",
+        "migration credential reference separate from the runtime credential reference (db_credentials)",
     ],
 }
 CLASS_ORDER = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"]
@@ -533,6 +549,16 @@ def artifact_index(session: Session | None, version: PlanVersion) -> dict[str, d
             for label in (a.get("filename"), a.get("id")):
                 if label:
                     idx.setdefault(str(label).casefold(), entry)
+        # §41 documentation checkpoint packages recorded by docs_engine (``doc_checkpoint:<revision id>`` = exactly that
+        # package; ``documentation_checkpoint:<project>:<kind>:<ref>`` = its newest package): the Tech Writer task of
+        # the next plan version reads exactly the recorded, hash-bound package
+        try:
+            from aeos.docs_engine import facade as docs
+        except ImportError:  # docs engine absent: the label stays visibly unresolved
+            docs = None  # type: ignore[assignment]
+        if docs is not None:
+            for label, entry in docs.checkpoint_artifacts(session, version.project_id):
+                idx.setdefault(label.strip().casefold(), entry)
     return idx
 
 

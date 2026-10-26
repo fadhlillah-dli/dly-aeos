@@ -25,8 +25,19 @@ Procedures for specific situations are in [runbooks/](runbooks/README.md).
 | Released controller | `<data>/releases/<version>-<sha12>.zip`, `.provenance.json`, extracted dir, `ACTIVE.json` |
 | Scratch | `<data>/tmp/` (restore tests, smoke tests; removed after use) |
 | Config (non-secret) | `%LOCALAPPDATA%\DLY-AEOS\aeos.yaml` / `~/Library/Application Support/DLY-AEOS/aeos.yaml` (example: `config/aeos.example.yaml`) |
+| Canonical MCI_V2 (owner-supplied) | `<data>/policy/canonical/<file>` (or `mci_source_path` in aeos.yaml) + `<data>/policy/canonical/mci-pack-mapping.yaml`; never in the repository |
 
 Secrets are never in these files: OpenBao + OS credential store only (§26).
+
+The platform repository is public, so MCI content never lives in it (master §06 "MCI tidak dimasukkan
+tanpa hak"). `policy/mci-reference.yaml` keeps the reference only: `status: VERIFIED`, `version`,
+`content_hash` (`sha256:<lowercase hex>` of the exact bytes of the local file) and `location:
+local:<file>`. The source is verified on each machine that has a copy; a machine without it reports
+`SOURCE_MISSING` (UNVERIFIED, fail closed), and a source inside the checkout is never read. The per-pack
+MCI controls and evidence contracts (§34) are derived MCI content too: they go into the local
+`mci-pack-mapping.yaml` (template: `blueprints/mci-pack-mapping.template.yaml`) and a pack is APPROVED
+only with an owner POLICY decision on `mci_pack_mapping/<pack>` bound to the hash shown at `/decisions`.
+Compliance is never claimed (NOT-PROVEN).
 
 ## Backup and restore
 
@@ -56,9 +67,9 @@ Office archives on company-approved storage only.
 
 | Command | What it does |
 |---|---|
-| `aeos ops release build [--ref HEAD]` | `git archive` of a clean commit reachable from `main` **that is accepted** (trusted provider-CI PASS for that exact commit, or an owner EXCEPTION decision) → zip + provenance (commit, tree hash, artifact SHA-256, schema head, acceptance basis, built_at, builder) + pinned UI bundle (`frontend/dist` zipped with its own SHA-256; its correspondence to the commit is labelled UNVERIFIED) |
+| `aeos ops release build [--ref HEAD]` | `git archive` of a clean commit reachable from `main` **that is accepted** (trusted provider-CI PASS for that exact commit, or an owner EXCEPTION decision) → zip + provenance (commit, tree hash, artifact SHA-256, schema head, acceptance basis, built_at, builder) + pinned UI bundle (`frontend/dist` zipped with its own SHA-256). The UI's commit correspondence is recorded and printed: VERIFIED when the Vite build record (`dist/aeos-build.json`) names a clean frontend tree equal to `git rev-parse <commit>:frontend`; a bundle from another tree refuses the build (RELEASE_UI_MISMATCH); no record or a dirty frontend tree is UNVERIFIED and refuses the build (RELEASE_UI_UNVERIFIED) unless the owner passes `--allow-unverified-ui` (recorded in the provenance and the audit, shown with its reason) |
 | `aeos ops release accept --commit <sha> --operator <admin> --reason "..."` | human-only EXCEPTION decision bound to one exact commit, used when trusted CI PASS is not available |
-| `aeos ops release list` | releases with integrity and ACTIVE/PREVIOUS role |
+| `aeos ops release list` | releases with integrity, ACTIVE/PREVIOUS role and `ui=VERIFIED/UNVERIFIED/NONE` (the recorded UI commit correspondence, with the reason when not VERIFIED; also in the Control Center, History > Releases) |
 | `aeos ops release promote <id> --operator <admin>` | decision (bound to artifact hash, UI hash, runtime-config hash) → compatibility (migration head vs DB) → pre-promote backup + restore test → smoke test in a subprocess on a temp loopback port against a DB copy (health, then functional: temporary admin in the copy, login, explicit PERSONAL, doctor RUNTIME run, capabilities, projects) → live migration only if required (server stopped) → `ACTIVE.json` (previous kept, config hash recorded) |
 | `aeos ops release rollback --operator <admin>` | pointer back to the previous release after the same checks; refused when the DB is ahead (restore the pre-promote backup first) |
 | `aeos serve [--release auto\|active\|checkout]` | `auto` (default) runs the ACTIVE release when one was promoted: artifact + UI hash verified, extracted tree compared byte-for-byte (planted files refused), `PYTHONPATH` = the release only, byte-code cache outside the release; refuses to start on any integrity failure. `checkout` runs the editable source tree and warns when a release is active. `--dev`/`--reload` always run the checkout and need a separate dev profile (`AEOS_DATA_DIR` + `AEOS_KEYRING_SERVICE`, set by `scripts/dev.*`) unless `--dev-with-real-credentials` |
@@ -192,9 +203,45 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   is shown NOT_PROVEN; a merge by any other account is FAIL.
 * **Staging / production targets (G6/G8):** register a PERSONAL integration with
   `provider=deployment-target`, `purpose=staging|production`, `root_id=https://<base url>` (optional
-  `config.health_path`, default `/health`). AEOS never deploys; `aeos delivery observe-target
-  <project> --environment staging --sha <commit>` performs one GET and records a RUNTIME_OBSERVATION
-  that is PASS only when the target reports the exact commit and healthy.
+  `config.health_path`, default `/health`; an absolute path only - `@host/...`, `//host/...`, query or
+  fragment are refused). AEOS never deploys, releases or rolls back; `aeos delivery observe-target
+  <project> --environment staging --sha <commit>` performs read-only GETs and records one aggregate
+  RUNTIME_OBSERVATION that is PASS only when the target reports the exact commit and healthy and every
+  owner check passed. DLY AEOS' own `/api/health` (set `health_path=/api/health`, e.g. Windows
+  `.\aeos.ps1 delivery target-checks <project> --environment production --health-path /api/health`, macOS
+  `./aeos delivery target-checks ...`) proves its commit only while `controller` runs the ACTIVE clean release.
+  * **Checks (owner values, never defaults):** `PUT /api/delivery/targets/{integration_id}/checks` or
+    `aeos delivery target-checks <project> --environment <env> --file checks.json` with
+    `smoke_checks` (`name`, `path`, `expect_status` (default 200), `json_keys`, `kind` `smoke|critical_flow`;
+    each one recorded as SMOKE_TEST evidence), `sli_checks` (`name`, `path`, `json_key`, `max`/`min` owner
+    thresholds - without one an SLI is `NO_TARGET`, report only), `rollback_on` (any of `health_fail`,
+    `smoke_fail`, `critical_flow_fail`, `sli_breach`, `artifact_digest_mismatch`; without it the rollback
+    recommendation is `UNDECIDED`) and `require_artifact_digest` (true/false); `health_path` can be set the
+    same way. A generic integration save whose config does not name these keys keeps them (an explicit value,
+    even empty, replaces them); changing them makes earlier observations STALE.
+  * **Staging gate (§08):** a staging observation and a staging screenshot run only while
+    `CAN_VALIDATE_STAGING` is READY for the project (verifier, restore test, and per project an
+    observable `deployment-target`; a `local-target` is recorded but not observable). Refusals are audited.
+  * **Owner decisions (POST /api/decisions kind POLICY, or `aeos policy decide`):**
+    `target_type=staging_environment`, `target_id=<project id>`, `auth_scope={"staging": "AUTHORISED",
+    "target": "<exact base url>"}` authorises the (human) staging deploys to that target - G6 PASS needs it;
+    `auth_scope={"staging": "NONE"}` (or `production_environment` + `{"production": "NONE"}`) states the
+    project has no such environment - the only way G6/G8 become NOT_APPLICABLE.
+  * **Post-release failure (G8):** a FAIL production observation raises the HIGH alert
+    `post_release_failure`, opens/links an incident with the rollback recommendation and files a decision
+    request (rollback / forward-fix / accept) - see [post-release-failure](runbooks/post-release-failure.md).
+  * **Build once (§31):** `aeos delivery artifacts <project> --sha <merge commit>` records the provider CI
+    artifact digests (ARTIFACT_DIGEST evidence; attestation presence shown, signature not verified); a target
+    that reports `artifact_digest`/`digest` is compared with it. The gate response's `promotion` is PASS
+    only with G5 and G7 PASS and every registered target serving the recorded digest.
+* **Provider enforcement test (M4):** after your own bypass attempt (or the opt-in live test
+  `tests/acceptance/test_delivery.py::test_provider_enforces_human_only_merge_on_the_real_repository`
+  with `DLY_AEOS_LIVE_BYPASS_REPO`, `DLY_AEOS_LIVE_BYPASS_BRANCH=aeos-probe/<name>`,
+  `DLY_AEOS_LIVE_BYPASS_TOKEN_REF`), `aeos delivery enforcement --repo <owner/name> --branch <branch>` reads
+  GitHub's rule suites (token needs `Administration: read`) and records PROVIDER_ENFORCEMENT_TEST evidence only
+  for a change refused by an ACTIVE ruleset; `aeos delivery capabilities --record` then shows enforcement
+  VERIFIED for that ruleset until it changes (STALE). `--attest "<what was refused>"` stores an untrusted
+  owner claim (CLAIMED, never VERIFIED).
 * **Pipeline reference (§31):** set `config.gate_G1 ... gate_G5` on the project's `ci` integration
   to exact CI job names (template: `blueprints/pipeline-reference.yaml`); otherwise CI jobs are
   classified by name heuristics and the evidence says `NAME_HEURISTIC`.
@@ -205,7 +252,51 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   a managed project whose migrations run only in its own pipeline, is a **blocking** NOT-PROVEN (G2
   needs a migration/rollback test per migration change) unless the TaskSpec sets
   `verifier_policy.migration_roundtrip: optional`; run those in the project's pipeline with a dedicated
-  migration credential separate from the runtime credential.
+  migration credential separate from the runtime credential. Since verifier v4 the round-trip also
+  seeds one generated row per table, backs the database up with the SQLite backup API, deletes and
+  restores it and compares the seeded rows, then rolls one revision back and forward **with the data
+  present** (a downgrade that only breaks on populated tables fails, leg `data_rollback`).
+* **Migration/runtime credential split (`db_credentials`, §16 DB/Data Engineer):** name both references
+  on each `deployment-target` integration: `config.migration_credential_ref` and
+  `config.runtime_credential_ref` (default: the integration's `credential_ref`), set through
+  `PUT /api/projects/{id}/integrations` and validated like `credential_ref` (secret-store reference in the
+  project's domain namespace). References only, never values. The verifier FAILs when both are the same reference, when an entry looks like a secret value,
+  or when a runtime configuration file of the candidate (env files, `config/`, settings, compose/k8s/helm)
+  names the migration reference. With no deployment target the check is NOT_APPLICABLE (local runtime);
+  a target that names only one reference is NOT_PROVEN until you add the other.
+* **Impact-selected verifier checks (§22, §31, verifier v4):** every VERIFICATION_REPORT carries
+  `impact_checks` - per impact category the checks it selected (`aeos.verification.impact`) and which
+  executed. API/auth changes execute the change's own refusal tests (found in the test syntax tree, never
+  in comments) and, for the DLY AEOS layout, the verifier-owned adversarial probes over every operation of
+  the candidate app (unauthenticated, cross-origin, non-loopback host, VIEWER write, malformed JSON,
+  traversal ids, hostile logins). Facade/OpenAPI changes get a contract diff against the base; a breaking
+  change is a blocking NOT-PROVEN unless the approved TaskSpec sets `verifier_policy.contract_breaking:
+  approved`. Integration-marked tests run only when the TaskSpec sets `verifier_policy.integration_tests:
+  run|required` (a tool-absent skip is NOT-PROVEN; blocking for `required`, api impact and the Backend/API
+  and Integration Engineer roles). The planner's TaskSpec contract (schema v1) does not emit these
+  opt-ins yet; planner-compiled tasks keep the fail-closed defaults.
+* **Per-candidate environments (§09 Zone 2):** a candidate that changes its Python dependency set is
+  verified again in a virtual environment built in the run directory from its own hash-pinned pip
+  lockfile (`pip install --require-hashes --only-binary=:all: --no-deps`; the trusted test harness is
+  the controller's). Lockfiles without `--hash` pins, pip options in the file, non-pip lock formats and
+  the container runner leave the change a blocking NOT-PROVEN with the reason. Generate hashes with
+  `uv pip compile --generate-hashes`. The install step reaches the package index (not an enforced egress
+  boundary on the process runner).
+* **Frontend verification:** a frontend change runs `npm ci --ignore-scripts` from the candidate's
+  `package-lock.json` (project `.npmrc` is not used), vitest with the verifier's own config, `tsc -b
+  --noEmit` and `vite build`, then renders the built bundle in headless Chromium per UI state (loading,
+  error, unauthenticated, empty; desktop and mobile) with screenshots and the verifier's accessibility
+  probe (a WCAG subset, not axe-core). For the DLY AEOS layout the loading/error states render for a
+  signed-in (synthetic, MOCK) session and the empty state is answered by the candidate's own app on an
+  empty throwaway database, so every endpoint has its real shape. A render that raises an uncaught script
+  error is never evidence of its state: under the error/401 envelopes or the candidate's own app it FAILs
+  `ui_a11y`, under the verifier's generic answers that state is NOT-PROVEN. Needs node/npm and Playwright's Chromium on the host and the
+  process runner; otherwise `frontend_tests` stays a visible, non-blocking NOT-PROVEN (G3 provider CI).
+* **Project test baseline (§05 step 6):** `aeos verify project-baseline <project id>` (or
+  `POST /api/projects/{id}/test-baseline`) runs the repository's own tests at the inventoried commit
+  through the verifier runner and tamper window and records a TEST_REPORT (commit, suite identity,
+  passing/failing ids). The inventory's `tests.baseline` (and so planning's repository inventory) cites
+  it for exactly that commit; a newer commit is NOT_RUN until the baseline runs again.
 * **Verifier isolation (§20 isolated runner):** the verifier executes candidate code (the trusted
   suite against the candidate, the candidate's own tests, the migration round-trip) through one of two
   runners, stated on every VERIFICATION_REPORT (`verifier_isolation` / `verifier_runner`) and shown in
@@ -235,27 +326,90 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   (decisions, policy, routes, budgets, TaskSpecs, acceptance/evidence, sessions, capability grants,
   projects/integrations, eval suites, containment proofs/write enablement/flags) and the SQLite schema (tables,
   indexes, append-only/immutability triggers) are detected and the run is
-  QUARANTINED for the owner's special review with a HIGH alert.
+  QUARANTINED for the owner's special review with a HIGH alert. Foreign approval/session/grant/route/policy rows
+  are neutralised at once (decision INVALIDATED, request WITHDRAWN, acceptance INVALIDATED, session/grant
+  revoked, route DISABLED until you re-activate its configuration hash, policy snapshot rebuilt, a forged
+  containment proof removed, write enablement off, a forged or modified account deactivated; audit
+  `verification.tamper.neutralize`); the alert lists what still needs your review (removed rows, schema, a
+  modified account's role and scope, ...) with the remedy. A deactivated account is re-activated locally with a
+  one-time password: Windows `.\aeos.ps1 admin recover <username>`, macOS `./aeos admin recover <username>`. If a
+  listed decision was your own (recorded from another AEOS process during the verification), record it again.
+  When something stays in effect (a changed controller file such as `policy/**`, a row without a safe inverse,
+  a failed neutralisation) the verifier also pauses admission of new worker runs (**integrity hold**, reason
+  `VERIFIER_TAMPER integrity hold`; the alert lists each remedy). Reconcile, then resume: Windows
+  `.\aeos.ps1 work resume --reason "VERIFIER_TAMPER reconciled"`, macOS `./aeos work resume --reason ...`.
+  Two more guards apply to both runners: every pytest step that runs candidate code is **sealed** by the
+  verifier's own plugin (a junit report or exit code changed after the fact is QUARANTINED; candidate code that
+  subverts the plugin inside its interpreter is a stated residual risk), and every process-runner step runs in
+  its own kill group (Windows Job Object / POSIX session): a process that outlives its step is killed and the
+  run QUARANTINED.
 * **Specialist reviews:** a UI change (or a frontend/UX role) needs the A11Y reviewer, data/AI roles or
   CONFIDENTIAL/RESTRICTED data the PRIVACY reviewer, CI/IaC or operations roles the SRE reviewer. Request
   them with "Review wajib (spesialis)" on the run list, `POST /api/runs/<run>/reviews/batch`, or
   `aeos verify review <run> --kind A11Y|PRIVACY|SRE|SECURITY`. A run has a review budget
   (`reviewer_policy.max_reviews_per_run`, default 12; quota waits do not count).
 * **OFFICE delivery (Bitbucket Cloud, ADR-0111):** DISABLED by default. It becomes AVAILABLE only with
-  (1) a company-authorisation POLICY decision on `office_policy` listing `bitbucket` whose
-  `office_policy.atlassian_deployment` is `"CLOUD"` (the interlock needs it too), (2) the project
-  integration `bitbucket/code` with `root_id=<workspace>/<repo_slug>` and `config={"enabled": true}`, (3) the
-  registered Bitbucket repository VERIFIED (`POST
-  /api/repositories/<id>/verify`), (4) `office/bitbucket` stored: `{"access_token": "..."}` (repository access
-  token) or `{"email": "...", "api_token": "..."}` (Atlassian API token; optional `git_username`), and (5)
-  `CAN_USE_OFFICE_INTEGRATIONS` READY. Data Center (`atlassian_deployment: "DATA_CENTER"`) is `NOT_SUPPORTED`. The broker then pushes the accepted head
+  (1) a company-authorisation POLICY decision on `office_policy` listing `bitbucket`, naming the repository or
+  its workspace as an approved target and carrying the override `atlassian_deployment: "CLOUD"` (the interlock
+  needs it too) - Control Center: switch the header domain to OFFICE, **Keputusan** (`/decisions`) -> POLICY ->
+  tick "Ini otorisasi perusahaan untuk OFFICE"; CLI: `aeos policy decide --kind POLICY --domain OFFICE
+  --office-authorization --company-reference "<ref>" --allowed-provider bitbucket --approved-target
+  bitbucket:workspace=<workspace> --office-policy atlassian_deployment=CLOUD --as <admin> --rationale "<why>"`;
+  (2) the project integration `bitbucket/code` with `root_id=<workspace>/<repo_slug>` and `enabled` - Control
+  Center: **Portofolio** -> project -> **Integrasi** -> "Kode — Bitbucket", tick "Aktifkan adapter" (no
+  deployment field: the deployment comes from the override above); (3) the registered Bitbucket repository
+  VERIFIED (Repositori -> "Verifikasi identitas", or `POST /api/repositories/<id>/verify`); (4)
+  `office/bitbucket` stored: `{"access_token": "..."}` (repository access token) or `{"email": "...",
+  "api_token": "..."}` (Atlassian API token; optional `git_username`) - the Doctor builds the same header as the
+  broker/publisher (Bearer / Basic); and (5) `CAN_USE_OFFICE_INTEGRATIONS` READY. Data Center
+  (`atlassian_deployment: "DATA_CENTER"`) is `NOT_SUPPORTED`. The broker then pushes the accepted head
   sha-pinned to `aeos/*` and opens a draft PR; nothing merges, declines or approves. Pipelines/commit-status CI
-  becomes provider-ci evidence (pipeline reference on `bitbucket-pipelines/ci`: step names per gate). Without
-  Bitbucket Premium's "enforce merge checks" the merge gate is NOT_ENFORCEABLE. G7 release approvers for OFFICE:
-  `auth_scope={"bitbucket_accounts": ["<Atlassian account id>"]}`. Live tenant behaviour is NOT-PROVEN (M5).
+  becomes provider-ci evidence (pipeline reference: **Integrasi** -> "CI — Bitbucket Pipelines", exact step or
+  commit-status names per gate G1/G2/G3/G5). Without Bitbucket Premium's "enforce merge checks" the merge gate is
+  NOT_ENFORCEABLE. G7 release approvers for OFFICE: `auth_scope={"bitbucket_accounts": ["<Atlassian account
+  id>"]}`. Live tenant behaviour is NOT-PROVEN (M5).
+* **Company-authorisation scope (§01 U-03, §07 step 10, §51 P1):** the authorisation also records what the
+  company approved - `approved_targets` (`confluence:tenant=<site>.atlassian.net[,space_id=<numeric id>]
+  [,root_id=<parent id>]`, `jira:tenant=<site>[,root_id=<KEY>]`, `bitbucket:workspace=<ws>[,root_id=<ws>/<repo>]`),
+  `approved_data_classes` (PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED) and, optionally, `approved_identities`
+  (`office/atlassian=<account id or email>`, `office/bitbucket=<uuid or account id>`; a nickname is not unique
+  and is never compared). Absent = UNDECIDED and fail closed: no OFFICE target is written, read, verified or
+  registered outside the list; no OFFICE data of an unapproved class reaches a worker route or Claude Max (an
+  OFFICE request without a project has no classification and is refused). Control Center: the three fields under "Ini otorisasi perusahaan untuk
+  OFFICE" on **Keputusan**; CLI: repeatable `--approved-target`, `--approved-data-class` and
+  `--approved-identity` on `aeos policy decide --office-authorization`, plus `--office-policy KEY=VALUE` for the
+  overrides. Single-quote every value that contains a comma (`--approved-target
+  'confluence:tenant=<site>.atlassian.net,space_id=<id>'`): Windows PowerShell splits an unquoted comma into
+  separate arguments. `aeos doctor -c CAN_USE_OFFICE_INTEGRATIONS --functional` compares the stored credential's
+  account with the approved identity (`secret.office_identity`).
+* **OFFICE worker route eligibility (§23):** after the authorisation lists the route in
+  `approved_worker_routes`: Control Center **Keputusan** -> "Kebijakan OFFICE" -> "Jadikan route worker layak
+  OFFICE", or `aeos policy office-route <route_key> --as <admin> --credential-ref office/<provider> --rationale
+  "<why>"` (password-confirmed). The route becomes OFFICE-only; activation stays `aeos routes activate ...`.
+* **Deployment targets (PERSONAL, observe-only):** **Portofolio** -> project -> **Integrasi** -> "Staging —
+  Deployment target" / "Produksi — Deployment target": the https base URL and an optional health path (validated
+  with the observer's rule). AEOS only GETs it (G6/G8, `aeos delivery observe-target`, `aeos docs screenshot`);
+  deploying stays a human action. The GitHub Actions pipeline reference is "CI — GitHub Actions" on the same page.
 * **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111):** activate the free route as TRIAL (owner decision),
   then `aeos broker probe-route <route_key>` / `POST /api/broker/routes/<key>/feasibility` sends one synthetic
   PUBLIC prompt and records PROBE evidence; the route never serves worker tasks and its status is unchanged.
+  The probe sends the route's own request shape (`<endpoint>/chat/completions`, bare upstream model id; ADR-0041
+  amendment 2026-10-25): OpenCode Zen `https://opencode.ai/inference/openai/v1`, Gemini
+  `https://generativelanguage.googleapis.com/v1beta/openai`. After upgrading, run `aeos seed` once: it corrects
+  untouched seeded CANDIDATE routes (new config hash); a route activated on the superseded endpoint is listed in
+  `request_shape_pending` and refused by the broker (`ROUTE_ENDPOINT_SUPERSEDED`): run `aeos routes disable <key>`,
+  then `aeos seed` again (a disabled seeded route gets the corrected request shape and stays DISABLED), then
+  activate the corrected configuration.
+* **Free OpenCode Zen routes (S07 client rule):** S07 says "Free-tier chat models require OpenCode; use paid models
+  or Go from other clients". The broker is its own client, so a free Zen route is not activated or proxied until
+  you decide: `aeos routes activate <key> ... --accept-client-terms --client-terms-note "<what you read>"` (recorded
+  on the decision and in the config hash; whether the provider accepts the call stays NOT-PROVEN until a probe),
+  or use OpenCode Go / a paid route with a BUDGET decision instead. `aeos routes list` flags undecided routes with
+  `client-terms=OWNER_DECISION_REQUIRED`.
+* **LOCAL route endpoint:** start an OpenAI-compatible server on this host, then `aeos routes set-endpoint
+  local/qwen3.8-flash-next --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "..." [--model <served
+  name>] [--quantization ...] [--backend ...] [--hardware ...]` (or the Models page form). Loopback `http` only;
+  it is a new configuration, so activate a new TRIAL, then probe. A loopback LOCAL route needs no BUDGET decision.
 
 ## Worker runtime (sandbox, engine contract, attribution)
 
@@ -278,6 +432,47 @@ quarantines the run (HIGH alert); a worker blocker (`.aeos/report.json`, schema
 `contracts/worker/aeos-report.schema.json`) becomes an AGENT decision request and the task waits BLOCKED
 (`WORKER_BLOCKER`) for the owner. A worker prompt template change changes `ModelRoute.prompt_revision`, which
 invalidates route approvals bound to the old configuration hash (`PROMPT_REVISION_CHANGED`).
+
+Wave 7 additions:
+
+* **Tamper checks around every run** (§09 Zone 1): besides the checkout and interpreter, the bytecode the next
+  start would load (`__pycache__` of the checkout and site-packages, and in release mode the
+  `PYTHONPYCACHEPREFIX` tree under the data dir) and the owner config file (`AEOS_CONFIG` / `aeos.yaml`) are
+  fingerprinted. A new/changed `.pyc` is accepted only when its code equals a fresh compile of its source
+  (checked in a separate `python -I -S -B` process); anything else is a finding and the file is deleted. A changed
+  `aeos.yaml` is restored to its pre-run bytes. Under the WEAK process sandbox a DB trust-table tamper window
+  (decisions, budgets, routes, agents, policy snapshots, grants, ...) wraps the run: a row changed by another
+  process fails and quarantines the run (`db-trust-table-modified`, HIGH alert `DB_TRUST_TAMPER`). The
+  bookkeeping the server process does for a run when the executor runs in the CLI (`aeos work run-once`) is
+  tolerated: the run's grant usage growing, a grant/session revoked, a session's `last_seen_at` moving forward.
+  Anything else written by another AEOS process during the run (for example a decision recorded from the CLI, or
+  a new sign-in) is reported as foreign: fail closed, review and reconcile. On `capability_grants` even this
+  process's own broker writes mask nothing: a forged cap, scope or grant row is foreign in every case. If the
+  executor itself fails after the worker started, the worker is stopped and the same checks still run.
+* **Integrity hold**: any controller/config/bytecode/DB finding (from a worker run or a verification) sets the
+  host-wide hold `worker_runtime.integrity_hold`: admission, the executor's start check, running attempts and
+  `CAN_RUN_WORKER` are BLOCKED (`INTEGRITY_HOLD`) until the owner reviews the findings (`aeos worker status`),
+  restores the checkout (`git status` / `git checkout -- <path>`) and records the reconciliation for exactly that
+  hold: `aeos policy decide --kind RISK_ACCEPTANCE --target-type worker_integrity_hold --target-id <hold id> --as
+  <SUPER_ADMIN> --domain <PERSONAL|OFFICE> --days 1 --rationale "<what you checked>"` (your explicit choice of
+  domain; the hold is host-wide). A later finding needs a new one. A domain's views show the hold, but another
+  domain's run id and findings only as a count (`aeos worker status --domain <that domain>` shows them).
+* **CPU cap**: `limits.max_cpus` is a Windows Job Object CPU-rate hard cap in the process sandbox (`run.caps.cpu_cap`
+  records the rate in force); on macOS/Linux it stays a reservation only. `limits.max_processes` is part of every
+  TaskSpec (256), the same cap for both sandboxes.
+* **Granted shell (container only)**: commands run only through the AEOS runner
+  `node /aeos/aeos-run.js <program> [args...]` (bash permission patterns). The runner starts exactly one program
+  with its arguments and never re-parses them with a shell, so a pattern grant such as `bash:npm test*` allows
+  nothing more than before. The engine sees the first 40 and last 80 lines; the full output is collected as
+  untrusted evidence (`worker-command-logs.json`) and removed from the candidate. Only runs that had the runner
+  get this; in any other run a worker-written `.aeos/cmdlog/` is an ordinary (scope-checked) change.
+* **Context**: a run without a CURRENT task-scoped ContextPack gets one built at start (knowledge facade, system
+  principal bound to the TaskSpec, the TaskSpec's input artifacts as DATA items under the pack's token budget).
+* **Doctor `worker.route_behaviour`**: per APPROVED/TRIAL worker route, the §43 measure `tool_schema_failures` of a
+  trusted evaluation on the route's current configuration (+ verified runs). UNKNOWN until such runs exist, STALE
+  after a configuration/engine change; FAILED only above the owner's threshold - a POLICY decision with target
+  `worker_route_behaviour:tool_schema_failures` and `details.max_failure_rate` (0..1, `POST /api/decisions`).
+  Without it, measured failures are reported, never judged.
 
 ## Scenarios tested as normal operations (§33)
 
@@ -303,6 +498,9 @@ invalidates route approvals bound to the old configuration hash (`PROMPT_REVISIO
   must pass on this machine before workers are trusted.
 * The released controller artifact is a source archive run with the checkout's virtual environment
   (third-party packages are pinned by `requirements.lock`, not bundled). The UI bundle is pinned by
-  hash at build time, but that it was built from the released commit is UNVERIFIED. Releases built
+  hash at build time; that it was built from the released commit is VERIFIED only through the Vite
+  build record of its clean source tree; an UNVERIFIED bundle is pinned only by the owner's explicit
+  `--allow-unverified-ui` (shown per release). No release
+  has been built or promoted on the build host yet (NOT-PROVEN). Releases built
   before acceptance gating show acceptance UNKNOWN at promotion.
 * Backups are not encrypted by AEOS; encryption at rest/off-machine copies are owner decisions.

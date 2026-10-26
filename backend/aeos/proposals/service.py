@@ -39,7 +39,8 @@ from aeos.models.research import ChangeProposal, ResearchEntry
 from aeos.proposals import review as R
 from aeos.proposals.trial import TRIAL_OPERATIONS
 from aeos.research import service as research
-from aeos.research.identity import IdentityError, canonical_identity
+from aeos.research.facade import canonical_identity
+from aeos.research.identity import IdentityError
 
 KINDS = ("ADD", "REPLACE", "UPGRADE", "REMOVE", "COMPARE")
 ACTIONS = ("TRIAL_APPROVE", "PROMOTE", "KEEP", "REJECT", "DEFER", "REQUEST_MORE_EVIDENCE", "REFERENCE_ONLY")
@@ -278,14 +279,30 @@ def _limits(limits: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
     return lim, unknown
 
 
+_CANDIDATE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def candidate_digest_value(raw: str | None) -> str | None:
+    """§25 "pinned version/digest": a structured ``sha256:<64 hex>`` (normalised to lower case) or None. Anything
+    else is refused - a digest is never free text."""
+    if raw is None or not str(raw).strip():
+        return None
+    value = str(raw).strip().lower()
+    if not _CANDIDATE_DIGEST.match(value):
+        raise ValidationFailed("candidate_digest must be 'sha256:<64 hex>' (the digest of the candidate artifact)",
+                               code="CANDIDATE_DIGEST_INVALID")
+    return value
+
+
 def create_proposal(
     session: Session, *, actor_user_id: str, domain: str, kind: str, title: str | None, sources: list[str],
     problem: str = "", expected_benefit: str = "", scope_type: str = "PLATFORM", project_id: str | None = None,
     existing_component_ids: list[str] | None = None, candidate_component_ids: list[str] | None = None,
     limits: dict[str, Any] | None = None, attachment_ids: list[str] | None = None, candidate_pin: str | None = None,
     parts: list[dict[str, Any]] | None = None, parent_id: str | None = None, emit: bool = True,
-    provenance: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None, candidate_digest: str | None = None,
 ) -> ChangeProposal:
+    digest = candidate_digest_value(candidate_digest)
     kind = (kind or "").upper()
     if kind not in KINDS:
         raise ValidationFailed(f"kind must be one of {KINDS}")
@@ -327,7 +344,8 @@ def create_proposal(
         parent_id=parent_id, submitted_by=actor_user_id[:64], scope_type=scope_type, project_id=project_id, domain=domain,
         source_refs=refs, problem=redact_text(problem or "")[:8000], expected_benefit=redact_text(expected_benefit or "")[:8000],
         existing_component_ids=existing, candidate_component_ids=candidates,
-        limits=lim, candidate_pin=redact_text(candidate_pin)[:128] if candidate_pin else None, status="SUBMITTED",
+        limits=lim, candidate_pin=redact_text(candidate_pin)[:128] if candidate_pin else None,
+        candidate_digest=digest, status="SUBMITTED",
         review_package={}, decision_ids=[], task_ids=[], evidence_ids=[], outcome={}, attachment_ids=atts,
         canonical_identities=resolved, duplicate_of=duplicate.id if duplicate else None, parts=[],
         unknown_fields=unknown, research_entry_ids=entry_ids, owner_plan={},
@@ -386,6 +404,7 @@ def _create_parts(session: Session, parent: ChangeProposal, parts: list[dict[str
             expected_benefit=part.get("expected_benefit") or "", scope_type=parent.scope_type,
             project_id=parent.project_id, existing_component_ids=part.get("existing_component_ids") or [],
             limits=parent.limits, candidate_pin=part.get("candidate_pin"), parent_id=parent.id, emit=False,
+            candidate_digest=part.get("candidate_digest"),
         )
         children.append(child)
     parent.parts = [{"child_id": c.id, "title": c.title, "kind": c.kind,
@@ -422,7 +441,8 @@ def file_suggestion(session: Session, *, source_kind: str, source_id: str, domai
 
 
 def review(session: Session, p: ChangeProposal, *, actor_user_id: str, with_claude: bool = False,
-           candidate_pin: str | None = None, domain: str | None = None) -> ChangeProposal:
+           candidate_pin: str | None = None, domain: str | None = None,
+           candidate_digest: str | None = None) -> ChangeProposal:
     if p.status in OUTCOME_FINAL:
         raise Conflict(f"proposal outcome already recorded ({p.status}); open a new proposal")
     if p.parent_id:
@@ -436,6 +456,8 @@ def review(session: Session, p: ChangeProposal, *, actor_user_id: str, with_clau
         pin = redact_text(candidate_pin.strip())[:128]
         p.candidate_pin = pin or None
         p.unknown_fields = [u for u in (p.unknown_fields or []) if u != "candidate_pin" or not pin]
+    if candidate_digest is not None:  # "" clears it; the candidate hash re-binds either way
+        p.candidate_digest = candidate_digest_value(candidate_digest)
     children = _children(session, p)
     _refresh_research_links(session, p, children)
     package, bh, ch = R.build_package(session, p, children, with_claude=with_claude, domain=domain or p.domain,
@@ -795,6 +817,11 @@ def decide(session: Session, p: ChangeProposal, *, actor_user_id: str, action: s
         if not p.candidate_pin:
             raise Blocked("candidate pin/digest is UNKNOWN; pin the candidate and re-review first",
                           code="CANDIDATE_NOT_PINNED")
+        digest_gate = candidate_digest_gate(session, p)
+        if digest_gate["required"] and not p.candidate_digest:
+            raise Blocked("the changed component is digest-pinned in the reviewed install-manifest; record the "
+                          "candidate's sha256 digest (candidate_digest) and re-review first (§25)",
+                          code="CANDIDATE_DIGEST_REQUIRED", details=digest_gate)
         gate = R.source_identity_gate(session, p)
         if gate["status"] != "OK":
             raise Blocked("source identity UNVERIFIED/CHANGED/NOT_FOUND or the pin is affected by a published "
@@ -953,6 +980,74 @@ def _config_targets(p: ChangeProposal, cfg: dict[str, Any]) -> list[tuple[str, s
     return []
 
 
+def _digest_targets(p: ChangeProposal) -> list[str]:
+    if p.kind in ("REMOVE", "COMPARE"):
+        return []
+    return sorted({*(p.candidate_component_ids or []),
+                   *((p.existing_component_ids or []) if p.kind in ("UPGRADE", "REPLACE") else [])})
+
+
+def candidate_digest_gate(session: Session, p: ChangeProposal) -> dict[str, Any]:
+    """§25 tool admission "pinned version/digest": a candidate digest is REQUIRED before TRIAL_APPROVE/PROMOTE when a
+    component the proposal changes is digest-pinned for this platform in the reviewed install-manifest (the owner
+    holds that component to an exact executable, so its replacement must name one too). Without a digest-pinned
+    baseline it stays optional and is shown as NOT_RECORDED - never invented."""
+    from aeos.inventory import facade as inventory
+
+    pinned: list[dict[str, Any]] = []
+    platform = None
+    for cid in _digest_targets(p):
+        comp = inventory.get_component(session, cid)
+        if not R.component_in_domain(comp, p.domain):
+            continue
+        sel = inventory.approved_digest(cid, session=session)
+        platform = sel["platform"]
+        if sel["digest"]:
+            pinned.append({"component_id": cid, "approved_digest": sel["digest"]})
+    return {"required": bool(pinned), "digest_pinned_components": pinned, "platform": platform,
+            "candidate_digest": p.candidate_digest,
+            "status": "RECORDED" if p.candidate_digest else ("MISSING" if pinned else "NOT_RECORDED")}
+
+
+def candidate_digest_problems(session: Session, p: ChangeProposal, since: datetime | None,
+                              targets: list[str] | None = None) -> list[str]:
+    """ACCEPTED with a candidate digest: the executable this domain observed installed after the promotion must be
+    exactly that digest, and a digest the reviewed manifest records for this platform must be it too.
+
+    Only the ACCEPTED component is compared (*targets*: the accepted configuration's component, else the candidate
+    components, or the upgraded component itself) - never the old component a REPLACE retires, whose bytes are
+    not the candidate's. A candidate digest names one artifact, so several targets need
+    ``accepted_configuration.component_id`` to say which one it belongs to."""
+    from aeos.inventory import facade as inventory
+
+    if not p.candidate_digest:
+        return []
+    if targets is None:
+        targets = list(p.candidate_component_ids or []) or (
+            list(p.existing_component_ids or []) if p.kind == "UPGRADE" else [])
+    if len(targets) > 1:
+        return [f"candidate_digest names one artifact but the accepted configuration covers {sorted(targets)}; set "
+                "accepted_configuration.component_id to the component the digest belongs to"]
+    problems: list[str] = []
+    for cid in targets:
+        comp = inventory.get_component(session, cid)
+        if not R.component_in_domain(comp, p.domain):
+            continue
+        sel = inventory.approved_digest(cid, session=session)
+        if sel["digest"] and sel["digest"] != p.candidate_digest:
+            problems.append(f"{cid} approved_digest for {sel['platform']} {sel['digest'][:19]}... != candidate_digest "
+                            f"{p.candidate_digest[:19]}... (manifest not applied)")
+        obs = _latest_observation(session, cid, ("installation",), since, domain=p.domain)
+        observed = str(getattr(obs, "observed_identity", "") or "") if obs is not None else ""
+        if not observed.startswith("sha256:"):
+            problems.append(f"{cid}: no installation observation with an executable digest after the promotion; the "
+                            "candidate_digest cannot be compared (reconcile the inventory first)")
+        elif observed != p.candidate_digest:
+            problems.append(f"{cid}: observed executable digest {observed[:19]}... != candidate_digest "
+                            f"{p.candidate_digest[:19]}... (not the reviewed candidate artifact)")
+    return problems
+
+
 def _latest_observation(session: Session, cid: str, dimensions: tuple[str, ...], since: datetime | None, *,
                         domain: str | None) -> Any:
     """The latest observation of *cid* in *dimensions* that belongs to *domain* (untagged or tagged with it),
@@ -1016,6 +1111,8 @@ def config_applied_problems(session: Session, p: ChangeProposal, cfg: dict[str, 
         if comp.enablement != "ENABLED" and not observed_at_pin(session, cid, pin, since, domain=p.domain):
             problems.append(f"{cid} is neither enabled by decision nor observed installed/configured"
                             + (f" at {pin}" if pin else "") + " after the promotion (configuration not applied)")
+    if p.kind != "REMOVE":
+        problems += candidate_digest_problems(session, p, since, [cid for cid, _pin in targets])
     return problems
 
 
@@ -1461,6 +1558,7 @@ def proposal_view(session: Session, p: ChangeProposal, *, detail: bool = False) 
         "source_refs": p.source_refs or [], "canonical_identities": p.canonical_identities or [],
         "existing_component_ids": p.existing_component_ids or [], "submitted_by": p.submitted_by,
         "baseline_hash": p.baseline_hash, "candidate_hash": p.candidate_hash, "candidate_pin": p.candidate_pin,
+        "candidate_digest": p.candidate_digest,
         "reviewed_at": p.reviewed_at.isoformat() if p.reviewed_at else None,
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
@@ -1473,7 +1571,8 @@ def proposal_view(session: Session, p: ChangeProposal, *, detail: bool = False) 
 
         dups = list(session.scalars(select(ChangeProposal).where(ChangeProposal.duplicate_of == p.id,
                                                                  ChangeProposal.domain == p.domain)))
-        package = dict(p.review_package or {})
+        # progress recorded after the review (REMOVE closure, credential revocation) is shown as it stands now
+        package = R.apply_progress(p, dict(p.review_package or {}))
         if package.get("human_decision"):
             package["human_decision"] = {**package["human_decision"], "allowed_now": R.allowed_actions(p)}
         cp = checkpoint.current(p)
@@ -1539,6 +1638,7 @@ def timeline(session: Session, p: ChangeProposal) -> dict[str, Any]:
     after = None
     if current.get("status") == "ACCEPTED":
         after = {"candidate_hash": p.candidate_hash, "candidate_pin": p.candidate_pin,
+                 "candidate_digest": p.candidate_digest,
                  "accepted_configuration": current.get("accepted_configuration")}
     return {
         "proposal_id": p.id, "items": items, "outcome_history": (p.outcome or {}).get("history") or [],

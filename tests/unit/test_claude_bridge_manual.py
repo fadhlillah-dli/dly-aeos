@@ -118,5 +118,7 @@ def test_manual_package_obeys_the_same_preflight_as_the_bridge(settings, db, tmp
         write_manual_package(_req(tmp_path, context_files=[office_file]), package_id="pkg-ctx")
     assert ei.value.code == "CONTEXT_DOMAIN_DENIED"
     assert not root.exists() or not any(root.iterdir())  # nothing half-written remains
-    reg.office["claude_max_allowed_for_office_data"] = True  # recorded company authorisation
+    # recorded company authorisation: Claude Max for OFFICE data, for the project's (INTERNAL) data class
+    reg.office.update(claude_max_allowed_for_office_data=True, office_authorization=True,
+                      approved_data_classes=["INTERNAL"])
     assert write_manual_package(_req(tmp_path, project_id=office, domain="OFFICE"), package_id="pkg-off").is_dir()

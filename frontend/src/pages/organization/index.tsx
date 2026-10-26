@@ -1,13 +1,20 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, Cog, Search, UserRound } from "lucide-react";
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { get } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { ExplainButtons } from "../../components/ExplainButtons";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Card, EmptyState, ErrorBox, inputClass, Loading, Mono, Notice, PageHeader } from "../../components/ui";
+import { AgentControls } from "../../components/workforce/AgentControls";
+import { RoleAdoption } from "../../components/workforce/RoleAdoption";
 import type { AgentDef, RoleCard, RoleGroup } from "../../components/workforce/types";
 import { useLiveInvalidation } from "../../components/workforce/useLive";
+
+/** §35 "Usulkan perubahan" opens the proposal form for the role/agent catalog: an UPGRADE of the
+ * workforce module that owns RoleSkillPack/AgentDefinition (inventory component workforce-scheduler). */
+const ORG_PROPOSE_HREF = "/proposals?kind=UPGRADE&component=workforce-scheduler";
 
 const KIND_LABEL: Record<string, string> = {
   PLANNER: "Perencana",
@@ -39,7 +46,7 @@ function Bullets({ title, items }: { title: string; items: string[] }) {
   );
 }
 
-function RoleCardView({ role }: { role: RoleCard }) {
+function RoleCardView({ role, isAdmin = false, onChanged }: { role: RoleCard; isAdmin?: boolean; onChanged?: () => void }) {
   return (
     <article className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-3">
       <header className="flex flex-wrap items-start justify-between gap-2">
@@ -81,6 +88,7 @@ function RoleCardView({ role }: { role: RoleCard }) {
         <StatusBadge status={role.eval_status === "NOT_EVALUATED" ? "NOT_TESTED" : role.eval_status} label={role.eval_status === "NOT_EVALUATED" ? "Belum dievaluasi" : role.eval_status} />
         {role.demo_runs > 0 && <StatusBadge status="DEMO" label={`${role.demo_runs} run DEMO (tidak dihitung)`} />}
       </div>
+      {role.evaluation && <RoleAdoption role={role} isAdmin={isAdmin} onChanged={onChanged ?? (() => undefined)} />}
       {role.forbidden_actions.length > 0 && (
         <details className="text-sm">
           <summary className="cursor-pointer text-xs text-ink-3">Tindakan terlarang ({role.forbidden_actions.length})</summary>
@@ -95,7 +103,7 @@ function RoleCardView({ role }: { role: RoleCard }) {
   );
 }
 
-function AgentCard({ a }: { a: AgentDef }) {
+function AgentCard({ a, isAdmin, onChanged }: { a: AgentDef; isAdmin: boolean; onChanged: () => void }) {
   return (
     <article className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-3">
       <header className="flex flex-wrap items-start justify-between gap-2">
@@ -128,12 +136,18 @@ function AgentCard({ a }: { a: AgentDef }) {
         <summary className="cursor-pointer text-ink-3">Batas & scope</summary>
         <pre className="mono mt-1 overflow-x-auto rounded bg-surface-2 p-2">{JSON.stringify({ limits: a.limits, scope: a.allowed_scope, route: a.route_policy }, null, 2)}</pre>
       </details>
+      <AgentControls agent={a} isAdmin={isAdmin} onChanged={onChanged} />
     </article>
   );
 }
 
 export default function OrganizationPage() {
-  const { domain } = useAuth();
+  const { domain, isAdmin } = useAuth();
+  const qc = useQueryClient();
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["workforce-agents", domain] });
+    qc.invalidateQueries({ queryKey: ["workforce-roles", domain] });
+  };
   const roles = useQuery({
     queryKey: ["workforce-roles", domain],
     queryFn: () => get<{ items: RoleGroup[]; note: string; source?: string; checked_at: string; mode: string }>("/api/workforce/roles"),
@@ -144,7 +158,10 @@ export default function OrganizationPage() {
     queryFn: () => get<{ items: AgentDef[]; checked_at: string }>("/api/workforce/agents"),
     refetchInterval: 30_000,
   });
-  useLiveInvalidation([["workforce-roles", domain], ["workforce-agents", domain]], (e) => e.kind === "run.state_changed");
+  useLiveInvalidation(
+    [["workforce-roles", domain], ["workforce-agents", domain]],
+    (e) => e.kind === "run.state_changed" || e.kind.startsWith("scheduler.agent_") || e.kind === "scheduler.role_result_adopted",
+  );
   const [query, setQuery] = useState("");
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -182,6 +199,17 @@ export default function OrganizationPage() {
       `Layanan deterministik (kode, bukan LLM): ${serviceNames.join(", ") || "tidak ada"}. ` +
       `Alasan tiap peran dirujuk ke bagian master: ${sections.join(", ") || "tidak tercatat"}.`
     : "Belum ada record peran; alasan pemilihan tidak dinyatakan.";
+  // "Apa dampaknya jika diganti?" from the same records: which roles carry active tasks/runs and which agents
+  // implement each role (an enabled agent would be re-evaluated on a new revision).
+  const busyRoles = allRoles.filter((r) => (r.assigned_tasks ?? 0) > 0 || r.active_runs > 0);
+  const agentItems = agents.data?.items ?? [];
+  const enabledAgents = agentItems.filter((a) => a.enabled);
+  const impactText = allRoles.length
+    ? `Mengganti peran/agent membuat revisi baru (riwayat run lama tidak ditulis ulang). Terdampak sekarang menurut record: ` +
+      `${busyRoles.length ? busyRoles.map((r) => `${r.name} (${r.assigned_tasks ?? 0} task, ${r.active_runs} run)`).join(", ") : "tidak ada peran dengan task/run aktif"}; ` +
+      `${agentItems.length} definisi agent memakai ${new Set(agentItems.map((a) => a.role_key)).size} peran, ` +
+      `${enabledAgents.length} aktif${enabledAgents.length ? ` (${enabledAgents.map((a) => a.agent_key).join(", ")})` : ""} — agent aktif perlu evaluasi ulang pada revisi baru.`
+    : "Belum ada record peran; dampak penggantian tidak dinyatakan.";
 
   return (
     <div className="space-y-5">
@@ -205,8 +233,15 @@ export default function OrganizationPage() {
           why: whyText,
           usedBy: `Run aktif saat ini: ${active}; task aktif yang ditugaskan ke peran: ${assigned}. Scheduler memilih agent per TaskSpec; peran lain tidak otomatis dipanggil.`,
           evidence: `Setiap kartu memuat versi + revision hash. Status evaluasi peran (dari katalog): ${evalText}.`,
-          impact: "Mengubah peran/agent membuat revisi baru; riwayat run lama tidak ditulis ulang.",
-          propose: "Gunakan Usulan Upgrade (ChangeProposal) untuk menambah/mengganti peran.",
+          impact: impactText,
+          propose: (
+            <p>
+              <Link className="text-accent underline" to={ORG_PROPOSE_HREF}>
+                Usulkan perubahan peran/agent
+              </Link>{" "}
+              (ChangeProposal UPGRADE; usulan tidak mengaktifkan atau mengubah peran apa pun).
+            </p>
+          ),
         }}
       />
 
@@ -222,7 +257,7 @@ export default function OrganizationPage() {
         ) : (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {agents.data!.items.map((a) => (
-              <AgentCard key={a.agent_key} a={a} />
+              <AgentCard key={a.agent_key} a={a} isAdmin={isAdmin} onChanged={refresh} />
             ))}
           </div>
         )}
@@ -254,7 +289,7 @@ export default function OrganizationPage() {
               ) : (
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {g.roles.map((r) => (
-                    <RoleCardView key={r.role_key} role={r} />
+                    <RoleCardView key={r.role_key} role={r} isAdmin={isAdmin} onChanged={refresh} />
                   ))}
                 </div>
               )}

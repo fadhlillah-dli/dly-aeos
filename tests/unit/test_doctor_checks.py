@@ -176,13 +176,62 @@ def test_needs_db_checks_are_unknown_without_database(settings):
 
 
 def test_mci_is_never_verified(settings, db, tmp_path):
-    res = check("policy.mci", _ctx(settings, db, base_runner()))
-    assert res.status == "MISSING" and res.observed_evidence["alignment"] == "UNVERIFIED"
-    repo = tmp_path / "repo"
-    (repo / "policy").mkdir(parents=True)
-    (repo / "policy" / "mci-reference.yaml").write_text("mci:\n  status: VERIFIED\n  version: '2'\n", encoding="utf-8")
+    from tests.unit import mci_support as ms
+
+    live = check("policy.mci", _ctx(settings, db, base_runner()))  # the owner's reference: true in every state
+    assert live.status not in ("VERIFIED", "READY", "PASS") and live.observed_evidence["compliance"] == "NOT-PROVEN"
+    repo = ms.fake_repo(tmp_path)
     res = check("policy.mci", _ctx(settings, db, base_runner(), repo=repo))
-    assert res.status == "CONFIGURED"  # a file claim is not verification
+    assert res.status == "MISSING" and res.observed_evidence["alignment"] == "UNVERIFIED"
+    assert str(settings.layout.canonical_policy) in res.remediation["operation"]  # local, never committed
+    ref = repo / "policy" / "mci-reference.yaml"
+    ref.write_text("mci:\n  status: VERIFIED\n  version: '2'\n", encoding="utf-8")
+    res = check("policy.mci", _ctx(settings, db, base_runner(), repo=repo))
+    # a file claim is not verification: a declared VERIFIED that does not verify FAILS (never CONFIGURED)
+    assert res.status == "FAILED" and res.error_code == "MCI_REFERENCE_INCOMPLETE"
+
+
+def test_mci_declared_verified_must_match_the_local_source_file(settings, db, tmp_path):
+    """§08 policy.mci reuses the policy module's verification of the owner's LOCAL source (<data dir>/policy/canonical;
+    the public repository never holds it): a declared VERIFIED that does not verify is FAILED with the reason."""
+    from aeos.doctor.runner import compute_fingerprint
+    from tests.unit import mci_support as ms
+
+    repo = ms.fake_repo(tmp_path)
+    local = settings.layout.canonical_policy
+    digest = ms.write_source(local)
+    ref = repo / "policy" / "mci-reference.yaml"
+    in_repo = repo / "policy" / "canonical" / ms.SOURCE_NAME
+    in_repo.parent.mkdir(parents=True)
+    in_repo.write_bytes((local / ms.SOURCE_NAME).read_bytes())
+    cases = ((ms.verified_reference(digest, location="local:missing.md"), "MCI_SOURCE_MISSING"),
+             (ms.verified_reference("sha256:" + "0" * 64), "MCI_HASH_MISMATCH"),
+             (ms.verified_reference(digest, location="local:../escape.md"), "MCI_LOCATION_OUTSIDE_LOCAL_DIR"),
+             (ms.verified_reference(digest, location="policy/canonical/MCI_V2_SOURCE_OF_TRUTH.md"),
+              "MCI_LOCATION_NOT_LOCAL"),
+             ("mci:\n  status: CERTIFIED\n", "MCI_STATUS_UNKNOWN"))
+    for text, code in cases:
+        ref.write_text(text, encoding="utf-8")
+        res = check("policy.mci", _ctx(settings, db, base_runner(), repo=repo))
+        assert (res.status, res.error_code) == ("FAILED", code), text
+        assert res.severity == "HIGH" and res.observed_evidence["source_status"] == "UNVERIFIED"
+    ref.write_text(ms.verified_reference("sha256:" + "0" * 64), encoding="utf-8")
+    res = check("policy.mci", _ctx(settings, db, base_runner(), repo=repo))
+    assert str(local / ms.SOURCE_NAME) in res.remediation["command"] and "sha256" in res.remediation["command"]
+    ref.write_text(ms.verified_reference(digest), encoding="utf-8")
+    ctx = _ctx(settings, db, base_runner(), repo=repo)
+    res = check("policy.mci", ctx)
+    assert res.status == "CONFIGURED" and res.error_code is None  # the source is present - not VERIFIED alignment
+    assert res.observed_evidence["source_status"] == "VERIFIED" and res.observed_evidence["compliance"] == "NOT-PROVEN"
+    assert res.observed_evidence["source_location"] == ms.LOCATION and res.component_version == "test-2"
+    before = compute_fingerprint(REGISTRY["policy.mci"], ctx)
+    ms.write_source(local, "# a different document of another size\n")  # replacing the MCI makes the result STALE
+    assert compute_fingerprint(REGISTRY["policy.mci"], ctx) != before
+    before = compute_fingerprint(REGISTRY["policy.mci"], ctx)
+    ms.write_mapping(local, "packs: []\n")  # so does the owner's local pack mapping
+    assert compute_fingerprint(REGISTRY["policy.mci"], ctx) != before
+    ref.write_text("mci:\n  status: REFERENCED\n", encoding="utf-8")
+    assert check("policy.mci", _ctx(settings, db, base_runner(), repo=repo)).status == "CONFIGURED"
 
 
 def test_office_defaults_deny_and_tampered_file_fails(settings, db, tmp_path):

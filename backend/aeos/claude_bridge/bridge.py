@@ -267,26 +267,38 @@ def preflight(request: ClaudeRequest) -> tuple[str, str] | None:
     if problem:
         return problem
     if request.domain == Domain.OFFICE.value:
-        allowed, why = office_claude_allowed()
+        allowed, why = office_claude_allowed(request.project_id)
         if not allowed:
             return "OFFICE_POLICY_DENIED", why
     return project_domain_problem(request)
 
 
-def office_claude_allowed() -> tuple[bool, str]:
-    """§23/§51: OFFICE data goes to Claude Max only after a recorded company authorisation."""
+def office_claude_allowed(project_id: str | None = None) -> tuple[bool, str]:
+    """§23/§51: OFFICE data goes to Claude Max only after a recorded company authorisation, and only data of a class
+    the company approved (approved_data_classes). The class is the project's data classification; a request without
+    a project carries no classification, which is UNKNOWN and never approved (fail closed)."""
     try:
-        from aeos.policy.facade import office_policy
+        from aeos.policy.facade import office_data_class_authorised, office_policy
 
         with session_scope() as s:
             pol = office_policy(s)
+            classification: str | None = None
+            if project_id:
+                from aeos.models.portfolio import Project
+
+                project = s.get(Project, project_id)
+                classification = project.data_classification if project is not None else None
+            class_ok, class_why = office_data_class_authorised(s, classification, policy=pol)
     except (ImportError, ModuleNotFoundError):
         return False, "office policy module unavailable - OFFICE planning/review is denied (fail closed)"
     except Exception as exc:
         return False, f"office policy could not be evaluated ({type(exc).__name__}) - denied"
-    if pol.get("claude_max_allowed_for_office_data") is True:
-        return True, ""
-    return False, "OFFICE policy: Claude Max is not authorised for office data (claude_max_allowed_for_office_data=false)"
+    if pol.get("claude_max_allowed_for_office_data") is not True:
+        return False, ("OFFICE policy: Claude Max is not authorised for office data "
+                       "(claude_max_allowed_for_office_data=false)")
+    if not class_ok:
+        return False, f"OFFICE policy: {class_why}"
+    return True, ""
 
 
 def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) -> ClaudeResult:
@@ -312,10 +324,13 @@ def run_structured(request: ClaudeRequest, *, settings: Settings | None = None) 
                      "Claude native bridge is BLOCKED: " + "; ".join(pr.reasons or ["unknown"]) +
                      " - use the manual package (official Claude Code) instead; no API fallback exists",
                      engine_version=pr.binary.version)
-    # §12 unmodified official binary: an OS-reported INVALID signature or a signer other than the owner-pinned
-    # publisher refuses the native call (fail closed); an unsigned binary is reported DEGRADED in the status.
+    # §12 unmodified official binary: an OS-reported INVALID signature refuses the native call (fail closed); once a
+    # publisher is pinned for this OS, anything but a VALID signature by exactly that signer is refused too. Without
+    # a pin an unsigned binary is reported DEGRADED in the status. An unreadable reviewed manifest means the pin is
+    # unknown, never "not pinned": refused as well.
+    pin = binmod.publisher_pin()
     gate, gate_reason = binmod.signature_gate(binmod.invocation_signature(pr.binary.path, pr.binary.fingerprint),
-                                              binmod.approved_publisher())
+                                              pin["signer"], pin_problem=binmod.pin_error(pin))
     if gate == "BLOCKED":
         return _fail(request, "BINARY_SIGNATURE_BLOCKED",
                      f"Claude native bridge is BLOCKED: {gate_reason} - use the manual package (official Claude "
@@ -720,6 +735,28 @@ def mark_stale_if_binary_changed(session: Session, row: ClaudeCapabilityTest | N
     return True
 
 
+def extra_usage_view(session: Session | None) -> dict[str, Any]:
+    """§12 paid extra usage, mirroring the Doctor check claude.extra_billing: the CLI does not report it, so the only
+    source is the owner's attestation (POLICY decision, preset claude_extra_usage_off) - CONFIGURED (E0), never
+    VERIFIED; without one it stays UNKNOWN."""
+    from aeos.policy import facade as policy
+
+    att = policy.claude_extra_usage_attestation(session)
+    base = {"attestation": att["state"], "evidence_level": "E0", "decision_id": att["decision_id"],
+            "expires_at": att["expires_at"], "source": "atestasi pemilik (keputusan POLICY)"}
+    if att["state"] == "ATTESTED_OFF":
+        return {**base, "state": "CONFIGURED",
+                "note": "Pemilik menyatakan extra usage berbayar NONAKTIF di pengaturan akun claude.ai (atestasi E0, "
+                        "tidak dapat diverifikasi AEOS)."}
+    if att["state"] == "ATTESTED_ON":
+        return {**base, "state": "FAILED",
+                "note": "Pemilik mencatat extra usage berbayar AKTIF; §12 meminta dinonaktifkan di pengaturan akun."}
+    return {**base, "state": "UNKNOWN", "source": "tidak ada sumber resmi",
+            "note": "Pembelian/penggunaan tambahan berbayar dimatikan lewat pengaturan akun claude.ai (langkah manual "
+                    "pemilik); CLI tidak melaporkan status ini. Catat atestasi pemilik: aeos policy decide --kind POLICY "
+                    "--policy-preset claude_extra_usage_off."}
+
+
 def status(session: Session, settings: Settings | None = None, *, refresh: bool = False) -> dict[str, Any]:
     from aeos.models.routing import ModelRoute
 
@@ -737,20 +774,22 @@ def status(session: Session, settings: Settings | None = None, *, refresh: bool 
                  binmod._SIG_CACHE.get((str(pr.binary.path), pr.binary.fingerprint or ""),
                                        {"status": "NOT_CHECKED",
                                         "reason": "refresh the status to run the OS signature check"}))
-    pinned = binmod.approved_publisher()
-    gate, gate_reason = binmod.signature_gate(signature, pinned) if pr.binary.found else ("UNVERIFIED", "no binary")
+    pin = binmod.publisher_pin()
+    authenticity = binmod.authenticity_view(signature, pin["signer"], found=pr.binary.found,
+                                            pin_problem=binmod.pin_error(pin))
+    gate = authenticity["gate"]
     bridge_status = "BLOCKED" if (not pr.usable or gate == "BLOCKED") else (
         "DEGRADED" if gate == "DEGRADED" else "CONFIGURED")
+    # why it is BLOCKED decides the remedy: a signature block is never fixed by /login
+    blocked_by = (["signature"] if gate == "BLOCKED" else []) + (["binary"] if not pr.binary.found else []) + (
+        ["auth"] if pr.binary.found and pr.auth.status not in {"VERIFIED", "DEGRADED"} else [])
     return {
         "binary": {"found": pr.binary.found, "status": binary_status, "path_logical": pr.binary.logical_path,
                    "version": pr.binary.version, "fingerprint": pr.binary.fingerprint, "reasons": pr.binary.reasons,
-                   "signature": signature,
-                   "authenticity": {"gate": gate, "reason": gate_reason, "approved_signer": pinned,
-                                    "owner_step": None if pinned else
-                                    "pin the Anthropic signer (Authenticode subject / TeamIdentifier) in "
-                                    "install-manifest claude-code signature.approved_signer"}},
+                   "signature": signature, "authenticity": authenticity},
         "auth": pr.auth.summary(),
         "bridge_status": bridge_status,
+        "blocked_by": blocked_by if bridge_status == "BLOCKED" else [],
         "env_hygiene": parent_hygiene(),
         "invocation": {
             "argv_template": ["claude", "-p", "--output-format", "json", "--json-schema", "<schema>", "--model",
@@ -770,11 +809,7 @@ def status(session: Session, settings: Settings | None = None, *, refresh: bool 
         "last_capability_test": capability_test_view(row, fingerprint=pr.binary.fingerprint, version=pr.binary.version),
         "capability_test_invalidated": changed,
         "quota": quota_view(session),
-        "extra_usage": {
-            "state": "UNKNOWN",
-            "note": "Pembelian/penggunaan tambahan berbayar dimatikan lewat pengaturan akun claude.ai (langkah "
-                    "manual pemilik); CLI tidak melaporkan status ini.",
-        },
+        "extra_usage": extra_usage_view(session),
         "manual_fallback": "Bila bridge BLOCKED, paket manual dibuat untuk dijalankan di Claude Code resmi.",
         "checked_at": utcnow().isoformat(),
         "source": "claude --version, claude auth status (env bersih), riwayat uji kemampuan",

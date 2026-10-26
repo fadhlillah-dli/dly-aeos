@@ -106,6 +106,84 @@ describe("DecisionForm exact target shapes (ADR-0042/0051)", () => {
     });
   });
 
+  it("binds the evaluation to the change with the new value (target_version)", async () => {
+    const fn = renderForm("PERSONAL");
+    fireEvent.change(screen.getByLabelText("Jenis keputusan"), { target: { value: "POLICY" } });
+    fireEvent.change(screen.getByLabelText("Jenis target"), { target: { value: "prompt" } });
+    fireEvent.change(screen.getByLabelText("ID target persis"), { target: { value: "worker-prompt" } });
+    fireEvent.change(screen.getByLabelText(/Nilai baru yang dievaluasi/), { target: { value: " wp-42 " } });
+    fireEvent.change(screen.getByLabelText(/ID EvalRun bukti/), { target: { value: "run-9" } });
+    fireEvent.change(screen.getByLabelText(/Target rollback/), { target: { value: "prompt wp-41" } });
+    fireEvent.change(screen.getByLabelText(/Scope eksplisit/), { target: { value: "role=worker" } });
+    fireEvent.change(screen.getByLabelText(/Rationale/), { target: { value: "prompt worker baru sudah dievaluasi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Catat keputusan" }));
+    await waitFor(() => expect(fn).toHaveBeenCalled());
+    const body = JSON.parse(String(fn.mock.calls[0][1]!.body));
+    expect(body).toMatchObject({ target_type: "prompt", target_id: "worker-prompt", target_version: "wp-42" });
+    expect(body.details.system_change).toEqual({ eval_run_ids: ["run-9"], rollback_target: "prompt wp-41" });
+  });
+
+  it("records a supervisor stage-model pin on the exact consumer target with its models and evaluation (§15)", async () => {
+    const fn = renderForm("PERSONAL");
+    fireEvent.change(screen.getByLabelText("Jenis keputusan"), { target: { value: "POLICY" } });
+    // a hash typed before switching to the pin is hidden with its field and never sent (a pin binds by its models)
+    fireEvent.change(screen.getByLabelText("Hash target (opsional)"), { target: { value: "sha256:stale" } });
+    fireEvent.click(screen.getByLabelText(/Pin model supervisor per tahap/));
+    expect(screen.queryByLabelText("Jenis target")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Nilai baru yang dievaluasi/)).not.toBeInTheDocument();
+    // stated, never implied: no supervisor evaluation path exists in this build, so the pin is refused for now
+    expect(screen.getByText(/belum punya jalur evaluasi untuk model supervisor/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("PRIMARY_PLANNING (opus)"), { target: { value: "claude-opus-4-8" } });
+    fireEvent.change(screen.getByLabelText(/ID EvalRun bukti/), { target: { value: "run-opus" } });
+    fireEvent.change(screen.getByLabelText(/Target rollback/), { target: { value: "alias baseline (opus)" } });
+    fireEvent.change(screen.getByLabelText(/Scope eksplisit/), { target: { value: "stage=PRIMARY_PLANNING" } });
+    fireEvent.change(screen.getByLabelText(/Rationale/), { target: { value: "pin Opus setelah evaluasi model persis" } });
+    fireEvent.click(screen.getByRole("button", { name: "Catat keputusan" }));
+    await waitFor(() => expect(fn).toHaveBeenCalled());
+    const body = JSON.parse(String(fn.mock.calls[0][1]!.body));
+    expect(body).toMatchObject({
+      kind: "POLICY",
+      target_type: "planning_baseline",
+      target_id: "stage_models",
+      details: { models: { PRIMARY_PLANNING: "claude-opus-4-8" }, system_change: { eval_run_ids: ["run-opus"], rollback_target: "alias baseline (opus)" } },
+    });
+    expect(body.target_version).toBeUndefined();
+    expect(body.target_hash).toBeUndefined();
+  });
+
+  it("refuses an empty stage-model pin locally", async () => {
+    const fn = renderForm("PERSONAL");
+    fireEvent.change(screen.getByLabelText("Jenis keputusan"), { target: { value: "POLICY" } });
+    fireEvent.click(screen.getByLabelText(/Pin model supervisor per tahap/));
+    fireEvent.change(screen.getByLabelText(/Scope eksplisit/), { target: { value: "stage=x" } });
+    fireEvent.change(screen.getByLabelText(/Rationale/), { target: { value: "pin tanpa model sama sekali" } });
+    fireEvent.click(screen.getByRole("button", { name: "Catat keputusan" }));
+    expect(await screen.findByText(/minimal satu ID model persis/)).toBeInTheDocument();
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("records the paid extra-usage attestation as a POLICY preset (§12, E0, never VERIFIED)", async () => {
+    const fn = renderForm("PERSONAL");
+    fireEvent.change(screen.getByLabelText("Jenis keputusan"), { target: { value: "POLICY" } });
+    fireEvent.change(screen.getByLabelText("Jenis kebijakan"), { target: { value: "claude_extra_usage_off" } });
+    expect(screen.queryByText("Jenis target")).not.toBeInTheDocument();
+    expect(screen.getByText("claude_extra_usage/PERSONAL")).toBeInTheDocument();
+    expect(screen.getByText(/tidak pernah VERIFIED/)).toBeInTheDocument();
+    expect(screen.getByText("Berlaku sampai (wajib)")).toBeInTheDocument();
+    // an attestation is no system change: no stage-model pin or evaluation fields (C2) next to it
+    expect(screen.queryByLabelText(/Pin model supervisor per tahap/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/ID EvalRun bukti/)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/Scope eksplisit/), { target: { value: "akun=Max pribadi" } });
+    fireEvent.change(screen.getByLabelText(/Berlaku sampai/), { target: { value: "2027-01-31T10:00" } });
+    fireEvent.change(screen.getByLabelText(/Rationale/), { target: { value: "extra usage berbayar dimatikan di claude.ai" } });
+    fireEvent.click(screen.getByRole("button", { name: "Catat keputusan" }));
+    await waitFor(() => expect(fn).toHaveBeenCalled());
+    const body = JSON.parse(String(fn.mock.calls[0][1]!.body));
+    expect(body).toMatchObject({ kind: "POLICY", policy_preset: "claude_extra_usage_off", auth_scope: { akun: "Max pribadi" } });
+    expect(body.target_type).toBeUndefined();
+    expect(body.expires_at).toBeTruthy();
+  });
+
   it("does not offer the PERSONAL-only presets in OFFICE", () => {
     renderForm("OFFICE");
     expect(screen.queryByLabelText("Jenis pengecualian")).not.toBeInTheDocument();

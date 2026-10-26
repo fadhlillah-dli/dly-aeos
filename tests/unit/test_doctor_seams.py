@@ -259,13 +259,25 @@ def test_agent_definition_gate_and_enable_endpoint_without_deadlock(settings, db
     # enabling asks CAN_RUN_WORKER without the agent itself (no chicken-and-egg)
     r = personal_client.post("/api/workforce/agents/opencode-implementer/enable", json={"reason": "pilot"})
     assert r.status_code == 200, r.text
+    # W6-164: the enable action re-checks the one DB-only check it changed, so the gate does not keep a STALE result
+    assert r.json()["doctor"] == {"status": "RECHECKED", "results": {"worker.agent_definition": "CONFIGURED"}}
     db.expire_all()
-    assert db.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == "opencode-implementer")).enabled
+    agent = db.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == "opencode-implementer"))
+    assert agent.enabled
+    assert facade.capability_state(db, Capability.CAN_RUN_WORKER, domain="PERSONAL").status == "READY"
+    # a change made outside the action (no recheck) still makes the stored result STALE by its fingerprint
+    agent.enabled = False
+    db.commit()
     stale = facade.capability_state(db, Capability.CAN_RUN_WORKER, domain="PERSONAL")
     assert stale.status != "READY"  # the stored agent check no longer matches: recheck first
     assert any("worker.agent_definition: STALE" in x for x in stale.reasons)
+    agent.enabled = True
+    db.commit()
     _run(settings, db, fake_host)
     assert facade.capability_state(db, Capability.CAN_RUN_WORKER, domain="PERSONAL").status == "READY"
+    r = personal_client.post("/api/workforce/agents/opencode-implementer/disable", json={"reason": "stop"})
+    assert r.status_code == 200 and r.json()["doctor"]["results"] == {"worker.agent_definition": "MISSING"}
+    assert facade.capability_state(db, Capability.CAN_RUN_WORKER, domain="PERSONAL").status != "READY"
 
 
 def test_untrusted_budget_blocks_worker_admission(settings, db, worker_ready, fake_host):
@@ -629,16 +641,23 @@ def test_publish_personal_needs_tokens_and_write_enablement(settings, db, secret
 
 def test_office_and_staging_gates_through_the_policy_module(settings, db, fake_host):
     from aeos.doctor.office import office_gate, read_office_policy
+    from aeos.models.portfolio import Project
 
     create_admin(db)
+    app_project = Project(project_key="staging-less", name="Staging-less", domain="PERSONAL")
+    db.add(app_project)
+    db.commit()
     _run(settings, db, fake_host)
     pol, source = read_office_policy(db)
     assert source == "policy-module" and pol["integrations_allowed"] is False
     for cap in (Capability.CAN_PLAN_OFFICE, Capability.CAN_USE_OFFICE_INTEGRATIONS):
         st = facade.capability_state(db, cap, domain="OFFICE")
         assert st.status == "BLOCKED" and st.reasons[0].startswith("OFFICE default deny"), (cap, st.reasons)
-    staging = facade.capability_state(db, Capability.CAN_VALIDATE_STAGING, domain="PERSONAL")
-    assert staging.status == "BLOCKED" and any("delivery.staging_target: MISSING" in r for r in staging.reasons)
+    # the staging target is evaluated for the project the operation names (G6's rule), never another project's
+    staging = facade.capability_state(db, Capability.CAN_VALIDATE_STAGING, domain="PERSONAL",
+                                      project_id=app_project.id)
+    assert staging.status == "BLOCKED" and any("delivery.staging_target (proyek" in r and "MISSING" in r
+                                               for r in staging.reasons), staging.reasons
     # a recorded company authorisation (policy module) is the only thing that opens the integration flag
     from aeos.policy import facade as policy
 

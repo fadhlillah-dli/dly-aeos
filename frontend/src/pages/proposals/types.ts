@@ -17,6 +17,8 @@ export interface ProposalRow {
   baseline_hash: string | null;
   candidate_hash: string | null;
   candidate_pin: string | null;
+  /** §25: structured sha256 of the candidate artifact (null = not recorded) */
+  candidate_digest?: string | null;
   reviewed_at: string | null;
   created_at: string | null;
   parts_count: number;
@@ -111,6 +113,10 @@ export interface RemovalItem {
   status: "OPEN" | "CLOSED" | "WAIVED";
   note: string;
   evidence_id: string | null;
+  /** identity/credential items: the exact secret reference ('aeos secrets delete' accepts it); null = a description. */
+  secret_ref?: string | null;
+  /** components (or "komponen domain lain") that still use the reference: SHARED when non-empty. */
+  shared_with?: string[];
 }
 
 export interface AcceptanceCriterion {
@@ -254,6 +260,8 @@ export interface ReviewPackage {
   experiment_plan: Record<string, unknown> & { type: string; pins?: Record<string, string | null> };
   replacement_plan: Record<string, unknown> | null;
   removal_plan?: { items: RemovalItem[]; open: string[]; status: string; rule: string } | null;
+  /** §40 W6-201 REPLACE/UPGRADE: per exact secret reference of the replaced component, revoked or kept (progress). */
+  credential_revocation?: { items: RemovalItem[]; open: string[]; status: string; rule: string } | null;
   upgrade_delta?: { components: Record<string, unknown>[]; source: string } | null;
   security_privacy?: SecurityPrivacy;
   review_contributors?: { role: string; performed_by: string }[];
@@ -318,7 +326,13 @@ export interface Timeline {
   outcome_history: OutcomeEntry[];
   before_after: {
     before: { baseline_hash: string | null; components: { component_id: string; name?: string; approved_pin?: string; status: string }[] };
-    after: { candidate_hash: string | null; candidate_pin: string | null; accepted_configuration: Record<string, unknown> | null } | null;
+    after: {
+      candidate_hash: string | null;
+      candidate_pin: string | null;
+      /** §25: the structured candidate digest compared at ACCEPTED (null = not recorded) */
+      candidate_digest?: string | null;
+      accepted_configuration: Record<string, unknown> | null;
+    } | null;
     status: string;
     note: string | null;
     snapshots: { before: { label: string; snapshot_hash: string } | null; after: { label: string; snapshot_hash: string } | null };

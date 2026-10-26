@@ -3,7 +3,9 @@
 Other modules read who is acting (``Principal``, resolved by ``aeos.api.deps``) and whether the first
 SUPER_ADMIN exists; the Readiness Doctor verifies stored password hashes against known defaults and exercises
 the login flow in its own throw-away probe database. Sessions, CSRF, lockout, recovery and the password policy
-stay internal to identity and are never reached through another module.
+stay internal to identity and are never reached through another module - with one additive exception (wave 7): the
+verifier's tamper neutralisation revokes every session of an account it found forged or modified
+(``revoke_all_sessions``).
 """
 
 from __future__ import annotations
@@ -14,7 +16,8 @@ from aeos.core.enums import Role
 from aeos.identity.service import Principal
 from aeos.models.identity import User
 
-__all__ = ["Principal", "bootstrap_admin", "bootstrap_complete", "create_user", "verify_password"]
+__all__ = ["Principal", "bootstrap_admin", "bootstrap_complete", "create_user", "revoke_all_sessions",
+           "verify_password"]
 
 
 def bootstrap_complete(session: Session) -> bool:
@@ -45,3 +48,11 @@ def create_user(session: Session, *, username: str, password: str, role: Role, d
 
     return impl(session, username=username, password=password, role=role, display_name=display_name, actor=actor,
                 must_change_password=must_change_password)
+
+
+def revoke_all_sessions(session: Session, user_id: str, *, reason: str) -> int:
+    """Revoke every live server-side session of *user_id* (additive, wave 7: the verifier's neutralisation of a
+    forged or modified account, aeos.verification.neutralize). Returns how many were revoked; does not commit."""
+    from aeos.identity.service import revoke_all_sessions as impl
+
+    return impl(session, user_id, reason=reason)

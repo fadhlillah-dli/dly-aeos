@@ -95,3 +95,32 @@ from an evaluation result.
 * **Domain-first for cases and comparisons.** A failure (evidence/run/alert), case candidate or proposal bound
   to a domain is visible only from that explicitly chosen domain - never from a session without an active domain
   (NotFound, checked before any state is revealed).
+
+### Amendment 2026-10-25 (wave 7, W6-121 / W6-141 / W6-142)
+
+* **Critical regressions come from the verifier baseline (§34).** The collector derives a sample's
+  `critical_regressions` from the trusted `VERIFICATION_REPORT` of every verified implementation attempt (the
+  baseline check: trusted tests that pass on the recorded base and fail on the head), as distinct tests across
+  attempts - a later repair does not redeem a regression (`regressions_by_attempt` shows each attempt). It is
+  `None` (UNKNOWN, in `unknown_fields`) when a verified attempt has no trusted report or its baseline did not run
+  and no regression is proven. A run whose samples state the measure but could not establish it has
+  `outcome.critical_regressions = None` (`critical_regressions_unknown_samples` > 0) and is
+  `EXCLUDED_REGRESSION_NOT_PROVEN` - never ranked as regression-free. The acceptance reasons
+  "non-regression <key> is missing" (a review that did not argue a dimension) are a separate review-coverage
+  measure, `non_regression_unargued` (`oversight`), never a regression.
+* **Executed configuration, not stated (review, wave 7).** `start_run` refuses a run whose AIConfiguration states a
+  `model_id`/`provider` other than its route's, or a policy version/prompt revision/harness other than the one the
+  route is bound to (`EVAL_CONFIGURATION_MISMATCH`; UNKNOWN states nothing). Each collected sample records
+  `context_memory_ids`: the memory records in the hash-checked context pack each attempt actually used (None when
+  no attempt recorded one) - the only evidence a memory acceptance binds to (ADR-0041 amendment).
+* **Still not produced (stated UNKNOWN):** `adjacent_regressions` (the baseline check does not split regressed
+  tests into critical/adjacent, so every one counts critical), `merge_conflicts` (no record observes PR
+  mergeability) and `coordination_tokens` (the supervisor bridge's usage ledger is not linked to a task).
+* **Controlled execution path per route pool.** `start_run` refuses (`EVAL_ROUTE_NOT_SERVED`, with the reason) an
+  evaluation whose route has no controlled execution path: COMPARATOR/LOCAL/WATCHLIST in this build, and an ARENA
+  route that fails the eval-only checks (PERSONAL only, TRIAL/APPROVED on a hash-bound decision, free, terms
+  allowing the suite's workload classification). Run views show `execution.serving` (`BROKER` | `EVAL_ONLY` |
+  `NONE`). A TaskSpec bound to a slot of a RUNNING run is routed to exactly the evaluated route (no ranking, no
+  fallback: `EVAL_NO_FALLBACK`); an ARENA route serves only such tasks (eval-scoped broker grant, ADR-0111
+  amendment). A bound task whose route cannot serve it is refused (`EVAL_ROUTE_NOT_SERVED` /
+  `EVAL_ROUTE_NOT_ELIGIBLE`) instead of running elsewhere and producing an INVALID sample.

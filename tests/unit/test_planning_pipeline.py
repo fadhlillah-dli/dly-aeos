@@ -301,25 +301,50 @@ def test_office_plan_blocked_by_policy_even_when_capability_ready(db, owner, mon
     assert bridge.calls == []
 
 
-def test_office_plan_runs_with_capability_and_company_authorisation(db, owner, monkeypatch, tmp_path):
-    from aeos.doctor import facade as doctor
+def _company_authorisation(db, owner, *, data_classes):
     from aeos.policy import decisions as registry
 
-    monkeypatch.setattr(doctor, "capability_state",
-                        lambda s, c, domain=None, project_id=None, **_kw: doctor.CapabilityState(
-                            capability=c, status="READY"))
     registry.record_decision(
         db, kind="POLICY", actor_user_id=owner.id, target_type="office_policy", target_id="OFFICE", domain="OFFICE",
         allowed_operations=[], auth_scope={"company": "ACME"}, rationale="company approval letter ref X",
         details={"office_authorization": True, "company_reference": "letter-1", "allowed_providers": ["confluence"],
+                 "approved_data_classes": list(data_classes),
                  "office_policy": {"claude_max_allowed_for_office_data": True}})
     db.commit()
+
+
+def test_office_plan_runs_with_capability_and_company_authorisation(db, owner, monkeypatch, tmp_path):
+    from aeos.doctor import facade as doctor
+
+    monkeypatch.setattr(doctor, "capability_state",
+                        lambda s, c, domain=None, project_id=None, **_kw: doctor.CapabilityState(
+                            capability=c, status="READY"))
+    _company_authorisation(db, owner, data_classes=["INTERNAL"])
     bridge = FakeBridge(monkeypatch, tmp_path)
     plan = _plan(db, owner, domain=Domain.OFFICE)
     service.run_pipeline(db, plan.id, actor=owner.id)
     db.refresh(plan)
     assert plan.state == "READY_FOR_HUMAN_REVIEW" and len(bridge.calls) == 4
     assert all(c.domain == "OFFICE" for c in bridge.calls)
+
+
+@pytest.mark.parametrize("data_classes", [[], ["PUBLIC"]])
+def test_office_plan_of_a_data_class_the_company_did_not_approve_is_blocked(db, owner, monkeypatch, tmp_path,
+                                                                           data_classes):
+    """W6-157: Claude Max may be approved for OFFICE data, but only for the data classes the company approved; an
+    INTERNAL project with none / only PUBLIC approved never reaches the model (approved_data_classes, §51 P1)."""
+    from aeos.doctor import facade as doctor
+
+    monkeypatch.setattr(doctor, "capability_state",
+                        lambda s, c, domain=None, project_id=None, **_kw: doctor.CapabilityState(
+                            capability=c, status="READY"))
+    _company_authorisation(db, owner, data_classes=data_classes)
+    bridge = FakeBridge(monkeypatch, tmp_path)
+    plan = _plan(db, owner, domain=Domain.OFFICE)
+    with pytest.raises(Blocked) as exc:
+        service.run_pipeline(db, plan.id, actor=owner.id)
+    assert any(r.startswith("OFFICE_POLICY_DATA_CLASS") for r in exc.value.details["reasons"])
+    assert bridge.calls == []
 
 
 def test_attachment_injection_does_not_change_domain_or_goal(db, owner, monkeypatch, tmp_path):

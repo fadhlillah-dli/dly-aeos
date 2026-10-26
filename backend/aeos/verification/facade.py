@@ -54,6 +54,14 @@ def acceptance_is_valid(
     return impl(session, task_id, base_commit=base_commit, config_hash=config_hash, plan_version_hash=plan_version_hash)
 
 
+def project_test_baseline(session: Session, project_id: str, commit: str | None) -> dict[str, Any]:
+    """§05 step 6: the latest trusted project test baseline at *commit* (status, evidence id, suite identity,
+    passed/failed/skipped, failing sample), else ``{"status": "NOT_RUN", "reason": ...}`` (additive, wave 7)."""
+    from aeos.verification.project_baseline import baseline_summary as impl
+
+    return impl(session, project_id, commit)
+
+
 def verifier_runner_status(session: Session, *, domain: str) -> dict[str, Any]:
     """Which runner the verifier executes candidate code in for *domain* now (§20 "isolated runner"):
     ``isolation`` CONTAINER on a host with a proven container boundary + the verifier image, else WEAK, with the
@@ -61,3 +69,17 @@ def verifier_runner_status(session: Session, *, domain: str) -> dict[str, Any]:
     from aeos.verification.runner import runner_status as impl
 
     return impl(session, domain=domain)
+
+
+def trust_table_window(engine: Any) -> Any:
+    """Open a DB trust-table tamper window (``aeos.verification.tamper.Window``) on *engine*: row digests of the
+    control-plane trust tables + the SQLite schema now; ``close()`` returns ``{"status": PASS|FAIL|UNKNOWN,
+    "foreign": [{table, id, change}], "tolerated": [...], ...}`` - writes made by THIS process in between are
+    journaled as its own, and the broker/session bookkeeping another AEOS process does for the run (grant usage
+    growing, revocation) is ``tolerated`` (``tamper.CROSS_PROCESS_TOLERATED``), never foreign; a session's
+    last_seen_at is not compared at all (``tamper._VOLATILE_COLUMNS``). On ``capability_grants`` (``tamper.CROSS_PROCESS_STRICT``) this process's own writes never mask a
+    forged cap or a forged grant row. Used by the worker runtime around WEAK process-sandbox runs (additive wave 7,
+    W6-005/W6-029)."""
+    from aeos.verification.tamper import CROSS_PROCESS_STRICT, CROSS_PROCESS_TOLERATED, Window
+
+    return Window(engine, tolerate=CROSS_PROCESS_TOLERATED, strict=CROSS_PROCESS_STRICT)

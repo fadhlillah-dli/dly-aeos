@@ -168,7 +168,7 @@ def host_resource_budget(ctx: CheckContext) -> Outcome:
                        target_identity=f"{evidence['os']}/{evidence['arch']}", remedy=budget_remedy())
     return Outcome("VERIFIED", f"{evidence['os']} {evidence['arch']}, {evidence['cpu_count']} CPU, RAM "
                    f"{evidence.get('ram_total_gib')} GiB memenuhi budget pemilik (max_parallel_workers "
-                   f"{budget.get('max_parallel_workers') or 'UNKNOWN'}; belum dipakai scheduler).", evidence=evidence,
+                   f"{budget.get('max_parallel_workers') or 'UNKNOWN'}; batas atas worker aktif scheduler).", evidence=evidence,
                    target_identity=f"{evidence['os']}/{evidence['arch']}")
 
 

@@ -99,8 +99,21 @@ def _stream(client: AuthedClient, app: Any, last_event_id: int | None) -> list[d
 # ---------------------------------------------------------------------------------------------- 1.40
 def test_compliance_is_never_claimed_from_templates_or_green_scanners(personal_client: AuthedClient, db, host,
                                                                       monkeypatch, tmp_path):
+    import shutil
+
     from aeos.policy import snapshot
 
+    # The owner's live policy/mci-reference.yaml turns VERIFIED once MCI_V2 is supplied, so the not-supplied case runs
+    # on an isolated controller policy/ (the real policy files, MCI_V2 not supplied); the Doctor row below reads the
+    # live file and holds in every state.
+    template = tmp_path / "policy"
+    template.mkdir()
+    for p in sorted((Path(repo_root()) / "policy").glob("*.yaml")):
+        shutil.copyfile(p, template / p.name)
+    (template / "mci-reference.yaml").write_text(
+        "mci:\n  name: MCI_V2_SOURCE_OF_TRUTH\n  status: UNAVAILABLE\n  version: null\n  content_hash: null\n"
+        "  location: null\npacks: [SEC/GRC, AI-GOV]\n", encoding="utf-8")
+    monkeypatch.setattr(snapshot, "policy_dir", lambda: template)
     seed_catalog(db)
     mci = _ok(personal_client.get("/api/policy/mci"))
     assert (mci["status"], mci["compliance"], mci["packs_mapping_status"]) == ("UNVERIFIED", "NOT-PROVEN", "UNVERIFIED")
@@ -111,13 +124,18 @@ def test_compliance_is_never_claimed_from_templates_or_green_scanners(personal_c
     checks = {c["check_id"]: c for c in _ok(personal_client.get("/api/doctor/checks"))["items"]}
     assert checks["policy.mci"]["effective_status"] not in ("VERIFIED", "READY", "PASS")
     # a template that *claims* VERIFIED compliance: a wrong hash stays UNVERIFIED ...
-    template = tmp_path / "policy"
-    template.mkdir()
+    # (the canonical source is read from this machine only - the repository is public - so the claim names a
+    # placeholder in this test's own <data dir>/policy/canonical, never the owner's)
+    from aeos.core.config import get_settings
+
+    source = get_settings().layout.canonical_policy / "MCI_V2_SOURCE_OF_TRUTH.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"# placeholder, not MCI content\n")
 
     def claim(content_hash: str) -> None:
         (template / "mci-reference.yaml").write_text(
             "mci:\n  name: MCI_V2_SOURCE_OF_TRUTH\n  status: VERIFIED\n  version: '2'\n"
-            f"  content_hash: '{content_hash}'\n  location: policy/mci-reference.yaml\n"
+            f"  content_hash: '{content_hash}'\n  location: local:MCI_V2_SOURCE_OF_TRUTH.md\n"
             "  note: 'template says: fully compliant, all scanners green'\n"
             "packs: [SEC/GRC, AI-GOV]\n", encoding="utf-8")
 
@@ -127,7 +145,7 @@ def test_compliance_is_never_claimed_from_templates_or_green_scanners(personal_c
     assert mci["declared_status"] == "VERIFIED" and mci["status"] == "UNVERIFIED"
     assert "hash mismatch" in mci["verification_note"] and mci["compliance"] == "NOT-PROVEN"
     # ... and even a hash-matching reference proves the source, never compliance or the pack mapping
-    claim(file_sha256(Path(repo_root()) / "policy" / "mci-reference.yaml"))
+    claim(file_sha256(source))
     mci = _ok(personal_client.get("/api/policy/mci"))
     assert mci["status"] == "VERIFIED"
     assert mci["compliance"] == "NOT-PROVEN" and mci["packs_mapping_status"] == "UNVERIFIED"

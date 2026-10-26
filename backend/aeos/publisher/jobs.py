@@ -50,11 +50,8 @@ from aeos.core.hashing import content_hash
 from aeos.core.paths import UnsafePathError, ensure_within
 from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
-from aeos.docs_engine import product1 as p1
-from aeos.docs_engine import renderer as rnd
-from aeos.docs_engine import service as docs_service
-from aeos.docs_engine.docx import markdown_to_docx
-from aeos.docs_engine.plan_content import as_text, build_view, feature_slug
+from aeos.docs_engine import facade as docs
+from aeos.docs_engine.facade import as_text, build_view, feature_slug, markdown_to_docx
 from aeos.events import service as events
 from aeos.models.decisions import ArchitectureSnapshot
 from aeos.models.planning import Plan, PlanVersion, TaskSpec
@@ -176,8 +173,10 @@ def approval_decision(session: Session, version: PlanVersion, *, for_publication
 def _blocking_checks(state: Any) -> list[str]:
     """Checks whose OBSERVED result blocks the gate (§08 "operasi dengan dependency critical gagal tidak
     dijalankan"): a critical check that ran and is not ok (FAILED, MISSING, ...), a required/guard check that
-    FAILED, or a critical/required check invalidated (STALE) after it passed. Never-run (UNKNOWN) and TTL-EXPIRED
-    results are not observations of failure: they make the gate UNKNOWN and stay advisory (owner decision,
+    FAILED, a critical/required check invalidated (STALE) after it passed, or a project-tier check of this project's
+    own target (e.g. ``adapter.project_drive_root``) that FAILED/MISSING or went STALE (Drive root changed, token
+    invalidated: §08 "memicu recheck sebelum capability tersebut digunakan kembali"). Never-run (UNKNOWN) and
+    TTL-EXPIRED results are not observations of failure: they make the gate UNKNOWN and stay advisory (owner decision,
     ADR-0094 - enforcing them changes the protected acceptance publication fixtures)."""
     out = []
     for c in state.checks or []:
@@ -189,7 +188,8 @@ def _blocking_checks(state: Any) -> list[str]:
         # Never-run (None/UNKNOWN) and TTL-EXPIRED results carry no new information and stay advisory (ADR-0094).
         if (c.get("tier") == "critical" and eff not in (None, "UNKNOWN", "EXPIRED")) or \
                 (c.get("tier") == "required" and eff in ("FAILED", "STALE")) or \
-                (c.get("tier") == "guard" and eff == "FAILED"):
+                (c.get("tier") == "guard" and eff == "FAILED") or \
+                (c.get("tier") == "project" and eff in ("FAILED", "MISSING", "STALE")):
             out.append(str(c.get("check_id")))
     if state.status == "BLOCKED" and not out:  # e.g. a policy gate reason without a single check row
         out.append(str(getattr(state.capability, "value", state.capability) or "gate"))
@@ -230,9 +230,10 @@ def publish_gate(session: Session, project_id: str, domain: str) -> dict[str, An
                       code="CAPABILITY_NOT_READY") from exc
     return {"capability": "CAN_PUBLISH_PERSONAL", "status": state.status, "reasons": list(state.reasons[:8]),
             "failed_checks": _blocking_checks(state), "remedies": list(state.remedies[:5]),
-            "enforcement": "observed failing/missing checks and checks invalidated since they passed (STALE) refuse "
-                           "execute/retry; never-run (UNKNOWN) or TTL-expired results are advisory until the owner "
-                           "adopts full READY enforcement (ADR-0094; the interlock enforces every write)",
+            "enforcement": "observed failing/missing checks and checks invalidated since they passed (STALE), including "
+                           "this project's own targets (project tier), refuse execute/retry; never-run (UNKNOWN) or "
+                           "TTL-expired results are advisory until the owner adopts full READY enforcement (ADR-0094; "
+                           "the interlock enforces every write)",
             "full_ready_enforcement": "OWNER_DECISION_PENDING"}
 
 
@@ -346,7 +347,7 @@ def _published_body(session: Session, rec: DocumentRecord | None, ref: ExternalR
 def _human_guard(session: Session, rec: DocumentRecord | None, ref: ExternalReference,
                  doc_type: str) -> dict[str, Any] | None:
     """§29: an update never deletes HUMAN_GOVERNED content a human wrote in the official document."""
-    spec = p1.DOC_TYPES.get(doc_type)
+    spec = docs.DOC_TYPES.get(doc_type)
     if spec is None:
         return None
     possible = _acknowledged_human_edit(session, rec) or bool(((rec.links or {}) if rec else {}).get(
@@ -363,7 +364,7 @@ def _acknowledged_human_edit(session: Session, rec: DocumentRecord | None) -> bo
         DocumentRevision.status == "ACKNOWLEDGED").limit(1)) is not None
 
 
-def _doc_ops(session: Session, project: Project, version: PlanVersion, result: rnd.RenderResult,
+def _doc_ops(session: Session, project: Project, version: PlanVersion, result: docs.RenderResult,
              target: Target) -> list[PlannedOp]:
     family = target.family
     # One provider per target (aeos.portfolio.providers): Google Docs are files in the project's Drive folder,
@@ -390,7 +391,7 @@ def _doc_ops(session: Session, project: Project, version: PlanVersion, result: r
             ops.append(op)
             continue
         rec = records.get(doc.logical_doc_id)
-        body = docs_service.document_body(session, project.id, doc)
+        body = docs.document_body(session, project.id, doc)
         chash = doc.content_hash or (rec.content_hash if rec else None) or content_hash({"markdown": body})
         used = sorted(k for k in visuals if f"(visual:{k})" in body)
         rendered = [k for k in used if visuals[k].status == "RENDERED" and visuals[k].png_path]
@@ -501,7 +502,7 @@ def superseded_body(rec: DocumentRecord, version: PlanVersion) -> str:
     return "\n".join([*lines[:head], "", banner, "", *lines[head:]]).rstrip() + "\n"
 
 
-def _superseded_ops(session: Session, project: Project, version: PlanVersion, result: rnd.RenderResult,
+def _superseded_ops(session: Session, project: Project, version: PlanVersion, result: docs.RenderResult,
                     target: Target, records: dict[str, DocumentRecord]) -> list[PlannedOp]:
     """A document dropped by a newer approved version is marked SUPERSEDED at the provider too (update under
     the same revision/conflict rules; nothing is deleted)."""
@@ -509,7 +510,7 @@ def _superseded_ops(session: Session, project: Project, version: PlanVersion, re
     ident = target.identity()
     out: list[PlannedOp] = []
     for lid, rec in sorted(records.items()):
-        if lid in current or rec.status != rnd.ST_SUPERSEDED or rec.kind != "DOC":
+        if lid in current or rec.status != docs.ST_SUPERSEDED or rec.kind != "DOC":
             continue
         # §29: a document last published as a DOCX snapshot gets the banner on that snapshot document too.
         snap_lid = str(((rec.links or {}).get("snapshot") or {}).get("logical_id") or "")
@@ -520,7 +521,7 @@ def _superseded_ops(session: Session, project: Project, version: PlanVersion, re
             body = superseded_body(rec, version)
             chash = content_hash({"markdown": body})
             payload: dict[str, Any] = {"markdown": body, "content_hash": chash, "doc_type": rec.doc_type,
-                                       "status": rnd.ST_SUPERSEDED, "superseded": True, "rendered_visuals": [],
+                                       "status": docs.ST_SUPERSEDED, "superseded": True, "rendered_visuals": [],
                                        "visual_paths": {}, "visual_titles": {}}
             guard = _human_guard(session, rec, ref, rec.doc_type)
             if guard:
@@ -666,8 +667,8 @@ def create_preview(session: Session, settings: Settings, *, plan_id: str, actor_
         raise Conflict("plan/version domain differs from the project's human-chosen domain", code="DOMAIN_MISMATCH")
     decision = approval_decision(session, version)
 
-    result, delta, state = docs_service.render_version(session, settings, version, persist=True,
-                                                       render_visuals=render_visuals, decision_id=decision.id)
+    result, delta, state = docs.render_version(session, settings, version, persist=True,
+                                               render_visuals=render_visuals, decision_id=decision.id)
     if not state.approved:  # defensive: approval changed between lookups
         raise Conflict(state.reason or "version not approved", code="PLAN_NOT_APPROVED")
     requested = options.get("targets")
@@ -804,8 +805,8 @@ def create_preview(session: Session, settings: Settings, *, plan_id: str, actor_
                      "disetujui. Bila bagian HUMAN_GOVERNED tidak dapat ditemukan, update ditolak (CONFLICT): "
                      + ", ".join(acked[:10]))
     persisted = list(session.scalars(select(DocumentRecord).where(DocumentRecord.project_id == project.id)))
-    readiness = {stage.value: p1.required_pending(persisted, stage)
-                 for stage in (p1.Timing.PROJECT_CREATION, p1.Timing.FEATURE_APPROVAL)}
+    readiness = {stage.value: docs.required_pending(persisted, stage)
+                 for stage in (docs.Timing.PROJECT_CREATION, docs.Timing.FEATURE_APPROVAL)}
     gaps = [f"{x['title']}: {', '.join(x['sections'])}" for items in readiness.values() for x in items]
     if gaps:
         notes.append(f"{len(gaps)} dokumen masih 'documentation pending' pada bagian yang wajib untuk tahap project "
@@ -1223,8 +1224,8 @@ def _record_success(run: _Run, op: PublicationOperation, res: OpResult) -> None:
         rec = s.scalar(select(DocumentRecord).where(DocumentRecord.project_id == pub.project_id,
                                                     DocumentRecord.logical_doc_id == snapshot_of))
         if rec is not None:
-            if rec.status == rnd.ST_APPROVED:
-                rec.status = rnd.ST_PUBLISHED
+            if rec.status == docs.ST_APPROVED:
+                rec.status = docs.ST_PUBLISHED
             rec.last_synced_at = now
             rec.links = {**(rec.links or {}), "external_url": res.external_url, "external_id": res.external_id,
                          "external_provider": ref_provider, "visual_update_pending": False,
@@ -1240,8 +1241,8 @@ def _record_success(run: _Run, op: PublicationOperation, res: OpResult) -> None:
             # Only an APPROVED document becomes PUBLISHED. A DRAFT of an approved version (an operations proposal
             # before production-validation evidence, a change record before its acceptance) stays DRAFT although
             # its text is now in the official folder: publishing never finalises it (§19, §27, §28).
-            if rec.status == rnd.ST_APPROVED:
-                rec.status = rnd.ST_PUBLISHED
+            if rec.status == docs.ST_APPROVED:
+                rec.status = docs.ST_PUBLISHED
             rec.external_revision = res.external_revision
             rec.last_synced_at = now
             kept = (res.response or {}).get("human_sections_kept") or {}
@@ -1275,9 +1276,9 @@ def _record_success(run: _Run, op: PublicationOperation, res: OpResult) -> None:
         proj.sync_status = "SYNCED"
         feature = feature_slug(tgt.get("feature_key"))
         if feature:  # §27 per-document links to the issues of the feature (reference, not a status copy)
-            docs = s.scalars(select(DocumentRecord).where(DocumentRecord.project_id == pub.project_id,
-                                                          DocumentRecord.doc_type.in_(("PRD", "TEST_PLAN"))))
-            for doc in docs:
+            feature_docs = s.scalars(select(DocumentRecord).where(DocumentRecord.project_id == pub.project_id,
+                                                                  DocumentRecord.doc_type.in_(("PRD", "TEST_PLAN"))))
+            for doc in feature_docs:
                 if feature not in ((doc.links or {}).get("requirement") or []):
                     continue
                 issues = [i for i in (doc.links or {}).get("issues", []) if i.get("issue_id") != res.external_id]

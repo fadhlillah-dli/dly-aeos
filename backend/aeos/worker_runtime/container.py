@@ -1,7 +1,8 @@
 """Container sandbox for workers (§11 "lingkungan per tugas dalam container", §25 minimum controls, ADR-0051).
 
 What this module does (software implemented; NOT_PROVEN on a host until the containment suite below
-passes there - Docker was not installed on the build host, so nothing here has run against a real daemon):
+passes there - on the build host, Windows 11 + Docker 29.8.2, the acceptance containment test passed against the
+real daemon on 2026-10-26; admission still reads only the owner's recorded report):
 
 * ``image_status`` - the pinned worker image ``dly-aeos-worker:<opencode pin>`` built from
   ``sandbox/Dockerfile`` (never auto-built or pulled: the owner builds it, §07 no auto-install).
@@ -85,9 +86,11 @@ def profile_for(domain: str) -> Profile:
 
 
 def image_tag() -> str:
-    from aeos.worker_runtime.opencode import PINNED_VERSION
+    """``dly-aeos-worker:<opencode pin>``: the owner-approved install-manifest pin when set, else the labelled
+    runtime default (``opencode.resolve_pin``) - never a constant the reviewed manifest cannot change."""
+    from aeos.worker_runtime.opencode import pinned_version
 
-    return f"{IMAGE_REPOSITORY}:{PINNED_VERSION}"
+    return f"{IMAGE_REPOSITORY}:{pinned_version()}"
 
 
 def docker_cmd() -> list[str] | None:
@@ -123,17 +126,46 @@ def _err(proc: subprocess.CompletedProcess[str]) -> str:
 
 
 # ----------------------------------------------------------------------------- image / network / gateway
+OPENCODE_VERSION_LABEL = "aeos.opencode_version"  # set by sandbox/Dockerfile from the OPENCODE_VERSION build arg
+
+
+def image_build_command() -> str:
+    """The build of the worker image for the resolved OpenCode pin: the build arg AND the tag carry the pin (a bare
+    ``docker build -t dly-aeos-worker:<pin>`` would install the Dockerfile's default engine under the pin's tag)."""
+    from aeos.worker_runtime.opencode import pinned_version
+
+    pin = pinned_version()
+    return f"docker build --build-arg OPENCODE_VERSION={pin} -t {IMAGE_REPOSITORY}:{pin} sandbox/"
+
+
 def image_status() -> dict[str, Any]:
     tag = image_tag()
+    pin = tag.rsplit(":", 1)[-1]
     try:
-        proc = run_docker(["image", "inspect", "--format", "{{.Id}}", tag], timeout=30)
+        # the whole Config as JSON: a template on .Config.Labels fails outright when an image has no labels
+        proc = run_docker(["image", "inspect", "--format", "{{.Id}}|{{json .Config}}", tag], timeout=30)
     except ContainerError as exc:
         return {"tag": tag, "present": False, "id": None, "evidence": exc.message}
-    image_id = (proc.stdout or "").strip()
+    image_id, _sep, config_json = (proc.stdout or "").strip().partition("|")
+    image_id = image_id.strip()
+    try:
+        config = json.loads(config_json) if config_json.strip() else {}
+    except ValueError:
+        config = {}
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    label = str((labels if isinstance(labels, dict) else {}).get(OPENCODE_VERSION_LABEL) or "").strip()
     if proc.returncode != 0 or not image_id:
         return {"tag": tag, "present": False, "id": None,
-                "evidence": f"image {tag} not built on this host (docker build -t {tag} sandbox/)"}
-    return {"tag": tag, "present": True, "id": image_id, "evidence": f"image {tag} present"}
+                "evidence": f"image {tag} not built on this host ({image_build_command()})"}
+    if label and label.lstrip("v") != pin:
+        # the tag claims the pin but the image was built with another engine: never run it as the pinned one
+        return {"tag": tag, "present": False, "id": image_id, "opencode_version": label,
+                "evidence": f"image {tag} was built with OpenCode {label}, not the pin {pin}; rebuild it "
+                            f"({image_build_command()})"}
+    return {"tag": tag, "present": True, "id": image_id, "opencode_version": label or None,
+            "evidence": f"image {tag} present" + ("" if label else
+                                                  " (no OpenCode version label: built before the label existed; "
+                                                  "the tag is the only version claim)")}
 
 
 def ensure_network(profile: Profile) -> dict[str, Any]:
@@ -211,6 +243,88 @@ def ensure_gateway(profile: Profile, *, broker_port: int, image: str) -> dict[st
 
 def broker_url(profile: Profile) -> str:
     return f"http://{profile.gateway}:{GATEWAY_PORT}/broker/v1"
+
+
+# ----------------------------------------------------------------------------- granted shell: AEOS runner (§42)
+# §42 "output command ringkas ... simpan log asli": when a TaskSpec grants a shell (container sandbox only), every
+# allowed command runs through this fixed runner (OpenCode ``bash`` permission patterns allow ONLY
+# ``node /aeos/aeos-run.js <command>``). It tees the complete stdout+stderr to a per-command log in the worktree
+# (``.aeos/cmdlog/``; the runtime takes those logs out of the candidate and stores them as untrusted evidence) and
+# returns a bounded head/tail to the engine context. Written into the per-run config dir (mounted read-only at
+# /aeos), so it needs no image rebuild. It is a compaction/retention convention, not a security boundary (the
+# container is): a compound command could keep part of its output out of the runner, never out of the sandbox.
+# The runner starts exactly ONE program with the argv the engine's shell gave it - never through a shell (review
+# wave 7: joining the arguments into ``sh -c`` re-interpreted quoted metacharacters, so a pattern grant such as
+# ``bash:npm test*`` would have run ``node /aeos/aeos-run.js npm test '; curl ...'`` as a second command). The
+# permission pattern therefore restricts exactly what runs, as it did without the runner.
+SHELL_RUNNER_FILE = "aeos-run.js"
+SHELL_RUNNER_COMMAND = f"node {CONTAINER_CONFIG}/{SHELL_RUNNER_FILE}"
+COMMAND_LOG_DIR = ".aeos/cmdlog"  # relative to the worktree
+RUNNER_HEAD_LINES = 40
+RUNNER_TAIL_LINES = 80
+RUNNER_MAX_LINE_CHARS = 400
+SHELL_RUNNER_JS = r"""
+'use strict';
+// AEOS shell runner (master s42): runs ONE program with its arguments exactly as given (no shell: quoting and
+// metacharacters are never re-interpreted), keeps the complete output and prints a bounded head/tail.
+const {spawn} = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const HEAD = __HEAD__, TAIL = __TAIL__, MAXLINE = __MAXLINE__;
+const args = process.argv.slice(2);
+if (!args.length) { process.stderr.write('aeos-run: usage: node /aeos/aeos-run.js <program> [args...]\n'); process.exit(2); }
+const dir = process.env.AEOSRUN_LOG_DIR || '__WORKTREE__/__LOGDIR__';
+fs.mkdirSync(dir, {recursive: true});
+const name = Date.now() + '-' + process.pid + '.log';
+const logPath = path.join(dir, name);
+const fd = fs.openSync(logPath, 'w');
+fs.writeSync(fd, '$ ' + JSON.stringify(args) + '\n');
+const head = [], tail = [];
+let total = 0;
+const partial = {out: '', err: ''};
+const line = (l) => {
+  total += 1;
+  const s = l.length > MAXLINE ? l.slice(0, MAXLINE) + ' [line truncated]' : l;
+  if (head.length < HEAD) { head.push(s); } else { tail.push(s); if (tail.length > TAIL) tail.shift(); }
+};
+const feed = (key) => (buf) => {
+  fs.writeSync(fd, buf);
+  const parts = (partial[key] + buf.toString('utf8')).split('\n');
+  partial[key] = parts.pop();
+  parts.forEach(line);
+};
+const child = spawn(args[0], args.slice(1), {stdio: ['ignore', 'pipe', 'pipe'], env: process.env, shell: false});
+child.stdout.on('data', feed('out'));
+child.stderr.on('data', feed('err'));
+let failed = null, done = false;
+const finish = (code, signal) => {
+  if (done) return;
+  done = true;
+  for (const k of ['out', 'err']) { if (partial[k]) line(partial[k]); }
+  if (failed) fs.writeSync(fd, '\n[aeos-run: could not start the command: ' + failed.code + ']\n');
+  fs.writeSync(fd, '\n[aeos-run: exit ' + (signal ? 'signal ' + signal : code) + ']\n');
+  fs.closeSync(fd);
+  const omitted = total - head.length - tail.length;
+  const out = [...head];
+  if (omitted > 0) out.push('[aeos-run: ' + omitted + ' line(s) omitted; the full output is kept in __LOGDIR__/' + name +
+                            ' and collected by the AEOS runtime as evidence]');
+  out.push(...tail);
+  out.push('[aeos-run: exit ' + (signal ? 'signal ' + signal : code) + ', ' + total + ' line(s) of output]');
+  process.stdout.write(out.join('\n') + '\n', () => process.exit(failed ? 127 : (code === null ? 128 : code)));
+};
+// 'close' follows 'error' when the program could not be started; the timer only guards against a missing one
+child.on('error', (e) => { failed = e; setTimeout(() => finish(null, null), 200); });
+child.on('close', finish);
+""".replace("__HEAD__", str(RUNNER_HEAD_LINES)).replace("__TAIL__", str(RUNNER_TAIL_LINES)) \
+    .replace("__MAXLINE__", str(RUNNER_MAX_LINE_CHARS)).replace("__LOGDIR__", COMMAND_LOG_DIR) \
+    .replace("__WORKTREE__", CONTAINER_WORKTREE)
+
+
+def write_shell_runner(config_dir: Path) -> Path:
+    """Place the runner in the per-run config dir (mounted read-only at /aeos inside the worker container)."""
+    path = config_dir / SHELL_RUNNER_FILE
+    path.write_text(SHELL_RUNNER_JS, encoding="utf-8")
+    return path
 
 
 def prepare_launch(settings: Any, *, domain: str) -> dict[str, Any]:
@@ -689,7 +803,7 @@ def containment_report(*, domain: str = Domain.PERSONAL.value) -> dict[str, Any]
     image = image_status()
     base.update(image=image["tag"], image_id=image["id"], docker_server=caps.get("server_version"))
     if not image["present"]:
-        return not_proven(image["evidence"], remedy=f"docker build -t {image['tag']} sandbox/")
+        return not_proven(image["evidence"], remedy=image_build_command())
     try:
         ensure_network(profile)
         ensure_gateway(profile, broker_port=int(settings.port), image=image["tag"])

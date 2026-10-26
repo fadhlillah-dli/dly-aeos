@@ -52,6 +52,41 @@ BASE_ALLOW = ("read", "glob", "grep", "list", "edit", "todowrite")
 ALWAYS_DENY = ("websearch", "task", "skill", "lsp", "question", "external_directory", "doom_loop")
 
 
+PIN_SOURCE_MANIFEST = "install-manifest approved_pin"
+PIN_SOURCE_DEFAULT = "worker runtime default (no approved_pin for opencode in the install-manifest)"
+
+
+def resolve_pin(session: Any = None) -> dict[str, str]:
+    """THE OpenCode pin the runtime holds the engine to (§07 "pins approved by a human"): the owner-approved
+    ``approved_pin`` of component ``opencode`` in the reviewed InstallManifest when set (the seeded
+    ComponentReference with a *session*, else the reviewed manifest file), otherwise the built-in
+    ``PINNED_VERSION`` default, labelled as such. Used by the image tag, the drift flag, the contract test and the
+    image build hint, so an approved pin other than the default is what gets built, run and compared. When the
+    reviewed manifest cannot be read the default is still the runtime's value, but its label says the approved pin
+    is UNKNOWN (never "no approved_pin")."""
+    problem: str | None = None
+    try:
+        from aeos.inventory import facade as inventory
+
+        if session is not None:
+            approved = inventory.approved_pin("opencode", session=session)
+        else:
+            state = inventory.manifest_pin("opencode")
+            approved, problem = state["pin"], state["problem"]
+    except Exception as exc:  # inventory unavailable: the labelled default, never a guessed pin
+        approved, problem = None, f"inventory unavailable ({type(exc).__name__})"
+    if approved:
+        return {"version": approved, "source": PIN_SOURCE_MANIFEST}
+    if problem:
+        return {"version": PINNED_VERSION,
+                "source": f"worker runtime default (install-manifest unreadable: {problem}; the approved pin is UNKNOWN)"}
+    return {"version": PINNED_VERSION, "source": PIN_SOURCE_DEFAULT}
+
+
+def pinned_version(session: Any = None) -> str:
+    return resolve_pin(session)["version"]
+
+
 def exposed_model_id(route_key: str) -> str:
     out = re.sub(r"[^A-Za-z0-9._-]", "-", route_key).strip("-.")[:128] or "route"
     return out
@@ -96,16 +131,18 @@ def opencode_status(configured: str | None = None, *, refresh: bool = False) -> 
             configured = get_settings().opencode_binary
         except Exception:
             configured = None
+    pin = resolve_pin()
     with _status_lock:
         cached = _status_cache["value"]
-        if not refresh and cached is not None and cached.get("_cfg") == configured \
+        if not refresh and cached is not None and cached.get("_cfg") == (configured, pin["version"]) \
                 and time.monotonic() - _status_cache["at"] < STATUS_CACHE_SECONDS:
             return {k: v for k, v in cached.items() if k != "_cfg"}
     checked = utcnow().isoformat()
     binary = resolve_binary(configured)
+    pinned = {"pinned_version": pin["version"], "pin_source": pin["source"]}
     if binary is None:
         value: dict[str, Any] = {
-            "status": "MISSING", "binary": None, "version": None, "pinned_version": PINNED_VERSION,
+            "status": "MISSING", "binary": None, "version": None, **pinned,
             "checked_at": checked, "functional": "NOT_PROVEN",
             "evidence": "opencode not found (set AEOS_OPENCODE_BINARY or install the pinned version)",
         }
@@ -118,29 +155,35 @@ def opencode_status(configured: str | None = None, *, refresh: bool = False) -> 
                 ok = proc.returncode == 0 and bool(version[0])
                 value = {
                     "status": "INSTALLED" if ok else "FAILED", "binary": str(binary),
-                    "version": version[0] if ok else None, "pinned_version": PINNED_VERSION,
+                    "version": version[0] if ok else None, **pinned,
                     "checked_at": checked, "functional": "NOT_PROVEN",
-                    "drift": bool(ok and version[0] != PINNED_VERSION),
+                    "drift": bool(ok and version[0].strip().lstrip("v") != pin["version"]),
                     "evidence": f"`opencode --version` exit {proc.returncode}",
                 }
             except (OSError, subprocess.TimeoutExpired) as exc:
-                value = {"status": "FAILED", "binary": str(binary), "version": None, "pinned_version": PINNED_VERSION,
+                value = {"status": "FAILED", "binary": str(binary), "version": None, **pinned,
                          "checked_at": checked, "functional": "NOT_PROVEN", "evidence": type(exc).__name__}
     with _status_lock:
-        _status_cache.update(at=time.monotonic(), value={**value, "_cfg": configured})
+        _status_cache.update(at=time.monotonic(), value={**value, "_cfg": (configured, pin["version"])})
     return value
 
 
-def _bash_rules(tools_allowed: list[str]) -> str | dict[str, str]:
+def _bash_rules(tools_allowed: list[str], *, runner: str | None = None) -> str | dict[str, str]:
     """``bash`` stays denied unless the TaskSpec allows it; ``bash:<pattern>`` entries allow only
-    matching commands (last matching rule wins in OpenCode, so the catch-all comes first)."""
+    matching commands (last matching rule wins in OpenCode, so the catch-all comes first). With a ``runner``
+    (the AEOS shell runner, container sandbox, §42) every allowed command must be run THROUGH it:
+    ``<runner> <pattern>`` instead of ``<pattern>``."""
     patterns = [t.split(":", 1)[1].strip() for t in tools_allowed if t.startswith("bash:") and t.split(":", 1)[1].strip()]
-    if patterns:
-        rules: dict[str, str] = {"*": "deny"}
-        for p in patterns:
-            rules[p] = "allow"
-        return rules
-    return "allow" if "bash" in tools_allowed else "deny"
+    if not patterns and "bash" in tools_allowed:
+        if not runner:
+            return "allow"
+        patterns = ["*"]
+    if not patterns:
+        return "deny"
+    rules: dict[str, str] = {"*": "deny"}
+    for p in patterns:
+        rules[f"{runner} {p}" if runner else p] = "allow"
+    return rules
 
 
 def _webfetch_rule(tools_allowed: list[str], egress_allowed: list[str]) -> str:
@@ -151,8 +194,12 @@ def _webfetch_rule(tools_allowed: list[str], egress_allowed: list[str]) -> str:
 
 def build_config(
     *, broker_base_url: str, token: str, model: str, tools_allowed: list[str], egress_allowed: list[str],
-    max_output_tokens: int | None = None, context_limit: int | None = None,
+    max_output_tokens: int | None = None, context_limit: int | None = None, shell_runner: str | None = None,
+    read_only: bool = False,
 ) -> dict[str, Any]:
+    """``shell_runner`` (additive, wave 7): granted shell commands are allowed only through the AEOS runner.
+    ``read_only`` (INVESTIGATION runs, §19): only read/glob/grep/list are allowed - edit/write/patch, todowrite,
+    bash and webfetch are denied whatever the TaskSpec asks."""
     if not _MODEL_ID.match(model):
         raise ValueError(f"unsafe model id {model!r}")
     model_entry: dict[str, Any] = {"name": model}
@@ -162,10 +209,18 @@ def build_config(
         model_entry["limit"] = {"context": int(context_limit or DEFAULT_CONTEXT_LIMIT),
                                 "output": int(max_output_tokens or DEFAULT_OUTPUT_LIMIT)}
     permission: dict[str, Any] = {"*": "deny"}
-    for t in BASE_ALLOW:
-        permission[t] = "allow"
-    permission["bash"] = _bash_rules(tools_allowed)
-    permission["webfetch"] = _webfetch_rule(tools_allowed, egress_allowed)
+    if read_only:
+        from aeos.worker_runtime.investigation import READ_ONLY_ALLOW
+
+        for t in BASE_ALLOW:
+            permission[t] = "allow" if t in READ_ONLY_ALLOW else "deny"
+        permission["bash"] = "deny"
+        permission["webfetch"] = "deny"
+    else:
+        for t in BASE_ALLOW:
+            permission[t] = "allow"
+        permission["bash"] = _bash_rules(tools_allowed, runner=shell_runner)
+        permission["webfetch"] = _webfetch_rule(tools_allowed, egress_allowed)
     for t in ALWAYS_DENY:
         permission[t] = "deny"
     return {

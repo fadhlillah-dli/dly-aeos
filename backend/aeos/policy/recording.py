@@ -12,7 +12,9 @@ consumer honours it:
   ``worker_sandbox/process`` with ``details.allow_process_sandbox = true`` (+ optional ``allow_bash``)
   (read by ``aeos.worker_runtime.sandbox``), PERSONAL only, with an explicit expiry;
 * OFFICE company authorisation → ``POLICY`` on ``office_policy/OFFICE`` with ``office_authorization``,
-  ``company_reference`` and explicit ``allowed_providers`` (read by ``aeos.policy.office``).
+  ``company_reference`` and explicit ``allowed_providers`` (read by ``aeos.policy.office``), plus the optional
+  structured scope ``approved_targets`` / ``approved_data_classes`` / ``approved_identities``
+  (``aeos.policy.office_scope``; absent = UNDECIDED, consumers fail closed).
 
 The caller authenticates the human (session + CSRF in the API, password prompt in the CLI); the registry
 still re-checks that the actor is an active SUPER_ADMIN whose scope covers the decision.
@@ -20,6 +22,7 @@ still re-checks that the actor is an active SUPER_ADMIN whose scope covers the d
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -29,7 +32,7 @@ from sqlalchemy.orm import Session
 from aeos.core.enums import Domain
 from aeos.core.errors import ValidationFailed
 from aeos.models.decisions import Decision
-from aeos.policy import catalog, enablement
+from aeos.policy import catalog, enablement, office_scope
 from aeos.policy import decisions as registry
 
 GENERIC_KINDS = catalog.GENERIC_DECISION_KINDS
@@ -37,7 +40,8 @@ GENERIC_KINDS = catalog.GENERIC_DECISION_KINDS
 # them through free-form ``details`` (e.g. ``office_authorization: true`` without a company reference) is
 # refused instead of silently granting or relaxing anything (fail closed).
 RESERVED_DETAIL_KEYS = frozenset({"office_authorization", "company_reference", "allowed_providers", "office_policy",
-                                  "enabled", "provider", "handled_by"})
+                                  "enabled", "provider", "handled_by", "approved_targets", "approved_data_classes",
+                                  "approved_identities"})
 
 
 def _require_target(kind: str, target_type: str | None, target_id: str | None) -> tuple[str, str]:
@@ -94,11 +98,182 @@ def _exception_shape(domain: Domain, *, exception: str | None, target_type: str 
     return spec.target_type, spec.target_id, out, ops or list(spec.allowed_operations)
 
 
+# Values that never bind evidence to a change (an UNKNOWN model/prompt matches nothing, §34).
+_UNBOUND_VALUES = frozenset({"", "unknown", "none", "null", "n/a", "-"})
+# Why a supervisor stage-model pin cannot be evidenced in this build (shown with every refused pin).
+SUPERVISOR_EVAL_PATH_NOTE = (
+    "this build has no evaluation path for a supervisor (Claude) model: EvalRuns execute only on broker-served "
+    "WORKER/ARENA routes and a run must state exactly its route's model_id (EVAL_CONFIGURATION_MISMATCH), while the "
+    "Claude Max supervisor is never served through the broker (master s12) - a stage-model pin stays refused until a "
+    "supervisor evaluation path exists; planning keeps the baseline alias")
+# Why a memory acceptance cannot be evidenced in this build (shown with every refused memory evaluation).
+MEMORY_EVAL_PATH_NOTE = (
+    "context packs carry ACCEPTED memory only, so a proposed record cannot reach a worker's context in this build: "
+    "evaluating a memory acceptance needs the owner-authored memory/retrieval fixture suite (ADR-0060, ADR-0081); "
+    "until then the acceptance is recorded NOT_EVALUATED (stated)")
+
+
+def _norm(value: Any) -> str:
+    return str(value if value is not None else "").strip().lower()
+
+
+def _strings(value: Any) -> set[str]:
+    """Every string leaf of a JSON value, normalised (context parameters may nest)."""
+    if isinstance(value, dict):
+        return {s for v in value.values() for s in _strings(v)}
+    if isinstance(value, list):
+        return {s for v in value for s in _strings(v)}
+    return {_norm(value)} - _UNBOUND_VALUES if isinstance(value, (str, int, float)) and not isinstance(value, bool) \
+        else set()
+
+
+def _carries(cfg: dict[str, Any], field: str, wanted: str) -> bool:
+    """Whether the evaluated AIConfiguration carries *wanted* in *field* (exact, normalised)."""
+    if field == "tools":
+        tools = {_norm(t) for t in cfg.get("tools") or [] if isinstance(t, str)} - _UNBOUND_VALUES
+        given = {t for t in re.split(r"[\s,]+", wanted) if t} - _UNBOUND_VALUES
+        return bool(tools) and tools == given
+    if field == "context_params":
+        return wanted in _strings(cfg.get("context_params"))
+    if field == "harness_version":
+        harness, version = _norm(cfg.get("harness")), _norm(cfg.get("harness_version"))
+        return version not in _UNBOUND_VALUES and wanted in {version, f"{harness} {version}", f"{harness}@{version}"}
+    return _norm(cfg.get(field)) == wanted
+
+
+def change_of(*, target_type: str | None, target_id: str | None, target_version: str | None = None,
+              target_hash: str | None = None, models: Any = None) -> dict[str, Any]:
+    """The identity of a system change as the decision states it (what its evaluation must be evidence of)."""
+    out: dict[str, Any] = {"target_type": target_type, "target_id": target_id, "target_version": target_version,
+                           "target_hash": target_hash}
+    if catalog.is_stage_model_pin(target_type, target_id):
+        out["models"] = {str(k): str(v) for k, v in models.items()} if isinstance(models, dict) else {}
+    return out
+
+
+def _pinned(change: dict[str, Any]) -> set[str] | None:
+    if not catalog.is_stage_model_pin(change.get("target_type"), change.get("target_id")):
+        return None
+    return {_norm(m) for m in (change.get("models") or {}).values()} - _UNBOUND_VALUES
+
+
+def _bind_memory(run: Any, change: dict[str, Any]) -> tuple[str | None, str]:
+    """A memory acceptance (§41/§43 "prompt/memory ... system change") is evidenced only by a run whose executed tasks
+    had exactly this record in their worker context: every collected sample's ``context_memory_ids`` (derived by the
+    evaluation collector from the context pack each attempt used) names it. The run's stated ``context_params`` alone
+    never bind - they describe an intention, not what reached the model."""
+    record = _norm(change.get("target_id"))
+    if record in _UNBOUND_VALUES:
+        return None, "the change names no memory record"
+    samples = [s for s in (run.samples or []) if isinstance(s, dict) and isinstance(s.get("context_memory_ids"), list)]
+    if not samples:
+        return None, ("no collected sample records which memory reached its tasks' context (collector "
+                      "context_memory_ids); a stated context_params value is not evidence - " + MEMORY_EVAL_PATH_NOTE)
+    missing = [str(s.get("sample_id") or s.get("task_id")) for s in samples
+               if record not in {_norm(i) for i in s["context_memory_ids"]}]
+    if missing:
+        return None, (f"memory record {change.get('target_id')} did not reach the worker context of sample(s) "
+                      f"{missing[:5]} - " + MEMORY_EVAL_PATH_NOTE)
+    return f"context_memory_ids={record}", ""
+
+
+def _bind(run: Any, change: dict[str, Any]) -> tuple[str | None, str]:
+    """(how *run* is bound to *change*, or None + why not). See ``catalog.SYSTEM_CHANGE_CONFIG_FIELDS``."""
+    if catalog.normalize_target_type(change.get("target_type")) in catalog.IDENTITY_BOUND_TARGETS:
+        return _bind_memory(run, change)
+    cfg = run.configuration if isinstance(run.configuration, dict) else {}
+    pinned = _pinned(change)
+    if pinned is not None:  # stage-model pin: only a run of exactly a pinned model is evidence of it
+        evaluated = {_norm(cfg.get("model_id")), _norm(cfg.get("model_version"))} - _UNBOUND_VALUES
+        hit = sorted(evaluated & pinned)
+        if hit:
+            return f"model_id={hit[0]}", ""
+        return None, (f"evaluated model {cfg.get('model_id')!r} is none of the pinned models "
+                      f"{sorted(pinned) or '(details.models names none)'}")
+    want_hash = _norm(change.get("target_hash"))
+    if want_hash not in _UNBOUND_VALUES and want_hash in {_norm(run.configuration_hash), _norm(run.route_config_hash)}:
+        return f"configuration_hash={change.get('target_hash')}", ""
+    ttype = catalog.normalize_target_type(change.get("target_type"))
+    fields = catalog.SYSTEM_CHANGE_CONFIG_FIELDS.get(ttype, ())
+    if not fields:
+        return None, (f"{ttype or 'the target'} has no AIConfiguration field: bind it with target_hash = the run's "
+                      f"configuration_hash ({run.configuration_hash})")
+    wanted = [w for w in [_norm(change.get("target_version"))] if w not in _UNBOUND_VALUES]
+    if not wanted:
+        return None, (f"the decision names no new value: target_version = the new {'/'.join(fields)} (or "
+                      f"target_hash = the run's configuration_hash {run.configuration_hash})")
+    for field in fields:
+        for value in wanted:
+            if _carries(cfg, field, value):
+                return f"{field}={value}", ""
+    shown = ", ".join(f"{f}={cfg.get(f)!r}" for f in fields)
+    return None, f"its configuration ({shown}) does not carry {wanted[0] if len(wanted) == 1 else wanted}"
+
+
+def _policy_preset_shape(domain: Domain, *, preset: str | None, target_type: str | None, target_id: str | None,
+                         details: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
+    """(target_type, target_id, details) of a POLICY attestation preset, or None when it is not one.
+
+    A decision on a preset's target always gets the preset's exact shape (the consumer reads exactly that), and the
+    consumer-read detail key is refused anywhere else, so an attestation can never look effective by accident."""
+    name = preset or catalog.policy_preset_for_target(target_type, target_id)
+    if name is None and target_type == catalog.TARGET_CLAUDE_EXTRA_USAGE:
+        name = "claude_extra_usage_off"  # the only shape its consumers read (target id PERSONAL)
+    if name is None:
+        stray = sorted(set(details) & catalog.POLICY_PRESET_DETAIL_KEYS)
+        if stray:
+            raise ValidationFailed(f"details {stray} are read only on their attestation target; use policy_preset="
+                                   f"{sorted(catalog.POLICY_PRESETS)}", code="POLICY_PRESET_MISMATCH")
+        return None
+    spec = catalog.POLICY_PRESETS.get(name)
+    if spec is None:
+        raise ValidationFailed(f"unknown policy preset {name!r}", details={"allowed": sorted(catalog.POLICY_PRESETS)})
+    if (target_type and target_type != spec.target_type) or (target_id and target_id != spec.target_id):
+        raise ValidationFailed(f"policy preset {name} is bound to target {spec.target_type}/{spec.target_id}",
+                               code="POLICY_PRESET_MISMATCH")
+    if domain.value not in spec.domains:
+        raise ValidationFailed(f"policy preset {name} can only be recorded in {list(spec.domains)}",
+                               code="POLICY_PRESET_DOMAIN_DENIED")
+    given = details.get(spec.detail_key, spec.value)
+    if not isinstance(given, bool):
+        raise ValidationFailed(f"details.{spec.detail_key} must be true/false", code="POLICY_PRESET_DETAILS_INVALID")
+    if preset is not None and given is not spec.value:
+        raise ValidationFailed(f"policy preset {name} records details.{spec.detail_key} = {str(spec.value).lower()}",
+                               code="POLICY_PRESET_DETAILS_INVALID")
+    out = {**details, spec.detail_key: given, "policy_preset": name, "consumer": spec.consumer,
+           "evidence_level": "E0", "attestation": "owner statement; AEOS cannot read this setting"}
+    return spec.target_type, spec.target_id, out
+
+
+def _mci_pack_mapping_check(target_id: str | None, target_hash: str | None) -> None:
+    """§34: a pack-to-MCI-control mapping is approved only for a VERIFIED MCI source and only bound to the exact hash
+    of the pack entry + MCI content hash shown in ``GET /api/policy/mci`` (fail closed: never a dangling approval)."""
+    from aeos.policy import snapshot
+
+    ref = snapshot.mci_reference()
+    if ref["status"] != "VERIFIED":
+        raise ValidationFailed("an MCI pack mapping can only be approved while the MCI_V2 source is VERIFIED "
+                               f"(now {ref['status']}: {ref['verification_note']})", code="MCI_NOT_VERIFIED")
+    pack = next((p for p in ref["pack_mappings"] if p["key"] == target_id), None)
+    if pack is None:
+        raise ValidationFailed(f"unknown pack {target_id!r}", code="MCI_PACK_UNKNOWN",
+                               details={"packs": [p["key"] for p in ref["pack_mappings"]]})
+    if not pack["mci_controls"] or pack["evidence_contract_status"] != "DECLARED":
+        raise ValidationFailed(f"pack {target_id} has no MCI controls / complete evidence contract in the local "
+                               f"{ref['pack_mapping_file']}", code="MCI_PACK_MAPPING_INCOMPLETE")
+    if target_hash != pack["binding"]["target_hash"]:
+        raise ValidationFailed("target_hash must be the current binding hash of this pack mapping",
+                               code="MCI_PACK_HASH_MISMATCH", details={"expected": pack["binding"]["target_hash"]})
+
+
 def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids: Any,
-                           rollback_target: Any) -> dict[str, Any]:
+                           rollback_target: Any, change: dict[str, Any] | None = None) -> dict[str, Any]:
     """§41/§43: validate the evaluation and rollback of a system change (policy/model/tools/hooks/prompt/memory/
     fallback/context strategy). Every named run must be a COMPLETED evaluation whose gates all PASS, planned in this
-    domain or the platform; the rollback target names what the change replaces. Returns the stored record."""
+    domain or the platform, and bound to exactly this *change* (``change_of``: target type/id/version/hash and, for a
+    stage-model pin, every pinned model id); the rollback target names what the change replaces. Returns the stored
+    record. Missing/unfinished evidence -> SYSTEM_CHANGE_EVIDENCE_REQUIRED; evidence of another configuration ->
+    SYSTEM_CHANGE_EVIDENCE_UNRELATED (an unstated change is never bound, fail closed)."""
     from aeos.models.research import EvalRun
 
     ids = [str(i).strip() for i in (eval_run_ids if isinstance(eval_run_ids, list) else []) if str(i).strip()]
@@ -106,7 +281,7 @@ def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids
     problems: list[str] = []
     if not ids:
         problems.append("no evaluation run (system_change.eval_run_ids)")
-    runs = []
+    valid = []
     for rid in dict.fromkeys(ids):
         run = session.get(EvalRun, rid)
         if run is None or run.submitted_domain not in (None, domain):
@@ -117,14 +292,46 @@ def system_change_evidence(session: Session, *, domain: str | None, eval_run_ids
             problems.append(f"evaluation run {rid} is {run.status} with gates {gates or 'none'} (needs COMPLETED, "
                             "every gate PASS)")
             continue
-        runs.append({"id": run.id, "suite_key": run.suite_key, "configuration_hash": run.configuration_hash})
+        valid.append(run)
     if len(rollback) < 3:
         problems.append("no rollback target (system_change.rollback_target: the version/config/decision it replaces)")
     if problems:
         raise ValidationFailed("a system change (§41/§43) needs evaluation and a rollback target: "
                                + "; ".join(problems), code="SYSTEM_CHANGE_EVIDENCE_REQUIRED",
                                details={"problems": problems})
-    return {"class": "SYSTEM_CHANGE", "evaluation": "EVALUATED", "eval_runs": runs, "rollback_target": rollback[:256]}
+    unrelated: list[str] = []
+    runs: list[dict[str, Any]] = []
+    if change is None:
+        unrelated.append("the change this evaluation is evidence of is not stated")
+    else:
+        for run in valid:
+            how, why = _bind(run, change)
+            if how is None:
+                unrelated.append(f"evaluation run {run.id} ({run.suite_key}) is not evidence of this change: {why}")
+                continue
+            cfg = run.configuration if isinstance(run.configuration, dict) else {}
+            runs.append({"id": run.id, "suite_key": run.suite_key, "configuration_hash": run.configuration_hash,
+                         "model_id": cfg.get("model_id"), "binding": how})
+        pinned = _pinned(change)
+        if pinned is not None:
+            covered = {r["binding"].split("=", 1)[1] for r in runs}
+            unrelated += [f"pinned model {m} has no passing evaluation run of exactly that model"
+                          for m in sorted(pinned - covered)]
+            if pinned - covered:
+                # stated, not implied (§02): a run's model is the model its route executes (evaluation start refuses
+                # a mismatch), and no broker-served route runs a supervisor model (§12)
+                unrelated.append(SUPERVISOR_EVAL_PATH_NOTE)
+            if not pinned:
+                unrelated.append("a stage-model pin names its models (details.models {STAGE: model id})")
+    if unrelated:
+        raise ValidationFailed("the evaluation runs of a system change (§41/§43) must be evidence of exactly this "
+                               "change: " + "; ".join(unrelated), code="SYSTEM_CHANGE_EVIDENCE_UNRELATED",
+                               details={"problems": unrelated, "change": change,
+                                        "binding": "target_hash = the run's configuration_hash, or target_version = "
+                                                   "the new value of the changed AIConfiguration field; a stage-model "
+                                                   "pin needs a run of every pinned model"})
+    return {"class": "SYSTEM_CHANGE", "evaluation": "EVALUATED", "eval_runs": runs, "rollback_target": rollback[:256],
+            "bound_to": {k: v for k, v in (change or {}).items() if v not in (None, "", {})}}
 
 
 def record_generic_decision(
@@ -135,11 +342,18 @@ def record_generic_decision(
     details: dict[str, Any] | None = None, provider: str | None = None, enabled: bool | None = None,
     office_authorization: bool = False, company_reference: str | None = None,
     allowed_providers: list[str] | None = None, office_policy: dict[str, Any] | None = None,
-    exception: str | None = None, allow_bash: bool | None = None,
+    exception: str | None = None, allow_bash: bool | None = None, policy_preset: str | None = None,
+    approved_targets: list[Any] | None = None, approved_data_classes: list[str] | None = None,
+    approved_identities: dict[str, str] | list[str] | None = None,
 ) -> Decision:
-    """Validate and record one human decision of a generic kind. Does not commit."""
+    """Validate and record one human decision of a generic kind. Does not commit.
+
+    ``approved_targets`` / ``approved_data_classes`` / ``approved_identities`` belong to the OFFICE company
+    authorisation only (``aeos.policy.office_scope``): what the company approved, never inferred."""
     if kind not in GENERIC_KINDS:
         raise ValidationFailed(f"kind must be one of {list(GENERIC_KINDS)}")
+    if policy_preset is not None and kind != "POLICY":
+        raise ValidationFailed("policy presets are POLICY decisions", code="POLICY_PRESET_MISMATCH")
     if not auth_scope:
         raise ValidationFailed("auth_scope must state the explicit scope of this decision")
     details = dict(details or {})
@@ -149,6 +363,10 @@ def record_generic_decision(
                                code="RESERVED_DETAIL_KEYS", details={"reserved": reserved})
     if exception is not None and kind != "EXCEPTION":
         raise ValidationFailed("exception presets are EXCEPTION decisions", code="EXCEPTION_TARGET_MISMATCH")
+    scoped = bool(approved_targets or approved_data_classes or approved_identities)
+    if scoped and not (kind == "POLICY" and office_authorization):
+        raise ValidationFailed("approved_targets / approved_data_classes / approved_identities are part of the OFFICE "
+                               "company authorisation (office_authorization=true)", code="OFFICE_SCOPE_WITHOUT_AUTHORISATION")
     dedicated = catalog.DEDICATED_TARGETS.get(str(target_type or ""))
     if dedicated:
         # office_route / workforce decisions are recorded only where their evidence is checked (company
@@ -187,7 +405,20 @@ def record_generic_decision(
             Decision.kind == "WRITE_ENABLEMENT", Decision.target_type == target_type,
             Decision.target_id == provider, Decision.status == "ACTIVE")))
     elif kind == "POLICY":
-        if office_authorization or office_policy:
+        office = bool(office_authorization or office_policy)
+        if office and policy_preset is not None:
+            raise ValidationFailed("a policy preset is not an OFFICE policy decision", code="POLICY_PRESET_MISMATCH")
+        shaped = None if office else _policy_preset_shape(domain, preset=policy_preset, target_type=target_type,
+                                                          target_id=target_id, details=details)
+        if shaped is not None:
+            target_type, target_id, details = shaped
+            if expires_at is None:
+                raise ValidationFailed("an owner attestation needs an explicit expiry (expires_at)",
+                                       code="POLICY_PRESET_EXPIRY_REQUIRED")
+            supersede = list(session.scalars(select(Decision).where(
+                Decision.kind == "POLICY", Decision.target_type == target_type, Decision.target_id == target_id,
+                Decision.domain == domain.value, Decision.status == "ACTIVE")))
+        elif office:
             if domain != Domain.OFFICE:
                 raise ValidationFailed("OFFICE policy decisions are recorded in the OFFICE domain only")
             if office_policy:
@@ -206,9 +437,24 @@ def record_generic_decision(
                                            details={"allowed": list(catalog.providers_for(Domain.OFFICE))})
                 details.update({"office_authorization": True, "company_reference": company_reference.strip(),
                                 "allowed_providers": providers})
+                # §01 U-03 / §07 step 10 / §51 P1: the company's approved targets, data classes and identities.
+                # Optional at recording; absent stays UNDECIDED and every consumer fails closed (office_scope).
+                details.update({
+                    "approved_targets": office_scope.normalize_targets(approved_targets, allowed_providers=providers),
+                    "approved_data_classes": office_scope.normalize_data_classes(approved_data_classes),
+                    "approved_identities": office_scope.normalize_identities(approved_identities),
+                })
             target_type, target_id = catalog.TARGET_OFFICE_POLICY, Domain.OFFICE.value
         else:
             target_type, target_id = _require_target(kind, target_type, target_id)
+            if target_type == catalog.TARGET_MCI_PACK_MAPPING:
+                if domain != Domain.PERSONAL:
+                    raise ValidationFailed("platform MCI pack mappings are recorded in the PERSONAL (platform) domain",
+                                           code="MCI_PACK_DOMAIN_DENIED")
+                _mci_pack_mapping_check(target_id, target_hash)
+                supersede = list(session.scalars(select(Decision).where(
+                    Decision.kind == "POLICY", Decision.target_type == target_type, Decision.target_id == target_id,
+                    Decision.status == "ACTIVE")))
         given = details.pop("system_change", None)
         if catalog.system_change_target(target_type):
             sc = given if isinstance(given, dict) else {}
@@ -218,7 +464,9 @@ def record_generic_decision(
                 # validated run: it is part of the system-change evidence, never a second unchecked reference
                 ids.append(str(details["eval_run_id"]))
             details["system_change"] = system_change_evidence(
-                session, domain=domain.value, eval_run_ids=ids, rollback_target=sc.get("rollback_target"))
+                session, domain=domain.value, eval_run_ids=ids, rollback_target=sc.get("rollback_target"),
+                change=change_of(target_type=target_type, target_id=target_id, target_version=target_version,
+                                 target_hash=target_hash, models=details.get("models")))
         else:
             # governance/convention policy: not an agent/model configuration change; stated, never implied evaluated
             details["system_change"] = {"class": "NOT_A_SYSTEM_CHANGE", "evaluation": "NOT_APPLICABLE",

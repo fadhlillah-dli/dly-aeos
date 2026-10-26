@@ -209,4 +209,4 @@ def history_view(session: Session, check_id: str, *, domain: str | None, limit: 
                       "ttl_seconds": spec.ttl_seconds, "invalidators": list(spec.invalidators),
                       "functional_only": spec.functional, "capabilities": caps},
             "items": rows, "source": "CheckResult history", "checked_at": rows[0]["last_checked_at"] if rows else None,
-            "mode": "LIVE"}
+            "generated_at": utcnow().isoformat(), "mode": "LIVE"}

@@ -27,6 +27,17 @@ def tasks_for_version(session: Session, plan_version_id: str) -> list[TaskSpec]:
 # ---- additive (non-breaking) contract ---------------------------------------------------------------
 
 
+def create_human_version(session: Session, plan_id: str, *, content: dict, parent_version_id: str, rationale: str,
+                         actor_user_id: str) -> PlanVersion:
+    """A HUMAN_EDIT PlanVersion from *content* on top of the current version (schema + DAG validated, stale parent
+    refused); the plan returns to READY_FOR_HUMAN_REVIEW and needs a new owner decision on the new hash. Used by
+    docs_engine when the owner adds a documentation checkpoint's writer draft to the next plan version."""
+    from aeos.planning.service import create_human_version as impl
+
+    return impl(session, plan_id, content=content, parent_version_id=parent_version_id, rationale=rationale,
+                actor_user_id=actor_user_id)
+
+
 # Publication states another module (the publisher) may set. Human decisions (APPROVED, REJECTED,
 # REVISION_REQUESTED, ...) are recorded only through ``aeos.planning.service.decide`` with a Decision row
 # bound to the exact version + hash; the pipeline states belong to the planning service itself.
@@ -55,3 +66,35 @@ def transition_plan(session: Session, plan_id: str, to_state: str, *, reason: st
         raise Conflict("publishing needs a version bound by an ACTIVE approval", code="NOT_APPROVED")
     transition(session, plan, to_state, reason=reason, actor=actor)
     return plan
+
+
+def supervisor_prompt_runtime() -> dict[str, object]:
+    """What a planning call to the native supervisor ran with (additive, ADR-0041 amendment 2026-10-25), so routing can
+    bind it to the supervisor ModelRoute identity (§23 "prompt revision", "context strategy"):
+
+    * ``prompt_revision``: the declared ``PROMPT_REVISION`` plus a fingerprint of the prompt module's text (line endings
+      normalised), so an edit of the templates/fixed policy without a revision bump is still a new revision;
+    * ``context``: how planning context is assembled - fixed control-plane facts, untrusted request/attachments as
+      fenced DATA, the challenger/final reviewer see the review package only (§15) - and its size budgets. None when a
+      value cannot be determined (it is then never bound)."""
+    import hashlib
+    from pathlib import Path
+
+    from aeos.planning import prompts
+
+    declared = str(getattr(prompts, "PROMPT_REVISION", "") or "UNKNOWN")
+    try:
+        text = Path(prompts.__file__).read_bytes().replace(b"\r\n", b"\n")
+        revision = f"{declared}@{hashlib.sha256(text).hexdigest()[:12]}"[:64]
+    except (OSError, TypeError):
+        revision = declared
+    context: dict[str, object] | None = None
+    try:
+        from aeos.planning import service as planning
+
+        context = {"assembly": "fixed-context+fenced-untrusted-data", "review_isolation": "review-package-only",
+                   "max_prompt_chars": planning.MAX_PROMPT_CHARS, "max_attachment_chars": planning.MAX_ATTACHMENT_CHARS,
+                   "max_attachments": planning.MAX_ATTACHMENTS}
+    except (ImportError, AttributeError):  # a planning build without the budgets: the strategy cannot be stated
+        context = None
+    return {"prompt_revision": revision, "context": context}

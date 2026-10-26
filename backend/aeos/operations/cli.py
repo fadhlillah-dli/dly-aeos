@@ -243,6 +243,10 @@ def backup_retention(
 def release_build(
     ref: str = typer.Option("HEAD", help="Commit/ref to release (must be on main)"),
     repo: str = typer.Option("", help="Repository path (default: this checkout)"),
+    allow_unverified_ui: bool = typer.Option(
+        False, "--allow-unverified-ui",
+        help="Owner choice: pin a Control Center bundle whose commit correspondence is UNVERIFIED (no build record "
+             "or a dirty frontend tree). Recorded in the provenance and the audit. Default: refuse."),
 ) -> None:
     """Build a release artifact (git archive of a clean, human-merged main commit) with provenance."""
     from pathlib import Path
@@ -254,7 +258,7 @@ def release_build(
     try:
         with session_scope() as s:
             prov = release.build_release(settings, repo=Path(repo) if repo else None, ref=ref,
-                                         builder=_local_actor(), session=s)
+                                         builder=_local_actor(), session=s, allow_unverified_ui=allow_unverified_ui)
     except AeosError as exc:
         _fail(exc)
     _echo(f"Release {prov['release_id']}{' (already built)' if prov.get('already_built') else ''}")
@@ -263,8 +267,21 @@ def release_build(
     _echo(f"  schema head: {prov.get('schema_head') or 'none (create_all baseline)'}")
     acc = prov.get("acceptance") or {}
     _echo(f"  acceptance: {acc.get('status', 'UNKNOWN')} via {acc.get('basis') or '-'}")
-    ui = prov.get("ui")
-    _echo(f"  ui bundle: {ui['sha256'] + ' (commit correspondence UNVERIFIED)' if ui else 'none (frontend not built)'}")
+    _echo(f"  ui bundle: {_ui_line(prov.get('ui'))}")
+
+
+def _ui_line(ui: dict[str, Any] | None) -> str:
+    """The pinned Control Center bundle and its commit correspondence as recorded in the provenance (VERIFIED /
+    UNVERIFIED with the reason); never a fixed label."""
+    if not isinstance(ui, dict):
+        return "none (frontend not built)"
+    corr = ui.get("commit_correspondence") or "UNVERIFIED"
+    reason = (ui.get("correspondence") or {}).get("reason")
+    line = f"{ui.get('sha256') or '-'} (commit correspondence {corr}"
+    line += f": {reason})" if reason and corr != "VERIFIED" else ")"
+    if corr != "VERIFIED" and ui.get("unverified_allowed_by"):
+        line += f" pinned by owner choice (--allow-unverified-ui, {ui['unverified_allowed_by']})"
+    return line
 
 
 @release_app.command("accept")
@@ -309,7 +326,11 @@ def release_list(as_json: bool = typer.Option(False, "--json")) -> None:
         _echo("No releases built yet. Build one from main: aeos ops release build")
         return
     for r in data["items"]:
-        _echo(f"{r['role']:<9} {r['release_id']}  integrity={r['integrity']}  built {r['built_at']}")
+        ui = r.get("ui") or {}
+        _echo(f"{r['role']:<9} {r['release_id']}  integrity={r['integrity']}  "
+              f"ui={ui.get('commit_correspondence') or 'NONE'}  built {r['built_at']}")
+        if ui.get("reason") and ui.get("commit_correspondence") != "VERIFIED":
+            _echo(f"          ui: {ui['reason']}")
 
 
 def _transition(action: str, release_id: str | None, operator: str, reason: str, force_maintenance: bool,
@@ -520,7 +541,7 @@ def emergency_stop(
 
 # ----------------------------------------------------------------------------------------- retirement
 
-retirement_app = typer.Typer(help="Project retirement: checklist, legal hold (nothing is ever deleted).",
+retirement_app = typer.Typer(help="Project retirement: checklist, legal hold, steps (nothing is ever deleted).",
                              no_args_is_help=True)
 app.add_typer(retirement_app, name="retirement")
 
@@ -571,4 +592,36 @@ def retirement_show(project: str = typer.Argument(..., help="Project id or proje
         return
     for item in data["items"]:
         _echo(f"  {item['key']:<20} {item['status']:<24} {item['owner_action']}")
+        rec = item.get("recorded")
+        if rec:
+            ev = f"  evidence: {', '.join(rec['evidence_ids'])}" if rec.get("evidence_ids") else ""
+            _echo(f"  {'':<20} step {rec['status']} by {rec.get('owner') or rec.get('by')} at {rec['at']}"
+                  f"{'  note: ' + rec['note'] if rec.get('note') else ''}{ev}")
     _echo(f"checklist_hash {data['checklist_hash']}  blocking: {', '.join(data['blocking']) or 'none'}")
+
+
+@retirement_app.command("step")
+def retirement_step(
+    project: str = typer.Argument(..., help="Project id or project key"),
+    key: str = typer.Argument(..., help="Checklist step: consumers, jobs, credentials, repositories, integrations, "
+                                        "infra, data, legal_hold, backups, communication"),
+    status: str = typer.Option(..., "--status", help="DONE, IN_PROGRESS or NOT_APPLICABLE"),
+    note: str = typer.Option("", "--note", help="What was done / who was informed (recorded and audited)"),
+    owner: str = typer.Option("", "--owner", help="Who owns this step (default: the local operator)"),
+    evidence: list[str] = typer.Option([], "--evidence", help="Evidence id of this project's domain (repeatable)"),
+) -> None:
+    """Record a retirement workflow step (section 33), e.g. that stakeholders were informed. Records only:
+    nothing is deleted, revoked or sent."""
+    _settings()
+    from aeos.core.db import session_scope
+    from aeos.operations import retirement
+
+    actor = f"cli:{_local_actor()}"
+    try:
+        with session_scope() as s:
+            p = _project(s, project)
+            entry = retirement.record_step(s, p, key, status=status.strip().upper(), actor=actor, owner=owner,
+                                           evidence_ids=evidence, note=note)
+    except AeosError as exc:
+        _fail(exc)
+    _echo(f"Step {key} of {project}: {entry['status']} by {entry['owner']} at {entry['at']} (audited)")

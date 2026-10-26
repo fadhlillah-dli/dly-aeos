@@ -82,3 +82,38 @@ fidelity and treated invalidated (STALE) readiness as advisory (§08, §29).
   suite: owner decision (ADR-0094). Tables in incremental Google updates still become text (disclosed).
 * EvalRuns reaching ARENA routes and routing's view of ARENA TRIAL activations belong to the evaluation and
   routing modules; the probe is their controlled execution path to build on.
+
+## Amendment 2026-10-25 (wave 7, C1): probe on seeded routes, LOCAL endpoint
+
+* **Seeded routes are probeable with their documented request shape** (ADR-0041 amendment 2026-10-25): the probe
+  POSTs `<endpoint>/chat/completions` with the bare upstream model id and reports `upstream_url`, `model_id` (the
+  upstream id) and `catalog_model_id`. respx tests cover a seeded ARENA Zen route (`mimo-v2.6-flash-free`,
+  `beam-free` with its reviewed region), the COMPARATOR Gemini route and a real loopback LOCAL server. A free Zen
+  route is probed only after the owner's client-terms decision (S07 client rule; `CLIENT_TERMS_RESTRICTED`).
+* **LOCAL endpoint is an owner configuration.** `POST /api/routes/{key}/endpoint` (SUPER_ADMIN, CSRF) /
+  `aeos routes set-endpoint` (password prompt) / the Models page form set the OpenAI-compatible base of a server on
+  this host: `http` on `127.0.0.1`/`localhost`/`[::1]` with an explicit port, no credentials/query/fragment; optional
+  served model name (`mode_params.upstream_model`) and build parameters (quantization, inference backend, hardware).
+  It is a new configuration: earlier decisions stop matching and a new TRIAL is needed (`needs_new_trial`). The
+  broker accepts a `local` provider route only on loopback http.
+* **A loopback LOCAL route needs no BUDGET decision** (`routing.service.needs_budget`): its calls never leave the
+  host and never spend money through the broker (the probe's existing rule, now shared by activation, eligibility and
+  the per-request check). `is_free` stays UNKNOWN - local compute cost is not claimed to be zero.
+* Still not done: EvalRun over the COMPARATOR/LOCAL pools (route view `evaluation_path` NOT_WIRED,
+  DESIGN/NOT-PROVEN). ARENA routes are evaluated only through the eval-only path below (`evaluation_path`
+  EVAL_ONLY).
+
+### Amendment 2026-10-25 (wave 7, W6-141): eval-only serving of ARENA routes
+
+* `broker.facade.EVAL_POOLS = ("ARENA",)`: pools served **only** to a TaskSpec bound to a slot of a RUNNING EvalRun
+  of exactly that route. `SERVED_POOLS` stays `("WORKER",)` for every ordinary task.
+* One answer, `evaluation.facade.eval_serving(task, route_key)`, is read by routing admission
+  (`select_route` picks exactly the evaluated route; `fallback_route` refuses `EVAL_NO_FALLBACK`), by the workforce
+  defence in depth (`integrations.select_route`, the agent's WORKER route policy) and by the broker.
+* The broker derives the grant's evaluation scope from the canonical binding (`MODEL_PROXY` scope `eval`:
+  eval run, slot, route, task - a caller-supplied `eval` key is dropped) and refuses to issue a grant naming an
+  ARENA route for any other run (`EVAL_SCOPE_REQUIRED`). The proxy re-checks the scope on **every request**
+  (`EVAL_SCOPE_INVALID`): the run still RUNNING, the binding valid, the route configuration unchanged since the
+  start, PERSONAL, TRIAL/APPROVED on a decision bound to the current configuration hash, free (no budget path for
+  an eval-only route, no silent paid spend) and terms allowing the task's data classification - the probe's
+  checks applied to a controlled evaluation. Usage, ledger, 429/quota and caps follow the ordinary proxy path.

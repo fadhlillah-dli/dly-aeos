@@ -33,7 +33,7 @@ from aeos.core.paths import repo_root
 from aeos.core.redaction import redact_text
 from aeos.core.timeutil import utcnow
 from aeos.events import service as events
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.portfolio import Project, RepositoryReference
 from aeos.portfolio import gitread
 from aeos.portfolio.service import deny, require_writable
@@ -335,7 +335,7 @@ def observe_local(session: Session, repo: RepositoryReference, *, path: Path | N
     repo.details = {**(repo.details or {}), "local": local}
     if previous_head and head and previous_head != head:
         try:
-            from aeos.knowledge.packs import mark_stale_for_repository
+            from aeos.knowledge.facade import mark_stale_for_repository
 
             mark_stale_for_repository(session, repo.id, head, reason=f"repository head moved {previous_head[:12]} -> {head[:12]}")
         except ImportError:  # pragma: no cover - knowledge module always present in this build
@@ -528,6 +528,11 @@ def _verify_bitbucket(session: Session, project: Project, repo: RepositoryRefere
     if integ is None or (integ.config or {}).get("enabled") is not True:
         return ("UNVERIFIED", "Bitbucket adapter is disabled for this project (integration bitbucket/code with "
                               "config.enabled=true required, ADR-0073); no provider call was made", attempt)
+    ok, why = policy.office_target_authorised(session, "bitbucket", root_id=repo.full_name, policy=pol)
+    if not ok:
+        # §01 U-03 / §07 step 10: only a company-approved target is read with the OFFICE credential
+        return ("UNVERIFIED", f"{repo.full_name} is not a company-approved Bitbucket target ({why}); no provider "
+                              "call was made", attempt)
     from aeos.publisher.facade import ProviderError, bitbucket_repository_reference
 
     attempt["auth_mode"] = "office/bitbucket"
@@ -631,10 +636,60 @@ def repository_view(repo: RepositoryReference, *, summary: bool = False) -> dict
     return view
 
 
+_REPO_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def ci_pipeline_link(repo: RepositoryReference, integ: Any) -> tuple[str | None, str | None]:
+    """(pipeline page URL, basis) of a CI integration from exact stored identifiers only (§37 "never guess"): the
+    integration's own root (a repository slug) or, when it names none, this repository's exact ``full_name`` on the
+    same provider host. Anything else (another host, a malformed slug) has no link."""
+    from aeos.portfolio import providers as pv
+
+    provider = pv.normalize(integ.provider)
+    slug, basis = (integ.root_id, "integration root_id") if integ.root_id else (repo.full_name, "repository full_name")
+    if not slug or not _REPO_SLUG.fullmatch(slug):
+        return None, None
+    if provider == pv.GITHUB_ACTIONS and (integ.root_id or repo.provider == "GITHUB"):
+        return f"https://github.com/{quote(slug, safe='/')}/actions", basis
+    if provider == pv.BITBUCKET_PIPELINES and (integ.root_id or repo.provider == "BITBUCKET"):
+        return f"https://bitbucket.org/{quote(slug, safe='/')}/pipelines", basis
+    return None, None
+
+
+def latest_ci_observation(session: Session, repo: RepositoryReference) -> dict[str, Any] | None:
+    """The latest provider-CI observation recorded for this repository (``CI_STATUS`` evidence from the check-runs /
+    commit-status API, written when AEOS syncs a pull request): commit, overall result and the first https run
+    link the provider returned. Only trusted provider-CI evidence counts (the same rule as the delivery CI gate);
+    its data mode is carried so a DEMO/MOCK record is labelled. None = nothing recorded yet (never inferred)."""
+    from aeos.models.evidence import EvidenceArtifact
+    from aeos.verification import facade as verification
+
+    rows = session.scalars(select(EvidenceArtifact).where(EvidenceArtifact.project_id == repo.project_id,
+                                                          EvidenceArtifact.kind == "CI_STATUS",
+                                                          EvidenceArtifact.origin == "provider-ci",
+                                                          EvidenceArtifact.trusted.is_(True))
+                           .order_by(EvidenceArtifact.created_at.desc()).limit(200))
+    for ev in rows:
+        env = ev.environment or {}
+        if env.get("repo") != repo.full_name:
+            continue
+        content = verification.read_json(ev) or {}
+        runs = [r for r in content.get("runs") or [] if isinstance(r, dict)]
+        urls = [str(r["url"]) for r in runs if re.match(r"https://", str(r.get("url") or ""))]
+        return {"evidence_id": ev.id, "commit": env.get("commit"), "overall": content.get("overall") or "UNKNOWN",
+                "checked_at": env.get("checked_at") or (ev.created_at.isoformat() if ev.created_at else None),
+                "runs": len(runs), "url": urls[0] if urls else None,
+                "integrity": "VERIFIED" if content else "UNVERIFIED", "mode": ev.mode or "LIVE"}
+    return None
+
+
 def repository_detail(session: Session, repo: RepositoryReference) -> dict[str, Any]:
     """§37 user repository view: identity + base branch, PR/CI links, policy/capability and docs targets in one
-    place (joined from delivery PR records, project integrations and WRITE_ENABLEMENT decisions)."""
+    place (joined from delivery PR records, project integrations and WRITE_ENABLEMENT decisions). CI and docs links
+    are built from exact stored identifiers (integration root/tenant, repository full_name) or the provider's own
+    recorded run URL - never guessed."""
     from aeos.models.portfolio import ProjectIntegration
+    from aeos.portfolio.integrations import target_link
 
     view = repository_view(repo)
     prs: list[dict[str, Any]] = []
@@ -655,13 +710,21 @@ def repository_detail(session: Session, repo: RepositoryReference) -> dict[str, 
     # §26 write enablement is per provider (flag + ACTIVE human decision on provider_write/<provider>), exactly as
     # the interlock checks it; a decision shaped any other way (e.g. on an integration id) enables nothing
     enabled = {i.id: policy.write_enablement(session, i.provider, domain=i.domain) for i in integrations}
+    ci_items: list[dict[str, Any]] = []
+    for i in integrations:
+        if i.purpose != "ci":
+            continue
+        url, basis = ci_pipeline_link(repo, i)
+        ci_items.append({"provider": i.provider, "integration_id": i.id,
+                         "configuration": (i.capability_status or {}).get("configuration", "UNKNOWN"),
+                         "pipeline_url": url, "pipeline_url_basis": basis})
     view.update({
         "base_branch": repo.default_branch,
         "pull_requests": prs,
-        "ci": [{"provider": i.provider, "integration_id": i.id, "configuration":
-                (i.capability_status or {}).get("configuration", "UNKNOWN")} for i in integrations if i.purpose == "ci"],
-        "docs_targets": [{"provider": i.provider, "root_id": i.root_id, "integration_id": i.id}
-                         for i in integrations if i.purpose == "docs"],
+        "ci": ci_items,
+        "ci_latest": latest_ci_observation(session, repo),
+        "docs_targets": [{"provider": i.provider, "root_id": i.root_id, "integration_id": i.id,
+                          "target_url": target_link(i)} for i in integrations if i.purpose == "docs"],
         "capability": {
             "write_enablement": [{"integration_id": i.id, "provider": i.provider, "purpose": i.purpose,
                                   "decision_id": enabled[i.id]["decision_id"], "status": enabled[i.id]["status"],
@@ -688,6 +751,14 @@ def inventory_for_repository(session: Session, principal: Principal | None, proj
     result = inventory_repository(path, commit=commit)
     result["repository"] = {"id": repo.id, "provider": repo.provider, "full_name": repo.full_name,
                             "verification_status": repo.verification_status}
+    # §05 step 6 "baseline tes": the verifier's project baseline at exactly this commit (or NOT_RUN with the reason);
+    # attached after inventory_hash, which covers commit content only.
+    try:
+        from aeos.verification import facade as verification
+
+        result["tests"]["baseline"] = verification.project_test_baseline(session, project.id, result["commit"])
+    except ImportError:  # pragma: no cover - verification is part of every build
+        pass
     repo.inventory = result
     repo.inventory_commit = result["commit"]
     repo.inventory_at = utcnow()

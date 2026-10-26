@@ -163,9 +163,16 @@ def publisher_signature(path: Path | None, *, fingerprint_value: str | None = No
                       "reason": "no OS code-signature check on this platform"}
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         result = {"method": None, "signer": None, "status": "UNKNOWN", "reason": type(exc).__name__}
-    pin = approved_publisher()
-    result["publisher_pin"] = (f"{pin} (owner-pinned in the install-manifest; see the authenticity gate)" if pin else
-                               "NONE (install-manifest has no approved pin; authenticity UNVERIFIED)")
+    pin_info = publisher_pin()
+    pin = pin_info.get("signer")
+    if pin:
+        result["publisher_pin"] = f"{pin} (owner-pinned in the install-manifest; see the authenticity gate)"
+    elif pin_error(pin_info):
+        # an unreadable/invalid install-manifest is not "no pin": whether one exists is UNKNOWN and the gate blocks
+        result["publisher_pin"] = (f"UNKNOWN (install-manifest unreadable: {pin_error(pin_info)}; authenticity "
+                                   "UNVERIFIED, the authenticity gate blocks)")[:300]
+    else:
+        result["publisher_pin"] = "NONE (install-manifest has no approved pin; authenticity UNVERIFIED)"
     if run is None:
         _SIG_CACHE[key] = result
     return result
@@ -196,14 +203,27 @@ def invocation_signature(path: Path | None, fingerprint_value: str | None) -> di
     return publisher_signature(path, fingerprint_value=fingerprint_value)
 
 
-def approved_publisher() -> str | None:
-    """Owner-pinned Claude Code publisher identity from the reviewed InstallManifest (None = not pinned)."""
+def publisher_pin() -> dict[str, Any]:
+    """The owner's Claude Code publisher pin for this OS: ``{"signer", "status" PINNED|NOT_PINNED|UNREADABLE,
+    "reason"}``. UNREADABLE (the reviewed InstallManifest cannot be read/validated) is not "not pinned": the gate
+    fails closed on it."""
     try:
         from aeos.inventory import facade as inventory
 
-        return inventory.approved_signer("claude-code")
-    except ImportError:
-        return None
+        return inventory.signer_pin("claude-code")
+    except ImportError as exc:
+        return {"signer": None, "status": "UNREADABLE", "reason": f"inventory unavailable ({type(exc).__name__})"}
+
+
+def pin_error(pin: dict[str, Any]) -> str | None:
+    """Why the publisher pin is unknown (UNREADABLE), else None."""
+    return str(pin.get("reason") or "publisher pin unknown") if pin.get("status") == "UNREADABLE" else None
+
+
+def approved_publisher() -> str | None:
+    """Owner-pinned Claude Code publisher identity from the reviewed InstallManifest (None = not pinned or unknown;
+    gates use ``publisher_pin`` to tell those apart)."""
+    return publisher_pin()["signer"]
 
 
 # One RDN of an X.500 subject as Windows prints it: ``KEY=value`` or ``KEY="value, with commas"``; an unquoted value
@@ -232,29 +252,88 @@ def signer_matches(observed: str | None, approved: str | None) -> bool:
     return False
 
 
-def signature_gate(sig: dict[str, Any] | None, approved_signer: str | None) -> tuple[str, str]:
+def signature_gate(sig: dict[str, Any] | None, approved_signer: str | None, *,
+                   pin_problem: str | None = None) -> tuple[str, str]:
     """What the observed OS code signature means for the bridge (§12 "unmodified official binary").
 
     * ``BLOCKED``: the OS reports the signature INVALID (e.g. Authenticode HashMismatch / NotTrusted, codesign
-      verify failure), or the owner pinned a publisher identity and the observed signer is not exactly it
-      (``signer_matches``: whole subject, whole RDN or exact CN/O value - never a substring);
-    * ``DEGRADED``: the binary is not signed (reported, never treated as the official build);
+      verify failure); or whether a publisher is pinned cannot be read (*pin_problem*: the reviewed manifest is
+      unreadable - unknown is never "not pinned"); or the owner pinned a publisher identity for this OS and the
+      binary is not proven to be it - the signature is not VALID (UNSIGNED, UNKNOWN, not checked) or the observed
+      signer is not exactly the pin (``signer_matches``: whole subject, whole RDN or exact CN/O value - never a
+      substring);
+    * ``DEGRADED``: no pin, and the binary is not signed (reported, never treated as the official build);
     * ``OK``: VALID and the observed signer matches the owner-pinned identity;
-    * ``UNVERIFIED``: VALID without a pinned identity, or no check ran / UNKNOWN (never shown as authentic)."""
+    * ``UNVERIFIED``: no pin, and VALID, or no check ran / UNKNOWN (never shown as authentic)."""
     status = str((sig or {}).get("status") or "NOT_CHECKED")
     signer = str((sig or {}).get("signer") or "")
+    pin_ref = "install-manifest claude-code signature.approved_signer"
     if status == "INVALID":
         return "BLOCKED", "OS reports the code signature of the claude binary INVALID (modified or untrusted build)"
-    if approved_signer and status == "VALID" and not signer_matches(signer, approved_signer):
-        return "BLOCKED", (f"observed signer {signer or 'unknown'!r} is not the owner-pinned publisher "
-                           f"{approved_signer!r} (install-manifest claude-code signature.approved_signer)")
+    if pin_problem:
+        return "BLOCKED", f"{pin_problem}; authenticity cannot be decided, so the native call is refused ({pin_ref})"
+    if approved_signer:
+        if status != "VALID":
+            # a pinned publisher must be PROVEN: an unsigned or unverifiable binary is not that publisher's build
+            return "BLOCKED", (f"code signature {status}: the binary cannot be shown to be signed by the owner-pinned "
+                               f"publisher {approved_signer!r} ({pin_ref})")
+        if not signer_matches(signer, approved_signer):
+            return "BLOCKED", (f"observed signer {signer or 'unknown'!r} is not the owner-pinned publisher "
+                               f"{approved_signer!r} ({pin_ref})")
+        return "OK", f"signature VALID and signer matches the pinned publisher {approved_signer!r}"
     if status == "UNSIGNED":
         return "DEGRADED", "the claude binary is not code-signed; it cannot be shown to be the official build"
-    if status == "VALID" and approved_signer:
-        return "OK", f"signature VALID and signer matches the pinned publisher {approved_signer!r}"
     if status == "VALID":
         return "UNVERIFIED", "signature VALID; no publisher identity pinned in the install-manifest (owner step)"
     return "UNVERIFIED", f"code signature {status}: authenticity not established"
+
+
+SIGNATURE_REMEDY: dict[str, Any] = {
+    "operation": "Pasang ulang build resmi Claude Code (distribusi Anthropic), lalu periksa tanda tangan OS-nya",
+    "windows": ["winget install --id Anthropic.ClaudeCode -e",
+                "(Get-AuthenticodeSignature (Get-Command claude.exe).Source).SignerCertificate.Subject"],
+    "darwin": ["brew reinstall --cask claude-code", 'codesign -dv --verbose=2 "$(which claude)" 2>&1 | grep TeamIdentifier'],
+    "pin_note": "Bila penerbit resmi memang berubah, ubah signature.approved_signer (per OS: windows / darwin) di "
+                "install-manifest/manifest.yaml lewat PR yang direview; jangan menonaktifkan pemeriksaan.",
+}
+
+
+MANIFEST_REMEDY: dict[str, Any] = {
+    "operation": "Perbaiki install-manifest/manifest.yaml sampai lolos validasi (pin penerbit tidak dapat dibaca, "
+                 "jadi bridge diblokir); perintah seed menampilkan setiap galat validasi",
+    "windows": [r".\aeos.ps1 seed --only aeos.inventory.seed"],
+    "darwin": ["./aeos seed --only aeos.inventory.seed"],
+    "pin_note": "Perubahan install-manifest lewat PR yang direview; jangan menonaktifkan pemeriksaan tanda tangan.",
+}
+
+
+def authenticity_view(sig: dict[str, Any] | None, approved_signer: str | None, *, found: bool = True,
+                      pin_problem: str | None = None) -> dict[str, Any]:
+    """The §12 authenticity claim as status pages and the Doctor show it: the gate, its reason, the pin that applies
+    on this OS and - when not authentic - the signature-specific remedy (never the login remedy)."""
+    from aeos.inventory import facade as inventory
+
+    status = str((sig or {}).get("status") or "NOT_CHECKED")
+    if not found:
+        gate, reason = "UNVERIFIED", "no binary"
+    elif pin_problem:
+        gate, reason = signature_gate(sig, approved_signer, pin_problem=pin_problem)
+    elif status == "NOT_CHECKED":
+        gate, reason = "NOT_CHECKED", ("OS signature not checked yet in this process (refresh); every native call "
+                                       "checks it first" + (" and is BLOCKED unless VALID and the pinned signer"
+                                                            if approved_signer else ""))
+    else:
+        gate, reason = signature_gate(sig, approved_signer)
+    os_name = inventory.host_platform()[0]
+    spec = MANIFEST_REMEDY if pin_problem and found else SIGNATURE_REMEDY
+    return {"gate": gate, "reason": reason, "approved_signer": approved_signer, "os": os_name,
+            "pin_status": "UNREADABLE" if pin_problem else ("PINNED" if approved_signer else "NOT_PINNED"),
+            "signature_status": status, "observed_signer": (sig or {}).get("signer"),
+            "owner_step": None if approved_signer or pin_problem else
+            f"Pin penerbit Anthropic untuk {os_name} (windows: subject/CN/O Authenticode; darwin: TeamIdentifier) di "
+            "install-manifest claude-code signature.approved_signer lewat PR yang direview",
+            "remedy": None if gate in ("OK", "UNVERIFIED", "NOT_CHECKED") else
+            {"operation": spec["operation"], "commands": spec.get(os_name, []), "note": spec["pin_note"]}}
 
 
 _fp_cache: dict[tuple[str, int, int], str] = {}

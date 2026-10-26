@@ -265,7 +265,8 @@ def record_step(session: Session, project: Project, key: str, *, status: str, ac
     rec.steps = {**(rec.steps or {}), key: entry}
     rec.updated_by = actor[:128]
     session.flush()
-    audit.record(session, actor_type="user", actor_id=actor, action="ops.retirement.step", target_type="project",
+    audit.record(session, actor_type="cli" if actor.startswith("cli") else "user", actor_id=actor,
+                 action="ops.retirement.step", target_type="project",
                  target_id=project.id, project_id=project.id, domain=project.domain,
                  details={"step": key, "status": status, "evidence_ids": entry["evidence_ids"]})
     return entry

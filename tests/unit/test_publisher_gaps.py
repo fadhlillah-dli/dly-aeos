@@ -518,6 +518,8 @@ def test_office_gate_is_enforced_again_at_execute_time(settings, db, secrets_mem
     gate = {"ready": True}
     monkeypatch.setattr(targets_mod, "office_gate", lambda session, project: (
         (True, []) if gate["ready"] else (False, ["CAN_USE_OFFICE_INTEGRATIONS BLOCKED: otorisasi dicabut"])))
+    # the target is one the company approved (approved_targets: test_office_company_scope)
+    monkeypatch.setattr(targets_mod, "_company_approved", lambda session, family, acfg: (True, "test: approved"))
     secrets_memory.put("office/atlassian", json.dumps({"email": "a@b.invalid", "api_token": "atl-token-1234567890"}),
                        actor="test")
     project = make_project(db, domain="OFFICE")
@@ -568,8 +570,9 @@ def test_pii_minimisation_never_mangles_record_ids():
 
 
 def test_every_operation_gate_is_consulted_by_its_operation():
-    """§08 "operasi dengan dependency critical gagal tidak dijalankan": every capability gate (except the dashboard
-    and staging, which no operation of this build runs) has a call site that asks the Doctor before the operation.
+    """§08 "operasi dengan dependency critical gagal tidak dijalankan": every capability gate (except the dashboard,
+    which no operation runs) has a call site that asks the Doctor before the operation - CAN_VALIDATE_STAGING is
+    consulted by the staging observation and the staging screenshot capture (aeos.delivery.deployment).
     Static check over the backend source, so a gate that is computed but never consulted fails here."""
     import re as _re
     from pathlib import Path
@@ -580,10 +583,10 @@ def test_every_operation_gate_is_consulted_by_its_operation():
     text = "\n".join(p.read_text(encoding="utf-8") for p in root.rglob("*.py")
                      if "doctor" not in p.parts and p.name != "enums.py")
     consulted = set(_re.findall(r"Capability\.(CAN_[A-Z_]+)", text))
-    exempt = {"CAN_OPEN_DASHBOARD", "CAN_VALIDATE_STAGING"}
+    exempt = {"CAN_OPEN_DASHBOARD"}
     # CAN_PLAN_PERSONAL is the planning module's own audit item (§08 gates, owning_module planning); listed here
     # so this cluster's gates (publish / office) can never silently lose their call site.
     other_module = {"CAN_PLAN_PERSONAL"}
     missing = {c.value for c in Capability} - exempt - other_module - consulted
     assert missing == set(), f"gates without a call site: {sorted(missing)}"
-    assert {"CAN_PUBLISH_PERSONAL", "CAN_USE_OFFICE_INTEGRATIONS"} <= consulted
+    assert {"CAN_PUBLISH_PERSONAL", "CAN_USE_OFFICE_INTEGRATIONS", "CAN_VALIDATE_STAGING"} <= consulted

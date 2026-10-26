@@ -71,6 +71,40 @@ def invalidate(session: Session, *, invalidator: str, reason: str = "") -> int:
     return impl(session, invalidator=invalidator, reason=reason)
 
 
+def recheck(session: Session, *, checks: list[str], actor: str, trigger: str) -> dict[str, str]:
+    """Additive (2026-10-25): re-run exactly the named checks now and persist their results in *session*
+    (caller commits) - for an owner action that changes what one DB-only check observes (e.g. enabling the
+    implementer agent re-checks ``worker.agent_definition``), so the gate does not keep a result made STALE by
+    that action. Returns {check_id: status}. Never runs a functional or paid probe."""
+    from aeos.core.config import get_settings
+    from aeos.doctor.runner import run_doctor
+
+    report = run_doctor(get_settings(), session, checks=list(checks), actor=actor, trigger=trigger)
+    return {r.check_id: r.status for r in report.results}
+
+
+def request_recheck(check_ids: list[str]) -> list[str]:
+    """Additive (§08 "memicu recheck sebelum capability tersebut digunakan kembali"): queue a background recheck of
+    the given checks that may be re-run implicitly (local non-functional checks and the zero-cost remote identity
+    probes; never quota-bearing ones). Returns the ids queued - empty when no server recheck worker runs (CLI)."""
+    from aeos.doctor import capabilities as caps
+
+    if not caps.auto_recheck_enabled():
+        return []
+    ids = [*caps.recheckable(list(check_ids)), *caps.remote_recheckable(list(check_ids))]
+    if ids:
+        caps.request_recheck(ids)
+    return ids
+
+
+def launcher_command(args: str) -> str:
+    """Additive: the copyable AEOS launcher command for this OS (``.\\aeos.ps1 <args>`` on Windows, ``./aeos <args>``
+    on macOS), as the Doctor's own remedies print it."""
+    from aeos.doctor.model import aeos_cmd
+
+    return aeos_cmd(args)
+
+
 def check_catalog() -> dict[str, Any]:
     """The registered Readiness Doctor checks (count and group labels) - static catalog, no results."""
     from aeos.doctor.checks import REGISTRY, load_all

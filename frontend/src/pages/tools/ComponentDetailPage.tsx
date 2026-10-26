@@ -368,7 +368,20 @@ export default function ComponentDetailPage() {
               ["Pin disetujui", ver.approved_pin ?? <Badge key="p" status="NO_PIN" />],
               ["Terpasang/teresolusi", ver.observed_version ?? "—"],
               ["Status versi", <Badge key="s" status={ver.status} />],
-              ["Digest disetujui / teramati", <span key="dg"><Mono>{shortHash(ver.approved_digest)}</Mono> / <Mono>{shortHash(ver.observed_digest)}</Mono> {ver.digest_status && <Badge status={ver.digest_status} />}</span>],
+              [
+                "Digest disetujui / teramati",
+                <span key="dg" className="inline-flex flex-wrap items-center gap-1">
+                  <Mono>{shortHash(ver.approved_digest)}</Mono> / <Mono>{shortHash(ver.observed_digest)}</Mono> {ver.digest_status && <Badge status={ver.digest_status} />}
+                  {ver.approved_digest_platform && (
+                    <span className="text-xs text-ink-3" data-testid="digest-platform">
+                      platform ini: <Mono>{ver.approved_digest_platform}</Mono>
+                      {ver.approved_digest_platforms && ver.approved_digest_platforms.length > 0 && (
+                        <> · digest tercatat untuk: <Mono>{ver.approved_digest_platforms.join(", ")}</Mono></>
+                      )}
+                    </span>
+                  )}
+                </span>,
+              ],
               ["Artefak distribusi", asText(ver.distribution)],
               ["Tanda tangan / provenance", asText(ver.signature)],
               [

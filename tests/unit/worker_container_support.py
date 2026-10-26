@@ -154,6 +154,10 @@ if args[:1] == ["run"]:
         wt = pathlib.Path(mounts["/workspace"])
         (wt / "src").mkdir(exist_ok=True)
         (wt / "src" / "feature.py").write_text("VALUE = 7\n", encoding="utf-8")
+        if cfg.get("worker_cmdlog"):  # what the AEOS shell runner leaves in the worktree for one granted command
+            (wt / ".aeos" / "cmdlog").mkdir(parents=True, exist_ok=True)
+            (wt / ".aeos" / "cmdlog" / "1-1.log").write_text(
+                "$ npm test\n" + "".join("output line %d\n" % i for i in range(1000)), encoding="utf-8")
         print(json.dumps({"type": "tool_use", "part": {"tool": "write", "state": {"status": "completed",
               "input": {"filePath": "/workspace/src/feature.py"}}}}), flush=True)
         print(json.dumps({"type": "step_finish", "part": {"reason": "stop", "tokens": {"input": 5, "output": 1}}}),

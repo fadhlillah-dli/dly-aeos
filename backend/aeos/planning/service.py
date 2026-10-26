@@ -250,7 +250,8 @@ def _integration_caps(session: Session, project: Project) -> dict[str, Any]:
 
 def build_context(session: Session, *, project: Project, domain: str, prompt: str, attachment_ids: list[str],
                   actor_user_id: str) -> PlanningContext:
-    from aeos.policy import office, snapshot
+    from aeos.policy import snapshot
+    from aeos.policy.facade import office_policy
 
     inputs = _attachment_inputs(session, project, domain, attachment_ids)
     repo = _repo_inventory(session, project)
@@ -279,7 +280,13 @@ def build_context(session: Session, *, project: Project, domain: str, prompt: st
     if domain == Domain.OFFICE.value:
         assumptions.append({"statement": "Atlassian Cloud is an assumption; Cloud vs Data Center is UNKNOWN",
                             "source": "§04"})
-    unknowns = [{"statement": "MCI_V2 canonical policy is UNVERIFIED; no compliance claim can be made",
+    # §24: the MCI status the policy module verifies on this machine (never the declared one); compliance is never
+    # claimed, so this stays an unknown even with a VERIFIED source
+    mci = snapshot.mci_reference()
+    unknowns = [{"statement": (f"MCI_V2 canonical source VERIFIED (version {mci['version']}, {mci['content_hash']}); "
+                               "compliance NOT-PROVEN" if mci["status"] == "VERIFIED" else
+                               f"MCI_V2 canonical policy is UNVERIFIED ({mci['verification_code']}); no compliance "
+                               "claim can be made"),
                  "impact": "Gates depending on MCI stay NOT-PROVEN"}]
     if repo["status"] == "UNKNOWN":
         unknowns.append({"statement": f"Repository inventory UNKNOWN: {repo.get('reason')}",
@@ -297,7 +304,7 @@ def build_context(session: Session, *, project: Project, domain: str, prompt: st
     if len((prompt or "").strip()) < 30:
         questions.append({"question": "Apa hasil yang diharapkan dan batas scope-nya? Prompt terlalu singkat.",
                           "category": "scope", "blocking": False})
-    if domain == Domain.OFFICE.value and not office.office_policy(session)["office_authorization"]:
+    if domain == Domain.OFFICE.value and not office_policy(session)["office_authorization"]:
         questions.append({"question": "Apakah ada otorisasi perusahaan untuk mengirim data OFFICE ke Claude Max dan "
                                       "target Confluence/Jira/Bitbucket?", "category": "legal", "blocking": True})
     constraints: list[dict[str, Any]] = [{"kind": "POLICY", "statement": s} for s in prompts.FIXED_POLICY]
@@ -344,10 +351,37 @@ def _is_pinned(model: str) -> bool:
     return is_pinned_id(model)
 
 
+def _evaluated_models(session: Session, decision: Any) -> dict[str, str]:
+    """Normalised model id -> EvalRun id for every run the stage-model decision cites (``details.eval_run_id`` and the
+    validated ``details.system_change.eval_runs``) that is still a COMPLETED evaluation with every gate PASS, planned
+    in the decision's domain or the platform. Re-read live: a run's evidence is never taken from the decision text."""
+    try:
+        from aeos.models.research import EvalRun
+    except ImportError:
+        return {}
+    details = decision.details or {}
+    cited = [details.get("eval_run_id"), *[r.get("id") for r in (details.get("system_change") or {}).get("eval_runs")
+                                           or [] if isinstance(r, dict)]]
+    out: dict[str, str] = {}
+    for rid in dict.fromkeys(str(i) for i in cited if i):
+        run = session.get(EvalRun, rid)
+        gates = {str(v).upper() for v in ((run.gate_results or {}) if run else {}).values()}
+        if run is None or run.status != "COMPLETED" or gates != {"PASS"} or \
+                run.submitted_domain not in (None, decision.domain):
+            continue
+        cfg = run.configuration if isinstance(run.configuration, dict) else {}
+        for model in (cfg.get("model_id"), cfg.get("model_version")):
+            if isinstance(model, str) and model.strip() and model.strip().upper() != "UNKNOWN":
+                out.setdefault(model.strip().lower(), run.id)
+    return out
+
+
 def configured_stage_models(session: Session) -> tuple[dict[str, str], dict[str, Any]]:
     """§15 "Opus family, versi terkonfigurasi": the owner may pin a stage to an exact model id of its policy family
     through a human POLICY decision on planning_baseline/stage_models that references a COMPLETED evaluation run
-    with every gate PASS. Anything else (other family, alias, no evaluation) is ignored and reported."""
+    with every gate PASS **of exactly that model** (the run's configuration model_id/model_version, §02 "a version
+    change needs evaluation"). Anything else (other family, alias, no evaluation, an evaluation of another model) is
+    ignored and reported."""
     from aeos.policy import decisions as registry
 
     d = registry.find_active_decision(session, kind="POLICY", target_type=STAGE_MODEL_TARGET[0],
@@ -356,25 +390,31 @@ def configured_stage_models(session: Session) -> tuple[dict[str, str], dict[str,
         return {}, {}
     details = d.details or {}
     note: dict[str, Any] = {"decision_id": d.id}
-    try:
-        from aeos.models.research import EvalRun
-
-        run = session.get(EvalRun, str(details.get("eval_run_id") or "")) if details.get("eval_run_id") else None
-    except ImportError:
-        run = None
-    gates = {str(v).upper() for v in ((run.gate_results or {}) if run else {}).values()}
-    if d.actor_kind != "HUMAN" or run is None or run.status != "COMPLETED" or gates != {"PASS"}:
-        return {}, {**note, "ignored": "a stage model change needs a COMPLETED evaluation run with every gate PASS"}
+    evaluated = _evaluated_models(session, d) if d.actor_kind == "HUMAN" else {}
+    if not evaluated:
+        return {}, {**note, "ignored": "a stage model change needs a COMPLETED evaluation run with every gate PASS "
+                                       "of exactly the pinned model"}
     out: dict[str, str] = {}
     rejected: dict[str, str] = {}
+    reasons: dict[str, str] = {}
+    bound: dict[str, str] = {}
     families = {s.state.value: s.family for s in STAGES}
     for stage, model in (details.get("models") or {}).items():
         fam = families.get(str(stage))
-        if fam and isinstance(model, str) and _is_pinned(model) and model_matches(fam, model):
-            out[str(stage)] = model.strip()
-        else:
+        if not (fam and isinstance(model, str) and _is_pinned(model) and model_matches(fam, model)):
             rejected[str(stage)] = str(model)[:64]
-    return out, {**note, "eval_run_id": run.id, **({"rejected": rejected} if rejected else {})}
+            reasons[str(stage)] = "not an exact model id of the stage's policy family"
+            continue
+        run_id = evaluated.get(model.strip().lower())
+        if run_id is None:
+            rejected[str(stage)] = str(model)[:64]
+            reasons[str(stage)] = "no cited passing evaluation run of exactly this model"
+            continue
+        out[str(stage)] = model.strip()
+        bound[str(stage)] = run_id
+    first = next(iter(bound.values()), None) or next(iter(evaluated.values()))
+    return out, {**note, "eval_run_id": first, "eval_runs": bound,
+                 **({"rejected": rejected, "rejected_reasons": reasons} if rejected else {})}
 
 
 def stage_model(plan: Plan, spec: StageSpec) -> str:
@@ -773,7 +813,7 @@ def publication_targets(session: Session, project_id: str) -> list[dict[str, Any
 
 def get_approved_version(session: Session, plan_id: str) -> PlanVersion | None:
     """The exact version bound by the ACTIVE approval decision — never "latest" (§50)."""
-    from aeos.policy.decisions import find_active_decision
+    from aeos.policy.facade import find_active_decision
 
     plan = session.get(Plan, plan_id)
     if plan is None or not plan.approved_version_id:
@@ -792,7 +832,7 @@ def get_approved_version(session: Session, plan_id: str) -> PlanVersion | None:
 
 def on_approval_inactive(session: Session, decision: Decision) -> None:
     """Hook from the decision registry when an APPROVAL stops being ACTIVE (revoked/expired)."""
-    from aeos.policy.decisions import find_active_decision
+    from aeos.policy.facade import find_active_decision
 
     version = session.get(PlanVersion, decision.target_id)
     if version is None:
@@ -814,7 +854,7 @@ def on_approval_inactive(session: Session, decision: Decision) -> None:
 def office_gate(session: Session, plan: Plan, *, actor: str) -> None:
     if plan.domain != Domain.OFFICE.value:
         return
-    from aeos.policy.office import office_policy
+    from aeos.policy.facade import office_policy
 
     reasons: list[str] = []
     try:
@@ -826,8 +866,15 @@ def office_gate(session: Session, plan: Plan, *, actor: str) -> None:
         reasons.append(f"CAN_PLAN_OFFICE: {exc.message}" + (f" ({'; '.join(extra)})" if extra else ""))
     except (ImportError, ModuleNotFoundError):
         reasons.append("CAN_PLAN_OFFICE: readiness doctor not available -> UNKNOWN (fail closed)")
-    if not office_policy(session)["claude_max_allowed_for_office_data"]:
+    pol = office_policy(session)
+    if not pol["claude_max_allowed_for_office_data"]:
         reasons.append("OFFICE_POLICY: Claude Max for OFFICE data is not approved by a company authorisation (§23, §51 P1)")
+    project = session.get(Project, plan.project_id)
+    from aeos.policy.facade import office_data_class_authorised
+
+    ok, why = office_data_class_authorised(session, project.data_classification if project else None, policy=pol)
+    if not ok:
+        reasons.append(f"OFFICE_POLICY_DATA_CLASS: {why} (§01 U-03, §51 P1)")
     if not reasons:
         return
     cp = dict(plan.checkpoint or {})
@@ -853,11 +900,16 @@ def personal_gate(session: Session, plan: Plan, *, actor: str) -> dict[str, Any]
       official Claude Code (explicit, never the Claude API).
     * UNKNOWN (readiness never checked) -> the official bridge is used, labelled NOT-PROVEN on the plan and every
       run (``bridge_proof``); it is never shown as a proven automatic integration.
+    * a critical check that passed and was invalidated since (STALE: environment, data dir, dependencies, schema
+      changed) -> §08 "memicu recheck sebelum capability tersebut digunakan kembali": no model call; the recheck is
+      queued where a server recheck worker runs and the plan waits in NEEDS_DECISION with the ``aeos doctor``
+      remedy (a never-run critical check stays UNKNOWN as above).
     * READY -> native bridge, labelled PROVEN.
     Returns the recorded ``bridge_proof``. OFFICE plans are gated by ``office_gate``."""
     if plan.domain != Domain.PERSONAL.value:
         return {}
     remedies: list[Any] = []
+    stale: list[str] = []
     try:
         from aeos.doctor import facade as doctor
 
@@ -865,11 +917,25 @@ def personal_gate(session: Session, plan: Plan, *, actor: str) -> dict[str, Any]
                                         project_id=plan.project_id)
         status, reasons = str(state.status), [str(r) for r in state.reasons]
         remedies = list(state.remedies or [])
+        stale = [str(c.get("check_id")) for c in state.checks or []
+                 if c.get("tier") == "critical" and c.get("effective_status") == "STALE"]
     except (ImportError, ModuleNotFoundError):
         status, reasons = "UNKNOWN", ["readiness doctor not available in this build"]
+    recheck = bool(stale) and status != "BLOCKED"
+    if recheck:
+        queued = doctor.request_recheck(stale)
+        status = "BLOCKED"
+        reasons = [f"pemeriksaan kritis STALE (dicek ulang sebelum bridge dipakai lagi): {', '.join(stale)}"
+                   + ("; recheck dijadwalkan, coba lagi sesudahnya" if queued else ""), *reasons]
+        remedies = [{"check_id": c, "operation": "Jalankan ulang pemeriksaan Readiness Doctor",
+                     "command": doctor.launcher_command(f"doctor --capability {Capability.CAN_PLAN_PERSONAL.value}"),
+                     "executed_by": "MANUSIA (salin dan jalankan sendiri)"} for c in stale] + remedies
     proof = {"capability": Capability.CAN_PLAN_PERSONAL.value, "status": status,
              "label": {"READY": "PROVEN", "DEGRADED": "MANUAL_PACKAGE", "BLOCKED": "BLOCKED"}.get(status, "NOT-PROVEN"),
              "reasons": [redact_text(r)[:300] for r in reasons[:10]], "checked_at": utcnow().isoformat()}
+    if recheck:
+        proof["label"] = "RECHECK_REQUIRED"
+        proof["stale_checks"] = stale
     if proof["label"] == "NOT-PROVEN":
         # §02 Istilah: UNKNOWN is not proven. This build still runs the official bridge on UNKNOWN (the trusted
         # acceptance helper relies on it); stated on the plan as an open owner decision, never as automatic/proven.

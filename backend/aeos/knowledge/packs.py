@@ -21,8 +21,10 @@ A pack is the minimum, provenance-carrying context for one task/role:
 from __future__ import annotations
 
 import fnmatch
+import functools
 import math
 import re
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -33,12 +35,12 @@ from sqlalchemy.orm import Session
 from aeos.audit import service as audit
 from aeos.core.enums import Domain
 from aeos.core.errors import AeosError, NotFound, ValidationFailed
-from aeos.core.hashing import content_hash, file_sha256, sha256_text
+from aeos.core.hashing import content_hash, file_sha256, sha256_bytes, sha256_text
 from aeos.core.paths import UnsafePathError, ensure_within, repo_root
 from aeos.core.redaction import redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.events import service as events
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.knowledge import memory as memory_mod
 from aeos.models.evidence import EvidenceArtifact
 from aeos.models.knowledge_ext import ContextPackMeta
@@ -138,7 +140,8 @@ class _Collector:
         self.refs: set[str] = set()
 
     def add(self, *, kind: str, ref: str, content: str, provenance: dict[str, Any], trust: str,
-            classification: str | None = None, title: str = "", truncatable: bool = False) -> bool:
+            classification: str | None = None, title: str = "", truncatable: bool = False,
+            mandatory: bool = True) -> bool:
         if ref in self.refs:
             return False
         redacted = redact_text(content)
@@ -153,7 +156,8 @@ class _Collector:
                 tokens = _tokens(redacted)
                 truncated = True
             else:
-                self.omitted.append({"kind": kind, "ref": ref, "reason": "token budget", "tokens": tokens})
+                self.omitted.append({"kind": kind, "ref": ref, "reason": "token budget", "tokens": tokens,
+                                     **({} if mandatory else {"mandatory": False})})
                 return False
         self.used += tokens
         self.refs.add(ref)
@@ -169,6 +173,24 @@ class _Collector:
 # ---------------------------------------------------------------- policy context
 
 
+def _local_only_mci(rel: str) -> bool:
+    """Owner-local canonical MCI material (the source, its pack mapping) that a copy in the checkout must never turn
+    into policy context: the repository is public and the source is read from this machine only (.gitignore guards
+    the same names)."""
+    name = rel.rsplit("/", 1)[-1]
+    return rel.split("/", 1)[0].lower() == "canonical" or name.upper().startswith("MCI_V2_SOURCE_OF_TRUTH") \
+        or name.lower() == "mci-pack-mapping.yaml"
+
+
+def misplaced_mci_files() -> list[str]:
+    """``policy/`` paths of canonical MCI material placed in the checkout by mistake (never read; see policy_files)."""
+    root = repo_root() / "policy"
+    if not root.is_dir():
+        return []
+    return [f"policy/{rel}" for rel in (p.relative_to(root).as_posix() for p in sorted(root.rglob("*")) if p.is_file())
+            if _local_only_mci(rel)]
+
+
 def policy_files() -> tuple[Path, list[Path]]:
     root = repo_root() / "policy"
     if not root.is_dir():
@@ -179,6 +201,8 @@ def policy_files() -> tuple[Path, list[Path]]:
             break
         if not p.is_file() or p.suffix.lower() not in POLICY_SUFFIXES:
             continue
+        if _local_only_mci(p.relative_to(root).as_posix()):
+            continue  # an MCI copy in the checkout is never policy context (misplaced_mci_files names it)
         try:
             files.append(ensure_within(root, p))  # a symlink out of policy/ is ignored
         except UnsafePathError:
@@ -191,14 +215,122 @@ def policy_hashes() -> dict[str, str]:
     return {p.relative_to(root.resolve()).as_posix(): file_sha256(p) for p in files}
 
 
-def _collect_policy(col: _Collector, warnings: list[str]) -> None:
+# §24 "Policy context: MCI ... read-only, versi/hash jelas". The canonical MCI source may be larger than the per-file
+# cap: it is then split at line boundaries into labelled parts of at most MAX_POLICY_BYTES (each item names its part,
+# line range, part hash and the whole document's hash); parts beyond MAX_MCI_PARTS or the token budget are listed as
+# omitted, and the pack warns that gates relying on them stay NOT-PROVEN. Other policy files over the cap are skipped
+# with a warning (never silently truncated).
+MAX_MCI_PARTS = 16
+MCI_CHUNKING_RULE = (f"canonical MCI over {MAX_POLICY_BYTES} bytes: split at line boundaries into parts of at most "
+                     f"{MAX_POLICY_BYTES} bytes, at most {MAX_MCI_PARTS} parts per pack")
+
+
+def _mci_parts(data: bytes) -> list[tuple[int, int, bytes]]:
+    """(first line, last line, bytes) parts of at most MAX_POLICY_BYTES; an over-long line is split hard."""
+    parts: list[tuple[int, int, bytes]] = []
+    buf, first, line_no = b"", 1, 0
+    for line in data.splitlines(keepends=True):
+        line_no += 1
+        while len(line) > MAX_POLICY_BYTES:  # a single line longer than a part
+            if buf:
+                parts.append((first, line_no - 1, buf))
+                buf = b""
+            parts.append((line_no, line_no, line[:MAX_POLICY_BYTES]))
+            line = line[MAX_POLICY_BYTES:]
+            first = line_no
+        if buf and len(buf) + len(line) > MAX_POLICY_BYTES:
+            parts.append((first, line_no - 1, buf))
+            buf, first = b"", line_no
+        if not buf:
+            first = line_no
+        buf += line
+    if buf:
+        parts.append((first, line_no, buf))
+    return parts
+
+
+def _mci_provenance(mci: dict[str, Any]) -> dict[str, Any]:
+    return {"mci_status": mci["status"], "mci_declared_status": mci["declared_status"],
+            "mci_verification": mci["verification_code"], "mci_version": mci["version"],
+            "mci_content_hash": mci["content_hash"], "mci_compliance": mci["compliance"]}
+
+
+def _same_digest(a: Any, b: Any) -> bool:
+    def norm(v: Any) -> str:
+        t = str(v or "").strip().lower()
+        return t[7:] if t.startswith("sha256:") else t
+
+    return bool(norm(a)) and norm(a) == norm(b)
+
+
+def _add_mci_source(col: _Collector, path: Path, ref: str, mci: dict[str, Any], warnings: list[str]) -> None:
+    """Add the VERIFIED local MCI source (whole, or in labelled parts). The bytes are re-hashed as read: a file that
+    changed after verification is not used (the pack says so). Its parts are not mandatory for the budget - the
+    reference in policy/mci-reference.yaml is - and every omitted part is named in the warnings."""
+    data = path.read_bytes()
+    digest = "sha256:" + sha256_bytes(data)
+    if not _same_digest(digest, mci["content_hash"]):
+        warnings.append(f"canonical MCI {ref} changed after verification (hash mismatch): not included; gates relying "
+                        "on it stay NOT-PROVEN")
+        return
+    base = {"source": "owner-local canonical MCI source (read-only, never in the repository)",
+            "path": mci.get("source_location") or ref, "sha256": digest, "read_only": True, "mci_source": True,
+            **_mci_provenance(mci)}
+    if len(data) <= MAX_POLICY_BYTES:
+        if not col.add(kind="policy", ref=ref, content=data.decode("utf-8", errors="replace"), provenance=base,
+                       trust="POLICY_READ_ONLY", classification="INTERNAL", title=f"{ref} (MCI)", mandatory=False):
+            warnings.append(f"canonical MCI {ref} not in this pack (token budget); gates relying on it stay NOT-PROVEN")
+        return
+    parts = _mci_parts(data)
+    n = len(parts)
+    omitted: list[int] = []
+    for i, (a, b, chunk) in enumerate(parts, 1):
+        if i > MAX_MCI_PARTS:
+            omitted.append(i)
+            continue
+        prov = {**base, "part": {"index": i, "of": n, "lines": [a, b], "bytes": len(chunk),
+                                 "sha256": "sha256:" + sha256_bytes(chunk)}, "chunking": MCI_CHUNKING_RULE}
+        if not col.add(kind="policy", ref=f"{ref}#part-{i}-of-{n}", content=chunk.decode("utf-8", errors="replace"),
+                       provenance=prov, trust="POLICY_READ_ONLY", classification="INTERNAL",
+                       title=f"{ref} (MCI bagian {i}/{n}, baris {a}-{b})", mandatory=False):
+            omitted.append(i)
+    warnings.append(f"canonical MCI {ref} is {len(data)} bytes: split into {n} labelled parts ({MCI_CHUNKING_RULE})")
+    if omitted:
+        warnings.append(f"canonical MCI {ref} only partly in this pack: parts {omitted} of {n} omitted (part cap or "
+                        "token budget); gates relying on the omitted parts stay NOT-PROVEN")
+
+
+def mci_state() -> dict[str, Any]:
+    """The verified MCI reference a pack was built against (a change makes the pack STALE)."""
+    from aeos.policy import facade as policy
+
+    m = policy.mci_reference(repo=repo_root())
+    return {k: m[k] for k in ("status", "verification_code", "version", "content_hash")}
+
+
+def _collect_policy(col: _Collector, warnings: list[str], deferred: list[Callable[[], None]] | None = None) -> None:
+    """Policy files (mandatory) and the VERIFIED local MCI source. With *deferred*, the MCI source is queued instead of
+    added: build_pack adds it once the mandatory task context is in, so a large MCI never pushes the task out of the
+    budget (BUDGET_TOO_SMALL); its parts take what is left and every omitted part is named."""
+    from aeos.policy import facade as policy
+
     root, files = policy_files()
+    misplaced = misplaced_mci_files()
+    if misplaced:
+        warnings.append(f"canonical MCI material inside the repository checkout is never read (public repository; "
+                        f"keep it in <data dir>/policy/canonical): {', '.join(misplaced[:5])}")
     if not files:
         warnings.append("policy context MISSING: no policy/ files in the trusted controller; nothing reconstructed")
         col.add(kind="policy", ref="policy:missing", content="POLICY CONTEXT MISSING — gates that need it stay BLOCKED.",
                 provenance={"source": "trusted-controller policy/", "status": "MISSING"}, trust="POLICY_READ_ONLY",
                 classification="INTERNAL", title="policy/ (missing)")
         return
+    # the status the policy module itself verifies (declared VERIFIED with a missing/mismatched file is UNVERIFIED)
+    repo = repo_root()
+    mci = policy.mci_reference(repo=repo)
+    if mci["status"] != "VERIFIED":
+        warnings.append(f"MCI reference status is {mci['status']} (declared {mci['declared_status']}, "
+                        f"{mci['verification_code']}): canonical policy alignment UNVERIFIED")
     for p in files:
         rel = p.relative_to(root.resolve()).as_posix()
         size = p.stat().st_size
@@ -209,12 +341,22 @@ def _collect_policy(col: _Collector, warnings: list[str]) -> None:
         prov: dict[str, Any] = {"source": "trusted-controller policy/ (read-only)", "path": f"policy/{rel}",
                                 "sha256": file_sha256(p), "read_only": True}
         if rel == "mci-reference.yaml":
-            m = re.search(r"^\s*status:\s*(\S+)", text, re.MULTILINE)
-            prov["mci_status"] = m.group(1) if m else "UNKNOWN"
-            if prov["mci_status"] != "VERIFIED":
-                warnings.append(f"MCI reference status is {prov['mci_status']}: canonical policy alignment UNVERIFIED")
+            prov.update(_mci_provenance(mci))
         col.add(kind="policy", ref=f"policy/{rel}", content=text, provenance=prov, trust="POLICY_READ_ONLY",
                 classification="INTERNAL", title=f"policy/{rel}")
+    # the canonical source itself lives on this machine only (the repository is public): only a VERIFIED source is
+    # canonical policy context; the item names its logical location, never a host path
+    source = policy.mci_source_path(repo=repo)
+    if source is None or not source.is_file():
+        return
+    if mci["status"] == "VERIFIED":
+        add = functools.partial(_add_mci_source, col, source, f"mci:{source.name}", mci, warnings)
+        if deferred is None:
+            add()
+        else:
+            deferred.append(add)
+    else:
+        warnings.append(f"local MCI source not included: it is not VERIFIED ({mci['verification_code']})")
 
 
 # ---------------------------------------------------------------- repository context
@@ -377,6 +519,26 @@ def metadata_accepted(item: dict[str, Any]) -> bool:
     return allowed is None or str(item.get("status") or "").upper() in allowed
 
 
+def _effective_item(session: Session, it: dict[str, Any]) -> dict[str, Any]:
+    """The search item with the status consumers must judge by: a decision past ``expires_at`` is EXPIRED even before
+    the expiry is written back; an ADR's status is the owner's recorded decision while it binds the current content,
+    else the (builder-written) file status."""
+    from aeos.policy import facade as policy
+
+    kind = it.get("kind")
+    if kind == "decision":
+        return {**it, "status": policy.decision_effective_status(session, str(it["id"])) or "UNKNOWN",
+                "stored_status": it.get("status")}
+    if kind == "adr":
+        reg = policy.adr_register_status(session, str(it["id"]))
+        if reg is None:
+            return {**it, "status": "UNKNOWN"}
+        return {**it, "status": reg["effective_status"], "file_status": reg["file_status"],
+                "subtitle": f"{reg['effective_status']} ({reg['status_source']})",
+                "status_source": reg["status_source"], "owner_status_state": reg["owner_status_state"]}
+    return it
+
+
 def _collect_metadata(col: _Collector, session: Session, principal: Principal, project: Project, terms: list[str]) -> None:
     from aeos.portfolio.search import search
 
@@ -387,10 +549,11 @@ def _collect_metadata(col: _Collector, session: Session, principal: Principal, p
                          limit=20, project_id=project.id)
         except ValidationFailed:
             continue
-        for it in res["items"]:
+        for raw in res["items"]:
             # only this project's records and platform-global ones (no cross-project leakage)
-            if it.get("project_id") not in (None, project.id) or n >= CAPS["metadata"]:
+            if raw.get("project_id") not in (None, project.id) or n >= CAPS["metadata"]:
                 continue
+            it = _effective_item(session, raw)
             if not metadata_accepted(it):
                 continue  # a draft/superseded/revoked record is not project context (not a budget omission)
             body = f"{it['kind']}: {it['title']}" + (f"\n{it['subtitle']}" if it.get("subtitle") else "") + \
@@ -398,6 +561,7 @@ def _collect_metadata(col: _Collector, session: Session, principal: Principal, p
             if col.add(kind="metadata", ref=f"{it['kind']}:{it['id']}", content=body, trust="AEOS_RECORD",
                        provenance={"source": "aeos-db metadata search", "record_kind": it["kind"], "record_id": it["id"],
                                    "status": it.get("status"), "url": it.get("url"), "term": term,
+                                   **({"status_source": it["status_source"]} if it.get("status_source") else {}),
                                    "precedence": "SUBORDINATE",
                                    "subordinate_to": "project_doc (approved) and repository source items"},
                        title=it["title"]):
@@ -556,12 +720,36 @@ def _collect_research(col: _Collector, session: Session, terms: list[str]) -> No
 # ---------------------------------------------------------------- build
 
 
+def _collect_task_artifacts(col: _Collector, task: TaskSpec, artifacts: list[dict[str, Any]]) -> None:
+    """§21 TaskSpec input artifacts (hash-bound attachments delivered by the planning context) as UNTRUSTED DATA
+    items under the pack's token budget (wave 7, W6-071): right after the TaskSpec, before any summary."""
+    for i, art in enumerate(artifacts[:CAPS["attachment"]]):
+        name = str(art.get("name") or art.get("ref") or f"artifact-{i}")[:200]
+        content = art.get("content")
+        if content is None:
+            content = {k: v for k, v in art.items() if k != "content"}
+        if not isinstance(content, str):
+            import json
+
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        col.add(kind="attachment", ref=f"task-artifact:{art.get('ref') or name}", content=content,
+                trust="UNTRUSTED_DATA", classification=task.data_classification, title=name, truncatable=True,
+                provenance={"source": TASK_ARTIFACT_SOURCE, "task_spec_id": task.id, "ref": art.get("ref"),
+                            "sha256": art.get("sha256"), "kind": art.get("kind")})
+
+
+TASK_ARTIFACT_SOURCE = "TaskSpec input_artifacts (hash-bound; untrusted DATA)"
+
+
 def build_pack(
     session: Session, principal: Principal, project: Project, *, task_id: str | None = None,
     role_key: str | None = None, repository_id: str | None = None, base_commit: str | None = None,
     query: Any = None, paths: Any = None, forbidden_paths: Any = None, token_budget: int | None = None,
-    include: Any = None, ttl_hours: int | None = None,
+    include: Any = None, ttl_hours: int | None = None, task_artifacts: list[dict[str, Any]] | None = None,
+    system_actor: str | None = None,
 ) -> tuple[ContextPack, ContextPackMeta]:
+    """``task_artifacts`` / ``system_actor`` (additive, wave 7): the TaskSpec's delivered input artifacts as DATA
+    items, and a system builder (the worker runtime at run start) recorded as actor_type ``system``."""
     from aeos.portfolio.service import require_writable
 
     require_writable(project)
@@ -627,12 +815,19 @@ def build_pack(
                                 f"{repo.full_name} (run Verifikasi identitas to re-check the origin remote)")
 
     policy_snapshot = policy_hashes() if "policy" in kinds else {}
+    mci_snapshot = mci_state() if "policy" in kinds else None
     col = _Collector(project, budget)
-    for kind in [k for k in SOURCE_ORDER if k in kinds]:  # sources first: they win the budget over summaries
+    order = [k for k in SOURCE_ORDER if k in kinds]
+    # the local MCI source (policy context, not mandatory) is added right after the last mandatory kind
+    last_mandatory = next((k for k in reversed(order) if k in MANDATORY), None)
+    deferred: list[Callable[[], None]] = []
+    for kind in order:  # sources first: they win the budget over summaries
         if kind == "policy":
-            _collect_policy(col, warnings)
+            _collect_policy(col, warnings, deferred)
         elif kind == "task" and task is not None:
             _collect_task(col, task)
+            if task_artifacts:
+                _collect_task_artifacts(col, task, task_artifacts)
         elif kind == "symbol" and reader and repo:
             _collect_symbols(col, reader, terms, repo.full_name)
         elif kind == "repo_file" and reader and repo and path_patterns:
@@ -651,9 +846,15 @@ def build_pack(
             _collect_attachments(col, session, project, terms)
         elif kind == "research":
             _collect_research(col, session, terms)
-        if kind in MANDATORY and any(o["kind"] == kind for o in col.omitted):
+        if kind in MANDATORY and any(o["kind"] == kind and o.get("mandatory", True) for o in col.omitted):
             raise ValidationFailed(f"token budget {budget} cannot hold the mandatory {kind} context",
                                    code="BUDGET_TOO_SMALL")
+        if kind == last_mandatory:
+            for add in deferred:
+                add()
+            deferred.clear()
+    for add in deferred:
+        add()
 
     classification = cls.highest(project.data_classification, task.data_classification if task else None,
                                  *[i["classification"] for i in col.items])
@@ -673,7 +874,7 @@ def build_pack(
         context_pack_id=pack.id, repository_id=repo.id if repo and reader else None,
         repository_full_name=repo.full_name if repo else None,
         request={"query": terms, "paths": path_patterns, "base_ref": base_ref, "include": include or None,
-                 "ttl_hours": ttl, "policy_snapshot": policy_snapshot},
+                 "ttl_hours": ttl, "policy_snapshot": policy_snapshot, "mci_reference": mci_snapshot},
         include_kinds=kinds, allowed_paths=allowed, forbidden_paths=forbidden, token_estimate=col.used,
         omitted=col.omitted, warnings=warnings, observed_head=resolved_commit, checked_at=now,
         created_by=principal.user.id, expires_at=now + timedelta(hours=ttl),
@@ -693,7 +894,8 @@ def build_pack(
     session.add(meta)
     session.flush()
     superseded = _supersede_older(session, pack, meta)
-    audit.record(session, actor_type="user", actor_id=principal.user.id, action="knowledge.context_pack.build",
+    audit.record(session, actor_type="system" if system_actor else "user", actor_id=system_actor or principal.user.id,
+                 action="knowledge.context_pack.build",
                  target_type="context_pack", target_id=pack.id, project_id=project.id, domain=project.domain,
                  details={"role": role, "task_id": pack.task_id, "base_commit": resolved_commit, "items": len(col.items),
                           "tokens": col.used, "budget": budget, "omitted": len(col.omitted), "hash": pack.pack_hash,
@@ -713,6 +915,12 @@ def _policy_changes(pack: ContextPack, meta: ContextPackMeta | None) -> list[str
     current = policy_hashes()
     snapshot = (meta.request or {}).get("policy_snapshot") if meta is not None else None
     reasons: list[str] = []
+    built_mci = (meta.request or {}).get("mci_reference") if meta is not None else None
+    if isinstance(built_mci, dict):  # the verified MCI reference (local source status/hash) the pack was built on
+        now_mci = mci_state()
+        if now_mci != built_mci:
+            reasons.append(f"canonical MCI reference changed ({built_mci.get('status')} "
+                           f"{built_mci.get('verification_code')} -> {now_mci['status']} {now_mci['verification_code']})")
     if isinstance(snapshot, dict):  # the whole policy file set as seen at build time
         for rel in sorted(set(snapshot) | set(current)):
             if rel not in current:
@@ -896,3 +1104,48 @@ def use_pack(session: Session, pack_id: str, *, project_id: str, consumer: str, 
                  details={"consumer": consumer, "pack_hash": pack.pack_hash, "task_id": pack.task_id})
     return {"context_pack_id": pack.id, "pack_hash": pack.pack_hash, "items": list(pack.items or []),
             "token_budget": pack.token_budget, "base_commit": pack.base_commit}
+
+
+# ---------------------------------------------------------------- task-scoped pack at run start (wave 7, W6-071)
+SYSTEM_PACK_ACTOR = "worker_runtime.executor"
+_ROLE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+
+def task_principal(task: TaskSpec, actor: str = SYSTEM_PACK_ACTOR) -> Principal:
+    """A non-persisted, read-only principal bound to exactly one TaskSpec (§13 ContextPack AUTH basis TASK_SPEC):
+    its project and domain only, role VIEWER (it reads context; it never decides). Never added to the session."""
+    from aeos.core.enums import Role
+    from aeos.models.identity import AuthSession, User
+
+    now = utcnow()
+    user = User(id=actor, username=actor, password_hash="!", role=Role.VIEWER.value, is_active=False,
+                project_scope=[task.project_id], domain_scope=[task.domain])
+    auth = AuthSession(token_hash=f"system:{actor}", user_id=actor, csrf_token="", created_at=now, last_seen_at=now,
+                       expires_at=now, selected_domain=task.domain)
+    return Principal(user=user, session=auth, role=Role.VIEWER, allowed_domains=[Domain(task.domain)],
+                     allowed_project_ids=[task.project_id])
+
+
+def build_task_pack(session: Session, task_id: str, *, base_commit: str | None,
+                    artifacts: list[dict[str, Any]] | None = None, actor: str = SYSTEM_PACK_ACTOR,
+                    token_budget: int | None = None) -> tuple[ContextPack, ContextPackMeta]:
+    """The minimum task-scoped pack a worker run receives when no CURRENT one exists (§24): the TaskSpec's role
+    profile, the files of its allowed paths at exactly *base_commit*, the trusted policy files, accepted project
+    documents and the TaskSpec's delivered input artifacts as DATA - all under the pack's token budget. Built by
+    the runtime (actor_type system) under a principal bound to the TaskSpec. Does not commit."""
+    task = session.get(TaskSpec, task_id)
+    if task is None:
+        raise NotFound("task not found")
+    project = session.get(Project, task.project_id)
+    if project is None or project.domain != task.domain:
+        raise NotFound("project not found")
+    role = task.role_key if task.role_key and _ROLE_RE.match(task.role_key) else "default"
+    paths: list[str] = []
+    for p in task.allowed_paths or []:
+        try:
+            paths.append(_validate_glob(p))
+        except ValidationFailed:
+            continue
+    return build_pack(session, task_principal(task, actor), project, task_id=task.id, role_key=role,
+                      base_commit=base_commit, paths=paths[:50], token_budget=token_budget,
+                      task_artifacts=list(artifacts or []), system_actor=actor)

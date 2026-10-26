@@ -166,11 +166,197 @@ def test_stale_github_rows_queue_a_functional_recheck(settings, db, monkeypatch)
 
 
 def test_the_capability_view_states_which_provider_calls_are_watched_and_which_are_not(personal_client):
-    """Evidence honesty: per-call observation covers the publisher only; delivery/broker GitHub calls are named as
-    not observed (a permission change they see waits for the next functional run or TTL expiry)."""
+    """Evidence honesty: per-call observation covers the publisher, the delivery reads and the broker's PR calls and
+    git pushes (W6-027); what is still not observed (a git failure that names no HTTP status) is stated."""
     body = personal_client.get("/api/doctor/capabilities").json()
     pw = body["permission_watch"]
     assert any("publisher" in c for c in pw["observed_calls"])
-    assert any("delivery" in c for c in pw["not_observed_calls"]) and any("broker" in c for c in
-                                                                           pw["not_observed_calls"])
-    assert "personal/github" in pw["watched"]
+    assert any(c.startswith("delivery GitHub") for c in pw["observed_calls"])
+    assert any(c.startswith("delivery Bitbucket") for c in pw["observed_calls"])
+    assert any("broker git push" in c for c in pw["observed_calls"])
+    assert pw["not_observed_calls"] and not any(c.startswith("delivery") for c in pw["not_observed_calls"])
+    assert "personal/github" in pw["watched"] and "office/bitbucket" in pw["watched"]
+
+
+# ---------------------------------------------------------------- delivery and broker calls (W6-027)
+
+
+def _stale_rows(db, *ids):
+    rows = [_row(db, cid, status="CONNECTED") for cid in ids]
+    db.commit()
+    return rows
+
+
+def test_a_403_on_a_delivery_pr_sync_marks_the_github_checks_stale(settings, db, watching, monkeypatch):
+    from aeos.delivery import provider as delivery_provider
+
+    monkeypatch.setattr(watch, "APPLY_DELAY_SECONDS", 3600.0)
+    token_row, protection_row = _stale_rows(db, "adapter.github_token", "delivery.branch_protection")
+    other = _row(db, "adapter.google_oauth", status="CONFIGURED")
+    db.commit()
+    pr = delivery_provider.fetch_pull("o/r", 7, token="ghp_" + "x" * 36, client=_client(403))
+    assert pr["error"].startswith("HTTP 403"), "the observer never changes the delivery read"
+    assert watch.pending() and watch.pending()[0][0] == "secret:personal/github"
+    watch.apply_pending(db)
+    db.commit()
+    for row in (token_row, protection_row):
+        db.refresh(row)
+        assert row.status == "STALE" and "HTTP 403" in row.observed_evidence["stale_reason"]
+    db.refresh(other)
+    assert other.status == "CONFIGURED"
+
+
+def test_a_scope_change_seen_by_a_delivery_check_run_read_invalidates(settings, db, watching, monkeypatch):
+    from aeos.delivery import provider as delivery_provider
+
+    monkeypatch.setattr(watch, "APPLY_DELAY_SECONDS", 3600.0)
+    sha = "a" * 40
+
+    def client(scopes: str) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(
+            200, headers={"X-OAuth-Scopes": scopes}, json={"total_count": 0, "check_runs": []})))
+
+    delivery_provider.fetch_check_runs("o/r", sha, token="ghp_" + "x" * 36, client=client("repo"))
+    assert watch.pending() == []
+    delivery_provider.fetch_check_runs("o/r", sha, token="ghp_" + "x" * 36, client=client("repo, workflow"))
+    assert watch.pending() and "scope token berubah" in watch.pending()[0][1]
+
+
+def test_a_403_on_a_delivery_bitbucket_ci_read_marks_the_office_credential_stale(settings, db, watching,
+                                                                                  monkeypatch):
+    from aeos.delivery import bitbucket as delivery_bitbucket
+
+    monkeypatch.setattr(watch, "APPLY_DELAY_SECONDS", 3600.0)
+    ci = delivery_bitbucket.fetch_ci_status("company_ws/svc", "c" * 40, auth_header="Bearer t", client=_client(403))
+    assert ci.overall == "UNKNOWN"
+    assert [inv for inv, _ in watch.pending()] == ["secret:office/bitbucket"]
+
+
+def test_capability_probe_answers_are_not_permission_changes(settings, db, watching, monkeypatch):
+    """A least-privilege token (no Administration, FINE_GRAINED_REMEDY) or GitHub Free answers 403 on branch
+    protection/rulesets by design: reporting it would keep the token's checks STALE on every capability read. A 401
+    on the repository itself still is a signal."""
+    from aeos.delivery import provider as delivery_provider
+
+    monkeypatch.setattr(watch, "APPLY_DELAY_SECONDS", 3600.0)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/o/r":
+            return httpx.Response(200, json={"private": True, "default_branch": "main", "owner": {"type": "User",
+                                                                                                  "login": "o"}})
+        if path.endswith("/protection") or path.endswith("/rulesets"):
+            return httpx.Response(403, json={"message": "Upgrade to GitHub Pro or make this repository public"})
+        return httpx.Response(403, json={"message": "Resource not accessible by personal access token"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    delivery_provider.check_capabilities("o/r", "main", token="ghp_" + "x" * 36, client=client)
+    assert watch.pending() == []
+    rejected = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(401, json={})))
+    delivery_provider.check_capabilities("o/r", "main", token="ghp_" + "x" * 36, client=rejected)
+    assert [inv for inv, _ in watch.pending()] == ["secret:personal/github"]
+
+
+def test_bitbucket_branch_restrictions_403_is_an_answer_not_a_change(watching):
+    from aeos.publisher.providers.atlassian import BitbucketProvider
+    from aeos.publisher.providers.base import ProviderError
+
+    bb = BitbucketProvider(full_name="ws/r", enabled=True, client=_client(403), auth_header="Bearer t")
+    with pytest.raises(ProviderError):
+        bb.branch_restrictions()
+    assert watch.pending() == []
+    with pytest.raises(ProviderError):
+        bb.repository()
+    assert [inv for inv, _ in watch.pending()] == ["secret:office/bitbucket"]
+
+
+def test_the_doctors_own_probes_never_invalidate_their_own_result(settings, db, watching, monkeypatch):
+    """A Doctor check's provider calls ARE the recheck: a probe that keeps answering 403 must not loop
+    (STALE -> recheck -> 403 -> STALE ...)."""
+    import dataclasses
+
+    from aeos.doctor.model import Outcome
+    from aeos.doctor.runner import make_context, run_check
+
+    load_all()
+
+    def probe(_ctx):
+        provider_base.send(_client(403), "GET", "https://api.github.com/repos/o/r/branches/main/protection",
+                           write=False, what="probe")
+        return Outcome("FAILED", "probe saw 403")
+
+    spec = dataclasses.replace(REGISTRY["host.disk"], fn=probe)
+    res = run_check(spec, make_context(settings, db, functional=True))
+    assert res.status == "FAILED" and watch.pending() == []
+    with watch.doctor_probe():
+        provider_base.send(_client(401), "GET", "https://api.github.com/user", write=False, what="x")
+    assert watch.pending() == []
+    provider_base.send(_client(401), "GET", "https://api.github.com/user", write=False, what="x")
+    assert watch.pending(), "outside a Doctor probe the same signal is observed"
+
+
+@pytest.mark.parametrize(("output", "status"), [
+    ("remote: Permission to o/r.git denied to bot.\nfatal: unable to access 'https://github.com/o/r.git/': "
+     "The requested URL returned error: 403", 403),
+    ("fatal: Authentication failed for 'https://github.com/o/r.git/'", 401),
+    ("fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com", None),
+])
+def test_git_output_names_the_http_status_of_a_failed_push(output, status):
+    from aeos.broker import git_broker
+
+    assert git_broker.git_http_status(output) == status
+
+
+def test_a_403_on_a_broker_push_marks_the_github_checks_stale(settings, db, watching, monkeypatch, tmp_path):
+    """The broker's sha-pinned push runs git; its HTTP status (git's 'returned error: 403') is observed."""
+    import subprocess
+
+    from aeos.broker import git_broker
+
+    monkeypatch.setattr(watch, "APPLY_DELAY_SECONDS", 3600.0)
+    (token_row,) = _stale_rows(db, "adapter.github_token")
+    head = "b" * 40
+
+    def fake_git(args, *, cwd, env, hooks):
+        if args[0] == "rev-parse":
+            return subprocess.CompletedProcess(args, 0, stdout=head + "\n", stderr="")
+        if args[0] == "push":
+            return subprocess.CompletedProcess(args, 128, stdout="", stderr=(
+                "remote: Permission to o/r.git denied.\nfatal: unable to access 'https://github.com/o/r.git/': "
+                "The requested URL returned error: 403"))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_broker, "_git", fake_git)
+    res = git_broker.push_from_mirror(source_repo=tmp_path, branch="aeos/t1-attempt-1",
+                                      remote_url="https://github.com/o/r.git", token="ghp_" + "y" * 36,
+                                      work_root=tmp_path)
+    assert res["ok"] is False and res["stage"] == "push"
+    assert [inv for inv, _ in watch.pending()] == ["secret:personal/github"]
+    assert "GIT PUSH" in watch.pending()[0][1] and "ghp_" not in watch.pending()[0][1]
+    watch.apply_pending(db)
+    db.commit()
+    db.refresh(token_row)
+    assert token_row.status == "STALE"
+
+
+def test_broker_api_clients_are_observed(settings, db, watching, monkeypatch):
+    """The PR create/find/reconcile calls of both brokers use broker.git_broker.http_client (one observed client)."""
+    import ast
+    import inspect
+
+    import respx
+
+    from aeos.broker import bitbucket_broker, git_broker
+
+    monkeypatch.setattr(watch, "APPLY_DELAY_SECONDS", 3600.0)
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post("https://api.bitbucket.org/2.0/repositories/ws/r/pullrequests").respond(401, json={})
+        with git_broker.http_client() as client:
+            assert client.post("https://api.bitbucket.org/2.0/repositories/ws/r/pullrequests",
+                               json={}).status_code == 401
+    assert [inv for inv, _ in watch.pending()] == ["secret:office/bitbucket"]
+    for mod in (git_broker, bitbucket_broker):
+        tree = ast.parse(inspect.getsource(mod))
+        raw = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+               and n.func.attr == "Client" and getattr(n.func.value, "id", None) == "httpx"]
+        assert len(raw) == (1 if mod is git_broker else 0), f"{mod.__name__}: every API client is the observed one"

@@ -1,6 +1,8 @@
 """Cross-platform subprocess helpers for the verifier (Windows, macOS, Linux).
 
-* list arguments only (no shell), explicit timeouts, whole process tree killed on timeout (psutil);
+* list arguments only (no shell), explicit timeouts, whole process tree killed on timeout (psutil); a step that
+  executes candidate code runs in its own kill group (Windows Job Object / POSIX session, ``procgroup``) and
+  whatever outlives it is reported and killed;
 * a scrubbed child environment built from an allow-list — no credentials, no provider keys, no
   ``AEOS_*`` overrides; every per-user location a tool discovers through the environment is redirected
   into the verifier's run dir (``HOME``/``USERPROFILE``/``APPDATA``/``LOCALAPPDATA``/``XDG_*``,
@@ -23,8 +25,9 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import psutil
 
@@ -55,9 +58,19 @@ class ProcResult:
     stderr: str
     timed_out: bool
     duration_s: float
+    # contained steps only (``run_process(contain=True)``): processes of the step's kill group still alive after
+    # its main process ended - listed, then killed (``aeos.verification.procgroup``) - and how the group was held
+    survivors: list[dict[str, Any]] = field(default_factory=list)
+    containment: str = ""
+    containment_errors: list[str] = field(default_factory=list)
+    # every result-seal line of stdout (``aeos.verification.seal``), kept in full even when the stdout tail above
+    # is trimmed - a long failing run never loses the sealed stream (that would read as tampering)
+    channel: str = ""
 
     def tail(self, limit: int = 8000) -> str:
-        text = (self.stdout or "") + ("\n" + self.stderr if self.stderr else "")
+        from aeos.verification.seal import strip_seal_lines
+
+        text = strip_seal_lines(self.stdout or "") + ("\n" + self.stderr if self.stderr else "")
         return redact_text(text[-limit:])
 
 
@@ -79,9 +92,124 @@ def _creationflags() -> int:
     return _CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
+_SEAL_PREFIX = b"@@AEOS-VSEAL1 "  # aeos.verification.seal.PREFIX
+MAX_CHANNEL_BYTES = 32 * 1024 * 1024
+_MAX_PARTIAL_LINE = 1024 * 1024
+# a contained step's output pipe still open after its whole kill group was killed: a process outside the group holds
+# it (it escaped the group) - the runner reports that as a survivor that could not be killed
+PIPE_HELD_ERROR = "step output pipe held open after the step ended (process outside the kill group)"
+
+
+def _channel_lines(lines: list[bytes]) -> list[bytes]:
+    return [ln[ln.index(_SEAL_PREFIX):].rstrip(b"\r") for ln in lines if _SEAL_PREFIX in ln]
+
+
+def extract_channel(data: bytes) -> str:
+    """The result-seal lines of a complete output buffer."""
+    return b"\n".join(_channel_lines(data.split(b"\n"))).decode("utf-8", errors="replace")
+
+
+class _PipeReader:
+    """Drains one pipe on a thread (bounded: keeps the last ``limit`` bytes), collecting result-seal lines in full."""
+
+    def __init__(self, pipe: Any, limit: int):
+        self.pipe, self.limit = pipe, limit
+        self.buf = bytearray()
+        self.channel: list[bytes] = []
+        self._channel_bytes = 0
+        self._partial = bytearray()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _scan(self, chunk: bytes) -> None:
+        self._partial += chunk
+        if b"\n" not in chunk:
+            if len(self._partial) > _MAX_PARTIAL_LINE and _SEAL_PREFIX not in self._partial:
+                del self._partial[:-len(_SEAL_PREFIX)]  # an endless line without the prefix: keep a boundary only
+            elif len(self._partial) > 4 * _MAX_PARTIAL_LINE:
+                del self._partial[:-_MAX_PARTIAL_LINE]  # never unbounded (a sealed line is a few hundred bytes)
+            return
+        *lines, rest = bytes(self._partial).split(b"\n")
+        self._partial = bytearray(rest)
+        for ln in _channel_lines(lines):
+            self._channel_bytes += len(ln)
+            if self._channel_bytes <= MAX_CHANNEL_BYTES:
+                self.channel.append(ln)
+
+    def _run(self) -> None:
+        try:
+            fd = self.pipe.fileno()
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    if self._partial:
+                        self._scan(b"\n")
+                    return
+                self._scan(chunk)
+                self.buf += chunk
+                if len(self.buf) > 2 * self.limit:
+                    del self.buf[:-self.limit]
+        except (OSError, ValueError):
+            return
+
+    def join(self, timeout: float) -> bool:
+        self.thread.join(timeout)
+        return not self.thread.is_alive()
+
+    def text(self) -> str:
+        return bytes(self.buf[-self.limit:]).decode("utf-8", errors="replace")
+
+    def channel_text(self) -> str:
+        return b"\n".join(self.channel).decode("utf-8", errors="replace")
+
+
+def _run_contained(args: list[str], *, cwd: Path, env: dict[str, str], timeout: float, max_output: int,
+                   start: float) -> ProcResult:
+    """One step in its own kill group (``procgroup.StepGroup``): the main process is waited for (not its pipes),
+    then every survivor of the group is listed and killed before the output is collected - a descendant holding
+    the step's stdout open can neither outlive the step nor stall the verifier."""
+    from aeos.verification.procgroup import StepGroup
+
+    group = StepGroup()
+    proc = group.popen(args, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, creationflags=_creationflags())
+    out_r, err_r = _PipeReader(proc.stdout, max_output), _PipeReader(proc.stderr, max_output)
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        group.kill_all()
+        kill_tree(proc.pid)
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+    survivors = group.reap()
+    errors = list(group.errors)
+    if not (out_r.join(10) and err_r.join(10)):
+        # a process outside the group (it escaped it) still holds the step's output pipes open
+        errors.append(PIPE_HELD_ERROR)
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except OSError:
+                pass
+    return ProcResult(
+        args=[str(a) for a in args], returncode=None if timed_out else proc.returncode,
+        stdout=out_r.text(), stderr=err_r.text(), timed_out=timed_out,
+        duration_s=round(time.monotonic() - start, 3), survivors=survivors, containment=group.method,
+        containment_errors=errors, channel=out_r.channel_text())
+
+
 def run_process(args: list[str], *, cwd: Path, env: dict[str, str], timeout: float,
-                max_output: int = 4_000_000) -> ProcResult:
+                max_output: int = 4_000_000, contain: bool = False) -> ProcResult:
+    """Run *args* (no shell) with a timeout that kills the whole tree. ``contain=True`` (every step that executes
+    candidate code on the process runner) runs it in its own kill group and reports its survivors."""
     start = time.monotonic()
+    if contain:
+        return _run_contained(args, cwd=cwd, env=env, timeout=timeout, max_output=max_output, start=start)
     proc = subprocess.Popen(
         args, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, creationflags=_creationflags(),
@@ -100,6 +228,7 @@ def run_process(args: list[str], *, cwd: Path, env: dict[str, str], timeout: flo
         stderr=err[-max_output:].decode("utf-8", errors="replace"),
         timed_out=timed_out,
         duration_s=round(time.monotonic() - start, 3),
+        channel=extract_channel(out) if _SEAL_PREFIX in out else "",
     )
 
 

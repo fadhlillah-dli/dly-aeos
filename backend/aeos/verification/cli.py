@@ -164,6 +164,93 @@ def accept_cmd(run_id: str = typer.Argument(..., help="Reviewed WorkerRun id")) 
     raise typer.Exit(0 if view["acceptance_status"] == "ACCEPTED" else 1)
 
 
+@app.command("project-baseline")
+def project_baseline_cmd(
+    project_id: str = typer.Argument(..., help="Project id (its primary repository must be inventoried)"),
+    timeout: float = typer.Option(1800.0, min=60, max=7200, help="Seconds for the project's test run"),
+) -> None:
+    """Run the project's existing tests at its inventory commit (verifier runner + tamper window) as the baseline."""
+    from aeos.verification import project_baseline
+
+    try:
+        with _session() as s:
+            out = project_baseline.run_project_baseline(s, project_id, actor=ACTOR, actor_type="cli",
+                                                        timeout_seconds=timeout)
+    except AeosError as exc:
+        _fail(exc)
+        return
+    _echo(f"project baseline at {out.get('commit')}: {out['status']} (evidence {out.get('evidence_id')})")
+    _echo(f"  passed={out.get('passed')} failed={out.get('failed')} skipped={out.get('skipped')} "
+          f"runner={out.get('runner')} isolation={out.get('isolation')}")
+    for t in out.get("failing_sample") or []:
+        _echo(f"  failing: {t}")
+    raise typer.Exit(0 if out["status"] == "PASS" else (1 if out["status"] == "FAIL" else 2))
+
+
+@app.command("suite-register")
+def suite_register_cmd(
+    project_id: str = typer.Argument(..., help="Project id (not the platform project)"),
+    as_user: str = typer.Option(..., "--as", help="Your SUPER_ADMIN username (a human owner decision)"),
+    domain: str = typer.Option(..., "--domain", help="The project's domain, PERSONAL or OFFICE (chosen by you)"),
+    rationale: str = typer.Option(..., help="Why this grader is trusted (min 5 chars; stored on the decision)"),
+    commit: str = typer.Option(None, help="Reviewed commit/branch of the project's repository (default: its "
+                                          "default branch head)"),
+) -> None:
+    """Register the project's trusted suite (tests/acceptance of a reviewed commit) outside every candidate,
+    bound to a human POLICY decision on the suite hash (ADR-0060)."""
+    from sqlalchemy import select
+
+    from aeos.core.enums import Role
+    from aeos.core.errors import NotFound
+    from aeos.identity import facade as identity
+    from aeos.models.identity import User
+    from aeos.models.portfolio import Project
+    from aeos.verification import suite
+
+    password = typer.prompt(f"Password for {as_user} (confirms this human decision)", hide_input=True,
+                            default="", show_default=False)
+    try:
+        with _session() as s:
+            # Human-only AUTH: an active SUPER_ADMIN proves it by password (never stored or logged)
+            user = s.scalars(select(User).where(User.username == as_user)).first()
+            if user is None or not user.is_active or user.role != Role.SUPER_ADMIN.value:
+                raise typer.BadParameter(f"{as_user!r} is not an active SUPER_ADMIN (decisions are human-only)")
+            if not password or not identity.verify_password(user.password_hash, password):
+                raise typer.BadParameter("password check failed - no decision recorded")
+            uid = str(user.id)
+            project = s.get(Project, project_id)
+            if project is None or project.domain != domain.strip().upper():
+                raise NotFound("project not found in this domain")
+            out = suite.register_project_suite(s, project, actor_user_id=uid, rationale=rationale, commit=commit)
+    except AeosError as exc:
+        _fail(exc)
+        return
+    _echo(f"project {out['project_id']}: trusted suite {out['suite_hash']} from {out['source_commit']} "
+          f"({out['files']} files), decision {out['decision_id']}")
+
+
+@app.command("suite-status")
+def suite_status_cmd(project_id: str = typer.Argument(..., help="Project id"),
+                     domain: str = typer.Option(..., "--domain", help="The project's domain, PERSONAL or OFFICE")) -> None:
+    """Show the project's trusted suite registration (read-only)."""
+    from aeos.core.errors import NotFound
+    from aeos.models.portfolio import Project
+    from aeos.verification import suite
+
+    try:
+        with _session() as s:
+            project = s.get(Project, project_id)
+            if project is None or project.domain != domain.strip().upper():
+                raise NotFound("project not found in this domain")
+            st = suite.suite_status(s, project)
+    except AeosError as exc:
+        _fail(exc)
+        return
+    _echo(f"project {project_id}: {st['status']} {st.get('code') or ''} {st.get('reason') or ''}".rstrip())
+    if st.get("suite_hash"):
+        _echo(f"  suite {st['suite_hash']} commit {st.get('source_commit') or '-'} decision {st.get('decision_id')}")
+
+
 @app.command("gates")
 def gates_cmd(task_id: str = typer.Argument(..., help="TaskSpec id")) -> None:
     """Show delivery gates G0-G8 for a task (computed from records; merge stays human)."""

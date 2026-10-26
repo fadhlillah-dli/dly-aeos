@@ -15,12 +15,13 @@ Optional binary override: environment variable ``AEOS_MMDC_BINARY`` (path to mmd
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 import re
 import shutil
 import subprocess
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -141,8 +142,11 @@ class VisualArtifact:
     evidence_role: str = EVIDENCE_ROLE
     # §29 "diverifikasi terhadap ...": what the plan says to check against, and what AEOS could actually check.
     verification_source: str = ""
-    verification_status: str = "UNVERIFIED"  # UNVERIFIED | CONSISTENT | MISMATCH
+    verification_status: str = "UNVERIFIED"  # UNVERIFIED | CONSISTENT | MISMATCH | VERIFIED (sequence + tests)
     verification_notes: list[str] = field(default_factory=list)
+    # the commit the references were read at (named in the notes); not an input on its own: the same facts at a
+    # newer commit of the repository are the same check (renderer._visual_slice)
+    reference_commit: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -298,29 +302,169 @@ def _norm_label(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.lower())
 
 
-_FLOW_LABELLED = re.compile(r"([A-Za-z_][\w-]*)\s*(\[\[|\[\(|\(\(|\[|\(|\{\{|\{|>)\s*\"?([^\]\)\}\"]{1,120}?)\"?\s*"
+norm_label = _norm_label  # shared with docs_engine.references (one normalisation for both sides of a check)
+
+
+def erd_relations(source: str) -> list[tuple[str, str]]:
+    """Relationship lines of a Mermaid ``erDiagram`` as (entity, entity) pairs, in source order."""
+    out: list[tuple[str, str]] = []
+    for line in source.splitlines():
+        m = _ERD_REL.match(line)
+        if m:
+            out.append((m.group(1), m.group(2)))
+    return out
+
+
+@dataclass
+class VisualReferences:
+    """What a diagram is compared with (§29 "Sumber / verifikasi"), gathered read-only by
+    ``aeos.docs_engine.references`` from the project's own records and its checkout at a recorded commit.
+
+    ``None`` means "not known for this project": that check stays UNVERIFIED and ``missing[<name>]`` says why.
+    Names are kept as read; comparisons normalise both sides with :func:`norm_label`."""
+
+    source: str = ""  # where the references were read (commit), for the record
+    commit: str | None = None  # the repository commit the checkout references were read at
+    component_source: str = "InstallManifest/inventory"
+    schema_source: str = "schema yang dirujuk"
+    ci_source: str = "pipeline CI"
+    deploy_source: str = "IaC/deployment yang terdeteksi"
+    tables: set[str] | None = None
+    columns: dict[str, set[str]] | None = None
+    foreign_keys: set[tuple[str, str]] | None = None  # (table, referenced table)
+    table_aliases: dict[str, str] = field(default_factory=dict)  # mapped class / model name -> table name
+    components: set[str] | None = None
+    component_ids: dict[str, str] = field(default_factory=dict)  # id / name / friendly name -> component id
+    relations: set[tuple[str, str]] | None = None  # (source component id, target component id), DESIGN lens
+    routes: set[str] | None = None
+    route_prefix: str = ""  # only paths under it are covered by the route contract ("/api/" for the platform)
+    route_source: str = "route contract"
+    ci_jobs: set[str] | None = None  # CI job ids/names, triggers, stages and job environments
+    deploy_refs: set[str] | None = None  # IaC/deploy kinds, compose services, chart/manifest names
+    # integration test key (junit form) -> (evidence id, accepted head commit): trusted verifier PASS at that head
+    passed_tests: dict[str, tuple[str, str]] = field(default_factory=dict)
+    missing: dict[str, str] = field(default_factory=dict)  # reference name -> why it is not known
+
+
+# --- flowchart nodes/edges, sequence calls and the integration tests a diagram names -----------------------
+
+_NODE_ID = r"[A-Za-z_]\w*(?:-\w+)*"  # a hyphen inside an id, never the start of a link ("A-->B" is two nodes)
+_FLOW_LABELLED = re.compile(rf"({_NODE_ID})\s*(\[\[|\[\(|\(\(|\[|\(|\{{\{{|\{{|>)\s*\"?([^\]\)\}}\"]{{1,120}}?)\"?\s*"
                             r"(\]\]|\)\]|\)\)|\]|\)|\}\}|\})")
-_FLOW_SKIP = ("%%", "flowchart", "graph", "classdef", "class ", "style ", "linkstyle", "click ", "end", "direction",
-              "subgraph")
+_FLOW_SKIP = re.compile(r"^(?:%%|(?:flowchart|graph|classdef|class|style|linkstyle|click|direction|subgraph)\b|"
+                        r"end\s*$)", re.IGNORECASE)
 _FLOW_ARROW = re.compile(r"<?[-.=]{2,}>?|&|\|[^|]*\|")
 _API_PATH = re.compile(r"(/api/[A-Za-z0-9_./{}:-]+)")
+# link text forms ("A -- text --> B", "A -. text .-> B", "A == text ==> B") and "|label|" are not nodes
+_EDGE_TEXT = (re.compile(r"(?<![-.=])--\s+[^-|>\s][^>]*?\s+-->"), re.compile(r"-\.\s+[^.]+?\s+\.->"),
+              re.compile(r"==\s+[^=]+?\s+==>"))
+_EDGE_LABEL = re.compile(r"\|[^|]*\|")
+_EDGE_SPLIT = re.compile(r"\s*(?:(?<=\s)[ox]|<)?(?:-{2,}|={2,}|-\.+-|~{3,})(?:>|[ox](?=\s))?\s*")
+
+
+def _flow_line(line: str) -> str | None:
+    """A flowchart statement with link texts/labels removed; None for directives, comments and subgraph lines."""
+    s = line.strip()
+    if not s or _FLOW_SKIP.match(s):
+        return None
+    for pat in _EDGE_TEXT:
+        s = pat.sub(" --> ", s)
+    return _EDGE_LABEL.sub(" ", s)
 
 
 def flow_nodes(source: str) -> dict[str, str]:
     """Node id -> label of a Mermaid flowchart/graph (``A[Label]``, ``B((x))``, bare ``A --> B``); subgraph
-    titles, styles and edge labels are not nodes."""
+    titles, styles and link texts/labels are not nodes."""
     nodes: dict[str, str] = {}
     for line in source.splitlines():
-        s = line.strip()
-        if not s or s.lower().startswith(_FLOW_SKIP):
+        s = _flow_line(line)
+        if s is None:
             continue
         for m in _FLOW_LABELLED.finditer(s):
             nodes[m.group(1)] = m.group(3).strip()
         bare = _FLOW_LABELLED.sub(lambda m: f" {m.group(1)} ", s)
-        for token in _FLOW_ARROW.sub(" ", bare).split():
-            if re.fullmatch(r"[A-Za-z_][\w-]*", token):
-                nodes.setdefault(token, token)
+        for part in _EDGE_SPLIT.split(bare):
+            for token in _FLOW_ARROW.sub(" ", part).split():
+                if re.fullmatch(_NODE_ID, token):
+                    nodes.setdefault(token, token)
     return nodes
+
+
+def flow_edges(source: str) -> list[tuple[str, str]]:
+    """(node id, node id) pairs of a Mermaid flowchart's links (``A --> B``, ``A -->|x| B``, ``A -- x --> B``,
+    ``A -.-> B``, ``A ==> B``, chains ``A --> B --> C`` and ``A & B --> C``); direction is kept as written."""
+    edges: list[tuple[str, str]] = []
+    for line in source.splitlines():
+        s = _flow_line(line)
+        if s is None:
+            continue
+        parts = _EDGE_SPLIT.split(_FLOW_LABELLED.sub(lambda m: f" {m.group(1)} ", s))
+        groups = [[t for t in (x.strip() for x in p.split("&")) if re.fullmatch(_NODE_ID, t)] for p in parts]
+        for left, right in itertools.pairwise(groups):
+            edges.extend((a, b) for a in left for b in right if a != b)
+    return edges
+
+
+_HTTP_CALL = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[A-Za-z0-9_./{}:-]*)")
+
+
+def sequence_paths(source: str, prefix: str = "") -> list[str]:
+    """API paths a sequence diagram uses: every ``/api/...`` path and every ``METHOD /path`` call; with *prefix*
+    only the paths the route contract covers (the platform contract covers ``/api/``)."""
+    found = set(_API_PATH.findall(source)) | {p for p in _HTTP_CALL.findall(source) if p}
+    paths = sorted({p.rstrip(".,;") or "/" for p in found})
+    return [p for p in paths if not prefix or p.startswith(prefix)]
+
+
+_TEST_NODE = re.compile(r"(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.py::[\w:.\[\]-]+)")
+
+
+def named_tests(diagram_source: str, verification_source: str = "") -> list[str]:
+    """Integration-test node ids a diagram names (``%% test: tests/integration/test_x.py::test_y`` lines in the
+    Mermaid source, or node ids in the plan's ``verification_source``) in junit key form."""
+    text = "\n".join([*(ln for ln in diagram_source.splitlines() if ln.strip().startswith("%%")),
+                      verification_source or ""])
+    return sorted({junit_key(m) for m in _TEST_NODE.findall(text)})
+
+
+def junit_key(nodeid: str) -> str:
+    """``tests/x/test_a.py::TestB::test_c[p]`` -> ``tests.x.test_a.TestB::test_c[p]``: the case key the trusted verifier
+    stores in its TEST_REPORT (same rule as ``aeos.verification.junit.nodeid_to_key``; a different form simply never
+    matches, so the diagram stays not VERIFIED)."""
+    bracket = nodeid.find("[")
+    param = nodeid[bracket:] if bracket != -1 else ""
+    parts = (nodeid[:bracket] if bracket != -1 else nodeid).split("::")
+    parts[-1] = parts[-1] + param
+    module = parts[0][:-3] if parts[0].endswith(".py") else parts[0]
+    module = module.replace("\\", "/").replace("/", ".")
+    if len(parts) == 1:
+        return module
+    classes = parts[1:-1]
+    return f"{'.'.join([module, *classes]) if classes else module}::{parts[-1]}"
+
+
+def _singular(norm: str) -> str:
+    if norm.endswith("ies") and len(norm) > 3:
+        return norm[:-3] + "y"
+    if norm.endswith(("sses", "xes", "ches", "shes")):
+        return norm[:-2]
+    return norm[:-1] if norm.endswith("s") and not norm.endswith("ss") else norm
+
+
+def _relation_supported(a: str, b: str, refs: VisualReferences) -> str | None:
+    """How the referenced schema supports an ERD relation between tables *a* and *b* (normalised table names):
+    ``FK`` (declared foreign key), ``JUNCTION`` (a table with foreign keys to both), ``COLUMN`` (an ``<entity>_id``
+    column without a constraint) or None."""
+    fks = {(_norm_label(x), _norm_label(y)) for x, y in (refs.foreign_keys or set())}
+    if (a, b) in fks or (b, a) in fks:
+        return "FK"
+    if any((t, a) in fks and (t, b) in fks for t, _ in fks):
+        return "JUNCTION"
+    cols = {_norm_label(t): {_norm_label(c) for c in cs} for t, cs in (refs.columns or {}).items()}
+    for child, parent in ((a, b), (b, a)):
+        if {_singular(parent) + "id", parent + "id"} & cols.get(child, set()):
+            return "COLUMN"
+    return None
 
 
 def _route_matches(path: str, templates: set[str]) -> bool:
@@ -339,72 +483,232 @@ def _labels_present(labels: list[str], source: str) -> list[str]:
     return [x for x in labels if _norm_label(x) and _norm_label(x) not in src]
 
 
+_REFERENCE_OF_KIND = {"context": "components", "component": "components", "sequence": "routes", "erd": "tables",
+                      "cicd": "ci_jobs", "deployment": "deploy_refs"}
+
+
+def _unknown_nodes(nodes: dict[str, str], allowed: set[str]) -> list[str]:
+    return sorted({label for nid, label in nodes.items()
+                   if _norm_label(label) not in allowed and _norm_label(nid) not in allowed})
+
+
+def _check_components(v: VisualArtifact, refs: VisualReferences) -> None:
+    if not refs.components:
+        return
+    where = refs.component_source
+    nodes = flow_nodes(v.source)
+    unknown = _unknown_nodes(nodes, {_norm_label(c) for c in refs.components})
+    if not nodes:
+        v.verification_notes = [f"Diagram tanpa node yang dapat dibaca; tidak dapat dibandingkan dengan {where}."]
+        return
+    if unknown:
+        v.verification_status = "MISMATCH"
+        v.verification_notes = [f"Node tidak terdaftar di {where} (tidak diterima sebagai fakta): "
+                                f"{', '.join(unknown[:20])}"]
+        return
+    if refs.relations is None:
+        v.verification_status = "CONSISTENT"
+        reason = refs.missing.get("relations")
+        v.verification_notes = [f"Semua {len(nodes)} node cocok dengan komponen {where} (cek nama; relasi belum "
+                                "dibandingkan" + (f": {reason}" if reason else "") + ")."]
+        return
+    ids = {_norm_label(k): cid for k, cid in refs.component_ids.items()}
+
+    def component_of(nid: str) -> str | None:
+        return ids.get(_norm_label(nodes.get(nid, nid))) or ids.get(_norm_label(nid))
+
+    registered = {frozenset(p) for p in refs.relations}
+    edges = flow_edges(v.source)
+    bad = []
+    for a, b in edges:
+        ca, cb = component_of(a), component_of(b)
+        if ca and cb and ca != cb and frozenset((ca, cb)) not in registered:
+            bad.append(f"{nodes.get(a, a)} -> {nodes.get(b, b)}")
+    if bad:
+        v.verification_status = "MISMATCH"
+        v.verification_notes = [f"Relasi tidak terdaftar di {where} (tidak diterima sebagai fakta): "
+                                f"{', '.join(sorted(set(bad))[:20])}"]
+        return
+    v.verification_status = "CONSISTENT"
+    v.verification_notes = [f"Semua {len(nodes)} node dan {len(edges)} relasi cocok dengan komponen dan relasi "
+                            f"{where} (relasi DESIGN dari manifest, arah tidak dibedakan)."]
+
+
+def _check_sequence(v: VisualArtifact, refs: VisualReferences) -> None:
+    paths = sequence_paths(v.source, refs.route_prefix)
+    tests = named_tests(v.source, v.verification_source)
+    notes: list[str] = []
+    routes_ok = False
+    if refs.routes:
+        unknown = [p for p in paths if not _route_matches(p, refs.routes)]
+        if unknown:
+            v.verification_status = "MISMATCH"
+            v.verification_notes = [f"Path API tidak ada di route contract ({refs.route_source}): "
+                                    + ", ".join(unknown[:20])]
+            return
+        if paths:
+            routes_ok = True
+            notes.append(f"Semua {len(paths)} path API ada di route contract ({refs.route_source})"
+                         + ("" if tests else "; urutan pesan belum dibuktikan oleh evidence integration test."))
+        else:
+            notes.append("Sequence tanpa path API yang dapat dibandingkan dengan route contract.")
+    elif paths:
+        notes.append("Path API belum dibandingkan: " + refs.missing.get("routes", "route contract tidak diketahui."))
+    if not tests:
+        if routes_ok:
+            v.verification_status = "CONSISTENT"
+            v.verification_notes = notes
+        elif notes:
+            v.verification_notes = [*notes, "VERIFIED hanya bila integration test yang dirujuk (`%% test: <node id>`) "
+                                            "PASS pada accepted head."]
+        return
+    passed = [k for k in tests if k in refs.passed_tests]
+    missing = [k for k in tests if k not in refs.passed_tests]
+    if missing:
+        notes.append("Integration test yang dirujuk belum PASS pada accepted head (TEST_REPORT verifier tepercaya): "
+                     + ", ".join(missing[:20]))
+        v.verification_status = "CONSISTENT" if routes_ok else "UNVERIFIED"
+        v.verification_notes = notes
+        return
+    proof = ", ".join(f"{k} (evidence {refs.passed_tests[k][0]} @ {refs.passed_tests[k][1][:12]})" for k in passed[:10])
+    notes.append(f"Urutan pesan dibuktikan oleh {len(passed)} integration test yang PASS pada accepted head: {proof}.")
+    # the route half must be proven too: without a route contract a passing test does not make the paths facts
+    v.verification_status = "VERIFIED" if routes_ok or not paths else "CONSISTENT"
+    v.verification_notes = notes
+
+
+def _check_topology(v: VisualArtifact, refs: VisualReferences, envs: list[str]) -> None:
+    notes: list[str] = []
+    checked = bad = False
+    if envs:
+        checked = True
+        missing = _labels_present(envs, v.source)
+        bad = bool(missing)
+        notes.append("Environment dengan target deployment terdaftar tidak muncul di diagram: " + ", ".join(missing)
+                     if missing else f"Semua {len(envs)} environment target deployment terdaftar muncul di diagram"
+                                     " (cek label).")
+    ref = refs.ci_jobs if v.kind == "cicd" else refs.deploy_refs
+    if ref:
+        checked = True
+        allowed = {_norm_label(x) for x in (*ref, *envs, *(refs.ci_jobs or ()))}
+        if v.kind == "deployment":
+            allowed |= {_norm_label(x) for x in refs.components or ()}
+        where = refs.ci_source if v.kind == "cicd" else refs.deploy_source
+        nodes = flow_nodes(v.source)
+        unknown = _unknown_nodes(nodes, allowed)
+        if not nodes:
+            notes.append(f"Diagram tanpa node yang dapat dibaca; tidak dapat dibandingkan dengan {where}.")
+        elif unknown:
+            bad = True
+            notes.append(f"Node tidak ada di {where} (tidak diterima sebagai fakta): {', '.join(unknown[:20])}")
+        else:
+            notes.append(f"Semua {len(nodes)} node cocok dengan {where}.")
+    elif checked:
+        reason = refs.missing.get(_REFERENCE_OF_KIND[v.kind])
+        notes.append("Pipeline/IaC belum dibandingkan" + (f": {reason}" if reason else "."))
+    if checked:
+        v.verification_status = "MISMATCH" if bad else "CONSISTENT"
+        v.verification_notes = notes
+
+
+def _check_erd(v: VisualArtifact, refs: VisualReferences) -> None:
+    if refs.tables is None:
+        return
+    where = refs.schema_source
+    entities = erd_entities(v.source)
+    alias = {_norm_label(k): _norm_label(t) for k, t in refs.table_aliases.items()}
+    tables = {_norm_label(t) for t in refs.tables} | set(alias)
+    unknown = sorted(e for e in entities if _norm_label(e) not in tables)
+    if not entities:
+        v.verification_status = "UNVERIFIED"
+        v.verification_notes = ["ERD tanpa entitas yang dapat dibaca; tidak dapat dibandingkan dengan schema."]
+        return
+    if unknown:
+        v.verification_status = "MISMATCH"
+        v.verification_notes = [f"Entitas tidak ada di {where} (tidak diterima sebagai fakta): "
+                                f"{', '.join(unknown[:20])}"]
+        return
+    cols = {_norm_label(t): {_norm_label(c) for c in cs} for t, cs in (refs.columns or {}).items()}
+    bad_cols = sorted(f"{e}.{a}" for e, attrs in erd_attributes(v.source).items()
+                      if _norm_label(e) in cols for a in attrs if _norm_label(a) not in cols[_norm_label(e)])
+    if bad_cols:
+        v.verification_status = "MISMATCH"
+        v.verification_notes = [f"Kolom tidak ada di tabel {where} (tidak diterima sebagai fakta): "
+                                f"{', '.join(bad_cols[:20])}"]
+        return
+    rels = erd_relations(v.source)
+    head = (f"Semua {len(entities)} entitas ada di {where} (nama tabel)"
+            + ("; atribut yang ditulis cocok dengan kolom tabel" if refs.columns else "; kolom belum dibandingkan"))
+    if refs.foreign_keys is None:
+        v.verification_status = "CONSISTENT"
+        v.verification_notes = [head + "; relasi belum dibandingkan."]
+        return
+
+    def table_of(e: str) -> str:
+        n = _norm_label(e)
+        return alias.get(n, n)
+
+    support = {(a, b): _relation_supported(table_of(a), table_of(b), refs) for a, b in rels}
+    unsupported = sorted({f"{a} - {b}" for (a, b), how in support.items() if how is None})
+    if unsupported:
+        v.verification_status = "MISMATCH"
+        v.verification_notes = [f"Relasi tidak didukung {where} (tanpa foreign key, tabel penghubung atau kolom "
+                                f"<entitas>_id; tidak diterima sebagai fakta): {', '.join(unsupported[:20])}"]
+        return
+    kinds = sorted({how for how in support.values() if how})
+    v.verification_status = "CONSISTENT"
+    v.verification_notes = [head + (f"; {len(rels)} relasi didukung schema ({', '.join(kinds)})" if rels
+                                    else "; ERD tanpa garis relasi") + "."]
+
+
 def verify_visuals(visuals: list[VisualArtifact], *, trust_boundaries: list[str] | None = None,
                    known_tables: set[str] | None = None, known_components: set[str] | None = None,
                    known_routes: set[str] | None = None, data_items: list[str] | None = None,
                    deployment_environments: list[str] | None = None,
-                   known_columns: dict[str, set[str]] | None = None) -> list[VisualArtifact]:
-    """Annotate visuals with the checks AEOS can run deterministically (labels/names, never runtime proof):
+                   known_columns: dict[str, set[str]] | None = None,
+                   refs: VisualReferences | None = None) -> list[VisualArtifact]:
+    """Annotate visuals with the checks AEOS can run deterministically (labels/names, never runtime proof).
 
-    * ``erd`` — entity names vs the referenced schema's table names (``known_tables``; for the platform
-      project these come from the SQLAlchemy metadata at the running commit). Tables the schema does not
-      have are reported as MISMATCH (never silently accepted); without a referenced schema → UNVERIFIED.
+    References come from ``refs`` (built by ``aeos.docs_engine.references`` from the project's own records and its
+    checkout at a recorded commit); the ``known_*`` keywords fill a reference ``refs`` does not carry.
+
+    * ``erd`` — entity names vs the referenced schema's tables (platform: SQLAlchemy metadata; product: Prisma
+      schema / SQL / Alembic migrations of the checkout), written attributes vs its columns and relationship lines
+      vs its foreign keys (or a junction table / ``<entity>_id`` column). Anything else → MISMATCH.
     * ``trust_boundary``/``data_flow`` — every trust boundary named in the plan's threat model, and (data flow)
       every data type of the plan's data inventory, must appear in the diagram source; missing ones → MISMATCH.
-    * ``context``/``component`` — every node must name a registered component (``known_components``: the
-      platform's InstallManifest/inventory ids and names); unknown nodes → MISMATCH.
-    * ``sequence`` — every ``/api/...`` path in the diagram must exist in the route contract (``known_routes``);
-      unknown paths → MISMATCH. The message order is not proven (integration-test evidence is separate).
-    * ``deployment``/``cicd`` — every environment with a registered deployment target must appear.
+    * ``context``/``component`` — every node must name a registered component (platform: InstallManifest/inventory;
+      product: compose services / package / chart names of the checkout) and every link a registered relation
+      (platform: the manifest's DESIGN relations); unknown nodes or links → MISMATCH.
+    * ``sequence`` — every API path must exist in the route contract (platform: contracts/api/routes.json; product:
+      the OpenAPI files of the checkout); VERIFIED only when every integration test the diagram names PASSed in a
+      trusted verifier report at an accepted head.
+    * ``deployment``/``cicd`` — every environment with a registered deployment target must appear, and every node
+      must be a CI job/stage of the checkout's pipeline (cicd) or a detected IaC/deploy reference (deployment).
     Without a reference to compare against, a diagram stays UNVERIFIED with the reason in ``verification_notes``."""
+    refs = replace(refs) if refs is not None else VisualReferences()
+    if refs.tables is None and known_tables is not None:
+        refs.tables = set(known_tables)
+    if refs.columns is None and known_columns is not None:
+        refs.columns = dict(known_columns)
+    if refs.components is None and known_components is not None:
+        refs.components = set(known_components)
+    if refs.routes is None and known_routes is not None:
+        refs.routes = set(known_routes)
     boundaries = [b for b in (trust_boundaries or []) if b.strip()]
     data_names = [d for d in (data_items or []) if d.strip()]
     envs = [e for e in (deployment_environments or []) if e.strip()]
     for v in visuals:
-        if v.kind in ("context", "component") and known_components:
-            known = {_norm_label(c) for c in known_components}
-            nodes = flow_nodes(v.source)
-            unknown = sorted({label for nid, label in nodes.items()
-                              if _norm_label(label) not in known and _norm_label(nid) not in known})
-            if not nodes:
-                v.verification_notes = ["Diagram tanpa node yang dapat dibaca; tidak dapat dibandingkan dengan "
-                                        "InstallManifest."]
-            elif unknown:
-                v.verification_status = "MISMATCH"
-                v.verification_notes = ["Node tidak terdaftar di InstallManifest/inventory (tidak diterima sebagai "
-                                        f"fakta): {', '.join(unknown[:20])}"]
-            else:
-                v.verification_status = "CONSISTENT"
-                v.verification_notes = [f"Semua {len(nodes)} node cocok dengan komponen InstallManifest/inventory "
-                                        "(cek nama; relasi belum dibandingkan)."]
-            continue
-        if v.kind == "sequence" and known_routes:
-            paths = sorted(set(_API_PATH.findall(v.source)))
-            unknown = [p for p in paths if not _route_matches(p, known_routes)]
-            if not paths:
-                v.verification_notes = ["Sequence tanpa path /api yang dapat dibandingkan dengan route contract; "
-                                        "tetap UNVERIFIED."]
-            elif unknown:
-                v.verification_status = "MISMATCH"
-                v.verification_notes = ["Path API tidak ada di route contract (contracts/api/routes.json): "
-                                        + ", ".join(unknown[:20])]
-            else:
-                v.verification_status = "CONSISTENT"
-                v.verification_notes = [f"Semua {len(paths)} path API ada di route contract; urutan pesan belum "
-                                        "dibuktikan oleh evidence integration test."]
-            continue
-        if v.kind in ("deployment", "cicd") and envs:
-            missing = _labels_present(envs, v.source)
-            if missing:
-                v.verification_status = "MISMATCH"
-                v.verification_notes = ["Environment dengan target deployment terdaftar tidak muncul di diagram: "
-                                        + ", ".join(missing)]
-            else:
-                v.verification_status = "CONSISTENT"
-                v.verification_notes = [f"Semua {len(envs)} environment target deployment terdaftar muncul di "
-                                        "diagram (cek label; pipeline/IaC belum dibandingkan)."]
-            continue
-        if v.kind == "data_flow" and (boundaries or data_names):
+        v.reference_commit = refs.commit or ""
+        if v.kind in ("context", "component"):
+            _check_components(v, refs)
+        elif v.kind == "sequence":
+            _check_sequence(v, refs)
+        elif v.kind in ("deployment", "cicd"):
+            _check_topology(v, refs, envs)
+        elif v.kind == "erd":
+            _check_erd(v, refs)
+        elif v.kind == "data_flow" and (boundaries or data_names):
             notes, bad = [], False
             if boundaries:
                 miss_b = _labels_present(boundaries, v.source)
@@ -418,32 +722,7 @@ def verify_visuals(visuals: list[VisualArtifact], *, trust_boundaries: list[str]
                              else f"Semua {len(data_names)} jenis data di data inventory muncul di diagram.")
             v.verification_status = "MISMATCH" if bad else "CONSISTENT"
             v.verification_notes = [*notes, "Cek label, bukan verifikasi runtime."]
-            continue
-        if v.kind == "erd" and known_tables is not None:
-            entities = erd_entities(v.source)
-            tables = {_norm_label(t) for t in known_tables}
-            unknown = sorted(e for e in entities if _norm_label(e) not in tables)
-            if not entities:
-                v.verification_status = "UNVERIFIED"
-                v.verification_notes = ["ERD tanpa entitas yang dapat dibaca; tidak dapat dibandingkan dengan schema."]
-            elif unknown:
-                v.verification_status = "MISMATCH"
-                v.verification_notes = [f"Entitas tidak ada di schema yang dirujuk (tidak diterima sebagai fakta): "
-                                        f"{', '.join(unknown[:20])}"]
-            else:
-                cols = {_norm_label(t): {_norm_label(c) for c in cs} for t, cs in (known_columns or {}).items()}
-                bad_cols = sorted(f"{e}.{a}" for e, attrs in erd_attributes(v.source).items()
-                                  if _norm_label(e) in cols for a in attrs if _norm_label(a) not in cols[_norm_label(e)])
-                if bad_cols:
-                    v.verification_status = "MISMATCH"
-                    v.verification_notes = ["Kolom tidak ada di tabel schema yang dirujuk (tidak diterima sebagai "
-                                            f"fakta): {', '.join(bad_cols[:20])}"]
-                else:
-                    v.verification_status = "CONSISTENT"
-                    v.verification_notes = [f"Semua {len(entities)} entitas ada di schema yang dirujuk (nama tabel)"
-                                            + ("; atribut yang ditulis cocok dengan kolom tabel" if known_columns
-                                               else "; kolom belum dibandingkan") + "; relasi belum dibandingkan."]
-        elif v.kind in ("trust_boundary", "data_flow") and boundaries:
+        elif v.kind == "trust_boundary" and boundaries:
             src = _norm_label(v.source)
             missing = [b for b in boundaries if _norm_label(b) and _norm_label(b) not in src]
             if missing:
@@ -453,6 +732,9 @@ def verify_visuals(visuals: list[VisualArtifact], *, trust_boundaries: list[str]
                 v.verification_status = "CONSISTENT"
                 v.verification_notes = [f"Semua {len(boundaries)} trust boundary threat model muncul di diagram "
                                         "(cek label, bukan verifikasi runtime)."]
+        reason = refs.missing.get(_REFERENCE_OF_KIND.get(v.kind, ""))
+        if v.verification_status == "UNVERIFIED" and reason and reason not in v.verification_notes:
+            v.verification_notes = [*v.verification_notes, reason]  # why no reference exists for this project
     return visuals
 
 

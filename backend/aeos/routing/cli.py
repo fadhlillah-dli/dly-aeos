@@ -17,7 +17,7 @@ def _admin_user_id(session, username: str, password: str) -> str:
     A username alone is not enough - any local process (an agent with a shell included) could name
     the owner. The password is read without echo and never stored or logged."""
     from aeos.core.enums import Role
-    from aeos.identity.passwords import verify_password
+    from aeos.identity.facade import verify_password
     from aeos.models.identity import User
 
     user = session.scalars(select(User).where(User.username == username)).first()
@@ -46,10 +46,17 @@ def list_cmd(pool: str = typer.Option(None, help="Filter by pool"), status: str 
         if not rows:
             typer.echo("No routes registered. Run: aeos seed --only aeos.routing.seed")
             return
+        from aeos.routing import service
+
         for r in rows:
+            flags = ""
+            if service.client_restriction_problem(r):
+                flags += " client-terms=OWNER_DECISION_REQUIRED"
+            if r.pool != "SUPERVISOR" and service.request_shape_rejections(r):
+                flags += " request=REFUSED"
             typer.echo(
                 f"{r.pool:<10} {r.status:<10} {r.mode:<6} free={r.is_free:<7} {r.route_key:<46} "
-                f"resolved={r.resolved_version or 'UNKNOWN'} hash={r.config_hash or '-'}"
+                f"resolved={r.resolved_version or 'UNKNOWN'} hash={r.config_hash or '-'}{flags}"
             )
 
 
@@ -100,10 +107,17 @@ def activate_cmd(
                                        "--no-trial-only and --terms-note; needs --terms-reviewed)"),
     trial_only: bool = typer.Option(None, "--trial-only/--no-trial-only",
                                     help="Provider terms: trial use only / no confidential data"),
+    accept_client_terms: bool = typer.Option(
+        False, "--accept-client-terms",
+        help="Your decision on a provider client restriction (e.g. S07: free-tier chat models require OpenCode): "
+             "let the AEOS broker call this route as its own client. Needs --client-terms-note"),
+    client_terms_note: str = typer.Option("", help="What you read/confirmed about the client restriction (min 10 "
+                                                   "chars; stored on the decision)"),
 ) -> None:
     """Record a human ROUTE_ACTIVATION/TRIAL decision bound to the route's exact config hash.
 
-    APPROVED needs --eval-run ids of completed, gate-passing evaluations of exactly this configuration."""
+    APPROVED needs --eval-run ids of completed, gate-passing evaluations of exactly this configuration. A route whose
+    provider restricts which client may call it is refused unless you pass --accept-client-terms."""
     from aeos.audit import service as audit
     from aeos.cli import ensure_database
     from aeos.core.db import session_scope
@@ -131,10 +145,52 @@ def activate_cmd(
                 terms_note=terms_note, terms_record=terms_record, region=region, tool_set=tool or None,
                 eval_run_ids=eval_run or None,
                 decision_record={"options": list(option or []), "goal": goal, "cost_quality_tradeoff": tradeoff,
-                                 "invalidate_if": invalidate_if})
+                                 "invalidate_if": invalidate_if},
+                client_terms=({"accepted": True, "note": client_terms_note} if accept_client_terms else None))
             audit.record(s, actor_type="cli", actor_id=uid, action="route.activate", target_type="model_route",
                          target_id=route.route_key, details={"mode": mode, "decision_id": decision.id})
             typer.echo(f"{route.route_key} -> {route.status} (decision {decision.id}, hash {route.config_hash})")
+    except AeosError as exc:
+        typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command("set-endpoint")
+def set_endpoint_cmd(
+    route_key: str = typer.Argument(..., help="A LOCAL route, e.g. local/qwen3.8-flash-next"),
+    endpoint: str = typer.Option(..., help="OpenAI-compatible base of your local server on this host, e.g. "
+                                           "http://127.0.0.1:8080/v1 (loopback only)"),
+    as_user: str = typer.Option(..., "--as", help="Your SUPER_ADMIN username"),
+    rationale: str = typer.Option(..., help="Why (min 10 chars)"),
+    model: str = typer.Option(None, help="Model name the local server serves, when it differs from the route model id"),
+    quantization: str = typer.Option(None, help="Build: quantization (e.g. Q4_K_M)"),
+    backend: str = typer.Option(None, help="Build: inference backend (e.g. llama.cpp-b5000)"),
+    hardware: str = typer.Option(None, help="Build: hardware (e.g. M3-Max-64GB)"),
+) -> None:
+    """Point a LOCAL route at a loopback server. A new configuration: activate a new TRIAL afterwards."""
+    from aeos.audit import service as audit
+    from aeos.cli import ensure_database
+    from aeos.core.db import session_scope
+    from aeos.core.errors import AeosError
+    from aeos.routing import service
+
+    ensure_database()
+    password = typer.prompt(f"Password for {as_user} (confirms this configuration change)", hide_input=True,
+                            default="", show_default=False)
+    try:
+        with session_scope() as s:
+            uid = _admin_user_id(s, as_user, password)
+            route, change = service.set_local_endpoint(
+                s, route_key, endpoint=endpoint, rationale=rationale, upstream_model=model,
+                build={"quantization": quantization or "", "inference_backend": backend or "",
+                       "hardware": hardware or ""})
+            audit.record(s, actor_type="cli", actor_id=uid, action="route.set_endpoint", target_type="model_route",
+                         target_id=route.route_key, reason=rationale[:500],
+                         details={"endpoint": route.endpoint, "previous_endpoint": change["previous"]["endpoint"],
+                                  "config_hash": route.config_hash, "needs_new_trial": change["needs_new_trial"]})
+            typer.echo(f"{route.route_key} endpoint={route.endpoint} hash={route.config_hash}")
+            typer.echo("Next: aeos routes activate " + route.route_key + " --mode TRIAL --expected-hash "
+                       f"{route.config_hash} ... (a new configuration needs a new TRIAL)")
     except AeosError as exc:
         typer.secho(f"{exc.code}: {exc.message}", fg="red", err=True)
         raise typer.Exit(1) from exc

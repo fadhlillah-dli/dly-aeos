@@ -103,8 +103,10 @@ def test_execution_endpoints_start_bind_collect_and_office_isolation(admin_clien
     route_seed.run(db)
     _seed(db)
     admin_client.select_domain(Domain.PERSONAL)
+    # the started run states exactly what its route runs (model, provider, harness); the prompt revision is stated
+    # UNKNOWN because a stated one must equal the route's bound revision (EVAL_CONFIGURATION_MISMATCH)
     cfg = CFG | {"model_id": "opencode/deepseek-v4.1-flash-free", "provider_route": "opencode-zen/deepseek-v4.1-flash-free",
-                 "harness_version": "1.19.3"}
+                 "harness_version": "1.19.3", "prompt_revision": "UNKNOWN"}
     run = admin_client.post("/api/eval/runs", json={"suite_key": "eval.small-bugfix", "configuration": cfg,
                                                    "repetitions": 1, "is_baseline": True,
                                                    "limits": {"max_attempts": 1, "max_minutes": 5, "max_cost_usd": 0}})

@@ -3,8 +3,15 @@
 | Level | Status on the build host (Windows 11, 2026-10-19) | Evidence |
 |---|---|---|
 | `process` | Available, **WEAK** — env scrubbed, HOME/APPDATA/XDG/TEMP redirected, cwd = worktree, OpenCode tool permissions (deny by default, inline config, project config refused), Job Object / process-group kill, memory/process watchdog, controller-checkout integrity check. No filesystem or egress enforcement by the OS. Never for shell or egress TaskSpecs, R3 only with explicit owner coverage, never R4, never elevated. | `aeos worker containment --kind process` (E2 on this host): egress/read/write/keyring = NOT_ENFORCED, env/home/kill/non_root = PASS |
-| `container` | **Implemented; boundary PROVEN on the build host 2026-10-25 (E3)** — `aeos.worker_runtime.container`: this `Dockerfile` (pinned OpenCode), internal network + broker gateway, hardened `docker run`, teardown by label, 20-check containment suite run inside the image. Docker Desktop 29.8.2 on Windows 11; a real OpenCode worker run is still NOT_PROVEN (OpenCode not installed). | `aeos worker containment --kind container` PASS 20/20 for PERSONAL and OFFICE profiles: [docs/evidence/containment](../docs/evidence/containment/README.md); code also tested against a scripted docker CLI (`tests/unit/test_worker_runtime_container.py`) |
+| `container` | **Implemented; boundary PROVEN on the build host 2026-10-25 (E3); admission uses it only where that data dir holds the owner's own fresh PASS report** — `aeos.worker_runtime.container`: this `Dockerfile` (pinned OpenCode), internal network + broker gateway, hardened `docker run`, teardown by label, 20-check containment suite run inside the image. Docker Desktop 29.8.2 on Windows 11; a real OpenCode worker run is still NOT_PROVEN (OpenCode not installed). | `aeos worker containment --kind container` PASS 20/20 for PERSONAL and OFFICE profiles (throwaway data dir): [docs/evidence/containment](../docs/evidence/containment/README.md); 2026-10-26, Windows 11 + Docker 29.8.2 with `dly-aeos-worker:1.19.3` built: `tests/acceptance/test_containment.py::test_container_sandbox_blocks_filesystem_and_egress` PASSED (real daemon, temp data dir); code also tested against a scripted docker CLI (`tests/unit/test_worker_runtime_container.py`). Admission in the owner's real data dir still needs the owner's recorded report: `aeos worker containment --kind container` |
 | `vm` | Not implemented in V1 (R4 work is BLOCKED). | — |
+
+Granted shell (container only, wave 7): the per-run config dir (mounted read-only at `/aeos`) carries the AEOS
+runner `aeos-run.js`; OpenCode's bash permission allows only `node /aeos/aeos-run.js <program> [args...]`. The runner
+starts exactly one program with its arguments (never through a shell, so a pattern grant is not widened), returns a
+bounded head/tail and keeps the full output under `.aeos/cmdlog/`, which the runtime collects as evidence and removes
+from the candidate. No image rebuild is needed for it (`tests/unit/test_worker_runtime_shell_runner.py` runs it
+inside the real image). It is a compaction and log-retention convention, not a security boundary: the container is.
 
 ## Enabling the container sandbox on a host (owner steps)
 

@@ -87,3 +87,20 @@ def test_never_run_and_expired_checks_stay_advisory(env):
     assert pub.preview["capability_gate"]["failed_checks"] == []
     assert any("CAN_PUBLISH_PERSONAL" in n and "informasi" in n for n in pub.preview["notes"])
     assert jobs.execute_publication(db, pub.id, actor_user_id="owner-user", confirm=confirm_of(pub)).allowed
+
+
+def test_a_stale_project_target_check_refuses_execute_until_rechecked():
+    """§08 "memicu recheck sebelum capability tersebut digunakan kembali": the project's own target check (Drive root
+    changed, token invalidated -> STALE) blocks like the platform checks; a never-run or not-applicable project
+    target stays advisory (ADR-0094)."""
+    from types import SimpleNamespace
+
+    def state(eff, *, ok=False, status="UNKNOWN"):
+        return SimpleNamespace(status=status, capability="CAN_PUBLISH_PERSONAL", checks=[
+            {"check_id": "adapter.project_drive_root", "tier": "project", "effective_status": eff, "ok": ok}])
+
+    assert jobs._blocking_checks(state("STALE")) == ["adapter.project_drive_root"]
+    assert jobs._blocking_checks(state("FAILED", status="BLOCKED")) == ["adapter.project_drive_root"]
+    assert jobs._blocking_checks(state("UNKNOWN")) == []  # never run: advisory
+    assert jobs._blocking_checks(state("EXPIRED")) == []  # TTL only: advisory
+    assert jobs._blocking_checks(state("NOT_APPLICABLE", ok=True, status="READY")) == []

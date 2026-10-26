@@ -21,6 +21,7 @@
   "baseline_hash": "sha256:52d54eab4acff34dd1f37473f33dfbe8378f3474e588469fa8001910e7920fdc",
   "candidate_hash": "sha256:4abd5420ebfe39100b682debd09fce68e72134efe2b0f58a9f36686f196946c3",
   "candidate_pin": "1.4.0",
+  "candidate_digest": null,
   "reviewed_at": "2026-10-19T01:19:45.045962+00:00",
   "created_at": "2026-10-19T01:19:44.949659+00:00",
   "updated_at": "2026-10-19T01:19:45.087039+00:00",
@@ -320,6 +321,7 @@
       "pins": {
         "baseline_hash": "sha256:52d54eab4acff34dd1f37473f33dfbe8378f3474e588469fa8001910e7920fdc",
         "candidate_pin": "1.4.0",
+        "candidate_digest": "NOT_RECORDED",
         "candidate_hash": "sha256:4abd5420ebfe39100b682debd09fce68e72134efe2b0f58a9f36686f196946c3",
         "note": null
       },
@@ -397,8 +399,11 @@
       ],
       "credential_egress_changes": {
         "credential_refs_to_revoke_after_cutover": [
-          "opencode: workers/openrouter"
+          "workers/openrouter"
         ],
+        "shared_credential_refs": [],
+        "not_secret_refs": [],
+        "rule": "Hanya ref pada daftar pertama: cabut/rotasi kunci di konsol provider, lalu 'aeos secrets delete <ref> --yes', setelah consumer sah dipindahkan (bukan efek review)",
         "egress": [
           "opencode: ['opencode.ai']"
         ]
@@ -419,6 +424,25 @@
       ]
     },
     "removal_plan": null,
+    "credential_revocation": {
+      "items": [
+        {
+          "id": "credential:workers/openrouter",
+          "kind": "credential",
+          "item": "Cabut credential ref workers/openrouter setelah consumer sah dipindahkan: cabut/rotasi di konsol provider, lalu 'aeos secrets delete workers/openrouter --yes'",
+          "secret_ref": "workers/openrouter",
+          "shared_with": [],
+          "status": "OPEN",
+          "note": "",
+          "evidence_id": null
+        }
+      ],
+      "open": [
+        "credential:workers/openrouter"
+      ],
+      "status": "OPEN",
+      "rule": "Progres, bukan gate: catat CLOSED setelah ref dicabut (sesudah cutover, boleh setelah ACCEPTED) atau WAIVED dengan alasan; review dan AEOS tidak pernah mencabut apa pun."
+    },
     "upgrade_delta": null,
     "security_privacy": {
       "status": "UNKNOWN",

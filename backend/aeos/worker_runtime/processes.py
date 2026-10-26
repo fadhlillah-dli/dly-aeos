@@ -4,7 +4,9 @@
   values), HOME/USERPROFILE/APPDATA/LOCALAPPDATA/XDG_*/TEMP are redirected into the run sandbox.
 * Windows: the process is created suspended, assigned to a Job Object with
   KILL_ON_JOB_CLOSE, then resumed — every descendant belongs to the job, and the whole job dies if
-  the controller dies. POSIX: a new session/process group per run.
+  the controller dies. The job also carries the run's memory/process backstop and, when the TaskSpec
+  sets ``limits.max_cpus``, a kernel CPU-rate HARD CAP (W6-055). POSIX: a new session/process group per
+  run; there ``max_cpus`` is a reservation only (stated as such by ``facade.enforced_run_limits``).
 * ``kill_run_processes`` snapshots the descendant tree before terminating anything, terminates the
   job / process group, kills survivors via psutil, and finally sweeps for any process carrying the
   run's ``AEOS_RUN_ID`` marker (orphans re-parented away from the tree).
@@ -61,12 +63,26 @@ DEFAULT_MAX_MEMORY_MB = 4096
 DEFAULT_MAX_PROCESSES = 64
 
 
+def cpu_rate_for(max_cpus: float, cpu_count: int | None) -> int:
+    """Windows Job Object hard CPU cap for ``max_cpus`` cores of this host: ``CpuRate`` is the share of ALL
+    processors' cycles in 1/100 percent (1..10000), e.g. 1 CPU of 8 -> 1250."""
+    cores = max(1, int(cpu_count or 1))
+    return max(1, min(10000, round(float(max_cpus) / cores * 10000)))
+
+
+def cpu_cap_supported() -> bool:
+    """True where the process sandbox enforces ``limits.max_cpus`` (Windows Job Object CPU rate hard cap). macOS
+    and Linux have no unprivileged per-tree CPU cap here: there ``max_cpus`` stays a reservation only."""
+    return sys.platform == "win32" and _win is not None
+
+
 @dataclass(frozen=True)
 class ResourceLimits:
     """§21/§25 process/resource caps of one run (time is enforced by the executor's timeout)."""
 
     max_memory_mb: int = DEFAULT_MAX_MEMORY_MB
     max_processes: int = DEFAULT_MAX_PROCESSES
+    max_cpus: float | None = None  # Windows: Job Object CPU rate hard cap; elsewhere a reservation only
 
     @classmethod
     def from_task(cls, limits: dict[str, Any] | None) -> ResourceLimits:
@@ -79,11 +95,19 @@ class ResourceLimits:
                 v = default
             return max(lo, min(v, hi))
 
+        cpus: float | None
+        try:
+            cpus = float(lim["max_cpus"]) if lim.get("max_cpus") is not None else None
+        except (TypeError, ValueError):
+            cpus = None
+        if cpus is not None and not cpus > 0:
+            cpus = None
         return cls(max_memory_mb=_int("max_memory_mb", DEFAULT_MAX_MEMORY_MB, 64, 65536),
-                   max_processes=_int("max_processes", DEFAULT_MAX_PROCESSES, 2, 4096))
+                   max_processes=_int("max_processes", DEFAULT_MAX_PROCESSES, 2, 4096),
+                   max_cpus=min(cpus, 1024.0) if cpus is not None else None)
 
-    def as_dict(self) -> dict[str, int]:
-        return {"max_memory_mb": self.max_memory_mb, "max_processes": self.max_processes}
+    def as_dict(self) -> dict[str, Any]:
+        return {"max_memory_mb": self.max_memory_mb, "max_processes": self.max_processes, "max_cpus": self.max_cpus}
 
 
 @dataclass(frozen=True)
@@ -173,11 +197,17 @@ if sys.platform == "win32":  # pragma: no branch
             ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t),
         ]
 
+    class _CpuRateControl(ctypes.Structure):  # JOBOBJECT_CPU_RATE_CONTROL_INFORMATION (CpuRate member of the union)
+        _fields_ = [("ControlFlags", wintypes.DWORD), ("CpuRate", wintypes.DWORD)]
+
     class _Win:
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
         JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
         JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
         JobObjectExtendedLimitInformation = 9
+        JobObjectCpuRateControlInformation = 15
+        JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1
+        JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4
         CREATE_SUSPENDED = 0x00000004
         CREATE_NO_WINDOW = 0x08000000
 
@@ -186,6 +216,8 @@ if sys.platform == "win32":  # pragma: no branch
             self.k32.CreateJobObjectW.restype = wintypes.HANDLE
             self.k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
             self.k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+            self.k32.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                                           wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
             self.k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
             self.k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
             self.k32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -215,6 +247,23 @@ if sys.platform == "win32":  # pragma: no branch
                 self.k32.CloseHandle(job)
                 raise OSError(err, "SetInformationJobObject failed")
             return int(job)
+
+        def set_cpu_rate(self, job: int, rate: int) -> bool:
+            """Hard cap of the whole job's CPU time (1..10000 = 0.01%..100% of all processors' cycles)."""
+            info = _CpuRateControl()
+            info.ControlFlags = self.JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | self.JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP
+            info.CpuRate = int(rate)
+            return bool(self.k32.SetInformationJobObject(job, self.JobObjectCpuRateControlInformation,
+                                                         ctypes.byref(info), ctypes.sizeof(info)))
+
+        def query_cpu_rate(self, job: int) -> tuple[int, int] | None:
+            """(ControlFlags, CpuRate) the kernel holds for the job (evidence that the cap is in force)."""
+            info = _CpuRateControl()
+            ret = wintypes.DWORD()
+            if not self.k32.QueryInformationJobObject(job, self.JobObjectCpuRateControlInformation,
+                                                      ctypes.byref(info), ctypes.sizeof(info), ctypes.byref(ret)):
+                return None
+            return int(info.ControlFlags), int(info.CpuRate)
 
         def assign(self, job: int, process_handle: int) -> None:
             if not self.k32.AssignProcessToJobObject(job, process_handle):
@@ -248,6 +297,7 @@ class ManagedProcess:
     pgid: int | None = None
     stderr_path: Path | None = None
     _stderr_fh: IO[bytes] | None = field(default=None, repr=False)
+    cpu_rate: int | None = None  # Windows Job Object CPU hard cap in force (1/100 percent of all CPUs), else None
 
     @property
     def stdout(self) -> IO[bytes] | None:
@@ -370,15 +420,23 @@ def spawn(run_id: str, argv: list[str], *, cwd: Path, env: dict[str, str], stder
         if stderr_fh:
             stderr_fh.close()
         raise
+    cpu_rate: int | None = None
     if sys.platform == "win32" and _win is not None:
         try:
             job = _win.create_job(limits)
+            if limits is not None and limits.max_cpus is not None:
+                # §21/§25 CPU cap: kernel-enforced hard cap of the whole job (set before the process resumes)
+                rate = cpu_rate_for(limits.max_cpus, os.cpu_count())
+                if _win.set_cpu_rate(job, rate):
+                    cpu_rate = rate
+                else:
+                    log.warning("job CPU rate cap failed for run %s: CPU is a reservation only", run_id)
             _win.assign(job, int(popen._handle))  # type: ignore[attr-defined]
         except OSError as exc:
             log.warning("job object assignment failed for run %s: %s (psutil tree kill still applies)", run_id, exc)
             if job is not None:
                 _win.close(job)
-            job = None
+            job, cpu_rate = None, None
         if suspended and not _win.resume(int(popen._handle)):  # type: ignore[attr-defined]
             popen.kill()
             if job is not None:
@@ -392,7 +450,7 @@ def spawn(run_id: str, argv: list[str], *, cwd: Path, env: dict[str, str], stder
         create_time = 0.0
     mp = ManagedProcess(run_id=run_id, popen=popen, pid=popen.pid, create_time=create_time, job=job,
                         pgid=popen.pid if sys.platform != "win32" else None, stderr_path=stderr_path,
-                        _stderr_fh=stderr_fh)
+                        _stderr_fh=stderr_fh, cpu_rate=cpu_rate)
     _register(mp)
     return mp
 

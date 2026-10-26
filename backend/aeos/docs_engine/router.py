@@ -100,10 +100,15 @@ def visuals_status(_principal: CurrentPrincipal) -> dict[str, Any]:
             "screenshot": "NOT_PROVEN",
             "screenshot_collector": {"available": browser, "command": "aeos docs screenshot",
                                      "remedy": None if browser else screenshots.INSTALL_REMEDY,
-                                     "note": "browser engine presence only; Chromium is checked when a capture runs"},
+                                     "note": "browser engine presence only; Chromium is checked when a capture runs",
+                                     "authenticated_capture": screenshots.AUTHENTICATED_CAPTURE},
             "screenshot_note": "documents reference trusted SCREENSHOT EvidenceArtifacts (commit recorded) only after "
                                "the screenshot collector stored them for a registered deployment target",
-            "diagram_verification": "UNVERIFIED unless checked: ERD vs platform schema, trust boundaries vs threat model",
+            "diagram_verification": "UNVERIFIED unless checked against the project's own references at a recorded "
+                                    "commit (platform schema/manifest/route contract; product checkout OpenAPI, "
+                                    "schema/migrations, compose/package names, CI jobs, IaC) and the plan's threat "
+                                    "model/data inventory; VERIFIED (sequence) only with integration tests PASS at "
+                                    "an accepted head",
             "evidence_role": visuals.EVIDENCE_ROLE,
             "source": "mermaid-cli probe on this host + aeos.docs_engine.visuals", "checked_at": utcnow().isoformat(),
             "mode": "LIVE"}
@@ -226,10 +231,40 @@ def list_checkpoints(project_id: str, db: DB, principal: CurrentPrincipal, domai
     from aeos.docs_engine import checkpoints
 
     project = load_project(db, principal, project_id, domain=domain)
-    items = checkpoints.list_checkpoints(db, project.id)
+    items = checkpoints.list_checkpoints(db, project.id, with_planning=True)
     return {"items": items, "source": "document_revisions (kind DOC_CHECKPOINT, immutable)",
             "checked_at": items[0]["created_at"] if items else None, "generated_at": utcnow().isoformat(),
             "mode": "LIVE"}
+
+
+@router.get("/api/projects/{project_id}/documents/checkpoints/candidates")
+def checkpoint_candidates(project_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
+    """§41 "finalisasi pada accepted milestone": milestones of the approved version with their acceptance count,
+    approved snapshots (platform) and OFFERS for accepted ones without a checkpoint. Read-only."""
+    from aeos.docs_engine import checkpoints
+
+    project = load_project(db, principal, project_id, domain=domain)
+    out = checkpoints.checkpoint_candidates(db, project)
+    return {**out, "source": "approved PlanVersion + AcceptanceRecord + ArchitectureSnapshot approvals",
+            "checked_at": utcnow().isoformat(), "mode": "LIVE"}
+
+
+class WriterTaskIn(BaseModel):
+    rationale: str = Field(default="", max_length=2000)
+
+
+@router.post("/api/projects/{project_id}/documents/checkpoints/{revision_id}/writer-task")
+def plan_writer_task(project_id: str, revision_id: str, body: WriterTaskIn, db: DB, principal: AdminPrincipal,
+                     domain: ActiveDomain) -> dict[str, Any]:
+    """The owner adds the checkpoint's Tech Writer / Diagram Author draft to a NEW plan version (human edit). It runs
+    only after the owner approves that version with the write paths set; nothing is approved here."""
+    from aeos.docs_engine import checkpoints
+
+    project = load_project(db, principal, project_id, domain=domain)
+    out = checkpoints.plan_writer_task(db, revision_id, project, actor_user_id=principal.user.id,
+                                       rationale=body.rationale)
+    db.commit()
+    return {**out, "checked_at": utcnow().isoformat(), "source": "planning (HUMAN_EDIT PlanVersion)"}
 
 
 def _load_doc(db: DB, principal: CurrentPrincipal, domain: ActiveDomain, doc_id: str) -> DocumentRecord:
@@ -247,7 +282,8 @@ def render_preview(doc_id: str, db: DB, principal: CurrentPrincipal, domain: Act
             "status": rec.status, "content_type": rec.content_type, "content_hash": rec.content_hash,
             "markdown": rec.body_markdown if rec.kind == "DOC" else "", "sections": rec.sections or [],
             "pending_sections": rec.pending_sections or [], "source_plan_version_id": rec.source_plan_version_id,
-            "rendered_at": _iso(rec.rendered_at), "mode": rec.mode, "format": "markdown"}
+            "rendered_at": _iso(rec.rendered_at), "mode": rec.mode, "format": "markdown",
+            "source": SOURCE, "generated_at": utcnow().isoformat()}  # stored snapshot, read now
 
 
 @router.get("/api/documents/{doc_id}/revisions")

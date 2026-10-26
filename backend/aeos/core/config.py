@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     # §23 OFFICE default deny — overridable only by recorded owner/company decisions, not config.
     office_external_worker_allowed: bool = False
 
+    # §02/§08 canonical MCI_V2 source: owner-supplied and never committed (the platform repository is public). By
+    # default it is read from <data dir>/policy/canonical/<file> (policy/mci-reference.yaml ``location:
+    # local:<file>``); this absolute path (aeos.yaml ``mci_source_path`` / AEOS_MCI_SOURCE_PATH) overrides it. A
+    # path inside the repository is refused when the reference is verified (aeos.policy.snapshot).
+    mci_source_path: Path | None = None
+
     platform_repo_slug: str = "fadhlillah-dli/dly-aeos"
     # §06 commit attribution of worker candidates: the owner's own identity (e.g. the GitHub noreply address
     # ``<id>+<user>@users.noreply.github.com``). Unset -> the runtime identity, reported as not linked.

@@ -14,11 +14,11 @@ from aeos.core.enums import Domain
 from aeos.core.errors import NotFound
 from aeos.core.hashing import content_hash
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.decisions import ArchitectureDecisionRecord, Decision
 from aeos.models.policy_ext import DecisionRequest
 from aeos.policy import adrs as adr_loader
-from aeos.policy import catalog, enablement, office, recording, snapshot
+from aeos.policy import catalog, enablement, office, office_scope, recording, snapshot
 from aeos.policy import decisions as registry
 from aeos.policy import queue as decision_queue
 from aeos.policy import requests as decision_requests
@@ -117,14 +117,27 @@ def decision_shapes(_principal: CurrentPrincipal, domain: ActiveDomain) -> dict[
                        for name, p in catalog.EXCEPTION_PRESETS.items()},
         "office_authorization": {"target_type": catalog.TARGET_OFFICE_POLICY, "target_id": Domain.OFFICE.value,
                                  "providers": list(catalog.providers_for(Domain.OFFICE)),
-                                 "available": domain == Domain.OFFICE},
+                                 "available": domain == Domain.OFFICE,
+                                 "approved_target_keys": {p: {"required": list(r), "optional": list(o)}
+                                                          for p, (r, o) in office_scope.TARGET_KEYS.items()},
+                                 "data_classes": list(office_scope.DATA_CLASSES),
+                                 "identity_refs": list(office_scope.IDENTITY_REFS)},
+        "policy_presets": {name: {"kind": "POLICY", "target_type": p.target_type, "target_id": p.target_id,
+                                  "domains": list(p.domains), "details": {p.detail_key: p.value},
+                                  "consumer": p.consumer, "label": p.label, "expiry_required": True,
+                                  "evidence_level": "E0", "available": domain.value in p.domains}
+                           for name, p in catalog.POLICY_PRESETS.items()},
+        "adr": {"kind": "ADR", "target_type": catalog.TARGET_ADR, "outcomes": list(catalog.ADR_OUTCOMES),
+                "endpoint": catalog.DEDICATED_TARGETS[catalog.TARGET_ADR]},
         "domain": domain.value, "checked_at": _now(),
     }
 
 
 @router.get("/api/decisions/{decision_id}")
 def get_decision(decision_id: str, db: DB, principal: CurrentPrincipal, domain: ActiveDomain) -> dict[str, Any]:
-    return registry.decision_view(db, _load_visible_decision(db, principal, domain, decision_id))
+    # the effective status (expiry/revocation/supersession) is evaluated at read time, like the register list
+    view = registry.decision_view(db, _load_visible_decision(db, principal, domain, decision_id))
+    return {**view, "source": "decisions", "checked_at": _now(), "mode": "LIVE"}
 
 
 # ---------------------------------------------------------------- decisions (write)
@@ -150,9 +163,15 @@ class DecisionIn(BaseModel):
     company_reference: str | None = Field(default=None, max_length=500)
     allowed_providers: list[str] = Field(default_factory=list)
     office_policy: dict[str, Any] | None = None
+    # structured scope of the company authorisation (aeos.policy.office_scope): dict or "provider:key=value,..." text
+    approved_targets: list[dict[str, Any] | str] = Field(default_factory=list, max_length=50)
+    approved_data_classes: list[str] = Field(default_factory=list, max_length=10)
+    approved_identities: dict[str, str] = Field(default_factory=dict, max_length=10)
     # EXCEPTION presets with the exact target shape their consumer reads (catalog.EXCEPTION_PRESETS)
     exception: Literal["secret_store_interim_keyring", "worker_sandbox_process"] | None = None
     allow_bash: bool | None = None
+    # POLICY owner attestations with the exact target shape their consumer reads (catalog.POLICY_PRESETS)
+    policy_preset: Literal["claude_extra_usage_off"] | None = None
     request_id: str | None = None
 
 
@@ -187,7 +206,9 @@ def create_decision(body: DecisionIn, db: DB, principal: AdminPrincipal, domain:
         expires_at=body.expires_at, details=body.details, provider=body.provider, enabled=body.enabled,
         office_authorization=body.office_authorization, company_reference=body.company_reference,
         allowed_providers=body.allowed_providers, office_policy=body.office_policy, exception=body.exception,
-        allow_bash=body.allow_bash,
+        allow_bash=body.allow_bash, approved_targets=body.approved_targets,
+        approved_data_classes=body.approved_data_classes, approved_identities=body.approved_identities,
+        policy_preset=body.policy_preset,
     )
     if body.request_id:
         req = db.get(DecisionRequest, body.request_id)
@@ -293,8 +314,11 @@ def refresh_snapshot(db: DB, principal: AdminPrincipal) -> dict[str, Any]:
 
 
 @router.get("/api/policy/mci")
-def get_mci(_principal: CurrentPrincipal) -> dict[str, Any]:
-    return {**snapshot.mci_reference(), "risk_classes": snapshot.risk_classes(), "checked_at": _now()}
+def get_mci(db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
+    # pack-mapping decisions are PERSONAL (platform) decisions: their ids are shown in PERSONAL sessions only
+    show_ids = principal.active_domain == Domain.PERSONAL
+    return {**snapshot.mci_reference(session=db, show_decision_ids=show_ids), "risk_classes": snapshot.risk_classes(),
+            "checked_at": _now()}
 
 
 @router.get("/api/policy/office")
@@ -303,8 +327,12 @@ def get_office_policy(db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
     if principal.active_domain != Domain.OFFICE or not principal.can_access_domain(Domain.OFFICE):
         # The effective (default-deny) policy is visible everywhere; the OFFICE decision references
         # behind it are OFFICE metadata and stay in OFFICE sessions (§35, §50).
+        # The approved tenants/targets and identities are OFFICE metadata too (§23 "office data never flows into
+        # Personal views"); only their counts are visible outside an OFFICE session.
         view.update(authorization_decision_id=None, applied_decision_ids=[], ignored_decisions=[],
-                    decision_refs_hidden=True)
+                    decision_refs_hidden=True, approved_targets=[], approved_identities={},
+                    approved_target_count=len(view.get("approved_targets") or []),
+                    approved_identity_count=len(view.get("approved_identities") or {}))
     return view
 
 
@@ -341,9 +369,36 @@ def get_write_enablement(db: DB, _principal: CurrentPrincipal, domain: ActiveDom
 @router.get("/api/adrs")
 def list_adrs(db: DB, _principal: CurrentPrincipal) -> dict[str, Any]:
     rows = list(db.scalars(select(ArchitectureDecisionRecord).order_by(ArchitectureDecisionRecord.adr_key)))
-    return {"items": [adr_loader.adr_view(r) for r in rows], "source": "docs/decisions (loaded by aeos seed)",
+    owner = adr_loader.owner_decisions(db)
+    items = [adr_loader.adr_view(r, decisions=owner.get(r.adr_key, [])) for r in rows]
+    counts: dict[str, int] = {}
+    for i in items:
+        counts[i["owner_status_state"]] = counts.get(i["owner_status_state"], 0) + 1
+    return {"items": items, "owner_status_counts": counts,
+            "source": "docs/decisions (loaded by aeos seed) + owner ADR decisions",
             "checked_at": _now(), "mode": "LIVE",
             "remedy": None if rows else "aeos seed --only aeos.policy.seed"}
+
+
+class AdrDecisionIn(BaseModel):
+    outcome: Literal["ACCEPTED", "REJECTED", "SUPERSEDED"]
+    rationale: str = Field(min_length=10, max_length=5000)
+    content_hash: str = Field(min_length=10, max_length=80)  # the hash of the ADR content the owner reviewed
+    superseded_by: str | None = Field(default=None, max_length=32)
+
+
+@router.post("/api/adrs/{adr_key}/decision", status_code=201)
+def decide_adr(adr_key: str, body: AdrDecisionIn, db: DB, principal: AdminPrincipal) -> dict[str, Any]:
+    """§02 change control: the owner accepts/rejects/supersedes an ADR (live SUPER_ADMIN session + CSRF). The Decision
+    (kind ADR) binds the ADR's content hash; editing the file afterwards makes the owner status STALE."""
+    d = adr_loader.record_adr_decision(db, adr_key=adr_key, outcome=body.outcome, actor_user_id=principal.user.id,
+                                       rationale=body.rationale, content_hash=body.content_hash,
+                                       superseded_by=body.superseded_by)
+    db.commit()
+    row = db.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == adr_key))
+    assert row is not None
+    return {"adr": adr_loader.adr_view(row, decisions=adr_loader.owner_decisions(db, [adr_key]).get(adr_key, [])),
+            "decision": registry.decision_view(db, d), "checked_at": _now()}
 
 
 @router.get("/api/adrs/{adr_key}")
@@ -351,11 +406,14 @@ def get_adr(adr_key: str, db: DB, principal: CurrentPrincipal) -> dict[str, Any]
     row = db.scalar(select(ArchitectureDecisionRecord).where(ArchitectureDecisionRecord.adr_key == adr_key))
     if row is None:
         raise NotFound("ADR not found")
-    view = adr_loader.adr_view(row, full=True)
-    linked = list(db.scalars(select(Decision).where(Decision.actor_user_id == f"owner:{adr_key}")))
+    view = adr_loader.adr_view(row, full=True,
+                               decisions=adr_loader.owner_decisions(db, [adr_key]).get(adr_key, []))
+    linked = list(db.scalars(select(Decision).where(or_(
+        Decision.actor_user_id == f"owner:{adr_key}",
+        (Decision.target_type == catalog.TARGET_ADR) & (Decision.target_id == adr_key))).order_by(Decision.created_at)))
     active = principal.active_domain
     # ADRs are platform documents (no domain); decisions linked to them stay in their own domain scope.
     visible = [d for d in linked if d.domain is None
                or (active is not None and principal.can_access_domain(active) and _visible(principal, active, d))]
     view["linked_decisions"] = [{"id": d.id, "kind": d.kind, "status": registry.effective_status(d)} for d in visible]
-    return view
+    return {**view, "source": "docs/decisions (loaded by aeos seed) + decisions", "checked_at": _now(), "mode": "LIVE"}

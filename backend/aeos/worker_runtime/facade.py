@@ -53,19 +53,21 @@ def sandbox_readiness(session: Any, *, domain: str) -> dict[str, Any]:
 def enforced_run_limits(limits: dict[str, Any] | None, *, sandbox_kind: str | None) -> dict[str, Any]:
     """The per-run compute this runtime ENFORCES for a TaskSpec's limits (§19, §22): ``memory_mb`` is the process
     watchdog's RSS cap (+ Windows job memory limit) or docker ``--memory``; ``cpus`` is docker ``--cpus`` in the
-    container sandbox (the process sandbox has no CPU cap: there ``limits.max_cpus`` is a reservation only)."""
+    container sandbox and, in the process sandbox on Windows, the Job Object CPU-rate hard cap (wave 7, W6-055).
+    On macOS/Linux the process sandbox has no CPU cap: there ``limits.max_cpus`` is a reservation only."""
     from aeos.worker_runtime import container, processes
 
     lim = limits or {}
     if sandbox_kind == "container":
         cl = container.limits_for(lim)
-        return {"memory_mb": int(str(cl["memory"]).rstrip("m")), "cpus": float(cl["cpus"]), "cpu_enforced": True}
-    try:
-        cpus = float(lim.get("max_cpus") or 1)
-    except (TypeError, ValueError):
-        cpus = 1.0
-    return {"memory_mb": int(processes.ResourceLimits.from_task(lim).max_memory_mb), "cpus": cpus,
-            "cpu_enforced": False}
+        return {"memory_mb": int(str(cl["memory"]).rstrip("m")), "cpus": float(cl["cpus"]), "cpu_enforced": True,
+                "enforced_by": "docker --memory/--cpus"}
+    rl = processes.ResourceLimits.from_task(lim)
+    capped = rl.max_cpus is not None and processes.cpu_cap_supported()
+    memory = "runtime watchdog RSS cap" + (" + Windows job memory limit" if processes.cpu_cap_supported() else "")
+    return {"memory_mb": int(rl.max_memory_mb), "cpus": float(rl.max_cpus if rl.max_cpus is not None else 1.0),
+            "cpu_enforced": capped,
+            "enforced_by": memory + (" + Windows job CPU-rate hard cap" if capped else "; no CPU cap (reservation only)")}
 
 
 # --- verifier runner (§20 "Verifier ENF ... isolated runner"; additive 2026-10-19, K2) -----------------------
@@ -108,7 +110,27 @@ def controller_integrity_snapshot() -> dict[str, Any]:
 
 
 def controller_integrity_compare(before: dict[str, Any] | None) -> list[dict[str, str]]:
-    """Controller files changed/added/removed since ``before`` (empty = untouched)."""
+    """Controller files changed/added/removed since ``before`` (empty = untouched). Bytecode caches are accepted
+    only when equal to a fresh compile of their source (others are deleted); the owner config is restored."""
     from aeos.worker_runtime.integrity import compare as impl
 
     return impl(before)
+
+
+def raise_integrity_hold(session: Any, *, source: str, subject_id: str, findings: list[dict[str, Any]],
+                         project_id: str | None = None, domain: str | None = None) -> dict[str, Any]:
+    """Record the host-wide integrity hold after a controller/config/bytecode/DB tamper finding: worker admission
+    and ``CAN_RUN_WORKER`` stay BLOCKED until the owner records the reconciliation decision (additive, wave 7).
+    Does not commit."""
+    from aeos.worker_runtime.integrity import raise_hold as impl
+
+    return impl(session, source=source, subject_id=subject_id, findings=findings, project_id=project_id,
+                domain=domain)
+
+
+def integrity_hold(session: Any, *, domain: str | None = None) -> dict[str, Any]:
+    """``{"status": "ACTIVE"|"CLEAR", "hold": ..., "remedy": ...}`` of the integrity hold (additive, wave 7); with
+    ``domain`` another domain's run id and findings are replaced by their count."""
+    from aeos.worker_runtime.integrity import hold_view as impl
+
+    return impl(session, domain=domain)

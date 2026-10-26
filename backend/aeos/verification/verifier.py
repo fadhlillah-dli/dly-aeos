@@ -29,7 +29,6 @@ import importlib.metadata
 import importlib.util
 import json
 import logging
-import re
 import shutil
 import sys
 import threading
@@ -53,7 +52,23 @@ from aeos.models.evidence import EvidenceArtifact
 from aeos.models.planning import TaskSpec
 from aeos.models.portfolio import Project
 from aeos.models.workforce import WorkerRun
-from aeos.verification import collector, runner, scope, suite, tamper
+from aeos.verification import (
+    adversarial,
+    collector,
+    contracts,
+    controlled,
+    db_evidence,
+    envs,
+    frontend,
+    neutralize,
+    runner,
+    scope,
+    seal,
+    steps,
+    suite,
+    tamper,
+)
+from aeos.verification import impact as impact_map
 from aeos.verification.integration import call
 from aeos.verification.junit import JUnitParseError, JUnitReport, nodeid_to_key, parse_junit
 from aeos.verification.procs import (
@@ -73,8 +88,18 @@ log = logging.getLogger("aeos.verification.verifier")
 # v3: isolated runner selection (container when proven, else WEAK with the hardened environment), controller
 # checkout/interpreter + DB trust-table/schema tamper window around candidate code and the migration round-trip
 # (impact adds steps the verifier runs itself; it does not yet widen the trusted test selection, §22/§31 - stated
-# as NOT-PROVEN, not claimed). A new version makes earlier acceptance STALE.
-VERIFIER_VERSION = "3"
+# as NOT-PROVEN, not claimed).
+# v4 (review W6-054/W6-057): the verifier-owned result seal on every pytest step that runs candidate code and on the
+# migration round-trip (a forged junit/exit code is QUARANTINED), every process-runner step in its own kill group
+# (a survivor is QUARANTINED), and automatic neutralisation of foreign approval/session/grant/route/policy rows.
+# v4 (wave 7 E1, same version - both landed together): impact -> executed checks (aeos.verification.impact):
+# AST-detected negative tests executed, verifier-owned adversarial probes + trusted modules per category, contract
+# diff (facades/OpenAPI) + contract tests, opt-in integration-marked tests, per-candidate dependency environment from
+# the candidate lockfile, frontend step (npm ci --ignore-scripts, vitest with the verifier's config, type check,
+# build) + UI states/a11y probe, seeded backup/restore + rollback-with-data in the migration round-trip,
+# migration/runtime credential split.
+# A new version makes earlier acceptance STALE.
+VERIFIER_VERSION = "4"
 ORIGIN = "verifier"
 MARK_EXPR = "not integration and not network"
 PASSING = "PASS"
@@ -92,13 +117,8 @@ MAX_PROTECTED_IDS = 2000
 VERIFIER_ISOLATION = runner.ISOLATION_WEAK
 VERIFIER_ISOLATION_NOTE = runner.PROCESS_NOTE
 RESIDUAL_RISKS = runner.PROCESS_RESIDUAL_RISKS
-# Added test lines that assert a refusal/error path (§16 negative tests, §22 adversarial cases).
-_NEGATIVE_ASSERTION = re.compile(
-    r"pytest\.raises|assertRaises|status_code\s*(?:==|in|!=)\s*[\(\[{]?\s*4\d\d|\b40[0-9]\b|\b42[29]\b|toThrow|"
-    r"\.rejects\b|\.not\.|\bassert\s+not\b|\bis\s+False\b|==\s*False\b|DENIED|Forbidden|Unauthorized|"
-    r"PolicyDenied|Blocked|ValidationFailed|NotFound|Conflict"
-)
-_TEST_FILE_PATTERNS = ("tests/**", "**/test_*.py", "**/*_test.py", "**/*.test.*", "**/*.spec.*", "**/__tests__/**")
+# Negative/refusal tests are detected in the syntax tree and executed (aeos.verification.controlled, wave 7): the
+# former regex over added lines (comments included) is gone.
 _PY_DEPENDENCY_FILES = ("requirements.lock", "requirements", "pyproject.toml", "poetry.lock", "uv.lock",
                         "Pipfile.lock")
 # verifier_policy.suites -> candidate test directories the verifier runs (the trusted acceptance suite always runs)
@@ -121,63 +141,44 @@ filterwarnings =
 HARNESS_MODULES = frozenset({
     "pytest", "_pytest", "pluggy", "iniconfig", "packaging", "py", "tests", "conftest", "sitecustomize",
     "usercustomize", "ruff", "xdist", "exceptiongroup", "tomli", "colorama", "_distutils_hack", "setuptools",
-    "pip", "typing_extensions",
+    "pip", "typing_extensions", seal.PLUGIN_MODULE,
 })
 _MODULE_SUFFIXES = (".py", ".pyc", ".pyo", ".pyd", ".so", ".dylib")
+# runner steps that import trusted code only (controller checkout / reviewed base commit + trusted suite). A process
+# outliving any OTHER step - every step that executes candidate code, and any unnamed or future step (fail closed) -
+# is tampering (see _guard_close).
+TRUSTED_ONLY_STEPS = frozenset({"collect_expected", "baseline", "contract_openapi_base"})
 
 _PREFLIGHT = (
     "import importlib, json, sys\n"
+    # the verifier's result seal, imported before any candidate module: the host only uses the mapping sealed at
+    # the very end, never a line an imported candidate module printed itself (review W6-054)
+    "try:\n"
+    "    import aeos_vseal as _vseal\n"
+    "except Exception:\n"
+    "    _vseal = None\n"
     "out = {}\n"
     "for n in sys.argv[1:]:\n"
     "    try:\n"
     "        m = importlib.import_module(n)\n"
     "        out[n] = getattr(m, '__file__', None)\n"
-    "    except Exception as e:\n"
+    "    except BaseException as e:\n"  # SystemExit at import too: reported, never the end of the driver
     "        out[n] = 'IMPORT_ERROR: ' + type(e).__name__\n"
+    "if _vseal is not None:\n"
+    "    _vseal.emit('result', d=out)\n"
     "print(json.dumps(out))\n"
 )
 
 
-# Candidate-code driver: run the candidate's own Alembic history forward, back to base and forward again on a
-# throwaway SQLite DB, then reopen it (restore). Printed as a single JSON line. Runs under the verifier runner
-# (and inside the tamper window) because it imports and executes the candidate's migration/env code.
-_MIGRATION_ROUNDTRIP = (
-    "import json, os, sqlite3, sys\n"
-    "mig_dir, db_path = sys.argv[1], sys.argv[2]\n"
-    "os.environ['AEOS_CONFIG'] = db_path + '.noconfig'\n"
-    "out = {'ok': False}\n"
-    "try:\n"
-    "    from alembic import command\n"
-    "    from alembic.config import Config\n"
-    "    from alembic.script import ScriptDirectory\n"
-    "    url = 'sqlite:///' + db_path.replace(os.sep, '/')\n"
-    "    cfg = Config()\n"
-    "    cfg.set_main_option('script_location', mig_dir)\n"
-    "    cfg.set_main_option('sqlalchemy.url', url)\n"
-    "    heads = ScriptDirectory.from_config(cfg).get_heads()\n"
-    "    out['heads'] = list(heads)\n"
-    "    if len(heads) != 1:\n"
-    "        out['error'] = 'history does not have exactly one head: ' + repr(heads)\n"
-    "        print(json.dumps(out)); sys.exit(0)\n"
-    "    out['head'] = heads[0]\n"
-    "    command.upgrade(cfg, 'head')\n"
-    "    command.downgrade(cfg, 'base')\n"
-    "    command.upgrade(cfg, 'head')\n"
-    "    conn = sqlite3.connect(db_path)\n"  # restore: the migrated DB reopens and carries the head revision
-    "    try:\n"
-    "        rev = conn.execute('select version_num from alembic_version').fetchone()\n"
-    "        tables = [r[0] for r in conn.execute(\"select name from sqlite_master where type='table'\")]\n"
-    "    finally:\n"
-    "        conn.close()\n"
-    "    out['restored_revision'] = rev[0] if rev else None\n"
-    "    out['tables'] = len([t for t in tables if t != 'alembic_version' and not t.startswith('sqlite_')])\n"
-    "    out['ok'] = out['restored_revision'] == heads[0] and out['tables'] > 0\n"
-    "    if not out['ok']:\n"
-    "        out['error'] = 'restored revision ' + repr(out['restored_revision']) + ' != head'\n"
-    "except Exception as e:\n"
-    "    out['error'] = type(e).__name__ + ': ' + str(e)[:300]\n"
-    "print(json.dumps(out))\n"
-)
+# Candidate-code driver for schema migrations (``packs/migration_roundtrip.py``): upgrade -> downgrade(base) ->
+# upgrade on a throwaway SQLite DB, seeded backup -> delete -> restore -> compare, and one-revision rollback with the
+# seeded data present. Runs under the verifier runner (inside the tamper window): it executes the candidate's
+# migration/env code. It imports the verifier's result seal before any candidate code and seals its result at the
+# very end; the host only uses that sealed result (review W6-054).
+MIGRATION_DRIVER = "migration_roundtrip.py"
+# pytest basetemps of the run's steps (trusted suite, candidate tests, baseline, negative tests, integration trusted/
+# candidate, adversarial probes, per-candidate environment); removed with the run dir.
+BASETEMP_NAMES = ("b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8")
 
 
 def top_level_modules(backend: Path) -> list[str]:
@@ -234,7 +235,8 @@ def compute_config_hash(*, suite_hash: str, trusted_root: Path, task_spec_hash: 
         "python": ".".join(str(x) for x in sys.version_info[:3]),
         "mark_expr": MARK_EXPR,
         "policy": {k: policy[k] for k in sorted(policy) if k in
-                   ("candidate_tests", "ruff", "suite_timeout_seconds", "unit_timeout_seconds")},
+                   ("candidate_tests", "ruff", "suite_timeout_seconds", "unit_timeout_seconds", "integration_tests",
+                    "contract_breaking", "isolated_dependencies", "negative_tests_required", "migration_roundtrip")},
     })
 
 
@@ -346,7 +348,7 @@ class _Blocked(Exception):
 class _PendingEvidence:
     kind: str
     claim: str
-    content: dict[str, Any] | str | None
+    content: dict[str, Any] | str | bytes | None
     level: str
     check: str | None = None
     env_extra: dict[str, Any] = field(default_factory=dict)
@@ -493,6 +495,20 @@ class _Verifier:
         self.tamper_findings: list[dict[str, str]] = []
         self.tamper_checks: dict[str, Any] = {}
         self.migration_roundtrip: dict[str, Any] | None = None
+        self.result_seals: dict[str, dict[str, Any]] = {}  # step -> seal.SealResult.to_dict()
+        self.neutralized: dict[str, Any] = {}
+        self.foreign_all: list[dict[str, str]] = []  # every foreign trust-table row, full keys (tamper.Window)
+        # wave 7 E1: inputs of the impact-selected steps (set in run())
+        self.git: GitReader | None = None
+        self.suite_kind = "CONTROLLER"
+        self.code_root: Path | None = None
+        self.trusted_copy: Path | None = None
+        self.ini: Path | None = None
+        self.expected: list[str] = []
+        self.trusted_cases: dict[str, str] = {}
+        self.impact_summary: dict[str, dict[str, Any]] = {}
+        self._base_dir: Path | None = None
+        self._base_failed = False
 
     # ------------------------------------------------------------------ orchestration
 
@@ -543,6 +559,7 @@ class _Verifier:
             policy = dict(task.verifier_policy or {})
             limits = VerifierLimits.from_policy(policy)
             git = self._git(candidate, limits)
+            self.git, self.suite_kind = git, trusted_suite.kind
             self._resolve_commits(git, run, task)
             diff = self._diff_and_scope(git, task, project)
             self.diff_text = diff
@@ -567,6 +584,7 @@ class _Verifier:
             # Trusted *code* for collecting the expected test ids: the controller checkout for the
             # platform, the human-reviewed base commit of the project otherwise (never the candidate head).
             code_root = trusted_root if trusted_suite.kind == "CONTROLLER" else self._export_base(git, workdir)
+            self.code_root = code_root
             if snap_ok:
                 snap_ok = self._check_shadowing(snapshot, code_root)
             if snap_ok:
@@ -576,12 +594,17 @@ class _Verifier:
                     raise _Blocked("TRUSTED_SUITE_COPY_MISMATCH", "trusted suite copy does not match its hash")
                 ini = workdir / "pytest.ini"
                 ini.write_text(PYTEST_INI, encoding="utf-8")
+                self.trusted_copy, self.ini = trusted_copy, ini
+                # the verifier-owned result seal (aeos.verification.seal): first on PYTHONPATH of every sealed step
+                seal.install_plugin(workdir)
+                self.env_identity["result_seal_sha256"] = seal.PLUGIN_SHA256
                 # §09 Zone 1 / §21: candidate code is about to run; fingerprint the controller checkout +
                 # interpreter and the DB trust tables now, compare after the last candidate step.
                 self._guard_open()
                 try:
                     self._preflight(snapshot, workdir, limits)
                     expected = self._collect_expected(code_root, trusted_copy, ini, workdir, limits)
+                    self.expected = expected
                     trusted_ran = True
                     self._run_trusted_suite(snapshot, trusted_copy, ini, workdir, limits, expected)
                     self._check_suite_integrity(copied, trusted_root)
@@ -592,7 +615,7 @@ class _Verifier:
                         self._run_candidate_tests(snapshot, ini, workdir, limits, suites=self._suites(policy))
                     else:
                         self._check("candidate_tests", "NOT_RUN", "disabled by TaskSpec verifier_policy")
-                    self._run_impact_steps(snapshot, workdir, limits)
+                    self._run_impact_steps(snapshot, workdir, limits, policy)
                 finally:
                     self._guard_close()
                 if policy.get("ruff", True):
@@ -612,11 +635,12 @@ class _Verifier:
         finally:
             if workdir is not None:
                 shutil.rmtree(workdir, ignore_errors=True)
-                for name in ("b1", "b2", "b3"):
+                for name in BASETEMP_NAMES:
                     short = _short_basetemp(workdir, name)
                     if short is not None:
                         shutil.rmtree(short, ignore_errors=True)
         self._apply_tamper()
+        self._neutralize()
         self._persist(trusted_ran)
         self._side_effects()
         self._audit_and_emit()
@@ -857,12 +881,22 @@ class _Verifier:
         if not names:
             raise _Blocked("CANDIDATE_HAS_NO_BACKEND", "candidate snapshot has no importable backend/ package")
         rn = self._runner()
+        step_seal = seal.StepSeal.new(workdir, "preflight")
         res = rn.python(["-c", _PREFLIGHT, *names[:20]], pythonpath=snapshot / "backend", autoload=False,
-                        timeout=limits.preflight_timeout)
-        try:
-            mapping = json.loads((res.stdout or "").strip().splitlines()[-1])
-        except (ValueError, IndexError):
-            mapping = {}
+                        timeout=limits.preflight_timeout, seal=step_seal, step="preflight")
+        # importing the candidate's packages runs candidate code: only the mapping sealed at the driver's end counts
+        sealed = self._driver_seal(step_seal, res)
+        if sealed is None:
+            # the driver never reached its sealed end (os._exit/crash/kill at import, or a forged stream): where
+            # the candidate's packages resolve is unknown, so the trusted suite result cannot be attributed to the
+            # candidate - never PASS on it (fail closed)
+            msg = ("candidate import preflight produced no sealed result (exit "
+                   f"{'timeout' if res.timed_out else res.returncode}); whether the candidate's packages resolve "
+                   "inside its snapshot is NOT-PROVEN")
+            self.out.not_proven.append(msg)
+            self.blocking_not_proven.append(msg)
+            return
+        mapping = sealed
         snap = backend.resolve()
         mismatched = [n for n, f in mapping.items()
                       if isinstance(f, str) and not f.startswith("IMPORT_ERROR")
@@ -897,7 +931,7 @@ class _Verifier:
         # same runner (interpreter + dependency set) as the suite run, so the collected ids are comparable;
         # only trusted code is imported here (controller checkout / reviewed base commit + trusted suite)
         res = self._runner().python(args, pythonpath=trusted_root / "backend", autoload=False,
-                                    timeout=limits.collect_timeout)
+                                    timeout=limits.collect_timeout, step="collect_expected")
         if res.timed_out or res.returncode not in (0, 5):
             raise _Blocked("TRUSTED_COLLECTION_FAILED",
                            "trusted suite could not be collected with the trusted controller code: " + res.tail(600))
@@ -914,13 +948,17 @@ class _Verifier:
         out = self.out
         junit_path = workdir / "r" / "trusted-junit.xml"
         junit_path.parent.mkdir(parents=True, exist_ok=True)
-        args = ["-m", "pytest", str(trusted_copy / "tests" / "acceptance"), "-c", str(ini),
+        step_seal = seal.StepSeal.new(workdir, "trusted_suite")
+        args = ["-m", "pytest", "-p", seal.PLUGIN_MODULE, str(trusted_copy / "tests" / "acceptance"), "-c", str(ini),
                 "--rootdir", str(trusted_copy), "--confcutdir", str(trusted_copy), "-p", "no:cacheprovider",
                 "-q", "--junitxml", str(junit_path), "-m", MARK_EXPR, *self._basetemp(workdir, "b1")]
         res = self._runner().python(args, pythonpath=snapshot / "backend", autoload=False,
-                                    timeout=limits.suite_timeout)
+                                    timeout=limits.suite_timeout, seal=step_seal, step="trusted_suite")
         report, parse_error = self._parse(junit_path)
-        problems: list[str] = []
+        sealed = self._check_seal(step_seal, res, junit_path, report, label="trusted suite")
+        if report is not None:  # per-test outcomes for the impact-selected trusted modules (adversarial/contract)
+            self.trusted_cases = {c.key: c.outcome for c in report.cases}
+        problems: list[str] = list(sealed.problems if sealed.status != "PASS" else [])
         not_proven: list[str] = []
         if res.timed_out:
             problems.append(f"trusted suite timed out after {limits.suite_timeout:.0f}s")
@@ -957,6 +995,7 @@ class _Verifier:
             "missing_tests": [k for k in expected if report is None or k not in {c.key for c in report.cases}][:200],
             "report": report.to_dict() if report else None,
             "parse_error": parse_error,
+            "result_seal": sealed.to_dict(),
             "output_tail": res.tail(),
         }
         counts = report.to_dict(include_cases=False) if report else {}
@@ -979,6 +1018,41 @@ class _Verifier:
             f"({counts.get('passed', 0)} passed, {counts.get('failures', 0)} failed, {counts.get('errors', 0)} errors, "
             f"{counts.get('skipped', 0)} skipped)",
             content, level, "trusted_suite", env_extra))
+
+    def _check_seal(self, step_seal: seal.StepSeal, res: ProcResult, junit_path: Path,
+                    report: JUnitReport | None, *, label: str) -> seal.SealResult:
+        """Cross-check a sealed pytest step (``aeos.verification.seal``). A disagreement is result tampering (a
+        ``result`` tamper finding: QUARANTINED); no sealed session end means the step cannot pass (fail closed)."""
+        consumed = step_seal.discard()
+        result = seal.check_pytest(step_seal, stdout=res.stdout, returncode=res.returncode, timed_out=res.timed_out,
+                                   junit_path=junit_path, report=report, key_consumed=consumed,
+                                   channel=res.channel)
+        if result.status == "MISSING" and res.timed_out:
+            result.problems = []  # the timeout is the finding; a killed session never ends sealed
+        if result.status == "FAIL":
+            self.tamper_findings += [{"kind": "result", "path": step_seal.name, "change": p[:300]}
+                                     for p in result.problems[:5]]
+        result.problems = [f"result integrity ({label}): {p}" for p in result.problems]
+        self.result_seals[step_seal.name] = result.to_dict()
+        return result
+
+    def _driver_seal(self, step_seal: seal.StepSeal, res: ProcResult) -> dict[str, Any] | None:
+        """The result a non-pytest driver step (import preflight, migration round-trip) sealed at its very end
+        (``seal.sealed_result``), recorded under the step's name. Forged or out-of-sequence channel lines naming
+        this step are result tampering (a ``result`` finding: QUARANTINED) whether or not a sealed result exists
+        (another session's seal lines are ignored); no sealed result at all, or a key file the plugin did not
+        remove, is MISSING and nothing is returned (the caller fails closed)."""
+        consumed = step_seal.discard()
+        sealed, problems = seal.sealed_result(step_seal, res.channel or res.stdout)
+        forged = [p for p in problems if not p.startswith("no sealed")]
+        if sealed is not None and not consumed:
+            # the driver sealed a result but its key file is still there: candidate code could have read the key
+            problems.append(seal.KEY_LEFT_PROBLEM)
+        status = "FAIL" if forged else ("PASS" if sealed is not None and consumed else "MISSING")
+        if forged:
+            self.tamper_findings += [{"kind": "result", "path": step_seal.name, "change": p[:300]} for p in forged[:5]]
+        self.result_seals[step_seal.name] = {"status": status, "problems": problems[:5], "key_consumed": consumed}
+        return sealed if status == "PASS" else None
 
     def _cached_baseline(self) -> dict[str, Any] | None:
         out = self.out
@@ -1009,7 +1083,7 @@ class _Verifier:
                     "--rootdir", str(trusted_copy), "--confcutdir", str(trusted_copy), "-p", "no:cacheprovider",
                     "-q", "--junitxml", str(junit_path), "-m", MARK_EXPR, *self._basetemp(workdir, "b3")]
             res = self._runner().python(args, pythonpath=base_dir / "backend", autoload=False,
-                                        timeout=limits.suite_timeout)
+                                        timeout=limits.suite_timeout, step="baseline")
             report, parse_error = self._parse(junit_path)
             if report is None:
                 msg = f"baseline run on {(out.base_commit or '')[:12]} produced no report ({parse_error})"
@@ -1077,6 +1151,44 @@ class _Verifier:
         guard, self._guard = self._guard, None
         if guard is None:
             return
+        # Kill groups of the process runner (aeos.verification.procgroup): a process that outlived its step was
+        # killed when the step ended, before this window closes - but its existence is tampering (it could have
+        # written after the window, review W6-054/W6-057): QUARANTINED, never PASS.
+        all_survivors = self.runner.survivors() if self.runner is not None else []
+        # only a step that executes candidate code can be tampered with by it; a survivor of a trusted-only step
+        # (expected-id collection, base-commit baseline) is a harness defect - stated, never blamed on the candidate
+        survivors = [s for s in all_survivors if s["step"] not in TRUSTED_ONLY_STEPS]
+        trusted_survivors = [s for s in all_survivors if s["step"] in TRUSTED_ONLY_STEPS]
+        gaps = self.runner.containment_gaps() if self.runner is not None else []
+        n_surv = sum(len(s["survivors"]) for s in survivors)
+        if gaps and not survivors:
+            # a weaker kill group (environment-marker sweep only) cannot prove that nothing outlived its step
+            msg = ("verifier step kill group degraded (" + "; ".join(gaps[:3]) + "): a process that outlived its "
+                   "step is NOT-PROVEN absent")
+            self.out.not_proven.append(msg[:500])
+        if trusted_survivors:
+            self.out.not_proven.append(
+                f"{sum(len(s['survivors']) for s in trusted_survivors)} process(es) outlived a trusted-only verifier "
+                f"step ({', '.join(s['step'] or '?' for s in trusted_survivors)}) and were killed - not candidate "
+                "code; check the trusted suite for leaked processes")
+        self._check("step_containment", "FAIL" if survivors else ("NOT_PROVEN" if gaps or trusted_survivors
+                                                                   else "PASS"),
+                    f"{n_surv} process(es) outlived their verifier step and were killed "
+                    f"({', '.join(s['step'] or '?' for s in survivors)})" if survivors else
+                    ("kill group degraded: " + "; ".join(gaps[:3]) if gaps else
+                     "a process outlived a trusted-only step (killed)" if trusted_survivors else
+                     "no process outlived its verifier step"),
+                    details={"survivors": survivors[:20], "trusted_step_survivors": trusted_survivors[:20],
+                             "gaps": gaps[:20]})
+        self.tamper_findings += [{"kind": "process", "path": s["step"] or "step",
+                                  "change": f"{len(s['survivors'])} process(es) outlived the step: " + ", ".join(
+                                      f"{p.get('name')}#{p.get('pid')}" for p in s["survivors"][:5])}
+                                 for s in survivors]
+        if self.result_seals:
+            st = [r.get("status") for r in self.result_seals.values()]
+            agg = "FAIL" if "FAIL" in st else ("NOT_PROVEN" if "MISSING" in st else "PASS")
+            self._check("result_seal", agg, "; ".join(f"{k}: {v.get('status')}" for k, v in self.result_seals.items()),
+                        details={"steps": self.result_seals, "plugin_sha256": seal.PLUGIN_SHA256})
         if guard["controller"] is None:
             changed = [{"path": "*", "change": f"integrity snapshot failed ({guard['controller_error']})"}]
         else:
@@ -1085,6 +1197,7 @@ class _Verifier:
             except Exception as exc:
                 changed = [{"path": "*", "change": f"integrity check failed ({type(exc).__name__})"}]
         db_result = guard["window"].close()
+        self.foreign_all = list(getattr(guard["window"], "foreign_all", None) or [])
         checked = len((guard["controller"] or {}).get("files") or {})
         self._check("controller_integrity", "FAIL" if changed else "PASS",
                     f"{len(changed)} controller checkout/interpreter file(s) changed while candidate code ran"
@@ -1109,11 +1222,12 @@ class _Verifier:
         self.tamper_findings += [{"kind": "db", "path": f"{f['table']}:{f['id']}", "change": f["change"]}
                                  for f in foreign]
         self.tamper_checks = {"controller": {"changed": changed[:100], "checked_files": checked},
-                              "trust_tables": db_result}
+                              "trust_tables": db_result, "step_containment": {"survivors": survivors[:20]},
+                              "result_seal": dict(self.result_seals)}
         self.pending.append(_PendingEvidence(
             "CONTAINMENT_TEST",
             f"Tamper window around candidate code: controller {'MODIFIED' if changed else 'unchanged'}, "
-            f"DB trust tables {db_status}",
+            f"DB trust tables {db_status}, {n_surv} process(es) outlived their step",
             {"status": "FAIL" if self.tamper_findings else ("UNKNOWN" if db_status == "UNKNOWN" else "PASS"),
              "runner": (self.runner.describe() if self.runner else {}), **self.tamper_checks,
              "note": "writes are detected after the fact; reads are not (see residual_risks)"},
@@ -1127,12 +1241,75 @@ class _Verifier:
             return
         out = self.out
         where = ", ".join(sorted({f"{f['kind']}:{f['path']}" for f in self.tamper_findings})[:5])
-        msg = (f"VERIFIER_TAMPER: candidate code changed the controller or control-plane records while the "
-               f"verifier ran it ({where})")
+        kinds = {f["kind"] for f in self.tamper_findings}
+        what = [w for k, w in (("controller", "changed the controller"), ("db", "changed control-plane records"),
+                               ("result", "forged or broke its test result"),
+                               ("process", "left processes running after its step")) if k in kinds]
+        msg = f"VERIFIER_TAMPER: candidate code {' / '.join(what) or 'tampered'} while the verifier ran it ({where})"
         out.reasons.insert(0, msg)
         out.status = "QUARANTINED"
         out.blocked_code = None
         out.quarantine_reason = msg[:500]
+
+    def _neutralize(self) -> None:
+        """§21 "workers may not change approval records / policy / routing policy": a foreign row found in the
+        tamper window must not stay in effect while the owner reviews the quarantine (review W6-057/W6-056/W6-060).
+        Approval decisions are INVALIDATED, open decision requests WITHDRAWN, acceptance records INVALIDATED,
+        server-side sessions and capability grants revoked, routes DISABLED (ineligible until a human re-activates
+        the configuration hash), foreign policy snapshots deactivated (the active one rebuilt from files +
+        decisions), containment proofs removed and write enablement switched off. Everything else is listed for
+        the owner's special review (``manual``). Whatever stays in effect - a changed controller file (policy/**,
+        controller code, interpreter), a row without a safe inverse, a failed neutralisation - puts the control
+        plane on an integrity hold: admission of new worker runs is paused until the owner reconciles and resumes
+        it (review W6-056 "nothing pauses admission"). The caller commits."""
+        db = (self.tamper_checks or {}).get("trust_tables") or {}
+        # every foreign row (full keys), not only the ones the report lists
+        foreign = [f for f in (self.foreign_all or db.get("foreign") or []) if isinstance(f, dict)]
+        if foreign:
+            try:
+                # one savepoint around the whole neutralisation: an unexpected error (beyond the per-row handling)
+                # leaves the session usable, so the QUARANTINE, the report and the alert are still recorded
+                with self.session.begin_nested():
+                    self.neutralized = neutralize.neutralize_foreign_rows(
+                        self.session, foreign, run_id=self.run_id, project_id=self.out.project_id,
+                        domain=self.out.domain, foreign_count=max(len(foreign), int(db.get("foreign_count") or 0)))
+            except Exception as exc:  # never hides the findings: everything stays in effect -> integrity hold
+                log.exception("tamper neutralisation failed")
+                self.neutralized = {"actions": [], "manual": [], "not_listed": 0,
+                                    "failed": [{"table": "*", "id": "*", "change": f"{len(foreign)} foreign row(s)",
+                                                "error": type(exc).__name__}],
+                                    "counts": {"actions": 0, "manual": 0, "failed": 1}}
+            counts = (self.neutralized or {}).get("counts") or {}
+            self.out.reasons.append(
+                f"VERIFIER_TAMPER: {counts.get('actions', 0)} foreign control-plane row(s) neutralised, "
+                f"{counts.get('manual', 0)} item(s) need the owner's review, {counts.get('failed', 0)} "
+                "neutralisation(s) failed (report tamper.neutralized and the HIGH alert list each row and remedy)")
+        self._integrity_hold()
+
+    def _integrity_hold(self) -> None:
+        from aeos.workforce import facade as workforce
+
+        controller = [f for f in self.tamper_findings if f["kind"] == "controller"]
+        manual = list((self.neutralized or {}).get("manual") or [])
+        failed = list((self.neutralized or {}).get("failed") or [])
+        if not (controller or manual or failed):
+            return
+        remedies = neutralize.controller_remedies([str(c.get("path") or "*") for c in controller])
+        reason = (f"VERIFIER_TAMPER integrity hold (run {self.run_id}): {len(controller)} controller file(s) changed, "
+                  f"{len(manual)} item(s) for manual review, {len(failed)} neutralisation(s) failed - reconcile, then "
+                  "resume admission (aeos work resume)")
+        res = call(workforce.set_scheduling_paused, self.session, True, actor=ORIGIN, reason=reason[:300])
+        self.neutralized = {**(self.neutralized or {}), "integrity_hold": {
+            "admission_paused": res.ok, "status": res.label(), "reason": reason[:300],
+            "controller_changes": [{"path": str(c.get("path") or "*"), "change": str(c.get("change") or "")[:200]}
+                                   for c in controller[:20]],
+            "remedies": remedies,
+            "resume": "after reconciling: aeos work resume --reason \"VERIFIER_TAMPER reconciled\" "
+                      "(or POST /api/workforce/resume)"}}
+        if not res.ok:
+            # the hold could not be recorded (workforce module unavailable / refused): said, never assumed
+            self.out.reasons.append(f"integrity hold not applied ({res.label()}): pause admission manually "
+                                    "(aeos work pause) until the tamper findings are reconciled")
 
     @staticmethod
     def _parse(path: Path) -> tuple[JUnitReport | None, str | None]:
@@ -1162,13 +1339,17 @@ class _Verifier:
             return
         junit_path = workdir / "r" / "candidate-junit.xml"
         junit_path.parent.mkdir(parents=True, exist_ok=True)
-        args = ["-m", "pytest", *[str(d) for d in dirs], "-c", str(ini), "--rootdir", str(snapshot),
-                "--confcutdir", str(snapshot), "-p", "no:cacheprovider", "-q", "--junitxml", str(junit_path),
-                "-m", MARK_EXPR, *self._basetemp(workdir, "b2")]
+        step_seal = seal.StepSeal.new(workdir, "candidate_tests")
+        args = ["-m", "pytest", "-p", seal.PLUGIN_MODULE, *[str(d) for d in dirs], "-c", str(ini),
+                "--rootdir", str(snapshot), "--confcutdir", str(snapshot), "-p", "no:cacheprovider", "-q",
+                "--junitxml", str(junit_path), "-m", MARK_EXPR, *self._basetemp(workdir, "b2")]
         res = self._runner().python(args, pythonpath=snapshot / "backend", autoload=True,
-                                    timeout=limits.unit_timeout)
+                                    timeout=limits.unit_timeout, seal=step_seal, step="candidate_tests")
         report, parse_error = self._parse(junit_path)
-        if res.timed_out:
+        sealed = self._check_seal(step_seal, res, junit_path, report, label="candidate tests")
+        if sealed.status != "PASS":
+            status, summary = "FAIL", "; ".join(sealed.problems)[:500]
+        elif res.timed_out:
             status, summary = "FAIL", f"candidate tests timed out after {limits.unit_timeout:.0f}s"
         elif res.returncode == 5:
             status, summary = "NOT_RUN", "candidate test dirs contain no selected tests"
@@ -1186,7 +1367,8 @@ class _Verifier:
             "TEST_REPORT", f"Candidate's own tests (worker-authored, lower trust): {status}",
             {"suite": "candidate-own-tests", "trust": "LOW — tests authored inside the candidate", "status": status,
              "exit_code": res.returncode, "timed_out": res.timed_out, "duration_s": res.duration_s,
-             "report": report.to_dict() if report else None, "parse_error": parse_error, "output_tail": res.tail()},
+             "report": report.to_dict() if report else None, "parse_error": parse_error,
+             "result_seal": sealed.to_dict(), "output_tail": res.tail()},
             "E2", "candidate_tests"))
 
     def _run_ruff(self, snapshot: Path, trusted_root: Path, workdir: Path, limits: VerifierLimits) -> None:
@@ -1235,12 +1417,93 @@ class _Verifier:
 
     # ------------------------------------------------------------------ impact-driven checks (§16, §22, §31)
 
-    def _run_impact_steps(self, snapshot: Path, workdir: Path, limits: VerifierLimits) -> None:
+    def _run_impact_steps(self, snapshot: Path, workdir: Path, limits: VerifierLimits,
+                          policy: dict[str, Any] | None = None) -> None:
         """Steps the impact of the change adds to what the verifier itself executes (candidate code, so they run
-        inside the tamper window and through the runner): a schema-migration upgrade/downgrade/upgrade round-trip."""
+        inside the tamper window and through the runner): the schema-migration round-trip, the change's negative
+        tests, opt-in integration-marked tests, the trusted adversarial pack, the contract diff and contract tests,
+        the migration/runtime credential split, the per-candidate dependency environment and the frontend step
+        (``aeos.verification.impact`` maps each category to these checks)."""
+        policy = policy or {}
         categories: dict[str, list[str]] = getattr(self, "categories", {}) or {}
         if categories.get("migration"):
             self._run_migration_roundtrip(snapshot, workdir, limits)
+        ctx = self._step_context(snapshot, workdir, limits, policy)
+        risky = sorted({p for c in ("api", "auth") for p in categories.get(c, [])})
+        if policy.get("negative_tests_required") and risky:
+            self._step("negative_tests", lambda: controlled.run_negative_tests(ctx, risky))
+        self._step("integration_tests", lambda: controlled.run_integration_tests(ctx, self._suites(policy)))
+        self._step("adversarial_pack", lambda: adversarial.run(ctx))
+        self._step("contract_diff", lambda: contracts.run_contract_diff(ctx))
+        self._step("contract_tests", lambda: contracts.run_contract_tests(ctx))
+        self._step("db_credentials", lambda: db_evidence.run(ctx))
+        if categories.get("dependency"):
+            pins_changed = self._python_pins_changed(categories["dependency"])
+            self._step("dependency_env", lambda: envs.run(ctx, pins_changed))
+        if categories.get("frontend"):
+            try:
+                results = frontend.run(ctx)
+            except (_Blocked, runner.RunnerError):
+                raise
+            except Exception as exc:  # a step bug never passes silently: stated, blocking
+                results = [self._step_error("frontend_tests", exc)]
+            for res in results:
+                self._apply_step(res)
+
+    def _step_context(self, snapshot: Path, workdir: Path, limits: VerifierLimits,
+                      policy: dict[str, Any]) -> steps.StepContext:
+        task = self.task
+        return steps.StepContext(
+            runner=self._runner(), snapshot=snapshot, workdir=workdir, diff_text=self.diff_text,
+            changed=list(self.out.changed_files), categories=dict(getattr(self, "categories", {}) or {}),
+            policy=dict(policy), timeout=limits.unit_timeout, suite_kind=self.suite_kind,
+            is_platform=bool(self.project.is_platform), role=str(getattr(task, "role_key", "") or ""),
+            ini=self.ini, trusted_copy=self.trusted_copy, expected=list(self.expected),
+            trusted_cases=dict(self.trusted_cases), base_tree=lambda: self._base_tree(workdir),
+            basetemp=lambda name: self._basetemp(workdir, name), session=self.session, project=self.project,
+            # the impact-selected pytest steps run candidate code: sealed like the trusted suite (review W6-054)
+            seal_step=lambda name: seal.StepSeal.new(workdir, name), check_seal=self._check_seal)
+
+    def _base_tree(self, workdir: Path) -> Path | None:
+        """The recorded base commit materialised once (reused when the trusted collection already did it)."""
+        if self._base_dir is not None:
+            return self._base_dir
+        if self._base_failed or self.git is None:
+            return None  # a failed (possibly partial) export is never reused as the base
+        existing = workdir / "bs"
+        if existing.is_dir():
+            self._base_dir = existing
+            return existing
+        try:
+            self._base_dir = self._export_base(self.git, workdir)
+        except _Blocked:
+            self._base_failed = True
+            return None
+        return self._base_dir
+
+    def _step(self, name: str, fn: Any) -> None:
+        try:
+            res = fn()
+        except (_Blocked, runner.RunnerError):
+            raise
+        except Exception as exc:  # a step bug never passes silently: stated, blocking
+            res = self._step_error(name, exc)
+        self._apply_step(res)
+
+    def _step_error(self, name: str, exc: Exception) -> steps.StepResult:
+        log.exception("verifier step %s failed", name)
+        msg = f"verifier step {name} failed internally ({type(exc).__name__}); its check is NOT-PROVEN"
+        return steps.StepResult(name, "UNKNOWN", msg, not_proven=[msg], blocking=[msg])
+
+    def _apply_step(self, res: steps.StepResult | None) -> None:
+        if res is None:
+            return
+        self._check(res.check, res.status, res.summary, details=res.details)
+        self.out.reasons.extend(res.reasons)
+        self.out.not_proven.extend(res.not_proven)
+        self.blocking_not_proven.extend(res.blocking)
+        for ev in res.evidence:
+            self.pending.append(_PendingEvidence(ev.kind, ev.claim, ev.content, ev.level, ev.check, dict(ev.env_extra)))
 
     @staticmethod
     def _find_alembic_dir(snapshot: Path) -> Path | None:
@@ -1259,8 +1522,10 @@ class _Verifier:
 
     def _run_migration_roundtrip(self, snapshot: Path, workdir: Path, limits: VerifierLimits) -> None:
         """§16/§31 "migration/rollback/restore tests": run the candidate's Alembic history forward, back to base
-        and forward again on a throwaway SQLite DB, then reopen it (restore). Proven PASS/FAIL when the candidate
-        has an Alembic migrations tree and alembic is available; otherwise NOT_PROVEN with the reason."""
+        and forward again on a throwaway SQLite DB, seed it, back it up, delete and restore it and compare the
+        seeded rows, then roll one revision back and forward with the data present (``packs/migration_roundtrip``).
+        Proven PASS/FAIL when the candidate has an Alembic migrations tree and alembic is available; otherwise
+        NOT_PROVEN with the reason."""
         mig_dir = self._find_alembic_dir(snapshot)
         if mig_dir is None:
             self.migration_roundtrip = {"status": "NOT_PROVEN",
@@ -1272,19 +1537,21 @@ class _Verifier:
         # (its root filesystem and the rest of the run dir are read-only)
         reports = workdir / "r"
         reports.mkdir(parents=True, exist_ok=True)
-        args = ["-c", _MIGRATION_ROUNDTRIP, rn.to_container(str(mig_dir)), rn.to_container(str(reports / "mig.sqlite3"))]
-        res = rn.python(args, pythonpath=snapshot / "backend", autoload=False, timeout=limits.unit_timeout)
-        data: dict[str, Any] = {}
-        try:
-            data = json.loads((res.stdout or "").strip().splitlines()[-1])
-        except (ValueError, IndexError):
-            data = {}
+        args = ["-c", steps.pack_text(MIGRATION_DRIVER), rn.to_container(str(mig_dir)),
+                rn.to_container(str(reports / "mig.sqlite3"))]
+        step_seal = seal.StepSeal.new(workdir, "migration_roundtrip")
+        res = rn.python(args, pythonpath=snapshot / "backend", autoload=False, timeout=limits.unit_timeout,
+                        seal=step_seal, step="migration_roundtrip")
+        # only the result the driver sealed at its very end counts (candidate migration code can print anything)
+        data: dict[str, Any] = dict(self._driver_seal(step_seal, res) or {})
+        seal_problems = list(self.result_seals["migration_roundtrip"].get("problems") or [])
         ok = bool(data.get("ok")) and not res.timed_out and res.returncode == 0
         if res.timed_out:
             self.migration_roundtrip = {"status": "FAIL", "reason": "migration round-trip timed out"}
         elif not data:
             self.migration_roundtrip = {"status": "NOT_PROVEN",
-                                        "reason": f"migration round-trip produced no report (exit {res.returncode})",
+                                        "reason": f"migration round-trip produced no sealed report (exit "
+                                                  f"{res.returncode}): " + "; ".join(seal_problems[:2]),
                                         "output_tail": res.tail(400)}
         else:
             self.migration_roundtrip = {"status": "PASS" if ok else "FAIL", **data}
@@ -1299,34 +1566,42 @@ class _Verifier:
         out = self.out
         categories: dict[str, list[str]] = getattr(self, "categories", {}) or {}
         suites = self._suites(policy)
-        if "integration" in suites:
+        if "integration" in suites and "integration_tests" not in out.checks:
             out.not_proven.append("integration-marked tests (real tools) are not run by the verifier; only tests "
-                                  f"selectable with '{MARK_EXPR}' ran")
-        # Negative / permission tests for API and auth changes (TaskSpec verifier_policy.negative_tests_required).
+                                  f"selectable with '{MARK_EXPR}' ran (opt in with TaskSpec "
+                                  "verifier_policy.integration_tests: run|required; the planner's TaskSpec contract "
+                                  "v1 cannot carry this opt-in yet, so planner-compiled tasks never run them)")
+        # Negative / permission tests for API and auth changes (TaskSpec verifier_policy.negative_tests_required):
+        # executed in _run_impact_steps; when the candidate could not be run at all nothing was proven.
         risky = sorted({p for c in ("api", "auth") for p in categories.get(c, [])})
-        if policy.get("negative_tests_required") and risky:
-            negatives = [a for a in scope.added_lines(self.diff_text)
-                         if scope.first_match(a.path, _TEST_FILE_PATTERNS) and _NEGATIVE_ASSERTION.search(a.text)]
-            if negatives:
-                self._check("negative_tests", "PASS",
-                            f"{len(negatives)} negative/refusal assertion(s) added in changed tests (authored with "
-                            "the candidate: lower trust)", details={"tests": sorted({a.path for a in negatives})[:20]})
-            else:
-                msg = ("negative tests required for the changed API/auth surface (" + ", ".join(risky[:5]) +
-                       "): no added test asserts a refusal/error path")
-                self._check("negative_tests", "NOT_PROVEN", msg)
-                out.not_proven.append(msg)
-                self.blocking_not_proven.append(msg)
+        if policy.get("negative_tests_required") and risky and "negative_tests" not in out.checks:
+            msg = ("negative tests required for the changed API/auth surface (" + ", ".join(risky[:5]) +
+                   "): the verifier could not execute the candidate's tests")
+            self._check("negative_tests", "NOT_PROVEN", msg)
+            out.not_proven.append(msg)
+            self.blocking_not_proven.append(msg)
         # Schema/data migrations: the verifier runs an upgrade/downgrade/restore round-trip itself (§16/§31).
         if categories.get("migration"):
             rt = getattr(self, "migration_roundtrip", None)
             label = ", ".join(categories["migration"][:5])
             if rt and rt.get("status") == "PASS":
+                seeded = rt.get("seeded_tables")
                 self._check("migration_rollback", "PASS",
-                            f"migration changed ({label}): upgrade->downgrade(base)->upgrade round-trip and reopen "
-                            f"passed (head {str(rt.get('head') or '')[:16]}, {rt.get('tables', '?')} tables)")
+                            f"migration changed ({label}): upgrade->downgrade(base)->upgrade round-trip passed (head "
+                            f"{str(rt.get('head') or '')[:16]}, {rt.get('tables', '?')} tables); {seeded} seeded "
+                            f"table(s) backed up, restored and compared; rollback to "
+                            f"{str(rt.get('data_rollback_target') or '?')[:24]} and forward with data passed",
+                            details={k: rt.get(k) for k in ("head", "tables", "seeded_tables", "seed_refused_tables",
+                                                             "restore_ok", "data_rollback_ok",
+                                                             "data_rollback_target")})
+                if not seeded:
+                    out.not_proven.append(f"migration changed ({label}): no table accepted a generated seed row, so "
+                                          "the restore of populated data is NOT-PROVEN")
             elif rt and rt.get("status") == "FAIL":
-                msg = f"migration changed ({label}): upgrade/downgrade/restore round-trip FAILED: {rt.get('reason') or rt.get('error') or ''}"
+                leg = rt.get("leg")
+                msg = (f"migration changed ({label}): upgrade/downgrade/restore round-trip FAILED"
+                       + (f" in leg '{leg}'" if leg and leg != "done" else "") +
+                       f": {rt.get('reason') or rt.get('error') or ''}")
                 self._check("migration_rollback", "FAIL", msg)
                 out.reasons.append(msg)
             else:
@@ -1342,23 +1617,33 @@ class _Verifier:
                 out.not_proven.append(msg)
                 if not optional:
                     self.blocking_not_proven.append(msg)
-        # Frontend: the verifier runs Python tests only; product tests come from provider CI (gate G3).
-        if categories.get("frontend"):
-            msg = ("frontend changed: unit/browser/visual/a11y tests are not run by the verifier (Python only); "
-                   "G3 needs the provider CI frontend job")
+        # Frontend: executed by the frontend step; a candidate that could not be materialised proves nothing.
+        if categories.get("frontend") and "frontend_tests" not in out.checks:
+            msg = ("frontend changed: the verifier could not run the frontend step (no candidate snapshot); "
+                   "unit/browser/visual/a11y tests NOT-PROVEN, G3 needs the provider CI frontend job")
             self._check("frontend_tests", "NOT_PROVEN", msg)
             out.not_proven.append(msg)
         # Dependencies: diff evidence (§16 Supply-chain) and Zone 2 honesty (§09).
         if categories.get("dependency"):
             self._dependency_diff(categories["dependency"])
+        # §31: which checks each impact category added, and whether they executed (report section impact_checks)
+        self.impact_summary = impact_map.summarize(categories, out.checks)
+        idle = sorted(c for c, e in self.impact_summary.items() if not e["executed"])
+        if idle:
+            out.not_proven.append(f"impact categories without an executed verifier check: {', '.join(idle)} "
+                                  "(see impact_checks on the report)")
+
+    def _python_pins_changed(self, paths: list[str]) -> bool:
+        changes = scope.dependency_changes(self.diff_text, paths)
+        return any(
+            (c["pins_added"] or c["pins_removed"]) for p, c in changes.items()
+            if any(p == f or p.endswith("/" + f) or p.rsplit("/", 1)[-1].startswith(f) for f in _PY_DEPENDENCY_FILES))
 
     def _dependency_diff(self, paths: list[str]) -> None:
         out = self.out
         changes = scope.dependency_changes(self.diff_text, paths)
         packages = scope.summarize_dependency_changes(changes)
-        python_pins_changed = any(
-            (c["pins_added"] or c["pins_removed"]) for p, c in changes.items()
-            if any(p == f or p.endswith("/" + f) or p.rsplit("/", 1)[-1].startswith(f) for f in _PY_DEPENDENCY_FILES))
+        python_pins_changed = self._python_pins_changed(paths)
         status = "NOT_PROVEN"
         msg = (f"dependency manifests changed ({', '.join(paths[:5])}): {len(packages['added'])} added, "
                f"{len(packages['removed'])} removed, {len(packages['upgraded'])} upgraded; licences UNKNOWN "
@@ -1371,12 +1656,16 @@ class _Verifier:
              "license_note": "licence/SBOM/provenance of changed packages is not verified by the verifier",
              "controller_dependency_set_hash": self.env_identity.get("dependency_set_hash"),
              "auto_upgrade": False}, "E1", "dependency_diff"))
-        if python_pins_changed:
+        env_check = out.checks.get("dependency_env")
+        if python_pins_changed and (env_check is None or env_check.status not in ("PASS", "FAIL")):
+            # §09 Zone 2: proven only by the trusted suite in the per-candidate environment (dependency_env PASS);
+            # a FAIL there is already a failure reason.
+            why = f" ({env_check.summary})" if env_check is not None else ""
             msg = ("candidate changes the Python dependency set; the trusted suite ran with the controller's "
                    f"installed dependencies ({self.env_identity.get('dependency_set_hash')}), so the change is "
-                   "not verified in an isolated dependency environment (§09 Zone 2)")
-            out.not_proven.append(msg)
-            self.blocking_not_proven.append(msg)
+                   f"not verified in an isolated dependency environment (§09 Zone 2){why}")
+            out.not_proven.append(msg[:600])
+            self.blocking_not_proven.append(msg[:600])
 
     # ------------------------------------------------------------------ decision & persistence
 
@@ -1430,9 +1719,13 @@ class _Verifier:
             "verifier_runner": rn.kind if rn is not None else "process",
             "runner": ({**rn.describe(), "remedies": list(rn.remedies)[:5],
                         "steps": list(getattr(rn, "steps", []))[:50]} if rn is not None else {}),
-            "tamper": {"findings": self.tamper_findings[:50], **self.tamper_checks} if self.tamper_checks else {},
+            "tamper": ({"findings": self.tamper_findings[:50], **self.tamper_checks,
+                        "neutralized": self.neutralized} if self.tamper_checks else {}),
+            "result_seal": dict(self.result_seals),
             "dependency_set_hash": self.env_identity.get("dependency_set_hash"),
             "impact_categories": sorted(getattr(self, "categories", {}) or {}),
+            # §31 "test scope follows impact": per category, the checks it selected and which ones executed
+            "impact_checks": self.impact_summary,
             "regressions": list(getattr(self, "regressions", []))[:50],
             "preexisting_failures": list(getattr(self, "preexisting", []))[:50],
             "blocked_code": out.blocked_code,
@@ -1524,8 +1817,17 @@ class _Verifier:
                 entity_version=out.head_commit, project_id=out.project_id, domain=out.domain, run_id=run.id,
                 attempt=run.attempt, mode=run.mode if run.mode in {m.value for m in DataMode} else "LIVE",
                 payload={"severity": "HIGH", "code": "VERIFIER_TAMPER", "findings": self.tamper_findings[:20],
-                         "report_evidence_id": out.report_evidence_id},
+                         "report_evidence_id": out.report_evidence_id,
+                         "neutralized": (self.neutralized.get("actions") or [])[:20],
+                         "manual_review": (self.neutralized.get("manual") or [])[:20],
+                         "integrity_hold": self.neutralized.get("integrity_hold")},
             )
+            # wave 7 (W6-005): no further worker is admitted until the owner reconciles (fail closed)
+            from aeos.worker_runtime import facade as worker
+
+            worker.raise_integrity_hold(self.session, source="verification", subject_id=run.id,
+                                        findings=self.tamper_findings[:50], project_id=out.project_id,
+                                        domain=out.domain)
         audit.record(
             self.session, actor_type=self.actor_type, actor_id=self.actor, action="verification.run",
             result="FAILED" if out.status == "BLOCKED" else "SUCCESS", target_type="worker_run", target_id=run.id,

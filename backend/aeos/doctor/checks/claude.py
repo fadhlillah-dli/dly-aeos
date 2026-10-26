@@ -19,7 +19,7 @@ from aeos.doctor.checks._common import (
     resolve_binary,
     run_version,
 )
-from aeos.doctor.model import CheckContext, Outcome, Remedy, os_install_command
+from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd, os_install_command
 from aeos.inventory.probes import PROVIDER_ENV_NAMES, scrubbed_env
 
 FORBIDDEN_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", *PROVIDER_ENV_NAMES)
@@ -62,8 +62,40 @@ def install_remedy() -> Remedy:
 INSTALL_REMEDY = install_remedy()  # import-time copy (current OS); checks call install_remedy()
 
 
+def _fp_claude_binary(ctx: CheckContext) -> dict[str, Any]:
+    """Binary identity plus the publisher pin that applies on this OS: pinning (or changing) the signer in the
+    reviewed manifest - or the manifest becoming unreadable - makes a stored authenticity result STALE."""
+    from aeos.claude_bridge import facade as bridge
+
+    pin = bridge.publisher_pin()
+    return {**_fp_claude(ctx), "approved_signer": pin["signer"], "signer_pin_status": pin["status"]}
+
+
+def signature_remedy(*, pin_unreadable: bool = False) -> Remedy:
+    from aeos.claude_bridge import facade as bridge
+
+    spec = bridge.signature_remedy(pin_unreadable=pin_unreadable)
+    if pin_unreadable:
+        return Remedy(
+            operation=spec["operation"] + ". " + spec["pin_note"],
+            command=os_install_command(windows=" ; ".join(spec["windows"]), macos=" ; ".join(spec["darwin"])),
+            source="install-manifest/manifest.yaml + install-manifest/schema.json (validasi manifest)",
+            target="install-manifest/manifest.yaml", privilege="reviewer manusia (PR yang direview)", cost="tidak ada",
+            rollback="kembalikan commit manifest yang terakhir lolos validasi",
+            evidence_to_collect="seed inventaris lolos validasi; claude.binary diperiksa ulang",
+        )
+    return Remedy(
+        operation=spec["operation"] + ". " + spec["pin_note"],
+        command=os_install_command(windows=" ; ".join(spec["windows"]), macos=" ; ".join(spec["darwin"])),
+        source=f"dokumentasi resmi Claude Code ({SETUP_DOCS}); install-manifest claude-code signature.approved_signer",
+        target="binary claude di PATH atau setelan claude_binary", privilege="pengguna lokal (pin baru: reviewer manusia)",
+        cost="tidak ada", rollback="uninstall lewat package manager yang sama",
+        evidence_to_collect="claude.binary VERIFIED dengan keaslian OK (tanda tangan VALID, penerbit cocok dengan pin)",
+    )
+
+
 @check("claude.binary", "CLAUDE_NATIVE", "Binary Claude Code resmi dan versinya", component_id="claude-code",
-       ttl_seconds=86400, invalidators=("binary:claude",), fingerprint=_fp_claude, severity_fail="HIGH",
+       ttl_seconds=86400, invalidators=("binary:claude",), fingerprint=_fp_claude_binary, severity_fail="HIGH",
        observation="installation")
 def claude_binary(ctx: CheckContext) -> Outcome:
     path, _lookup = resolve_binary(ctx, "claude", "claude_binary")
@@ -73,8 +105,45 @@ def claude_binary(ctx: CheckContext) -> Outcome:
         return Outcome("FAILED", "Hanya shim skrip Claude Code (.cmd/.bat/.ps1) yang ditemukan; bridge hanya menerima "
                        "claude.exe native.", evidence={"location": logical(ctx, path)}, error_code="BINARY_IS_SHIM",
                        remedy=install_remedy(), target_identity=logical(ctx, path))
-    return binary_outcome(ctx, name="claude", override_attr="claude_binary", args=["--version"],
-                          regex=r"(\d+\.\d+\.\d+)", missing_remedy=install_remedy(), label="Claude Code", timeout=20.0)
+    out = binary_outcome(ctx, name="claude", override_attr="claude_binary", args=["--version"],
+                         regex=r"(\d+\.\d+\.\d+)", missing_remedy=install_remedy(), label="Claude Code", timeout=20.0)
+    if out.status != "VERIFIED" or not path:
+        return out
+    return _with_authenticity(out, path)
+
+
+def _with_authenticity(out: Outcome, path: str) -> Outcome:
+    """§12 "unmodified official binary": the same OS code-signature gate the bridge applies before every native
+    call (checked once per binary fingerprint). BLOCKED fails the check with a signature remedy (never /login);
+    DEGRADED/UNVERIFIED/NOT_CHECKED stay visible in the evidence and summary, never shown as authentic."""
+    from pathlib import Path
+
+    from aeos.claude_bridge import facade as bridge
+
+    auth = bridge.binary_authenticity(Path(path))
+    pinned = auth["approved_signer"]
+    gate = auth["gate"]
+    evidence = {**out.evidence, "authenticity": {k: auth.get(k) for k in ("gate", "reason", "approved_signer", "os",
+                                                                          "pin_status", "signature_status",
+                                                                          "observed_signer")},
+                "distribution_verified": gate == "OK"}
+    if gate == "BLOCKED":
+        return Outcome("FAILED", f"{out.summary.split(' (skenario')[0]}, tetapi keaslian binary DIBLOKIR: "
+                       f"{auth['reason']}. Bridge menolak panggilan native; gunakan paket manual.",
+                       evidence=evidence, component_version=out.component_version, target_identity=out.target_identity,
+                       error_code="BINARY_SIGNATURE_BLOCKED", severity="HIGH",
+                       remedy=signature_remedy(pin_unreadable=auth.get("pin_status") == "UNREADABLE"),
+                       # the binary is installed (its authenticity failed): the inventory still records INSTALLED
+                       observations=[{"component_id": "claude-code", "dimension": "installation",
+                                      "status": "INSTALLED", "observed_version": out.component_version}])
+    label = {"OK": "tanda tangan VALID dan penerbit cocok dengan pin pemilik",
+             "DEGRADED": "binary TIDAK ditandatangani (DEGRADED): tidak dapat dibuktikan sebagai build resmi",
+             "UNVERIFIED": "keaslian UNVERIFIED (" + ("tidak ada pin penerbit untuk OS ini" if not pinned
+                                                     else "tanda tangan tidak dapat diperiksa") + ")",
+             "NOT_CHECKED": "tanda tangan OS belum diperiksa"}.get(gate, gate)
+    return Outcome(out.status, f"{out.summary.split(' (skenario')[0]} (skenario: perintah versi berhasil; {label}).",
+                   evidence=evidence, component_version=out.component_version, target_identity=out.target_identity,
+                   remedy=signature_remedy() if gate == "DEGRADED" else out.remedy, observations=out.observations)
 
 
 def _parse_status(text: str) -> dict[str, Any] | None:
@@ -152,18 +221,55 @@ def claude_env(ctx: CheckContext) -> Outcome:
                    evidence=evidence)
 
 
+EXTRA_USAGE_PRESET_CMD = ("policy decide --kind POLICY --policy-preset claude_extra_usage_off --domain PERSONAL "
+                          "--as <admin> --days <hari> --rationale \"Extra usage berbayar dimatikan di claude.ai\"")
+
+
+def _fp_extra_usage(ctx: CheckContext) -> dict[str, Any] | None:
+    """The owner attestation the result was computed from: a new, revoked or expired attestation makes it STALE."""
+    if ctx.session is None:
+        return None
+    from aeos.policy import facade as policy
+
+    att = policy.claude_extra_usage_attestation(ctx.session)
+    return {"state": att["state"], "decision_id": att["decision_id"], "expires_at": att["expires_at"]}
+
+
 @check("claude.extra_billing", "CLAUDE_NATIVE", "Konfigurasi extra usage berbayar", component_id="claude-code",
-       ttl_seconds=86400, ok=frozenset(), severity_fail="MEDIUM")
+       ttl_seconds=86400, ok=frozenset(), severity_fail="MEDIUM", fingerprint=_fp_extra_usage,
+       invalidators=("config:claude_extra_usage",))
 def claude_extra_billing(ctx: CheckContext) -> Outcome:
+    """§12: AEOS cannot read the claude.ai paid extra-usage setting. An ACTIVE owner attestation (POLICY decision,
+    preset ``claude_extra_usage_off``) is consumed as an owner claim: CONFIGURED (E0), never VERIFIED."""
+    from aeos.policy import facade as policy
+
+    remedy = Remedy(operation="Di claude.ai (akun Max): Settings -> Usage, matikan extra usage berbayar (§12), lalu catat "
+                    "atestasi pemilik dengan masa berlaku yang Anda pilih", command=aeos_cmd(EXTRA_USAGE_PRESET_CMD),
+                    source=f"S03: {LOGIN_DOCS}", privilege="pemilik akun", cost="mencegah tagihan tambahan",
+                    evidence_to_collect="catatan keputusan pemilik (atestasi E0, tidak dapat diverifikasi AEOS)")
+    att = policy.claude_extra_usage_attestation(ctx.session)
+    evidence: dict[str, Any] = {"source": "tidak ada API resmi untuk status ini", "attestation": att["state"],
+                                "decision_id": att["decision_id"], "attestation_expires_at": att["expires_at"],
+                                "evidence_level": "E0"}
+    if att["state"] == "ATTESTED_OFF":
+        return Outcome("CONFIGURED", "Pemilik menyatakan extra usage berbayar NONAKTIF (atestasi E0, tidak dapat "
+                       f"diverifikasi AEOS; berlaku s.d. {att['expires_at'] or '-'}).", evidence={
+                           **evidence, "source": "atestasi pemilik (keputusan POLICY claude_extra_usage/PERSONAL)",
+                           "residual_risks": ["Extra usage berbayar: hanya atestasi pemilik (E0); AEOS tidak dapat "
+                                              "membaca pengaturan akun - bila diaktifkan lagi, pemakaian di atas kuota "
+                                              "Max dapat ditagih (§12)"]})
+    if att["state"] == "ATTESTED_ON":
+        return Outcome("FAILED", "Pemilik mencatat extra usage berbayar AKTIF; §12 meminta dinonaktifkan (pemakaian di "
+                       "atas kuota Max dapat ditagih).", severity="MEDIUM", error_code="EXTRA_USAGE_ATTESTED_ON",
+                       evidence={**evidence, "residual_risks": ["Extra usage berbayar akun Claude AKTIF menurut "
+                                                                "atestasi pemilik (§12)"]}, remedy=remedy)
     return Outcome("UNKNOWN", "Pengaturan extra usage berbayar tidak dapat dibaca secara resmi oleh AEOS; status UNKNOWN.",
                    severity="MEDIUM", evidence={
-                       "source": "tidak ada API resmi untuk status ini",
+                       **evidence,
                        # advisory for the Max gates, but true even when they are READY (no silent paid usage, §12)
                        "residual_risks": ["Extra usage berbayar akun Claude UNKNOWN: bila aktif, pemakaian di atas kuota "
                                           "Max dapat ditagih; pastikan nonaktif di pengaturan akun (§12)"]},
-                   remedy=Remedy(operation="Periksa manual pengaturan usage di akun Claude dan pastikan extra usage "
-                                 "berbayar nonaktif (§12)", source=f"S03: {LOGIN_DOCS}", privilege="pemilik akun",
-                                 cost="mencegah tagihan tambahan", evidence_to_collect="catatan keputusan pemilik"))
+                   remedy=remedy)
 
 
 @check("claude.quota", "CLAUDE_NATIVE", "Status kuota Max", component_id="claude-code", ttl_seconds=3600,

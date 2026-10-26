@@ -213,7 +213,12 @@ def _verifier_runner_view(ctx: CheckContext) -> dict[str, Any]:
             "to the controller checkout/interpreter and the DB trust tables during a verification are detected and "
             "QUARANTINED; reads by absolute path or the OS credential API are not prevented.",
             *([f"verifier container runner not available: {r}" for r in (st.get('reasons') or [])[:3]]),
+            *[str(r) for r in (st.get("residual_risks") or [])[1:]],
         ]
+    else:
+        # a container separates candidate code from the host, not from the test process it is imported into: the
+        # in-process result-forgery limit (and the VM/dependency-set limits) are stated here too (review W6-054)
+        view["residual_risks"] = [str(r) for r in (st.get("residual_risks") or [])]
     return view
 
 
@@ -298,7 +303,8 @@ def evidence_acceptance_invalidation(ctx: CheckContext) -> Outcome:
 
     try:
         from aeos.models.evidence import AcceptanceRecord
-        from aeos.verification.acceptance import acceptance_is_valid, latest_acceptance, staleness
+        from aeos.verification.acceptance import staleness
+        from aeos.verification.facade import acceptance_is_valid, latest_acceptance
     except (ImportError, ModuleNotFoundError):
         return Outcome("UNKNOWN", "Modul verification belum tersedia.", error_code="VERIFIER_NOT_IMPLEMENTED")
     assert ctx.session is not None

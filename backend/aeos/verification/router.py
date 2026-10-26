@@ -21,7 +21,7 @@ from aeos.core.enums import Domain, Role
 from aeos.core.errors import AeosError, NotFound, ValidationFailed
 from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import utcnow
-from aeos.identity.service import Principal
+from aeos.identity.facade import Principal
 from aeos.models.evidence import AcceptanceRecord, EvidenceArtifact, ReviewRecord
 from aeos.models.planning import TaskSpec
 from aeos.models.portfolio import Project
@@ -187,7 +187,8 @@ def get_review(review_id: str, principal: CurrentPrincipal, domain: ActiveDomain
     rec = db.scalar(select(ReviewRecord).where(ReviewRecord.id == review_id, _review_scope(db, principal, domain)))
     if rec is None:
         raise NotFound("review not found")
-    return review.review_view(rec)
+    # an immutable review record: its claims date from created_at; generated_at = when it was read
+    return {**review.review_view(rec), "source": "review_records", "generated_at": utcnow().isoformat()}
 
 
 class ManualResultIn(BaseModel):
@@ -339,6 +340,45 @@ def trusted_suite_status(project_id: str, principal: CurrentPrincipal, domain: A
             "source": "owner POLICY decision (trusted_suite) + controller data dir copy"}
 
 
+# ---------------------------------------------------------------------------- project test baseline (§05 step 6)
+
+
+class BaselineRunIn(BaseModel):
+    timeout_seconds: float | None = Field(default=None, ge=60, le=7200)
+
+
+@router.post("/api/projects/{project_id}/test-baseline")
+def run_test_baseline(project_id: str, principal: AdminPrincipal, domain: ActiveDomain, db: DB,
+                      body: BaselineRunIn | None = None) -> dict[str, Any]:
+    """Run the project's existing tests at its inventoried commit through the verifier runner + tamper window and
+    record the TEST_REPORT baseline that the inventory/planning cite (W6-013). Synchronous, like /verify."""
+    from aeos.verification import project_baseline
+
+    project = load_project(db, principal, project_id, domain=domain)
+    try:
+        out = project_baseline.run_project_baseline(db, project.id, actor=principal.user.id, principal=principal,
+                                                    timeout_seconds=(body or BaselineRunIn()).timeout_seconds)
+    except AeosError as exc:
+        audit_denied(db, principal, "verification.project_baseline", exc, target_type="project",
+                     target_id=project.id, project_id=project.id, domain=project.domain)
+        raise
+    db.commit()
+    return out
+
+
+@router.get("/api/projects/{project_id}/test-baseline")
+def test_baseline_status(project_id: str, principal: CurrentPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
+    from aeos.portfolio import facade as portfolio
+    from aeos.verification import project_baseline
+
+    project = load_project(db, principal, project_id, domain=domain)
+    repo = portfolio.primary_repository(db, project.id)
+    commit = repo.inventory_commit if repo is not None else None
+    out = project_baseline.baseline_summary(db, project.id, commit)
+    return {**out, "project_id": project.id, "checked_at": out.get("checked_at"), "generated_at": utcnow().isoformat(),
+            "mode": "LIVE", "source": "evidence_artifacts (verifier TEST_REPORT, project baseline)"}
+
+
 # ---------------------------------------------------------------------------- acceptance
 
 
@@ -400,6 +440,19 @@ def verification_summary(principal: CurrentPrincipal, domain: ActiveDomain, db: 
         })
     return {"items": items, "source": "worker_runs + evidence_artifacts + review_records + acceptance_records",
             "checked_at": utcnow().isoformat(), "mode": _mode_of(r.mode for r in runs)}
+
+
+@router.get("/api/verification/asvs")
+def asvs_trace(principal: CurrentPrincipal) -> dict[str, Any]:
+    """§46 OWASP ASVS trace of the control plane (read-only, every role): every ASVS 4.0.3 requirement with its
+    disposition - TESTED (named tests), NOT_PROVEN, NOT_SELECTED (reason) or DELETED - per chapter. Platform-level
+    contract files only (no domain data); applications AEOS builds have no ASVS level until the owner decides one."""
+    from aeos.verification import asvs
+
+    body = asvs.trace()
+    return {**body, "source": f"{asvs.SELECTION_REL} + {asvs.CATALOG_REL} (reviewed contract files, ASVS "
+                              f"{body['asvs_version']} pinned)",
+            "checked_at": None, "generated_at": utcnow().isoformat(), "mode": "LIVE"}
 
 
 def audit_denied(db: Session, principal: Principal, action: str, exc: AeosError, **target: Any) -> None:

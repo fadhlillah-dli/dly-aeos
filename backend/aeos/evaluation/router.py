@@ -85,7 +85,8 @@ def get_run(run_id: str, db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
     run = executor.get_run(db, run_id, viewer_domain=_viewer_domain(principal), scoped=True)
     out = _run_out(db, run)
     db.rollback()
-    return out
+    # "mode" stays the run's own mode; the envelope adds where the claim comes from and when it was read
+    return {**out, "source": "eval_runs + eval samples (trusted collector)", "generated_at": utcnow().isoformat()}
 
 
 @router.post("/api/eval/runs/{run_id}/start")
@@ -99,10 +100,20 @@ def start_run(run_id: str, db: DB, principal: AdminPrincipal) -> dict[str, Any]:
 class BindIn(BaseModel):
     slot_id: str = Field(min_length=3, max_length=128)
     task_id: str = Field(min_length=1, max_length=36)
+    # §44 B/C/D: append one more TaskSpec to an already bound slot (an ordered task set aggregated as one sample)
+    append: bool = False
 
 
 @router.post("/api/eval/runs/{run_id}/bind")
 def bind_task(run_id: str, body: BindIn, db: DB, principal: AdminPrincipal) -> dict[str, Any]:
+    if body.append:
+        from aeos.evaluation import topology
+
+        run = topology.bind_additional_task(db, run_id, slot_id=body.slot_id, task_id=body.task_id,
+                                            actor_user_id=principal.user.id, viewer_domain=_viewer_domain(principal),
+                                            scoped=True)
+        db.commit()
+        return _run_out(db, run)
     run = executor.bind_task(db, run_id, slot_id=body.slot_id, task_id=body.task_id, actor_user_id=principal.user.id,
                              viewer_domain=_viewer_domain(principal), scoped=True)
     db.commit()
@@ -169,7 +180,8 @@ def plan_comparison(body: ComparisonIn, db: DB, principal: AdminPrincipal) -> di
 def get_comparison(proposal_id: str, db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
     out = service.comparison(db, proposal_id=proposal_id, domain=_viewer_domain(principal), scoped=True)
     db.rollback()
-    return out
+    return {**out, "source": "eval_runs (recorded results bound to the proposal)",
+            "generated_at": utcnow().isoformat(), "mode": "LIVE"}
 
 
 class WeightsIn(BaseModel):
@@ -266,7 +278,7 @@ class ScorecardIn(BaseModel):
 @router.post("/api/eval/scorecard")
 def scorecard(body: ScorecardIn, db: DB, principal: AdminPrincipal, domain: ActiveDomain) -> dict[str, Any]:
     """Open a decision request (COMPARE proposal) from the current scorecard. Never changes a route."""
-    from aeos.proposals import service as proposals
+    from aeos.proposals import facade as proposals
 
     snap = service.scorecard_snapshot(db, role=body.role, domain=domain.value, scoped=True)
     summary = json.dumps(snap, ensure_ascii=False, sort_keys=True)[:6000]

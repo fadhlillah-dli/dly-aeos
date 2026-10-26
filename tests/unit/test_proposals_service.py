@@ -126,7 +126,9 @@ def test_review_package_has_all_ten_items(db, policy):
     rp = pkg["replacement_plan"]  # §40 replacement & rollback plan
     assert rp["previous_accepted_configuration"][0]["approved_pin"] == "1.3.0"
     assert rp["adapter_consumer_changes"] == ["workforce"] and rp["cutover_order"] == "UNKNOWN"
-    assert rp["credential_egress_changes"]["credential_refs_to_revoke_after_cutover"] == ["opencode: workers/openrouter"]
+    creds = rp["credential_egress_changes"]  # exact refs 'aeos secrets delete' accepts; nobody else uses this one
+    assert creds["credential_refs_to_revoke_after_cutover"] == ["workers/openrouter"]
+    assert creds["shared_credential_refs"] == [] and creds["not_secret_refs"] == []
     assert rp["operations_owner"] == ["owner"] and rp["data_state_relations"] is True
     roles = {c["role"]: c["performed_by"] for c in pkg["review_contributors"]}
     assert "batas data/akses" in roles["Security / Privacy"] and roles["Owner"].startswith("manusia")

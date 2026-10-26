@@ -83,7 +83,11 @@ ANTHROPIC = "CN=Anthropic, PBC, O=Anthropic, PBC, L=San Francisco, S=California,
     ({"status": "VALID", "signer": ANTHROPIC}, "Anthropic, PBC", "OK"),
     ({"status": "VALID", "signer": ANTHROPIC}, None, "UNVERIFIED"),       # no pin: never shown as authentic
     ({"status": "UNKNOWN"}, None, "UNVERIFIED"),
-    (None, "Anthropic", "UNVERIFIED"),
+    # W6-042: once a publisher is pinned, the binary must be PROVEN to be its build - anything but VALID blocks
+    (None, "Anthropic", "BLOCKED"),
+    ({"status": "UNSIGNED", "signer": None}, "Anthropic, PBC", "BLOCKED"),
+    ({"status": "UNKNOWN"}, "Anthropic, PBC", "BLOCKED"),
+    ({"status": "NOT_CHECKED"}, "Anthropic, PBC", "BLOCKED"),
 ])
 def test_signature_gate_blocks_invalid_or_foreign_signers_and_never_claims_authenticity_unpinned(sig, pinned, gate):
     assert binmod.signature_gate(sig, pinned)[0] == gate
@@ -170,3 +174,155 @@ def test_a_pinned_publisher_in_the_manifest_reaches_the_gate(monkeypatch):
         return (1, "", "")
 
     assert binmod.publisher_signature(Path("claude"), run=run)["publisher_pin"].startswith("Anthropic, PBC")
+
+
+# ------------------------------------------------------------------------------------------------- W6-042
+TEAM = "Q6L2SF6YDW"  # an example TeamIdentifier shape (tests only; the owner records the real one)
+
+
+def _pinned(monkeypatch, approved_signer) -> None:
+    from types import SimpleNamespace
+
+    from aeos.inventory import manifest
+
+    data = {"components": [{"component_id": "claude-code", "signature": {
+        "method": "os_codesign", "result": "UNKNOWN", "approved_signer": approved_signer}}]}
+    monkeypatch.setattr(manifest, "load_manifest", lambda *a, **k: SimpleNamespace(data=data))
+
+
+@pytest.mark.parametrize(("os_name", "observed", "gate"), [
+    ("windows", REAL_WINDOWS, "OK"), ("darwin", TEAM, "OK"),
+    ("windows", TEAM, "BLOCKED"), ("darwin", REAL_WINDOWS, "BLOCKED"),  # never the other OS's identity
+])
+def test_a_per_os_pin_covers_windows_and_macos(monkeypatch, os_name, observed, gate):
+    from aeos.inventory import pins
+
+    _pinned(monkeypatch, {"windows": "Anthropic, PBC", "darwin": TEAM})
+    monkeypatch.setattr(pins, "host_os", lambda: os_name)
+    assert binmod.approved_publisher() == ("Anthropic, PBC" if os_name == "windows" else TEAM)
+    assert binmod.signature_gate({"status": "VALID", "signer": observed}, binmod.approved_publisher())[0] == gate
+
+
+def test_an_os_without_a_pin_entry_is_unverified_not_borrowed(monkeypatch):
+    from aeos.inventory import pins
+
+    _pinned(monkeypatch, {"windows": "Anthropic, PBC"})
+    monkeypatch.setattr(pins, "host_os", lambda: "darwin")
+    assert binmod.approved_publisher() is None
+    assert binmod.signature_gate({"status": "VALID", "signer": TEAM}, binmod.approved_publisher())[0] == "UNVERIFIED"
+
+
+def test_a_pinned_publisher_blocks_an_unsigned_binary_before_the_native_call(settings, monkeypatch):
+    from aeos.claude_bridge import bridge
+    from aeos.claude_bridge.facade import ClaudeRequest
+    from tests.unit.test_claude_bridge_run import PROMPT, SCHEMA, _probe
+
+    _pinned(monkeypatch, "Anthropic, PBC")
+    called: list[int] = []
+    monkeypatch.setattr(bridge, "run_process", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(binmod, "probe", lambda settings, refresh=False: _probe())
+    for sig in ({"status": "UNSIGNED", "signer": None}, {"status": "UNKNOWN", "signer": None}):
+        monkeypatch.setattr(binmod, "invocation_signature", lambda path, fingerprint_value, s=sig: s)
+        res = bridge.run_structured(ClaudeRequest(purpose="x", role="r", model="opus", prompt=PROMPT,
+                                                  json_schema=SCHEMA, domain="PERSONAL"), settings=settings)
+        assert not res.ok and res.error_code == "BINARY_SIGNATURE_BLOCKED", sig
+    assert not called
+
+
+def test_status_names_the_authenticity_gate_and_a_signature_remedy(settings, db, monkeypatch):
+    from aeos.claude_bridge import bridge
+    from tests.unit.test_claude_bridge_run import _probe
+
+    monkeypatch.setattr(binmod, "probe", lambda settings, refresh=False: _probe())
+    _pinned(monkeypatch, "Anthropic, PBC")
+    monkeypatch.setattr(binmod, "publisher_signature", lambda path, fingerprint_value=None: {"status": "UNSIGNED"})
+    out = bridge.status(db, settings, refresh=True)
+    au = out["binary"]["authenticity"]
+    assert out["bridge_status"] == "BLOCKED" and out["blocked_by"] == ["signature"]
+    assert au["gate"] == "BLOCKED" and au["approved_signer"] == "Anthropic, PBC" and au["owner_step"] is None
+    assert au["remedy"] and "/login" not in str(au["remedy"]), "a signature block is never fixed by /login"
+    _pinned(monkeypatch, None)
+    out = bridge.status(db, settings, refresh=True)
+    assert out["bridge_status"] == "DEGRADED" and out["binary"]["authenticity"]["gate"] == "DEGRADED"
+    assert out["binary"]["authenticity"]["remedy"]
+    # not refreshed: the OS check has not run in this process -> NOT_CHECKED, never authentic
+    binmod._SIG_CACHE.clear()
+    assert bridge.status(db, settings)["binary"]["authenticity"]["gate"] == "NOT_CHECKED"
+
+
+def test_doctor_claude_binary_applies_the_same_gate(settings, db, monkeypatch):
+    from tests.unit.test_doctor_checks import NATIVE, _ctx, check, claude_runner
+
+    monkeypatch.setattr(binmod, "invocation_signature",
+                        lambda path, fingerprint_value: {"status": "INVALID", "signer": ANTHROPIC})
+    res = check("claude.binary", _ctx(settings, db, claude_runner(NATIVE)))
+    assert res.status == "FAILED" and res.error_code == "BINARY_SIGNATURE_BLOCKED"
+    assert res.observed_evidence["authenticity"]["gate"] == "BLOCKED"
+    assert "login" not in res.remediation["operation"].lower() and "approved_signer" in res.remediation["operation"]
+    assert res.observations[0]["status"] == "INSTALLED"  # installed, but not authentic
+
+    monkeypatch.setattr(binmod, "invocation_signature", lambda path, fingerprint_value: {"status": "UNSIGNED"})
+    res = check("claude.binary", _ctx(settings, db, claude_runner(NATIVE)))
+    assert res.status == "VERIFIED" and res.observed_evidence["authenticity"]["gate"] == "DEGRADED"
+    assert "DEGRADED" in res.summary and res.observed_evidence["distribution_verified"] is False
+
+    _pinned(monkeypatch, "Anthropic, PBC")
+    res = check("claude.binary", _ctx(settings, db, claude_runner(NATIVE)))
+    assert res.status == "FAILED" and res.error_code == "BINARY_SIGNATURE_BLOCKED"  # pinned + unsigned
+    monkeypatch.setattr(binmod, "invocation_signature",
+                        lambda path, fingerprint_value: {"status": "VALID", "signer": REAL_WINDOWS})
+    res = check("claude.binary", _ctx(settings, db, claude_runner(NATIVE)))
+    assert res.status == "VERIFIED" and res.observed_evidence["authenticity"]["gate"] == "OK"
+    assert res.observed_evidence["distribution_verified"] is True
+
+
+def test_an_unreadable_manifest_is_an_unknown_pin_and_blocks_never_unpinned(settings, db, monkeypatch):
+    """Fail closed: when the reviewed install-manifest cannot be read/validated, whether a publisher is pinned is
+    UNKNOWN - the bridge, the status page and the Doctor block (with a manifest remedy), even for a VALID binary."""
+    from aeos.claude_bridge import bridge
+    from aeos.claude_bridge.facade import ClaudeRequest
+    from aeos.core.errors import ValidationFailed
+    from aeos.inventory import manifest
+    from tests.unit.test_claude_bridge_run import PROMPT, SCHEMA, _probe
+    from tests.unit.test_doctor_checks import NATIVE, _ctx, check, claude_runner
+
+    def broken(*_a, **_k):
+        raise ValidationFailed("install manifest failed validation (1 errors)", code="MANIFEST_INVALID")
+
+    monkeypatch.setattr(manifest, "load_manifest", broken)
+    pin = binmod.publisher_pin()
+    assert pin["status"] == "UNREADABLE" and pin["signer"] is None and "MANIFEST_INVALID" in pin["reason"]
+    valid = {"status": "VALID", "signer": REAL_WINDOWS}
+    assert binmod.signature_gate(valid, None, pin_problem=binmod.pin_error(pin))[0] == "BLOCKED"
+    # the OS signature report says the pin is UNKNOWN, never that none exists (integration of G with main's codesign fix)
+    text = binmod.publisher_signature(Path("claude-unreadable-pin"), run=lambda argv, timeout=30: (1, "", ""))
+    assert text["publisher_pin"].startswith("UNKNOWN (install-manifest unreadable") and "NONE" not in text["publisher_pin"]
+
+    called: list[int] = []
+    monkeypatch.setattr(bridge, "run_process", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(binmod, "probe", lambda settings, refresh=False: _probe())
+    monkeypatch.setattr(binmod, "invocation_signature", lambda path, fingerprint_value: valid)
+    res = bridge.run_structured(ClaudeRequest(purpose="x", role="r", model="opus", prompt=PROMPT, json_schema=SCHEMA,
+                                              domain="PERSONAL"), settings=settings)
+    assert not res.ok and res.error_code == "BINARY_SIGNATURE_BLOCKED" and not called
+
+    monkeypatch.setattr(binmod, "publisher_signature", lambda path, fingerprint_value=None: valid)
+    out = bridge.status(db, settings, refresh=True)
+    au = out["binary"]["authenticity"]
+    assert out["bridge_status"] == "BLOCKED" and out["blocked_by"] == ["signature"]
+    assert au["gate"] == "BLOCKED" and au["pin_status"] == "UNREADABLE" and au["owner_step"] is None
+    assert any("aeos.inventory.seed" in c for c in au["remedy"]["commands"]) and "/login" not in str(au["remedy"])
+
+    res = check("claude.binary", _ctx(settings, db, claude_runner(NATIVE)))
+    assert res.status == "FAILED" and res.error_code == "BINARY_SIGNATURE_BLOCKED"
+    assert res.observed_evidence["authenticity"]["pin_status"] == "UNREADABLE"
+    assert "install-manifest" in res.remediation["operation"] and "login" not in res.remediation["operation"].lower()
+
+
+def test_the_manifest_note_no_longer_claims_the_signature_is_unchecked():
+    from aeos.inventory.manifest import load_manifest
+
+    comp = next(c for c in load_manifest().data["components"] if c["component_id"] == "claude-code")
+    assert comp["signature"]["approved_signer"] is None  # owner step: not pinned yet (never invented)
+    assert "tidak diperiksa oleh AEOS" not in (comp["signature"]["note"] or "")
+    assert comp["signature"]["method"] == "os_codesign"

@@ -66,6 +66,9 @@ class ResearchEntry(IdMixin, TimestampMixin, Base):
     distribution: Mapped[str] = mapped_column(String(256), default="")
     terms_checked_at: Mapped[datetime | None] = mapped_column(nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # --- 0008_w7i2 (§01 U-11): intake attachments (e.g. a .md brief) submitted with a manual entry; each lives in
+    # the entry's submitted_domain and is untrusted DATA (never authority). Seeded platform rows have none.
+    attachment_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
 class ChangeProposal(IdMixin, TimestampMixin, Base):
@@ -90,6 +93,9 @@ class ChangeProposal(IdMixin, TimestampMixin, Base):
     limits: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # cost/data/resource
     baseline_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     candidate_pin: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # --- 0006 (§25 tool admission "pinned version/digest"): structured sha256:<hex> of the candidate artifact,
+    # compared at ACCEPTED with the observed executable digest of this domain's installation observation.
+    candidate_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
     candidate_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     # SUBMITTED|UNDER_REVIEW|REVIEWED|TRIAL_APPROVED|IN_TRIAL|PROMOTION_PENDING|PROMOTION_APPROVED|ACCEPTED|
     # ROLLED_BACK|FAILED|PARTIAL|KEEP|REJECTED|DEFERRED|REQUEST_MORE_EVIDENCE|REFERENCE_ONLY

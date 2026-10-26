@@ -170,3 +170,130 @@ context 262144, tools, `expiration_date` 2026-10-31; 16 `:free` models in total)
 * **Owner terms record from UI and CLI.** The route view lists `terms_unknown`; the activation dialog and
   `aeos routes activate --inputs-used-for-training/--no-... --trial-only/--no-... --terms-note` record the
   owner's reading (`terms_record`), so UNKNOWN terms can be lifted above PUBLIC only by that recorded review.
+
+## Amendment 2026-10-25 (wave 7, C1): upstream request shape and the S07 client restriction
+
+Status of this amendment: the request-shape correction is ACCEPTED (it only aligns the seed with the provider
+documentation). The client-restriction question in "Owner decision required" below is **open: owner decision**.
+
+### Context (E1 documentation reading, 2026-10-25; nothing exercised live)
+
+* S07 (`https://opencode.ai/docs/zen/`, `https://opencode.ai/v2/docs/console/models/`) documents the OpenAI-compatible
+  Zen endpoint `https://opencode.ai/inference/openai/v1/chat/completions`, and says direct API calls use the **bare**
+  model id (`deepseek-v4.1-flash-free`); `opencode/<model-id>` is the OpenCode **config** format. Some seeded
+  watchlist models are documented on other API families: `gpt-5.3-codex`, `grok-build-0.1`, `muse-spark-1.3` on
+  `/inference/openai/v1/responses`, `qwen3.8-flash` on `/inference/anthropic/v1/messages`. LongCat 2.5 Preview, Space
+  Bunny, LL Alpha and Exo are no longer listed.
+* The Gemini API documents its OpenAI-compatible base `https://generativelanguage.googleapis.com/v1beta/openai`
+  (`.../chat/completions`).
+* The earlier seed sent `https://opencode.ai/zen/chat/completions` with `model: "opencode/<id>"` and
+  `https://generativelanguage.googleapis.com/chat/completions`. Both contradict the documentation, so every Zen route
+  (the two pilot WORKER routes included) and the comparator would most likely have failed upstream.
+* S07 also states: **"Free-tier chat models require OpenCode; use paid models or Go from other clients."** The AEOS
+  broker is the only worker-model egress (§25/§26) and calls the upstream as its own HTTP client; OpenCode inside the
+  sandbox only talks to the broker. A broker-proxied call to a free Zen model may therefore be refused even with the
+  corrected URL. Whether it is refused is NOT-PROVEN (no key stored, no live call).
+
+### Decision (implemented)
+
+1. **Request shape is configuration.** `ModelRoute.model_id` keeps the OpenCode catalog id (`opencode/<id>`, what
+   `opencode models` lists for the catalog refresh); `mode_params.upstream_model` holds the bare API id and
+   `mode_params.upstream_api` the documented API family. Seeded Zen endpoints: `https://opencode.ai/inference/openai/v1`
+   (chat completions and responses) or `https://opencode.ai/inference/anthropic/v1` (messages); Gemini:
+   `https://generativelanguage.googleapis.com/v1beta/openai`. All of it is part of the config hash.
+2. **The broker builds exactly that request** (`broker.facade.upstream_request_shape`, `model_proxy.request_shape`):
+   `<endpoint>/chat/completions` with the bare upstream model id (for an older Zen row without `upstream_model`, the
+   catalog id minus `opencode/`). It refuses, before any credential is read: a non-chat-completions API
+   (`ROUTE_API_UNSUPPORTED`), a superseded seed endpoint (`ROUTE_ENDPOINT_SUPERSEDED`, remedy `aeos seed`), a
+   provider credential towards another host (`opencode-zen` -> `https://opencode.ai` only, `gemini` ->
+   `https://generativelanguage.googleapis.com` only; `ROUTE_ENDPOINT`), and an invalid reasoning level
+   (`ROUTE_MODE_PARAMS`). Routing applies the same verdict as a hard filter and activation refuses such a route
+   (`ROUTE_REQUEST_SHAPE_REFUSED`), so no decision is ever recorded for a request the broker would not send.
+3. **Seed backfill, never a silent rewrite of an owner decision.** `aeos seed` corrects untouched SEED CANDIDATE rows
+   (endpoint, `upstream_model`/`upstream_api`/`reasoning`, client restriction) and recomputes their hash - a
+   CANDIDATE carries no approval, so nothing is invalidated (`request_shape_corrected`). A TRIAL/APPROVED row is not
+   rewritten; it is listed in `request_shape_pending` and refused by the broker (`ROUTE_ENDPOINT_SUPERSEDED`). The
+   owner's way out: `aeos routes disable <key>` (its decisions are invalidated), then `aeos seed` - a DISABLED seed
+   row on a superseded endpoint gets only the request-shape correction and stays DISABLED - then a new activation of
+   the corrected configuration. Migration `0007_w7c1_broker_reasoning` changes no route data for the same reason.
+4. **Client restriction recorded, fail closed.** Every free Zen route carries `data_terms.client_restriction`
+   (statement, source, `applies_to`, `owner_decision: UNDECIDED`). Until the owner decides: activation is refused
+   (`CLIENT_TERMS_DECISION_REQUIRED`), routing rejects the route, the broker refuses to proxy or probe it
+   (`CLIENT_TERMS_RESTRICTED`, before any upstream call), and the route view / Models page / `aeos routes list` show
+   `OWNER_DECISION_REQUIRED`. The restriction is part of the identity, so editing the row to look decided changes
+   the hash and voids any older decision.
+5. **Worker reasoning level** (§23 "mode/thinking params"): the route states it (`mode_params.reasoning`; seeded
+   `PROVIDER_DEFAULT` on worker-runtime routes = the broker sends no level, the provider default applies). A
+   worker-sent `reasoning_effort` is never forwarded; `BrokerRequest.reasoning_effort` (sent level or `NOT_SENT`) and
+   `reasoning_requested` (the dropped worker value) record it. A stated level (`none|minimal|low|medium|high|xhigh`) is
+   sent by the broker and is a new configuration.
+6. **Supervisor binding** (§23 "prompt revision, policy version, context strategy"): `observe_supervisor_call` also
+   binds the planning prompt revision (declared revision + fingerprint of `planning/prompts.py`), the policy version
+   and the planning context-strategy fingerprint. A later change is a new configuration (NEEDS_EVALUATION); because
+   it does not touch the bridge, it does not invalidate the bridge capability proof (an engine/effort change still
+   does).
+
+### Owner decision required (open)
+
+How AEOS should use the free Zen routes given the S07 client rule. Options:
+
+* **A. OpenCode Go** for broker calls (a subscription; its endpoint/terms are not in this build: a new route after
+  the owner reads its terms).
+* **B. Paid Zen models with a BUDGET decision** (e.g. the chat-completions watchlist routes `kimi-k2.7-code`,
+  `minimax-m3`, `mistral-large-4`); the existing paid-route path (BUDGET decision, no paid fallback) applies.
+* **C. Another worker route** (e.g. an OpenRouter free route, or a LOCAL loopback model).
+* **D. Proxy the free route anyway**, under the owner's responsibility for the provider terms: activation with an
+  explicit client-terms decision (`client_terms` in the API / Models page, `--accept-client-terms
+  --client-terms-note` in the CLI). It is written into `data_terms.client_restriction.owner_decision`
+  (`OWNER_ACCEPTED_BROKER_CLIENT`) and onto the decision, bound to the configuration hash. A feasibility probe then
+  shows (E3) whether the provider accepts the broker call; acceptance stays NOT-PROVEN until then.
+
+Until the owner records one of these, the free Zen routes - including the pilot WORKER routes - stay
+non-activatable for broker proxying. AEOS does not pick an option.
+
+### Not done here (honest status)
+
+* No live call: the corrected shape is E1 until a probe records E3 (owner key + activation).
+* OpenCode Go and new free models in the S07 catalog (e.g. `flint-40b-free`) are not seeded; there is no OpenCode
+  catalog discovery in this build. LongCat & co. stay seeded; `aeos routes refresh` marks them MISSING when
+  `opencode models` no longer lists them.
+* EvalRun still cannot execute COMPARATOR/LOCAL routes: the route view states `evaluation_path` NOT_WIRED
+  (DESIGN, NOT-PROVEN, §49 M6). ARENA routes are evaluated only through the eval-only path of the W6-141
+  amendment (ADR-0111; route view `evaluation_path` EVAL_ONLY, results on real routes NOT-PROVEN).
+
+### Amendment 2026-10-25 (wave 7, W6-008 / W6-114 / W6-120): system-change evidence bound to the change
+
+* **Evidence of exactly this change (§41/§43).** `policy.recording.system_change_evidence` (and the facade, additive
+  `change=`) binds every cited EvalRun to the decision's change: `target_hash` equal to the run's
+  `configuration_hash` (or `route_config_hash`), or `target_version` equal to the changed AIConfiguration field
+  (`catalog.SYSTEM_CHANGE_CONFIG_FIELDS`: policy -> `policy_version`, model/supervisor -> `model_id`/`model_version`,
+  route/fallback -> `provider_route`, prompt/instruction -> `prompt_revision`, tool set -> `tools` as a set,
+  harness -> `harness_version`, context strategy/retrieval/memory -> a `context_params` value). Hooks, tool schemas,
+  skills, schemas and agent definitions bind by the configuration hash only. UNKNOWN never binds. A run of another
+  configuration is refused `SYSTEM_CHANGE_EVIDENCE_UNRELATED`; a caller that states no change binds nothing.
+* **Supervisor stage-model pin (rollback of §02).** `planning_baseline/stage_models` needs, for every pinned model
+  id, a cited COMPLETED all-PASS run whose `model_id`/`model_version` is exactly that id (never a hash alone);
+  `planning.configured_stage_models` re-checks this live and ignores a pin whose evaluation is of another model.
+  The pin is recorded from the Decisions page ("Pin model supervisor per tahap") or
+  `aeos policy decide --kind POLICY --stage-model STAGE=ID --eval-run RUN --rollback-target ...`; other system
+  changes use `--target-version/--target-hash --eval-run --rollback-target`.
+* **The stated configuration is the executed one (review, wave 7).** An EvalRun whose AIConfiguration states another
+  `model_id`/`provider` than its registered route - or a `policy_version`/`prompt_revision`/`harness`/
+  `harness_version` other than the one the route is bound to (UNKNOWN states nothing) - never starts
+  (`EVAL_CONFIGURATION_MISMATCH`, `evaluation.executor.configuration_mismatches`; the Evaluation page shows the
+  reason before a start), so no run can carry a value that never ran into a binding. `context_params` are not
+  carried by the route and stay the run's stated configuration. Consequence, stated
+  in the Decisions page, the CLI help and every refused pin (`recording.SUPERVISOR_EVAL_PATH_NOTE`): this build has
+  **no evaluation path for a supervisor (Claude) model** - EvalRuns execute only on broker-served WORKER/ARENA routes
+  and the Claude Max supervisor is never served through the broker (§12) - so a stage-model pin stays refused and
+  planning keeps the baseline alias until a supervisor evaluation path exists (it needs owner-authored planning
+  evaluation fixtures, ADR-0060).
+* **Memory acceptance** binds its evaluation to the record: every collected sample of a cited run must have had
+  exactly this record in its executed worker context (`context_memory_ids`, derived by the evaluation collector from
+  the hash-checked context pack each attempt used); a run's stated `context_params` alone never bind (review, wave 7).
+  The Control Center memory tab accepts the EvalRun ids. Context packs carry ACCEPTED memory only, so no run can
+  evidence a proposed record in this build (`recording.MEMORY_EVAL_PATH_NOTE`, shown in the refusal and the memory
+  tab): that needs the owner-authored memory/retrieval fixture suite (ADR-0060, ADR-0081). Requiring EVALUATED
+  stays an owner decision.
+* **Unchanged (owner decision):** planning/review continue on a re-resolved supervisor version (protected
+  acceptance 1.31); the change is stated as NEEDS_EVALUATION / `supervisor_unevaluated`.

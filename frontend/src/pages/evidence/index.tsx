@@ -4,6 +4,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { PageHeader, Tabs } from "../../components/ui";
 import { useEventStream, type AeosEvent } from "../../lib/events";
 import { AcceptancePanel } from "./AcceptancePanel";
+import { AsvsPanel } from "./AsvsPanel";
 import { evidenceApi } from "./api";
 import { DeliveryPanel } from "./DeliveryPanel";
 import { EvidenceLedger } from "./EvidenceLedger";
@@ -63,6 +64,7 @@ export default function EvidencePage() {
           { id: "acceptance", label: "Penerimaan", content: <AcceptancePanel /> },
           { id: "gates", label: "Gate delivery", content: <GatesPanel taskId={taskId} /> },
           { id: "delivery", label: "PR & provider", content: <DeliveryPanel /> },
+          { id: "asvs", label: "Kontrol keamanan (ASVS)", content: <AsvsPanel /> },
         ]}
       />
     </div>

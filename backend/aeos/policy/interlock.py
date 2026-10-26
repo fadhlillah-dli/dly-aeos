@@ -8,8 +8,9 @@ only when the list of reasons is empty. Conditions:
    is not automatically AUTH over office resources);
 3. project exists, is not archived/retired, and ``project.domain == intent.domain``;
 4. provider is allowed for the domain and the operation is a known, non-human-only operation;
-5. OFFICE: an ACTIVE company-authorisation decision listing the provider, and a verified Atlassian
-   deployment kind (Cloud vs Data Center is not assumed, §04);
+5. OFFICE: an ACTIVE company-authorisation decision listing the provider, the exact target inside its
+   ``approved_targets`` (tenant/space/parent/project key/repository, ``aeos.policy.office_scope``), and a verified
+   Atlassian deployment kind (Cloud vs Data Center is not assumed, §04);
 6. write enablement: ``write_enabled.<provider>`` flag AND an ACTIVE human WRITE_ENABLEMENT decision;
 7. an approved, immutable, LIVE (never MOCK/DEMO) PlanVersion whose stored content still hashes to
    its manifest hash and whose manifest hash equals ``intent.approved_hash``, bound by the ACTIVE
@@ -184,8 +185,30 @@ def _authority_reasons(session: Session, intent: WriteIntent, reasons: list[str]
     return d
 
 
+def _office_target_reason(session: Session, intent: WriteIntent, office: dict) -> tuple[bool, str]:
+    """§01 U-03 / §07 step 10: the exact OFFICE write target (tenant, space, parent/project key, repository) must lie
+    within the company-approved targets. The tenant/space come from the project's registered integration for that
+    exact root (the Integration Registry is the one source of the target identity, never the intent's own claim)."""
+    from sqlalchemy import select
+
+    from aeos.models.portfolio import ProjectIntegration
+    from aeos.policy import office_scope
+
+    target = intent.target if isinstance(intent.target, dict) else {}
+    root = str(target.get("root_id") or target.get("repo") or "").strip()
+    tenant = space = None
+    if intent.project_id and root:
+        integ = next((i for i in session.scalars(select(ProjectIntegration).where(
+            ProjectIntegration.project_id == intent.project_id, ProjectIntegration.provider == intent.provider))
+            if (i.root_id or "").strip().lower() == root.lower()), None)
+        if integ is not None:
+            tenant = integ.tenant_id or (integ.config or {}).get("base_url")
+            space = (integ.config or {}).get("space_id")
+    return office_scope.target_check(office, intent.provider, root_id=root or None, tenant=tenant, space_id=space)
+
+
 def check_external_write(session: Session, intent: WriteIntent) -> InterlockResult:
-    from aeos.identity.service import bootstrap_complete
+    from aeos.identity.facade import bootstrap_complete
 
     reasons: list[str] = []
     if not bootstrap_complete(session):
@@ -227,6 +250,10 @@ def check_external_write(session: Session, intent: WriteIntent) -> InterlockResu
             reasons.append("OFFICE_NOT_AUTHORISED: no ACTIVE company authorisation decision for OFFICE writes")
         elif intent.provider not in office["authorized_providers"]:
             reasons.append(f"OFFICE_PROVIDER_NOT_AUTHORISED: company authorisation does not cover {intent.provider!r}")
+        else:
+            ok, why = _office_target_reason(session, intent, office)
+            if not ok:
+                reasons.append(f"OFFICE_TARGET_NOT_AUTHORISED: {why}")
         if intent.provider in catalog.ATLASSIAN_PROVIDERS and office["atlassian_deployment"] not in ("CLOUD", "DATA_CENTER"):
             reasons.append("ATLASSIAN_DEPLOYMENT_UNKNOWN: Cloud vs Data Center not verified for this tenant")
 

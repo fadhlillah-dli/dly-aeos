@@ -148,6 +148,71 @@ def test_timeout_kills_process_tree(tmp_path: Path):
     assert res.duration_s < 30
 
 
+# Candidate code that starts a detached grandchild (own process group / session, no pipes) which acts two seconds
+# later - after the step returned (review W6-054/W6-057: it could write the DB after the tamper window closed).
+DETACHED_WRITER = r'''
+import os, subprocess, sys
+code = "import pathlib, sys, time; time.sleep(2); pathlib.Path(sys.argv[1]).write_text('late')"
+kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
+if os.name == "nt":
+    kw["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+else:
+    kw["start_new_session"] = True  # leaves the step's session: only the inherited marker still names it
+subprocess.Popen([sys.executable, "-c", code, sys.argv[1]], **kw)
+'''
+
+
+def _wait_for(path: Path, seconds: float) -> bool:
+    import time
+
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if path.exists():
+            return True
+        time.sleep(0.2)
+    return path.exists()
+
+
+def test_a_detached_grandchild_outlives_an_uncontained_step_but_never_a_contained_one(tmp_path: Path):
+    env = procs.scrubbed_env(pythonpath=[tmp_path], home=tmp_path / "h", tmp=tmp_path / "t", data_dir=tmp_path / "d",
+                             disable_plugin_autoload=True)
+    late = tmp_path / "late-uncontained.txt"
+    res = procs.run_process([sys.executable, "-c", DETACHED_WRITER, str(late)], cwd=tmp_path, env=env, timeout=60)
+    assert res.returncode == 0 and res.survivors == []
+    assert _wait_for(late, 15), "the defect the kill group closes: the grandchild acted after its step had ended"
+    caught = tmp_path / "late-contained.txt"
+    res = procs.run_process([sys.executable, "-c", DETACHED_WRITER, str(caught)], cwd=tmp_path, env=env, timeout=60,
+                            contain=True)
+    assert res.returncode == 0 and not res.timed_out
+    assert res.containment in ("job-object", "process-group"), (res.containment, res.containment_errors)
+    assert len(res.survivors) >= 1 and all("pid" in s for s in res.survivors), res.survivors
+    assert not _wait_for(caught, 5), "the survivor was killed before it could act"
+
+
+def test_a_contained_step_is_not_stalled_by_a_descendant_holding_its_output(tmp_path: Path):
+    """A background child that keeps the step's stdout open used to keep the verifier waiting until the step
+    timeout (and was not killed when it had left the tree); the contained step returns when its main process does."""
+    holder = ("import subprocess, sys\n"
+              "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+              "print('main done')\n")
+    env = procs.scrubbed_env(pythonpath=[tmp_path], home=tmp_path / "h", tmp=tmp_path / "t", data_dir=tmp_path / "d",
+                             disable_plugin_autoload=True)
+    res = procs.run_process([sys.executable, "-c", holder], cwd=tmp_path, env=env, timeout=90, contain=True)
+    assert not res.timed_out and res.returncode == 0 and "main done" in res.stdout
+    # Windows lists the venv launcher + interpreter (+ its console host) of the sleeper: at least one survivor
+    assert res.duration_s < 45 and len(res.survivors) >= 1, (res.duration_s, res.survivors)
+
+
+def test_a_contained_step_without_descendants_has_no_survivors(tmp_path: Path):
+    env = procs.scrubbed_env(pythonpath=[tmp_path], home=tmp_path / "h", tmp=tmp_path / "t", data_dir=tmp_path / "d",
+                             disable_plugin_autoload=True)
+    code = ("import subprocess, sys\n"
+            "subprocess.run([sys.executable, '-c', 'print(1)'], check=True)\n"  # a child that ends inside the step
+            "print('ok')\n")
+    res = procs.run_process([sys.executable, "-c", code], cwd=tmp_path, env=env, timeout=60, contain=True)
+    assert res.returncode == 0 and res.survivors == [] and "ok" in res.stdout
+
+
 @requires_git
 def test_git_reader_export_is_exact_tree(tmp_path: Path):
     repo = tmp_path / "repo"

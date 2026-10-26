@@ -134,6 +134,23 @@ def _identity_field_errors(cid: Any, c: dict[str, Any], master_urls: set[str] | 
         errors.append(f"{cid}: signature.verified=true contradicts result {sig.get('result')}")
     if c.get("approved_digest") and not c.get("approved_pin"):
         errors.append(f"{cid}: approved_digest needs the approved_pin it belongs to")
+    raw_digest = c.get("approved_digest")
+    if isinstance(raw_digest, dict):
+        # per-platform digests (§07): every key must name a real <os>_<arch> the component claims to support
+        from aeos.inventory.pins import PLATFORM_KEY, select_digest
+
+        oses = {"macos": "darwin"}
+        supported = {oses.get(o, o) for o in ((c.get("compatibility") or {}).get("os") or [])}
+        for key in raw_digest:
+            if not PLATFORM_KEY.match(str(key)):
+                errors.append(f"{cid}: approved_digest key {key!r} is not <os>_<arch>")
+            elif supported and str(key).split("_", 1)[0] not in supported:
+                errors.append(f"{cid}: approved_digest key {key!r} is outside compatibility.os {sorted(supported)}")
+            elif select_digest(raw_digest, str(key))["status"] != "RECORDED":
+                errors.append(f"{cid}: approved_digest[{key}] is not 'sha256:<64 hex>'")
+    signer = sig.get("approved_signer")
+    if isinstance(signer, dict) and not any(str(v or "").strip() for v in signer.values()):
+        errors.append(f"{cid}: signature.approved_signer mapping names no publisher identity")
     return errors
 
 

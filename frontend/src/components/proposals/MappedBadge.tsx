@@ -96,6 +96,8 @@ export const ELIGIBILITY: BadgeMap = {
   EXCLUDED_GATE_FAILED: ["FAIL", "Dikecualikan: gate gagal"],
   EXCLUDED_GATE_NOT_PROVEN: ["NOT-PROVEN", "Dikecualikan: gate belum terbukti"],
   EXCLUDED_REGRESSION: ["FAIL", "Dikecualikan: regresi kritis"],
+  // §34: no verifier baseline proved the absence of a critical regression (UNKNOWN is never a pass)
+  EXCLUDED_REGRESSION_NOT_PROVEN: ["NOT-PROVEN", "Dikecualikan: bebas regresi kritis belum terbukti"],
   EXCLUDED_ROUTE_TERMS: ["FAIL", "Dikecualikan: rute tidak eligible (terms/data)"],
   EXCLUDED_STALE_CONFIGURATION: ["STALE", "Dikecualikan: konfigurasi rute sudah berubah"],
   BELUM_DIUJI: ["NOT_TESTED", "BELUM DIUJI"],

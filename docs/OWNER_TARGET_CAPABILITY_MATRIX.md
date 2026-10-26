@@ -20,7 +20,7 @@ OWN/AUTH/CAP/ENF, §04 domain profiles, §08 capability gates.
 | `CAN_REVIEW_WITH_MAX` | platform | SUPER_ADMIN of the domain | no | Review checkpoint dengan Claude Max: Pengawas native Max; kuota habis berarti menunggu, bukan fallback. |
 | `CAN_PREPARE_PR` | PERSONAL | SUPER_ADMIN of the domain | no | Menyiapkan PR (merge tetap manusia): Broker membuat PR dari branch aeos/*; tidak ada operasi merge. Per proyek: akses repo proyek (ID repo persis) terbukti. |
 | `CAN_USE_OFFICE_INTEGRATIONS` | OFFICE | SUPER_ADMIN of the domain + company authorisation (POLICY decision) | yes | Integrasi OFFICE (Bitbucket/Jira/Confluence): Diblokir default sampai otorisasi perusahaan (§23). |
-| `CAN_VALIDATE_STAGING` | platform | SUPER_ADMIN of the domain | no | Validasi staging: Target staging berizin, verifier, recovery teruji. |
+| `CAN_VALIDATE_STAGING` | platform | SUPER_ADMIN of the domain | no | Validasi staging: Verifier dan recovery teruji; per proyek: target staging deployment-target yang dapat diobservasi (aturan gate G6). Observasi staging dan screenshot staging hanya berjalan saat READY. |
 
 ## Targets per domain (exact identifiers an approval binds)
 

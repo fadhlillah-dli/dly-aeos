@@ -123,8 +123,11 @@ def run_check(spec: CheckSpec, ctx: CheckContext) -> CheckResultData:
                           operation="Buat database lokal lalu jalankan ulang Doctor", command=aeos_cmd("db upgrade"),
                           target="<data>/aeos.sqlite3", evidence_to_collect="pemeriksaan ini tidak UNKNOWN lagi"))
     else:
+        from aeos.doctor.provider_watch import doctor_probe
+
         try:
-            out = spec.fn(ctx)
+            with doctor_probe():  # the check's own provider calls are its result, not a new STALE signal (§08)
+                out = spec.fn(ctx)
         except Exception as exc:  # a broken probe is UNKNOWN, never green (§38 step 5)
             out = Outcome("UNKNOWN", f"Pemeriksaan gagal dijalankan ({type(exc).__name__}).",
                           error_code="PROBE_ERROR", evidence={"exception": type(exc).__name__,
@@ -267,7 +270,8 @@ def _result_key(r: CheckResultData | CheckResult) -> Any:
 def _persist(session: Session, results: list[CheckResultData], run: DoctorRun, ctx: CheckContext) -> None:
     from aeos.doctor.capabilities import invalidate
     from aeos.events import service as events
-    from aeos.inventory.observations import component_known, record_observation
+    from aeos.inventory.facade import record_observation
+    from aeos.inventory.observations import component_known
 
     previous: dict[Any, CheckResult] = dict(latest_results(session, [r.check_id for r in results
                                                                      if not (r.scope or {}).get("project_id")]))

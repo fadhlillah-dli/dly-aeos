@@ -347,9 +347,34 @@ def roles_view(session: Session, *, domain: str, project_ids: list[str] | None =
             "availability": "ACTIVE" if n else ("CANDIDATE" if r.mode == "CANDIDATE" else
                                                 "SERVICE" if r.deterministic_service else
                                                 "HUMAN" if r.kind == "HUMAN" else "AVAILABLE_INACTIVE"),
+            **(_role_adoption_view(session, r) if r.kind == "EXECUTOR" and not r.deterministic_service else {}),
         })
     return {"groups": [{"key": g, "label": GROUP_LABELS.get(g, g), "roles": groups.get(g, [])} for g, _ in GROUPS],
             "note": "Org view adalah proyeksi katalog: garis organisasi tidak memberi permission atau authority."}
+
+
+def _role_adoption_view(session: Session, r: RoleSkillPack) -> dict[str, Any]:
+    """§44/§46: the role's current evaluation result and whether the owner adopted it (DecisionRecord bound to the
+    role revision and that EvalRun). Read-only; the adoption itself is POST /api/workforce/roles/{key}/adopt."""
+    from aeos.workforce import roles
+
+    ev = roles.role_evaluation(session, r.role_key, r.revision_hash)
+    evaluation = {k: ev.get(k) for k in ("status", "run_id", "suite_key", "basis")}
+    adoption: dict[str, Any] = {"decision_id": None, "eval_run_id": None, "scope": None, "current": False}
+    try:
+        from aeos.policy import catalog as policy_catalog
+        from aeos.policy import facade as policy
+
+        d = policy.find_active_decision(session, kind="POLICY", target_type=policy_catalog.TARGET_ROLE_ADOPTION,
+                                        target_id=r.role_key, target_hash=r.revision_hash)
+    except ImportError:
+        d = None
+    if d is not None and d.target_hash == r.revision_hash:
+        details = d.details or {}
+        adoption = {"decision_id": d.id, "eval_run_id": details.get("eval_run_id"), "scope": details.get("scope") or {},
+                    "current": details.get("eval_run_id") == ev.get("run_id") and ev.get("status") == "PASS"}
+    return {"evaluation": evaluation, "adoption": adoption,
+            "adoptable": ev.get("status") == "PASS" and bool(ev.get("run_id")) and not adoption["current"]}
 
 
 def _agent_gate(session: Session, a: AgentDefinition, *, domain: str) -> tuple[bool, str]:
@@ -447,10 +472,10 @@ def cost_summary(session: Session, *, domain: str, project_ids: list[str] | None
 
 
 def summary(session: Session, *, domain: str, project_ids: list[str] | None, loop_running: bool) -> dict[str, Any]:
-    from aeos.worker_runtime.opencode import opencode_status
-    from aeos.worker_runtime.sandbox import sandbox_readiness
+    from aeos.worker_runtime.facade import opencode_status, sandbox_readiness
 
-    cap, cap_decision = scheduler.concurrency_cap(session)
+    conc = scheduler.concurrency_detail(session)
+    cap, cap_decision = conc["cap"], conc["decision_id"]
     pause = scheduler.pause_info(session)
     live_q = select(func.count()).select_from(WorkerRun).where(
         WorkerRun.domain == domain, WorkerRun.mode == DataMode.LIVE.value,
@@ -469,6 +494,10 @@ def summary(session: Session, *, domain: str, project_ids: list[str] | None, loo
         "scheduler": {"enabled": scheduler.scheduler_enabled(session), "paused": bool(pause.get("paused")),
                       "paused_reason": pause.get("reason", ""), "paused_by": pause.get("by"),
                       "concurrency_cap": cap, "cap_decision_id": cap_decision,
+                      # §19/§51 P2: where the cap comes from (pilot / owner decision) and the owner's resource budget
+                      "cap_source": conc["source"], "cap_reason": conc["reason"],
+                      "budget_max_parallel_workers": conc["budget_max_parallel_workers"],
+                      "budget_note": conc["budget_note"],
                       "controller_id": scheduler.CONTROLLER_ID, "loop_running": loop_running},
         "task_counts": scheduler.counts_by_state(session, domain=domain, project_ids=project_ids),
         "active_runs": int(live_active), "demo_runs": int(demo_runs),

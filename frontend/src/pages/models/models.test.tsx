@@ -11,7 +11,7 @@ const route = (over: Record<string, unknown>) => ({
   route_key: "opencode-zen/deepseek-v4.1-flash-free",
   pool: "WORKER",
   provider: "opencode-zen",
-  endpoint: "https://opencode.ai/zen",
+  endpoint: "https://opencode.ai/inference/openai/v1",
   model_id: "opencode/deepseek-v4.1-flash-free",
   alias: null,
   display_name: "DeepSeek V4.1 Flash Free",
@@ -290,6 +290,113 @@ describe("Models & Routes page", () => {
     expect(within(drawer).getByText("Belum tersambung")).toBeInTheDocument();
   });
 
+  it("states the S07 client restriction, the exact upstream request and the unwired arena evaluation (ADR-0041)", async () => {
+    const mimo = route({
+      route_key: "opencode-zen/mimo-v2.6-flash-free",
+      model_id: "opencode/mimo-v2.6-flash-free",
+      display_name: "MiMo-V2.6 Flash Free",
+      pool: "ARENA",
+      allowed_data_classes: ["PUBLIC"],
+      upstream_request: {
+        url: "https://opencode.ai/inference/openai/v1/chat/completions", model: "mimo-v2.6-flash-free", api: "openai.chat_completions",
+        reasoning_effort: "NOT_SENT", code: null, problem: null, status: "READY_SHAPE", note: "Bentuk permintaan sesuai dokumentasi provider (E1)",
+      },
+      client_restriction: {
+        status: "OWNER_DECISION_REQUIRED", statement: "Free-tier chat models require OpenCode; use paid models or Go from other clients.",
+        source: "S07", applies_to: "broker", owner_note: null, note: "Broker AEOS memanggil upstream sebagai klien HTTP sendiri",
+      },
+      evaluation_path: { status: "NOT_WIRED", note: "EvalRun/scorecard arena belum tersambung (DESIGN, NOT-PROVEN)" },
+      budget_required: false,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? "GET", body: init?.body as string | undefined });
+        let body: unknown = {};
+        if (url.startsWith("/api/claude/status")) body = STATUS;
+        else if (url === "/api/routes") body = { ...ROUTES, items: [mimo] };
+        else if (url.startsWith("/api/routes/")) body = { ...mimo, config: DS_CONFIG, decisions: [], quota_states: [] };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderPage();
+    expect(await screen.findByText("Syarat klien: perlu keputusan pemilik")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("MiMo-V2.6 Flash Free"));
+    const drawer = await screen.findByRole("dialog", { name: /Detail rute/ });
+    expect(await within(drawer).findByText("https://opencode.ai/inference/openai/v1/chat/completions")).toBeInTheDocument();
+    expect(within(drawer).getByText("mimo-v2.6-flash-free")).toBeInTheDocument();
+    expect(within(drawer).getByText("Sesuai dokumen provider (E1), belum dibuktikan")).toBeInTheDocument();
+    expect(within(drawer).getByText(/Perlu keputusan pemilik/)).toBeInTheDocument();
+    expect(within(drawer).getByText(/require OpenCode/)).toBeInTheDocument();
+    expect(within(drawer).getByText("Evaluasi/scorecard belum tersambung")).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: /Aktifkan rute/ }));
+    const dialog = await screen.findByRole("dialog", { name: "Aktivasi rute" });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Alasan/ }), { target: { value: "uji kelayakan arena §23" } });
+    const submit = within(dialog).getByRole("button", { name: /Catat keputusan TRIAL/ });
+    expect(submit).toBeDisabled(); // no activation without the owner's client-terms decision
+    expect(within(dialog).queryByText("ID keputusan BUDGET")).toBeNull();
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /broker AEOS boleh memanggil rute ini/ }));
+    expect(submit).toBeDisabled();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Catatan keputusan syarat klien" }), {
+      target: { value: "membaca aturan S07; menerima risiko ditolak" },
+    });
+    expect(submit).not.toBeDisabled();
+    fireEvent.click(submit);
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/activate") && c.method === "POST")).toBe(true));
+    const sent = JSON.parse(calls.find((c) => c.url.endsWith("/activate"))!.body!);
+    expect(sent).toMatchObject({ mode: "TRIAL", client_terms: { accepted: true, note: "membaca aturan S07; menerima risiko ditolak" } });
+  });
+
+  it("lets an admin set a loopback endpoint on a LOCAL route, never another host", async () => {
+    const local = route({
+      route_key: "local/qwen3.8-flash-next",
+      provider: "local",
+      endpoint: null,
+      model_id: "Qwen/Qwen3.8-Flash-Next",
+      display_name: "Qwen3.8-Flash-Next (open weights, local)",
+      pool: "LOCAL",
+      is_free: "UNKNOWN",
+      effectively_free: false,
+      budget_required: true,
+      upstream_request: { status: "REFUSED", note: "ROUTE_ENDPOINT: route endpoint must be https (or loopback http) without credentials" },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? "GET", body: init?.body as string | undefined });
+        let body: unknown = {};
+        if (url.startsWith("/api/claude/status")) body = STATUS;
+        else if (url === "/api/routes") body = { ...ROUTES, items: [local] };
+        else if (url.endsWith("/endpoint")) body = { config_changed: true, needs_new_trial: false, route: local };
+        else if (url.startsWith("/api/routes/")) body = { ...local, config: DS_CONFIG, decisions: [], quota_states: [] };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByText("Qwen3.8-Flash-Next (open weights, local)"));
+    const drawer = await screen.findByRole("dialog", { name: /Detail rute/ });
+    expect(await within(drawer).findByText("Ditolak broker")).toBeInTheDocument();
+    const save = within(drawer).getByRole("button", { name: "Tetapkan endpoint" });
+    fireEvent.change(within(drawer).getByRole("textbox", { name: "Endpoint loopback" }), { target: { value: "http://192.168.1.5:8080/v1" } });
+    fireEvent.change(within(drawer).getByRole("textbox", { name: "Alasan perubahan endpoint" }), { target: { value: "server llama.cpp lokal" } });
+    expect(save).toBeDisabled();
+    expect(within(drawer).getByText(/Hanya http pada 127\.0\.0\.1/)).toBeInTheDocument();
+    fireEvent.change(within(drawer).getByRole("textbox", { name: "Endpoint loopback" }), { target: { value: "http://127.0.0.1:8080/v1" } });
+    // §23 LOCAL: the build is part of the configuration identity, stated with the endpoint
+    fireEvent.change(within(drawer).getByRole("textbox", { name: "Kuantisasi" }), { target: { value: "Q4_K_M" } });
+    fireEvent.change(within(drawer).getByRole("textbox", { name: "Backend inferensi" }), { target: { value: "llama.cpp-b5000" } });
+    expect(save).not.toBeDisabled();
+    fireEvent.click(save);
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/endpoint") && c.method === "POST")).toBe(true));
+    expect(JSON.parse(calls.find((c) => c.url.endsWith("/endpoint"))!.body!)).toMatchObject({
+      endpoint: "http://127.0.0.1:8080/v1",
+      rationale: "server llama.cpp lokal",
+      quantization: "Q4_K_M",
+      inference_backend: "llama.cpp-b5000",
+      hardware: null,
+    });
+  });
+
   it("labels an arena route as feasibility-probe only, never as a worker path", async () => {
     const arena = route({
       execution_path: { status: "FEASIBILITY_PROBE_ONLY", note: "Uji kelayakan lewat probe broker" },
@@ -310,5 +417,73 @@ describe("Models & Routes page", () => {
     const drawer = await screen.findByRole("dialog", { name: /Detail rute/ });
     expect(await within(drawer).findByText("Hanya probe kelayakan (bukan task worker)")).toBeInTheDocument();
     expect(within(drawer).getByText("Uji kelayakan lewat probe broker")).toBeInTheDocument();
+  });
+
+  const withStatus = (status: unknown) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        let body: unknown = {};
+        if (url.startsWith("/api/claude/status")) body = status;
+        else if (url === "/api/routes") body = ROUTES;
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+  const authenticity = (over: Record<string, unknown>) => ({
+    gate: "UNVERIFIED", reason: "signature VALID; no publisher identity pinned", approved_signer: null, os: "windows",
+    signature_status: "VALID", observed_signer: "CN=\"Anthropic, PBC\"", owner_step: "Pin penerbit Anthropic untuk windows di install-manifest claude-code signature.approved_signer",
+    remedy: null, ...over,
+  });
+
+  it("shows the binary authenticity gate; an unpinned valid signature is never shown as authentic (§12)", async () => {
+    withStatus({ ...STATUS, binary: { ...STATUS.binary, authenticity: authenticity({}) } });
+    renderPage();
+    const cell = await screen.findByTestId("binary-authenticity");
+    expect(within(cell).getByText("Belum diverifikasi")).toBeInTheDocument();
+    expect(within(cell).getByText(/belum dipin/)).toBeInTheDocument();
+    expect(screen.getByText(/Langkah pemilik: Pin penerbit Anthropic untuk windows/)).toBeInTheDocument();
+    // the owner-facing explanation is Indonesian; the backend reason is shown only as technical detail
+    expect(screen.getByText(/Keaslian belum terverifikasi/)).toBeInTheDocument();
+    expect(screen.getByText("signature VALID; no publisher identity pinned")).toBeInTheDocument();
+  });
+
+  it("an unreadable install-manifest blocks with a manifest remedy, never 'belum dipin' (fail closed)", async () => {
+    const remedy = { operation: "Perbaiki install-manifest/manifest.yaml", commands: ["./aeos seed --only aeos.inventory.seed"], note: "lewat PR" };
+    withStatus({
+      ...STATUS,
+      bridge_status: "BLOCKED",
+      blocked_by: ["signature"],
+      binary: { ...STATUS.binary, authenticity: authenticity({ gate: "BLOCKED", pin_status: "UNREADABLE", owner_step: null, reason: "install-manifest cannot be read/validated (MANIFEST_INVALID)", remedy }) },
+    });
+    renderPage();
+    const cell = await screen.findByTestId("binary-authenticity");
+    expect(within(cell).getByText(/tidak dapat dibaca/)).toBeInTheDocument();
+    expect(within(cell).queryByText(/belum dipin/)).toBeNull();
+    expect(screen.getByText("Langkah perbaikan install-manifest")).toBeInTheDocument();
+    expect(screen.getByText(/pin penerbit tidak diketahui/)).toBeInTheDocument();
+    expect(screen.queryByText(/ketik \/login/)).toBeNull();
+  });
+
+  it("a signature block shows the signature remedy, never the /login remedy", async () => {
+    const remedy = { operation: "Pasang ulang build resmi Claude Code", commands: ["winget install --id Anthropic.ClaudeCode -e"], note: "ubah approved_signer lewat PR" };
+    withStatus({
+      ...STATUS,
+      bridge_status: "BLOCKED",
+      blocked_by: ["signature"],
+      binary: { ...STATUS.binary, authenticity: authenticity({ gate: "BLOCKED", signature_status: "INVALID", reason: "OS reports the code signature INVALID", approved_signer: "Anthropic, PBC", owner_step: null, remedy }) },
+    });
+    renderPage();
+    expect(await screen.findByTestId("signature-remedy")).toBeInTheDocument();
+    expect(screen.getByText("winget install --id Anthropic.ClaudeCode -e")).toBeInTheDocument();
+    expect(screen.queryByText(/ketik \/login/)).toBeNull();
+    expect(screen.getAllByText("Terblokir").length).toBeGreaterThan(0);
+  });
+
+  it("an unsigned binary is DEGRADED in the header, not a pass", async () => {
+    const remedy = { operation: "Pasang ulang", commands: ["brew reinstall --cask claude-code"], note: "x" };
+    withStatus({ ...STATUS, bridge_status: "DEGRADED", binary: { ...STATUS.binary, authenticity: authenticity({ gate: "DEGRADED", signature_status: "UNSIGNED", os: "darwin", remedy }) } });
+    renderPage();
+    expect(await screen.findByTestId("signature-remedy")).toBeInTheDocument();
+    expect(screen.getAllByText("Terbatas").length).toBeGreaterThan(0);
   });
 });

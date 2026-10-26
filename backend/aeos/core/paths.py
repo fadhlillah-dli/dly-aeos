@@ -87,6 +87,12 @@ class DataLayout:
         """§12 fallback: planning/review packages the user runs in official Claude Code."""
         return self.root / "manual-claude"
 
+    @property
+    def canonical_policy(self) -> Path:
+        """§02/§06 owner-supplied canonical policy sources (MCI_V2), kept on this machine only: the platform
+        repository is public and never holds MCI content ("MCI tidak dimasukkan tanpa hak")."""
+        return self.root / "policy" / "canonical"
+
     def domain_root(self, domain: Domain) -> Path:
         """Personal and Office partitions never share a directory (§04 evidence/memory/cache)."""
         return self.root / domain.value.lower()

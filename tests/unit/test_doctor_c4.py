@@ -551,6 +551,11 @@ def test_verifier_independence_is_self_tested_with_functional(settings, db, monk
     rv = res0.observed_evidence["verifier_runner"]
     assert rv["isolation"] == "WEAK" and rv["runner"] == "process"
     assert any("isolation WEAK" in r for r in res0.observed_evidence["residual_risks"])
+    # the WEAK runner's specific limits ride along: in-process result forgery and processes outside the kill group
+    from aeos.verification import runner as vrunner
+
+    assert vrunner.RESULT_FORGERY_RISK in res0.observed_evidence["residual_risks"]
+    assert any("kill group" in r for r in res0.observed_evidence["residual_risks"])
     # evidence honesty: the residual risk is stated, never claimed as owner-accepted (no Decision records that)
     assert "isolasi WEAK" in res0.summary and "diterima pemilik" not in res0.summary
     res = check("evidence.verifier", _ctx(settings, db, base_runner(), functional=True))
@@ -567,7 +572,9 @@ def test_verifier_independence_is_self_tested_with_functional(settings, db, monk
 
 def test_verifier_runner_reports_container_when_the_boundary_is_proven(settings, db, monkeypatch, tmp_path):
     """With a fresh PASS container containment report and the verifier image present, the Doctor reports the
-    verifier runs candidate code in the CONTAINER runner (no WEAK residual risk)."""
+    verifier runs candidate code in the CONTAINER runner (no WEAK residual risk, but the container runner's own
+    residual risks - the in-process result-forgery limit among them - are stated, review W6-054)."""
+    from aeos.verification import runner
     from aeos.worker_runtime import container, sandbox
     from aeos.worker_runtime.containment import containment_report, record_containment_report
     from tests.unit.worker_container_support import install_fake_docker
@@ -581,7 +588,9 @@ def test_verifier_runner_reports_container_when_the_boundary_is_proven(settings,
     assert res.status == "CONFIGURED"
     rv = res.observed_evidence["verifier_runner"]
     assert rv["isolation"] == "CONTAINER" and rv["image"] == container.verifier_image_tag()
-    assert "residual_risks" not in res.observed_evidence or not res.observed_evidence["residual_risks"]
+    risks = res.observed_evidence["residual_risks"]
+    assert not any("isolation WEAK" in r for r in risks)
+    assert risks == list(runner.CONTAINER_RESIDUAL_RISKS) and runner.RESULT_FORGERY_RISK in risks
     sandbox._cache.update(at=0.0, value=None)
 
 

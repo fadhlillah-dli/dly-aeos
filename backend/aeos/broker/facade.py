@@ -15,7 +15,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from aeos.models.routing import CapabilityGrant
+from aeos.models.routing import CapabilityGrant, ModelRoute
 
 # Route pools the model proxy can serve for worker tasks (additive contract, ADR-0106). ARENA/COMPARATOR/LOCAL/
 # WATCHLIST never serve tasks: routing refuses such tasks at admission and the proxy refuses their requests.
@@ -23,6 +23,33 @@ SERVED_POOLS: tuple[str, ...] = ("WORKER",)
 # Pools whose feasibility the owner can test through the controlled probe (additive, ADR-0111): one synthetic
 # PUBLIC request on a free, TRIAL/APPROVED (hash-bound human decision) PERSONAL route; evidence only.
 PROBE_POOLS: tuple[str, ...] = ("ARENA", "COMPARATOR", "LOCAL", "WORKER")
+# Pools served ONLY to a TaskSpec bound to a RUNNING EvalRun of exactly that route (additive, wave 7, §49 M6 "model
+# arena"): the MODEL_PROXY grant carries the evaluation scope (``scope["eval"]``) and the proxy re-checks it on every
+# request through ``evaluation.facade.eval_serving`` (PERSONAL, TRIAL/APPROVED hash-bound, free, terms-eligible -
+# the probe's checks), so an ARENA route never serves an ordinary task and never a paid request.
+EVAL_POOLS: tuple[str, ...] = ("ARENA",)
+
+# Upstream request shape (additive, ADR-0041 amendment 2026-10-25). The broker speaks the OpenAI chat-completions
+# API only (``<endpoint>/chat/completions``); a route whose provider documents another API for the model
+# (``mode_params.upstream_api``) is refused at the boundary instead of being sent a request it cannot answer.
+UPSTREAM_API_CHAT = "openai.chat_completions"
+UPSTREAM_APIS: tuple[str, ...] = (UPSTREAM_API_CHAT, "openai.responses", "anthropic.messages")
+# Provider -> the only host its credential is ever sent to (a route edited to another host fails closed).
+PROVIDER_ENDPOINT_HOSTS: dict[str, tuple[str, ...]] = {
+    "opencode-zen": ("opencode.ai",),
+    "gemini": ("generativelanguage.googleapis.com",),
+}
+# Endpoints an earlier seed wrote that contradict the provider documentation (E1, read 2026-10-25): S07 documents
+# ``https://opencode.ai/inference/openai/v1/chat/completions`` (bare model ids; ``opencode/<id>`` is the OpenCode
+# config format) and the Gemini API its OpenAI-compatible base ``.../v1beta/openai``. Old -> documented base.
+SUPERSEDED_ENDPOINTS: dict[str, str] = {
+    "https://opencode.ai/zen": "https://opencode.ai/inference/openai/v1",
+    "https://generativelanguage.googleapis.com": "https://generativelanguage.googleapis.com/v1beta/openai",
+}
+# ``mode_params.reasoning`` of a route: a level the broker sets as ``reasoning_effort`` upstream, or a default
+# marker (nothing is sent; the provider's default applies). A worker-sent ``reasoning_effort`` is never forwarded.
+REASONING_LEVELS: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh")
+REASONING_DEFAULT_MARKERS: tuple[str, ...] = ("HARNESS_DEFAULT", "PROVIDER_DEFAULT")
 
 
 def issue_grant(
@@ -75,6 +102,16 @@ def credential_ref_problem(domain: str, ref: str, *, project_id: str | None = No
     from aeos.broker.model_proxy import credential_namespace_problem as impl
 
     return impl(domain, ref, project_id=project_id)
+
+
+def upstream_request_shape(route: ModelRoute) -> dict[str, Any]:
+    """The upstream request the broker would build for *route* - ``url`` (``<endpoint>/chat/completions``),
+    ``model`` (the bare upstream model id), ``catalog_model_id``, ``api``, ``reasoning_effort`` (or ``NOT_SENT``) -
+    and ``code``/``problem`` when the broker refuses to build it (no secret, no DB; additive, ADR-0041 amendment
+    2026-10-25). Routing uses it so a route the broker refuses is never selected or activated."""
+    from aeos.broker.model_proxy import request_shape as impl
+
+    return impl(route)
 
 
 def probe_route(session: Session, *, route_key: str, actor: str) -> dict[str, Any]:

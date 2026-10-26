@@ -103,6 +103,18 @@ def capability_ready(session: Session, capability: Capability, *, domain: str, p
     return True, []
 
 
+def eval_served(session: Session, task: TaskSpec, route: ModelRoute) -> bool:
+    """Whether *route* (an eval-only pool) is the exact route of a RUNNING evaluation *task* is bound to."""
+    try:
+        from aeos.broker.facade import EVAL_POOLS
+        from aeos.evaluation import facade as evaluation
+    except ImportError:
+        return False
+    if route.pool not in EVAL_POOLS:
+        return False
+    return evaluation.eval_serving(session, task=task, route_key=route.route_key).get("status") == "SERVED"
+
+
 def select_route(session: Session, task: TaskSpec) -> tuple[ModelRoute | None, list[str]]:
     from aeos.routing import facade as routing
 
@@ -117,8 +129,9 @@ def select_route(session: Session, task: TaskSpec) -> tuple[ModelRoute | None, l
         return None, [decision.reason or "no eligible approved route"]
     problems: list[str] = []
     # Defence in depth (§12, §23): the worker pool never uses the Claude Max supervisor route, and
-    # the route must explicitly list the task's domain.
-    if route.provider == "claude-native" or route.pool != "WORKER":
+    # the route must explicitly list the task's domain. A non-WORKER route is accepted only as the exact route of a
+    # RUNNING evaluation this task is bound to (eval-only ARENA path, §49 M6), re-checked here independently.
+    if route.provider == "claude-native" or (route.pool != "WORKER" and not eval_served(session, task, route)):
         problems.append(f"route {route.route_key} is not a WORKER route")
     if route.status not in {"APPROVED", "TRIAL"}:
         problems.append(f"route {route.route_key} status {route.status} is not APPROVED/TRIAL")

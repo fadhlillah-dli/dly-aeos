@@ -18,6 +18,9 @@
 FROM node:22.11.0-bookworm-slim
 
 ARG OPENCODE_VERSION=1.19.3
+# The engine version the image really contains: aeos.worker_runtime.container.image_status refuses an image whose
+# label differs from the pin in its tag (a build without --build-arg would otherwise run 1.19.3 as another pin).
+LABEL aeos.opencode_version="${OPENCODE_VERSION}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates tini \

@@ -327,6 +327,13 @@ export interface AdrSummary {
   date: string | null;
   deciders: string | null;
   updated_at: string | null;
+  // §02 change control: the file's Status line (builder-written) vs the owner's ADR decision bound to the content hash
+  file_status?: string;
+  owner_status?: string | null;
+  owner_status_state?: "RECORDED" | "STALE" | "NOT_RECORDED";
+  owner_decision?: { id: string; outcome: string; target_hash: string | null; decided_at: string | null; superseded_by: string | null } | null;
+  effective_status?: string;
+  status_source?: string;
 }
 
 export interface AdrDetail extends AdrSummary {

@@ -150,8 +150,28 @@ def resolve_target(session: Session, project: Project, purpose: str) -> Target:
                     t.remedies.append("Catat otorisasi perusahaan (Decision) dan jalankan Readiness Doctor sampai "
                                       "CAN_USE_OFFICE_INTEGRATIONS READY.")
                 else:
-                    t.reasons.append("capability (Cloud REST v2, folder support) diperiksa saat eksekusi")
+                    ok, why = _company_approved(session, family, acfg)
+                    if not ok:
+                        # §01 U-03 / §07 step 10: only a company-approved tenant/space/target is read or written
+                        t.status = "BLOCKED"
+                        t.reasons.append(f"target bukan target yang disetujui perusahaan: {why}")
+                        t.remedies.append("Catat target pada keputusan otorisasi perusahaan (approved_targets) atau "
+                                          "perbaiki target integrasi proyek.")
+                    else:
+                        t.reasons.append("capability (Cloud REST v2, folder support) diperiksa saat eksekusi")
     return t
+
+
+def _company_approved(session: Session, family: str, acfg: atl.AtlassianConfig) -> tuple[bool, str]:
+    """(authorised, reason) of the exact Atlassian target against the company authorisation's approved targets."""
+    try:
+        from aeos.policy import facade as policy
+
+        return policy.office_target_authorised(
+            session, family, tenant=acfg.base_url, space_id=acfg.space_id or None,
+            root_id=acfg.parent_id if family == "confluence" else acfg.project_key)
+    except ImportError:  # policy module absent: never a reason to call an OFFICE system
+        return False, "policy module unavailable (fail closed)"
 
 
 def office_gate(session: Session, project: Project) -> tuple[bool, list[str]]:

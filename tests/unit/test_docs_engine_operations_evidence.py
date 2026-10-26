@@ -72,7 +72,9 @@ def test_production_observation_of_the_registered_target_validates_the_operation
     assert all(ids[k].status == "DRAFT" for k in OPS_DOCS)
     _target(db, project, "staging", "https://staging.example.org")
     _target(db, project, "production", "https://app.example.org")
+    from tests.unit.test_deployment_support import make_staging_ready
 
+    make_staging_ready(db, project)  # controlled precondition: staging observations need CAN_VALIDATE_STAGING READY
     staging = _observe(db, project, "staging", "https://staging.example.org", {"status": "ok", "commit": HEAD})
     assert staging["status"] == "PASS"
     ids = _render(world)
@@ -100,6 +102,44 @@ def test_production_observation_of_the_registered_target_validates_the_operation
     ids = _render(world)
     assert ids["08-operational-overview"].status == "DRAFT"
     assert later["evidence_id"] in ids["08-operational-overview"].status_reason
+
+
+def test_the_platform_release_health_validates_the_platform_operations_documents(settings, db, monkeypatch):
+    """W6-091: DLY AEOS itself (the first project) has an evidence path - its own /api/health reports the commit
+    only under ``controller``; the observer accepts it while the controller runs the ACTIVE clean release, so the
+    platform's 08 Operations documents leave DRAFT. A checkout (no promoted release) stays NOT_PROVEN."""
+    from aeos.delivery import deployment
+    from tests.unit.test_deployment_support import HEALTHY_RELEASE
+
+    install_fakes(monkeypatch)
+    project = make_project(db, key="dly-aeos-platform", github_repo="fadhlillah-dli/dly-aeos")
+    project.is_platform = True
+    db.commit()
+    _plan, version = make_plan(db, project, sample(), tasks=TASKS)
+    world = {"settings": settings, "db": db, "project": project, "version": version}
+    base = "http://127.0.0.1:8787"
+    db.add(ProjectIntegration(project_id=project.id, domain=project.domain, provider="deployment-target",
+                              purpose="production", root_id=base, config={"health_path": "/api/health"}))
+    db.commit()
+    checkout = {"status": "ok", "version": "0.1.0", "controller": {
+        "mode": "checkout", "release_id": None, "commit": HEAD, "dirty": False, "active_release_id": None,
+        "matches_active": None, "status": "NO_ACTIVE_RELEASE"}}
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{base}/api/health").mock(return_value=httpx.Response(200, json=checkout))
+        before = deployment.observe(db, project.id, "production", HEAD, actor="owner")
+    db.commit()
+    assert before["status"] == "NOT_PROVEN" and "ACTIVE release" in before["reason"]
+    assert _render(world)["08-operational-overview"].status == "DRAFT"
+    release = {"status": "ok", "version": "0.1.0", "controller": {**HEALTHY_RELEASE, "commit": HEAD}}
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{base}/api/health").mock(return_value=httpx.Response(200, json=release))
+        prod = deployment.observe(db, project.id, "production", HEAD, actor="owner")
+    db.commit()
+    assert prod["status"] == "PASS" and prod["target"] == f"{base}/api/health"
+    ids = _render(world)
+    for key in OPS_DOCS:
+        assert ids[key].status == "APPROVED", key
+        assert prod["evidence_id"] in ids[key].status_reason, key
 
 
 def test_untrusted_or_other_domain_production_evidence_never_validates(world):
@@ -199,6 +239,41 @@ def test_recorded_incident_becomes_an_incident_report_and_a_problem_record(world
     problem = problems[0]
     assert problem.status == "APPROVED" and inc.id in _section(problem, "problem_statement")
     assert ev in _section(problem, "root_cause") and REGRESSION in _section(problem, "validation")
+    # §27 09. Problems: statement / root cause / impact / actions / validation all come from the record
+    assert not problem.pending_sections, problem.pending_sections
+    assert "Satu branch kandidat tercemar" in _section(problem, "impact")
+    assert "Normalisasi glob" in _section(problem, "actions")
+
+
+def test_a_real_restore_test_reaches_the_platform_backup_document_only(world):
+    """§27 08. Backup "restore procedure/testing": the only RESTORE_TEST producer (operations.backup.restore_test)
+    records PLATFORM-level evidence (no project, no domain). The platform project's 08-backup-restore names and
+    links it; a product project never sees it (it is not that product's restore test)."""
+    from aeos.operations import backup
+
+    db, settings, project = world["db"], world["settings"], world["project"]
+    bid = backup.create_backup(settings, label="docs", actor="owner")["backup_id"]
+    result = backup.restore_test(settings, bid, session=db, actor="owner")
+    db.commit()
+    assert result["status"] == "PASSED", result
+    ev = db.get(EvidenceArtifact, result["evidence_id"])
+    assert ev.project_id is None and ev.domain is None and ev.origin == "restore-test"
+
+    product = _render(world)["08-backup-restore"]
+    assert ev.id not in (product.body_markdown or "") and ev.id not in product.links.get("evidence", [])
+    assert "belum teruji" in _section(product, "restore_testing")
+
+    project.is_platform = True
+    db.commit()
+    doc = _render(world)["08-backup-restore"]
+    assert ev.id in _section(doc, "restore_testing") and ev.id in doc.links["evidence"]
+    runbook = _render(world)["08-runbooks/runbook-restart"]
+    assert ev.id in runbook.links["evidence"]
+    # a restore-test-kind row from any other origin is not this controller's restore test
+    db.add(EvidenceArtifact(kind="RESTORE_TEST", origin="collector", collector_identity="x", trusted=True,
+                            content_hash="sha256:other", claim="other", inline={}))
+    db.commit()
+    assert [e.id for e in service.evidence_refs(db, project) if e.kind == "RESTORE_TEST"] == [ev.id]
 
 
 def test_platform_wide_incident_reaches_the_projects_its_blast_radius_names(world):

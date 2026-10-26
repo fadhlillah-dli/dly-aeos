@@ -28,7 +28,49 @@ export const EXCEPTION_PRESETS: Record<string, { label: string; target: string; 
   },
 };
 
+/** §15 supervisor stage-model pin: the exact target planning.configured_stage_models reads, and its stages. */
+export const STAGE_MODEL_TARGET = { type: "planning_baseline", id: "stage_models" } as const;
+export const PLANNING_STAGES: { stage: string; family: string }[] = [
+  { stage: "PRIMARY_PLANNING", family: "opus" },
+  { stage: "CHALLENGE_REVIEW", family: "fable" },
+  { stage: "SYNTHESIS", family: "opus" },
+  { stage: "FINAL_REVIEW", family: "fable" },
+];
+
+/** POLICY owner attestations with the exact target shape their consumer reads (PERSONAL only, expiry required). */
+export const POLICY_PRESETS: Record<string, { label: string; target: string; consumer: string; note: string }> = {
+  claude_extra_usage_off: {
+    label: "Atestasi pemilik: extra usage berbayar Claude NONAKTIF di pengaturan akun claude.ai",
+    target: "claude_extra_usage/PERSONAL",
+    consumer: "Doctor claude.extra_billing dan ClaudeNativeBridge",
+    note: "AEOS tidak dapat membaca pengaturan akun ini: ditampilkan sebagai atestasi pemilik (bukti E0, CONFIGURED), tidak pernah VERIFIED. Matikan dulu di claude.ai (Settings → Usage).",
+  },
+};
+
 const OFFICE_KEYS = ["external_worker_allowed", "approved_worker_routes", "claude_max_allowed_for_office_data", "trace_destinations_allowed", "requires_isolated_runtime", "atlassian_deployment"];
+/** Data classes the company can approve for AI processing of OFFICE data (backend DataClassification). */
+export const DATA_CLASSES = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"];
+
+/** One "office/<provider>=<identity>" per line -> {ref: identity}; the backend validates refs and values. */
+export function parseIdentities(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split(/\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    const i = t.indexOf("=");
+    if (i <= 0) throw new Error(`identitas "${t}" harus berbentuk office/<provider>=<identitas>`);
+    out[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+  }
+  return out;
+}
+
+/** One approved target per line ("provider:kunci=nilai,kunci=nilai"); parsed and validated by the backend. */
+export function parseTargets(text: string): string[] {
+  return text
+    .split(/\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
 
 /** "k=v; k2=v2" -> {k: "v", k2: "v2"}; JSON objects are accepted as-is. */
 export function parseScope(text: string): Record<string, unknown> {
@@ -62,14 +104,26 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
   const [companyRef, setCompanyRef] = useState("");
   const [allowedProviders, setAllowedProviders] = useState<string[]>([]);
   const [officeOverrides, setOfficeOverrides] = useState("");
+  // §01 U-03 / §07 step 10 / §51 P1: what the company approved; empty = UNDECIDED (consumers fail closed)
+  const [approvedTargets, setApprovedTargets] = useState("");
+  const [approvedClasses, setApprovedClasses] = useState<string[]>([]);
+  const [approvedIdentities, setApprovedIdentities] = useState("");
   const [preset, setPreset] = useState<string>("");
+  const [policyPreset, setPolicyPreset] = useState<string>("");
   const [allowBash, setAllowBash] = useState(false);
   // §41/§43 system change: a POLICY on a policy/model/tool/hook/prompt/memory/fallback/context target needs
   // COMPLETED all-gates-PASS evaluation runs and the rollback target it replaces (backend SYSTEM_CHANGE_TARGET_TYPES)
   const [scEvalRuns, setScEvalRuns] = useState("");
   const [scRollback, setScRollback] = useState("");
+  // the evaluated runs must be evidence of exactly this change: the new value (target_version) the run's
+  // configuration carries, or the run's configuration hash as the target hash (backend SYSTEM_CHANGE_EVIDENCE_UNRELATED)
+  const [targetVersion, setTargetVersion] = useState("");
+  // §15 supervisor stage-model pin (planning_baseline/stage_models): exact model id per stage, each evaluated
+  const [stagePin, setStagePin] = useState(false);
+  const [stageModels, setStageModels] = useState<Record<string, string>>({});
   const [localError, setLocalError] = useState<string | null>(null);
   const usePreset = kind === "EXCEPTION" && domain === "PERSONAL" && !!preset;
+  const usePolicyPreset = kind === "POLICY" && domain === "PERSONAL" && !!policyPreset;
 
   const save = useMutation({
     mutationFn: (body: Record<string, unknown>) => post("/api/decisions", body),
@@ -85,9 +139,11 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
     setLocalError(null);
     let authScope: Record<string, unknown>;
     let overrides: Record<string, unknown> | null = null;
+    let identities: Record<string, string> = {};
     try {
       authScope = parseScope(scope);
       if (officeOverrides.trim()) overrides = JSON.parse(officeOverrides) as Record<string, unknown>;
+      if (officeAuth) identities = parseIdentities(approvedIdentities);
     } catch (e) {
       setLocalError(`Format tidak valid: ${e instanceof Error ? e.message : String(e)}`);
       return;
@@ -110,26 +166,53 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
     } else if (usePreset) {
       body.exception = preset;
       if (preset === "worker_sandbox_process") body.allow_bash = allowBash;
+    } else if (usePolicyPreset) {
+      body.policy_preset = policyPreset;
     } else if (kind === "POLICY" && domain === "OFFICE" && (officeAuth || overrides)) {
       body.office_authorization = officeAuth;
       if (officeAuth) {
         body.company_reference = companyRef;
         body.allowed_providers = allowedProviders;
+        body.approved_targets = parseTargets(approvedTargets);
+        body.approved_data_classes = approvedClasses;
+        body.approved_identities = identities;
       }
       if (overrides) body.office_policy = overrides;
     } else {
-      body.target_type = targetType;
-      body.target_id = targetId;
-      if (targetHash) body.target_hash = targetHash;
+      const pin = kind === "POLICY" && stagePin;
+      body.target_type = pin ? STAGE_MODEL_TARGET.type : targetType;
+      body.target_id = pin ? STAGE_MODEL_TARGET.id : targetId;
+      // a pin is bound by its models, never by a hash: a hash typed before switching to the pin (its field is hidden
+      // then) is not sent as the decision's target hash
+      if (!pin && targetHash.trim()) body.target_hash = targetHash.trim();
+      if (kind === "POLICY" && !pin && targetVersion.trim()) body.target_version = targetVersion.trim();
       const evalRunIds = scEvalRuns.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
-      if (kind === "POLICY" && (evalRunIds.length || scRollback.trim())) {
-        body.details = { system_change: { eval_run_ids: evalRunIds, rollback_target: scRollback.trim() } };
+      const details: Record<string, unknown> = {};
+      if (pin) {
+        const models = Object.fromEntries(
+          Object.entries(stageModels)
+            .map(([k, v]) => [k, v.trim()])
+            .filter(([, v]) => v),
+        );
+        if (!Object.keys(models).length) {
+          setLocalError("Isi minimal satu ID model persis untuk tahap yang di-pin.");
+          return;
+        }
+        details.models = models;
       }
+      if (kind === "POLICY" && (evalRunIds.length || scRollback.trim())) {
+        details.system_change = { eval_run_ids: evalRunIds, rollback_target: scRollback.trim() };
+      }
+      if (Object.keys(details).length) body.details = details;
     }
     save.mutate(body);
   };
 
-  const needsTarget = kind !== "WRITE_ENABLEMENT" && !usePreset && !(kind === "POLICY" && domain === "OFFICE" && officeAuth);
+  const officePolicy = kind === "POLICY" && domain === "OFFICE" && officeAuth;
+  const needsTarget = kind !== "WRITE_ENABLEMENT" && !usePreset && !usePolicyPreset && !officePolicy && !(kind === "POLICY" && stagePin);
+  // an owner attestation preset has its fixed target and is no system change: no evaluation/pin fields for it
+  const systemChange = kind === "POLICY" && !officePolicy && !usePolicyPreset;
+  const expiryRequired = kind === "EXCEPTION" || kind === "RISK_ACCEPTANCE" || usePolicyPreset;
   return (
     <Card title="Catat keputusan manusia">
       <div className="grid gap-3">
@@ -192,6 +275,26 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
             </Field>
           </div>
         )}
+        {kind === "POLICY" && domain === "PERSONAL" && (
+          <div className="grid gap-3 rounded-md border border-line p-3">
+            <Field label="Jenis kebijakan" hint="Preset memakai target persis yang dibaca modul pemakainya.">
+              <select aria-label="Jenis kebijakan" className={inputClass} value={policyPreset} onChange={(e) => setPolicyPreset(e.target.value)}>
+                <option value="">Lainnya (target manual)</option>
+                {Object.entries(POLICY_PRESETS).map(([k, v]) => (
+                  <option key={k} value={k}>
+                    {v.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {usePolicyPreset && (
+              <Notice tone="warn">
+                Target <strong>{POLICY_PRESETS[policyPreset].target}</strong> (dibaca oleh {POLICY_PRESETS[policyPreset].consumer}). {POLICY_PRESETS[policyPreset].note} Wajib
+                berlaku sampai tanggal tertentu.
+              </Notice>
+            )}
+          </div>
+        )}
         {kind === "POLICY" && domain === "OFFICE" && (
           <div className="grid gap-3 rounded-md border border-line p-3">
             <label className="flex items-center gap-2 text-sm">
@@ -215,6 +318,44 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
                     </label>
                   ))}
                 </fieldset>
+                <Field
+                  label="Target yang disetujui perusahaan (satu per baris)"
+                  hint="provider:kunci=nilai,kunci=nilai. Confluence/Jira wajib tenant (confluence:tenant=perusahaan.atlassian.net,space_id=98765 · jira:tenant=perusahaan.atlassian.net,root_id=ENG); Bitbucket wajib workspace (bitbucket:workspace=perusahaan[,root_id=perusahaan/repo]). Kosong = belum diputuskan: semua target OFFICE ditolak."
+                >
+                  <textarea
+                    aria-label="Target yang disetujui perusahaan"
+                    className={`${inputClass} mono text-xs`}
+                    value={approvedTargets}
+                    onChange={(e) => setApprovedTargets(e.target.value)}
+                    placeholder={"confluence:tenant=perusahaan.atlassian.net,space_id=98765\nbitbucket:workspace=perusahaan"}
+                  />
+                </Field>
+                <fieldset className="flex flex-wrap gap-3 text-sm">
+                  <legend className="mb-1 text-sm font-medium">Kelas data yang disetujui untuk AI (route worker / Claude Max)</legend>
+                  {DATA_CLASSES.map((c) => (
+                    <label key={c} className="flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={approvedClasses.includes(c)}
+                        onChange={(e) => setApprovedClasses(e.target.checked ? [...approvedClasses, c] : approvedClasses.filter((x) => x !== c))}
+                      />
+                      {c}
+                    </label>
+                  ))}
+                  <span className="w-full text-xs text-ink-3">Tidak ada yang dicentang = belum diputuskan: data OFFICE tidak dikirim ke model mana pun.</span>
+                </fieldset>
+                <Field
+                  label="Identitas credential yang disetujui (opsional, satu per baris)"
+                  hint="office/atlassian=<account id atau email>; office/bitbucket=<uuid atau account id> (bukan nickname: tidak unik). Dibandingkan Doctor (secret.office_identity) dengan akun credential tersimpan — bukan secret."
+                >
+                  <textarea
+                    aria-label="Identitas credential yang disetujui"
+                    className={`${inputClass} mono text-xs`}
+                    value={approvedIdentities}
+                    onChange={(e) => setApprovedIdentities(e.target.value)}
+                    placeholder="office/atlassian=akun@perusahaan.example"
+                  />
+                </Field>
               </>
             )}
             <Field label="Override kebijakan OFFICE (JSON, opsional)" hint={`Hanya kunci: ${OFFICE_KEYS.join(", ")}. Berlaku hanya saat otorisasi perusahaan aktif.`}>
@@ -235,12 +376,43 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
             </Field>
           </div>
         )}
-        {needsTarget && kind === "POLICY" && (
+        {systemChange && (
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={stagePin} onChange={(e) => setStagePin(e.target.checked)} /> Pin model supervisor per tahap perencanaan (target{" "}
+            {STAGE_MODEL_TARGET.type}/{STAGE_MODEL_TARGET.id})
+          </label>
+        )}
+        {systemChange && stagePin && (
+          <fieldset className="grid gap-3 rounded-md border border-line p-3 sm:grid-cols-2" aria-label="Pin model tahap">
+            <legend className="px-1 text-sm font-medium">Model persis per tahap (§15)</legend>
+            <p className="text-xs text-ink-3 sm:col-span-2">
+              Hanya ID model persis dari keluarga tahapnya. Setiap model yang di-pin wajib punya EvalRun COMPLETED (semua gate PASS) dengan model_id persis sama;
+              tahap yang dikosongkan tetap memakai alias baseline. Target rollback: alias baseline atau pin sebelumnya.
+            </p>
+            <Notice tone="warn">
+              Build ini belum punya jalur evaluasi untuk model supervisor (Claude): EvalRun hanya berjalan di rute WORKER/ARENA lewat broker dan harus
+              menyatakan model_id persis rutenya, sedangkan Claude Max tidak pernah dilayani broker. Karena itu EvalRun model supervisor belum
+              bisa ada dan pin tahap ditolak (SYSTEM_CHANGE_EVIDENCE_UNRELATED) sampai jalur evaluasi supervisor tersedia; perencanaan tetap memakai
+              alias baseline.
+            </Notice>
+            {PLANNING_STAGES.map((st) => (
+              <Field key={st.stage} label={`${st.stage} (${st.family})`}>
+                <input
+                  className={`${inputClass} mono`}
+                  value={stageModels[st.stage] ?? ""}
+                  onChange={(e) => setStageModels({ ...stageModels, [st.stage]: e.target.value })}
+                  placeholder={`claude-${st.family}-…`}
+                />
+              </Field>
+            ))}
+          </fieldset>
+        )}
+        {systemChange && (needsTarget || stagePin) && (
           <fieldset className="grid gap-3 rounded-md border border-line p-3 sm:grid-cols-2">
             <legend className="px-1 text-sm font-medium">System change (§41/§43)</legend>
             <p className="text-xs text-ink-3 sm:col-span-2">
               Wajib bila target adalah policy, model/route, pin model tahap (planning_baseline), tool schema/tools, hooks, prompt/instruction, schema, skill/agent definition, memory, fallback, context strategy, retrieval atau harness:
-              EvalRun COMPLETED dengan semua gate PASS dan target rollback. Kebijakan tata kelola lain tercatat sebagai bukan system change.
+              EvalRun COMPLETED dengan semua gate PASS yang menjadi bukti perubahan persis ini, dan target rollback. Kebijakan tata kelola lain tercatat sebagai bukan system change.
             </p>
             <Field label="ID EvalRun bukti" hint="Pisahkan dengan koma.">
               <input className={inputClass} value={scEvalRuns} onChange={(e) => setScEvalRuns(e.target.value)} placeholder="uuid EvalRun" />
@@ -248,6 +420,16 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
             <Field label="Target rollback" hint="Versi/konfigurasi/keputusan yang digantikan.">
               <input className={inputClass} value={scRollback} onChange={(e) => setScRollback(e.target.value)} placeholder="mis. prompt rev r41" />
             </Field>
+            {!stagePin && (
+              <div className="sm:col-span-2">
+                <Field
+                  label="Nilai baru yang dievaluasi (target_version)"
+                  hint="Sama persis dengan nilai di konfigurasi EvalRun: revisi prompt, versi policy, model id, route key, versi harness, tool set (pisahkan koma) atau nilai context_params. Hooks/tool schema/skill: isi Hash target = configuration_hash EvalRun."
+                >
+                  <input className={inputClass} value={targetVersion} onChange={(e) => setTargetVersion(e.target.value)} placeholder="mis. wp-42" />
+                </Field>
+              </div>
+            )}
           </fieldset>
         )}
         {kind !== "WRITE_ENABLEMENT" && (
@@ -258,7 +440,7 @@ export function DecisionForm({ domain, requestId, initialKind, onDone }: { domai
         <Field label="Scope eksplisit (wajib)" hint="key=value; key2=value2 atau JSON. Contoh: repo=owner/nama; alasan=hotfix">
           <textarea className={inputClass} value={scope} onChange={(e) => setScope(e.target.value)} />
         </Field>
-        <Field label={kind === "EXCEPTION" || kind === "RISK_ACCEPTANCE" ? "Berlaku sampai (wajib)" : "Berlaku sampai (opsional)"}>
+        <Field label={expiryRequired ? "Berlaku sampai (wajib)" : "Berlaku sampai (opsional)"}>
           <input type="datetime-local" className={inputClass} value={expires} onChange={(e) => setExpires(e.target.value)} />
         </Field>
         <Field label="Rationale (wajib, min. 10 karakter)">

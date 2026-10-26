@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
@@ -24,6 +24,7 @@ from aeos.core.hashing import content_hash
 from aeos.core.paths import ensure_within, safe_segment
 from aeos.core.redaction import redact_text
 from aeos.docs_engine import product1 as p1
+from aeos.docs_engine import references
 from aeos.docs_engine import renderer as r
 from aeos.docs_engine import visuals as vis
 from aeos.docs_engine.docx import markdown_to_docx
@@ -102,10 +103,21 @@ _SUMMARY_KEYS = ("scope", "method", "tools", "remediation", "target", "environme
                  "expected_commit", "reported_commit", "route", "viewport", "provenance", "tester", "performed_on")
 
 
+# Platform-level evidence about this controller itself (no project, no domain): the backup restore test
+# (operations.backup.restore_test) proves the DLY AEOS data dir can be restored, so it belongs to the platform
+# project's 08 Backup & Restore / runbooks only. It carries no per-domain counts (backup.py), so showing its id in
+# the PERSONAL platform documents reveals nothing of OFFICE (§50).
+PLATFORM_LEVEL_EVIDENCE = {"RESTORE_TEST": "restore-test"}  # kind -> the only collector origin accepted
+
+
 def evidence_refs(session: Session, project: Project) -> list[r.EvidenceRef]:
+    scope = and_(EvidenceArtifact.project_id == project.id, EvidenceArtifact.domain == project.domain)
+    if project.is_platform:
+        scope = or_(scope, *(and_(EvidenceArtifact.project_id.is_(None), EvidenceArtifact.domain.is_(None),
+                                  EvidenceArtifact.kind == kind, EvidenceArtifact.origin == origin)
+                             for kind, origin in PLATFORM_LEVEL_EVIDENCE.items()))
     rows = session.scalars(select(EvidenceArtifact).where(
-        EvidenceArtifact.project_id == project.id, EvidenceArtifact.domain == project.domain,
-        EvidenceArtifact.kind.in_(SIGNAL_EVIDENCE_KINDS), EvidenceArtifact.trusted.is_(True),
+        scope, EvidenceArtifact.kind.in_(SIGNAL_EVIDENCE_KINDS), EvidenceArtifact.trusted.is_(True),
         EvidenceArtifact.origin != "worker").order_by(EvidenceArtifact.created_at))
     out = []
     for ev in rows:
@@ -126,39 +138,16 @@ def evidence_refs(session: Session, project: Project) -> list[r.EvidenceRef]:
     return out
 
 
-def repo_runbooks(project: Project) -> list[r.RunbookSource]:
-    """The reviewed runbooks of the project's own repository: for the platform project ``docs/runbooks/*.md``
-    (Trigger / Authority / Steps / Verification / rollback sections). Product repositories are not read here."""
-    if not project.is_platform:
+def repo_runbooks(project: Project, session: Session | None = None) -> list[r.RunbookSource]:
+    """The reviewed runbooks of the project's own repository (Trigger / Authority / Steps / Verification / rollback
+    sections): for the platform project ``docs/runbooks/*.md`` at the platform repository's HEAD commit; for a
+    product (with a *session*) ``docs/runbooks/*.md`` of its registered checkout at the known commit
+    (``docs_engine.references``). Without a source: [] (the runbook sections stay pending)."""
+    if project.is_platform:
+        return references.platform_runbooks()
+    if session is None:
         return []
-    from aeos.core.paths import repo_root
-
-    out = []
-    for path in sorted((repo_root() / "docs" / "runbooks").glob("*.md")):
-        if path.stem.lower() == "readme":
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        title = path.stem
-        sections: list[tuple[str, str]] = []
-        head: str | None = None
-        buf: list[str] = []
-        for line in text.splitlines():
-            if line.startswith("# ") and title == path.stem:
-                title = line[2:].strip().removeprefix("Runbook:").strip()
-            elif line.startswith("## "):
-                if head is not None:
-                    sections.append((head, "\n".join(buf).strip()))
-                head, buf = line[3:].strip().lower(), []
-            elif head is not None:
-                buf.append(line)
-        if head is not None:
-            sections.append((head, "\n".join(buf).strip()))
-        out.append(r.RunbookSource(key=path.stem, title=title, path=f"docs/runbooks/{path.name}",
-                                   sections=tuple((h, redact_text(b)) for h, b in sections if b)))
-    return out
+    return references.project_references(session, project).runbooks
 
 
 def _incident_info(v: dict[str, Any]) -> r.IncidentInfo:
@@ -213,12 +202,12 @@ def _changed_files(session: Session, acc: AcceptanceRecord | None) -> list[str]:
     if acc is None or not acc.verification_evidence_id:
         return []
     try:
-        from aeos.verification import collector
+        from aeos.verification import facade as verification
         from aeos.verification.verifier import related_evidence
 
         report = session.get(EvidenceArtifact, acc.verification_evidence_id)
         scope = related_evidence(session, report, "SCOPE_CHECK")
-        return [str(p) for p in ((collector.read_json(scope) or {}).get("changed_files") or [])][:200]
+        return [str(p) for p in ((verification.read_json(scope) or {}).get("changed_files") or [])][:200]
     except Exception:  # evidence unreadable: the change record says documentation pending, never guesses
         log.warning("changed files of acceptance %s unavailable", acc.id)
         return []
@@ -267,8 +256,17 @@ def change_infos(session: Session, project: Project) -> list[r.ChangeInfo]:
             rollback_notes=tuple(rollback_notes(changed)) if changed else (),
             contract_deltas=tuple(deltas["contracts"]), dependency_deltas=tuple(deltas["dependencies"]),
             decision_refs=tuple(sorted(f"{d.kind}:{d.id}" for d in decisions)),
+            checkpoint_refs=checkpoint_refs(task.input_artifacts),
         ))
     return out
+
+
+def checkpoint_refs(artifacts: Any) -> tuple[str, ...]:
+    """The documentation checkpoint packages a compiled TaskSpec integrates: its RESOLVED ``documentation_checkpoint``
+    input artifacts (hash-bound by the task compiler). An unresolved label proves nothing and is not counted."""
+    out = {f"{a['ref']} ({a.get('sha256') or 'tanpa hash'})" for a in (artifacts or []) if isinstance(a, dict)
+           and a.get("kind") == "documentation_checkpoint" and a.get("resolved") and a.get("ref")}
+    return tuple(sorted(out))
 
 
 def improvement_infos(session: Session, project: Project) -> list[r.ImprovementInfo]:
@@ -288,7 +286,8 @@ def improvement_infos(session: Session, project: Project) -> list[r.ImprovementI
     return out
 
 
-def render_signals(session: Session, settings: Settings, project: Project) -> r.RenderSignals:
+def render_signals(session: Session, settings: Settings, project: Project, *,
+                   runbooks: list[r.RunbookSource] | None = None) -> r.RenderSignals:
     """Read-only inputs for documents whose §28 timing is not plan approval (PR, release, production, retirement)."""
     retirement = None
     if (project.lifecycle or "").upper() in ("RETIRING", "RETIRED"):
@@ -297,7 +296,8 @@ def render_signals(session: Session, settings: Settings, project: Project) -> r.
         retirement = retirement_mod.checklist(session, settings, project)
     return r.RenderSignals(evidence=evidence_refs(session, project), changes=change_infos(session, project),
                            improvements=improvement_infos(session, project), retirement=retirement,
-                           incidents=incident_infos(session, project), runbooks=repo_runbooks(project),
+                           incidents=incident_infos(session, project),
+                           runbooks=repo_runbooks(project, session) if runbooks is None else runbooks,
                            platform_ops=platform_ops_facts(project))
 
 
@@ -354,9 +354,18 @@ def known_route_paths(project: Project) -> set[str] | None:
 
 def deployment_environments(session: Session, project: Project) -> list[str]:
     """Environments of this project with a registered (observe-only) deployment target."""
+    from aeos.core.errors import ValidationFailed
     from aeos.delivery import facade as delivery
 
-    return [env for env in ("staging", "production") if delivery.deployment_target(session, project, env)]
+    out = []
+    for env in ("staging", "production"):
+        try:
+            registered = delivery.deployment_target(session, project, env) is not None
+        except ValidationFailed:  # registered, but its stored health_path is refused (never observed/captured)
+            registered = True
+        if registered:
+            out.append(env)
+    return out
 
 
 def render_version(session: Session, settings: Settings, version: PlanVersion, *, persist: bool,
@@ -372,11 +381,13 @@ def render_version(session: Session, settings: Settings, version: PlanVersion, *
     threat_model = view.security.get("threat_model")
     tm = threat_model if isinstance(threat_model, dict) else {}
     data_items = [str(x.get("data_type") or "") for x in (view.data.get("items") or []) if isinstance(x, dict)]
-    vis.verify_visuals(visuals, trust_boundaries=[str(x) for x in (tm.get("trust_boundaries") or [])],
-                       known_tables=known_schema_names(project), known_columns=known_schema_columns(project),
-                       known_components=known_component_names(session, project),
-                       known_routes=known_route_paths(project), data_items=data_items,
-                       deployment_environments=deployment_environments(session, project))
+    # §29 references: platform schema/manifest/route contract, or the product checkout at its known commit
+    refs = references.project_references(session, project, version.content)
+    tests = sorted({k for v in visuals if v.kind == "sequence" for k in vis.named_tests(v.source, v.verification_source)})
+    if tests:
+        refs.visual.passed_tests = references.passed_integration_tests(session, project, tests)
+    vis.verify_visuals(visuals, refs=refs.visual, trust_boundaries=[str(x) for x in (tm.get("trust_boundaries") or [])],
+                       data_items=data_items, deployment_environments=deployment_environments(session, project))
     previous = r.previous_input_hashes(session, project.id) if (persist and state.approved) else {}
     result = r.render_document_set(
         project=project_identity(session, project),
@@ -384,7 +395,7 @@ def render_version(session: Session, settings: Settings, version: PlanVersion, *
                                   manifest_hash=version.manifest_hash, approved=state.approved,
                                   approval_decision_id=decision_id, created_at=version.created_at),
         content=version.content, tasks=task_infos(session, version.id), visuals=visuals,
-        previous_input_hashes=previous, signals=render_signals(session, settings, project),
+        previous_input_hashes=previous, signals=render_signals(session, settings, project, runbooks=refs.runbooks),
     )
     delta = r.sync_document_records(session, result, domain=project.domain) if (persist and state.approved) else None
     return result, delta, state

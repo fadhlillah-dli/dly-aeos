@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from aeos import __version__
 from aeos.audit import service as audit
 from aeos.core.enums import Domain
-from aeos.core.errors import Blocked, NotFound, PolicyDenied, ValidationFailed
+from aeos.core.errors import Blocked, Conflict, NotFound, PolicyDenied, ValidationFailed
 from aeos.core.redaction import redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.events import service as events
@@ -255,6 +255,9 @@ def entry_view(e: ResearchEntry, *, detail: bool = False) -> dict[str, Any]:
             "editable_fields": list(EDITABLE_FIELDS if e.entry_key is None else EDITABLE_FIELDS_SEEDED),
             "can_confirm_source": e.lifecycle == "DISCOVERED" and e.upstream_status == "OK"
                                   and e.identity_status == "CHECKED",
+            "attachment_ids": list(e.attachment_ids or []),
+            "attachments": [{"attachment_id": a, "note": "lampiran adalah DATA tidak tepercaya"}
+                            for a in e.attachment_ids or []],
         })
     return v
 
@@ -320,9 +323,32 @@ def resolve_alias(session: Session, identity: str) -> str:
 # --------------------------------------------------------------------------- add by URL
 
 
+def validate_attachments(session: Session, attachment_ids: list[str] | None, domain: str | None) -> list[str]:
+    """§01 U-11: intake attachments submitted with a manual entry must exist in the entry's own domain and not be
+    REJECTED by intake scanning (the same rule as change-proposal attachments). Another domain's attachment is
+    answered like a missing one (no metadata leak). Fails closed; de-duplicated, order kept."""
+    from aeos.intake import facade as intake
+
+    out: list[str] = []
+    for aid in attachment_ids or []:
+        att = intake.get_attachment(session, str(aid))
+        if att is None or domain is None or att.domain != domain:
+            raise ValidationFailed(f"attachment {aid} not found in this domain", code="ATTACHMENT_NOT_FOUND")
+        if att.scan_status == "REJECTED":
+            raise ValidationFailed(f"attachment {aid} was rejected by intake scanning", code="ATTACHMENT_REJECTED")
+        if att.id not in out:
+            out.append(att.id)
+    return out
+
+
 def add_by_url(session: Session, *, url: str, name: str | None, category: str | None, notes: str | None,
-               actor_user_id: str, domain: str | None) -> tuple[ResearchEntry, bool]:
-    """Create a DISCOVERED entry (no install, no network, no project data). Returns (entry, duplicate)."""
+               actor_user_id: str, domain: str | None,
+               attachment_ids: list[str] | None = None) -> tuple[ResearchEntry, bool]:
+    """Create a DISCOVERED entry (no install, no network, no project data). Returns (entry, duplicate).
+    *attachment_ids* (intake uploads of this domain, untrusted DATA) are kept on the entry; on a duplicate they
+    are added to it only when it is this domain's own manual entry - a shared platform entry is visible from both
+    domains, so a domain's attachment is never pinned to it (Conflict instead of silently dropping the files)."""
+    attachments = validate_attachments(session, attachment_ids, domain)
     try:
         identity = canonical_identity(url)
         if identity.startswith("name:"):
@@ -335,6 +361,17 @@ def add_by_url(session: Session, *, url: str, name: str | None, category: str | 
         raise ValidationFailed(f"category {REFERENCE_CATEGORY!r} is reserved for the master §52 references")
     existing = find_by_identity(session, identity, domain=domain)
     if existing is not None:
+        if attachments:
+            if existing.submitted_domain != domain or domain is None:
+                raise Conflict("this source is already a shared registry entry (visible in both domains): attach the "
+                               "files to a change proposal for it instead", code="RESEARCH_ENTRY_SHARED",
+                               details={"entry_id": existing.id})
+            added = [a for a in attachments if a not in (existing.attachment_ids or [])]
+            if added:
+                existing.attachment_ids = [*(existing.attachment_ids or []), *added]
+                audit.record(session, actor_type="user", actor_id=actor_user_id, action="research.entry.attach",
+                             target_type="research_entry", target_id=existing.id, domain=domain,
+                             details={"attachment_ids": added, "trusted": False})
         return existing, True
     display = (name or "").strip() or (gh[1] if gh else identity.split(":", 1)[1][:120])
     e = ResearchEntry(
@@ -345,13 +382,14 @@ def add_by_url(session: Session, *, url: str, name: str | None, category: str | 
         upstream={}, section_refs=[], submitted_domain=domain, added_by=actor_user_id, mode="LIVE",
         research_date=utcnow().date().isoformat(),
         limitations="Ditambahkan manual; belum ada source review, belum dipasang, tidak ada data proyek yang dikirim.",
+        attachment_ids=attachments,
     )
     session.add(e)
     session.flush()
     link_components(session)
     audit.record(session, actor_type="user", actor_id=actor_user_id, action="research.entry.add",
                  target_type="research_entry", target_id=e.id, domain=domain,
-                 details={"identity": identity, "installed": False, "network": False})
+                 details={"identity": identity, "installed": False, "network": False, "attachment_ids": attachments})
     events.emit(session, source="research", kind="research.entry.added", entity_type="research_entry",
                 entity_id=e.id, domain=domain, payload={"identity": identity, "lifecycle": e.lifecycle})
     return e, False

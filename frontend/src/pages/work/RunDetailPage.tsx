@@ -7,6 +7,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Card, EmptyState, ErrorBox, Field, Freshness, inputClass, KeyValue, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
 import { ConfirmAction } from "../../components/workforce/ConfirmAction";
+import { InvestigationPanel } from "../../components/workforce/InvestigationPanel";
 import { ExecState, ModeBadge, SeparateStatuses, costText, shortId } from "../../components/workforce/status";
 import type { ActionEvent, AgentDef, RunDetail } from "../../components/workforce/types";
 import { useLiveInvalidation } from "../../components/workforce/useLive";
@@ -252,6 +253,7 @@ export default function RunDetailPage() {
           {r.mode !== "LIVE" && <Notice tone="mock">Run ini adalah fixture {r.mode}; bukan pekerjaan nyata dan tidak dihitung.</Notice>}
 
           <OperatorActions run={r} isAdmin={isAdmin} onDone={() => qc.invalidateQueries({ queryKey: key })} />
+          {r.run_type === "INVESTIGATION" && r.task.id && <InvestigationPanel taskId={r.task.id} isAdmin={isAdmin} />}
 
           <div className="grid gap-4 lg:grid-cols-2">
             <Card title="Ringkasan run">

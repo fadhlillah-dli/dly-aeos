@@ -70,3 +70,29 @@ describe("Organization page explain buttons (§35 'buka record sumber yang sama'
     expect(await screen.findByText(/tidak ada fungsi yang dinyatakan tanpa record/)).toBeInTheDocument();
   });
 });
+
+describe("Organization 'impact' and 'Usulkan perubahan' (W6-109)", () => {
+  it("derives the impact from roles, agents and active assignments and links to the proposal form", async () => {
+    const agent = (over: Record<string, unknown>) => ({
+      agent_key: "a", role_key: "impl", harness: "opencode", description: "", route_policy: {}, tools: [], limits: {},
+      allowed_scope: {}, enabled: false, enabled_reason: "", deterministic: false, revision: "1", revision_hash: null,
+      mode: "DESIGN", owner: "", active_runs: 0, availability: "IDLE", ...over,
+    });
+    respond(
+      [role({ role_key: "impl", name: "Implementer", assigned_tasks: 2, active_runs: 1 }),
+        role({ role_key: "rev", name: "Reviewer kode", kind: "REVIEWER" })],
+      [agent({ agent_key: "impl-opencode", enabled: true }), agent({ agent_key: "rev-claude", role_key: "rev" })],
+    );
+    wrap();
+    const user = userEvent.setup();
+    await screen.findByText("Implementer");
+    await user.click(screen.getByRole("button", { name: /Apa dampaknya jika diganti\?/ }));
+    const impact = await screen.findByText(/Terdampak sekarang menurut record/);
+    expect(impact.textContent).toContain("Implementer (2 task, 1 run)");
+    expect(impact.textContent).not.toContain("Reviewer kode (");
+    expect(impact.textContent).toContain("2 definisi agent memakai 2 peran, 1 aktif (impl-opencode)");
+    await user.click(screen.getByRole("button", { name: /Usulkan perubahan/ }));
+    expect(screen.getByRole("link", { name: "Usulkan perubahan peran/agent" })).toHaveAttribute(
+      "href", "/proposals?kind=UPGRADE&component=workforce-scheduler");
+  });
+});
