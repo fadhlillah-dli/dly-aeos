@@ -491,24 +491,36 @@ uses the owner's company identity. No AI appears on GitHub, Bitbucket or the com
 author, committer, co-author or contributor, and not in any attribution line. Provenance (run id, agent, route,
 model) stays in DLY AEOS records (run rows, EvidenceArtifact); it is not written to the code host.
 
-Set both identities in your local `aeos.yaml` (OS config dir, or the file `AEOS_CONFIG` names). The real addresses
-live only there - the repository is public and never contains them:
+**Owner step (required before any push, PR, issue or page goes out):**
 
-```yaml
-commit_identities:
-  github:
-    name: Your Name
-    email: 12345+you@users.noreply.github.com   # your GitHub identity (noreply address recommended)
-  bitbucket:
-    name: Your Name
-    email: you@company.example.com              # your company identity (a different address)
-```
+1. Open your local `aeos.yaml` (OS config dir: `%LOCALAPPDATA%\DLY-AEOS\aeos.yaml` on Windows,
+   `~/Library/Application Support/DLY-AEOS/aeos.yaml` on macOS, or the file `AEOS_CONFIG` names) and set both
+   identities. The real addresses live only there. The repository is public and never contains them, so never
+   copy this file into the checkout (`/aeos.yaml` and `config/aeos.yaml` are gitignored as a guard). Replace the
+   placeholders; an address left as `<...>` is refused:
 
-Then run `aeos doctor` and check `git.commit_identity.github` / `git.commit_identity.bitbucket`: CONFIGURED,
-MISSING (the remedy names the key, never an address), FAILED for an invalid entry (also an AI or bot identity),
-NOT_APPLICABLE for Bitbucket while no Bitbucket repository is registered. CONFIGURED is not VERIFIED: reading
-`aeos.yaml` does not prove the address is linked to the account. `CAN_PREPARE_PR` is BLOCKED while the GitHub
-identity is missing; OFFICE delivery readiness lists a missing company identity as a reason.
+   ```yaml
+   commit_identities:
+     github:
+       name: Your Name
+       email: <id>+<username>@users.noreply.github.com   # your GitHub identity (noreply address recommended)
+     bitbucket:
+       name: Your Name
+       email: you@company.example.com                    # placeholder: your company identity (a different address)
+   ```
+
+2. Run `aeos doctor` (or open Kesiapan in the Control Center). `git.commit_identity.github` must show
+   **CONFIGURED**, and so must `git.commit_identity.bitbucket` once a Bitbucket repository is registered (until
+   then it is NOT_APPLICABLE). MISSING means the key is absent (the remedy names the key, never an address);
+   FAILED means the entry is invalid, including an AI or bot identity.
+3. Until `git.commit_identity.github` is CONFIGURED, `CAN_PREPARE_PR` is **BLOCKED** and the broker refuses every
+   push with `COMMIT_IDENTITY_MISSING`. OFFICE delivery readiness lists a missing or invalid company identity as a
+   reason, and the Bitbucket broker refuses the push the same way.
+
+CONFIGURED is not VERIFIED: reading `aeos.yaml` does not prove the address is linked to the account. Candidates
+committed before this rule still carry the old `AEOS-Agent`/`AEOS-Route`/`AEOS-Engine` trailers and are refused at
+push (`AI_ATTRIBUTION_IN_COMMIT`); re-run those tasks. The decision is recorded in
+[ADR-0121](decisions/ADR-0121-code-host-identity-and-no-ai-attribution.md).
 
 What enforces it:
 
