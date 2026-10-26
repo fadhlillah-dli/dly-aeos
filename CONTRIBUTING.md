@@ -82,6 +82,27 @@ The frontend gates (typecheck, unit tests) run only when files under `frontend/`
 `frontend/node_modules` exists; otherwise they are SKIPPED and the reason is printed. The gate list is the G1
 step of `ci.yml`; `tests/unit/test_dev_gates.py` fails when the two diverge.
 
+The run also does what CI cannot do for you, and says what it did not do:
+
+- **`merge-conflict`.** When `origin/main` exists, `git merge-tree --write-tree origin/main HEAD` must be clean. A
+  conflict is a FAIL that lists the files: pushing such a branch costs a conflict-resolution commit and a full CI
+  re-run. Any other failure of that command (for example unrelated histories, exit 128) is a FAIL with git's message.
+  It needs git 2.38 or newer; only with an older git (usage error, exit 129) is the gate SKIPPED with that reason.
+- **`NOT RUN: <job> (<reason>)`.** One line for every job of `ci.yml` that this run does not execute (the job ids
+  are read from the workflow, so a new job shows up by itself): the backend shards, the verifier, bootstrap,
+  browser e2e, the supply-chain report and the aggregators. `commit-subjects` is the only job that counts as run, and
+  only when both of its steps ran here: the commit-subject gate and the `shellcheck` gate (SKIPPED when shellcheck
+  is not installed; then the job stays NOT RUN). CI uses the shellcheck that ubuntu-latest ships (0.9.x), so a newer
+  local one can accept what CI rejects. A local PASS is therefore never a CI PASS.
+- **One verdict line, last:** `GATES: PASS|FAIL (<n> run, <m> failed, <k> not run)`; "not run" counts SKIPPED gates
+  and the NOT RUN jobs. `--report path.json` writes the same verdict, every result and the NOT RUN list to a file,
+  for tools that hide lines of long output. With `--json` the JSON is the only thing on stdout and the verdict goes
+  to stderr, written after the JSON is flushed so that `2>&1` output also ends with it.
+- **Environment facts first** (`python scripts/preflight.py --facts`, informational, never fails the run): the Python
+  path and version, whether it is the project venv, whether pytest and pytest-xdist import, the node, npm and git
+  versions, `core.hooksPath`, the shell and whether `gh auth status` succeeds (only the exit status is used; no token
+  is read or printed). `--no-facts` skips it.
+
 To run the static gates automatically before every push, enable the hook once in each clone:
 
 ```bash
@@ -94,10 +115,38 @@ get only the commit-message check over `base..tip`, and only when a base is know
 for a new branch); with no base that check is SKIPPED and says so. A failing gate stops the push. Frontend gates are SKIPPED in
 the hook (the temporary worktree has no `node_modules`). `git push --no-verify` skips the hook; CI stays the gate.
 
+Before any gate the hook refuses two classes of wrong push (incident 2026-10-26: a delegated agent left a worktree
+on a detached `HEAD`, so the push and the pull request went out on an old commit):
+
+- **Wrong commit.** `HEAD` is detached and is neither a pushed commit nor an ancestor of one (the commits made on it
+  are on no branch), or a pushed ref is `refs/heads/<current branch>` and its sha is not `HEAD`. The message prints
+  both shas and the fix: check the ancestry (`git merge-base --is-ancestor <branch> HEAD`), then
+  `git branch -f <branch> HEAD`. Pushing another branch from a clean `HEAD` stays allowed.
+- **Identity.** Every commit the push adds (not reachable from the remote sha or from `origin/main`) must have
+  author and committer e-mail equal to this repository's `git config user.email`, no AI identity and no AI
+  attribution (`aeos.core.commit_identity` and `aeos.core.attribution`, the broker's own checks). The message names
+  the commits and the exact fix (`git config user.email`, then `git rebase -r <base> --exec '<amend>'`, where
+  `<amend>` is `git merge-base --is-ancestor HEAD origin/main || git commit --amend --no-edit --reset-author
+  --allow-empty`: commits that `origin/main` already has keep their author); it never prints an address. The address is set per repository, never committed.
+
 The hook picks its Python in this order: `AEOS_GATES_PYTHON` (an existing executable; the hook stops with an error
 if it is not), the `.venv` of the checkout, the `.venv` of the main checkout (a linked worktree has none of its
 own, found only when the common git directory is a `.git`; never link or junction one into a worktree), then `python3` or `python` from `PATH` with a warning. Gates
 that need ruff or mypy report FAIL, not SKIPPED, when the chosen Python does not have them.
+
+### Run the tests with a preflight
+
+`scripts/run_tests.sh [--deadline MINUTES] [--] [pytest arguments]` runs the backend suite as CI does
+(`pytest -q -m "not integration and not network" -n logical`, then your arguments). It exists because a background
+test run once failed on a missing dependency and again because zsh does not word-split an unquoted variable: the
+script is `bash` with `set -euo pipefail` and keeps its arguments in arrays. Before pytest starts it runs
+`python -m pip check` and imports `pytest` and `xdist`; a missing or conflicting package stops the run (exit 2) with
+the package named, and pytest is never started. `--deadline` (or `AEOS_TEST_DEADLINE_MIN`) stops the run after that
+many minutes with exit 124, through `scripts/run_with_deadline.py` because macOS has no `timeout`. The interpreter is
+chosen as the pre-push hook does (`AEOS_GATES_PYTHON`, the `.venv`, the main checkout's `.venv`, `python3`). The last
+line of output is always `RUN_TESTS: PASS rc=<n>` or `RUN_TESTS: FAIL rc=<n>`, so grep for it instead of trusting a
+tail of the log. macOS arm64 is proven; Windows and Intel macOS are NOT-PROVEN (Windows runs the suite with
+`python -m pytest` directly). CI lints the shell scripts with `shellcheck scripts/*.sh scripts/git-hooks/pre-push`.
 
 Commit subjects follow Conventional Commits, `type(scope)?!?: description` (types `feat`, `fix`, `docs`,
 `test`, `ci`, `build`, `chore`, `refactor`, `perf`, `style`, `revert`, `security`; at most 100 characters;
@@ -120,7 +169,8 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
   JUnit XML as the artifact `junit-backend-<os>-shard-<k>`.
 - **Commit subjects.** `commit subjects [G1]` runs only on pull requests (`ubuntu-latest`, full history) and
   checks the subjects and the no-attribution rule (message, author and committer e-mail, merge commits
-  included) of the pull request's commits with `scripts/commit_subject.py`.
+  included) of the pull request's commits with `scripts/commit_subject.py`, and runs `shellcheck` over the shell
+  scripts (`scripts/*.sh`, `scripts/git-hooks/pre-push`).
 - **Verifier.** `backend verifier [G2] (macos-latest)` runs the real trusted-suite verifier test.
 - **Required names are aggregators.** The ruleset on `main` requires `backend [G1,G2] (<os>)` for each
   OS. These are small jobs on `ubuntu-latest` that wait for every backend job of their OS. They pass only

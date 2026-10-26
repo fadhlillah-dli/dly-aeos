@@ -48,6 +48,7 @@ def _hermetic_git_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     empty.write_text("", encoding="utf-8")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setattr(gates, "run_facts", lambda: [])  # no preflight subprocess (it asks gh about its login)
 
 
 # ------------------------------------------------------------------ throwaway repositories
