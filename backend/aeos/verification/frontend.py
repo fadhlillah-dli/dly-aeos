@@ -15,6 +15,13 @@ For a change with ``frontend`` impact the verifier itself, through its runner an
    headless Chromium, stores a screenshot per state and runs the verifier's accessibility probe
    (``packs/ui_driver.py``; a WCAG subset, not axe-core).
 
+Every tool step (npm ci, vitest, tsc, vite build) runs in its own kill group on the runner and is recorded in its
+step list (``ProcessRunner.tool``): a process left behind is a survivor the verifier QUARANTINES, exactly like a
+Python step. Only the build-tool helper processes in ``BUILD_TOOL_HELPERS`` (esbuild's service process, which ends
+when its parent's pipe closes) get ``HELPER_GRACE_SECONDS`` more to exit, and the ones that did are listed on the
+step. The UI driver is sealed (``aeos.verification.seal``): only its sealed report and the screenshots it sealed by
+digest are evidence.
+
 ``frontend_tests`` is PASS only when vitest ran tests and every executed frontend step passed; FAIL when a test,
 the type check, the build or the lockfile itself failed; otherwise NOT_PROVEN with the reason (no node/npm on this
 host, container runner without a node runtime, install did not complete, no tests) - visible and non-blocking (G3
@@ -32,12 +39,21 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from aeos.verification import runner as runner_mod
-from aeos.verification.procs import ProcResult, run_process
-from aeos.verification.steps import StepContext, StepEvidence, StepResult, last_json_line, pack_text
+from aeos.verification.procs import ProcResult
+from aeos.verification.seal import sealed_output
+from aeos.verification.steps import StepContext, StepEvidence, StepResult, pack_text, run_driver
 
 INSTALL_TIMEOUT = 900.0
 STEP_TIMEOUT = 900.0
 UI_TIMEOUT = 600.0
+# Build-tool helper processes (``procgroup.helper_key`` names) that may still be exiting when the tool that started
+# them returns: esbuild's service process (vite/vitest transforms) ends when its parent's stdin pipe closes. They -
+# and only they - get HELPER_GRACE_SECONDS more; one still alive after that is a survivor like any other process.
+BUILD_TOOL_HELPERS = frozenset({"esbuild"})
+HELPER_GRACE_SECONDS = 10.0
+# kill-group step names in the runner's step list (survivors are attributed to them)
+STEP_NAMES = {"install": "frontend_install", "unit": "frontend_vitest", "typecheck": "frontend_typecheck",
+              "build": "frontend_build"}
 EXCLUDED_NAMES = frozenset({"node_modules", "dist", "build", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs",
                             ".git", "coverage"})
 # build output is excluded at the package root only (a source folder named build/dist deeper down is source);
@@ -168,6 +184,27 @@ def _env(rn: Any, fe: Path, *, egress: bool) -> dict[str, str]:
     return env
 
 
+def _exec(rn: Any, args: list[str], *, cwd: Path, env: dict[str, str], timeout: float, step: str,
+          prefix: str = "") -> ProcResult:
+    """One frontend tool step in its own kill group, recorded in the runner's step list (``ProcessRunner.tool``)."""
+    return rn.tool(args, cwd=cwd, env=env, timeout=timeout, step=prefix + step, helpers=BUILD_TOOL_HELPERS,
+                   helper_grace=HELPER_GRACE_SECONDS)
+
+
+def _containment(res: ProcResult) -> dict[str, Any]:
+    """What the step's kill group saw (stated on the step's evidence)."""
+    out: dict[str, Any] = {"kill_group": res.containment or "none", "survivors": list(res.survivors)[:10]}
+    if res.helper_exits:
+        out["helper_exits"] = list(res.helper_exits)[:10]
+    return out
+
+
+def _install(rn: Any, node: list[str], npm_cli: Path, fe: Path, *, prefix: str = "") -> ProcResult:
+    return _exec(rn, [*node, str(npm_cli), "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"],
+                 cwd=fe, env=_env(rn, fe, egress=True), timeout=INSTALL_TIMEOUT, step=STEP_NAMES["install"],
+                 prefix=prefix)
+
+
 def _classify_install(res: ProcResult) -> str:
     text = (res.stdout or "") + (res.stderr or "")
     if "in sync" in text or "EJSONPARSE" in text or "EUSAGE" in text or "ERESOLVE" in text:
@@ -175,13 +212,15 @@ def _classify_install(res: ProcResult) -> str:
     return "NOT_RUN"
 
 
-def _vitest(node: list[str], fe: Path, out: Path, env: dict[str, str], timeout: float) -> tuple[str, str, dict[str, Any]]:
+def _vitest(rn: Any, node: list[str], fe: Path, out: Path, env: dict[str, str], timeout: float, *,
+            prefix: str = "") -> tuple[str, str, dict[str, Any]]:
     cli = fe / "node_modules" / "vitest" / "vitest.mjs"
     if not cli.is_file():
         return "NOT_RUN", "the candidate lockfile provides no vitest", {}
     (fe / TRUSTED_CONFIG_NAME).write_text(trusted_config(fe), encoding="utf-8")
-    res = run_process([*node, str(cli), "run", "--config", str(fe / TRUSTED_CONFIG_NAME), "--root", str(fe),
-                       "--reporter=json", f"--outputFile={out}"], cwd=fe, env=env, timeout=timeout)
+    res = _exec(rn, [*node, str(cli), "run", "--config", str(fe / TRUSTED_CONFIG_NAME), "--root", str(fe),
+                     "--reporter=json", f"--outputFile={out}"], cwd=fe, env=env, timeout=timeout,
+                step=STEP_NAMES["unit"], prefix=prefix)
     data: dict[str, Any] = {}
     if out.is_file():
         try:
@@ -194,7 +233,8 @@ def _vitest(node: list[str], fe: Path, out: Path, env: dict[str, str], timeout: 
     info = {"exit_code": res.returncode, "timed_out": res.timed_out, "duration_s": res.duration_s,
             "total": data.get("numTotalTests"), "passed": data.get("numPassedTests"),
             "failed": data.get("numFailedTests"), "failed_suites": data.get("numFailedTestSuites"),
-            "pending": data.get("numPendingTests"), "tests": rows[:500], "output_tail": res.tail(3000)}
+            "pending": data.get("numPendingTests"), "tests": rows[:500], "output_tail": res.tail(3000),
+            **_containment(res)}
     if res.timed_out:
         return "FAIL", f"vitest timed out after {timeout:.0f}s", info
     if not data:
@@ -209,21 +249,22 @@ def _vitest(node: list[str], fe: Path, out: Path, env: dict[str, str], timeout: 
     return "PASS", f"vitest: {passed} frontend test(s) passed (verifier config)", info
 
 
-def _tool_step(node: list[str], script: Path, args: list[str], fe: Path, env: dict[str, str], timeout: float,
-               label: str) -> tuple[str, str, dict[str, Any]]:
+def _tool_step(rn: Any, node: list[str], script: Path, args: list[str], fe: Path, env: dict[str, str],
+               timeout: float, label: str, step: str) -> tuple[str, str, dict[str, Any]]:
     if not script.is_file():
         return "NOT_RUN", f"{label}: not provided by the candidate lockfile", {}
-    res = run_process([*node, str(script), *args], cwd=fe, env=env, timeout=timeout)
+    res = _exec(rn, [*node, str(script), *args], cwd=fe, env=env, timeout=timeout, step=step)
     info = {"exit_code": res.returncode, "timed_out": res.timed_out, "duration_s": res.duration_s,
-            "output_tail": res.tail(3000)}
+            "output_tail": res.tail(3000), **_containment(res)}
     if res.timed_out:
         return "FAIL", f"{label} timed out after {timeout:.0f}s", info
     return ("PASS", f"{label} passed", info) if res.returncode == 0 else (
         "FAIL", f"{label} failed (exit {res.returncode})", info)
 
 
-def run_package_tests(rn: Any, package_dir: Path, workdir: Path) -> dict[str, Any]:
-    """``npm ci --ignore-scripts`` + vitest (verifier config) for one package directory (project test baseline)."""
+def run_package_tests(rn: Any, package_dir: Path, workdir: Path, *, prefix: str = "") -> dict[str, Any]:
+    """``npm ci --ignore-scripts`` + vitest (verifier config) for one package directory (project test baseline),
+    each in its own kill group on *rn* (step names start with *prefix*)."""
     if not isinstance(rn, runner_mod.ProcessRunner):
         return {"status": "NOT_RUN", "summary": "the container runner's verifier image has no node runtime"}
     node, npm_cli, why = node_tools()
@@ -231,32 +272,43 @@ def run_package_tests(rn: Any, package_dir: Path, workdir: Path) -> dict[str, An
         return {"status": "NOT_RUN", "summary": why}
     fe = workdir / "fe"
     files = _materialise(package_dir, fe)
-    install = run_process([*node, str(npm_cli), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
-                           "--loglevel=error"], cwd=fe, env=_env(rn, fe, egress=True), timeout=INSTALL_TIMEOUT)
+    install = _install(rn, node, npm_cli, fe, prefix=prefix)
     inst = {"exit_code": install.returncode, "timed_out": install.timed_out, "duration_s": install.duration_s,
-            "output_tail": install.tail(2000), "command": "npm ci --ignore-scripts"}
+            "output_tail": install.tail(2000), "command": "npm ci --ignore-scripts", **_containment(install)}
     if install.returncode != 0 or install.timed_out:
         st = _classify_install(install)
         return {"status": st, "summary": f"npm ci --ignore-scripts did not complete (exit {install.returncode})",
                 "install": inst, "files": files}
     reports = workdir / "r"
     reports.mkdir(parents=True, exist_ok=True)
-    st, summary, info = _vitest(node, fe, reports / "vitest-baseline.json", _env(rn, fe, egress=False), STEP_TIMEOUT)
+    st, summary, info = _vitest(rn, node, fe, reports / "vitest-baseline.json", _env(rn, fe, egress=False),
+                                STEP_TIMEOUT, prefix=prefix)
     return {"status": st, "summary": summary, "install": inst, "files": files, **info}
 
 
+UI_STEP = "ui_states"
+
+
 def run_ui(rn: Any, dist: Path, out_dir: Path, timeout: float = UI_TIMEOUT, *,
-           options: dict[str, Any] | None = None, backend: Path | None = None, step: str = "") -> dict[str, Any]:
+           options: dict[str, Any] | None = None, backend: Path | None = None,
+           ctx: StepContext | None = None) -> dict[str, Any]:
     """The UI state/a11y driver against a built bundle, through the runner (process runner only). With
-    ``options["live_app"]`` the driver imports the candidate backend (*backend* on ``PYTHONPATH``)."""
-    named: dict[str, Any] = {"step": step} if step else {}  # the verifier's step list (kill-group survivors)
-    res = rn.python(["-c", pack_text("ui_driver.py"), str(dist), str(out_dir), browsers_path(),
-                     json.dumps(options) if options else "-"],
-                    pythonpath=backend if backend is not None else out_dir.parent, autoload=False, timeout=timeout,
-                    **named)
-    data = last_json_line(res.stdout)
+    ``options["live_app"]`` the driver imports the candidate backend (*backend* on ``PYTHONPATH``).
+
+    With the verifier's step context (*ctx* carrying its result seal) the driver is the named step ``ui_states``
+    and sealed: the report is only what it sealed at its very end, its screenshots are re-checked against the
+    digests it sealed (a replaced file is result tampering) and ``sealed`` is true. A direct call without the seal
+    uses the printed report (``sealed`` false)."""
+    args = ["-c", pack_text("ui_driver.py"), str(dist), str(out_dir), browsers_path(),
+            json.dumps(options) if options else "-"]
+    step_ctx = ctx if ctx is not None else StepContext(runner=rn, snapshot=dist, workdir=out_dir.parent)
+    run = run_driver(step_ctx, UI_STEP, args, pythonpath=backend if backend is not None else out_dir.parent,
+                     autoload=False, timeout=timeout, out_dir=out_dir, runner=rn)
+    res, data = run.res, run.data
     if not data:
-        data = {"status": "ERROR", "reason": f"ui driver produced no report (exit {res.returncode}): {res.tail(400)}"}
+        what = "sealed report" if run.sealed else "report"
+        data = {"status": "ERROR", "reason": f"ui driver produced no {what} (exit {res.returncode}): {res.tail(400)}"}
+    data["sealed"] = run.sealed
     data["exit_code"] = res.returncode
     data["duration_s"] = res.duration_s
     return data
@@ -287,9 +339,14 @@ def ui_result(ui: dict[str, Any], out_dir: Path) -> StepResult:
                                "wcag": "-", "target": "page", "detail": str(errors[0])[:120]})
         else:
             unproven.append(f"{s.get('state')}/{s.get('viewport')}")
+    unsealed_shots: list[str] = []
     for s in states:
-        shot = out_dir / str(s.get("screenshot") or "")
-        if shot.is_file() and shot.suffix == ".png":
+        name = str(s.get("screenshot") or "")
+        shot = out_dir / name
+        if ui.get("sealed") and name and not sealed_output(ui, name):
+            unsealed_shots.append(name)  # no sealed digest: never evidence (the file could be anyone's)
+            continue
+        if name and shot.is_file() and shot.suffix == ".png":
             crashed = " - the render raised an uncaught script error" if s.get("page_errors") else ""
             evidence.append(StepEvidence("SCREENSHOT", f"UI state '{s.get('state')}' ({s.get('viewport')}) of the "
                                                        f"candidate bundle (API answered by "
@@ -303,10 +360,14 @@ def ui_result(ui: dict[str, Any], out_dir: Path) -> StepResult:
     if ui.get("live_app_error"):
         stated.append(f"UI empty state: the candidate app could not answer it ({str(ui['live_app_error'])[:160]}); "
                       "the verifier's generic answers were used")
+    if unsealed_shots:
+        stated.append(f"{len(unsealed_shots)} UI screenshot(s) without a digest in the driver's sealed report were not "
+                      "used as evidence")
     content = {"suite": "ui-a11y", "status": status, "probe": "verifier a11y probe (WCAG subset; not axe-core)",
                "rules": ui.get("rules"), "browser": ui.get("browser"), "states": states,
                "violations": violations[:200], "unproven_states": unproven, "live_app": ui.get("live_app"),
-               "live_app_error": ui.get("live_app_error"),
+               "live_app_error": ui.get("live_app_error"), "sealed_report": bool(ui.get("sealed")),
+               "screenshots_without_sealed_digest": unsealed_shots[:20],
                "not_covered": ["colour contrast", "focus order / keyboard traps", "screen-reader announcements",
                                "routes other than the bundle entry '/'"]}
     evidence.insert(0, StepEvidence("TEST_REPORT", f"UI states + accessibility probe of the candidate bundle: {status} "
@@ -354,32 +415,31 @@ def run(ctx: StepContext) -> list[StepResult]:
     reports = ctx.workdir / "r"
     reports.mkdir(parents=True, exist_ok=True)
     steps: dict[str, dict[str, Any]] = {}
-    install = run_process([*node, str(npm_cli), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
-                           "--loglevel=error"], cwd=fe, env=_env(ctx.runner, fe, egress=True), timeout=INSTALL_TIMEOUT)
+    install = _install(ctx.runner, node, npm_cli, fe)
     inst_status = "PASS" if install.returncode == 0 and not install.timed_out else _classify_install(install)
     steps["install"] = {"status": inst_status, "command": "npm ci --ignore-scripts", "exit_code": install.returncode,
                         "timed_out": install.timed_out, "duration_s": install.duration_s,
-                        "output_tail": install.tail(2000),
+                        "output_tail": install.tail(2000), **_containment(install),
                         "egress": "package registry reachable for this step only; not enforced on the process runner"}
     results: list[StepResult] = []
     env = _env(ctx.runner, fe, egress=False)
     if inst_status == "PASS":
-        st, summary, info = _vitest(node, fe, reports / "vitest.json", env, STEP_TIMEOUT)
+        st, summary, info = _vitest(ctx.runner, node, fe, reports / "vitest.json", env, STEP_TIMEOUT)
         steps["unit"] = {"status": st, "summary": summary, **info}
         if (fe / "tsconfig.json").is_file():
-            st, summary, info = _tool_step(node, fe / "node_modules" / "typescript" / "bin" / "tsc", ["-b", "--noEmit"],
-                                           fe, env, STEP_TIMEOUT, "type check (tsc -b --noEmit)")
+            st, summary, info = _tool_step(ctx.runner, node, fe / "node_modules" / "typescript" / "bin" / "tsc",
+                                           ["-b", "--noEmit"], fe, env, STEP_TIMEOUT, "type check (tsc -b --noEmit)",
+                                           STEP_NAMES["typecheck"])
             steps["typecheck"] = {"status": st, "summary": summary, **info}
-        st, summary, info = _tool_step(node, fe / "node_modules" / "vite" / "bin" / "vite.js", ["build"], fe, env,
-                                       STEP_TIMEOUT, "build (vite build)")
+        st, summary, info = _tool_step(ctx.runner, node, fe / "node_modules" / "vite" / "bin" / "vite.js", ["build"],
+                                       fe, env, STEP_TIMEOUT, "build (vite build)", STEP_NAMES["build"])
         steps["build"] = {"status": st, "summary": summary, **info}
         dist = fe / "dist"
         if st == "PASS" and (dist / "index.html").is_file():
             platform = (ctx.snapshot / "backend" / "aeos" / "api" / "app.py").is_file() and root == "frontend"
-            named = "ui_states" if ctx.seal_step is not None else ""
             ui = (run_ui(ctx.runner, dist, reports / "ui", backend=ctx.snapshot / "backend",
-                         options={"fixtures": PLATFORM_UI_FIXTURES, "live_app": "aeos"}, step=named)
-                  if platform else run_ui(ctx.runner, dist, reports / "ui", step=named))
+                         options={"fixtures": PLATFORM_UI_FIXTURES, "live_app": "aeos"}, ctx=ctx)
+                  if platform else run_ui(ctx.runner, dist, reports / "ui", ctx=ctx))
             results.append(ui_result(ui, reports / "ui"))
         else:
             msg = "UI states/a11y not rendered: no built bundle (dist/index.html)"
@@ -402,7 +462,11 @@ def run(ctx: StepContext) -> list[StepResult]:
                    f"{install.timed_out}): {last[0][:160]}")
     content = {"suite": "frontend", "package_root": root or ".", "files_materialised": files, "status": status,
                "steps": steps, "excluded": sorted(EXCLUDED_NAMES),
-               "trust": "LOW for the candidate's own frontend tests; selection/reporting by the verifier config"}
+               "trust": "LOW for the candidate's own frontend tests; selection/reporting by the verifier config",
+               "kill_group": "every tool step in its own kill group (survivors QUARANTINED); build-tool helpers "
+                             f"{sorted(BUILD_TOOL_HELPERS)} get {HELPER_GRACE_SECONDS:.0f}s more to exit",
+               "report_integrity": "vitest/tsc/vite come from the candidate lockfile: their reports are the candidate "
+                                   "toolchain's own (not sealed by the verifier)"}
     ev = StepEvidence("TEST_REPORT", f"Frontend step (npm ci --ignore-scripts, vitest, type check, build) on "
                                      f"{root or '.'}: {status}", content, "E2", "frontend_tests")
     details = {"package_root": root or ".", "steps": {k: v.get("status") for k, v in steps.items()}}

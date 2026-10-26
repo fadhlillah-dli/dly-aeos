@@ -8,7 +8,8 @@ keputusan/review", §22 "API contract ... disepakati", §31 G3 "contract"; W6-04
   new required parameters, lost defaults or removed dataclass fields are BREAKING; added names and added optional
   parameters are compatible;
 * **OpenAPI**: for the DLY AEOS layout the base and head apps generate their documents (candidate code, through the
-  verifier runner); a changed ``openapi*.json|yaml`` file is parsed statically. Removed operations, newly required
+  verifier runner, under the verifier's result seal with the document's digest sealed); a changed
+  ``openapi*.json|yaml`` file is parsed statically. Removed operations, newly required
   parameters and newly required request bodies are BREAKING; response schemas are not analysed (stated);
 * other contract formats (proto, GraphQL, JSON schema, AsyncAPI) are listed as changed and NOT analysed.
 
@@ -29,14 +30,14 @@ from pathlib import Path
 from typing import Any
 
 from aeos.verification import scope
+from aeos.verification.seal import sealed_output
 from aeos.verification.steps import (
     StepContext,
     StepEvidence,
     StepResult,
-    last_json_line,
     outcomes_for,
     pack_text,
-    run_named,
+    run_driver,
 )
 
 OPENAPI_FILE = re.compile(r"(^|/)(openapi|swagger)[\w.-]*\.(json|ya?ml)$", re.IGNORECASE)
@@ -213,11 +214,15 @@ def _generated_openapi(ctx: StepContext, tree: Path, name: str) -> tuple[dict[st
     out = ctx.workdir / "r" / f"openapi-{name}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     # named step: the base tree's dump imports reviewed code only (verifier.TRUSTED_ONLY_STEPS), the head's runs
-    # candidate code (a process outliving it is tampering)
-    res = run_named(ctx, f"contract_openapi_{name}", ["-c", pack_text("openapi_dump.py"), rn.to_container(str(out))],
-                    pythonpath=tree / "backend", autoload=False, timeout=min(ctx.timeout, 300.0))
-    status = last_json_line(res.stdout)
-    if not status.get("ok") or not out.is_file():
+    # candidate code (a process outliving it is tampering). Sealed: only the status the driver sealed at its end
+    # counts, and the document must still have the digest it sealed (a rewrite afterwards is result tampering).
+    run = run_driver(ctx, f"contract_openapi_{name}", ["-c", pack_text("openapi_dump.py"), rn.to_container(str(out))],
+                     pythonpath=tree / "backend", autoload=False, timeout=min(ctx.timeout, 300.0), out_dir=out.parent)
+    res, status = run.res, run.data
+    if run.seal_missing:
+        return None, (f"the OpenAPI dump produced no usable sealed result (missing, or it failed the integrity "
+                      f"check; exit {res.returncode}, timed out {res.timed_out})")
+    if not status.get("ok") or not out.is_file() or (run.sealed and not sealed_output(status, out.name)):
         return None, str(status.get("error") or f"no document (exit {res.returncode}, timed out {res.timed_out})")
     return _load_doc(out), ""
 

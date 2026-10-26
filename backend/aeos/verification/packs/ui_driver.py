@@ -26,10 +26,16 @@ accessibility probe: a fixed subset of WCAG 2.x checks (document language, title
 accessible names of controls, form labels, duplicate referenced ids, positive tabindex, reflow at 390 px). It is
 NOT axe-core and NOT a full WCAG audit: colour contrast, focus order and screen-reader behaviour stay NOT-PROVEN.
 Prints one JSON line; never raises to the verifier.
+
+The verifier's result seal (``aeos.verification.seal``) is imported before anything else: the host uses only the
+report sealed at the very end of this driver, and only the screenshots whose sha256 it sealed (``files``) - the
+live app imports candidate code, which could otherwise print its own report or replace a screenshot afterwards.
+Absent outside a sealed verifier step.
 """
 
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import os
@@ -40,6 +46,11 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+try:
+    import aeos_vseal as _vseal
+except Exception:
+    _vseal = None
 
 STATES = ("loading", "error", "unauthenticated", "empty")
 VIEWPORTS = {"desktop": {"width": 1280, "height": 800}, "mobile": {"width": 390, "height": 844}}
@@ -313,10 +324,28 @@ def main(argv: list[str], out: dict[str, Any]) -> None:
                violations=sum(len(r["violations"]) for r in results))
 
 
+def _digests(out_dir: Path, states: list[dict[str, Any]]) -> dict[str, str]:
+    """sha256 of every screenshot the report names (sealed with it: the host uses no other file)."""
+    out: dict[str, str] = {}
+    for s in states:
+        name = str(s.get("screenshot") or "")
+        path = out_dir / name
+        if name and name == path.name and path.is_file():
+            out[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return out
+
+
 if __name__ == "__main__":
     result: dict[str, Any] = {"status": "NOT_RUN"}
     try:
         main(sys.argv, result)
     except Exception as exc:  # reported, never raised to the verifier
         result.update(status="ERROR", reason=type(exc).__name__ + ": " + str(exc)[:300])
+    try:
+        result["files"] = _digests(Path(sys.argv[2]), list(result.get("states") or []))
+    except Exception as exc:  # no digest, no screenshot evidence
+        result["files"] = {}
+        result["digest_error"] = type(exc).__name__
+    if _vseal is not None:
+        _vseal.emit("result", d=json.loads(json.dumps(result, default=str)))
     print(json.dumps(result, default=str))
