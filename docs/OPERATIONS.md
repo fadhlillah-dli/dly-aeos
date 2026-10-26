@@ -457,7 +457,10 @@ Wave 7 additions:
   hold: `aeos policy decide --kind RISK_ACCEPTANCE --target-type worker_integrity_hold --target-id <hold id> --as
   <SUPER_ADMIN> --domain <PERSONAL|OFFICE> --days 1 --rationale "<what you checked>"` (your explicit choice of
   domain; the hold is host-wide). A later finding needs a new one. A domain's views show the hold, but another
-  domain's run id and findings only as a count (`aeos worker status --domain <that domain>` shows them).
+  domain's run id and findings only as a count (`aeos worker status --domain <that domain>` shows them). In the
+  Control Center the hold is a red panel on **Pekerjaan Live** (and a banner on **Ringkasan**) with the findings,
+  the command above and, for a SUPER_ADMIN, **Catat rekonsiliasi** - the same RISK_ACCEPTANCE through
+  `POST /api/decisions`, bound to the hold id, in the domain of the session (two explicit steps, 1-day expiry).
 * **CPU cap**: `limits.max_cpus` is a Windows Job Object CPU-rate hard cap in the process sandbox (`run.caps.cpu_cap`
   records the rate in force); on macOS/Linux it stays a reservation only. `limits.max_processes` is part of every
   TaskSpec (256), the same cap for both sandboxes.
@@ -472,7 +475,8 @@ Wave 7 additions:
 * **Doctor `worker.route_behaviour`**: per APPROVED/TRIAL worker route, the §43 measure `tool_schema_failures` of a
   trusted evaluation on the route's current configuration (+ verified runs). UNKNOWN until such runs exist, STALE
   after a configuration/engine change; FAILED only above the owner's threshold - a POLICY decision with target
-  `worker_route_behaviour:tool_schema_failures` and `details.max_failure_rate` (0..1, `POST /api/decisions`).
+  `worker_route_behaviour:tool_schema_failures` and `details.max_failure_rate` (0..1, `POST /api/decisions`; in
+  the Control Center: Kesiapan -> the check -> **Tetapkan ambang pemilik**, PERSONAL session, entered as a percentage).
   Without it, measured failures are reported, never judged.
 
 ## Commit identity and no AI attribution (owner rule, AGENTS.md invariant 11)
