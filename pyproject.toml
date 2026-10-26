@@ -42,6 +42,9 @@ dependencies = [
 dev = [
   "pytest>=8",
   "pytest-cov>=5",
+  # Parallel test run (pytest -n auto). CI splits the suite into shards (tests/conftest.py --shard K/N) and
+  # runs each shard on parallel workers, -n logical (ADR-0115 amendment "CI in about ten minutes").
+  "pytest-xdist>=3.8",
   "respx>=0.21",
   "ruff>=0.6",
   "mypy>=1.11",
