@@ -12,7 +12,7 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ## [0.1.0] - 2026-10-26
 
-First release of the local-first control plane. It contains pull requests #1 to #12 (#8 was
+First release of the local-first control plane. It contains pull requests #1 to #13 (#8 was
 closed unmerged and replaced by #9). Anything that needs the owner's credentials, a company tenant or a
 tool that was absent on the build host is NOT-PROVEN. The full list and the owner setup steps are
 in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
@@ -142,6 +142,24 @@ in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
   trailer. Outbound PR, issue and page text with AI attribution is refused, and the renderers use
   neutral role labels. Provenance stays inside DLY AEOS's own records.
 
+- **Every owner decision has a control (#13).** The owner can now record these through the Control
+  Center or the CLI:
+  - the authenticated-screenshot decision (a POLICY preset; capture stays unauthenticated);
+  - the role-evaluation threshold (`aeos work role-eval-threshold` and a control on *Organisasi &
+    Peran*);
+  - the worker route-behaviour threshold (`aeos policy route-threshold`).
+
+  `aeos policy decisions` prints decision ids so a delegation can be revoked by id.
+- **Owner checklist and coverage matrix (#13).** [docs/OWNER_ACTIONS.md](docs/OWNER_ACTIONS.md) lists
+  every remaining owner step in order, macOS first (Apple Silicon and Intel), with every command
+  checked against the CLI. [docs/IMPLEMENTATION_COVERAGE.md](docs/IMPLEMENTATION_COVERAGE.md) traces
+  all 1,656 master requirements through four audit rounds:
+  - 1,486 implemented and tested;
+  - 81 waiting on an owner step or decision;
+  - 9 externally blocked;
+  - 73 design-only by the master's own statement;
+  - 7 not applicable.
+
 ### Changed
 
 - **Public repository on GitHub Free (#9, ADR-0115, owner decision 2026-10-25).** Pull requests and
@@ -152,6 +170,8 @@ in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
   The backend suite and the bootstrap run on `windows-latest`, `macos-latest` (Apple Silicon) and
   `macos-26-intel` (x86_64). mypy checks the darwin and win32 code paths. The real trusted-suite
   verifier test runs on the macOS arm64 job.
+- **Type checking is a full gate (#13).** All 13 modules still exempt from mypy were cleaned (235
+  errors to 0 on darwin and win32), and no module is exempt any more. The behaviour is unchanged.
 - **Module boundaries (#11).** The identity facade burn-down cut module boundary crossings from 132
   to 110.
 - **Licence metadata (this release).** `pyproject.toml` now uses the PEP 639 licence expression
@@ -188,6 +208,9 @@ in the [v0.1.0 release notes](docs/releases/v0.1.0.md).
   step's process group and session received the 2-second exit grace, acted, and exited unreported. A
   detached member is now a survivor at once and is killed, and an empty first sweep is repeated
   briefly.
+- **OpenBao root token guidance (#13).** The README, the setup guides and the `vault init` banner told
+  the owner to store the root token. `vault init` actually revokes it once setup completes, so only the
+  unseal keys are kept offline.
 - **Merge integration (#4, #11).** Secret purpose contract, provider vocabulary, approved-pin
   drift, the migration chain order, facade imports, and the shared health-path rule for the
   registry, the checks API and the observer.
