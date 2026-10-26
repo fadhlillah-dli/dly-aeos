@@ -26,6 +26,7 @@ from sqlalchemy import select
 
 from aeos.broker import bitbucket_broker, git_broker
 from aeos.broker import facade as broker
+from aeos.core.attribution import find_ai_attribution
 from aeos.core.errors import Blocked, PolicyDenied
 from aeos.core.hashing import content_hash
 from aeos.core.timeutil import utcnow
@@ -573,11 +574,14 @@ def test_push_whose_commits_carry_the_github_identity_is_refused_on_bitbucket(db
     assert row.details["code"] == "COMMIT_IDENTITY_MISMATCH" and row.details["provider"] == "bitbucket"
 
 
-@pytest.mark.parametrize("trailer", [
+ATTRIBUTION_TRAILERS = [
     "Co-Authored-By: Claude <noreply@anthropic.com>",
     "\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)",
     "AEOS-Route: worker.test-free",
-])
+]
+
+
+@pytest.mark.parametrize("trailer", ATTRIBUTION_TRAILERS)
 def test_push_whose_commit_carries_ai_attribution_is_refused_on_bitbucket(db, office_run, monkeypatch, trailer):
     """The Bitbucket path runs the same commit gate as GitHub: a commit authored and committed by the configured
     company identity but whose message carries AI attribution never reaches Bitbucket (AI_ATTRIBUTION_IN_COMMIT,
@@ -834,3 +838,11 @@ def test_capability_grant_expiry_and_one_shot_still_apply(db, office_run, monkey
         broker.push_task_branch(db, run_id=run.id, worktree=str(office_run["src"]), branch=BRANCH,
                                 repo_full_name=REPO)
     assert e.value.code == "CAPABILITY_MISSING"
+
+
+def test_the_attribution_samples_of_this_file_are_attribution_for_the_canonical_guard():
+    """The samples of this file only prove the Bitbucket refusal while the canonical guard (aeos.core.attribution)
+    still calls them attribution; an ordinary trailer stays clean."""
+    for trailer in ATTRIBUTION_TRAILERS + ["[AEOS] t\n\nevidence\n\n\U0001F916 Generated with Claude Code"]:
+        assert find_ai_attribution(f"aeos: candidate\n\n{trailer}"), trailer
+    assert not find_ai_attribution("aeos: candidate\n\nRefs: nothing")

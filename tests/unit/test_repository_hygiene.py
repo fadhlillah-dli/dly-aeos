@@ -7,17 +7,20 @@ carry an AI-assistant attribution line: commits and files carry no attribution (
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import re
 import subprocess
 import sys
 import tomllib
+import warnings
 from pathlib import Path
 
 import pytest
 import yaml
 
+from aeos.core.attribution import AI_VENDOR_DOMAINS, ai_identity_problem, find_ai_attribution
 from aeos.core.paths import repo_root
 from aeos.core.pii import redact_pii
 
@@ -278,36 +281,104 @@ def test_readme_states_the_licence_and_links_the_governance_files():
 
 
 # ------------------------------------------------------------------ no AI attribution anywhere
-# Assembled from parts so that this file does not itself contain the markers it looks for.
-_AI_NAMES = r"claude|anthropic|openai|chatgpt|\bgpt\b|copilot|gemini|codex|cursor|devin|aider|codeium|tabnine"
-CO_AUTHOR = re.compile(r"(?im)^[ \t>#*-]*" + "co-authored" + r"-by:(?P<who>[^\n]*)$")
-BOT = re.compile(rf"(?i){_AI_NAMES}|\[bot\]|\bbot\b")
-GENERATED = re.compile(r"(?i)generated\s+(?:with|by)\s+\[?\s*(?:" + _AI_NAMES + r"|an?\s+ai\b)")
+# One implementation (AGENTS.md invariant 11, ADR-0121): this module holds NO attribution regex of its own. What counts
+# as AI attribution is decided by aeos.core.attribution (find_ai_attribution / ai_identity_problem) alone; a second,
+# private pattern set drifts from it (2026-10-26: misses and false positives). A gap in the guard is fixed in the
+# guard, never patched here. Samples below are assembled from parts so that this file holds no marker verbatim.
 AI_ADDRESS = "noreply" + "@" + "anthropic.com"
-ATTRIBUTION_ALLOW = {"tests/unit/test_repository_hygiene.py"}
-# The product's own guards (ADR-0121: outbound attribution guard, commit identity guard) and the tests that prove
-# they refuse attribution must contain samples of what they refuse. Only those may: the attribution guard module
-# itself and test files that exercise one of the guards.
 ATTRIBUTION_GUARD_MODULE = "backend/aeos/core/attribution.py"
-_GUARD_MARKERS = ("aeos.core.attribution", "find_ai_attribution", "AI_ATTRIBUTION", "aeos.core import commit_identity",
-                  "aeos.core.commit_identity", "git.commit_identity")
-
-
-def _is_guard_sample_file(rel: str, text: str) -> bool:
-    if rel == ATTRIBUTION_GUARD_MODULE:
-        return True
-    return rel.startswith("tests/") and rel.endswith(".py") and any(m in text for m in _GUARD_MARKERS)
+GUARD_IMPORT = "aeos.core.attribution"
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf", ".docx", ".xlsx", ".pptx", ".zip",
                    ".gz", ".sqlite3", ".sqlite", ".woff", ".woff2", ".ttf", ".otf", ".pyc"}
 
 
-def attribution_findings(rel: str, text: str) -> list[str]:
-    found = [f"{rel}: co-author trailer naming an AI or bot: {m.group(0).strip()}"
-             for m in CO_AUTHOR.finditer(text) if BOT.search(m.group("who"))]
-    found += [f"{rel}: generated-by footer: {m.group(0)}" for m in GENERATED.finditer(text)]
-    if AI_ADDRESS in text.lower():
-        found.append(f"{rel}: AI attribution address")
+def parse_python(source: str | bytes) -> ast.Module:
+    """Parse Python source the way the interpreter reads a file: bytes keep their BOM and coding cookie handling, and a
+    str that starts with a BOM (a decoded file) is read without it. Raises SyntaxError / ValueError when unparsable."""
+    return ast.parse(source.lstrip("\ufeff") if isinstance(source, str) else source)
+
+
+def imports_attribution_guard(text: str | bytes) -> bool:
+    """True when the Python source really imports aeos.core.attribution (``import aeos.core.attribution``,
+    ``from aeos.core.attribution import x`` or ``from aeos.core import attribution``). Decided on the syntax tree, so a
+    comment, a docstring or a string that merely names the module proves nothing."""
+    try:
+        tree = parse_python(text)
+    except (SyntaxError, ValueError):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(a.name == GUARD_IMPORT or a.name.startswith(GUARD_IMPORT + ".")
+                                                for a in node.names):
+            return True
+        if isinstance(node, ast.ImportFrom) and node.level == 0:
+            if node.module == GUARD_IMPORT or (node.module or "").startswith(GUARD_IMPORT + "."):
+                return True
+            if node.module == "aeos.core" and any(a.name == "attribution" for a in node.names):
+                return True
+    return False
+
+
+# The product's own guard (ADR-0121) and the tests that prove it refuses attribution must contain samples of what it
+# refuses. Only those may: the guard module itself and test files that import it.
+def _is_guard_sample_file(rel: str, text: str | bytes) -> bool:
+    if rel == ATTRIBUTION_GUARD_MODULE:
+        return True
+    return rel.startswith("tests/") and rel.endswith(".py") and imports_attribution_guard(text)
+
+
+# The guard screens OUTBOUND text, so it is deliberately conservative: product prose such as "AI-assisted software
+# engineering" or an Indonesian doctor message "dibuat dengan Claude Code <version>" (a recorded tool version) reads to
+# it as an AI-produced statement. These reviewed lines are the only ones accepted: (file, finding code, fragment of
+# the offending line). A new line in the same file is still checked; an entry that no longer matches anything is
+# stale and fails the scan, so the list can only shrink. Do not add a regex here: reword the line or extend the guard.
+REVIEWED_PROSE = (
+    ("CITATION.cff", "GENERATED_WITH_AI", "AI-assisted software engineering"),
+    ("CITATION.cff", "GENERATED_WITH_AI", "AI-assisted development"),
+    ("README.md", "GENERATED_WITH_AI", "AI-assisted software engineering"),
+    ("docs/releases/v0.1.0.md", "GENERATED_WITH_AI", "control plane for AI-assisted"),
+    ("docs/OPERATIONS.md", "GENERATED_WITH_AI", "written with the help of"),
+    ("docs/OPERATIONS.md", "GENERATED_WITH_AI", '"AI-generated"'),
+    ("backend/aeos/doctor/checks/claude.py", "GENERATED_WITH_AI", "dibuat dengan Claude Code {version}"),
+    ("backend/aeos/doctor/checks/worker.py", "GENERATED_WITH_AI", "dibuat dengan OpenCode {recorded}"),
+)
+
+
+def attribution_findings(rel: str, text: str, reviewed: set[int] | None = None,
+                         prose: tuple[tuple[str, str, str], ...] | None = None) -> list[str]:
+    """The canonical guard's findings for *text* as ``rel: ...`` lines, minus the reviewed prose. A finding is accepted
+    only when its line still has NO finding once the reviewed fragment is removed, so a real attribution appended to a
+    reviewed line stays red. Indexes of *prose* (default REVIEWED_PROSE) entries whose fragment sits on a finding line
+    are added to *reviewed* (for the stale-entry check)."""
+    entries = REVIEWED_PROSE if prose is None else prose
+    lines = text.split("\n")
+    found: list[str] = []
+    for finding in find_ai_attribution(text):
+        raw = lines[finding.line - 1].rstrip("\r") if 0 < finding.line <= len(lines) else ""
+        # every reviewed fragment of this file and code that sits on the line (a line may quote several forms)
+        matches = [i for i, (r, code, fragment) in enumerate(entries)
+                   if r == rel and code == finding.code and fragment in raw]
+        residue = raw
+        for i in matches:
+            residue = residue.replace(entries[i][2], "")
+        if reviewed is not None:
+            reviewed.update(matches)
+        if not matches or find_ai_attribution(residue):
+            found.append(f"{rel}: {finding.describe()}")
     return found
+
+
+def scan_attribution(files: dict[str, str], prose: tuple[tuple[str, str, str], ...] | None = None
+                     ) -> tuple[list[str], list[tuple[str, str, str]]]:
+    """(findings, stale reviewed-prose entries) for a ``{relative path: text}`` map. Guard-sample files are skipped. An
+    entry is stale when its fragment sits on no finding line of its file: it must be removed."""
+    entries = REVIEWED_PROSE if prose is None else prose
+    findings: list[str] = []
+    reviewed: set[int] = set()
+    for rel, text in files.items():
+        if _is_guard_sample_file(rel, text):
+            continue
+        findings += attribution_findings(rel, text, reviewed, entries)
+    return findings, [entry for i, entry in enumerate(entries) if i not in reviewed]
 
 
 def _repository_files() -> list[str]:
@@ -324,26 +395,49 @@ def test_attribution_detector_flags_trailers_footers_and_the_address():
     assert attribution_findings("x.md", "\U0001f916 Generated" + " with [Claude Code](https://claude.ai)\n")
     assert attribution_findings("x.md", "reach " + AI_ADDRESS.upper() + "\n")
     # a human co-author and product prose about the Claude Code supervisor are not attribution
-    assert not attribution_findings("x.md", "Co-Authored" + "-By: Fadhlillah\n")
+    assert not attribution_findings("x.md", "Co-Authored" + "-By: Jane Doe\n")
     assert not attribution_findings("x.md", "Claude supervises through the official Claude Code client.\n")
     assert not attribution_findings("x.md", "Never add co-authored" + "-by: lines (rule, mid-sentence).\n")
 
 
+def test_holder_and_author_identities_are_not_ai_identities():
+    names = [HOLDER] + [a["name"] for a in yaml.safe_load(_read("CITATION.cff"))["authors"]]
+    for name in names:
+        assert ai_identity_problem(name, None) is None, f"{name!r} reads as an AI or bot identity"
+    # bite: the same guard refuses an AI or bot identity and an AI vendor address, and accepts a human one
+    assert ai_identity_problem("dependabot[bot]", None)
+    assert ai_identity_problem("Claude", None)
+    assert ai_identity_problem("Jane Doe", AI_ADDRESS)
+    assert ai_identity_problem("Jane Doe", "you@example.com") is None
+
+
 def test_only_the_guard_and_its_tests_may_hold_attribution_samples():
-    sample = "Generated" + " with Claude"
+    sample = "S = '" + "Generated" + " with Claude'\n"
+    importing = "from aeos.core.attribution import find_ai_attribution\n"
     assert _is_guard_sample_file(ATTRIBUTION_GUARD_MODULE, "")
-    assert _is_guard_sample_file("tests/unit/test_x.py", "from aeos.core.attribution import find_ai_attribution\n" + sample)
-    assert _is_guard_sample_file("tests/unit/test_y.py", "run_check('git.commit_identity.github')\n" + sample)
+    assert _is_guard_sample_file("tests/unit/test_x.py", importing + sample)
+    assert _is_guard_sample_file("tests/unit/test_x.py", "import aeos.core.attribution as a\n" + sample)
+    assert _is_guard_sample_file("tests/unit/test_x.py", "from aeos.core import attribution\n" + sample)
     assert not _is_guard_sample_file("tests/unit/test_x.py", sample)  # a test that does not exercise the guard
-    assert not _is_guard_sample_file("docs/x.md", "aeos.core.attribution " + sample)  # docs are never exempt
-    assert not _is_guard_sample_file("backend/aeos/other.py", "find_ai_attribution " + sample)
+    assert not _is_guard_sample_file("docs/x.md", importing + sample)  # docs are never exempt
+    assert not _is_guard_sample_file("backend/aeos/other.py", importing + sample)
+    # near misses: the marker only in a comment, a docstring, a string or a lookalike module is NOT an import
+    assert not _is_guard_sample_file("tests/unit/test_x.py", "# from aeos.core.attribution import find_ai_attribution\n" + sample)
+    assert not _is_guard_sample_file("tests/unit/test_x.py", '"""aeos.core.attribution"""\n' + sample)
+    assert not _is_guard_sample_file("tests/unit/test_x.py", "MARK = 'aeos.core.attribution'\n" + sample)
+    assert not _is_guard_sample_file("tests/unit/test_x.py", "from aeos.core.attribution_other import x\n" + sample)
+    assert not _is_guard_sample_file("tests/unit/test_x.py", "from other.aeos.core.attribution import x\n" + sample)
+    assert not _is_guard_sample_file("tests/unit/test_x.py", "def broken(:\n" + sample)  # unparsable: not exempt
+    # a byte order mark (a Windows editor) does not hide a real import, bytes or text; it grants nothing without one
+    assert _is_guard_sample_file("tests/unit/test_x.py", "\ufeff" + importing + sample)
+    assert _is_guard_sample_file("tests/unit/test_x.py", b"\xef\xbb\xbf" + (importing + sample).encode("utf-8"))
+    assert not _is_guard_sample_file("tests/unit/test_x.py", "\ufeff# " + importing + sample)
 
 
 def test_no_file_carries_an_ai_attribution_line():
-    findings: list[str] = []
-    scanned = 0
+    files: dict[str, str] = {}
     for rel in _repository_files():
-        if rel in ATTRIBUTION_ALLOW or Path(rel).suffix.lower() in BINARY_SUFFIXES or "node_modules/" in rel:
+        if Path(rel).suffix.lower() in BINARY_SUFFIXES or "node_modules/" in rel:
             continue
         path = ROOT / rel
         if not path.is_file():
@@ -352,12 +446,275 @@ def test_no_file_carries_an_ai_attribution_line():
         if b"\0" in data:
             continue
         try:
-            text = data.decode("utf-8")
+            files[rel] = data.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        scanned += 1
-        if _is_guard_sample_file(rel, text):
-            continue
-        findings += attribution_findings(rel, text)
-    assert scanned > 100, f"only {scanned} files scanned - is this a git checkout?"
+    findings, stale = scan_attribution(files)
+    assert not stale, f"REVIEWED_PROSE entries that no longer match anything (remove them): {stale}"
+    assert len(files) > 100, f"only {len(files)} files scanned - is this a git checkout?"
     assert not findings, "AI attribution found:\n" + "\n".join(findings)
+
+
+def test_reviewed_prose_is_one_line_not_the_whole_file():
+    prose = "DLY AEOS is a control plane for AI-assisted software engineering.\n"
+    assert not attribution_findings("README.md", prose)  # the reviewed line
+    assert attribution_findings("docs/other.md", prose)  # the same words in another file are not reviewed
+    assert attribution_findings("README.md", prose + "Generated" + " with Claude Code\n")  # a new line is checked
+    assert attribution_findings("README.md", "Co-Authored" + "-By: Claude\n")
+
+
+def test_reviewed_prose_does_not_excuse_a_real_attribution_on_the_same_line():
+    prose = "DLY AEOS is a control plane for AI-assisted software engineering."
+    attribution = "Generated" + " with Claude Code."
+    assert not attribution_findings("README.md", prose + "\n")  # green: the reviewed line as it is
+    assert attribution_findings("README.md", f"{prose} {attribution}\n")  # red: attribution after the fragment
+    assert attribution_findings("README.md", f"{attribution} {prose}\n")  # red: attribution before the fragment
+    assert attribution_findings("README.md", f"intro\r\n{prose} {attribution}\r\n")  # red: CRLF text
+    assert not attribution_findings("README.md", f"{prose} Nothing else here.\n")  # green: harmless words added
+
+
+def test_stale_reviewed_prose_entries_are_reported():
+    entries = (("a.md", "GENERATED_WITH_AI", "AI-assisted software engineering"),
+               ("b.md", "GENERATED_WITH_AI", "written with the help of"))
+    live = "control plane for AI-assisted software engineering\n"
+    findings, stale = scan_attribution({"a.md": live, "b.md": "an ordinary line\n"}, entries)
+    assert findings == [] and stale == [entries[1]]  # red: b.md no longer holds its reviewed line
+    # every entry matched -> nothing stale (green); no file at all -> every entry stale (red)
+    both = {"a.md": live, "b.md": "documented, written with the help of an AI assistant\n"}
+    assert scan_attribution(both, entries)[1] == []
+    assert scan_attribution({}, entries)[1] == list(entries)
+    # the same fragment in the wrong file does not keep an entry alive
+    assert scan_attribution({"c.md": live, "b.md": both["b.md"]}, entries)[1] == [entries[0]]
+
+
+# ------------------------------------------------------------------ one attribution implementation (ratchet)
+# No other module may carry its own attribution pattern: a string-constant pattern given to re.compile / re.search /
+# ... that matches an attribution marker (co-authored-by, generated with/by, a noreply address at an AI vendor) is a
+# second implementation that drifts from aeos.core.attribution. Python only; the pattern is read from the syntax tree
+# (string constants, concatenations, f-string constant parts and module-level constants), so splitting the marker
+# into parts does not hide it.
+_RE_FUNCTIONS = frozenset({"compile", "search", "match", "fullmatch", "findall", "finditer", "sub", "subn", "split"})
+_RATCHET_ROOTS = ("backend/", "scripts/", "tests/")
+_VENDOR_LABELS = tuple(sorted({d.split(".")[0] for d in AI_VENDOR_DOMAINS if len(d.split(".")[0]) >= 5}))
+
+
+def _squeeze(pattern: str) -> str:
+    """Lower-case letters and digits of a regex source, without escapes, character classes and separators:
+    ``Co-?authored-?by:`` and ``generated\\s+with`` read ``coauthoredby`` and ``generatedwith``."""
+    flat = re.sub(r"\\[A-Za-z]", "", pattern)
+    flat = re.sub(r"\[([^\]]*)\]", r"\1", flat)
+    return "".join(ch for ch in flat.lower() if ch.isalnum())
+
+
+# Behavioural check: a pattern is a private attribution matcher when it really finds a probe statement but not its
+# decoy. A decoy is the probe with the marker words swapped for neutral ones of the same shape ("Re-Viewed-On: x",
+# "reported near x", "noreply@example.com"), so a generic validator (an e-mail, host:path or name check, a catch-all)
+# that merely accepts the probe is not flagged. A probe counts only when the match covers the marker itself (verb and
+# preposition, key and ``by``, ``@`` and the vendor label), so ``generated`` or ``noreply@`` alone is not attribution.
+_PROBE_SUBJECTS = ("x", "Claude", "ChatGPT", "Copilot")
+_PROBE_VERBS = (("generated", "reported"), ("created", "printed"), ("written", "carried"))
+_PROBE_PREPOSITIONS = (("with", "near"), ("by", "for"), ("using", "over"))
+_NEUTRAL_CONTROLS = ("plain text 123, release v1.2.3 for user@example.org", "user@example.org", "v1.2.3", "abc")
+
+
+def _behavioural_probes() -> list[tuple[str, str, str, tuple[str, ...]]]:
+    """(marker name, probe text, decoy text, words the match on the probe must cover)."""
+    probes: list[tuple[str, str, str, tuple[str, ...]]] = []
+    for subject in _PROBE_SUBJECTS:
+        probes.append(("co-authored-by", f"Co-Authored-By: {subject}", f"Re-Viewed-On: {subject}", ("authored", "by")))
+        for verb, plain_verb in _PROBE_VERBS:
+            for prep, plain_prep in _PROBE_PREPOSITIONS:
+                probes.append(("generated with/by", f"{verb} {prep} {subject}", f"{plain_verb} {plain_prep} {subject}",
+                               (verb, prep)))
+    for domain in AI_VENDOR_DOMAINS:
+        label, _, tld = domain.partition(".")
+        probes.append(("noreply address at an AI vendor", f"noreply@{domain}", f"noreply@example.{tld}",
+                       ("@" + label,)))
+    return probes
+
+
+def _behavioural_marker(pattern: str) -> str | None:
+    """The marker a compilable regex source really matches (case-insensitively), or None. A source that does not
+    compile, or that matches a neutral control, is left to the textual check."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            rx = re.compile(pattern, re.I)
+    except (re.error, RecursionError, OverflowError):
+        return None
+    if any(rx.search(control) for control in _NEUTRAL_CONTROLS):
+        return None
+    for marker, probe, decoy, words in _behavioural_probes():
+        m = rx.search(probe)
+        if m and all(word in m.group(0).lower() for word in words) and not rx.search(decoy):
+            return marker
+    return None
+
+
+def attribution_marker_in_pattern(pattern: str) -> str | None:
+    """The attribution marker a regex source contains or matches, or None."""
+    if not pattern:
+        return None
+    behavioural = _behavioural_marker(pattern)
+    if behavioural:
+        return behavioural
+    squeezed = _squeeze(pattern)
+    if "coauthoredby" in squeezed:
+        return "co-authored-by"
+    if "generatedwith" in squeezed or "generatedby" in squeezed:
+        return "generated with/by"
+    if "noreply" in squeezed and any(label in squeezed for label in _VENDOR_LABELS):
+        return "noreply address at an AI vendor"
+    if "@" in pattern and any(label in squeezed for label in _VENDOR_LABELS):
+        return "address at an AI vendor"
+    return None
+
+
+def _constant_text(node: ast.AST, names: dict[str, str]) -> str:
+    """The constant text of a string expression ("" for the parts that are not constants)."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else ""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _constant_text(node.left, names) + _constant_text(node.right, names)
+    if isinstance(node, ast.JoinedStr):
+        return "".join(_constant_text(v.value, names) if isinstance(v, ast.FormattedValue) else _constant_text(v, names)
+                       for v in node.values)
+    if isinstance(node, ast.Name):
+        return names.get(node.id, "")
+    return ""
+
+
+def attribution_regexes(rel: str, source: str | bytes) -> list[str]:
+    """``rel:line: re.<function>() pattern ...`` for every re call whose constant pattern holds or matches an attribution
+    marker. A file that cannot be parsed is itself a finding (the ratchet must not fail open on it)."""
+    try:
+        tree = parse_python(source)
+    except (SyntaxError, ValueError) as err:
+        return [f"{rel}: cannot be parsed as Python ({type(err).__name__}), so the ratchet cannot check it"]
+    modules: set[str] = set()  # names bound to the re module
+    functions: dict[str, str] = {}  # local name -> re function (from re import compile as c)
+    names: dict[str, str] = {}  # module-level NAME = <string expression>
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(a.asname or a.name for a in node.names if a.name == "re")
+        elif isinstance(node, ast.ImportFrom) and node.module == "re" and node.level == 0:
+            functions.update({a.asname or a.name: a.name for a in node.names if a.name in _RE_FUNCTIONS})
+    for node in tree.body:
+        value = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+        if value is not None:
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    names[target.id] = _constant_text(value, names)
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in modules \
+                and func.attr in _RE_FUNCTIONS:
+            name = func.attr
+        elif isinstance(func, ast.Name) and func.id in functions:
+            name = functions[func.id]
+        else:
+            continue
+        pattern = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "pattern"), None)
+        marker = attribution_marker_in_pattern(_constant_text(pattern, names)) if pattern is not None else None
+        if marker:
+            found.append(f"{rel}:{node.lineno}: re.{name}() pattern matches {marker}")
+    return found
+
+
+def test_single_attribution_implementation():
+    findings: list[str] = []
+    scanned = 0
+    for rel in _repository_files():
+        if rel == ATTRIBUTION_GUARD_MODULE or not rel.endswith(".py") or not rel.startswith(_RATCHET_ROOTS):
+            continue
+        path = ROOT / rel
+        if not path.is_file():
+            continue  # deleted in the working tree
+        scanned += 1
+        findings += attribution_regexes(rel, path.read_bytes())
+    assert scanned > 100, f"only {scanned} Python files scanned - is this a git checkout?"
+    assert not findings, ("AI attribution patterns outside backend/aeos/core/attribution.py - use "
+                          "find_ai_attribution / ai_identity_problem instead:\n" + "\n".join(findings))
+
+
+def test_attribution_ratchet_flags_private_patterns_and_passes_legitimate_ones():
+    flagged = {
+        "split constants": "import re\nP = re.compile('co-' + 'authored-by:')\n",
+        "search": "import re\nre.search(r'(?i)generated\\s+(?:with|by)\\s+x', 'y')\n",
+        "from-import alias": "from re import compile as rc\nrc('Co-?authored-?by')\n",
+        "module alias": "import re as regex\nregex.finditer('GENERATED' + ' WITH', 't')\n",
+        "named constant": "import re\nMARK = 'co-authored' + '-by'\nre.sub(MARK, '', 'x')\n",
+        "f-string": "import re\nHEAD = 'generated'\nre.match(f'{HEAD} with', 'x')\n",
+        "keyword pattern": "import re\nre.compile(pattern='generated by')\n",
+        "vendor address": "import re\nre.compile('noreply' + '@' + 'anthropic.com')\n",
+        "vendor domain": "import re\nre.compile(r'[\\w.]+@openai\\.com')\n",
+        "character classes": "import re\nre.compile(r'^[Cc]o-[Aa]uthored-[Bb]y:')\n",
+        "alternation": "import re\nre.compile(r'(?i)(?:co-authored|signed-off)-by:')\n",
+        "verb alternation": "import re\nre.compile(r'(?i)(?:generated|written)\\s+(?:with|by)\\s+claude')\n",
+        "canonical verbs": "import re\nre.compile(r'(?:generated|created|written)(?:\\s+\\w+ly)?\\s+(?:with|by|using)')\n",
+        "short vendor label": "import re\nre.compile(r'noreply@groq\\.com')\n",
+        "short vendor domain": "import re\nre.compile(r'noreply@x\\.ai')\n",
+        "short vendor tld": "import re\nre.compile(r'noreply@z\\.ai')\n",
+        "byte order mark": "\ufeffimport re\nPAT = re.compile('co-' + 'authored-by:')\n",
+        "unparsable": "re.compile('co-authored-by'\n",
+    }
+    for case, source in flagged.items():
+        assert attribution_regexes("scripts/x.py", source), case
+    legitimate = {
+        "ordinary pattern": "import re\nre.compile(r'^v(\\d+)\\.(\\d+)$')\n",
+        "marker only in a comment": "import re\n# co-authored-by: the rule\nre.compile('abc')\n",
+        "marker only in a string": "import re\nTEXT = 'Co-Authored-By'\nre.compile('abc')\nprint(TEXT)\n",
+        "marker in a docstring": 'import re\n"""generated with"""\nre.compile("abc")\n',
+        "non-constant pattern": "import re\nre.compile(some_function())\n",
+        "not the re module": "import regex\nregex.compile('co-authored-by')\n",
+        "other call": "class P:\n    def compile(self, s): ...\nP().compile('generated with')\n",
+        "generated alone": "import re\nre.compile(r'\\bgenerated\\b')\n",
+        "with alone": "import re\nre.compile(r'\\bwith\\b')\n",
+        "generic noreply": "import re\nre.compile(r'noreply@\\w+\\.org')\n",
+        "catch-all": "import re\nre.compile(r'.*')\nre.compile(r'\\S+@\\S+')\n",
+        "email validator": "import re\nre.compile(r'^[^@\\s<>]+@[^@\\s<>]+\\.[^@\\s<>]+$')\n",
+        "host path validator": "import re\nre.match(r'^(?:[\\w.-]+@)?([\\w.-]+):(?!//)(.+)$', 'h:p')\n",
+        "name validator": "import re\nre.compile(r'^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$')\n",
+        "env secret names": "import re\nre.compile(r'(?i)(TOKEN|ANTHROPIC|OPENAI|GITHUB)')\n",
+        "uncompilable constant": "import re\nre.compile('(unclosed')\n",
+    }
+    for case, source in legitimate.items():
+        assert not attribution_regexes("scripts/x.py", source), case
+
+
+def test_attribution_ratchet_finds_a_violating_file_on_disk(tmp_path):
+    bad = tmp_path / "bad.py"
+    bad.write_text("import re\nPAT = re.compile('co-' + 'authored-by:')\n", encoding="utf-8")
+    good = tmp_path / "good.py"
+    good.write_text("import re\n# co-authored-by is handled by aeos.core.attribution\nPAT = re.compile('x')\n",
+                    encoding="utf-8")
+    assert attribution_regexes("scripts/bad.py", bad.read_text(encoding="utf-8")) == [
+        "scripts/bad.py:2: re.compile() pattern matches co-authored-by"]
+    assert attribution_regexes("scripts/good.py", good.read_text(encoding="utf-8")) == []
+    # a file with a UTF-8 byte order mark runs under Python, so the ratchet must read it (bytes and decoded text)
+    bom = tmp_path / "bom.py"
+    bom.write_bytes(b"\xef\xbb\xbf" + b"import re\nPAT = re.compile('co-' + 'authored-by:')\n")
+    expected = ["scripts/bom.py:2: re.compile() pattern matches co-authored-by"]
+    assert attribution_regexes("scripts/bom.py", bom.read_bytes()) == expected
+    assert attribution_regexes("scripts/bom.py", bom.read_bytes().decode("utf-8")) == expected
+    # a file that cannot be parsed is reported, never skipped
+    broken = tmp_path / "broken.py"
+    broken.write_text("import re\nPAT = re.compile('co-' + 'authored-by:'\n", encoding="utf-8")
+    assert len(attribution_regexes("scripts/broken.py", broken.read_bytes())) == 1
+
+
+def test_comment_only_marker_does_not_exempt_a_file_from_the_attribution_scan(tmp_path):
+    """Bite for the guard-sample exemption, on files written to disk: a marker in a comment is not an import."""
+    sample = "S = '" + "Generated" + " with Claude'\n"
+    faked = tmp_path / "test_faked.py"
+    faked.write_text("# uses aeos.core.attribution and find_ai_attribution\n" + sample, encoding="utf-8")
+    real = tmp_path / "test_real.py"
+    real.write_text("from aeos.core.attribution import find_ai_attribution\n" + sample, encoding="utf-8")
+    rel = "tests/unit/test_x.py"
+    faked_text, real_text = faked.read_text(encoding="utf-8"), real.read_text(encoding="utf-8")
+    assert not _is_guard_sample_file(rel, faked_text) and attribution_findings(rel, faked_text)  # red
+    assert _is_guard_sample_file(rel, real_text)  # green: a real import is exempt
