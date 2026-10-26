@@ -15,7 +15,13 @@ When the step's main process has exited (or was killed on its timeout), whatever
 *survivor* - is listed and killed (Windows ``TerminateJobObject``; POSIX ``killpg`` plus the marker/session sweep)
 before the verifier compares its tamper window; the verifier QUARANTINES a verification with any survivor.
 
-Every member gets ``SURVIVOR_GRACE_SECONDS`` to finish exiting. A step may name an allow-list of build-tool helper
+A member still in the step leader's process group or session gets ``SURVIVOR_GRACE_SECONDS`` to finish exiting.
+A member found only through the marker, having left both the process group and the session (``setsid``, a double
+fork), detached itself: that is how a step escapes its kill group, not how a child finishes exiting. It is a
+survivor at once, with no grace, and is killed. A grace would let a detached process sleep briefly, act after its
+step has ended, then exit unseen; macOS CI showed exactly that. When the first sweep finds nothing on POSIX, the
+sweep is repeated for ``SURVIVOR_SETTLE_SECONDS``, because a descendant spawned in the step's last moments may
+not be readable yet. A step may name an allow-list of build-tool helper
 processes (``helpers``: process names such as esbuild's service process, which ends when its parent's pipe closes):
 while *only* allow-listed helpers are left they get ``helper_grace`` more seconds, and the ones that exited in it
 are recorded (``helper_exits``), never hidden; a Windows console host (``conhost``) of such a helper waits with
@@ -44,6 +50,8 @@ import psutil
 STEP_MARKER = "AEOS_VERIFY_STEP"
 # a step's own children that are just exiting when the main process returns are not survivors
 SURVIVOR_GRACE_SECONDS = 2.0
+# POSIX: how long an empty first sweep is repeated before the group is taken to be empty
+SURVIVOR_SETTLE_SECONDS = 1.0
 _MAX_LISTED = 50
 
 _win: Any = None
@@ -277,6 +285,16 @@ class StepGroup:
                 continue
         return [p for p in out if _alive(p)]
 
+    def _left_group(self, pid: int) -> bool:
+        """POSIX: a member outside both the leader's process group and session detached itself (it was found through
+        the marker only). Windows job members cannot leave the job, so this never applies there."""
+        if sys.platform == "win32" or self.pid is None or pid <= 0:
+            return False
+        try:
+            return os.getpgid(pid) != self.pid and os.getsid(pid) != self.pid
+        except (ProcessLookupError, PermissionError, OSError):
+            return False
+
     def _members(self) -> list[int]:
         if self.method == "job-object" and self._job is not None and _win is not None:
             active = _win.active(self._job)
@@ -308,19 +326,30 @@ class StepGroup:
         """After the step's main process ended: every process still alive in the group (after *grace*), each
         killed. Never raises; an unreadable group is reported as one survivor entry (fail closed)."""
         try:
-            deadline = time.monotonic() + max(0.0, grace)
             members = self._members()
-            while members and time.monotonic() < deadline:
+            if not members and self.method != "job-object":
+                settle = time.monotonic() + SURVIVOR_SETTLE_SECONDS
+                while not members and time.monotonic() < settle:
+                    time.sleep(0.1)
+                    members = self._members()
+            detached = {pid: _describe(pid) for pid in members if self._left_group(pid)}
+            deadline = time.monotonic() + max(0.0, grace)
+            while members and not detached and time.monotonic() < deadline:
                 time.sleep(0.1)
                 members = self._members()
-            if members and self.helpers and self.helper_grace > 0:
+                detached = {pid: _describe(pid) for pid in members if self._left_group(pid)}
+            if members and self.helpers and self.helper_grace > 0 and not detached:
                 waiting = {pid: _describe(pid) for pid in members if pid > 0}
                 deadline = time.monotonic() + self.helper_grace
                 while members and time.monotonic() < deadline and all(_is_helper(p, self.helpers) for p in members):
                     time.sleep(0.1)
                     members = self._members()
                 self.helper_exits = [d for pid, d in waiting.items() if pid not in members][:_MAX_LISTED]
-            survivors = [_describe(pid) if pid > 0 else {"pid": None, "name": "?"} for pid in members[:_MAX_LISTED]]
+            survivors = [detached.get(pid) or (_describe(pid) if pid > 0 else {"pid": None, "name": "?"})
+                         for pid in members[:_MAX_LISTED]]
+            for d in survivors:
+                if d.get("pid") in detached:
+                    d["detached"] = True  # left the step's process group and session: no grace was given
             if members:
                 self.kill_all()
                 if self.method != "job-object":
