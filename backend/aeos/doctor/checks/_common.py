@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from aeos.core.binaries import locate_binary
 from aeos.doctor.model import CheckContext, Outcome, Remedy
 from aeos.inventory.probes import (
     clean_output,
@@ -95,17 +96,10 @@ def module_present(name: str) -> tuple[bool, bool]:
 
 
 def resolve_openbao(ctx: CheckContext) -> tuple[str | None, str]:
-    """(path, lookup) of the OpenBao binary with the same precedence as ``aeos vault`` (settings
-    override, then the user-level install in ``<data>/bin`` made by ``aeos vault install``, then PATH)."""
-    import sys
-
-    configured = getattr(ctx.settings, "openbao_binary", None)
-    if configured:
-        return (str(configured) if ctx.runner.stat(str(configured)) else None), "settings"
-    local = ctx.data_dir / "bin" / ("bao.exe" if sys.platform == "win32" else "bao")
-    if ctx.runner.stat(str(local)):
-        return str(local), "data-dir"
-    return ctx.runner.which("bao"), "PATH"
+    """(path, lookup) of the OpenBao binary by the one rule the reconciler and ``aeos vault`` also use
+    (``aeos.core.binaries``): settings override, then ``<data>/bin``, then PATH; a regular executable file only."""
+    return locate_binary("bao", configured=getattr(ctx.settings, "openbao_binary", None), data_dir=ctx.data_dir,
+                         is_executable=ctx.runner.is_executable, which=ctx.runner.which)
 
 
 def secret_ref_status(ref: str) -> tuple[str, dict[str, Any]]:

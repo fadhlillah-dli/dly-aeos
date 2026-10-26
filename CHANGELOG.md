@@ -54,28 +54,13 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
   Unit tests (E2) and the owner's stored advisory records (E3, that host only: LangGraph 1.2.14 passes,
   ToolHive v0.51.4 and Deep Agents 0.7.24 stay blocked, their patched pins pass).
 
-- **Inventory finds OpenBao in the data bin.** The reconciler looked for `bao` on PATH only, so the binary that
-  `aeos vault install` puts in `<data>/bin` showed NOT_INSTALLED (drift `planned-but-missing`) next to
-  CONNECTED/VERIFIED. It now looks in settings, then `<data>/bin` (`bao.exe` on Windows), then PATH, and accepts a
-  candidate only if it is a regular file that is executable (same rule as `shutil.which` and the vault runtime); a
-  directory or a file without the execute bit falls through to PATH. A located binary that fails to run is
-  UNKNOWN with its evidence, never INSTALLED. Evidence: unit tests (E2: precedence, directory, non-executable,
-  failing run); reconcile observed INSTALLED 2.7.1 on the owner's Mac arm64 only (E3). Windows `bao.exe`:
-  NOT-PROVEN.
-
-- **Inventory probes admitted candidates.** A CANDIDATE with a probe definition is now probed (read-only
-  `--version`) once a human TRIAL_APPROVED/APPROVED decision exists, never before; `rtk` and `ccusage` gained that
-  probe, Serena and Context7 stay UNKNOWN with an honest reason (no local binary). The poll loop and the views use
-  the same rule. Evidence: unit tests and a throwaway copy of the owner's database (E2). NOT-PROVEN on the real
-  database until the new manifest is stored: run `./aeos seed --only aeos.inventory.seed` once after upgrading.
-
-- **Candidate admission is per domain.** A probe runs when the candidate's own admission in at least one of
-  platform / PERSONAL / OFFICE is TRIAL_APPROVED/APPROVED; a SUSPENDED or REJECTED decision in one domain only
-  removes that domain and no longer blocks another. The observation of a candidate admitted in exactly one domain
-  carries that domain in its scope (the existing domain-tagged observation convention), so the other domain neither
-  sees the observation, its drift findings (now filtered per viewer on the component views too), nor a
-  "not yet probed" prompt: it keeps the honest skip reason. Reconcile, the poll loop and the views share one
-  authority (`probe_domains`). Unit tests (E2); no run on a real database (NOT-PROVEN).
+- **OpenBao found in the data bin; a binary that cannot run is UNKNOWN.** The inventory, the Doctor and the vault
+  runtime now find OpenBao through one resolver (`aeos.core.binaries`): settings override, `<data>/bin`, PATH; a
+  candidate counts only as a regular executable file. A located binary that times out, fails to start, is killed by a
+  signal or (Windows) crashes with an NTSTATUS code is UNKNOWN, no longer INSTALLED, also for the REQUIRED `claude`,
+  `git` and `opencode` (before, a TIMEOUT/OS_ERROR was reported INSTALLED; intentional evidence honesty).
+  Evidence: OpenBao lookup E3 on the owner's Mac arm64 only (reconcile observed INSTALLED 2.7.1); the rest E2 unit
+  tests. Windows `bao.exe` and the NTSTATUS path: NOT-PROVEN.
 
 - **Data directory private on POSIX (#14).** The data layout was created with the process umask (0755
   under the usual 022), so the Doctor reported `evidence.dir_permissions` FAILED on every fresh Mac. On the

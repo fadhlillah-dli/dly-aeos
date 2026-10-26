@@ -23,7 +23,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
-from collections.abc import Collection, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -34,6 +34,7 @@ import yaml
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from aeos.core.binaries import locate_binary
 from aeos.core.config import LOOPBACK_HOSTS, Settings
 from aeos.core.errors import Conflict, NotFound
 from aeos.core.hashing import content_hash
@@ -43,7 +44,6 @@ from aeos.core.redaction import redact_text
 from aeos.core.timeutil import utcnow
 from aeos.inventory import dependencies as dep_reader
 from aeos.inventory import scope as scope_reader
-from aeos.inventory.decisions import decision_states
 from aeos.inventory.drift import compute_drift, persist_drift
 from aeos.inventory.manifest import MANIFEST_REL, apply_manifest, current_manifest
 from aeos.inventory.observations import UNREGISTERED_PREFIX, component_domain, record_observation
@@ -51,6 +51,7 @@ from aeos.inventory.probes import (
     PROVIDER_ENV_PREFIXES,
     ProbeRefused,
     ProbeRunner,
+    RunResult,
     clean_output,
     file_digest,
     file_is_placeholder,
@@ -67,13 +68,11 @@ from aeos.models.inventory import ComponentObservation, ComponentReference
 from aeos.models.inventory_ext import ReconciliationRun
 
 OBSERVER = "reconciler"
-CORE_REQUIREMENTS = frozenset({"REQUIRED", "OPTIONAL"})
-# A CANDIDATE with a probe definition is observed only once a human admission decision exists (§39/§40).
-PROBE_ADMISSIONS = frozenset({"TRIAL_APPROVED", "APPROVED"})
-# Decision viewpoints of a candidate: platform-level (no domain) and each domain (§23, §35).
-PROBE_VIEWPOINTS: tuple[str | None, ...] = (None, "PERSONAL", "OFFICE")
 # Executables that an ``aeos ... install`` command places user-level in ``<data>/bin`` (never on PATH).
 DATA_BIN_BINARIES = frozenset({"bao"})
+# Windows NTSTATUS error severity: a process that crashed (e.g. 0xC0000135 STATUS_DLL_NOT_FOUND) exits with >= this.
+NTSTATUS_ERROR_MIN = 0xC0000000
+CORE_REQUIREMENTS = frozenset({"REQUIRED", "OPTIONAL"})
 DEFAULT_TTL = 3600
 DECLARATION_TTL = 86400
 
@@ -125,18 +124,27 @@ def _obs(dimension: str, status: str, *, version: str | None = None, identity: s
 
 
 def _locate_binary(ctx: ReconcileContext, b: dict[str, Any]) -> tuple[str | None, str]:
-    """(path, lookup) with the precedence of ``aeos vault`` and the Doctor: settings override, then the
-    user-level install in ``<data>/bin``, then PATH."""
-    name = b["name"]
+    """(path, lookup) by the one shared rule (``aeos.core.binaries``: settings override, then the user-level install
+    in ``<data>/bin`` for binaries an ``aeos ... install`` places there, then PATH). Existence checks go through the
+    runner so a fake runner keeps tests hermetic."""
     override = b.get("settings_override")
-    configured = getattr(ctx.settings, override, None) if override else None
-    if configured:
-        return (str(configured) if ctx.runner.is_executable(str(configured)) else None), "settings"
-    if name in DATA_BIN_BINARIES:
-        local = ctx.data_dir / "bin" / (name + (".exe" if sys.platform == "win32" else ""))
-        if ctx.runner.is_executable(str(local)):  # a directory or a file without the x bit falls through to PATH
-            return str(local), "data-dir"
-    return ctx.runner.which(name), "PATH"
+    name = b["name"]
+    return locate_binary(
+        name,
+        configured=getattr(ctx.settings, override, None) if override else None,
+        data_dir=ctx.data_dir if name in DATA_BIN_BINARIES else None,
+        is_executable=ctx.runner.is_executable,
+        which=ctx.runner.which,
+    )
+
+
+def _did_not_run(rr: RunResult) -> bool:
+    """The located binary did not complete normally: the call failed (timeout, OS error), there is no exit status,
+    it was killed by a signal (negative status, e.g. SIGKILL from code signing on macOS) or on Windows it crashed with
+    an NTSTATUS code (>= 0xC0000000, e.g. STATUS_DLL_NOT_FOUND). A non-zero but normal exit is not this case."""
+    rc = rr.returncode
+    return (rr.error is not None or rc is None or rc < 0
+            or (sys.platform == "win32" and rc >= NTSTATUS_ERROR_MIN))
 
 
 def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[str, Any]) -> list[Spec]:
@@ -154,6 +162,9 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
             continue
         argv = [path, *b.get("version_args", [])]
         rr = ctx.runner.run(argv, timeout=timeout, env=env, cwd=ctx.probe_cwd)
+        did_not_run = _did_not_run(rr)
+        if did_not_run:
+            failed.append(name)
         version = None
         if rr.returncode == 0 and rr.error is None:
             version = parse_version(f"{rr.stdout}\n{rr.stderr}", b.get("version_regex"))
@@ -164,21 +175,21 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
             "operation_ref": " ".join([name, *b.get("version_args", [])]),
             # §37: the installed executable is its own identity (distinct from source repo / release asset):
             # a replaced binary that prints the same --version is visible as a changed digest.
-            "digest": file_digest(path),
+            "digest": None if did_not_run else file_digest(path),
         })
-        if rr.error is not None:
-            failed.append(name)
     specs: list[Spec] = []
     if missing:
         specs.append(_obs("installation", "NOT_INSTALLED", ttl=ttl, missing=missing,
-                          operation_ref="which " + " ".join(missing), lookup="settings/data-dir/PATH", found=found or None))
+                          operation_ref="which " + " ".join(missing), lookup="settings/data-dir/PATH",
+                          found=found or None))
     elif failed:
-        # located but it would not run (timeout, OS error): never INSTALLED, and the file digest is no identity
-        # of a working executable
+        # located but it did not run to completion: never INSTALLED, and the file digest is no identity of a
+        # working executable (no version, no identity)
         specs.append(_obs("installation", "UNKNOWN", ttl=ttl, failed=failed, binaries=found,
                           location=found[0]["location"], operation_ref=found[0]["operation_ref"],
-                          reason="binary ditemukan tetapi tidak dapat dijalankan: " + ", ".join(
-                              f"{f['name']} ({f['error']})" for f in found if f["error"])))
+                          reason="binary ditemukan tetapi tidak berjalan normal: " + ", ".join(
+                              f"{f['name']} ({f['error'] or 'exit ' + str(f['exit_code'])})"
+                              for f in found if f["name"] in failed)))
     elif found:
         versions = [f"{f['name']} {f['version']}" if len(found) > 1 else f["version"] for f in found]
         version = "; ".join(v for v in versions if v) or None
@@ -460,51 +471,9 @@ def is_probeable(comp: ComponentReference) -> bool:
     return str((comp.probe or {}).get("type") or "none") in PROBES
 
 
-def probe_domains(session: Session, comps: dict[str, ComponentReference]) -> dict[str, frozenset[str | None]]:
-    """candidate id -> the decision viewpoints (None = platform-level, "PERSONAL", "OFFICE") whose OWN current
-    admission lets the candidate be probed (TRIAL_APPROVED/APPROVED). Only candidates with a non-empty set appear.
-
-    The Decision registry is the only authority (``decision_states`` per domain). Admission is per domain: a
-    SUSPENDED/REJECTED decision in one domain only removes that domain; it never blocks another domain's probe
-    (§23, §35). Reconcile, the poll loop and the views all use this one function."""
-    cands = {cid: c for cid, c in comps.items() if c.requirement == "CANDIDATE" and is_probeable(c)}
-    out: dict[str, set[str | None]] = {}
-    for domain in (PROBE_VIEWPOINTS if cands else ()):
-        for cid, st in decision_states(session, cands, domain=domain).items():
-            if st.admission in PROBE_ADMISSIONS:
-                out.setdefault(cid, set()).add(domain)
-    return {cid: frozenset(d) for cid, d in out.items()}
-
-
-def probed_for(domains: Collection[str | None] | None, viewer: str | None) -> bool:
-    """Would a probe run for a viewer in *viewer* domain? Platform-level admission (None) covers everyone."""
-    return domains is not None and (None in domains or viewer in domains)
-
-
-def probe_scope(run_id: str, domains: Collection[str | None] | None) -> dict[str, Any]:
-    """Observation scope of a probe: untagged when platform-level or both domains admit (or for REQUIRED/OPTIONAL),
-    tagged with the one admitting domain otherwise, so the other domain never sees the observation."""
-    scope: dict[str, Any] = {"run_id": run_id}
-    if domains and None not in domains and len(domains) == 1:
-        scope["domain"] = next(iter(domains))
-    return scope
-
-
-def probe_skip_reason(comp: ComponentReference, admitted: bool) -> str | None:
-    """Why *comp* is not probed now (None = probe it): no probe definition, or a candidate not yet admitted."""
-    probe = comp.probe or {}
-    if not is_probeable(comp):
-        return str(probe.get("reason") or "tanpa probe")
-    if comp.requirement == "CANDIDATE" and not admitted:
-        return str(probe.get("reason") or "Kandidat; tidak diprobe sebelum admission.")
-    return None
-
-
-def core_targets(components: Iterable[ComponentReference], admitted: Collection[str] = ()
-                 ) -> list[ComponentReference]:
+def core_targets(components: Iterable[ComponentReference]) -> list[ComponentReference]:
     return [c for c in components
-            if c.tombstoned_at is None and is_probeable(c)
-            and (c.requirement in CORE_REQUIREMENTS or (c.requirement == "CANDIDATE" and c.component_id in admitted))]
+            if c.tombstoned_at is None and c.requirement in CORE_REQUIREMENTS and is_probeable(c)]
 
 
 # ---------------------------------------------------------------- managed-scope sources
@@ -810,8 +779,6 @@ def _reconcile(
 
     manifest_hash = _ensure_desired(session, actor)
     comps = {c.component_id: c for c in session.scalars(select(ComponentReference))}
-    probe_by = probe_domains(session, comps)
-    admitted = set(probe_by)
     if component_id is not None:
         comp = comps.get(component_id)
         if comp is None:
@@ -821,7 +788,7 @@ def _reconcile(
         targets = [comp]
         scope: dict[str, Any] = {"component_id": component_id}
     else:
-        targets = core_targets(comps.values(), admitted)
+        targets = core_targets(comps.values())
         scope = {"set": "core", "requirements": sorted(CORE_REQUIREMENTS)}
     ctx = ReconcileContext(settings=settings, runner=runner or get_runner(), repo=repo or repo_root(), session=session)
     run = ReconciliationRun(trigger=trigger, actor=actor, scope=scope, status="RUNNING", manifest_hash=manifest_hash,
@@ -835,11 +802,10 @@ def _reconcile(
     for comp in targets:
         cid = comp.component_id
         at = utcnow().isoformat()
-        skip = probe_skip_reason(comp, cid in admitted)
-        if skip is not None:
-            component_status[cid] = {"status": "SKIPPED", "at": at, "reason": skip}
+        if not is_probeable(comp):
+            component_status[cid] = {"status": "SKIPPED", "at": at,
+                                     "reason": str((comp.probe or {}).get("reason") or "tanpa probe")}
             continue
-        obs_scope = probe_scope(run.id, probe_by.get(cid))
         try:
             specs = probe_component(ctx, comp)
             change = identity_change(session, cid, specs)
@@ -849,13 +815,13 @@ def _reconcile(
                 # observations are expired.
                 invalidated[cid] = _invalidate_component(session, comp, change)
             for spec in specs:
-                record_observation(session, component_id=cid, observer=OBSERVER, scope=obs_scope, **spec)
+                record_observation(session, component_id=cid, observer=OBSERVER, scope={"run_id": run.id}, **spec)
                 recorded += 1
             unknown = any(s["status"] in ("UNKNOWN", "UNREACHABLE", "INVALID") for s in specs)
             component_status[cid] = {"status": "UNKNOWN" if unknown else "OK", "at": at, "observations": len(specs)}
         except Exception as exc:  # a broken probe never turns green (§38 step 5)
             record_observation(session, component_id=cid, dimension="installation", status="UNKNOWN",
-                               observer=OBSERVER, ttl_seconds=DEFAULT_TTL, scope=obs_scope,
+                               observer=OBSERVER, ttl_seconds=DEFAULT_TTL, scope={"run_id": run.id},
                                detail={"error": type(exc).__name__, "message": redact_text(str(exc))[:200]})
             recorded += 1
             component_status[cid] = {"status": "FAILED", "at": at, "reason": type(exc).__name__}

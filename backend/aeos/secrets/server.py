@@ -20,8 +20,9 @@ from urllib.parse import urlsplit
 
 import psutil
 
+from aeos.core.binaries import locate_binary
 from aeos.core.config import Settings
-from aeos.secrets.installer import binary_name, install_dir
+from aeos.secrets.installer import binary_name
 from aeos.secrets.openbao import LOOPBACK, OpenBaoUnavailable
 
 
@@ -38,13 +39,10 @@ def log_file(settings: Settings) -> Path:
 
 
 def bin_path(settings: Settings) -> Path | None:
-    if settings.openbao_binary:
-        p = Path(settings.openbao_binary).expanduser()
-        return p if p.is_file() else None
-    local = install_dir(settings) / binary_name()
-    if local.is_file():
-        return local
-    found = shutil.which(binary_name()) or shutil.which("bao")
+    """The OpenBao binary by the one rule the reconciler and the Doctor also use (``aeos.core.binaries``)."""
+    found, _ = locate_binary(
+        "bao", configured=settings.openbao_binary, data_dir=settings.data_dir,
+        which=lambda name: shutil.which(binary_name()) or shutil.which(name))
     return Path(found) if found else None
 
 

@@ -23,7 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from aeos.inventory.probes import HttpResult, ProbeRefused, RunResult, is_executable_file, is_loopback_url
+from aeos.core.binaries import is_executable_file
+from aeos.inventory.probes import HttpResult, ProbeRefused, RunResult, is_loopback_url
 
 FAKE_BIN = "/opt/acceptance-fake/bin"
 

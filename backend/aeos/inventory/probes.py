@@ -31,6 +31,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from aeos.core.binaries import is_executable_file
 from aeos.core.hashing import sha256_text
 from aeos.core.redaction import redact_text
 
@@ -107,13 +108,6 @@ def _kill_tree(pid: int) -> None:
         psutil.wait_procs([*children, parent], timeout=3)
     except Exception:  # pragma: no cover - best effort; the caller still reports TIMEOUT
         log.warning("could not kill process tree %s after probe timeout", pid)
-
-
-def is_executable_file(path: str | os.PathLike[str]) -> bool:
-    """A regular file that can be run: what ``shutil.which`` and the vault runtime accept (a directory, or off
-    Windows a file without the execute bit, is not a binary)."""
-    p = Path(path)
-    return p.is_file() and (sys.platform == "win32" or os.access(p, os.X_OK))
 
 
 class SystemProbeRunner:

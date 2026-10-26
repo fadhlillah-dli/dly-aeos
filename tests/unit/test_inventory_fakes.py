@@ -8,11 +8,11 @@ from typing import Any
 
 import pytest
 
+from aeos.core.binaries import is_executable_file
 from aeos.inventory.probes import (
     HttpResult,
     ProbeRefused,
     RunResult,
-    is_executable_file,
     is_loopback_url,
     set_runner_override,
 )

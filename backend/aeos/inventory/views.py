@@ -41,14 +41,7 @@ from aeos.inventory.observations import (
     latest_observations,
 )
 from aeos.inventory.pins import select_digest
-from aeos.inventory.reconcile import (
-    PROBE_ADMISSIONS,
-    latest_run,
-    probe_domains,
-    probe_skip_reason,
-    probed_for,
-    run_view,
-)
+from aeos.inventory.reconcile import is_probeable, latest_run, run_view
 from aeos.models.inventory import CheckResult, ComponentObservation, ComponentReference, ComponentRelation
 from aeos.models.inventory_ext import DriftFinding
 
@@ -209,10 +202,7 @@ def _usage_dim(obs: ComponentObservation | None, fact: rt.UsageFact | None, now:
 
 def dimension_values(comp: ComponentReference, latest: dict[tuple[str, str], ComponentObservation],
                      now: datetime, *, state: DecisionState | None = None, basis: list[str] | None = None,
-                     usage_fact: rt.UsageFact | None = None, write_enabled: bool = False,
-                     probed: bool | None = None) -> dict[str, dict[str, Any]]:
-    """*probed*: would a reconcile probe this component for this viewer's domain (``probe_domains``)? None = unknown
-    to the caller, so the cached admission column decides (no decision state)."""
+                     usage_fact: rt.UsageFact | None = None, write_enabled: bool = False) -> dict[str, dict[str, Any]]:
     cid = comp.component_id
     probe = comp.probe or {}
     out: dict[str, dict[str, Any]] = {}
@@ -232,9 +222,8 @@ def dimension_values(comp: ComponentReference, latest: dict[tuple[str, str], Com
         out["installation"] = _dim_from_obs(inst, now)
     elif str(probe.get("type")) == "none" and probe.get("local_install") is False:
         out["installation"] = _dim("NOT_APPLICABLE", "layanan eksternal/rujukan; tidak dipasang lokal", "manifest")
-    elif (skip := probe_skip_reason(
-            comp, probed if probed is not None else out["admission"]["value"] in PROBE_ADMISSIONS)) is not None:
-        out["installation"] = _dim("UNKNOWN", skip, "manifest")
+    elif not is_probeable(comp):
+        out["installation"] = _dim("UNKNOWN", str(probe.get("reason") or "tidak diprobe"), "manifest")
     else:
         out["installation"] = _dim("UNKNOWN", "belum diprobe; jalankan aeos inventory reconcile", "belum ada observasi")
     for dim, missing, reason in (
@@ -265,7 +254,7 @@ def dimension_values(comp: ComponentReference, latest: dict[tuple[str, str], Com
 
 
 def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift: list[dict[str, Any]],
-                version: dict[str, Any], *, probed: bool | None = None) -> dict[str, Any]:
+                version: dict[str, Any]) -> dict[str, Any]:
     """The one next step a human can take (§35 "tindakan berikutnya"), derived deterministically from the
     separate dimensions, drift and coverage; it never runs anything itself."""
     classes = {d["drift_class"] for d in drift}
@@ -284,8 +273,7 @@ def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift
                    f"/proposals?component={comp.component_id}")
     if "planned-but-missing" in classes:
         return act("INSTALL_MANUALLY", "Pasang sesuai remedy Readiness (manual, tanpa auto-install)", link="/readiness")
-    if probe_skip_reason(comp, probed if probed is not None else dims["admission"]["value"] in PROBE_ADMISSIONS) \
-            is None and inst["observation_id"] is None:
+    if is_probeable(comp) and inst["observation_id"] is None:
         return act("RUN_RECONCILE", "Jalankan aeos inventory reconcile", "aeos inventory reconcile")
     if inst.get("stale"):
         return act("REFRESH", "Segarkan observasi (kedaluwarsa)", "aeos inventory reconcile")
@@ -320,12 +308,8 @@ def version_status(comp: ComponentReference, latest: dict[tuple[str, str], Compo
             "pin_note": None if comp.approved_pin else "pin belum disetujui (UNKNOWN); 'latest' tidak dipakai"}
 
 
-def _open_drift(session: Session, component_ids: Iterable[str] | None = None, *, domain: str | None = None
-                ) -> dict[str, list[dict[str, Any]]]:
-    """Open findings visible to *domain*: platform-level ones and its own (a finding born from another domain's
-    probe never reaches this viewer, §23/§35)."""
-    q = select(DriftFinding).where(DriftFinding.status == "OPEN",
-                                   DriftFinding.domain_scope.in_(("PLATFORM", domain) if domain else ("PLATFORM",)))
+def _open_drift(session: Session, component_ids: Iterable[str] | None = None) -> dict[str, list[dict[str, Any]]]:
+    q = select(DriftFinding).where(DriftFinding.status == "OPEN")
     if component_ids is not None:
         q = q.where(DriftFinding.component_id.in_(list(component_ids)))
     out: dict[str, list[dict[str, Any]]] = {}
@@ -351,9 +335,9 @@ def component_row(comp: ComponentReference, latest: dict[tuple[str, str], Compon
                   drift: dict[str, list[dict[str, Any]]], now: datetime, *, advanced: bool = False,
                   relation_counts: dict[str, int] | None = None, basis: list[str] | None = None,
                   state: DecisionState | None = None, usage_fact: rt.UsageFact | None = None,
-                  write_enabled: bool = False, probed: bool | None = None) -> dict[str, Any]:
+                  write_enabled: bool = False) -> dict[str, Any]:
     dims = dimension_values(comp, latest, now, state=state, basis=basis, usage_fact=usage_fact,
-                            write_enabled=write_enabled, probed=probed)
+                            write_enabled=write_enabled)
     version = version_status(comp, latest)
     comp_drift = drift.get(comp.component_id, [])
     row: dict[str, Any] = {
@@ -369,7 +353,7 @@ def component_row(comp: ComponentReference, latest: dict[tuple[str, str], Compon
         "dimensions": dims,
         "drift": [{"drift_class": d["drift_class"], "label": d["label"], "severity": d["severity"]}
                   for d in comp_drift],
-        "next_action": next_action(comp, dims, comp_drift, version, probed=probed),
+        "next_action": next_action(comp, dims, comp_drift, version),
         "tombstoned_at": _iso(comp.tombstoned_at), "mode": comp.mode,
     }
     if advanced:
@@ -432,13 +416,12 @@ def list_components(
     window = filtered[start:start + page_size]
     ids = [c.component_id for c in window]
     latest = latest_observations(session, ids, visible_to=domain) if ids else {}
-    drift = _open_drift(session, ids, domain=domain)
+    drift = _open_drift(session, ids)
     advanced = view == "advanced"
     rel_counts = _relation_counts(session, set(ids)) if advanced else None
     window_comps = {c.component_id: c for c in window}
     basis = config_basis(session, window_comps, latest, now, domain=domain) if ids else {}
     states = decision_states(session, window_comps, domain=domain) if ids else {}
-    admitting = probe_domains(session, window_comps) if ids else {}
     usage, _edges, _runs = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)
     writable = write_enabled_components(session, domain)
     rec = current_manifest(session)
@@ -449,8 +432,7 @@ def list_components(
     return {
         "items": [component_row(c, latest, drift, now, advanced=advanced, relation_counts=rel_counts,
                                 basis=basis.get(c.component_id), state=states.get(c.component_id),
-                                usage_fact=usage.get(c.component_id), write_enabled=c.component_id in writable,
-                                probed=probed_for(admitting.get(c.component_id), domain))
+                                usage_fact=usage.get(c.component_id), write_enabled=c.component_id in writable)
                   for c in window],
         "total": len(filtered), "page": page, "page_size": page_size, "view": view, "facets": facets,
         "coverage": cov,
@@ -496,11 +478,9 @@ def coverage(session: Session, *, domain: str | None, compact: bool = False,
         usage = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)[0]
     observed_ids = {cid for (cid, dim), o in latest.items() if dim in OBSERVED_DIMENSIONS and not is_stale(o, now)}
     stale_ids = {cid for (cid, dim), o in latest.items() if dim in OBSERVED_DIMENSIONS and is_stale(o, now)}
-    admitting = probe_domains(session, comps)
-    probeable = [c for c in comps.values()
-                 if probe_skip_reason(c, probed_for(admitting.get(c.component_id), domain)) is None]
+    probeable = [c for c in comps.values() if is_probeable(c)]
     never = [c.component_id for c in probeable if not any((c.component_id, d) in latest for d in OBSERVED_DIMENSIONS)]
-    not_probed = [c for c in comps.values() if c not in probeable]
+    not_probed = [c for c in comps.values() if not is_probeable(c)]
     external = [c for c in not_probed if (c.probe or {}).get("local_install") is False]
     candidates = [c for c in not_probed if c not in external]
     usage_seen = any(dim == "usage" for (_cid, dim) in latest) or any(cid in comps for cid in usage)
@@ -995,9 +975,8 @@ def component_detail(session: Session, component_id: str, *, domain: str | None,
     basis = config_basis(session, {component_id: comp}, latest, now, domain=domain).get(component_id, [])
     state = decision_states(session, {component_id: comp}, domain=domain)[component_id]
     usage, _edges, _runs = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)
-    probed = probed_for(probe_domains(session, {component_id: comp}).get(component_id), domain)
     dims = dimension_values(comp, latest, now, state=state, basis=basis, usage_fact=usage.get(component_id),
-                            write_enabled=component_id in write_enabled_components(session, domain), probed=probed)
+                            write_enabled=component_id in write_enabled_components(session, domain))
     rels = component_relations(session, component_id, domain=domain, page_size=500,
                                allowed_project_ids=allowed_project_ids)
     checks = latest_checks_for(session, component_id, domain)
@@ -1018,7 +997,7 @@ def component_detail(session: Session, component_id: str, *, domain: str | None,
         for (cid, dim), o in latest.items() if dim == "declaration" and cid == component_id
     ]
     used_by = [r for r in rels["incoming"] if r["relation"] in IMPACT_RELATIONS - {"governed_by"}]
-    drift = _open_drift(session, [component_id], domain=domain).get(component_id, [])
+    drift = _open_drift(session, [component_id]).get(component_id, [])
     domains = sorted(component_domains(comp))
     unknown = {"value": None, "status": "UNKNOWN"}
     probe = comp.probe or {}
@@ -1092,7 +1071,7 @@ def component_detail(session: Session, component_id: str, *, domain: str | None,
         "lifecycle": dims,
         "admission": {"status": dims["admission"]["value"], "decision_refs": state.decision_refs,
                       "scope": state.scope, "capability_tests": _admission_tests(session, comp, latest, now)},
-        "next_action": next_action(comp, dims, drift, version, probed=probed),
+        "next_action": next_action(comp, dims, drift, version),
         "config_lens": {"present": bool(basis), "basis": basis,
                         "note": "Konfigurasi berlaku hanya dengan dasar eksplisit; nilai default bukan enablement."},
         "access": {**(comp.access or {}), "expiry": _access_expiry(comp, domain),
@@ -1307,7 +1286,7 @@ def system_map(session: Session, *, lens: str, domain: str | None, category: str
     if environment:
         comps = {k: v for k, v in comps.items() if (v.scope or {}).get("environment", "local") == environment}
     latest = latest_observations(session, visible_to=domain)
-    drift = _open_drift(session, domain=domain)
+    drift = _open_drift(session)
     basis = config_basis(session, comps, latest, now, domain=domain) if lens == "CONFIG" else {}
     usage, fact_edges, active_runs = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)
     if project_id is not None:
