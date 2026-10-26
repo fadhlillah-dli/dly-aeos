@@ -10,6 +10,15 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ## [Unreleased]
 
+### Added
+
+- **GitHub token expiry warning (#16).** The Doctor check `adapter.github_token` reads the expiry GitHub reports for
+  the token (`GitHub-Authentication-Token-Expiration`) and the date recorded with `aeos secrets set
+  personal/github --expires-at`, and warns 14 days ahead with the rotation command, without turning the check
+  red while the token still works. The probe runner keeps that header (and still drops every other one). Unit
+  tests cover both header formats, an unreadable header, the recorded date and the header filter (E2); a live
+  GitHub response with the header was observed on the owner's Mac (E3, that host only).
+
 ### Fixed
 
 - **Advisory matching in multi-package repositories.** The TRIAL/PROMOTE admission gate compared a candidate's pin
@@ -31,6 +40,12 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
   (E2) cover POSIX tightening and the Windows mode; on the owner's Mac (arm64) the Doctor reported
   `evidence.dir_permissions` VERIFIED after the fix (E3, that host only). A real Windows run of the
   unchanged path is covered by the existing Windows CI suite only.
+
+- **Public repositories no longer count as a fine-grained PAT breach (#16).** GitHub lists every public
+  repository for a fine-grained PAT ("Also includes public repositories (read-only)"), so `adapter.github_token`
+  reported a correctly scoped token as exceeding least privilege. Unregistered public repositories now leave
+  least privilege NOT proven, with a note; an unregistered private repository, or one whose visibility is not
+  reported, is still a breach. Unit tests (E2) and the owner's token on the Mac (E3, that host only).
 
 ### Security
 

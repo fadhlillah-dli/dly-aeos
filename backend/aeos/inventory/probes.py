@@ -39,6 +39,8 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 PROVIDER_ENV_PREFIXES = ("ANTHROPIC_",)
 PROVIDER_ENV_NAMES = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 MAX_OUTPUT_CHARS = 20_000
+# response headers a probe keeps (never credentials): GitHub SSO, classic-token scopes, token expiry
+KEPT_RESPONSE_HEADERS = ("x-github-sso", "x-oauth-scopes", "github-authentication-token-expiration")
 
 
 class ProbeRefused(Exception):
@@ -162,7 +164,7 @@ class SystemProbeRunner:
         except ValueError:
             body = None
         return HttpResult(r.status_code, body, r.text[:MAX_OUTPUT_CHARS], None,
-                          {k.lower(): v for k, v in r.headers.items() if k.lower() in ("x-github-sso", "x-oauth-scopes")})
+                          {k.lower(): v for k, v in r.headers.items() if k.lower() in KEPT_RESPONSE_HEADERS})
 
     def environ(self) -> Mapping[str, str]:
         return dict(os.environ)
