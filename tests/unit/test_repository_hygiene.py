@@ -256,6 +256,18 @@ BOT = re.compile(rf"(?i){_AI_NAMES}|\[bot\]|\bbot\b")
 GENERATED = re.compile(r"(?i)generated\s+(?:with|by)\s+\[?\s*(?:" + _AI_NAMES + r"|an?\s+ai\b)")
 AI_ADDRESS = "noreply" + "@" + "anthropic.com"
 ATTRIBUTION_ALLOW = {"tests/unit/test_repository_hygiene.py"}
+# The product's own guards (ADR-0121: outbound attribution guard, commit identity guard) and the tests that prove
+# they refuse attribution must contain samples of what they refuse. Only those may: the attribution guard module
+# itself and test files that exercise one of the guards.
+ATTRIBUTION_GUARD_MODULE = "backend/aeos/core/attribution.py"
+_GUARD_MARKERS = ("aeos.core.attribution", "find_ai_attribution", "AI_ATTRIBUTION", "aeos.core import commit_identity",
+                  "aeos.core.commit_identity", "git.commit_identity")
+
+
+def _is_guard_sample_file(rel: str, text: str) -> bool:
+    if rel == ATTRIBUTION_GUARD_MODULE:
+        return True
+    return rel.startswith("tests/") and rel.endswith(".py") and any(m in text for m in _GUARD_MARKERS)
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf", ".docx", ".xlsx", ".pptx", ".zip",
                    ".gz", ".sqlite3", ".sqlite", ".woff", ".woff2", ".ttf", ".otf", ".pyc"}
 
@@ -288,6 +300,16 @@ def test_attribution_detector_flags_trailers_footers_and_the_address():
     assert not attribution_findings("x.md", "Never add co-authored" + "-by: lines (rule, mid-sentence).\n")
 
 
+def test_only_the_guard_and_its_tests_may_hold_attribution_samples():
+    sample = "Generated" + " with Claude"
+    assert _is_guard_sample_file(ATTRIBUTION_GUARD_MODULE, "")
+    assert _is_guard_sample_file("tests/unit/test_x.py", "from aeos.core.attribution import find_ai_attribution\n" + sample)
+    assert _is_guard_sample_file("tests/unit/test_y.py", "run_check('git.commit_identity.github')\n" + sample)
+    assert not _is_guard_sample_file("tests/unit/test_x.py", sample)  # a test that does not exercise the guard
+    assert not _is_guard_sample_file("docs/x.md", "aeos.core.attribution " + sample)  # docs are never exempt
+    assert not _is_guard_sample_file("backend/aeos/other.py", "find_ai_attribution " + sample)
+
+
 def test_no_file_carries_an_ai_attribution_line():
     findings: list[str] = []
     scanned = 0
@@ -305,6 +327,8 @@ def test_no_file_carries_an_ai_attribution_line():
         except UnicodeDecodeError:
             continue
         scanned += 1
+        if _is_guard_sample_file(rel, text):
+            continue
         findings += attribution_findings(rel, text)
     assert scanned > 100, f"only {scanned} files scanned - is this a git checkout?"
     assert not findings, "AI attribution found:\n" + "\n".join(findings)
