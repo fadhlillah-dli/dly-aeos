@@ -1,0 +1,25 @@
+# EditorConfig (https://editorconfig.org). Keeps editors in line with .gitattributes, which stays authoritative
+# for line endings in the repository: text files are LF, and only *.ps1, *.cmd and *.bat are CRLF.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+[*.py]
+indent_size = 4
+
+[*.{ts,tsx,js,json,yml,yaml,css,html}]
+indent_size = 2
+
+# Two trailing spaces are a hard line break in Markdown.
+[*.md]
+indent_size = 2
+trim_trailing_whitespace = false
+
+# Windows scripts: .gitattributes pins these to CRLF.
+[*.{ps1,cmd,bat}]
+end_of_line = crlf

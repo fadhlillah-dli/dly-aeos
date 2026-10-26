@@ -85,3 +85,13 @@ bootstrap installs; until then Python dependencies are pinned by exact version (
   then the `[NO-GATE]` tag changes to the gate it belongs to. No code change is needed for that step.
 * IaC/DAST/load become applicable when a deployed target or infrastructure code exists (§31 G7/G8).
 * External enforcement (§48) stays outside what CI can prove: strong worker isolation needs the container sandbox (proven on the owner's Windows build host 2026-10-25, `docs/evidence/containment`; NOT-PROVEN in CI, on another host or without Docker; MATRIX 1.12/1.13 BLOCKED), and provider-side branch protection / required checks are NOT_ENFORCEABLE on GitHub Free (ADR-0063). The SBOM and dependency scans above are evidence for the owner, not enforcement.
+
+## Amendment 2026-10-26 - the G1 static gates also run locally, and commit subjects are a G1 check
+
+`scripts/gates.py` runs the commands of the G1 static steps of `ci.yml` (ruff, mypy for darwin and win32, the
+secret scan) before a push, by hand or from the `scripts/git-hooks/pre-push` hook, and `tests/unit/test_dev_gates.py`
+fails when the two lists diverge. `scripts/commit_subject.py` checks the commit messages: the Conventional Commits subject format and no AI
+attribution in the message, author or committer (the guard of `backend/aeos/core/attribution.py`); the
+`commit subjects [G1]` job runs it on pull requests only, for commits after a recorded baseline. It is not in the
+required checks of the ruleset (owner configuration). `git push --no-verify` stays available: the hook is a
+convenience, CI is the gate.

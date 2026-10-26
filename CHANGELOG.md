@@ -19,6 +19,15 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
   tests cover both header formats, an unreadable header, the recorded date and the header filter (E2); a live
   GitHub response with the header was observed on the owner's Mac (E3, that host only).
 
+- **Local gate runner, pre-push hook and commit-subject gate.** `python scripts/gates.py` runs the G1 static
+  commands of `ci.yml` (ruff, mypy darwin and win32, secret scan) plus frontend gates when `frontend/` changed.
+  `scripts/git-hooks/pre-push` (`git config core.hooksPath scripts/git-hooks`) runs them on the tip commit of each pushed
+  ref in a temporary worktree outside the repo (intermediate commits get only the message check; the hook finds
+  the main checkout's `.venv` from a linked worktree, or `AEOS_GATES_PYTHON`). `scripts/commit_subject.py` and a `commit subjects [G1]` job (pull
+  requests only) enforce Conventional Commits and the no-attribution rule after a baseline (reverts accepted); `.editorconfig` added. A drift test pins
+  `gates.py` to `ci.yml`. Proven by static checks and unit runs on macOS arm64 (E1/E2); the hook, the CI job and
+  every Windows path are NOT-PROVEN until a real push and a CI run.
+
 ### Changed
 
 - **CI in about ten minutes, with the same tests.** On each host OS the backend suite now runs as 2 shards in
