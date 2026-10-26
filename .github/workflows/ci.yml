@@ -13,6 +13,15 @@
 # browser and supply-chain jobs stay on ubuntu-latest runners because they check platform-neutral
 # artifacts (the frontend bundle, lockfiles) and are fastest there; they do not claim Linux host support.
 # Use standard runner labels only: larger runners are billed even for public repositories.
+#
+# Backend layout (ADR-0115 amendment "CI in about ten minutes"): on every host OS the full backend suite is
+# split by test file into 2 shards (tests/conftest.py --shard K/2, weights in tests/ci_durations.json) and each
+# shard runs with one pytest-xdist worker per logical CPU. Together the 2 shards of an OS run every test of the
+# old single job; shard 1 also runs the G1 static checks. The real trusted-suite verifier run has its own job on
+# macos-latest. The required check names of the main ruleset, "backend [G1,G2] (<os>)", are aggregator jobs on
+# ubuntu-latest that need every backend job of their OS and pass only when each of them ended in success
+# (skipped or cancelled is never a pass). Each shard uploads its JUnit XML (rebalance input for
+# scripts/ci_durations.py).
 name: ci
 
 on:
@@ -23,23 +32,31 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels that pull request's older run. A push to main never shares a group
+# (one group per run), so a main run is never cancelled or replaced while pending: every merge commit gets its
+# own CI result, which `aeos ops release accept` needs.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  backend:
-    name: backend [G1,G2] (${{ matrix.os }})
+  # The three shard jobs are identical apart from the runner (tests/unit/test_ci_gates.py keeps their steps equal).
+  backend-shards-windows-latest:
+    name: backend shard ${{ matrix.shard }}/2 [${{ matrix.gates }}] (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, macos-26-intel]
+        include:
+          - { os: windows-latest, shard: 1, gates: "G1,G2" }
+          - { os: windows-latest, shard: 2, gates: "G2" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock
       - name: Install (universal lockfile, ADR-0093)
         run: |
           python -m pip install --upgrade pip
@@ -47,19 +64,206 @@ jobs:
           python -m pip install --no-deps -e .
           python -m pip check
       - name: G1 static — ruff
+        if: contains(matrix.gates, 'G1')
         run: python -m ruff check backend tests scripts
       - name: G1 static — mypy for the macOS and Windows code paths (every module, none exempt in pyproject.toml)
-        if: runner.os == 'macOS' && runner.arch == 'ARM64'
+        if: contains(matrix.gates, 'G1') && runner.os == 'macOS' && runner.arch == 'ARM64'
         run: |
           python -m mypy --platform darwin
           python -m mypy --platform win32
       - name: G1 static — secret + PII scan (blueprints, contracts, docs)
+        if: contains(matrix.gates, 'G1')
         run: python scripts/secret_scan.py
-      - name: G2 controlled tests
-        run: python -m pytest -q -m "not integration and not network"
+      # -n logical: one worker per logical CPU. "-n auto" counts physical cores (psutil is installed), which is
+      # half the vCPUs on the 4-vCPU Windows runner.
+      - name: G2 controlled tests (shard ${{ matrix.shard }} of 2, parallel workers)
+        run: python -m pytest -q -m "not integration and not network" -n logical --shard ${{ matrix.shard }}/2 --junitxml=junit-backend.xml
+      - name: Upload the shard's JUnit XML (input for scripts/ci_durations.py)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-backend-${{ matrix.os }}-shard-${{ matrix.shard }}
+          path: junit-backend.xml
+          if-no-files-found: warn
+          retention-days: 30
+
+  backend-shards-macos-latest:
+    name: backend shard ${{ matrix.shard }}/2 [${{ matrix.gates }}] (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, shard: 1, gates: "G1,G2" }
+          - { os: macos-latest, shard: 2, gates: "G2" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install (universal lockfile, ADR-0093)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+          python -m pip install --no-deps -e .
+          python -m pip check
+      - name: G1 static — ruff
+        if: contains(matrix.gates, 'G1')
+        run: python -m ruff check backend tests scripts
+      - name: G1 static — mypy for the macOS and Windows code paths (every module, none exempt in pyproject.toml)
+        if: contains(matrix.gates, 'G1') && runner.os == 'macOS' && runner.arch == 'ARM64'
+        run: |
+          python -m mypy --platform darwin
+          python -m mypy --platform win32
+      - name: G1 static — secret + PII scan (blueprints, contracts, docs)
+        if: contains(matrix.gates, 'G1')
+        run: python scripts/secret_scan.py
+      # -n logical: one worker per logical CPU. "-n auto" counts physical cores (psutil is installed), which is
+      # half the vCPUs on the 4-vCPU Windows runner.
+      - name: G2 controlled tests (shard ${{ matrix.shard }} of 2, parallel workers)
+        run: python -m pytest -q -m "not integration and not network" -n logical --shard ${{ matrix.shard }}/2 --junitxml=junit-backend.xml
+      - name: Upload the shard's JUnit XML (input for scripts/ci_durations.py)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-backend-${{ matrix.os }}-shard-${{ matrix.shard }}
+          path: junit-backend.xml
+          if-no-files-found: warn
+          retention-days: 30
+
+  backend-shards-macos-26-intel:
+    name: backend shard ${{ matrix.shard }}/2 [${{ matrix.gates }}] (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-26-intel, shard: 1, gates: "G1,G2" }
+          - { os: macos-26-intel, shard: 2, gates: "G2" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install (universal lockfile, ADR-0093)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+          python -m pip install --no-deps -e .
+          python -m pip check
+      - name: G1 static — ruff
+        if: contains(matrix.gates, 'G1')
+        run: python -m ruff check backend tests scripts
+      - name: G1 static — mypy for the macOS and Windows code paths (every module, none exempt in pyproject.toml)
+        if: contains(matrix.gates, 'G1') && runner.os == 'macOS' && runner.arch == 'ARM64'
+        run: |
+          python -m mypy --platform darwin
+          python -m mypy --platform win32
+      - name: G1 static — secret + PII scan (blueprints, contracts, docs)
+        if: contains(matrix.gates, 'G1')
+        run: python scripts/secret_scan.py
+      # -n logical: one worker per logical CPU. "-n auto" counts physical cores (psutil is installed), which is
+      # half the vCPUs on the 4-vCPU Windows runner.
+      - name: G2 controlled tests (shard ${{ matrix.shard }} of 2, parallel workers)
+        run: python -m pytest -q -m "not integration and not network" -n logical --shard ${{ matrix.shard }}/2 --junitxml=junit-backend.xml
+      - name: Upload the shard's JUnit XML (input for scripts/ci_durations.py)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-backend-${{ matrix.os }}-shard-${{ matrix.shard }}
+          path: junit-backend.xml
+          if-no-files-found: warn
+          retention-days: 30
+
+  # Moved out of the macos-latest backend job so that it runs next to the shards instead of after the suite.
+  backend-verifier-macos-latest:
+    name: backend verifier [G2] (macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install (universal lockfile, ADR-0093)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+          python -m pip install --no-deps -e .
+          python -m pip check
       - name: G2 verifier runs the trusted suite for real (git only)
-        if: runner.os == 'macOS' && runner.arch == 'ARM64'
         run: python -m pytest -q -m integration tests/integration/test_verification_real_suite.py
+
+  # Required check names (main ruleset): one aggregator per host OS. `if: always()` makes it report even when a
+  # needed job failed or was skipped or cancelled; it then fails. It passes only when every needed job succeeded.
+  backend-windows-latest:
+    name: backend [G1,G2] (windows-latest)
+    if: always()
+    needs: [backend-shards-windows-latest]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every backend job of windows-latest succeeded (skipped, cancelled or failed is never a pass)
+        shell: bash
+        env:
+          RESULTS: >-
+            backend-shards-windows-latest=${{ needs.backend-shards-windows-latest.result }}
+        run: |
+          status=0
+          count=0
+          for entry in $RESULTS; do
+            count=$((count + 1))
+            if [ "${entry#*=}" = "success" ]; then echo "PASS  ${entry}"; else echo "FAIL  ${entry} (only success passes)"; status=1; fi
+          done
+          if [ "$count" -eq 0 ]; then echo "FAIL  no needed job result"; status=1; fi
+          exit "$status"
+
+  backend-macos-latest:
+    name: backend [G1,G2] (macos-latest)
+    if: always()
+    needs: [backend-shards-macos-latest, backend-verifier-macos-latest]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every backend job of macos-latest succeeded (skipped, cancelled or failed is never a pass)
+        shell: bash
+        env:
+          RESULTS: >-
+            backend-shards-macos-latest=${{ needs.backend-shards-macos-latest.result }}
+            backend-verifier-macos-latest=${{ needs.backend-verifier-macos-latest.result }}
+        run: |
+          status=0
+          count=0
+          for entry in $RESULTS; do
+            count=$((count + 1))
+            if [ "${entry#*=}" = "success" ]; then echo "PASS  ${entry}"; else echo "FAIL  ${entry} (only success passes)"; status=1; fi
+          done
+          if [ "$count" -eq 0 ]; then echo "FAIL  no needed job result"; status=1; fi
+          exit "$status"
+
+  backend-macos-26-intel:
+    name: backend [G1,G2] (macos-26-intel)
+    if: always()
+    needs: [backend-shards-macos-26-intel]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every backend job of macos-26-intel succeeded (skipped, cancelled or failed is never a pass)
+        shell: bash
+        env:
+          RESULTS: >-
+            backend-shards-macos-26-intel=${{ needs.backend-shards-macos-26-intel.result }}
+        run: |
+          status=0
+          count=0
+          for entry in $RESULTS; do
+            count=$((count + 1))
+            if [ "${entry#*=}" = "success" ]; then echo "PASS  ${entry}"; else echo "FAIL  ${entry} (only success passes)"; status=1; fi
+          done
+          if [ "$count" -eq 0 ]; then echo "FAIL  no needed job result"; status=1; fi
+          exit "$status"
 
   frontend:
     name: frontend [G1,G3]
@@ -90,6 +294,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
@@ -100,7 +306,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.lock
           python -m pip install --no-deps -e .
-          python -m playwright install --with-deps chromium
+      - name: Playwright version (browser cache key)
+        id: playwright
+        shell: bash
+        run: echo "version=$(python -c 'from importlib.metadata import version; print(version("playwright"))')" >> "$GITHUB_OUTPUT"
+      # Browser binaries only (public downloads, nothing secret), keyed by the pinned Playwright version.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-browsers-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
+      - name: Playwright Chromium and its OS packages (a cached browser is not downloaded again)
+        run: python -m playwright install --with-deps chromium
       - name: Build the Control Center
         working-directory: frontend
         run: |
@@ -128,12 +344,18 @@ jobs:
         os: [windows-latest, macos-latest, macos-26-intel]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The caches hold downloaded packages only (the user-level pip and npm caches the bootstrap's own .venv pip and
+      # npm ci read); the bootstrap still installs everything from requirements.lock and package-lock.json.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Bootstrap (macOS)
         if: runner.os != 'Windows'
         env:
@@ -176,6 +398,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"

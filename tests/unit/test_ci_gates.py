@@ -47,12 +47,19 @@ def test_supply_chain_reports_are_produced_and_labelled_report_only():
 
 
 def test_every_job_names_its_gates_explicitly():
+    """Every check-run name carries its gates. A matrix job is checked per matrix combination: the backend shards
+    take their tag from the matrix (only shard 1 runs the G1 static checks, so only shard 1 claims G1)."""
     from aeos.delivery.provider import classify_check
 
-    names = re.findall(r"^\s{4}name:\s*(.+)$", CI, flags=re.M)
-    assert names
+    raw = re.findall(r"^\s{4}name:\s*(.+)$", CI, flags=re.M)
+    jobs = _workflow()["jobs"]
+    assert raw and len(raw) == len(jobs)  # every job is named
+    names = [n for job in jobs.values() for n in _check_names(job)]
+    assert len(names) >= len(jobs)
     for name in names:
+        assert "${{" not in name, name
         assert re.search(r"\[(G[0-8](,G[0-8])*|NO-GATE)\]", name), name
+    assert classify_check("backend shard 2/2 [G2] (windows-latest)") == ["G2"]
     assert classify_check("backend [G1,G2] (ubuntu-latest)") == ["G1", "G2"]
     assert classify_check("supply-chain report [NO-GATE] (SBOM)") == []
     assert classify_check("frontend [G1,G3]") == ["G1", "G3"]
@@ -143,6 +150,212 @@ def _workflow() -> dict:
     import yaml
 
     return yaml.safe_load(CI)
+
+
+_MATRIX_REF = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}")
+
+
+def _matrix_combinations(job: dict) -> list[dict]:
+    """The combinations of a job's matrix, for the shapes this workflow uses: list axes (their product) and/or
+    ``include`` entries (each one extends the matching combinations, or is a combination of its own)."""
+    matrix = (job.get("strategy") or {}).get("matrix") or {}
+    assert "exclude" not in matrix, "matrix exclude is not modelled by this test"
+    axes = {k: v for k, v in matrix.items() if k != "include"}
+    assert all(isinstance(v, list) for v in axes.values()), axes
+    combos: list[dict] = [{}] if axes else []
+    for key, values in axes.items():
+        combos = [{**c, key: v} for c in combos for v in values]
+    for extra in matrix.get("include") or []:
+        matching = [c for c in combos if all(c.get(k) == v for k, v in extra.items() if k in axes)]
+        if matching and axes:
+            for c in matching:
+                c.update(extra)
+        else:
+            combos.append(dict(extra))
+    return combos
+
+
+def _check_names(job: dict) -> list[str]:
+    """The check-run name(s) a job reports: its name per matrix combination."""
+    name = str(job.get("name") or "")
+    combos = _matrix_combinations(job) or [{}]
+    return [_MATRIX_REF.sub(lambda m, c=c: str(c.get(m.group(1), m.group(0))), name) for c in combos]
+
+
+def _runners(job: dict) -> set[str]:
+    runs_on = str(job.get("runs-on") or "")
+    combos = _matrix_combinations(job) or [{}]
+    return {_MATRIX_REF.sub(lambda m, c=c: str(c.get(m.group(1), m.group(0))), runs_on) for c in combos}
+
+
+# ------------------------------------------------------------------ CI in about ten minutes (ADR-0115 amendment)
+HOST_OSES = ("windows-latest", "macos-latest", "macos-26-intel")
+# The required status checks of the ruleset on main (GitHub Actions app). The ruleset is owner configuration; these
+# names must keep existing, each exactly once, and must only pass when everything they stand for passed.
+REQUIRED_CHECKS = (
+    *(f"backend [G1,G2] ({o})" for o in HOST_OSES),
+    *(f"bootstrap [G2] ({o})" for o in HOST_OSES),
+    "browser e2e + a11y smoke [G3]",
+    "frontend [G1,G3]",
+)
+
+
+def test_every_required_check_of_the_main_ruleset_is_reported_by_exactly_one_job():
+    names = [n for job in _workflow()["jobs"].values() for n in _check_names(job)]
+    for required in REQUIRED_CHECKS:
+        assert names.count(required) == 1, (required, names.count(required))
+
+
+def _aggregator(os_label: str) -> tuple[str, dict]:
+    jobs = _workflow()["jobs"]
+    return next((jid, j) for jid, j in jobs.items() if j.get("name") == f"backend [G1,G2] ({os_label})")
+
+
+def test_backend_required_names_are_aggregators_over_every_backend_job_of_their_os():
+    """The required name of an OS needs all backend jobs on that OS (both shards; on macos-latest also the real
+    verifier run), runs even when they failed, were skipped or cancelled (if: always()) and then reports their
+    result. It runs no test itself."""
+    jobs = _workflow()["jobs"]
+    scripts = set()
+    for os_label in HOST_OSES:
+        agg_id, agg = _aggregator(os_label)
+        assert agg["runs-on"] == "ubuntu-latest" and agg["if"] == "always()", agg_id
+        needs = agg["needs"] if isinstance(agg["needs"], list) else [agg["needs"]]
+        on_os = {jid for jid, j in jobs.items()
+                 if jid != agg_id and str(j.get("name", "")).startswith("backend") and os_label in _runners(j)}
+        assert set(needs) == on_os and on_os, (os_label, needs, on_os)
+        (step,) = agg["steps"]
+        assert step["shell"] == "bash" and "uses" not in step
+        results = step["env"]["RESULTS"]
+        entry = re.compile(r"(\S+)=\$\{\{ needs\.(\S+)\.result \}\}")
+        pairs = entry.findall(results)
+        assert not entry.sub("", results).strip(), results  # nothing but job=result entries
+        assert all(a == b for a, b in pairs) and sorted(a for a, _ in pairs) == sorted(needs), results
+        scripts.add(step["run"])
+    assert len(scripts) == 1, "the three aggregators run the same check"
+    assert {"backend-shards-macos-latest", "backend-verifier-macos-latest"} <= set(_aggregator("macos-latest")[1]["needs"])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the aggregator step runs under bash on ubuntu-latest")
+@pytest.mark.parametrize("results, passes", [
+    ("a=success", True),
+    ("a=success b=success", True),
+    ("a=success b=skipped", False),
+    ("a=cancelled b=success", False),
+    ("a=failure", False),
+    ("a=", False),
+    ("", False),
+])
+def test_the_aggregator_passes_only_when_every_needed_job_succeeded(tmp_path: Path, results: str, passes: bool):
+    import os
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    script = tmp_path / "aggregate.sh"
+    script.write_text(_aggregator("macos-latest")[1]["steps"][0]["run"], encoding="utf-8")
+    res = subprocess.run([bash, "--noprofile", "--norc", "-eo", "pipefail", str(script)], capture_output=True,
+                         text=True, timeout=60, env={**os.environ, "RESULTS": results})
+    assert (res.returncode == 0) is passes, (results, res.returncode, res.stdout, res.stderr)
+    res.stdout.encode("ascii")
+    assert ("FAIL" in res.stdout) is not passes
+
+
+def _shard_jobs() -> dict[str, dict]:
+    return {jid: j for jid, j in _workflow()["jobs"].items() if jid.startswith("backend-shards-")}
+
+
+def test_every_host_os_runs_the_whole_backend_suite_as_shards_with_identical_steps():
+    """Sharding splits the suite, it drops nothing (ADR-0115: the full backend suite on every host OS): the shards
+    1..N of an OS all run, with the same marker selection the single backend job had, and the OS jobs never drift."""
+    shards = _shard_jobs()
+    assert set(shards) == {f"backend-shards-{o}" for o in HOST_OSES}
+    first = next(iter(shards.values()))["steps"]
+    for jid, job in shards.items():
+        assert job["steps"] == first, f"{jid} differs from the other shard jobs"
+        assert job["strategy"]["fail-fast"] is False
+        os_label = jid.removeprefix("backend-shards-")
+        combos = _matrix_combinations(job)
+        assert _runners(job) == {os_label} and {c["os"] for c in combos} == {os_label}
+        (run,) = [s["run"] for s in job["steps"] if "--shard" in (s.get("run") or "")]
+        m = re.search(r"--shard \$\{\{ matrix\.shard \}\}/(\d+)", run)
+        assert m, run
+        assert sorted(c["shard"] for c in combos) == list(range(1, int(m.group(1)) + 1)), combos
+        assert run.startswith("python -m pytest -q -m \"not integration and not network\" ")
+        assert " -n " in run and "--junitxml=" in run
+        assert {c["gates"] for c in combos if c["shard"] == 1} == {"G1,G2"}
+        assert {c["gates"] for c in combos if c["shard"] != 1} == {"G2"}
+
+
+def test_g1_static_steps_run_exactly_where_the_shard_name_claims_g1():
+    first = next(iter(_shard_jobs().values()))["steps"]
+    static = [s for s in first if str(s.get("name", "")).startswith("G1 static")]
+    assert {s["run"].split("\n")[0] for s in static} == {"python -m ruff check backend tests scripts",
+                                                          "python -m mypy --platform darwin",
+                                                          "python scripts/secret_scan.py"}
+    for step in static:
+        assert str(step.get("if", "")).startswith("contains(matrix.gates, 'G1')"), step["name"]
+    mypy = next(s for s in static if "mypy" in s["run"])
+    assert "python -m mypy --platform win32" in mypy["run"] and "runner.arch == 'ARM64'" in mypy["if"]
+    for step in first:  # the tests themselves never depend on the gate tag
+        if "pytest" in (step.get("run") or ""):
+            assert "if" not in step
+
+
+def test_each_shard_uploads_its_junit_report_for_rebalancing():
+    first = next(iter(_shard_jobs().values()))["steps"]
+    (upload,) = [s for s in first if str(s.get("uses", "")).startswith("actions/upload-artifact@")]
+    assert upload["with"]["path"] == "junit-backend.xml" and upload["if"] == "${{ !cancelled() }}"
+    assert upload["with"]["name"] == "junit-backend-${{ matrix.os }}-shard-${{ matrix.shard }}"
+
+
+def test_the_real_trusted_suite_verifier_runs_in_its_own_macos_arm64_job():
+    jobs = _workflow()["jobs"]
+    job = jobs["backend-verifier-macos-latest"]
+    assert job["runs-on"] == "macos-latest" and "[G2]" in job["name"]
+    (step,) = [s for s in job["steps"] if s.get("name") == "G2 verifier runs the trusted suite for real (git only)"]
+    assert step["run"] == "python -m pytest -q -m integration tests/integration/test_verification_real_suite.py"
+    assert "if" not in step and "if" not in job  # never skipped (a skipped step would still pass the job)
+
+
+def test_only_pull_request_runs_are_cancelled_by_a_newer_run():
+    """A main push run is never cancelled (each merge commit needs its own CI PASS for `aeos ops release accept`):
+    cancel-in-progress is true for pull requests only and every push run has a group of its own (a pending run
+    in a shared group would be replaced by the next one even without cancel-in-progress)."""
+    c = _workflow()["concurrency"]
+    assert c["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+    assert c["group"] == "ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}"
+
+
+def test_dependency_and_browser_caches_are_keyed_on_lockfiles_and_versions():
+    """pip caches keyed on requirements.lock, npm caches where npm ci runs (directly or in the bootstrap), and the
+    Playwright browsers keyed by the pinned Playwright version. Only package/browser downloads are cached."""
+    jobs = _workflow()["jobs"]
+    python_jobs = 0
+    for jid, job in jobs.items():
+        steps = job.get("steps") or []
+        runs = "\n".join(s.get("run") or "" for s in steps)
+        for step in steps:
+            uses = str(step.get("uses") or "")
+            if uses.startswith("actions/setup-python@"):
+                python_jobs += 1
+                assert step["with"].get("cache") == "pip", jid
+                assert step["with"].get("cache-dependency-path") == "requirements.lock", jid
+            if uses.startswith("actions/cache@"):
+                assert step["with"]["path"] == "~/.cache/ms-playwright", (jid, step["with"]["path"])
+                assert step["with"]["key"].endswith("${{ steps.playwright.outputs.version }}")
+        if "npm ci" in runs or "scripts/bootstrap" in runs or "bootstrap.ps1" in runs:
+            node = [s for s in steps if str(s.get("uses") or "").startswith("actions/setup-node@")]
+            assert node and node[0]["with"].get("cache") == "npm", jid
+            assert node[0]["with"].get("cache-dependency-path") == "frontend/package-lock.json", jid
+    assert python_jobs >= 7
+    e2e = jobs["browser-e2e"]["steps"]
+    order = [str(s.get("uses") or s.get("run") or "") for s in e2e]
+    cache_at = next(i for i, s in enumerate(order) if s.startswith("actions/cache@"))
+    install_at = next(i for i, s in enumerate(order) if "playwright install --with-deps chromium" in s)
+    assert cache_at < install_at, "the browser cache is restored before the install"
 
 
 def test_every_teed_report_step_runs_with_pipefail():

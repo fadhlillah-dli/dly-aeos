@@ -28,3 +28,12 @@ already pins through `package-lock.json`; the backend only had lower bounds in `
   the same change; modules merged separately require a regeneration by the integrator.
 * CI can switch to installing from the lock for reproducible builds (integrator change to the
   protected workflow).
+
+## Amendment 2026-10-26 — pytest-xdist in the dev extra
+
+`pytest-xdist>=3.8` joins the `dev` extra. CI runs each backend shard with parallel workers (ADR-0115 amendment
+2026-10-26 "CI in about ten minutes"), and developers can run `pytest -n auto`. The lock was regenerated in the
+same change with the command of decision 1, using uv 0.13.0. First, the unchanged `pyproject.toml` reproduced
+the committed lock byte for byte. The diff then adds only `pytest-xdist==3.8.0` and its dependency
+`execnet==2.1.2` (exact pins without hashes, like the rest of the file; decision 4 still defers hashes), plus the
+`pytest-xdist` entry in the "via" list of `pytest`. No other package moved.
