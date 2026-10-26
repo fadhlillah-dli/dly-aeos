@@ -4,8 +4,8 @@
 intake attachments submitted with it (validated: same domain as the entry, not REJECTED by intake scanning).
 Existing rows get an empty list.
 
-Revision ID: 0006_w7i2_research_attachments
-Revises: 0005_c8_platform_misc
+Revision ID: 0008_w7i2_research_attachments
+Revises: 0007_w7c1_broker_reasoning
 Create Date: 2026-10-26 03:00:00
 """
 from __future__ import annotations
@@ -13,8 +13,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0006_w7i2_research_attachments"
-down_revision = "0005_c8_platform_misc"
+revision = "0008_w7i2_research_attachments"
+down_revision = "0007_w7c1_broker_reasoning"
 branch_labels = None
 depends_on = None
 
