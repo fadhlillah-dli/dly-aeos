@@ -229,6 +229,24 @@ Workflows and no Administration. You can also record the capability probe from *
 *Catat sebagai bukti*. Other route keys are needed only for the routes you choose in 1.11:
 `./aeos secrets set workers/opencode-zen` and `./aeos secrets set workers/gemini`.
 
+**OpenCode Go key (decision A, ADR-0041 amendment 2026-10-26).** Only after you subscribe to Go:
+
+1. Open the OpenCode Console and select the **Personal** workspace. Go works only in single-member workspaces.
+2. Create an API key with permission **Restricted → Models: Request**. That is the least privilege the docs give for
+   inference.
+3. Store it, prompted without echo:
+
+   ```bash
+   ./aeos secrets set workers/opencode-go   # a separate ref, never the Zen key
+   ./aeos secrets status
+   ```
+
+4. On the Console's Go page, keep **Extra Usage OFF**. With it ON, Go falls back to your pay-as-you-go balance after
+   a usage limit, and AEOS cannot see that setting.
+
+The Integrasi & Akses card "OpenCode Go (langganan, rute pekerja)" then reads CONFIGURED. That means stored, not
+verified.
+
 ### 1.9 OpenCode and the contract test [per machine]
 
 ```bash
@@ -276,6 +294,23 @@ Activating a route is your explicit decision. Nothing is active by default.
 * **Paid route:** first record a BUDGET decision on *Keputusan* → *Catat keputusan manusia* (Jenis keputusan:
   BUDGET), then add `--budget-decision <id>`.
 * **Free OpenCode Zen routes:** they need the client-terms decision in [2.12](#212-smaller-open-decisions) first.
+* **OpenCode Go routes (decision A, ADR-0041 amendment 2026-10-26):** the WORKER candidates are
+  `opencode-go/glm-5.3-flash` (first), `opencode-go/mimo-v2.6-flash`, `opencode-go/minimax-m3.1-flash`,
+  `opencode-go/hy3` and `opencode-go/kimi-k2.7-code`. hy3 has no documented tool support, so it never serves
+  tool-using tasks. To activate one:
+  1. Store the Go key (1.8), then run `./aeos routes refresh`. The `opencode_go_catalog` line must read OK, and the
+     route availability AVAILABLE.
+  2. Read the Go terms: <https://opencode.ai/v2/docs/console/go/>, <https://opencode.ai/go> and the terms of service
+     <https://opencode.ai/legal/terms-of-service>. The ToS clause on automated or programmatic use is your risk to
+     accept: write what you read into `--terms-note`.
+  3. Record a BUDGET decision for the route (*Keputusan* → *Catat keputusan manusia*, Jenis keputusan: BUDGET).
+  4. Activate it. The provider restricts regions (workspace default EU & US), so state the region you reviewed:
+     `./aeos routes activate opencode-go/glm-5.3-flash --as <admin> --mode TRIAL --expected-hash <hash> --terms-reviewed --terms-note "<what you read, incl. the ToS automation clause>" --region <EU|US> --budget-decision <id> --rationale "<why>"`.
+     No client-terms flag: Go allows other clients, and passing one is refused with `CLIENT_TERMS_NOT_APPLICABLE`.
+
+  Keep Extra Usage OFF. The feasibility probe covers free routes only, so the first live evidence of a Go route is a
+  TRIAL worker run. Until part 2 of decision A (subscription billing in the cost module), the cost ledger treats a
+  Go route as a paid route.
 * **Prompt revision change:** a route approved under an older worker prompt revision stops with
   `PROMPT_REVISION_CHANGED`. Approve it again.
 
@@ -605,12 +640,18 @@ After that, three follow-up decisions open up, all from MCI_V2 only:
 Each item below is recorded either as an ADR, through the builder, or with the command given.
 
 * **Free OpenCode Zen routes** (ADR-0041 amendment 2026-10-25). The provider documents "Free-tier chat models
-  require OpenCode; use paid models or Go from other clients", and the AEOS broker is its own client. Choose one
-  option:
-  * (A) OpenCode Go. It is not seeded yet, so tell the builder.
+  require OpenCode; use paid models or Go from other clients", and the AEOS broker is its own client.
+  **Decided 2026-10-26: option A, OpenCode Go** (ADR-0041 amendment 2026-10-26). The `opencode-go/*` routes are
+  seeded as CANDIDATE. Activate them through [1.8](#18-secrets-openrouter-and-the-github-token-per-machine) and
+  [1.11](#111-route-activation-budget-and-the-worker-agent-per-machine-decision). The options were:
+  * (A) OpenCode Go. **Chosen.** Still yours to do: the Go key, the terms review including the ToS automation
+    clause, the region, a BUDGET decision and Extra Usage OFF.
   * (B) A paid Zen route: a BUDGET decision, then `./aeos routes activate ... --budget-decision <id>`.
-  * (C) Another route: OpenRouter, or LOCAL through `./aeos routes set-endpoint <local route_key> --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "<why>"`.
-  * (D) Proxy anyway: `./aeos routes activate ... --accept-client-terms --client-terms-note "<what you read>"`.
+  * (C) Another route. Correction: the seeded OpenRouter route is ARENA and the local route is LOCAL. Only the WORKER
+    pool serves worker tasks through the broker, so neither one serves worker tasks in this build. They can only be
+    probed (LOCAL through `./aeos routes set-endpoint <local route_key> --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "<why>"`).
+  * (D) Proxy anyway: `./aeos routes activate ... --accept-client-terms --client-terms-note "<what you read>"`. Still
+    possible per free Zen route. Decision A leaves the Zen client restriction UNDECIDED.
 * **Supervisor model.** If Fable resolves to another family (1.4), choose another supervisor, or pin a stage
   model with
   `./aeos policy decide --kind POLICY --stage-model <STAGE>=<exact-model-id> --eval-run <id> --rollback-target <old> --domain PERSONAL --as <admin> --rationale "<why>"`,

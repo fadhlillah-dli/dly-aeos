@@ -410,6 +410,23 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   on the decision and in the config hash; whether the provider accepts the call stays NOT-PROVEN until a probe),
   or use OpenCode Go / a paid route with a BUDGET decision instead. `aeos routes list` flags undecided routes with
   `client-terms=OWNER_DECISION_REQUIRED`.
+* **OpenCode Go routes (owner decision A, ADR-0041 amendment 2026-10-26):** `aeos seed` adds the `opencode-go/*`
+  CANDIDATE routes. In the WORKER pool they rank above the Zen pilots: glm-5.3-flash, mimo-v2.6-flash,
+  minimax-m3.1-flash, hy3 (no documented tool support) and kimi-k2.7-code. The other chat-completions models are on
+  the WATCHLIST.
+  * **Request.** The broker calls `https://opencode.ai/inference/go/openai/v1/chat/completions` with the bare model
+    id and the key `workers/opencode-go`, sent only to https://opencode.ai. It also sends `User-Agent:
+    dly-aeos-broker/<version>` and a stable `x-opencode-session` per worker run (a hash, never a secret), as the Go
+    docs ask of clients other than OpenCode.
+  * **Availability.** `aeos routes refresh` (`opencode_go_catalog`) reads `https://opencode.ai/inference/go/v1/models`
+    with that key: a listed model is AVAILABLE and an absent one MISSING. No key, a rejected key, an unreachable
+    endpoint or an unexpected answer leaves every Go route UNKNOWN.
+  * **Activation.** A Go route has no client restriction. Activating it needs the terms review (incl. the ToS
+    automation clause), the reviewed region (`--region`, workspace default EU & US) and a BUDGET decision.
+  * **Extra Usage on the Console's Go page must stay OFF.** With it ON, Go falls back to the pay-as-you-go balance
+    after a limit, and AEOS cannot observe that.
+  * **No probe.** The feasibility probe refuses a paid route (`ROUTE_NOT_FREE`), so the first live evidence is a
+    TRIAL worker run. Everything about Go is E1 (docs read 2026-10-26) until then.
 * **LOCAL route endpoint:** start an OpenAI-compatible server on this host, then `aeos routes set-endpoint
   local/qwen3.8-flash-next --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "..." [--model <served
   name>] [--quantization ...] [--backend ...] [--hardware ...]` (or the Models page form). Loopback `http` only;

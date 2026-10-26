@@ -10,6 +10,37 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ## [Unreleased]
 
+### Added
+
+- **OpenCode Go WORKER routes (owner decision A, part 1 of 2).** The owner chose option A of ADR-0041 on
+  2026-10-26: OpenCode Go, a $10/month subscription, for broker-served worker routes. This entry covers the routes
+  and code paths. The subscription billing semantics are part 2.
+  - **Routes.** `aeos seed` adds PERSONAL-only CANDIDATE routes for provider `opencode-go`:
+    - WORKER, ranked above the client-restricted free Zen pilots: glm-5.3-flash, mimo-v2.6-flash,
+      minimax-m3.1-flash, hy3 and kimi-k2.7-code.
+    - WATCHLIST: longcat-2.0, glm-5.2, glm-5.3, kimi-k3.1-pro and mimo-v2.6-pro, plus deepseek-v4.1-flash
+      (PUBLIC only: Global region, zero-retention agreement valid through 2026-10-31).
+
+    Each route records the Go terms: no training, 0-day retention, the region setting and Go's permission for other
+    clients, with no client restriction. Its pricing is a subscription: $10/month, a dollar allowance per model, 5h
+    20% / week 50% / month 100% windows and allowance rates per 1M tokens, never a metered price.
+  - **Broker.** It sends the Go key (`workers/opencode-go`) only to https://opencode.ai, with the bare model id, its
+    own User-Agent and a stable opaque `x-opencode-session` per worker run.
+  - **Availability.** `aeos routes refresh` reads the Go model list with that key. A listed model is AVAILABLE and an
+    absent one MISSING. No key, a rejected key or an unreachable list is UNKNOWN, never MISSING.
+  - **Secrets, Doctor and inventory.** The secret ref and its "OpenCode Go" integrations card warn that Extra Usage
+    must stay OFF. Doctor `route.worker_key` now follows every `workers/*` key, and its remedy names the route's own
+    key. The inventory CONFIG lens maps Go routes to the `opencode-console` component.
+  - **Evidence.** The facts are E1: the OpenCode Go docs, FAQ, ToS and models.dev for tool calling, read 2026-10-26.
+    The AEOS side is E2: unit tests against mocked upstreams for the request shape, host pin, headers, catalog
+    AVAILABLE/MISSING/UNKNOWN, activation (region + BUDGET, no client terms) and the separate credential. No live
+    call was made.
+  - **NOT-PROVEN:** whether Go accepts the broker as a client, tool calling on Go (hy3 UNKNOWN), the model-list shape,
+    and the owner's subscription, key, region and Extra Usage setting.
+  - **Not changed.** The free Zen pilots keep their S07 client restriction. ADR-0041 records the decision and its
+    risks (the ToS automation clause and Extra Usage are owner risks). OWNER_ACTIONS 1.8, 1.11 and 2.12 and
+    OPERATIONS give the owner steps.
+
 ### Fixed
 
 - **Data directory private on POSIX (#14).** The data layout was created with the process umask (0755

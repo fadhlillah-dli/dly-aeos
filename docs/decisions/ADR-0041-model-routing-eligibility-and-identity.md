@@ -174,7 +174,8 @@ context 262144, tools, `expiration_date` 2026-10-31; 16 `:free` models in total)
 ## Amendment 2026-10-25 (wave 7, C1): upstream request shape and the S07 client restriction
 
 Status of this amendment: the request-shape correction is ACCEPTED (it only aligns the seed with the provider
-documentation). The client-restriction question in "Owner decision required" below is **open: owner decision**.
+documentation). The client-restriction question in "Owner decision" below was **decided by the owner on 2026-10-26:
+option A, OpenCode Go** (see "Amendment 2026-10-26 (decision A: OpenCode Go WORKER routes)" at the end).
 
 ### Context (E1 documentation reading, 2026-10-25; nothing exercised live)
 
@@ -233,29 +234,33 @@ documentation). The client-restriction question in "Owner decision required" bel
    it does not touch the bridge, it does not invalidate the bridge capability proof (an engine/effort change still
    does).
 
-### Owner decision required (open)
+### Owner decision (decided 2026-10-26: A, OpenCode Go)
 
 How AEOS should use the free Zen routes given the S07 client rule. Options:
 
-* **A. OpenCode Go** for broker calls (a subscription; its endpoint/terms are not in this build: a new route after
-  the owner reads its terms).
+* **A. OpenCode Go** for broker calls (a subscription). **Chosen by the owner on 2026-10-26** for broker-served
+  WORKER routes; seeded as CANDIDATE routes by the 2026-10-26 amendment below. Activation, terms, budget and the
+  attestations stay the owner's decisions in the app.
 * **B. Paid Zen models with a BUDGET decision** (e.g. the chat-completions watchlist routes `kimi-k2.7-code`,
   `minimax-m3`, `mistral-large-4`); the existing paid-route path (BUDGET decision, no paid fallback) applies.
-* **C. Another worker route** (e.g. an OpenRouter free route, or a LOCAL loopback model).
+* **C. Another worker route** (e.g. an OpenRouter free route, or a LOCAL loopback model). Correction 2026-10-26: the
+  seeded OpenRouter route is ARENA and the local route is LOCAL; only the WORKER pool is broker-served for worker
+  tasks (ADR-0106 `SERVED_POOLS`), so neither serves a worker task in this build (only the feasibility probe).
 * **D. Proxy the free route anyway**, under the owner's responsibility for the provider terms: activation with an
   explicit client-terms decision (`client_terms` in the API / Models page, `--accept-client-terms
   --client-terms-note` in the CLI). It is written into `data_terms.client_restriction.owner_decision`
   (`OWNER_ACCEPTED_BROKER_CLIENT`) and onto the decision, bound to the configuration hash. A feasibility probe then
   shows (E3) whether the provider accepts the broker call; acceptance stays NOT-PROVEN until then.
 
-Until the owner records one of these, the free Zen routes - including the pilot WORKER routes - stay
-non-activatable for broker proxying. AEOS does not pick an option.
+The owner chose A. The free Zen routes - including the pilot WORKER routes - keep their client restriction
+(`owner_decision: UNDECIDED`) and stay non-activatable for broker proxying unless the owner records D for one of
+them; decision A does not decide the Zen rule. AEOS does not pick an option.
 
 ### Not done here (honest status)
 
 * No live call: the corrected shape is E1 until a probe records E3 (owner key + activation).
-* OpenCode Go and new free models in the S07 catalog (e.g. `flint-40b-free`) are not seeded; there is no OpenCode
-  catalog discovery in this build. LongCat & co. stay seeded; `aeos routes refresh` marks them MISSING when
+* New free models in the S07 catalog (e.g. `flint-40b-free`) are not seeded; there is no OpenCode catalog discovery
+  in this build. (OpenCode Go is seeded by the 2026-10-26 amendment.) LongCat & co. stay seeded; `aeos routes refresh` marks them MISSING when
   `opencode models` no longer lists them.
 * EvalRun still cannot execute COMPARATOR/LOCAL routes: the route view states `evaluation_path` NOT_WIRED
   (DESIGN, NOT-PROVEN, §49 M6). ARENA routes are evaluated only through the eval-only path of the W6-141
@@ -297,3 +302,179 @@ non-activatable for broker proxying. AEOS does not pick an option.
   stays an owner decision.
 * **Unchanged (owner decision):** planning/review continue on a re-resolved supervisor version (protected
   acceptance 1.31); the change is stated as NEEDS_EVALUATION / `supervisor_unevaluated`.
+
+## Amendment 2026-10-26 (decision A: OpenCode Go WORKER routes)
+
+Status of this amendment: the owner decided option A on 2026-10-26 (OpenCode Go, a $10/month subscription) for
+broker-served WORKER routes. This amendment records that decision and implements part 1 of 2: the CANDIDATE routes and
+the code paths. Part 2 is not in this amendment. It covers the subscription billing and cost semantics (cost module,
+scheduler, feasibility probe). Activating a route, the terms review, the budget and the attestations stay the owner's
+decisions in the app. Seeding activates nothing.
+
+### Context (E1 documentation reading, 2026-10-26; nothing exercised live)
+
+Sources, all read on 2026-10-26: the Go docs `https://opencode.ai/v2/docs/console/go/`, the product page and FAQ
+`https://opencode.ai/go`, `https://opencode.ai/v2/docs/console/harnesses/`,
+`https://opencode.ai/v2/docs/console/api/inference/`, `https://opencode.ai/v2/docs/console/api/`,
+`https://opencode.ai/v2/docs/console/billing/`, the terms of service `https://opencode.ai/legal/terms-of-service`,
+and models.dev `providers/opencode-go` (`https://github.com/anomalyco/models.dev`, the OpenCode org's model catalog).
+These pages belong to the OpenCode Console documentation that S07 cites. The research catalog keeps only the URLs the
+master states, so they are cited here and in the seeded `data_terms.sources`, not added to S07.
+
+* **Plan.** Go costs $10/month and Go Plus $40/month. Both are for single-member workspaces only, such as the
+  Personal workspace.
+* **Endpoint.** Chat completions are at `https://opencode.ai/inference/go/openai/v1/chat/completions` and take the
+  bare model id. `opencode-go/<id>` is the OpenCode config format. Other Go models are documented on Anthropic
+  messages, OpenAI responses or the Gemini path. The broker does not speak those APIs, so those models are not seeded.
+* **Auth.** `Authorization: Bearer <OpenCode Console API key, oc_sk_...>` from the workspace subscribed to Go. The
+  documented least privilege is permission Restricted with Models: Request. A revoked key gets 401, and a call outside
+  the key's permissions gets 403.
+* **Other clients are allowed.**
+  * The FAQ says: "Can I use Go with other coding agents? Yes, you can use Go with any agent."
+  * The Go docs say: "Your client should: Send typical coding agent traffic; Identify itself with its own user agent
+    ... rather than a generic SDK or HTTP-library name; Send a stable session ID in x-opencode-session for each
+    conversation".
+  * The harnesses page says "Go requires it" about that session ID.
+  * Free-tier chat models are different: "other clients receive HTTP 403 ... Use paid models or a Go subscription
+    from other clients".
+* **Limits.**
+  * Each model has a monthly DOLLAR allowance. The windows are 5 hours = 20%, week = 50% and month = 100% of it.
+  * Within the limits `usage.cost` is 0. `usage.opencode.allowance` reports the dollars counted, and
+    `usage.opencode.billing_source` is `go` or `go-plus`.
+  * At a limit the answer is HTTP 429 (`GoUsageLimitError`, `Retry-After`). This comes from OpenCode's own client test
+    fixture, not from the docs.
+  * The 429 only holds while "Extra Usage" is off. When it is on, Go "will fall back to your pay-as-you-go balance".
+    That is a paid fallback on the provider side.
+  * No requests-per-minute, tokens-per-minute or concurrency limit is documented. The docs only say "Traffic is
+    monitored for abuse".
+* **Privacy.**
+  * Privacy is a workspace setting. Paid endpoints that train on request data are blocked by default, and the allowed
+    regions default to Europe and United States.
+  * Every seeded model is listed as not used for training, with 0-day retention.
+  * DeepSeek V4.1 Flash and V4 Pro need the Global region. Their zero-retention agreement "is renewed monthly. The
+    current agreement is valid through October 31, 2026."
+* **Tool calling** is not in the Go docs. models.dev states tool support for glm-5.3-flash, mimo-v2.6-flash,
+  minimax-m3.1-flash and kimi-k2.7-code. It states no tool capability for hy3.
+* **Terms of service.** Users may not use the Services in a way that "automatically or programmatically extracts data
+  or Output", or run "processes that run or are activated while you are not logged into the Services". The Console
+  API docs, on the other hand, support scripts and integrations. How the ToS applies to an unattended broker is
+  unclear. This is not a legal conclusion.
+* **Not confirmed:**
+  * a "$5 first month" price, which appears only on third-party mirrors;
+  * whether `reasoning_effort` works on Go;
+  * whether Extra Usage is off by default;
+  * whether the model list needs the key.
+
+### Decision (implemented, part 1 of 2)
+
+1. **Seed** (`routing/seed.py`). A new `_go` builder makes the routes. `_zen` is not reused, because it attaches the
+   Zen client restriction and sets tool support to UNKNOWN on paid routes. Every Go route has:
+   * provider `opencode-go`, and route key and model id `opencode-go/<id>`;
+   * endpoint `https://opencode.ai/inference/go/openai/v1`;
+   * `mode_params`: `credential_ref` `workers/opencode-go`, the bare `upstream_model`, `upstream_api`
+     `openai.chat_completions` and `reasoning` `PROVIDER_DEFAULT`;
+   * PERSONAL only, CANDIDATE/DESIGN/E1, an empty `terms_checked_at` (the reading is in
+     `data_terms.read_for_research`) and an empty fallback chain.
+
+   The routes:
+   * **WORKER, priority 1-5:** glm-5.3-flash, mimo-v2.6-flash, minimax-m3.1-flash, hy3 and kimi-k2.7-code, with data
+     classes PUBLIC and INTERNAL. They rank above the client-restricted Zen pilots (priority 10 and 20). This is pilot
+     priority, not a ranking. `supports_tools` is YES as models.dev states, except hy3, which is UNKNOWN. A route
+     with UNKNOWN tool support is never eligible for tool-using tasks.
+   * **WATCHLIST:** longcat-2.0, glm-5.2, glm-5.3, kimi-k3.1-pro and mimo-v2.6-pro, with PUBLIC and INTERNAL.
+   * **WATCHLIST, PUBLIC only:** deepseek-v4.1-flash. Its terms and expiry note record the Global region and the
+     2026-10-31 zero-retention date.
+   * **Not seeded:**
+     * the models on other API families;
+     * the models that train on data or keep it for 30 days (Muse Spark Contributor, Grok, GPT Luna, Claude Haiku,
+       Beam Free);
+     * the remaining chat-completions models (kimi-k3, mimo-v2.5, mimo-v2.5-pro, hy4-preview, step-5-preview,
+       deepseek-v4-pro).
+
+     A later reviewed change can add them.
+
+   `data_terms` holds:
+   * no training and 0-day retention;
+   * `regions`: the workspace setting, Europe and United States by default. A provider that restricts regions needs
+     the owner's reviewed region at activation (`REGION_REVIEW_REQUIRED`).
+   * `client_permission`: the FAQ quote, with the claim level NOT-PROVEN for the broker. There is no
+     `client_restriction`.
+   * `provider_paid_fallback`: Extra Usage must stay OFF.
+   * `automation_terms`: the ToS clause is an owner risk.
+   * the sources.
+
+   `pricing`:
+   * `is_free` is NO. The pricing record is `billing` SUBSCRIPTION, `plan` OpenCode Go, `monthly_fee_usd` 10,
+     `allowance_usd_month`, `allowance_windows` {5h: 0.2, week: 0.5, month: 1.0}, `allowance_rate_per_mtok` and
+     `checked_at`.
+   * There are deliberately no `input_per_mtok`/`output_per_mtok` keys, so nothing reads the allowance rate as a
+     metered price.
+   * `pricing_checked_at` is 2026-10-26.
+2. **Broker.**
+   * `PROVIDER_ENDPOINT_HOSTS` gains `opencode-go` -> `opencode.ai`, https only. A Go row edited to another host, or
+     to plain or loopback http, is refused with `ROUTE_ENDPOINT`.
+   * `upstream_model_id` strips `opencode-go/` from a row without `upstream_model`.
+   * For provider `opencode-go` the broker sends `User-Agent: dly-aeos-broker/<version>` and
+     `x-opencode-session: ses_<first 24 hex of sha256(run id)>`. The session ID is stable per worker run and opaque:
+     never the capability token, a key or the run id itself.
+   * `Authorization: Bearer` comes from `mode_params.credential_ref`.
+   * Everything else is the existing non-OpenRouter path. For example, a 429 becomes RATE_LIMITED with no fallback.
+3. **Secrets.**
+   * `workers/opencode-go` is in `KNOWN_REFS`, separate from `workers/opencode-zen`, so a stored Zen key never reads
+     as Go.
+   * The integrations card "OpenCode Go (langganan, rute pekerja)" carries the Extra Usage OFF warning.
+   * `workers/` serves PERSONAL worker-model calls only. OFFICE refuses it.
+4. **Availability.** The catalog source `opencode_go_catalog` runs in `aeos routes refresh` and
+   `POST /api/routes/refresh-catalog`.
+   * It sends `GET https://opencode.ai/inference/go/v1/models` with Bearer `workers/opencode-go` (purpose
+     `workers:routing.catalog`).
+   * A listed id becomes AVAILABLE and an absent id MISSING.
+   * Without a stored key nothing is requested, and the Go routes become UNKNOWN. The same holds for 401/403, an
+     unreachable endpoint, another status or an unexpected shape: UNKNOWN, never MISSING.
+   * `opencode-go` is in `CATALOG_OBSERVED_PROVIDERS`. `opencode models` stays the Zen source only.
+5. **Doctor and inventory.**
+   * `route.worker_key` is invalidated by `secret:workers/*`, so any worker-model key counts, including
+     `workers/opencode-go`. Before, only the OpenRouter keys did.
+   * Its remedy names the eligible route's own key.
+   * The inventory CONFIG lens maps `opencode-go` to the `opencode-console` component. The research catalog
+     component hint is added.
+
+### Consequences
+
+* **Master §23 is extended through this ADR.** Its pool table names the free Zen pilots as the initial workers; this
+  amendment adds Go WORKER candidates. The master is not edited (`docs/architecture` is protected). Go is an official
+  API-key subscription that the provider documents for other clients. It is not the session/subscription-credential
+  routing that §45 excludes (9Router).
+* **The ToS automation clause is an owner risk.** It is recorded at activation: the TRIAL needs `terms_reviewed` and
+  a terms note. This is not a legal conclusion.
+* **Extra Usage must stay OFF.** AEOS cannot observe that account setting. With it ON, the provider silently falls
+  back to the paid balance after an allowance (invariant 8, no silent paid fallback). Until part 2 adds an
+  attestation preset, the owner step is in OWNER_ACTIONS 1.8/1.11.
+* **DeepSeek on Go** needs the Global region, and its zero-retention agreement expires 2026-10-31 unless renewed. It
+  stays WATCHLIST and PUBLIC only.
+* **Under the current cost semantics a Go route is a paid route:**
+  * a BUDGET decision is needed at activation, in routing and on every request; one decision can cover several Go
+    routes through `auth_scope.routes`;
+  * it is never an automatic fallback;
+  * the feasibility probe refuses it (`ROUTE_NOT_FREE`), so its first live evidence is a TRIAL worker run;
+  * a TaskSpec needs `max_cost_usd`;
+  * when the upstream reports no cost, the reservation is charged.
+
+  Part 2 of decision A changes this: allowance accounting, $0 within the allowance, the account-wide 429 scope and the
+  Extra Usage attestation.
+* **A later change to a seeded Go row voids its TRIAL.** Changing its pricing, terms or `mode_params` changes its
+  config hash. The seed only backfills untouched CANDIDATE rows.
+* **ADR-0041 changed again.** An owner ACCEPTED registration of it is STALE until it is recorded again (OWNER_ACTIONS
+  2.8).
+* **The install manifest is not updated here.** Component `opencode-console` still describes Zen only (cost
+  FREE_TIER, no Go `identity_ref`). It is a protected path and is updated through a reviewed change. The egress host
+  does not change: `opencode.ai`, through the broker and routing.
+
+### NOT-PROVEN
+
+* **No live call.** The endpoint, model ids, request shape, headers, auth, model-list shape and 429 behaviour are E1
+  documentation. The unit tests exercise the AEOS side against respx mocks (E2).
+* Whether Go accepts the AEOS broker as a client: typical coding-agent traffic, abuse monitoring.
+* Tool calling per models.dev is E1 and not exercised on Go. hy3 is UNKNOWN.
+* Whether the model list needs the key, and its exact shape. An OpenAI list is assumed; any other shape is UNKNOWN.
+* The owner's subscription, key, region and Extra Usage setting. None of them are observed by AEOS.
