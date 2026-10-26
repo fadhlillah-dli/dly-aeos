@@ -415,7 +415,9 @@ describe("project test baseline (§05 step 6)", () => {
   };
 
   it("shows status, counts, failing sample and the evidence link; the admin action asks for confirmation", async () => {
-    mockFetch((url, method) => (url === "/api/projects/p1/test-baseline" ? (method === "POST" ? { ...baseline, status: "PASS", failed: 0, failing_sample: [] } : baseline) : {}));
+    mockFetch((url, method) =>
+      url === "/api/projects/p1/test-baseline" ? (method === "POST" ? { ...baseline, status: "PASS", integrity: "PASS", failed: 0, failing_sample: [] } : baseline) : {},
+    );
     const { TestBaselinePanel } = await import("./TestBaselinePanel");
     wrap(<TestBaselinePanel projectId="p1" isAdmin />);
     const facts = await screen.findByTestId("test-baseline");
@@ -428,6 +430,36 @@ describe("project test baseline (§05 step 6)", () => {
     await userEvent.click(within(screen.getByRole("group", { name: "Konfirmasi baseline tes" })).getByRole("button", { name: /Konfirmasi & jalankan/ }));
     await waitFor(() => expect(sent("POST", "/api/projects/p1/test-baseline")).toHaveLength(1));
     expect(await screen.findByText("Baseline tercatat: PASS.")).toBeInTheDocument();
+  });
+
+  it("a PASS whose tamper window did not prove integrity is never shown as a pass", async () => {
+    mockFetch((url, method) =>
+      url === "/api/projects/p1/test-baseline"
+        ? method === "POST"
+          ? { ...baseline, status: "PASS", integrity: "UNKNOWN", failed: 0, failing_sample: [] }
+          : { ...baseline, status: "PASS", integrity: "UNKNOWN", failed: 0, failing_sample: [] }
+        : {},
+    );
+    const { TestBaselinePanel } = await import("./TestBaselinePanel");
+    wrap(<TestBaselinePanel projectId="p1" isAdmin />);
+    const facts = await screen.findByTestId("test-baseline");
+    expect(within(facts).getByText("PASS, integritas UNKNOWN (bukan lulus terbukti)")).toBeInTheDocument();
+    expect(within(facts).getByText("Tidak terbukti (UNKNOWN)")).toBeInTheDocument();
+    expect(within(facts).queryByText("Lulus")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Jalankan baseline tes/ }));
+    await userEvent.click(within(screen.getByRole("group", { name: "Konfirmasi baseline tes" })).getByRole("button", { name: /Konfirmasi & jalankan/ }));
+    expect(await screen.findByText("Baseline tercatat: PASS, integritas UNKNOWN (bukan lulus terbukti).")).toBeInTheDocument();
+  });
+
+  it("a PASS with a proven tamper window reads as a pass; an older server without the field is not proven", async () => {
+    const { BaselineFacts } = await import("./TestBaselinePanel");
+    const { unmount } = wrap(<BaselineFacts b={{ ...baseline, status: "PASS", integrity: "PASS", failed: 0, failing_sample: [] }} />);
+    expect(screen.getByText("Tidak ada perubahan terdeteksi di jendela tamper")).toBeInTheDocument();
+    expect(screen.queryByText(/bukan lulus terbukti/)).not.toBeInTheDocument();
+    unmount();
+    wrap(<BaselineFacts b={{ ...baseline, status: "PASS", failed: 0, failing_sample: [] }} />);
+    expect(screen.getByText("PASS, integritas tidak dinyatakan (bukan lulus terbukti)")).toBeInTheDocument();
+    expect(screen.getByText("Tidak dinyatakan server (tidak terbukti)")).toBeInTheDocument();
   });
 
   it("without an inventoried commit the admin run action is disabled and says why", async () => {

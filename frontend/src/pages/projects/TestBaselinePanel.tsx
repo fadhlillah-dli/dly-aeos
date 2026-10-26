@@ -24,18 +24,39 @@ export interface TestBaseline {
   javascript?: { status?: string | null; passed?: number | null; failed?: number | null };
   runner?: string | null;
   isolation?: string | null;
+  /** The tamper window's verdict beside the measurement (PASS | FAIL | UNKNOWN); a PASS baseline is not an integrity PASS. */
+  integrity?: string | null;
   source?: string;
 }
 
 const count = (v: number | null | undefined) => (v === null || v === undefined ? "?" : String(v));
 
+const INTEGRITY_LABELS: Record<string, string> = {
+  PASS: "Tidak ada perubahan terdeteksi di jendela tamper",
+  FAIL: "Perubahan terdeteksi (tamper)",
+  UNKNOWN: "Tidak terbukti (UNKNOWN)",
+};
+
+/** A PASS whose tamper window did not prove integrity (UNKNOWN, FAIL or not stated) is never shown as a pass. */
+function baselinePassUnproven(b: TestBaseline): boolean {
+  return b.status === "PASS" && b.integrity !== "PASS";
+}
+
+function unprovenPassLabel(b: TestBaseline): string {
+  return `PASS, integritas ${b.integrity || "tidak dinyatakan"} (bukan lulus terbukti)`;
+}
+
 /** The facts of one baseline (shared by the project card and the inventory facts). */
 export function BaselineFacts({ b }: { b: TestBaseline }) {
   const ran = !!b.evidence_id;
+  const unproven = baselinePassUnproven(b);
   return (
     <div className="space-y-2 text-sm" data-testid="test-baseline">
       <div className="flex flex-wrap items-center gap-2">
-        <Outcome status={b.status ?? "UNKNOWN"} label={b.status === "NOT_RUN" ? "Baseline belum dijalankan" : undefined} />
+        <Outcome
+          status={unproven ? "UNKNOWN" : (b.status ?? "UNKNOWN")}
+          label={b.status === "NOT_RUN" ? "Baseline belum dijalankan" : unproven ? unprovenPassLabel(b) : undefined}
+        />
         {b.commit && (
           <span className="text-xs">
             commit <Mono>{shortHash(b.commit, 12)}</Mono>
@@ -48,6 +69,14 @@ export function BaselineFacts({ b }: { b: TestBaseline }) {
         <KeyValue
           items={[
             ["Tes Python", `${count(b.passed)} lulus · ${count(b.failed)} gagal · ${count(b.skipped)} dilewati`],
+            [
+              "Integritas (jendela tamper)",
+              <Outcome
+                key="int"
+                status={b.integrity || "UNKNOWN"}
+                label={b.integrity ? (INTEGRITY_LABELS[b.integrity] ?? undefined) : "Tidak dinyatakan server (tidak terbukti)"}
+              />,
+            ],
             [
               "Tes JavaScript",
               b.javascript?.status ? (
@@ -166,7 +195,11 @@ export function TestBaselinePanel({ projectId, isAdmin }: { projectId: string; i
         )}
         <ErrorBox error={run.error} />
         <div aria-live="polite" className="text-xs text-ink-2">
-          {run.isPending ? "Baseline tes sedang berjalan…" : run.data ? `Baseline tercatat: ${run.data.status ?? "UNKNOWN"}.` : ""}
+          {run.isPending
+            ? "Baseline tes sedang berjalan…"
+            : run.data
+              ? `Baseline tercatat: ${baselinePassUnproven(run.data) ? unprovenPassLabel(run.data) : (run.data.status ?? "UNKNOWN")}.`
+              : ""}
         </div>
         {q.data?.status === "NOT_RUN" && !isAdmin && (
           <Notice tone="info">Baseline dijalankan SUPER_ADMIN (atau CLI: aeos verify project-baseline &lt;project id&gt;).</Notice>
