@@ -13,8 +13,8 @@ only after a new hash-bound human activation.
   are shared by every ``:free`` model: 20 requests/minute, and 50 requests per UTC day (less than 10 credits purchased,
   all time) or 1000 (at least 10). The caps are owner settings (``openrouter_free_rpm_limit``,
   ``openrouter_free_daily_limit``); a lower daily limit the key endpoint reports (``free_model_daily_requests.limit``)
-  wins. This AEOS instance counts its own upstream requests to ``:free`` models: forwarded broker requests (worker and
-  evaluation calls) and feasibility probes in the usage ledger. A 429 OpenRouter answers is recorded as an account-wide
+  wins. This AEOS instance counts its own upstream requests to ``:free`` models: its broker request rows - worker and
+  evaluation calls, and feasibility probes (recorded PENDING under the count lock before they are sent). A 429 OpenRouter answers is recorded as an account-wide
   quota state. Over a limit the request is refused with 429 + Retry-After and the task waits - it never moves to
   another route, and never to a paid one.
 """

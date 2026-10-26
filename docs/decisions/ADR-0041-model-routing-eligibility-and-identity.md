@@ -676,11 +676,15 @@ behaviour is NOT-PROVEN until a probe or a TRIAL run records it.
    worker and evaluation calls) and every feasibility probe that reached OpenRouter, over the last 60 s and the current
    UTC day. A probe of a `:free` model is a broker request row too: it is checked and recorded PENDING under the same
    count lock, in its own committed transaction, before anything is sent (so a probe and a worker request at the limit
-   cannot both pass), and settled in its own transaction right after the attempt - `NOT_SENT` (uncounted) when nothing
-   left this host (a refused connection), else the observed outcome (a 5xx or a read timeout counts). The count never
-   depends on the probe's later bookkeeping: if the database refuses that (locked, disk full), the session is rolled
-   back, the row keeps counting (PENDING when even the settlement was refused) and the error
-   (`PROBE_BOOKKEEPING_FAILED`) says whether the request was sent. On the broker the count and the request's PENDING row are one atomic step: the SQLite write lock (row
+   cannot both pass), and settled in its own transaction right after the attempt: `NOT_SENT` (uncounted) only for an
+   error raised before sending (a refused connection, an invalid URL, the client not built); `UNKNOWN` (counted) when it
+   is not known - any other error, or an interrupt (Ctrl-C), from the moment the transport is entered (the interrupt
+   then propagates); else the observed outcome with the usage the upstream reported (a 5xx or a read timeout counts).
+   The count never depends on the probe's later bookkeeping: if the database refuses that (locked, disk full), the
+   session is rolled back, the row keeps counting (PENDING when even the settlement was refused) and the error
+   (`PROBE_BOOKKEEPING_FAILED`) says whether the request was sent, or that this is not known. The probe needs a caller
+   session without uncommitted writes (`PROBE_SESSION_NOT_CLEAN` otherwise, nothing sent); `GET /api/broker/requests`
+   marks probe rows `kind: FEASIBILITY_PROBE`, and a probe still PENDING from an earlier UTC day `ABANDONED`. On the broker the count and the request's PENDING row are one atomic step: the SQLite write lock (row
    `openrouter-free` of `cost_admission_lock`, as the cost module's admission lock) is taken before counting and held
    until the commit, so concurrent requests cannot all pass the same count (a busy lock: 503
    `FREE_TIER_LOCK_UNAVAILABLE`, nothing sent). Enforced in the routing hard filter (a limit reason), in scheduler admission (`FREE_TIER_LIMIT_REACHED`, a
@@ -688,8 +692,7 @@ behaviour is NOT-PROVEN until a probe or a TRIAL run records it.
    `route_quota_exhausted`), on every broker request (429 + Retry-After before the request counts against the grant,
    recorded `RATE_LIMITED` without an upstream model so the executor's quota stop sees it and the counter does not) and
    in the probe (`PolicyDenied FREE_TIER_LIMIT_REACHED`). Migration `0009_dc_broker_request_created` adds the index
-   `ix_broker_requests_created` (the count does not scan the whole table); migration `0010_dc_audit_action_time` adds
-   `ix_audit_action_at` on `audit_events (action, at)` for audit lookups by action and time (downgrades drop them).
+   `ix_broker_requests_created` (the count does not scan the whole table; the downgrade drops it).
    **A quota stop is not a failed attempt.** When the executor stops a run at a provider quota (`QUOTA_EXHAUSTED`:
    3 consecutive rate-limit refusals - an answered request in between resets the count), the attempt is given back in
    the same row-version-guarded transition, and the task waits for the quota, then runs again. This holds for every
@@ -730,9 +733,7 @@ behaviour is NOT-PROVEN until a probe or a TRIAL run records it.
 * Two machines (or other clients) on the same OpenRouter account are invisible to each AEOS instance: each counts only
   its own requests; OpenRouter's 429 stays authoritative. On two Macs the owner may split the daily cap.
 * Concurrent broker requests and feasibility probes are serialised by the count lock and cannot exceed the cap
-  together; OpenRouter's 429 stays the boundary (other clients of the account are not counted). Migration 0010's
-  audit index no longer serves the count (probes are broker request rows now); it stays for audit lookups by action and
-  time.
+  together; OpenRouter's 429 stays the boundary (other clients of the account are not counted).
 * **Acceptance suite (protected path, `tests/acceptance`).** Its generic worker pilot was a `:free` OpenRouter route
   with INTERNAL tasks, which decision C refuses. The pilot is now a free route under the general rules
   (`vendor/acc-model`); the two tests about OpenRouter free models (1.29 free quota 429, 1.31 route changed by the

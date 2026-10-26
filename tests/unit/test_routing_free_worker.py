@@ -1023,6 +1023,9 @@ def test_seed_keeps_the_note_of_a_catalog_end_date_which_the_catalog_can_clear_l
     _discover(routes, _laguna({"prompt": "0", "completion": "0"}, None))
     r = service.get_route(routes, LAGUNA)
     assert r.free_until is None and "no expiration_date" in r.expires_note
+    seed.run(routes)  # the stored date is no longer the seed's: its S11 note would contradict it and is not written
+    r = service.get_route(routes, LAGUNA)
+    assert r.free_until is None and "no expiration_date" in r.expires_note and "S11" not in r.expires_note
 
 
 def test_only_an_active_retry_decision_resets_the_quota_stop_count(db, monkeypatch):
@@ -1052,3 +1055,93 @@ def test_only_an_active_retry_decision_resets_the_quota_stop_count(db, monkeypat
     retry.status = "INVALIDATED"  # a revoked retry decision no longer resets the count
     db.flush()
     assert scheduler.quota_stop_problem(db, spec, te)
+
+
+# ------------------------------------------------------------------ final review round (2026-10-27)
+
+
+def test_an_interrupt_after_the_request_reached_the_transport_keeps_it_counted(proxy, db):
+    received: list[str] = []
+
+    def interrupted(request):
+        received.append(str(request.url))
+        raise KeyboardInterrupt  # Ctrl-C while waiting for the answer: the request is already on its way
+
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:  # respx counts no call that raised
+        mock.post(UPSTREAM).mock(side_effect=interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            broker.probe_route(db, route_key=FREE, actor="user:owner")
+    assert received == [UPSTREAM]
+    assert [r.outcome for r in _probe_rows()] == ["UNKNOWN"]
+    assert free_tier.usage(db)["day"] == 1
+
+
+def test_an_unclassified_transport_error_is_counted_and_says_it_is_not_known_whether_it_was_sent(proxy, db):
+    def broken(request):
+        raise RuntimeError("transport bug")
+
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(UPSTREAM).mock(side_effect=broken)
+        with pytest.raises(Blocked) as ei:
+            broker.probe_route(db, route_key=FREE, actor="user:owner")
+    assert ei.value.code == "PROBE_BOOKKEEPING_FAILED"
+    assert "it is not known whether the request was sent; it is counted" in ei.value.message
+    assert "not sent (" not in ei.value.message
+    assert [r.outcome for r in _probe_rows()] == ["UNKNOWN"] and free_tier.usage(db)["day"] == 1
+
+
+def test_a_failed_probe_bookkeeping_is_audited_as_sent_when_the_database_works(proxy, db, monkeypatch):
+    from aeos.broker import feasibility
+
+    monkeypatch.setattr(feasibility, "_evidence", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full")))
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(UPSTREAM).mock(return_value=httpx.Response(503))
+        with pytest.raises(Blocked) as ei:
+            broker.probe_route(db, route_key=FREE, actor="user:owner")
+    assert ei.value.code == "PROBE_BOOKKEEPING_FAILED"
+    db.commit()  # what the API and the CLI do on an AeosError
+    failed = db.scalars(select(AuditEvent).where(AuditEvent.action == "broker.route_feasibility.probe")
+                        .order_by(AuditEvent.seq.desc())).first()
+    assert failed.details["upstream"] == "SENT" and "PROBE_BOOKKEEPING_FAILED" in failed.reason
+
+
+def test_a_probe_from_a_session_with_uncommitted_writes_is_refused_up_front(proxy, db):
+    from aeos.core.errors import Conflict
+
+    db.add(QuotaState(provider="openrouter", scope="unrelated", state="OK", source="test"))  # a pending write
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+        up = mock.post(UPSTREAM).mock(return_value=httpx.Response(200, json=_ok()))
+        with pytest.raises(Conflict) as ei:
+            broker.probe_route(db, route_key=FREE, actor="user:owner")
+        db.flush()  # a write already sent to the database: the connection holds a write transaction
+        with pytest.raises(Conflict):
+            broker.probe_route(db, route_key=FREE, actor="user:owner")
+        assert up.call_count == 0
+    assert ei.value.code == "PROBE_SESSION_NOT_CLEAN" and _probe_rows() == []
+    db.rollback()
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(UPSTREAM).mock(return_value=httpx.Response(200, json=_ok()))
+        assert broker.probe_route(db, route_key=FREE, actor="user:owner")["outcome"] == "REACHABLE"
+
+
+def test_probe_rows_are_marked_in_the_broker_request_list_and_carry_their_usage(proxy, db, admin_client):
+    from aeos.core.enums import Domain
+
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(UPSTREAM).mock(return_value=httpx.Response(200, json=_ok()))
+        broker.probe_route(db, route_key=FREE, actor="user:owner")
+    db.commit()
+    (settled,) = _probe_rows()
+    assert (settled.outcome, settled.prompt_tokens, settled.completion_tokens) == ("OK", 11, 3)
+    db.add(BrokerRequest(grant_id="feasibility-probe", run_id="r-old", project_id="feasibility-probe",
+                         domain="PERSONAL", route_key=FREE, provider="openrouter", exposed_model="feasibility-probe",
+                         upstream_model="cohere/north-mini-code:free", outcome="PENDING",
+                         created_at=utcnow() - timedelta(days=1)))
+    db.commit()
+    admin_client.select_domain(Domain.PERSONAL)
+    items = admin_client.get("/api/broker/requests").json()["items"]
+    probes = [i for i in items if i["kind"] == "FEASIBILITY_PROBE"]
+    assert sorted(i["outcome"] for i in probes) == ["ABANDONED", "OK"]  # a probe never settled on an earlier day
+    assert all(i["run_id"] is None for i in probes)
+    assert {i["kind"] for i in items} == {"FEASIBILITY_PROBE"}  # no worker call was made in this test
+    assert next(i for i in probes if i["outcome"] == "OK")["prompt_tokens"] == 11
