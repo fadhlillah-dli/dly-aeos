@@ -17,10 +17,19 @@ the bare id is ``mode_params.upstream_model`` and the documented API family ``mo
 API documents its OpenAI-compatible base ``https://generativelanguage.googleapis.com/v1beta/openai``. S07 also
 states "Free-tier chat models require OpenCode; use paid models or Go from other clients": every free Zen route
 carries that in ``data_terms.client_restriction`` and stays non-activatable/non-proxied until the owner decides.
+
+OpenCode Go (ADR-0041 amendment 2026-10-26, owner decision A; E1 documentation reading dated 2026-10-26, not
+exercised live): a $10/month subscription with per-model monthly DOLLAR allowances, served on
+``https://opencode.ai/inference/go/openai/v1/chat/completions`` with the bare model id and an OpenCode Console API key
+(``workers/opencode-go``). Go allows other clients ("Yes, you can use Go with any agent"), so its routes carry no
+client restriction. Only chat-completions models are seeded (the broker speaks nothing else): the flash/coding models
+as WORKER candidates ranked above the client-restricted Zen pilots, the others as WATCHLIST. Seeding activates nothing:
+the terms review, the region, the BUDGET decision and the Extra Usage attestation stay the owner's at activation.
 """
 
 from __future__ import annotations
 
+import copy
 from datetime import UTC, datetime
 from typing import Any
 
@@ -83,6 +92,62 @@ ZEN_FREE_PRICING = {"input_per_mtok": 0, "output_per_mtok": 0, "currency": "USD"
 # Non-OpenRouter OpenAI-compatible upstreams name their broker credential explicitly (§26: the key lives
 # in the secrets store under the worker-model namespace; the broker enforces the domain namespace rule).
 ZEN_CREDENTIAL_REF = "workers/opencode-zen"
+# ---- OpenCode Go (ADR-0041 amendment 2026-10-26, owner decision A; E1 documentation reading, not exercised live) ----
+GO_READ = "2026-10-26"
+GO_READ_AT = datetime(2026, 10, 26, tzinfo=UTC)
+GO_OPENAI_BASE = "https://opencode.ai/inference/go/openai/v1"  # + /chat/completions (Go docs "Endpoints")
+GO_CREDENTIAL_REF = "workers/opencode-go"  # a Console API key of the (single-member) workspace subscribed to Go
+GO_DOCS = "https://opencode.ai/v2/docs/console/go/"
+GO_SOURCES = (GO_DOCS, "https://opencode.ai/go", "https://opencode.ai/v2/docs/console/harnesses/",
+              "https://opencode.ai/v2/docs/console/api/inference/", "https://opencode.ai/legal/terms-of-service")
+# tool calling is not in the Go docs; models.dev (the OpenCode org's model catalog) states it per Go model
+GO_TOOLS_SOURCE = f"models.dev providers/opencode-go (github.com/anomalyco/models.dev, read {GO_READ})"
+GO_TERMS: dict[str, Any] = {
+    "retention": "0 days (provider claim, OpenCode Go privacy table)",
+    "training": "not used for training (provider claim, OpenCode Go privacy table)",
+    "may_use_inputs_for_training": False, "trial_only_no_confidential": False,
+    # a workspace privacy setting restricts regions: the owner states the reviewed region at activation
+    "regions": "workspace privacy setting; allowed regions default Europe & United States (OpenCode Go docs)",
+    "training_endpoints": "paid endpoints that train on request data are blocked by default (workspace privacy)",
+    # no ``client_restriction``: unlike the free Zen models, Go is documented for other clients
+    "client_permission": {
+        "statement": "Can I use Go with other coding agents? Yes, you can use Go with any agent.",
+        "conditions": "send typical coding agent traffic, identify with its own User-Agent and send a stable "
+                      "x-opencode-session per conversation (the broker sends both)",
+        "source": f"https://opencode.ai/go (FAQ) and {GO_DOCS} 'Where can I use it?', read {GO_READ}",
+        "claim_level": "E1 provider statement - whether Go accepts the broker as a client is NOT-PROVEN (no live call)",
+    },
+    "provider_paid_fallback": "Extra Usage falls back to the pay-as-you-go balance after a limit: must stay OFF "
+                              "(owner attestation)",
+    "automation_terms": "the ToS clause on automated/programmatic use is an owner risk recorded at activation "
+                        "(https://opencode.ai/legal/terms-of-service)",
+    "sources": list(GO_SOURCES),
+    "claim_level": "E1 provider statement - not proof of compliant routing",
+    "read_for_research": f"{GO_READ} (OpenCode Go docs reading for owner decision A; not an owner terms review)",
+}
+GO_ALLOWANCE_WINDOWS = {"5h": 0.2, "week": 0.5, "month": 1.0}  # share of the per-model monthly allowance (Go docs)
+GO_DEEPSEEK_TERMS: dict[str, Any] = {
+    **GO_TERMS,
+    "retention": "0 days* (provider claim): the DeepSeek ZDR agreement is renewed monthly, the current one is valid "
+                 "through 2026-10-31 (OpenCode Go privacy table)",
+    "regions": "needs the Global region (Settings > Privacy > Regions); the workspace default Europe & United "
+               "States excludes it (OpenCode Go docs)",
+}
+# (model, display, monthly allowance USD, allowance rate per 1M tokens, supports_tools per GO_TOOLS_SOURCE)
+GO_WORKERS: tuple[tuple[str, str, float, dict[str, float], str], ...] = (
+    ("glm-5.3-flash", "GLM-5.3-Flash", 60, {"input": 0.15, "output": 0.50, "cached_read": 0.03}, "YES"),
+    ("mimo-v2.6-flash", "MiMo-V2.6-Flash", 60, {"input": 0.14, "output": 0.28}, "YES"),
+    ("minimax-m3.1-flash", "MiniMax M3.1 Flash", 20, {"input": 0.15, "output": 0.60}, "YES"),
+    ("hy3", "Hy3", 60, {"input": 0.14, "output": 0.58}, "UNKNOWN"),  # models.dev states no tool capability
+    ("kimi-k2.7-code", "Kimi K2.7 Code", 60, {"input": 0.95, "output": 4.00}, "YES"),
+)
+GO_WATCH: tuple[tuple[str, str, float, dict[str, float]], ...] = (
+    ("longcat-2.0", "LongCat-2.0", 60, {"input": 0.30, "output": 1.20}),
+    ("glm-5.2", "GLM-5.2", 60, {"input": 1.40, "output": 4.40}),
+    ("glm-5.3", "GLM-5.3", 15, {"input": 1.40, "output": 4.40}),
+    ("kimi-k3.1-pro", "Kimi K3.1 Pro", 15, {"input": 2.00, "output": 10.00}),
+    ("mimo-v2.6-pro", "MiMo-V2.6-Pro", 15, {"input": 0.435, "output": 0.87}),
+)
 # §23 "mode/thinking params" of the native supervisor routes: the bridge passes no --effort/thinking flag, so the
 # Claude Code default applies; stated explicitly so that a caller passing a level is a configuration change.
 SUPERVISOR_MODE_PARAMS = {"effort": "CLI_DEFAULT", "thinking": "CLI_DEFAULT"}
@@ -123,6 +188,71 @@ def _zen(model: str, display: str, *, pool: str, terms: dict[str, Any], classes:
                         "reasoning": WORKER_REASONING},
         "prompt_revision": _worker_prompt_revision(),
     }
+
+
+def _go_pricing(allowance: float, rates: dict[str, float], **extra: Any) -> dict[str, Any]:
+    """A Go subscription is not a per-token price: the rates only say how fast a request consumes the model's monthly
+    dollar allowance (``usage.cost`` is 0 within the limits; part 2 of decision A gives the cost module these
+    semantics). No ``input_per_mtok``/``output_per_mtok`` keys, so nothing reads them as a metered price."""
+    return {"billing": "SUBSCRIPTION", "plan": "OpenCode Go", "monthly_fee_usd": 10, "currency": "USD",
+            "allowance_usd_month": allowance, "allowance_windows": dict(GO_ALLOWANCE_WINDOWS),
+            "allowance_rate_per_mtok": dict(rates), **extra,
+            "basis": "OpenCode Go subscription ($10/month): per-model monthly dollar allowance consumed at the listed "
+                     "rates (5h 20%, week 50%, month 100%); HTTP 429 at a limit while Extra Usage is OFF (Go docs)",
+            "checked_at": GO_READ}
+
+
+def _go(model: str, display: str, *, pool: str, pricing: dict[str, Any], priority: int, tools: str = "UNKNOWN",
+        classes: list[str] | None = None, terms: dict[str, Any] | None = None, notes: str = "",
+        expires_note: str | None = None) -> dict[str, Any]:
+    """An OpenCode Go route (ADR-0041 amendment 2026-10-26). Not ``_zen``: Go allows other clients, so no client
+    restriction is attached, and its tool support is the documented one, not UNKNOWN for every paid route."""
+    return {
+        "route_key": f"opencode-go/{model}", "pool": pool, "provider": "opencode-go",
+        # model_id keeps the OpenCode config id (``opencode-go/<id>``); the API takes the bare id (Go docs)
+        "endpoint": GO_OPENAI_BASE, "model_id": f"opencode-go/{model}", "display_name": f"{display} (OpenCode Go)",
+        "harness": "opencode", "tool_set": list(WORKER_TOOL_SET), "is_free": "NO", "pricing": pricing,
+        "data_terms": copy.deepcopy(terms or GO_TERMS), "eligible_domains": ["PERSONAL"],
+        "allowed_data_classes": classes or [P, I], "supports_tools": tools, "identity_status": "PROVIDER_CLAIMED",
+        "priority": priority, "fallback_chain": [],  # never a paid fallback (§42): Go routes carry no chain
+        "expires_note": expires_note, "source_refs": ["S07"], "notes": notes, "pricing_checked_at": GO_READ_AT,
+        "terms_checked_at": None,
+        "mode_params": {"credential_ref": GO_CREDENTIAL_REF, "upstream_model": model, "upstream_api": UPSTREAM_API_CHAT,
+                        "reasoning": WORKER_REASONING},
+        "prompt_revision": _worker_prompt_revision(),
+    }
+
+
+def _go_routes() -> list[dict[str, Any]]:
+    paid = ("Paid subscription route: inactive until the owner reviews the Go terms (incl. the ToS automation "
+            "clause), the region and a BUDGET decision, and keeps Extra Usage OFF (§23, §42).")
+    def worker_note(tools: str) -> str:
+        tool_note = (f"Tool calling YES per {GO_TOOLS_SOURCE} (E1, not exercised on Go)." if tools == "YES" else
+                     f"Tool calling UNKNOWN: {GO_TOOLS_SOURCE} states no tool capability for this model, so the route "
+                     "is not eligible for tool-using tasks.")
+        return ("OpenCode Go WORKER candidate (owner decision A, 2026-10-26): pilot priority above the "
+                f"client-restricted Zen pilots, not a ranking. {tool_note} {paid}")
+
+    out = [
+        _go(model, display, pool="WORKER", pricing=_go_pricing(allowance, rates), priority=1 + i, tools=tools,
+            notes=worker_note(tools))
+        for i, (model, display, allowance, rates, tools) in enumerate(GO_WORKERS)
+    ]
+    out += [
+        _go(model, display, pool="WATCHLIST", pricing=_go_pricing(allowance, rates), priority=510 + i,
+            notes=f"OpenCode Go chat-completions model on the watchlist (not a WORKER pilot). {paid}")
+        for i, (model, display, allowance, rates) in enumerate(GO_WATCH)
+    ]
+    out.append(_go(
+        "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", pool="WATCHLIST", priority=510 + len(GO_WATCH),
+        pricing=_go_pricing(80, {"input": 0.15, "output": 0.60}, peak_rate_per_mtok={"input": 0.30, "output": 1.20},
+                            peak_hours="01:00-04:00 and 06:00-10:00 UTC, Mon-Fri"),
+        terms=GO_DEEPSEEK_TERMS, classes=[P],
+        expires_note="DeepSeek ZDR agreement valid through 2026-10-31 per the Go docs (renewed monthly)",
+        notes="OpenCode Go watchlist: needs the Global region in the Go workspace (default EU & US excludes it) and "
+              "its zero-retention agreement is valid only through 2026-10-31 (renewed monthly, re-check at any "
+              f"activation); PUBLIC only until the owner reviews it. {paid}"))
+    return out
 
 
 def _worker_prompt_revision() -> str | None:
@@ -173,6 +303,8 @@ def seed_routes() -> list[dict[str, Any]]:
         _zen("glm-5.3-flash-free", "GLM-5.3 Flash Free", pool="WORKER", terms=ZERO_RETENTION, classes=[P, I],
              priority=20, fallback=["opencode-zen/deepseek-v4.1-flash-free"],
              notes="Pilot priority (§23); community experience S42 is anecdotal, not an evaluation."),
+        # ---- WORKER and WATCHLIST, OpenCode Go (owner decision A): ranked above the client-restricted Zen pilots ----
+        *_go_routes(),
         # ---- COMPARATOR ----
         {
             "route_key": "gemini/gemini-3.8-flash-free-tier", "pool": "COMPARATOR", "provider": "gemini",

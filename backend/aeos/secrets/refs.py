@@ -35,6 +35,10 @@ KNOWN_REFS: tuple[KnownRef, ...] = (
     KnownRef("personal/openrouter", "openrouter", "Kunci OpenRouter pribadi (cadangan info kunci/katalog)",
              "routing", "PERSONAL"),
     KnownRef("workers/opencode-zen", "opencode", "Kunci OpenCode Zen untuk rute pekerja", "broker", None),
+    # ADR-0041 amendment 2026-10-26 (owner decision A): a separate ref, so a stored Zen key never reads as Go
+    KnownRef("workers/opencode-go", "opencode-go",
+             "Kunci OpenCode Go (langganan) untuk rute pekerja (dipakai broker, bukan sandbox)", "broker / routing",
+             None),
     KnownRef("workers/gemini", "gemini", "Kunci Gemini API (pembanding Free Tier)", "broker", None),
     KnownRef("office/atlassian", "atlassian", "Token Atlassian OFFICE (Jira/Confluence) - diblokir sampai otorisasi kantor",
              "publisher", "OFFICE"),

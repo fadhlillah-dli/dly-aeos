@@ -154,6 +154,32 @@ def test_integrations_overview_cards(personal_client: AuthedClient, secrets_memo
     assert "VERIFIED" not in {c["status"] for c in cards.values()}
 
 
+def test_opencode_go_card_and_ref_are_separate_from_zen(personal_client: AuthedClient, secrets_memory, monkeypatch):
+    """ADR-0041 amendment 2026-10-26 (owner decision A): the Go key is its own ref and card, so a stored Zen key never
+    reads as a configured Go subscription (and the other way round)."""
+    from aeos.claude_bridge import binary as binmod
+    from aeos.secrets.refs import known
+    from tests.unit.test_claude_bridge_run import _probe
+
+    monkeypatch.setattr(binmod, "probe", lambda settings, refresh=False: _probe())
+    ref = known("workers/opencode-go")
+    assert ref is not None and ref.namespace == "workers" and ref.domain is None
+    assert "OpenCode Go" in ref.purpose and ref.remedy == "aeos secrets set workers/opencode-go"
+    secrets_memory.put("workers/opencode-zen", VALUE, actor="t")
+    cards = {c["id"]: c for c in personal_client.get("/api/secrets/integrations").json()["items"]}
+    go = cards["opencode-go"]
+    assert go["status"] == "MISSING" and cards["opencode"]["status"] == "CONFIGURED"
+    assert [r["ref"] for r in go["credential_refs"]] == ["workers/opencode-go"]
+    assert any(x["command"] == "aeos secrets set workers/opencode-go" for x in go["remedies"])
+    assert "Extra Usage" in go["warning"] and "OFF" in go["warning"]
+    secrets_memory.put("workers/opencode-go", "go-" + VALUE, actor="t")
+    r = personal_client.get("/api/secrets/integrations")
+    assert VALUE not in r.text
+    assert {c["id"]: c for c in r.json()["items"]}["opencode-go"]["status"] == "CONFIGURED"  # stored, not VERIFIED
+    items = {i["ref"] for i in personal_client.get("/api/secrets/status").json()["items"]}
+    assert "workers/opencode-go" in items
+
+
 def test_google_card_reads_the_refs_google_connect_writes(personal_client: AuthedClient, secrets_memory, monkeypatch):
     """W1 seam: the card follows the refs `aeos publish google-connect` writes and the publisher reads
     (personal/google-oauth-client + personal/google-oauth-token); both are needed for CONFIGURED."""

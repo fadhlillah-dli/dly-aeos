@@ -62,8 +62,9 @@ WORKER_EXECUTED_POOLS = ("WORKER",)
 REVIEWED_WORKER_TOOLS = ("fs.read", "fs.write:allowed_paths", "tests.run")
 TOOL_VOCABULARY = frozenset({*REVIEWED_WORKER_TOOLS, "bash", "webfetch"})
 PLACEHOLDER_TOOL_SETS = frozenset({"opencode-default"})
-# Providers whose availability a catalog refresh observes (routing.catalog: OpenRouter models, `opencode models`).
-CATALOG_OBSERVED_PROVIDERS = frozenset({"openrouter", "opencode-zen"})
+# Providers whose availability a catalog refresh observes (routing.catalog: OpenRouter models, `opencode models`,
+# the OpenCode Go model list with the workers/opencode-go key - ADR-0041 amendment 2026-10-26).
+CATALOG_OBSERVED_PROVIDERS = frozenset({"openrouter", "opencode-zen", "opencode-go"})
 _REGION = re.compile(r"^[A-Z0-9][A-Z0-9-]{1,31}$")
 # TaskSpec model_route_policy keys: consumed by routing, or constraints routing always enforces (a TaskSpec
 # asking to relax one of them is refused rather than silently ignored).
@@ -310,8 +311,8 @@ def client_restriction_problem(route: ModelRoute) -> str | None:
     return (f"provider client restriction ({cr.get('source') or 'provider terms'}): "
             f"{cr.get('statement') or 'the provider restricts which client may call this route'} The AEOS broker "
             "calls the upstream as its own HTTP client, not OpenCode: no owner decision is recorded for this route "
-            "(options: OpenCode Go, a paid route with a BUDGET decision, or an explicit client-terms decision at "
-            "activation; ADR-0041 amendment 2026-10-25)")
+            "(options: the seeded OpenCode Go routes opencode-go/* (owner decision A), a paid route with a BUDGET "
+            "decision, or an explicit client-terms decision at activation; ADR-0041 amendments 2026-10-25/26)")
 
 
 def request_shape_rejections(route: ModelRoute) -> list[str]:
@@ -1177,7 +1178,8 @@ def _validated_client_terms(client_terms: dict[str, Any] | None, route: ModelRou
         raise ValidationFailed("client_terms accepts accepted and note only", details={"unknown": unknown})
     if client_terms.get("accepted") is not True:
         raise ValidationFailed("client_terms.accepted must be true to activate a client-restricted route; otherwise "
-                               "keep it inactive and use OpenCode Go or a paid route with a BUDGET decision",
+                               "keep it inactive and use an OpenCode Go route (opencode-go/*) or a paid route with "
+                               "a BUDGET decision",
                                code="CLIENT_TERMS_DECISION_REQUIRED")
     note = str(client_terms.get("note") or "").strip()
     if len(note) < 10:

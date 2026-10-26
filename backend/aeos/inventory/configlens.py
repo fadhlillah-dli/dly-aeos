@@ -25,7 +25,8 @@ from aeos.models.inventory import ComponentObservation, ComponentReference
 
 PROVIDER_COMPONENTS = {
     "claude-native": "claude-code", "openrouter": "openrouter", "opencode-zen": "opencode-console",
-    "opencode": "opencode-console", "gemini": "gemini-api", "deepseek": "deepseek-api", "litellm": "litellm",
+    "opencode-go": "opencode-console", "opencode": "opencode-console", "gemini": "gemini-api",
+    "deepseek": "deepseek-api", "litellm": "litellm",
 }
 INTEGRATION_COMPONENTS = {
     "github": "github", "github-repo": "github", "github-issues": "github-issues", "github-actions": "github-actions",

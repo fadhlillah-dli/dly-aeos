@@ -215,6 +215,22 @@ def test_wildcard_invalidators_match(settings, db, runner, secrets_memory):
     assert n >= 1 and {"route.worker_key", "secret.status"} <= stale
 
 
+@pytest.mark.parametrize("ref", ["workers/opencode-go", "workers/opencode-zen", "personal/openrouter"])
+def test_any_worker_model_key_write_makes_the_worker_key_check_stale(settings, db, runner, secrets_memory, ref):
+    """route.worker_key follows the reference an eligible route names (ADR-0041 amendment 2026-10-26: the Go key
+    workers/opencode-go), not only the OpenRouter one; another namespace's key leaves it fresh."""
+    run_doctor(settings, db, groups=["SECRET", "MODEL_ROUTE"], runner=runner)
+    db.commit()
+    assert invalidate(db, invalidator="secret:personal/github", reason="token dirotasi") >= 0
+    db.commit()
+    stale = {r.check_id for r in db.scalars(select(CheckResult).where(CheckResult.status == "STALE"))}
+    assert "route.worker_key" not in stale
+    n = invalidate(db, invalidator=f"secret:{ref}", reason="kunci disimpan")
+    db.commit()
+    stale = {r.check_id for r in db.scalars(select(CheckResult).where(CheckResult.status == "STALE"))}
+    assert n >= 1 and "route.worker_key" in stale and "secret.status" not in stale
+
+
 def test_every_capability_rule_references_registered_checks():
     load_all()
     for cap in Capability:

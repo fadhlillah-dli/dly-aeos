@@ -19,6 +19,10 @@ from aeos.doctor.model import CheckContext, Outcome, Remedy, aeos_cmd
 
 WORKER_KEY_REF = "workers/openrouter"
 OPENROUTER_PERSONAL_REFS = ("workers/openrouter", "personal/openrouter")  # broker model proxy order (PERSONAL)
+# Remedy wording per worker credential reference (an eligible route names its own, e.g. workers/opencode-go)
+KEY_LABELS = {"workers/openrouter": "OpenRouter untuk pekerja",
+              "workers/opencode-go": "OpenCode Go (langganan) untuk pekerja",
+              "workers/opencode-zen": "OpenCode Zen untuk pekerja", "workers/gemini": "Gemini API (pembanding)"}
 CATALOG_MAX_AGE = timedelta(days=30)
 ROUTE_DOMAIN = "PERSONAL"  # OFFICE routes stay denied by the office policy (§23) and are gated per domain
 ROUTE_CLASSIFICATION = "INTERNAL"  # TaskSpec default data classification (same probe as the agent enable endpoint)
@@ -145,9 +149,10 @@ def _required_key_refs(ctx: CheckContext) -> tuple[list[str], list[tuple[str, tu
     return eligible, out
 
 
-# Secret changes are signalled by explicit invalidators (secret:<ref>), not by reading the store.
+# Secret changes are signalled by explicit invalidators (secret:<ref>), not by reading the store. ``secret:workers/*``
+# covers every worker-model key an eligible route may name (workers/openrouter, workers/opencode-go, ...).
 @check("route.worker_key", "MODEL_ROUTE", "Referensi kunci route pekerja (tanpa panggilan)", component_id="openrouter",
-       ttl_seconds=3600, invalidators=(f"secret:{WORKER_KEY_REF}", "secret:personal/openrouter", "config:routes",
+       ttl_seconds=3600, invalidators=("secret:workers/*", "secret:personal/openrouter", "config:routes",
                                        "model:route"),
        ok={"CONFIGURED", "VERIFIED", "NOT_APPLICABLE"}, severity_fail="HIGH", observation="configuration")
 def route_worker_key(ctx: CheckContext) -> Outcome:
@@ -196,7 +201,7 @@ def route_worker_key(ctx: CheckContext) -> Outcome:
                        evidence=evidence, error_code="SECRET_STORE_UNAVAILABLE")
     ref = (required[0][1][0] if required else WORKER_KEY_REF)
     return Outcome("MISSING", f"Kunci route belum disimpan: {'; '.join(missing)}.", evidence=evidence,
-                   error_code="WORKER_KEY_MISSING", remedy=set_secret_remedy(ref, "OpenRouter untuk pekerja"))
+                   error_code="WORKER_KEY_MISSING", remedy=set_secret_remedy(ref, KEY_LABELS.get(ref, ref)))
 
 
 @check("route.catalog_freshness", "MODEL_ROUTE", "Kesegaran harga/terms route yang diputuskan", component_id="model-routing",

@@ -12,6 +12,9 @@ Guarantees:
   ``opencode/`` config prefix), the provider's credential only towards the provider's own host, a superseded seed
   endpoint or a non-chat-completions API refused; the reasoning level is the route's (``mode_params.reasoning``),
   never the worker's - a worker-sent ``reasoning_effort`` is dropped and recorded on the BrokerRequest;
+* OpenCode Go (ADR-0041 amendment 2026-10-26): the broker identifies itself with its own User-Agent and sends a
+  stable, opaque ``x-opencode-session`` per worker run (a hash of the run id, never a secret), as the Go docs ask
+  of clients other than OpenCode;
 * request/token/cost caps and expiry are enforced before forwarding; ``max_tokens`` is clamped;
 * upstream 429 -> 429 + ``Retry-After`` to the worker, QuotaState recorded, and NO fallback to any
   other (paid or unapproved) model (§42, §50 "Free quota habis / 429");
@@ -23,6 +26,7 @@ Guarantees:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -38,6 +42,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import select
 from starlette.concurrency import run_in_threadpool
 
+from aeos import __version__
 from aeos.audit import service as audit
 from aeos.broker import grants
 from aeos.core.db import session_factory
@@ -68,6 +73,14 @@ ALLOWED_FIELDS = frozenset({
 })
 REASONING_NOT_SENT = "NOT_SENT"  # BrokerRequest.reasoning_effort when nothing was sent (provider default)
 ZEN_CONFIG_PREFIX = "opencode/"  # OpenCode config/catalog format; the Zen API takes the bare model id (S07)
+# OpenCode Go (ADR-0041 amendment 2026-10-26, E1 Go docs read 2026-10-26): ``opencode-go/<id>`` is the OpenCode config
+# format, the API takes the bare id; clients other than OpenCode identify themselves with their own User-Agent ("rather
+# than a generic SDK or HTTP-library name") and send a stable ``x-opencode-session`` per conversation ("Go requires it").
+GO_PROVIDER = "opencode-go"
+GO_CONFIG_PREFIX = "opencode-go/"
+BROKER_USER_AGENT = f"dly-aeos-broker/{__version__}"
+OPENCODE_SESSION_HEADER = "x-opencode-session"
+CONFIG_PREFIXES = {"opencode-zen": ZEN_CONFIG_PREFIX, GO_PROVIDER: GO_CONFIG_PREFIX}
 
 
 class ProxyError(Exception):
@@ -205,13 +218,15 @@ def client_restriction_problem(session: Any, route: ModelRoute) -> str | None:
 
 def upstream_model_id(route: ModelRoute) -> str:
     """The model id sent upstream: ``mode_params.upstream_model`` when the route states it, else the route's model
-    id - for OpenCode Zen without the ``opencode/`` OpenCode-config prefix (S07: API requests use the bare id)."""
+    id - for OpenCode Zen/Go without the ``opencode/`` / ``opencode-go/`` OpenCode-config prefix (S07 and the Go
+    docs: API requests use the bare id)."""
     explicit = (route.mode_params or {}).get("upstream_model")
     if isinstance(explicit, str) and explicit.strip():
         return explicit.strip()
     model = route.model_id or ""
-    if route.provider == "opencode-zen" and model.startswith(ZEN_CONFIG_PREFIX):
-        return model[len(ZEN_CONFIG_PREFIX):]
+    prefix = CONFIG_PREFIXES.get(route.provider or "")
+    if prefix and model.startswith(prefix):
+        return model[len(prefix):]
     return model
 
 
@@ -603,12 +618,23 @@ def _usage_of(data: dict[str, Any]) -> tuple[int | None, int | None, float | Non
             int(completion) if isinstance(completion, int | float) else None, cost_f, model)
 
 
-def _upstream_headers(up: Upstream) -> dict[str, str]:
+def opencode_session_id(run_id: str) -> str:
+    """The stable ``x-opencode-session`` of one worker run (the Go docs: one stable id per conversation, used for
+    routing and prompt caching). Opaque: a hash prefix of the run id, never the capability token or any secret."""
+    return "ses_" + hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()[:24]
+
+
+def _upstream_headers(up: Upstream, *, run_id: str | None = None) -> dict[str, str]:
     h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
     if up.api_key:
         h["Authorization"] = f"Bearer {up.api_key}"
     if up.is_openrouter:
         h["X-Title"] = "DLY AEOS worker broker"
+    if up.provider == GO_PROVIDER:
+        # the client identification the Go docs ask of other clients (not httpx's generic default User-Agent)
+        h["User-Agent"] = BROKER_USER_AGENT
+        if run_id:
+            h[OPENCODE_SESSION_HEADER] = opencode_session_id(run_id)
     return h
 
 
@@ -676,7 +702,8 @@ async def chat_completions(request: Request) -> Response:
     started = time.monotonic()
     client = httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT, follow_redirects=False, trust_env=False)
     try:
-        resp = await client.send(client.build_request("POST", url, json=p.body, headers=_upstream_headers(p.upstream)),
+        resp = await client.send(client.build_request("POST", url, json=p.body,
+                                                      headers=_upstream_headers(p.upstream, run_id=p.run_id)),
                                  stream=True)
     except httpx.TimeoutException:
         await client.aclose()

@@ -1,4 +1,4 @@
-"""Catalog refresh (§23, §38, §41): OpenRouter public models, OpenRouter key info, OpenCode models.
+"""Catalog refresh (§23, §38, §41): OpenRouter public models, OpenRouter key info, OpenCode models, OpenCode Go models.
 
 * Observations update pricing/context/free flags/availability with ``*_checked_at`` timestamps and
   register newly found ``:free`` models as DISCOVERED candidates (status CANDIDATE, mode LIVE,
@@ -9,6 +9,10 @@
 * Key info: GET /api/v1/key with the key from secret ref ``workers/openrouter`` (falls back to
   ``personal/openrouter``); no key -> quota UNKNOWN. The response ``label`` (it can contain a key
   fragment) is never stored.
+* OpenCode Go (ADR-0041 amendment 2026-10-26): GET the documented Go model list with the key from
+  ``workers/opencode-go``; it only sets the availability of the seeded ``opencode-go/*`` routes. Anything but a
+  list that was actually read (no key, rejected key, unreachable, unexpected answer) is UNKNOWN, never MISSING.
+  ``opencode models`` stays the Zen source only.
 """
 
 from __future__ import annotations
@@ -41,6 +45,10 @@ log = logging.getLogger("aeos.routing.catalog")
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 OPENROUTER_KEY_REFS = (("workers/openrouter", "workers:routing.key-info"), ("personal/openrouter", "personal:routing.key-info"))
+# OpenCode Go docs (E1, read 2026-10-26): "Fetch the full list of available models ... from the models endpoint"
+OPENCODE_GO_MODELS_URL = "https://opencode.ai/inference/go/v1/models"
+OPENCODE_GO_KEY_REF = ("workers/opencode-go", "workers:routing.catalog")
+OPENCODE_GO_PREFIX = "opencode-go/"
 HTTP_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 # S12 (documentation, E1): free-model daily request caps depend on purchased credits.
 FREE_DAILY_LIMIT_NO_CREDITS = 50
@@ -306,6 +314,85 @@ def refresh_opencode_catalog(session: Session, settings: Settings) -> dict[str, 
             "missing": missing, **harness}
 
 
+def _opencode_go_key() -> tuple[str | None, str]:
+    try:
+        from aeos.secrets.facade import get_secret
+    except (ImportError, ModuleNotFoundError):  # pragma: no cover - same owner
+        return None, "secrets module unavailable"
+    ref, purpose = OPENCODE_GO_KEY_REF
+    try:
+        return get_secret(ref, purpose=purpose, actor="routing.catalog"), ""
+    except AeosError as exc:
+        return None, f"{ref}: {exc.code}"
+
+
+def parse_opencode_go_models(payload: Any) -> set[str]:
+    """Model ids of the Go model list (OpenAI-style ``{"data": [{"id": ...}]}``); another shape is refused."""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        raise ValueError("unexpected OpenCode Go model list shape")
+    return {m["id"] for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)}
+
+
+def _go_ids(route: ModelRoute) -> set[str]:
+    """The ids a listing may name *route* by: the bare upstream id, or the ``opencode-go/<id>`` config form."""
+    model = route.model_id or ""
+    ids = {model, model.removeprefix(OPENCODE_GO_PREFIX)}
+    upstream = (route.mode_params or {}).get("upstream_model")
+    if isinstance(upstream, str) and upstream.strip():
+        ids.add(upstream.strip())
+    return {i for i in ids if i}
+
+
+def refresh_opencode_go_catalog(session: Session, client: httpx.Client) -> dict[str, Any]:
+    """Availability of the ``opencode-go`` routes from the Go model list (ADR-0041 amendment 2026-10-26).
+
+    The list is read with the ``workers/opencode-go`` key only (``Authorization: Bearer``): without a stored key
+    nothing is requested - such a route cannot be served anyway. Only a list that was actually read says AVAILABLE or
+    MISSING; no key, a rejected key (401/403), an unreachable endpoint or an unexpected answer leaves every Go route
+    UNKNOWN (never MISSING, never AVAILABLE). Pricing, terms and tool support are not in the listing and are never
+    changed here; nothing is activated."""
+    now = utcnow()
+    routes = list(session.scalars(select(ModelRoute).where(ModelRoute.provider == "opencode-go")))
+    remedy = "aeos secrets set workers/opencode-go"
+
+    def unknown(reason: str, **extra: Any) -> dict[str, Any]:
+        for route in routes:
+            route.availability = "UNKNOWN"
+            route.availability_checked_at = now
+        session.flush()
+        return {"status": "UNKNOWN", "checked_at": now.isoformat(), "reason": reason,
+                "unknown": [r.route_key for r in routes], **extra}
+
+    if not routes:
+        return {"status": "UNKNOWN", "checked_at": now.isoformat(), "reason": "no opencode-go routes registered"}
+    key, why = _opencode_go_key()
+    if key is None:
+        return unknown(f"no OpenCode Go key ({why}) - availability UNKNOWN", remedy=remedy)
+    try:
+        r = client.get(OPENCODE_GO_MODELS_URL, headers={"Authorization": f"Bearer {key}"}, timeout=HTTP_TIMEOUT)
+    except httpx.HTTPError as exc:
+        return unknown(f"OpenCode Go model list unreachable ({type(exc).__name__}) - availability UNKNOWN")
+    if r.status_code in (401, 403):
+        return unknown(f"OpenCode Go key rejected (HTTP {r.status_code}) - availability UNKNOWN", remedy=remedy)
+    if r.status_code != 200:
+        return unknown(f"OpenCode Go model list answered HTTP {r.status_code} - availability UNKNOWN")
+    try:
+        listed = parse_opencode_go_models(r.json())
+    except ValueError as exc:  # invalid JSON is a ValueError too
+        return unknown(f"{redact_text(str(exc))[:120]} - availability UNKNOWN")
+    present: list[str] = []
+    missing: list[str] = []
+    for route in routes:
+        found = bool(_go_ids(route) & listed)
+        route.availability = "AVAILABLE" if found else "MISSING"
+        route.availability_checked_at = now
+        (present if found else missing).append(route.route_key)
+    session.flush()
+    return {"status": "OK", "checked_at": now.isoformat(), "listed": len(listed), "available": present,
+            "missing": missing, "secret_ref": OPENCODE_GO_KEY_REF[0], "evidence_level": "E1"}
+
+
 def observe_harness_version(session: Session, binary: str | None) -> dict[str, Any]:
     """§23 "harness version": record the installed OpenCode version on every route the worker runtime runs
     with it. A different version is a configuration change (approvals bound to the old hash stop matching,
@@ -345,7 +432,8 @@ def refresh_all(session: Session, *, actor: str, settings: Settings | None = Non
     try:
         for name, fn in (("openrouter_catalog", lambda: refresh_openrouter_catalog(session, http)),
                          ("openrouter_key", lambda: refresh_openrouter_key_info(session, http)),
-                         ("opencode_catalog", lambda: refresh_opencode_catalog(session, settings))):
+                         ("opencode_catalog", lambda: refresh_opencode_catalog(session, settings)),
+                         ("opencode_go_catalog", lambda: refresh_opencode_go_catalog(session, http))):
             try:
                 results[name] = fn()
             except (httpx.HTTPError, ValueError) as exc:

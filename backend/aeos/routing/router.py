@@ -151,8 +151,9 @@ def _client_restriction_view(r: ModelRoute) -> dict[str, Any] | None:
             "note": ("Pemilik mencatat keputusan pada aktivasi (terikat hash konfigurasi). Apakah provider menerima "
                      "panggilan broker tetap NOT-PROVEN sampai probe kelayakan." if decided else
                      "Broker AEOS memanggil upstream sebagai klien HTTP sendiri, bukan OpenCode. Rute ini tidak dapat "
-                     "diaktifkan atau diproksikan sampai pemilik memutuskan: OpenCode Go, rute berbayar dengan "
-                     "keputusan BUDGET, atau keputusan syarat-klien eksplisit saat aktivasi (ADR-0041).")}
+                     "diaktifkan atau diproksikan sampai pemilik memutuskan: rute OpenCode Go (opencode-go/*, "
+                     "keputusan pemilik A), rute berbayar dengan keputusan BUDGET, atau keputusan syarat-klien "
+                     "eksplisit saat aktivasi (ADR-0041).")}
 
 
 def route_view(session: Session, r: ModelRoute, principal: Principal,

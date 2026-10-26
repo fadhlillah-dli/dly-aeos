@@ -35,8 +35,10 @@ EVAL_POOLS: tuple[str, ...] = ("ARENA",)
 UPSTREAM_API_CHAT = "openai.chat_completions"
 UPSTREAM_APIS: tuple[str, ...] = (UPSTREAM_API_CHAT, "openai.responses", "anthropic.messages")
 # Provider -> the only host its credential is ever sent to (a route edited to another host fails closed).
+# ``opencode-go`` (additive, ADR-0041 amendment 2026-10-26): the Go subscription key goes to opencode.ai only.
 PROVIDER_ENDPOINT_HOSTS: dict[str, tuple[str, ...]] = {
     "opencode-zen": ("opencode.ai",),
+    "opencode-go": ("opencode.ai",),
     "gemini": ("generativelanguage.googleapis.com",),
 }
 # Endpoints an earlier seed wrote that contradict the provider documentation (E1, read 2026-10-25): S07 documents

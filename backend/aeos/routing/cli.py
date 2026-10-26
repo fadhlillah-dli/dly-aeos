@@ -62,7 +62,8 @@ def list_cmd(pool: str = typer.Option(None, help="Filter by pool"), status: str 
 
 @app.command("refresh")
 def refresh_cmd() -> None:
-    """Refresh OpenRouter catalog + key info and the OpenCode model list (never activates)."""
+    """Refresh OpenRouter catalog + key info, the OpenCode model list and the OpenCode Go model list (never
+    activates)."""
     from aeos.audit import service as audit
     from aeos.cli import ensure_database
     from aeos.core.db import session_scope
