@@ -550,7 +550,7 @@ def _push_branch(session: Session, broker: Any, run: WorkerRun, *, repo: str, ac
     pushed = call(broker.push_task_branch, session, run_id=run.id, worktree=run.workspace_ref, branch=run.branch,
                   repo_full_name=repo, expected_head_sha=accepted_head or None)
     if not pushed.ok:
-        _owner_rule_refusal(pushed, "push")
+        _owner_rule_refusal(pushed, "branch push")
         raise Blocked(f"trusted broker push {pushed.label()}", code="BROKER_PUSH_FAILED")
     res = dict(pushed.result or {})
     status = str(res.get("status") or "UNKNOWN")
