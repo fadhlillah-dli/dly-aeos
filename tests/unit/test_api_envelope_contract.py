@@ -213,6 +213,17 @@ def _detail_ids(db, client: AuthedClient) -> tuple[dict[str, str], dict[str, dic
                       approved_hash=version.manifest_hash, decision_id="approval-decision")
     db.add_all([evidence, review, decision, doc, pub])
     make_route(db, key="worker.contract-free")
+    # wave 7 (cluster D): a read-only investigation TaskSpec (its own detail view) and the seeded worker agents
+    from aeos.workforce import seed as workforce_seed
+
+    _iplan, _ipv, inv_specs = make_plan(db, project, [
+        {"task_key": "INV", "allowed_paths": ["src/**"], "expected_outputs": ["investigation report per hypothesis"],
+         "capability_scope": {"operations": ["investigation", "investigation.timebox=120", "investigation.repair=FIX",
+                                             "hypothesis:h1=the constant is wrong"]}},
+        {"task_key": "FIX", "allowed_paths": ["src/**"], "depends_on": ["INV"]}])
+    db.add(TaskExecution(task_id=inv_specs[0].id, project_id=project.id, domain=project.domain, state="QUEUED",
+                         plan_id=_iplan.id, plan_version_id=_ipv.id, task_key="INV"))
+    workforce_seed.run(db)
     research.seed_registry(db, platform_repo_slug="fadhlillah-dli/dly-aeos")
     eval_service.seed_suites(db)
     repo = db.scalars(select(RepositoryReference).where(RepositoryReference.project_id == project.id)).first()
@@ -243,11 +254,12 @@ def _detail_ids(db, client: AuthedClient) -> tuple[dict[str, str], dict[str, dic
         if "attachment" in attachment else attachment["id"], "pack_id": (pack.get("context_pack") or pack)["id"],
         "snapshot_id": snapshot["id"], "incident_id": incident["id"], "proposal_id": proposal["id"],
         "adr_key": adr["key"], "entry_id": entry["id"], "check_id": check.get("check_id") or check["id"],
-        "sli_key": next(iter(sli.SLI_DEFS)),
+        "sli_key": next(iter(sli.SLI_DEFS)), "agent_key": "opencode-implementer",
     })
     if repo is not None:
         ids["repository_id"] = repo.id
-    per_route = {"/api/eval/runs/{run_id}": {"run_id": eval_run["id"]}}
+    per_route = {"/api/eval/runs/{run_id}": {"run_id": eval_run["id"]},
+                 "/api/tasks/{task_id}/investigation": {"task_id": inv_specs[0].id}}
     return ids, per_route
 
 
