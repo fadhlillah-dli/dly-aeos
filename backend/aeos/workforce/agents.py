@@ -66,8 +66,10 @@ def prerequisites(session: Session, agent: AgentDefinition, *, domain: str) -> d
         from aeos.routing import facade as routing
 
         try:
-            rd = routing.eligible_routes(session, domain=domain, data_classification="INTERNAL")
-            if not rd.eligible:
+            # INTERNAL work, or PUBLIC work only (a free OpenRouter WORKER route, decision C, ADR-0041 amendment
+            # 2026-10-26); every task is still routed by its own data class
+            if not any(routing.eligible_routes(session, domain=domain, data_classification=c).eligible
+                       for c in ("INTERNAL", "PUBLIC")):
                 reasons.append("no APPROVED worker route is eligible for this domain")
         except ImportError:
             reasons.append("routing module unavailable; failing closed")

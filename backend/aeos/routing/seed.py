@@ -39,6 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aeos.broker.facade import SUPERSEDED_ENDPOINTS, UPSTREAM_API_CHAT
+from aeos.core.timeutil import ensure_aware
 from aeos.models.routing import ModelRoute
 from aeos.routing.service import REVIEWED_WORKER_TOOLS, compute_config_hash
 
@@ -469,7 +470,12 @@ def run(session: Session) -> dict[str, Any]:
             pending.append(row.route_key)
         if row.origin == "SEED" and row.status == "CANDIDATE":
             changed = False
+            # expires_note describes free_until: it is reset to the seed's note only while the stored end date is still the
+            # seed's own (a catalog-set or catalog-cleared date keeps its own note, never a contradicting one)
+            seed_dated = ensure_aware(row.free_until) == ensure_aware(spec.get("free_until"))
             for f in _NON_CONFIG_UPDATABLE:
+                if f == "expires_note" and not seed_dated:
+                    continue
                 if spec.get(f) is not None and getattr(row, f) != spec[f]:
                     setattr(row, f, spec[f])
                     changed = True

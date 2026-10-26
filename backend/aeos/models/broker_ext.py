@@ -20,7 +20,9 @@ from aeos.models.base import IdMixin, TimestampMixin
 
 class BrokerRequest(IdMixin, TimestampMixin, Base):
     __tablename__ = "broker_requests"
-    __table_args__ = (Index("ix_broker_requests_run", "run_id"), Index("ix_broker_requests_grant", "grant_id"))
+    # created_at: the OpenRouter free-model limits count the requests of the last minute / UTC day (decision C, 0009)
+    __table_args__ = (Index("ix_broker_requests_run", "run_id"), Index("ix_broker_requests_grant", "grant_id"),
+                      Index("ix_broker_requests_created", "created_at"))
 
     grant_id: Mapped[str] = mapped_column(String(36), nullable=False)
     run_id: Mapped[str] = mapped_column(String(36), nullable=False)
@@ -33,7 +35,8 @@ class BrokerRequest(IdMixin, TimestampMixin, Base):
     model_resolved: Mapped[str | None] = mapped_column(String(160), nullable=True)  # as reported by upstream
     stream: Mapped[bool] = mapped_column(default=False)
     status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # OK|RATE_LIMITED|UPSTREAM_ERROR|DENIED|CAP_EXCEEDED|UNKNOWN_MODEL|TIMEOUT
+    # PENDING|OK|RATE_LIMITED|UPSTREAM_ERROR|DENIED|CAP_EXCEEDED|UNKNOWN_MODEL|TIMEOUT; a feasibility probe of an
+    # OpenRouter :free model (grant_id ``feasibility-probe``) also NOT_SENT (uncounted) or UNKNOWN (counted)
     outcome: Mapped[str] = mapped_column(String(24), default="PENDING")
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

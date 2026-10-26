@@ -169,6 +169,7 @@
   "budget_required": true,
   "billing": "SUBSCRIPTION",
   "budget_note": "subscription route (OpenCode Go, $10/month plan fee; the BUDGET decision covers the fee, usage is plan allowance)",
+  "free_tier": null,
   "subscription": {
     "route_key": "opencode-go/glm-5.3-flash",
     "provider": "opencode-go",

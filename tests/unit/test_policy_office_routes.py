@@ -30,7 +30,9 @@ def _owner(db) -> str:
 
 
 def _route(db) -> ModelRoute:
-    r = ModelRoute(route_key=ROUTE, pool="WORKER", provider="openrouter", model_id="vendor/model:free",
+    # not a ':free' model: an OpenRouter ':free' WORKER route is PERSONAL and PUBLIC only (decision C, ADR-0041 amendment
+    # 2026-10-26); any other OpenRouter route keeps the company OFFICE path
+    r = ModelRoute(route_key=ROUTE, pool="WORKER", provider="openrouter", model_id="vendor/model",
                    status="CANDIDATE", eligible_domains=["PERSONAL"], is_free="YES", mode_params={})
     db.add(r)
     db.flush()

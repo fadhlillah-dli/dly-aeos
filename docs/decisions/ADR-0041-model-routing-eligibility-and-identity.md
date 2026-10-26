@@ -246,6 +246,8 @@ How AEOS should use the free Zen routes given the S07 client rule. Options:
 * **C. Another worker route** (e.g. an OpenRouter free route, or a LOCAL loopback model). Correction 2026-10-26: the
   seeded OpenRouter route is ARENA and the local route is LOCAL; only the WORKER pool is broker-served for worker
   tasks (ADR-0106 `SERVED_POOLS`), so neither serves a worker task in this build (only the feasibility probe).
+  **Also decided 2026-10-26 for free OpenRouter routes, PUBLIC data only** (an owner pool move into WORKER plus a new
+  activation): see "Amendment 2026-10-26 (decision C: free OpenRouter WORKER routes for PUBLIC data)" at the end.
 * **D. Proxy the free route anyway**, under the owner's responsibility for the provider terms: activation with an
   explicit client-terms decision (`client_terms` in the API / Models page, `--accept-client-terms
   --client-terms-note` in the CLI). It is written into `data_terms.client_restriction.owner_decision`
@@ -598,3 +600,155 @@ A Go route could be activated but could not run honestly.
   is updated, which is a config change and needs a new TRIAL. Reported figures do not drift.
 * In-flight runs hold no allowance. With concurrency 1-2, the provider's limit is the boundary inside a run.
 * The billing source values `go` / `go-plus` / `balance` are an E1 reading of the API docs.
+
+## Amendment 2026-10-26 (decision C: free OpenRouter WORKER routes for PUBLIC data)
+
+Status of this amendment: the owner decided on 2026-10-26 ("G2 / option C") that free OpenRouter models may serve as a
+first-tier WORKER for PUBLIC data only (this repository is public). The decision covers OpenRouter `:free` models only;
+every other OpenRouter route keeps the existing rules. INTERNAL data stays on OpenCode Go (decision A);
+CONFIDENTIAL never goes to a worker route. This amendment records that decision and implements the code path. Moving a
+route, activating it, the terms review and the daily cap stay the owner's actions in the app; nothing is moved or
+activated automatically. Evidence: E1 (OpenRouter documentation) and E2 (unit tests against respx mocks). Every live
+behaviour is NOT-PROVEN until a probe or a TRIAL run records it.
+
+### Context
+
+* Only the WORKER pool is broker-served for worker tasks (ADR-0106 `SERVED_POOLS`); ARENA is evaluation-only, and the
+  catalog refresh registers OpenRouter `:free` models as ARENA candidates. Separately (G1) the owner activates five of
+  them in ARENA as a 30-day PUBLIC TRIAL: `cohere/north-mini-code:free`, `poolside/laguna-xs-2.1:free`,
+  `nvidia/nemotron-3-ultra-550b-a55b:free`, `nvidia/nemotron-3.5-lightning:free`, `google/gemma-4-31b-it:free`.
+* OpenRouter limits page (`https://openrouter.ai/docs/api-reference/limits`, read 2026-10-26, E1): `:free` models are
+  limited per account, shared by every `:free` model: 20 requests/minute; 50 requests per UTC day with less than 10
+  credits purchased (all time), 1000 with at least 10. Over a limit: HTTP 429 (`error.code` 429, "Rate limit exceeded",
+  `metadata.error_type` `rate_limit_exceeded`) with `X-RateLimit-Limit/-Remaining/-Reset` headers (format not
+  documented); `Retry-After` only "when every attempted provider returned a retry hint". `GET /api/v1/key` reports
+  `free_model_daily_requests` (`used`, `limit`, `remaining` of the current UTC day); the tier is "selected by all-time
+  credits purchased, independently of `is_free_tier`". The page does not say whether failed requests count.
+* The owner buys $10 of credits once (daily cap 50 -> 1000) and enables training-capable free endpoints in the
+  OpenRouter privacy settings, so inputs may be used for training: PUBLIC data only.
+
+### Decision (implemented)
+
+1. **Shape: an owner pool move, then a new activation** (option (a); nothing equivalent was latent in the code). New
+   `aeos routes set-pool <route_key> --pool WORKER|ARENA --as <admin> --rationale ...` (password-confirmed like
+   `set-endpoint`) and `POST /api/routes/{route_key}/pool` (SUPER_ADMIN) call `routing.service.set_route_pool`. Only an
+   OpenRouter `:free` route moves, only ARENA <-> WORKER (`ROUTE_POOL_MOVE_UNSUPPORTED`). The pool is part of the configuration
+   identity, so the move reuses the existing path: `refresh_config_hash` invalidates every decision bound to the route
+   (the G1 ARENA TRIAL never carries over; moving back to ARENA restores the old hash but not the INVALIDATED decision),
+   eval results are not inherited, readiness of the old and the new pool goes STALE, `route.config_changed` and
+   `route.pool_set` are emitted and the move is audited. The owner then activates the WORKER configuration as a new
+   TRIAL (the existing hash-bound human decision). The catalog refresh and `aeos seed` never change a pool.
+2. **Eligibility (`routing/free_tier.py`, `decision_c_problems`)** for every OpenRouter `:free` route in WORKER
+   (`is_decision_c_route`; a repriced `:free` route stays one, so it is refused, never billed): `is_free=YES`; catalog price `prompt` and `completion` observed and exactly
+   zero (and any other listed component zero); `allowed_data_classes` exactly `[PUBLIC]`; `eligible_domains` exactly
+   `[PERSONAL]`; `free_until` not passed. After `free_until` the route is treated as paid (the existing BUDGET rule
+   applies too), and decision C covers free routes only, so it is refused (`FREE_WORKER_ROUTE_INELIGIBLE`). Checked at
+   the pool move, at activation (with the classes being activated), in the routing hard filter and on every broker
+   request (through `route_use_problem` and `free_worker_problem`). The broker also refuses a run whose TaskSpec is not
+   PUBLIC, or cannot be read (fail closed). A LIVE call of the route reported with a cost above $0 after the latest
+   activation refuses the route until the owner re-activates it (a model repriced between catalog refreshes is not
+   billed again; the run's $0 grant cap stops that run at once).
+3. **Catalog refresh**: a known route keeps its pool; a repriced model becomes `is_free=NO` with its price (a
+   configuration change: its TRIAL stops applying, decision C refuses it); a model no longer listed becomes MISSING; a
+   model listed free with no `expiration_date` any more gets `free_until` cleared - only when that end date came from
+   the catalog itself (a configuration change too: the activation bound to the old end date stops applying). The
+   provenance is a field, `data_terms.catalog.free_until_from_catalog` (outside the identity), set only when the
+   catalog's date is actually taken - for a model listed free; the `expiration_date` of a priced or unknown-price listing
+   is not taken and changes neither the date nor the note. An end date from another source (the seeded Laguna S 2.1
+   date from S11) is kept until the owner changes it, and so is one the catalog states but AEOS cannot read. `aeos seed`
+   does not reset the note of a catalog-dated row, so the note never contradicts the stored date.
+4. **Free first.** `rank` puts an eligible, effectively free OpenRouter WORKER route ahead of every other eligible route
+   (the Go subscription routes included, even with an eval score); within that tier the existing order applies (eval,
+   priority, key). It is eligible for PUBLIC only, so INTERNAL tasks rank as before.
+5. **Fallback rule (unchanged, not loosened).** `_walk_fallback` allows a fallback only along the failed route's chain,
+   only to an eligible route in the same pool that is effectively free. A Go route is SUBSCRIPTION (`is_free=NO`, it
+   needs a BUDGET decision), so a fallback from a free route to Go is forbidden and stays forbidden
+   ("paid fallback is never automatic", `NO_ELIGIBLE_FALLBACK`). Selection had one more path to Go: a free route
+   excluded by a quota state leaves Go as the top eligible route. Decision C closes it: when a free OpenRouter WORKER
+   route is kept out only by a rate/quota limit and the selection would land on a route that is not free, routing
+   raises `FREE_TIER_LIMIT_REACHED` and the task waits (also for a TaskSpec `primary` free route).
+6. **Account limits.** Owner settings `openrouter_free_rpm_limit` (default 20, 1..20) and `openrouter_free_daily_limit`
+   (default 50, 1..1000) in `aeos.yaml` / `AEOS_*` (the repository's pattern for non-secret owner configuration;
+   values above the documented limits are refused at startup). A lower `free_model_daily_requests.limit` from the key
+   endpoint wins (`daily_basis` KEY_ENDPOINT), and `remaining` 0 marks `free-daily` EXHAUSTED until the next UTC
+   midnight; a later key refresh that reports requests left clears that block (e.g. after the credit purchase). AEOS
+   counts its own requests to `:free` models: forwarded broker requests (any outcome the upstream saw, 429 included;
+   worker and evaluation calls) and every feasibility probe that reached OpenRouter, over the last 60 s and the current
+   UTC day. A probe of a `:free` model is a broker request row too: it is checked and recorded PENDING under the same
+   count lock, in its own committed transaction, before anything is sent (so a probe and a worker request at the limit
+   cannot both pass), and settled in its own transaction right after the attempt: `NOT_SENT` (uncounted) only for an
+   error raised before sending (a refused connection, an invalid URL, the client not built); `UNKNOWN` (counted) when it
+   is not known - any other error, or an interrupt (Ctrl-C), from the moment the transport is entered (the interrupt
+   then propagates); else the observed outcome with the usage the upstream reported (a 5xx or a read timeout counts).
+   The count never depends on the probe's later bookkeeping: if the database refuses that (locked, disk full), the
+   session is rolled back, the row keeps counting (PENDING when even the settlement was refused) and the error
+   (`PROBE_BOOKKEEPING_FAILED`) says whether the request was sent, or that this is not known. The probe needs a caller
+   session without uncommitted writes (`PROBE_SESSION_NOT_CLEAN` otherwise, nothing sent); `GET /api/broker/requests`
+   marks probe rows `kind: FEASIBILITY_PROBE`, and a probe still PENDING from an earlier UTC day `ABANDONED`. On the broker the count and the request's PENDING row are one atomic step: the SQLite write lock (row
+   `openrouter-free` of `cost_admission_lock`, as the cost module's admission lock) is taken before counting and held
+   until the commit, so concurrent requests cannot all pass the same count (a busy lock: 503
+   `FREE_TIER_LOCK_UNAVAILABLE`, nothing sent). Enforced in the routing hard filter (a limit reason), in scheduler admission (`FREE_TIER_LIMIT_REACHED`, a
+   QUOTA wait shown as WAITING_QUOTA; a task the executor stopped for repeated rate limits keeps waiting through
+   `route_quota_exhausted`), on every broker request (429 + Retry-After before the request counts against the grant,
+   recorded `RATE_LIMITED` without an upstream model so the executor's quota stop sees it and the counter does not) and
+   in the probe (`PolicyDenied FREE_TIER_LIMIT_REACHED`). Migration `0009_dc_broker_request_created` adds the index
+   `ix_broker_requests_created` (the count does not scan the whole table; the downgrade drops it).
+   **A quota stop is not a failed attempt.** When the executor stops a run at a provider quota (`QUOTA_EXHAUSTED`:
+   3 consecutive rate-limit refusals - an answered request in between resets the count), the attempt is given back in
+   the same row-version-guarded transition, and the task waits for the quota, then runs again. This holds for every
+   provider quota stop (an OpenCode Go 429 too). `scheduler.QUOTA_STOPS_MAX` bounds it: after 6 quota stops since the
+   owner's last retry decision (its newest ACTIVE human EXCEPTION decision allowing `retry`; a revoked one resets
+   nothing) the task needs a new one (`NEEDS_DECISION`), so a task that never fits the limit cannot loop. Each owner
+   retry allows exactly 6 more; a retry for the quota-stop bound alone never raises the attempt cap (extra attempts are
+   granted only when the attempt cap was reached), and the run view's retry dialog asks for no extra attempts then. Enabling the worker agent accepts a route eligible for PUBLIC data only, so a
+   free WORKER route alone is enough for PUBLIC work.
+7. **429 from OpenRouter** for a `:free` model: recorded RATE_LIMITED as before (route-scoped quota state, audit FAILED,
+   no ledger entry, no other route tried) and additionally account-wide (`openrouter/free-rpm` or `free-daily`). Which
+   limit: `X-RateLimit-Limit` (at most the documented 20 = per minute, else daily); without it, a reset more than an
+   hour away is the daily limit. The reset: `Retry-After` (seconds or an HTTP date, one parser for every broker use;
+   `inf`/`nan`, a negative delta, text or a date no datetime can hold are unreadable, never an error); else
+   `X-RateLimit-Reset` (epoch ms or s, trusted up to 48 h
+   ahead); else the next UTC midnight for the daily limit (or when this instance's daily count reached the cap), else
+   one minute. A longer or indefinite block already recorded for that scope is kept, never shortened. The
+   `X-RateLimit-*` values are kept on the quota state.
+8. **Ledger**: unchanged path, now tested: a free call is recorded at the cost OpenRouter reports (`usage.include`; $0
+   for a free model) with its token usage; no reported cost stays UNKNOWN and is charged $0 (the reservation is $0).
+9. **Views**: the route view adds `free_tier` (limits, this instance's counts, state, decision C status); `aeos routes
+   list` flags `decision-c=PUBLIC-ONLY|INELIGIBLE`.
+
+### Consequences
+
+* **Master §23 is extended through this ADR** (the master is not edited): a free OpenRouter route may now be an initial
+  worker for PUBLIC data, behind the owner's move and activation.
+* **PUBLIC tasks wait when the free tier is used up**, even if a Go route has allowance (no paid fallback). With the
+  1000/day cap used up, PUBLIC work waits until 00:00 UTC. Routing PUBLIC work to Go in that case would loosen the
+  fallback rule and is not implemented; it needs its own owner decision.
+* **Scope: OpenRouter `:free` models only.** A `:free` route whose free period ended, or that was repriced, stays a
+  decision C route and is refused, even with a BUDGET decision; the owner moves it back to ARENA or disables it. A
+  `:free` WORKER route made OFFICE-eligible through the company path (`policy.office_routes`) is refused as well
+  (PERSONAL only). Any other OpenRouter WORKER route (a paid model, or an OFFICE route through the company path) keeps
+  the existing rules: BUDGET decision, data-class and terms rules, the OFFICE path; no PUBLIC-only rule, no free-tier
+  limit, no free-first rank. Three existing tests used a `:free` OpenRouter WORKER route as a generic example with
+  INTERNAL data, an OFFICE domain or no catalog price; they now use a non-`:free` model id.
+* Two machines (or other clients) on the same OpenRouter account are invisible to each AEOS instance: each counts only
+  its own requests; OpenRouter's 429 stays authoritative. On two Macs the owner may split the daily cap.
+* Concurrent broker requests and feasibility probes are serialised by the count lock and cannot exceed the cap
+  together; OpenRouter's 429 stays the boundary (other clients of the account are not counted).
+* **Acceptance suite (protected path, `tests/acceptance`).** Its generic worker pilot was a `:free` OpenRouter route
+  with INTERNAL tasks, which decision C refuses. The pilot is now a free route under the general rules
+  (`vendor/acc-model`); the two tests about OpenRouter free models (1.29 free quota 429, 1.31 route changed by the
+  provider) run on a decision C pilot (`vendor/acc-model:free`, PUBLIC project and tasks), and their second free route
+  is not a `:free` model (two `:free` models share the account limit, so one is never a fallback for the other).
+  Assertions are unchanged.
+* **ADR-0041 changed again.** An owner ACCEPTED registration of it is STALE until it is recorded again (OWNER_ACTIONS
+  2.8).
+
+### NOT-PROVEN
+
+* No live OpenRouter call: limits, 429 shape and headers, `free_model_daily_requests` and `usage.cost` for `:free`
+  models are E1 documentation; the tests exercise AEOS against respx mocks (E2).
+* Which limit a 429 without Retry-After hit, the format of `X-RateLimit-Reset`, and whether failed or rate-limited
+  requests count against OpenRouter's limits (AEOS counts every forwarded request, the conservative choice).
+* That the UTC day is OpenRouter's daily reset (the key endpoint describes the counter as the current UTC day).
+* The owner's credit purchase, privacy setting and key: none of them is observable except through the key endpoint.
+* Tool calling, quality and data handling of the five G1 models: E1 catalog facts until an evaluation or TRIAL run.

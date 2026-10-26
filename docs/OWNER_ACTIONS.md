@@ -422,6 +422,89 @@ Copy the route key and its config hash from the `routes list` output.
     route view and the task admission answer (`GET /api/tasks/<id>/admission`) carry the same figures for a user who
     may see every domain. `./aeos routes list` only flags `billing=SUBSCRIPTION`, and the Control Center pages do not
     show the windows yet.
+* **Free OpenRouter WORKER routes (decision C, ADR-0041 amendment 2026-10-26).** Free OpenRouter models (ids ending in
+  `:free`) may serve worker tasks for **PUBLIC data only**, PERSONAL only. INTERNAL data stays on the OpenCode Go routes;
+  CONFIDENTIAL never goes to a worker route. Other OpenRouter routes keep the rules above (a paid route needs a BUDGET
+  decision); `set-pool` moves only `:free` routes. A free route ranks first for PUBLIC tasks. When the free tier is at its limit, the
+  task waits (`FREE_TIER_LIMIT_REACHED`, shown as WAITING_QUOTA); it never moves to a Go route or to any paid route. Do
+  these steps in order:
+  1. **Credits (once, on openrouter.ai).** Buy at least $10 of credits. This raises the free-model daily cap of the
+     account from 50 to 1000 requests. The per-minute cap stays 20.
+  2. **Privacy (once, on openrouter.ai).** In the privacy settings, enable the free endpoints that may train on inputs.
+     That is why these routes take PUBLIC data only. Write what you enabled into the terms notes below.
+  3. **Daily cap in `aeos.yaml` [per machine].** Only after step 1. AEOS stops at 50 requests per UTC day until you
+     raise it. The startup refuses a value above 1000:
+
+     ```bash
+     CFG="$HOME/Library/Application Support/DLY-AEOS/aeos.yaml"
+     test -f "$CFG" || cp config/aeos.example.yaml "$CFG"
+     grep -q '^openrouter_free_daily_limit:' "$CFG" || printf '\nopenrouter_free_daily_limit: 1000\n' >> "$CFG"
+     grep '^openrouter_free_daily_limit:' "$CFG"
+     ```
+
+     Restart `./aeos serve`. The limits are per OpenRouter account. If both Macs run DLY AEOS with the same account,
+     split the cap (for example 500 on each), because each machine counts only its own requests.
+  4. **Key and catalog.** Store the key (1.8: `./aeos secrets set workers/openrouter`), then run `./aeos routes refresh`.
+     The `openrouter_catalog` line lists newly `discovered:` free routes in ARENA. The key info also records the daily
+     limit OpenRouter reports for the account; if it still reports 50, the lower value wins until the purchase shows.
+  5. **G1, the ARENA TRIAL (evaluation only).** For each of the five routes
+     `openrouter/cohere/north-mini-code:free`, `openrouter/poolside/laguna-xs-2.1:free`,
+     `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`, `openrouter/nvidia/nemotron-3.5-lightning:free` and
+     `openrouter/google/gemma-4-31b-it:free`, copy its hash from `./aeos routes list --pool ARENA` and run:
+
+     ```bash
+     ./aeos routes activate openrouter/cohere/north-mini-code:free --as <admin> --mode TRIAL --expected-hash <hash> --data-class PUBLIC --days 30 --terms-reviewed --terms-note "Read the OpenRouter model page and privacy settings on <date>: training-capable free endpoints enabled, PUBLIC data only" --rationale "G1: evaluate this free model in ARENA"
+     ```
+
+  6. **Decision C, the move into WORKER.** For each route you want as a worker, move it. The move is a new
+     configuration: its ARENA TRIAL from step 5 stops applying, and it does not come back if you move the route back.
+     Only a `:free` OpenRouter route moves (`ROUTE_POOL_MOVE_UNSUPPORTED` otherwise).
+
+     ```bash
+     ./aeos routes set-pool openrouter/cohere/north-mini-code:free --pool WORKER --as <admin> --rationale "Decision C: free worker tier for PUBLIC data"
+     ./aeos routes list --pool WORKER
+     ```
+
+     The line of the route must show `decision-c=PUBLIC-ONLY`. Copy its new hash. A move is refused
+     (`FREE_WORKER_ROUTE_INELIGIBLE`) for a catalog price that is not exactly zero, an ended free period, data classes
+     other than PUBLIC alone, or an OFFICE domain.
+  7. **Re-activate the WORKER configuration.** **A WORKER TRIAL is eligible for real PUBLIC worker tasks at once, ahead
+     of the Go routes.** If you want the probe (step 8) first, pause scheduling around it
+     (`./aeos work pause --reason "OpenRouter probe"`, then `./aeos work resume`).
+
+     ```bash
+     ./aeos routes activate openrouter/cohere/north-mini-code:free --as <admin> --mode TRIAL --expected-hash <new hash> --data-class PUBLIC --days 30 --terms-reviewed --terms-note "Decision C: OpenRouter free endpoints may train on inputs, PUBLIC data only, credits bought on <date>" --rationale "Decision C: first-tier worker for PUBLIC tasks"
+     ```
+
+     No BUDGET decision: the route is free. A `--data-class INTERNAL` is refused (`FREE_WORKER_ROUTE_INELIGIBLE`).
+  8. **Probe (optional, one synthetic PUBLIC request, E3 evidence):** `./aeos broker probe-route openrouter/cohere/north-mini-code:free`.
+  9. **Every 30 days** (before the TRIAL expires): run step 7 again with the hash `./aeos routes list --pool WORKER` shows.
+
+  **What AEOS does with a free WORKER route:**
+
+  * **Limits.** AEOS counts the requests it sent to `:free` models (workers, evaluations, every probe that reached
+    OpenRouter): at most 20 in a minute and the daily cap per UTC day. A 429 from OpenRouter stops every free route of
+    the account until its Retry-After or `X-RateLimit-Reset` (else one minute, or 00:00 UTC for the daily limit). A run
+    stopped at a quota does not use up an attempt; the task runs again after the reset. Your own use of the same account
+    elsewhere is invisible to AEOS, so OpenRouter can refuse earlier; its 429 stays authoritative and is never a
+    success.
+  * **No paid fallback.** A task never moves from the free route to a Go route or any other paid route. Over the limit
+    it waits, even if a Go route has allowance left.
+  * **Repricing.** `./aeos routes refresh` marks a repriced model `is_free=NO` (its TRIAL stops applying) and a dropped
+    model MISSING. A call OpenRouter reports with a cost refuses the route until you re-activate it. The route keeps its
+    WORKER pool; the catalog never moves it.
+  * **Cost.** A free call is recorded at $0 with the token usage OpenRouter reports.
+  * **Admission codes and remedies:**
+
+    | Code | Shown as | What to do |
+    |---|---|---|
+    | `FREE_TIER_LIMIT_REACHED` | WAITING_QUOTA | Nothing: it clears after a minute, after the Retry-After or at 00:00 UTC. After you buy credits: step 3. |
+    | `NEEDS_DECISION` naming "provider quota" | BLOCKED | The task was stopped at a quota 6 times since your last retry decision: it does not fit the limit. Retry it with a rationale (*Pekerjaan Live* -> retry) once the limit allows it: that allows 6 more quota stops and adds no attempts. Or plan it on another route. |
+    | `FREE_WORKER_ROUTE_INELIGIBLE` | BLOCKED (broker 403) | The route is no longer free, or the task is not PUBLIC. Run `./aeos routes refresh` and check the route. Move a paid one back with `./aeos routes set-pool <route_key> --pool ARENA --as <admin> --rationale "<why>"` or `./aeos routes disable <route_key> --reason "<why>"`. |
+    | `ROUTE_INELIGIBLE` naming the TRIAL | BLOCKED | The TRIAL expired or the configuration changed: step 7. |
+
+  * **Where to see it:** the route view (`GET /api/routes/<route_key>`, field `free_tier`): limits, this machine's
+    counts and the decision C status. `./aeos routes list` flags `decision-c=`.
 * **Prompt revision change:** a route approved under an older worker prompt revision stops with
   `PROMPT_REVISION_CHANGED`. Approve it again.
 
@@ -557,6 +640,7 @@ AEOS never creates a GitHub tag or Release. To publish one, use
 | When an integrity hold is raised | review the findings on *Pekerjaan Live* (or `./aeos worker status`), restore the checkout and data, then *Catat rekonsiliasi*. Each hold needs its own reconciliation |
 | After a process-sandbox exception is no longer needed | *Keputusan* → *Cabut* ([2.7](#27-process-sandbox-exception-per-machine)) |
 | Each OpenCode Go billing cycle, and before a Go TRIAL expires | a new BUDGET decision, then `./aeos routes activate <route> ... --days 30 --budget-decision <new id>` ([1.11](#111-route-activation-budget-and-the-worker-agent-per-machine-decision) step 7) |
+| Before a free OpenRouter WORKER TRIAL expires (30 days) | `./aeos routes refresh`, then `./aeos routes activate <route> ... --mode TRIAL --data-class PUBLIC --days 30` with the hash `./aeos routes list --pool WORKER` shows ([1.11](#111-route-activation-budget-and-the-worker-agent-per-machine-decision), free OpenRouter WORKER routes, step 9) |
 
 ---
 

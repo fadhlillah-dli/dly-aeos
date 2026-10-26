@@ -75,6 +75,14 @@ class Settings(BaseSettings):
     # §23 OFFICE default deny — overridable only by recorded owner/company decisions, not config.
     office_external_worker_allowed: bool = False
 
+    # ADR-0041 amendment 2026-10-26 (decision C): OpenRouter's limits for ``:free`` models, per account and shared by
+    # every ``:free`` model (E1, OpenRouter limits page read 2026-10-26): 20 requests/minute; 50 requests/UTC day with
+    # less than 10 credits purchased (all time), 1000 with at least 10. The broker and the scheduler stop at these
+    # counts (wait / 429 to the worker, never another route). The owner raises the daily cap to 1000 only after the
+    # purchase; a value above the documented limit is refused (never a guess in the permissive direction).
+    openrouter_free_rpm_limit: int = 20
+    openrouter_free_daily_limit: int = 50
+
     # §02/§08 canonical MCI_V2 source: owner-supplied and never committed (the platform repository is public). By
     # default it is read from <data dir>/policy/canonical/<file> (policy/mci-reference.yaml ``location:
     # local:<file>``); this absolute path (aeos.yaml ``mci_source_path`` / AEOS_MCI_SOURCE_PATH) overrides it. A
@@ -99,6 +107,22 @@ class Settings(BaseSettings):
         # §06/§50: never auto-bind 0.0.0.0 or a public interface to make startup succeed.
         if v not in LOOPBACK_HOSTS:
             raise ValueError("AEOS V1 binds loopback only (127.0.0.1/::1/localhost)")
+        return v
+
+    @field_validator("openrouter_free_rpm_limit")
+    @classmethod
+    def _free_rpm_documented(cls, v: int) -> int:
+        if not 1 <= v <= 20:
+            raise ValueError("openrouter_free_rpm_limit must be 1..20 (OpenRouter documents 20 requests/minute for "
+                             ":free models)")
+        return v
+
+    @field_validator("openrouter_free_daily_limit")
+    @classmethod
+    def _free_daily_documented(cls, v: int) -> int:
+        if not 1 <= v <= 1000:
+            raise ValueError("openrouter_free_daily_limit must be 1..1000 (OpenRouter documents 50/day, or 1000/day "
+                             "after at least 10 credits purchased)")
         return v
 
     @field_validator("data_dir")

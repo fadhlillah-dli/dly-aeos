@@ -63,9 +63,14 @@ def _worker_call(client: AuthedClient, token: str, model: str = "m"):
 # ---------------------------------------------------------------------------------------------- 1.29
 def test_free_quota_429_backs_off_and_never_falls_back_to_paid(personal_client: AuthedClient, db, monkeypatch, vault):
     vault.put("workers/openrouter", "sk-or-v1-" + "k" * 48, actor="owner")
-    w = worker_ready(personal_client, db, monkeypatch, tasks=[task("T1"), task("T2", paths=["docs/**"])])
-    # a second FREE approved route on the chain, and a PAID route that is never an automatic fallback
-    register_free_route(db, "worker.acc-free-2", model_id="vendor/acc-two:free")
+    # the pilot is an OpenRouter :free model (decision C: PUBLIC tasks only)
+    w = worker_ready(personal_client, db, monkeypatch, free_tier=True,
+                     tasks=[task("T1", data_classification="PUBLIC"),
+                            task("T2", paths=["docs/**"], data_classification="PUBLIC")])
+    # a second FREE approved route on the chain, and a PAID route that is never an automatic fallback. The second free
+    # route is not another OpenRouter :free model: those share the account's free-model limit, so a 429 of one stops
+    # them all (decision C) and none of them is a fallback for another
+    register_free_route(db, "worker.acc-free-2", model_id="vendor/acc-two")
     activate_route(personal_client, "worker.acc-free-2")
     register_free_route(db, "worker.acc-paid", model_id="vendor/acc-paid", is_free="NO",
                         pricing={"prompt": "0.000003", "completion": "0.000015"})
@@ -193,7 +198,8 @@ def test_supervisor_alias_resolving_to_a_new_model_is_a_new_configuration(person
 
 def test_worker_route_changed_by_the_provider_loses_its_approval(personal_client: AuthedClient, db, monkeypatch,
                                                                 vault):
-    w = worker_ready(personal_client, db, monkeypatch, tasks=[task("T1")])
+    # the pilot is the OpenRouter :free model the catalog lists (decision C: a PUBLIC task)
+    w = worker_ready(personal_client, db, monkeypatch, free_tier=True, tasks=[task("T1", data_classification="PUBLIC")])
     assert personal_client.get(f"/api/tasks/{w['tasks']['T1']}/admission").json()["admitted"] is True
     before = personal_client.get(f"/api/routes/{WORKER_ROUTE}").json()
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
@@ -244,7 +250,7 @@ def test_finished_model_request_is_last_used_not_an_active_session(personal_clie
     token = _grant(db, run.id, w["project"]["id"], {"m": WORKER_ROUTE})
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
         router.post(f"{OPENROUTER}/chat/completions").respond(200, json={
-            "id": "c1", "object": "chat.completion", "model": "vendor/acc-model:free",
+            "id": "c1", "object": "chat.completion", "model": "vendor/acc-model",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 12, "completion_tokens": 3, "cost": 0}})
         assert _worker_call(personal_client, token).status_code == 200

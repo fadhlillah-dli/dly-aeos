@@ -32,9 +32,10 @@ UPSTREAM = "https://openrouter.ai/api/v1/chat/completions"
 KEY = "sk-or-v1-" + "a" * 48
 
 
-def _route(db, key=ARENA, *, pool="ARENA", status="TRIAL", is_free="YES", classes=("PUBLIC", "INTERNAL")):
+def _route(db, key=ARENA, *, pool="ARENA", status="TRIAL", is_free="YES", classes=("PUBLIC", "INTERNAL"),
+           suffix=":free"):
     rt = routing_service.runtime_context()
-    r = ModelRoute(route_key=key, pool=pool, provider="openrouter", model_id=f"vendor/{key}:free", status=status,
+    r = ModelRoute(route_key=key, pool=pool, provider="openrouter", model_id=f"vendor/{key}{suffix}", status=status,
                    eligible_domains=["PERSONAL"], is_free=is_free, allowed_data_classes=list(classes),
                    supports_tools="YES", availability="AVAILABLE", identity_status="VERIFIED", mode_params={},
                    data_terms={"may_use_inputs_for_training": False, "trial_only_no_confidential": False},
@@ -164,8 +165,9 @@ def test_a_bound_task_runs_on_the_evaluated_worker_route_not_the_top_ranked_one(
     another route always produced an INVALID sample ("ran on other routes")."""
     from aeos.routing import facade as routing
 
-    _route(db, "worker.a", pool="WORKER")
-    second = _route(db, "worker.b", pool="WORKER")
+    # not ':free' models: an OpenRouter ':free' WORKER route serves PUBLIC tasks only (decision C); these tasks are INTERNAL
+    _route(db, "worker.a", pool="WORKER", suffix="")
+    second = _route(db, "worker.b", pool="WORKER", suffix="")
     run = _plan(db, second)
     assert service.run_view(run, db)["execution"]["serving"]["path"] == "BROKER"
     executor.start_run(db, run.id, actor_user_id="owner")

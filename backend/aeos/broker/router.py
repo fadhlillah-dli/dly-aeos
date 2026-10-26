@@ -13,7 +13,7 @@ from aeos.api.deps import DB, ActiveDomain, AdminPrincipal
 from aeos.broker import grants
 from aeos.broker.model_proxy import router as proxy_router
 from aeos.core.errors import NotFound
-from aeos.core.timeutil import utcnow
+from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.broker_ext import BrokerRequest, BrokerSideEffect
 from aeos.models.routing import CapabilityGrant
 
@@ -36,6 +36,25 @@ def list_grants(principal: AdminPrincipal, domain: ActiveDomain, db: DB, run_id:
             "checked_at": utcnow().isoformat(), "mode": "LIVE"}
 
 
+def _request_view(r: BrokerRequest) -> dict[str, Any]:
+    """One broker request. ``kind`` tells a worker/evaluation call from an owner's feasibility probe (decision C: a
+    probe of an OpenRouter :free model is a row too, so it counts against the free-model limit); a probe still PENDING
+    from an earlier UTC day was never settled and is shown ABANDONED (it counted on its day)."""
+    from aeos.broker.feasibility import PROBE_MARK
+
+    probe = r.grant_id == PROBE_MARK
+    outcome = r.outcome
+    created = ensure_aware(r.created_at)
+    if probe and outcome == "PENDING" and created is not None and created < utcnow().replace(
+            hour=0, minute=0, second=0, microsecond=0):
+        outcome = "ABANDONED"
+    return {"id": r.id, "kind": "FEASIBILITY_PROBE" if probe else "WORKER", "run_id": None if probe else r.run_id,
+            "route_key": r.route_key, "outcome": outcome, "status": r.status_code, "prompt_tokens": r.prompt_tokens,
+            "completion_tokens": r.completion_tokens,
+            "cost_usd": float(r.cost_usd) if r.cost_usd is not None else "UNKNOWN", "model_resolved": r.model_resolved,
+            "created_at": r.created_at.isoformat(), "error": r.error_summary}
+
+
 @router.get("/api/broker/requests")
 def list_requests(principal: AdminPrincipal, domain: ActiveDomain, db: DB, run_id: str | None = None,
                   limit: int = Query(200, ge=1, le=500)) -> dict[str, Any]:
@@ -45,10 +64,7 @@ def list_requests(principal: AdminPrincipal, domain: ActiveDomain, db: DB, run_i
     if principal.allowed_project_ids is not None:
         q = q.where(BrokerRequest.project_id.in_(principal.allowed_project_ids))
     rows = db.scalars(q.order_by(BrokerRequest.created_at.desc()).limit(limit))
-    items = [{"id": r.id, "run_id": r.run_id, "route_key": r.route_key, "outcome": r.outcome, "status": r.status_code,
-              "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens,
-              "cost_usd": float(r.cost_usd) if r.cost_usd is not None else "UNKNOWN", "model_resolved": r.model_resolved,
-              "created_at": r.created_at.isoformat(), "error": r.error_summary} for r in rows]
+    items = [_request_view(r) for r in rows]
     return {"items": items, "source": "broker_requests", "checked_at": utcnow().isoformat(), "mode": "LIVE"}
 
 
