@@ -114,7 +114,9 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, *, policy: bool = True, cost:
     if policy:
         monkeypatch.setitem(sys.modules, "aeos.policy.decisions", _decisions_module(reg))
         monkeypatch.setitem(sys.modules, "aeos.policy.office",
-                            _simple("aeos.policy.office", office_policy=lambda session: dict(reg.office)))
+                            _simple("aeos.policy.office", office_policy=lambda session: dict(reg.office),
+                                    # no company authorisation: office routes stay unauthorised (fail closed)
+                                    company_authorisation=lambda session: None))
     if cost:
         from aeos.cost import service as real_cost  # quota states use the real implementation (recorded)
 

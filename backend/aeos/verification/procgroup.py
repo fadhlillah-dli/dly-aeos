@@ -28,6 +28,16 @@ are recorded (``helper_exits``), never hidden; a Windows console host (``conhost
 them. A helper still alive after that, and every other process, is a survivor. A grace never weakens the tamper
 window: a process that ends inside it acted while the window was still open.
 
+The POSIX sweep reads every process on the host, one at a time, and one process that cannot be read never makes the
+whole group unreadable. Reading the environment of a process the kernel is tearing down makes psutil raise
+``SystemError`` on macOS (``sysctl(KERN_PROCARGS2)`` fails with errno 0); before this rule any unrelated process
+exiting during a sweep reported the group as unreadable and QUARANTINED a clean verification, more often the busier
+the host. A process whose state cannot be read is re-checked: once it has finished exiting (gone, or a zombie that
+can no longer run code) it is no member; a process read normally on a later attempt is judged like any other; a
+process still alive and still unreadable after ``UNREADABLE_RECHECK_SECONDS`` is a member (fail closed). Each sweep
+builds fresh process objects from the pid list (never ``psutil.process_iter``'s cache, which can hold the identity of
+an older process that used the same pid).
+
 Residual risk (stated on the report, ``runner.PROCESS_RESIDUAL_RISKS``): a process created *outside* the step's tree
 on the candidate's behalf - Windows WMI/Task Scheduler/COM out-of-process servers, a POSIX daemon that both leaves
 the session and drops the marker from its environment, launchd/systemd user units - is not in the group and is not
@@ -52,6 +62,9 @@ STEP_MARKER = "AEOS_VERIFY_STEP"
 SURVIVOR_GRACE_SECONDS = 2.0
 # POSIX: how long an empty first sweep is repeated before the group is taken to be empty
 SURVIVOR_SETTLE_SECONDS = 1.0
+# how long a process whose state cannot be read is re-checked before it counts as a member (fail closed); a process
+# the kernel is tearing down has finished exiting long before this
+UNREADABLE_RECHECK_SECONDS = 2.0
 _MAX_LISTED = 50
 
 _win: Any = None
@@ -171,9 +184,19 @@ def _describe(pid: int) -> dict[str, Any]:
     try:
         p = psutil.Process(pid)
         out["name"] = p.name()[:80]
-    except psutil.Error:
+    except Exception:  # descriptive only: an unreadable name never decides membership
         out["name"] = "?"
     return out
+
+
+def _finished(pid: int) -> bool:
+    """*pid* has finished exiting: it is gone, or a zombie (it can no longer run code)."""
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:  # gone (``ZombieProcess`` is a subclass: a zombie)
+        return True
+    except Exception:  # unreadable: not known to have finished (fail closed)
+        return False
 
 
 def helper_key(name: str) -> str:
@@ -198,6 +221,8 @@ def _is_helper(pid: int, helpers: frozenset[str]) -> bool:
         return True  # it ended right now: the next poll drops it from the group
     except psutil.Error:
         return False  # unreadable: no extra grace
+    except Exception:  # an unexpected read error: decided by the state (finished exiting), else no extra grace
+        return _finished(pid)
 
 
 def _alive(p: psutil.Process) -> bool:
@@ -262,28 +287,61 @@ class StepGroup:
 
     # --- survivors ------------------------------------------------------------------------------------------
     def _posix_members(self) -> list[psutil.Process]:
+        """Every live process of the group (session/process group of the step leader, or the step's marker). Each
+        process is read on its own (``_member``): one that cannot be read never makes the whole sweep fail."""
         out: list[psutil.Process] = []
         me = os.getpid()
-        lead = self.pid
-        for p in psutil.process_iter(["pid"]):
-            if p.pid in (me, 0, lead):
+        for pid in psutil.pids():  # fresh objects: process_iter's cache can hold a reused pid's older identity
+            if pid in (me, 0, self.pid):
                 continue
+            p = self._member(pid)
+            if p is not None:
+                out.append(p)
+        return out
+
+    def _member(self, pid: int) -> psutil.Process | None:
+        """*pid* as a live member of the group, or None. A read that fails unexpectedly (macOS: psutil raises
+        ``SystemError`` for a process the kernel is tearing down) is decided by the process's state, not by the
+        error: finished exiting - no member; read normally on a later attempt - judged like any other; still alive
+        and unreadable after ``UNREADABLE_RECHECK_SECONDS`` - a member (fail closed)."""
+        deadline = time.monotonic() + UNREADABLE_RECHECK_SECONDS
+        while True:
+            try:
+                return self._classify(pid)
+            except Exception:
+                if _finished(pid):
+                    return None
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+        try:
+            return psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            return None
+
+    def _classify(self, pid: int) -> psutil.Process | None:
+        """The live member *pid*, or None. Answers the expected outcomes of reading another process (gone, a zombie,
+        another user's); any other error propagates to ``_member``."""
+        try:
+            p = psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            return None
+        member = False
+        if sys.platform != "win32":
+            lead = self.pid
             try:
                 # same session/process group as the step leader, and started after the step (a recycled leader
                 # pid of an unrelated, older group is never taken for the step's)
-                if lead is not None and sys.platform != "win32" and (
-                        os.getpgid(p.pid) == lead or os.getsid(p.pid) == lead) \
-                        and p.create_time() >= self.started - 1.0:
-                    out.append(p)
-                    continue
-            except (ProcessLookupError, PermissionError, OSError, psutil.Error):
-                pass
+                member = lead is not None and (os.getpgid(pid) == lead or os.getsid(pid) == lead) \
+                    and p.create_time() >= self.started - 1.0
+            except (OSError, psutil.Error):
+                member = False
+        if not member:
             try:
-                if p.environ().get(STEP_MARKER) == self.marker:
-                    out.append(p)
+                member = p.environ().get(STEP_MARKER) == self.marker
             except (psutil.Error, OSError, ValueError):
-                continue
-        return [p for p in out if _alive(p)]
+                return None
+        return p if member and _alive(p) else None
 
     def _left_group(self, pid: int) -> bool:
         """POSIX: a member outside both the leader's process group and session detached itself (it was found through
