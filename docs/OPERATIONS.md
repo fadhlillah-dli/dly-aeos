@@ -497,16 +497,17 @@ model) stays in DLY AEOS records (run rows, EvidenceArtifact); it is not written
    `~/Library/Application Support/DLY-AEOS/aeos.yaml` on macOS, or the file `AEOS_CONFIG` names) and set both
    identities. The real addresses live only there. The repository is public and never contains them, so never
    copy this file into the checkout (`/aeos.yaml` and `config/aeos.yaml` are gitignored as a guard). Replace the
-   placeholders; an address left as `<...>` is refused:
+   placeholders; a name or address left as `<...>` is refused (FAILED in Doctor), so an unedited copy is never
+   CONFIGURED:
 
    ```yaml
    commit_identities:
      github:
-       name: Your Name
+       name: <Your Name>
        email: <id>+<username>@users.noreply.github.com   # your GitHub identity (noreply address recommended)
      bitbucket:
-       name: Your Name
-       email: you@company.example.com                    # placeholder: your company identity (a different address)
+       name: <Your Name>
+       email: <you>@<company-domain>                     # your company identity (a different address)
    ```
 
 2. Run `aeos doctor` (or open Kesiapan in the Control Center). `git.commit_identity.github` must show

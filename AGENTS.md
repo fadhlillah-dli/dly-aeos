@@ -48,8 +48,8 @@ host) (§06).
    until a recorded company authorisation exists. Office data never flows into Personal views.
 10. **Localhost only** (§06): bind 127.0.0.1; never 0.0.0.0; never disable auth/CSRF/origin checks.
 11. **Owner identity on code hosts, no AI attribution** (owner rule 2026-10-26, ADR-0121; applies to DLY AEOS
-    and to every project it creates or manages): every GitHub activity (commits as author AND committer, pushes, PRs, issues,
-    comments) uses the owner's GitHub identity; every Bitbucket activity the owner's company identity (two
+    and to every project it creates or manages): every GitHub activity (commits as author AND committer, pushes, PRs,
+    issues, comments) uses the owner's GitHub identity; every Bitbucket activity the owner's company identity (two
     different addresses, configured only in the gitignored `aeos.yaml` as `commit_identities`, never committed).
     No AI may appear on GitHub, Bitbucket or the company's Jira/Confluence: not as author, committer, co-author
     or contributor, and not in any attribution line (`Co-Authored-By:` naming an AI or a bot, "Generated

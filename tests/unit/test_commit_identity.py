@@ -64,6 +64,35 @@ def test_an_invalid_identity_is_invalid_never_replaced(settings, entry, fragment
     assert "commit_identities.github" in cid.missing_message(ident)
 
 
+def test_the_documented_placeholders_are_never_a_configured_identity(settings):
+    """config/aeos.example.yaml and docs/OPERATIONS.md tell the owner to replace both placeholders: a copy left
+    unedited must be refused (Doctor FAILED), never CONFIGURED - otherwise commits would reach a code host as a
+    placeholder identity."""
+    import yaml
+
+    root = Path(__file__).resolve().parents[2]
+    example = (root / "config" / "aeos.example.yaml").read_text(encoding="utf-8").splitlines()
+    start = example.index("# commit_identities:")
+    block = [example[start][2:]]
+    for line in example[start + 1:]:
+        if not line.startswith("#   "):
+            break
+        block.append(line[2:])
+    ops = (root / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+    fenced = ops.split("   ```yaml\n   commit_identities:\n", 1)[1].split("   ```", 1)[0]
+    for text in ("\n".join(block), "commit_identities:\n" + "\n".join(x[3:] for x in fenced.splitlines())):
+        mapping = yaml.safe_load(text)["commit_identities"]
+        assert set(mapping) == {"github", "bitbucket"}
+        s = _settings(settings, commit_identities=mapping)
+        for provider in cid.PROVIDERS:
+            ident = cid.resolve(s, provider)
+            assert ident.status == cid.INVALID and not ident.configured, (provider, ident.problem)
+            # the name alone or the address alone left unedited is refused too
+            entry = mapping[provider]
+            assert cid.validate_identity("Owner Name", entry["email"]) is not None
+            assert cid.validate_identity(entry["name"], BB["email"]) is not None
+
+
 def test_missing_message_names_the_key_never_an_address(settings):
     msg = cid.missing_message(cid.resolve(_settings(settings), "bitbucket"))
     assert "commit_identities.bitbucket" in msg and "@" not in msg

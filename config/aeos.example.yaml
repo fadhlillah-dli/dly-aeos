@@ -22,16 +22,17 @@ platform_repo_slug: fadhlillah-dli/dly-aeos
 # address), bitbucket = your company identity (a different address). No AI or bot identity is accepted. Keep the
 # real addresses only in your local aeos.yaml - never commit them. Unset for a host -> candidates are committed
 # locally as "AEOS Runtime <aeos-runtime@localhost>", marked not pushable, and the broker refuses the push.
-# Owner step: replace BOTH placeholders below in your local copy (a value left as <...> is refused), then run
-# `aeos doctor`: git.commit_identity.github and git.commit_identity.bitbucket must show CONFIGURED. Until the
-# github identity is CONFIGURED, CAN_PREPARE_PR is BLOCKED (docs/OPERATIONS.md "Commit identity and no AI attribution").
+# Owner step: replace BOTH placeholders below in your local copy (a name or address left as <...> is refused, so an
+# unedited copy is never CONFIGURED), then run `aeos doctor`: git.commit_identity.github and
+# git.commit_identity.bitbucket must show CONFIGURED. Until the github identity is CONFIGURED, CAN_PREPARE_PR is
+# BLOCKED (docs/OPERATIONS.md "Commit identity and no AI attribution").
 # commit_identities:
 #   github:
-#     name: Your Name
+#     name: <Your Name>
 #     email: <id>+<username>@users.noreply.github.com   # your GitHub identity (noreply address recommended)
 #   bitbucket:
-#     name: Your Name
-#     email: you@company.example.com                    # placeholder: your company address (a different one)
+#     name: <Your Name>
+#     email: <you>@<company-domain>                     # your company identity (a different address)
 # Backward-compatible fallback for the github identity only (commit_identities.github wins when both are set):
-# commit_author_name: Your Name
+# commit_author_name: <Your Name>
 # commit_author_email: <id>+<username>@users.noreply.github.com
