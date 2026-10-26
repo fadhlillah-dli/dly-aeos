@@ -774,6 +774,8 @@ def execute_run(settings: Settings, run_id: str, *, shutdown: threading.Event | 
     try:
         with sf() as s:
             run = s.get(WorkerRun, run_id)
+            # phase 1 bound this LEASED run to its task (a run without one is SKIPPED there)
+            assert run is not None and run.task_id is not None
             run.pid = mp.pid
             run.pid_create_time = mp.create_time
             # §21/§25 CPU cap actually in force for this run (W6-055): docker --cpus in the container; in the process
@@ -921,6 +923,7 @@ def _monitor_and_finalize(settings: Settings, run_id: str, prep: Prepared, mp: p
             processes.kill_run_processes(run_id)
         if stop_reason is not None and mp.poll() is not None and (eof or not t.is_alive()):
             break
+    exit_code: int | None
     try:
         exit_code = mp.wait(timeout=10)
     except Exception:
@@ -1190,6 +1193,7 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
     foreign = list(db_result.get("foreign") or [])
     with sf() as s:
         run = s.get(WorkerRun, run_id)
+        assert run is not None  # the run row is created before its worker is spawned and never deleted
         run.exit_code = exit_code
         run.worker_reported_status = f"EXITED_{exit_code}" if exit_code is not None else "UNKNOWN"
         evidence_dir = prep.sandbox.root / "evidence"
@@ -1205,11 +1209,11 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
             if prep.shell_runner:  # only a run that had the AEOS runner has runner logs (else: ordinary changes)
                 cmd_logs, cmd_info = _take_command_logs(prep.ws)
             changes = workspace.collect_changes(prep.ws)
-            result = check_scope(changes["changes"], allowed=prep.allowed, forbidden=prep.forbidden,
-                                 protected=prep.protected)
+            scope = check_scope(changes["changes"], allowed=prep.allowed, forbidden=prep.forbidden,
+                                protected=prep.protected)
             seen = {(v["path"], v["rule"]) for v in violations}
-            violations += [v for v in result.violations if (v["path"], v["rule"]) not in seen]
-            protected_hits = result.protected_hits
+            violations += [v for v in scope.violations if (v["path"], v["rule"]) not in seen]
+            protected_hits = scope.protected_hits
             for p in changes["symlinks_escaping"]:
                 violations.append({"path": p, "rule": "symlink-escapes-worktree", "detail": "symlink target outside"})
             if prep.investigation is not None:
@@ -1342,7 +1346,9 @@ def _finalize(settings: Settings, run_id: str, prep: Prepared, parser: opencode.
     for _ in range(3):
         with sf() as s:
             run = s.get(WorkerRun, run_id, populate_existing=True)
+            assert run is not None
             task = s.get(TaskSpec, run.task_id)
+            assert task is not None  # phase 1 refused a run whose task is missing
             te = s.scalar(select(TaskExecution).where(TaskExecution.task_id == run.task_id)
                           .execution_options(populate_existing=True))
             try:

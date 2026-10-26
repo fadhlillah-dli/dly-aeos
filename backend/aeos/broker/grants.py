@@ -13,9 +13,10 @@ import hashlib
 import secrets
 from datetime import timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
@@ -191,12 +192,12 @@ def authenticate(session: Session, raw_token: str | None, *, kind: str) -> Capab
 
 def consume_request(session: Session, grant_id: str) -> bool:
     """Atomically count one request against max_requests. False when the cap is exhausted."""
-    res = session.execute(
+    res = cast("CursorResult[Any]", session.execute(  # an UPDATE returns a CursorResult (rowcount)
         update(CapabilityGrant)
         .where(CapabilityGrant.id == grant_id, CapabilityGrant.active.is_(True),
                or_(CapabilityGrant.max_requests.is_(None), CapabilityGrant.used_requests < CapabilityGrant.max_requests))
         .values(used_requests=CapabilityGrant.used_requests + 1)
-    )
+    ))
     return res.rowcount == 1
 
 

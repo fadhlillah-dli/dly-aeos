@@ -56,7 +56,8 @@ cd frontend && npm ci && npx tsc -b --noEmit && npm test && npm run build
 ```
 
 On Windows, run `python` from `.venv\Scripts\python.exe` and use `npx.cmd`/`npm.cmd` if script
-execution is blocked. The mypy baseline in `pyproject.toml` may only shrink.
+execution is blocked. mypy must report no errors for `--platform darwin` and `--platform win32`;
+`pyproject.toml` exempts no module (no `ignore_errors` override may be added).
 `tests/unit/test_repository_hygiene.py` keeps the licence, version and repository files consistent.
 
 ### Rules for every change

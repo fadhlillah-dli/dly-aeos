@@ -101,10 +101,10 @@ def queue_items(session: Session, domain: str | Domain, project_ids: list[str] |
     items: list[dict[str, Any]] = []
 
     # Plans waiting for a human.
-    q = select(Plan).where(Plan.domain == domain, Plan.state.in_(list(PLAN_WAITING)))
+    plan_q = select(Plan).where(Plan.domain == domain, Plan.state.in_(list(PLAN_WAITING)))
     if project_ids is not None:
-        q = q.where(Plan.project_id.in_(project_ids))
-    for plan in session.scalars(q):
+        plan_q = plan_q.where(Plan.project_id.in_(project_ids))
+    for plan in session.scalars(plan_q):
         why, requested, prio = PLAN_WAITING[plan.state]
         version = session.get(PlanVersion, plan.current_version_id) if plan.current_version_id else None
         reason = plan.state_reason.strip() if plan.state_reason else ""
@@ -118,10 +118,10 @@ def queue_items(session: Session, domain: str | Domain, project_ids: list[str] |
         ))
 
     # Publication previews awaiting human approval.
-    q = select(Publication).where(Publication.domain == domain, Publication.status == "PREVIEW")
+    pub_q = select(Publication).where(Publication.domain == domain, Publication.status == "PREVIEW")
     if project_ids is not None:
-        q = q.where(Publication.project_id.in_(project_ids))
-    for pub in session.scalars(q):
+        pub_q = pub_q.where(Publication.project_id.in_(project_ids))
+    for pub in session.scalars(pub_q):
         items.append(_item(
             kind="PUBLICATION", title="Pratinjau publikasi menunggu persetujuan",
             target={"type": "publication", "id": pub.id, "version_id": pub.plan_version_id, "hash": pub.approved_hash},
@@ -132,14 +132,14 @@ def queue_items(session: Session, domain: str | Domain, project_ids: list[str] |
         ))
 
     # Change proposals awaiting a decision (platform proposals belong to the PERSONAL platform project).
-    q = select(ChangeProposal).where(ChangeProposal.status.in_(list(PROPOSAL_WAITING)))
+    proposal_q = select(ChangeProposal).where(ChangeProposal.status.in_(list(PROPOSAL_WAITING)))
     if domain == Domain.PERSONAL.value:
-        q = q.where(or_(ChangeProposal.domain == domain, ChangeProposal.domain.is_(None)))
+        proposal_q = proposal_q.where(or_(ChangeProposal.domain == domain, ChangeProposal.domain.is_(None)))
     else:
-        q = q.where(ChangeProposal.domain == domain)
+        proposal_q = proposal_q.where(ChangeProposal.domain == domain)
     if project_ids is not None:
-        q = q.where(or_(ChangeProposal.project_id.in_(project_ids), ChangeProposal.project_id.is_(None)))
-    for cp in session.scalars(q):
+        proposal_q = proposal_q.where(or_(ChangeProposal.project_id.in_(project_ids), ChangeProposal.project_id.is_(None)))
+    for cp in session.scalars(proposal_q):
         why, requested = PROPOSAL_WAITING[cp.status]
         items.append(_item(
             kind="CHANGE_PROPOSAL", title=cp.title,
@@ -149,32 +149,32 @@ def queue_items(session: Session, domain: str | Domain, project_ids: list[str] |
         ))
 
     # Task executions blocked on a human decision.
-    q = (select(TaskExecution, TaskSpec, PlanVersion)
+    blocked_q = (select(TaskExecution, TaskSpec, PlanVersion)
          .join(TaskSpec, TaskSpec.id == TaskExecution.task_id)
          .join(PlanVersion, PlanVersion.id == TaskSpec.plan_version_id)
          .where(TaskExecution.domain == domain, TaskExecution.state == "BLOCKED",
                 TaskExecution.reason.contains("NEEDS_DECISION")))
     if project_ids is not None:
-        q = q.where(TaskExecution.project_id.in_(project_ids))
-    for te, spec, version in session.execute(q):
+        blocked_q = blocked_q.where(TaskExecution.project_id.in_(project_ids))
+    for te, spec, pv in session.execute(blocked_q):
         items.append(_item(
             kind="TASK_BLOCKED", title=f"{spec.task_key}: {spec.title}",
             target={"type": "task", "id": spec.id, "task_key": spec.task_key, "hash": spec.spec_hash},
             why=te.reason or "Task BLOCKED menunggu keputusan.",
             requested="Putuskan: perpanjang batas/attempt dalam policy, ubah kontrak (versi rencana baru), atau batalkan.",
-            link=f"/dag?plan={version.plan_id}&task={spec.task_key}", created_at=te.updated_at,
+            link=f"/dag?plan={pv.plan_id}&task={spec.task_key}", created_at=te.updated_at,
             project_id=te.project_id, domain=te.domain, priority=1,
         ))
 
     # Worker runs in REVIEW that explicitly need a human.
-    q = select(WorkerRun).where(
+    run_q = select(WorkerRun).where(
         WorkerRun.domain == domain, WorkerRun.execution_status == "REVIEW",
         or_(WorkerRun.block_reason.contains("NEEDS_HUMAN"), WorkerRun.block_reason.contains("NEEDS_DECISION"),
             WorkerRun.review_verdict.in_(["BLOCKED", "NOT-PROVEN"])),
     )
     if project_ids is not None:
-        q = q.where(WorkerRun.project_id.in_(project_ids))
-    for run in session.scalars(q):
+        run_q = run_q.where(WorkerRun.project_id.in_(project_ids))
+    for run in session.scalars(run_q):
         items.append(_item(
             kind="RUN_REVIEW", title=f"Run {run.id[:8]} ({run.role_key or run.run_type}) menunggu keputusan",
             target={"type": "worker_run", "id": run.id, "task_id": run.task_id, "verdict": run.review_verdict},
@@ -186,12 +186,12 @@ def queue_items(session: Session, domain: str | Domain, project_ids: list[str] |
 
     # ACTIVE decisions expiring soon (global decisions without a domain appear in both domains).
     horizon = utcnow() + EXPIRING_WITHIN
-    q = select(Decision).where(Decision.status == "ACTIVE", Decision.expires_at.is_not(None),
+    expiring_q = select(Decision).where(Decision.status == "ACTIVE", Decision.expires_at.is_not(None),
                                or_(Decision.domain == domain, Decision.domain.is_(None)))
     if project_ids is not None:
-        q = q.where(or_(Decision.project_id.in_(project_ids), Decision.project_id.is_(None)))
+        expiring_q = expiring_q.where(or_(Decision.project_id.in_(project_ids), Decision.project_id.is_(None)))
     now = utcnow()
-    for d in session.scalars(q):
+    for d in session.scalars(expiring_q):
         exp = ensure_aware(d.expires_at)
         if exp is None or exp <= now or exp > horizon:
             continue
@@ -207,11 +207,11 @@ def queue_items(session: Session, domain: str | Domain, project_ids: list[str] |
 
     # Owner delegations recorded from an ADR (ADR-0003 seed exception) that have no machine expiry: the owner
     # sees them as pending so the bounded delegation is ended deliberately (§09), never forgotten.
-    q = select(Decision).where(Decision.status == "ACTIVE", Decision.actor_kind == "HUMAN_RECORDED",
+    delegation_q = select(Decision).where(Decision.status == "ACTIVE", Decision.actor_kind == "HUMAN_RECORDED",
                                Decision.expires_at.is_(None), or_(Decision.domain == domain, Decision.domain.is_(None)))
     if project_ids is not None:
-        q = q.where(or_(Decision.project_id.in_(project_ids), Decision.project_id.is_(None)))
-    for d in session.scalars(q):
+        delegation_q = delegation_q.where(or_(Decision.project_id.in_(project_ids), Decision.project_id.is_(None)))
+    for d in session.scalars(delegation_q):
         until = str((d.details or {}).get("expires_when") or "pemilik mencabutnya")
         items.append(_item(
             kind="DELEGATION_ACTIVE", title=f"Delegasi {d.actor_user_id} masih aktif",

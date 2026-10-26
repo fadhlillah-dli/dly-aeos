@@ -417,7 +417,7 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
     finally:
         # The delivery capabilities are bound to this one step; nothing may use them afterwards.
         call(broker.revoke_grants, session, run_id=run.id, reason="delivery step finished")
-    number = res.get("number")
+    number: Any = res.get("number")
     pr = PullRequestRecord(
         project_id=project.id, domain=project.domain, task_id=task.id, run_id=run.id, acceptance_id=acc.id,
         provider=CODE_HOST.get(project.domain, "GITHUB"),
@@ -556,10 +556,10 @@ def _push_branch(session: Session, broker: Any, run: WorkerRun, *, repo: str, ac
     res = dict(pushed.result or {})
     status = str(res.get("status") or "UNKNOWN")
     if status == "UNKNOWN":
-        rec = call(broker.reconcile_side_effect, session, side_effect_id=res.get("side_effect_id") or "",
-                   actor="delivery")
-        reconciled = dict(rec.result or {}) if rec.ok else {}
-        notes.append(f"push outcome UNKNOWN; reconciled: {reconciled.get('status', rec.label())}")
+        recon = call(broker.reconcile_side_effect, session, side_effect_id=res.get("side_effect_id") or "",
+                     actor="delivery")
+        reconciled = dict(recon.result or {}) if recon.ok else {}
+        notes.append(f"push outcome UNKNOWN; reconciled: {reconciled.get('status', recon.label())}")
         if reconciled.get("status") != "SUCCEEDED":
             raise Blocked("push outcome is UNKNOWN (it may have landed); reconcile before any retry",
                           code="BROKER_PUSH_UNKNOWN", details={"side_effect_id": res.get("side_effect_id")})
@@ -584,9 +584,9 @@ def _create_pr(session: Session, broker: Any, run: WorkerRun, *, repo: str, base
     res = dict(created.result or {})
     status = str(res.get("status") or "UNKNOWN")
     if status == "UNKNOWN":
-        rec = call(broker.reconcile_side_effect, session, side_effect_id=res.get("side_effect_id") or "",
-                   actor="delivery")
-        reconciled = dict(rec.result or {}) if rec.ok else {}
+        recon = call(broker.reconcile_side_effect, session, side_effect_id=res.get("side_effect_id") or "",
+                     actor="delivery")
+        reconciled = dict(recon.result or {}) if recon.ok else {}
         if reconciled.get("status") != "SUCCEEDED":
             raise Blocked("PR creation outcome is UNKNOWN; reconcile before any retry", code="BROKER_PR_UNKNOWN",
                           details={"side_effect_id": res.get("side_effect_id")})

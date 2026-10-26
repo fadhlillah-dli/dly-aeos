@@ -301,6 +301,7 @@ def sandbox_readiness(session: Session, *, domain: str) -> dict[str, Any]:
         # container user and data partition) and egress enforcement; the company authorisation is gated by
         # the scheduler separately (OFFICE_DENIED).
         if not problems:
+            assert report is not None  # container_report_problems() is never empty without a report
             return {**base, "status": "READY", "kind": "container", "profile": "OFFICE", "reasons": [], "remedies": [],
                     "containment": {"overall": report.get("overall"), "checked_at": report.get("checked_at")}}
         reasons = ["OFFICE requires verified container isolation with its own profile and egress enforcement "
@@ -309,6 +310,7 @@ def sandbox_readiness(session: Session, *, domain: str) -> dict[str, Any]:
                 "remedies": [_container_remedy(domain), "or use PERSONAL"]}
 
     if not problems:
+        assert report is not None  # container_report_problems() is never empty without a report
         return {**base, "status": "READY", "kind": "container", "profile": "PERSONAL", "reasons": [], "remedies": [],
                 "containment": {"overall": report.get("overall"), "checked_at": report.get("checked_at")}}
 

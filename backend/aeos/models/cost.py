@@ -7,6 +7,7 @@ budget arithmetic in ``Decimal`` so ``committed + reserved + request <= limit`` 
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import JSON, Boolean, Index, Integer, Numeric, String, Text, UniqueConstraint
@@ -40,14 +41,14 @@ class UsageLedgerEntry(IdMixin, Base):
     input_tokens: Mapped[int | None] = mapped_column(nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(nullable=True)
     requests: Mapped[int] = mapped_column(default=1)
-    cost_usd: Mapped[float | None] = mapped_column(Numeric(12, 6), nullable=True)  # None = UNKNOWN
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)  # None = UNKNOWN
     is_estimate: Mapped[bool] = mapped_column(Boolean, default=False)
     # Conservative amount charged against budgets when the actual cost is UNKNOWN (the reserved
     # estimate). Never shown as an actual cost.
-    charged_usd: Mapped[float | None] = mapped_column(Numeric(12, 6), nullable=True)
+    charged_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
     reservation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     # Non-token units (CI minutes, compute seconds, storage bytes, human minutes).
-    quantity: Mapped[float | None] = mapped_column(Numeric(18, 6), nullable=True)
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source: Mapped[str] = mapped_column(String(64), nullable=False)  # provider|broker|estimator|ccusage
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -64,7 +65,7 @@ class Budget(IdMixin, TimestampMixin, Base):
     scope_type: Mapped[str] = mapped_column(String(32), nullable=False)  # GLOBAL|PROJECT|ROUTE|RUN
     scope_id: Mapped[str] = mapped_column(String(128), default="*")
     period: Mapped[str] = mapped_column(String(16), default="MONTH")  # DAY|WEEK|MONTH|TOTAL
-    limit_usd: Mapped[float | None] = mapped_column(Numeric(12, 6), nullable=True)
+    limit_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
     limit_tokens: Mapped[int | None] = mapped_column(nullable=True)
     limit_requests: Mapped[int | None] = mapped_column(nullable=True)
     hard_stop: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -91,11 +92,11 @@ class BudgetReservation(IdMixin, TimestampMixin, Base):
     domain: Mapped[str | None] = mapped_column(String(16), nullable=True)
     route_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     budget_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
-    reserved_usd: Mapped[float] = mapped_column(Numeric(12, 6), default=0)
+    reserved_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=0)
     reserved_tokens: Mapped[int] = mapped_column(default=0)
     reserved_requests: Mapped[int] = mapped_column(default=0)
     status: Mapped[str] = mapped_column(String(16), default="RESERVED")  # RESERVED|COMMITTED|RELEASED
-    committed_usd: Mapped[float | None] = mapped_column(Numeric(12, 6), nullable=True)
+    committed_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
     committed_tokens: Mapped[int | None] = mapped_column(nullable=True)
     committed_requests: Mapped[int | None] = mapped_column(nullable=True)
     committed_at: Mapped[datetime | None] = mapped_column(nullable=True)
