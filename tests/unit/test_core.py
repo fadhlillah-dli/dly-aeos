@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,20 @@ def test_domain_partitions_are_separate(tmp_path: Path):
     layout = DataLayout(tmp_path)
     assert layout.project_root(Domain.PERSONAL, "p") != layout.project_root(Domain.OFFICE, "p")
     assert "personal" in str(layout.project_root(Domain.PERSONAL, "p"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows ACLs are checked by the Doctor")
+def test_layout_is_private_to_the_os_user_and_tightens_an_open_data_dir(tmp_path: Path):
+    from aeos.core.enums import Domain
+
+    root = tmp_path / "data"
+    (root / "personal").mkdir(parents=True)
+    for p in (root, root / "personal"):
+        p.chmod(0o755)  # left open by an older bootstrap under umask 022
+    layout = DataLayout(root)
+    layout.ensure()
+    for p in (layout.root, layout.backups, layout.domain_root(Domain.PERSONAL), layout.domain_root(Domain.OFFICE)):
+        assert p.stat().st_mode & 0o077 == 0, p
 
 
 def test_content_hash_is_canonical():

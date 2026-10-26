@@ -5,9 +5,11 @@ probe goes through the fake runner, in-process ASGI or a throw-away in-memory da
 from __future__ import annotations
 
 import json
+import sys
 import time
 from datetime import timedelta
 
+import pytest
 from sqlalchemy import select
 
 from aeos.core.enums import Capability
@@ -749,6 +751,14 @@ def test_a_replaced_project_repository_makes_the_project_result_stale(settings, 
     # a project of another domain is never evaluated as this domain's project
     foreign = caps.capability_state(db, Capability.CAN_PREPARE_PR, domain="PERSONAL", project_id=office.id)
     assert foreign.status != "READY" and any("tidak ditemukan pada domain ini" in x for x in foreign.reasons)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes; Windows ACLs are tested above")
+def test_evidence_dir_permissions_verified_on_a_fresh_posix_layout(settings, db):
+    """A layout created by bootstrap under umask 022 must not leave the partitions readable by other users."""
+    res = check("evidence.dir_permissions", _ctx(settings, db, base_runner()))
+    assert res.status == "VERIFIED", res.summary
+    assert "other_access" not in res.observed_evidence
 
 
 def test_windows_acl_numeric_generic_rights_are_read_as_write(settings, db, monkeypatch):

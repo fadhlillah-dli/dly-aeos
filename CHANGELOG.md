@@ -10,6 +10,14 @@ describes what was built and how it was proven. NOT-PROVEN means no run on a rea
 
 ## [Unreleased]
 
+### Fixed
+
+- **Data directory private on macOS.** The data layout was created with the default umask (0755), so other
+  OS users could read the database and the PERSONAL/OFFICE partitions, and the Doctor reported
+  `evidence.dir_permissions` FAILED on every fresh Mac. The layout is now created as 0700 on POSIX, and a
+  directory left open by an older bootstrap is tightened at the next start. Unit tests cover both cases
+  (skipped on Windows, where the Doctor checks ACLs instead).
+
 ## [0.1.0] - 2026-10-26
 
 First release of the local-first control plane. It contains pull requests #1 to #13 (#8 was

@@ -13,6 +13,7 @@ Defaults:
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -114,6 +115,9 @@ class DataLayout:
         return self.project_root(domain, project_key) / "publications"
 
     def ensure(self) -> None:
+        """Create the layout private to the OS user: 0700 on POSIX, so other users cannot read the database or the
+        PERSONAL/OFFICE partitions. A directory left open by an older bootstrap is tightened; one that cannot be
+        changed stays visible as FAILED in the Doctor check evidence.dir_permissions. Windows uses ACLs instead."""
         for p in (
             self.root,
             self.backups,
@@ -124,7 +128,12 @@ class DataLayout:
             self.domain_root(Domain.PERSONAL),
             self.domain_root(Domain.OFFICE),
         ):
-            p.mkdir(parents=True, exist_ok=True)
+            p.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if sys.platform != "win32" and p.stat().st_mode & 0o077:
+                try:
+                    p.chmod(0o700)
+                except OSError:
+                    pass
 
 
 def repo_root() -> Path:
