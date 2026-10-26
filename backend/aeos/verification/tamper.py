@@ -25,9 +25,10 @@ guarding triggers are (a drop-modify-recreate inside the window is not detected 
 activity timestamps ``auth_sessions.last_seen_at`` and ``users.last_login_at`` are not compared (``_VOLATILE_COLUMNS``:
 no trust attribute, rewritten by the server on ordinary use).
 The worker runtime's window (wave 7, opt-in ``CROSS_PROCESS_TOLERATED``) also accepts a grant's usage counters
-growing, a grant or session being revoked and a session's ``last_seen_at`` moving forward, even from another
-process: a writer making only those changes (inflating usage, revoking, keeping an owner session from idling out)
-is not detected there. On ``capability_grants`` (``CROSS_PROCESS_STRICT``) the controller's own writes mask nothing
+growing and a grant or session being revoked, even from another process: a writer making only those changes
+(inflating usage, revoking) is not detected there. A session's ``last_seen_at`` is compared in no window at all
+(``_VOLATILE_COLUMNS``), so a writer that only keeps an owner session from idling out is detected in neither the
+worker's nor the verifier's window (it gains nothing without the session token). On ``capability_grants`` (``CROSS_PROCESS_STRICT``) the controller's own writes mask nothing
 (review wave 7: the in-process broker's usage ``UPDATE`` used to hide the whole table for the rest of a run). On the
 other tables a foreign change to a row this controller process also wrote by ORM in the same window is masked (for
 example the owner's own session row, touched while the owner uses the dashboard). The container runner never
