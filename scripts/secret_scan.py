@@ -67,6 +67,23 @@ def pii_findings(rel: str, text: str) -> list[str]:
     return out
 
 
+def multiline_findings(rel: str, text: str) -> list[str]:
+    """Credential shapes that span lines (a pretty-printed `operator init -format=json`, a PEM block).
+
+    The per-line loop in `main` cannot see them, so the same high-confidence patterns also run over the
+    whole text; only matches that contain a newline are reported here, the rest are already reported per
+    line."""
+    out: list[str] = []
+    for pat in HIGH_CONFIDENCE:
+        for m in pat.finditer(text):
+            if "\n" not in m.group(0):
+                continue
+            if rel.startswith("tests/") and any(k in m.group(0).lower() for k in FAKE_MARKERS):
+                continue
+            out.append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}: matches {pat.pattern[:40]}... (multi-line)")
+    return out
+
+
 def main() -> int:
     findings: list[str] = []
     for rel in tracked_files():
@@ -82,6 +99,7 @@ def main() -> int:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, FileNotFoundError):
             continue
+        findings += multiline_findings(rel, text)
         for lineno, line in enumerate(text.splitlines(), 1):
             for pat in HIGH_CONFIDENCE:
                 for m in pat.finditer(line):

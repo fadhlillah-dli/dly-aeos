@@ -54,7 +54,8 @@ Read `AGENTS.md` and the master. If DLY AEOS already ran on this Mac, the bootst
 
 ## 1. Git, VS Code, Python, Node.js
 
-Install the Command Line Tools and Homebrew (https://brew.sh) if you do not have them:
+Install the Command Line Tools and Homebrew (https://brew.sh) if you do not have them. The GitHub e-mail
+below is the noreply address that attributes contributions to you (§06):
 
 ```bash
 xcode-select --install
@@ -62,7 +63,7 @@ brew install git python@3.13 node@22
 brew install --cask visual-studio-code
 git --version; python3.13 --version; node --version
 git config --global user.name "Your Name"
-git config --global user.email "your-github-noreply@users.noreply.github.com"   # contributions (§06)
+git config --global user.email "your-github-noreply@users.noreply.github.com"
 ./scripts/bootstrap.sh
 ```
 
@@ -85,14 +86,19 @@ Open http://127.0.0.1:8787, sign in, choose **PERSONAL**.
 
 ## 2. Claude Code (official) with native Max login
 
+Install it with the package manager (docs: https://code.claude.com/docs/en/setup). Alternatively use the
+official installer, downloaded and REVIEWED before it runs and never piped into a shell (§07):
+`curl -fsSL https://claude.ai/install.sh -o install-claude.sh`, then `less install-claude.sh`, then
+`bash install-claude.sh`. Running `claude` the first time asks you to sign in with your Claude account
+(Max plan); then type `/exit`. `claude auth status` must show `loggedIn true`, authMethod `claude.ai` and
+subscriptionType `max`. The last command must print `<not set>`.
+
 ```bash
-brew install --cask claude-code                     # package manager (docs: https://code.claude.com/docs/en/setup)
-# or the official installer, downloaded and REVIEWED before it runs (never piped into a shell, §07):
-#   curl -fsSL https://claude.ai/install.sh -o install-claude.sh && less install-claude.sh && bash install-claude.sh
-claude                                              # sign in with your Claude account (Max plan), then /exit
+brew install --cask claude-code
+claude
 claude --version
-claude auth status                                  # loggedIn true, authMethod "claude.ai", subscriptionType "max"
-echo "${ANTHROPIC_API_KEY:-<not set>}"              # must print <not set>
+claude auth status
+echo "${ANTHROPIC_API_KEY:-<not set>}"
 ```
 
 If `ANTHROPIC_API_KEY` is exported in `~/.zshrc`/`~/.zprofile`, remove it: Claude Code would bill
@@ -109,12 +115,15 @@ model becomes a route only through a recorded ROUTE_ACTIVATION decision. Then ru
 
 ## 3. OpenBao and the macOS Keychain
 
+`vault install` uses the install-manifest `approved_pin`; while that is null, add `--version X.Y.Z` (a version
+you reviewed). `brew install openbao` is an alternative. `vault init` shows the unseal keys ONCE on a
+temporary screen: store them offline, then type `stored`. Run `vault unseal` after every restart of OpenBao.
+
 ```bash
-./aeos vault install     # the install-manifest approved_pin; while it is null: --version X.Y.Z (a version you reviewed)
-                         # alternative: brew install openbao
+./aeos vault install
 ./aeos vault start
-./aeos vault init        # shows unseal keys ONCE on a temporary screen - store them offline, then type "stored"
-./aeos vault unseal      # after every restart of OpenBao
+./aeos vault init
+./aeos vault unseal
 ```
 
 The Keychain holds the bootstrap identity used to reach OpenBao. Unseal keys/root token never go
@@ -137,10 +146,13 @@ CAN_RUN_WORKER blocked.
 
 ## 5. OpenCode and one approved route
 
+The OpenCode version was observed on 2026-10-18; `install-manifest/` is authoritative. The OpenRouter key is
+not echoed when you enter it.
+
 ```bash
-npm install -g opencode-ai@1.19.3     # version observed on 2026-10-18; install-manifest/ is authoritative
+npm install -g opencode-ai@1.19.3
 opencode --version
-./aeos secrets set workers/openrouter  # OpenRouter key, not echoed
+./aeos secrets set workers/openrouter
 ```
 
 Activate exactly one route in *Model & Rute* (your recorded decision; paid routes need a budget
@@ -176,9 +188,10 @@ Google Drive + Docs:
 3. *OAuth consent screen*: External (personal) or Internal (Workspace), app name `DLY AEOS`, add
    yourself as **test user** while in testing.
 4. *Credentials → Create credentials → OAuth client ID* → type **Desktop app** → download the JSON.
-5. ```bash
+5. Connect, then delete the downloaded JSON once consent has succeeded:
+   ```bash
    ./aeos publish google-connect --client-secret ~/Downloads/client_secret_XXXX.json
-   rm ~/Downloads/client_secret_XXXX.json      # after consent succeeded
+   rm ~/Downloads/client_secret_XXXX.json
    ```
 
 **Evidence:** *Integrasi & Akses* shows credential status CONFIGURED (never the value); adapter
@@ -186,9 +199,11 @@ checks pass a dry-run against the exact folder/repository.
 
 ## 8. Doctor, Control Center, verifier, Claude bridge
 
+`./aeos serve` can be replaced by `./scripts/dev.sh` (backend with `--dev` plus Vite on 5173).
+
 ```bash
 ./aeos doctor
-./aeos serve            # or ./scripts/dev.sh for backend --dev + Vite on 5173
+./aeos serve
 ```
 
 ## 9. DLY AEOS as the first PERSONAL project

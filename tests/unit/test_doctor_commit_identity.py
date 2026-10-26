@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+from aeos.core.attribution import ai_identity_problem
 from aeos.core.enums import Capability
 from aeos.doctor import capabilities as caps
 from aeos.doctor.checks import REGISTRY, load_all
@@ -92,3 +93,8 @@ def test_pr_preparation_is_gated_on_the_github_identity(status, ready):
     assert (st.status != "BLOCKED") is ready
     if not ready:
         assert any("git.commit_identity.github" in r for r in st.reasons)
+
+
+def test_the_invalid_identity_sample_is_an_ai_identity_for_the_canonical_guard():
+    assert ai_identity_problem("Claude", "noreply@anthropic.com")
+    assert ai_identity_problem("Jane Doe", "owner@example.com") is None

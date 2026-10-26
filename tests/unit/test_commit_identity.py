@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from aeos.core import commit_identity as cid
+from aeos.core.attribution import ai_identity_problem, find_ai_attribution
 from aeos.core.config import Settings
 from aeos.core.enums import Domain
 from aeos.core.paths import DataLayout
@@ -243,3 +244,13 @@ def test_the_runtime_commit_alone_stays_pushable(ws):
     executor._mark_pushable(other, _prep(ws, email="someone-else@example.com"), head)
     assert other.caps["commit_identity"]["pushable"] is False
     assert other.caps["commit_identity"]["not_pushable_reason"].startswith(cid.CODE_IDENTITY_MISMATCH)
+
+
+def test_the_attribution_samples_of_this_file_are_attribution_for_the_canonical_guard():
+    """commit_identity delegates to aeos.core.attribution: the samples used here must be attribution for it."""
+    assert find_ai_attribution("fix\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n")
+    assert ai_identity_problem("Claude", "noreply@anthropic.com")
+    assert ai_identity_problem("Jane Doe", "noreply@anthropic.com")
+    assert ai_identity_problem("Claude", "owner@example.com")
+    assert ai_identity_problem("Jane Doe", "owner@example.com") is None
+    assert not find_ai_attribution("fix(claude_bridge): argv\n")
