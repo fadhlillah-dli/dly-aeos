@@ -7,13 +7,9 @@ check fail-closed behaviour simply do not install them.
 
 from __future__ import annotations
 
-import atexit
-import os
 import shutil
-import stat
 import subprocess
 import sys
-import tempfile
 import types
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -35,6 +31,7 @@ from aeos.models.portfolio import Project, RepositoryReference
 from aeos.models.routing import ModelRoute
 from aeos.models.workforce import AgentDefinition
 from aeos.routing.service import compute_config_hash as _route_config_hash  # real one, before any fake
+from tests.conftest import template_dir
 
 
 @dataclass
@@ -319,19 +316,6 @@ def process_sandbox_exception(db: Session, *, domain: str = "PERSONAL", allow: b
 _GIT_TEMPLATES: dict[tuple[tuple[str, str], ...], tuple[Path, str]] = {}
 
 
-def _rmtree_writable(path: Path) -> None:
-    """Remove a template repo; git objects are read-only, which Windows refuses to delete."""
-
-    def onerror(func: Any, name: str, _exc: Any) -> None:
-        try:
-            os.chmod(name, stat.S_IWRITE)
-            func(name)
-        except OSError:
-            pass
-
-    shutil.rmtree(path, onerror=onerror)
-
-
 def _init_git_repo_uncached(path: Path, files: dict[str, str]) -> str:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -359,9 +343,8 @@ def init_git_repo(path: Path, files: dict[str, str] | None = None) -> str:
         return _init_git_repo_uncached(path, files)
     key = tuple(sorted(files.items()))
     if key not in _GIT_TEMPLATES:
-        template = Path(tempfile.mkdtemp(prefix="aeos-gittpl-"))
+        template = template_dir("aeos-gittpl-")
         _GIT_TEMPLATES[key] = (template, _init_git_repo_uncached(template, files))
-        atexit.register(_rmtree_writable, template)
     template, sha = _GIT_TEMPLATES[key]
     path.mkdir(parents=True, exist_ok=True)
     shutil.copytree(template, path, dirs_exist_ok=True)

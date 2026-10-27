@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import statistics
+import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -119,6 +120,27 @@ def _memoised_argon2() -> Iterator[None]:
             setattr(pw, "_hasher", real)  # noqa: B010
 
 
+_TEMPLATE_ROOT: list[Path] = []
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _template_root(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Parent of the per-process git/release template repositories. It lives under pytest's own base temp
+    directory, which pytest prunes, so a killed run leaves nothing in $TMPDIR (an atexit hook never runs then)."""
+    _TEMPLATE_ROOT.append(tmp_path_factory.mktemp("aeos-templates"))
+    try:
+        yield
+    finally:
+        _TEMPLATE_ROOT.clear()
+
+
+def template_dir(prefix: str) -> Path:
+    """A new empty directory for a template repository (valid only while the pytest session runs)."""
+    if not _TEMPLATE_ROOT:
+        raise RuntimeError("template_dir() is only available inside a pytest session")
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=_TEMPLATE_ROOT[0]))
+
+
 @pytest.fixture(scope="session")
 def _template_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """One migrated database per test process (per xdist worker): create_all + the append-only triggers + the
@@ -178,11 +200,16 @@ _HEAD: list[str] = []
 def _stamp_head(engine) -> None:
     """Record the migration head like `aeos db upgrade` does for a create_all database (fast path)."""
     if not _HEAD:
+        from alembic.config import Config
         from alembic.script import ScriptDirectory
 
-        from aeos.core.migrate import alembic_config
+        from aeos.core.migrate import MIGRATIONS_DIR
 
-        _HEAD.append(ScriptDirectory.from_config(alembic_config()).get_current_head() or "")
+        # script_location only: `alembic_config()` would call get_settings() and read the host's AEOS_* variables and
+        # aeos.yaml, because the template is built before the `settings` fixture isolates them
+        cfg = Config()
+        cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
+        _HEAD.append(ScriptDirectory.from_config(cfg).get_current_head() or "")
     if _HEAD[0]:
         with engine.begin() as conn:
             conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL, "

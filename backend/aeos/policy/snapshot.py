@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -27,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
 from aeos.core.config import Settings, get_settings
-from aeos.core.hashing import content_hash, file_sha256
+from aeos.core.hashing import content_hash, file_sha256, sha256_bytes
 from aeos.core.paths import UnsafePathError, ensure_within, repo_root
 from aeos.events import service as events
 from aeos.models.decisions import PolicySnapshot
@@ -46,13 +47,31 @@ def policy_dir() -> Path:
     return repo_root() / "policy"
 
 
+@functools.lru_cache(maxsize=32)
+def _yaml_parses(text: str) -> bool:
+    """True once ``text`` has been parsed without an unexpected error. A YAMLError is a recorded INVALID file (the
+    hash still counts); any other error (RecursionError of a deeply nested file) propagates and is not cached."""
+    try:
+        yaml.safe_load(text)
+    except yaml.YAMLError:
+        pass
+    return True
+
+
 def policy_file_hashes() -> dict[str, str]:
-    """``{file name: sha256}`` of every ``policy/*.yaml`` without parsing any YAML (the same hashes as
-    ``load_policy_files``; an unreadable file raises OSError)."""
+    """``{file name: sha256}`` of every ``policy/*.yaml``: the hashes ``load_policy_files`` records, from a single
+    read of the bytes. Fails exactly where ``load_policy_files`` does: an unreadable file raises OSError, and a
+    file that is not UTF-8 (UnicodeDecodeError) or whose YAML parse blows up (RecursionError) raises too, so the
+    caller can fail closed. The parse itself is remembered per distinct text."""
     root = policy_dir()
     if not root.is_dir():
         return {}
-    return {path.name: file_sha256(path) for path in sorted(root.glob("*.yaml"))}
+    out: dict[str, str] = {}
+    for path in sorted(root.glob("*.yaml")):
+        data = path.read_bytes()
+        _yaml_parses(data.decode("utf-8"))
+        out[path.name] = "sha256:" + sha256_bytes(data)
+    return out
 
 
 def load_policy_files() -> dict[str, dict[str, Any]]:

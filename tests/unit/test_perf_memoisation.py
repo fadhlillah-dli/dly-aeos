@@ -7,13 +7,17 @@ policy version (hash of ``policy/*.yaml`` without a YAML parse).
 from __future__ import annotations
 
 import itertools
+import os
 import random
+import subprocess
+import sys
 
 import pytest
 from jsonschema.exceptions import SchemaError
 
 from aeos.claude_bridge import parsing
 from aeos.core.hashing import content_hash
+from aeos.core.paths import repo_root
 from aeos.policy import snapshot
 from aeos.routing import service as routing
 from aeos.secrets import installer
@@ -32,7 +36,11 @@ def _manifest(root, pin: str, *, extra: str = "") -> None:
 def test_manifest_entry_rereads_a_changed_file_even_at_the_same_size(tmp_path):
     _manifest(tmp_path, "2.7.1")
     assert installer.manifest_pin(tmp_path) == "2.7.1"
+    p = tmp_path / "install-manifest" / "manifest.yaml"
+    st = p.stat()
     _manifest(tmp_path, "2.7.2")  # same byte length, rewritten immediately: must not be served from the memo
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))  # and with the old timestamps back: keyed on content, not mtime
+    assert p.stat().st_mtime_ns == st.st_mtime_ns and p.stat().st_size == st.st_size
     assert installer.manifest_pin(tmp_path) == "2.7.2"
     _manifest(tmp_path, "2.8.0", extra="# longer\n")
     assert installer.manifest_pin(tmp_path) == "2.8.0"
@@ -81,6 +89,30 @@ def test_policy_version_of_the_real_policy_equals_the_parsed_files_version():
     assert files, "the repository ships policy/*.yaml"
     expected = "pol-" + content_hash({name: entry.get("sha256") for name, entry in sorted(files.items())})[7:23]
     assert routing.current_policy_version() == expected
+
+
+def _old_policy_version():
+    """current_policy_version as it was on main: parse every file, None when that raises."""
+    try:
+        files = snapshot.load_policy_files()
+    except Exception:
+        return None
+    return "pol-" + content_hash({name: entry.get("sha256") for name, entry in sorted(files.items())})[7:23]
+
+
+@pytest.mark.parametrize("bad", [b"x: \xff\xfe\n", b"[" * 200_000], ids=["not-utf8", "recursion"])
+def test_an_undecodable_or_unparseable_policy_file_still_fails_closed(monkeypatch, tmp_path, bad):
+    (tmp_path / "a.yaml").write_text("x: 1\n", encoding="utf-8")
+    monkeypatch.setattr(snapshot, "policy_dir", lambda: tmp_path)
+    good = routing.current_policy_version()
+    assert good is not None and good.startswith("pol-") and good == _old_policy_version()
+    (tmp_path / "b.yaml").write_bytes(bad)
+    assert _old_policy_version() is None  # main: unknown policy -> binding drift cannot be determined
+    assert routing.current_policy_version() is None
+    with pytest.raises((UnicodeDecodeError, RecursionError)):
+        snapshot.policy_file_hashes()
+    (tmp_path / "b.yaml").write_text("y: 2\n", encoding="utf-8")  # repaired: a version again
+    assert routing.current_policy_version() == _old_policy_version() and routing.current_policy_version() != good
 
 
 def test_policy_file_hashes_without_a_policy_dir_is_empty(monkeypatch, tmp_path):
@@ -169,9 +201,42 @@ def test_matches_any_follows_a_mutated_pattern_list_and_keeps_first_match_order(
     assert scope.matches_any("src/a.py", ["**", "src/**"]) == "**"
 
 
+# what main does (first-match loop, no compile up front): a bad element only matters if the loop reaches it
+@pytest.mark.parametrize("pats, expected", [
+    (["a/**", ["x"]], "a/**"), (["a/**", None], "a/**"), (("a/**", 7), "a/**"),
+    ([5], AttributeError), ([["x"]], AttributeError), ([None, "a/**"], AttributeError), (["zzz", ["x"]], AttributeError),
+], ids=["list-after-match", "none-after-match", "int-after-match", "int-only", "list-only", "none-first", "list-no-match"])
+def test_matches_any_with_non_string_elements_behaves_like_main(pats, expected):
+    for _ in range(2):  # nothing is remembered from the first call
+        if isinstance(expected, str):
+            assert scope.matches_any("a/b.py", pats) == expected
+        else:
+            with pytest.raises(expected):
+                scope.matches_any("a/b.py", pats)
+
+
 def test_normalize_pattern_still_raises_for_bad_patterns_every_time():
     for _ in range(2):
         with pytest.raises(scope.ScopePathError):
             scope.normalize_pattern("../x")
     assert scope.normalize_pattern("dir/") == "dir/**" and scope.normalize_pattern(" a\\b ") == "a/b"
     assert scope.matches("a/b.py", "../x") is False
+
+
+# ------------------------------------------------------------------------------------------- template database
+def test_settings_fixture_probe(settings):
+    """Only a probe for the next test: it needs the session template database built."""
+    assert settings.layout.db_path.exists()
+
+
+def test_the_template_database_build_ignores_a_hostile_host_environment():
+    """The session template is built before the ``settings`` fixture isolates AEOS_*; the build must not read the
+    host's variables (AEOS_PORT=notanint made every settings-using test ERROR with a pydantic ValidationError)."""
+    import os
+
+    env = {**os.environ, "AEOS_PORT": "notanint", "AEOS_HOST": "", "AEOS_CONFIG": str(repo_root() / "no-such.yaml")}
+    run = subprocess.run([sys.executable, "-m", "pytest", "tests/unit/test_perf_memoisation.py", "-q", "-p",
+                          "no:cacheprovider", "-k", "test_settings_fixture_probe"], cwd=repo_root(), env=env,
+                         capture_output=True, text=True, timeout=300)
+    assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-1000:]
+    assert "1 passed" in run.stdout

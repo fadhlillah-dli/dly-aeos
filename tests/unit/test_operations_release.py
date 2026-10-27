@@ -12,14 +12,10 @@
 
 from __future__ import annotations
 
-import atexit
 import io
-import os
 import shutil
 import sqlite3
-import stat
 import subprocess
-import tempfile
 import zipfile
 from pathlib import Path
 
@@ -31,7 +27,7 @@ from aeos.core.paths import repo_root
 from aeos.models.audit import AuditEvent
 from aeos.models.operations_ext import OpsAlert
 from aeos.operations import release
-from tests.conftest import create_admin
+from tests.conftest import create_admin, template_dir
 from tests.unit.test_operations_fakes import block_module, fake_policy, fake_verification
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
@@ -63,19 +59,6 @@ def git_repo(tmp_path: Path) -> Path:
 _REPO_TEMPLATE: list[Path] = []
 
 
-def _rmtree_writable(path: Path) -> None:
-    """Remove the template repo; git objects are read-only, which Windows refuses to delete."""
-
-    def onerror(func, name, _exc):
-        try:
-            os.chmod(name, stat.S_IWRITE)
-            func(name)
-        except OSError:
-            pass
-
-    shutil.rmtree(path, onerror=onerror)
-
-
 def _make_git_repo_uncached(tmp_path: Path) -> Path:
     repo = tmp_path / "platform"
     (repo / "backend").mkdir(parents=True)
@@ -91,8 +74,7 @@ def make_git_repo(tmp_path: Path) -> Path:
     """The real ``git init`` + commit of the shipped backend runs once per process; each test gets its own
     plain copy of that repository (same files, message and identity; never a link)."""
     if not _REPO_TEMPLATE:
-        base = Path(tempfile.mkdtemp(prefix="aeos-reltpl-"))
-        atexit.register(_rmtree_writable, base)
+        base = template_dir("aeos-reltpl-")
         _REPO_TEMPLATE.append(_make_git_repo_uncached(base))
     return Path(shutil.copytree(_REPO_TEMPLATE[0], tmp_path / "platform"))
 
