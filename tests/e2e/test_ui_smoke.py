@@ -14,7 +14,8 @@ MOCK/DEMO/DESIGN rows must carry their label. OFFICE shows empty/blocked states 
 VIEWER sees no admin-only controls and a direct write is rejected with 403 by the backend.
 
 External tools are never called: claude/opencode/bao/mmdc point at absent paths, OpenBao at a closed
-loopback port and the keyring service name is unique to the run. Nothing leaves the machine.
+loopback port and the OS keyring is the null backend (``PYTHON_KEYRING_BACKEND``, the one ``tests/conftest.py``
+gives sandboxed children) under a service name that is unique to the run. Nothing leaves the machine.
 
 Screenshots (full page, 1440px and 390px, plus one dark-mode run) are written to a temp dir
 (override with ``AEOS_UI_SHOTS_DIR``). ``AEOS_UI_EVIDENCE=1`` refreshes the curated set in
@@ -41,6 +42,8 @@ from typing import Any
 
 import httpx
 import pytest
+
+from tests.conftest import NULL_KEYRING
 
 pytestmark = pytest.mark.integration
 
@@ -176,6 +179,9 @@ def _isolated_env(root: Path, port: int) -> dict[str, str]:
         AEOS_MMDC_BINARY=str(absent / f"mmdc{exe}"),
         AEOS_OPENBAO_ADDR=f"http://127.0.0.1:{_free_port()}",
         AEOS_KEYRING_SERVICE=f"dly-aeos-ui-smoke-{uuid.uuid4().hex[:8]}",
+        # The server child runs outside the SecretGuard: it selects the null keyring (the backend the guard gives
+        # sandboxed children), so no lookup ever reaches the macOS Keychain or Windows Credential Manager (L20).
+        PYTHON_KEYRING_BACKEND=NULL_KEYRING,
         PYTHONPATH=str(REPO / "backend"),
         PYTHONUTF8="1",
         PYTHONIOENCODING="utf-8",

@@ -97,6 +97,44 @@ def test_third_party_actions_are_pinned_to_full_commit_shas(path: Path):
             assert re.fullmatch(r"[0-9a-f]{40}", ref), f"{uses} is not pinned to a full commit SHA"
 
 
+def _action_pins_tool():
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location("aeos_script_action_pins_rules", repo_root() / "scripts" / "action_pins.py")
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _yaml_action_refs(data: dict) -> set[str]:
+    return {step["uses"] for job in (data.get("jobs") or {}).values() for step in (job or {}).get("steps") or []
+            if (step or {}).get("uses") and not step["uses"].startswith("./")}
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_every_pin_carries_a_version_comment_the_monthly_report_can_read(path: Path):
+    """``scripts/action_pins.py --report`` (CONTRIBUTING "Developer tools") reads ``uses: owner/repo@<sha> # vX``; a pin
+    without the comment would be UNKNOWN there. The tool's line reader must also agree with the parsed YAML."""
+    tool = _action_pins_tool()
+    pins = [p for p in tool.parse_workflow(path.read_text(encoding="utf-8"), path.name) if p.kind == "action"]
+    assert not [p.name for p in pins if not p.tag], "a pin has no '# vX.Y.Z' version comment after the sha"
+    in_yaml = {"/".join(spec.split("/")[:2]) + "@" + ref
+               for spec, ref in (u.rsplit("@", 1) for u in _yaml_action_refs(_load(path)))}
+    assert {f"{p.name}@{p.ref}" for p in pins} == in_yaml
+
+
+def test_the_version_comment_rule_bites_on_a_missing_comment_and_passes_a_near_miss():
+    tool = _action_pins_tool()
+    sha = "a" * 40
+    bad = tool.parse_workflow(f"      - uses: acme/tool@{sha}\n      - uses: acme/other@{sha} # pinned\n", "x.yml")
+    assert [p.name for p in bad if not p.tag] == ["acme/tool", "acme/other"]  # violating: red, both named
+    good = tool.parse_workflow(f"      - uses: acme/tool/sub@{sha} # v1.2.3\n", "x.yml")
+    assert [(p.name, p.tag) for p in good] == [("acme/tool", "v1.2.3")]  # near miss: a sub-path action with its comment
+
+
 # ------------------------------------------------------------------ rules for every workflow file (one owner: here)
 # A timeout on every job (the default is 360 minutes and GitHub Free has 5 account-wide macOS slots), no macOS runner
 # outside ci.yml (a pull request title or lint check is platform-neutral and a macOS slot is scarce), and no

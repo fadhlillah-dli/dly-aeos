@@ -229,6 +229,30 @@ def test_guard_gives_sandboxed_children_the_null_keyring(_hermetic_secret_stores
     assert _sandbox_child_keyring(tmp_path / "again") == NULL_KEYRING
 
 
+# ------------------------------------------------------------------ the UI smoke server child
+def _smoke_child_keyring(env: dict[str, str], home: Path) -> str:
+    """The keyring a child with the UI smoke environment would pick (reads the variable and the config only)."""
+    home.mkdir(parents=True, exist_ok=True)
+    env = {**env, "HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "LOCALAPPDATA": str(home / "local")}
+    out = subprocess.run([sys.executable, "-I", "-c", _CHILD_KEYRING], env=env, cwd=str(home),
+                         capture_output=True, text=True, timeout=120, check=True)
+    return out.stdout.strip()
+
+
+def test_ui_smoke_server_child_selects_the_null_keyring(tmp_path: Path):
+    """The smoke server runs outside the SecretGuard (a real uvicorn child). Its environment must select the null
+    keyring itself; without that variable the child would fall through to OS keyring detection (the owner's Keychain)."""
+    pytest.importorskip("playwright.sync_api", reason="the smoke module needs playwright to import")
+    from tests.e2e import test_ui_smoke as smoke
+
+    env = smoke._isolated_env(tmp_path / "run", 8799)
+    assert env["PYTHON_KEYRING_BACKEND"] == NULL_KEYRING
+    assert env["AEOS_KEYRING_SERVICE"].startswith("dly-aeos-ui-smoke-")  # the random service name is kept
+    assert _smoke_child_keyring(env, tmp_path / "with") == NULL_KEYRING
+    without = {k: v for k, v in env.items() if k != "PYTHON_KEYRING_BACKEND"}  # violating: the variable is gone
+    assert _smoke_child_keyring(without, tmp_path / "without") == "OS-KEYRING-DETECTION"
+
+
 # ------------------------------------------------------------------ the owner's real Claude Code
 _SENTINEL_LOGIN = "sentinel-claude-login-loggedIn"
 

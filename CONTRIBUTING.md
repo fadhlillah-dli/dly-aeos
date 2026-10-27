@@ -294,9 +294,22 @@ Standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the ve
   `--apply` prints the changes it would send and sends nothing without `--yes`; with `--yes` it updates the repository
   (`PATCH`), the existing rulesets (`PUT`, matched by name) and creates a missing one (`POST`), then checks again. It
   never deletes a ruleset and never runs in CI; `--repo owner/name` names another repository.
+- **`scripts/action_pins.py`** is the monthly report of pinned versions, because a pin never moves by itself and
+  ADR-0115 allows no automatic Dependabot pull requests. `python scripts/action_pins.py --report` lists every
+  `uses: owner/repo@<40-hex sha> # vX` of `.github/workflows` and the pinned release binary of `ci.yml`
+  (`ACTIONLINT_VERSION` with `ACTIONLINT_SHA256`), asks the GitHub CLI (`gh`) for the newest release published at
+  least 14 days ago and the commit of its tag, and prints one row per pin: name, pinned tag, pinned sha (the SHA-256 for
+  a binary), newest eligible tag, the full commit SHA of that tag (an action update only; also `newest_sha` in `--json`) and `CURRENT`, `UPDATE <tag>` or `UNKNOWN (reason)`. `UNKNOWN` covers a pin without a
+  version comment, a tag that does not point at the pinned sha and a failed lookup. It always exits 0; the last line is
+  `ACTION_PINS: <n> pins, <k> updates available`. `--json` prints JSON only (the last line then goes to stderr),
+  `--today YYYY-MM-DD` replaces the date of the 14-day rule and `--workflows DIR` the workflow directory. **Run it
+  monthly.** An update is a normal pull request: the new full SHA of the release tag (the report prints it, so nothing is resolved by hand) and the new version comment, and for a
+  binary also the new SHA-256 from that release's checksums file (bump the version and the checksum together).
+  `tests/unit/test_delivery_ci_secrets.py` fails when a pin has no version comment.
 
 The tools have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`,
-`tests/unit/test_github_settings.py`): a violating fixture is red and a near-miss legitimate one is green. The junction
+`tests/unit/test_github_settings.py`, `tests/unit/test_action_pins_tool.py`): a violating fixture is red and a
+near-miss legitimate one is green. The junction
 test runs only on Windows.
 
 #### Claude Code hooks
