@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from aeos.verification import procs
+from aeos.verification import procgroup, procs
 from tests.unit.test_verification_support import GIT, fake_secret, git, requires_git
 
 
@@ -153,14 +153,21 @@ def test_timeout_kills_process_tree(tmp_path: Path):
 # later - after the step returned (review W6-054/W6-057: it could write the DB after the tamper window closed).
 DETACHED_WRITER = r'''
 import os, subprocess, sys
-code = "import pathlib, sys, time; time.sleep(2); pathlib.Path(sys.argv[1]).write_text('late')"
+code = "import pathlib, sys, time; time.sleep(float(sys.argv[2])); pathlib.Path(sys.argv[1]).write_text('late')"
 kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
 if os.name == "nt":
     kw["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
 else:
     kw["start_new_session"] = True  # leaves the step's session: only the inherited marker still names it
-subprocess.Popen([sys.executable, "-c", code, sys.argv[1]], **kw)
+subprocess.Popen([sys.executable, "-c", code, sys.argv[1], sys.argv[2]], **kw)
 '''
+
+# How long the detached grandchild sleeps before it writes. POSIX: it left the step's session, so it is a survivor at
+# once with no grace (procgroup) and 2 s is the margin that caught the old graceful sweep on macOS CI. Windows: it stays
+# in the step's Job Object, so it is a member that gets SURVIVOR_GRACE_SECONDS by design (an act inside the grace
+# happens while the tamper window is still open); a 2 s sleep raced that 2.0 s grace and failed on a busy runner
+# (PR 30, windows shard 2/3). The sleep there is the grace plus a margin, so only a kill that never comes lets it act.
+DETACHED_DELAY_SECONDS = (procgroup.SURVIVOR_GRACE_SECONDS + 4.0) if os.name == "nt" else 2.0
 
 
 def _wait_for(path: Path, seconds: float) -> bool:
@@ -178,16 +185,18 @@ def test_a_detached_grandchild_outlives_an_uncontained_step_but_never_a_containe
     env = procs.scrubbed_env(pythonpath=[tmp_path], home=tmp_path / "h", tmp=tmp_path / "t", data_dir=tmp_path / "d",
                              disable_plugin_autoload=True)
     late = tmp_path / "late-uncontained.txt"
-    res = procs.run_process([sys.executable, "-c", DETACHED_WRITER, str(late)], cwd=tmp_path, env=env, timeout=60)
+    delay = str(DETACHED_DELAY_SECONDS)
+    res = procs.run_process([sys.executable, "-c", DETACHED_WRITER, str(late), delay], cwd=tmp_path, env=env, timeout=60)
     assert res.returncode == 0 and res.survivors == []
-    assert _wait_for(late, 15), "the defect the kill group closes: the grandchild acted after its step had ended"
+    assert _wait_for(late, DETACHED_DELAY_SECONDS + 15), \
+        "the defect the kill group closes: the grandchild acted after its step had ended"
     caught = tmp_path / "late-contained.txt"
-    res = procs.run_process([sys.executable, "-c", DETACHED_WRITER, str(caught)], cwd=tmp_path, env=env, timeout=60,
+    res = procs.run_process([sys.executable, "-c", DETACHED_WRITER, str(caught), delay], cwd=tmp_path, env=env, timeout=60,
                             contain=True)
     assert res.returncode == 0 and not res.timed_out
     assert res.containment in ("job-object", "process-group"), (res.containment, res.containment_errors)
     assert len(res.survivors) >= 1 and all("pid" in s for s in res.survivors), res.survivors
-    assert not _wait_for(caught, 5), "the survivor was killed before it could act"
+    assert not _wait_for(caught, DETACHED_DELAY_SECONDS + 3), "the survivor acted: it was not killed in time"
 
 
 def test_a_contained_step_is_not_stalled_by_a_descendant_holding_its_output(tmp_path: Path):
