@@ -903,15 +903,39 @@ def test_the_real_trusted_suite_verifier_runs_in_its_own_macos_arm64_job():
     assert "if" not in step and "if" not in job  # never skipped (a skipped step would still pass the job)
 
 
-def test_every_job_has_a_timeout_so_a_hung_runner_cannot_hold_a_macos_slot_for_six_hours():
-    """The default is 360 minutes; GitHub Free has 5 account-wide macOS slots."""
+def _timeout_cap_problems(jobs: dict) -> list[str]:
+    """The exact per-job cap; the generic 1..25 bound for every workflow is owned by test_delivery_ci_secrets."""
     caps = {"static-checks": 15, "backend-shards-": 25, "backend-verifier-": 20, "frontend": 15, "browser-e2e": 20,
             "bootstrap": 15, "supply-chain": 20}
-    for jid, job in _workflow()["jobs"].items():
+    problems = []
+    for jid, job in jobs.items():
         timeout = job.get("timeout-minutes")
-        assert isinstance(timeout, int) and not isinstance(timeout, bool) and 0 < timeout <= 25, (jid, timeout)
         expected = next((v for k, v in caps.items() if jid.startswith(k)), 5)  # the rest are the aggregators
-        assert timeout == expected, (jid, timeout)
+        if timeout != expected or isinstance(timeout, bool):
+            problems.append(f"job {jid}: timeout-minutes is {timeout!r}, expected {expected}")
+    return problems
+
+
+def test_every_job_has_a_timeout_so_a_hung_runner_cannot_hold_a_macos_slot_for_six_hours():
+    """The default is 360 minutes; GitHub Free has 5 account-wide macOS slots."""
+    assert _timeout_cap_problems(_workflow()["jobs"]) == []
+
+
+def test_the_timeout_cap_check_bites_on_a_missing_wrong_or_boolean_value_and_passes_the_exact_cap():
+    import copy
+
+    jobs = copy.deepcopy(_workflow()["jobs"])
+    jid = "static-checks"
+    assert jid in jobs and _timeout_cap_problems(jobs) == []  # near miss: the exact caps are green
+    missing = copy.deepcopy(jobs)
+    del missing[jid]["timeout-minutes"]
+    assert _timeout_cap_problems(missing) == [f"job {jid}: timeout-minutes is None, expected 15"]
+    wrong = copy.deepcopy(jobs)
+    wrong[jid]["timeout-minutes"] = 16
+    assert _timeout_cap_problems(wrong) == [f"job {jid}: timeout-minutes is 16, expected 15"]
+    string = copy.deepcopy(jobs)
+    string[jid]["timeout-minutes"] = "15"
+    assert _timeout_cap_problems(string) == [f"job {jid}: timeout-minutes is '15', expected 15"]
 
 
 def test_only_pull_request_runs_are_cancelled_by_a_newer_run():
