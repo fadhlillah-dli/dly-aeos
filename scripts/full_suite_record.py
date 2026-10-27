@@ -143,11 +143,15 @@ def find_record(directory: Path, tree: str) -> Record | None:
     return found[-1] if found else None
 
 
-def decide(start: State | None, end: State | None, args: Sequence[str]) -> str | None:
-    """None when the run may be recorded, else why not."""
+def decide(start: State | None, end: State | None, args: Sequence[str],
+           env: Mapping[str, str] | None = None) -> str | None:
+    """None when the run may be recorded, else why not. PYTEST_ADDOPTS is read by pytest itself, so a selection put
+    there (a path, -k, -m) would make a partial run look full: any non-empty value is a partial run."""
     partial = partial_reason(args)
     if partial:
         return partial
+    if (os.environ if env is None else env).get("PYTEST_ADDOPTS", "").strip():
+        return "partial run (PYTEST_ADDOPTS is set and may select or deselect tests)"
     if start is None or end is None:
         return "the state of the checkout could not be read (not a git checkout, or no commit yet)"
     if start.head != end.head or start.tree != end.tree:

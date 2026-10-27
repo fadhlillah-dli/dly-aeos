@@ -615,7 +615,9 @@ def conflict_markers_result(root: Path, env: Mapping[str, str], tip: str = "HEAD
     return Result(CONFLICT_MARKERS, FAIL, seconds,
                   f"{len(places)} leftover conflict marker(s) committed:\n{listed}{more}\n"
                   "Fix: resolve each conflict in the file, commit, and check again. Chain dependent steps with && "
-                  "(LESSONS L22), so a failed resolution never reaches the commit.", command, ref)
+                  "(LESSONS L22), so a failed resolution never reaches the commit. A document that must show a "
+                  "conflict example can raise the marker length for that file in .gitattributes "
+                  "(conflict-marker-size), which git diff --check honours.", command, ref)
 
 
 def _git_common_dir(root: Path, env: Mapping[str, str]) -> Path | None:

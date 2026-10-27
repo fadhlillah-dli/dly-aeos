@@ -101,9 +101,12 @@ if scenario == "outside_sleep":
     write("other/hack.py", "x\n")
     time.sleep(120)
 if scenario == "hog":
+    # random, not zero-filled: macOS compresses zero pages in memory, so a zero-filled hog kept its resident size
+    # under the 80 MB cap (peak 63.6 MB measured on 2026-10-27) and finished without the cap ever firing
+    chunk = os.urandom(10 * 1024 * 1024)
     blocks = []
     for _ in range(60):
-        blocks.append(bytearray(10 * 1024 * 1024))
+        blocks.append(bytearray(chunk))
         time.sleep(0.3)
     time.sleep(120)
 if scenario in ("blocker", "badreport"):

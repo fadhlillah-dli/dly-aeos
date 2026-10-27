@@ -116,6 +116,19 @@ def test_a_full_clean_passing_run_is_recorded_in_the_common_git_dir(repo: Path):
     assert stored == [f"{_tree(repo)} {_git(repo, 'rev-parse', 'HEAD')} 2026-10-27T09:00:00Z 1.00,2.00,3.00"]
 
 
+def test_bite_a_selection_in_pytest_addopts_is_a_partial_run(repo: Path, monkeypatch: pytest.MonkeyPatch):
+    """pytest reads PYTEST_ADDOPTS itself: a path or -k there would make a partial run look full (L8 tool bypass)."""
+    start = fsr.read_state(repo)
+    assert start is not None
+    monkeypatch.setenv("PYTEST_ADDOPTS", "tests/unit/test_gates.py")
+    line = fsr.record(repo, start.line, [])
+    assert line == ("run_tests: full-suite record: not recorded: partial run (PYTEST_ADDOPTS is set and may select "
+                    "or deselect tests)")
+    assert not (repo / ".git" / fsr.RECORD_FILE).exists()
+    monkeypatch.setenv("PYTEST_ADDOPTS", "   ")  # near miss: blank is no selection
+    assert fsr.decide(start, start, [], {"PYTEST_ADDOPTS": "   "}) is None
+
+
 def test_a_partial_run_is_not_recorded_and_says_why(repo: Path):
     start = fsr.read_state(repo)
     assert start is not None
