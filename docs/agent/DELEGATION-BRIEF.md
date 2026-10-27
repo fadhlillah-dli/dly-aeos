@@ -69,8 +69,8 @@ RULES (lesson ids in brackets)
     fixture with the owner's DLY_AEOS_REAL_CLAUDE=1 runs the real Claude Code. Never query the real vault,
     OpenBao, Keychain or keyring to check anything; all proof is by tests with fakes.
 18. Dependent steps [L22]. Chain a step whose failure must stop the next one with && or a checked if, never ';' or
-    a separate line (a failed conflict resolution once still committed its conflict markers). Check each result
-    before a commit, merge or push; scripts/gates.py fails on a committed conflict marker.
+    a separate line, and run chains with 'set -o pipefail' (a gate piped into tail or grep hides its exit code). Check
+    each result before a commit, merge or push; the pre-push hook refuses static-gate failures and conflict markers.
 
 REPORT (at most 15 lines): commit sha, files changed, gate results, bite-test results
 (violating fixture red, near-miss fixture green), NOT-PROVEN items.
