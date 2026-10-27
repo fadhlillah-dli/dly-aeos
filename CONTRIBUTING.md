@@ -199,8 +199,10 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
 - **Commit subjects.** `commit subjects [G1]` runs only on pull requests (`ubuntu-latest`, full history) and
   checks the subjects and the no-attribution rule (message, author and committer e-mail, merge commits
   included) of the pull request's commits with `scripts/commit_subject.py`. It is the one job that differs between
-  a pull request and a push to `main` (`tests/unit/test_ci_gates.py` lists it as the only event-conditional job, so a
-  new check cannot silently skip `main`).
+  a pull request and a push to `main` (`tests/unit/test_ci_gates.py` lists it as the only job or step whose `if:`
+  reads the `github` context: event name, event payload, ref, head or base ref). A new check with such a condition
+  fails the test, so it cannot silently skip `main` that way; a condition that reaches the event by another route,
+  for example through a `needs` output or an `env` value, is not caught and needs a human look.
 - **Pull request title.** `.github/workflows/pr-title.yml` (job `pr title [G1]`, `ubuntu-latest`, read-only token) checks
   the title with `python scripts/commit_subject.py --subject "<title>"`: the title becomes the merge-commit body and,
   with a squash merge, the subject on `main`, so it follows the same Conventional Commits and no-attribution rules.

@@ -651,15 +651,21 @@ def test_the_actionlint_checks_bite_on_a_missing_or_late_checksum_a_pipe_and_a_m
         {"name": "G1 static — shellcheck", "run": "shellcheck scripts/*.sh scripts/git-hooks/pre-push"}))
 
 
+# Any reference to the ``github`` context in an ``if:`` can make a job or step depend on the event (github.event_name,
+# github.event.*, github.ref, github.head_ref, github.base_ref, github.actor, toJSON(github) ...). An if on status
+# functions (always(), !cancelled()), runner.*, matrix.* or needs.* does not, so those stay allowed without a listing.
+EVENT_CONTEXT = re.compile(r"\bgithub\b")
+
+
 def _event_conditional(jobs: dict) -> list[str]:
-    """Names of the jobs and steps whose ``if:`` mentions github.event_name: they run on a pull request but not on a
+    """Names of the jobs and steps whose ``if:`` reads the github context: they may run on a pull request but not on a
     push to main (or the other way round)."""
     found = []
     for jid, job in jobs.items():
-        if "github.event_name" in str(job.get("if", "")):
+        if EVENT_CONTEXT.search(str(job.get("if", ""))):
             found.append(f"job {jid}")
         for step in job.get("steps") or []:
-            if "github.event_name" in str(step.get("if", "")):
+            if EVENT_CONTEXT.search(str(step.get("if", ""))):
                 found.append(f"step {jid}/{step.get('name') or step.get('uses') or step.get('run')}")
     return found
 
@@ -671,7 +677,7 @@ EVENT_CONDITIONAL_ALLOWED = ("job commit-subjects",)
 
 def _parity_problems(jobs: dict) -> list[str]:
     found = _event_conditional(jobs)
-    problems = [f"{name} is event-conditional (if: github.event_name) and not in EVENT_CONDITIONAL_ALLOWED: "
+    problems = [f"{name} is event-conditional (its if: reads the github context) and not in EVENT_CONDITIONAL_ALLOWED: "
                 "it runs on pull requests or on main, not on both" for name in found
                 if name not in EVENT_CONDITIONAL_ALLOWED]
     problems += [f"{name} is in EVENT_CONDITIONAL_ALLOWED but no longer event-conditional: remove it"
@@ -692,8 +698,19 @@ def test_the_parity_guard_names_a_new_event_conditional_job_or_step():
     jobs = _workflow()["jobs"]
     ok = copy.deepcopy(jobs)
     ok[STATIC_JOB]["steps"][3]["if"] = "${{ !cancelled() }}"
-    ok["frontend"]["if"] = "github.ref == 'refs/heads/main'"
+    ok["frontend"]["steps"][1]["if"] = "runner.os != 'Windows' && matrix.os != ''"
+    ok["browser-e2e"]["if"] = "always()"
     assert _parity_problems(ok) == []
+
+    # other spellings of "pull request only" or "main only" are caught too, not just github.event_name
+    for condition in ("github.head_ref != ''", "github.event.pull_request.number", "github.ref == 'refs/heads/main'",
+                      "${{ github.base_ref }}", "contains(toJSON(github), 'pull_request')"):
+        for where, name in (("job", "job frontend"), ("step", "step frontend/")):
+            other = copy.deepcopy(jobs)
+            target = other["frontend"] if where == "job" else other["frontend"]["steps"][1]
+            target["if"] = condition
+            problems = _parity_problems(other)
+            assert len(problems) == 1 and name in problems[0], (condition, where, problems)
 
     on_step = copy.deepcopy(jobs)
     step = _step(on_step, STATIC_JOB, "G1 static — actionlint")

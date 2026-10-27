@@ -9,6 +9,7 @@
   check) validates the pull request title as a commit subject through `scripts/commit_subject.py --subject`, with the
   title passed through `env:` only. `scripts/gates.py` mirrors the new steps (SKIPPED with a reason, never PASS, when
   the tools are missing, so the job stays NOT RUN), and `tests/unit/test_ci_gates.py` pins the checksum comparison, the
-  SHA pins of every workflow, the title-in-env rule and an allow-list of event-conditional jobs (only `commit-subjects`).
+  SHA pins of every workflow, the title-in-env rule and an allow-list of jobs and steps whose `if:` reads the `github` context (only
+  `commit-subjects`).
   Evidence: E2 unit run on macOS arm64 for the tests and `gates.py`; actionlint and shellcheck themselves ran on no
   host yet (E3 only after the first CI run on ubuntu-latest), Windows and Linux are NOT-PROVEN for the new tests.
