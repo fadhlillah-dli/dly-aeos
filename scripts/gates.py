@@ -683,6 +683,25 @@ def _workflow_events(text: str) -> set[str]:
     return events
 
 
+def _push_is_tags_only(text: str) -> bool:
+    """True when the `push:` event of the top-level `on:` mapping filters on tags only (`tags`/`tags-ignore`, no
+    `branches`): such a workflow (release.yml) never runs for a branch push or a pull request, so a local run of the
+    gates has nothing to report about it."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if not re.match(r"^  push:[ \t]*(?:#.*)?$", line):
+            continue
+        keys: set[str] = set()
+        for follow in lines[i + 1:]:
+            if follow.strip() and not follow.startswith("   "):
+                break
+            key = re.match(r"^    ([A-Za-z_-]+):", follow)
+            if key:
+                keys.add(key.group(1))
+        return bool(keys) and keys <= {"tags", "tags-ignore"}
+    return False
+
+
 def ci_job_ids(root: Path) -> list[str]:
     """The job ids of ci.yml (the keys under `jobs:`), read without a YAML library."""
     try:
@@ -693,8 +712,9 @@ def ci_job_ids(root: Path) -> list[str]:
 
 
 def other_workflow_jobs(root: Path) -> list[str]:
-    """Labels of the jobs of every workflow besides ci.yml that runs on pull_request or push: the job's literal
-    `name:` (the check name CI shows, for example "pr title [G1]"), else its id."""
+    """Labels of the jobs of every workflow besides ci.yml that runs on pull_request or on a branch push (a tag-only
+    push workflow such as release.yml is left out): the job's literal `name:` (the check name CI shows, for example
+    "pr title [G1]"), else its id."""
     labels: list[str] = []
     try:
         files = sorted(p for p in (root / WORKFLOWS_DIR).glob("*.y*ml") if p.name != CI_WORKFLOW.name)
@@ -705,7 +725,8 @@ def other_workflow_jobs(root: Path) -> list[str]:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        if _workflow_events(text) & {"push", "pull_request"}:
+        events = _workflow_events(text)
+        if "pull_request" in events or ("push" in events and not _push_is_tags_only(text)):
             labels += [name or jid for jid, name in _job_blocks(text)]
     return labels
 
