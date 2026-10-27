@@ -120,6 +120,17 @@ def _run(argv: list[str], *, timeout: float = 30.0) -> tuple[int, str, str]:
 
 
 _SIG_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+# The last result of every real check, definitive or not, for display only (the status view). The gate never reads it:
+# an undecided result is checked again on the next call, but the page still shows why the last check blocked.
+_SIG_LAST: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def last_signature(path: Path | None, fingerprint_value: str | None = None) -> dict[str, Any] | None:
+    """The cached definitive result, else the last undecided one of this process, else None (never checked)."""
+    if path is None:
+        return None
+    key = (str(path), fingerprint_value or "")
+    return _SIG_CACHE.get(key) or _SIG_LAST.get(key)
 
 
 def _definitive(result: dict[str, Any]) -> bool:
@@ -182,8 +193,10 @@ def publisher_signature(path: Path | None, *, fingerprint_value: str | None = No
                                    "UNVERIFIED, the authenticity gate blocks)")[:300]
     else:
         result["publisher_pin"] = "NONE (install-manifest has no approved pin; authenticity UNVERIFIED)"
-    if run is None and _definitive(result):
-        _SIG_CACHE[key] = result
+    if run is None:
+        _SIG_LAST[key] = result
+        if _definitive(result):
+            _SIG_CACHE[key] = result
     return result
 
 

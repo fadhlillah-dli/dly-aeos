@@ -92,6 +92,7 @@ def _process_runner(monkeypatch, responses: dict) -> dict:
 
     monkeypatch.setattr(binmod.sys, "platform", "darwin")
     monkeypatch.setattr(binmod, "_SIG_CACHE", {})
+    monkeypatch.setattr(binmod, "_SIG_LAST", {})
     state: dict = {"responses": responses, "calls": 0}
 
     def run(argv, timeout=30.0):
@@ -120,6 +121,9 @@ def test_a_transient_signature_failure_is_not_cached_so_a_pinned_publisher_is_no
     state = _process_runner(monkeypatch, transient)
     first = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1")
     assert binmod.signature_gate(first, PINNED_TEAM)[0] == "BLOCKED"
+    # the status view (no refresh) shows that last undecided result and why, never "not checked yet"
+    assert binmod.last_signature(Path("/x/claude"), "fp-1") is first
+    assert binmod.last_signature(Path("/x/claude"), "fp-2") is None  # near miss: another binary was never checked
     state["responses"] = VALID_PINNED
     second = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1")
     assert binmod.signature_gate(second, PINNED_TEAM)[0] == "OK", (
@@ -345,6 +349,7 @@ def test_status_names_the_authenticity_gate_and_a_signature_remedy(settings, db,
     assert out["binary"]["authenticity"]["remedy"]
     # not refreshed: the OS check has not run in this process -> NOT_CHECKED, never authentic
     binmod._SIG_CACHE.clear()
+    binmod._SIG_LAST.clear()
     assert bridge.status(db, settings)["binary"]["authenticity"]["gate"] == "NOT_CHECKED"
 
 
