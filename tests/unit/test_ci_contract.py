@@ -163,7 +163,7 @@ def test_bite_a_matrix_job_without_a_name_is_keyed_on_its_id():
 
 
 def test_bite_a_documented_name_that_is_no_job_is_red():
-    text = _contributing().replace("`commit subjects [G1]`", "`commit subjectz [G1]`", 1)
+    text = _contributing().replace("`commit subjects [G1]`", "`commit subjectz [G1]`")
     assert text != _contributing()
     problems = layout_problems(checked_workflows(), text)
     assert any("commit subjectz [G1]" in p and "no job of any workflow" in p for p in problems)
@@ -218,6 +218,9 @@ TEST_CALLERS: dict[str, tuple[str, str]] = {
                      "runs the script as a subprocess with --check and asserts exit 0 on the real repo"),
     "ci_durations": ("tests/unit/test_ci_shards.py::test_the_weights_script_refuses_reports_it_cannot_use",
                      "loads the script as a module and asserts main([... '--check']) returns 0 and writes nothing"),
+    "github_settings": ("tests/unit/test_github_settings.py::test_identical_live_state_is_ok_and_check_never_writes",
+                        "loads the script as a module and runs main(['--check']) against a fake API; it never "
+                        "runs in CI (it needs the owner's gh login to read the live settings)"),
 }
 
 CHECK = "--check"
@@ -371,10 +374,10 @@ def test_every_check_flag_is_run_by_ci_gates_or_a_declared_test():
 
 
 def test_the_real_check_scripts_are_found_with_their_callers():
-    """changelog.py runs in CI; owner_matrix.py and ci_durations.py are declared test callers."""
-    assert {"changelog", "owner_matrix", "ci_durations"} <= set(check_flag_scripts(ROOT))
+    """changelog.py runs in CI; owner_matrix.py, ci_durations.py and github_settings.py are declared test callers."""
+    assert {"changelog", "owner_matrix", "ci_durations", "github_settings"} <= set(check_flag_scripts(ROOT))
     assert ".github/workflows/ci.yml" in automatic_callers(ROOT, "changelog")
-    assert set(TEST_CALLERS) == {"owner_matrix", "ci_durations"}
+    assert set(TEST_CALLERS) == {"owner_matrix", "ci_durations", "github_settings"}
 
 
 # --- bite tests on a temporary tree ---

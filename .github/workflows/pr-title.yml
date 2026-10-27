@@ -5,24 +5,32 @@
 #
 # The title is untrusted text. It reaches the script through an environment variable only, never through an
 # expression inside `run:` (script injection); tests/unit/test_ci_gates.py checks that. The check name,
-# "pr title [G1]", is not a required check: adding it to a ruleset is an owner decision.
+# "pr title [G1]", is a required check of the ruleset on main (ADR-0115, amendment 2026-10-27).
+#
+# The workflow also runs on a push to main, where the job is skipped (it has no title to check). A skipped job still
+# reports a check run named "pr title [G1]" on the merge commit, which scripts/ci_status.py counts as OK; without it
+# the required context would never exist there and `ci_status.py --after-merge` could not turn GREEN (the same
+# pattern as the "commit subjects [G1]" job of ci.yml).
 name: pr-title
 
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 # An edit of the title cancels the run for the previous title of the same pull request.
 concurrency:
-  group: pr-title-${{ github.event.pull_request.number }}
+  group: pr-title-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
   pr-title:
     name: pr title [G1]
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
