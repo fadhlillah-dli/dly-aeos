@@ -504,6 +504,10 @@ def test_only_workflows_that_run_on_pull_request_or_push_count_and_the_label_is_
         "d.yml": ("on:\n  - push\n  - workflow_dispatch\n", True),
         "e.yml": ("on:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 3 * * *'\n", False),  # near miss
         "f.yml": ("on:\n  workflow_run:\n    workflows: [ci]\n", False),  # near miss
+        # a tag-only push (release.yml) never runs for a branch push or a pull request: not a local NOT RUN
+        "a2.yml": ("on:\n  push:\n    tags: ['v*.*.*']\n", False),
+        "a3.yml": ("on:\n  push:\n    branches: [main]\n", True),  # near miss: a branch push counts
+        "a4.yml": ("on:\n  push:\n    branches: [main]\n    tags: ['v*']\n", True),
     }
     for name, (trigger, _) in cases.items():
         (wf / name).write_text(f"name: x\n{trigger}\n{job}", encoding="utf-8")

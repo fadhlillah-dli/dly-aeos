@@ -1,0 +1,85 @@
+# DLY AEOS release evidence (ADR-0122). Pushing a release tag vX.Y.Z builds the evidence for that exact commit and
+# uploads it as workflow artifacts. It never creates or publishes a GitHub Release, never pushes, never writes to the
+# repository: `aeos ops release` stays the release authority, and after `aeos ops release promote` the owner creates the
+# GitHub Release by hand (docs/OPERATIONS.md "Controller releases", CONTRIBUTING.md "Releasing").
+# This workflow is a protected path: workers may only propose changes to it (§09, AGENTS.md).
+#
+# Order is the gate: the release check of the tagged commit, then CI must be GREEN for that commit (required checks of
+# the main ruleset, scripts/ci_status.py; PENDING, RED, INFRA or TIMEOUT stop the job, there is no override), and only
+# then the source zip, the SBOM, the checksums and the build-provenance attestation are made.
+#
+# Token: read-only at the top. The one job asks for exactly what it uses (tests/unit/test_delivery_ci_secrets.py keeps
+# this list): contents/actions/checks read for the checkout and the CI verdict, id-token and attestations write for the
+# attestation (Sigstore signing through GitHub's OIDC token; free for public repositories). No secrets.* reference.
+# The tag reaches the shell only as the runner's own GITHUB_REF_NAME, never as an expression inside run:.
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  release-evidence:
+    name: release evidence [NO-GATE]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      id-token: write
+      attestations: write
+    steps:
+      # Full history: release_check.py reads the tagged commit and needs origin/main to prove the tag sits on main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      # Stdlib only: every version source equals the tag, CHANGELOG.md has the heading, no fragment left behind, the
+      # release notes exist and the tagged commit is an ancestor of origin/main. Its tag regex also limits the
+      # characters the tag can bring into the file names below.
+      - name: Release check of the tagged commit
+        run: python scripts/release_check.py --tag "$GITHUB_REF_NAME"
+      # Required checks only (the release job itself is not one, so it cannot wait for itself). The deadline ends the
+      # step with "CI: TIMEOUT" before the job's own timeout would cancel it.
+      - name: CI must be GREEN for the tagged commit (required checks, no override)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci_status.py --sha "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" --required-only --wait --deadline 15
+      - name: Source zip of the tagged commit (git archive)
+        shell: bash
+        run: |
+          commit=$(git rev-parse --verify "refs/tags/${GITHUB_REF_NAME}^{commit}")
+          if [ "$commit" != "$GITHUB_SHA" ]; then echo "tag ${GITHUB_REF_NAME} names ${commit}, not ${GITHUB_SHA}"; exit 1; fi
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          git archive --format=zip --prefix="dly-aeos-${version}/" --output="dist/dly-aeos-src-${version}.zip" "$GITHUB_SHA"
+      # The same command as the supply-chain job of ci.yml (offline, from the lockfiles), written into dist/.
+      - name: SBOM (CycloneDX, offline, from the lockfiles)
+        shell: bash
+        run: python scripts/supply_chain.py sbom -o dist/sbom.cdx.json
+      - name: SHA256SUMS of the release files
+        shell: bash
+        working-directory: dist
+        run: |
+          sha256sum -- * > "${RUNNER_TEMP}/SHA256SUMS"
+          mv "${RUNNER_TEMP}/SHA256SUMS" SHA256SUMS
+          cat SHA256SUMS
+      # Verify a downloaded file with: gh attestation verify <file> --repo fadhlillah-dli/dly-aeos
+      - name: Build-provenance attestation of every release file
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Upload the release evidence (90 days)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-evidence-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90

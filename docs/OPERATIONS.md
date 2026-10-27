@@ -163,9 +163,28 @@ Any failure keeps the previous release active, raises a HIGH alert and is audite
 (§50 "Upgrade controller gagal"). Details: [runbook](runbooks/controller-upgrade-rollback.md).
 
 **GitHub Releases** (master §06 "GitHub activity ... releases"): AEOS builds and promotes local release
-artifacts only; it never creates a GitHub tag or Release. After a successful promotion the owner may
-publish one by hand (`gh release create v<version> --target <commit> --notes-file <provenance summary>`),
-so release activity on GitHub is an owner action, not something the controller claims.
+artifacts only; it never creates a GitHub tag or Release. Release activity on GitHub stays an owner action, not
+something the controller claims. Since [ADR-0122](decisions/ADR-0122-release-provenance-in-ci.md) CI builds the
+evidence for it, and CI never creates or publishes a Release either:
+
+1. The owner first confirms the release merge commit is GREEN on `main` (`python scripts/ci_status.py --sha <commit>
+   --required-only --wait --deadline 30`), then pushes the tag `vX.Y.Z` on it (CONTRIBUTING.md "Releasing"). Release
+   tags are protected by the v* tag ruleset.
+2. The tag push runs `release evidence [NO-GATE]` (`.github/workflows/release.yml`): `release_check.py --tag`, then CI
+   must be GREEN for the tagged commit (no override), then a `git archive` source zip, the SBOM, `SHA256SUMS` and a
+   build-provenance attestation, uploaded as the workflow artifact `release-evidence-vX.Y.Z` (90 days).
+3. Wait for that run: `python scripts/ci_status.py --sha <tagged commit> --required-only --require "release evidence [NO-GATE]" --wait --deadline 25`.
+4. Download it: `gh run download --name release-evidence-vX.Y.Z --dir dist`.
+5. Verify each file: `gh attestation verify dist/dly-aeos-src-X.Y.Z.zip --repo fadhlillah-dli/dly-aeos` (and the same for
+   `dist/sbom.cdx.json` and `dist/SHA256SUMS`).
+6. After `aeos ops release promote`, the owner (or the delegating session on the owner's explicit instruction) creates
+   a draft: `gh release create vX.Y.Z --draft --notes-file docs/releases/vX.Y.Z.md dist/dly-aeos-src-X.Y.Z.zip dist/sbom.cdx.json dist/SHA256SUMS`,
+   and publishes it after reading it.
+
+The CI zip and the zip of `aeos ops release build` are both `git archive` of the same commit, but the CI zip has the
+prefix `dly-aeos-X.Y.Z/` and the local one has none, and they are made by different git versions on different hosts:
+their file hashes differ, and a byte-for-byte match of their contents is NOT-PROVEN. Tie them by the commit, which the
+attestation and the local provenance both record, not by the file hash.
 
 ## SLIs and alerts
 
