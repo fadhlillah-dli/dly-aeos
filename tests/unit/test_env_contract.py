@@ -21,7 +21,7 @@ embedded code that is not valid Python on its own, or that is not in a string co
 Every name read must have a row in the "Environment variables" table of ``docs/OPERATIONS.md`` (name, source, read by,
 default, purpose) whose "read by" cell names each reader (``Settings`` or the file path) and whose "source" cell
 matches the readers (``Settings field``, ``direct read``, ``script``, joined with `` + ``), or an entry in ``EXEMPT``
-with a reason. Every operation that calls ``refuse_worker_context`` must be named in that section too. A row that nothing reads and an exemption that matches nothing fail as stale. Names only: a value
+with a reason. Every operation that calls ``refuse_worker_context`` must be named in that section too, and be passed as a string literal (a non-literal name is a problem). A row that nothing reads and an exemption that matches nothing fail as stale. Names only: a value
 is never documented here. A key that is a loop variable over a module-level tuple of names
 (``[k for k in WORKER_CONTEXT_ENV if os.environ.get(k)]``) reads every name of the tuple. Writes
 (``os.environ["X"] = ...``, an ``AEOS_`` key of an ``env`` dict) are collected as evidence but do not need a row: a
@@ -293,20 +293,38 @@ def section_text(markdown: str) -> str:
     return "\n".join(body)
 
 
-def worker_context_operations(root: Path) -> dict[str, str]:
-    """operation text -> file of every ``refuse_worker_context("<operation>")`` call under backend/."""
+def _is_refuse_call(node: ast.AST) -> bool:
+    return (isinstance(node, ast.Call)
+            and ((isinstance(node.func, ast.Name) and node.func.id == "refuse_worker_context")
+                 or (isinstance(node.func, ast.Attribute) and node.func.attr == "refuse_worker_context")))
+
+
+def worker_context_scan(root: Path) -> tuple[dict[str, str], list[str]]:
+    """(operation text -> file of every ``refuse_worker_context("<operation>")`` call under backend/, problems).
+
+    A call whose first argument is not a string literal cannot be checked against the docs list, so it is a problem
+    naming file:line."""
     found: dict[str, str] = {}
+    bad: list[str] = []
     for path in _files(root / "backend", {".py"}):
         text = path.read_text(encoding="utf-8")
         if "refuse_worker_context" not in text:
             continue
+        rel = path.relative_to(root).as_posix()
         for node in ast.walk(ast.parse(text, filename=str(path))):
-            if (isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)
-                    and isinstance(node.args[0].value, str)
-                    and ((isinstance(node.func, ast.Name) and node.func.id == "refuse_worker_context")
-                         or (isinstance(node.func, ast.Attribute) and node.func.attr == "refuse_worker_context"))):
-                found[node.args[0].value] = path.relative_to(root).as_posix()
-    return found
+            if not _is_refuse_call(node):
+                continue
+            first = node.args[0] if node.args else None
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                found[first.value] = rel
+            else:
+                bad.append(f"{rel}:{node.lineno}: refuse_worker_context called with a non-literal operation name; "
+                           f"use a literal so the docs list can be checked")
+    return found, bad
+
+
+def worker_context_operations(root: Path) -> dict[str, str]:
+    return worker_context_scan(root)[0]
 
 
 def problems(root: Path, exempt: Mapping[str, str]) -> list[str]:
@@ -340,7 +358,9 @@ def problems(root: Path, exempt: Mapping[str, str]) -> list[str]:
     for name in sorted(set(rows) - set(usage.reads)):
         out.append(f"{name} is documented in {DOC} but nothing in backend/ or scripts/ reads it: delete the row")
     section = section_text(doc_path.read_text(encoding="utf-8"))
-    for operation, where_file in sorted(worker_context_operations(root).items()):
+    operations, non_literal = worker_context_scan(root)
+    out.extend(non_literal)
+    for operation, where_file in sorted(operations.items()):
         if operation not in section:
             out.append(f"refuse_worker_context('{operation}') in {where_file} is not named in the '{SECTION}' section "
                        f"of {DOC}: list it with the other human-only operations")
@@ -568,8 +588,19 @@ def test_bite_a_human_only_operation_missing_from_the_list_is_red_and_named(tmp_
     (listed / DOC).write_text((listed / DOC).read_text(encoding="utf-8").replace(
         "\n## Next", "\n* `controller rollback`\n\n## Next"), encoding="utf-8")
     assert problems(listed, {}) == []
-    other = _tree(tmp_path / "near", 'def run(action):\n    refuse_worker_context(action)\n    print("refuse_worker_context")\n')
-    assert problems(other, {}) == []  # a non-literal argument and a mention in a string are not call sites
+    mention = _tree(tmp_path / "near", 'def run():\n    print("refuse_worker_context")\n')
+    assert problems(mention, {}) == []  # a mention in a string is not a call site
+
+
+def test_bite_a_non_literal_operation_name_is_red_and_names_file_and_line(tmp_path):
+    for label, call in {"variable": "refuse_worker_context(action)", "f-string": 'refuse_worker_context(f"x {action}")',
+                        "no argument": "refuse_worker_context()",
+                        "attribute": "u.refuse_worker_context(action)"}.items():
+        root = _tree(tmp_path / label.replace(" ", "_"), f"def run(action):\n    {call}\n")
+        red = problems(root, {})
+        assert len(red) == 1, (label, red)
+        assert "backend/aeos/x.py:2" in red[0] and "non-literal operation name" in red[0], (label, red)
+        assert "use a literal" in red[0], red
 
 
 def test_the_real_human_only_operations_are_all_listed():
