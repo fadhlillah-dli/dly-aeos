@@ -20,7 +20,7 @@ checks, which share the same component ids.
 aeos seed
 aeos inventory reconcile
 aeos inventory list
-aeos inventory show <id>
+aeos inventory show "<id>"
 aeos doctor
 ```
 

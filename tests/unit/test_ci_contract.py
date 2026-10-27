@@ -221,6 +221,9 @@ TEST_CALLERS: dict[str, tuple[str, str]] = {
     "github_settings": ("tests/unit/test_github_settings.py::test_identical_live_state_is_ok_and_check_never_writes",
                         "loads the script as a module and runs main(['--check']) against a fake API; it never "
                         "runs in CI (it needs the owner's gh login to read the live settings)"),
+    "paste_safe": ("tests/unit/test_owner_commands_paste_safe.py::test_check_cli_exit_codes_and_verdict_line",
+                   "loads the script as a module and asserts main(['--check', ...]) exit codes 0, 1 and 2 and the "
+                   "verdict line; the same test file runs its rules over every Markdown file of the repository"),
 }
 
 CHECK = "--check"
@@ -374,10 +377,11 @@ def test_every_check_flag_is_run_by_ci_gates_or_a_declared_test():
 
 
 def test_the_real_check_scripts_are_found_with_their_callers():
-    """changelog.py runs in CI; owner_matrix.py, ci_durations.py and github_settings.py are declared test callers."""
-    assert {"changelog", "owner_matrix", "ci_durations", "github_settings"} <= set(check_flag_scripts(ROOT))
+    """changelog.py runs in CI; owner_matrix.py, ci_durations.py, github_settings.py and paste_safe.py are declared
+    test callers."""
+    assert {"changelog", "owner_matrix", "ci_durations", "github_settings", "paste_safe"} <= set(check_flag_scripts(ROOT))
     assert ".github/workflows/ci.yml" in automatic_callers(ROOT, "changelog")
-    assert set(TEST_CALLERS) == {"owner_matrix", "ci_durations", "github_settings"}
+    assert set(TEST_CALLERS) == {"owner_matrix", "ci_durations", "github_settings", "paste_safe"}
 
 
 # --- bite tests on a temporary tree ---

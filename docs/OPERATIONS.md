@@ -172,6 +172,11 @@ recovery file offline and delete it from the disk, as the
 
 ```bash
 ./aeos vault import-unseal-key
+```
+
+Then:
+
+```bash
 ./aeos vault status
 ./aeos vault export-recovery "$HOME/aeos-openbao-recovery.txt"
 ```
@@ -316,8 +321,11 @@ Run the first command inside the repository venv.
 
 ```bash
 python -m pip install uv
-python -m uv pip compile pyproject.toml --universal --extra dev -o requirements.lock
-python -m pip install -r requirements.lock && python -m pip install --no-deps -e . && python -m pip check
+python -m uv pip compile pyproject.toml --universal --extra dev \
+  -o requirements.lock
+python -m pip install -r requirements.lock &&
+  python -m pip install --no-deps -e . &&
+  python -m pip check
 ```
 
 Review the diff (new packages are supply-chain changes) and commit it with the dependency change.

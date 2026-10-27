@@ -37,6 +37,11 @@ clipboard. `export-recovery` prints only the path of the new file.
 
 ```bash
 ./aeos vault import-unseal-key
+```
+
+Then:
+
+```bash
 ./aeos vault status
 ./aeos vault export-recovery "$HOME/aeos-openbao-recovery.txt"
 ```
@@ -46,15 +51,15 @@ your password manager entry), check the copy, and remove the original only after
 not synced by iCloud Drive; never choose Desktop or Documents when "Desktop & Documents Folders" sync is on.
 
 `AEOS-RECOVERY` below is an example: replace it with the name of your own encrypted volume (`ls /Volumes` lists
-the mounted ones), in both places. The command is one chain: `cp` copies, `cmp` compares the copy byte by byte,
-and only when both succeed does `rm` delete the original. If the volume is not mounted, the copy fails or differs,
+the mounted ones) in the `DST=` line. The last line is one chain: `cp` copies, `cmp` compares the copy byte by
+byte, and only when both succeed does `rm` delete the original. If the volume is not mounted, the copy fails or differs,
 the chain stops with an error and the original stays on the disk; fix the cause and run it again. Never run the
 `rm` on its own: the file may be the only copy.
 
 ```bash
-cp "$HOME/aeos-openbao-recovery.txt" "/Volumes/AEOS-RECOVERY/aeos-openbao-recovery.txt" \
-  && cmp "$HOME/aeos-openbao-recovery.txt" "/Volumes/AEOS-RECOVERY/aeos-openbao-recovery.txt" \
-  && rm "$HOME/aeos-openbao-recovery.txt"
+SRC="$HOME/aeos-openbao-recovery.txt"
+DST="/Volumes/AEOS-RECOVERY/aeos-openbao-recovery.txt"
+cp "$SRC" "$DST" && cmp "$SRC" "$DST" && rm "$SRC"
 ```
 
 If you put the content into your password manager instead, delete the file only after you have opened the
@@ -75,12 +80,19 @@ The keyring entries are gone but `<data>/openbao/raft` is still there (or was co
 the recovery copy from offline storage. `import-unseal-key` asks for each unseal key share and then, with
 `--with-approle`, for the AppRole role_id and secret_id, each twice at a hidden prompt: paste each value from the
 recovery copy there only. Use the `--shares` number the recovery copy names (1 by default). `vault status --verify`
-proves the controller login with the restored AppRole credentials.
+proves the controller login with the restored AppRole credentials. Each command that asks at a hidden prompt
+ends its own block:
 
 ```bash
 ./aeos vault start
 ./aeos vault import-unseal-key --shares 1 --with-approle
+```
+
+```bash
 ./aeos vault unseal
+```
+
+```bash
 ./aeos vault status --verify
 ```
 

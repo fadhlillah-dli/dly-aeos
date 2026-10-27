@@ -291,7 +291,9 @@ one run and give each OS its own group; the OSes are scaled to the same total an
 serves all of them and they weigh files differently:
 
 ```bash
-python scripts/ci_durations.py --os windows-latest w1.xml w2.xml w3.xml --os macos-latest a1.xml a2.xml \
+python scripts/ci_durations.py \
+    --os windows-latest w1.xml w2.xml w3.xml \
+    --os macos-latest a1.xml a2.xml \
     --os macos-26-intel i1.xml i2.xml --source "CI run <id>"
 ```
 
@@ -353,8 +355,31 @@ Standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the ve
   binary also the new SHA-256 from that release's checksums file (bump the version and the checksum together).
   `tests/unit/test_delivery_ci_secrets.py` fails when a pin has no version comment.
 
+- **`scripts/paste_safe.py`** checks that shell commands meant for the owner survive a paste into zsh. Draft the
+  commands into a file first and check it before you show them, in chat or in a document:
+
+  ```bash
+  python scripts/paste_safe.py --check docs/OWNER_ACTIONS.md
+  python scripts/paste_safe.py --check "$TMPDIR/owner-steps.sh"
+  python scripts/paste_safe.py --check --text './aeos doctor -g SECRET'
+  ```
+
+  A `.md` file (or `-` for standard input) is read as Markdown and every bash, sh, zsh, shell or console block is
+  checked; a `.sh`, `.zsh`, `.bash` or `.txt` file, `--text` and `--shell` are plain shell text. It refuses an inline
+  `#` comment, an unquoted `[ ] ? *` or `<placeholder>` (zsh reads `<` as a redirection), a line over 80 characters
+  (a chat view or a narrow terminal wraps it and the paste breaks it: split it with a trailing backslash or after a
+  pipe), a command that asks for hidden input (any `aeos` command with `--as`, `admin create`, `secrets set`,
+  `vault import-unseal-key`, `vault unseal`) that is not the last line of its block, two such commands in one block,
+  and an `rm` after a `cp` outside `cp SRC DST && cmp SRC DST && rm SRC`. Each finding is
+  `path:line: problem and fix: line`. Exit codes: 0 OK, 1 findings, 2 usage or read error; the last line is
+  `PASTE_SAFE: OK` or `PASTE_SAFE: FAIL`. A block that shows file contents opts out with
+  `<!-- paste-safe: file-content -->` directly above it. `tests/unit/test_owner_commands_paste_safe.py` runs it
+  over every Markdown file of the repository and fails when a CLI command gains a hidden prompt that the
+  checker's list lacks.
+
 The tools have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`,
-`tests/unit/test_github_settings.py`, `tests/unit/test_action_pins_tool.py`): a violating fixture is red and a
+`tests/unit/test_github_settings.py`, `tests/unit/test_action_pins_tool.py`,
+`tests/unit/test_owner_commands_paste_safe.py`): a violating fixture is red and a
 near-miss legitimate one is green. The junction
 test runs only on Windows.
 

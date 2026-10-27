@@ -1,188 +1,52 @@
-"""Owner-facing shell commands must be paste-safe in zsh (incident 2026-10-26).
+"""Owner-facing shell commands must be paste-safe in zsh (LESSONS L2, L21).
 
-zsh does not treat ``#`` as a comment at an interactive prompt, so a pasted ``cmd  # note`` passes
-``#`` and ``note`` to the command, and an unquoted ``.[dev]`` stops with ``no matches found``
-(``nomatch``). Every fenced bash/sh/zsh/shell/console block in the owner-facing Markdown must
-therefore carry no ``#`` comment (put the explanation in the prose before the block) and no
-unquoted glob character (``[ ] ? *``) in any word. A block that shows file contents instead of
-commands opts out with ``<!-- paste-safe: file-content -->`` directly above it. powershell, cmd,
-text, yaml and json blocks are not scanned.
+The rules live in one place, ``scripts/paste_safe.py`` (single owner, L10/L17); this test imports that checker and
+runs it over every Markdown file of the repository, and holds its bite tests: a violating fixture is red for the
+right reason (its own message) and a near-miss legitimate fixture is green. Rules: no ``#`` comment, no unquoted
+glob character, no ``rm`` after a ``cp`` outside ``cp && cmp && rm``, no line longer than 80 characters, a command
+that prompts for hidden input is the only one of its block and its last line, and no ``<placeholder>`` outside
+quotes. The list of CLI commands with a hidden prompt is derived from ``backend/aeos`` here and compared with the
+checker's list.
 """
 
 from __future__ import annotations
 
-import re
-from collections.abc import Iterator
+import ast
+import importlib
+import importlib.util
+import io
+import sys
+from collections.abc import Iterator, Mapping
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 import pytest
 
 from aeos.core.paths import repo_root
 
 ROOT = repo_root()
-SHELL_LANGS = frozenset({"bash", "sh", "zsh", "shell", "console"})
-OPT_OUT = "<!-- paste-safe: file-content -->"
-# CommonMark fence: any number of blockquote markers and list markers (nested lists, a list inside a quote and a
-# quote inside a list), then 3+ backticks or tildes.
-# Each repetition starts with '>' or a list marker (never with whitespace), so the match is linear (no ReDoS).
-FENCE = re.compile(r"^[ \t]*(?:(?:>|(?:[-*+]|\d{1,9}[.)])(?=[ \t]))[ \t]*)*(`{3,}|~{3,})[ \t]*(.*)$")
-CLOSE_PREFIX = re.compile(r"^[ \t]*(?:>[ \t]?)*[ \t]*")
-PROMPT = re.compile(r"^\s*[$%] ")
-HEREDOC = re.compile(r"<<(-?)[ \t]*([\"']?)([A-Za-z_][A-Za-z0-9_]*)\2")
-WORD_START_PREV = " \t;&|("
-GLOB_CHARS = "[]?*"
-# Untagged fences are scanned too when their first line starts like a shell command (incident class:
-# an untagged "Reproduce" block that carried the exact pasted command).
-COMMAND_START = re.compile(r"^\s*(?:[$%] )?(?:\./|\.\./|~/)?(?:aeos|pip3?|python3?|npm|npx|git|gh|cd|brew|curl|make|"
-                           r"source|export|sh|bash|zsh|uv|node|pytest|ruff|mypy)(?:\s|$)")
+CHECKER = ROOT / "scripts" / "paste_safe.py"
 
 
-def _scan_line(line: str, quote: str | None) -> tuple[list[str], str | None, str | None]:
-    """Return (problems, quote state at end of line, heredoc delimiter opened on this line)."""
-    problems: list[str] = []
-    heredoc: str | None = None
-    i, n = 0, len(line)
-    while i < n:
-        c = line[i]
-        if quote == "'":
-            if c == "'":
-                quote = None
-        elif quote == '"':
-            if c == "\\":
-                i += 1
-            elif c == '"':
-                quote = None
-        elif c == "\\":
-            i += 1
-        elif c in "'\"":
-            quote = c
-        elif c == "<" and line.startswith("<<<", i):
-            i += 2  # here-string: not a heredoc
-        elif c == "<" and line.startswith("<<", i):
-            hd = HEREDOC.match(line, i)
-            if hd:
-                heredoc = hd.group(3)
-                i = hd.end() - 1
-            else:
-                i += 1
-        elif c == "$" and line.startswith("${", i):
-            end = line.find("}", i)
-            i = n if end < 0 else end
-        elif c == "#" and (i == 0 or line[i - 1] in WORD_START_PREV):
-            problems.append("'#' comment outside quotes")
-            break
-        elif c in GLOB_CHARS and not (c == "?" and i > 0 and line[i - 1] == "$"):
-            problems.append(f"unquoted glob character {c!r}")
-        i += 1
-    return problems, quote, heredoc
+def _load_checker() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("aeos_script_paste_safe", CHECKER)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def _is_closing(line: str, char: str, length: int) -> bool:
-    rest = CLOSE_PREFIX.sub("", line, count=1).rstrip()
-    return len(rest) >= length and set(rest) == {char}
-
-
-def shell_fences(markdown: str) -> Iterator[tuple[int, str, list[str]]]:
-    """(index of the opening fence line, language, body lines) of every shell fence that is scanned."""
-    lines = markdown.splitlines()
-    idx = 0
-    while idx < len(lines):
-        m = FENCE.match(lines[idx])
-        if not m or (m.group(1)[0] == "`" and "`" in m.group(2)):
-            idx += 1
-            continue
-        fence, info = m.group(1), m.group(2).split()
-        lang = info[0].lower() if info else ""
-        prev = idx - 1
-        while prev >= 0 and not lines[prev].strip():
-            prev -= 1
-        opted_out = prev >= 0 and lines[prev].strip() == OPT_OUT
-        end = idx + 1
-        while end < len(lines) and not _is_closing(lines[end], fence[0], len(fence)):
-            end += 1
-        body = lines[idx + 1 : end]
-        first = next((b for b in body if b.strip()), "")
-        if not lang and COMMAND_START.match(first):
-            lang = "bash"
-        if lang in SHELL_LANGS and not opted_out:
-            yield idx, lang, body
-        idx = end + 1
-
-
-def paste_problems(markdown: str) -> list[tuple[int, str, str]]:
-    """Return (line number, line, problem) for every non paste-safe line in shell fences."""
-    out: list[tuple[int, str, str]] = []
-    for idx, lang, body in shell_fences(markdown):
-        prompted = lang == "console" and any(PROMPT.match(b) for b in body)
-        quote: str | None = None
-        heredoc: str | None = None
-        continued = False
-        for off, raw in enumerate(body):
-            if heredoc is not None:
-                if raw.strip() == heredoc:
-                    heredoc = None
-                continue
-            if lang == "console" and prompted and not PROMPT.match(raw) and quote is None and not continued:
-                continue  # command output in a console transcript
-            text = PROMPT.sub("", raw, count=1)
-            probs, quote, heredoc = _scan_line(text, quote)
-            continued = quote is None and text.rstrip().endswith("\\") and not text.rstrip().endswith("\\\\")
-            out += [(idx + 2 + off, raw, p) for p in probs]
-    return out
-
-
-# Data-loss class (LESSONS strike 1): a copy followed by a delete must delete only when the copy is proven, in one
-# '&&' chain with a compare ('cp SRC DST && cmp SRC DST && rm SRC'). A separate 'rm' line (or one after ';') runs
-# even when the copy failed and may delete the only copy of recovery material.
-_CHAIN_SPLIT = re.compile(r"\s*(&&|\|\||;|\|)\s*")
-
-
-def _command_head(word: str) -> str:
-    """The program a simple command runs: 'sudo rm', 'command rm', '\\rm' and '/bin/rm' all run rm."""
-    tokens = word.split()
-    while tokens and tokens[0] in ("sudo", "command", "builtin", "nohup", "exec"):
-        tokens = tokens[1:]
-    return tokens[0].lstrip("\\").rsplit("/", 1)[-1] if tokens else ""
-
-
-def unguarded_deletes(markdown: str) -> list[tuple[int, str]]:
-    """(line number, command) of every 'rm' after a 'cp' in the same shell fence that is not guarded by
-    'cp ... && cmp ... && rm' in one chain."""
-    out: list[tuple[int, str]] = []
-    for idx, _lang, body in shell_fences(markdown):
-        seen_cp = False
-        commands: list[tuple[int, str]] = []  # (line number, logical command line with continuations joined)
-        pending = ""
-        start = 0
-        for off, raw in enumerate(body):
-            text = PROMPT.sub("", raw, count=1)
-            if not pending:
-                start = idx + 2 + off
-            if text.rstrip().endswith("\\"):
-                pending += text.rstrip()[:-1] + " "
-                continue
-            commands.append((start, pending + text))
-            pending = ""
-        if pending:
-            commands.append((start, pending))
-        for lineno, line in commands:
-            parts = _CHAIN_SPLIT.split(line.strip())
-            words, ops = parts[0::2], ["&&", *parts[1::2]]
-            guarded = False  # within the current '&&' chain: a cp followed by a cmp/diff
-            chain_cp = False
-            for word, op in zip(words, ops, strict=True):
-                head = _command_head(word)
-                if op != "&&":
-                    guarded = chain_cp = False
-                if head == "cp":
-                    seen_cp = chain_cp = True
-                    guarded = False
-                elif head in ("cmp", "diff") and chain_cp:
-                    guarded = True
-                elif head == "rm" and seen_cp and not guarded:
-                    out.append((lineno, word))
-    return out
-
+ps = _load_checker()
+FENCE = ps.FENCE
+OPT_OUT = ps.OPT_OUT
+MAX_LINE = ps.MAX_LINE
+check_markdown = ps.check_markdown
+paste_problems = ps.paste_problems
+prompt_problems = ps.prompt_problems
+shell_fences = ps.shell_fences
+unguarded_deletes = ps.unguarded_deletes
 
 NOT_REPOSITORY_FILES = frozenset({".git", ".venv", "node_modules", "dist", "build", "__pycache__", ".mypy_cache",
                                   ".ruff_cache", ".pytest_cache"})
@@ -198,13 +62,9 @@ def owner_markdown_files() -> list[Path]:
 def test_owner_markdown_shell_blocks_are_paste_safe():
     findings = []
     for path in owner_markdown_files():
-        text = path.read_text(encoding="utf-8")
-        for lineno, line, problem in paste_problems(text):
+        for lineno, line, problem in check_markdown(path.read_text(encoding="utf-8")):
             findings.append(f"{path.relative_to(ROOT).as_posix()}:{lineno}: {problem}: {line.strip()}")
     assert not findings, "not paste-safe in zsh:\n" + "\n".join(findings)
-
-
-RECOVERY_RUNBOOK = "docs/runbooks/openbao-unseal-recovery.md"
 
 
 def test_owner_markdown_never_deletes_after_an_unproven_copy():
@@ -215,6 +75,9 @@ def test_owner_markdown_never_deletes_after_an_unproven_copy():
         for lineno, command in unguarded_deletes(path.read_text(encoding="utf-8")):
             findings.append(f"{path.relative_to(ROOT).as_posix()}:{lineno}: rm without a proven copy: {command}")
     assert not findings, "a delete runs even when the copy failed:\n" + "\n".join(findings)
+
+
+RECOVERY_RUNBOOK = "docs/runbooks/openbao-unseal-recovery.md"
 
 
 def test_recovery_runbook_moves_the_copy_with_a_guarded_chain():
@@ -230,6 +93,15 @@ def test_scanner_covers_the_owner_documents():
     assert {"README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/OWNER_ACTIONS.md", "docs/SETUP_MACOS.md",
             "changelog.d/README.md", "install-manifest/README.md", "tests/acceptance/MATRIX.md"} <= names
     assert not {n for n in names if NOT_REPOSITORY_FILES & set(n.split("/"))}
+
+
+def test_the_rules_have_one_owner():
+    """L10/L17: the test holds no second copy of the rules; it uses the checker's functions."""
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    defined = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+    assert not defined & {"_scan_line", "_is_closing", "_command_head", "paste_problems", "shell_fences",
+                          "unguarded_deletes", "prompt_problems"}
+    assert paste_problems.__module__ == "aeos_script_paste_safe"
 
 
 def _block(body: str, lang: str = "bash", before: str = "") -> str:
@@ -276,7 +148,7 @@ def test_violation_after_a_comment_marker_for_another_block_is_still_red():
         'ls "*.md" \\*.md',
         "echo $? $# ok",
         "$ ./aeos doctor",
-        "./aeos vault install --version <X.Y.Z>",
+        './aeos vault install --version "<X.Y.Z>"',
         'git commit -m "fix: a # b"',
         'echo "multi\nline # inside" done',
         "cat <<'EOF'\n# file content [x] *\nEOF",
@@ -424,6 +296,7 @@ SRC, DST = '"$HOME/aeos-openbao-recovery.txt"', '"/Volumes/AEOS-RECOVERY/aeos-op
 def test_unguarded_delete_after_copy_is_red(body):
     found = unguarded_deletes(_block(body, "console" if body.startswith("$") else "bash"))
     assert found and all("rm " in cmd for _, cmd in found), body
+    assert any("rm without a proven copy" in p for _, _, p in check_markdown(_block(body)))
 
 
 def test_old_runbook_block_is_red_in_the_runbook_scan():
@@ -439,6 +312,7 @@ def test_old_runbook_block_is_red_in_the_runbook_scan():
         f"cp {SRC} {DST} && diff {SRC} {DST} && rm {SRC}",
         f"rm {SRC}",  # no copy in the block: not a move
         f"rm {SRC}\ncp {SRC} {DST}",
+        f'SRC={SRC}\nDST={DST}\ncp "$SRC" "$DST" && cmp "$SRC" "$DST" && rm "$SRC"',
     ],
 )
 def test_guarded_or_unrelated_delete_is_green(body):
@@ -447,3 +321,307 @@ def test_guarded_or_unrelated_delete_is_green(body):
 
 def test_delete_in_another_fence_kind_is_not_scanned():
     assert unguarded_deletes(_block(f"cp {SRC} {DST}\nrm {SRC}", "text")) == []
+
+
+# ------------------------------------------- bite tests: long lines (wrap risk, incident 2026-10-27)
+def _line(width: int) -> str:
+    head = "./aeos doctor --reason "
+    return head + '"' + "x" * (width - len(head) - 2) + '"'
+
+
+def test_an_81_character_line_is_red_with_its_fix():
+    line = _line(MAX_LINE + 1)
+    assert len(line) == 81
+    found = paste_problems(_block(line))
+    assert [ln for ln, _, _ in found] == [3]
+    assert "line is 81 characters (more than 80)" in found[0][2] and "trailing backslash" in found[0][2]
+
+
+def test_an_80_character_line_is_green():
+    line = _line(MAX_LINE)
+    assert len(line) == 80
+    assert check_markdown(_block(line)) == []
+
+
+def test_line_length_ignores_the_container_indent_but_counts_the_command():
+    assert check_markdown("1. Run:\n\n   ```bash\n   " + _line(80) + "\n   ```\n") == []
+    assert check_markdown("> ```bash\n> " + _line(80) + "\n> ```\n") == []
+    assert len(paste_problems("1. Run:\n\n   ```bash\n   " + _line(81) + "\n   ```\n")) == 1
+
+
+def test_a_long_line_split_with_backslashes_or_after_a_pipe_is_green():
+    assert check_markdown(_block("./aeos policy decide --kind BUDGET \\\n  --rationale \"" + "x" * 60 + "\"")) == []
+    assert check_markdown(_block("grep -q 'a' \"$CFG\" ||\n  printf 'b' >> \"$CFG\"")) == []
+
+
+def test_a_long_heredoc_body_line_and_console_output_are_green():
+    assert check_markdown(_block("cat <<'EOF' > f.txt\n" + "y" * 120 + "\nEOF")) == []
+    assert check_markdown(_block("$ ./aeos doctor\n" + "z" * 120, "console")) == []
+
+
+# ------------------------------------------- bite tests: hidden prompts (incident 2026-10-27)
+ADMIN = '"<admin>"'
+
+
+def test_two_as_commands_in_one_block_are_red():
+    body = f"./aeos policy adrs --load\n./aeos policy decide --as {ADMIN}\n./aeos routes set-pool r --as {ADMIN}"
+    found = prompt_problems(_block(body))
+    assert any("2 commands in this block prompt for hidden input (lines 4, 5)" in p for _, _, p in found), found
+
+
+def test_an_as_command_followed_by_another_line_is_red():
+    found = prompt_problems(_block(f"./aeos policy decide --as {ADMIN}\necho x"))
+    assert len(found) == 1
+    lineno, _line_text, problem = found[0]
+    assert lineno == 3
+    assert "'--as' asks for the admin password and line 4 follows it in the same block" in problem
+    assert "end the block with this command" in problem
+
+
+@pytest.mark.parametrize(
+    "body, fragment",
+    [
+        ("./aeos admin create\n./aeos serve", "'aeos admin create' asks for hidden input"),
+        ("./aeos vault import-unseal-key --shares 1 --with-approle\n./aeos vault status",
+         "'aeos vault import-unseal-key' asks for hidden input"),
+        ("./aeos vault unseal\n./aeos vault status", "'aeos vault unseal' asks for hidden input"),
+        ("./aeos secrets set workers/x\n./aeos secrets status", "'aeos secrets set' asks for hidden input"),
+        ("./aeos secrets set workers/x --stdin\n./aeos secrets status", "'aeos secrets set' asks"),  # reads the paste
+        ("./aeos policy decide --as=admin\n./aeos doctor", "'--as' asks for the admin password"),
+        ("FOO=1 aeos routes activate r --as admin \\\n  --mode TRIAL\n./aeos doctor", "'--as' asks"),
+        ("$ ./aeos policy decide --as admin\nPassword for admin:\n$ ./aeos doctor", "'--as' asks"),
+    ],
+)
+def test_a_hidden_prompt_command_that_is_not_last_is_red(body, fragment):
+    found = prompt_problems(_block(body, "console" if body.startswith("$") else "bash"))
+    assert any(fragment in p and "follows it in the same block" in p for _, _, p in found), found
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f'ADMIN={ADMIN}\nWHY="first route"\n./aeos policy decide --as "$ADMIN" \\\n  --rationale "$WHY"',
+        "./aeos vault start\n./aeos vault unseal",
+        "./aeos vault unseal --from-keyring\n./aeos vault status",
+        "printf '%s' \"$V\" | ./aeos secrets set workers/x --stdin\n./aeos secrets status",
+        "./aeos admin recover owner\n./aeos doctor",
+        "./aeos doctor --assume x\n./aeos serve",
+        "git log --as\n./aeos doctor",
+        f"$ ./aeos policy decide --as {ADMIN}\nPassword for admin:\nRecorded.",
+    ],
+)
+def test_one_hidden_prompt_command_as_the_last_line_is_green(body):
+    assert prompt_problems(_block(body, "console" if body.startswith("$") else "bash")) == [], body
+
+
+def test_a_hidden_prompt_inside_a_heredoc_body_is_not_a_command():
+    assert prompt_problems(_block("cat <<'EOF' > steps.txt\n./aeos admin create\n./aeos serve\nEOF\necho done")) == []
+
+
+# ------------------------------------------- bite tests: placeholders outside quotes
+@pytest.mark.parametrize("body, shown", [
+    ("./aeos secrets set personal/github --token <your-token>", "<your-token>"),
+    ("./aeos ops backup restore-test <backup_id>", "<backup_id>"),
+    ("rm ~/Downloads/client_secret_<...>.json", "<...>"),
+    ("./aeos ops sli target x --max <new hash>", "<new hash>"),
+])
+def test_a_placeholder_outside_quotes_is_red(body, shown):
+    found = paste_problems(_block(body))
+    assert any(f"placeholder '{shown}' outside quotes" in p and "redirection" in p for _, _, p in found), found
+
+
+@pytest.mark.parametrize("body", [
+    './aeos ops backup restore-test "<x>"',
+    "./aeos ops backup restore-test '<x>'",
+    "./aeos inventory show \"<id>\" --json",
+    "cat <<'EOF' > f.txt\nkey: <x>\nEOF",
+    "sort < in.txt > out.txt",
+    "sort <in.txt >out.txt",
+    "cat <<< \"<x>\"",
+    "echo 1 2>&1",
+])
+def test_a_quoted_placeholder_a_heredoc_body_and_a_redirection_are_green(body):
+    assert paste_problems(_block(body)) == [], body
+
+
+# ------------------------------------------- the CLI: --check, stdin, --text, exit codes, verdict line
+def _run(capsys: pytest.CaptureFixture[str], argv: list[str]) -> tuple[int, list[str]]:
+    code = ps.main(argv)
+    out = capsys.readouterr().out.splitlines()
+    return code, out
+
+
+def test_check_cli_exit_codes_and_verdict_line(tmp_path, capsys, monkeypatch):
+    good = tmp_path / "good.md"
+    good.write_text(_block("./aeos doctor"), encoding="utf-8")
+    bad = tmp_path / "bad.md"
+    bad.write_text(_block("./aeos doctor  # x"), encoding="utf-8")
+    code, out = _run(capsys, ["--check", str(good)])
+    assert code == 0 and out[-1] == "PASTE_SAFE: OK"
+    code, out = _run(capsys, ["--check", str(good), str(bad)])
+    assert code == 1 and out[-1] == "PASTE_SAFE: FAIL"
+    assert any(line.startswith(f"{bad}:3: '#' comment outside quotes") for line in out), out
+    for argv in ([], ["--check"], ["--check", str(tmp_path / "missing.md")], ["--no-such-flag"], [str(good)]):
+        code, out = _run(capsys, argv)
+        assert code == 2 and out[-1] == "PASTE_SAFE: FAIL", argv
+    shell = tmp_path / "steps.sh"
+    shell.write_text(f"./aeos policy decide --as {ADMIN}\necho x\n", encoding="utf-8")
+    code, out = _run(capsys, ["--check", str(shell)])
+    assert code == 1 and any(line.startswith(f"{shell}:1: '--as' asks") and "line 2 follows" in line for line in out)
+    code, out = _run(capsys, ["--check", "--text", "echo ok\n./aeos ops backup restore-test <id>"])
+    assert code == 1 and any(line.startswith("<text 1>:2: placeholder '<id>'") for line in out), out
+    code, out = _run(capsys, ["--check", "--text", './aeos ops backup restore-test "<id>"'])
+    assert code == 0 and out[-1] == "PASTE_SAFE: OK"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_block("ls *.md")))
+    code, out = _run(capsys, ["--check", "-"])
+    assert code == 1 and any(line.startswith("<stdin>:3: unquoted glob") for line in out), out
+    monkeypatch.setattr(sys, "stdin", io.StringIO("./aeos admin create\n./aeos serve\n"))
+    code, out = _run(capsys, ["--check", "--shell", "-"])
+    assert code == 1 and any(line.startswith("<stdin>:1: 'aeos admin create'") and "line 2 follows" in line
+                             for line in out), out
+    two = "./aeos vault unseal\n./aeos policy decide --as x"
+    assert any("(lines 1, 2)" in p for _, _, p in ps.check_markdown(two, shell=True))
+
+
+def test_check_output_is_ascii(tmp_path, capsys):
+    page = tmp_path / "page.md"
+    page.write_text(_block("echo été  # x"), encoding="utf-8")
+    code, out = _run(capsys, ["--check", str(page)])
+    assert code == 1 and all(line.isascii() for line in out)
+
+
+# ------------------------------------------- the hidden-prompt list follows the CLI
+def _hidden_prompt_functions(source_root: Path, package: str) -> set[tuple[str, str]]:
+    """(module, function) of every function under source_root/package that reaches getpass.getpass or a
+    hide_input=True prompt, directly or through a function it calls by name (same module or imported by name)."""
+    defs: dict[tuple[str, str], ast.AST] = {}
+    imports: dict[str, dict[str, tuple[str, str]]] = {}
+    for path in sorted((source_root / package).rglob("*.py")):
+        module = ".".join(path.relative_to(source_root).with_suffix("").parts)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imports[module] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defs[(module, node.name)] = node
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    imports[module][alias.asname or alias.name] = (node.module, alias.name)
+
+    def direct(fn: ast.AST) -> bool:
+        for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+            f = call.func
+            if (isinstance(f, ast.Attribute) and f.attr == "getpass") or (isinstance(f, ast.Name) and f.id == "getpass"):
+                return True
+            if any(k.arg == "hide_input" and isinstance(k.value, ast.Constant) and k.value.value is True
+                   for k in call.keywords):
+                return True
+        return False
+
+    def callees(module: str, fn: ast.AST) -> set[tuple[str, str]]:
+        return {imports[module].get(n.func.id, (module, n.func.id)) for n in ast.walk(fn)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+
+    hidden = {key for key, fn in defs.items() if direct(fn)}
+    changed = True
+    while changed:
+        changed = False
+        for key, fn in defs.items():
+            if key not in hidden and callees(key[0], fn) & hidden:
+                hidden.add(key)
+                changed = True
+    return hidden
+
+
+def _commands(command: Any, path: tuple[str, ...] = ()) -> Iterator[tuple[str, Any]]:
+    if hasattr(command, "commands"):
+        for name, sub in command.commands.items():
+            yield from _commands(sub, (*path, name))
+    else:
+        yield " ".join(path), command
+
+
+def hidden_prompt_problems(app: Any, source_root: Path, package: str,
+                           listed: Mapping[str, tuple[str, ...]]) -> list[str]:
+    """Commands that prompt for hidden input without an '--as' option must be in ``listed``; every listed entry must
+    be such a command, and its skip flags must be options of it."""
+    import typer
+
+    hidden = _hidden_prompt_functions(source_root, package)
+    found: dict[str, tuple[bool, set[str]]] = {}  # path -> (has --as, option names)
+    for path, cmd in _commands(typer.main.get_command(app)):
+        options = {opt for p in cmd.params for opt in getattr(p, "opts", [])}
+        cb = cmd.callback
+        prompts = (cb is not None and (cb.__module__, cb.__name__) in hidden) or any(
+            getattr(p, "hide_input", False) for p in cmd.params)
+        if prompts:
+            found[path] = (ps.AS_OPTION in options, options)
+    problems = [f"CLI command '{path}' prompts for hidden input but HIDDEN_PROMPT_COMMANDS in scripts/paste_safe.py "
+                f"lacks it" for path, (has_as, _o) in sorted(found.items()) if not has_as and path not in listed]
+    for path, flags in sorted(listed.items()):
+        if path not in found:
+            problems.append(f"HIDDEN_PROMPT_COMMANDS entry '{path}' is not a CLI command that prompts for hidden input")
+            continue
+        problems += [f"HIDDEN_PROMPT_COMMANDS entry '{path}': {flag} is not an option of the command"
+                     for flag in flags if flag not in found[path][1]]
+    return problems
+
+
+def test_the_hidden_prompt_list_matches_the_cli():
+    from aeos.cli import app
+
+    assert hidden_prompt_problems(app, ROOT / "backend", "aeos", ps.HIDDEN_PROMPT_COMMANDS) == []
+
+
+FAKE_CLI = '''
+import getpass
+
+import typer
+
+app = typer.Typer()
+
+
+def _ask() -> str:
+    return getpass.getpass("Secret: ")
+
+
+@app.command("store")
+def store() -> None:
+    _ask()
+
+
+@app.command("decide")
+def decide(as_user: str = typer.Option(..., "--as")) -> None:
+    typer.prompt("Password", hide_input=True)
+
+
+@app.command("show")
+def show(flag: bool = typer.Option(False, "--quiet")) -> None:
+    pass
+'''
+
+
+@pytest.fixture()
+def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    package = tmp_path / "fake_paste_cli"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "cli.py").write_text(FAKE_CLI, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in [m for m in sys.modules if m.startswith("fake_paste_cli")]:
+        monkeypatch.delitem(sys.modules, name)
+    module = importlib.import_module("fake_paste_cli.cli")
+    return module.app
+
+
+def test_bite_a_new_hidden_prompt_missing_from_the_list_is_red(tmp_path, fake_cli):
+    problems = hidden_prompt_problems(fake_cli, tmp_path, "fake_paste_cli", {})
+    assert problems == ["CLI command 'store' prompts for hidden input but HIDDEN_PROMPT_COMMANDS in "
+                        "scripts/paste_safe.py lacks it"]
+
+
+def test_bite_a_stale_entry_or_a_wrong_flag_is_red_and_the_right_list_is_green(tmp_path, fake_cli):
+    assert hidden_prompt_problems(fake_cli, tmp_path, "fake_paste_cli", {"store": ()}) == []  # '--as' is generic
+    stale = hidden_prompt_problems(fake_cli, tmp_path, "fake_paste_cli", {"store": (), "show": ()})
+    assert stale == ["HIDDEN_PROMPT_COMMANDS entry 'show' is not a CLI command that prompts for hidden input"]
+    flag = hidden_prompt_problems(fake_cli, tmp_path, "fake_paste_cli", {"store": ("--quiet",)})
+    assert flag == ["HIDDEN_PROMPT_COMMANDS entry 'store': --quiet is not an option of the command"]
