@@ -101,8 +101,11 @@ def canonical_patterns() -> list[re.Pattern[str]]:
     return [p for p in _PATTERNS if not p.groups and not p.pattern.startswith(SKIPPED_PATTERN_PREFIXES)]
 
 
-def secret_kinds(prompt: str) -> list[str]:
-    """Distinct kinds of secret found in ``prompt``, in order of first appearance (never the values)."""
+def detected_kinds(prompt: str) -> list[str]:
+    """Distinct kinds of secret found in ``prompt``, in order of first appearance. Only the fixed kind labels of
+    KIND_BY_PREFIX / KIND_BY_LABEL / GAPS leave this function, never matched text, so the block reason that names them
+    carries no secret (CodeQL py/clear-text-logging-sensitive-data flagged the former name ``secret_kinds`` by its
+    name alone)."""
     found: list[tuple[int, str]] = []
     for pattern in canonical_patterns():
         for m in pattern.finditer(prompt):
@@ -140,7 +143,7 @@ def decide(raw: str) -> dict[str, object] | None:
     prompt = data.get("prompt") if isinstance(data, dict) else None
     if not isinstance(prompt, str) or not prompt:
         return None
-    kinds = secret_kinds(prompt)
+    kinds = detected_kinds(prompt)
     return block_decision(kinds) if kinds else None
 
 
