@@ -198,16 +198,27 @@ def test_main_prints_exactly_one_json_object_on_a_block(capsys: pytest.CaptureFi
     assert json.loads(out)["decision"] == "block"
 
 
-def _run(stdin: bytes) -> tuple[subprocess.CompletedProcess[bytes], float]:
+# The real hook runs the system ``python3``, not the project venv: no third-party package is importable there. ``-S``
+# drops site-packages and ``-I`` drops PYTHON* variables and the user site, so a third-party import added to
+# aeos/__init__.py, aeos/core/__init__.py or aeos/core/redaction.py would be swallowed by the fail-open handler and
+# every prompt would pass; the bare-interpreter cases below turn that into a red test.
+INTERPRETERS = {
+    "venv": [sys.executable],
+    "bare": [sys.executable, "-S", "-I"],
+}
+
+
+def _run(stdin: bytes, interpreter: str = "venv") -> tuple[subprocess.CompletedProcess[bytes], float]:
     started = time.monotonic()
-    proc = subprocess.run([sys.executable, str(GUARD)], input=stdin, capture_output=True, timeout=60, check=False,
-                          cwd=str(ROOT))
+    proc = subprocess.run([*INTERPRETERS[interpreter], str(GUARD)], input=stdin, capture_output=True, timeout=60,
+                          check=False, cwd=str(ROOT))
     return proc, time.monotonic() - started
 
 
-def test_subprocess_blocks_a_secret_and_stays_inside_a_loose_time_budget() -> None:
+@pytest.mark.parametrize("interpreter", sorted(INTERPRETERS))
+def test_subprocess_blocks_a_secret_and_stays_inside_a_loose_time_budget(interpreter: str) -> None:
     secret = SAMPLES["anthropic"][0]
-    proc, elapsed = _run(_payload(f"here: {secret}").encode())
+    proc, elapsed = _run(_payload(f"here: {secret}").encode(), interpreter)
     assert proc.returncode == 0
     assert proc.stderr == b""
     decision = json.loads(proc.stdout)
@@ -217,9 +228,20 @@ def test_subprocess_blocks_a_secret_and_stays_inside_a_loose_time_budget() -> No
     assert elapsed < 10, f"hook took {elapsed:.2f}s"
 
 
-def test_subprocess_is_silent_for_a_clean_prompt_and_for_garbage() -> None:
+@pytest.mark.parametrize("interpreter", sorted(INTERPRETERS))
+def test_subprocess_blocks_every_secret_kind(interpreter: str) -> None:
+    for name, (secret, kind) in sorted(SAMPLES.items()):
+        proc, _ = _run(_payload(f"see {secret} here").encode(), interpreter)
+        assert proc.returncode == 0 and proc.stderr == b"", name
+        assert proc.stdout, f"{name}: the guard let the secret through under the {interpreter} interpreter"
+        reason = json.loads(proc.stdout)["reason"]
+        assert kind in reason and secret not in reason, name
+
+
+@pytest.mark.parametrize("interpreter", sorted(INTERPRETERS))
+def test_subprocess_is_silent_for_a_clean_prompt_and_for_garbage(interpreter: str) -> None:
     for stdin in (_payload("refactor the config loader please").encode(), b"{", b"", b"\xff\xff"):
-        proc, elapsed = _run(stdin)
+        proc, elapsed = _run(stdin, interpreter)
         assert proc.returncode == 0 and proc.stdout == b"" and proc.stderr == b""
         assert elapsed < 10
 
@@ -258,15 +280,18 @@ def settings_problems(settings: object, root: Path) -> list[str]:
                         problems.append(f"{event}: script {rel} does not exist")
     if not any("scripts/claude_hooks/secret_prompt_guard.py" in c for c in commands.get("UserPromptSubmit", [])):
         problems.append("UserPromptSubmit does not run scripts/claude_hooks/secret_prompt_guard.py")
-    if not any("scripts/preflight.py" in c and "--facts" in c for c in commands.get("SessionStart", [])):
-        problems.append("SessionStart does not run scripts/preflight.py --facts")
+    # not `python3 scripts/preflight.py --facts`: that describes the system python3, not the project .venv
+    if not any("scripts/claude_hooks/session_facts.py" in c for c in commands.get("SessionStart", [])):
+        problems.append("SessionStart does not run scripts/claude_hooks/session_facts.py (the launcher that reports "
+                        "the project .venv; scripts/preflight.py --facts under python3 reports the system interpreter)")
     return problems
 
 
 def _good_settings() -> dict[str, object]:
     return {"hooks": {
         "SessionStart": [{"hooks": [{"type": "command", "timeout": 20,
-                                     "command": 'python3 "$CLAUDE_PROJECT_DIR/scripts/preflight.py" --facts || true'}]}],
+                                     "command":
+                                     'python3 "$CLAUDE_PROJECT_DIR/scripts/claude_hooks/session_facts.py" || true'}]}],
         "UserPromptSubmit": [{"hooks": [{"type": "command", "timeout": 5, "command":
                                          'python3 "$CLAUDE_PROJECT_DIR/scripts/claude_hooks/secret_prompt_guard.py"'}]}],
     }}
@@ -274,6 +299,14 @@ def _good_settings() -> dict[str, object]:
 
 def test_settings_checker_accepts_a_good_document_in_the_real_tree() -> None:
     assert settings_problems(_good_settings(), ROOT) == []
+
+
+def test_settings_checker_is_red_for_a_session_hook_that_reports_the_system_python() -> None:
+    bad = _good_settings()
+    bad["hooks"]["SessionStart"][0]["hooks"][0]["command"] = (  # type: ignore[index]
+        'python3 "$CLAUDE_PROJECT_DIR/scripts/preflight.py" --facts || true')
+    problems = settings_problems(bad, ROOT)
+    assert len(problems) == 1 and "session_facts.py" in problems[0] and "system interpreter" in problems[0]
 
 
 def test_settings_checker_is_red_for_the_right_reason() -> None:

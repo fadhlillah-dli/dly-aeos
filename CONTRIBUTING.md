@@ -289,8 +289,12 @@ The committed `.claude/settings.json` registers two Claude Code hooks for anyone
 Claude Code (hooks reference: <https://code.claude.com/docs/en/hooks>). Both are fail-open: whatever goes wrong inside
 a hook (a missing `python3`, bad input, an exception, a timeout), the session or the prompt goes on unchanged.
 
-- **SessionStart** runs `python3 scripts/preflight.py --facts` and puts the environment facts (interpreter, venv,
-  pytest, node, git, `core.hooksPath`, `gh` login status) into the session context, so nobody guesses them.
+- **SessionStart** runs `scripts/claude_hooks/session_facts.py`, which runs `scripts/preflight.py --facts` with the
+  interpreter that `scripts/run_tests.sh` would use (`$AEOS_GATES_PYTHON`, the `.venv` of this checkout, the `.venv`
+  of the main checkout, else the launching `python3`), and puts the environment facts (interpreter, venv, pytest,
+  xdist, node, git, `core.hooksPath`, `gh` login status) into the session context, so nobody guesses them. The hook
+  itself starts with the system `python3`; running `preflight.py` directly under it would describe that interpreter
+  and say the project venv and xdist are missing.
 - **UserPromptSubmit** runs `scripts/claude_hooks/secret_prompt_guard.py` (stdlib only, about 30 ms). A prompt that
   carries a high-confidence secret shape (a provider token with a fixed prefix, a Vault/OpenBao token, an unseal key
   line, a PEM private key header; the patterns are the ones of `aeos.core.redaction`) is blocked before it reaches the
@@ -300,13 +304,17 @@ a hook (a missing `python3`, bad input, an exception, a timeout), the session or
   in its local prompt history, which is another reason to rotate. Ordinary prose, git SHAs, UUIDs, digests and
   placeholders such as `<your-token>` pass.
 
-To switch them off for yourself, override them in `.claude/settings.local.json` (not committed) or use `/hooks` in
-Claude Code; do not edit the committed file for a personal preference. Setting `"disableAllHooks": true` in
-`.claude/settings.local.json` turns off every hook. A copy of the guard in your user-level Claude Code settings, to
-protect your other repositories too, is optional: point the user-level `UserPromptSubmit` hook at the absolute path of
-this script (it needs the `backend/` folder of this checkout next to it, so it works only from a checkout).
-`tests/unit/test_secret_prompt_guard.py` holds the bite tests (every secret kind blocked, near misses allowed, bad
-input silent) and checks that the hook commands in `.claude/settings.json` name scripts that exist.
+To switch them off for yourself, put `"disableAllHooks": true` in `.claude/settings.local.json` (not committed): it
+turns off every hook of the session, not one of them. For a single run use
+`claude --settings '{"disableAllHooks": true}'`. There is no per-hook switch: hook entries from user, project and local
+settings merge, so a `.claude/settings.local.json` entry cannot replace or cancel the committed one, and `/hooks` is a
+read-only browser that only lists them. Do not edit the committed file for a personal preference. A copy of the guard
+in your user-level Claude Code settings, to protect your other repositories too, is optional: point the user-level
+`UserPromptSubmit` hook at the absolute path of this script (it needs the `backend/` folder of this checkout next to
+it, so it works only from a checkout).
+`tests/unit/test_secret_prompt_guard.py` holds the bite tests (every secret kind blocked, also under a bare
+`python3 -S -I` without any installed package; near misses allowed; bad input silent) and checks that the hook
+commands in `.claude/settings.json` name scripts that exist.
 
 ### Rules for every change
 
