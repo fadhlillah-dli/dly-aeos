@@ -207,6 +207,61 @@ def test_every_required_check_of_the_main_ruleset_is_reported_by_exactly_one_job
         assert names.count(required) == 1, (required, names.count(required))
 
 
+# Every job id of ci.yml except the shard jobs, with its name (the check-run name a ruleset or classify_check sees). The
+# shard jobs are pinned by their id, name template and legs (SHARDS_PER_OS): a rebalance changes the leg counts, not
+# the template. This is the committed baseline, so a renamed or dropped job is red in every checkout, also in CI where
+# only the pull request's merge ref is fetched and there is no origin/main to compare with.
+JOB_NAMES = {
+    "static-checks": "static checks [G1] (ubuntu-latest)",
+    "backend-verifier-macos-latest": "backend verifier [G2] (macos-latest)",
+    "backend-windows-latest": "backend [G1,G2] (windows-latest)",
+    "backend-macos-latest": "backend [G1,G2] (macos-latest)",
+    "backend-macos-26-intel": "backend [G1,G2] (macos-26-intel)",
+    "frontend": "frontend [G1,G3]",
+    "browser-e2e": "browser e2e + a11y smoke [G3]",
+    "bootstrap": "bootstrap [G2] (${{ matrix.os }})",
+    "commit-subjects": "commit subjects [G1]",
+    "supply-chain": "supply-chain report [NO-GATE] (SBOM, licences, vulnerabilities, SAST)",
+}
+SHARD_JOB_NAME = "backend shard ${{ matrix.shard }}/${{ matrix.shards }} [G2] (${{ matrix.os }})"
+
+
+def _job_name_problems(jobs: dict) -> list[str]:
+    expected = {**JOB_NAMES, **{f"backend-shards-{o}": SHARD_JOB_NAME for o in HOST_OSES}}
+    problems = [f"{jid}: name {jobs[jid].get('name')!r}, expected {name!r}"
+                for jid, name in expected.items() if jid in jobs and jobs[jid].get("name") != name]
+    problems += [f"job {jid} is missing" for jid in expected if jid not in jobs]
+    problems += [f"job {jid} is not pinned in JOB_NAMES" for jid in jobs if jid not in expected]
+    names = [n for job in jobs.values() for n in _check_names(job)]
+    problems += [f"required check {r!r} reported {names.count(r)} times" for r in REQUIRED_CHECKS if names.count(r) != 1]
+    return problems
+
+
+def test_no_job_id_or_check_name_changed_against_the_committed_baseline():
+    assert _job_name_problems(_workflow()["jobs"]) == []
+
+
+def test_the_job_name_check_bites_on_a_renamed_dropped_or_unpinned_job_without_any_git_history():
+    """Runs the same in CI (a depth-1 merge-ref checkout): no git command, no origin/main."""
+    import copy
+
+    jobs = _workflow()["jobs"]
+    assert _job_name_problems(jobs) == []
+    for jid in JOB_NAMES:
+        renamed = copy.deepcopy(jobs)
+        renamed[jid]["name"] += " renamed"
+        assert _job_name_problems(renamed), jid
+        dropped = copy.deepcopy(jobs)
+        del dropped[jid]
+        assert _job_name_problems(dropped), jid
+    shard_renamed = copy.deepcopy(jobs)
+    shard_renamed["backend-shards-macos-latest"]["name"] = "backend shard [G2] (${{ matrix.os }})"
+    assert _job_name_problems(shard_renamed)
+    extra = copy.deepcopy(jobs)
+    extra["new-job"] = {"name": "new job [G1]", "runs-on": "ubuntu-latest", "steps": []}
+    assert _job_name_problems(extra)
+
+
 def _aggregator(os_label: str) -> tuple[str, dict]:
     jobs = _workflow()["jobs"]
     return next((jid, j) for jid, j in jobs.items() if j.get("name") == f"backend [G1,G2] ({os_label})")
@@ -388,25 +443,113 @@ def test_the_shard_leg_check_bites_on_a_dropped_leg_a_wrong_count_or_a_foreign_o
     assert _shard_leg_problems(foreign)
 
 
+G1_STATIC_STEPS = (("ruff", "python -m ruff check backend tests scripts"),
+                   ("mypy darwin", "python -m mypy --platform darwin"),
+                   ("mypy win32", "python -m mypy --platform win32"),
+                   ("secret + PII scan", "python scripts/secret_scan.py"))
+
+
+def _static_step_problems(jobs: dict) -> list[str]:
+    """What is wrong with the G1 steps of the static job of *jobs*: exactly the four commands, one per step (two in one
+    ``run`` block under a ``shell: bash {0}`` override, which has no -e, would hide a failing darwin check behind a
+    passing win32 one), none skipped, none allowed to fail, none under a shell override."""
+    problems = []
+    static = [s for s in jobs[STATIC_JOB]["steps"] if str(s.get("name", "")).startswith("G1 static")]
+    if [(str(s["name"]).split(" — ")[-1].split(" (")[0], s.get("run")) for s in static] != list(G1_STATIC_STEPS):
+        problems.append(f"G1 steps {[(s['name'], s.get('run')) for s in static]}")
+    for step in static:
+        if "if" in step or "continue-on-error" in step or "shell" in step:
+            problems.append(f"{step['name']}: if / continue-on-error / shell is set")
+    return problems
+
+
 def test_g1_static_checks_run_once_in_their_own_job_that_every_backend_aggregator_needs():
     jobs = _workflow()["jobs"]
     job = jobs[STATIC_JOB]
     assert job["runs-on"] == "ubuntu-latest" and "[G1]" in job["name"] and "if" not in job
     assert "continue-on-error" not in job and "strategy" not in job
-    static = [s for s in job["steps"] if str(s.get("name", "")).startswith("G1 static")]
-    assert [s["run"].split("\n")[0] for s in static] == ["python -m ruff check backend tests scripts",
-                                                        "python -m mypy --platform darwin",
-                                                        "python scripts/secret_scan.py"]
-    mypy = static[1]["run"].splitlines()
-    assert mypy == ["python -m mypy --platform darwin", "python -m mypy --platform win32"]
-    for step in static:  # never skipped, never allowed to fail
-        assert "if" not in step and "continue-on-error" not in step, step["name"]
+    assert _static_step_problems(jobs) == []
     for shard in _shard_jobs().values():  # the tests themselves never depend on a gate tag
         for step in shard["steps"]:
             if "pytest" in (step.get("run") or ""):
                 assert "if" not in step
     for os_label in HOST_OSES:
         assert STATIC_JOB in _aggregator(os_label)[1]["needs"]
+
+
+def test_the_g1_step_check_bites_on_a_shell_override_a_joined_run_block_and_a_dropped_or_tolerated_step():
+    """Near miss green (the real workflow), violations red."""
+    import copy
+
+    jobs = _workflow()["jobs"]
+    assert _static_step_problems(jobs) == []
+    steps = lambda j: j[STATIC_JOB]["steps"]  # noqa: E731
+    mypy_win = next(s for s in steps(jobs) if s.get("run") == "python -m mypy --platform win32")
+    for key, value in (("shell", "bash {0}"), ("continue-on-error", True), ("if", "always()")):
+        mutated = copy.deepcopy(jobs)
+        next(s for s in steps(mutated) if s.get("run") == mypy_win["run"])[key] = value
+        assert _static_step_problems(mutated), key
+    joined = copy.deepcopy(jobs)  # the two mypy commands back in one block (the shape that `bash {0}` would mask)
+    darwin = next(s for s in steps(joined) if s.get("run") == "python -m mypy --platform darwin")
+    darwin["run"] = "python -m mypy --platform darwin\npython -m mypy --platform win32"
+    steps(joined).remove(next(s for s in steps(joined) if s.get("run") == "python -m mypy --platform win32"))
+    assert _static_step_problems(joined)
+    dropped = copy.deepcopy(jobs)
+    steps(dropped).remove(next(s for s in steps(dropped) if s.get("run") == "python -m mypy --platform darwin"))
+    assert _static_step_problems(dropped)
+
+
+# The checkout and setup of every backend job (static, shards, verifier) must build the commit under test: an
+# `actions/checkout` `with:` key such as ref, repository, path, sparse-checkout or token could point G1 or a shard at
+# another commit (for example main) while every test stays green.
+BACKEND_JOB_PREFIXES = ("static-checks", "backend-shards-", "backend-verifier-")
+SETUP_STEPS = 3  # checkout, setup-python, install
+
+
+def _checkout_problems(jobs: dict) -> list[str]:
+    problems = []
+    backend = {jid: j for jid, j in jobs.items() if jid.startswith(BACKEND_JOB_PREFIXES)}
+    for jid, job in backend.items():
+        checkouts = [s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout@")]
+        if len(checkouts) != 1 or job["steps"][0] is not checkouts[0]:
+            problems.append(f"{jid}: needs exactly one actions/checkout, as the first step")
+        for step in checkouts:
+            if step.get("with"):
+                problems.append(f"{jid}: actions/checkout has with: {sorted(step['with'])}")
+    reference = _shard_jobs(jobs).get("backend-shards-windows-latest", {}).get("steps", [])[:SETUP_STEPS]
+    for jid in ("static-checks", *sorted(_shard_jobs(jobs)), "backend-verifier-macos-latest"):
+        if backend.get(jid, {}).get("steps", [])[:SETUP_STEPS] != reference:
+            problems.append(f"{jid}: checkout / setup-python / install differ from the shard jobs")
+    return problems
+
+
+def test_no_backend_job_checks_out_anything_but_the_commit_under_test_and_all_set_up_the_same_way():
+    jobs = _workflow()["jobs"]
+    assert _checkout_problems(jobs) == []
+    first = _shard_jobs(jobs)["backend-shards-windows-latest"]["steps"][:SETUP_STEPS]
+    assert [str(s.get("uses") or s.get("name")).split("@")[0] for s in first] == [
+        "actions/checkout", "actions/setup-python", "Install (universal lockfile, ADR-0093)"]
+
+
+def test_the_checkout_check_bites_on_a_ref_a_foreign_install_and_a_missing_checkout():
+    import copy
+
+    jobs = _workflow()["jobs"]
+    assert _checkout_problems(jobs) == []
+    for jid in ("static-checks", "backend-shards-macos-latest", "backend-verifier-macos-latest"):
+        for key, value in (("ref", "main"), ("repository", "someone/else"), ("path", "sub"), ("sparse-checkout", "tests")):
+            mutated = copy.deepcopy(jobs)
+            mutated[jid]["steps"][0]["with"] = {key: value}
+            assert _checkout_problems(mutated), (jid, key)
+    other_python = copy.deepcopy(jobs)
+    other_python["static-checks"]["steps"][1]["with"]["python-version"] = "3.12"
+    assert _checkout_problems(other_python)
+    other_install = copy.deepcopy(jobs)
+    other_install["static-checks"]["steps"][2]["run"] = "python -m pip install ruff"
+    assert _checkout_problems(other_install)
+    missing = copy.deepcopy(jobs)
+    del missing["backend-shards-windows-latest"]["steps"][0]
+    assert _checkout_problems(missing)
 
 
 def test_each_shard_uploads_its_junit_report_for_rebalancing():

@@ -191,6 +191,48 @@ def test_shards_of_a_real_collection_are_disjoint_and_add_up_to_the_whole_run(to
     assert sum(len(f) for f in files) == len(set().union(*files)), "a file is split across shards"
 
 
+def _ci_marker_expression() -> str:
+    """The ``-m`` expression of the shard step in .github/workflows/ci.yml, read from the workflow itself."""
+    import re
+
+    import yaml
+
+    jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))["jobs"]
+    runs = {s["run"] for jid, j in jobs.items() if jid.startswith("backend-shards-") for s in j["steps"]
+            if "--shard" in (s.get("run") or "")}
+    (run,) = runs  # every shard job runs the same command
+    (expr,) = re.findall(r'-m "([^"]+)"', run)
+    return expr
+
+
+@functools.cache
+def _collect_suite(*extra: str) -> str:
+    """stdout of ``pytest --collect-only -q -m <CI's expression> <extra>`` over the WHOLE suite (no file list)."""
+    res = _pytest("--collect-only", "-q", "-m", _ci_marker_expression(), *extra)
+    assert res.returncode == 0, res.stdout[-2000:] + res.stderr[-2000:]
+    return res.stdout
+
+
+@pytest.mark.parametrize("total", [2, 3])
+def test_the_shards_of_the_whole_ci_collection_are_complete_and_disjoint(total: int):
+    """ADR-0115: with the exact marker expression of the CI shard step, over the whole suite (not a sample), the shards
+    of 2 (macOS) and 3 (Windows) together collect every test of the unsharded run, no node id is in two shards and no
+    file is in two shards."""
+    everything = _collected(_collect_suite())
+    assert len(everything) > 1000, len(everything)  # the real suite, not an accidentally narrowed collection
+    parts = []
+    for k in range(1, total + 1):
+        out = _collect_suite("--shard", f"{k}/{total}")
+        assert f"AEOS test shard {k}/{total}: " in out
+        parts.append(_collected(out))
+    assert all(parts), "an empty shard"
+    assert sum(len(p) for p in parts) == len(set().union(*parts)), "a node id is in two shards"
+    assert set().union(*parts) == everything, "a test is in no shard, or a shard has a test the full run lacks"
+    files = [{n.split("::", 1)[0] for n in p} for p in parts]
+    assert sum(len(f) for f in files) == len(set().union(*files)), "a file is in two shards"
+    assert set().union(*files) == {n.split("::", 1)[0] for n in everything}
+
+
 def test_the_environment_variable_selects_the_shard_and_is_not_inherited_by_test_processes(tmp_path: Path):
     """AEOS_TEST_SHARD is read once and removed, so a pytest process that a test starts is never sharded."""
     probe = tmp_path / "aeos_shard_env_probe.py"
@@ -379,3 +421,40 @@ def test_the_weights_script_refuses_to_mix_summed_reports_with_per_os_groups(tmp
         assert exc.value.code == 2, argv
     assert not out.exists()
     assert script.main(["--os", "win", str(good), "-o", str(out), "--check"]) == 0 and not out.exists()
+
+
+def test_an_os_whose_total_is_zero_seconds_is_an_error_naming_it_not_a_traceback(tmp_path: Path, capsys):
+    script = _durations_script()
+    good, idle = tmp_path / "good.xml", tmp_path / "idle.xml"
+    good.write_text(JUNIT, encoding="utf-8")
+    idle.write_text(JUNIT.replace('time="1.25"', 'time="0"').replace('time="0.75"', 'time="0"')
+                    .replace('time="2.5"', 'time="0"').replace('time="1"', 'time="0"'), encoding="utf-8")
+    out = tmp_path / "w.json"
+    assert script.main(["--os", "fast", str(good), "--os", "idle", str(idle), "-o", str(out)]) == 2
+    printed = capsys.readouterr().out
+    printed.encode("ascii")
+    assert "ERROR  idle: total 0 s" in printed and "fast: total" not in printed
+    assert not out.exists()
+    # near miss: the same OS with one timed case is accepted
+    idle.write_text(JUNIT.replace('time="1.25"', 'time="0.01"'), encoding="utf-8")
+    assert script.main(["--os", "fast", str(good), "--os", "idle", str(idle), "-o", str(out), "--check"]) == 0
+
+
+def test_an_os_label_that_is_a_report_file_is_refused_instead_of_dropping_that_report(tmp_path: Path, monkeypatch, capsys):
+    """`--os w1.xml w2.xml --os a1.xml a2.xml` forgot the labels: w1.xml and a1.xml must not become labels."""
+    script = _durations_script()
+    w1, w2, a1, a2 = (tmp_path / n for n in ("w1.xml", "w2.xml", "a1.xml", "a2.xml"))
+    for report in (w1, w2, a1, a2):
+        report.write_text(JUNIT, encoding="utf-8")
+    out = tmp_path / "w.json"
+    with pytest.raises(SystemExit) as exc:
+        script.main(["--os", str(w1), str(w2), "--os", str(a1), str(a2), "-o", str(out)])
+    assert exc.value.code == 2 and "needs a LABEL" in capsys.readouterr().err and not out.exists()
+    monkeypatch.chdir(tmp_path)  # a bare file name that exists is a file, whatever its extension
+    (tmp_path / "windows-latest").write_text("not a label", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        script.main(["--os", "windows-latest", str(w1), "-o", str(out)])
+    assert exc.value.code == 2 and not out.exists()
+    (tmp_path / "windows-latest").unlink()
+    assert script.main(["--os", "windows-latest", str(w1), str(w2), "--os", "macos-latest", str(a1), str(a2),
+                        "-o", str(out), "--check"]) == 0  # near miss: real labels

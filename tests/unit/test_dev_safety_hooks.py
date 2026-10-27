@@ -1032,21 +1032,29 @@ def test_the_shell_scripts_follow_the_conventions():
 SHELLCHECK_CMD = "shellcheck scripts/*.sh scripts/git-hooks/pre-push"
 
 
-def test_ci_runs_shellcheck_in_an_existing_ubuntu_job_and_no_job_or_check_name_changed():
+def test_ci_runs_shellcheck_in_an_existing_ubuntu_job_that_keeps_its_name():
     jobs = yaml.safe_load(CI_TEXT)["jobs"]
     (host,) = [jid for jid, j in jobs.items() if any(s.get("run") == SHELLCHECK_CMD for s in j["steps"])]
     assert jobs[host]["runs-on"] == "ubuntu-latest" and jobs[host]["name"] == "commit subjects [G1]"
     assert (ROOT / "scripts" / "git-hooks" / "pre-push").is_file() and sorted((ROOT / "scripts").glob("*.sh"))
+
+
+def test_no_job_name_changed_since_origin_main_when_it_is_available():
+    """An extra to the committed baseline (tests/unit/test_ci_gates.py JOB_NAMES, which is what guards CI): skipped
+    with a reason where origin/main is not fetched (a pull request's depth-1 merge-ref checkout), never a silent pass."""
+    jobs = yaml.safe_load(CI_TEXT)["jobs"]
     base = subprocess.run(["git", "show", "origin/main:.github/workflows/ci.yml"], cwd=ROOT, capture_output=True,
                           text=True, check=False, env=gates.clean_env())
-    if base.returncode == 0:
-        before = yaml.safe_load(base.stdout)["jobs"]
-        # The shard jobs are not required checks (the `backend [G1,G2] (<os>)` aggregators are) and their names carry
-        # the shard count, which a rebalance changes (ADR-0115 amendment "rebalanced shards"); every other name stays.
-        def names(all_jobs: dict) -> dict[str, str]:
-            return {jid: j["name"] for jid, j in all_jobs.items() if not jid.startswith("backend-shards-")}
+    if base.returncode != 0:
+        pytest.skip("origin/main is not available in this checkout; JOB_NAMES in test_ci_gates.py is the guard here")
+    before = yaml.safe_load(base.stdout)["jobs"]
 
-        assert {jid: n for jid, n in names(jobs).items() if jid in before} == names(before)
+    # The shard jobs are not required checks (the `backend [G1,G2] (<os>)` aggregators are) and their names carry
+    # the shard count, which a rebalance changes (ADR-0115 amendment "rebalanced shards"); every other name stays.
+    def names(all_jobs: dict) -> dict[str, str]:
+        return {jid: j["name"] for jid, j in all_jobs.items() if not jid.startswith("backend-shards-")}
+
+    assert {jid: n for jid, n in names(jobs).items() if jid in before} == names(before)
 
 
 @pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck is not installed on this host (CI runs it on ubuntu)")

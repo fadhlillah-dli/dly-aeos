@@ -66,10 +66,12 @@ jobs:
           python -m pip check
       - name: G1 static — ruff
         run: python -m ruff check backend tests scripts
-      - name: G1 static — mypy for the macOS and Windows code paths (every module, none exempt in pyproject.toml)
-        run: |
-          python -m mypy --platform darwin
-          python -m mypy --platform win32
+      # One command per step and no `shell:` override: the default bash runs with -e, and a `shell: bash {0}` (no -e)
+      # on a step with two commands would let a darwin failure pass when win32 passes (tests/unit/test_ci_gates.py).
+      - name: G1 static — mypy darwin (every module, none exempt in pyproject.toml)
+        run: python -m mypy --platform darwin
+      - name: G1 static — mypy win32 (every module, none exempt in pyproject.toml)
+        run: python -m mypy --platform win32
       - name: G1 static — secret + PII scan (blueprints, contracts, docs)
         run: python scripts/secret_scan.py
 

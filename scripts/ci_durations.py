@@ -102,6 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--root", type=Path, default=ROOT, help="repository root the test files are resolved against")
     ap.add_argument("--check", action="store_true", help="print the summary only, write nothing")
     args = ap.parse_args(argv)
+    for group in args.per_os or []:  # `--os w1.xml w2.xml --os a1.xml a2.xml` would take w1.xml as the label and drop it
+        if group[0].lower().endswith(".xml") or Path(group[0]).is_file():
+            ap.error(f"--os needs a LABEL (for example windows-latest) before its files; {group[0]!r} is a file name")
     groups = {group[0]: [Path(p) for p in group[1:]] for group in args.per_os or []}
     if bool(args.reports) == bool(groups) or len(groups) != len(args.per_os or []) or not all(groups.values()):
         ap.error("give JUnit files (summed), or --os LABEL FILE... once per OS with at least one file; not both")
@@ -112,13 +115,18 @@ def main(argv: list[str] | None = None) -> int:
             per_os = {label: durations(paths, root) for label, paths in groups.items()}
             for label, (per_file, *_rest) in per_os.items():
                 print(f"  {label}: {len(per_file)} test files, {sum(per_file.values()):.1f} s")
+            zero = [label for label, (per_file, *_rest) in per_os.items() if per_file and sum(per_file.values()) <= 0]
+            for label in zero:
+                print(f"ERROR  {label}: total 0 s (no testcase with a time above zero); the OSes cannot be scaled")
+            if zero:
+                return 2
             files = combine_per_os({label: r[0] for label, r in per_os.items()}) if all(r[0] for r in per_os.values()) else {}
             cases = sum(r[1] for r in per_os.values())
             unmapped = sorted({u for r in per_os.values() for u in r[2]})
             bad_time = [b for r in per_os.values() for b in r[3]]
         else:
             files, cases, unmapped, bad_time = durations(args.reports, root)
-    except JUnitParseError as exc:
+    except (JUnitParseError, ValueError) as exc:
         print(f"ERROR  {exc}")
         return 2
     if not files:
