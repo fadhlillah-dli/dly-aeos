@@ -210,6 +210,11 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
   The title reaches the script through an environment variable, never through an expression inside `run:`. The check
   is not in any ruleset: making it required is an owner decision.
 - **Verifier.** `backend verifier [G2] (macos-latest)` runs the real trusted-suite verifier test.
+- **Release evidence.** `.github/workflows/release.yml` (job `release evidence [NO-GATE]`, `ubuntu-latest`) runs only when
+  a tag `vX.Y.Z` is pushed, never on pull requests or on `main`. It builds the evidence of that one commit and uploads it;
+  it never creates a GitHub Release ([ADR-0122](docs/decisions/ADR-0122-release-provenance-in-ci.md), see "Releasing").
+  It is the one job with write scopes, and only `id-token` and `attestations` for the provenance attestation
+  (`tests/unit/test_delivery_ci_secrets.py` holds the allow-list).
 - **Required names are aggregators.** The ruleset on `main` requires `backend [G1,G2] (<os>)` for each
   OS. These are small jobs on `ubuntu-latest` that wait for the static job and every backend job of their OS. They pass only
   when each of those jobs succeeded: a failed, skipped or cancelled job fails them. The other required
@@ -362,4 +367,21 @@ to merge stays the owner's (see "Rules for every change"); this is how it is car
    has `## [X.Y.Z]`, that `changelog.d/` holds only its README, that `docs/releases/vX.Y.Z.md` exists and that the
    tagged commit is an ancestor of `origin/main`. Its last line is `RELEASE_CHECK: PASS` or `RELEASE_CHECK: FAIL`;
    fix every FAIL line (delete the tag first if the commit is wrong) before step 5.
-5. Push the tag and publish the GitHub Release with the release notes as its body.
+5. Push the tag: `git push origin vX.Y.Z`. Release tags are protected by the v* tag ruleset. The push starts
+   `release evidence [NO-GATE]` ([.github/workflows/release.yml](.github/workflows/release.yml),
+   [ADR-0122](docs/decisions/ADR-0122-release-provenance-in-ci.md)). It runs `release_check.py --tag` again on the tagged
+   commit, then requires CI to be GREEN for that commit (`scripts/ci_status.py --required-only --wait`; PENDING, RED,
+   INFRA or TIMEOUT stop it and there is no override). Only then it builds `dist/dly-aeos-src-X.Y.Z.zip` (`git archive`,
+   prefix `dly-aeos-X.Y.Z/`), `dist/sbom.cdx.json` (the supply-chain job's SBOM command), `dist/SHA256SUMS` and a
+   build-provenance attestation of each file, and uploads them as the workflow artifact `release-evidence-vX.Y.Z`
+   (kept 90 days). CI never creates or publishes a GitHub Release.
+6. Wait for that run (the tagged commit is `git rev-list -n 1 vX.Y.Z`) with
+   `python scripts/ci_status.py --sha <tagged commit> --require "release evidence [NO-GATE]" --wait --deadline 25`
+   (last line `CI: GREEN <sha>`), then download and verify the evidence:
+   `gh run download --name release-evidence-vX.Y.Z --dir dist` and, for each file,
+   `gh attestation verify dist/dly-aeos-src-X.Y.Z.zip --repo fadhlillah-dli/dly-aeos`.
+7. `aeos ops release` stays the release authority ([docs/OPERATIONS.md](docs/OPERATIONS.md), "Controller releases").
+   After `aeos ops release promote`, the owner (or the delegating session on the owner's explicit instruction) creates
+   the GitHub Release as a draft from the verified files:
+   `gh release create vX.Y.Z --draft --notes-file docs/releases/vX.Y.Z.md dist/dly-aeos-src-X.Y.Z.zip dist/sbom.cdx.json dist/SHA256SUMS`,
+   and publishes it after reading it.
