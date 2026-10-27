@@ -72,8 +72,9 @@ for example to debug a single test.
 `scripts/gates.py` runs the static gates above for you (stdlib only; use the `.venv` Python). It prints one
 line per gate with PASS, FAIL or SKIPPED and the seconds, and exits 1 when a gate fails.
 
-The plain run covers ruff, mypy for darwin and win32, the secret scan, the commit subjects and the frontend gates if
-`frontend/` changed. `--tests` also runs the backend suite (pytest `-n logical` when xdist is installed). `--json`
+The plain run covers ruff, mypy for darwin and win32, the secret scan, `shellcheck` and `actionlint` (each SKIPPED
+with the reason when it is not installed, see "Install actionlint and shellcheck" below), the commit subjects and the
+frontend gates if `frontend/` changed. `--tests` also runs the backend suite (pytest `-n logical` when xdist is installed). `--json`
 prints machine-readable results.
 
 ```bash
@@ -92,12 +93,14 @@ The run also does what CI cannot do for you, and says what it did not do:
   conflict is a FAIL that lists the files: pushing such a branch costs a conflict-resolution commit and a full CI
   re-run. Any other failure of that command (for example unrelated histories, exit 128) is a FAIL with git's message.
   It needs git 2.38 or newer; only with an older git (usage error, exit 129) is the gate SKIPPED with that reason.
-- **`NOT RUN: <job> (<reason>)`.** One line for every job of `ci.yml` that this run does not execute (the job ids
-  are read from the workflow, so a new job shows up by itself): the backend shards, the verifier, bootstrap,
-  browser e2e, the supply-chain report and the aggregators. `static-checks` counts as run when ruff, both mypy
-  platforms and the secret scan ran here, and `commit-subjects` only when both of its steps ran here: the commit-subject gate and the `shellcheck` gate (SKIPPED when shellcheck
-  is not installed; then the job stays NOT RUN). CI uses the shellcheck that ubuntu-latest ships (0.9.x), so a newer
-  local one can accept what CI rejects. A local PASS is therefore never a CI PASS.
+- **`NOT RUN: <job> (<reason>)`.** One line for every job of every workflow that runs on `pull_request` or `push` that this run does not
+  execute (the job ids of `ci.yml` and the job names of the other workflows are read from the files, so a new job shows
+  up by itself): the backend shards, the verifier, bootstrap, browser e2e, the supply-chain report, the aggregators
+  and `pr title [G1]` (checked only in CI). `static-checks` counts as run only when ruff, both mypy
+  platforms, the secret scan, `shellcheck`, `actionlint` and the actionlint bite control all ran here (a SKIPPED one,
+  for example without the tool installed, keeps the job NOT RUN); `commit-subjects` counts as run when the
+  commit-subject gate ran. CI uses the shellcheck that ubuntu-latest ships (0.9.x) and a pinned actionlint, so a
+  different local version can accept what CI rejects. A local PASS is therefore never a CI PASS.
 - **One verdict line, last:** `GATES: PASS|FAIL (<n> run, <m> failed, <k> not run)`; "not run" counts SKIPPED gates
   and the NOT RUN jobs. `--report path.json` writes the same verdict, every result and the NOT RUN list to a file,
   for tools that hide lines of long output. With `--json` the JSON is the only thing on stdout and the verdict goes
@@ -106,6 +109,24 @@ The run also does what CI cannot do for you, and says what it did not do:
   path and version, whether it is the project venv, whether pytest and pytest-xdist import, the node, npm and git
   versions, `core.hooksPath`, the shell and whether `gh auth status` succeeds (only the exit status is used; no token
   is read or printed). `--no-facts` skips it.
+
+#### Install actionlint and shellcheck
+
+CI lints the workflows with `actionlint`, which lints the `run:` blocks with `shellcheck`. Locally both are optional:
+without them `scripts/gates.py` SKIPS the `shellcheck`, `actionlint` and `actionlint-control` gates (never PASS) and
+the `static-checks` job stays NOT RUN.
+
+- **macOS:** `brew install actionlint shellcheck`.
+- **Windows:** the Scoop main bucket and winget have manifests for both (`scoop install actionlint shellcheck`;
+  `winget install rhysd.actionlint koalaman.shellcheck`). That the packages exist is checked; installing them on the
+  owner's Windows machine is NOT-PROVEN.
+- **Versions:** CI downloads actionlint v1.7.12 from its release page and compares the tarball with a SHA-256 pinned in
+  `ci.yml` before it extracts anything (a mismatch fails the step); shellcheck is the one ubuntu-latest ships. Your
+  local version can differ, so a local PASS or FAIL is a hint and CI is the proof. Bump the pinned version and its
+  checksum together (take the digest from the release's `checksums.txt`).
+- **What runs:** `actionlint` (no arguments) lints every file of `.github/workflows`. The bite control lints
+  `tests/fixtures/actionlint/bad-workflow.yml`, which must fail with the `matrix.oss` finding, and
+  `near-miss-workflow.yml`, which must pass; the fixtures live outside `.github/workflows` on purpose.
 
 To run the static gates automatically before every push, enable the hook once in each clone:
 
@@ -171,12 +192,23 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
   named `backend shard K/N [G2] (<os>)` and each runs `pytest -n logical --shard K/N`. Every shard is the same job
   and uploads its JUnit XML as the artifact `junit-backend-<os>-shard-<k>`.
 - **Static checks.** `static checks [G1] (ubuntu-latest)` runs ruff, mypy for `--platform darwin` and
-  `--platform win32` and the secret scan once for all host OSes. The three required `backend [G1,G2] (<os>)`
-  aggregators need it, so a failing static check fails them all.
+  `--platform win32`, the secret scan, `shellcheck` over the shell scripts (`scripts/*.sh`,
+  `scripts/git-hooks/pre-push`) and `actionlint` over the workflows once for all host OSes, on pull requests and on
+  `main`. The actionlint release is pinned by version and SHA-256, and a bite control lints a known-bad and a
+  near-miss fixture on every run. The three required `backend [G1,G2] (<os>)` aggregators need the job, so a failing
+  static check fails them all.
 - **Commit subjects.** `commit subjects [G1]` runs only on pull requests (`ubuntu-latest`, full history) and
   checks the subjects and the no-attribution rule (message, author and committer e-mail, merge commits
-  included) of the pull request's commits with `scripts/commit_subject.py`, and runs `shellcheck` over the shell
-  scripts (`scripts/*.sh`, `scripts/git-hooks/pre-push`).
+  included) of the pull request's commits with `scripts/commit_subject.py`. It is the one job that differs between
+  a pull request and a push to `main` (`tests/unit/test_ci_gates.py` lists it as the only job or step whose `if:`
+  reads the `github` context: event name, event payload, ref, head or base ref). A new check with such a condition
+  fails the test, so it cannot silently skip `main` that way; a condition that reaches the event by another route,
+  for example through a `needs` output or an `env` value, is not caught and needs a human look.
+- **Pull request title.** `.github/workflows/pr-title.yml` (job `pr title [G1]`, `ubuntu-latest`, read-only token) checks
+  the title with `python scripts/commit_subject.py --subject "<title>"`: the title becomes the merge-commit body and,
+  with a squash merge, the subject on `main`, so it follows the same Conventional Commits and no-attribution rules.
+  The title reaches the script through an environment variable, never through an expression inside `run:`. The check
+  is not in any ruleset: making it required is an owner decision.
 - **Verifier.** `backend verifier [G2] (macos-latest)` runs the real trusted-suite verifier test.
 - **Required names are aggregators.** The ruleset on `main` requires `backend [G1,G2] (<os>)` for each
   OS. These are small jobs on `ubuntu-latest` that wait for the static job and every backend job of their OS. They pass only

@@ -17,8 +17,10 @@ node_modules, the commit-message check without a base) is SKIPPED with its reaso
 mypy is a FAIL.
 Exit code 1 when any gate FAILs.
 
-It also runs CI's shellcheck step when shellcheck is installed (SKIPPED with the reason otherwise; the version may differ
-from CI's, so the commit-subjects job counts as run only when both its gates ran).
+It also runs CI's shellcheck, actionlint and actionlint bite-control steps (all in the static-checks job) when the tools
+are installed (each SKIPPED with the reason otherwise; the versions may differ from CI's, which pins actionlint, so
+the static-checks job counts as run only when all of its gates ran). CI's "Install actionlint" step has no local
+equivalent: locally the tool comes from your package manager (CONTRIBUTING.md).
 
 Beyond the CI gates it runs checks CI cannot make for you: a merge-conflict gate (`git merge-tree --write-tree
 origin/main <tip>`: a branch that conflicts needs a merge commit and a full CI re-run), and in hook mode, before
@@ -26,7 +28,8 @@ any gate, a wrong-commit guard (a detached HEAD whose commits the pushed refs do
 is not the HEAD of the current branch) and an identity guard (every pushed commit is authored and committed by this
 repository's `git config user.email`, with no AI identity or attribution: aeos.core.commit_identity).
 
-The output ends with one `NOT RUN: <job> (<reason>)` line for every CI job this run does not execute, then exactly
+The output ends with one `NOT RUN: <job> (<reason>)` line for every CI job this run does not execute (every job of
+every workflow that runs on pull_request or push, ci.yml and pr-title.yml alike), then exactly
 one verdict line `GATES: PASS|FAIL (<n> run, <m> failed, <k> not run)` ("not run" counts SKIPPED gates and those
 CI jobs), so a local PASS never reads as a CI PASS. `--report` writes the same facts to a file for tools that hide
 output lines. Before everything, scripts/preflight.py --facts prints environment facts (informational only)."""
@@ -65,7 +68,8 @@ from aeos.core.commit_identity import (  # noqa: E402
 SCRIPTS = Path(__file__).resolve().parent
 COMMIT_SUBJECT = SCRIPTS / "commit_subject.py"
 PREFLIGHT = SCRIPTS / "preflight.py"
-CI_WORKFLOW = Path(".github") / "workflows" / "ci.yml"
+WORKFLOWS_DIR = Path(".github") / "workflows"
+CI_WORKFLOW = WORKFLOWS_DIR / "ci.yml"
 
 PASS, FAIL, SKIPPED = "PASS", "FAIL", "SKIPPED"
 ZERO_SHA_CHARS = frozenset("0")
@@ -78,6 +82,15 @@ GATE_TIMEOUT_SECONDS = 1800
 AMEND_EXEC = (f"git merge-base --is-ancestor HEAD {DEFAULT_BASE} || "
               "git commit --amend --no-edit --reset-author --allow-empty")
 SHELLCHECK_COMMAND = "shellcheck scripts/*.sh scripts/git-hooks/pre-push"  # the CI step, word for word
+ACTIONLINT = "actionlint"
+ACTIONLINT_CONTROL = "actionlint-control"
+ACTIONLINT_COMMAND = "actionlint"  # the CI step, word for word (no arguments: every file of .github/workflows)
+# The bite control of CI's static-checks job, mirrored: the bad fixture must exit 1 and name the property, the near
+# miss must pass. tests/unit/test_ci_gates.py checks that the CI step carries the same paths and finding text.
+ACTIONLINT_BAD_FIXTURE = "tests/fixtures/actionlint/bad-workflow.yml"
+ACTIONLINT_NEAR_MISS_FIXTURE = "tests/fixtures/actionlint/near-miss-workflow.yml"
+ACTIONLINT_FINDING = 'property "oss" is not defined in object type'
+ACTIONLINT_PINNED_VERSION = "1.7.12"  # what CI runs; CONTRIBUTING.md says a local version may differ
 # Variables git sets for hooks. A gate must find its repository from its own cwd, not from the pushing clone.
 SCRUBBED_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
 
@@ -226,13 +239,56 @@ def shell_files(root: Path) -> list[str]:
 
 
 def shellcheck_result(root: Path, env: Mapping[str, str], ref: str = "") -> Result:
-    """CI's shellcheck step (the commit-subjects job). SKIPPED with the reason when shellcheck is not installed or
+    """CI's shellcheck step (the static-checks job). SKIPPED with the reason when shellcheck is not installed or
     the checkout has no shell scripts: then that CI step stays NOT RUN. The version of shellcheck matters: CI uses
     the one ubuntu-latest ships (0.9.x at the time of writing); a newer local one may accept what CI rejects."""
     files = shell_files(root)
     if not files:
         return Result(SHELLCHECK, SKIPPED, 0.0, "no shell scripts in this checkout", SHELLCHECK_COMMAND, ref)
     return run_gate(Gate(SHELLCHECK, ("shellcheck", *files)), root, env, ref)
+
+
+def actionlint_result(root: Path, env: Mapping[str, str], ref: str = "") -> Result:
+    """CI's actionlint step (the static-checks job): `actionlint` with no arguments lints every workflow file.
+    SKIPPED with the reason, never PASS, when actionlint is not installed. Without shellcheck on PATH actionlint
+    skips the `run:` blocks, so a PASS here can be weaker than CI's; the version may differ from CI's pin."""
+    result = run_gate(Gate(ACTIONLINT, (ACTIONLINT_COMMAND,)), root, env, ref)
+    if result.status == SKIPPED:
+        result.detail = (f"actionlint is not on PATH (CI runs v{ACTIONLINT_PINNED_VERSION}; install it as "
+                         "CONTRIBUTING.md says to lint the workflows here)")
+    return result
+
+
+def actionlint_control_result(root: Path, env: Mapping[str, str], ref: str = "") -> Result:
+    """CI's bite control of actionlint: the bad fixture must exit 1 with the finding, the near-miss fixture must exit
+    0. FAIL when actionlint accepts the bad fixture (it stopped finding things). SKIPPED when it is not installed."""
+    bad = Gate(ACTIONLINT_CONTROL, (ACTIONLINT_COMMAND, ACTIONLINT_BAD_FIXTURE))
+    near = Gate(ACTIONLINT_CONTROL, (ACTIONLINT_COMMAND, ACTIONLINT_NEAR_MISS_FIXTURE))
+    command = f"{bad.command} (must fail); {near.command} (must pass)"
+    argv_bad, argv_near = resolve_argv(bad), resolve_argv(near)
+    if argv_bad is None or argv_near is None:
+        return Result(ACTIONLINT_CONTROL, SKIPPED, 0.0, f"actionlint is not on PATH (CI runs v{ACTIONLINT_PINNED_VERSION})",
+                      command, ref)
+    started = time.perf_counter()
+    try:
+        red = _run(argv_bad, root, env)
+        green = _run(argv_near, root, env)
+    except subprocess.TimeoutExpired:
+        return Result(ACTIONLINT_CONTROL, FAIL, time.perf_counter() - started,
+                      f"timed out after {GATE_TIMEOUT_SECONDS} s", command, ref)
+    except OSError as exc:
+        return Result(ACTIONLINT_CONTROL, FAIL, time.perf_counter() - started, f"could not start: {exc}", command, ref)
+    seconds = time.perf_counter() - started
+    problems = []
+    if red.returncode != 1:
+        problems.append(f"the bad fixture exited {red.returncode}, expected 1 (problems found)")
+    if ACTIONLINT_FINDING not in red.stdout + red.stderr:
+        problems.append(f"the output for the bad fixture lacks the finding: {ACTIONLINT_FINDING}")
+    if green.returncode != 0:
+        problems.append(f"the near-miss fixture exited {green.returncode}, expected 0\n{_tail(green.stdout + green.stderr)}")
+    if problems:
+        return Result(ACTIONLINT_CONTROL, FAIL, seconds, "\n".join(problems), command, ref)
+    return Result(ACTIONLINT_CONTROL, PASS, seconds, "", command, ref)
 
 
 def ref_exists(root: Path, ref: str, env: Mapping[str, str]) -> bool:
@@ -523,6 +579,8 @@ def run_hook(stdin_text: str, root: Path = ROOT) -> list[Result]:
             with detached_worktree(root, ref.local_sha, env) as tmp:
                 results.extend(run_gate(g, tmp, env, label) for g in STATIC_GATES)
                 results.append(shellcheck_result(tmp, env, label))
+                results.append(actionlint_result(tmp, env, label))
+                results.append(actionlint_control_result(tmp, env, label))
                 if base:
                     results.append(run_gate(commit_subject_gate(base, ref.local_sha), tmp, env, label))
                 else:
@@ -542,6 +600,8 @@ def run_local(args: argparse.Namespace, root: Path = ROOT) -> list[Result]:
     results = [merge_conflict_result(root, env)]
     results.extend(run_gate(g, root, env) for g in STATIC_GATES)
     results.append(shellcheck_result(root, env))
+    results.append(actionlint_result(root, env))
+    results.append(actionlint_control_result(root, env))
     if base:
         results.append(run_gate(commit_subject_gate(base, "HEAD"), root, env))
     else:
@@ -554,9 +614,11 @@ def run_local(args: argparse.Namespace, root: Path = ROOT) -> list[Result]:
 
 
 # ------------------------------------------------------------------ what this run did not do
-# Reasons by job id prefix, first match wins. Job ids come from the `jobs:` keys of ci.yml, so a job added to the
-# workflow shows up as NOT RUN ("no local equivalent") without anyone editing this file.
+# Reasons by job label prefix, first match wins. The labels come from the workflows: the `jobs:` keys of ci.yml, and
+# the `name:` of a job of any other workflow that runs on pull_request or push (for example "pr title [G1]"). A job
+# added to a workflow shows up as NOT RUN ("no local equivalent") without anyone editing this file.
 NOT_RUN_REASONS: tuple[tuple[str, str], ...] = (
+    ("pr title", "checks the pull request title; runs only in CI"),
     ("backend-shards-", "test shards run on that CI host; locally only the G1 static gates run, and --tests runs the "
                         "suite once on this host (Windows and Intel macOS stay NOT-PROVEN)"),
     ("backend-verifier-", "the real trusted-suite verifier test is not part of a local run"),
@@ -567,21 +629,18 @@ NOT_RUN_REASONS: tuple[tuple[str, str], ...] = (
     ("supply-chain", "report-only SBOM, licence, vulnerability and SAST scans; not run locally"),
 )
 # job id -> the gates that run it here. A job counts as run only when EVERY one of its gates PASSed or FAILed: the
-# commit-subjects job also has the shellcheck step, so a run without shellcheck must still say NOT RUN for it. The
-# static-checks job is exactly the STATIC_GATES (a SKIPPED one keeps it NOT RUN).
+# static-checks job also has the shellcheck, actionlint and actionlint bite-control steps, so a run without those
+# tools must still say NOT RUN for it (a SKIPPED gate keeps the job NOT RUN). Its "Install actionlint" step is not a
+# gate: the local tool comes from the package manager.
 LOCALLY_RUN_JOBS: dict[str, tuple[str, ...]] = {
-    "commit-subjects": ("commit-subjects", SHELLCHECK),
-    "static-checks": tuple(g.name for g in STATIC_GATES),
+    "commit-subjects": ("commit-subjects",),
+    "static-checks": (*(g.name for g in STATIC_GATES), SHELLCHECK, ACTIONLINT, ACTIONLINT_CONTROL),
 }
 
 
-def ci_job_ids(root: Path) -> list[str]:
-    """The job ids of ci.yml (the keys under `jobs:`), read without a YAML library."""
-    try:
-        text = (root / CI_WORKFLOW).read_text(encoding="utf-8")
-    except OSError:
-        return []
-    ids: list[str] = []
+def _job_blocks(text: str) -> list[tuple[str, str | None]]:
+    """(job id, literal `name:` or None) for each job under the top-level `jobs:` key, read without a YAML library."""
+    jobs: list[tuple[str, str | None]] = []
     in_jobs = False
     for line in text.splitlines():
         if re.match(r"^jobs:\s*(#.*)?$", line):
@@ -593,18 +652,72 @@ def ci_job_ids(root: Path) -> list[str]:
             break
         match = re.match(r"^  ([A-Za-z_][\w-]*):\s*(#.*)?$", line)
         if match:
-            ids.append(match.group(1))
-    return ids
+            jobs.append((match.group(1), None))
+            continue
+        named = re.match(r"^    name:\s*(.*?)\s*$", line)
+        if named and jobs and jobs[-1][1] is None:
+            value = re.sub(r"\s+#.*$", "", named.group(1)).strip().strip("'\"")
+            if value and "${{" not in value:
+                jobs[-1] = (jobs[-1][0], value)
+    return jobs
+
+
+def _workflow_events(text: str) -> set[str]:
+    """The event names of the top-level `on:` key (a scalar, a flow list, a block list or a mapping)."""
+    events: set[str] = set()
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        inline = re.match(r"^(?:on|'on'|\"on\"):[ \t]*(.*?)\s*$", line)
+        if not inline:
+            continue
+        rest = re.sub(r"\s*#.*$", "", inline.group(1))
+        if rest:
+            return set(re.findall(r"[A-Za-z_]+", rest))
+        for follow in lines[i + 1:]:
+            if follow and not follow[0].isspace() and not follow.startswith("#"):
+                break
+            key = re.match(r"^  (?:- *)?([A-Za-z_]+)\b", follow)
+            if key:
+                events.add(key.group(1))
+        break
+    return events
+
+
+def ci_job_ids(root: Path) -> list[str]:
+    """The job ids of ci.yml (the keys under `jobs:`), read without a YAML library."""
+    try:
+        text = (root / CI_WORKFLOW).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [jid for jid, _ in _job_blocks(text)]
+
+
+def other_workflow_jobs(root: Path) -> list[str]:
+    """Labels of the jobs of every workflow besides ci.yml that runs on pull_request or push: the job's literal
+    `name:` (the check name CI shows, for example "pr title [G1]"), else its id."""
+    labels: list[str] = []
+    try:
+        files = sorted(p for p in (root / WORKFLOWS_DIR).glob("*.y*ml") if p.name != CI_WORKFLOW.name)
+    except OSError:
+        return []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if _workflow_events(text) & {"push", "pull_request"}:
+            labels += [name or jid for jid, name in _job_blocks(text)]
+    return labels
 
 
 def not_run_jobs(results: Sequence[Result], root: Path = ROOT) -> list[tuple[str, str]]:
-    """(job id, reason) for every CI job of ci.yml that this run did not execute."""
+    """(job label, reason) for every CI job of a push or pull_request workflow that this run did not execute."""
     ids = ci_job_ids(root)
     if not ids:
         return [("all CI jobs", f"{CI_WORKFLOW.as_posix()} was not found or has no jobs")]
     ran = {r.gate for r in results if r.status in (PASS, FAIL)}
     out: list[tuple[str, str]] = []
-    for job in ids:
+    for job in [*ids, *other_workflow_jobs(root)]:
         needed = LOCALLY_RUN_JOBS.get(job)
         if needed and all(g in ran for g in needed):
             continue

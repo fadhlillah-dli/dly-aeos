@@ -4,6 +4,7 @@ attribution rules are the repository's own guard, backend/aeos/core/attribution.
 ADR-0121), not a copy of them. Stdlib only, ASCII-only output.
 
     python scripts/commit_subject.py <base>..<head>      exit 0 ok, 1 violations, 2 usage or git error
+    python scripts/commit_subject.py --subject "<text>"  one subject, for example a pull request title (no git)
 
 Merge commits (two or more parents) are exempt from the subject format but not from the attribution check (GitHub
 writes their message). Commits at or below BASELINE are never checked. `Revert "<inner>"` and `Reapply "<inner>"`
@@ -115,15 +116,37 @@ def commits(range_spec: str, cwd: str | None = None, baseline: str | None = BASE
     return [(c.sha, c.subject) for c in log(range_spec, cwd, baseline) if not c.is_merge]
 
 
+def message_attribution_reason(message: str) -> str | None:
+    """Why the text carries an AI attribution (None when it does not): the repository's guard
+    (aeos.core.attribution) decides, its findings are passed on as they are."""
+    findings = find_ai_attribution(message)
+    if not findings:
+        return None
+    shown = "; ".join(f.describe() for f in findings[:MAX_FINDINGS_SHOWN])
+    more = f" (+{len(findings) - MAX_FINDINGS_SHOWN} more)" if len(findings) > MAX_FINDINGS_SHOWN else ""
+    return f"AI attribution in the message - {shown}{more}"
+
+
+def subject_reasons(subject: str) -> list[str]:
+    """Why a lone subject (a pull request title: it becomes the merge-commit body and the squash subject) does not
+    comply: the same subject format and the same attribution rules as a commit, without author or committer."""
+    reasons = []
+    subject_reason = check_subject(subject)
+    if subject_reason:
+        reasons.append(subject_reason)
+    attribution = message_attribution_reason(subject)
+    if attribution:
+        reasons.append(attribution)
+    return reasons
+
+
 def attribution_reasons(commit: Commit) -> list[str]:
     """Why the message, author or committer of the commit carries an AI attribution (empty when it does not).
     The judgement is the repository's guard (aeos.core.attribution); its reasons are passed on as they are."""
     reasons = []
-    findings = find_ai_attribution(commit.message)
-    if findings:
-        shown = "; ".join(f.describe() for f in findings[:MAX_FINDINGS_SHOWN])
-        more = f" (+{len(findings) - MAX_FINDINGS_SHOWN} more)" if len(findings) > MAX_FINDINGS_SHOWN else ""
-        reasons.append(f"AI attribution in the message - {shown}{more}")
+    message_reason = message_attribution_reason(commit.message)
+    if message_reason:
+        reasons.append(message_reason)
     for role, (name, email) in (("author", commit.author), ("committer", commit.committer)):
         problem = ai_identity_problem(name, email)
         if problem:
@@ -145,12 +168,29 @@ def violations(range_spec: str, cwd: str | None = None, baseline: str | None = B
     return out
 
 
+def check_one_subject(subject: str) -> int:
+    reasons = subject_reasons(subject)
+    if reasons:
+        # A title with an attribution is not echoed (the reasons quote it with addresses redacted).
+        shown = "(withheld)" if message_attribution_reason(subject) else repr(subject)
+        print(ascii_text(f"commit-subject: FAIL {shown}: {'; '.join(reasons)}"))
+        return 1
+    print("commit-subject: 1 subject checked, it complies")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check commit subjects (Conventional Commits) and the no-attribution rule.")
-    parser.add_argument("range", help="<base>..<head>")
+    parser.add_argument("range", nargs="?", help="<base>..<head>")
+    parser.add_argument("--subject", metavar="TEXT",
+                        help="check this one subject (a pull request title) instead of a commit range")
     parser.add_argument("--baseline", default=BASELINE,
                         help="commits at or below this sha are not checked ('none' checks everything)")
     args = parser.parse_args(argv)
+    if (args.range is None) == (args.subject is None):
+        parser.error("give either <base>..<head> or --subject TEXT, not both and not neither")  # exits 2
+    if args.subject is not None:
+        return check_one_subject(args.subject)
     baseline = None if args.baseline.lower() == "none" else args.baseline
     try:
         bad = violations(args.range, baseline=baseline)

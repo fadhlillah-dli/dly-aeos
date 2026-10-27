@@ -1,0 +1,34 @@
+# Pull request title gate. The title becomes the merge-commit body and, with a squash merge, the commit subject on
+# main, so it has to follow the same rules as a commit subject: a Conventional Commits first line of at most 100
+# characters and no AI attribution (scripts/commit_subject.py --subject, which reuses the checks of the commit-subjects
+# job in ci.yml and backend/aeos/core/attribution.py). This workflow is a protected path (AGENTS.md).
+#
+# The title is untrusted text. It reaches the script through an environment variable only, never through an
+# expression inside `run:` (script injection); tests/unit/test_ci_gates.py checks that. The check name,
+# "pr title [G1]", is not a required check: adding it to a ruleset is an owner decision.
+name: pr-title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+# An edit of the title cancels the run for the previous title of the same pull request.
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    name: pr title [G1]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: G1 static — pull request title (Conventional Commits subject, no attribution)
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python3 scripts/commit_subject.py --subject="$PR_TITLE"
