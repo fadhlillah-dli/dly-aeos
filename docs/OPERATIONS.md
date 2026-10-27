@@ -39,6 +39,85 @@ MCI controls and evidence contracts (§34) are derived MCI content too: they go 
 only with an owner POLICY decision on `mci_pack_mapping/<pack>` bound to the hash shown at `/decisions`.
 Compliance is never claimed (NOT-PROVEN).
 
+## Environment variables
+
+Every `AEOS_*` variable that the code in `backend/` and `scripts/` reads. The "Source" column says how the code takes
+it, and only the first kind goes through `Settings`:
+
+* `Settings field`: a field of `Settings` (`backend/aeos/core/config.py`). `Settings` takes it from the environment
+  first, then from the same key (lower case, without the prefix) in `aeos.yaml`, then from its default. A list or
+  mapping in the environment is JSON.
+* `direct read`: the module named in "Read by" reads `os.environ` itself. No `aeos.yaml` key, no `Settings`
+  validation, no `Settings` default; the "Default" column is what that module does when the variable is unset.
+  `AEOS_CONFIG` is of this kind: it locates `aeos.yaml` itself, so it cannot come from that file.
+* `script`: a shell, PowerShell or Python script under `scripts/` reads it from the environment only.
+
+A row with several sources (for example `Settings field + direct read`) is taken by each reader in its own way; the
+"Purpose" column says which one wins. The names are listed, never a value: secrets are not configuration and never
+go in an environment variable of this list (OpenBao and the OS credential store only, §26).
+`tests/unit/test_env_contract.py` fails when the code reads a variable that has no row here, when a row names a reader
+that does not read it, when its "Source" does not match its readers, and when a row is read by nothing.
+
+| Variable | Source | Read by | Default | Purpose |
+|---|---|---|---|---|
+| `AEOS_CANDIDATE_BUILD` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a candidate build. If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it. Reserved: no code in this repository sets it today, a worker or candidate runtime that carries it must set it itself |
+| `AEOS_CAPABILITY_TOKEN` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a process that holds a worker capability token (the name is listed, never a value). If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it. Reserved: no code in this repository sets it today, a worker or candidate runtime that carries it must set it itself |
+| `AEOS_CLAUDE_BINARY` | Settings field | `Settings` | unset (the `claude` binary on `PATH`) | Path of the official `claude` binary; when set it is the only candidate (an unusable path is reported, `PATH` is not tried) |
+| `AEOS_COMMIT_AUTHOR_EMAIL` | Settings field | `Settings` | unset | Fallback commit e-mail for the **github** identity only; `commit_identities` wins (see "Commit identity and no AI attribution") |
+| `AEOS_COMMIT_AUTHOR_NAME` | Settings field | `Settings` | unset | Fallback commit name for the **github** identity only |
+| `AEOS_COMMIT_IDENTITIES` | Settings field | `Settings` | unset | JSON `{"github": {"name", "email"}, "bitbucket": {...}}`, the commit identity per code host; only in local configuration, never committed |
+| `AEOS_CONFIG` | direct read | `backend/aeos/core/config.py` | `<config dir>/aeos.yaml` | Path of the non-secret YAML settings file |
+| `AEOS_CONFLUENCE_PROJECTS_PARENT_ID` | Settings field | `Settings` | unset | Declared field that no code reads for its value (it only enters the settings hash); setting it changes no behaviour. The Confluence parent the publisher uses is the `CONFLUENCE_PROJECTS_PARENT_ID` key of the project integration config (`aeos.publisher.providers.atlassian`, §04) |
+| `AEOS_DATA_DIR` | Settings field + script | `Settings`, `scripts/dev.ps1`, `scripts/dev.sh` | OS default (see "Data locations") | Data root; must be absolute and outside the checkout. The dev scripts set a separate dev profile when it is unset |
+| `AEOS_DEV_FRONTEND_PORT` | Settings field | `Settings` | `5173` | Port of the Vite dev server whose origin is allowed in dev mode; the dev scripts set it |
+| `AEOS_DEV_MODE` | Settings field | `Settings` | `false` | Dev mode: allow the Vite origin, enable API docs. `aeos serve --dev` sets it for its own process |
+| `AEOS_ENVIRONMENT` | Settings field | `Settings` | `local` | Environment label shown in the Control Center header |
+| `AEOS_EXTRA_ALLOWED_ORIGINS` | Settings field | `Settings` | empty (JSON list) | Extra allowed origins; only loopback `http` origins with a port are accepted |
+| `AEOS_GATES_PYTHON` | script | `scripts/git-hooks/pre-push`, `scripts/run_tests.sh` | unset (the `.venv` of the checkout or of the main checkout, then `python3` or `python` on `PATH` with a warning) | Python interpreter for the pre-push gates and `scripts/run_tests.sh`; it must be an existing executable file |
+| `AEOS_HOST` | Settings field | `Settings` | `127.0.0.1` | Bind address; loopback only (`127.0.0.1`, `::1`, `localhost`), anything else refuses to start |
+| `AEOS_KEYRING_SERVICE` | Settings field + script | `Settings`, `scripts/dev.ps1`, `scripts/dev.sh` | `dly-aeos` | OS credential store service name; the dev scripts use `dly-aeos-dev`, and `aeos serve --dev` refuses the default one unless `--dev-with-real-credentials` is passed |
+| `AEOS_LOGIN_LOCKOUT_SECONDS` | Settings field | `Settings` | `300` | Window in seconds in which failed logins are counted; a login stays throttled while the failures in the window are at the limit |
+| `AEOS_LOGIN_MAX_FAILURES` | Settings field | `Settings` | `5` | Failed logins of one username within the window before it is throttled; one client IP is throttled at four times this |
+| `AEOS_MAX_ARCHIVE_MEMBERS` | Settings field | `Settings` | `2000` | Most members accepted in an uploaded archive |
+| `AEOS_MAX_UPLOAD_BYTES` | Settings field | `Settings` | `26214400` (25 MiB) | Largest accepted upload |
+| `AEOS_MCI_SOURCE_PATH` | Settings field | `Settings` | unset (`<data>/policy/canonical/<file>`) | Absolute path of the owner-supplied canonical MCI_V2 source; a path inside the repository is refused |
+| `AEOS_MMDC_BINARY` | Settings field + direct read | `Settings`, `backend/aeos/docs_engine/visuals.py` | unset (`mmdc` on `PATH`) | Path of the optional mermaid-cli renderer; without it visuals stay "pending". Only the environment variable is read (`visuals.py`): an `mmdc_binary` key in `aeos.yaml` fills the `Settings` field but the renderer does not read it. A path that is not a file means no renderer (`PATH` is not tried) |
+| `AEOS_OFFICE_EXTERNAL_WORKER_ALLOWED` | Settings field | `Settings` | `false` | Authorises nothing. OFFICE stays default deny until a recorded company authorisation (§23). The only read is `backend/aeos/policy/office.py` (`_config_override_requested`): `office_policy` reports `config_override_ignored: true` when it is set, and the value is never used to relax any rule. It also enters the settings hash |
+| `AEOS_OPENBAO_ADDR` | Settings field + script | `Settings`, `scripts/component_status.py` | `http://127.0.0.1:8200` | Address of the OpenBao server (the script reads the environment only, not `aeos.yaml`) |
+| `AEOS_OPENBAO_BINARY` | Settings field | `Settings` | unset (found in `<data>/bin` or on `PATH`) | Path of the `bao` binary; an unusable path is authoritative and reported, never skipped |
+| `AEOS_OPENCODE_BINARY` | Settings field + direct read | `Settings`, `backend/aeos/worker_runtime/opencode.py` | unset (`opencode` on `PATH`) | Path of the OpenCode executable; `Settings` (so `aeos.yaml` too) is used first, `worker_runtime/opencode.py` falls back to the environment variable, then to `PATH` |
+| `AEOS_OPENROUTER_FREE_DAILY_LIMIT` | Settings field | `Settings` | `50` | Requests per UTC day for `:free` models; 1 to 1000 (1000 only after at least 10 credits were bought). The cap in force is the lower of this value and the limit the OpenRouter key endpoint reported at the last catalog refresh |
+| `AEOS_OPENROUTER_FREE_RPM_LIMIT` | Settings field | `Settings` | `20` | Requests per minute for `:free` models; 1 to 20 |
+| `AEOS_PLATFORM_REPO_SLUG` | Settings field | `Settings` | `fadhlillah-dli/dly-aeos` | `owner/name` of this platform repository, used by the Doctor repository and delivery checks and the research registry seed |
+| `AEOS_PORT` | Settings field | `Settings` | `8787` | Port of the control plane. `aeos serve --port` sets it for its own process |
+| `AEOS_RUN_ID` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a worker run; the worker runtime writes it as the run marker of every child it starts (`worker_runtime/processes.py`, `container.py`). If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it |
+| `AEOS_SANDBOX` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present inside a worker sandbox. If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it. Reserved: no code in this repository sets it today, a worker or candidate runtime that carries it must set it itself |
+| `AEOS_SECURE_COOKIES` | Settings field | `Settings` | `false` | Mark session cookies `Secure`; off because `http://127.0.0.1` has no TLS |
+| `AEOS_SESSION_IDLE_MINUTES` | Settings field | `Settings` | `120` | Minutes without activity before a session ends |
+| `AEOS_SESSION_TTL_HOURS` | Settings field | `Settings` | `12` | Longest life of a session |
+| `AEOS_TASK_ID` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a process working on a task. If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it. Reserved: no code in this repository sets it today, a worker or candidate runtime that carries it must set it itself |
+| `AEOS_TEST_DEADLINE_MIN` | script | `scripts/run_tests.sh` | unset (no deadline) | Minutes after which `scripts/run_tests.sh` stops the run (exit 124); same as `--deadline` |
+| `AEOS_WORKER_RUN_ID` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a worker run. If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it. Reserved: no code in this repository sets it today, a worker or candidate runtime that carries it must set it itself |
+
+The six worker-context markers (`AEOS_CANDIDATE_BUILD`, `AEOS_CAPABILITY_TOKEN`, `AEOS_RUN_ID`, `AEOS_SANDBOX`,
+`AEOS_TASK_ID`, `AEOS_WORKER_RUN_ID`) are read as a guard, not as settings: the owner never sets them. The guard is
+`refuse_worker_context` (`backend/aeos/operations/_util.py`). Every human-only operation that calls it is refused
+when one marker is set and non-empty (these are all the call sites in `backend/`):
+
+* `release acceptance exception` (`backend/aeos/operations/release.py`)
+* `controller promotion` (`backend/aeos/operations/release.py`)
+* `controller rollback` (`backend/aeos/operations/release.py`)
+* `live restore` (`backend/aeos/operations/backup.py`)
+
+`tests/unit/test_env_contract.py` fails when a call site of `refuse_worker_context` names an operation that this
+list does not.
+
+Internal hand-offs are not listed: a variable that the code sets only for a child process of its own is not a setting
+the owner can use. The ones the code also reads are exemptions with a reason in `tests/unit/test_env_contract.py`:
+`AEOS_ACL_PATH` (the path the Doctor hands to its own PowerShell child) and `AEOS_VSEAL_NONCE` and
+`AEOS_VSEAL_KEYFILE` (the per-run seal inputs the verifier hands to its own pytest plugin, which reads them in code
+embedded as a string in `backend/aeos/verification/seal.py`). They are set by the controller, never by the owner.
+
 ## Backup and restore
 
 | Command | What it does |

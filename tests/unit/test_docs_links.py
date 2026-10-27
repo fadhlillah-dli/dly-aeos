@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from aeos.core.paths import repo_root
+from tests.unit.docs_contract_support import command_problem, registered_commands
 
 ROOT = repo_root()
 MASTER = ROOT / "docs" / "architecture" / "DLY_AEOS_Master_Architecture_Final.md"
@@ -83,27 +84,9 @@ def test_owner_target_capability_matrix_is_up_to_date():
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-def _registered_commands() -> set[str]:
-    from typer.main import get_command
-
-    from aeos.cli import app
-
-    root = get_command(app)
-    names: set[str] = set()
-
-    def walk(cmd, prefix: str) -> None:
-        for name, sub in getattr(cmd, "commands", {}).items():
-            full = f"{prefix} {name}".strip()
-            names.add(full)
-            walk(sub, full)
-
-    walk(root, "")
-    return names
-
-
 def test_vscode_tasks_call_registered_aeos_commands():
     tasks = json.loads((ROOT / ".vscode" / "tasks.json").read_text(encoding="utf-8"))
-    commands = _registered_commands()
+    commands = registered_commands()
     seen = 0
     for task in tasks["tasks"]:
         for os_key in ("windows", "osx", "linux"):
@@ -112,7 +95,7 @@ def test_vscode_tasks_call_registered_aeos_commands():
             if not m:
                 continue
             words = [w for w in m.group(1).split() if not w.startswith("-")]
-            assert words and (words[0] in commands or " ".join(words[:2]) in commands), (task["label"], cmd)
+            assert words and command_problem(words, commands) is None, (task["label"], cmd)
             seen += 1
     assert seen >= 4
 
