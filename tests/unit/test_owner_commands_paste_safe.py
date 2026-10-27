@@ -137,6 +137,14 @@ def paste_problems(markdown: str) -> list[tuple[int, str, str]]:
 _CHAIN_SPLIT = re.compile(r"\s*(&&|\|\||;|\|)\s*")
 
 
+def _command_head(word: str) -> str:
+    """The program a simple command runs: 'sudo rm', 'command rm', '\\rm' and '/bin/rm' all run rm."""
+    tokens = word.split()
+    while tokens and tokens[0] in ("sudo", "command", "builtin", "nohup", "exec"):
+        tokens = tokens[1:]
+    return tokens[0].lstrip("\\").rsplit("/", 1)[-1] if tokens else ""
+
+
 def unguarded_deletes(markdown: str) -> list[tuple[int, str]]:
     """(line number, command) of every 'rm' after a 'cp' in the same shell fence that is not guarded by
     'cp ... && cmp ... && rm' in one chain."""
@@ -163,7 +171,7 @@ def unguarded_deletes(markdown: str) -> list[tuple[int, str]]:
             guarded = False  # within the current '&&' chain: a cp followed by a cmp/diff
             chain_cp = False
             for word, op in zip(words, ops, strict=True):
-                head = word.split()[0] if word.split() else ""
+                head = _command_head(word)
                 if op != "&&":
                     guarded = chain_cp = False
                 if head == "cp":
@@ -407,11 +415,15 @@ SRC, DST = '"$HOME/aeos-openbao-recovery.txt"', '"/Volumes/AEOS-RECOVERY/aeos-op
         f"cp {SRC} {DST} && cmp {SRC} {DST}\nrm {SRC}",
         f"cp {SRC} {DST} && cmp {SRC} {DST}; rm {SRC}",
         f"$ cp {SRC} {DST}\n$ rm {SRC}",
+        f"cp {SRC} {DST} && sudo rm {SRC}",
+        f"cp {SRC} {DST} && \\rm {SRC}",
+        f"cp {SRC} {DST} && /bin/rm {SRC}",
+        f"cp {SRC} {DST} && command rm {SRC}",
     ],
 )
 def test_unguarded_delete_after_copy_is_red(body):
     found = unguarded_deletes(_block(body, "console" if body.startswith("$") else "bash"))
-    assert found and all(cmd.startswith("rm ") for _, cmd in found), body
+    assert found and all("rm " in cmd for _, cmd in found), body
 
 
 def test_old_runbook_block_is_red_in_the_runbook_scan():

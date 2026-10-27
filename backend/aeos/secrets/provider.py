@@ -316,7 +316,9 @@ class KeyringBootstrapStore:
     def write_probe(self) -> str | None:
         """Write, read back and delete a random, non-secret probe entry. None when the keyring takes a write, else
         the reason (an exception name). ``vault init`` runs it before ``sys/init`` when nothing could show the
-        material if the keyring later refused it (ADR-0123 decision 1)."""
+        material if the keyring later refused it (ADR-0123 decision 1). Only the write and the read back decide: a
+        failed delete of the probe leaves one harmless, non-secret entry and never blocks init."""
+        import contextlib
         import uuid
 
         import keyring
@@ -325,9 +327,11 @@ class KeyringBootstrapStore:
         try:
             keyring.set_password(self.service, self.WRITE_PROBE, value)
             back = keyring.get_password(self.service, self.WRITE_PROBE)
-            keyring.delete_password(self.service, self.WRITE_PROBE)
         except Exception as exc:  # keyring.errors.KeyringError and backend errors
             return type(exc).__name__
+        finally:
+            with contextlib.suppress(Exception):  # the probe value is a random, non-secret marker
+                keyring.delete_password(self.service, self.WRITE_PROBE)
         return None if back == value else "read back a different value"
 
     def root_token(self) -> str | None:

@@ -726,3 +726,17 @@ def test_keyring_write_probe_leaves_no_entry(settings, memory_keyring):  # noqa:
     store = bootstrap_store(settings)
     assert store.write_probe() is None
     assert keyring.get_password(store.service, store.WRITE_PROBE) is None
+
+
+def test_bite_a_failed_probe_delete_does_not_claim_the_keyring_refused_a_write(settings, memory_keyring,  # noqa: F811
+                                                                              monkeypatch):
+    from keyring.errors import PasswordDeleteError
+
+    def refuse_delete(*_a, **_k):
+        raise PasswordDeleteError("backend refuses deletes")
+
+    monkeypatch.setattr(keyring, "delete_password", refuse_delete)
+    store = bootstrap_store(settings)
+    assert store.write_probe() is None  # the write and the read back worked: init may go on
+    monkeypatch.setattr(keyring, "set_password", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("no write")))
+    assert store.write_probe() == "RuntimeError"  # near miss: a refused write is still reported
