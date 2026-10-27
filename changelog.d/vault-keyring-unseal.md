@@ -6,8 +6,9 @@
   any later step can fail, and prints only where they are; the root token is revoked (kept in the keyring only
   while setup is incomplete). `aeos serve` and `aeos vault unseal` unseal a sealed OpenBao from the keyring and
   audit each attempt without a value; with no stored key both behave as before. New `aeos vault
-  import-unseal-key` (hidden prompt, one-time migration) and `aeos vault export-recovery <file>` (new 0600 file
-  outside every git repository and the data directory, path printed only; refused on Windows, owner-only ACL
-  NOT-PROVEN). Doctor `secret.openbao_health` and `aeos vault status` name where the key lives and the residual
+  import-unseal-key` (hidden prompt, one-time migration; `--with-approle` restores the AppRole credentials after a
+  lost keyring) and `aeos vault export-recovery <file>` (the unseal key share(s) and the AppRole role_id/secret_id
+  to a new 0600 file outside every git repository and the data directory, path printed only; refused on Windows,
+  owner-only ACL NOT-PROVEN, where `vault init` shows the same material once instead). Doctor `secret.openbao_health` and `aeos vault status` name where the key lives and the residual
   risk (same machine, same OS user). `--show-unseal-once` keeps the former flow. Evidence E2 on macOS arm64 with
   fakes only; a real keyring, a real reboot and Windows are NOT-PROVEN.

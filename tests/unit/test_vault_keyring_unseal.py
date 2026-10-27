@@ -36,6 +36,7 @@ KEYS_B64 = ["b1" * 16, "b2" * 16, "b3" * 16]  # what _mock_init's sys/init retur
 KEYS_HEX = ["k1" * 16, "k2" * 16, "k3" * 16]
 INIT = ["vault", "init", "--shares", "3", "--threshold", "2", "--yes"]  # default: keys into the OS keyring
 FAKE_KEY = "Fk" + "q" * 40 + "=="  # an unseal key share as the owner would type it (fake)
+ROLE_ID, SECRET_ID = "role-" + "i" * 20, "sid-" + "j" * 20  # what _mock_init's AppRole endpoints return (fake)
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +44,18 @@ def _reset():
     reset_provider_cache()
     yield
     reset_provider_cache()
+
+
+@pytest.fixture
+def posix_export(monkeypatch):
+    """The POSIX flow on every host (also on the Windows CI runner): export-recovery is supported."""
+    monkeypatch.setattr(unseal_mod, "recovery_export_supported", lambda: True)
+
+
+@pytest.fixture
+def windows_export(monkeypatch):
+    """The Windows flow on every host: export-recovery refuses, so vault init shows the recovery material once."""
+    monkeypatch.setattr(unseal_mod, "recovery_export_supported", lambda: False)
 
 
 def assert_no_secret(where: dict[str, str], secrets: list[str]) -> None:
@@ -65,13 +78,14 @@ def _audit_rows(action: str) -> list[AuditEvent]:
 # ------------------------------------------------------------------------------ init
 
 
-def test_init_stores_the_keys_in_the_keyring_and_never_prints_them(settings, memory_keyring, caplog):  # noqa: F811
+def test_init_stores_the_keys_in_the_keyring_and_never_prints_them(settings, memory_keyring, caplog,  # noqa: F811
+                                                                   posix_export):
     caplog.set_level(logging.DEBUG)
     with respx.mock(assert_all_called=False) as m:
         calls = _mock_init(m)
         r = runner.invoke(app, INIT)  # no terminal needed: nothing is shown
     assert r.exit_code == 0, r.output
-    assert_no_secret(_outputs(r, caplog), [*KEYS_B64, *KEYS_HEX, ROOT])
+    assert_no_secret(_outputs(r, caplog), [*KEYS_B64, *KEYS_HEX, ROOT, ROLE_ID, SECRET_ID])
     store = bootstrap_store(settings)
     assert store.unseal_keys() == KEYS_B64  # every share, so a recovery copy is complete
     assert store.root_token() is None and calls["revoke"].called  # revoked, then removed from the keyring
@@ -80,7 +94,8 @@ def test_init_stores_the_keys_in_the_keyring_and_never_prints_them(settings, mem
     assert vault_cli.ALT_SCREEN_ON not in r.output and "SHOWN ONCE" not in r.output
 
 
-def test_init_incomplete_keeps_the_root_token_in_the_keyring_only(settings, memory_keyring, caplog):  # noqa: F811
+def test_init_incomplete_keeps_the_root_token_in_the_keyring_only(settings, memory_keyring, caplog,  # noqa: F811
+                                                                  posix_export):
     with respx.mock(assert_all_called=False) as m:
         calls = _mock_init(m, fail_approle=True)
         r = runner.invoke(app, INIT)
@@ -90,7 +105,8 @@ def test_init_incomplete_keeps_the_root_token_in_the_keyring_only(settings, memo
     assert "NOT revoked" in r.stderr and "kept in the OS keyring only" in r.stderr and "export-recovery" in r.stderr
 
 
-def test_init_falls_back_to_showing_once_when_the_keyring_refuses(settings, memory_keyring, monkeypatch):  # noqa: F811
+def test_init_falls_back_to_showing_once_when_the_keyring_refuses(settings, memory_keyring, monkeypatch,  # noqa: F811
+                                                                  posix_export):
     real_set = keyring.set_password
 
     def refuse_unseal(service, name, value):
@@ -106,13 +122,63 @@ def test_init_falls_back_to_showing_once_when_the_keyring_refuses(settings, memo
     assert_no_secret({"output": lost.output}, KEYS_B64)
 
 
-def test_init_keyring_refusal_with_plain_output_shows_the_material(settings, memory_keyring, monkeypatch):  # noqa: F811
+def test_init_keyring_refusal_with_plain_output_shows_the_material(settings, memory_keyring, monkeypatch,  # noqa: F811
+                                                                   posix_export):
     monkeypatch.setattr(keyring, "set_password", lambda *a: (_ for _ in ()).throw(keyring.errors.PasswordSetError("x")))
     with respx.mock(assert_all_called=False) as m:
         _mock_init(m)
         r = runner.invoke(app, [*INIT, "--plain-output"])
     assert r.exit_code == 1 and "did not take the unseal material" in r.stderr
     assert "SHOWN ONCE" in r.stdout and KEYS_B64[0] in r.stdout and ROOT in r.stdout  # never lose the material
+
+
+def test_bite_windows_init_outside_a_terminal_is_refused_before_anything_changes(settings, memory_keyring,  # noqa: F811
+                                                                                 windows_export):
+    with respx.mock(assert_all_called=False) as m:
+        calls = _mock_init(m)
+        r = runner.invoke(app, INIT)
+        init_called = any(c.request.url.path.endswith("/sys/init") for c in m.calls)
+    assert r.exit_code == 1 and "On Windows vault init also shows the recovery material" in r.stderr
+    assert "Nothing was changed" in r.stderr and not init_called and not calls["revoke"].called
+    assert bootstrap_store(settings).unseal_key_count() == 0
+
+
+def test_windows_init_keeps_the_keyring_and_shows_the_recovery_material_once(settings, memory_keyring,  # noqa: F811
+                                                                              windows_export, monkeypatch):
+    seen: list[list[str]] = []
+    monkeypatch.setattr(vault_cli, "_vt_terminal", lambda: True)
+    monkeypatch.setattr(vault_cli, "_show_on_temporary_screen", lambda lines, what: seen.append(lines) or True)
+    with respx.mock(assert_all_called=False) as m:
+        calls = _mock_init(m)
+        r = runner.invoke(app, INIT)
+    assert r.exit_code == 0, r.output
+    assert bootstrap_store(settings).unseal_keys() == KEYS_B64 and calls["revoke"].called  # auto-unseal still works
+    screen = "\n".join(seen[0])
+    assert all(k in screen for k in KEYS_B64) and f"AppRole role_id  : {ROLE_ID}" in screen
+    assert f"AppRole secret_id: {SECRET_ID}" in screen and ROOT not in screen  # revoked: useless, not shown
+    assert "import-unseal-key --with-approle" in screen
+    assert_no_secret({"output": r.output}, [*KEYS_B64, ROOT, ROLE_ID, SECRET_ID])  # only on the temporary screen
+    assert "export-recovery <file>" not in r.output and "is your offline" in r.stdout
+
+
+def test_windows_init_screen_closed_early_names_the_reset_and_fails(settings, memory_keyring,  # noqa: F811
+                                                                     windows_export, monkeypatch):
+    monkeypatch.setattr(vault_cli, "_vt_terminal", lambda: True)
+    monkeypatch.setattr(vault_cli, "_show_on_temporary_screen", lambda lines, what: False)
+    with respx.mock(assert_all_called=False) as m:
+        _mock_init(m)
+        r = runner.invoke(app, INIT)
+    assert r.exit_code == 1 and "now holds the only copy" in r.stderr and "reset the still empty vault" in r.stderr
+    assert bootstrap_store(settings).unseal_keys() == KEYS_B64
+
+
+def test_windows_init_plain_output_is_the_near_miss(settings, memory_keyring, windows_export):  # noqa: F811
+    with respx.mock(assert_all_called=False) as m:
+        _mock_init(m)
+        r = runner.invoke(app, [*INIT, "--plain-output"])
+    assert r.exit_code == 0, r.output
+    assert "SHOWN ONCE" in r.stdout and KEYS_B64[0] in r.stdout and SECRET_ID in r.stdout and ROOT not in r.stdout
+    assert bootstrap_store(settings).unseal_keys() == KEYS_B64
 
 
 # ------------------------------------------------------------------------------ unseal / auto-unseal
@@ -252,7 +318,8 @@ def _typed(monkeypatch, values: list[str]) -> list[str]:
     return prompts
 
 
-def test_import_reads_a_hidden_prompt_and_never_echoes(settings, memory_keyring, monkeypatch, caplog):  # noqa: F811
+def test_import_reads_a_hidden_prompt_and_never_echoes(settings, memory_keyring, monkeypatch, caplog,  # noqa: F811
+                                                       posix_export):
     caplog.set_level(logging.DEBUG)
     prompts = _typed(monkeypatch, [FAKE_KEY, FAKE_KEY])
     r = runner.invoke(app, ["vault", "import-unseal-key"])
@@ -263,6 +330,56 @@ def test_import_reads_a_hidden_prompt_and_never_echoes(settings, memory_keyring,
     assert "Stored 1 unseal key share(s) in the OS keyring" in r.stdout and "export-recovery" in r.stdout
     row = _audit_rows("openbao.unseal_key_import")[0]
     assert row.details == {"unseal_key_shares": 1, "replaced": False}
+
+
+def test_import_on_windows_names_the_refused_export_instead_of_suggesting_it(settings, memory_keyring,  # noqa: F811
+                                                                                monkeypatch, windows_export):
+    _typed(monkeypatch, [FAKE_KEY, FAKE_KEY])
+    r = runner.invoke(app, ["vault", "import-unseal-key"])
+    assert r.exit_code == 0 and "export-recovery is refused on Windows" in r.stdout
+    assert "Next: aeos vault export-recovery" not in r.stdout
+
+
+def test_import_with_approle_restores_a_lost_keyring_from_hidden_prompts(settings, memory_keyring,  # noqa: F811
+                                                                         monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    prompts = _typed(monkeypatch, [FAKE_KEY, FAKE_KEY, ROLE_ID, ROLE_ID, SECRET_ID, SECRET_ID])
+    r = runner.invoke(app, ["vault", "import-unseal-key", "--with-approle"])
+    assert r.exit_code == 0, r.output
+    assert prompts[2:] == ["AppRole role_id (hidden): ", "Repeat AppRole role_id (hidden): ",
+                           "AppRole secret_id (hidden): ", "Repeat AppRole secret_id (hidden): "]
+    store = bootstrap_store(settings)
+    assert store.unseal_keys() == [FAKE_KEY] and store.approle() == (ROLE_ID, SECRET_ID)
+    assert "and the AppRole credentials" in r.stdout and "aeos vault status --verify" in r.stdout
+    assert_no_secret(_outputs(r, caplog), [FAKE_KEY, ROLE_ID, SECRET_ID])
+    row = _audit_rows("openbao.unseal_key_import")[0]
+    assert row.details == {"unseal_key_shares": 1, "approle_restored": True, "replaced": False}
+
+
+@pytest.mark.parametrize(("typed", "message"), [
+    ([FAKE_KEY, FAKE_KEY, "not an id!", "not an id!"], "That is not an AppRole role_id"),
+    ([FAKE_KEY, FAKE_KEY, ROLE_ID, ROLE_ID + "x"], "The two entries differ"),
+    ([FAKE_KEY, FAKE_KEY, ROLE_ID, ROLE_ID, ROLE_ID, ROLE_ID], "two different values"),
+])
+def test_bite_import_with_approle_refuses_bad_input_and_stores_nothing(settings, memory_keyring,  # noqa: F811
+                                                                      monkeypatch, typed, message):
+    _typed(monkeypatch, typed)
+    r = runner.invoke(app, ["vault", "import-unseal-key", "--with-approle"])
+    assert r.exit_code == 1 and message in r.stderr and "Nothing stored" in r.stderr
+    store = bootstrap_store(settings)
+    assert store.unseal_key_count() == 0 and store.approle() is None
+    assert_no_secret({"output": r.output}, [FAKE_KEY, ROLE_ID])
+
+
+def test_bite_import_with_approle_refuses_to_replace_unless_asked(settings, memory_keyring, monkeypatch):  # noqa: F811
+    bootstrap_store(settings).set_approle("role-old-0000", "sid-old-0000")
+    _typed(monkeypatch, [FAKE_KEY, FAKE_KEY, ROLE_ID, ROLE_ID, SECRET_ID, SECRET_ID])
+    r = runner.invoke(app, ["vault", "import-unseal-key", "--with-approle"])
+    assert r.exit_code == 1 and "AppRole credentials are already stored" in r.stderr and "pass --replace" in r.stderr
+    assert bootstrap_store(settings).approle() == ("role-old-0000", "sid-old-0000")
+    _typed(monkeypatch, [FAKE_KEY, FAKE_KEY, ROLE_ID, ROLE_ID, SECRET_ID, SECRET_ID])
+    near = runner.invoke(app, ["vault", "import-unseal-key", "--with-approle", "--replace"])
+    assert near.exit_code == 0 and bootstrap_store(settings).approle() == (ROLE_ID, SECRET_ID)
 
 
 def test_import_never_takes_the_key_from_argv(settings, memory_keyring):  # noqa: F811
@@ -312,9 +429,36 @@ def test_export_writes_a_new_owner_only_file_and_prints_only_the_path(settings, 
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     body = target.read_text(encoding="utf-8")
     assert all(f"unseal_key_{i}: {k}" in body for i, k in enumerate(KEYS_B64, 1)) and "root_token" not in body
+    assert "approle: NOT in the OS keyring" in body  # said, not silently missing
     assert_no_secret(_outputs(r, caplog), KEYS_B64)
     row = _audit_rows("openbao.recovery_export")[0]
     assert row.details["unseal_key_shares"] == 3 and row.details["root_token_included"] is False
+    assert row.details["approle_included"] is False
+
+
+@posix_only
+def test_recovery_copy_restores_a_lost_keyring_unseal_and_approle(settings, memory_keyring, tmp_path,  # noqa: F811
+                                                                   monkeypatch, caplog):
+    store = bootstrap_store(settings)
+    store.set_unseal_keys(KEYS_B64)
+    store.set_approle(ROLE_ID, SECRET_ID)
+    target = tmp_path / "r.txt"
+    r = runner.invoke(app, ["vault", "export-recovery", str(target)])
+    assert r.exit_code == 0 and r.stdout == f"{target.resolve()}\n"
+    assert_no_secret(_outputs(r, caplog), [*KEYS_B64, ROLE_ID, SECRET_ID])
+    assert _audit_rows("openbao.recovery_export")[0].details["approle_included"] is True
+    fields = dict(line.split(": ", 1) for line in target.read_text(encoding="utf-8").splitlines() if ": " in line)
+    assert "--shares 3 --with-approle" in target.read_text(encoding="utf-8")
+    # the keyring is lost (profile reset / new machine): every entry of the bootstrap service is gone
+    store.clear_unseal_keys()
+    keyring.delete_password(store.service, store.ROLE_ID)
+    keyring.delete_password(store.service, store.SECRET_ID)
+    assert store.unseal_keys() == [] and store.approle() is None
+    shares = [fields[f"unseal_key_{i}"] for i in (1, 2, 3)]
+    _typed(monkeypatch, [v for x in [*shares, fields["approle_role_id"], fields["approle_secret_id"]] for v in (x, x)])
+    back = runner.invoke(app, ["vault", "import-unseal-key", "--shares", "3", "--with-approle"])
+    assert back.exit_code == 0, back.output
+    assert store.unseal_keys() == KEYS_B64 and store.approle() == (ROLE_ID, SECRET_ID)
 
 
 @posix_only
@@ -375,6 +519,7 @@ def test_export_refuses_without_a_stored_key_and_on_windows(settings, memory_key
         assert r.exit_code == 1 and "No unseal key is stored" in r.stderr and not (tmp_path / "r.txt").exists()
     bootstrap_store(settings).set_unseal_keys(KEYS_B64)
     monkeypatch.setattr(unseal_mod, "sys", SimpleNamespace(platform="win32"))
+    assert unseal_mod.recovery_export_supported() is False  # the one switch vault init and the export share
     r = runner.invoke(app, ["vault", "export-recovery", str(tmp_path / "w.txt")])
     assert r.exit_code == 1 and "NOT-PROVEN" in r.stderr and not (tmp_path / "w.txt").exists()
 

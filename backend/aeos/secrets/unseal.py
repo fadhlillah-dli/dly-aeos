@@ -4,8 +4,10 @@
   with ``vault import-unseal-key``). It reads the keyring only after OpenBao itself reported "sealed", so an
   unreachable, uninitialised or unsealed vault never causes a keyring read. Every attempt is audited without a value.
 * ``write_recovery_file`` writes the stored material to a NEW owner-only file (0600) outside every git work tree
-  and outside the AEOS data dir (backups must not carry it, §33). Windows is refused: an owner-only ACL is not
-  guaranteed by this code (NOT-PROVEN).
+  and outside the AEOS data dir (backups must not carry it, §33): the unseal key share(s), the AppRole
+  role_id/secret_id (without them a lost keyring locks the controller out of an unsealed vault) and a root token
+  kept by an incomplete init. Windows is refused: an owner-only ACL is not guaranteed by this code (NOT-PROVEN);
+  there ``vault init`` shows the same material once instead (``recovery_export_supported``).
 
 No function here prints, logs or returns a key or token; callers print paths, counts and outcomes only.
 """
@@ -157,9 +159,15 @@ def _git_work_tree(path: Path) -> Path | None:
     return None
 
 
+def recovery_export_supported() -> bool:
+    """False on Windows: an owner-only ACL for the recovery file is NOT-PROVEN, so the export refuses there and
+    ``vault init`` shows the recovery material once instead (ADR-0123)."""
+    return sys.platform != "win32"
+
+
 def recovery_target(raw: str, settings: Settings) -> Path:
     """The resolved target, or RecoveryRefused. The file itself must not exist yet."""
-    if sys.platform == "win32":
+    if not recovery_export_supported():
         raise RecoveryRefused("WINDOWS_ACL_NOT_PROVEN", "Refused on Windows: this command cannot guarantee an "
                               "owner-only ACL for the file (NOT-PROVEN). Nothing was written.")
     given = Path(raw).expanduser()
@@ -183,13 +191,15 @@ def recovery_target(raw: str, settings: Settings) -> Path:
 
 
 def write_recovery_file(raw: str, settings: Settings, store: KeyringBootstrapStore | None = None) -> Path:
-    """Write the stored unseal key share(s) (and a root token kept by an incomplete init) to a new 0600 file."""
+    """Write the stored unseal key share(s), the AppRole role_id/secret_id and a root token kept by an incomplete
+    init to a new 0600 file: everything a lost keyring needs (``vault import-unseal-key --with-approle``)."""
     target = recovery_target(raw, settings)
     bs = store or bootstrap_store(settings)
     keys = bs.unseal_keys()
     if not keys:
         raise RecoveryRefused("NO_KEY_IN_KEYRING", "No unseal key is stored in the OS keyring (run aeos vault "
                               "import-unseal-key first). Nothing was written.")
+    approle = bs.approle()
     root = bs.root_token()
     lines = [RECOVERY_HEADER, f"created_at: {utcnow().isoformat()}",
              f"openbao_addr: {logical_addr(settings.openbao_addr)}",
@@ -198,8 +208,16 @@ def write_recovery_file(raw: str, settings: Settings, store: KeyringBootstrapSto
              "a cloud-synced folder, a chat or an AI assistant.",
              "Use: aeos vault unseal (prompts for the key) or aeos vault import-unseal-key (puts it back into the "
              "OS keyring).",
+             f"Lost keyring (profile reset, new machine with the same OpenBao data): aeos vault import-unseal-key "
+             f"--shares {len(keys)} --with-approle (hidden prompts: each unseal key share, then the AppRole role_id "
+             "and secret_id), then aeos vault unseal and aeos vault status --verify.",
              f"unseal_key_shares: {len(keys)}"]
     lines += [f"unseal_key_{i}: {k}" for i, k in enumerate(keys, 1)]
+    if approle:
+        lines += [f"approle_role_id: {approle[0]}", f"approle_secret_id: {approle[1]}"]
+    else:
+        lines.append("approle: NOT in the OS keyring when this copy was made (a lost keyring then needs a new "
+                     "vault init)")
     if root:
         lines.append(f"root_token: {root}  (vault init was incomplete; revoke it once the setup is finished)")
     data = ("\n".join(lines) + "\n").encode("utf-8")
@@ -224,5 +242,5 @@ def write_recovery_file(raw: str, settings: Settings, store: KeyringBootstrapSto
         target.unlink(missing_ok=True)
         raise RecoveryRefused("MODE_NOT_PRIVATE", f"{target} was not owner-only after writing; it was removed.")
     audit("openbao.recovery_export", "SUCCESS", {"path": str(target), "unseal_key_shares": len(keys),
-                                                 "root_token_included": bool(root)})
+                                                 "approle_included": bool(approle), "root_token_included": bool(root)})
     return target

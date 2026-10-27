@@ -158,8 +158,8 @@ The complete ordered list, with the open owner decisions and the external items,
    recorded pass `--version X.Y.Z` for a version you reviewed - `latest` is never implied),
    `aeos vault start`, `aeos vault init` (the unseal key share(s) go into the OS keyring and are never
    printed; init revokes the root token when setup completes - the controller then uses AppRole),
-   `aeos vault export-recovery <file>` for the offline recovery copy (never in the repo, a chat or an AI
-   assistant). After each restart `aeos serve` or `aeos vault unseal` unseals from the keyring (ADR-0123).
+   `aeos vault export-recovery <file>` for the offline recovery copy of the unseal key and the AppRole
+   credentials (never in the repo, a chat or an AI assistant; on Windows `vault init` shows it once instead). After each restart `aeos serve` or `aeos vault unseal` unseals from the keyring (ADR-0123).
 5. **Google OAuth client + consent** (PERSONAL docs) — in Google Cloud Console create a project,
    enable the Google Drive API and Google Docs API, configure the OAuth consent screen, create an
    OAuth client of type **Desktop app**, download the JSON, then

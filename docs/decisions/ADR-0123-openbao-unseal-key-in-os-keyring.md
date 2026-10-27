@@ -35,7 +35,11 @@
    entries `openbao-unseal-key-<n>` and `openbao-unseal-key-count`) right after `sys/init`, before any later step
    can fail. It prints where they are and how to make a recovery copy, never the values. `--show-unseal-once` keeps
    the former flow (temporary screen, `--plain-output` outside a terminal). If the keyring refuses the write, init
-   falls back to that flow so the material is never lost.
+   falls back to that flow so the material is never lost. On Windows, where the recovery export refuses (decision
+   5), the default init stores the shares in the Credential Manager as well and shows the recovery material (the
+   shares and the AppRole role_id/secret_id) once on the temporary screen: that screen is the Windows offline copy,
+   so the Credential Manager never holds the only copy. Outside a terminal it refuses before anything changes,
+   unless `--plain-output` is given.
 2. **Root token.** As before, it is revoked once the AppRole login works, and its keyring entry is removed. Only
    while a setup stays incomplete is it kept, in the keyring only (`openbao-root-token`), never printed; the
    recovery copy then contains it so the owner can finish, or the owner resets the still empty vault.
@@ -47,14 +51,17 @@
    `--from-keyring` makes `vault unseal` fail instead of prompting.
 4. **Migration of an existing install.** `aeos vault import-unseal-key` reads the share(s) from a hidden prompt
    (getpass, entered twice; never argv, never echoed) and stores them; `--replace` overwrites stored shares. Audit
-   row `openbao.unseal_key_import` with the count.
-5. **Offline recovery copy.** `aeos vault export-recovery <file>` writes the stored shares (and a kept root token)
-   to a new file created with mode 0600 (`O_CREAT|O_EXCL|O_NOFOLLOW`, then `fchmod`, then a mode check). It refuses
+   row `openbao.unseal_key_import` with the count. `--with-approle` also restores the AppRole role_id and secret_id
+   from the recovery copy at the same kind of hidden prompt (a lost keyring); `--replace` is needed to overwrite
+   stored AppRole credentials.
+5. **Offline recovery copy.** `aeos vault export-recovery <file>` writes the stored shares, the AppRole role_id and
+   secret_id (the secret_id has no TTL and no use limit, so it stays valid with the vault's data) and a kept root
+   token to a new file created with mode 0600 (`O_CREAT|O_EXCL|O_NOFOLLOW`, then `fchmod`, then a mode check). It refuses
    an existing path or link, a path inside the AEOS repository or any git work tree, and a path inside the AEOS
    data directory (backups copy that directory; §33 keeps recovery material out of them). It prints the path
-   only. Audit row `openbao.recovery_export` (path, count). On Windows it refuses: the code cannot guarantee an
-   owner-only ACL (NOT-PROVEN). Windows owners take their offline copy with `vault init --show-unseal-once` and
-   then `vault import-unseal-key`.
+   only. Audit row `openbao.recovery_export` (path, count, whether AppRole and a root token are included). On
+   Windows it refuses: the code cannot guarantee an owner-only ACL (NOT-PROVEN); `vault init` shows the same
+   material once instead (decision 1).
 6. **Doctor and status.** `secret.openbao_health` adds one line: where the unseal key lives (OS keyring with the
    share count, or not stored) and the residual risk; the evidence field `unseal_key_location` is `os-keyring`,
    `not-stored` or `UNKNOWN`. Only the count entry is read. `aeos vault status` prints the same location.
@@ -73,9 +80,17 @@
 * **Chat and screenshot leaks** (incident class of 2026-10-26): the default flow prints nothing, and no reboot needs
   a manual unseal any more, so the material no longer passes through a terminal. The recovery copy is the one
   moment it exists outside the keyring; it is a file, never terminal output.
-* **Loss of the keyring** (user profile reset, new machine): the offline recovery copy restores it
-  (`vault import-unseal-key`). Without that copy, a vault whose keys are only in the keyring is lost; the owner
-  makes the copy right after init or migration.
+* **Loss of the keyring** (user profile reset, new machine with a copy of `<data>/openbao/raft`): the offline
+  recovery copy restores both the unseal share(s) and the AppRole credentials
+  (`vault import-unseal-key --shares <n> --with-approle`); without the AppRole credentials the vault would unseal
+  but the controller could not log in, and with the root token revoked nothing could re-issue them. Without that
+  copy, a vault whose keys are only in the keyring is lost; the owner makes the copy right after init or migration.
+  A copy made before ADR-0123 (the shown-once unseal key only, or one exported while no AppRole was stored, which
+  says so in the file) restores the unseal key but not the controller login: then re-initialise and re-enter every
+  credential (runbook step 5).
+* **The recovery copy itself** holds the unseal share(s) and the AppRole credentials together: whoever holds it and
+  the raft data reads everything. That is no wider than the unseal key alone with the raft data; it is why the copy
+  lives offline and never on the machine.
 * **Root token**: not long-lived. A complete setup leaves none anywhere; generating a new one needs the unseal
   quorum and an owner decision (break-glass, NOT-PROVEN, ADR-0042 runbook step 6).
 
@@ -100,5 +115,9 @@
 * The owner-only ACL of a recovery file on Windows (the command refuses there), and that the owner's chosen
   target is not a cloud-synced folder (the command cannot detect sync clients).
 * That an imported key is correct: it is checked the next time OpenBao is sealed (`serve` or `vault unseal`
-  report a rejected key and name `import-unseal-key --replace`).
+  report a rejected key and name `import-unseal-key --replace`). Imported AppRole credentials are checked by
+  `vault status --verify`.
+* A real restore after a lost keyring (profile reset or a new machine with the raft data): proven only by a unit
+  round trip with fakes (export, empty keyring, `import-unseal-key --with-approle`).
+* The Windows init screen with the recovery material on a real Windows console (unit tests fake the platform).
 * Windows and macOS Intel behaviour of the new code paths until CI runs them.

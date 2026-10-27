@@ -48,7 +48,7 @@ INTERIM_NAMESPACES = ("personal", "workers", "platform", "projects")
 # ADR-0123: what keeping the unseal key share(s) in the OS keyring leaves open (one line, no value).
 UNSEAL_KEYRING_RISK = (
     "Residual risk: anyone who acts as your OS user on this machine can read the unseal key from the OS keyring, "
-    "as they can the AppRole credentials already there; keep an offline recovery copy (aeos vault export-recovery)."
+    "as they can the AppRole credentials already there; keep an offline recovery copy."
 )
 UNSEAL_KEYRING_RISK_ID = (
     "Risiko sisa: siapa pun yang bertindak sebagai pengguna OS Anda di mesin ini dapat membaca kunci unseal dari OS "

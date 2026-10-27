@@ -234,7 +234,10 @@ show `secret.keyring` VERIFIED (allow the Keychain prompt for the dly-aeos servi
 ```
 
 Move the recovery file offline right away (encrypted USB drive or your password manager entry), then delete it
-from the disk; the runbook below has the exact commands. It is the only way back if the Keychain entry is lost.
+from the disk; the runbook below has the exact commands. It holds the unseal key share(s) and the AppRole
+credentials the controller logs in with, and it is the only way back if the Keychain entries are lost: the runbook
+section "Lost keyring" restores both with `./aeos vault import-unseal-key --with-approle`. A copy that says
+`approle: NOT in the OS keyring` (or a key you stored before ADR-0123) restores the unseal key only.
 The root token is revoked when setup completes, so none is kept anywhere; only a `setup incomplete` run keeps it,
 in the Keychain only, and the recovery copy then contains it so you can finish. Never paste or screenshot
 `vault init` output, the recovery file or a key into a chat or an AI assistant. To prove the step, paste only
@@ -1117,8 +1120,12 @@ pytest lines: in PowerShell write `$env:NAME="value"; <command>`, in cmd.exe `se
   `approved_signer`.
 * **Commit identity (1.5):** edit `%LOCALAPPDATA%\DLY-AEOS\aeos.yaml` (copy `config\aeos.example.yaml` there if it
   does not exist).
-* **OpenBao:** `vault install` picks the `windows_amd64` release. The bootstrap identity is in Windows Credential
-  Manager. The live test is
+* **OpenBao:** `vault install` picks the `windows_amd64` release. The bootstrap identity and the unseal key share(s)
+  are in Windows Credential Manager. `vault export-recovery` refuses on Windows (an owner-only ACL for the file is
+  NOT-PROVEN), so on Windows a plain `vault init` also shows the recovery material (unseal key share(s) and AppRole
+  credentials) ONCE on a temporary screen: store it offline there, then type `stored`. Skip the
+  `vault export-recovery` line of 1.7. For an install initialised before ADR-0123 run
+  `.\aeos.ps1 vault import-unseal-key` and keep your existing offline copy. The live test is
   `$env:DLY_AEOS_TEST_BAO="$env:LOCALAPPDATA\DLY-AEOS\bin\bao.exe"; .\.venv\Scripts\python.exe -m pytest -m integration tests/integration/test_secrets_openbao_live.py -q`.
 * **MCI hash (2.11):** `"sha256:" + (Get-FileHash -Algorithm SHA256 -LiteralPath '<path>').Hash.ToLower()`. The file
   goes to `%LOCALAPPDATA%\DLY-AEOS\policy\canonical\`.

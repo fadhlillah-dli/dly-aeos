@@ -23,9 +23,10 @@ operation that needs a secret fails closed while OpenBao is unavailable — that
 * `./aeos serve` unseals a sealed OpenBao from the keyring before it starts; `./aeos vault unseal` does the same
   and prompts (hidden) only when no key is stored. Each attempt is an audit row `openbao.unseal`, without a value.
 * The offline copy is a file that `./aeos vault export-recovery` creates owner-only (0600) outside every
-  repository and outside the AEOS data directory. It is the only way back if the keyring is lost (profile reset,
-  new machine). On Windows the export refuses (owner-only ACL NOT-PROVEN): take the offline copy with
-  `.\aeos.ps1 vault init --show-unseal-once` at init time instead.
+  repository and outside the AEOS data directory. It holds the unseal key share(s) and the AppRole role_id and
+  secret_id, and it is the only way back if the keyring is lost (profile reset, new machine): see "Lost keyring"
+  below. On Windows the export refuses (owner-only ACL NOT-PROVEN): a plain `.\aeos.ps1 vault init` shows the same
+  material once on a temporary screen instead, and that is the Windows offline copy.
 
 ## One-time migration of an existing install (macOS, zsh)
 
@@ -61,6 +62,26 @@ must say `Unsealed with the key from the OS keyring`:
 
 A rejected key ends with `aeos vault import-unseal-key --replace`: run that with the right key.
 
+## Lost keyring (profile reset, or a new Mac with the OpenBao data)
+
+The keyring entries are gone but `<data>/openbao/raft` is still there (or was copied to the new machine). Take
+the recovery copy from offline storage. `import-unseal-key` asks for each unseal key share and then, with
+`--with-approle`, for the AppRole role_id and secret_id, each twice at a hidden prompt: paste each value from the
+recovery copy there only. Use the `--shares` number the recovery copy names (1 by default). `vault status --verify`
+proves the controller login with the restored AppRole credentials.
+
+```bash
+./aeos vault start
+./aeos vault import-unseal-key --shares 1 --with-approle
+./aeos vault unseal
+./aeos vault status --verify
+```
+
+A recovery copy that says `approle: NOT in the OS keyring`, or an unseal key kept from before ADR-0123, restores
+the unseal key only (`./aeos vault import-unseal-key`): the controller cannot log in, and with the root token
+revoked nothing re-issues the AppRole credentials. Then follow step 5 (re-initialise and re-enter every
+credential), and make a new recovery copy right after.
+
 ## Steps
 
 1. **Status**: `aeos vault --help` lists the vault commands of this installation. The service
@@ -69,7 +90,8 @@ A rejected key ends with `aeos vault import-unseal-key --replace`: run that with
 2. **Start** OpenBao if it is not running: `aeos vault start`.
 3. **Unseal**: `aeos vault unseal`. With the key in the OS keyring it unseals without a prompt (so does
    `aeos serve`). Without one it asks for the required number of unseal key shares at a hidden prompt: take them
-   from your offline recovery copy, then put them back into the keyring with `aeos vault import-unseal-key`.
+   from your offline recovery copy, then put them back into the keyring with `aeos vault import-unseal-key`
+   (`--with-approle` when the AppRole credentials were lost too, see "Lost keyring").
    Do not paste keys into files, chats or terminals that log history.
 4. **Re-authenticate the controller** (AppRole/agent) if its token expired — follow the prompt of
    `aeos vault` / `aeos secrets` (the bootstrap SecretID is delivered by the OS credential store,
