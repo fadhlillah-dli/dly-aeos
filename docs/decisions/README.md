@@ -73,4 +73,5 @@ SUPERSEDED on ADR-0003 also revokes the decisions its `owner:ADR-0003` actor hol
 | [ADR-0115](ADR-0115-public-repository-on-github-free.md) | Platform repository public on GitHub Free: free CI on all three OSes, ruleset on main, free security features | ACCEPTED |
 | [ADR-0120](ADR-0120-verifier-impact-selected-steps.md) | Verifier v4: impact-selected executed checks, per-candidate environments, UI/a11y evidence, project test baseline | PROPOSED |
 | [ADR-0121](ADR-0121-code-host-identity-and-no-ai-attribution.md) | Owner identity per code host (local `aeos.yaml`), broker push gate, outbound attribution guard, neutral labels; provenance stays in AEOS | ACCEPTED |
+| [ADR-0122](ADR-0122-release-provenance-in-ci.md) | Release evidence and build provenance in CI on a tag push; the GitHub Release stays a human action | PROPOSED |
 | [ADR-0123](ADR-0123-openbao-unseal-key-in-os-keyring.md) | OpenBao unseal key in the OS keyring, auto-unseal at `serve`/`vault unseal`, one-time import and an owner-only offline recovery copy (amends ADR-0042) | ACCEPTED |

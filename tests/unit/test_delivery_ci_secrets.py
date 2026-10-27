@@ -50,15 +50,39 @@ def test_pr_builds_receive_no_secrets_and_a_read_only_token(path: Path):
     assert "pull_request_target" not in triggers, "pull_request_target runs PR code with repository secrets"
     assert "workflow_run" not in triggers, "workflow_run can hand privileged context to PR artifacts"
     assert not re.search(r"\$\{\{\s*secrets\.", text), "no secrets.* reference may reach a PR build"
+    assert _permission_problems(path.name, data) == []
+
+
+# One explicit, minimal allow-list of job-level permission sets that hold a write scope: (workflow file, job id) ->
+# the exact mapping that job must declare. Every other job and every top-level ``permissions`` stays read-only. The
+# release evidence job (ADR-0122) signs a build-provenance attestation: Sigstore needs the OIDC token (id-token) and
+# the attestation is stored with the repository (attestations). It writes nothing else: no contents, no releases.
+JOB_PERMISSION_ALLOW_LIST: dict[tuple[str, str], dict[str, str]] = {
+    ("release.yml", "release-evidence"): {"contents": "read", "actions": "read", "checks": "read",
+                                          "id-token": "write", "attestations": "write"},
+}
+
+
+def _render(perms: object) -> str:
+    return " ".join(f"{k}:{v}" for k, v in perms.items()) if isinstance(perms, dict) else str(perms)
+
+
+def _permission_problems(name: str, data: dict) -> list[str]:
+    problems = []
     perms = data.get("permissions")
-    assert perms is not None, "the default GITHUB_TOKEN permissions must be declared (read-only)"
-    rendered = perms if isinstance(perms, str) else " ".join(f"{k}:{v}" for k, v in perms.items())
-    assert not WRITE_SCOPES.search(str(rendered)), f"workflow token must be read-only, got {rendered}"
-    for name, job in (data.get("jobs") or {}).items():
+    if perms is None:
+        problems.append("the default GITHUB_TOKEN permissions must be declared (read-only)")
+    elif WRITE_SCOPES.search(_render(perms)):
+        problems.append(f"workflow token must be read-only, got {_render(perms)}")
+    for jid, job in (data.get("jobs") or {}).items():
         job_perms = (job or {}).get("permissions")
-        if job_perms is not None:
-            rendered = job_perms if isinstance(job_perms, str) else " ".join(f"{k}:{v}" for k, v in job_perms.items())
-            assert not WRITE_SCOPES.search(str(rendered)), f"job {name} requests write permissions"
+        allowed = JOB_PERMISSION_ALLOW_LIST.get((name, jid))
+        if allowed is not None:
+            if job_perms != allowed:
+                problems.append(f"job {jid}: permissions must be exactly {_render(allowed)}, got {_render(job_perms)}")
+        elif job_perms is not None and WRITE_SCOPES.search(_render(job_perms)):
+            problems.append(f"job {jid} requests write permissions: {_render(job_perms)}")
+    return problems
 
 
 @pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
@@ -149,3 +173,132 @@ def test_the_every_workflow_rules_bite_on_a_violation_and_pass_a_near_miss():
         injected["jobs"]["a"]["steps"][0]["run"] = f"echo '${{{{ {expr} }}}}'"
         (problem,) = _run_interpolation_problems(injected)
         assert problem == f"job a, step s: run: interpolates {{{{ {expr} }}}}; pass it through env:", expr
+
+
+# ------------------------------------------------------------------ release.yml (ADR-0122; its rules are owned here)
+# A pushed tag vX.Y.Z builds release evidence and uploads it; it never publishes a release. The checks below pin the
+# shape that makes that safe: tags only, one ubuntu job with a timeout, the release check and a GREEN CI verdict for the
+# tagged commit before anything is built, no step that may fail softly, and the tag reaching the shell only as the
+# runner's GITHUB_REF_NAME. Reuse of ci.yml's pins and SBOM command is checked in tests/unit/test_ci_gates.py.
+RELEASE = "release.yml"
+RELEASE_JOB = "release-evidence"
+RELEASE_CHECK_RUN = 'python scripts/release_check.py --tag "$GITHUB_REF_NAME"'
+CI_STATUS_RUN = re.compile(r'python scripts/ci_status\.py --sha "\$GITHUB_SHA" --repo "\$GITHUB_REPOSITORY" '
+                           r"--required-only --wait --deadline (\d+)")
+# (label, predicate) in the order the steps must run.
+RELEASE_STEPS = (
+    ("release check", lambda s: s.get("run") == RELEASE_CHECK_RUN),
+    ("CI status", lambda s: bool(CI_STATUS_RUN.fullmatch(str(s.get("run", ""))))),
+    ("git archive", lambda s: "git archive --format=zip" in str(s.get("run", ""))),
+    ("SBOM", lambda s: "scripts/supply_chain.py sbom -o dist/" in str(s.get("run", ""))),
+    ("SHA256SUMS", lambda s: "sha256sum" in str(s.get("run", ""))),
+    ("attestation", lambda s: str(s.get("uses", "")).startswith("actions/attest-build-provenance@")),
+    ("upload", lambda s: str(s.get("uses", "")).startswith("actions/upload-artifact@")),
+)
+
+
+def _release_problems(data: dict) -> list[str]:
+    problems = []
+    on = data.get("on", data.get(True))
+    if on != {"push": {"tags": ["v*.*.*"]}}:
+        problems.append(f"on: must be a push of tags ['v*.*.*'] only, got {on!r}")
+    jobs = data.get("jobs") or {}
+    if list(jobs) != [RELEASE_JOB]:
+        return problems + [f"jobs must be exactly ['{RELEASE_JOB}'], got {list(jobs)}"]
+    job = jobs[RELEASE_JOB] or {}
+    for key, want in (("name", "release evidence [NO-GATE]"), ("runs-on", "ubuntu-latest"), ("timeout-minutes", 20)):
+        if job.get(key) != want:
+            problems.append(f"job {RELEASE_JOB}: {key} must be {want!r}, got {job.get(key)!r}")
+    steps = job.get("steps") or []
+    for where, block in ((f"job {RELEASE_JOB}", job), *((f"step {s.get('name') or s.get('uses')}", s) for s in steps)):
+        for key in ("if", "continue-on-error"):
+            if key in block:
+                problems.append(f"{where}: '{key}' could let the job go on past a failed check")
+    found = [(label, next((i for i, s in enumerate(steps) if pred(s)), None)) for label, pred in RELEASE_STEPS]
+    problems += [f"step '{label}' is missing" for label, i in found if i is None]
+    present = [(label, i) for label, i in found if i is not None]
+    problems += [f"step '{a}' must run before '{b}'" for (a, i), (b, j) in zip(present, present[1:]) if not i < j]
+    for step in steps:
+        match = CI_STATUS_RUN.fullmatch(str(step.get("run", "")))
+        if match:
+            if step.get("env") != {"GH_TOKEN": "${{ github.token }}"}:
+                problems.append(f"CI status: env must be exactly GH_TOKEN from github.token, got {step.get('env')!r}")
+            if not 0 < int(match.group(1)) < (job.get("timeout-minutes") or 0):
+                problems.append("CI status: --deadline must end before the job's timeout-minutes")
+        uses = str(step.get("uses", ""))
+        if uses.startswith("actions/checkout@") and (step.get("with") or {}).get("fetch-depth") != 0:
+            problems.append("checkout: fetch-depth must be 0 (release_check.py needs origin/main)")
+        if uses.startswith("actions/attest-build-provenance@") and step.get("with") != {"subject-path": "dist/*"}:
+            problems.append(f"attestation: with must be exactly subject-path dist/*, got {step.get('with')!r}")
+        if uses.startswith("actions/upload-artifact@"):
+            given = step.get("with") or {}
+            if given.get("path") != "dist/" or given.get("retention-days") != 90:
+                problems.append(f"upload: path dist/ with retention-days 90, got {given!r}")
+    return problems
+
+
+def _release_workflow() -> dict:
+    path = repo_root() / ".github" / "workflows" / RELEASE
+    if not path.is_file():
+        pytest.skip("not running from a repository checkout")
+    return _load(path)
+
+
+def test_release_workflow_builds_evidence_only_after_the_release_check_and_a_green_ci_verdict():
+    data = _release_workflow()
+    assert _release_problems(data) == []
+    assert _permission_problems(RELEASE, data) == []
+    assert _macos_problems(RELEASE, data) == [] and _run_interpolation_problems(data) == []
+    assert data["permissions"] == {"contents": "read"}  # write scopes only at job level, only the allow-listed two
+
+
+def test_the_release_rules_bite_on_a_branch_trigger_a_write_scope_macos_and_an_interpolated_tag():
+    import copy
+
+    real = _release_workflow()
+    job = lambda d: d["jobs"][RELEASE_JOB]  # noqa: E731
+
+    def mutated(edit) -> dict:
+        doc = copy.deepcopy(real)
+        edit(doc)
+        return doc
+
+    branches = mutated(lambda d: d.update({"on": {"push": {"tags": ["v*.*.*"], "branches": ["main"]}}}))
+    assert _release_problems(branches) == [
+        "on: must be a push of tags ['v*.*.*'] only, got {'push': {'tags': ['v*.*.*'], 'branches': ['main']}}"]
+
+    contents = mutated(lambda d: job(d)["permissions"].update({"contents": "write"}))
+    (problem,) = _permission_problems(RELEASE, contents)
+    assert problem.startswith("job release-evidence: permissions must be exactly contents:read actions:read") \
+        and problem.endswith("got contents:write actions:read checks:read id-token:write attestations:write")
+    top = mutated(lambda d: d.update({"permissions": {"contents": "write"}}))
+    assert _permission_problems(RELEASE, top) == ["workflow token must be read-only, got contents:write"]
+    other = mutated(lambda d: d["jobs"].update({"extra": {"permissions": {"id-token": "write"}}}))
+    assert "job extra requests write permissions: id-token:write" in _permission_problems(RELEASE, other)
+    elsewhere = _permission_problems("pr-title.yml", real)  # the allow-list is keyed on the file too
+    assert elsewhere == ["job release-evidence requests write permissions: contents:read actions:read checks:read "
+                         "id-token:write attestations:write"]
+
+    mac = mutated(lambda d: job(d).update({"runs-on": "macos-latest"}))
+    assert _macos_problems(RELEASE, mac) == ["job release-evidence: runs on 'macos-latest'; only ci.yml may use a macOS runner"]
+    assert "job release-evidence: runs-on must be 'ubuntu-latest', got 'macos-latest'" in _release_problems(mac)
+
+    def interpolate(d: dict) -> None:
+        step = next(s for s in job(d)["steps"] if s.get("run") == RELEASE_CHECK_RUN)
+        step["run"] = 'python scripts/release_check.py --tag "${{ github.ref_name }}"'
+
+    injected = mutated(interpolate)
+    assert _run_interpolation_problems(injected) == [
+        "job release-evidence, step Release check of the tagged commit: run: interpolates {{ github.ref_name }}; "
+        "pass it through env:"]
+    assert "step 'release check' is missing" in _release_problems(injected)
+
+    def late_check(d: dict) -> None:
+        steps = job(d)["steps"]
+        steps.append(steps.pop(next(i for i, s in enumerate(steps) if CI_STATUS_RUN.fullmatch(str(s.get("run", ""))))))
+
+    assert "step 'CI status' must run before 'git archive'" in _release_problems(mutated(late_check))
+    soft = mutated(lambda d: job(d)["steps"][3].update({"continue-on-error": True}))
+    assert any("'continue-on-error' could let the job go on" in p for p in _release_problems(soft))
+    long_wait = mutated(lambda d: job(d)["steps"][3].update(run=job(d)["steps"][3]["run"].replace("15", "30")))
+    assert _release_problems(long_wait) == ["CI status: --deadline must end before the job's timeout-minutes"]

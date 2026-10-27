@@ -835,6 +835,59 @@ def test_the_pr_title_checks_bite_on_each_unsafe_or_weakened_shape():
                                                                                "reopened", "ready_for_review"]}}}))
 
 
+
+# release.yml (ADR-0122) builds the release evidence with what ci.yml already trusts: the same pinned checkout,
+# setup-python and upload-artifact SHAs, the same Python, and the supply-chain job's SBOM command (written into dist/).
+# Its own rules (tags only, permissions, step order) are owned by tests/unit/test_delivery_ci_secrets.py.
+RELEASE_REUSED_ACTIONS = ("actions/checkout", "actions/setup-python", "actions/upload-artifact")
+
+
+def _release_reuse_problems(ci: dict, release: dict) -> list[str]:
+    ci_steps = [s for job in ci["jobs"].values() for s in job.get("steps") or []]
+    ci_pins = {str(s["uses"]) for s in ci_steps if s.get("uses")}
+    steps = [s for job in release["jobs"].values() for s in job.get("steps") or []]
+    problems = []
+    for action in RELEASE_REUSED_ACTIONS:
+        used = [str(s["uses"]) for s in steps if str(s.get("uses", "")).startswith(f"{action}@")]
+        if not used:
+            problems.append(f"{action}: not used by release.yml")
+        problems += [f"{u}: not the pin ci.yml uses" for u in used if u not in ci_pins]
+    versions = {(s.get("with") or {}).get("python-version") for s in ci_steps + steps
+                if str(s.get("uses", "")).startswith("actions/setup-python@")}
+    if len(versions) != 1:
+        problems.append(f"setup-python versions differ between ci.yml and release.yml: {sorted(map(str, versions))}")
+    sbom = [ln.strip() for s in ci["jobs"]["supply-chain"]["steps"] for ln in str(s.get("run", "")).splitlines()
+            if "scripts/supply_chain.py sbom" in ln]
+    want = [ln.replace(" -o ", " -o dist/", 1) for ln in sbom]
+    if len(want) != 1 or not any(str(s.get("run", "")).strip() == want[0] for s in steps):
+        problems.append(f"the SBOM step must run the supply-chain job's command into dist/: {want}")
+    return problems
+
+
+def test_the_release_workflow_reuses_the_pins_and_the_sbom_command_of_ci():
+    assert _release_reuse_problems(_workflow(), _workflow_files()["release.yml"]) == []
+
+
+def test_the_release_reuse_check_bites_on_a_foreign_pin_another_python_and_a_different_sbom_command():
+    import copy
+
+    real = _workflow_files()["release.yml"]
+    steps = lambda d: d["jobs"]["release-evidence"]["steps"]  # noqa: E731
+    foreign = copy.deepcopy(real)
+    steps(foreign)[0]["uses"] = "actions/checkout@" + "0" * 40
+    assert _release_reuse_problems(_workflow(), foreign) == [f"actions/checkout@{'0' * 40}: not the pin ci.yml uses"]
+    python = copy.deepcopy(real)
+    steps(python)[1]["with"]["python-version"] = "3.12"
+    assert _release_reuse_problems(_workflow(), python) == [
+        "setup-python versions differ between ci.yml and release.yml: ['3.12', '3.13']"]
+    sbom = copy.deepcopy(real)
+    for step in steps(sbom):
+        if "supply_chain.py sbom" in str(step.get("run", "")):
+            step["run"] = "python scripts/supply_chain.py sbom --offline -o dist/sbom.cdx.json"
+    (problem,) = _release_reuse_problems(_workflow(), sbom)
+    assert problem.startswith("the SBOM step must run the supply-chain job's command into dist/")
+
+
 # The checkout and setup of every backend job (static, shards, verifier) must build the commit under test: an
 # `actions/checkout` `with:` key such as ref, repository, path, sparse-checkout or token could point G1 or a shard at
 # another commit (for example main) while every test stays green.
