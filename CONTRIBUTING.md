@@ -93,6 +93,14 @@ The run also does what CI cannot do for you, and says what it did not do:
   conflict is a FAIL that lists the files: pushing such a branch costs a conflict-resolution commit and a full CI
   re-run. Any other failure of that command (for example unrelated histories, exit 128) is a FAIL with git's message.
   It needs git 2.38 or newer; only with an older git (usage error, exit 129) is the gate SKIPPED with that reason.
+- **`conflict-markers`.** When `origin/main` exists, `git diff --check <merge base with origin/main>..HEAD` must report
+  no "leftover conflict marker" (whitespace complaints are ignored). A FAIL lists each `file:line`. A file whose only
+  finding is a lone `=======` line passes: git reports a markdown setext heading underline as a conflict marker too,
+  so only a file that also has a `<<<<<<<`, `>>>>>>>` or `|||||||` line is reported. SKIPPED with the reason when
+  `origin/main` is missing (LESSONS L22: a failed scripted conflict resolution chained with `;` once committed its
+  markers).
+- **Full-suite record (informational).** A local run prints whether HEAD's tree has a passing full-suite record from
+  `scripts/run_tests.sh` (see "Run the tests with a preflight"); the pre-push hook refuses a push without one.
 - **`NOT RUN: <job> (<reason>)`.** One line for every job of every workflow that runs on `pull_request` or `push` that this run does not
   execute (the job ids of `ci.yml` and the job names of the other workflows are read from the files, so a new job shows
   up by itself): the backend shards, the verifier, bootstrap, browser e2e, the supply-chain report, the aggregators
@@ -140,7 +148,7 @@ get only the commit-message check over `base..tip`, and only when a base is know
 for a new branch); with no base that check is SKIPPED and says so. A failing gate stops the push. Frontend gates are SKIPPED in
 the hook (the temporary worktree has no `node_modules`). `git push --no-verify` skips the hook; CI stays the gate.
 
-Before any gate the hook refuses two classes of wrong push (incident 2026-10-26: a delegated agent left a worktree
+Before any gate the hook refuses these classes of wrong push (incident 2026-10-26: a delegated agent left a worktree
 on a detached `HEAD`, so the push and the pull request went out on an old commit):
 
 - **Wrong commit.** `HEAD` is detached and is neither a pushed commit nor an ancestor of one (the commits made on it
@@ -153,6 +161,16 @@ on a detached `HEAD`, so the push and the pull request went out on an old commit
   the commits and the exact fix (`git config user.email`, then `git rebase -r <base> --exec "<amend>"` with the exec string in double quotes so that cmd.exe, PowerShell and sh read it as one argument, where
   `<amend>` is `git merge-base --is-ancestor HEAD origin/main || git commit --amend --no-edit --reset-author
   --allow-empty`: commits that `origin/main` already has keep their author); it never prints an address. The address is set per repository, never committed.
+- **Full suite** (LESSONS L8, strike 3: a branch tested only with targeted tests was pushed and CI went red). The tree
+  of every pushed commit (deletions are not checked) must have a passing full-suite record, written by
+  `scripts/run_tests.sh`. Without one the push stops with `full suite not run for tree <short> (<sha>): run
+  scripts/run_tests.sh on a clean tree, or push with AEOS_PUSH_WITHOUT_FULL_SUITE='<reason>'`. With that variable set
+  to a non-empty reason the `full-suite` guard is SKIPPED (never PASS) and the reason is printed. Records live in the
+  common git directory, so every worktree of the clone shares them, and a tree is content-addressed: a merge tested in
+  one worktree counts for the same tree pushed from another. A commit that changes content (a merge of `origin/main`
+  that brings changes, an edit) has a new tree and needs a new full run; a message-only amend keeps the tree.
+
+The hook also runs the `conflict-markers` gate on the pushed tip.
 
 The hook picks its Python in this order: `AEOS_GATES_PYTHON` (an existing executable; the hook stops with an error
 if it is not), the `.venv` of the checkout, the `.venv` of the main checkout (a linked worktree has none of its
@@ -172,6 +190,22 @@ chosen as the pre-push hook does (`AEOS_GATES_PYTHON`, the `.venv`, the main che
 line of output is always `RUN_TESTS: PASS rc=<n>` or `RUN_TESTS: FAIL rc=<n>`, so grep for it instead of trusting a
 tail of the log. macOS arm64 is proven; Windows and Intel macOS are NOT-PROVEN (Windows runs the suite with
 `python -m pytest` directly). CI lints the shell scripts with `shellcheck scripts/*.sh scripts/git-hooks/pre-push`.
+
+After a PASS the runner records the run for the pre-push hook (`scripts/full_suite_record.py`, the one owner of the
+record format) when the run was FULL and the tree CLEAN; otherwise it prints one line
+`run_tests: full-suite record: not recorded: <why>`. Recording never fails a run.
+
+- **Full** means no pytest argument that can select or deselect tests: only `-q`, `-qq`, `-v`, `-vv`, `-x`,
+  `--exitfirst`, `-n N`, `--numprocesses N`, `--durations N`, `--tb=...`, `-r...` and `--color=...` (and `--deadline`,
+  which is the runner's own) are allowed. A path, `-k`, `-m`, `--lf`, `--deselect`, `-p` or anything else makes the run
+  partial.
+- **Clean** means no staged, unstaged or untracked file that git does not ignore, both before pytest starts and after
+  it passes, and HEAD unchanged in between: then HEAD's tree is exactly what was tested.
+- The record is one line `<HEAD tree sha> <HEAD sha> <UTC time> <load average>` appended to
+  `<git common dir>/aeos-full-suite-runs` (`git rev-parse --git-common-dir`), shared by every worktree of the clone.
+
+A delegated builder that cannot run the full suite says so; the delegating session runs it before the push
+(`docs/agent/DELEGATION-BRIEF.md` rule 7).
 
 Commit subjects follow Conventional Commits, `type(scope)?!?: description` (types `feat`, `fix`, `docs`,
 `test`, `ci`, `build`, `chore`, `refactor`, `perf`, `style`, `revert`, `security`; at most 100 characters;
@@ -293,7 +327,10 @@ Standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the ve
   difference by setting name or check context and ends with `GITHUB_SETTINGS: OK`, `DRIFT` or `ERROR` (exit 0, 1, 2).
   `--apply` prints the changes it would send and sends nothing without `--yes`; with `--yes` it updates the repository
   (`PATCH`), the existing rulesets (`PUT`, matched by name) and creates a missing one (`POST`), then checks again. It
-  never deletes a ruleset and never runs in CI; `--repo owner/name` names another repository.
+  never deletes a ruleset and never runs in CI; `--repo owner/name` names another repository. GitHub can serve a stale
+  read for a while after a write (2026-10-27: a `--check` seconds after `--apply --yes` read DRIFT, minutes later OK),
+  so when a read shows DRIFT, `--check` and the check after `--apply --yes` wait `--settle SECONDS` (default 10, `0`
+  disables) and read once more; the verdict is the second read, and the output says that it waited.
 - **`scripts/action_pins.py`** is the monthly report of pinned versions, because a pin never moves by itself and
   ADR-0115 allows no automatic Dependabot pull requests. `python scripts/action_pins.py --report` lists every
   `uses: owner/repo@<40-hex sha> # vX` of `.github/workflows` and the pinned release binary of `ci.yml`

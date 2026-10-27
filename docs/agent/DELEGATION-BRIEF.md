@@ -31,9 +31,11 @@ RULES (lesson ids in brackets)
    OWNER DECISION: "<verbatim quote>"  SCOPE: <exact scope>
 6. Domains [L12]. A change for one domain (PERSONAL or OFFICE) must not alter the other domain's
    view. Add a test that shows it.
-7. Full gates before "done" [L8]. Run scripts/gates.py (or the commands in CONTRIBUTING.md) and the
-   unit, acceptance and integration suites; add the frontend tests when the change touches the frontend.
-   Unit tests alone are not "done".
+7. Full gates before "done" [L8]. "Done" means scripts/gates.py (or the commands in CONTRIBUTING.md) and the FULL
+   suite: scripts/run_tests.sh with no selecting argument, on a clean tree (frontend tests when the change touches the
+   frontend). Targeted tests alone are not "done". A builder that cannot run the full suite says so in its report;
+   the delegating session then runs it before the push, and the pre-push hook refuses a commit whose tree has no
+   passing full-suite record (AEOS_PUSH_WITHOUT_FULL_SUITE='<reason>' only with a stated reason; it is SKIPPED, never PASS).
 8. Claims carry evidence [L3]. Every security or readiness statement names its E-level, the host it
    ran on and its NOT-PROVEN part. Anything not run on Windows is NOT-PROVEN there.
 9. Secrets [L1]. Never print, paste, log or commit a secret. If one appears, stop and report it
@@ -64,6 +66,9 @@ RULES (lesson ids in brackets)
     (secrets_memory, its own keyring, a vault on a free port, a fake claude); only the real_claude_cli
     fixture with the owner's DLY_AEOS_REAL_CLAUDE=1 runs the real Claude Code. Never query the real vault,
     OpenBao, Keychain or keyring to check anything; all proof is by tests with fakes.
+18. Dependent steps [L22]. Chain a step whose failure must stop the next one with && or a checked if, never ';' or
+    a separate line (a failed conflict resolution once still committed its conflict markers). Check each result
+    before a commit, merge or push; scripts/gates.py fails on a committed conflict marker.
 
 REPORT (at most 15 lines): commit sha, files changed, gate results, bite-test results
 (violating fixture red, near-miss fixture green), NOT-PROVEN items.
