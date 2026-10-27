@@ -10,6 +10,15 @@ import pytest
 
 from aeos.claude_bridge import binary as binmod
 
+_REAL_PUBLISHER_PIN = binmod.publisher_pin  # captured at import, before the conftest stub runs
+
+
+@pytest.fixture(autouse=True)
+def _real_publisher_pin(monkeypatch):
+    """This module tests the publisher pin itself: undo the conftest NOT_PINNED stub, so the pin is read from the
+    reviewed manifest (or the manifest a test installs with _pinned)."""
+    monkeypatch.setattr(binmod, "publisher_pin", _REAL_PUBLISHER_PIN)
+
 
 def _runner(responses):
     calls = []
@@ -70,6 +79,78 @@ def test_missing_binary_or_failing_check_is_unknown_never_valid():
         raise OSError("no shell")
 
     assert binmod.publisher_signature(Path("claude"), run=boom)["status"] == "UNKNOWN"
+
+
+PINNED_TEAM = "Q6L2SF6YDW"  # the reviewed darwin publisher pin (OWNER_ACTIONS 1.12)
+VALID_PINNED = {"--verify": (0, "", ""), "-dv": (0, "", f"Authority=Developer ID Application\nTeamIdentifier={PINNED_TEAM}")}
+
+
+def _process_runner(monkeypatch, responses: dict) -> dict:
+    """Fake the default runner, whose results publisher_signature caches for the process (an explicit run= never is),
+    on a macOS host with an empty cache. Returns the mutable state: swap state["responses"] between calls."""
+    import subprocess
+
+    monkeypatch.setattr(binmod.sys, "platform", "darwin")
+    monkeypatch.setattr(binmod, "_SIG_CACHE", {})
+    monkeypatch.setattr(binmod, "_SIG_LAST", {})
+    state: dict = {"responses": responses, "calls": 0}
+
+    def run(argv, timeout=30.0):
+        state["calls"] += 1
+        step = state["responses"]
+        if step == "timeout":
+            raise subprocess.TimeoutExpired(argv, timeout)
+        if step == "oserror":
+            raise OSError("codesign could not start")
+        return next((v for k, v in step.items() if k in " ".join(argv)), (1, "", ""))
+
+    monkeypatch.setattr(binmod, "_run", run)
+    return state
+
+
+@pytest.mark.parametrize("transient", [
+    "timeout",                                                        # codesign hung past its 30 s timeout
+    "oserror",                                                        # codesign could not be started
+    {"--verify": (1, "", "/x/claude: Permission denied"), "-dv": (1, "", "")},   # UNKNOWN: says nothing of the sig
+    {"--verify": (0, "", ""), "-dv": (1, "", "")},                    # VALID, but the signer was not read
+])
+def test_a_transient_signature_failure_is_not_cached_so_a_pinned_publisher_is_not_blocked_for_the_process(
+        monkeypatch, transient):
+    """With the darwin publisher pinned, a failed check BLOCKS the native call (unknown is not the publisher). That is
+    right for that call, but caching it per (path, fingerprint) kept the bridge BLOCKED until the process restarted."""
+    state = _process_runner(monkeypatch, transient)
+    first = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1")
+    assert binmod.signature_gate(first, PINNED_TEAM)[0] == "BLOCKED"
+    # the status view (no refresh) shows that last undecided result and why, never "not checked yet"
+    assert binmod.last_signature(Path("/x/claude"), "fp-1") is first
+    assert binmod.last_signature(Path("/x/claude"), "fp-2") is None  # near miss: another binary was never checked
+    state["responses"] = VALID_PINNED
+    second = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1")
+    assert binmod.signature_gate(second, PINNED_TEAM)[0] == "OK", (
+        f"a transient signature failure was cached for the process: {second}")
+    calls = state["calls"]
+    assert binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1") is second
+    assert state["calls"] == calls, "a definitive VALID report is cached"
+
+
+@pytest.mark.parametrize(("definite", "status"), [
+    ({"--verify": (0, "", ""), "-dv": (0, "", "TeamIdentifier=FOREIGN123")}, "VALID"),     # signer mismatch
+    ({"--verify": (1, "", "code object is not signed at all"), "-dv": (1, "", "not signed")}, "UNSIGNED"),
+    ({"--verify": (1, "", "invalid signature (code or signature have been modified)"),
+      "-dv": (0, "", f"TeamIdentifier={PINNED_TEAM}")}, "INVALID"),
+])
+def test_a_definitive_signature_verdict_stays_cached_and_blocked(monkeypatch, definite, status):
+    """Near miss: a definite mismatch, unsigned or broken signature is the OS's verdict on that exact binary; it stays
+    cached (and BLOCKED) for that fingerprint, and only a different binary (new fingerprint) is checked again."""
+    state = _process_runner(monkeypatch, definite)
+    first = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1")
+    assert first["status"] == status and binmod.signature_gate(first, PINNED_TEAM)[0] == "BLOCKED"
+    calls = state["calls"]
+    state["responses"] = VALID_PINNED
+    again = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1")
+    assert again is first and state["calls"] == calls and binmod.signature_gate(again, PINNED_TEAM)[0] == "BLOCKED"
+    swapped = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-2")
+    assert binmod.signature_gate(swapped, PINNED_TEAM)[0] == "OK"
 
 
 ANTHROPIC = "CN=Anthropic, PBC, O=Anthropic, PBC, L=San Francisco, S=California, C=US"
@@ -140,6 +221,7 @@ def test_status_reports_blocked_or_degraded_from_the_signature(settings, db, mon
     from aeos.claude_bridge import bridge
     from tests.unit.test_claude_bridge_run import _probe
 
+    _pinned(monkeypatch, None)  # the unpinned behaviour (the reviewed manifest pins darwin)
     monkeypatch.setattr(binmod, "probe", lambda settings, refresh=False: _probe())
     for os_sig, expected in (({"status": "INVALID", "signer": ANTHROPIC}, "BLOCKED"),
                              ({"status": "UNSIGNED", "signer": None}, "DEGRADED"),
@@ -154,8 +236,28 @@ def test_status_reports_blocked_or_degraded_from_the_signature(settings, db, mon
 def test_the_owner_pinned_publisher_is_read_from_the_install_manifest():
     from aeos.inventory import facade as inventory
 
-    assert inventory.approved_signer("claude-code") is None  # owner step: not pinned in the reviewed manifest
+    # OWNER_ACTIONS 1.12 (2026-10-27): darwin pinned to the TeamIdentifier; windows not recorded yet (owner step)
+    assert inventory.approved_signer("claude-code", os_name="darwin") == TEAM
+    assert inventory.approved_signer("claude-code", os_name="windows") is None
     assert inventory.approved_signer("no-such-component") is None
+
+
+@pytest.mark.parametrize(("os_name", "sig", "gate"), [
+    ("darwin", {"status": "VALID", "signer": "Q6L2SF6YDW"}, "OK"),          # the official build
+    ("darwin", {"status": "VALID", "signer": "ABCDE12345"}, "BLOCKED"),     # foreign-signed
+    ("darwin", {"status": "UNSIGNED", "signer": None}, "BLOCKED"),          # un-signed
+    ("darwin", {"status": "NOT_CHECKED"}, "BLOCKED"),                       # not proven
+    ("windows", {"status": "VALID", "signer": "CN=Anyone"}, "UNVERIFIED"),  # windows NOT_RECORDED: never borrowed
+])
+def test_the_reviewed_manifest_pin_blocks_a_foreign_or_unsigned_claude_on_macos(monkeypatch, os_name, sig, gate):
+    """Bite test of the real manifest pin (OWNER_ACTIONS 1.12): on macOS only a VALID signature by the pinned
+    TeamIdentifier passes; on Windows nothing is pinned yet, so authenticity stays UNVERIFIED (never OK)."""
+    from aeos.inventory import pins
+
+    monkeypatch.setattr(pins, "host_os", lambda: os_name)
+    pin = binmod.publisher_pin()
+    assert pin["status"] == ("PINNED" if os_name == "darwin" else "NOT_PINNED")
+    assert binmod.signature_gate(sig, pin["signer"], pin_problem=binmod.pin_error(pin))[0] == gate
 
 
 def test_a_pinned_publisher_in_the_manifest_reaches_the_gate(monkeypatch):
@@ -177,7 +279,7 @@ def test_a_pinned_publisher_in_the_manifest_reaches_the_gate(monkeypatch):
 
 
 # ------------------------------------------------------------------------------------------------- W6-042
-TEAM = "Q6L2SF6YDW"  # an example TeamIdentifier shape (tests only; the owner records the real one)
+TEAM = "Q6L2SF6YDW"  # Anthropic PBC TeamIdentifier, pinned for darwin in the reviewed manifest (OWNER_ACTIONS 1.12)
 
 
 def _pinned(monkeypatch, approved_signer) -> None:
@@ -247,12 +349,14 @@ def test_status_names_the_authenticity_gate_and_a_signature_remedy(settings, db,
     assert out["binary"]["authenticity"]["remedy"]
     # not refreshed: the OS check has not run in this process -> NOT_CHECKED, never authentic
     binmod._SIG_CACHE.clear()
+    binmod._SIG_LAST.clear()
     assert bridge.status(db, settings)["binary"]["authenticity"]["gate"] == "NOT_CHECKED"
 
 
 def test_doctor_claude_binary_applies_the_same_gate(settings, db, monkeypatch):
     from tests.unit.test_doctor_checks import NATIVE, _ctx, check, claude_runner
 
+    _pinned(monkeypatch, None)  # starts unpinned (the reviewed manifest pins darwin)
     monkeypatch.setattr(binmod, "invocation_signature",
                         lambda path, fingerprint_value: {"status": "INVALID", "signer": ANTHROPIC})
     res = check("claude.binary", _ctx(settings, db, claude_runner(NATIVE)))
@@ -323,6 +427,7 @@ def test_the_manifest_note_no_longer_claims_the_signature_is_unchecked():
     from aeos.inventory.manifest import load_manifest
 
     comp = next(c for c in load_manifest().data["components"] if c["component_id"] == "claude-code")
-    assert comp["signature"]["approved_signer"] is None  # owner step: not pinned yet (never invented)
+    # read with codesign on the owner's Mac (OWNER_ACTIONS 1.12); windows stays an owner step (never invented)
+    assert comp["signature"]["approved_signer"] == {"darwin": TEAM}
     assert "tidak diperiksa oleh AEOS" not in (comp["signature"]["note"] or "")
     assert comp["signature"]["method"] == "os_codesign"

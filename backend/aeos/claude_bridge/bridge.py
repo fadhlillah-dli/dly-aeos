@@ -771,9 +771,8 @@ def status(session: Session, settings: Settings | None = None, *, refresh: bool 
         binary_status = "CONFIGURED"
     signature = (binmod.publisher_signature(pr.binary.path, fingerprint_value=pr.binary.fingerprint)
                  if pr.binary.found and refresh else
-                 binmod._SIG_CACHE.get((str(pr.binary.path), pr.binary.fingerprint or ""),
-                                       {"status": "NOT_CHECKED",
-                                        "reason": "refresh the status to run the OS signature check"}))
+                 binmod.last_signature(pr.binary.path, pr.binary.fingerprint)
+                 or {"status": "NOT_CHECKED", "reason": "refresh the status to run the OS signature check"})
     pin = binmod.publisher_pin()
     authenticity = binmod.authenticity_view(signature, pin["signer"], found=pr.binary.found,
                                             pin_problem=binmod.pin_error(pin))

@@ -18,7 +18,29 @@ status: DESIGN
 title: DLY AEOS InstallManifest
 master_ref: docs/architecture/DLY_AEOS_Master_Architecture_Final.md
 sources_checked: "2026-10-17/2026-10-18"
-reviewed_by: null
+# Pins (docs/OWNER_ACTIONS.md 1.12): reviewed by the owner; darwin_arm64 recorded 2026-10-27 under the owner's
+# delegated decision of 2026-10-27 ("rekomendasi terbaik yang tidak mengganggu atau menghambat operasional ...
+# sesuai praktek industri profesional", applied as D13). Rule: pin what protects without blocking a routine update.
+#   * claude-code: publisher pin only (signature.approved_signer darwin = TeamIdentifier). It updates itself
+#     often, so a version/digest pin would drift on every update; the publisher pin survives updates and BLOCKS a
+#     foreign- or un-signed binary.
+#   * opencode: approved_pin 1.19.3, equal to the worker runtime default (worker_runtime/opencode.py PINNED_VERSION),
+#     so the version the worker is built, run and compared with does not change. What changes: the pin is now a
+#     human-approved manifest pin (master §07), so inventory shows MATCH/MISMATCH and a resolved-version-mismatch
+#     drift finding instead of NO_PIN/UNKNOWN, and the doctor quotes "install-manifest approved_pin" as its source.
+#     Drift from the pin makes worker.opencode FAILED (OPENCODE_PIN_DRIFT), which BLOCKS CAN_RUN_WORKER (master §38
+#     "Binary/version/route berubah dari pin": admission stops) - with or without this entry. So the owner turns
+#     OpenCode self-update off on each machine (OPENCODE_DISABLE_AUTOUPDATE=1, OWNER_ACTIONS 1.12); the worker
+#     already runs with it off (its generated config sets autoupdate false). No approved_digest: none reviewed.
+#     tool_schema_hash: none observed yet (the worker contract test has not recorded one).
+#   * openbao: version pin. Installed only by `aeos vault install`, never self-updating; drift is a finding, not a
+#     block. Its darwin_arm64 digest is not recorded yet: a digest pin also makes every openbao proposal need a
+#     candidate digest, which the trusted acceptance suite does not supply (OWNER_ACTIONS 1.12).
+#   * git, nodejs-runtime, python-runtime: no pin. approved_pin has no per-platform form, so a Mac value would
+#     drift on Windows; OS/package-manager security updates would raise a finding and a PR each time.
+#   * windows_amd64 and darwin_amd64 stay NOT_RECORDED until those machines.
+# tests/unit/test_inventory_pins.py encodes this rule.
+reviewed_by: "Fadhlillah"
 categories:
   - experience/intake
   - planning/governance
@@ -499,8 +521,8 @@ components:
     bootstrap_order: 2
     approved_pin: null
     approved_digest: null
-    distribution: {kind: package_manager, url: null, digest: null, channel: "official native build", note: "Distribusi resmi Anthropic (winget Anthropic.ClaudeCode / brew cask claude-code; Linux: halaman setup resmi). Digest belum dipin."}
-    signature: {method: os_codesign, available: null, verified: false, verified_at: null, result: UNKNOWN, approved_signer: null, note: "Bridge dan Doctor (claude.binary) memeriksa tanda tangan OS sebelum dipakai: Windows Get-AuthenticodeSignature, macOS codesign (TeamIdentifier). INVALID selalu BLOCKED; tanpa pin keaslian UNVERIFIED (UNSIGNED = DEGRADED). Langkah pemilik: isi approved_signer per OS {windows: subject/CN/O Authenticode, darwin: TeamIdentifier} lewat PR yang direview; setelah dipin, apa pun selain VALID + penerbit cocok = BLOCKED. Manifest yang gagal divalidasi = pin tidak diketahui = BLOCKED."}
+    distribution: {kind: package_manager, url: null, digest: null, channel: "official native build", note: "Distribusi resmi Anthropic (winget Anthropic.ClaudeCode / brew cask claude-code; Linux: halaman setup resmi). Versi/digest sengaja tidak dipin (keputusan 2026-10-27, OWNER_ACTIONS 1.12): Claude Code memperbarui dirinya sendiri, jadi pin versi/digest selalu drift; keaslian dijaga pin penerbit (signature.approved_signer)."}
+    signature: {method: os_codesign, available: null, verified: false, verified_at: null, result: UNKNOWN, approved_signer: {darwin: Q6L2SF6YDW}, note: "Bridge dan Doctor (claude.binary) memeriksa tanda tangan OS sebelum dipakai: Windows Get-AuthenticodeSignature, macOS codesign (TeamIdentifier). INVALID selalu BLOCKED; tanpa pin keaslian UNVERIFIED (UNSIGNED = DEGRADED). darwin dipin 2026-10-27 (TeamIdentifier Q6L2SF6YDW = Developer ID Application: Anthropic PBC, dibaca dengan codesign di Mac pemilik); windows belum dipin (langkah pemilik di mesin Windows: subject/CN/O Authenticode lewat PR yang direview). Setelah dipin, apa pun selain VALID + penerbit cocok = BLOCKED di OS itu. Manifest yang gagal divalidasi = pin tidak diketahui = BLOCKED."}
     ports: []
     config_refs: ["settings:claude_binary"]
     compatibility: {os: [windows, macos, linux], arch: [], min_version: null, max_version: null, source: "ADR-0040", note: "Windows: hanya claude.exe native; shim .cmd/.ps1 ditolak bridge."}
@@ -1398,9 +1420,9 @@ components:
     requirement: REQUIRED
     design_label: SELECTED_DESIGN
     bootstrap_order: 5
-    approved_pin: null
+    approved_pin: "1.19.3"
     approved_digest: null
-    distribution: {kind: release_asset, url: null, digest: null, channel: null, note: "Rilis resmi github:anomalyco/opencode; aset dan digest dipin setelah capability test (belum)."}
+    distribution: {kind: release_asset, url: null, digest: null, channel: null, note: "Rilis resmi github:anomalyco/opencode. approved_pin 1.19.3 (keputusan 2026-10-27, OWNER_ACTIONS 1.12) sama dengan pin bawaan worker runtime (PINNED_VERSION), jadi perilaku runtime tidak berubah; inventaris kini menampilkan pin yang disetujui manusia dan drift-nya. Drift dari pin membuat worker.opencode FAILED sehingga CAN_RUN_WORKER BLOCKED; karena itu pemilik mematikan pembaruan otomatis OpenCode di tiap mesin (OPENCODE_DISABLE_AUTOUPDATE=1). approved_digest kosong: belum ada digest yang direview. tool_schema_hash: none observed yet (uji kontrak worker belum mencatatnya)."}
     signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Belum diperiksa apakah rilis ditandatangani/beratestasi."}
     ports: []
     config_refs: ["settings:opencode_binary"]
@@ -2710,9 +2732,9 @@ components:
     requirement: REQUIRED
     design_label: SELECTED_DESIGN
     bootstrap_order: 3
-    approved_pin: null
+    approved_pin: "2.7.1"
     approved_digest: null
-    distribution: {kind: release_asset, url: null, digest: null, channel: null, note: "aeos vault install mengunduh rilis resmi OpenBao dan mencocokkan SHA256 dengan checksums.txt rilis itu (versi belum dipin)."}
+    distribution: {kind: release_asset, url: null, digest: null, channel: null, note: "aeos vault install mengunduh rilis resmi OpenBao, mencocokkan SHA256 dengan checksums.txt rilis itu, lalu biner bao dengan approved_digest platform ini bila dicatat. Pin 2.7.1 dicatat 2026-10-27 (OWNER_ACTIONS 1.12); approved_digest belum dicatat untuk platform mana pun (darwin_arm64 menunggu penyesuaian suite acceptance, lihat OWNER_ACTIONS 1.12)."}
     signature: {method: gpg, available: null, verified: false, verified_at: null, result: NOT_VERIFIED, note: "Tanda tangan GPG checksums.txt belum diverifikasi oleh installer (hanya SHA256)."}
     ports:
       - {port: 8200, host: 127.0.0.1, setting: openbao_addr, purpose: "API vault (loopback saja)"}

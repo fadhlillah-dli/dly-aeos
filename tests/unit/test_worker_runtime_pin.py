@@ -178,7 +178,8 @@ def test_the_bootstrap_status_script_reads_the_reviewed_pin(tmp_path):
     path.write_text("components:\n  - component_id: opencode\n    approved_pin: null\n"
                     "  - component_id: goose\n    approved_pin: 9.9.9\n", encoding="utf-8")
     assert cs.manifest_pin("opencode", tmp_path) is None
-    assert cs.manifest_pin("opencode") is None and cs.OPENCODE_PIN == opencode.PINNED_VERSION  # repo: not pinned
+    # repo: the reviewed manifest pins exactly the runtime default (OWNER_ACTIONS 1.12)
+    assert cs.manifest_pin("opencode") == opencode.PINNED_VERSION and cs.OPENCODE_PIN == opencode.PINNED_VERSION
 
 
 @pytest.fixture(autouse=True)
