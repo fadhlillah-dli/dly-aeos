@@ -13,6 +13,8 @@ from aeos.secrets import server
 from aeos.secrets.facade import SecretStatus
 from aeos.secrets.provider import (
     INTERIM_RESIDUAL_RISK,
+    LOST_KEYRING_RUNBOOK,
+    approle_missing_command,
     bootstrap_store,
     keyring_backend,
     last_verification,
@@ -48,7 +50,10 @@ def _remedies(bao: dict[str, Any], binary_installed: bool, approle: bool | None,
     elif bao.get("sealed"):
         out.append({"command": "aeos vault unseal", "why": "Buka segel vault setelah restart"})
     elif approle is False:
-        out.append({"command": "aeos vault init", "why": "Kredensial AppRole tidak ada di OS keyring"})
+        # initialised here: `vault init` would be refused, so name the lost-keyring path (ADR-0123)
+        out.append({"command": approle_missing_command(bao.get("initialized")),
+                    "why": "Kredensial AppRole tidak ada di OS keyring padahal vault sudah diinisialisasi (keyring "
+                           "hilang): pulihkan dari salinan pemulihan offline, lihat " + LOST_KEYRING_RUNBOOK})
     return out
 
 

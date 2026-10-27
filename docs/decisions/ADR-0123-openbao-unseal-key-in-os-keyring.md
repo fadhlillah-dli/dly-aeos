@@ -40,14 +40,31 @@
    shares and the AppRole role_id/secret_id) once on the temporary screen: that screen is the Windows offline copy,
    so the Credential Manager never holds the only copy. Outside a terminal it refuses before anything changes,
    unless `--plain-output` is given.
+   *Non-interactive keyring mode* (macOS/Linux, `--yes`, no terminal, no `--plain-output`): the happy path shows
+   nothing and needs no terminal, so it is not refused as `--show-unseal-once` is. The one later step that needs
+   the owner's eyes is the fallback when the keyring refuses the material after `sys/init`; there nothing could
+   show it. So init first writes, reads back and deletes a random non-secret probe entry
+   (`openbao-write-probe`) and, when that fails, stops before `sys/init` with "Nothing was changed". A keyring
+   that takes the probe but refuses the real write a moment later still ends in the lost-material message
+   (residual, NOT-PROVEN as a real keyring event).
+   *`--show-unseal-once` after an earlier vault*: share(s) of that earlier vault left in the keyring cannot unseal
+   the new one, and auto-unseal would apply them and report a rejected key. They are removed right after a
+   successful `sys/init` (OpenBao reported the vault uninitialised, so they belong to a vault that no longer exists
+   at that address; the keyring default overwrites them in the same situation). Refusing before init instead was
+   rejected: no command removes only the shares, so the owner would be stuck. A failed removal is a step note
+   naming the leftover, not a failed setup.
 2. **Root token.** As before, it is revoked once the AppRole login works, and its keyring entry is removed. Only
    while a setup stays incomplete is it kept, in the keyring only (`openbao-root-token`), never printed; the
    recovery copy then contains it so the owner can finish, or the owner resets the still empty vault.
 3. **Auto-unseal.** `aeos serve` (before it starts the controller) and `aeos vault unseal` first ask OpenBao for
    its seal status. Only when it reports sealed do they read the share(s) from the keyring and unseal. Each
    attempt is an audit row `openbao.unseal` (source, trigger, outcome, number of shares applied; never a value).
-   Unreachable, uninitialised or unsealed: the keyring is not read. No share in the keyring: the former behaviour
-   (`serve` says "OpenBao is sealed. Next: aeos vault unseal"; `vault unseal` prompts without echo).
+   `serve` writes that row only into a database that already exists at the migration head and never creates or
+   migrates it as a side effect of auto-unseal; otherwise the row is skipped with a logged reason (no value). The
+   explicit `aeos vault` commands prepare the database first, as every CLI audit does.
+   Unreachable, uninitialised or unsealed: the keyring is not read. No share in the keyring: `vault unseal` prompts
+   without echo as before ADR-0123; `serve` prints one new line, "OpenBao is sealed. Next: aeos vault unseal", and
+   starts (before ADR-0123 it printed nothing about OpenBao).
    `--from-keyring` makes `vault unseal` fail instead of prompting.
 4. **Migration of an existing install.** `aeos vault import-unseal-key` reads the share(s) from a hidden prompt
    (getpass, entered twice; never argv, never echoed) and stores them; `--replace` overwrites stored shares. Audit
@@ -61,10 +78,16 @@
    data directory (backups copy that directory; §33 keeps recovery material out of them). It prints the path
    only. Audit row `openbao.recovery_export` (path, count, whether AppRole and a root token are included). On
    Windows it refuses: the code cannot guarantee an owner-only ACL (NOT-PROVEN); `vault init` shows the same
-   material once instead (decision 1).
+   material once instead (decision 1). The file and that screen name `import-unseal-key --with-approle` only when
+   they really hold the AppRole credentials; otherwise they give the command without it and say that the AppRole
+   is not included (the controller then needs runbook step 5).
 6. **Doctor and status.** `secret.openbao_health` adds one line: where the unseal key lives (OS keyring with the
    share count, or not stored) and the residual risk; the evidence field `unseal_key_location` is `os-keyring`,
    `not-stored` or `UNKNOWN`. Only the count entry is read. `aeos vault status` prints the same location.
+   Missing AppRole credentials on an initialised vault (a lost keyring) name the recovery path, `aeos vault
+   import-unseal-key --with-approle` from the offline copy and the runbook section "Lost keyring", in the Doctor
+   remedy and the controller's login error; `aeos vault init` is named only while OpenBao is not initialised
+   (on an initialised vault it is refused).
 
 ## Threat model
 

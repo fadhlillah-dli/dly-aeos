@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import sys
+import textwrap
 import time
 
 import httpx
@@ -107,8 +108,12 @@ def _show_material_once(res, *, threshold: int, shares: int, vt: bool, kept_in: 
     if incomplete:
         banner.append(f"  Root token  : {res.root_token}  (NOT revoked: revoke it when the setup is finished)")
     if kept_in:
+        from aeos.secrets.unseal import lost_keyring_line
+
         banner += [f"  (also kept in the {kept_in}: aeos serve and aeos vault unseal use them after a restart;",
-                   "   this is your offline copy for a lost keyring: aeos vault import-unseal-key --with-approle)"]
+                   "   this is your offline copy for a lost keyring.)",
+                   *textwrap.wrap(lost_keyring_line(len(res.keys), approle_included=approle is not None), 70,
+                                  initial_indent="  ", subsequent_indent="   ", break_on_hyphens=False)]
     else:
         banner.append(f"  ({threshold} of {shares} keys are needed after every restart: aeos vault unseal)")
     banner.append("=" * 72)
@@ -372,6 +377,16 @@ def init_cmd(
                  "is not an interactive terminal. Run it in a terminal, or pass --plain-output to print them to "
                  "stdout. Nothing was changed.")
         raise typer.Exit(1)
+    if store_unseal_in_keyring and not vt and not plain_output:
+        # Nothing could show the material if the keyring refused it after sys/init (the fallback needs the owner's
+        # eyes), so prove a keyring write first and keep "nothing was changed" when it fails (ADR-0123 decision 1).
+        why = bootstrap_store(settings).write_probe()
+        if why:
+            _err(f"The OS keyring did not take a test write ({why}). vault init stores the unseal key there; if it "
+                 "refused that write after init, the material would have to be shown once, and this is not an "
+                 "interactive terminal. Fix the keyring, run it in a terminal, or pass --plain-output. Nothing was "
+                 "changed.")
+            raise typer.Exit(1)
     location = unseal.keyring_location(settings)
     typer.echo("This will initialise the local OpenBao at " + settings.openbao_addr)
     typer.echo(f"  key shares/threshold : {shares}/{threshold}")
@@ -514,13 +529,14 @@ def unseal_cmd(from_keyring: bool = typer.Option(
                 break
     except OpenBaoError as exc:
         _err(f"unseal failed: {exc}")
-        unseal.audit("openbao.unseal", "FAILED", {"source": "prompt", "trigger": "cli", "keys_applied": applied})
+        unseal.audit("openbao.unseal", "FAILED", {"source": "prompt", "trigger": "cli", "keys_applied": applied},
+                     prepare_db=True)
         raise typer.Exit(1) from exc
     finally:
         c.close()
     reset_provider_cache()
     unseal.audit("openbao.unseal", "FAILED" if st.get("sealed") else "SUCCESS",
-                 {"source": "prompt", "trigger": "cli", "keys_applied": applied})
+                 {"source": "prompt", "trigger": "cli", "keys_applied": applied}, prepare_db=True)
     typer.echo("Unsealed." if not st.get("sealed") else "Still sealed - more keys needed.")
 
 
@@ -617,9 +633,10 @@ def import_unseal_key_cmd(
             store.set_approle(*approle)
     except AeosError as exc:
         _err(f"{exc.message}. Run the command again.")
-        unseal.audit("openbao.unseal_key_import", "FAILED", details)
+        unseal.audit("openbao.unseal_key_import", "FAILED", details, prepare_db=True)
         raise typer.Exit(1) from exc
-    unseal.audit("openbao.unseal_key_import", "SUCCESS", {**details, "replaced": bool(existing or approle_existing)})
+    unseal.audit("openbao.unseal_key_import", "SUCCESS", {**details, "replaced": bool(existing or approle_existing)},
+                 prepare_db=True)
     typer.echo(f"Stored {len(keys)} unseal key share(s){' and the AppRole credentials' if approle else ''} in the "
                f"{location}.")
     typer.echo("The key is checked the next time OpenBao is sealed (aeos serve or aeos vault unseal).")

@@ -3,7 +3,7 @@
 1. ``sys/init`` (key shares/threshold) -> unseal keys + root token. By default (ADR-0123) both go to the OS
    keyring at once, before any other step can fail; the root token entry is removed again once it is revoked.
    With ``store_unseal_in_keyring=False`` the caller shows the keys to the owner ONCE (and the root token only if
-   setup stays incomplete);
+   setup stays incomplete), and share(s) of an earlier vault still in the OS keyring are removed;
 2. unseal with the threshold keys;
 3. with the root token: KV v2 at ``aeos``; ACL policies ``aeos-personal``/``aeos-office``/
    ``aeos-workers``/``aeos-platform``/``aeos-projects`` (one per namespace); AppRole auth with role
@@ -66,6 +66,20 @@ def _wait_active(c: OpenBaoClient, timeout: float = 60.0) -> None:
     raise OpenBaoError("OpenBao did not become active after unseal")
 
 
+def _clear_earlier_shares(bootstrap: KeyringBootstrapStore, res: InitResult) -> None:
+    """``--show-unseal-once``: share(s) of an earlier vault left in the OS keyring cannot unseal the vault this init
+    just created (OpenBao reported it uninitialised), and auto-unseal would apply them and report a rejected key.
+    Removed right after a successful ``sys/init``; a failure to remove them is a step note, never a failed setup."""
+    try:
+        stale = bootstrap.unseal_key_count()
+        if stale:
+            bootstrap.clear_unseal_keys()
+            res.steps.append(f"{stale} unseal key share(s) of an earlier vault removed from the OS keyring")
+    except Exception as exc:  # the new vault exists; the note names the leftover, never a value
+        res.steps.append(f"unseal key share(s) of an earlier vault NOT removed from the OS keyring "
+                         f"({type(exc).__name__}): aeos serve would apply them and report a rejected key")
+
+
 def run_init(addr: str, *, shares: int, threshold: int, bootstrap: KeyringBootstrapStore,
              store_unseal_in_keyring: bool = False, http: httpx.Client | None = None) -> InitResult:
     if not 1 <= threshold <= shares <= 10:
@@ -95,6 +109,8 @@ def run_init(addr: str, *, shares: int, threshold: int, bootstrap: KeyringBootst
                 res.store_error = type(exc).__name__
                 raise
             res.steps.append(f"{len(res.keys)} unseal key share(s) and the root token stored in the OS keyring")
+        else:
+            _clear_earlier_shares(bootstrap, res)
         st: dict = {}
         for k in res.keys[:threshold]:
             st = c.unseal(k)

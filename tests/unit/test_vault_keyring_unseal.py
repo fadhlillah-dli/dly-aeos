@@ -156,7 +156,7 @@ def test_windows_init_keeps_the_keyring_and_shows_the_recovery_material_once(set
     screen = "\n".join(seen[0])
     assert all(k in screen for k in KEYS_B64) and f"AppRole role_id  : {ROLE_ID}" in screen
     assert f"AppRole secret_id: {SECRET_ID}" in screen and ROOT not in screen  # revoked: useless, not shown
-    assert "import-unseal-key --with-approle" in screen
+    assert "import-unseal-key --shares 3 --with-approle" in " ".join(screen.split())
     assert_no_secret({"output": r.output}, [*KEYS_B64, ROOT, ROLE_ID, SECRET_ID])  # only on the temporary screen
     assert "export-recovery <file>" not in r.output and "is your offline" in r.stdout
 
@@ -567,3 +567,162 @@ def test_bite_assert_no_secret_is_red_with_the_place_and_green_on_a_near_miss():
     assert KEYS_B64[0] not in str(exc.value)  # the failure message never repeats the value
     assert_no_secret({"stdout": "3 stored in the OS keyring (macOS Keychain), service dly-aeos-bootstrap; "
                                 f"prefix {KEYS_B64[0][:8]}"}, KEYS_B64)
+
+
+# ------------------------------------------------------------------------------ review fixes (ADR-0123)
+
+
+def _health(m, *, initialized: bool) -> None:
+    m.get(f"{ADDR}/v1/sys/health").mock(return_value=httpx.Response(
+        200, json={"initialized": initialized, "sealed": False, "standby": False, "version": "2.7.1"}))
+
+
+def test_bite_missing_approle_names_the_lost_keyring_path_on_an_initialised_vault(settings, memory_keyring):  # noqa: F811
+    from aeos.core.errors import Blocked
+    from aeos.secrets.health import _remedies
+    from aeos.secrets.provider import KeyringBootstrapStore, OpenBaoProvider
+
+    lost = _remedies({"reachable": True, "initialized": True, "sealed": False}, True, False)
+    assert [r["command"] for r in lost] == ["aeos vault import-unseal-key --with-approle"]
+    assert "Lost keyring" in lost[0]["why"] and "openbao-unseal-recovery.md" in lost[0]["why"]
+    fresh = _remedies({"reachable": True, "initialized": False, "sealed": True}, True, False)
+    assert [r["command"] for r in fresh] == ["aeos vault init"]  # near miss: not initialised, init is right
+    for initialized, want, never in ((True, "`aeos vault import-unseal-key --with-approle`", "vault init"),
+                                     (False, "run `aeos vault init`", "import-unseal-key")):
+        with respx.mock(assert_all_called=False) as m:
+            _health(m, initialized=initialized)
+            with pytest.raises(Blocked) as ei:
+                OpenBaoProvider(settings, KeyringBootstrapStore("empty-service"))._login()
+        assert want in ei.value.message and never not in ei.value.message, ei.value.message
+
+
+@posix_only
+def test_bite_recovery_copy_without_approle_gives_the_command_without_it(settings, memory_keyring,  # noqa: F811
+                                                                          tmp_path):
+    bootstrap_store(settings).set_unseal_keys(KEYS_B64)
+    r = runner.invoke(app, ["vault", "export-recovery", str(tmp_path / "r.txt")])
+    assert r.exit_code == 0, r.output
+    body = (tmp_path / "r.txt").read_text(encoding="utf-8")
+    assert "--with-approle" not in body and "aeos vault import-unseal-key --shares 3 (hidden prompt" in body
+    assert "AppRole credentials are NOT included in this copy" in body
+    # near miss (the AppRole is in the copy): test_recovery_copy_restores_a_lost_keyring_unseal_and_approle
+
+
+def test_bite_windows_screen_names_with_approle_only_when_the_copy_holds_it(monkeypatch):
+    seen: list[list[str]] = []
+    monkeypatch.setattr(vault_cli, "_show_on_temporary_screen", lambda lines, what: seen.append(lines) or True)
+    res = SimpleNamespace(keys=KEYS_B64, root_token=ROOT, root_revoked=True, error=None)
+    for approle in (None, (ROLE_ID, SECRET_ID)):
+        vault_cli._show_material_once(res, threshold=2, shares=3, vt=True, kept_in="OS keyring", approle=approle)
+    without, with_ = (" ".join(" ".join(lines).split()) for lines in seen)
+    assert "--with-approle" not in without and "import-unseal-key --shares 3 (hidden prompt" in without
+    assert "AppRole credentials are NOT included" in without
+    assert "import-unseal-key --shares 3 --with-approle" in with_ and "NOT included" not in with_
+
+
+def test_bite_show_once_init_removes_shares_of_an_earlier_vault(settings, memory_keyring):  # noqa: F811
+    store = bootstrap_store(settings)
+    store.set_unseal_keys([FAKE_KEY])  # left by an earlier vault at this address
+    with respx.mock(assert_all_called=False) as m:
+        _mock_init(m)
+        r = runner.invoke(app, [*INIT, "--show-unseal-once", "--plain-output"])
+    assert r.exit_code == 0, r.output
+    assert store.unseal_key_count() == 0 and store.unseal_keys() == []  # auto-unseal no longer applies stale shares
+    assert "1 unseal key share(s) of an earlier vault removed from the OS keyring" in r.stdout
+    assert_no_secret({"output": r.output}, [FAKE_KEY])
+    with respx.mock(assert_all_called=False) as m:  # near miss: nothing stored before, nothing to remove
+        _mock_init(m)
+        clean = runner.invoke(app, [*INIT, "--show-unseal-once", "--plain-output"])
+    assert clean.exit_code == 0 and "earlier vault" not in clean.output and store.unseal_key_count() == 0
+
+
+def test_show_once_init_with_a_stuck_earlier_share_says_so_and_completes(settings, memory_keyring,  # noqa: F811
+                                                                          monkeypatch):
+    bootstrap_store(settings).set_unseal_keys([FAKE_KEY])
+    monkeypatch.setattr(keyring, "delete_password",
+                        lambda *a: (_ for _ in ()).throw(keyring.errors.KeyringError("locked")))
+    with respx.mock(assert_all_called=False) as m:
+        calls = _mock_init(m)
+        r = runner.invoke(app, [*INIT, "--show-unseal-once", "--plain-output"])
+    assert r.exit_code == 0 and calls["revoke"].called
+    assert "earlier vault NOT removed from the OS keyring (KeyringError)" in r.stdout
+
+
+def _no_migration(monkeypatch) -> list[str]:
+    import aeos.cli
+    import aeos.core.migrate
+
+    calls: list[str] = []
+    monkeypatch.setattr(aeos.cli, "ensure_database", lambda: calls.append("ensure_database"))
+    monkeypatch.setattr(aeos.core.migrate, "upgrade_database", lambda: calls.append("upgrade_database"))
+    return calls
+
+
+def test_bite_serve_auto_unseal_never_migrates_and_skips_the_row_when_the_db_is_not_ready(  # noqa: F811
+        settings, memory_keyring, monkeypatch, caplog):  # noqa: F811
+    from aeos.core import db as db_mod
+    from aeos.core.migrate import migration_status
+
+    calls = _no_migration(monkeypatch)
+    bootstrap_store(settings).set_unseal_keys(KEYS_B64)
+    with db_mod.get_engine().begin() as conn:  # a database one migration behind (an upgrade is pending)
+        conn.exec_driver_sql("UPDATE alembic_version SET version_num = 'older-revision'")
+    caplog.set_level(logging.WARNING, logger="aeos.secrets")
+    with respx.mock(assert_all_called=False) as m:
+        _vault(m, sealed=True)
+        note = unseal_mod.unseal_at_start(settings)
+    assert note and "unsealed with the key from the OS keyring" in note  # the unseal itself still happens
+    assert calls == [] and migration_status()["current"] == "older-revision"  # no migration as a side effect
+    assert _audit_rows("openbao.unseal") == []
+    assert "openbao audit row openbao.unseal skipped: database not at the migration head" in caplog.text
+    assert_no_secret({"log": caplog.text}, KEYS_B64)
+
+
+def test_serve_auto_unseal_without_a_database_file_creates_none(settings, memory_keyring, monkeypatch,  # noqa: F811
+                                                               caplog):
+    from aeos.core import db as db_mod
+
+    calls = _no_migration(monkeypatch)
+    bootstrap_store(settings).set_unseal_keys(KEYS_B64)
+    moved = settings.layout.db_path.with_suffix(".moved")
+    db_mod.get_engine().dispose()
+    monkeypatch.setattr(db_mod, "_engine", None)
+    settings.layout.db_path.rename(moved)
+    try:
+        caplog.set_level(logging.WARNING, logger="aeos.secrets")
+        with respx.mock(assert_all_called=False) as m:
+            _vault(m, sealed=True)
+            assert unseal_mod.unseal_at_start(settings)
+        assert calls == [] and not settings.layout.db_path.exists()
+        assert "skipped: database not created yet" in caplog.text
+    finally:
+        moved.rename(settings.layout.db_path)
+
+
+def test_serve_auto_unseal_records_the_row_in_a_ready_db_without_preparing_it(settings, memory_keyring,  # noqa: F811
+                                                                             monkeypatch):
+    calls = _no_migration(monkeypatch)
+    bootstrap_store(settings).set_unseal_keys(KEYS_B64)
+    with respx.mock(assert_all_called=False) as m:
+        _vault(m, sealed=True)
+        unseal_mod.unseal_at_start(settings)
+    assert calls == [] and [r.details["trigger"] for r in _audit_rows("openbao.unseal")] == ["serve"]
+
+
+def test_bite_non_interactive_keyring_init_stops_before_any_change_when_the_keyring_refuses_writes(  # noqa: F811
+        settings, memory_keyring, monkeypatch, posix_export):  # noqa: F811
+    monkeypatch.setattr(keyring, "set_password", lambda *a: (_ for _ in ()).throw(keyring.errors.PasswordSetError("x")))
+    with respx.mock(assert_all_called=False) as m:
+        calls = _mock_init(m)
+        r = runner.invoke(app, INIT)  # --yes, no terminal, no --plain-output
+        init_called = any(c.request.url.path.endswith("/sys/init") for c in m.calls)
+    assert r.exit_code == 1 and "did not take a test write (PasswordSetError)" in r.stderr
+    assert "Nothing was changed" in r.stderr and not init_called and not calls["revoke"].called
+    # near misses: a keyring that takes writes (test_init_stores_the_keys_in_the_keyring_and_never_prints_them) and
+    # --plain-output (test_init_keyring_refusal_with_plain_output_shows_the_material) still initialise
+
+
+def test_keyring_write_probe_leaves_no_entry(settings, memory_keyring):  # noqa: F811
+    store = bootstrap_store(settings)
+    assert store.write_probe() is None
+    assert keyring.get_password(store.service, store.WRITE_PROBE) is None

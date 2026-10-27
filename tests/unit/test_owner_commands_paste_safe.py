@@ -12,6 +12,7 @@ text, yaml and json blocks are not scanned.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -81,9 +82,8 @@ def _is_closing(line: str, char: str, length: int) -> bool:
     return len(rest) >= length and set(rest) == {char}
 
 
-def paste_problems(markdown: str) -> list[tuple[int, str, str]]:
-    """Return (line number, line, problem) for every non paste-safe line in shell fences."""
-    out: list[tuple[int, str, str]] = []
+def shell_fences(markdown: str) -> Iterator[tuple[int, str, list[str]]]:
+    """(index of the opening fence line, language, body lines) of every shell fence that is scanned."""
     lines = markdown.splitlines()
     idx = 0
     while idx < len(lines):
@@ -105,22 +105,74 @@ def paste_problems(markdown: str) -> list[tuple[int, str, str]]:
         if not lang and COMMAND_START.match(first):
             lang = "bash"
         if lang in SHELL_LANGS and not opted_out:
-            prompted = lang == "console" and any(PROMPT.match(b) for b in body)
-            quote: str | None = None
-            heredoc: str | None = None
-            continued = False
-            for off, raw in enumerate(body):
-                if heredoc is not None:
-                    if raw.strip() == heredoc:
-                        heredoc = None
-                    continue
-                if lang == "console" and prompted and not PROMPT.match(raw) and quote is None and not continued:
-                    continue  # command output in a console transcript
-                text = PROMPT.sub("", raw, count=1)
-                probs, quote, heredoc = _scan_line(text, quote)
-                continued = quote is None and text.rstrip().endswith("\\") and not text.rstrip().endswith("\\\\")
-                out += [(idx + 2 + off, raw, p) for p in probs]
+            yield idx, lang, body
         idx = end + 1
+
+
+def paste_problems(markdown: str) -> list[tuple[int, str, str]]:
+    """Return (line number, line, problem) for every non paste-safe line in shell fences."""
+    out: list[tuple[int, str, str]] = []
+    for idx, lang, body in shell_fences(markdown):
+        prompted = lang == "console" and any(PROMPT.match(b) for b in body)
+        quote: str | None = None
+        heredoc: str | None = None
+        continued = False
+        for off, raw in enumerate(body):
+            if heredoc is not None:
+                if raw.strip() == heredoc:
+                    heredoc = None
+                continue
+            if lang == "console" and prompted and not PROMPT.match(raw) and quote is None and not continued:
+                continue  # command output in a console transcript
+            text = PROMPT.sub("", raw, count=1)
+            probs, quote, heredoc = _scan_line(text, quote)
+            continued = quote is None and text.rstrip().endswith("\\") and not text.rstrip().endswith("\\\\")
+            out += [(idx + 2 + off, raw, p) for p in probs]
+    return out
+
+
+# Data-loss class (LESSONS strike 1): a copy followed by a delete must delete only when the copy is proven, in one
+# '&&' chain with a compare ('cp SRC DST && cmp SRC DST && rm SRC'). A separate 'rm' line (or one after ';') runs
+# even when the copy failed and may delete the only copy of recovery material.
+_CHAIN_SPLIT = re.compile(r"\s*(&&|\|\||;|\|)\s*")
+
+
+def unguarded_deletes(markdown: str) -> list[tuple[int, str]]:
+    """(line number, command) of every 'rm' after a 'cp' in the same shell fence that is not guarded by
+    'cp ... && cmp ... && rm' in one chain."""
+    out: list[tuple[int, str]] = []
+    for idx, _lang, body in shell_fences(markdown):
+        seen_cp = False
+        commands: list[tuple[int, str]] = []  # (line number, logical command line with continuations joined)
+        pending = ""
+        start = 0
+        for off, raw in enumerate(body):
+            text = PROMPT.sub("", raw, count=1)
+            if not pending:
+                start = idx + 2 + off
+            if text.rstrip().endswith("\\"):
+                pending += text.rstrip()[:-1] + " "
+                continue
+            commands.append((start, pending + text))
+            pending = ""
+        if pending:
+            commands.append((start, pending))
+        for lineno, line in commands:
+            parts = _CHAIN_SPLIT.split(line.strip())
+            words, ops = parts[0::2], ["&&", *parts[1::2]]
+            guarded = False  # within the current '&&' chain: a cp followed by a cmp/diff
+            chain_cp = False
+            for word, op in zip(words, ops, strict=True):
+                head = word.split()[0] if word.split() else ""
+                if op != "&&":
+                    guarded = chain_cp = False
+                if head == "cp":
+                    seen_cp = chain_cp = True
+                    guarded = False
+                elif head in ("cmp", "diff") and chain_cp:
+                    guarded = True
+                elif head == "rm" and seen_cp and not guarded:
+                    out.append((lineno, word))
     return out
 
 
@@ -142,6 +194,27 @@ def test_owner_markdown_shell_blocks_are_paste_safe():
         for lineno, line, problem in paste_problems(text):
             findings.append(f"{path.relative_to(ROOT).as_posix()}:{lineno}: {problem}: {line.strip()}")
     assert not findings, "not paste-safe in zsh:\n" + "\n".join(findings)
+
+
+RECOVERY_RUNBOOK = "docs/runbooks/openbao-unseal-recovery.md"
+
+
+def test_owner_markdown_never_deletes_after_an_unproven_copy():
+    """Data-loss class: the offline move of the OpenBao recovery copy (and any other cp-then-rm) deletes the original
+    only in 'cp SRC DST && cmp SRC DST && rm SRC'."""
+    findings = []
+    for path in owner_markdown_files():
+        for lineno, command in unguarded_deletes(path.read_text(encoding="utf-8")):
+            findings.append(f"{path.relative_to(ROOT).as_posix()}:{lineno}: rm without a proven copy: {command}")
+    assert not findings, "a delete runs even when the copy failed:\n" + "\n".join(findings)
+
+
+def test_recovery_runbook_moves_the_copy_with_a_guarded_chain():
+    text = (ROOT / RECOVERY_RUNBOOK).read_text(encoding="utf-8")
+    blocks = ["\n".join(body) for _, _, body in shell_fences(text)]
+    move = [b for b in blocks if "cp " in b and "rm " in b]
+    assert len(move) == 1 and "&& cmp " in move[0] and "&& rm " in move[0], move
+    assert "/Volumes/AEOS-RECOVERY/" in move[0] and "your own encrypted volume" in text  # the name is the owner's
 
 
 def test_scanner_covers_the_owner_documents():
@@ -318,3 +391,47 @@ def test_fence_regex_is_linear_on_hostile_prefixes(hostile: str) -> None:
     start = time.perf_counter()
     assert FENCE.match(hostile) is None
     assert time.perf_counter() - start < 0.5
+
+
+# ------------------------------------------- bite tests: delete after an unproven copy (data-loss class)
+SRC, DST = '"$HOME/aeos-openbao-recovery.txt"', '"/Volumes/AEOS-RECOVERY/aeos-openbao-recovery.txt"'
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"cp {SRC} {DST}\nrm {SRC}",  # the block this runbook carried before: rm runs when cp failed
+        f"cp {SRC} {DST}; rm {SRC}",
+        f"cp {SRC} {DST} && rm {SRC}",  # the copy may be short or on the wrong volume: nothing compared it
+        f"cp {SRC} {DST} || rm {SRC}",
+        f"cp {SRC} {DST} && cmp {SRC} {DST}\nrm {SRC}",
+        f"cp {SRC} {DST} && cmp {SRC} {DST}; rm {SRC}",
+        f"$ cp {SRC} {DST}\n$ rm {SRC}",
+    ],
+)
+def test_unguarded_delete_after_copy_is_red(body):
+    found = unguarded_deletes(_block(body, "console" if body.startswith("$") else "bash"))
+    assert found and all(cmd.startswith("rm ") for _, cmd in found), body
+
+
+def test_old_runbook_block_is_red_in_the_runbook_scan():
+    old = _block(f"cp {SRC} {DST}\nrm {SRC}")
+    assert [ln for ln, _ in unguarded_deletes("# Runbook\n" + old)] == [5]  # the rm line
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"cp {SRC} {DST} && cmp {SRC} {DST} && rm {SRC}",
+        f"cp {SRC} {DST} \\\n  && cmp {SRC} {DST} \\\n  && rm {SRC}",
+        f"cp {SRC} {DST} && diff {SRC} {DST} && rm {SRC}",
+        f"rm {SRC}",  # no copy in the block: not a move
+        f"rm {SRC}\ncp {SRC} {DST}",
+    ],
+)
+def test_guarded_or_unrelated_delete_is_green(body):
+    assert unguarded_deletes(_block(body)) == [], body
+
+
+def test_delete_in_another_fence_kind_is_not_scanned():
+    assert unguarded_deletes(_block(f"cp {SRC} {DST}\nrm {SRC}", "text")) == []

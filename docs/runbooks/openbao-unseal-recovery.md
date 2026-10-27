@@ -42,17 +42,24 @@ clipboard. `export-recovery` prints only the path of the new file.
 ```
 
 Move the file offline, then delete it from the disk: copy it to an encrypted USB drive (or put its content into
-your password manager entry), check the copy, and remove the original. `$HOME` itself is not synced by iCloud
-Drive; never choose Desktop or Documents when "Desktop & Documents Folders" sync is on.
+your password manager entry), check the copy, and remove the original only after that check. `$HOME` itself is
+not synced by iCloud Drive; never choose Desktop or Documents when "Desktop & Documents Folders" sync is on.
+
+`AEOS-RECOVERY` below is an example: replace it with the name of your own encrypted volume (`ls /Volumes` lists
+the mounted ones), in both places. The command is one chain: `cp` copies, `cmp` compares the copy byte by byte,
+and only when both succeed does `rm` delete the original. If the volume is not mounted, the copy fails or differs,
+the chain stops with an error and the original stays on the disk; fix the cause and run it again. Never run the
+`rm` on its own: the file may be the only copy.
 
 ```bash
-cp "$HOME/aeos-openbao-recovery.txt" "/Volumes/AEOS-RECOVERY/aeos-openbao-recovery.txt"
-rm "$HOME/aeos-openbao-recovery.txt"
+cp "$HOME/aeos-openbao-recovery.txt" "/Volumes/AEOS-RECOVERY/aeos-openbao-recovery.txt" \
+  && cmp "$HOME/aeos-openbao-recovery.txt" "/Volumes/AEOS-RECOVERY/aeos-openbao-recovery.txt" \
+  && rm "$HOME/aeos-openbao-recovery.txt"
 ```
 
-`/Volumes/AEOS-RECOVERY` is the name of your encrypted USB volume; use your own volume's name. To prove the
-imported key now instead of at the next reboot, restart the vault and unseal it from the keyring; the last line
-must say `Unsealed with the key from the OS keyring`:
+If you put the content into your password manager instead, delete the file only after you have opened the
+entry again and compared it. To prove the imported key now instead of at the next reboot, restart the vault and
+unseal it from the keyring; the last line must say `Unsealed with the key from the OS keyring`:
 
 ```bash
 ./aeos vault stop

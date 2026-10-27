@@ -55,6 +55,17 @@ UNSEAL_KEYRING_RISK_ID = (
     "keyring, sama seperti kredensial AppRole yang sudah ada di sana; simpan salinan pemulihan offline."
 )
 
+# AppRole credentials missing from the OS keyring: `vault init` only helps a vault that is not initialised yet; an
+# initialised one (a lost keyring) is restored from the offline recovery copy (ADR-0123, runbook "Lost keyring").
+LOST_KEYRING_COMMAND = "aeos vault import-unseal-key --with-approle"
+LOST_KEYRING_RUNBOOK = 'docs/runbooks/openbao-unseal-recovery.md, section "Lost keyring"'
+
+
+def approle_missing_command(initialized: bool | None) -> str:
+    """The command for missing AppRole credentials: ``vault init`` only when OpenBao reports not initialised."""
+    return "aeos vault init" if initialized is False else LOST_KEYRING_COMMAND
+
+
 INTERIM_RESIDUAL_RISK = (
     "Mode sementara OS keyring: tidak ada TTL/lease token, tidak ada audit device vault, tidak ada policy "
     "per namespace; nilai dapat dibaca proses lain yang berjalan sebagai pengguna OS yang sama. OFFICE tidak "
@@ -225,6 +236,7 @@ class KeyringBootstrapStore:
     UNSEAL_PREFIX = "openbao-unseal-key-"
     UNSEAL_COUNT = "openbao-unseal-key-count"
     ROOT_TOKEN = "openbao-root-token"
+    WRITE_PROBE = "openbao-write-probe"
 
     def __init__(self, service: str):
         self.service = service
@@ -301,6 +313,23 @@ class KeyringBootstrapStore:
             self._delete(f"{self.UNSEAL_PREFIX}{i}")
         self._delete(self.UNSEAL_COUNT)
 
+    def write_probe(self) -> str | None:
+        """Write, read back and delete a random, non-secret probe entry. None when the keyring takes a write, else
+        the reason (an exception name). ``vault init`` runs it before ``sys/init`` when nothing could show the
+        material if the keyring later refused it (ADR-0123 decision 1)."""
+        import uuid
+
+        import keyring
+
+        value = uuid.uuid4().hex
+        try:
+            keyring.set_password(self.service, self.WRITE_PROBE, value)
+            back = keyring.get_password(self.service, self.WRITE_PROBE)
+            keyring.delete_password(self.service, self.WRITE_PROBE)
+        except Exception as exc:  # keyring.errors.KeyringError and backend errors
+            return type(exc).__name__
+        return None if back == value else "read back a different value"
+
     def root_token(self) -> str | None:
         """Present only while a ``vault init`` is incomplete (a complete setup revokes and removes it)."""
         return self._get(self.ROOT_TOKEN)
@@ -360,8 +389,13 @@ class OpenBaoProvider:
     def _login(self) -> str:
         creds = self.bootstrap.approle()
         if not creds:
-            raise Blocked("OpenBao AppRole credentials are missing from the OS keyring; run `aeos vault init`",
-                          code="SECRET_STORE_UNAVAILABLE")
+            cmd = approle_missing_command(self.health().get("initialized"))
+            if cmd == LOST_KEYRING_COMMAND:
+                msg = (f"OpenBao AppRole credentials are missing from the OS keyring of an initialised vault (lost "
+                       f"keyring); restore them from your offline recovery copy: `{cmd}` ({LOST_KEYRING_RUNBOOK})")
+            else:
+                msg = f"OpenBao AppRole credentials are missing from the OS keyring; run `{cmd}`"
+            raise Blocked(msg, code="SECRET_STORE_UNAVAILABLE")
         c = self._client()
         try:
             auth = c.approle_login(*creds)

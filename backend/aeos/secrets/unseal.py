@@ -51,14 +51,43 @@ class UnsealOutcome:
     seal: dict[str, Any] | None = None
 
 
-def audit(action: str, result: str, details: dict[str, Any], *, actor_id: str = "local-owner") -> None:
-    """Best-effort audit row (never a value); an audit failure never blocks the vault operation."""
+def audit_db_not_ready() -> str | None:
+    """Why the metadata DB cannot take an audit row without preparing it first, or None when it is ready.
+
+    Read-only: never creates the database file and never runs a migration (``aeos serve`` must not migrate as a side
+    effect of auto-unseal; the controller's own startup does that)."""
+    from aeos.core import db
+    from aeos.core.config import get_settings
+    from aeos.core.migrate import migration_status
+
+    if db._engine is None and not get_settings().layout.db_path.is_file():
+        return "database not created yet"
+    status = migration_status()
+    if status["head"] is not None and status["current"] != status["head"]:
+        return "database not at the migration head"
+    return None
+
+
+def audit(action: str, result: str, details: dict[str, Any], *, actor_id: str = "local-owner",
+          prepare_db: bool = False) -> None:
+    """Best-effort audit row (never a value); an audit failure never blocks the vault operation.
+
+    ``prepare_db`` (explicit ``aeos vault`` commands only) creates/upgrades the database first, as every other CLI
+    audit does. Without it the row goes only into a database that is already at the migration head; otherwise it is
+    skipped with a logged reason (the action and the reason, never a value)."""
     try:
         from aeos.audit import service as audit_service
-        from aeos.cli import ensure_database
         from aeos.core.db import session_scope
 
-        ensure_database()
+        if prepare_db:
+            from aeos.cli import ensure_database
+
+            ensure_database()
+        else:
+            reason = audit_db_not_ready()
+            if reason:
+                log.warning("openbao audit row %s skipped: %s", action, reason)
+                return
         with session_scope() as s:
             audit_service.record(s, actor_type="cli", actor_id=actor_id, action=action, result=result,
                                  target_type="secret_store", target_id="openbao", details=details)
@@ -112,7 +141,7 @@ def unseal_from_keyring(settings: Settings, *, trigger: str, client: OpenBaoClie
             c.close()
     audit("openbao.unseal", "SUCCESS" if out.status == UNSEALED else "FAILED",
           {"source": "os-keyring", "trigger": trigger, "outcome": out.status, "keys_applied": out.keys_applied,
-           "addr": logical_addr(settings.openbao_addr)})
+           "addr": logical_addr(settings.openbao_addr)}, prepare_db=trigger != "serve")
     return out
 
 
@@ -190,6 +219,19 @@ def recovery_target(raw: str, settings: Settings) -> Path:
     return target
 
 
+def lost_keyring_line(shares: int, *, approle_included: bool) -> str:
+    """What a lost keyring needs, for the recovery file and the Windows init screen: ``--with-approle`` only when the
+    copy really holds the AppRole credentials; otherwise the command without it and what is missing."""
+    if approle_included:
+        return (f"Lost keyring (profile reset, new machine with the same OpenBao data): aeos vault import-unseal-key "
+                f"--shares {shares} --with-approle (hidden prompts: each unseal key share, then the AppRole role_id "
+                "and secret_id), then aeos vault unseal and aeos vault status --verify.")
+    return (f"Lost keyring (profile reset, new machine with the same OpenBao data): aeos vault import-unseal-key "
+            f"--shares {shares} (hidden prompt: each unseal key share), then aeos vault unseal. The AppRole "
+            "credentials are NOT included in this copy, so the controller cannot log in after a lost keyring: "
+            "re-initialise and re-enter every credential (runbook openbao-unseal-recovery, step 5).")
+
+
 def write_recovery_file(raw: str, settings: Settings, store: KeyringBootstrapStore | None = None) -> Path:
     """Write the stored unseal key share(s), the AppRole role_id/secret_id and a root token kept by an incomplete
     init to a new 0600 file: everything a lost keyring needs (``vault import-unseal-key --with-approle``)."""
@@ -208,9 +250,7 @@ def write_recovery_file(raw: str, settings: Settings, store: KeyringBootstrapSto
              "a cloud-synced folder, a chat or an AI assistant.",
              "Use: aeos vault unseal (prompts for the key) or aeos vault import-unseal-key (puts it back into the "
              "OS keyring).",
-             f"Lost keyring (profile reset, new machine with the same OpenBao data): aeos vault import-unseal-key "
-             f"--shares {len(keys)} --with-approle (hidden prompts: each unseal key share, then the AppRole role_id "
-             "and secret_id), then aeos vault unseal and aeos vault status --verify.",
+             lost_keyring_line(len(keys), approle_included=bool(approle)),
              f"unseal_key_shares: {len(keys)}"]
     lines += [f"unseal_key_{i}: {k}" for i, k in enumerate(keys, 1)]
     if approle:
@@ -242,5 +282,6 @@ def write_recovery_file(raw: str, settings: Settings, store: KeyringBootstrapSto
         target.unlink(missing_ok=True)
         raise RecoveryRefused("MODE_NOT_PRIVATE", f"{target} was not owner-only after writing; it was removed.")
     audit("openbao.recovery_export", "SUCCESS", {"path": str(target), "unseal_key_shares": len(keys),
-                                                 "approle_included": bool(approle), "root_token_included": bool(root)})
+                                                 "approle_included": bool(approle), "root_token_included": bool(root)},
+          prepare_db=True)
     return target
