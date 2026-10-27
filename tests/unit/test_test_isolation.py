@@ -35,7 +35,14 @@ from aeos.inventory.probes import SystemProbeRunner
 from aeos.secrets import facade
 from aeos.secrets.provider import KeyringBootstrapStore, keyring_backend, reset_provider_cache
 from aeos.worker_runtime import processes
-from tests.conftest import NULL_KEYRING, HermeticKeyring, SecretGuard, exe_key
+from tests.conftest import (
+    NULL_KEYRING,
+    REAL_SECRETS_OPT_IN,
+    HermeticKeyring,
+    SecretGuard,
+    exe_key,
+    lifted_secret_guard,
+)
 
 SENTINEL_VALUE = "sentinel-owner-github-value-7f3a"  # what the owner's vault would return; never a real secret
 SENTINEL_ROLE = ("sentinel-role-id-01", "sentinel-secret-id-01")
@@ -265,3 +272,30 @@ def test_session_guard_knows_the_owner_claude(_hermetic_secret_stores: SecretGua
         if found:
             assert exe_key(found) in guard.claude_binaries
             assert guard.refuses_exec([found, "auth", "status", "--json"])
+
+
+def _refusal(port: int) -> str:
+    with pytest.raises(ConnectionRefusedError) as exc:  # nothing listens on the port, so the OS refuses too
+        socket.create_connection(("127.0.0.1", port), timeout=5).close()
+    return str(exc.value)
+
+
+def test_bite_the_real_secret_stores_opt_in_skips_without_the_owner_variable_and_restores_the_guard():
+    with socket.socket() as probe:  # a free loopback port that only this guard blocks (the session guard does not)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    guard = SecretGuard(frozenset({port}))
+    guard.install()
+    try:
+        assert "tests never reach a real OpenBao" in _refusal(port)
+        with pytest.raises(pytest.skip.Exception, match=f"{REAL_SECRETS_OPT_IN}=1"), lifted_secret_guard(guard, {}):
+            pass  # pragma: no cover - never entered
+        # only the exact value "1" opts in
+        with pytest.raises(pytest.skip.Exception), lifted_secret_guard(guard, {REAL_SECRETS_OPT_IN: "yes"}):
+            pass  # pragma: no cover
+        assert "tests never reach a real OpenBao" in _refusal(port)  # a skip leaves the guard on
+        with lifted_secret_guard(guard, {REAL_SECRETS_OPT_IN: "1"}):
+            assert "tests never reach a real OpenBao" not in _refusal(port)  # off inside the block: the OS answers
+        assert "tests never reach a real OpenBao" in _refusal(port)  # and on again afterwards
+    finally:
+        guard.uninstall()

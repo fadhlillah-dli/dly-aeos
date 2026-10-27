@@ -115,8 +115,9 @@ def _live_settings() -> tuple[str, str, str]:
 
 @pytest.mark.integration
 @pytest.mark.network
-def test_provider_enforces_human_only_merge_on_the_real_repository(tmp_path):
-    """1.33 provider side, OPT-IN and owner-run only (env vars above; skipped otherwise, deselected by the verifier).
+def test_provider_enforces_human_only_merge_on_the_real_repository(tmp_path, real_secret_stores):
+    """1.33 provider side, OPT-IN and owner-run only (env vars above plus DLY_AEOS_REAL_SECRETS=1, because the token
+    is read from the owner's vault, which no other test can reach; skipped otherwise, deselected by the verifier).
 
     Safe even if protection is absent: every attempt targets a dedicated probe branch (``aeos-probe/...``, refused
     when it is the default branch or not covered by a ruleset) and a throwaway PR into it - main is never touched.

@@ -12,7 +12,9 @@
   macOS Keychain or Windows Credential Manager. The owner's real Claude Code (found on PATH or configured), whose
   `auth status` reads its login from the OS credential store, is refused before it starts; four unit tests ran it on
   the owner's Mac. Integration tests that need it request the `real_claude_cli` fixture and skip unless the owner
-  sets `DLY_AEOS_REAL_CLAUDE=1` (or `DLY_AEOS_LIVE_CLAUDE=1`). Not covered: the UI smoke server (integration) still
+  sets `DLY_AEOS_REAL_CLAUDE=1` (or `DLY_AEOS_LIVE_CLAUDE=1`). The opt-in live provider test reads its token
+  from the owner's vault through the `real_secret_stores` fixture, which lifts the guard only when the owner sets
+  `DLY_AEOS_REAL_SECRETS=1`. Not covered: the UI smoke server (integration) still
   looks up the OS keyring, under a random service name. Bite tests in `tests/unit/test_test_isolation.py` serve a
   sentinel secret from a sentinel vault and keyring: it is read without the guard and refused with
   `SECRET_STORE_UNAVAILABLE` with it; a sandboxed child resolves the null keyring only with the guard, and a sentinel

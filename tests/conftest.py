@@ -4,6 +4,7 @@ Also the CI shard option ``--shard K/N`` (see the section at the end of this fil
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import ipaddress
@@ -372,7 +373,8 @@ class SecretGuard:
     sets them on the active keyring or installs its own backend (``keyring.set_keyring``); a fake vault runs on a
     free port or behind respx/MockTransport, neither of which opens a socket to a guarded port; a test that must run
     the owner's real Claude Code requests the ``real_claude_cli`` fixture, which skips unless the owner set
-    ``DLY_AEOS_REAL_CLAUDE=1`` (or ``DLY_AEOS_LIVE_CLAUDE=1``)."""
+    ``DLY_AEOS_REAL_CLAUDE=1`` (or ``DLY_AEOS_LIVE_CLAUDE=1``); a test that must read the owner's real secret stores
+    requests ``real_secret_stores``, which skips unless the owner set ``DLY_AEOS_REAL_SECRETS=1``."""
 
     def __init__(self, vault_ports: frozenset[int], claude_binaries: frozenset[str] = frozenset()) -> None:
         self.vault_ports = vault_ports
@@ -495,6 +497,27 @@ def _hermetic_secrets_per_test(_hermetic_secret_stores: SecretGuard) -> Iterator
 
 
 REAL_CLAUDE_OPT_IN = ("DLY_AEOS_REAL_CLAUDE", "DLY_AEOS_LIVE_CLAUDE")
+REAL_SECRETS_OPT_IN = "DLY_AEOS_REAL_SECRETS"
+
+
+@contextlib.contextmanager
+def lifted_secret_guard(guard: SecretGuard, environ: Mapping[str, str]) -> Iterator[None]:
+    """Owner opt-in: the SecretGuard is off inside the block, so the test reads the owner's real vault and OS keyring,
+    and on again afterwards. Skips unless ``DLY_AEOS_REAL_SECRETS=1``; the opt-in live provider test
+    (tests/acceptance/test_delivery.py) reads its low-privilege token this way."""
+    if environ.get(REAL_SECRETS_OPT_IN) != "1":
+        pytest.skip(f"owner opt-in: {REAL_SECRETS_OPT_IN}=1 lets this test read the owner's real secret stores")
+    guard.uninstall()
+    try:
+        yield
+    finally:
+        guard.install()
+
+
+@pytest.fixture
+def real_secret_stores(_hermetic_secret_stores: SecretGuard) -> Iterator[None]:
+    with lifted_secret_guard(_hermetic_secret_stores, os.environ):
+        yield
 
 
 @pytest.fixture
