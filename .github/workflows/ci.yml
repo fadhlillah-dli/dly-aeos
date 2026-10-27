@@ -266,7 +266,9 @@ jobs:
         run: |
           status=0
           count=0
-          read -r -a entries <<< "$RESULTS"
+          # -d '': read every line, not only the first, so a RESULTS written as a literal block (one entry per line)
+          # cannot drop a failed job from the check. read returns 1 at the end of input, hence || true.
+          read -r -d '' -a entries <<< "$RESULTS" || true
           for entry in "${entries[@]}"; do
             count=$((count + 1))
             if [ "${entry#*=}" = "success" ]; then echo "PASS  ${entry}"; else echo "FAIL  ${entry} (only success passes)"; status=1; fi
@@ -291,7 +293,9 @@ jobs:
         run: |
           status=0
           count=0
-          read -r -a entries <<< "$RESULTS"
+          # -d '': read every line, not only the first, so a RESULTS written as a literal block (one entry per line)
+          # cannot drop a failed job from the check. read returns 1 at the end of input, hence || true.
+          read -r -d '' -a entries <<< "$RESULTS" || true
           for entry in "${entries[@]}"; do
             count=$((count + 1))
             if [ "${entry#*=}" = "success" ]; then echo "PASS  ${entry}"; else echo "FAIL  ${entry} (only success passes)"; status=1; fi
@@ -315,7 +319,9 @@ jobs:
         run: |
           status=0
           count=0
-          read -r -a entries <<< "$RESULTS"
+          # -d '': read every line, not only the first, so a RESULTS written as a literal block (one entry per line)
+          # cannot drop a failed job from the check. read returns 1 at the end of input, hence || true.
+          read -r -d '' -a entries <<< "$RESULTS" || true
           for entry in "${entries[@]}"; do
             count=$((count + 1))
             if [ "${entry#*=}" = "success" ]; then echo "PASS  ${entry}"; else echo "FAIL  ${entry} (only success passes)"; status=1; fi

@@ -343,6 +343,8 @@ def test_the_aggregator_check_bites_when_a_needed_job_is_dropped_or_a_result_is_
     ("a=success", True),
     ("a=success b=success", True),
     ("a=success b=skipped", False),
+    ("a=success\nb=failure", False),  # one entry per line: the second line must be read too
+    ("a=success\nb=success\n", True),
     ("a=cancelled b=success", False),
     ("a=failure", False),
     ("a=", False),
