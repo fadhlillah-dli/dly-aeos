@@ -57,7 +57,9 @@ cd frontend && npm ci && npx tsc -b --noEmit && npm test && npm run build
 ```
 
 On Windows, run `python` from `.venv\Scripts\python.exe` and use `npx.cmd`/`npm.cmd` if script
-execution is blocked. mypy must report no errors for `--platform darwin` and `--platform win32`;
+execution is blocked. The `pytest` line above writes no full-suite record, so the pre-push hook refuses the push
+afterwards: run the suite with `scripts/run_tests.sh` (on Windows with Git Bash, see "Run the tests with a
+preflight"). mypy must report no errors for `--platform darwin` and `--platform win32`;
 `pyproject.toml` exempts no module (no `ignore_errors` override may be added).
 `tests/unit/test_repository_hygiene.py` keeps the licence, version and repository files consistent.
 
@@ -165,7 +167,12 @@ on a detached `HEAD`, so the push and the pull request went out on an old commit
   of every pushed commit (deletions are not checked) must have a passing full-suite record, written by
   `scripts/run_tests.sh`. Without one the push stops with `full suite not run for tree <short> (<sha>): run
   scripts/run_tests.sh on a clean tree, or push with AEOS_PUSH_WITHOUT_FULL_SUITE='<reason>'`. With that variable set
-  to a non-empty reason the `full-suite` guard is SKIPPED (never PASS) and the reason is printed. Records live in the
+  to a non-empty reason the `full-suite` guard is SKIPPED (never PASS) and the reason is printed. Set it for one push
+  only. `AEOS_PUSH_WITHOUT_FULL_SUITE='docs only' git push` is sh syntax (macOS, Git Bash). In cmd use
+  `cmd /c "set "AEOS_PUSH_WITHOUT_FULL_SUITE=docs only" && git push"`: the child cmd ends with the push, whereas a
+  bare `set` in the open window keeps the reason for every later push from that window. In PowerShell use
+  `try { $env:AEOS_PUSH_WITHOUT_FULL_SUITE = 'docs only'; git push } finally { Remove-Item Env:AEOS_PUSH_WITHOUT_FULL_SUITE }`
+  (an unset variable only makes the hook refuse). Records live in the
   common git directory, so every worktree of the clone shares them, and a tree is content-addressed: a merge tested in
   one worktree counts for the same tree pushed from another. A commit that changes content (a merge of `origin/main`
   that brings changes, an edit) has a new tree and needs a new full run; a message-only amend keeps the tree.
@@ -188,8 +195,10 @@ the package named, and pytest is never started. `--deadline` (or `AEOS_TEST_DEAD
 many minutes with exit 124, through `scripts/run_with_deadline.py` because macOS has no `timeout`. The interpreter is
 chosen as the pre-push hook does (`AEOS_GATES_PYTHON`, the `.venv`, the main checkout's `.venv`, `python3`). The last
 line of output is always `RUN_TESTS: PASS rc=<n>` or `RUN_TESTS: FAIL rc=<n>`, so grep for it instead of trusting a
-tail of the log. macOS arm64 is proven; Windows and Intel macOS are NOT-PROVEN (Windows runs the suite with
-`python -m pytest` directly). CI lints the shell scripts with `shellcheck scripts/*.sh scripts/git-hooks/pre-push`.
+tail of the log. macOS arm64 is proven; Windows and Intel macOS are NOT-PROVEN. On Windows run the same script
+with Git Bash; from cmd name its bash, `"%ProgramFiles%\Git\bin\bash.exe" scripts/run_tests.sh` (a `bash` found
+first on `PATH` can be the WSL one); it picks `.venv\Scripts\python.exe`. A suite run with `python -m pytest`
+directly writes no full-suite record, so the pre-push hook refuses its push. CI lints the shell scripts with `shellcheck scripts/*.sh scripts/git-hooks/pre-push`.
 
 After a PASS the runner records the run for the pre-push hook (`scripts/full_suite_record.py`, the one owner of the
 record format) when the run was FULL and the tree CLEAN; otherwise it prints one line
