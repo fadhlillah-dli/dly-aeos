@@ -13,8 +13,9 @@ and a check that was cancelled by a newer run is SUPERSEDED, not "fine".
 Data comes from the GitHub CLI (``gh api``), through a runner function the tests replace with fixture JSON:
   repos/{owner}/{repo}/commits/{sha}/check-runs   (paginated; the count is compared with total_count)
   repos/{owner}/{repo}/rulesets and each ruleset  (required status check contexts of active branch rulesets)
-  repos/{owner}/{repo}/pulls/{n}                  (head sha / merge commit)
-  repos/{owner}/{repo}/actions/runs               (only to prove that a cancelled run was superseded)
+  repos/{owner}/{repo}/pulls/{n}                  (head sha / merge commit / base branch)
+  repos/{owner}/{repo}/commits?sha=<base>&since=  (only for a RED --pr verdict: did the base branch move?)
+  repos/{owner}/{repo}/actions/runs               (a cancelled run superseded?; the run creation time for the hint)
 
 Required checks = the required status check contexts of the active branch rulesets plus every ``--require``.
 Every other reported check is informational: a failure of one still makes the verdict RED (default), a queued or
@@ -39,6 +40,22 @@ applies when no check failed and every cancelled required check has that reason.
 ``--wait`` polls (interval 30 s or more, ``--deadline`` minutes, default 30) until the verdict is not PENDING;
 at the deadline the verdict is TIMEOUT. The last line is always exactly one ``CI: <VERDICT> <sha>``.
 Exit 0 GREEN; 1 RED, SUPERSEDED or sha mismatch (MISMATCH); 2 TIMEOUT or ERROR; 3 PENDING without --wait; 4 INFRA.
+
+HINT: when a ``--pr`` verdict is RED and the base branch of the pull request has commits newer than the time the
+ORIGINAL workflow run of this commit was created, one line ``HINT: main moved since this run (approximate
+<old>..<new>); update the branch, do not re-run.`` is printed before the verdict line (never for GREEN or any other
+verdict). A re-run reuses the original GITHUB_SHA and GITHUB_REF of the triggering event, so for ``pull_request`` it
+measures the old test merge commit again; merging the base branch into the PR branch makes a new run. The window
+starts at the workflow run's ``created_at`` (a re-run does not change it; the start of the latest attempt would miss a
+base commit that landed between the first run and the re-run), read from ``actions/runs?head_sha=<sha>&event=
+pull_request``. Only when that run object is unavailable the earliest start of any attempt of the check runs
+(``filter=all``) is used, and the line then says so. The exact base is not available: the run object's
+``pull_requests[]`` (with ``base.sha``) was empty for runs of CLOSED pull requests (checked live on 100 runs, PR 26 and
+PR 27 included); for an OPEN pull request it is unmeasured here (NOT-PROVEN), so ``base.sha`` is not used and the time
+heuristic stands in; the test merge commit is not exposed either. ``<old>`` is the first parent of the oldest base
+commit since then and the line says "approximate" (NOT-PROVEN: a base commit landing between the trigger and the run
+creation is not seen; a failed hint lookup prints a ``note:`` line and never changes the verdict). Up to three
+read-only calls (paginated).
 Output is ASCII only. Stdlib only.
 """
 
@@ -117,6 +134,7 @@ class Api:
         self.runner = runner
         # without --repo gh expands {owner}/{repo} from the current directory's remote itself
         self.base = f"repos/{repo}" if repo else "repos/{owner}/{repo}"
+        self.base_ref = ""  # base branch of the pull request, set by resolve()
 
     def get(self, path: str, *, paginate: bool = False) -> list[Any]:
         args = ["api", "-H", "Accept: application/vnd.github+json"]
@@ -133,8 +151,10 @@ class Api:
 
 
 # ------------------------------------------------------------------------------------------------ data
-def fetch_check_runs(api: Api, sha: str) -> list[dict[str, Any]]:
-    pages = api.get(f"commits/{sha}/check-runs?per_page=100", paginate=True)
+def fetch_check_runs(api: Api, sha: str, *, every_attempt: bool = False) -> list[dict[str, Any]]:
+    """Check runs of *sha*; GitHub lists only the latest attempt of each check unless ``filter=all`` is asked."""
+    query = "filter=all&per_page=100" if every_attempt else "per_page=100"
+    pages = api.get(f"commits/{sha}/check-runs?{query}", paginate=True)
     runs: list[dict[str, Any]] = []
     total = None
     for page in pages:
@@ -221,6 +241,50 @@ def infra_cancelled(api: Api, run: dict[str, Any]) -> bool:
     pages = api.get(f"check-runs/{rid}/annotations?per_page=100", paginate=True)
     return any(NOT_ACQUIRED.search(str(a.get("message") or "") + " " + str(a.get("title") or ""))
                for page in pages if isinstance(page, list) for a in page if isinstance(a, dict))
+
+
+def run_origin(api: Api, sha: str, judged: Sequence[dict[str, Any]]) -> tuple[str, str] | None:
+    """(time, source) at which the judged workflow run was FIRST created, or None when nothing is known.
+
+    A re-run keeps the ``created_at`` of the workflow run and the GITHUB_SHA of the original event, so this is the
+    time of the original test merge commit; the start of the latest attempt is later and would miss a base commit
+    that landed in between. Source "run": the workflow run object (``actions/runs?head_sha=&event=pull_request``,
+    limited to the runs whose check suite produced the judged checks when the check runs name their suite).
+    Source "check": the earliest start of ANY attempt of the check runs (``filter=all``), used only when the run
+    object is unavailable (the call failed, or it lists no run with a ``created_at``)."""
+    try:
+        pages = api.get(f"actions/runs?head_sha={sha}&event=pull_request&per_page=100", paginate=True)
+        listed = [r for p in pages if isinstance(p, dict) for r in p.get("workflow_runs", []) if isinstance(r, dict)]
+    except CiError:
+        listed = []
+    suites = {(r.get("check_suite") or {}).get("id") for r in judged if isinstance(r.get("check_suite"), dict)}
+    suites.discard(None)
+    produced = [r for r in listed if r.get("check_suite_id") in suites] if suites else []
+    created = sorted(str(r["created_at"]) for r in (produced or listed) if r.get("created_at"))
+    if created:
+        return created[0], "run"
+    started = sorted(str(r["started_at"]) for r in fetch_check_runs(api, sha, every_attempt=True) if r.get("started_at"))
+    return (started[0], "check") if started else None
+
+
+def base_moved_hint(api: Api, base_ref: str, sha: str, runs: Sequence[dict[str, Any]]) -> str | None:
+    """The HINT line when *base_ref* got commits after the ORIGINAL workflow run of *sha* was created, else None.
+
+    The workflow run object's ``pull_requests`` list was empty for runs of closed pull requests and is unmeasured
+    for an open one (NOT-PROVEN), so ``base.sha`` is never used: the line is an approximation and says so."""
+    origin = run_origin(api, sha, list(latest_by_name(runs).values()))
+    if origin is None or not base_ref:
+        return None
+    since, source = origin
+    pages = api.get(f"commits?sha={urllib.parse.quote(base_ref, safe='')}&since={since}&per_page=100", paginate=True)
+    newer = [c for page in pages if isinstance(page, list) for c in page if isinstance(c, dict)]
+    if not newer or not SHA_RE.match(str(newer[0].get("sha") or "")):
+        return None
+    parents = newer[-1].get("parents")
+    old = str(parents[0].get("sha") or "") if isinstance(parents, list) and parents and isinstance(parents[0], dict) else ""
+    how = "" if source == "run" else ", from the first check run start because the workflow run is unavailable"
+    return (f"HINT: {base_ref} moved since this run (approximate {old[:10] or 'unknown'}..{str(newer[0]['sha'])[:10]}{how}); "
+            "update the branch, do not re-run.")
 
 
 # ------------------------------------------------------------------------------------------------ judgement
@@ -315,6 +379,7 @@ def resolve(api: Api, args: argparse.Namespace) -> tuple[str, str]:
     pr = api.one(f"pulls/{number}")
     if args.pr is not None:
         sha = str((pr.get("head") or {}).get("sha") or "").lower()
+        api.base_ref = str((pr.get("base") or {}).get("ref") or "")
         label = f"PR #{number} head"
     else:
         if not pr.get("merged"):
@@ -381,7 +446,8 @@ def run(argv: Sequence[str] | None = None, *, runner: Runner = gh_runner, sleep:
                         say(f"PR #{args.pr} head moved to {head}; {sha} was superseded", out)
                         report["reasons"] = [f"PR head moved to {head}"]
                         return finish(SUPERSEDED, sha)
-                result = judge(fetch_check_runs(api, sha), required, lambda: cancellation_superseded(api, sha),
+                check_runs = fetch_check_runs(api, sha)
+                result = judge(check_runs, required, lambda: cancellation_superseded(api, sha),
                                args.required_only, lambda r: infra_cancelled(api, r))
                 errors = 0
             except CiError as exc:
@@ -397,6 +463,13 @@ def run(argv: Sequence[str] | None = None, *, runner: Runner = gh_runner, sleep:
                                       for r in result.rows])
                 if result.verdict != PENDING or not args.wait:
                     print_result(result, out)
+                    if result.verdict == RED and args.pr is not None:
+                        try:
+                            hint = base_moved_hint(api, api.base_ref, sha, check_runs)
+                        except CiError as exc:
+                            hint = f"note: could not check whether {api.base_ref} moved: {exc}"
+                        if hint:
+                            say(hint, out)
                     return finish(result.verdict, sha)
                 say(f"pending ({len([r for r in result.rows if r.required and r.state in {'PENDING', 'MISSING'}])} "
                     "required not done yet)", out)

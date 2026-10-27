@@ -20,7 +20,8 @@ observe -> record with incident -> count strikes -> threshold -> tool -> bite te
 5. **Tool.** The `tool` column names a repo path, `OWNER-SETTING:<what>` (a setting only the owner can
    change, outside the repo) or `PENDING:<branch>` (built on a branch that is not merged yet). `-` means no tool yet.
 6. **Bite test.** Every tool ships a violating fixture that is red and a near-miss legitimate fixture
-   that is green, built in a temporary directory.
+   that is green, built in a temporary directory. A red fixture must assert its own finding text (the specific
+   message), not only a non-zero exit: it must be "red for the right reason".
 7. **Recall.** Rows with `brief` = yes are copied into every delegated prompt by id
    (DELEGATION-BRIEF.md). `tests/unit/test_lessons_register.py` keeps both files consistent.
 8. **Prune.** A rule that obstructs more than it protects is removed or loosened. Record the date and

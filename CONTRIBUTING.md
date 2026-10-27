@@ -309,6 +309,44 @@ fixture is red and a near-miss legitimate one is green. The junction test runs o
   that authority is an owner decision recorded as an ADR in `docs/decisions`. DLY AEOS workers never
   inherit it: they can push only `aeos/*` task branches.
 
+### Merging
+
+One written procedure, backed by `scripts/ci_status.py` (flags are described under "Developer tools" above). The decision
+to merge stays the owner's (see "Rules for every change"); this is how it is carried out.
+
+1. **Merge only on a GREEN verdict for the exact head.** Run
+   `python scripts/ci_status.py --pr <n> --expect-sha <head sha> --required-only --wait --deadline 25`. Merge only if
+   the last line is `CI: GREEN <sha>` (exit 0). Read the `non-required failed` names in that line: the verdict does
+   not block on them, so fix them first. A pull request whose head moved is SUPERSEDED or MISMATCH, never a merge.
+2. **Check main after the merge.** Run
+   `python scripts/ci_status.py --after-merge <n> --wait --deadline 25`. Runs on `main` are never cancelled, so the
+   merge commit always gets its own verdict.
+3. **While `main` is RED, merge nothing else.** The next merge waits until a fix pull request has made `main` GREEN
+   again; otherwise two failures hide behind one red.
+4. **Re-run only for INFRA.** For an [INFRA verdict](#developer-tools) (defined there) re-run that job
+   (`gh run rerun <run id> --failed`). A RED verdict is a code or test failure: do not re-run until green
+   (LESSONS L15).
+5. **RED and `main` moved since the run: update the branch, do not re-run.** Merge `main` into the pull request branch
+   and push; the new head gets a new run. GitHub's documentation says that a re-run "will also use the same
+   `GITHUB_SHA` (commit SHA) and `GITHUB_REF` (git ref) of the original event that triggered the workflow run"
+   ([Re-running workflows and jobs](https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-workflow-runs/re-running-workflows-and-jobs)),
+   and for `pull_request` the documented `GITHUB_SHA` is the "last merge commit on the `GITHUB_REF` branch" and
+   `GITHUB_REF` is `refs/pull/<n>/merge` ([Events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)).
+   So a re-run measures the old base again. NOT-PROVEN: that the checkout step of this workflow then really
+   builds the old test merge commit was not run against the live service. When a RED pull request exists and the base
+   branch got commits after the original workflow run was created, `ci_status.py --pr` prints
+   `HINT: main moved since this run (approximate <old>..<new>); update the branch, do not re-run.` before the verdict.
+   The window starts at the workflow run's `created_at`, which a re-run does not change (the start of the latest
+   attempt is later and would miss a base commit that landed between the first run and the re-run); only when the run
+   object is unavailable the earliest check run start is used, and the line says so. The range is approximate: the
+   workflow run object's `pull_requests[]` was empty for runs of closed pull requests, and for an open pull request it
+   is unmeasured here (NOT-PROVEN), so `base.sha` is not used and the time heuristic stands in; a base commit that
+   landed between the trigger and the run creation is not seen.
+6. **One concern per pull request, merged the same day it is green.** Every open pull request costs a full run. At
+   the time of writing one run starts about 16 jobs, 7 of them on macOS, and GitHub Free allows 20 concurrent jobs
+   and 5 concurrent macOS jobs ([Actions limits](https://docs.github.com/en/actions/reference/limits)), so a
+   second open run queues behind the first. Recount against `ci.yml` when the layout changes.
+
 ### Releasing
 
 1. Set the new version in `pyproject.toml`, `frontend/package.json` (and the root entry of
@@ -317,5 +355,11 @@ fixture is red and a near-miss legitimate one is green. The junction test runs o
    into `[Unreleased]` of `CHANGELOG.md`. Then move the `[Unreleased]` entries under a new version heading,
    and add its compare/tag link.
 3. Write the release notes in `docs/releases/vX.Y.Z.md`.
-4. After the release pull request is merged, tag the merge commit `vX.Y.Z` and publish the GitHub
-   Release with the release notes as its body.
+4. After the release pull request is merged (see "Merging"), tag the merge commit `vX.Y.Z`, run
+   `git fetch origin` and then `python scripts/release_check.py --tag vX.Y.Z`. It reads the tagged commit and
+   checks that the tag equals the version in every version source (`pyproject.toml`, `frontend/package.json`,
+   the root entry of `frontend/package-lock.json`, `CITATION.cff`, `backend/aeos/__init__.py`), that `CHANGELOG.md`
+   has `## [X.Y.Z]`, that `changelog.d/` holds only its README, that `docs/releases/vX.Y.Z.md` exists and that the
+   tagged commit is an ancestor of `origin/main`. Its last line is `RELEASE_CHECK: PASS` or `RELEASE_CHECK: FAIL`;
+   fix every FAIL line (delete the tag first if the commit is wrong) before step 5.
+5. Push the tag and publish the GitHub Release with the release notes as its body.
