@@ -47,6 +47,8 @@ RULES (lesson ids in brackets)
 12. CI state [L7, L18]. Never hand-write a CI wait loop: use scripts/ci_status.py --wait --deadline, and
     --required-only for a merge decision. A check list that is empty or pending is not green; name each
     required check. A job cancelled because no runner acquired it is INFRA: re-run it, do not debug code.
+    Merging (CONTRIBUTING.md "Merging"): after a merge check main with --after-merge; while main is RED merge nothing
+    else; a RED PR whose base moved since its run gets main merged in, not a re-run (a re-run reuses the old GITHUB_SHA).
 13. Changelog [L5]. Merge main into the branch and resolve the changelog before push. Use a
     changelog fragment where the repository has them.
 14. Flaky tests [L15]. A test that passes on re-run is a defect. Report it and fix the timing

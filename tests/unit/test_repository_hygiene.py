@@ -95,6 +95,25 @@ def test_citation_cff_parses_with_the_required_keys_and_the_project_version():
     assert cff["keywords"] and all(isinstance(k, str) and k for k in cff["keywords"])
 
 
+def _release_check_script():
+    spec = importlib.util.spec_from_file_location("aeos_script_release_check", ROOT / "scripts" / "release_check.py")
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_every_version_source_declares_the_project_version():
+    # The list of version sources lives once, in scripts/release_check.py (which also checks a release tag against
+    # it). The fifth source, backend/aeos/__init__.py (__version__), is what `aeos ops release` reads.
+    script = _release_check_script()
+    declared = {rel: script.extract_version(rel, _read(rel)) for rel, _ in script.VERSION_SOURCES}
+    assert set(declared) >= {"pyproject.toml", "frontend/package.json", "frontend/package-lock.json",
+                             "CITATION.cff", "backend/aeos/__init__.py"}
+    assert declared == {rel: VERSION for rel in declared}, declared
+
+
 def assert_changelog_structure(log: str) -> None:
     """The CHANGELOG.md structure test. Fragments (changelog.d/) are moved into [Unreleased] by
     ``scripts/changelog.py --assemble``, so an assembled file must pass exactly this."""

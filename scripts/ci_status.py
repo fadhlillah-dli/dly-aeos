@@ -13,7 +13,8 @@ and a check that was cancelled by a newer run is SUPERSEDED, not "fine".
 Data comes from the GitHub CLI (``gh api``), through a runner function the tests replace with fixture JSON:
   repos/{owner}/{repo}/commits/{sha}/check-runs   (paginated; the count is compared with total_count)
   repos/{owner}/{repo}/rulesets and each ruleset  (required status check contexts of active branch rulesets)
-  repos/{owner}/{repo}/pulls/{n}                  (head sha / merge commit)
+  repos/{owner}/{repo}/pulls/{n}                  (head sha / merge commit / base branch)
+  repos/{owner}/{repo}/commits?sha=<base>&since=  (only for a RED --pr verdict: did the base branch move?)
   repos/{owner}/{repo}/actions/runs               (only to prove that a cancelled run was superseded)
 
 Required checks = the required status check contexts of the active branch rulesets plus every ``--require``.
@@ -39,6 +40,14 @@ applies when no check failed and every cancelled required check has that reason.
 ``--wait`` polls (interval 30 s or more, ``--deadline`` minutes, default 30) until the verdict is not PENDING;
 at the deadline the verdict is TIMEOUT. The last line is always exactly one ``CI: <VERDICT> <sha>``.
 Exit 0 GREEN; 1 RED, SUPERSEDED or sha mismatch (MISMATCH); 2 TIMEOUT or ERROR; 3 PENDING without --wait; 4 INFRA.
+
+HINT: when a ``--pr`` verdict is RED and the base branch of the pull request has commits newer than the earliest
+check run of this commit, one line ``HINT: main moved since this run (<old>..<new>); update the branch, do not
+re-run.`` is printed before the verdict line (never for GREEN or any other verdict). A re-run reuses the original
+GITHUB_SHA and GITHUB_REF of the triggering event, so for ``pull_request`` it measures the old test merge commit
+again; merging the base branch into the PR branch makes a new run. The check run start time stands in for the time
+the test merge commit was made (NOT-PROVEN: a base commit landing between the trigger and the first job start is not
+seen; a failed hint lookup prints a ``note:`` line and never changes the verdict). One extra read-only call.
 Output is ASCII only. Stdlib only.
 """
 
@@ -117,6 +126,7 @@ class Api:
         self.runner = runner
         # without --repo gh expands {owner}/{repo} from the current directory's remote itself
         self.base = f"repos/{repo}" if repo else "repos/{owner}/{repo}"
+        self.base_ref = ""  # base branch of the pull request, set by resolve()
 
     def get(self, path: str, *, paginate: bool = False) -> list[Any]:
         args = ["api", "-H", "Accept: application/vnd.github+json"]
@@ -223,6 +233,21 @@ def infra_cancelled(api: Api, run: dict[str, Any]) -> bool:
                for page in pages if isinstance(page, list) for a in page if isinstance(a, dict))
 
 
+def base_moved_hint(api: Api, base_ref: str, runs: Sequence[dict[str, Any]]) -> str | None:
+    """The HINT line when *base_ref* got commits after the earliest check run of the judged commit, else None."""
+    started = sorted(str(r.get("started_at")) for r in runs if r.get("started_at"))
+    if not started or not base_ref:
+        return None
+    pages = api.get(f"commits?sha={urllib.parse.quote(base_ref, safe='')}&since={started[0]}&per_page=100")
+    newer = [c for page in pages if isinstance(page, list) for c in page if isinstance(c, dict)]
+    if not newer or not SHA_RE.match(str(newer[0].get("sha") or "")):
+        return None
+    parents = newer[-1].get("parents")
+    old = str(parents[0].get("sha") or "") if isinstance(parents, list) and parents and isinstance(parents[0], dict) else ""
+    return (f"HINT: {base_ref} moved since this run ({old[:10] or 'unknown'}..{str(newer[0]['sha'])[:10]}); "
+            "update the branch, do not re-run.")
+
+
 # ------------------------------------------------------------------------------------------------ judgement
 @dataclass
 class Row:
@@ -315,6 +340,7 @@ def resolve(api: Api, args: argparse.Namespace) -> tuple[str, str]:
     pr = api.one(f"pulls/{number}")
     if args.pr is not None:
         sha = str((pr.get("head") or {}).get("sha") or "").lower()
+        api.base_ref = str((pr.get("base") or {}).get("ref") or "")
         label = f"PR #{number} head"
     else:
         if not pr.get("merged"):
@@ -381,7 +407,8 @@ def run(argv: Sequence[str] | None = None, *, runner: Runner = gh_runner, sleep:
                         say(f"PR #{args.pr} head moved to {head}; {sha} was superseded", out)
                         report["reasons"] = [f"PR head moved to {head}"]
                         return finish(SUPERSEDED, sha)
-                result = judge(fetch_check_runs(api, sha), required, lambda: cancellation_superseded(api, sha),
+                check_runs = fetch_check_runs(api, sha)
+                result = judge(check_runs, required, lambda: cancellation_superseded(api, sha),
                                args.required_only, lambda r: infra_cancelled(api, r))
                 errors = 0
             except CiError as exc:
@@ -397,6 +424,13 @@ def run(argv: Sequence[str] | None = None, *, runner: Runner = gh_runner, sleep:
                                       for r in result.rows])
                 if result.verdict != PENDING or not args.wait:
                     print_result(result, out)
+                    if result.verdict == RED and args.pr is not None:
+                        try:
+                            hint = base_moved_hint(api, api.base_ref, check_runs)
+                        except CiError as exc:
+                            hint = f"note: could not check whether {api.base_ref} moved: {exc}"
+                        if hint:
+                            say(hint, out)
                     return finish(result.verdict, sha)
                 say(f"pending ({len([r for r in result.rows if r.required and r.state in {'PENDING', 'MISSING'}])} "
                     "required not done yet)", out)

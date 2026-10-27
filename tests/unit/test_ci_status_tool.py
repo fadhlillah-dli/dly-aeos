@@ -556,3 +556,73 @@ def test_infra_on_a_check_that_is_not_required_is_ignored():
 def test_the_infra_verdict_is_in_the_docstring_and_the_exit_code_differs_from_red():
     assert ci.EXIT_CODES[ci.INFRA] not in {ci.EXIT_CODES[ci.RED], ci.EXIT_CODES[ci.ERROR], ci.EXIT_CODES[ci.PENDING]}
     assert "INFRA" in ci.__doc__
+
+
+# ------------------------------------------------------------------------------------------------ base-moved hint
+RUN_START = "2026-01-01T10:00:00Z"
+OLD_BASE, NEW_BASE, MID_BASE = "c" * 40, "d" * 40, "e" * 40
+HINT_LINE = f"HINT: main moved since this run ({OLD_BASE[:10]}..{NEW_BASE[:10]}); update the branch, do not re-run."
+
+
+def _hint_files(conclusion, base_commits):
+    runs = [check(REQUIRED[0], conclusion=conclusion, started=RUN_START), check(REQUIRED[1], rid=2, started=RUN_START)]
+    # newest first, as the commits API lists them; the parent of the oldest returned commit is the base of the run
+    return {**files(runs), **pr_file(SHA), f"{BASE}/commits": base_commits}
+
+
+def _commit(sha, parent):
+    return {"sha": sha, "parents": [{"sha": parent}]}
+
+
+def test_red_pr_gets_the_hint_when_main_moved_after_the_run_and_the_verdict_stays_last():
+    moved = [_commit(NEW_BASE, MID_BASE), _commit(MID_BASE, OLD_BASE)]
+    gh = FakeGh(_hint_files("failure", moved))
+    code, last, text = call(["--pr", "21"], gh)
+    lines = text.strip().splitlines()
+    assert (code, last) == (1, f"CI: RED {SHA}")
+    assert lines[-2] == HINT_LINE and sum(1 for ln in lines if ln.startswith("HINT:")) == 1
+    assert f"{BASE}/commits" in gh.calls
+
+
+def test_red_pr_gets_no_hint_when_main_did_not_move():
+    code, last, text = call(["--pr", "21"], FakeGh(_hint_files("failure", [])))
+    assert (code, last) == (1, f"CI: RED {SHA}") and "HINT" not in text
+
+
+def test_green_pr_never_gets_the_hint_and_does_not_even_look():
+    gh = FakeGh(_hint_files("success", [_commit(NEW_BASE, OLD_BASE)]))
+    code, last, text = call(["--pr", "21"], gh)
+    assert (code, last) == (0, f"CI: GREEN {SHA}") and "HINT" not in text
+    assert f"{BASE}/commits" not in gh.calls
+
+
+@pytest.mark.parametrize("argv", [["--sha", SHA], ["--after-merge", "21"]])
+def test_hint_is_only_for_a_pull_request_verdict(argv):
+    extra = {f"{BASE}/pulls/21": {"head": {"sha": SHA}, "merged": True, "merge_commit_sha": SHA,
+                                  "base": {"ref": "main"}}, f"{BASE}/compare/{SHA}...main": {"status": "identical"}}
+    gh = FakeGh({**_hint_files("failure", [_commit(NEW_BASE, OLD_BASE)]), **extra})
+    code, last, text = call(argv, gh)
+    assert code == 1 and "HINT" not in text and f"{BASE}/commits" not in gh.calls
+
+
+def test_a_failed_hint_lookup_keeps_the_red_verdict_and_prints_a_note():
+    gh = FakeGh(_hint_files("failure", []), fail={f"{BASE}/commits": "gh api commits failed: HTTP 500"})
+    code, last, text = call(["--pr", "21"], gh)
+    assert (code, last) == (1, f"CI: RED {SHA}")
+    assert "HINT" not in text and "note: could not check whether main moved" in text
+
+
+def test_hint_uses_the_earliest_check_run_start_as_the_run_time():
+    class Spy(FakeGh):
+        queries = []
+
+        def __call__(self, args):
+            self.queries.append(args[-1])
+            return super().__call__(args)
+
+    gh = Spy(_hint_files("failure", []))
+    runs = [check(REQUIRED[0], conclusion="failure", started="2026-01-01T12:00:00Z"),
+            check(REQUIRED[1], rid=2, started=RUN_START)]
+    gh.files[f"{BASE}/commits/{SHA}/check-runs"] = {"total_count": 2, "check_runs": runs}
+    call(["--pr", "21"], gh)
+    assert any("/commits?sha=main" in q and f"since={RUN_START}" in q for q in gh.queries)
