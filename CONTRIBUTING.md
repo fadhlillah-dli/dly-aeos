@@ -94,8 +94,8 @@ The run also does what CI cannot do for you, and says what it did not do:
   It needs git 2.38 or newer; only with an older git (usage error, exit 129) is the gate SKIPPED with that reason.
 - **`NOT RUN: <job> (<reason>)`.** One line for every job of `ci.yml` that this run does not execute (the job ids
   are read from the workflow, so a new job shows up by itself): the backend shards, the verifier, bootstrap,
-  browser e2e, the supply-chain report and the aggregators. `commit-subjects` is the only job that counts as run, and
-  only when both of its steps ran here: the commit-subject gate and the `shellcheck` gate (SKIPPED when shellcheck
+  browser e2e, the supply-chain report and the aggregators. `static-checks` counts as run when ruff, both mypy
+  platforms and the secret scan ran here, and `commit-subjects` only when both of its steps ran here: the commit-subject gate and the `shellcheck` gate (SKIPPED when shellcheck
   is not installed; then the job stays NOT RUN). CI uses the shellcheck that ubuntu-latest ships (0.9.x), so a newer
   local one can accept what CI rejects. A local PASS is therefore never a CI PASS.
 - **One verdict line, last:** `GATES: PASS|FAIL (<n> run, <m> failed, <k> not run)`; "not run" counts SKIPPED gates
@@ -166,18 +166,20 @@ up to the baseline in that script are not checked; older history does not comply
 push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-free.md), amendment
 "CI in about ten minutes"):
 
-- **Backend shards.** On each host OS (`windows-latest`, `macos-latest`, `macos-26-intel`) the full
-  backend suite is split by test file into 2 shards: `backend shard 1/2 [G1,G2] (<os>)` and
-  `backend shard 2/2 [G2] (<os>)`. Each shard runs `pytest -n logical --shard K/2`. Shard 1 also runs
-  the G1 static checks (ruff and the secret scan, plus mypy on `macos-latest`). Each shard uploads its
-  JUnit XML as the artifact `junit-backend-<os>-shard-<k>`.
+- **Backend shards.** On each host OS the full backend suite is split by test file: 3 shards on `windows-latest`
+  (Windows jobs do not use the macOS slots), 2 on each macOS host (`macos-latest`, `macos-26-intel`). The jobs are
+  named `backend shard K/N [G2] (<os>)` and each runs `pytest -n logical --shard K/N`. Every shard is the same job
+  and uploads its JUnit XML as the artifact `junit-backend-<os>-shard-<k>`.
+- **Static checks.** `static checks [G1] (ubuntu-latest)` runs ruff, mypy for `--platform darwin` and
+  `--platform win32` and the secret scan once for all host OSes. The three required `backend [G1,G2] (<os>)`
+  aggregators need it, so a failing static check fails them all.
 - **Commit subjects.** `commit subjects [G1]` runs only on pull requests (`ubuntu-latest`, full history) and
   checks the subjects and the no-attribution rule (message, author and committer e-mail, merge commits
   included) of the pull request's commits with `scripts/commit_subject.py`, and runs `shellcheck` over the shell
   scripts (`scripts/*.sh`, `scripts/git-hooks/pre-push`).
 - **Verifier.** `backend verifier [G2] (macos-latest)` runs the real trusted-suite verifier test.
 - **Required names are aggregators.** The ruleset on `main` requires `backend [G1,G2] (<os>)` for each
-  OS. These are small jobs on `ubuntu-latest` that wait for every backend job of their OS. They pass only
+  OS. These are small jobs on `ubuntu-latest` that wait for the static job and every backend job of their OS. They pass only
   when each of those jobs succeeded: a failed, skipped or cancelled job fails them. The other required
   checks are real jobs: `bootstrap [G2] (<os>)`, `frontend [G1,G3]` and
   `browser e2e + a11y smoke [G3]`. The supply-chain report is `[NO-GATE]`. Keep these names when you
@@ -197,14 +199,18 @@ python -m pytest -q -n auto -m "not integration and not network" --shard 1/2
 python -m pytest -q -n auto -m "not integration and not network" --shard 2/2
 ```
 
+(`windows-latest` uses `--shard K/3`.)
+
 `--shard K/N` can also come from the `AEOS_TEST_SHARD` environment variable, and the command-line flag
 wins if both are set. Shards are packed from measured seconds per test file in
 [tests/ci_durations.json](tests/ci_durations.json). A test file that is not listed there gets the
 median weight. To rebalance from real CI times, download the `junit-backend-<os>-shard-*` artifacts of
-one run (normally `windows-latest`, the slowest OS) and run:
+one run and give each OS its own group; the OSes are scaled to the same total and averaged, because one split
+serves all of them and they weigh files differently:
 
 ```bash
-python scripts/ci_durations.py junit-shard-1.xml junit-shard-2.xml --source "CI run <id>, windows-latest"
+python scripts/ci_durations.py --os windows-latest w1.xml w2.xml w3.xml --os macos-latest a1.xml a2.xml \
+    --os macos-26-intel i1.xml i2.xml --source "CI run <id>"
 ```
 
 Commit the rewritten `tests/ci_durations.json`. The weights only move files between shards: no test

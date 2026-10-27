@@ -74,20 +74,24 @@ def test_the_split_is_deterministic_whatever_the_input_order_separator_or_hash_s
     weights = load_shard_weights()
     files = sorted(set(_repo_test_files()) | set(weights))
     expected = assign_shards(files, 2, weights)
+    expected_3 = assign_shards(files, 3, weights)
     shuffled = list(files)
     for seed in range(5):
         random.Random(seed).shuffle(shuffled)
         assert assign_shards(shuffled, 2, weights) == expected
+        assert assign_shards(shuffled, 3, weights) == expected_3
     assert assign_shards([f.replace("/", "\\") for f in files], 2, weights) == expected  # Windows separators
+    assert assign_shards([f.replace("/", "\\") for f in files], 3, weights) == expected_3
     assert assign_shards(files + files, 2, weights) == expected  # duplicates collapse
     probe = ("import json, sys; from tests.conftest import assign_shards, load_shard_weights; "
-             "w = load_shard_weights(); print(json.dumps(assign_shards(json.loads(sys.stdin.read()), 2, w)))")
+             "w = load_shard_weights(); f = json.loads(sys.stdin.read()); "
+             "print(json.dumps([assign_shards(f, 2, w), assign_shards(f, 3, w)]))")
     env = {**os.environ, "PYTHONHASHSEED": "12345",
            "PYTHONPATH": os.pathsep.join([str(ROOT), str(ROOT / "backend"), os.environ.get("PYTHONPATH", "")])}
     env.pop(SHARD_ENV, None)
     out = subprocess.run([sys.executable, "-c", probe], input=json.dumps(shuffled), capture_output=True, text=True,
                          cwd=ROOT, env=env, timeout=120, check=True).stdout
-    assert json.loads(out) == expected
+    assert json.loads(out) == [expected, expected_3]
 
 
 def test_lpt_packing_keeps_the_shards_balanced():
@@ -100,7 +104,7 @@ def test_lpt_packing_keeps_the_shards_balanced():
             loads = [sum(weights[f] for f in s) for s in assign_shards(weights, total, weights)]
             assert max(loads) - min(loads) <= max(weights.values()) + 1e-9
     committed = load_shard_weights()
-    for total in (2, 3):
+    for total in (2, 3):  # 2 on the macOS hosts, 3 on windows-latest (tests/unit/test_ci_gates.py SHARDS_PER_OS)
         loads = [sum(committed[f] for f in s) for s in assign_shards(committed, total, committed)]
         assert max(loads) - min(loads) <= 0.01 * sum(loads), loads
 
@@ -170,17 +174,21 @@ def _collect_only(*extra: str) -> str:
     return res.stdout
 
 
-def test_shards_of_a_real_collection_are_disjoint_and_add_up_to_the_whole_run():
+@pytest.mark.parametrize("total", [2, 3])
+def test_shards_of_a_real_collection_are_disjoint_and_add_up_to_the_whole_run(total: int):
+    """2 shards (the macOS hosts) and 3 (windows-latest): the union of all shards' node ids is the whole collection,
+    no node id is in two shards, and a file is never split across shards."""
     everything = _collected(_collect_only())
     parts = []
-    for k in (1, 2):
-        out = _collect_only("--shard", f"{k}/2")
-        assert f"AEOS test shard {k}/2: " in out
+    for k in range(1, total + 1):
+        out = _collect_only("--shard", f"{k}/{total}")
+        assert f"AEOS test shard {k}/{total}: " in out
         parts.append(_collected(out))
-    assert parts[0] and parts[1] and not parts[0] & parts[1]
-    assert parts[0] | parts[1] == everything
+    assert all(parts), "an empty shard"
+    assert sum(len(p) for p in parts) == len(set().union(*parts)), "a test is in two shards"
+    assert set().union(*parts) == everything
     files = [{n.split("::", 1)[0] for n in p} for p in parts]
-    assert not files[0] & files[1], "a file is never split across shards"
+    assert sum(len(f) for f in files) == len(set().union(*files)), "a file is split across shards"
 
 
 def test_the_environment_variable_selects_the_shard_and_is_not_inherited_by_test_processes(tmp_path: Path):
@@ -230,18 +238,18 @@ def _collected_junit_keys(out: str) -> set[str]:
     return keys
 
 
-def _run_shard_with_junit(tmp_path: Path, k: int, *, by_env: bool) -> set[str]:
-    """Run shard k/2 under xdist (2 workers), select it by --shard or by AEOS_TEST_SHARD, and return its test ids from
-    the JUnit report. A shard must end green: no failure and no error (a skipped test is not one)."""
-    report = tmp_path / f"shard-{k}-{'env' if by_env else 'flag'}.xml"
+def _run_shard_with_junit(tmp_path: Path, k: int, *, by_env: bool, total: int = 2) -> set[str]:
+    """Run shard k/total under xdist (2 workers), select it by --shard or by AEOS_TEST_SHARD, and return its test ids
+    from the JUnit report. A shard must end green: no failure and no error (a skipped test is not one)."""
+    report = tmp_path / f"shard-{k}of{total}-{'env' if by_env else 'flag'}.xml"
     args = ["-q", "-p", "xdist", "-n", "2", f"--junitxml={report}", *FAST_FILES]
     if by_env:
-        res = _pytest(*args, env_extra={SHARD_ENV: f"{k}/2"})
+        res = _pytest(*args, env_extra={SHARD_ENV: f"{k}/{total}"})
     else:
-        res = _pytest(*args, "--shard", f"{k}/2")
+        res = _pytest(*args, "--shard", f"{k}/{total}")
     assert res.returncode == 0, res.stdout + res.stderr
-    assert f"AEOS test shard {k}/2: " in res.stdout
-    next(ln for ln in res.stdout.splitlines() if ln.startswith(f"AEOS test shard {k}/2: ")).encode("ascii")
+    assert f"AEOS test shard {k}/{total}: " in res.stdout
+    next(ln for ln in res.stdout.splitlines() if ln.startswith(f"AEOS test shard {k}/{total}: ")).encode("ascii")
     cases = ET.parse(report).getroot().iter("testcase")  # noqa: S314 - the report pytest just wrote
     keys = []
     for case in cases:
@@ -251,18 +259,19 @@ def _run_shard_with_junit(tmp_path: Path, k: int, *, by_env: bool) -> set[str]:
     return set(keys)
 
 
-def _assert_shards_partition_the_full_collection(tmp_path: Path, *, by_env: bool) -> None:
+def _assert_shards_partition_the_full_collection(tmp_path: Path, *, by_env: bool, total: int = 2) -> None:
     pytest.importorskip("xdist")
     everything = _collected_junit_keys(_collect_only())
-    first, second = (_run_shard_with_junit(tmp_path, k, by_env=by_env) for k in (1, 2))
-    assert not first & second, "a test ran in both shards"
-    assert first | second == everything, "a collected test ran in no shard (or an uncollected one ran)"
+    parts = [_run_shard_with_junit(tmp_path, k, by_env=by_env, total=total) for k in range(1, total + 1)]
+    assert sum(len(p) for p in parts) == len(set().union(*parts)), "a test ran in two shards"
+    assert set().union(*parts) == everything, "a collected test ran in no shard (or an uncollected one ran)"
 
 
-def test_shards_run_under_pytest_xdist_and_together_run_every_collected_test_once(tmp_path: Path):
+@pytest.mark.parametrize("total", [2, 3])
+def test_shards_run_under_pytest_xdist_and_together_run_every_collected_test_once(tmp_path: Path, total: int):
     """Compares test ids, not counts: a test skipped on a platform (tests/unit/test_core.py has a win32 skipif) is in
-    the report as skipped, so the union still equals the collection."""
-    _assert_shards_partition_the_full_collection(tmp_path, by_env=False)
+    the report as skipped, so the union still equals the collection. 3 shards is the windows-latest layout."""
+    _assert_shards_partition_the_full_collection(tmp_path, by_env=False, total=total)
 
 
 def test_shards_selected_by_the_environment_variable_run_under_xdist_without_overlap(tmp_path: Path):
@@ -330,3 +339,43 @@ def test_the_weights_script_refuses_reports_it_cannot_use(tmp_path: Path):
     good = tmp_path / "good.xml"
     good.write_text(JUNIT, encoding="utf-8")
     assert script.main([str(good), "-o", str(out), "--check"]) == 0 and not out.exists()
+
+
+def test_per_os_weights_scale_every_os_to_the_same_total_then_average(tmp_path: Path, capsys):
+    """The OSes weigh files differently and run at different speeds: --os LABEL FILE... reads each OS alone, scales
+    it to the mean of the OS totals and averages, so a slow OS does not outweigh a fast one."""
+    script = _durations_script()
+    assert script.combine_per_os({"fast": {"a": 1.0, "b": 3.0}, "slow": {"a": 8.0, "b": 0.0, "c": 8.0}}) == {
+        "a": 3.75, "b": 3.75, "c": 2.5}  # totals 4 and 16 -> mean 10: fast x2.5 (2.5, 7.5), slow x0.625 (5, 0, 5)
+    with pytest.raises(ValueError):
+        script.combine_per_os({"a": {"x": 1.0}, "b": {}})
+    fast, slow = tmp_path / "fast.xml", tmp_path / "slow.xml"
+    fast.write_text(JUNIT, encoding="utf-8")  # test_core 3.0, test_ci_shards 2.5 (total 5.5)
+    slow.write_text(JUNIT.replace('time="2.5"', 'time="10"').replace('time="1.25"', 'time="5"'), encoding="utf-8")
+    out = tmp_path / "w.json"
+    assert script.main(["--os", "fast", str(fast), "--os", "slow", str(slow), "-o", str(out), "--source", "x"]) == 0
+    printed = capsys.readouterr().out
+    printed.encode("ascii")
+    assert "fast: 2 test files" in printed and "slow: 2 test files" in printed
+    totals = {"fast": 5.5, "slow": 5 + 0.75 + 10 + 1}
+    mean = sum(totals.values()) / 2
+    expected_core = round(((3.0 * mean / totals["fast"]) + (6.75 * mean / totals["slow"])) / 2, 2)
+    files = json.loads(out.read_text(encoding="utf-8"))["files"]
+    assert files["tests/unit/test_core.py"] == expected_core
+    assert abs(sum(files.values()) - mean) < 0.05  # the combined total is the mean OS total
+
+
+def test_the_weights_script_refuses_to_mix_summed_reports_with_per_os_groups(tmp_path: Path):
+    script = _durations_script()
+    good = tmp_path / "good.xml"
+    good.write_text(JUNIT, encoding="utf-8")
+    out = tmp_path / "w.json"
+    for argv in ([str(good), "--os", "win", str(good), "-o", str(out)],  # summed reports + --os
+                 ["--os", "win", "-o", str(out)],  # a label without a report
+                 ["--os", "win", str(good), "--os", "win", str(good), "-o", str(out)],  # the same label twice
+                 ["-o", str(out)]):  # nothing at all
+        with pytest.raises(SystemExit) as exc:
+            script.main(argv)
+        assert exc.value.code == 2, argv
+    assert not out.exists()
+    assert script.main(["--os", "win", str(good), "-o", str(out), "--check"]) == 0 and not out.exists()

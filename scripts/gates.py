@@ -93,8 +93,8 @@ class Gate:
         return " ".join(self.argv)
 
 
-# Same commands as the "G1 static" steps of the backend shard 1 jobs in .github/workflows/ci.yml, in the same order.
-# CI runs the mypy pair on macos-latest only; locally both platforms always run (mypy needs no Windows host).
+# Same commands as the "G1 static" steps of the `static-checks` job in .github/workflows/ci.yml, in the same order.
+# CI runs that job once, on ubuntu-latest; mypy needs no Windows or macOS host for --platform win32 / darwin.
 STATIC_GATES: tuple[Gate, ...] = (
     Gate("ruff", ("python", "-m", "ruff", "check", "backend", "tests", "scripts")),
     Gate("mypy-darwin", ("python", "-m", "mypy", "--platform", "darwin")),
@@ -567,8 +567,12 @@ NOT_RUN_REASONS: tuple[tuple[str, str], ...] = (
     ("supply-chain", "report-only SBOM, licence, vulnerability and SAST scans; not run locally"),
 )
 # job id -> the gates that run it here. A job counts as run only when EVERY one of its gates PASSed or FAILed: the
-# commit-subjects job also has the shellcheck step, so a run without shellcheck must still say NOT RUN for it.
-LOCALLY_RUN_JOBS: dict[str, tuple[str, ...]] = {"commit-subjects": ("commit-subjects", SHELLCHECK)}
+# commit-subjects job also has the shellcheck step, so a run without shellcheck must still say NOT RUN for it. The
+# static-checks job is exactly the STATIC_GATES (a SKIPPED one keeps it NOT RUN).
+LOCALLY_RUN_JOBS: dict[str, tuple[str, ...]] = {
+    "commit-subjects": ("commit-subjects", SHELLCHECK),
+    "static-checks": tuple(g.name for g in STATIC_GATES),
+}
 
 
 def ci_job_ids(root: Path) -> list[str]:

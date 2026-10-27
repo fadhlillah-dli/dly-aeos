@@ -47,8 +47,8 @@ def test_supply_chain_reports_are_produced_and_labelled_report_only():
 
 
 def test_every_job_names_its_gates_explicitly():
-    """Every check-run name carries its gates. A matrix job is checked per matrix combination: the backend shards
-    take their tag from the matrix (only shard 1 runs the G1 static checks, so only shard 1 claims G1)."""
+    """Every check-run name carries its gates. A matrix job is checked per matrix combination. The G1 static checks
+    have a job of their own (``static checks [G1]``), so the backend shards claim G2 only."""
     from aeos.delivery.provider import classify_check
 
     raw = re.findall(r"^\s{4}name:\s*(.+)$", CI, flags=re.M)
@@ -59,7 +59,8 @@ def test_every_job_names_its_gates_explicitly():
     for name in names:
         assert "${{" not in name, name
         assert re.search(r"\[(G[0-8](,G[0-8])*|NO-GATE)\]", name), name
-    assert classify_check("backend shard 2/2 [G2] (windows-latest)") == ["G2"]
+    assert classify_check("backend shard 2/3 [G2] (windows-latest)") == ["G2"]
+    assert classify_check("static checks [G1] (ubuntu-latest)") == ["G1"]
     assert classify_check("backend [G1,G2] (ubuntu-latest)") == ["G1", "G2"]
     assert classify_check("supply-chain report [NO-GATE] (SBOM)") == []
     assert classify_check("frontend [G1,G3]") == ["G1", "G3"]
@@ -211,29 +212,75 @@ def _aggregator(os_label: str) -> tuple[str, dict]:
     return next((jid, j) for jid, j in jobs.items() if j.get("name") == f"backend [G1,G2] ({os_label})")
 
 
-def test_backend_required_names_are_aggregators_over_every_backend_job_of_their_os():
-    """The required name of an OS needs all backend jobs on that OS (both shards; on macos-latest also the real
-    verifier run), runs even when they failed, were skipped or cancelled (if: always()) and then reports their
-    result. It runs no test itself."""
-    jobs = _workflow()["jobs"]
-    scripts = set()
+STATIC_JOB = "static-checks"
+
+
+def _aggregator_problems(jobs: dict) -> list[str]:
+    """What is wrong with the three required ``backend [G1,G2] (<os>)`` jobs of *jobs* (a parsed workflow): each must
+    need the static job and every backend job of its OS, run under ``if: always()`` on ubuntu-latest, and report
+    exactly the results of the jobs it needs."""
+    problems = []
     for os_label in HOST_OSES:
-        agg_id, agg = _aggregator(os_label)
-        assert agg["runs-on"] == "ubuntu-latest" and agg["if"] == "always()", agg_id
-        needs = agg["needs"] if isinstance(agg["needs"], list) else [agg["needs"]]
+        found = [(jid, j) for jid, j in jobs.items() if j.get("name") == f"backend [G1,G2] ({os_label})"]
+        if len(found) != 1:
+            problems.append(f"{os_label}: {len(found)} aggregator jobs")
+            continue
+        agg_id, agg = found[0]
+        if agg.get("runs-on") != "ubuntu-latest" or agg.get("if") != "always()":
+            problems.append(f"{os_label}: must run on ubuntu-latest under if: always()")
+        needs = agg["needs"] if isinstance(agg.get("needs"), list) else [agg.get("needs")]
         on_os = {jid for jid, j in jobs.items()
                  if jid != agg_id and str(j.get("name", "")).startswith("backend") and os_label in _runners(j)}
-        assert set(needs) == on_os and on_os, (os_label, needs, on_os)
+        if set(needs) != on_os | {STATIC_JOB} or not on_os:
+            problems.append(f"{os_label}: needs {sorted(map(str, needs))}, expected {sorted(on_os | {STATIC_JOB})}")
+        results = ((agg.get("steps") or [{}])[0].get("env") or {}).get("RESULTS", "")
+        pairs = re.findall(r"(\S+)=\$\{\{ needs\.(\S+)\.result \}\}", results)
+        if not all(a == b for a, b in pairs) or sorted(a for a, _ in pairs) != sorted(map(str, needs)):
+            problems.append(f"{os_label}: RESULTS {results!r} does not list the needed jobs")
+    return problems
+
+
+def test_backend_required_names_are_aggregators_over_the_static_job_and_every_backend_job_of_their_os():
+    """The required name of an OS needs the G1 static job and all backend jobs on that OS (every shard; on
+    macos-latest also the real verifier run), runs even when they failed, were skipped or cancelled (if: always())
+    and then reports their result. It runs no test itself."""
+    jobs = _workflow()["jobs"]
+    assert _aggregator_problems(jobs) == []
+    scripts = set()
+    for os_label in HOST_OSES:
+        _, agg = _aggregator(os_label)
         (step,) = agg["steps"]
         assert step["shell"] == "bash" and "uses" not in step
-        results = step["env"]["RESULTS"]
         entry = re.compile(r"(\S+)=\$\{\{ needs\.(\S+)\.result \}\}")
-        pairs = entry.findall(results)
-        assert not entry.sub("", results).strip(), results  # nothing but job=result entries
-        assert all(a == b for a, b in pairs) and sorted(a for a, _ in pairs) == sorted(needs), results
+        assert not entry.sub("", step["env"]["RESULTS"]).strip(), step["env"]["RESULTS"]  # only job=result entries
         scripts.add(step["run"])
     assert len(scripts) == 1, "the three aggregators run the same check"
-    assert {"backend-shards-macos-latest", "backend-verifier-macos-latest"} <= set(_aggregator("macos-latest")[1]["needs"])
+    assert {STATIC_JOB, "backend-shards-macos-latest", "backend-verifier-macos-latest"} <= set(
+        _aggregator("macos-latest")[1]["needs"])
+
+
+@pytest.mark.parametrize("os_label", HOST_OSES)
+def test_the_aggregator_check_bites_when_a_needed_job_is_dropped_or_a_result_is_not_listed(os_label: str):
+    """Near miss green (the real workflow), violations red: no static job, no shard job, a result left out."""
+    import copy
+
+    jobs = _workflow()["jobs"]
+    agg_id, _ = _aggregator(os_label)
+    shard_id = f"backend-shards-{os_label}"
+    for drop in (STATIC_JOB, shard_id):
+        mutated = copy.deepcopy(jobs)
+        mutated[agg_id]["needs"].remove(drop)
+        mutated[agg_id]["steps"][0]["env"]["RESULTS"] = re.sub(
+            rf"\s*{re.escape(drop)}=\$\{{\{{ needs\.{re.escape(drop)}\.result \}}\}}", "",
+            mutated[agg_id]["steps"][0]["env"]["RESULTS"])
+        assert _aggregator_problems(mutated), drop
+    unlisted = copy.deepcopy(jobs)
+    unlisted[agg_id]["steps"][0]["env"]["RESULTS"] = re.sub(
+        rf"\s*{STATIC_JOB}=\$\{{\{{ needs\.{STATIC_JOB}\.result \}}\}}", "", unlisted[agg_id]["steps"][0]["env"]["RESULTS"])
+    assert _aggregator_problems(unlisted)
+    skippable = copy.deepcopy(jobs)
+    skippable[agg_id]["if"] = "success()"
+    assert _aggregator_problems(skippable)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the aggregator step runs under bash on ubuntu-latest")
@@ -266,49 +313,100 @@ def test_the_aggregator_passes_only_when_every_needed_job_succeeded(tmp_path: Pa
 # The exact shard command: -n logical (one worker per logical CPU, "-n auto" counts physical cores), the same marker
 # selection the single backend job had, and the JUnit report the rebalancing script reads.
 SHARD_PYTEST = ('python -m pytest -q -m "not integration and not network" -n logical '
-                '--shard ${{ matrix.shard }}/2 --junitxml=junit-backend.xml')
+                '--shard ${{ matrix.shard }}/${{ matrix.shards }} --junitxml=junit-backend.xml')
+# Shards per host OS (ADR-0115 amendment "rebalanced shards"): Windows jobs do not use the 5 macOS slots of GitHub
+# Free, so Windows gets 3; the macOS hosts stay at 2 each (7 macOS jobs already compete for those slots).
+SHARDS_PER_OS = {"windows-latest": 3, "macos-latest": 2, "macos-26-intel": 2}
 
 
-def _shard_jobs() -> dict[str, dict]:
-    return {jid: j for jid, j in _workflow()["jobs"].items() if jid.startswith("backend-shards-")}
+def _shard_jobs(jobs: dict | None = None) -> dict[str, dict]:
+    return {jid: j for jid, j in (jobs or _workflow()["jobs"]).items() if jid.startswith("backend-shards-")}
+
+
+def _shard_leg_problems(jobs: dict) -> list[str]:
+    """What is wrong with the shard matrices of *jobs*: every host OS needs exactly the legs 1..N, each leg carrying
+    ``shards: N``, with N from SHARDS_PER_OS (a missing leg would silently drop a part of the suite on that OS)."""
+    problems = []
+    shards = _shard_jobs(jobs)
+    if set(shards) != {f"backend-shards-{o}" for o in HOST_OSES}:
+        problems.append(f"shard jobs {sorted(shards)}")
+    for os_label, total in SHARDS_PER_OS.items():
+        combos = _matrix_combinations(shards.get(f"backend-shards-{os_label}", {}))
+        if sorted(c.get("shard", 0) for c in combos) != list(range(1, total + 1)):
+            problems.append(f"{os_label}: legs {sorted(c.get('shard', 0) for c in combos)}, expected 1..{total}")
+        if {c.get("shards") for c in combos} != {total} or {c.get("os") for c in combos} != {os_label}:
+            problems.append(f"{os_label}: every leg needs os {os_label} and shards {total}: {combos}")
+        if any(set(c) - {"os", "shard", "shards"} for c in combos):
+            problems.append(f"{os_label}: unexpected matrix keys {combos}")
+    return problems
 
 
 def test_every_host_os_runs_the_whole_backend_suite_as_shards_with_identical_steps():
     """Sharding splits the suite, it drops nothing (ADR-0115: the full backend suite on every host OS): the shards
-    1..N of an OS all run, with the same marker selection the single backend job had, and the OS jobs never drift."""
+    1..N of an OS all run, with the same marker selection the single backend job had, and the OS jobs never drift.
+    Every shard is G2 only: the G1 static checks are not in a shard (see the static job)."""
+    from aeos.delivery.provider import classify_check
+
     shards = _shard_jobs()
-    assert set(shards) == {f"backend-shards-{o}" for o in HOST_OSES}
+    assert _shard_leg_problems(_workflow()["jobs"]) == []
     first = next(iter(shards.values()))["steps"]
     for jid, job in shards.items():
         assert job["steps"] == first, f"{jid} differs from the other shard jobs"
         assert job["strategy"]["fail-fast"] is False
         os_label = jid.removeprefix("backend-shards-")
-        combos = _matrix_combinations(job)
-        assert _runners(job) == {os_label} and {c["os"] for c in combos} == {os_label}
+        assert _runners(job) == {os_label}
         (run,) = [s["run"] for s in job["steps"] if "--shard" in (s.get("run") or "")]
-        m = re.search(r"--shard \$\{\{ matrix\.shard \}\}/(\d+)", run)
-        assert m, run
-        assert sorted(c["shard"] for c in combos) == list(range(1, int(m.group(1)) + 1)), combos
         assert run == SHARD_PYTEST, run
         assert "continue-on-error" not in job
         assert not [s for s in job["steps"] if "continue-on-error" in s], "a failing shard step must fail the job"
-        assert {c["gates"] for c in combos if c["shard"] == 1} == {"G1,G2"}
-        assert {c["gates"] for c in combos if c["shard"] != 1} == {"G2"}
+        assert not [s for s in job["steps"] if str(s.get("name", "")).startswith("G1")], "G1 has its own job"
+        assert "gates" not in str(job["strategy"]) and "matrix.gates" not in str(job)
+        for name in _check_names(job):
+            assert classify_check(name) == ["G2"], name
+    assert [n for n in _check_names(shards["backend-shards-windows-latest"])] == [
+        f"backend shard {k}/3 [G2] (windows-latest)" for k in (1, 2, 3)]
 
 
-def test_g1_static_steps_run_exactly_where_the_shard_name_claims_g1():
-    first = next(iter(_shard_jobs().values()))["steps"]
-    static = [s for s in first if str(s.get("name", "")).startswith("G1 static")]
-    assert {s["run"].split("\n")[0] for s in static} == {"python -m ruff check backend tests scripts",
-                                                          "python -m mypy --platform darwin",
-                                                          "python scripts/secret_scan.py"}
-    for step in static:
-        assert str(step.get("if", "")).startswith("contains(matrix.gates, 'G1')"), step["name"]
-    mypy = next(s for s in static if "mypy" in s["run"])
-    assert "python -m mypy --platform win32" in mypy["run"] and "runner.arch == 'ARM64'" in mypy["if"]
-    for step in first:  # the tests themselves never depend on the gate tag
-        if "pytest" in (step.get("run") or ""):
-            assert "if" not in step
+def test_the_shard_leg_check_bites_on_a_dropped_leg_a_wrong_count_or_a_foreign_os():
+    """Near miss green (the real workflow), violations red."""
+    import copy
+
+    jobs = _workflow()["jobs"]
+    assert _shard_leg_problems(jobs) == []
+    dropped = copy.deepcopy(jobs)
+    dropped["backend-shards-windows-latest"]["strategy"]["matrix"]["include"].pop()
+    assert _shard_leg_problems(dropped)
+    old_count = copy.deepcopy(jobs)
+    for leg in old_count["backend-shards-windows-latest"]["strategy"]["matrix"]["include"]:
+        leg["shards"] = 2
+    assert _shard_leg_problems(old_count)
+    duplicated = copy.deepcopy(jobs)
+    duplicated["backend-shards-macos-latest"]["strategy"]["matrix"]["include"][1]["shard"] = 1
+    assert _shard_leg_problems(duplicated)
+    foreign = copy.deepcopy(jobs)
+    foreign["backend-shards-macos-26-intel"]["strategy"]["matrix"]["include"][0]["os"] = "macos-latest"
+    assert _shard_leg_problems(foreign)
+
+
+def test_g1_static_checks_run_once_in_their_own_job_that_every_backend_aggregator_needs():
+    jobs = _workflow()["jobs"]
+    job = jobs[STATIC_JOB]
+    assert job["runs-on"] == "ubuntu-latest" and "[G1]" in job["name"] and "if" not in job
+    assert "continue-on-error" not in job and "strategy" not in job
+    static = [s for s in job["steps"] if str(s.get("name", "")).startswith("G1 static")]
+    assert [s["run"].split("\n")[0] for s in static] == ["python -m ruff check backend tests scripts",
+                                                        "python -m mypy --platform darwin",
+                                                        "python scripts/secret_scan.py"]
+    mypy = static[1]["run"].splitlines()
+    assert mypy == ["python -m mypy --platform darwin", "python -m mypy --platform win32"]
+    for step in static:  # never skipped, never allowed to fail
+        assert "if" not in step and "continue-on-error" not in step, step["name"]
+    for shard in _shard_jobs().values():  # the tests themselves never depend on a gate tag
+        for step in shard["steps"]:
+            if "pytest" in (step.get("run") or ""):
+                assert "if" not in step
+    for os_label in HOST_OSES:
+        assert STATIC_JOB in _aggregator(os_label)[1]["needs"]
 
 
 def test_each_shard_uploads_its_junit_report_for_rebalancing():
@@ -330,8 +428,8 @@ def test_the_real_trusted_suite_verifier_runs_in_its_own_macos_arm64_job():
 
 def test_every_job_has_a_timeout_so_a_hung_runner_cannot_hold_a_macos_slot_for_six_hours():
     """The default is 360 minutes; GitHub Free has 5 account-wide macOS slots."""
-    caps = {"backend-shards-": 25, "backend-verifier-": 20, "frontend": 15, "browser-e2e": 20, "bootstrap": 15,
-            "supply-chain": 20}
+    caps = {"static-checks": 15, "backend-shards-": 25, "backend-verifier-": 20, "frontend": 15, "browser-e2e": 20,
+            "bootstrap": 15, "supply-chain": 20}
     for jid, job in _workflow()["jobs"].items():
         timeout = job.get("timeout-minutes")
         assert isinstance(timeout, int) and not isinstance(timeout, bool) and 0 < timeout <= 25, (jid, timeout)

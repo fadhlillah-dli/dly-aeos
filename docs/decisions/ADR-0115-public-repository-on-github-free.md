@@ -162,3 +162,57 @@ take about 10 minutes. Caveats:
   test turns out to share state across workers, the fallbacks are `--dist loadfile` for that OS or a third shard.
 * Branch protection is owner configuration. This change does not touch the ruleset: the required names keep
   existing, now reported by the aggregators.
+
+## Amendment 2026-10-27 — rebalanced shards: static job, per-OS weights, 3 Windows shards
+
+**Context (measured, GitHub run 40424256888, the last green run of PR #26, per-job wall time including setup).**
+The layout above ran in 11.1 minutes (first job created to last job completed), which is above the goal of about ten.
+Backend shard 1 / shard 2: `windows-latest` 9.3 / 8.8 min, `macos-latest` 11.0 / 5.5, `macos-26-intel` 9.6 / 7.6; the
+verifier 8.0. Three causes: (a) shard 1 of every OS also ran the G1 static checks, 58 s on `macos-latest` (mypy for
+both platforms 49 s, secret scan 9 s) and 10-16 s elsewhere; (b) `tests/ci_durations.json` still held the seconds
+of a local run made before the test speedups of PR #26, and one split of those weights was used on three OSes whose
+files cost differently: the same two shards ran 1,216 s and 697 s of test time on `macos-latest` (G2 step 534 s and
+295 s) but 1,615 s and 1,569 s on `windows-latest`; (c) the macOS jobs of one run add up to 2,743 s on 5 concurrent
+slots, so the bootstrap of Intel macOS waited 338 s for a slot.
+
+**Decision.**
+
+1. **G1 runs once, in its own job.** `static checks [G1] (ubuntu-latest)` (job id `static-checks`) runs ruff,
+   mypy `--platform darwin` and `--platform win32` and the secret scan once, on `ubuntu-latest`; it consumes no
+   macOS slot. These checks are platform-neutral (they read files; `--platform` selects the code path to check and
+   needs no such host). The alternative, a fixed head-start offset for shard 1 in the packer, would need a
+   different offset per OS (58 s against 10-16 s) and a hook change in a trusted file; the job needs neither, and
+   every shard becomes the same job (no `gates` matrix key, no `if:` on the G1 steps). The required semantics
+   hold: each of the three aggregators `backend [G1,G2] (<os>)` now also `needs` `static-checks` and lists its
+   result, so a failed, skipped or cancelled static job fails all three required names. mypy on Linux is
+   NOT-PROVEN until the first run (it ran on `macos-latest` before).
+2. **Per-OS weights.** `scripts/ci_durations.py --os LABEL FILE...` (once per OS) reads each OS alone, scales it to
+   the mean of the OS totals and averages the files, so one split fits all three OSes. A split from one OS alone
+   leaves the others uneven (packed from Windows only: `macos-latest` 486 s / 343 s predicted). The committed weights are
+   rebuilt from the 6 JUnit reports of run 40424256888.
+3. **Windows: 3 shards** (`backend shard K/3 [G2] (windows-latest)`); Windows jobs do not use the 5 macOS slots. The
+   macOS hosts stay at 2 shards: 7 macOS jobs already compete for 5 slots, a third shard adds about 50 s of setup
+   per extra job and would raise the macOS slot time. The shard job names carry the matrix (`shard`, `shards`)
+   and are not required checks; `backend [G1,G2] (windows-latest)` needs the whole shard job, which fails when any
+   of its three legs fails.
+4. Every test still runs on all three OSes: `--shard K/N` assigns whole files, and
+   `tests/unit/test_ci_shards.py` proves that for 2 and 3 shards the node ids of all shards are disjoint and
+   their union is the whole collection.
+
+**Predicted shard test seconds** (per-file seconds of run 40424256888 times each OS's measured wall/CPU-second
+ratio; the same model gives 482 / 469, 527 / 302 and 465 / 437 for the old split against the measured 482 / 469,
+534 / 295 and 496 / 406):
+
+| OS | old shards (measured G2 step) | new shards (predicted G2 step) |
+|---|---|---|
+| windows-latest | 482 / 469 s | 296 / 311 / 344 s |
+| macos-latest | 534 / 295 s | 432 / 397 s |
+| macos-26-intel | 496 / 406 s | 450 / 452 s |
+
+**Expected wall clock (NOT-PROVEN until the first run of this change).** Per-job time with about 35-70 s of setup:
+Windows about 6.5-7 min, `macos-latest` shards about 8 min, Intel macOS about 8.5 min, the verifier 8.0 min
+(unchanged: it runs the trusted suite serially in one process), the static job about 3 min (not measured on
+ubuntu). The macOS slots set the floor: the jobs add up to about 2,690 s on 5 slots, 9.0 minutes at perfect packing,
+and 7 jobs of 8 minutes and more on 5 slots do not pack perfectly, so expect 9.5-11 minutes, not a guaranteed
+under-ten. The remaining levers, none taken here, are the serial verifier run (434 s of its 479 s) and the Intel
+bootstrap (169 s).
