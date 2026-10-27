@@ -81,6 +81,74 @@ def test_missing_binary_or_failing_check_is_unknown_never_valid():
     assert binmod.publisher_signature(Path("claude"), run=boom)["status"] == "UNKNOWN"
 
 
+PINNED_TEAM = "Q6L2SF6YDW"  # the reviewed darwin publisher pin (OWNER_ACTIONS 1.12)
+VALID_PINNED = {"--verify": (0, "", ""), "-dv": (0, "", f"Authority=Developer ID Application\nTeamIdentifier={PINNED_TEAM}")}
+
+
+def _process_runner(monkeypatch, responses: dict) -> dict:
+    """Fake the default runner, whose results publisher_signature caches for the process (an explicit run= never is),
+    on a macOS host with an empty cache. Returns the mutable state: swap state["responses"] between calls."""
+    import subprocess
+
+    monkeypatch.setattr(binmod.sys, "platform", "darwin")
+    monkeypatch.setattr(binmod, "_SIG_CACHE", {})
+    state: dict = {"responses": responses, "calls": 0}
+
+    def run(argv, timeout=30.0):
+        state["calls"] += 1
+        step = state["responses"]
+        if step == "timeout":
+            raise subprocess.TimeoutExpired(argv, timeout)
+        if step == "oserror":
+            raise OSError("codesign could not start")
+        return next((v for k, v in step.items() if k in " ".join(argv)), (1, "", ""))
+
+    monkeypatch.setattr(binmod, "_run", run)
+    return state
+
+
+@pytest.mark.parametrize("transient", [
+    "timeout",                                                        # codesign hung past its 30 s timeout
+    "oserror",                                                        # codesign could not be started
+    {"--verify": (1, "", "/x/claude: Permission denied"), "-dv": (1, "", "")},   # UNKNOWN: says nothing of the sig
+    {"--verify": (0, "", ""), "-dv": (1, "", "")},                    # VALID, but the signer was not read
+])
+def test_a_transient_signature_failure_is_not_cached_so_a_pinned_publisher_is_not_blocked_for_the_process(
+        monkeypatch, transient):
+    """With the darwin publisher pinned, a failed check BLOCKS the native call (unknown is not the publisher). That is
+    right for that call, but caching it per (path, fingerprint) kept the bridge BLOCKED until the process restarted."""
+    state = _process_runner(monkeypatch, transient)
+    first = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1")
+    assert binmod.signature_gate(first, PINNED_TEAM)[0] == "BLOCKED"
+    state["responses"] = VALID_PINNED
+    second = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1")
+    assert binmod.signature_gate(second, PINNED_TEAM)[0] == "OK", (
+        f"a transient signature failure was cached for the process: {second}")
+    calls = state["calls"]
+    assert binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1") is second
+    assert state["calls"] == calls, "a definitive VALID report is cached"
+
+
+@pytest.mark.parametrize(("definite", "status"), [
+    ({"--verify": (0, "", ""), "-dv": (0, "", "TeamIdentifier=FOREIGN123")}, "VALID"),     # signer mismatch
+    ({"--verify": (1, "", "code object is not signed at all"), "-dv": (1, "", "not signed")}, "UNSIGNED"),
+    ({"--verify": (1, "", "invalid signature (code or signature have been modified)"),
+      "-dv": (0, "", f"TeamIdentifier={PINNED_TEAM}")}, "INVALID"),
+])
+def test_a_definitive_signature_verdict_stays_cached_and_blocked(monkeypatch, definite, status):
+    """Near miss: a definite mismatch, unsigned or broken signature is the OS's verdict on that exact binary; it stays
+    cached (and BLOCKED) for that fingerprint, and only a different binary (new fingerprint) is checked again."""
+    state = _process_runner(monkeypatch, definite)
+    first = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1")
+    assert first["status"] == status and binmod.signature_gate(first, PINNED_TEAM)[0] == "BLOCKED"
+    calls = state["calls"]
+    state["responses"] = VALID_PINNED
+    again = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-1")
+    assert again is first and state["calls"] == calls and binmod.signature_gate(again, PINNED_TEAM)[0] == "BLOCKED"
+    swapped = binmod.publisher_signature(Path("/x/claude"), fingerprint_value="fp-2")
+    assert binmod.signature_gate(swapped, PINNED_TEAM)[0] == "OK"
+
+
 ANTHROPIC = "CN=Anthropic, PBC, O=Anthropic, PBC, L=San Francisco, S=California, C=US"
 
 

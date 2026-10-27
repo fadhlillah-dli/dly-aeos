@@ -13,3 +13,10 @@
   `tests/unit/test_inventory_pins.py` checks the rule with bite fixtures. Tests outside the signature module see the
   publisher as not pinned (their Claude binaries are fakes). Evidence E2 on macOS arm64 (targeted tests); E3 for the
   observed signer and version on the owner's M4; NOT-PROVEN on Windows and macOS Intel until CI runs.
+- **A transient code-signature failure no longer blocks the Claude bridge for the life of the process.** With the
+  darwin publisher pinned, a check that could not decide (`codesign` failed to start or timed out, an unrecognised
+  answer, or a VALID report without its signer) BLOCKS the call it gates, by design. The result cache per (path,
+  fingerprint) used to keep that UNKNOWN until a restart. Now only a definitive verdict is cached (INVALID, UNSIGNED,
+  or VALID with its signer, so a definite mismatch stays BLOCKED), and an undecided check runs again on the next call.
+  Bite tests in `tests/unit/test_claude_bridge_signature.py`. Evidence E2 on macOS arm64; NOT-PROVEN on Windows until
+  CI runs.
