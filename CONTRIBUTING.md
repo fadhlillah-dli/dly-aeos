@@ -367,7 +367,10 @@ to merge stays the owner's (see "Rules for every change"); this is how it is car
    has `## [X.Y.Z]`, that `changelog.d/` holds only its README, that `docs/releases/vX.Y.Z.md` exists and that the
    tagged commit is an ancestor of `origin/main`. Its last line is `RELEASE_CHECK: PASS` or `RELEASE_CHECK: FAIL`;
    fix every FAIL line (delete the tag first if the commit is wrong) before step 5.
-5. Push the tag: `git push origin vX.Y.Z`. Release tags are protected by the v* tag ruleset. The push starts
+5. Confirm the tagged commit is already GREEN on `main` (the release run waits only 15 minutes, and a `main` run takes
+   about 15 to 25):
+   `python scripts/ci_status.py --sha "$(git rev-list -n 1 vX.Y.Z)" --required-only --wait --deadline 30`, then
+   push the tag: `git push origin vX.Y.Z`. Release tags are protected by the v* tag ruleset. The push starts
    `release evidence [NO-GATE]` ([.github/workflows/release.yml](.github/workflows/release.yml),
    [ADR-0122](docs/decisions/ADR-0122-release-provenance-in-ci.md)). It runs `release_check.py --tag` again on the tagged
    commit, then requires CI to be GREEN for that commit (`scripts/ci_status.py --required-only --wait`; PENDING, RED,
@@ -376,7 +379,7 @@ to merge stays the owner's (see "Rules for every change"); this is how it is car
    build-provenance attestation of each file, and uploads them as the workflow artifact `release-evidence-vX.Y.Z`
    (kept 90 days). CI never creates or publishes a GitHub Release.
 6. Wait for that run (the tagged commit is `git rev-list -n 1 vX.Y.Z`) with
-   `python scripts/ci_status.py --sha <tagged commit> --require "release evidence [NO-GATE]" --wait --deadline 25`
+   `python scripts/ci_status.py --sha <tagged commit> --required-only --require "release evidence [NO-GATE]" --wait --deadline 25`
    (last line `CI: GREEN <sha>`), then download and verify the evidence:
    `gh run download --name release-evidence-vX.Y.Z --dir dist` and, for each file,
    `gh attestation verify dist/dly-aeos-src-X.Y.Z.zip --repo fadhlillah-dli/dly-aeos`.
