@@ -379,7 +379,7 @@ def _ci_commands(workflow_text: str, job_prefix: str, step_prefixes: tuple[str, 
 
 def _drift(workflow_text: str) -> tuple[list[str], list[str]]:
     """(G1 commands in ci.yml, the static gates of scripts/gates.py), then the same for the frontend job."""
-    return (_ci_commands(workflow_text, "backend-shards-", ("G1 static",)) + _ci_commands(
+    return (_ci_commands(workflow_text, "static-checks", ("G1 static",)) + _ci_commands(
         workflow_text, "frontend", ("G1 static", "G3 product tests")),
         [g.command for g in gates.STATIC_GATES + gates.FRONTEND_GATES])
 
@@ -391,12 +391,16 @@ def test_gates_py_runs_exactly_the_g1_commands_of_ci_yml():
     assert in_ci == in_gates, "scripts/gates.py and the G1 steps of ci.yml diverged: change both together"
 
 
-def test_every_shard_job_carries_the_same_g1_commands_the_guard_reads():
+def test_the_guard_reads_the_one_static_job_and_no_shard_job_repeats_a_g1_command():
+    """The G1 commands live in the `static-checks` job only (ubuntu-latest, once for all host OSes); a G1 step that
+    came back into a shard job would run the check twice and the guard would not see it."""
     jobs = yaml.safe_load(CI_TEXT)["jobs"]
+    assert [jid for jid in jobs if jid.startswith("static-checks")] == ["static-checks"]
     shard_ids = [jid for jid in jobs if jid.startswith("backend-shards-")]
     assert len(shard_ids) == 3
-    reads = {tuple(_ci_commands(CI_TEXT, jid, ("G1 static",))) for jid in shard_ids}
-    assert len(reads) == 1
+    for jid in shard_ids:
+        assert _ci_commands(CI_TEXT, jid, ("G1",)) == [], jid
+        assert not any("ruff" in (s.get("run") or "") or "mypy" in (s.get("run") or "") for s in jobs[jid]["steps"]), jid
 
 
 @pytest.mark.parametrize("old, new", [

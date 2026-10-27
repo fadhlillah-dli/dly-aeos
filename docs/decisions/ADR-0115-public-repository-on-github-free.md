@@ -162,3 +162,75 @@ take about 10 minutes. Caveats:
   test turns out to share state across workers, the fallbacks are `--dist loadfile` for that OS or a third shard.
 * Branch protection is owner configuration. This change does not touch the ruleset: the required names keep
   existing, now reported by the aggregators.
+
+## Amendment 2026-10-27 — rebalanced shards: static job, per-OS weights, 3 Windows shards
+
+**Context (measured, GitHub run 40424256888, the last green run of PR #26, per-job wall time including setup).**
+The layout above ran in 11.1 minutes (first job created to last job completed), which is above the goal of about ten.
+Backend shard 1 / shard 2: `windows-latest` 9.3 / 8.8 min, `macos-latest` 11.0 / 5.5, `macos-26-intel` 9.6 / 7.6; the
+verifier 8.0. Three causes: (a) shard 1 of every OS also ran the G1 static checks, 58 s on `macos-latest` (mypy for
+both platforms 49 s, secret scan 9 s) and 10-16 s elsewhere; (b) `tests/ci_durations.json` still held the seconds
+of a local run made before the test speedups of PR #26, and one split of those weights was used on three OSes whose
+files cost differently: the same two shards ran 1,216 s and 697 s of test time on `macos-latest` (G2 step 534 s and
+295 s) but 1,615 s and 1,569 s on `windows-latest`; (c) the macOS jobs of one run add up to 2,743 s on 5 concurrent
+slots, so the bootstrap of Intel macOS waited 338 s for a slot.
+
+**Decision.**
+
+1. **G1 runs once, in its own job.** `static checks [G1] (ubuntu-latest)` (job id `static-checks`) runs ruff,
+   mypy `--platform darwin` and `--platform win32` and the secret scan once, on `ubuntu-latest`; it consumes no
+   macOS slot. These checks are platform-neutral (they read files; `--platform` selects the code path to check and
+   needs no such host). The alternative, a fixed head-start offset for shard 1 in the packer, would need a
+   different offset per OS (58 s against 10-16 s) and a hook change in a trusted file; the job needs neither, and
+   every shard becomes the same job (no `gates` matrix key, no `if:` on the G1 steps). The required semantics
+   hold: each of the three aggregators `backend [G1,G2] (<os>)` now also `needs` `static-checks` and lists its
+   result, so a failed, skipped or cancelled static job fails all three required names. mypy on Linux is
+   proven by run 40427552409 (PR #27): the job took 62 s, the mypy steps 30 s in all. Each mypy platform is its own step
+   (`G1 static — mypy darwin`, `... mypy win32`) and the static job's steps carry no `shell:` override: two commands in
+   one `run` block under `shell: bash {0}` (no `-e`) would let a darwin failure pass when win32 passes.
+2. **Per-OS weights.** `scripts/ci_durations.py --os LABEL FILE...` (once per OS) reads each OS alone, scales it to
+   the mean of the OS totals and averages the files, so one split fits all three OSes. A split from one OS alone
+   leaves the others uneven (packed from Windows only: `macos-latest` 486 s / 343 s predicted). The committed weights are
+   rebuilt from the 6 JUnit reports of run 40424256888.
+3. **Windows: 3 shards** (`backend shard K/3 [G2] (windows-latest)`); Windows jobs do not use the 5 macOS slots. The
+   macOS hosts stay at 2 shards: 7 macOS jobs already compete for 5 slots, a third shard adds about 50 s of setup
+   per extra job and would raise the macOS slot time. The shard job names carry the matrix (`shard`, `shards`)
+   and are not required checks; `backend [G1,G2] (windows-latest)` needs the whole shard job, which fails when any
+   of its three legs fails.
+4. Every test still runs on all three OSes: `--shard K/N` assigns whole files, and
+   `tests/unit/test_ci_shards.py` collects the whole suite with the exact `-m` expression of the CI shard step
+   (read from `ci.yml`) and proves that for 2 and 3 shards the node ids of all shards are disjoint, no file is in two
+   shards, and their union equals the unsharded collection (about 12 s).
+5. The workflow structure is pinned in `tests/unit/test_ci_gates.py`, not compared with `origin/main` (a pull request
+   checkout has no `origin/main`): every non-shard job id with its name (`JOB_NAMES`) next to `REQUIRED_CHECKS`; no
+   `actions/checkout` of a backend job carries a `with:` key (`ref` could point G1 or a shard at `main`); and the
+   checkout, setup-python and install steps of the static job equal those of the shard jobs and the verifier.
+
+**Predicted shard test seconds** (per-file seconds of run 40424256888 times each OS's measured wall/CPU-second
+ratio; the same model gives 482 / 469, 527 / 302 and 465 / 437 for the old split against the measured 482 / 469,
+534 / 295 and 496 / 406):
+
+| OS | old shards (measured G2 step) | new shards (predicted G2 step) |
+|---|---|---|
+| windows-latest | 482 / 469 s | 296 / 311 / 344 s |
+| macos-latest | 534 / 295 s | 432 / 397 s |
+| macos-26-intel | 496 / 406 s | 450 / 452 s |
+
+**Measured (GitHub run 40427552409, PR #27, replaces the estimate that stood here).** Whole run 10 min 47 s. The static
+job took 62 s (the mypy steps 30 s of it). All backend required checks were done at 9.6 min; the last required check
+to finish was the Intel bootstrap, which waited for a macOS slot. G2 step seconds per shard (predicted in brackets):
+
+| OS | measured G2 step | predicted |
+|---|---|---|
+| windows-latest | 372 / 338 / 375 s | 296 / 311 / 344 s |
+| macos-latest | 457 / 354 s | 432 / 397 s |
+| macos-26-intel | 472 / 383 s | 450 / 452 s |
+
+The macOS jobs add up to about 2,669 s on 5 slots (8.9 minutes at perfect packing), so the macOS slots set the floor, as
+estimated. The prediction was low for Windows by 27-76 s per shard and the split is not perfectly even (Windows 338 to
+375 s, macOS 354 to 472 s); a further rebalance from the reports of this run is possible but gains little against the
+slot floor. The remaining levers, none taken here, are the serial verifier run (434 s of its 479 s) and the Intel
+bootstrap (169 s).
+
+**Open items (record only).** 26 tests marked `integration` or `network` run in no CI job (the shards select `not
+integration and not network`; the verifier and browser jobs run only their named files). This gap predates this change.

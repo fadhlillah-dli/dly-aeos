@@ -450,6 +450,20 @@ def test_the_commit_subjects_job_counts_as_run_only_when_both_its_gates_ran():
         assert reasons[prefix] and reasons[prefix] != "no local equivalent", prefix
 
 
+def test_the_static_checks_job_counts_as_run_only_when_every_static_gate_ran():
+    names = [g.name for g in gates.STATIC_GATES]
+    assert names == ["ruff", "mypy-darwin", "mypy-win32", "secret-scan"]
+    all_ran = [gates.Result(n, gates.PASS) for n in names]
+    assert "static-checks" not in dict(gates.not_run_jobs(all_ran, ROOT))
+    assert "static-checks" in dict(gates.not_run_jobs([], ROOT))
+    for missing in names:  # near misses: one gate absent or SKIPPED keeps the job NOT RUN and names that gate
+        partial = [gates.Result(n, gates.SKIPPED if n == missing else gates.PASS, 0.0, "x") for n in names]
+        assert missing in dict(gates.not_run_jobs(partial, ROOT))["static-checks"], missing
+        assert missing in dict(gates.not_run_jobs([r for r in all_ran if r.gate != missing], ROOT))["static-checks"]
+    failed = [gates.Result(n, gates.FAIL if n == "ruff" else gates.PASS, 0.0, "x") for n in names]
+    assert "static-checks" not in dict(gates.not_run_jobs(failed, ROOT))  # a FAIL ran
+
+
 def test_a_job_added_to_the_workflow_shows_up_as_not_run_by_itself(tmp_path: Path):
     wf = tmp_path / ".github" / "workflows"
     wf.mkdir(parents=True)
@@ -1018,16 +1032,29 @@ def test_the_shell_scripts_follow_the_conventions():
 SHELLCHECK_CMD = "shellcheck scripts/*.sh scripts/git-hooks/pre-push"
 
 
-def test_ci_runs_shellcheck_in_an_existing_ubuntu_job_and_no_job_or_check_name_changed():
+def test_ci_runs_shellcheck_in_an_existing_ubuntu_job_that_keeps_its_name():
     jobs = yaml.safe_load(CI_TEXT)["jobs"]
     (host,) = [jid for jid, j in jobs.items() if any(s.get("run") == SHELLCHECK_CMD for s in j["steps"])]
     assert jobs[host]["runs-on"] == "ubuntu-latest" and jobs[host]["name"] == "commit subjects [G1]"
     assert (ROOT / "scripts" / "git-hooks" / "pre-push").is_file() and sorted((ROOT / "scripts").glob("*.sh"))
+
+
+def test_no_job_name_changed_since_origin_main_when_it_is_available():
+    """An extra to the committed baseline (tests/unit/test_ci_gates.py JOB_NAMES, which is what guards CI): skipped
+    with a reason where origin/main is not fetched (a pull request's depth-1 merge-ref checkout), never a silent pass."""
+    jobs = yaml.safe_load(CI_TEXT)["jobs"]
     base = subprocess.run(["git", "show", "origin/main:.github/workflows/ci.yml"], cwd=ROOT, capture_output=True,
                           text=True, check=False, env=gates.clean_env())
-    if base.returncode == 0:
-        before = yaml.safe_load(base.stdout)["jobs"]
-        assert {jid: j["name"] for jid, j in jobs.items() if jid in before} == {jid: j["name"] for jid, j in before.items()}
+    if base.returncode != 0:
+        pytest.skip("origin/main is not available in this checkout; JOB_NAMES in test_ci_gates.py is the guard here")
+    before = yaml.safe_load(base.stdout)["jobs"]
+
+    # The shard jobs are not required checks (the `backend [G1,G2] (<os>)` aggregators are) and their names carry
+    # the shard count, which a rebalance changes (ADR-0115 amendment "rebalanced shards"); every other name stays.
+    def names(all_jobs: dict) -> dict[str, str]:
+        return {jid: j["name"] for jid, j in all_jobs.items() if not jid.startswith("backend-shards-")}
+
+    assert {jid: n for jid, n in names(jobs).items() if jid in before} == names(before)
 
 
 @pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck is not installed on this host (CI runs it on ubuntu)")
